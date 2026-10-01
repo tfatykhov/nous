@@ -13,7 +13,7 @@ from types import MappingProxyType
 from typing import Any
 
 from nous.api.execution_context import FOREGROUND_KINDS, ExecutionContext
-from nous.api.tool_classes import tool_class
+from nous.api.tool_classes import is_compensable_call, tool_class
 from nous.cognitive.execution_ledger import classify_side_effect
 
 _ALL = frozenset({"none", "write", "external", "irreversible"})
@@ -23,27 +23,45 @@ _LOCAL = frozenset({"none", "write"})
 
 @dataclass(frozen=True)
 class ContextPolicy:
-    levels: frozenset[str]          # side-effect levels this context may use
-    spawn: bool | frozenset[str]    # True: any spawn tool; a set: only these; False: none
+    levels: frozenset[str]  # side-effect levels this context may use
+    spawn: bool | frozenset[str]  # True: any spawn tool; a set: only these; False: none
 
 
-CONTEXT_POLICY: Mapping[str, ContextPolicy] = MappingProxyType({
-    "interactive": ContextPolicy(_ALL, spawn=True),
-    "mcp": ContextPolicy(_ALL, spawn=True),
-    "subtask": ContextPolicy(_WORK, spawn=False),
-    "dag_node": ContextPolicy(_WORK, spawn=False),
-    "scheduled": ContextPolicy(_WORK, spawn=False),
-    "agent_action": ContextPolicy(_WORK, spawn=False),
-    # Prod delivers DAG results by email through spawn_task from this turn:
-    # that one spawn tool is allowed explicitly, the rest are not (roadmap §4).
-    "dag_summary": ContextPolicy(_WORK, spawn=frozenset({"spawn_task"})),
-    "heartbeat_triage": ContextPolicy(_LOCAL, spawn=False),
-    # A check/callback may spawn only what it declared (check pipelines
-    # declare heartbeat_check_create) -- see evaluate().
-    "heartbeat_check": ContextPolicy(_WORK, spawn=False),
-    "heartbeat_callback": ContextPolicy(_WORK, spawn=False),
-    "background": ContextPolicy(_LOCAL, spawn=False),
-})
+CONTEXT_POLICY: Mapping[str, ContextPolicy] = MappingProxyType(
+    {
+        "interactive": ContextPolicy(_ALL, spawn=True),
+        "mcp": ContextPolicy(_ALL, spawn=True),
+        "subtask": ContextPolicy(_WORK, spawn=False),
+        "dag_node": ContextPolicy(_WORK, spawn=False),
+        "scheduled": ContextPolicy(_WORK, spawn=False),
+        "agent_action": ContextPolicy(_WORK, spawn=False),
+        # Prod delivers DAG results by email through spawn_task from this turn:
+        # that one spawn tool is allowed explicitly, the rest are not (roadmap §4).
+        "dag_summary": ContextPolicy(_WORK, spawn=frozenset({"spawn_task"})),
+        "heartbeat_triage": ContextPolicy(_LOCAL, spawn=False),
+        # A check/callback may spawn only what it declared (check pipelines
+        # declare heartbeat_check_create) -- see evaluate().
+        "heartbeat_check": ContextPolicy(_WORK, spawn=False),
+        "heartbeat_callback": ContextPolicy(_WORK, spawn=False),
+        "background": ContextPolicy(_LOCAL, spawn=False),
+    }
+)
+
+
+def undoable_violation(ctx: ExecutionContext, tool_name: str, tool_input: Mapping[str, Any]) -> str | None:
+    """``"not_compensable"`` when an ``undoable`` context makes a call that
+    has a side effect and cannot be undone, else None.
+
+    Separate from :func:`evaluate` because it is a safety invariant, not a
+    policy preference: the runner enforces it even when the context policy
+    is ``off`` or ``warn`` -- an undoable claim with no undo is false."""
+    if not ctx.undoable:
+        return None
+    if classify_side_effect(tool_name, dict(tool_input)) == "none":
+        return None
+    if not is_compensable_call(tool_name, tool_input):
+        return "not_compensable"
+    return None
 
 
 def evaluate(ctx: ExecutionContext, tool_name: str, tool_input: Mapping[str, Any]) -> str | None:
@@ -61,6 +79,13 @@ def evaluate(ctx: ExecutionContext, tool_name: str, tool_input: Mapping[str, Any
     level = classify_side_effect(tool_name, dict(tool_input))
     if level not in policy.levels:
         return f"level:{level}"
+    # Phase 2.8: check undoability BEFORE the spawn gate so that a tool that
+    # both spawns and lacks a compensator (e.g. dag_create) returns
+    # "not_compensable" — the true constraint — rather than "spawn", which
+    # masks the undoability violation and prevents force_block from activating
+    # in warn mode.
+    if undoable_violation(ctx, tool_name, tool_input) is not None:
+        return "not_compensable"
     if cls.spawns and not (
         policy.spawn is True
         or (isinstance(policy.spawn, frozenset) and tool_name in policy.spawn)
@@ -73,7 +98,8 @@ def evaluate(ctx: ExecutionContext, tool_name: str, tool_input: Mapping[str, Any
     if ctx.kind == "heartbeat_callback" and own:
         named = str(tool_input.get("name", "")).strip().lower() == own
         action = str(tool_input.get("action", "")).strip().lower()
-        if named and ((tool_name == "heartbeat_check_manage" and action == "enable")
-                      or tool_name == "heartbeat_check_create"):
+        if named and (
+            (tool_name == "heartbeat_check_manage" and action == "enable") or tool_name == "heartbeat_check_create"
+        ):
             return "reenable"
     return None

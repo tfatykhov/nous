@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from croniter import croniter
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from nous.api.execution_context import ExecutionContext
 from nous.heartbeat.registry import BaseCheck
@@ -72,12 +72,29 @@ RUN_OUTCOME: contextvars.ContextVar[dict[str, bool] | None] = contextvars.Contex
 # check creation is restricted to admin/conversation so risk is accepted.
 # heartbeat_check_create/manage enable autonomous sequential pipelines:
 # a check can spawn follow-up checks and disable itself when done.
-ALLOWED_TOOLS = frozenset({
-    "web_search", "web_fetch", "recall_deep", "recall_recent", "bash", "read_file",
-    "heartbeat_check_create", "heartbeat_check_manage",
-})
+ALLOWED_TOOLS = frozenset(
+    {
+        "web_search",
+        "web_fetch",
+        "recall_deep",
+        "recall_recent",
+        "bash",
+        "read_file",
+        "heartbeat_check_create",
+        "heartbeat_check_manage",
+    }
+)
 
 MIN_INTERVAL_SECONDS = 300  # 5 minutes minimum
+
+# Metadata key stamped fresh by every enable/disable (Phase 2.8 revert guard).
+_STATE_TOKEN_KEY = "enabled_state_token"
+
+
+def _meta(model: Any) -> dict:
+    return model.metadata_ if isinstance(model.metadata_, dict) else {}
+
+
 CALLBACK_RETRY_DELAY_SECONDS = 30
 
 
@@ -187,9 +204,7 @@ class DynamicCheck(BaseCheck):
             return CheckResult(skipped=True)
 
         session_id = f"dynamic-check-{self.name}-{uuid4().hex[:8]}"
-        has_pipeline_tools = bool(
-            {"heartbeat_check_create", "heartbeat_check_manage"} & set(self._tools)
-        )
+        has_pipeline_tools = bool({"heartbeat_check_create", "heartbeat_check_manage"} & set(self._tools))
         pipeline_section = ""
         if has_pipeline_tools:
             pipeline_section = (
@@ -209,7 +224,7 @@ class DynamicCheck(BaseCheck):
             f"Respond with a JSON object:\n"
             f'{{"has_findings": bool, "findings": [{{"summary": "...", '
             f'"urgency": "high|normal|low", "needs_action": bool}}]}}\n\n'
-            f"If nothing noteworthy, return: {{\"has_findings\": false, \"findings\": []}}"
+            f'If nothing noteworthy, return: {{"has_findings": false, "findings": []}}'
         )
 
         run_task = asyncio.create_task(
@@ -321,19 +336,24 @@ class DynamicCheck(BaseCheck):
             urgency = item.get("urgency", "normal")
             if urgency not in ("high", "normal", "low"):
                 urgency = "normal"
-            findings.append(Finding(
-                source=f"dynamic:{self.name}",
-                summary=summary[:200],
-                urgency=urgency,
-                needs_action=item.get("needs_action", False),
-                raw_data={"check_id": self.check_id, "dynamic": True},
-            ))
+            findings.append(
+                Finding(
+                    source=f"dynamic:{self.name}",
+                    summary=summary[:200],
+                    urgency=urgency,
+                    needs_action=item.get("needs_action", False),
+                    raw_data={"check_id": self.check_id, "dynamic": True},
+                )
+            )
 
         return findings
 
     def signature(self) -> str:
         """Return a signature string for change detection."""
-        return f"{self.name}|{self._prompt}|{self._tools}|{self.interval}|{self.timeout}|{self.urgent_override}|{self._cron_expr}|{self.on_complete_prompt}|{self.on_complete_tools}"
+        return (
+            f"{self.name}|{self._prompt}|{self._tools}|{self.interval}|{self.timeout}|"
+            f"{self.urgent_override}|{self._cron_expr}|{self.on_complete_prompt}|{self.on_complete_tools}"
+        )
 
 
 class DynamicCheckLoader:
@@ -379,6 +399,13 @@ class DynamicCheckLoader:
             if check.cancel_run(by_sibling_run=by_sibling_run):
                 logger.info("F034.5: Cancelled in-flight run of disabled check '%s'", name)
 
+    def _has_cancellable_run(self, name: str) -> bool:
+        """Whether ``_cancel_active_runs(name)`` would cancel a run now: any
+        in-flight run of ``name`` other than the one making this call (a
+        check disabling itself finishes its own run; it is never cancelled)."""
+        initiator = _CURRENT_CHECK_RUN.get()
+        return any(task is not initiator for check in self._active_runs.get(name, ()) for task in check._run_tasks)
+
     def set_runner(self, runner: AgentRunner) -> None:
         """Set the runner after construction (needed when runner is created in start())."""
         self._runner = runner
@@ -418,7 +445,8 @@ class DynamicCheckLoader:
             existing = self._registry.get_check(name)
             if existing and name in self._registry._permanent:
                 logger.warning(
-                    "F034.5: Skipping dynamic check '%s' — collides with permanent check", name,
+                    "F034.5: Skipping dynamic check '%s' — collides with permanent check",
+                    name,
                 )
                 continue
 
@@ -477,7 +505,10 @@ class DynamicCheckLoader:
             return list(result.scalars().all())
 
     async def update_run_stats(
-        self, check_id: str, success: bool, error_msg: str | None = None,
+        self,
+        check_id: str,
+        success: bool,
+        error_msg: str | None = None,
     ) -> None:
         """Update run statistics in DB after a check execution."""
         from nous.storage.models import DynamicCheckModel
@@ -642,9 +673,7 @@ class DynamicCheckLoader:
         # Check max count
         current_count = len(self._loaded_ids)
         if current_count >= self._max_checks:
-            raise DynamicCheckLimitReached(
-                f"Maximum of {self._max_checks} dynamic checks reached"
-            )
+            raise DynamicCheckLimitReached(f"Maximum of {self._max_checks} dynamic checks reached")
 
         # Validate cron expression
         if cron_expr:
@@ -720,14 +749,37 @@ class DynamicCheckLoader:
         }
 
     async def manage_check(
-        self, action: str, name: str | None = None, updates: dict | None = None,
+        self,
+        action: str,
+        name: str | None = None,
+        updates: dict | None = None,
+        *,
+        capture: dict | None = None,
     ) -> dict[str, Any]:
-        """List, enable, disable, delete, or update a dynamic check."""
+        """List, enable, disable, delete, or update a dynamic check.
+
+        Every enable/disable stamps a fresh ``enabled_state_token`` in the
+        row's metadata. ``capture``, when given to a disable, receives the
+        check's prior ``enabled`` and the token this disable wrote, so a
+        compensation revert can refuse once anyone has toggled it since
+        (``enable_if_unchanged``). A ``capture["persist"]`` coroutine is
+        awaited with the disable's session before its commit.
+        """
         async with self._mutation_lock:
-            return await self._manage_check_locked(action, name, updates)
+            return await self._manage_check_locked(
+                action,
+                name,
+                updates,
+                capture=capture,
+            )
 
     async def _manage_check_locked(
-        self, action: str, name: str | None, updates: dict | None,
+        self,
+        action: str,
+        name: str | None,
+        updates: dict | None,
+        *,
+        capture: dict | None = None,
     ) -> dict[str, Any]:
         """manage_check() body; the caller holds ``_mutation_lock``."""
         from nous.storage.models import DynamicCheckModel
@@ -739,26 +791,78 @@ class DynamicCheckLoader:
             raise ValueError("Name required for action: " + action)
 
         async with self._db.session() as session:
-            result = await session.execute(
+            stmt = (
                 select(DynamicCheckModel)
                 .where(DynamicCheckModel.agent_id == self._agent_id)
                 .where(DynamicCheckModel.name == name)
             )
+            if capture is not None:
+                # Row-locked for a recorded disable: a concurrent revert
+                # (enable_if_unchanged, outside _mutation_lock) cannot commit
+                # between this read and the commit, so the prior state
+                # recorded in this transaction is exact.
+                stmt = stmt.with_for_update()
+            result = await session.execute(stmt)
             model = result.scalar_one_or_none()
             if model is None:
                 raise ValueError(f"Dynamic check '{name}' not found")
 
             if action == "enable":
                 model.enabled = True
+                model.metadata_ = {**_meta(model), _STATE_TOKEN_KEY: uuid4().hex}
                 model.updated_at = datetime.now(UTC)
                 await session.commit()
                 await self._sync_locked()
                 return {"status": "enabled", "name": name}
 
             elif action == "disable":
-                model.enabled = False
-                model.updated_at = datetime.now(UTC)
-                await session.commit()
+                # codex P1 (PR #652 r11): a disable that cancels an in-flight
+                # run cannot be undone -- re-enabling restores the schedule,
+                # not the interrupted run. Decided from the registry
+                # _cancel_active_runs reads, before anything is written.
+                cancels_run = capture is not None and self._has_cancellable_run(name)
+                if cancels_run and capture.get("refuse_if_running"):
+                    raise ValueError(
+                        f"check '{name}' has an active run; disabling it now would cancel that run, "
+                        "which is not undoable. Nothing was changed; retry once the run has finished"
+                    )
+                # From the check above until the commit lands, no run of this
+                # check may start (run() re-checks _self_disabled before it
+                # registers in _active_runs, with no await between), so the
+                # answer cannot go stale. Undone if the disable does not land.
+                # Not for a disable that cancels anyway: a run finishing
+                # mid-commit would then report a self-disable it did not make.
+                gate = self._registry.get_check(name) if capture is not None and not cancels_run else None
+                if not (isinstance(gate, DynamicCheck) and not gate._self_disabled):
+                    gate = None
+                if gate is not None:
+                    gate._self_disabled = True
+                try:
+                    prior_enabled = model.enabled
+                    token = uuid4().hex
+                    model.enabled = False
+                    model.metadata_ = {**_meta(model), _STATE_TOKEN_KEY: token}
+                    model.updated_at = datetime.now(UTC)
+                    # Filled BEFORE the commit: a call cancelled while the
+                    # commit is in flight still reports the token it may have
+                    # written. The revert matches on that token, so a disable
+                    # that never committed can never be "reverted".
+                    if capture is not None:
+                        capture["prior_enabled"] = prior_enabled
+                        capture["written"] = {"check_id": str(model.id), _STATE_TOKEN_KEY: token}
+                        # The compensation snapshot is written in THIS
+                        # transaction: the disable and its revert record
+                        # commit (or roll back) together. A disable that
+                        # cancels a run records no written state, so it is
+                        # never revertible.
+                        persist = capture.get("persist")
+                        if persist is not None and not cancels_run:
+                            await persist(session, capture)
+                    await session.commit()
+                except BaseException:
+                    if gate is not None:
+                        gate._self_disabled = False
+                    raise
                 # codex P2 (PR #656): flag the in-memory check only once the
                 # disable is durable. Flagging before the commit left a failed
                 # commit with an enabled, registered check whose run() skips
@@ -792,9 +896,15 @@ class DynamicCheckLoader:
                 if not updates:
                     raise ValueError("No updates provided")
                 allowed_fields = {
-                    "description", "prompt", "tools", "interval_seconds",
-                    "cron_expr", "timeout_seconds", "urgent",
-                    "on_complete_prompt", "on_complete_tools",
+                    "description",
+                    "prompt",
+                    "tools",
+                    "interval_seconds",
+                    "cron_expr",
+                    "timeout_seconds",
+                    "urgent",
+                    "on_complete_prompt",
+                    "on_complete_tools",
                 }
                 for key, value in updates.items():
                     if key not in allowed_fields:
@@ -835,6 +945,66 @@ class DynamicCheckLoader:
             else:
                 raise ValueError(f"Unknown action: {action}")
 
+    async def is_enabled(self, name: str, check_id: str) -> bool:
+        """Whether check ``name`` is still the row ``check_id`` and enabled."""
+        from uuid import UUID
+
+        from nous.storage.models import DynamicCheckModel
+
+        async with self._db.session() as session:
+            result = await session.execute(
+                select(DynamicCheckModel.enabled)
+                .where(DynamicCheckModel.agent_id == self._agent_id)
+                .where(DynamicCheckModel.name == name)
+                .where(DynamicCheckModel.id == UUID(check_id))
+            )
+            return result.scalar_one_or_none() is True
+
+    async def enable_if_unchanged(self, name: str, check_id: str, token: str) -> bool:
+        """Re-enable check ``name`` only while it is still the disabled row
+        ``check_id`` carrying ``token`` -- the state one disable left. Any
+        later enable/disable (or delete and re-create) changes that, and the
+        conditional update then touches nothing. Returns whether it enabled."""
+        from uuid import UUID
+
+        from nous.storage.models import DynamicCheckModel
+
+        async with self._db.session() as session:
+            result = await session.execute(
+                update(DynamicCheckModel)
+                .where(DynamicCheckModel.agent_id == self._agent_id)
+                .where(DynamicCheckModel.name == name)
+                .where(DynamicCheckModel.id == UUID(check_id))
+                .where(DynamicCheckModel.enabled == False)  # noqa: E712
+                .where(DynamicCheckModel.metadata_[_STATE_TOKEN_KEY].astext == token)
+                .values(
+                    enabled=True,
+                    metadata_=DynamicCheckModel.metadata_.op("||")(
+                        func.jsonb_build_object(_STATE_TOKEN_KEY, uuid4().hex)
+                    ),
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            await session.commit()
+        if (result.rowcount or 0) != 1:
+            return False
+        # codex P2 on #652: the revert succeeded once the conditional update
+        # commits. If sync() fails, the check is re-enabled in the DB but not
+        # in the registry -- a transient state that the next periodic sync or
+        # heartbeat tick will reconcile. Treat this as success (the revert
+        # happened) rather than failure (which would leave the old token
+        # invalid with no way to retry).
+        try:
+            await self.sync()
+        except Exception:
+            logger.warning(
+                "F034.5: enable_if_unchanged succeeded but sync() failed for '%s'; "
+                "check is re-enabled in DB and will appear on next tick",
+                name,
+                exc_info=True,
+            )
+        return True
+
     async def _list_checks(self) -> dict[str, Any]:
         """List all dynamic checks with status."""
         from nous.storage.models import DynamicCheckModel
@@ -850,26 +1020,27 @@ class DynamicCheckLoader:
         checks = []
         for row in rows:
             registry_check = self._registry.get_check(row.name)
-            checks.append({
-                "name": row.name,
-                "description": row.description,
-                "enabled": row.enabled,
-                "interval_seconds": row.interval_seconds,
-                "cron_expr": row.cron_expr,
-                "urgent": row.urgent,
-                "tools": row.tools or [],
-                "run_count": row.run_count,
-                "error_count": row.error_count,
-                "last_error": row.last_error,
-                "last_run_at": row.last_run_at.isoformat() if row.last_run_at else None,
-                "created_at": row.created_at.isoformat() if row.created_at else None,
-                "created_by": row.created_by,
-                "on_complete_prompt": (row.on_complete_prompt or "")[:200] if row.on_complete_prompt else None,
-                "on_complete_tools": row.on_complete_tools or [],
-                "circuit_breaker_open": (
-                    registry_check.consecutive_failures >= registry_check.max_failures
-                    if registry_check else False
-                ),
-            })
+            checks.append(
+                {
+                    "name": row.name,
+                    "description": row.description,
+                    "enabled": row.enabled,
+                    "interval_seconds": row.interval_seconds,
+                    "cron_expr": row.cron_expr,
+                    "urgent": row.urgent,
+                    "tools": row.tools or [],
+                    "run_count": row.run_count,
+                    "error_count": row.error_count,
+                    "last_error": row.last_error,
+                    "last_run_at": row.last_run_at.isoformat() if row.last_run_at else None,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                    "created_by": row.created_by,
+                    "on_complete_prompt": (row.on_complete_prompt or "")[:200] if row.on_complete_prompt else None,
+                    "on_complete_tools": row.on_complete_tools or [],
+                    "circuit_breaker_open": (
+                        registry_check.consecutive_failures >= registry_check.max_failures if registry_check else False
+                    ),
+                }
+            )
 
         return {"checks": checks, "count": len(checks), "max": self._max_checks}

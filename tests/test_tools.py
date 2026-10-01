@@ -145,12 +145,15 @@ class TestResolveDecision:
         multiple decisions share the same created_at timestamp (SQLite).
         """
         from nous.brain.schemas import RecordInput
-        detail = await brain.record(RecordInput(
-            description=f"Decision to resolve in tool test {uuid.uuid4()}",
-            confidence=0.7,
-            category="tooling",
-            stakes="low",
-        ))
+
+        detail = await brain.record(
+            RecordInput(
+                description=f"Decision to resolve in tool test {uuid.uuid4()}",
+                confidence=0.7,
+                category="tooling",
+                stakes="low",
+            )
+        )
         return str(detail.id)
 
     @pytest.mark.asyncio
@@ -158,18 +161,166 @@ class TestResolveDecision:
         """resolve_decision persists outcome + note."""
         did = await self._make_decision(tools, brain)
         result = await tools["resolve_decision"](
-            decision_id=did, outcome="noise", resolution_note="sweep artifact",
+            decision_id=did,
+            outcome="noise",
+            resolution_note="sweep artifact",
         )
         assert "resolved" in result["content"][0]["text"]
         detail = await brain.get(uuid.UUID(did))
         assert detail.outcome == "noise"
 
     @pytest.mark.asyncio
+    async def test_resolve_decision_reports_review_state_from_its_own_transaction(self, tools, brain):
+        """codex P1 #652 (runner.py:530/660): the compensation snapshot's prior
+        and written review states come from the resolving transaction, not
+        from re-reads a concurrent review could slip between."""
+        from nous.api.call_outcome import CallOutcome
+        from nous.api.call_outcome import _current as outcome_var
+        from nous.api.compensation import SnapshotStore
+
+        did = await self._make_decision(tools, brain)
+        await brain.review(uuid.UUID(did), "noise", result="earlier review", reviewer="someone")
+        store = SnapshotStore(brain.db, brain.agent_id)
+        before = await store.decision_state(did)
+        outcome = CallOutcome()
+        token = outcome_var.set(outcome)
+        try:
+            await tools["resolve_decision"](decision_id=did, outcome="noise", resolution_note="mine")
+        finally:
+            outcome_var.reset(token)
+        written = await store.decision_state(did)
+        # a later review lands after the call: the capture still reports the call's own write
+        await brain.review(uuid.UUID(did), "noise", result="later review", reviewer="someone-else")
+
+        def _naive(state):  # the SQLite test DB drops the UTC offset on read
+            ts = state["reviewed_at"]
+            return {**state, "reviewed_at": ts and ts.split("+")[0]}
+
+        cap = outcome.review_capture
+        assert _naive(cap["prior"]) == _naive(before)
+        assert _naive(cap["written"]) == _naive(written)
+        assert cap["prior"]["outcome_result"] == "earlier review"
+        assert cap["written"]["outcome_result"] == "mine"
+
+    @pytest.mark.asyncio
+    async def test_resolve_decision_capture_survives_a_cancel_during_the_commit(self, tools, brain, monkeypatch):
+        """codex P1 #652 (runner.py:645): the capture was attached to the call's
+        outcome only after brain.review returned, so a call cancelled while
+        its commit was in flight (outcome unknown -- it may have landed)
+        reported no written state and could never be reverted."""
+        import asyncio
+
+        from nous.api.call_outcome import CallOutcome
+        from nous.api.call_outcome import _current as outcome_var
+
+        did = await self._make_decision(tools, brain)
+
+        async def review_cancelled_mid_commit(*args, capture=None, **kwargs):
+            capture["prior"] = {"outcome": None}
+            capture["written"] = {"outcome": "noise"}
+            raise asyncio.CancelledError  # the commit was cancelled in flight
+
+        monkeypatch.setattr(brain, "review", review_cancelled_mid_commit)
+        outcome = CallOutcome()
+        token = outcome_var.set(outcome)
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await tools["resolve_decision"](decision_id=did, outcome="noise", resolution_note="x")
+        finally:
+            outcome_var.reset(token)
+        assert outcome.review_capture == {"prior": {"outcome": None}, "written": {"outcome": "noise"}}
+
+    async def _snapshotted_call(self, brain, did):
+        """A runner snapshot for a resolve_decision on an undoable DAG node:
+        returns (store, entry_id, outcome) as dispatch would see them."""
+        from nous.api.call_outcome import CallOutcome
+        from nous.api.compensation import SnapshotStore
+        from nous.api.execution_context import ExecutionContext
+
+        store = SnapshotStore(brain.db, brain.agent_id)
+        runner = _compensating_runner(store)
+        entry, outcome = uuid.uuid4(), CallOutcome()
+        assert await runner._capture_compensation_snapshot(
+            ExecutionContext(kind="dag_node", undoable=True),
+            "resolve_decision",
+            {"decision_id": did, "outcome": "noise"},
+            entry,
+            outcome=outcome,
+        )
+        assert outcome.persist_written is not None
+        return store, entry, outcome
+
+    @pytest.mark.asyncio
+    async def test_resolve_decision_written_state_commits_with_the_review(self, tools, brain):
+        """codex P1 #652 (runner.py:607): the written state was recorded by a
+        post-dispatch write, so a crash or a cancelled ledger close after the
+        review committed left a snapshot with no written state and no usable
+        revert. It is now written in the review's own transaction: with the
+        post-dispatch hook never reached, the snapshot already holds it and
+        the revert works."""
+        from nous.api.call_outcome import _current as outcome_var
+        from nous.api.compensation import compensate_resolve_decision, snapshot_is_revertible
+
+        did = await self._make_decision(tools, brain)
+        store, entry, outcome = await self._snapshotted_call(brain, did)
+        token = outcome_var.set(outcome)
+        try:
+            result = await tools["resolve_decision"](decision_id=did, outcome="noise", resolution_note="mine")
+        finally:
+            outcome_var.reset(token)
+        assert not result.get("is_error")
+        # The call is cut off here (process exit / CancelledError from the
+        # ledger close): _after_compensable_call never runs.
+        snap = await store.get_by_ledger_entry(entry)
+        assert snapshot_is_revertible("resolve_decision", snap.snapshot_data)
+        assert snap.snapshot_data["written"]["outcome_result"] == "mine"
+        assert outcome.review_capture["persisted"] is True
+        res = await compensate_resolve_decision(entry, snap.snapshot_data, type("D", (), {"brain": brain})())
+        assert res.success, res.message
+        assert (await brain.get(uuid.UUID(did))).outcome == "pending"
+
+    @pytest.mark.asyncio
+    async def test_resolve_decision_rolled_back_leaves_no_written_state(self, tools, brain, monkeypatch):
+        """codex P1 #652: the record shares the review's transaction both ways
+        -- a review that rolls back after recording leaves no written state,
+        and a snapshot row that cannot be updated rolls the review back."""
+        from nous.api.call_outcome import _current as outcome_var
+
+        did = await self._make_decision(tools, brain)
+        store, entry, outcome = await self._snapshotted_call(brain, did)
+        monkeypatch.setattr(brain, "_emit_event", AsyncMock(side_effect=RuntimeError("boom")))
+        token = outcome_var.set(outcome)
+        try:
+            result = await tools["resolve_decision"](decision_id=did, outcome="noise", resolution_note="mine")
+        finally:
+            outcome_var.reset(token)
+        monkeypatch.undo()
+        assert result.get("is_error") is True
+        assert outcome.review_capture.get("persisted") is True  # recorded, then rolled back
+        snap = await store.get_by_ledger_entry(entry)
+        assert "written" not in snap.snapshot_data
+        assert (await brain.get(uuid.UUID(did))).outcome == "pending"
+
+        # No snapshot row to record into: the review itself is refused.
+        did2 = await self._make_decision(tools, brain)
+        store, entry, outcome = await self._snapshotted_call(brain, did2)
+        outcome.persist_written = _compensating_runner(store)._written_state_persister("resolve_decision", uuid.uuid4())
+        token = outcome_var.set(outcome)
+        try:
+            result = await tools["resolve_decision"](decision_id=did2, outcome="noise", resolution_note="x")
+        finally:
+            outcome_var.reset(token)
+        assert result.get("is_error") is True
+        assert (await brain.get(uuid.UUID(did2))).outcome == "pending"
+
+    @pytest.mark.asyncio
     async def test_resolve_decision_noise_allowed_in_background(self, tools, brain):
         """A background turn may mark a pending decision as noise, attributed to it."""
         did = await self._make_decision(tools, brain)
         result = await tools["resolve_decision"](
-            decision_id=did, outcome="noise", resolution_note="heartbeat tick artifact",
+            decision_id=did,
+            outcome="noise",
+            resolution_note="heartbeat tick artifact",
             _is_background=True,
         )
         assert result.get("is_error") is not True
@@ -193,7 +344,9 @@ class TestResolveDecision:
         """Background turns cannot grade a prediction; the error names what IS allowed."""
         did = await self._make_decision(tools, brain)
         result = await tools["resolve_decision"](
-            decision_id=did, outcome=outcome, _is_background=True,
+            decision_id=did,
+            outcome=outcome,
+            _is_background=True,
         )
         assert result.get("is_error") is True
         text = result["content"][0]["text"]
@@ -208,14 +361,18 @@ class TestResolveDecision:
         old_id = await self._make_decision(tools, brain)
         new_id = await self._make_decision(tools, brain)
         refused = await tools["resolve_decision"](
-            decision_id=old_id, outcome="superseded", _is_background=True,
+            decision_id=old_id,
+            outcome="superseded",
+            _is_background=True,
         )
         assert refused.get("is_error") is True
         assert "superseded_by" in refused["content"][0]["text"]
         assert (await brain.get(uuid.UUID(old_id))).outcome == "pending"
 
         result = await tools["resolve_decision"](
-            decision_id=old_id, outcome="superseded", superseded_by=new_id,
+            decision_id=old_id,
+            outcome="superseded",
+            superseded_by=new_id,
             _is_background=True,
         )
         assert result.get("is_error") is not True
@@ -230,7 +387,9 @@ class TestResolveDecision:
         did = await self._make_decision(tools, brain)
         await tools["resolve_decision"](decision_id=did, outcome="failure", resolution_note="broke prod")
         result = await tools["resolve_decision"](
-            decision_id=did, outcome="noise", _is_background=True,
+            decision_id=did,
+            outcome="noise",
+            _is_background=True,
         )
         assert result.get("is_error") is True
         assert "failure" in result["content"][0]["text"]
@@ -245,7 +404,9 @@ class TestResolveDecision:
         new_id = await self._make_decision(tools, brain)
         await tools["resolve_decision"](decision_id=old_id, outcome="noise", _is_background=True)
         result = await tools["resolve_decision"](
-            decision_id=old_id, outcome="superseded", superseded_by=new_id,
+            decision_id=old_id,
+            outcome="superseded",
+            superseded_by=new_id,
             _is_background=True,
         )
         assert result.get("is_error") is not True
@@ -258,11 +419,15 @@ class TestResolveDecision:
         old_id = await self._make_decision(tools, brain)
         new_id = await self._make_decision(tools, brain)
         await tools["resolve_decision"](
-            decision_id=old_id, outcome="superseded", superseded_by=new_id,
+            decision_id=old_id,
+            outcome="superseded",
+            superseded_by=new_id,
             _is_background=True,
         )
         result = await tools["resolve_decision"](
-            decision_id=old_id, outcome="noise", _is_background=True,
+            decision_id=old_id,
+            outcome="noise",
+            _is_background=True,
         )
         assert result.get("is_error") is not True
         assert "superseded_by" not in result["content"][0]["text"]
@@ -364,7 +529,9 @@ class TestResolveDecision:
         """
         did = await self._make_decision(tools, brain)
         result = await tools["resolve_decision"](
-            decision_id=did, outcome="superseded", resolution_note="replaced it",
+            decision_id=did,
+            outcome="superseded",
+            resolution_note="replaced it",
         )
         assert result.get("is_error") is True
         assert "superseded_by" in result["content"][0]["text"]
@@ -377,7 +544,9 @@ class TestResolveDecision:
         """Non-supersession outcomes are unaffected by the new requirement."""
         did = await self._make_decision(tools, brain)
         result = await tools["resolve_decision"](
-            decision_id=did, outcome="success", resolution_note="shipped",
+            decision_id=did,
+            outcome="success",
+            resolution_note="shipped",
         )
         assert result.get("is_error") is not True
         detail = await brain.get(uuid.UUID(did))
@@ -406,6 +575,135 @@ class TestResolveDecision:
 # ---------------------------------------------------------------------------
 # learn_fact tests
 # ---------------------------------------------------------------------------
+
+
+def _compensating_runner(store):
+    """A bare AgentRunner with only the compensation wiring."""
+    import tempfile
+    from types import SimpleNamespace
+
+    from nous.api.runner import AgentRunner
+
+    runner = object.__new__(AgentRunner)
+    runner._settings = SimpleNamespace(compensation_auto_review_enabled=False)
+    runner._action_review_pusher = None
+    runner._snap_store = store
+    runner._workspace_dir = tempfile.gettempdir()
+    runner._dispatcher = SimpleNamespace()
+    return runner
+
+
+class TestHeartbeatCheckDisableCompensation:
+    """codex P1 #652 (runner.py:607): a heartbeat_check_manage disable records
+    its compensation state in its own transaction."""
+
+    async def _setup(self, db, *, snapshot=True):
+        from types import SimpleNamespace
+
+        from nous.api.call_outcome import CallOutcome
+        from nous.api.compensation import SnapshotStore
+        from nous.api.execution_context import ExecutionContext
+        from nous.api.tools import register_heartbeat_tools
+        from nous.heartbeat.dynamic import DynamicCheckLoader
+        from nous.heartbeat.registry import CheckRegistry
+        from nous.storage.models import DynamicCheckModel
+
+        agent = f"hb-{uuid.uuid4().hex[:8]}"
+        name = "nightly"
+        async with db.session() as s:
+            s.add(DynamicCheckModel(agent_id=agent, name=name, description="d", prompt="p", enabled=True))
+            await s.commit()
+        loader = DynamicCheckLoader(db=db, registry=CheckRegistry(), agent_id=agent)
+        handlers: dict = {}
+        register_heartbeat_tools(SimpleNamespace(register=lambda n, fn, *a, **k: handlers.__setitem__(n, fn)), loader)
+        store = SnapshotStore(db, agent)
+        entry, outcome = uuid.uuid4(), CallOutcome()
+        if snapshot:
+            assert await _compensating_runner(store)._capture_compensation_snapshot(
+                ExecutionContext(kind="dag_node", undoable=True),
+                "heartbeat_check_manage",
+                {"name": name, "action": "disable"},
+                entry,
+                outcome=outcome,
+            )
+        return SimpleNamespace(
+            loader=loader,
+            handler=handlers["heartbeat_check_manage"],
+            store=store,
+            entry=entry,
+            outcome=outcome,
+            name=name,
+            agent=agent,
+        )
+
+    async def _row(self, db, agent, name):
+        from sqlalchemy import select
+
+        from nous.storage.models import DynamicCheckModel
+
+        async with db.session() as s:
+            return (
+                await s.execute(
+                    select(DynamicCheckModel)
+                    .where(DynamicCheckModel.agent_id == agent)
+                    .where(DynamicCheckModel.name == name)
+                )
+            ).scalar_one()
+
+    @pytest.mark.asyncio
+    async def test_disable_written_state_commits_with_the_disable(self, db):
+        """With the post-dispatch hook never reached (crash / cancelled ledger
+        close), the snapshot already holds the disable's written state and
+        prior_enabled, and the revert re-enables the check."""
+        from nous.api.call_outcome import _current as outcome_var
+        from nous.api.compensation import compensate_heartbeat_check_manage, snapshot_is_revertible
+
+        t = await self._setup(db)
+        token = outcome_var.set(t.outcome)
+        try:
+            result = await t.handler(action="disable", name=t.name)
+        finally:
+            outcome_var.reset(token)
+        assert not result.get("is_error")
+        snap = await t.store.get_by_ledger_entry(t.entry)
+        assert snapshot_is_revertible("heartbeat_check_manage", snap.snapshot_data)
+        row = await self._row(db, t.agent, t.name)
+        assert row.enabled is False
+        assert snap.snapshot_data["written"] == {
+            "check_id": str(row.id),
+            "enabled_state_token": row.metadata_["enabled_state_token"],
+        }
+        assert snap.snapshot_data["prior_enabled"] is True
+
+        async def enable_if_unchanged(name, check_id, tok):  # the guard, without Postgres JSONB operators
+            current = await self._row(db, t.agent, name)
+            return str(current.id) == check_id and current.metadata_.get("enabled_state_token") == tok
+
+        loader = type("L", (), {"enable_if_unchanged": staticmethod(enable_if_unchanged)})()
+        res = await compensate_heartbeat_check_manage(
+            t.entry, snap.snapshot_data, type("D", (), {"heartbeat_loader": loader})()
+        )
+        assert res.success and "re-enabled" in res.message
+
+    @pytest.mark.asyncio
+    async def test_disable_without_its_snapshot_row_rolls_back(self, db):
+        """A disable whose compensation record cannot be written is rolled
+        back -- it never commits unrevertibly -- and nothing is recorded."""
+        from nous.api.call_outcome import _current as outcome_var
+
+        t = await self._setup(db)
+        t.outcome.persist_written = _compensating_runner(t.store)._written_state_persister(
+            "heartbeat_check_manage", uuid.uuid4()
+        )
+        token = outcome_var.set(t.outcome)
+        try:
+            result = await t.handler(action="disable", name=t.name)
+        finally:
+            outcome_var.reset(token)
+        assert result.get("is_error") is True
+        assert (await self._row(db, t.agent, t.name)).enabled is True
+        snap = await t.store.get_by_ledger_entry(t.entry)
+        assert "written" not in snap.snapshot_data
 
 
 class TestLearnFact:

@@ -50,7 +50,6 @@ def test_a_well_formed_approval_dag_validates():
 @pytest.mark.parametrize(
     "overrides, match",
     [
-        ({"default_option": "send"}, "must be a 'stop' option"),
         ({"default_option": None}, "default_option"),
         ({"default_option": "nope"}, "default_option"),
         ({"options": [_OPTIONS[1], {"id": "x", "label": "X", "outcome": "stop"}]}, "'proceed'"),
@@ -69,6 +68,13 @@ def test_a_well_formed_approval_dag_validates():
 def test_bad_approval_nodes_are_rejected(overrides, match):
     with pytest.raises(ValidationError, match=match):
         _approval(**overrides)
+
+
+def test_proceed_default_is_rejected_at_dag_level_when_flag_is_off():
+    """A proceed-default passes node-level validation but is rejected when
+    the full DAG is assembled and the feature flag is off (default)."""
+    with pytest.raises(ValidationError, match="must be a 'stop' option"):
+        _gated(_approval(default_option="send"))
 
 
 def test_empty_values_count_as_not_given():

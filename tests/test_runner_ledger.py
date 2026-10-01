@@ -7,10 +7,7 @@ import uuid
 from unittest.mock import MagicMock
 
 import pytest
-
-from nous.api.execution_context import ExecutionContext
-from nous.cognitive.ledger_store import LedgerWriteError
-from tests.test_runner_authorization import (
+from test_runner_authorization import (
     AgentRunner,
     _MockBrain,
     _MockCognitive,
@@ -21,10 +18,14 @@ from tests.test_runner_authorization import (
     _settings,
 )
 
+from nous.api.execution_context import ExecutionContext
+from nous.cognitive.ledger_store import LedgerWriteError
+
 
 class _FakeStore:
-    def __init__(self, *, fail_open=False, fail_close=False, duplicate=None,
-                 duplicate_after_first=False, fail_claim=False):
+    def __init__(
+        self, *, fail_open=False, fail_close=False, duplicate=None, duplicate_after_first=False, fail_claim=False
+    ):
         self.events: list[tuple] = []
         self.fail_open = fail_open
         self.fail_close = fail_close
@@ -46,8 +47,11 @@ class _FakeStore:
         self.keys.append(idempotency_key)
         if self.fail_open:
             raise LedgerWriteError(self.failed_id, RuntimeError("db down"))
-        if self.duplicate is not None and idempotency_key is not None and (
-                not self.duplicate_after_first or len(self.keys) > 1):
+        if (
+            self.duplicate is not None
+            and idempotency_key is not None
+            and (not self.duplicate_after_first or len(self.keys) > 1)
+        ):
             raise DuplicateSend(self.duplicate)
         return f"id-{tool_name}"
 
@@ -55,13 +59,11 @@ class _FakeStore:
         self.claimed.append(entry_id)
         return not self.fail_claim
 
-    async def record_blocked(self, *, context, tool_name, tool_input, turn, refused_by,
-                             idempotency_key=None):
+    async def record_blocked(self, *, context, tool_name, tool_input, turn, refused_by, idempotency_key=None):
         self.events.append(("blocked", tool_name, refused_by))
         self.blocked_keys.append(idempotency_key)
 
-    async def close_entry(self, entry_id, *, status, result_summary, output_of=None,
-                          external_ref=None, keyed=False):
+    async def close_entry(self, entry_id, *, status, result_summary, output_of=None, external_ref=None, keyed=False):
         self.events.append(("close", entry_id, status))
         self.output_of.append(output_of)
         self.closes.append((status, external_ref))
@@ -190,8 +192,7 @@ async def test_close_failure_never_breaks_the_turn(caplog):
 @pytest.mark.asyncio
 async def test_enforced_refusal_is_recorded_blocked():
     store = _FakeStore()
-    r, d = _runner(store, offered=("recall_deep", "write_file"),
-                   tool_offered_set_enforcement_mode="enforce")
+    r, d = _runner(store, offered=("recall_deep", "write_file"), tool_offered_set_enforcement_mode="enforce")
     r._call_api = _one_tool_call_then_done("write_file")
     await _run_loop(r, is_background=True, tool_filter=["recall_deep"])
     assert d.calls == []
@@ -210,8 +211,7 @@ async def test_action_gate_block_records_a_code_never_the_gate_model_prose():
 
     class _Gate:
         async def check(self, *a, **k):
-            return GateResult(approved=False, reason="echoes sk-ABCDEFGHIJKLMNOP",
-                              suggestion="try sk-ABCDEFGHIJKLMNOP")
+            return GateResult(approved=False, reason="echoes sk-ABCDEFGHIJKLMNOP", suggestion="try sk-ABCDEFGHIJKLMNOP")
 
     r._action_gate = _Gate()
     r._call_api = _one_tool_call_then_done("write_file")
@@ -281,7 +281,7 @@ def test_fork_shares_the_ledger_store():
 
 
 def _stream_runner(store, dispatch):
-    from tests.test_streaming import _make_mock_cognitive, _make_mock_settings, _make_runner
+    from test_streaming import _make_mock_cognitive, _make_mock_settings, _make_runner
 
     cognitive, _ = _make_mock_cognitive()
     settings = _make_mock_settings()
@@ -369,12 +369,13 @@ def _held(status, subject="s"):
 
     from nous.cognitive.ledger_store import HeldKey, _digest
 
-    return HeldKey(uuid.uuid4(), status, "<m1@x>", datetime.now(UTC), datetime.now(UTC),
-                   {"subject_sha256": _digest(subject)[0]})
+    return HeldKey(
+        uuid.uuid4(), status, "<m1@x>", datetime.now(UTC), datetime.now(UTC), {"subject_sha256": _digest(subject)[0]}
+    )
 
 
 def _email_call(subject="s"):
-    from tests.test_runner_authorization import _one_tool_call_then_done_with
+    from test_runner_authorization import _one_tool_call_then_done_with
 
     return _one_tool_call_then_done_with("send_email", {"to": "a@x.io", "subject": subject, "body": "b"})
 
@@ -409,8 +410,7 @@ async def test_a_key_held_from_an_earlier_turn_is_already_sent_whatever_the_word
     r, d = _runner(store, offered=("send_email",))
     r._call_api = _email_call(subject)
     ledger = ExecutionLedger(session_id="s1")
-    _text, results, _usage, _thinking = await _run_loop(
-        r, is_background=True, ledger=ledger, context=_dag_ctx())
+    _text, results, _usage, _thinking = await _run_loop(r, is_background=True, ledger=ledger, context=_dag_ctx())
     assert d.calls == []
     assert ("blocked", "send_email", "duplicate") in store.events
     assert store.blocked_keys[0] and store.blocked_keys[0].startswith("dag:")
@@ -422,16 +422,16 @@ async def test_a_key_held_from_an_earlier_turn_is_already_sent_whatever_the_word
 
 @pytest.mark.asyncio
 async def test_a_second_send_in_the_same_turn_asks_for_a_label():
+    from test_runner_authorization import _two_tool_calls_then_done_with
+
     from nous.cognitive.execution_ledger import ExecutionLedger
-    from tests.test_runner_authorization import _two_tool_calls_then_done_with
 
     store = _FakeStore(duplicate=_held("success"), duplicate_after_first=True)
     r, d = _runner(store, offered=("send_email",))
     r._call_api = _two_tool_calls_then_done_with("send_email", {"to": "a@x.io", "subject": "s", "body": "b"})
     ledger = ExecutionLedger(session_id="s1")
-    _text, results, _usage, _thinking = await _run_loop(
-        r, is_background=True, ledger=ledger, context=_dag_ctx())
-    assert [c[0] for c in d.calls] == ["send_email"]                 # the first went out
+    _text, results, _usage, _thinking = await _run_loop(r, is_background=True, ledger=ledger, context=_dag_ctx())
+    assert [c[0] for c in d.calls] == ["send_email"]  # the first went out
     assert ledger.actions[1].status == "blocked"
     assert "send_label" in results[1].error
 
@@ -586,10 +586,17 @@ async def _rows(db, agent):
     from nous.storage.models import ExecutionLedgerEntry
 
     async with db.session() as s:
-        return (await s.execute(
-            select(ExecutionLedgerEntry).where(ExecutionLedgerEntry.agent_id == agent)
-            .order_by(ExecutionLedgerEntry.created_at)
-        )).scalars().all()
+        return (
+            (
+                await s.execute(
+                    select(ExecutionLedgerEntry)
+                    .where(ExecutionLedgerEntry.agent_id == agent)
+                    .order_by(ExecutionLedgerEntry.created_at)
+                )
+            )
+            .scalars()
+            .all()
+        )
 
 
 @pytest.mark.asyncio
@@ -604,7 +611,8 @@ async def test_a_relaunched_node_does_not_send_twice_with_the_real_store(db):
     relaunch, d2 = _real_runner(db, agent)
     relaunch._call_api = _email_call("Premarket brief (retry)")
     _text, results, _usage, _thinking = await _run_loop(
-        relaunch, is_background=True, context=ExecutionContext(subtask_id=uuid.uuid4(), **ctx_kwargs))
+        relaunch, is_background=True, context=ExecutionContext(subtask_id=uuid.uuid4(), **ctx_kwargs)
+    )
 
     assert [c[0] for c in d1.calls] == ["send_email"] and d2.calls == []
     assert "Already sent" in results[0].result
@@ -635,14 +643,14 @@ async def test_a_definite_failure_lets_the_relaunch_send_with_the_real_store(db)
     assert [r.status for r in await _rows(db, agent)] == ["error", "success"]
 
 
-
 @pytest.mark.asyncio
 async def test_the_key_is_derived_from_the_arguments_the_handler_receives():
     """Codex r1: a `to` leaked as XML inside the body is salvaged by dispatch;
     the key must see it, or a relaunch that emits `to` correctly re-sends."""
+    from test_runner_authorization import _one_tool_call_then_done_with
+
     from nous.api.email_tools import _SEND_EMAIL_SCHEMA
     from nous.api.tools import ToolDispatcher
-    from tests.test_runner_authorization import _one_tool_call_then_done_with
 
     sent: list[str] = []
 
@@ -667,3 +675,57 @@ async def test_the_key_is_derived_from_the_arguments_the_handler_receives():
         r._call_api = _one_tool_call_then_done_with("send_email", tool_input)
         await _run_loop(r, is_background=True, context=ExecutionContext(subtask_id=uuid.uuid4(), **ctx_kwargs))
     assert store.keys[0] == store.keys[1] and store.keys[0].startswith("dag:")
+
+
+class _FakeSnapStore:
+    def __init__(self):
+        self.captured: list[tuple] = []
+
+    async def capture(self, *, ledger_entry_id, tool_name, snapshot_data, card_pending=False):
+        self.captured.append((ledger_entry_id, tool_name, snapshot_data))
+        return uuid.uuid4()
+
+    async def mark_card_published(self, ledger_entry_id):
+        return True
+
+
+async def _undoable_write(tmp_path, *, auto_review: bool, dispatch_error: bool = False):
+    from test_runner_authorization import _one_tool_call_then_done_with
+
+    store = _FakeStore()
+    r, d = _runner(store, compensation_enabled=True, compensation_auto_review_enabled=auto_review)
+    snaps = _FakeSnapStore()
+    r.set_snapshot_store(snaps, str(tmp_path))
+    pushed: list[tuple] = []
+
+    async def pusher(tool_name, entry_id, session_id):
+        pushed.append((tool_name, entry_id, session_id))
+
+    r.set_action_review_pusher(pusher)
+    if dispatch_error:
+
+        async def failing(name, inp, **kw):
+            store.events.append(("dispatch", name))
+            return "boom", True
+
+        d.dispatch = failing
+    r._call_api = _one_tool_call_then_done_with("write_file", {"path": "x.txt", "content": "hi"})
+    await _run_loop(r, is_background=True, context=ExecutionContext(kind="dag_node", session_id="s1", undoable=True))
+    return snaps, pushed
+
+
+@pytest.mark.asyncio
+async def test_auto_review_pushes_a_card_after_a_snapshotted_background_mutation(tmp_path):
+    """codex P2 on #652: NOUS_COMPENSATION_AUTO_REVIEW_ENABLED was declared and
+    validated but read by nothing, so a revertible mutation never got a card."""
+    snaps, pushed = await _undoable_write(tmp_path, auto_review=True)
+    assert [c[1] for c in snaps.captured] == ["write_file"]
+    assert pushed == [("write_file", "id-write_file", "s1")]
+
+
+@pytest.mark.asyncio
+async def test_auto_review_off_or_failed_call_pushes_nothing(tmp_path):
+    _, pushed = await _undoable_write(tmp_path, auto_review=False)
+    assert pushed == []
+    _, pushed = await _undoable_write(tmp_path, auto_review=True, dispatch_error=True)
+    assert pushed == []

@@ -43,7 +43,6 @@ from nous.heart.schemas import (
     FactInput,
     FactRejected,
     FactSummary,
-    ProcedureInput,
 )
 from nous.observability.retrieval_logger import get_active as get_active_retrieval_logger
 from nous.observability.retrieval_trace import RETURNED_TO_SCRIPT, SLICED_OFF
@@ -59,9 +58,7 @@ logger = logging.getLogger(__name__)
 
 # Protocol-only tools registered for the one-time `initiation` frame. They must
 # never leak into the conversational-frame tool superset (the "*" / task set).
-_INITIATION_ONLY_TOOLS: frozenset[str] = frozenset(
-    {"store_identity", "complete_initiation"}
-)
+_INITIATION_ONLY_TOOLS: frozenset[str] = frozenset({"store_identity", "complete_initiation"})
 
 
 def _tool_error(text: str) -> dict[str, Any]:
@@ -77,6 +74,7 @@ def _tool_error(text: str) -> dict[str, Any]:
     flagging that would teach the model an empty corpus is a broken tool.
     """
     return {"is_error": True, "content": [{"type": "text", "text": text}]}
+
 
 # Trailing run of leaked XML tool syntax inside a JSON string arg. The model
 # can slip from JSON tool-input into Claude's internal XML tool-call format
@@ -222,9 +220,7 @@ def _salvage_leaked_args(
         if tail_start is None:
             continue
         found_in_host = False
-        for leaked_key, leaked_raw in _XML_PARAM_LEAK_PAIR.findall(
-            host_value[tail_start:]
-        ):
+        for leaked_key, leaked_raw in _XML_PARAM_LEAK_PAIR.findall(host_value[tail_start:]):
             if leaked_key not in missing or leaked_key in salvaged:
                 continue
             value = _coerce_to_schema_type(leaked_raw, properties.get(leaked_key, {}))
@@ -257,8 +253,12 @@ _CONTAINER_TYPES = {"array": list, "object": dict}
 _SCALAR_TYPES = {"string": str, "number": (int, float), "integer": int, "boolean": bool}
 
 _JSON_TYPE_NAMES: dict[type, str] = {
-    str: "string", bool: "boolean", int: "integer",
-    float: "number", list: "array", dict: "object",
+    str: "string",
+    bool: "boolean",
+    int: "integer",
+    float: "number",
+    list: "array",
+    dict: "object",
 }
 
 
@@ -289,21 +289,14 @@ def _schema_type_errors(args: dict[str, Any], schema: dict[str, Any]) -> list[st
                 hint = ""
                 if declared == "array" and isinstance(value, str):
                     items = (properties[key].get("items") or {}).get("type", "string")
-                    hint = (
-                        f' Send a JSON array of {items}s -- ["a", "b"] -- '
-                        f"not one delimited string."
-                    )
-                errors.append(
-                    f"{key} must be {declared}, got {_describe_json_type(value)}.{hint}"
-                )
+                    hint = f' Send a JSON array of {items}s -- ["a", "b"] -- not one delimited string.'
+                errors.append(f"{key} must be {declared}, got {_describe_json_type(value)}.{hint}")
             continue
         expected_scalar = _SCALAR_TYPES.get(declared)
         # Only the reverse structural error: a container where a scalar belongs.
         # Scalar-for-scalar is left to the handler, which coerces it.
         if expected_scalar is not None and isinstance(value, list | dict):
-            errors.append(
-                f"{key} must be {declared}, got {_describe_json_type(value)}."
-            )
+            errors.append(f"{key} must be {declared}, got {_describe_json_type(value)}.")
     return errors
 
 
@@ -327,12 +320,9 @@ def _required_handler_params(handler: Callable[..., Any]) -> set[str] | None:
         p.name
         for p in sig.parameters.values()
         if p.default is inspect.Parameter.empty
-        and p.kind
-        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        and p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
     }
-    accepts_var_kw = any(
-        p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-    )
+    accepts_var_kw = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
     # A handler with BOTH named required params and **kwargs still can't be
     # trusted to have defaults for the schema-required keys it swallows.
     return None if accepts_var_kw else named
@@ -349,9 +339,7 @@ class ToolDispatcher:
 
     # Tools that read the injected ``_is_background`` flag (#541/#642 decision
     # resolution; F092.1 compose_surface origin). One set for every consumer.
-    _BACKGROUND_AWARE_TOOLS: frozenset[str] = frozenset(
-        {"resolve_decision", "resolve_decisions", "compose_surface"}
-    )
+    _BACKGROUND_AWARE_TOOLS: frozenset[str] = frozenset({"resolve_decision", "resolve_decisions", "compose_surface"})
 
     def __init__(
         self,
@@ -405,9 +393,14 @@ class ToolDispatcher:
         return self._repair(name, args)[0]
 
     async def dispatch(
-        self, name: str, args: dict[str, Any], session_id: str | None = None,
-        is_background: bool = False, turn_number: int | None = None,
-        context: ExecutionContext | None = None, outcome: CallOutcome | None = None,
+        self,
+        name: str,
+        args: dict[str, Any],
+        session_id: str | None = None,
+        is_background: bool = False,
+        turn_number: int | None = None,
+        context: ExecutionContext | None = None,
+        outcome: CallOutcome | None = None,
     ) -> tuple[str, bool]:
         """Dispatch a tool call and return (result_text, is_error).
 
@@ -445,9 +438,7 @@ class ToolDispatcher:
                 # back to the schema's own required list rather than skipping
                 # validation entirely (which is what zero named params meant).
                 hard_missing = (
-                    list(missing)
-                    if handler_required is None
-                    else [k for k in missing if k in handler_required]
+                    list(missing) if handler_required is None else [k for k in missing if k in handler_required]
                 )
                 if hard_missing:
                     provided = sorted(k for k in args if not k.startswith("_"))
@@ -467,9 +458,7 @@ class ToolDispatcher:
             # the wrong shape and repeats it next turn).
             type_errors = _schema_type_errors(args, schema)
             if type_errors:
-                logger.warning(
-                    "Tool arg type mismatch for %s: %s", name, "; ".join(type_errors)
-                )
+                logger.warning("Tool arg type mismatch for %s: %s", name, "; ".join(type_errors))
                 return (
                     f"Tool error: {name} received argument(s) of the wrong type. "
                     + " ".join(type_errors)
@@ -582,11 +571,7 @@ class ToolDispatcher:
         # Collapse conversational frames to one cache-stable superset. The
         # effective frame is used as BOTH the cache key and the FRAME_TOOLS
         # lookup, so every non-initiation frame returns a byte-identical list.
-        effective_frame = (
-            "task"
-            if self._stable_tool_set_enabled and frame_id != "initiation"
-            else frame_id
-        )
+        effective_frame = "task" if self._stable_tool_set_enabled and frame_id != "initiation" else frame_id
 
         # F036: Check cache first (skip if caching disabled)
         if self._tool_schema_cache_enabled and effective_frame in self._tool_schema_cache:
@@ -599,10 +584,7 @@ class ToolDispatcher:
         # Wildcard means all tools — minus initiation-only protocol tools,
         # which must never leak into a conversational-frame tool array.
         if "*" in allowed:
-            result = [
-                d for d in self.tool_definitions()
-                if d["name"] not in _INITIATION_ONLY_TOOLS
-            ]
+            result = [d for d in self.tool_definitions() if d["name"] not in _INITIATION_ONLY_TOOLS]
         else:
             result = [
                 {
@@ -627,8 +609,8 @@ class ToolDispatcher:
 
 
 async def _fetch_parent_episodes_for_facts(
-    heart: "Heart",
-    results: "list[Any]",  # list[PipelineResult]
+    heart: Heart,
+    results: list[Any],  # list[PipelineResult]
     max_parents: int,
     truncate: int,
 ) -> list[tuple[str, str]]:
@@ -642,6 +624,7 @@ async def _fetch_parent_episodes_for_facts(
     fail. The caller is responsible for the feature-flag gate.
     """
     from sqlalchemy import text as sa_text
+
     fact_ids = [str(r.id) for r in results if getattr(r, "type", None) == "fact"]
     if not fact_ids:
         return []
@@ -650,13 +633,15 @@ async def _fetch_parent_episodes_for_facts(
     if max_parents <= 0:
         return []
     async with heart.db.session() as s:
-        rows = (await s.execute(
-            sa_text(
-                "SELECT id::text, source_episode_id::text FROM heart.facts "
-                "WHERE agent_id = :a AND id::text = ANY(:ids)"
-            ),
-            {"a": heart.agent_id, "ids": fact_ids},
-        )).all()
+        rows = (
+            await s.execute(
+                sa_text(
+                    "SELECT id::text, source_episode_id::text FROM heart.facts "
+                    "WHERE agent_id = :a AND id::text = ANY(:ids)"
+                ),
+                {"a": heart.agent_id, "ids": fact_ids},
+            )
+        ).all()
         fact_to_ep = {r[0]: r[1] for r in rows if r[1] is not None}
         ordered_eps: list[str] = []
         seen: set[str] = set()
@@ -678,14 +663,16 @@ async def _fetch_parent_episodes_for_facts(
         # and risks mid-JSON truncation at [:truncate]. Extract the inner
         # 'summary' string via ->> operator; fall back to the legacy summary
         # column when structured_summary is NULL.
-        ep_rows = (await s.execute(
-            sa_text(
-                "SELECT id::text, "
-                "COALESCE(structured_summary->>'summary', summary) "
-                "FROM heart.episodes WHERE agent_id = :a AND id::text = ANY(:ids)"
-            ),
-            {"a": heart.agent_id, "ids": ordered_eps},
-        )).all()
+        ep_rows = (
+            await s.execute(
+                sa_text(
+                    "SELECT id::text, "
+                    "COALESCE(structured_summary->>'summary', summary) "
+                    "FROM heart.episodes WHERE agent_id = :a AND id::text = ANY(:ids)"
+                ),
+                {"a": heart.agent_id, "ids": ordered_eps},
+            )
+        ).all()
         ep_summary = {r[0]: r[1] for r in ep_rows if r[1]}
     out: list[tuple[str, str]] = []
     for eid in ordered_eps:
@@ -696,8 +683,8 @@ async def _fetch_parent_episodes_for_facts(
 
 
 def _format_pipeline_text(
-    results: "list[Any]",  # list[PipelineResult] — string-quoted to avoid import cycle at module top
-    stats: "Any",  # PipelineStats
+    results: list[Any],  # list[PipelineResult] — string-quoted to avoid import cycle at module top
+    stats: Any,  # PipelineStats
     search_types: list[str],
     parent_episodes: list[tuple[str, str]] | None = None,
     session_group_heart: bool = False,
@@ -752,7 +739,7 @@ def _format_pipeline_text(
         if emitted_out is not None:
             emitted_out.append((r.id, r.type))
 
-    def _recency_tag(r: "Any") -> str:
+    def _recency_tag(r: Any) -> str:
         # §1: inline [current|superseded YYYY-MM] tag. Empty string when no
         # recency_status (flag OFF, or non-conflicting fact) => byte-identical.
         status = r.metadata.get("recency_status")
@@ -791,21 +778,15 @@ def _format_pipeline_text(
     # rank where the agent actually reads. Empty when heart_graph_all_types is off
     # (default) => the default recall_deep output stays byte-identical.
     heart_results = [
-        r for r in results
-        if (
-            r.source == "heart"
-            or r.metadata.get("stage_origin") == "heart_graph_memory"
-        )
+        r
+        for r in results
+        if (r.source == "heart" or r.metadata.get("stage_origin") == "heart_graph_memory")
         and r.metadata.get("retrieval_leg") != "exemplar"
     ]
     # F086: ICL exemplar-leg hits get their own dedicated section (rendered
     # near the end of the function) instead of the Heart Memory list.
-    exemplar_rows = [
-        r for r in results if r.metadata.get("retrieval_leg") == "exemplar"
-    ]
-    heart_section_eligible = search_all or any(
-        t in search_types for t in ["episode", "fact", "procedure", "censor"]
-    )
+    exemplar_rows = [r for r in results if r.metadata.get("retrieval_leg") == "exemplar"]
+    heart_section_eligible = search_all or any(t in search_types for t in ["episode", "fact", "procedure", "censor"])
     # The original closure ALSO requires that heart_types resolves to a non-empty
     # list — which is always true once heart_section_eligible is True (because the
     # filter expression yields the same membership). So the gate matches.
@@ -818,7 +799,7 @@ def _format_pipeline_text(
                 # reasoning. Sessions ordered by first-appearance in the
                 # ranked list. Procedures/censors don't belong to a session
                 # and are appended flat at the end of the bucket.
-                session_buckets: "dict[str, list]" = {}
+                session_buckets: dict[str, list] = {}
                 no_session: list = []
                 for result in heart_results:
                     if result.type == "episode":
@@ -877,19 +858,15 @@ def _format_pipeline_text(
     # ``rerank_by_score`` (set when F067 chunks are enabled) globally
     # re-sorts the list and would otherwise break a position-based gate.
     heart_graph: list = [
-        r for r in results
-        if r.source == "graph_expanded"
-        and r.type == "decision"
-        and r.metadata.get("stage_origin") == "heart_graph"
+        r
+        for r in results
+        if r.source == "graph_expanded" and r.type == "decision" and r.metadata.get("stage_origin") == "heart_graph"
     ]
 
     if heart_graph:
         results_text.append("\n=== Graph-Connected Decisions ===")
         for i, n in enumerate(heart_graph, 1):
-            results_text.append(
-                f"{i}. [via {n.edge_relation}] {n.description} "
-                f"(id: {n.id}, score: {n.score:.3f})"
-            )
+            results_text.append(f"{i}. [via {n.edge_relation}] {n.description} (id: {n.id}, score: {n.score:.3f})")
             _emit(n)
 
     # NOTE: Path-A graph-memory neighbours (stage_origin == "heart_graph_memory") are no
@@ -910,7 +887,8 @@ def _format_pipeline_text(
         # previous position-based gate so the formatter is stable under
         # ``rerank_by_score``.
         brain_graph: list = [
-            r for r in results
+            r
+            for r in results
             if r.source in ("graph_expanded", "spreading_activation")
             and r.metadata.get("stage_origin") == "brain_graph"
         ]
@@ -951,8 +929,7 @@ def _format_pipeline_text(
                 _emit(dec)
             for j, n in enumerate(brain_graph, len(decision_results) + 1):
                 results_text.append(
-                    f"{j}. [via graph: {n.edge_relation}] {n.description} "
-                    f"(id: {n.id}, score: {n.score:.3f})"
+                    f"{j}. [via graph: {n.edge_relation}] {n.description} (id: {n.id}, score: {n.score:.3f})"
                 )
                 _emit(n)
         elif not exemplar_rows:
@@ -965,9 +942,7 @@ def _format_pipeline_text(
     # ------------------------------------------------------------------
     for src_id, src_type, tgt_id, tgt_type in stats.contradiction_edges:
         results_text.append(
-            f"\nWarning: Contradiction detected between "
-            f"{src_type}({str(src_id)[:8]}) and "
-            f"{tgt_type}({str(tgt_id)[:8]})"
+            f"\nWarning: Contradiction detected between {src_type}({str(src_id)[:8]}) and {tgt_type}({str(tgt_id)[:8]})"
         )
 
     # Codex r14: a classification-shaped recall can return ONLY exemplar hits
@@ -1042,6 +1017,7 @@ async def ingest_document_text(
     Honors settings.document_ingest_enabled and the chunk-size settings.
     """
     from uuid import UUID as _UUID
+
     from sqlalchemy import text as _sql_text
 
     from nous.heart.document_chunker import chunk_document
@@ -1063,7 +1039,10 @@ async def ingest_document_text(
                 return {"code": "bad_uuid", "error": f"episode_id must be a UUID, got {episode_id!r}."}
         else:
             if not session_id:
-                return {"code": "no_session", "error": "no episode_id provided and no active session — pass episode_id explicitly."}
+                return {
+                    "code": "no_session",
+                    "error": "no episode_id provided and no active session — pass episode_id explicitly.",
+                }
             async with heart.db.session() as session:
                 row = await session.execute(
                     _sql_text(
@@ -1075,7 +1054,10 @@ async def ingest_document_text(
                 )
                 found = row.scalar()
             if not found:
-                return {"code": "no_episode", "error": f"no active episode for session {session_id}; pass episode_id explicitly."}
+                return {
+                    "code": "no_episode",
+                    "error": f"no active episode for session {session_id}; pass episode_id explicitly.",
+                }
             target_episode_id = found
 
         # 2. Chunk the document.
@@ -1086,9 +1068,10 @@ async def ingest_document_text(
             min_chars=settings.document_chunk_min_chars,
         )
         if not chunks:
-            return {"code": "too_short", "error": (
-                f"Ingest skipped: content shorter than min_chars ({settings.document_chunk_min_chars})."
-            )}
+            return {
+                "code": "too_short",
+                "error": (f"Ingest skipped: content shorter than min_chars ({settings.document_chunk_min_chars})."),
+            }
 
         # 3. Embed in one batch (cheaper than per-chunk).
         try:
@@ -1105,13 +1088,19 @@ async def ingest_document_text(
             logger.warning(
                 "ingest_document_text: embedder returned %d vectors for %d chunks "
                 "(episode=%s, source_ref=%s); aborting to avoid partial ingest",
-                len(embeddings), len(chunks), target_episode_id, source_ref,
+                len(embeddings),
+                len(chunks),
+                target_episode_id,
+                source_ref,
             )
-            return {"code": "vector_mismatch", "error": (
-                f"embedder returned {len(embeddings)} vectors "
-                f"for {len(chunks)} chunks; refusing to write a "
-                f"partial ingest. Retry."
-            )}
+            return {
+                "code": "vector_mismatch",
+                "error": (
+                    f"embedder returned {len(embeddings)} vectors "
+                    f"for {len(chunks)} chunks; refusing to write a "
+                    f"partial ingest. Retry."
+                ),
+            }
 
         # 4. Atomic idempotency + insert.
         #
@@ -1135,9 +1124,7 @@ async def ingest_document_text(
         async with heart.db.session() as session:
             # Advisory lock — released at COMMIT / ROLLBACK.
             await session.execute(
-                _sql_text(
-                    "SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"
-                ),
+                _sql_text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
                 {"k": lock_key},
             )
 
@@ -1270,8 +1257,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 for r in reasons:
                     if not isinstance(r, dict) or "type" not in r or "text" not in r:
                         return _tool_error(
-                            "Error: Invalid reason format. Expected dict with "
-                            f"'type' and 'text', got: {r}"
+                            f"Error: Invalid reason format. Expected dict with 'type' and 'text', got: {r}"
                         )
                     reason_inputs.append(ReasonInput(type=r["type"], text=r["text"]))
 
@@ -1286,11 +1272,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 reasons=reason_inputs,
                 # Flag-gated: see Settings.decision_session_id_enabled. Off by
                 # default, so this stays NULL exactly as it is in prod today.
-                session_id=(
-                    _session_id
-                    if settings.decision_session_id_enabled
-                    else None
-                ),
+                session_id=(_session_id if settings.decision_session_id_enabled else None),
             )
 
             # Record to Brain
@@ -1456,6 +1438,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         # Deferred import (same as F071 below): runner imports tools, so a
         # module-level import here would be circular.
         from nous.api.runner import CURRENT_TURN_EXCLUDE_IDS
+
         _f071_exclude_ids = CURRENT_TURN_EXCLUDE_IDS.get()
 
         try:
@@ -1477,12 +1460,16 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     activator = heart._residual_activator
                     current_turn = await activator.current_turn(brain.agent_id, _session_id)
                     residual_activations = await activator.compute_activations(
-                        brain.agent_id, _session_id, current_turn,
+                        brain.agent_id,
+                        _session_id,
+                        current_turn,
                     )
                 except Exception:
                     logger.warning(
                         "F055: compute_activations failed for %s/%s, continuing cold",
-                        brain.agent_id, _session_id, exc_info=True,
+                        brain.agent_id,
+                        _session_id,
+                        exc_info=True,
                     )
                     residual_activations = {}
 
@@ -1500,9 +1487,8 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             # memory_types=["decision"]) keep legacy stage-order output
             # even with the feature flag on.
             search_all_for_rerank = "all" in search_types
-            chunks_rerank = (
-                getattr(settings, "episode_chunks_enabled", False)
-                and (search_all_for_rerank or "fact" in search_types)
+            chunks_rerank = getattr(settings, "episode_chunks_enabled", False) and (
+                search_all_for_rerank or "fact" in search_types
             )
             # F091: open a telemetry trace for this retrieval. NULL_TRACE when
             # the feature is off, so the pipeline call below is unchanged.
@@ -1510,12 +1496,15 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             _rl = get_active_retrieval_logger()
             _tr = (
                 _rl.start(
-                    query=query, path="pipeline", session_id=_session_id,
+                    query=query,
+                    path="pipeline",
+                    session_id=_session_id,
                     # None outside a tool loop (eval harness, scripts), which is
                     # honest — there is no turn to attribute those to.
                     turn_number=_turn_number,
                 )
-                if _rl is not None else None
+                if _rl is not None
+                else None
             )
             results, stats = await run_recall_pipeline(
                 query=query,
@@ -1538,15 +1527,10 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             # (chunks_searched), how many chunks reach the top-of-list,
             # and where the first chunk lands in the global result order
             # so we can spot "chunks retrieved but buried" cases.
-            n_chunks_total = sum(
-                1 for r in results if getattr(r, "type", None) == "chunk"
-            )
-            n_chunks_top10 = sum(
-                1 for r in results[:10] if getattr(r, "type", None) == "chunk"
-            )
+            n_chunks_total = sum(1 for r in results if getattr(r, "type", None) == "chunk")
+            n_chunks_top10 = sum(1 for r in results[:10] if getattr(r, "type", None) == "chunk")
             first_chunk_rank = next(
-                (i + 1 for i, r in enumerate(results)
-                 if getattr(r, "type", None) == "chunk"),
+                (i + 1 for i, r in enumerate(results) if getattr(r, "type", None) == "chunk"),
                 None,
             )
             logger.info(
@@ -1585,14 +1569,14 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                         truncate=settings.recall_parent_episode_truncate,
                     )
                 except Exception:
-                    n_facts = sum(
-                        1 for r in results if getattr(r, "type", None) == "fact"
-                    )
+                    n_facts = sum(1 for r in results if getattr(r, "type", None) == "fact")
                     logger.warning(
                         "F067: parent-episode fetch failed for agent=%s "
                         "(n_facts=%d, falling back to legacy recall_deep "
                         "output)",
-                        heart.agent_id, n_facts, exc_info=True,
+                        heart.agent_id,
+                        n_facts,
+                        exc_info=True,
                     )
                     parent_episodes = []
             # F091: parent episodes are memory DELIVERED to the model, appended
@@ -1602,11 +1586,9 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             # path where the flag makes them appear.
             if _tr is not None and parent_episodes:
                 for _rank, (_ep_id, _summary) in enumerate(parent_episodes):
-                    _tr.add(_ep_id, "episode", "parent_episode",
-                            rank=_rank + 1, content=_summary)
+                    _tr.add(_ep_id, "episode", "parent_episode", rank=_rank + 1, content=_summary)
                     _tr.mark_rendered(_ep_id, "episode", "parent_episode_section")
-                _tr.leg("parent_episode", attempted=True,
-                        n_returned=len(parent_episodes))
+                _tr.leg("parent_episode", attempted=True, n_returned=len(parent_episodes))
             # Format FIRST, commit after. `rendered` means the text reached the
             # model, and until the formatter returns, no text exists — a raise
             # here with the trace already persisted would claim every survivor
@@ -1615,7 +1597,10 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             # the same trace id, which merely collided on the primary key.
             _emitted: list[tuple[Any, str]] | None = [] if _tr is not None else None
             text = _format_pipeline_text(
-                results, stats, search_types, parent_episodes=parent_episodes,
+                results,
+                stats,
+                search_types,
+                parent_episodes=parent_episodes,
                 session_group_heart=getattr(settings, "session_group_heart_section", False),
                 emitted_out=_emitted,
             )
@@ -1651,7 +1636,10 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     if _r.type == "episode" and str(_r.id) in _parent_ids:
                         continue
                     _tr.mark_not_delivered(
-                        _r.id, _r.type, SLICED_OFF, "formatter_scope_filter",
+                        _r.id,
+                        _r.type,
+                        SLICED_OFF,
+                        "formatter_scope_filter",
                     )
             if _rl is not None and _tr is not None:
                 try:
@@ -1672,6 +1660,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             ):
                 try:
                     import asyncio
+
                     surfaced = [
                         (
                             r.id,
@@ -1707,10 +1696,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 # Only if the happy path did not already commit — a second
                 # commit on the same trace id is a duplicate insert that merely
                 # collides on the primary key.
-                if (
-                    _rl_err is not None and _tr_err is not None
-                    and not locals().get("_tr_committed", False)
-                ):
+                if _rl_err is not None and _tr_err is not None and not locals().get("_tr_committed", False):
                     # Nothing was returned to the model, so anything finalize
                     # had already marked `rendered` (e.g. a formatter raise
                     # after the pipeline finished) must be un-claimed before
@@ -1748,10 +1734,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         try:
             # F078: validate action vocabulary before constructing the input.
             if action not in ("steer", "refuse", "abort"):
-                return _tool_error(
-                    f"Invalid action {action!r}; must be one of "
-                    "steer, refuse, abort."
-                )
+                return _tool_error(f"Invalid action {action!r}; must be one of steer, refuse, abort.")
 
             # Parse UUIDs if provided
             decision_uuid = UUID(learned_from_decision) if learned_from_decision else None
@@ -1864,6 +1847,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             elif source.startswith(("http://", "https://")):
                 # Fetch from URL
                 import httpx as _httpx
+
                 async with _httpx.AsyncClient(timeout=30) as client:
                     resp = await client.get(source)
                     resp.raise_for_status()
@@ -1871,6 +1855,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             else:
                 # Local file path
                 import os
+
                 workspace = settings.workspace_dir if settings else "."
                 path = os.path.join(workspace, source) if not os.path.isabs(source) else source
                 if not os.path.exists(path):
@@ -1883,6 +1868,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
 
             # 2b. Check requires (env var validation)
             import os as _os
+
             missing_requires = [var for var in manifest.requires if not _os.environ.get(var)]
             skill_active = len(missing_requires) == 0
 
@@ -1948,6 +1934,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         """
         try:
             from uuid import UUID as _UUID
+
             try:
                 pid: _UUID | None = _UUID(procedure_id)
             except ValueError:
@@ -1965,8 +1952,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             else:
                 detail = await heart.get_procedure_by_name(procedure_id)
             if detail is None:
-                return {"content": [{"type": "text",
-                                     "text": f"No procedure found for '{procedure_id}'."}]}
+                return {"content": [{"type": "text", "text": f"No procedure found for '{procedure_id}'."}]}
 
             lines = [
                 f"**{detail.name}** ({detail.domain or 'general'})",
@@ -1987,7 +1973,9 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 lines.append("Implementation notes:")
                 for note in detail.implementation_notes:
                     lines.append(note)
-            lines.append(f"\nActivated: {detail.activation_count}x | Status: {'active' if detail.active else 'inactive'}")
+            lines.append(
+                f"\nActivated: {detail.activation_count}x | Status: {'active' if detail.active else 'inactive'}"
+            )
             if detail.effectiveness is not None:
                 lines.append(f"Effectiveness: {detail.effectiveness:.0%}")
 
@@ -2078,8 +2066,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             # would report to the model as a successful ingest of nothing.
             # These messages historically carried an "Error: " prefix; the
             # helper drops it so callers get clean text. Re-add it here.
-            if code in ("empty_content", "no_source_ref", "bad_uuid",
-                        "no_session", "no_episode", "vector_mismatch"):
+            if code in ("empty_content", "no_source_ref", "bad_uuid", "no_session", "no_episode", "vector_mismatch"):
                 return _tool_error(f"Error: {result['error']}")
             # disabled / too_short / embed_failed / exception are emitted
             # verbatim (they never had the prefix).
@@ -2156,13 +2143,29 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         if outcome == "superseded" and not superseded_by:
             return {
                 "is_error": True,
-                "content": [{"type": "text", "text": (
-                    "Error: outcome='superseded' requires superseded_by — the UUID of the "
-                    "decision that replaces this one. Record the replacement decision first, "
-                    "then resolve this one with its ID. If nothing replaced it, use a "
-                    "different outcome (e.g. 'noise' or 'failure')."
-                )}],
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "Error: outcome='superseded' requires superseded_by — the UUID of the "
+                            "decision that replaces this one. Record the replacement decision first, "
+                            "then resolve this one with its ID. If nothing replaced it, use a "
+                            "different outcome (e.g. 'noise' or 'failure')."
+                        ),
+                    }
+                ],
             }
+        # Phase 2.8: the review state around this write, read inside the
+        # resolving transaction, is what a compensation snapshot records.
+        call_outcome = _outcome_var.get()
+        capture: dict | None = {} if call_outcome is not None else None
+        # Attached BEFORE the await: Brain._review fills it in place before
+        # its commit, so a call cancelled mid-commit (outcome unknown) still
+        # reports the state it may have written.
+        if call_outcome is not None:
+            call_outcome.review_capture = capture
+            if call_outcome.persist_written is not None:
+                capture["persist"] = call_outcome.persist_written
         try:
             detail = await brain.review(
                 UUID(decision_id),
@@ -2171,6 +2174,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 reviewer=_BG_REVIEWER if _is_background else "agent",
                 superseded_by=UUID(superseded_by) if superseded_by else None,
                 preserve_graded=_is_background,
+                capture=capture,
             )
             text = f"Decision {detail.id} resolved: outcome={detail.outcome}"
             if detail.superseded_by:
@@ -2214,13 +2218,18 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 allowed = [i for i, it in enumerate(items) if it["outcome"] in NON_PREDICTION_OUTCOMES]
                 reviewed = (
                     await brain.review_many(
-                        [items[i] for i in allowed], reviewer=_BG_REVIEWER, preserve_graded=True,
+                        [items[i] for i in allowed],
+                        reviewer=_BG_REVIEWER,
+                        preserve_graded=True,
                     )
-                    if allowed else []
+                    if allowed
+                    else []
                 )
                 by_index = dict(zip(allowed, reviewed))
                 results = [
-                    by_index[i] if i in by_index else {
+                    by_index[i]
+                    if i in by_index
+                    else {
                         "decision_id": str(it["decision_id"]),
                         "ok": False,
                         "error": _bg_outcome_error(it["outcome"]),
@@ -2233,9 +2242,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             failed = [r for r in results if not r["ok"]]
             text = f"Resolved {ok}/{len(results)} decisions."
             if failed:
-                text += "\nFailures:\n" + "\n".join(
-                    f"- {r['decision_id']}: {r['error']}" for r in failed
-                )
+                text += "\nFailures:\n" + "\n".join(f"- {r['decision_id']}: {r['error']}" for r in failed)
             return {"content": [{"type": "text", "text": text}], "is_error": bool(failed and ok == 0)}
         except Exception as e:
             logger.exception("resolve_decisions tool failed")
@@ -2256,7 +2263,10 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             if older_than_days is not None:
                 date_to = (datetime.now(UTC) - timedelta(days=older_than_days)).isoformat()
             decisions, total = await brain.list_decisions(
-                limit=limit, outcome=outcome, reviewed=reviewed, date_to=date_to,
+                limit=limit,
+                outcome=outcome,
+                reviewed=reviewed,
+                date_to=date_to,
             )
             if not decisions:
                 return {"content": [{"type": "text", "text": "No matching decisions."}]}
@@ -2489,7 +2499,7 @@ _RECALL_DEEP_SCHEMA: dict[str, Any] = {
                 "Types to search. If omitted or contains 'all', searches the "
                 "knowledge pool: episodes, facts, decisions (+ transcript "
                 "chunks). Procedures and censors are NOT in the default pool "
-                "— name them explicitly (e.g. [\"procedure\"]) to search them; "
+                '— name them explicitly (e.g. ["procedure"]) to search them; '
                 "a null default-pool result does not mean none exist."
             ),
         },
@@ -2525,7 +2535,10 @@ _CREATE_CENSOR_SCHEMA: dict[str, Any] = {
 
 _RECALL_RECENT_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "description": "Recall recent episodes by time (not topic similarity). Use when the user asks what you discussed recently or you need a temporal overview.",
+    "description": (
+        "Recall recent episodes by time (not topic similarity). Use when the user asks what you discussed recently or "
+        "you need a temporal overview."
+    ),
     "properties": {
         "hours": {
             "type": "integer",
@@ -2551,10 +2564,7 @@ _LEARN_SKILL_SCHEMA: dict[str, Any] = {
     "properties": {
         "source": {
             "type": "string",
-            "description": (
-                "URL (https://...), local file path relative to workspace, "
-                "or 'inline' for raw content"
-            ),
+            "description": ("URL (https://...), local file path relative to workspace, or 'inline' for raw content"),
         },
         "content": {
             "type": "string",
@@ -2575,8 +2585,7 @@ _GET_PROCEDURE_SCHEMA: dict[str, Any] = {
         "procedure_id": {
             "type": "string",
             "description": (
-                "The procedure's NAME exactly as listed in the Procedure Catalog "
-                "(preferred), or its UUID."
+                "The procedure's NAME exactly as listed in the Procedure Catalog (preferred), or its UUID."
             ),
         },
     },
@@ -2651,7 +2660,9 @@ _INGEST_DOCUMENT_SCHEMA: dict[str, Any] = {
 }
 
 
-def register_nous_tools(dispatcher: ToolDispatcher, brain: Brain, heart: Heart, settings: Settings | None = None) -> None:
+def register_nous_tools(
+    dispatcher: ToolDispatcher, brain: Brain, heart: Heart, settings: Settings | None = None
+) -> None:
     """Create Nous memory tools and register them with the dispatcher.
 
     This is the main wiring function called at startup to register
@@ -2679,7 +2690,10 @@ def register_nous_tools(dispatcher: ToolDispatcher, brain: Brain, heart: Heart, 
 # ---------------------------------------------------------------------------
 
 _CACHE_RETRIEVE_SCHEMA = {
-    "description": "Retrieve original content from a previously compressed search or fetch result. Use when you see a [SmartCompressed] marker and need more detail.",
+    "description": (
+        "Retrieve original content from a previously compressed search or fetch result. Use when you see a "
+        "[SmartCompressed] marker and need more detail."
+    ),
     "type": "object",
     "properties": {
         "hash_key": {
@@ -2709,7 +2723,10 @@ def register_cache_retrieve_tool(
     from nous.api.tool_cache import retrieve_cached_result
 
     async def _cache_retrieve(
-        hash_key: str, query: str | None = None, session_id: str | None = None, **kwargs,
+        hash_key: str,
+        query: str | None = None,
+        session_id: str | None = None,
+        **kwargs,
     ) -> dict:
         if not session_id:
             return _tool_error("Error: no active session for cache lookup.")
@@ -2717,7 +2734,10 @@ def register_cache_retrieve_tool(
             async with db_session_factory() as db_sess:
                 result = await retrieve_cached_result(db_sess, session_id, hash_key, query)
                 if result is None:
-                    text = f"No cached result found for hash key '{hash_key}'. It may have expired or the key may be incorrect."
+                    text = (
+                        f"No cached result found for hash key '{hash_key}'. "
+                        "It may have expired or the key may be incorrect."
+                    )
                 else:
                     text = result
                 return {"content": [{"type": "text", "text": text}]}
@@ -2733,26 +2753,25 @@ def register_cache_retrieve_tool(
 # ---------------------------------------------------------------------------
 
 
-_F061_DEFAULT_SUCCESS_CRITERIA = (
-    "The summary directly addresses the task and is internally consistent."
-)
+_F061_DEFAULT_SUCCESS_CRITERIA = "The summary directly addresses the task and is internally consistent."
 _F061_DEFAULT_BOUNDARIES = (
     "Do not spawn further subtasks. Do not modify files unless the task "
     "explicitly requires it. Cap tool calls per the runner limit."
 )
 _F061_FRAME_OUTPUT_FORMATS = {
-    "task":         "Concise summary of what was done + verification of success.",
-    "research":     "Synthesis of findings, with key facts in `findings[]` and sources in `evidence_refs[]`.",
-    "decision":     "Decision recommendation + reasoning + confidence; record the decision via record_decision and reference its ID in `evidence_refs[]`.",
-    "debug":        "Root cause + fix suggestion + verification steps.",
+    "task": "Concise summary of what was done + verification of success.",
+    "research": "Synthesis of findings, with key facts in `findings[]` and sources in `evidence_refs[]`.",
+    "decision": (
+        "Decision recommendation + reasoning + confidence; record the decision via record_decision and reference its "
+        "ID in `evidence_refs[]`."
+    ),
+    "debug": "Root cause + fix suggestion + verification steps.",
     "conversation": "Direct natural-language answer to the question.",
 }
 
 
 def _f061_default_output_format(frame_type: str | None) -> str:
-    return _F061_FRAME_OUTPUT_FORMATS.get(
-        frame_type or "", "Free-form summary appropriate to the task."
-    )
+    return _F061_FRAME_OUTPUT_FORMATS.get(frame_type or "", "Free-form summary appropriate to the task.")
 
 
 def build_subtask_prefix(
@@ -2787,16 +2806,10 @@ def build_subtask_prefix(
 
     if not hardening_enabled:
         # LEGACY — DO NOT MODIFY. PR-6 deletes this branch.
-        base = (
-            "You are executing a background subtask.\n"
-            "Deliver a clear, complete result. Do not ask questions."
-        )
+        base = "You are executing a background subtask.\nDeliver a clear, complete result. Do not ask questions."
         frame_instruction = ""
         if frame_type and frame_type in FRAME_TOOLS:
-            frame_instruction = (
-                f"\n\nFrame: {frame_type} — apply {frame_type}-appropriate "
-                "reasoning and tool usage."
-            )
+            frame_instruction = f"\n\nFrame: {frame_type} — apply {frame_type}-appropriate reasoning and tool usage."
         return f"{base}{frame_instruction}\n\nTask: {task}"
 
     of = output_format or _f061_default_output_format(frame_type)
@@ -2807,16 +2820,14 @@ def build_subtask_prefix(
     # informational; FRAME_TOOLS gates only tool availability.
     frame_block = ""
     if frame_type:
-        frame_block = (
-            f"\n# Frame\n{frame_type} — apply {frame_type}-appropriate "
-            "reasoning and tool usage.\n"
-        )
+        frame_block = f"\n# Frame\n{frame_type} — apply {frame_type}-appropriate reasoning and tool usage.\n"
     # F062: when a payload schema was supplied, append a result-schema block
     # that the model populates via submit_final_report's optional `payload`
     # field. Compact JSON to keep prompt token spend bounded.
     payload_schema_block = ""
     if payload_schema is not None:
         import json as _json
+
         compact_schema = _json.dumps(payload_schema, separators=(",", ":"))
         payload_schema_block = (
             "\n# Result schema (REQUIRED)\n"
@@ -2850,7 +2861,7 @@ async def _persist_and_emit_inline_outcome(
     *,
     heart: Heart,
     bus: object,
-    settings: "Settings",
+    settings: Settings,
     subtask: Any,
     final_outcome: str,
     error_msg: str,
@@ -2867,7 +2878,8 @@ async def _persist_and_emit_inline_outcome(
     tool_calls_made = getattr(state, "tool_calls_made", 0)
 
     await heart.subtasks.fail(
-        subtask.id, error_msg,
+        subtask.id,
+        error_msg,
         final_outcome=final_outcome,
         attempts=attempts,
         tokens_in=tokens_in,
@@ -2893,18 +2905,16 @@ async def _persist_and_emit_inline_outcome(
             "tokens_out": tokens_out,
             "tool_calls_made": tool_calls_made,
             "duration_ms": None,
-            "dag_node_id": (
-                str(subtask.dag_node_id)
-                if getattr(subtask, "dag_node_id", None) is not None
-                else None
-            ),
+            "dag_node_id": (str(subtask.dag_node_id) if getattr(subtask, "dag_node_id", None) is not None else None),
         }
-        await bus.emit(Event(
-            type=SUBTASK_OUTCOME_EVENT_TYPE,
-            agent_id=getattr(subtask, "agent_id", "") or settings.agent_id,
-            session_id=f"subtask-{subtask.id.hex[:8]}",
-            data=data,
-        ))
+        await bus.emit(
+            Event(
+                type=SUBTASK_OUTCOME_EVENT_TYPE,
+                agent_id=getattr(subtask, "agent_id", "") or settings.agent_id,
+                session_id=f"subtask-{subtask.id.hex[:8]}",
+                data=data,
+            )
+        )
     except Exception:
         logger.exception(
             "Failed to emit subtask_outcome from inline outer handler for %s",
@@ -2916,9 +2926,10 @@ async def _persist_and_emit_inline_outcome(
 # Subtask & Schedule tool closures (011.1)
 # ---------------------------------------------------------------------------
 
+
 def create_subtask_tools(
     heart: Heart,
-    settings: "Settings",
+    settings: Settings,
     runner: object = None,
     bus: object = None,
 ) -> dict[str, Any]:
@@ -2930,7 +2941,6 @@ def create_subtask_tools(
     path uses to emit ``subtask_outcome`` telemetry; ``None`` disables that
     emission for inline subtasks (background subtasks emit via the worker pool).
     """
-    from nous.config import Settings as _Settings  # noqa: F811 — deferred to avoid circular
 
     # F061 PR-3 silent-failure review P2.1: warn loudly when inline telemetry
     # is silently disabled because no bus was wired through. Operator who
@@ -3029,10 +3039,7 @@ def create_subtask_tools(
             # who read payload_schema from the row.
             effective_payload_schema = (
                 payload_schema
-                if (
-                    settings.subtask_payload_schema_enabled
-                    and settings.subtask_hardening_enabled
-                )
+                if (settings.subtask_payload_schema_enabled and settings.subtask_hardening_enabled)
                 else None
             )
             # F062: stash the spawn_sync lookup token in metadata when set
@@ -3075,10 +3082,7 @@ def create_subtask_tools(
 
             # 012.2: Synchronous inline execution
             if runner is None:
-                return _tool_error(
-                    "Cannot execute inline subtask: runner not available. "
-                    "Use await_result=false."
-                )
+                return _tool_error("Cannot execute inline subtask: runner not available. Use await_result=false.")
 
             import asyncio as _asyncio
 
@@ -3103,10 +3107,7 @@ def create_subtask_tools(
                 # F061 PR-3: pass an emit_event callback so inline subtasks
                 # also produce subtask_outcome telemetry. ``bus`` is captured
                 # by the outer create_subtask_tools closure when available.
-                _outcome_emitter = (
-                    partial(emit_outcome_event, bus, settings=settings)
-                    if bus is not None else None
-                )
+                _outcome_emitter = partial(emit_outcome_event, bus, settings=settings) if bus is not None else None
 
                 # F061 round 4: HardenedRunState side channel so the timeout
                 # / exception handlers below can read accurate attempts +
@@ -3125,8 +3126,11 @@ def create_subtask_tools(
                 try:
                     final_text, _result = await _asyncio.wait_for(
                         execute_hardened(
-                            subtask, subtask_session_id,
-                            runner=runner, heart=heart, settings=settings,
+                            subtask,
+                            subtask_session_id,
+                            runner=runner,
+                            heart=heart,
+                            settings=settings,
                             emit_event=_outcome_emitter,
                             state=state,
                         ),
@@ -3134,41 +3138,35 @@ def create_subtask_tools(
                     )
                     executed = True
                     if _result.ok:
-                        body = (
-                            f"[Subtask {subtask.id.hex[:8]} completed]\n\n{final_text}"
-                        )
+                        body = f"[Subtask {subtask.id.hex[:8]} completed]\n\n{final_text}"
                     elif _result.outcome == "incomplete_blocked":
-                        body = (
-                            f"[Subtask {subtask.id.hex[:8]} blocked: {_result.reason}]"
-                        )
+                        body = f"[Subtask {subtask.id.hex[:8]} blocked: {_result.reason}]"
                     else:
-                        body = (
-                            f"[Subtask {subtask.id.hex[:8]} {_result.outcome}: "
-                            f"{_result.reason}]"
-                        )
+                        body = f"[Subtask {subtask.id.hex[:8]} {_result.outcome}: {_result.reason}]"
                     # Mixed path: `body` is a completion OR a blocked/failed
                     # outcome, so the flag follows _result.ok rather than being
                     # set blanket either way.
                     if not _result.ok:
                         return _tool_error(body)
                     return {"content": [{"type": "text", "text": body}]}
-                except _asyncio.TimeoutError:
+                except TimeoutError:
                     if not executed:
                         await _persist_and_emit_inline_outcome(
-                            heart=heart, bus=bus, settings=settings,
+                            heart=heart,
+                            bus=bus,
+                            settings=settings,
                             subtask=subtask,
                             final_outcome="timed_out",
                             error_msg=f"Timeout after {effective_timeout}s",
                             state=state,
                         )
-                    return _tool_error(
-                        f"[Subtask {subtask.id.hex[:8]} timed out after "
-                        f"{effective_timeout}s]"
-                    )
+                    return _tool_error(f"[Subtask {subtask.id.hex[:8]} timed out after {effective_timeout}s]")
                 except Exception as e:
                     if not executed:
                         await _persist_and_emit_inline_outcome(
-                            heart=heart, bus=bus, settings=settings,
+                            heart=heart,
+                            bus=bus,
+                            settings=settings,
                             subtask=subtask,
                             final_outcome="errored",
                             error_msg=str(e),
@@ -3192,7 +3190,8 @@ def create_subtask_tools(
                         model_override=effective_model,
                         is_background=True,
                         context=ExecutionContext.for_subtask(  # harness Phase 1a
-                            subtask, subtask_session_id,
+                            subtask,
+                            subtask_session_id,
                         ),
                     ),
                     timeout=effective_timeout,
@@ -3201,7 +3200,9 @@ def create_subtask_tools(
                 # F061 PR-1: record outcome on legacy path so dashboard rows
                 # are never NULL between PR-1 ship and PR-2 hardened-executor ship.
                 await heart.subtasks.complete(
-                    subtask.id, response_text, final_outcome="completed",
+                    subtask.id,
+                    response_text,
+                    final_outcome="completed",
                 )
                 return {
                     "content": [
@@ -3212,20 +3213,23 @@ def create_subtask_tools(
                     ]
                 }
 
-            except _asyncio.TimeoutError:
+            except TimeoutError:
                 # F061 PR-3 Codex review: attempts=1 because one execution
                 # attempt definitely happened before the timeout.
                 await heart.subtasks.fail(
-                    subtask.id, f"Timeout after {effective_timeout}s",
-                    final_outcome="timed_out", attempts=1,
+                    subtask.id,
+                    f"Timeout after {effective_timeout}s",
+                    final_outcome="timed_out",
+                    attempts=1,
                 )
                 # Flagged like the hardened inline path above.
-                return _tool_error(
-                    f"[Subtask {subtask.id.hex[:8]} timed out after {effective_timeout}s]"
-                )
+                return _tool_error(f"[Subtask {subtask.id.hex[:8]} timed out after {effective_timeout}s]")
             except Exception as e:
                 await heart.subtasks.fail(
-                    subtask.id, str(e), final_outcome="errored", attempts=1,
+                    subtask.id,
+                    str(e),
+                    final_outcome="errored",
+                    attempts=1,
                 )
                 return _tool_error(f"[Subtask {subtask.id.hex[:8]} failed: {e}]")
 
@@ -3258,9 +3262,7 @@ def create_subtask_tools(
         """
         try:
             if bool(when) == bool(every):
-                return _tool_error(
-                    "Exactly one of 'when' or 'every' must be provided."
-                )
+                return _tool_error("Exactly one of 'when' or 'every' must be provided.")
 
             from nous.handlers.time_parser import parse_every, parse_when
 
@@ -3288,9 +3290,7 @@ def create_subtask_tools(
                     frame_type=frame_type,
                 )
 
-            next_fire = (
-                schedule.next_fire_at.isoformat() if schedule.next_fire_at else "N/A"
-            )
+            next_fire = schedule.next_fire_at.isoformat() if schedule.next_fire_at else "N/A"
             return {
                 "content": [
                     {
@@ -3342,14 +3342,8 @@ def create_subtask_tools(
             if schedules:
                 lines.append("\n=== Schedules ===")
                 for sc in schedules:
-                    next_fire = (
-                        sc.next_fire_at.strftime("%Y-%m-%d %H:%M UTC")
-                        if sc.next_fire_at
-                        else "N/A"
-                    )
-                    lines.append(
-                        f"- [{sc.schedule_type}] {sc.id} | {sc.task[:80]} (next: {next_fire})"
-                    )
+                    next_fire = sc.next_fire_at.strftime("%Y-%m-%d %H:%M UTC") if sc.next_fire_at else "N/A"
+                    lines.append(f"- [{sc.schedule_type}] {sc.id} | {sc.task[:80]} (next: {next_fire})")
             else:
                 lines.append("\n=== Schedules ===\nNo active schedules.")
 
@@ -3377,21 +3371,13 @@ def create_subtask_tools(
             # Try subtask cancel first
             cancelled = await heart.subtasks.cancel(uid)
             if cancelled:
-                return {
-                    "content": [
-                        {"type": "text", "text": f"Subtask {task_id} cancelled."}
-                    ]
-                }
+                return {"content": [{"type": "text", "text": f"Subtask {task_id} cancelled."}]}
 
             # Try schedule deactivation
             schedule = await heart.schedules.get(uid)
             if schedule:
                 await heart.schedules.deactivate(uid)
-                return {
-                    "content": [
-                        {"type": "text", "text": f"Schedule {task_id} deactivated."}
-                    ]
-                }
+                return {"content": [{"type": "text", "text": f"Schedule {task_id} deactivated."}]}
 
             # A cancel that cancelled nothing did not happen.
             return _tool_error(f"No pending subtask or active schedule found for {task_id}.")
@@ -3523,11 +3509,7 @@ def create_subtask_tools(
         # caller actually wants to inspect the failed payload.
         _UNSET = object()
         if status == "completed":
-            payload_or_unset: Any = (
-                report.get("payload", _UNSET)
-                if isinstance(report, dict)
-                else _UNSET
-            )
+            payload_or_unset: Any = report.get("payload", _UNSET) if isinstance(report, dict) else _UNSET
             if payload_or_unset is _UNSET:
                 payload = {}
             else:
@@ -3556,11 +3538,7 @@ def create_subtask_tools(
         # subtask is never reported (or durably recorded) as a success.
         if status != "completed":
             return _tool_error(_json.dumps(result.to_dict(), indent=2))
-        return {
-            "content": [
-                {"type": "text", "text": _json.dumps(result.to_dict(), indent=2)}
-            ]
-        }
+        return {"content": [{"type": "text", "text": _json.dumps(result.to_dict(), indent=2)}]}
 
     return {
         "spawn_task": spawn_task,
@@ -3577,7 +3555,10 @@ def create_subtask_tools(
 
 _SPAWN_TASK_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "description": "Spawn a subtask. Use await_result=true to wait for the result inline, or leave false for fire-and-forget background execution.",
+    "description": (
+        "Spawn a subtask. Use await_result=true to wait for the result inline, or leave false for fire-and-forget "
+        "background execution."
+    ),
     "properties": {
         "task": {
             "type": "string",
@@ -3606,12 +3587,17 @@ _SPAWN_TASK_SCHEMA: dict[str, Any] = {
         },
         "await_result": {
             "type": "boolean",
-            "description": "If true, wait for subtask completion and return result inline. Default false (fire-and-forget).",
+            "description": (
+                "If true, wait for subtask completion and return result inline. Default false (fire-and-forget)."
+            ),
             "default": False,
         },
         "model": {
             "type": "string",
-            "description": "Model to use for this subtask. If omitted, uses default background model. Use a smaller model for fast lookup/summarization tasks.",
+            "description": (
+                "Model to use for this subtask. If omitted, uses default background model. Use a smaller model for "
+                "fast lookup/summarization tasks."
+            ),
         },
         # F061: 2 of 4 brief fields exposed via schema (output_format,
         # success_criteria). The 4th field "boundaries" is NOT exposed yet
@@ -3620,11 +3606,16 @@ _SPAWN_TASK_SCHEMA: dict[str, Any] = {
         # PR adds a column.
         "output_format": {
             "type": "string",
-            "description": "How the subtask should structure its final report. Optional; sensible default applied per frame_type.",
+            "description": (
+                "How the subtask should structure its final report. Optional; sensible default applied per frame_type."
+            ),
         },
         "success_criteria": {
             "type": "string",
-            "description": "What 'done' looks like. Optional; default 'summary directly addresses the task and is internally consistent'.",
+            "description": (
+                "What 'done' looks like. Optional; default 'summary directly addresses the task and is internally "
+                "consistent'."
+            ),
         },
     },
     "required": ["task"],
@@ -3736,9 +3727,7 @@ _SPAWN_SYNC_SCHEMA: dict[str, Any] = {
         },
         "success_criteria": {
             "type": "string",
-            "description": (
-                "What 'done' looks like. Optional; defaults to a generic check."
-            ),
+            "description": ("What 'done' looks like. Optional; defaults to a generic check."),
         },
     },
     "required": ["task"],
@@ -3755,6 +3744,7 @@ def _build_spawn_task_schema(payload_schema_enabled: bool) -> dict[str, Any]:
     that share the import.
     """
     import copy
+
     schema = copy.deepcopy(_SPAWN_TASK_SCHEMA)
     if payload_schema_enabled:
         schema["properties"]["payload_schema"] = {
@@ -3776,7 +3766,7 @@ def _build_spawn_task_schema(payload_schema_enabled: bool) -> dict[str, Any]:
 def register_subtask_tools(
     dispatcher: ToolDispatcher,
     heart: Heart,
-    settings: "Settings",
+    settings: Settings,
     runner: object = None,
     bus: object = None,
 ) -> None:
@@ -3814,11 +3804,7 @@ def register_subtask_tools(
     # registration on ALL THREE so the operator can't accidentally end up
     # with a tool that creates pending subtask rows and synthesizes false
     # error results (Codex round-10 P2).
-    if (
-        settings.subtask_payload_schema_enabled
-        and settings.subtask_hardening_enabled
-        and runner is not None
-    ):
+    if settings.subtask_payload_schema_enabled and settings.subtask_hardening_enabled and runner is not None:
         dispatcher.register("spawn_sync", closures["spawn_sync"], _SPAWN_SYNC_SCHEMA)
     elif settings.subtask_payload_schema_enabled and settings.subtask_hardening_enabled:
         logger.warning(
@@ -4001,9 +3987,7 @@ def _deadline_tracer(deadline: float, timeout: float):  # noqa: ANN202 - CPython
             code = frame.f_code
             is_owned = owned.get(code)
             if is_owned is None:
-                is_owned = owned[code] = not os.path.normcase(
-                    code.co_filename
-                ).startswith(_PROTECTED_PREFIXES)
+                is_owned = owned[code] = not os.path.normcase(code.co_filename).startswith(_PROTECTED_PREFIXES)
             if not is_owned or code.co_name in _RELEASE_METHODS:
                 return None
             local = _new_local()
@@ -4067,7 +4051,7 @@ def create_programmatic_tools(
     brain: Brain,
     heart: Heart,
     settings: Settings,
-    episode_id_resolver: "Callable[[str], str | None] | None" = None,
+    episode_id_resolver: Callable[[str], str | None] | None = None,
 ) -> dict[str, Any]:
     """Create run_python tool closure for client-side programmatic execution.
 
@@ -4143,6 +4127,7 @@ def create_programmatic_tools(
         # `NOUS_RESIDUAL_ACTIVATION_ENABLED=true` in prod, so this is live, not
         # theoretical.
         from nous.api.runner import CURRENT_TURN_EXCLUDE_IDS
+
         _script_exclude_ids = CURRENT_TURN_EXCLUDE_IDS.get()
 
         # F055 state is resolved LAZILY, on the first in-script recall — see
@@ -4214,13 +4199,13 @@ def create_programmatic_tools(
                 act = heart._residual_activator
                 turn = _schedule(act.current_turn(brain.agent_id, _session_id))
                 _residual_state["turn"] = turn
-                _residual_state["acts"] = _schedule(
-                    act.compute_activations(brain.agent_id, _session_id, turn)
-                )
+                _residual_state["acts"] = _schedule(act.compute_activations(brain.agent_id, _session_id, turn))
             except Exception:
                 logger.warning(
-                    "F055: compute_activations failed for %s/%s in run_python, "
-                    "continuing cold", brain.agent_id, _session_id, exc_info=True,
+                    "F055: compute_activations failed for %s/%s in run_python, continuing cold",
+                    brain.agent_id,
+                    _session_id,
+                    exc_info=True,
                 )
                 _residual_state["acts"] = {}
 
@@ -4258,12 +4243,16 @@ def create_programmatic_tools(
             # has no turn of its own to attribute to.
             _tr = (
                 _rl.start(
-                    query=query, path="script", session_id=_session_id,
+                    query=query,
+                    path="script",
+                    session_id=_session_id,
                     # Several in-script recalls legitimately share one turn.
                     turn_number=_turn_number,
                 )
-                if _rl is not None else None
+                if _rl is not None
+                else None
             )
+
             def _commit(tr) -> None:
                 """Commit from the MAIN loop, never from this worker thread.
 
@@ -4283,7 +4272,8 @@ def create_programmatic_tools(
                     loop.call_soon_threadsafe(_rl.commit, tr)
                 except Exception:
                     logger.debug(
-                        "F091: script retrieval trace commit failed", exc_info=True,
+                        "F091: script retrieval trace commit failed",
+                        exc_info=True,
                     )
 
             def _fail_trace(exc: BaseException) -> None:
@@ -4339,14 +4329,24 @@ def create_programmatic_tools(
             # for the same reason (see the note at its own commit site: the
             # parent-episode fetch still changes what reaches the model).
             try:
-                results, _stats = _schedule(run_recall_pipeline(
-                    query=query, heart=heart, brain=brain, settings=settings,
-                    limit=limit, rerank_by_score=rerank, trace=_tr,
-                    residual_activations=_residual_state["acts"] or None,  # F055
-                    exclude_ids=_script_exclude_ids,  # F071
-                ))
+                results, _stats = _schedule(
+                    run_recall_pipeline(
+                        query=query,
+                        heart=heart,
+                        brain=brain,
+                        settings=settings,
+                        limit=limit,
+                        rerank_by_score=rerank,
+                        trace=_tr,
+                        residual_activations=_residual_state["acts"] or None,  # F055
+                        exclude_ids=_script_exclude_ids,  # F071
+                    )
+                )
                 out = _apply_script_limit(
-                    results, _build_script_results(results), limit, _tr,
+                    results,
+                    _build_script_results(results),
+                    limit,
+                    _tr,
                 )
             except (Exception, ScriptDeadlineExceeded) as e:
                 # ScriptDeadlineExceeded derives from BaseException ON PURPOSE,
@@ -4391,11 +4391,12 @@ def create_programmatic_tools(
                     # and the limit only truncates the tail.
                     _surfaced = [
                         (
-                            r.id, r.type,
+                            r.id,
+                            r.type,
                             float(r.score) if r.score is not None else 0.0,
                             (r.description or "")[:160],
                         )
-                        for r in results[:len(out)]
+                        for r in results[: len(out)]
                     ]
                     loop.call_soon_threadsafe(
                         lambda: asyncio.ensure_future(
@@ -4432,10 +4433,7 @@ def create_programmatic_tools(
             # it. Keyed off the MISSING FIELD, not the leg, so a leg added later
             # is covered for free. One batched query, and it fetches nothing
             # when every fact already arrived complete.
-            _needs = [
-                r.id for r in results
-                if r.type == "fact" and "active" not in r.metadata
-            ]
+            _needs = [r.id for r in results if r.type == "fact" and "active" not in r.metadata]
             _filled: dict = {}
             if _needs:
                 try:
@@ -4515,7 +4513,10 @@ def create_programmatic_tools(
             return out
 
         def _apply_script_limit(
-            results: list, out: list[dict], limit: int, tr,
+            results: list,
+            out: list[dict],
+            limit: int,
+            tr,
         ) -> list[dict]:
             """Honour `limit` as a cap on what the SCRIPT receives.
 
@@ -4577,13 +4578,20 @@ def create_programmatic_tools(
                 raise RuntimeError(f"learn_fact write cap ({_MAX_WRITES}) exceeded")
             write_count["n"] += 1
             from uuid import UUID as _UUID
+
             ep_uuid = _UUID(_active_episode_id) if _active_episode_id else None
-            result = _schedule(heart.learn(FactInput(
-                content=content, category=category,
-                subject=subject, confidence=confidence,
-                source="user_direct",  # F023/F038: +0.15 admission bonus
-                source_episode_id=ep_uuid,
-            )))
+            result = _schedule(
+                heart.learn(
+                    FactInput(
+                        content=content,
+                        category=category,
+                        subject=subject,
+                        confidence=confidence,
+                        source="user_direct",  # F023/F038: +0.15 admission bonus
+                        source_episode_id=ep_uuid,
+                    )
+                )
+            )
             # F023/F038: Handle FactRejected (user_direct gets +0.15 bonus
             # but very low-quality facts can still be rejected)
             if hasattr(result, "admitted") and not result.admitted:
@@ -4677,14 +4685,9 @@ def create_programmatic_tools(
                             return float(obj)
                         return str(obj)
 
-                    _encoded = _enc_cls(
-                        default=_jsonable, allow_nan=False
-                    ).encode(namespace.get("result"))
+                    _encoded = _enc_cls(default=_jsonable, allow_nan=False).encode(namespace.get("result"))
                     namespace["__nous_chars__"] = len(_encoded)
-                    if (
-                        _max_result_chars is not None
-                        and len(_encoded) > _max_result_chars
-                    ):
+                    if _max_result_chars is not None and len(_encoded) > _max_result_chars:
                         # Oversized: never decode it (codex P1) — not here, and
                         # certainly not on the loop.
                         namespace["__nous_obj__"] = None
@@ -4703,16 +4706,17 @@ def create_programmatic_tools(
         if not _acquire_run_slot(max_concurrent):
             logger.warning(
                 "run_python rejected: %d/%d concurrent executions in flight",
-                run_python_active_runs(), max_concurrent,
+                run_python_active_runs(),
+                max_concurrent,
             )
-            return _fail(
-                f"Error: too many concurrent run_python executions "
-                f"({max_concurrent} max) — retry shortly"
-            )
+            return _fail(f"Error: too many concurrent run_python executions ({max_concurrent} max) — retry shortly")
 
         logger.info(
             "run_python | %d chars | %d/%d slots in use\n%s",
-            len(code), run_python_active_runs(), max_concurrent, code,
+            len(code),
+            run_python_active_runs(),
+            max_concurrent,
+            code,
         )
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
@@ -4720,10 +4724,8 @@ def create_programmatic_tools(
             # scheduled via run_coroutine_threadsafe can actually execute.
             # The grace covers the trace hook's own check interval; the hook,
             # not this wait_for, is what actually stops the script.
-            await asyncio.wait_for(
-                loop.run_in_executor(executor, _run), timeout=timeout + _TIMEOUT_GRACE
-            )
-        except (asyncio.TimeoutError, ScriptDeadlineExceeded):
+            await asyncio.wait_for(loop.run_in_executor(executor, _run), timeout=timeout + _TIMEOUT_GRACE)
+        except (TimeoutError, ScriptDeadlineExceeded):
             # is_error per MCP (#179): lets downstream consumers (runner
             # tool_result block, compaction bulk-failure detection)
             # distinguish a real execution failure from a successful run
@@ -4829,7 +4831,7 @@ def register_programmatic_tools(
     brain: Brain,
     heart: Heart,
     settings: Settings,
-    cognitive: "Any | None" = None,
+    cognitive: Any | None = None,
 ) -> None:
     """Register run_python tool if programmatic tools are enabled.
 
@@ -4849,7 +4851,7 @@ def register_programmatic_tools(
 # ---------------------------------------------------------------------------
 
 
-def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: "Any") -> None:
+def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: Any) -> None:
     """F034.5: Register dynamic heartbeat check management tools."""
 
     async def heartbeat_check_create(**kwargs) -> dict:
@@ -4874,10 +4876,21 @@ def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: "Any") -> None:
 
     async def heartbeat_check_manage(**kwargs) -> dict:
         try:
+            # Phase 2.8: a disable reports the state it wrote, which a
+            # compensation snapshot records for its stale-revert guard.
+            call_outcome = _outcome_var.get()
+            capture: dict | None = {} if call_outcome is not None and kwargs["action"] == "disable" else None
+            if capture is not None:
+                # Attached BEFORE the await (filled in place before the commit).
+                call_outcome.check_capture = capture
+                capture["refuse_if_running"] = call_outcome.check_refuse_if_running
+                if call_outcome.persist_written is not None:
+                    capture["persist"] = call_outcome.persist_written
             result = await loader.manage_check(
                 action=kwargs["action"],
                 name=kwargs.get("name"),
                 updates=kwargs.get("updates"),
+                **({"capture": capture} if capture is not None else {}),
             )
             return {"content": [{"type": "text", "text": json.dumps(result)}]}
         except ValueError as e:
@@ -4885,34 +4898,75 @@ def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: "Any") -> None:
         except Exception as e:
             return _tool_error(f"Failed: {e}")
 
-    dispatcher.register("heartbeat_check_create", heartbeat_check_create, {
-        "type": "object",
-        "description": "Create a new dynamic heartbeat check that runs on a schedule",
-        "properties": {
-            "name": {"type": "string", "description": "Unique check name (slug, e.g. 'arxiv-agent-papers')"},
-            "description": {"type": "string", "description": "Human-readable description of what this check monitors"},
-            "prompt": {"type": "string", "description": "Instruction for what to check and report on"},
-            "tools": {"type": "array", "items": {"type": "string"}, "description": "Tools the check can use (allowed: web_search, web_fetch, recall_deep, recall_recent, bash, read_file, heartbeat_check_create, heartbeat_check_manage)"},
-            "interval_seconds": {"type": "integer", "description": "Seconds between runs (min 300, default 3600)"},
-            "cron_expr": {"type": "string", "description": "Cron expression for scheduling (overrides interval_seconds)"},
-            "timeout_seconds": {"type": "integer", "description": "Max seconds per run (default from NOUS_HEARTBEAT_DEFAULT_CHECK_TIMEOUT)"},
-            "urgent": {"type": "boolean", "description": "If true, runs during quiet hours too"},
-            "on_complete_prompt": {"type": "string", "description": "Prompt to execute when check self-disables (callback)"},
-            "on_complete_tools": {"type": "array", "items": {"type": "string"}, "description": "Tools for callback (must be subset of check tools)"},
+    dispatcher.register(
+        "heartbeat_check_create",
+        heartbeat_check_create,
+        {
+            "type": "object",
+            "description": "Create a new dynamic heartbeat check that runs on a schedule",
+            "properties": {
+                "name": {"type": "string", "description": "Unique check name (slug, e.g. 'arxiv-agent-papers')"},
+                "description": {
+                    "type": "string",
+                    "description": "Human-readable description of what this check monitors",
+                },
+                "prompt": {"type": "string", "description": "Instruction for what to check and report on"},
+                "tools": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Tools the check can use (allowed: web_search, web_fetch, recall_deep, recall_recent, bash, "
+                        "read_file, heartbeat_check_create, heartbeat_check_manage)"
+                    ),
+                },
+                "interval_seconds": {"type": "integer", "description": "Seconds between runs (min 300, default 3600)"},
+                "cron_expr": {
+                    "type": "string",
+                    "description": "Cron expression for scheduling (overrides interval_seconds)",
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": "Max seconds per run (default from NOUS_HEARTBEAT_DEFAULT_CHECK_TIMEOUT)",
+                },
+                "urgent": {"type": "boolean", "description": "If true, runs during quiet hours too"},
+                "on_complete_prompt": {
+                    "type": "string",
+                    "description": "Prompt to execute when check self-disables (callback)",
+                },
+                "on_complete_tools": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Tools for callback (must be subset of check tools)",
+                },
+            },
+            "required": ["name", "description", "prompt"],
         },
-        "required": ["name", "description", "prompt"],
-    })
+    )
 
-    dispatcher.register("heartbeat_check_manage", heartbeat_check_manage, {
-        "type": "object",
-        "description": "List, enable, disable, delete, or update dynamic heartbeat checks",
-        "properties": {
-            "action": {"type": "string", "enum": ["list", "enable", "disable", "delete", "update"], "description": "Action to perform"},
-            "name": {"type": "string", "description": "Check name (required for enable/disable/delete/update)"},
-            "updates": {"type": "object", "description": "Fields to update when action=update (allowed: description, prompt, tools, interval_seconds, cron_expr, timeout_seconds, urgent, on_complete_prompt, on_complete_tools)"},
+    dispatcher.register(
+        "heartbeat_check_manage",
+        heartbeat_check_manage,
+        {
+            "type": "object",
+            "description": "List, enable, disable, delete, or update dynamic heartbeat checks",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "enable", "disable", "delete", "update"],
+                    "description": "Action to perform",
+                },
+                "name": {"type": "string", "description": "Check name (required for enable/disable/delete/update)"},
+                "updates": {
+                    "type": "object",
+                    "description": (
+                        "Fields to update when action=update (allowed: description, prompt, tools, interval_seconds, "
+                        "cron_expr, timeout_seconds, urgent, on_complete_prompt, on_complete_tools)"
+                    ),
+                },
+            },
+            "required": ["action"],
         },
-        "required": ["action"],
-    })
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -4936,8 +4990,8 @@ _STATUS_RESULT_PREVIEW_CHARS = 500
 
 def register_dag_tools(
     dispatcher: ToolDispatcher,
-    store: "Any",
-    orchestrator: "Any",
+    store: Any,
+    orchestrator: Any,
     settings: Any = None,
 ) -> None:
     """F038: Register DAG orchestration tools."""
@@ -4968,8 +5022,7 @@ def register_dag_tools(
         if wants_approval:
             if not getattr(cfg, "dag_approval_nodes_enabled", False):
                 return _tool_error(
-                    "Error: approval nodes are disabled — set "
-                    "NOUS_DAG_APPROVAL_NODES_ENABLED=true to create them."
+                    "Error: approval nodes are disabled — set NOUS_DAG_APPROVAL_NODES_ENABLED=true to create them."
                 )
             if not getattr(orchestrator, "approvals_wired", False):
                 return _tool_error(
@@ -5018,6 +5071,9 @@ def register_dag_tools(
                 # default (1) applies otherwise.
                 if "max_fix_attempts" in n:
                     node_data["max_fix_attempts"] = n["max_fix_attempts"]
+                # Harness Phase 2.8: undoable declaration.
+                if "undoable" in n:
+                    node_data["undoable"] = n["undoable"]
                 # Harness Phase 3: approval-node fields — threaded explicitly
                 # (the F066.1 silent-drop lesson above).
                 for key in ("options", "default_option", "recommended_option", "answer_timeout_seconds"):
@@ -5028,11 +5084,13 @@ def register_dag_tools(
             # Parse edges
             edge_specs: list[DAGEdgeSpec] = []
             for e in kwargs.get("edges", []):
-                edge_specs.append(DAGEdgeSpec(
-                    from_node=e["from_node"],
-                    to_node=e["to_node"],
-                    edge_type=e.get("edge_type", "dependency"),
-                ))
+                edge_specs.append(
+                    DAGEdgeSpec(
+                        from_node=e["from_node"],
+                        to_node=e["to_node"],
+                        edge_type=e.get("edge_type", "dependency"),
+                    )
+                )
 
             request = DAGCreateRequest(
                 name=kwargs["name"],
@@ -5084,10 +5142,7 @@ def register_dag_tools(
                 # F087: an unwired clock is the difference between "nothing is
                 # running" and "nothing can ever run" — say which.
                 if not getattr(orchestrator, "clock_wired", True):
-                    warning = (
-                        "WARNING: DAG execution is not wired (no heartbeat "
-                        "runner) — DAGs cannot advance."
-                    )
+                    warning = "WARNING: DAG execution is not wired (no heartbeat runner) — DAGs cannot advance."
                     if not dags:
                         return {"content": [{"type": "text", "text": warning}]}
                     lines = [warning, f"Active DAGs ({len(dags)}):"]
@@ -5120,16 +5175,12 @@ def register_dag_tools(
                 # instead, so the limit applies to the finished population.
                 finished = await store.get_recent_finished_dags(limit=20)
                 if not finished:
-                    return {"content": [{"type": "text",
-                                         "text": "No finished DAGs."}]}
+                    return {"content": [{"type": "text", "text": "No finished DAGs."}]}
                 lines = [f"Recent finished DAGs ({len(finished)}):"]
                 for d in finished:
                     done = sum(1 for n in d.nodes if n.status == "completed")
                     when = d.completed_at.strftime("%Y-%m-%d %H:%M") if d.completed_at else "—"
-                    lines.append(
-                        f"  {str(d.id)[:8]} | {d.name} | {d.status} | "
-                        f"{done}/{len(d.nodes)} nodes | {when}"
-                    )
+                    lines.append(f"  {str(d.id)[:8]} | {d.name} | {d.status} | {done}/{len(d.nodes)} nodes | {when}")
                     # codex P2: result_summary is the generic constant
                     # _check_dag_completion writes ("All nodes completed
                     # successfully", "Failed nodes: ...") -- never the real
@@ -5151,8 +5202,13 @@ def register_dag_tools(
 
             if action == "status":
                 status_icons = {
-                    "completed": "+", "failed": "X", "running": ">",
-                    "ready": "~", "pending": ".", "blocked": "!", "cancelled": "-",
+                    "completed": "+",
+                    "failed": "X",
+                    "running": ">",
+                    "ready": "~",
+                    "pending": ".",
+                    "blocked": "!",
+                    "cancelled": "-",
                     "awaiting_check": "*",
                     "awaiting_input": "?",
                 }
@@ -5168,7 +5224,7 @@ def register_dag_tools(
                     icon = status_icons.get(node.status, "?")
                     wave_str = f"w{node.wave}" if node.wave is not None else "w?"
                     line = f"  [{icon}] {node.name} ({node.node_type}, {wave_str}) — {node.status}"
-                    if node.status == "awaiting_check" and hasattr(node, 'check_attempts'):
+                    if node.status == "awaiting_check" and hasattr(node, "check_attempts"):
                         line += f" | polls: {node.check_attempts}"
                     if node.error:
                         line += f" | error: {node.error[:80]}"
@@ -5232,9 +5288,11 @@ def register_dag_tools(
                         f"Available nodes: {available}"
                     )
                 if node.result is None:
-                    return {"content": [{"type": "text", "text": (
-                        f"Node '{node_name}' has no result yet (status: {node.status})"
-                    )}]}
+                    return {
+                        "content": [
+                            {"type": "text", "text": (f"Node '{node_name}' has no result yet (status: {node.status})")}
+                        ]
+                    }
                 return {"content": [{"type": "text", "text": node.result}]}
 
             else:
@@ -5249,11 +5307,18 @@ def register_dag_tools(
     approval_properties: dict[str, Any] = {}
     if approvals_advertised:
         node_type_enum.append("approval")
+        proceed_note = "default_option (applied if nobody answers) MUST be a 'stop' option"
+        if getattr(cfg, "dag_approval_proceed_default_enabled", False):
+            proceed_note = (
+                "default_option (applied if nobody answers) must be a 'stop' option "
+                "UNLESS every acting node downstream is declared undoable=true — in that "
+                "case a 'proceed' default is allowed (the actions can be reversed)"
+            )
         approval_help = (
             " 'approval' asks the person a question on a companion card and waits for "
             "the answer (up to answer_timeout_seconds, default 24 h). Put the question "
             "in instructions and give 2-4 options, each 'proceed' or 'stop'; "
-            "default_option (applied if nobody answers) MUST be a 'stop' option. Wire it "
+            f"{proceed_note}. Wire it "
             "with two context_flow edges: draft → approval (the card shows the draft) and "
             "approval → the acting node (it runs only after a 'proceed' answer and "
             "receives the answer). The acting node must be a 'subtask' — a 'callback' "
@@ -5263,7 +5328,9 @@ def register_dag_tools(
         )
         approval_properties = {
             "options": {
-                "type": "array", "minItems": 2, "maxItems": 4,
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 4,
                 "items": {
                     "type": "object",
                     "properties": {
@@ -5290,129 +5357,220 @@ def register_dag_tools(
             },
         }
 
-    dispatcher.register("dag_create", dag_create, {
-        "type": "object",
-        "description": (
-            "Create a DAG to orchestrate subtasks and checks with dependency tracking. "
-            "You do NOT need to poll for the result: when the DAG reaches a terminal "
-            "state its outcome is delivered to you automatically (F087), so create it "
-            "and move on. Use dag_manage only when the user asks about progress "
-            "mid-flight, to cancel or retry, or to look up a DAG whose delivery you "
-            "missed or that finished before this session (dag_manage action='recent')."
-        ),
-        "properties": {
-            "name": {"type": "string", "description": "DAG name"},
-            "description": {"type": "string"},
-            "nodes": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        # F066.1 (2026-05-23): added "fix" so fix-stage
-                        # recovery nodes are authorable. Phase 1 ships
-                        # rule-based dispatch; Phase 1.5 (NOUS_DAG_FIX_LLM_
-                        # DISPATCH_ENABLED) routes to Haiku tool-use.
-                        "type": {
-                            "type": "string",
-                            "enum": node_type_enum,
-                            "description": (
-                                "'callback' runs AFTER its predecessors and receives "
-                                "their results as context — use it to interpret or act "
-                                "on what earlier nodes produced (point a context_flow "
-                                "edge at it). It accepts frame_type / model / "
-                                "timeout_seconds like a subtask. Requires "
-                                "NOUS_DAG_CALLBACK_EXECUTION_ENABLED=true; with the flag "
-                                "off a callback completes instantly without running. "
-                                "'gate' currently auto-passes — it is a marker, not an "
-                                "enforced quality check. Note: 'tools' below is honored "
-                                "ONLY for 'check' nodes — on every other node type "
-                                "(subtask, callback, gate, fix) it is silently ignored."
-                            ) + approval_help,
+    dispatcher.register(
+        "dag_create",
+        dag_create,
+        {
+            "type": "object",
+            "description": (
+                "Create a DAG to orchestrate subtasks and checks with dependency tracking. "
+                "You do NOT need to poll for the result: when the DAG reaches a terminal "
+                "state its outcome is delivered to you automatically (F087), so create it "
+                "and move on. Use dag_manage only when the user asks about progress "
+                "mid-flight, to cancel or retry, or to look up a DAG whose delivery you "
+                "missed or that finished before this session (dag_manage action='recent')."
+            ),
+            "properties": {
+                "name": {"type": "string", "description": "DAG name"},
+                "description": {"type": "string"},
+                "nodes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            # F066.1 (2026-05-23): added "fix" so fix-stage
+                            # recovery nodes are authorable. Phase 1 ships
+                            # rule-based dispatch; Phase 1.5 (NOUS_DAG_FIX_LLM_
+                            # DISPATCH_ENABLED) routes to Haiku tool-use.
+                            "type": {
+                                "type": "string",
+                                "enum": node_type_enum,
+                                "description": (
+                                    "'callback' runs AFTER its predecessors and receives "
+                                    "their results as context — use it to interpret or act "
+                                    "on what earlier nodes produced (point a context_flow "
+                                    "edge at it). It accepts frame_type / model / "
+                                    "timeout_seconds like a subtask. Requires "
+                                    "NOUS_DAG_CALLBACK_EXECUTION_ENABLED=true; with the flag "
+                                    "off a callback completes instantly without running. "
+                                    "'gate' currently auto-passes — it is a marker, not an "
+                                    "enforced quality check. Note: 'tools' below is honored "
+                                    "ONLY for 'check' nodes — on every other node type "
+                                    "(subtask, callback, gate, fix) it is silently ignored."
+                                )
+                                + approval_help,
+                            },
+                            "instructions": {"type": "string"},
+                            "tools": {"type": "array", "items": {"type": "string"}},
+                            "frame_type": {"type": "string"},
+                            "model": {"type": "string"},
+                            "timeout_seconds": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": (
+                                    "Execution timeout in seconds (default: NOUS_DAG_NODE_DEFAULT_TIMEOUT, ceiling: "
+                                    "NOUS_DAG_NODE_MAX_TIMEOUT). F087: now a REAL bound — a node still executing past "
+                                    "this plus NOUS_DAG_NODE_TIMEOUT_GRACE_SECONDS is cancelled and failed, so size it "
+                                    "to the work rather than leaving the default on a long job."
+                                ),
+                            },
+                            "stall_timeout_seconds": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "description": (
+                                    "F064.1: max seconds without activity before failing this node. 0 = disabled for "
+                                    "this node. Unset = inherit NOUS_DAG_NODE_DEFAULT_STALL_TIMEOUT."
+                                ),
+                            },
+                            "completion_condition": {"type": "string"},
+                            "completion_check": {
+                                "type": "string",
+                                "description": (
+                                    "Shell command polled each tick. Exit 0 = success, 1 = failed, 2 = still running."
+                                ),
+                            },
+                            "completion_check_interval": {
+                                "type": "integer",
+                                "description": "Seconds between completion check polls (default: every tick)",
+                            },
+                            "max_check_attempts": {
+                                "type": "integer",
+                                "description": "Max poll attempts before node fails",
+                            },
+                            # F066.1 — fix-stage recovery fields. Only meaningful
+                            # when type='fix'; the DAGCreateRequest validator
+                            # enforces parent_node + non-empty fix_actions for
+                            # fix nodes and rejects these fields on non-fix nodes.
+                            "parent_node": {
+                                "type": "string",
+                                "description": (
+                                    "F066.1 (type='fix' only): name of the node this fix attaches to. Fires when the "
+                                    "parent transitions to 'failed'. The matching 'on_failure' edge MUST point from "
+                                    "the parent to this fix node — i.e. from_node = (this parent_node value), to_node "
+                                    "= (the fix node's own name). Pointing the edge the other direction fails "
+                                    "validation."
+                                ),
+                            },
+                            "fix_actions": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string",
+                                    "enum": [
+                                        "retry_as_is",
+                                        "retry_with_amended_prompt",
+                                        "mark_unrecoverable",
+                                        "skip_and_continue",
+                                    ],
+                                },
+                                "description": (
+                                    "F066.1 (type='fix' only): allowed action vocabulary. Phase 1 dispatcher rules: "
+                                    "incomplete/validation_failed errors → retry_as_is; timed_out → skip_and_continue "
+                                    "(or mark_unrecoverable); other errors → skip_and_continue then mark_unrecoverable "
+                                    "as final fallback. retry_with_amended_prompt only acts when "
+                                    "NOUS_DAG_FIX_LLM_DISPATCH_ENABLED=true."
+                                ),
+                            },
+                            "max_fix_attempts": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 3,
+                                "description": (
+                                    "F066.1 (type='fix' only): max fix attempts per parent failure. Default 1."
+                                ),
+                            },
+                            "expected_modes": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": (
+                                    "F066.1 (type='fix' only): declared failure modes for typed dispatch (Phase 2). "
+                                    "Phase 1 ignores this field."
+                                ),
+                            },
+                            "undoable": {
+                                "type": "boolean",
+                                "description": (
+                                    "Harness Phase 2.8: declare that this node's effects can be undone. When true, the "
+                                    "harness enforces at runtime that every tool call from this node uses a "
+                                    "compensable tool. Required for all acting nodes downstream of a proceed-default "
+                                    "approval."
+                                ),
+                            },
+                            **approval_properties,
                         },
-                        "instructions": {"type": "string"},
-                        "tools": {"type": "array", "items": {"type": "string"}},
-                        "frame_type": {"type": "string"},
-                        "model": {"type": "string"},
-                        "timeout_seconds": {"type": "integer", "minimum": 1, "description": "Execution timeout in seconds (default: NOUS_DAG_NODE_DEFAULT_TIMEOUT, ceiling: NOUS_DAG_NODE_MAX_TIMEOUT). F087: now a REAL bound — a node still executing past this plus NOUS_DAG_NODE_TIMEOUT_GRACE_SECONDS is cancelled and failed, so size it to the work rather than leaving the default on a long job."},
-                        "stall_timeout_seconds": {"type": "integer", "minimum": 0, "description": "F064.1: max seconds without activity before failing this node. 0 = disabled for this node. Unset = inherit NOUS_DAG_NODE_DEFAULT_STALL_TIMEOUT."},
-                        "completion_condition": {"type": "string"},
-                        "completion_check": {"type": "string", "description": "Shell command polled each tick. Exit 0 = success, 1 = failed, 2 = still running."},
-                        "completion_check_interval": {"type": "integer", "description": "Seconds between completion check polls (default: every tick)"},
-                        "max_check_attempts": {"type": "integer", "description": "Max poll attempts before node fails"},
-                        # F066.1 — fix-stage recovery fields. Only meaningful
-                        # when type='fix'; the DAGCreateRequest validator
-                        # enforces parent_node + non-empty fix_actions for
-                        # fix nodes and rejects these fields on non-fix nodes.
-                        "parent_node": {"type": "string", "description": "F066.1 (type='fix' only): name of the node this fix attaches to. Fires when the parent transitions to 'failed'. The matching 'on_failure' edge MUST point from the parent to this fix node — i.e. from_node = (this parent_node value), to_node = (the fix node's own name). Pointing the edge the other direction fails validation."},
-                        "fix_actions": {
-                            "type": "array",
-                            "items": {"type": "string", "enum": ["retry_as_is", "retry_with_amended_prompt", "mark_unrecoverable", "skip_and_continue"]},
-                            "description": "F066.1 (type='fix' only): allowed action vocabulary. Phase 1 dispatcher rules: incomplete/validation_failed errors → retry_as_is; timed_out → skip_and_continue (or mark_unrecoverable); other errors → skip_and_continue then mark_unrecoverable as final fallback. retry_with_amended_prompt only acts when NOUS_DAG_FIX_LLM_DISPATCH_ENABLED=true."
+                        "required": ["name", "type", "instructions"],
+                    },
+                },
+                "edges": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "from_node": {"type": "string"},
+                            "to_node": {"type": "string"},
+                            # F066.1: added "on_failure" so the fix-node attach
+                            # edge is authorable. The validator requires exactly
+                            # one on_failure inbound edge per fix node, with
+                            # from_node == fix.parent_node.
+                            "edge_type": {
+                                "type": "string",
+                                "enum": ["dependency", "cancel_cascade", "context_flow", "on_failure"],
+                            },
                         },
-                        "max_fix_attempts": {"type": "integer", "minimum": 1, "maximum": 3, "description": "F066.1 (type='fix' only): max fix attempts per parent failure. Default 1."},
-                        "expected_modes": {"type": "array", "items": {"type": "string"}, "description": "F066.1 (type='fix' only): declared failure modes for typed dispatch (Phase 2). Phase 1 ignores this field."},
-                        **approval_properties,
+                        "required": ["from_node", "to_node"],
                     },
-                    "required": ["name", "type", "instructions"],
                 },
+                "source": {"type": "string"},
+                "token_budget": {"type": "integer"},
             },
-            "edges": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "from_node": {"type": "string"},
-                        "to_node": {"type": "string"},
-                        # F066.1: added "on_failure" so the fix-node attach
-                        # edge is authorable. The validator requires exactly
-                        # one on_failure inbound edge per fix node, with
-                        # from_node == fix.parent_node.
-                        "edge_type": {"type": "string", "enum": ["dependency", "cancel_cascade", "context_flow", "on_failure"]},
-                    },
-                    "required": ["from_node", "to_node"],
-                },
-            },
-            "source": {"type": "string"},
-            "token_budget": {"type": "integer"},
+            # `edges` is NOT required: the handler reads kwargs.get("edges", []) and
+            # DAGCreateRequest.edges is default_factory=list, so a single-node DAG
+            # legitimately omits it. Listing it here told the model a lie, and once
+            # required-arg validation began trusting the schema for variadic
+            # handlers that lie became a rejection. `nodes` stays required — its
+            # .get default hits DAGCreateRequest's min_length=1 and fails anyway.
+            "required": ["name", "nodes"],
         },
-        # `edges` is NOT required: the handler reads kwargs.get("edges", []) and
-        # DAGCreateRequest.edges is default_factory=list, so a single-node DAG
-        # legitimately omits it. Listing it here told the model a lie, and once
-        # required-arg validation began trusting the schema for variadic
-        # handlers that lie became a rejection. `nodes` stays required — its
-        # .get default hits DAGCreateRequest's min_length=1 and fails anyway.
-        "required": ["name", "nodes"],
-    })
+    )
 
-    dispatcher.register("dag_manage", dag_manage, {
-        "type": "object",
-        "description": (
-            "List, inspect, cancel, or retry nodes in DAGs. Not needed to collect "
-            "results — a finished DAG announces itself; use 'recent' only as a "
-            "fallback when a delivery was missed or you want an older outcome. "
-            "'recent' lists finished DAGs (completed/failed/cancelled) — the only way "
-            "to find one you don't already have the id or id-prefix for. 'status' "
-            f"shows every node with a preview of its result (truncated past "
-            f"{_STATUS_RESULT_PREVIEW_CHARS} chars — it says so when it does, and "
-            "names the node). 'node_result' returns one named node's COMPLETE "
-            "result, byte-for-byte — use it whenever 'status' shows a truncated "
-            "preview. 'retry_node' re-queues a failed node (and any descendants it "
-            "alone blocked); it is refused on a cancelled DAG, since cancellation "
-            "is deliberate."
-        ),
-        "properties": {
-            "action": {"type": "string", "enum": ["list", "recent", "status", "cancel", "retry_node", "node_result"]},
-            "dag_id": {"type": "string"},
-            "node_name": {"type": "string", "description": "Required for 'retry_node' and 'node_result'; ignored by every other action."},
+    dispatcher.register(
+        "dag_manage",
+        dag_manage,
+        {
+            "type": "object",
+            "description": (
+                "List, inspect, cancel, or retry nodes in DAGs. Not needed to collect "
+                "results — a finished DAG announces itself; use 'recent' only as a "
+                "fallback when a delivery was missed or you want an older outcome. "
+                "'recent' lists finished DAGs (completed/failed/cancelled) — the only way "
+                "to find one you don't already have the id or id-prefix for. 'status' "
+                f"shows every node with a preview of its result (truncated past "
+                f"{_STATUS_RESULT_PREVIEW_CHARS} chars — it says so when it does, and "
+                "names the node). 'node_result' returns one named node's COMPLETE "
+                "result, byte-for-byte — use it whenever 'status' shows a truncated "
+                "preview. 'retry_node' re-queues a failed node (and any descendants it "
+                "alone blocked); it is refused on a cancelled DAG, since cancellation "
+                "is deliberate."
+            ),
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "recent", "status", "cancel", "retry_node", "node_result"],
+                },
+                "dag_id": {"type": "string"},
+                "node_name": {
+                    "type": "string",
+                    "description": "Required for 'retry_node' and 'node_result'; ignored by every other action.",
+                },
+            },
+            "required": ["action"],
         },
-        "required": ["action"],
-    })
+    )
 
     logger.info("F038: Registered dag_create and dag_manage tools")
 
 
-async def _resolve_dag(store: "Any", dag_id_str: str) -> "Any | None":
+async def _resolve_dag(store: Any, dag_id_str: str) -> Any | None:
     """Resolve a DAG by full UUID or id prefix, any status, any age.
 
     codex P2 (FINDING 3): previously two Python-side scans — active DAGs,

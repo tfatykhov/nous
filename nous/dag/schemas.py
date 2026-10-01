@@ -8,13 +8,12 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
 
 
-class DAGNodeType(str, Enum):
+class DAGNodeType(str, Enum):  # noqa: UP042 -- StrEnum changes str()/format() output (e.g. dag/approval.py)
     """Types of DAG execution nodes."""
 
     subtask = "subtask"
@@ -30,7 +29,7 @@ class DAGNodeType(str, Enum):
     approval = "approval"
 
 
-class DAGStatus(str, Enum):
+class DAGStatus(str, Enum):  # noqa: UP042 -- StrEnum changes str()/format() output (e.g. dag/approval.py)
     """Status of a DAG execution."""
 
     pending = "pending"
@@ -41,7 +40,7 @@ class DAGStatus(str, Enum):
     partial = "partial"
 
 
-class DAGNodeStatus(str, Enum):
+class DAGNodeStatus(str, Enum):  # noqa: UP042 -- StrEnum changes str()/format() output (e.g. dag/approval.py)
     """Status of an individual DAG node."""
 
     pending = "pending"
@@ -80,9 +79,7 @@ FixAction = Literal[
     "mark_unrecoverable",
     "skip_and_continue",
 ]
-_VALID_FIX_ACTIONS = frozenset(
-    {"retry_as_is", "retry_with_amended_prompt", "mark_unrecoverable", "skip_and_continue"}
-)
+_VALID_FIX_ACTIONS = frozenset({"retry_as_is", "retry_with_amended_prompt", "mark_unrecoverable", "skip_and_continue"})
 
 
 class DAGEdgeSpec(BaseModel):
@@ -126,16 +123,13 @@ class DAGNodeSpec(BaseModel):
     )
     completion_condition: str | None = Field(None, description="Optional completion condition")
     completion_check: str | None = Field(
-        None,
-        description="Shell command polled each tick. Exit 0 = success, 1 = failed, 2 = still running."
+        None, description="Shell command polled each tick. Exit 0 = success, 1 = failed, 2 = still running."
     )
     completion_check_interval: int | None = Field(
-        None, ge=1,
-        description="Seconds between completion check polls. Default: every tick."
+        None, ge=1, description="Seconds between completion check polls. Default: every tick."
     )
     max_check_attempts: int | None = Field(
-        None, ge=1,
-        description="Max poll attempts before failure. Default: unlimited (timeout-based)."
+        None, ge=1, description="Max poll attempts before failure. Default: unlimited (timeout-based)."
     )
     # F064.1: stall detection. Per-node override of the global default at
     # NOUS_DAG_NODE_DEFAULT_STALL_TIMEOUT. Cascade (matches
@@ -194,18 +188,26 @@ class DAGNodeSpec(BaseModel):
         ),
     )
 
+    # Harness Phase 2.8 — undoable declaration. When true, the harness
+    # enforces at runtime that every tool call from this node is compensable.
+    undoable: bool = Field(
+        False,
+        description="Declare that this node's effects can be undone. Runtime-enforced: "
+        "non-compensable tool calls are refused.",
+    )
+
     # Harness Phase 3 — approval nodes (type='approval' only).
     options: list[ApprovalOption] | None = Field(
         None, description="2-4 answers, each 'proceed' or 'stop'; at least one of each."
     )
     default_option: str | None = Field(
-        None, description="Option id applied when nobody answers by the deadline. Must STOP."
+        None,
+        description="Option id applied when nobody answers by the deadline.",
     )
-    recommended_option: str | None = Field(
-        None, description="Option id highlighted on the card. Default: none."
-    )
+    recommended_option: str | None = Field(None, description="Option id highlighted on the card. Default: none.")
     answer_timeout_seconds: int | None = Field(
-        None, ge=APPROVAL_MIN_WAIT_SECONDS,
+        None,
+        ge=APPROVAL_MIN_WAIT_SECONDS,
         description="Seconds allowed for an answer (default NOUS_DAG_APPROVAL_DEFAULT_WAIT_SECONDS).",
     )
 
@@ -220,36 +222,32 @@ class DAGNodeSpec(BaseModel):
         if self.type != DAGNodeType.approval:
             given = sorted(k for k, v in approval_only.items() if v)
             if given:
-                raise ValueError(
-                    f"Node '{self.name}': {given} are allowed only on approval nodes"
-                )
+                raise ValueError(f"Node '{self.name}': {given} are allowed only on approval nodes")
             return self
         # dag_create passes every one of these as n.get(...), and LLM-authored
         # JSON routinely emits [] / "" / 0 for "none" — all falsy values count
         # as "not given"; a real value would be silently meaningless, so reject it.
         runs_nothing = {
-            "tools": self.tools, "frame_type": self.frame_type, "model": self.model,
+            "tools": self.tools,
+            "frame_type": self.frame_type,
+            "model": self.model,
             "timeout_seconds": self.timeout_seconds,
             "stall_timeout_seconds": self.stall_timeout_seconds,
             "completion_condition": self.completion_condition,
             "completion_check": self.completion_check,
             "completion_check_interval": self.completion_check_interval,
             "max_check_attempts": self.max_check_attempts,
-            "parent_node": self.parent_node, "fix_actions": self.fix_actions,
+            "parent_node": self.parent_node,
+            "fix_actions": self.fix_actions,
         }
         given = sorted(k for k, v in runs_nothing.items() if v)
         if given:
-            raise ValueError(
-                f"Approval node '{self.name}' does not take {given}: it runs nothing"
-            )
+            raise ValueError(f"Approval node '{self.name}' does not take {given}: it runs nothing")
         if not self.instructions.strip():
-            raise ValueError(
-                f"Approval node '{self.name}' needs the question in 'instructions'"
-            )
+            raise ValueError(f"Approval node '{self.name}' needs the question in 'instructions'")
         if len(self.instructions) > APPROVAL_QUESTION_MAX_CHARS:
             raise ValueError(
-                f"Approval node '{self.name}': the question is capped at "
-                f"{APPROVAL_QUESTION_MAX_CHARS} characters"
+                f"Approval node '{self.name}': the question is capped at {APPROVAL_QUESTION_MAX_CHARS} characters"
             )
         options = self.options or []
         if not 2 <= len(options) <= 4:
@@ -258,23 +256,16 @@ class DAGNodeSpec(BaseModel):
         if len(set(ids)) != len(ids):
             raise ValueError(f"Approval node '{self.name}': option ids must be unique")
         if {o.outcome for o in options} != {"proceed", "stop"}:
-            raise ValueError(
-                f"Approval node '{self.name}' needs at least one 'proceed' and one 'stop' option"
-            )
+            raise ValueError(f"Approval node '{self.name}' needs at least one 'proceed' and one 'stop' option")
         by_id = {o.id: o for o in options}
         if self.default_option not in by_id:
-            raise ValueError(
-                f"Approval node '{self.name}': default_option must name one of {ids}"
-            )
-        if by_id[self.default_option].outcome != "stop":
-            raise ValueError(
-                f"Approval node '{self.name}': default_option must be a 'stop' option — "
-                "an unanswered card must never approve the action it guards"
-            )
+            raise ValueError(f"Approval node '{self.name}': default_option must name one of {ids}")
+        # A 'proceed' default is allowed ONLY when the graph validator
+        # confirms all downstream nodes are undoable AND the flag is on.
+        # The per-node validator stores the outcome for the graph check.
+        # (see validate_dag's _validate_proceed_defaults)
         if self.recommended_option is not None and self.recommended_option not in by_id:
-            raise ValueError(
-                f"Approval node '{self.name}': recommended_option must name one of {ids}"
-            )
+            raise ValueError(f"Approval node '{self.name}': recommended_option must name one of {ids}")
         return self
 
 
@@ -328,10 +319,7 @@ class DAGCreateRequest(BaseModel):
         if self.max_concurrent_by_frame_type is not None:
             for frame, cap in self.max_concurrent_by_frame_type.items():
                 if cap < 1:
-                    raise ValueError(
-                        f"max_concurrent_by_frame_type['{frame}']={cap} is invalid; "
-                        "values must be >= 1"
-                    )
+                    raise ValueError(f"max_concurrent_by_frame_type['{frame}']={cap} is invalid; values must be >= 1")
 
         # F064.3: insert-time sanitize node names against the workspace
         # safety regex. Loaded lazily to keep schema → settings layering
@@ -339,6 +327,7 @@ class DAGCreateRequest(BaseModel):
         try:
             from nous.config import Settings as _Settings
             from nous.dag._workspace import sanitize_segment
+
             _s = _Settings()
             if _s.dag_workspace_safety_enabled:
                 for n in self.nodes:
@@ -372,30 +361,21 @@ class DAGCreateRequest(BaseModel):
         for fn in fix_nodes:
             # Fix node MUST declare parent_node + fix_actions.
             if not fn.parent_node:
-                raise ValueError(
-                    f"Fix node '{fn.name}' must declare parent_node"
-                )
+                raise ValueError(f"Fix node '{fn.name}' must declare parent_node")
             if not fn.fix_actions:
-                raise ValueError(
-                    f"Fix node '{fn.name}' must declare a non-empty fix_actions list"
-                )
+                raise ValueError(f"Fix node '{fn.name}' must declare a non-empty fix_actions list")
             invalid = [a for a in fn.fix_actions if a not in _VALID_FIX_ACTIONS]
             if invalid:
                 raise ValueError(
-                    f"Fix node '{fn.name}' has invalid actions: {invalid}. "
-                    f"Allowed: {sorted(_VALID_FIX_ACTIONS)}"
+                    f"Fix node '{fn.name}' has invalid actions: {invalid}. Allowed: {sorted(_VALID_FIX_ACTIONS)}"
                 )
             # parent_node must reference a real node in the DAG.
             if fn.parent_node not in name_set:
-                raise ValueError(
-                    f"Fix node '{fn.name}' references unknown parent_node '{fn.parent_node}'"
-                )
+                raise ValueError(f"Fix node '{fn.name}' references unknown parent_node '{fn.parent_node}'")
             # No fix-of-fix.
             parent = nodes_by_name[fn.parent_node]
             if parent.type == DAGNodeType.fix:
-                raise ValueError(
-                    f"Fix node '{fn.name}' has another fix node as parent — fix-of-fix is forbidden"
-                )
+                raise ValueError(f"Fix node '{fn.name}' has another fix node as parent — fix-of-fix is forbidden")
 
         # At most one fix child per parent (count on_failure edges per source).
         on_failure_count_by_parent: dict[str, int] = {}
@@ -406,19 +386,11 @@ class DAGCreateRequest(BaseModel):
                 tgt = nodes_by_name.get(edge.to_node)
                 src = nodes_by_name.get(edge.from_node)
                 if tgt is None or tgt.type != DAGNodeType.fix:
-                    raise ValueError(
-                        f"on_failure edge target '{edge.to_node}' must be a fix node"
-                    )
+                    raise ValueError(f"on_failure edge target '{edge.to_node}' must be a fix node")
                 if src is None or src.type == DAGNodeType.fix:
-                    raise ValueError(
-                        f"on_failure edge source '{edge.from_node}' cannot be another fix node"
-                    )
-                on_failure_count_by_parent[edge.from_node] = (
-                    on_failure_count_by_parent.get(edge.from_node, 0) + 1
-                )
-                on_failure_inbound_by_fix[edge.to_node] = (
-                    on_failure_inbound_by_fix.get(edge.to_node, 0) + 1
-                )
+                    raise ValueError(f"on_failure edge source '{edge.from_node}' cannot be another fix node")
+                on_failure_count_by_parent[edge.from_node] = on_failure_count_by_parent.get(edge.from_node, 0) + 1
+                on_failure_inbound_by_fix[edge.to_node] = on_failure_inbound_by_fix.get(edge.to_node, 0) + 1
 
         # Every fix node MUST have exactly one on_failure inbound edge,
         # AND that edge's source MUST equal fn.parent_node.
@@ -431,10 +403,7 @@ class DAGCreateRequest(BaseModel):
         for fn in fix_nodes:
             inbound = on_failure_inbound_by_fix.get(fn.name, 0)
             if inbound != 1:
-                raise ValueError(
-                    f"Fix node '{fn.name}' must have exactly one on_failure "
-                    f"inbound edge; found {inbound}"
-                )
+                raise ValueError(f"Fix node '{fn.name}' must have exactly one on_failure inbound edge; found {inbound}")
             # Source of the on_failure edge MUST match parent_node, or
             # runtime lookup (by parent_node string) won't find this fix
             # when the cited edge's source fails (Codex round-2 P2).
@@ -449,10 +418,7 @@ class DAGCreateRequest(BaseModel):
         # At most one fix child per parent.
         for parent_name, count in on_failure_count_by_parent.items():
             if count > 1:
-                raise ValueError(
-                    f"Node '{parent_name}' has {count} fix children; at most "
-                    "one is allowed"
-                )
+                raise ValueError(f"Node '{parent_name}' has {count} fix children; at most one is allowed")
 
         # --- Harness Phase 3 §3.1: approval-node structure ---
         approval_names = {n.name for n in self.nodes if n.type == DAGNodeType.approval}
@@ -460,8 +426,7 @@ class DAGCreateRequest(BaseModel):
             gating = {e.from_node for e in self.edges if e.edge_type in PREDECESSOR_EDGE_TYPES}
             for name in sorted(approval_names - gating):
                 raise ValueError(
-                    f"Approval node '{name}' gates nothing: add a context_flow edge "
-                    "from it to the node it guards"
+                    f"Approval node '{name}' gates nothing: add a context_flow edge from it to the node it guards"
                 )
             downstream = self._downstream_of(approval_names)
             for fn in fix_nodes:
@@ -471,9 +436,7 @@ class DAGCreateRequest(BaseModel):
                         f"'{fn.parent_node}': a declined answer is an answer, not a "
                         "failure to repair"
                     )
-                if fn.parent_node in downstream and "retry_with_amended_prompt" in (
-                    fn.fix_actions or []
-                ):
+                if fn.parent_node in downstream and "retry_with_amended_prompt" in (fn.fix_actions or []):
                     raise ValueError(
                         f"Fix node '{fn.name}' may not use retry_with_amended_prompt: "
                         f"'{fn.parent_node}' runs under an approval, and amending its "
@@ -487,10 +450,7 @@ class DAGCreateRequest(BaseModel):
         if waves:
             max_wave = max(waves.values())
             if max_wave >= MAX_WAVES:
-                raise ValueError(
-                    f"DAG exceeds maximum {MAX_WAVES} waves (0-{MAX_WAVES - 1}), "
-                    f"got wave {max_wave}"
-                )
+                raise ValueError(f"DAG exceeds maximum {MAX_WAVES} waves (0-{MAX_WAVES - 1}), got wave {max_wave}")
 
         # --- max parallel per wave ---
         wave_counts: dict[int, int] = defaultdict(int)
@@ -498,11 +458,78 @@ class DAGCreateRequest(BaseModel):
             wave_counts[w] += 1
         for w, count in wave_counts.items():
             if count > MAX_PARALLEL_PER_WAVE:
-                raise ValueError(
-                    f"Wave {w} has {count} parallel nodes, max is {MAX_PARALLEL_PER_WAVE}"
-                )
+                raise ValueError(f"Wave {w} has {count} parallel nodes, max is {MAX_PARALLEL_PER_WAVE}")
+
+        # --- Harness Phase 2.8: proceed-default requires all downstream undoable ---
+        self._validate_proceed_defaults(nodes_by_name)
 
         return self
+
+    def _validate_proceed_defaults(self, nodes_by_name: dict[str, DAGNodeSpec]) -> None:
+        """A 'proceed' default on an approval node is allowed ONLY when
+        ``NOUS_DAG_APPROVAL_PROCEED_DEFAULT_ENABLED`` is true and every
+        downstream acting node is declared ``undoable``."""
+        approvals_with_proceed_default: list[DAGNodeSpec] = []
+        for n in self.nodes:
+            if n.type != DAGNodeType.approval or not n.options or not n.default_option:
+                continue
+            by_id = {o.id: o for o in n.options}
+            opt = by_id.get(n.default_option)
+            if opt and opt.outcome == "proceed":
+                approvals_with_proceed_default.append(n)
+
+        if not approvals_with_proceed_default:
+            return
+
+        try:
+            from nous.config import Settings as _Settings
+
+            enabled = _Settings().dag_approval_proceed_default_enabled
+        except ImportError:  # pragma: no cover
+            enabled = False
+
+        for appr in approvals_with_proceed_default:
+            if not enabled:
+                raise ValueError(
+                    f"Approval node '{appr.name}': default_option must be a 'stop' option — "
+                    "an unanswered card must never approve the action it guards "
+                    "(set NOUS_DAG_APPROVAL_PROCEED_DEFAULT_ENABLED=true to allow "
+                    "proceed-defaults when downstream nodes are undoable)"
+                )
+            downstream = self._downstream_of({appr.name})
+            acting = [
+                nodes_by_name[name]
+                for name in downstream
+                if name in nodes_by_name
+                and nodes_by_name[name].type in (DAGNodeType.subtask, DAGNodeType.callback, DAGNodeType.check)
+            ]
+            # A check node never counts as undoable, whatever it declares:
+            # it runs as a dynamic heartbeat check whose execution context
+            # does not carry the node's undoable flag (so nothing enforces
+            # it), and the only compensable call a check may make is a
+            # heartbeat_check_manage disable (codex P1 on #652).
+            non_undoable = [n.name for n in acting if not n.undoable or n.type == DAGNodeType.check]
+            if non_undoable:
+                raise ValueError(
+                    f"Approval node '{appr.name}': default_option is a 'proceed' option, "
+                    f"but downstream acting nodes {non_undoable} are not declared undoable "
+                    "(check nodes can never be undoable)"
+                )
+            # A completion_check is a model-authored shell command the
+            # orchestrator runs directly (create_subprocess_shell): it never
+            # passes tool authorization or snapshot capture, so `undoable`
+            # cannot cover it. Any downstream node carrying one is refused.
+            shell_checked = sorted(
+                name
+                for name in downstream
+                if name in nodes_by_name and (nodes_by_name[name].completion_check or "").strip()
+            )
+            if shell_checked:
+                raise ValueError(
+                    f"Approval node '{appr.name}': default_option is a 'proceed' option, "
+                    f"but downstream nodes {shell_checked} declare a completion_check -- a shell "
+                    "command run outside the undoable tool path, which cannot be reverted"
+                )
 
     def _downstream_of(self, roots: set[str]) -> set[str]:
         """Every node reachable from ``roots`` along PREDECESSOR_EDGE_TYPES."""

@@ -11,7 +11,6 @@ import pytest
 
 from nous.api.builtin_tools import (
     _MAX_FILE_SIZE,
-    _MAX_OUTPUT_CHARS,
     bash_tool,
     read_file_tool,
     write_file_tool,
@@ -35,7 +34,7 @@ class TestBashTool:
     async def test_bash_tool_success(self, tmp_path):
         """Simple command -> stdout captured in response."""
         result = await bash_tool(
-            command=f'{sys.executable} -c "print(\'hello from bash tool\')"',
+            command=f"{sys.executable} -c \"print('hello from bash tool')\"",
             _workspace_dir=str(tmp_path),
         )
         text = _extract_text(result)
@@ -81,7 +80,7 @@ class TestBashTool:
         """Output exceeding 100KB -> truncated with marker."""
         # Generate ~150KB of output (well over 100KB limit)
         result = await bash_tool(
-            command=f'{sys.executable} -c "print(\'x\' * 200000)"',
+            command=f"{sys.executable} -c \"print('x' * 200000)\"",
             _workspace_dir=str(tmp_path),
         )
         text = _extract_text(result)
@@ -91,7 +90,7 @@ class TestBashTool:
     async def test_bash_tool_stderr(self, tmp_path):
         """Stderr output captured and labeled."""
         result = await bash_tool(
-            command=f'{sys.executable} -c "import sys; sys.stderr.write(\'warning msg\\n\')"',
+            command=f"{sys.executable} -c \"import sys; sys.stderr.write('warning msg\\n')\"",
             _workspace_dir=str(tmp_path),
         )
         text = _extract_text(result)
@@ -114,7 +113,7 @@ class TestBashTool:
         line = authoritative wrapper status), so quoted 'Exit code: N' in a
         command's own output can be disambiguated downstream."""
         result = await bash_tool(
-            command=f'{sys.executable} -c "print(\'hello\')"',
+            command=f"{sys.executable} -c \"print('hello')\"",
             _workspace_dir=str(tmp_path),
         )
         text = _extract_text(result)
@@ -127,7 +126,7 @@ class TestBashTool:
         assert not workspace.exists()
 
         result = await bash_tool(
-            command=f'{sys.executable} -c "print(\'created\')"',
+            command=f"{sys.executable} -c \"print('created')\"",
             _workspace_dir=str(workspace),
         )
         text = _extract_text(result)
@@ -320,3 +319,56 @@ class TestWriteFileTool:
         )
         text = _extract_text(result)
         assert "600" in text  # Size: 600 bytes
+
+    @pytest.mark.asyncio
+    async def test_write_file_atomic_preserves_original_on_failure(self, tmp_path, monkeypatch):
+        """Codex P1 on #652: write_file is atomic — an I/O failure mid-write
+        (e.g. ENOSPC during fsync) must leave the original file untouched."""
+        import errno
+        import os
+
+        target = tmp_path / "existing.txt"
+        original_content = "original valuable content"
+        target.write_text(original_content, encoding="utf-8")
+
+        call_count = {"fsync": 0}
+
+        def failing_fsync(fd):
+            call_count["fsync"] += 1
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr(os, "fsync", failing_fsync)
+
+        result = await write_file_tool(
+            path="existing.txt",
+            content="new content that should not stick",
+            _workspace_dir=str(tmp_path),
+        )
+
+        text = _extract_text(result)
+        assert "Error" in text
+        assert "No space left" in text
+
+        assert target.read_text(encoding="utf-8") == original_content
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["existing.txt"], "temp file was not cleaned up"
+        assert call_count["fsync"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_write_file_atomic_preserves_mode(self, tmp_path):
+        """Atomic write preserves the original file's mode."""
+        import stat
+
+        target = tmp_path / "executable.sh"
+        target.write_text("#!/bin/bash\necho hello", encoding="utf-8")
+        target.chmod(0o755)
+
+        result = await write_file_tool(
+            path="executable.sh",
+            content="#!/bin/bash\necho updated",
+            _workspace_dir=str(tmp_path),
+        )
+        text = _extract_text(result)
+        assert "written successfully" in text.lower()
+
+        mode = stat.S_IMODE(target.stat().st_mode)
+        assert mode == 0o755, f"expected 0o755, got {oct(mode)}"
