@@ -399,6 +399,13 @@ class DynamicCheckLoader:
             if check.cancel_run(by_sibling_run=by_sibling_run):
                 logger.info("F034.5: Cancelled in-flight run of disabled check '%s'", name)
 
+    def _has_cancellable_run(self, name: str) -> bool:
+        """Whether ``_cancel_active_runs(name)`` would cancel a run now: any
+        in-flight run of ``name`` other than the one making this call (a
+        check disabling itself finishes its own run; it is never cancelled)."""
+        initiator = _CURRENT_CHECK_RUN.get()
+        return any(task is not initiator for check in self._active_runs.get(name, ()) for task in check._run_tasks)
+
     def set_runner(self, runner: AgentRunner) -> None:
         """Set the runner after construction (needed when runner is created in start())."""
         self._runner = runner
@@ -809,6 +816,16 @@ class DynamicCheckLoader:
                 return {"status": "enabled", "name": name}
 
             elif action == "disable":
+                # codex P1 (PR #652 r11): a disable that cancels an in-flight
+                # run cannot be undone -- re-enabling restores the schedule,
+                # not the interrupted run. Decided from the registry
+                # _cancel_active_runs reads, before anything is written.
+                cancels_run = capture is not None and self._has_cancellable_run(name)
+                if cancels_run and capture.get("refuse_if_running"):
+                    raise ValueError(
+                        f"check '{name}' has an active run; disabling it now would cancel that run, "
+                        "which is not undoable. Nothing was changed; retry once the run has finished"
+                    )
                 prior_enabled = model.enabled
                 token = uuid4().hex
                 model.enabled = False
@@ -823,11 +840,26 @@ class DynamicCheckLoader:
                     capture["written"] = {"check_id": str(model.id), _STATE_TOKEN_KEY: token}
                     # The compensation snapshot is written in THIS
                     # transaction: the disable and its revert record commit
-                    # (or roll back) together.
+                    # (or roll back) together. A disable that cancels a run
+                    # records no written state, so it is never revertible.
                     persist = capture.get("persist")
-                    if persist is not None:
+                    if persist is not None and not cancels_run:
                         await persist(session, capture)
-                await session.commit()
+                # A recorded disable that cancels nothing must stay that way:
+                # no run of this check may start while the commit is in
+                # flight (run() re-checks _self_disabled synchronously before
+                # registering in _active_runs). Undone if the commit fails.
+                gate = self._registry.get_check(name) if capture is not None else None
+                if not (isinstance(gate, DynamicCheck) and not gate._self_disabled):
+                    gate = None
+                if gate is not None:
+                    gate._self_disabled = True
+                try:
+                    await session.commit()
+                except BaseException:
+                    if gate is not None:
+                        gate._self_disabled = False
+                    raise
                 # codex P2 (PR #656): flag the in-memory check only once the
                 # disable is durable. Flagging before the commit left a failed
                 # commit with an enabled, registered check whose run() skips

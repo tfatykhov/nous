@@ -23,6 +23,9 @@ class CallOutcome:
     # Phase 2.8: a heartbeat_check_manage disable's prior state and the
     # state token it wrote (DynamicCheckLoader.manage_check capture=).
     check_capture: dict | None = None
+    # Phase 2.8: set by the runner for a disable in an undoable context: the
+    # disable is refused (nothing changed) if it would cancel an active run.
+    check_refuse_if_running: bool = False
     # Phase 2.8: ``async persist(session, capture)`` writing the capture into
     # this call's compensation snapshot on the MUTATION's own session, before
     # its commit -- so the change and its revert record commit together. Set

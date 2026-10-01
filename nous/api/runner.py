@@ -764,6 +764,10 @@ class AgentRunner:
                     "action": "disable",
                     "prior_enabled": prior_enabled,
                 }
+                if undoable and outcome is not None:
+                    # A disable that cancels an active run is not undoable:
+                    # manage_check refuses it, under its mutation lock.
+                    outcome.check_refuse_if_running = True
             elif tool_name == "resolve_decision":
                 # The prior review state the revert restores. The state this
                 # call writes is recorded in its own transaction

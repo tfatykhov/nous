@@ -1448,6 +1448,30 @@ async def test_undoable_check_disable_refused_when_prior_state_unreadable() -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("undoable", "expected"), [(True, True), (False, False)])
+async def test_undoable_check_disable_asks_the_handler_to_refuse_if_running(undoable, expected) -> None:
+    """codex P1 #652 r11: cancelling an active run cannot be undone, so an
+    undoable context's disable is flagged to refuse while a run is active
+    (manage_check decides, under its mutation lock); elsewhere it cancels."""
+    from unittest.mock import AsyncMock
+
+    from nous.api.call_outcome import CallOutcome
+
+    store = AsyncMock()
+    store.check_enabled.return_value = True
+    runner = _bare_runner(store)
+    outcome = CallOutcome()
+    assert await runner._capture_compensation_snapshot(
+        ExecutionContext(kind="dag_node", undoable=undoable),
+        "heartbeat_check_manage",
+        {"name": "c", "action": "disable"},
+        uuid4(),
+        outcome=outcome,
+    )
+    assert outcome.check_refuse_if_running is expected
+
+
+@pytest.mark.asyncio
 async def test_capture_resolve_decision_records_prior_review_state() -> None:
     """The snapshot used to hard-code prior_outcome=None; it now records the
     fields Brain.review overwrites. The state the call writes is recorded

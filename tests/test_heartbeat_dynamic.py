@@ -2788,3 +2788,144 @@ class TestFinalRunDecidedByTheRun:
         finally:
             RUN_OUTCOME.reset(token)
         assert outcome == {"final_run": True}
+
+
+# ===========================================================================
+# TestUndoableDisableOfRunningCheck — codex P1 (PR #652 round 11): a disable
+# that cancels an active run cannot be undone (re-enabling restores the
+# schedule, not the interrupted run), so a recorded (compensable) disable
+# either refuses -- undoable context -- or records no revertible state.
+# ===========================================================================
+
+
+class TestUndoableDisableOfRunningCheck:
+    @pytest.mark.asyncio
+    async def test_undoable_disable_refused_while_run_active(self):
+        """(a) refused, run NOT cancelled, check still enabled, nothing
+        recorded as revertible."""
+        registry = CheckRegistry()
+        loader = _loader_with_disable_row(registry, "busy")
+        session = loader._db.session.return_value.__aenter__.return_value
+        model = session.execute.return_value.scalar_one_or_none.return_value
+        started, release, effects = asyncio.Event(), asyncio.Event(), []
+        check = _tracked_check(loader, "busy", _blocking_runner(started, release, effects))
+
+        run = asyncio.create_task(check.run())
+        await asyncio.wait_for(started.wait(), 1)
+        persist = AsyncMock()
+        capture = {"refuse_if_running": True, "persist": persist}
+        with pytest.raises(ValueError, match="active run"):
+            await loader.manage_check(action="disable", name="busy", capture=capture)
+
+        assert model.enabled is True
+        session.commit.assert_not_awaited()
+        persist.assert_not_awaited()
+        assert "written" not in capture
+        assert registry.get_check("busy") is check and check._self_disabled is False
+        release.set()
+        result = await asyncio.wait_for(run, 1)  # completes, not cancelled
+        assert result.has_updates and effects == ["side effect after disable"]
+
+    @pytest.mark.asyncio
+    async def test_undoable_disable_without_active_run_stays_revertible(self):
+        """(b) no active run: the disable succeeds and records its written
+        state (revertible), as before."""
+        registry = CheckRegistry()
+        loader = _loader_with_disable_row(registry, "idle")
+        session = loader._db.session.return_value.__aenter__.return_value
+        model = session.execute.return_value.scalar_one_or_none.return_value
+        check = _tracked_check(loader, "idle", AsyncMock())
+        persist = AsyncMock()
+        capture = {"refuse_if_running": True, "persist": persist}
+
+        assert await loader.manage_check(action="disable", name="idle", capture=capture) == {
+            "status": "disabled",
+            "name": "idle",
+        }
+        assert model.enabled is False
+        persist.assert_awaited_once()
+        assert capture["prior_enabled"] is True and capture["written"]["check_id"] == "id-1"
+        assert check._self_disabled is True
+
+    @pytest.mark.asyncio
+    async def test_disable_outside_undoable_context_still_cancels(self):
+        """(c) outside an undoable context the disable cancels the run as
+        before; when recorded (background snapshot) it records no written
+        state, so it is never offered as revertible."""
+        from nous.heartbeat.dynamic import DynamicCheckCancelled
+
+        for capture in (None, {"refuse_if_running": False, "persist": AsyncMock()}):
+            registry = CheckRegistry()
+            loader = _loader_with_disable_row(registry, "busy")
+            session = loader._db.session.return_value.__aenter__.return_value
+            started, release, effects = asyncio.Event(), asyncio.Event(), []
+            check = _tracked_check(loader, "busy", _blocking_runner(started, release, effects))
+
+            run = asyncio.create_task(check.run())
+            await asyncio.wait_for(started.wait(), 1)
+            kwargs = {"capture": capture} if capture is not None else {}
+            await loader.manage_check(action="disable", name="busy", **kwargs)
+            release.set()
+            with pytest.raises(DynamicCheckCancelled):
+                await asyncio.wait_for(run, 1)
+            assert effects == []
+            session.commit.assert_awaited_once()
+            if capture is not None:
+                capture["persist"].assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_run_can_start_while_a_recorded_disable_commits(self):
+        """The active-run check and the disable cannot race: a run that tries
+        to start while the commit is in flight is skipped, so there is never
+        a run for the disable to cancel."""
+        registry = CheckRegistry()
+        loader = _loader_with_disable_row(registry, "racy")
+        session = loader._db.session.return_value.__aenter__.return_value
+        runner = AsyncMock()
+        check = _tracked_check(loader, "racy", runner)
+        results = []
+
+        async def _commit():
+            results.append(await check.run())  # a tick firing mid-commit
+
+        session.commit = AsyncMock(side_effect=_commit)
+        await loader.manage_check(
+            action="disable", name="racy", capture={"refuse_if_running": True, "persist": AsyncMock()}
+        )
+        assert results and results[0].skipped
+        runner.run_turn.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_failed_commit_reopens_the_gate(self):
+        registry = CheckRegistry()
+        loader = _loader_with_disable_row(registry, "flaky")
+        session = loader._db.session.return_value.__aenter__.return_value
+        session.commit = AsyncMock(side_effect=RuntimeError("db down"))
+        check = _tracked_check(loader, "flaky", AsyncMock())
+        with pytest.raises(RuntimeError):
+            await loader.manage_check(
+                action="disable", name="flaky", capture={"refuse_if_running": True, "persist": AsyncMock()}
+            )
+        assert check._self_disabled is False
+
+    @pytest.mark.asyncio
+    async def test_undoable_self_disable_from_own_run_is_allowed(self):
+        """The run making the call is finishing, not cancelled: it is not an
+        active run the disable would cancel."""
+        registry = CheckRegistry()
+        loader = _loader_with_disable_row(registry, "self")
+        runner = AsyncMock()
+        runner.end_conversation = AsyncMock()
+        captured = {}
+
+        async def _run_turn(*args, **kwargs):
+            captured["result"] = await loader.manage_check(
+                action="disable", name="self", capture={"refuse_if_running": True, "persist": AsyncMock()}
+            )
+            return ('{"has_findings": false, "findings": []}', MagicMock(), {})
+
+        runner.run_turn = AsyncMock(side_effect=_run_turn)
+        check = _tracked_check(loader, "self", runner)
+        result = await asyncio.wait_for(check.run(), 1)
+        assert captured["result"]["status"] == "disabled"
+        assert result.self_disabled is True

@@ -37,7 +37,7 @@ TOOL_CLASSES: Mapping[str, ToolClass] = MappingProxyType({
     "recall_hubs": _READ, "list_decisions": _READ,
     "submit_final_report": _READ,  # injected via extra_tools in hardened subtasks
     # local writes — compensable where a compensator exists. heartbeat_check_manage
-    # is compensable for action="disable" ONLY: see is_compensable_call.
+    # is compensable for action="disable" with no active run ONLY: see is_compensable_call.
     "write_file": _WRITE_C, "learn_fact": _WRITE, "record_decision": _WRITE, "create_censor": _WRITE,
     "store_identity": _WRITE, "learn_skill": _WRITE, "complete_initiation": _WRITE,
     "cancel_task": _WRITE, "heartbeat_check_manage": _WRITE_C, "ingest_document": _WRITE,
@@ -80,7 +80,10 @@ def is_compensable_call(name: str, tool_input: Mapping[str, object]) -> bool:
     """True when THIS call can be undone. ``heartbeat_check_manage`` is
     compensable only for ``action="disable"`` (compared exactly as the handler
     does): enable/update/delete re-arm or rewrite a check's future runs, which
-    a snapshot cannot take back."""
+    a snapshot cannot take back. A disable is undoable only while the check
+    has no active run -- cancelling one cannot be undone -- which is decided
+    at dispatch, not here: ``DynamicCheckLoader.manage_check`` refuses it in an
+    undoable context and records no revertible state anywhere else."""
     cls = TOOL_CLASSES.get(name)
     if cls is None or not cls.compensable:
         return False
