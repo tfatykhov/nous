@@ -445,7 +445,7 @@ async def test_push_surface_offers_revert_when_snapshot_and_compensator_exist() 
         id=uuid4(),
         tool_name="write_file",
         # What write_file records before dispatch: the revert's guard needs it.
-        snapshot_data={"written_content_hash": "0" * 64, "written_size": 1},
+        snapshot_data={"written_content_hash": "0" * 64, "written_size": 1, "workspace_root": "/ws"},
         reverted_at=None,
     )
 
