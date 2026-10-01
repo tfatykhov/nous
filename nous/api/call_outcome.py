@@ -35,6 +35,10 @@ class CallOutcome:
     write_fence: Any = None
     # Phase 2.8: the per-path lock the runner holds for this write_file.
     write_lock: Any = None
+    # Phase 2.8: the asyncio task running write_file's worker thread. A
+    # cancelled call returns before the thread finishes; the runner releases
+    # write_lock only once this task is done.
+    write_worker: Any = None
 
 
 _current: ContextVar[CallOutcome | None] = ContextVar("tool_call_outcome", default=None)

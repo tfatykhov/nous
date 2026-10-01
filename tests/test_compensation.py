@@ -16,6 +16,7 @@ import asyncio
 import base64
 import hashlib
 import os
+import sys
 import tempfile
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -169,6 +170,7 @@ async def test_compensate_write_file_restores_content() -> None:
         snapshot_data = {
             "path": path,
             "full_path": path,
+            "workspace_root": os.path.dirname(path),
             "existed": True,
             **_prior("original content"),
             **_written("new content after write"),
@@ -191,6 +193,7 @@ async def test_compensate_write_file_deletes_new_file() -> None:
     snapshot_data = {
         "path": path,
         "full_path": path,
+        "workspace_root": os.path.dirname(path),
         "existed": False,
         "prior_b64": None,
         **_written("was created by write_file"),
@@ -206,6 +209,7 @@ async def test_compensate_write_file_already_absent() -> None:
     snapshot_data = {
         "path": path,
         "full_path": path,
+        "workspace_root": os.path.dirname(path),
         "existed": False,
         "prior_b64": None,
         **_written("x"),
@@ -594,6 +598,7 @@ async def test_compensate_write_file_refuses_when_removed_after_write() -> None:
     snapshot_data = {
         "path": path,
         "full_path": path,
+        "workspace_root": os.path.dirname(path),
         "existed": True,
         **_prior("the original content"),
         **_written("what write_file wrote"),
@@ -618,6 +623,7 @@ async def test_compensate_write_file_fails_when_existed_no_prior_content() -> No
     snapshot_data = {
         "path": path,
         "full_path": path,
+        "workspace_root": os.path.dirname(path),
         "existed": True,
         "prior_b64": None,  # capture was not possible
         **_written("written"),
@@ -755,6 +761,7 @@ async def test_compensate_write_file_refuses_stale_revert() -> None:
         snapshot_data = {
             "path": path,
             "full_path": path,
+            "workspace_root": os.path.dirname(path),
             "existed": True,
             **_prior("original content"),
             "written_content_hash": written_hash,
@@ -784,6 +791,7 @@ async def test_compensate_write_file_proceeds_when_hash_matches() -> None:
         snapshot_data = {
             "path": path,
             "full_path": path,
+            "workspace_root": os.path.dirname(path),
             "existed": True,
             **_prior("original content"),
             "written_content_hash": written_hash,
@@ -940,7 +948,9 @@ async def test_action_review_pusher_publishes_a_revertible_card() -> None:
     entry_id = uuid4()
     snap_store = SimpleNamespace(
         get_by_ledger_entry=AsyncMock(
-            return_value=SimpleNamespace(tool_name="write_file", reverted_at=None, snapshot_data=_written("x"))
+            return_value=SimpleNamespace(
+                tool_name="write_file", reverted_at=None, snapshot_data={**_written("x"), "workspace_root": "/ws"}
+            )
         )
     )
     registry = CompensationRegistry()
@@ -977,7 +987,9 @@ async def test_action_review_pusher_bypasses_session_blocks() -> None:
     entry_id = uuid4()
     snap_store = SimpleNamespace(
         get_by_ledger_entry=AsyncMock(
-            return_value=SimpleNamespace(tool_name="write_file", reverted_at=None, snapshot_data=_written("x"))
+            return_value=SimpleNamespace(
+                tool_name="write_file", reverted_at=None, snapshot_data={**_written("x"), "workspace_root": "/ws"}
+            )
         )
     )
     registry = CompensationRegistry()
@@ -1606,7 +1618,7 @@ async def test_server_compensation_ignores_caller_handler() -> None:
 
     store = AsyncMock()
     store.get_by_ledger_entry.return_value = SimpleNamespace(
-        tool_name="write_file", reverted_at=None, snapshot_data=_written("x")
+        tool_name="write_file", reverted_at=None, snapshot_data={**_written("x"), "workspace_root": "/ws"}
     )
     registry = CompensationRegistry()
     register_compensators(registry)
@@ -1689,7 +1701,13 @@ async def test_stale_check_refuses_a_grown_file_without_reading_it(tmp_path) -> 
     synchronous f.read() on the event loop before refusing."""
     target = tmp_path / "f.txt"
     target.write_text("x" * 10_000)
-    snap = {"full_path": str(target), "existed": True, **_prior("old"), **_written("short")}
+    snap = {
+        "full_path": str(target),
+        "workspace_root": str(tmp_path),
+        "existed": True,
+        **_prior("old"),
+        **_written("short"),
+    }
     with patch("builtins.open", side_effect=AssertionError("must not read a size-mismatched file")):
         res = await compensate_write_file(uuid4(), snap, None)
     assert not res.success and "modified after" in res.message
@@ -1865,6 +1883,7 @@ async def test_file_revert_waits_for_an_in_flight_write(tmp_path) -> None:
     target.write_text("ours")
     snap = {
         "full_path": str(target),
+        "workspace_root": str(target.parent),
         "existed": True,
         **_prior("original"),
         **_written("ours"),
@@ -1891,10 +1910,11 @@ async def test_unreadable_prior_file_blocks_an_undoable_write(tmp_path) -> None:
 
     (tmp_path / "wo.txt").write_text("secret")
 
-    def _denied(*a, **k):
+    def _denied(fd, *a, **k):
+        os.close(fd)
         raise PermissionError("write-only file")
 
-    with patch.object(comp, "open", _denied, create=True):
+    with patch("os.fdopen", _denied):
         snap = await comp.snapshot_for_write_file("wo.txt", str(tmp_path))
         assert snap["existed"] and snap["prior_b64"] is None and "PermissionError" in snap["capture_error"]
         runner = _bare_runner(SimpleNamespace(capture=None))
@@ -2351,7 +2371,9 @@ async def test_make_action_review_pusher_sets_compensation_card_flag() -> None:
     entry_id = uuid4()
     snap_store = SimpleNamespace(
         get_by_ledger_entry=AsyncMock(
-            return_value=SimpleNamespace(tool_name="write_file", reverted_at=None, snapshot_data=_written("x"))
+            return_value=SimpleNamespace(
+                tool_name="write_file", reverted_at=None, snapshot_data={**_written("x"), "workspace_root": "/ws"}
+            )
         )
     )
     registry = CompensationRegistry()
@@ -2608,7 +2630,7 @@ async def test_forward_write_to_an_absent_file_does_not_clobber_one_that_appeare
     target = tmp_path / "late.txt"
     target.write_text("someone else's")
     with pytest.raises(PreconditionFailed):
-        atomic_replace_bytes(target, b"mine", expected=ABSENT)
+        atomic_replace_bytes(target, b"mine", expected=ABSENT, root=tmp_path)
     assert target.read_text() == "someone else's"
     assert sorted(p.name for p in tmp_path.iterdir()) == ["late.txt"]
 
@@ -2629,7 +2651,7 @@ def test_absent_target_that_appears_during_the_write_is_not_clobbered(tmp_path, 
 
     monkeypatch.setattr(builtin_tools, "_unchanged_since", appears_right_after_the_check)
     with pytest.raises(PreconditionFailed):
-        atomic_replace_bytes(target, b"mine", expected=ABSENT)
+        atomic_replace_bytes(target, b"mine", expected=ABSENT, root=tmp_path)
     assert target.read_text() == "appeared"
     assert sorted(p.name for p in tmp_path.iterdir()) == ["race.txt"]
 
@@ -2656,7 +2678,7 @@ async def test_revert_never_follows_a_symlink_swapped_in(tmp_path) -> None:
     from nous.api.builtin_tools import PreconditionFailed, file_digest
 
     with pytest.raises(PreconditionFailed, match="symlink"):
-        file_digest(target, 100)
+        file_digest(target, 100, root=ws)
 
 
 @pytest.mark.asyncio
@@ -2703,12 +2725,18 @@ async def test_revert_fences_off_a_write_orphaned_by_a_cancelled_call(tmp_path) 
     target = tmp_path / "new.txt"
     fence = register_write_fence(str(entry))
     fence.started = True  # the worker thread is running, not yet renamed
-    snap = {"full_path": str(target), "existed": False, "prior_b64": None, **_written("late")}
+    snap = {
+        "full_path": str(target),
+        "workspace_root": str(tmp_path),
+        "existed": False,
+        "prior_b64": None,
+        **_written("late"),
+    }
     res = await compensate_write_file(entry, snap, None)
     assert res.success and "already absent" in res.message
     # the orphaned worker reaches its rename only now
     with pytest.raises(PreconditionFailed, match="revoked"):
-        atomic_replace_bytes(target, b"late", expected=ABSENT, fence=fence)
+        atomic_replace_bytes(target, b"late", expected=ABSENT, fence=fence, root=tmp_path)
     assert not target.exists()
     _write_fences.pop(str(entry), None)
 
@@ -2870,7 +2898,9 @@ def test_card_offers_revert_only_when_the_guard_state_is_recorded() -> None:
     compensator would refuse."""
     from nous.api.compensation import snapshot_is_revertible
 
-    assert snapshot_is_revertible("write_file", _written("x"))
+    assert snapshot_is_revertible("write_file", {**_written("x"), "workspace_root": "/ws"})
+    # without its workspace root the revert cannot walk to the file safely
+    assert not snapshot_is_revertible("write_file", _written("x"))
     assert not snapshot_is_revertible("write_file", {})
     for tool in ("resolve_decision", "heartbeat_check_manage"):
         assert not snapshot_is_revertible(tool, {"prior": {}})
@@ -2905,10 +2935,10 @@ def test_absent_create_falls_back_to_rename_only_when_links_are_unsupported(tmp_
         return fail
 
     with patch("nous.api.builtin_tools.os.link", _link(errno.EOPNOTSUPP)):
-        atomic_replace_bytes(tmp_path / "a.txt", b"a", expected=ABSENT)
+        atomic_replace_bytes(tmp_path / "a.txt", b"a", expected=ABSENT, root=tmp_path)
     assert (tmp_path / "a.txt").read_bytes() == b"a"
     with patch("nous.api.builtin_tools.os.link", _link(errno.ENOSPC)), pytest.raises(OSError):
-        atomic_replace_bytes(tmp_path / "b.txt", b"b", expected=ABSENT)
+        atomic_replace_bytes(tmp_path / "b.txt", b"b", expected=ABSENT, root=tmp_path)
     assert not (tmp_path / "b.txt").exists()
     assert not [p for p in tmp_path.iterdir() if p.name.startswith(".write_file_")]
 
@@ -2934,3 +2964,228 @@ async def test_write_cancelled_before_its_worker_began_revokes_and_drops_the_fen
         call_outcome._current.reset(token)
     assert fence.revoked and key not in _write_fences
     assert not (tmp_path / "n.txt").exists()
+
+
+# ---------------------------------------------------------------------------
+# codex P1 #652 round 9: every directory below the workspace is walked
+# O_NOFOLLOW, and a cancelled write keeps its path lock until its thread ends
+# ---------------------------------------------------------------------------
+
+
+def _swap_ancestor_for_symlink(ws, outside, rel_file: str, content: str | None) -> None:
+    """Replace ``ws/a`` (two levels above ``rel_file``) with a symlink to
+    ``outside``, where the same relative file holds ``content``."""
+    import shutil
+
+    shutil.rmtree(ws / "a")
+    dest = outside / rel_file.split("/", 1)[1]
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if content is not None:
+        dest.write_text(content)
+    (ws / "a").symlink_to(outside, target_is_directory=True)
+
+
+def test_forward_write_refuses_an_ancestor_swapped_for_a_symlink(tmp_path) -> None:
+    """codex P1 (builtin_tools.py:276): O_NOFOLLOW on the full parent path
+    guarded only its last component. An ancestor two levels up swapped for a
+    symlink after validation now fails the walk; nothing outside is touched."""
+    from nous.api.builtin_tools import PreconditionFailed, atomic_replace_bytes
+
+    ws, outside = tmp_path / "ws", tmp_path / "outside"
+    ws.mkdir()
+    outside.mkdir()
+    target = ws / "a" / "b" / "f.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("inside")
+    _swap_ancestor_for_symlink(ws, outside, "a/b/f.txt", "outside original")
+    for expected in (None, _h("outside original")):
+        with pytest.raises(PreconditionFailed, match="symlink"):
+            atomic_replace_bytes(target, b"evil", expected=expected, root=ws)
+    with pytest.raises(PreconditionFailed, match="symlink"):
+        atomic_replace_bytes(ws / "a" / "b" / "new.txt", b"evil", expected=None, root=ws)
+    assert (outside / "b" / "f.txt").read_text() == "outside original"
+    assert sorted(p.name for p in (outside / "b").iterdir()) == ["f.txt"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("existed", [True, False])
+async def test_revert_refuses_an_ancestor_swapped_for_a_symlink(tmp_path, existed) -> None:
+    """The revert's hash read, restore and delete walk from the workspace
+    root: a matching file reached through a swapped ancestor is neither
+    replaced nor deleted."""
+    from nous.api.builtin_tools import PreconditionFailed, file_digest, remove_if_matches
+
+    ws, outside = tmp_path / "ws", tmp_path / "outside"
+    ws.mkdir()
+    outside.mkdir()
+    (ws / "a" / "b").mkdir(parents=True)
+    if existed:
+        (ws / "a" / "b" / "f.txt").write_text("original")
+    entry, snap, result = await _snapshotted_write(ws, "a/b/f.txt", "agent")
+    assert not result.get("is_error")
+    assert snap["workspace_root"] == str(ws.resolve())
+    _swap_ancestor_for_symlink(ws, outside, "a/b/f.txt", "agent")  # same bytes: the hash alone would pass
+    res = await compensate_write_file(entry, snap, None)
+    assert not res.success
+    assert (outside / "b" / "f.txt").read_text() == "agent"
+    target = ws / "a" / "b" / "f.txt"
+    with pytest.raises(PreconditionFailed, match="symlink"):
+        file_digest(target, 100, root=ws)
+    with pytest.raises(PreconditionFailed, match="symlink"):
+        remove_if_matches(target, _h("agent"), limit=100, root=ws)
+    assert (outside / "b" / "f.txt").read_text() == "agent"
+
+
+@pytest.mark.asyncio
+async def test_nested_writes_and_reverts_still_work(tmp_path) -> None:
+    """Missing directories are created by the walk; a nested file reverts."""
+    entry, snap, result = await _snapshotted_write(tmp_path, "x/y/z/new.txt", "hello")
+    assert not result.get("is_error"), result
+    assert (tmp_path / "x" / "y" / "z" / "new.txt").read_text() == "hello"
+    res = await compensate_write_file(entry, snap, None)
+    assert res.success, res.message
+    assert not (tmp_path / "x" / "y" / "z" / "new.txt").exists()
+
+
+def _gate_first_write(monkeypatch):
+    """Block the worker thread of the write whose data is b"first"."""
+    import threading
+
+    from nous.api import builtin_tools
+
+    real = builtin_tools.atomic_replace_bytes
+    entered, gate = threading.Event(), threading.Event()
+
+    def gated(target, data, **kw):
+        if data == b"first":
+            entered.set()
+            assert gate.wait(10)
+        return real(target, data, **kw)
+
+    monkeypatch.setattr(builtin_tools, "atomic_replace_bytes", gated)
+    return entered, gate
+
+
+async def _start_write(runner, ws, path: str, content: str):
+    """The runner's sequence up to dispatch: lock, snapshot, then the handler
+    as a task (it inherits the bound CallOutcome)."""
+    from nous.api import call_outcome
+    from nous.api.builtin_tools import write_file_tool
+
+    outcome = await _held(path, str(ws))
+    entry = uuid4()
+    assert await runner._capture_compensation_snapshot(
+        ExecutionContext(kind="subtask"), "write_file", {"path": path, "content": content}, entry, outcome=outcome
+    )
+    snap = runner._snap_store.capture.await_args.kwargs["snapshot_data"]
+    token = call_outcome._current.set(outcome)
+    try:
+        task = asyncio.create_task(write_file_tool(path, content, _workspace_dir=str(ws)))
+    finally:
+        call_outcome._current.reset(token)
+    return outcome, entry, snap, task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("how", ["cancel", "timeout"])
+async def test_cancelled_write_keeps_its_path_lock_until_the_worker_finishes(tmp_path, monkeypatch, how) -> None:
+    """codex P1 (runner.py:3182): the path lock was released as soon as the
+    cancelled call returned, while its worker thread could still rename. A
+    second write then snapshotted the same pre-state and the orphan landed
+    over it. The lock is now released only when the worker is done."""
+    from unittest.mock import AsyncMock
+
+    from nous.api.compensation import release_write_path_lock_after
+
+    (tmp_path / "f.txt").write_text("v0")
+    entered, gate = _gate_first_write(monkeypatch)
+    runner1 = _bare_runner(AsyncMock())
+    runner1._workspace_dir = str(tmp_path)
+    runner1._handler_args = lambda name, inp: inp
+    out1, entry1, snap1, task1 = await _start_write(runner1, tmp_path, "f.txt", "first")
+    assert await asyncio.to_thread(entered.wait, 5)
+    if how == "cancel":
+        task1.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task1
+    else:
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(task1, 0.05)
+    # the runner's finally: the caller has already returned, the lock has not
+    release_write_path_lock_after(out1.write_lock, out1.write_worker)
+    assert out1.write_lock.locked()
+
+    runner2 = _bare_runner(AsyncMock())
+    runner2._workspace_dir = str(tmp_path)
+    runner2._handler_args = lambda name, inp: inp
+
+    async def second():
+        out2, entry2, snap2, task2 = await _start_write(runner2, tmp_path, "f.txt", "second")
+        try:
+            return entry2, snap2, await task2
+        finally:
+            release_write_path_lock_after(out2.write_lock, out2.write_worker)
+
+    t2 = asyncio.create_task(second())
+    await asyncio.sleep(0.2)
+    assert not t2.done()
+    runner2._snap_store.capture.assert_not_awaited()  # no snapshot while the orphan can rename
+    assert (tmp_path / "f.txt").read_text() == "v0"
+
+    gate.set()
+    entry2, snap2, result2 = await asyncio.wait_for(t2, 10)
+    assert not result2.get("is_error"), result2
+    assert (tmp_path / "f.txt").read_text() == "second"
+    # both snapshots stay consistent: each records what the other left behind
+    assert _prior_text(snap1) == "v0" and _prior_text(snap2) == "first"
+    assert (await compensate_write_file(entry2, {**snap2, **_written("second")}, None)).success
+    assert (tmp_path / "f.txt").read_text() == "first"
+    assert (await compensate_write_file(entry1, {**snap1, **_written("first")}, None)).success
+    assert (tmp_path / "f.txt").read_text() == "v0"
+
+
+@pytest.mark.asyncio
+async def test_deferred_path_lock_is_released_when_the_orphan_finishes(tmp_path, monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    from nous.api.compensation import _write_path_locks, release_write_path_lock_after, write_path_key
+
+    entered, gate = _gate_first_write(monkeypatch)
+    runner = _bare_runner(AsyncMock())
+    runner._workspace_dir = str(tmp_path)
+    runner._handler_args = lambda name, inp: inp
+    out, _, _, task = await _start_write(runner, tmp_path, "g.txt", "first")
+    assert await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    release_write_path_lock_after(out.write_lock, out.write_worker)
+    assert out.write_lock.locked() and not out.write_worker.done()
+    gate.set()
+    await asyncio.wait_for(asyncio.shield(out.write_worker), 10)
+    await asyncio.sleep(0)  # the done-callback runs on the next loop pass
+    assert not out.write_lock.locked()
+    assert write_path_key("g.txt", str(tmp_path)) not in _write_path_locks
+    assert (tmp_path / "g.txt").read_text() == "first"
+
+
+def test_runner_releases_write_locks_only_after_the_worker() -> None:
+    """Both runner tool loops route their path-lock release through
+    release_write_path_lock_after with the call's worker."""
+    import inspect
+
+    from nous.api import runner
+
+    src = inspect.getsource(runner)
+    assert src.count("release_write_path_lock_after(_write_lock, outcome.write_worker)") == 1
+    assert src.count("release_write_path_lock_after(_write_lock2, outcome.write_worker)") == 1
+    assert "release_write_path_lock(" not in src
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the container is Linux")
+def test_descriptor_relative_operations_are_enabled_on_linux() -> None:
+    """os.replace is never listed in os.supports_dir_fd; probing it silently
+    turned every write/revert into the path-based fallback."""
+    from nous.api import builtin_tools
+
+    assert builtin_tools._DIR_FD

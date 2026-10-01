@@ -72,6 +72,25 @@ def release_write_path_lock(lock: asyncio.Lock) -> None:
             del _write_path_locks[key]
 
 
+def release_write_path_lock_after(lock: asyncio.Lock, worker: asyncio.Future | None) -> None:
+    """Release ``lock`` now, or -- while ``worker`` (a write_file's thread
+    task) is still running -- only once it finishes. A cancelled or timed-out
+    write returns before its thread does; releasing at once would let the
+    next write snapshot and dispatch while the orphan can still rename over
+    it. The release is deferred, never the caller: cancellation still
+    propagates immediately, and the lock is freed the moment the thread ends."""
+    if worker is None or worker.done():
+        release_write_path_lock(lock)
+        return
+
+    def _done(task: asyncio.Future) -> None:
+        if not task.cancelled():
+            task.exception()  # retrieved: the cancelled caller cannot report it
+        release_write_path_lock(lock)
+
+    worker.add_done_callback(_done)
+
+
 class SnapshotBlocksDispatch(Exception):
     """Raised when a required snapshot cannot be captured, preventing the dispatch.
 
@@ -398,9 +417,12 @@ async def snapshot_for_write_file(
     import hashlib
     import os
     import stat
+    from pathlib import Path
 
-    from nous.api.builtin_tools import _validate_path
+    from nous.api.builtin_tools import PreconditionFailed, _parent_dir, _ParentMissing, _validate_path
 
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    nonblock = getattr(os, "O_NONBLOCK", 0)
     try:
         target = _validate_path(path, workspace_dir)
     except ValueError as exc:
@@ -413,16 +435,21 @@ async def snapshot_for_write_file(
     # symlink retargeted outside the workspace between the check and the
     # read can never have its target's content captured.
     full_path = str(target)
-    nofollow = getattr(os, "O_NOFOLLOW", 0)
-    nonblock = getattr(os, "O_NONBLOCK", 0)
+    root = Path(workspace_dir).resolve()
 
     def _capture() -> tuple[bool, bytes | None, bool]:
         try:
-            # O_NONBLOCK: a FIFO with no writer must not block the snapshot.
-            f = open(full_path, "rb", opener=lambda p, flags: os.open(p, flags | nofollow | nonblock))
-        except FileNotFoundError:
+            # Walked down from the workspace root without following a symlink
+            # at any level (builtin_tools._parent_dir), then the final
+            # component opened O_NOFOLLOW; O_NONBLOCK: a FIFO with no writer
+            # must not block the snapshot.
+            with _parent_dir(target, root) as (dfd, name):
+                fd = os.open(name, os.O_RDONLY | nofollow | nonblock, dir_fd=dfd)
+        except (FileNotFoundError, _ParentMissing):
             return False, None, False
-        with f:
+        except PreconditionFailed as exc:
+            raise ValueError(str(exc)) from exc
+        with os.fdopen(fd, "rb") as f:
             st = os.fstat(f.fileno())
             if not stat.S_ISREG(st.st_mode):
                 raise ValueError(f"{path!r} is not a regular file")
@@ -452,6 +479,8 @@ async def snapshot_for_write_file(
     snap: dict[str, Any] = {
         "path": path,
         "full_path": full_path,
+        # The revert walks down from here without following symlinks.
+        "workspace_root": str(root),
         "existed": existed,
         "prior_b64": base64.b64encode(prior).decode("ascii") if prior is not None else None,
         "prior_sha256": hashlib.sha256(prior).hexdigest() if prior is not None else None,
@@ -492,6 +521,7 @@ async def compensate_write_file(
     written_content_hash: str | None = snapshot_data.get("written_content_hash")
     written_size = snapshot_data.get("written_size")
 
+    workspace_root = snapshot_data.get("workspace_root")
     if not full_path:
         return CompensationResult(False, "no path in snapshot")
     if written_content_hash is None or not isinstance(written_size, int):
@@ -504,6 +534,10 @@ async def compensate_write_file(
         if not isinstance(prior_b64, str):
             return CompensationResult(False, "file existed but prior content not captured")
         prior = base64.b64decode(prior_b64)
+    if not isinstance(workspace_root, str) or not workspace_root:
+        # Without the root the revert cannot walk to the file without
+        # following a symlink somewhere on the way.
+        return CompensationResult(False, "revert refused: snapshot does not record its workspace")
 
     # The same per-path lock write_file holds across its snapshot and write:
     # held across the check AND the restore, no runner write can land between
@@ -512,7 +546,7 @@ async def compensate_write_file(
     await lock.acquire()
     try:
         return await _check_and_restore_write_file(
-            entry_id, full_path, existed, prior, written_size, written_content_hash
+            entry_id, full_path, workspace_root, existed, prior, written_size, written_content_hash
         )
     finally:
         release_write_path_lock(lock)
@@ -521,6 +555,7 @@ async def compensate_write_file(
 async def _check_and_restore_write_file(
     entry_id: UUID,
     full_path: str,
+    workspace_root: str,
     existed: bool,
     prior: bytes | None,
     written_size: int,
@@ -541,11 +576,12 @@ async def _check_and_restore_write_file(
     )
 
     target = Path(full_path)
+    root = Path(workspace_root)
     limit = max(written_size, len(prior or b""))
 
     def _revert() -> CompensationResult:
         revoke_write_fence(str(entry_id))
-        current = file_digest(target, limit)
+        current = file_digest(target, limit, root=root)
         if existed:
             assert prior is not None
             if current == hashlib.sha256(prior).hexdigest():
@@ -555,13 +591,13 @@ async def _check_and_restore_write_file(
                 return CompensationResult(False, f"revert refused: {full_path!r} was removed after the original write")
             if current != written_content_hash:
                 raise PreconditionFailed("modified")
-            atomic_replace_bytes(target, prior, expected=written_content_hash, limit=limit)
+            atomic_replace_bytes(target, prior, expected=written_content_hash, limit=limit, root=root)
             return CompensationResult(True, f"restored prior content of {full_path}")
         if current == ABSENT:
             return CompensationResult(True, "file already absent")
         if current != written_content_hash:
             raise PreconditionFailed("modified")
-        remove_if_matches(target, written_content_hash, limit=limit)
+        remove_if_matches(target, written_content_hash, limit=limit, root=root)
         return CompensationResult(True, f"deleted {full_path} (was new)")
 
     try:
@@ -586,7 +622,11 @@ def snapshot_is_revertible(tool_name: str, snapshot_data: dict[str, Any]) -> boo
     """
     data = snapshot_data or {}
     if tool_name == "write_file":
-        return bool(data.get("written_content_hash")) and isinstance(data.get("written_size"), int)
+        return (
+            bool(data.get("written_content_hash"))
+            and isinstance(data.get("written_size"), int)
+            and bool(data.get("workspace_root"))
+        )
     if tool_name in ("resolve_decision", "heartbeat_check_manage"):
         return isinstance(data.get("written"), dict)
     return False

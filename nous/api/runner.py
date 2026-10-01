@@ -38,7 +38,7 @@ from nous.api.cache_optimizer import CacheBreakDetector
 from nous.api.cache_optimizer import _hash as cache_hash
 from nous.api.call_outcome import CallOutcome
 from nous.api.compaction import ConversationCompactor
-from nous.api.compensation import release_write_path_lock, write_path_lock, write_path_lock_is
+from nous.api.compensation import release_write_path_lock_after, write_path_lock, write_path_lock_is
 from nous.api.execution_context import ExecutionContext, resolve_context
 from nous.api.idempotency import idempotency_key
 from nous.api.models import (  # noqa: F401 — re-exported for backward compat
@@ -2524,7 +2524,8 @@ class AgentRunner:
                                     # worker thread: nothing can land any more.
                                     drop_write_fence(outcome.write_fence)
                                 if _write_lock is not None:
-                                    release_write_path_lock(_write_lock)
+                                    # Held until an orphaned worker thread finishes.
+                                    release_write_path_lock_after(_write_lock, outcome.write_worker)
                             duration_ms = int((time.monotonic() - start_time) * 1000)
                         else:
                             duration_ms = 0
@@ -3179,7 +3180,8 @@ class AgentRunner:
                                     # worker thread: nothing can land any more.
                                     drop_write_fence(outcome.write_fence)
                                 if _write_lock2 is not None:
-                                    release_write_path_lock(_write_lock2)
+                                    # Held until an orphaned worker thread finishes.
+                                    release_write_path_lock_after(_write_lock2, outcome.write_worker)
                         duration_ms = int((time.monotonic() - start_time) * 1000)
 
                         # F026: Record in execution ledger (post-dispatch). A

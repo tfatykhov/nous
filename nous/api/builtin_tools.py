@@ -211,7 +211,12 @@ _NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 # link() errnos meaning "this filesystem has no hard links" -- only these fall
 # back to a plain rename; any other link failure propagates.
 _LINK_UNSUPPORTED = {errno.EPERM, getattr(errno, "ENOTSUP", errno.EOPNOTSUPP), errno.EOPNOTSUPP}
-_DIR_FD = os.open in os.supports_dir_fd and os.replace in os.supports_dir_fd
+# os.replace shares os.rename's implementation but is never listed in
+# os.supports_dir_fd, so probing it disabled every descriptor-relative
+# operation below; probe rename (and the others actually used) instead.
+_DIR_FD = all(
+    f in os.supports_dir_fd for f in (os.open, os.rename, os.stat, os.unlink, os.mkdir, os.link)
+)
 
 
 class PreconditionFailed(Exception):
@@ -265,15 +270,75 @@ class _State:
     stat: os.stat_result | None
 
 
+class _ParentMissing(Exception):
+    """A directory on the way to the target does not exist (and was not
+    to be created): the target is absent."""
+
+
+def _open_parent_beneath(root: Path, target: Path, *, create: bool) -> int:
+    """An O_DIRECTORY descriptor of ``target``'s parent, reached by walking
+    down from the workspace ``root`` one component at a time with
+    ``openat(..., O_NOFOLLOW)``. No component below ``root`` is ever followed
+    through a symlink, so an ancestor swapped for a symlink after validation
+    cannot redirect the operation outside the workspace: the walk fails
+    closed with PreconditionFailed instead. ``create`` makes missing
+    directories (inside the walk, never through a symlink); without it a
+    missing one raises _ParentMissing."""
+    dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _NOFOLLOW
+    try:
+        parts = target.relative_to(root).parts
+    except ValueError as exc:
+        raise PreconditionFailed(f"{target} is not inside the workspace {root}") from exc
+    if not parts:
+        raise PreconditionFailed(f"{target} is the workspace itself, not a file in it")
+    for part in parts[:-1]:
+        if part in ("", ".", "..") or os.sep in part or (os.altsep and os.altsep in part):
+            raise PreconditionFailed(f"{target} has an unsafe path component {part!r}")
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(root, dir_flags)
+    except FileNotFoundError as exc:
+        raise _ParentMissing(str(root)) from exc
+    try:
+        for part in parts[:-1]:
+            try:
+                nxt = os.open(part, dir_flags, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    raise _ParentMissing(part) from None
+                try:
+                    os.mkdir(part, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                nxt = os.open(part, dir_flags, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+    except OSError as exc:
+        os.close(fd)
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise PreconditionFailed(
+                f"a directory on the way to {target} is a symlink or not a directory; refused"
+            ) from exc
+        raise
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 @contextlib.contextmanager
-def _parent_dir(target: Path) -> Iterator[tuple[int | None, str]]:
+def _parent_dir(target: Path, root: Path, *, create: bool = False) -> Iterator[tuple[int | None, str]]:
     """(dir_fd, name) for ``target``: every later operation is relative to
-    ONE open descriptor of the parent, so the path is never re-resolved.
+    ONE descriptor of the parent, reached from ``root`` without following any
+    symlink (_open_parent_beneath), so the path is never re-resolved.
     Path-based (dir_fd None) where the platform has no dir_fd support."""
     if not _DIR_FD:
+        if create:
+            target.parent.mkdir(parents=True, exist_ok=True)
         yield None, str(target)
         return
-    dfd = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _NOFOLLOW)
+    dfd = _open_parent_beneath(root, target, create=create)
     try:
         yield dfd, target.name
     finally:
@@ -325,11 +390,15 @@ def _fsync_dir(dfd: int | None) -> None:
             pass
 
 
-def file_digest(target: Path, limit: int) -> str:
+def file_digest(target: Path, limit: int, *, root: Path) -> str:
     """ABSENT, the sha256 of ``target``'s bytes, or "oversized" (> ``limit``).
-    Raises PreconditionFailed for a symlink or non-regular file."""
-    with _parent_dir(target) as (dfd, name):
-        return _read_state(dfd, name, limit).digest
+    Raises PreconditionFailed for a symlink (the target or any directory
+    below ``root`` on the way to it) or a non-regular file."""
+    try:
+        with _parent_dir(target, root) as (dfd, name):
+            return _read_state(dfd, name, limit).digest
+    except _ParentMissing:
+        return ABSENT
 
 
 def atomic_replace_bytes(
@@ -339,6 +408,7 @@ def atomic_replace_bytes(
     expected: str | None = None,
     limit: int = _MAX_FILE_SIZE,
     fence: WriteFence | None = None,
+    root: Path,
 ) -> None:
     """Replace ``target`` with ``data`` atomically, or change nothing.
 
@@ -350,78 +420,87 @@ def atomic_replace_bytes(
     PreconditionFailed. A symlink target is never followed. The one window
     left, between that last check and the rename, cannot be closed against
     a writer that takes no lock (POSIX has no compare-and-swap rename).
+    The parent is reached from the workspace ``root`` without following a
+    symlink at any level; missing directories are created only when the
+    target may be new (no ``expected``, or ABSENT).
     """
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with _parent_dir(target) as (dfd, name):
-        # Without an expected state only the mode is needed: nothing is hashed.
-        pre = _read_state(dfd, name, limit if expected is not None else 0)
-        if expected is not None and pre.digest != expected:
-            raise PreconditionFailed(f"{target} changed since its state was recorded")
-        mode = stat.S_IMODE(pre.stat.st_mode) if pre.stat is not None else None
-        tmp_name = f".write_file_{uuid.uuid4().hex}.tmp"
-        tmp: str | None = tmp_name if dfd is not None else str(target.parent / tmp_name)
-        fd: int | None = os.open(
-            tmp,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW,
-            0o666 if mode is None else 0o600,
-            dir_fd=dfd,
-        )
-        try:
-            view = memoryview(data)
-            while view:
-                view = view[os.write(fd, view) :]
-            if mode is not None and hasattr(os, "fchmod"):
-                os.fchmod(fd, mode)
-            os.fsync(fd)
-            os.close(fd)
-            fd = None
-            if mode is not None and not hasattr(os, "fchmod"):
-                os.chmod(tmp, mode)  # only reached path-based (no fchmod => no dir_fd either)
-            with fence.lock if fence is not None else contextlib.nullcontext():
-                if fence is not None and fence.revoked:
-                    raise PreconditionFailed("the write was revoked by a revert")
-                if expected is not None and not _unchanged_since(dfd, name, pre):
-                    raise PreconditionFailed(f"{target} changed while it was being written")
-                if expected == ABSENT:
-                    try:
-                        os.link(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd, follow_symlinks=False)
-                    except FileExistsError as exc:
-                        raise PreconditionFailed(f"{target} appeared while it was being written") from exc
-                    except (OSError, NotImplementedError) as exc:
-                        if isinstance(exc, OSError) and exc.errno not in _LINK_UNSUPPORTED:
-                            raise
-                        logger.warning("write_file: no hard links for %s; creating it by rename", target)
+    try:
+        with _parent_dir(target, root, create=expected is None or expected == ABSENT) as (dfd, name):
+            # Without an expected state only the mode is needed: nothing is hashed.
+            pre = _read_state(dfd, name, limit if expected is not None else 0)
+            if expected is not None and pre.digest != expected:
+                raise PreconditionFailed(f"{target} changed since its state was recorded")
+            mode = stat.S_IMODE(pre.stat.st_mode) if pre.stat is not None else None
+            tmp_name = f".write_file_{uuid.uuid4().hex}.tmp"
+            tmp: str | None = tmp_name if dfd is not None else str(target.parent / tmp_name)
+            fd: int | None = os.open(
+                tmp,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW,
+                0o666 if mode is None else 0o600,
+                dir_fd=dfd,
+            )
+            try:
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(fd, view) :]
+                if mode is not None and hasattr(os, "fchmod"):
+                    os.fchmod(fd, mode)
+                os.fsync(fd)
+                os.close(fd)
+                fd = None
+                if mode is not None and not hasattr(os, "fchmod"):
+                    os.chmod(tmp, mode)  # only reached path-based (no fchmod => no dir_fd either)
+                with fence.lock if fence is not None else contextlib.nullcontext():
+                    if fence is not None and fence.revoked:
+                        raise PreconditionFailed("the write was revoked by a revert")
+                    if expected is not None and not _unchanged_since(dfd, name, pre):
+                        raise PreconditionFailed(f"{target} changed while it was being written")
+                    if expected == ABSENT:
+                        try:
+                            os.link(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd, follow_symlinks=False)
+                        except FileExistsError as exc:
+                            raise PreconditionFailed(f"{target} appeared while it was being written") from exc
+                        except (OSError, NotImplementedError) as exc:
+                            if isinstance(exc, OSError) and exc.errno not in _LINK_UNSUPPORTED:
+                                raise
+                            logger.warning("write_file: no hard links for %s; creating it by rename", target)
+                            os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+                            tmp = None
+                    else:
                         os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
                         tmp = None
-                else:
-                    os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
-                    tmp = None
-            _fsync_dir(dfd)
-        finally:
-            if fd is not None:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-            if tmp is not None:
-                try:
-                    os.unlink(tmp, dir_fd=dfd)
-                except OSError:
-                    pass
+                _fsync_dir(dfd)
+            finally:
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                if tmp is not None:
+                    try:
+                        os.unlink(tmp, dir_fd=dfd)
+                    except OSError:
+                        pass
+    except _ParentMissing as exc:
+        raise PreconditionFailed(f"{target} changed since its state was recorded") from exc
 
 
-def remove_if_matches(target: Path, expected: str, *, limit: int) -> bool:
+def remove_if_matches(target: Path, expected: str, *, limit: int, root: Path) -> bool:
     """Delete ``target`` only while it holds exactly ``expected`` (sha256).
-    False when it is already absent; PreconditionFailed when it differs."""
-    with _parent_dir(target) as (dfd, name):
-        pre = _read_state(dfd, name, limit)
-        if pre.digest == ABSENT:
-            return False
-        if pre.digest != expected or not _unchanged_since(dfd, name, pre):
-            raise PreconditionFailed(f"{target} changed since its state was recorded")
-        os.unlink(name, dir_fd=dfd)
-        _fsync_dir(dfd)
-        return True
+    False when it is already absent; PreconditionFailed when it differs or a
+    directory below ``root`` on the way to it is a symlink."""
+    try:
+        with _parent_dir(target, root) as (dfd, name):
+            pre = _read_state(dfd, name, limit)
+            if pre.digest == ABSENT:
+                return False
+            if pre.digest != expected or not _unchanged_since(dfd, name, pre):
+                raise PreconditionFailed(f"{target} changed since its state was recorded")
+            os.unlink(name, dir_fd=dfd)
+            _fsync_dir(dfd)
+            return True
+    except _ParentMissing:
+        return False
 
 
 async def write_file_tool(
@@ -458,26 +537,35 @@ async def write_file_tool(
             expected = outcome.write_expected
             fence = outcome.write_fence
         data = content.encode("utf-8")
+        root = Path(_workspace_dir).resolve()
 
         def _run() -> None:
             try:
                 if fence is not None:
                     with fence.lock:
                         fence.began = True
-                atomic_replace_bytes(target, data, expected=expected, fence=fence)
+                        if fence.revoked:
+                            raise PreconditionFailed("the write was revoked before it began")
+                atomic_replace_bytes(target, data, expected=expected, fence=fence, root=root)
             finally:
                 if fence is not None:
                     drop_write_fence(fence)
 
         if fence is not None:
             fence.started = True
+        # The worker runs as its own task, shielded from this call's
+        # cancellation: a cancelled call cannot stop the thread, so the runner
+        # keeps this path's lock until the task -- i.e. the thread -- is done
+        # (compensation.release_write_path_lock_after).
+        worker = asyncio.ensure_future(asyncio.to_thread(_run))
+        if outcome is not None:
+            outcome.write_worker = worker
         try:
-            await asyncio.to_thread(_run)
+            await asyncio.shield(worker)
         except asyncio.CancelledError:
             if fence is not None:
-                # Cancelled before the worker began: it may never run, so its
-                # finally would never drop the fence. Revoke it first, so a
-                # worker that does start later refuses to write.
+                # Cancelled before the worker began: revoke the fence, so the
+                # worker refuses to write when it does start.
                 with fence.lock:
                     if not fence.began:
                         fence.revoked = True
