@@ -552,22 +552,26 @@ class AgentRunner:
         await lock.acquire()
         return lock
 
-    async def _record_written_state(self, entry_id: Any, written: dict, **kwargs: Any) -> bool:
-        """Persist a compensable call's written state, retrying transient
-        failures: without it the snapshot's revert is refused. True only once
-        a snapshot row was actually updated."""
-        for attempt in range(3):
-            try:
-                if await self._snap_store.record_written_state(entry_id, written, **kwargs):
-                    return True
-                return False  # no snapshot row: retrying cannot help
-            except Exception:
-                logger.warning(
-                    "Harness Phase 2.8: recording written state failed (attempt %d)", attempt + 1, exc_info=True
+    def _written_state_persister(self, tool_name: str, entry_id: Any) -> Any:
+        """``async persist(session, capture)`` the mutation awaits on its own
+        session before committing (``capture["persist"]``): the written state
+        lands in the compensation snapshot in the SAME transaction as the
+        change, so a crash or cancellation after the commit cannot leave a
+        change without a revertible record, and a rolled-back change leaves
+        none (codex P1 on #652). A missing snapshot row raises, rolling the
+        change back rather than committing it unrevertibly."""
+        store = self._snap_store
+
+        async def persist(session: Any, capture: dict) -> None:
+            if tool_name == "resolve_decision":
+                await store.record_written_state_in(session, entry_id, capture["written"], prior=capture["prior"])
+            else:
+                await store.record_written_state_in(
+                    session, entry_id, capture["written"], extra={"prior_enabled": capture["prior_enabled"]}
                 )
-                if attempt < 2:
-                    await asyncio.sleep(0.5 * (attempt + 1))
-        return False
+            capture["persisted"] = True
+
+        return persist
 
     async def _after_compensable_call(
         self,
@@ -581,49 +585,24 @@ class AgentRunner:
         tool_input: dict,
         outcome: CallOutcome | None = None,
     ) -> str | None:
-        """After a snapshotted call returned (any status): when it may have
-        written (``success``/``unknown``), record the state it wrote where a
-        revert must check it (resolve_decision -- the full review state, so a
-        later re-review is never undone); then resolve the review-card intent
-        (publish, or clear for ``error``/``blocked``). The call already
-        happened, so this never fails it; but when the written state cannot
-        be recorded the revert would be refused, so the card offers no Revert
-        and the returned note (prefixed to the tool result) tells the caller
-        the change is applied and NOT revertible."""
+        """After a snapshotted call returned (any status): resolve the
+        review-card intent (publish, or clear for ``error``/``blocked``). The
+        DB tools' written state is NOT written here: the mutation recorded it
+        in its own transaction (``_written_state_persister``), so this only
+        confirms it did. The call already happened, so this never fails it;
+        but a call that may have written (``success``/``unknown``) without
+        that record cannot be reverted, so the card offers no Revert and the
+        returned note (prefixed to the tool result) tells the caller the
+        change is applied and NOT revertible."""
         recorded = True
-        # ``unknown`` too: a call cancelled mid-commit may have written. The
-        # capture is filled before the commit, and the revert applies only
-        # while the row carries exactly that state (microsecond reviewed_at /
-        # fresh uuid token), so recording it for a write that never committed
-        # can only make its revert refuse -- never undo something else.
+        # ``unknown`` too: a call cancelled mid-commit may have written; its
+        # written state commits with it or not at all.
         landed = status in ("success", "unknown")
-        if snapshotted and landed and tool_name == "resolve_decision" and self._snap_store is not None:
-            # The prior and written states come from the resolving transaction
-            # itself (row-locked), never a re-read before or after it: a
-            # concurrent review can then neither be adopted as "written" nor
-            # be skipped over by "prior".
-            capture = outcome.review_capture if outcome is not None else None
-            if isinstance(capture, dict) and "prior" in capture and "written" in capture:
-                recorded = await self._record_written_state(entry_id, capture["written"], prior=capture["prior"])
-            else:
-                recorded = False
-        if snapshotted and landed and tool_name == "heartbeat_check_manage" and self._snap_store is not None:
-            # The state token the disable wrote AND the enabled state it
-            # overwrote, both from its own transaction: the revert re-enables
-            # only while the check still carries the token, and only if the
-            # check was enabled right before THIS disable -- the pre-dispatch
-            # read can be overtaken by a concurrent toggle.
-            capture = outcome.check_capture if outcome is not None else None
-            if (
-                isinstance(capture, dict)
-                and isinstance(capture.get("written"), dict)
-                and isinstance(capture.get("prior_enabled"), bool)
-            ):
-                recorded = await self._record_written_state(
-                    entry_id, capture["written"], extra={"prior_enabled": capture["prior_enabled"]}
-                )
-            else:
-                recorded = False
+        if snapshotted and landed and tool_name in ("resolve_decision", "heartbeat_check_manage"):
+            capture = None
+            if outcome is not None:
+                capture = outcome.review_capture if tool_name == "resolve_decision" else outcome.check_capture
+            recorded = isinstance(capture, dict) and capture.get("persisted") is True
         # The card is published either way: when the written state is
         # missing it says the change is NOT revertible (its revert would be
         # refused), rather than leaving the user without any record of it.
@@ -784,9 +763,9 @@ class AgentRunner:
                 }
             elif tool_name == "resolve_decision":
                 # The prior review state the revert restores. The state this
-                # call writes is recorded after it succeeds
-                # (_after_compensable_call); the revert applies only while the
-                # decision still carries all of it.
+                # call writes is recorded in its own transaction
+                # (_written_state_persister); the revert applies only while
+                # the decision still carries all of it.
                 decision_id = str(tool_input.get("decision_id") or "")
                 prior = await self._snap_store.decision_state(decision_id)
                 if prior is None:
@@ -809,6 +788,10 @@ class AgentRunner:
                     and self._action_review_pusher is not None
                 ),
             )
+            if tool_name in ("resolve_decision", "heartbeat_check_manage") and outcome is not None:
+                # The written state is recorded by the mutation itself, in
+                # its own transaction (see _written_state_persister).
+                outcome.persist_written = self._written_state_persister(tool_name, entry_id)
             if tool_name == "write_file" and outcome is not None:
                 # Bind the write to the file just snapshotted -- write_file
                 # re-resolves the path and refuses if it now names another --

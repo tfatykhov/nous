@@ -2164,6 +2164,8 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         # reports the state it may have written.
         if call_outcome is not None:
             call_outcome.review_capture = capture
+            if call_outcome.persist_written is not None:
+                capture["persist"] = call_outcome.persist_written
         try:
             detail = await brain.review(
                 UUID(decision_id),
@@ -4881,6 +4883,8 @@ def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: Any) -> None:
             if capture is not None:
                 # Attached BEFORE the await (filled in place before the commit).
                 call_outcome.check_capture = capture
+                if call_outcome.persist_written is not None:
+                    capture["persist"] = call_outcome.persist_written
             result = await loader.manage_check(
                 action=kwargs["action"],
                 name=kwargs.get("name"),

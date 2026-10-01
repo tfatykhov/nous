@@ -208,9 +208,10 @@ ABSENT = "absent"
 
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)  # 0 on Windows: symlink refusal is POSIX-only
 _NONBLOCK = getattr(os, "O_NONBLOCK", 0)
-# link() errnos meaning "this filesystem has no hard links" -- only these fall
-# back to a plain rename; any other link failure propagates.
-_LINK_UNSUPPORTED = {errno.EPERM, getattr(errno, "ENOTSUP", errno.EOPNOTSUPP), errno.EOPNOTSUPP}
+# link() errnos meaning "this filesystem has no hard links": a create-only
+# write is then refused (no no-clobber primitive), never done by a rename
+# that could overwrite a file created concurrently. Others propagate.
+_LINK_UNSUPPORTED = {errno.EPERM, getattr(errno, "ENOTSUP", errno.EOPNOTSUPP), errno.EOPNOTSUPP, errno.EXDEV}
 # os.replace shares os.rename's implementation but is never listed in
 # os.supports_dir_fd, so probing it disabled every descriptor-relative
 # operation below; probe rename (and the others actually used) instead.
@@ -463,9 +464,13 @@ def atomic_replace_bytes(
                         except (OSError, NotImplementedError) as exc:
                             if isinstance(exc, OSError) and exc.errno not in _LINK_UNSUPPORTED:
                                 raise
-                            logger.warning("write_file: no hard links for %s; creating it by rename", target)
-                            os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
-                            tmp = None
+                            # A rename here would clobber a file created after
+                            # the absence check, and its revert would then
+                            # delete that file: refuse instead (codex P2 #652).
+                            raise PreconditionFailed(
+                                f"{target} cannot be created without risking an overwrite: this "
+                                "filesystem does not support no-clobber creation (hard links)"
+                            ) from exc
                     else:
                         os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
                         tmp = None

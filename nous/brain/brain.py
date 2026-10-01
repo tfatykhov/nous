@@ -1069,7 +1069,9 @@ class Brain:
         capture: when given, receives ``prior`` and ``written`` -- the review
         fields just before and just after this write, read under the row
         lock inside this transaction, so no concurrent review can land
-        between them (harness Phase 2.8 compensation snapshots).
+        between them (harness Phase 2.8 compensation snapshots). A
+        ``capture["persist"]`` coroutine is awaited with this session before
+        the commit, recording them in the same transaction.
         """
         if session is None:
             async with self.db.session() as session:
@@ -1235,6 +1237,11 @@ class Brain:
         await session.flush()
         if capture is not None:
             capture["written"] = _review_state(decision)
+            # The compensation snapshot is written in THIS transaction, so
+            # the review and its revert record commit (or roll back) together.
+            persist = capture.get("persist")
+            if persist is not None:
+                await persist(session, capture)
 
         # Emit event (P2-9)
         await self._emit_event(

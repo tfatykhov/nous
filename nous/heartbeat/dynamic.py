@@ -755,7 +755,8 @@ class DynamicCheckLoader:
         row's metadata. ``capture``, when given to a disable, receives the
         check's prior ``enabled`` and the token this disable wrote, so a
         compensation revert can refuse once anyone has toggled it since
-        (``enable_if_unchanged``).
+        (``enable_if_unchanged``). A ``capture["persist"]`` coroutine is
+        awaited with the disable's session before its commit.
         """
         async with self._mutation_lock:
             return await self._manage_check_locked(
@@ -813,6 +814,12 @@ class DynamicCheckLoader:
                 if capture is not None:
                     capture["prior_enabled"] = prior_enabled
                     capture["written"] = {"check_id": str(model.id), _STATE_TOKEN_KEY: token}
+                    # The compensation snapshot is written in THIS
+                    # transaction: the disable and its revert record commit
+                    # (or roll back) together.
+                    persist = capture.get("persist")
+                    if persist is not None:
+                        await persist(session, capture)
                 await session.commit()
                 # codex P2 (PR #656): flag the in-memory check only once the
                 # disable is durable. Flagging before the commit left a failed

@@ -23,6 +23,13 @@ class CallOutcome:
     # Phase 2.8: a heartbeat_check_manage disable's prior state and the
     # state token it wrote (DynamicCheckLoader.manage_check capture=).
     check_capture: dict | None = None
+    # Phase 2.8: ``async persist(session, capture)`` writing the capture into
+    # this call's compensation snapshot on the MUTATION's own session, before
+    # its commit -- so the change and its revert record commit together. Set
+    # by the runner once the pre-dispatch snapshot exists; the handler hands
+    # it to the mutation as ``capture["persist"]``, which sets
+    # ``capture["persisted"]``.
+    persist_written: Any = None
     # Phase 2.8: the resolved path a write_file snapshot was captured for.
     # write_file refuses to write anywhere else, so a symlink retargeted
     # between the snapshot and the write cannot mutate an unsnapshotted file.

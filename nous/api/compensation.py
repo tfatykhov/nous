@@ -300,49 +300,49 @@ class SnapshotStore:
 
         return await asyncio.wait_for(_read(), timeout=self._timeout)
 
-    async def record_written_state(
+    async def record_written_state_in(
         self,
+        session: Any,
         ledger_entry_id: UUID,
         written: dict[str, Any],
         *,
         prior: dict[str, Any] | None = None,
         extra: dict[str, Any] | None = None,
-    ) -> bool:
+    ) -> None:
         """Merge ``written`` -- the state the call left behind -- into its
         snapshot, so the revert can refuse once anything has changed that
-        state since. ``prior``, when given, replaces the pre-dispatch prior
-        state (read inside the call's own transaction, it is exact where the
-        pre-dispatch read could be overtaken by a concurrent write); ``extra``
-        top-level fields replace their pre-dispatch values for the same
-        reason. Returns whether a row was updated."""
-
-        async def _write() -> bool:
-            async with self._db.session() as s:
-                row = (
-                    await s.execute(
-                        select(CompensationSnapshot)
-                        .where(CompensationSnapshot.ledger_entry_id == ledger_entry_id)
-                        .where(CompensationSnapshot.agent_id == self._agent_id)
-                        .limit(1)
-                        # Row-locked read-modify-write: the card marker and
-                        # the written state are merged into one JSONB value
-                        # by different tasks, and an unlocked merge could
-                        # write back a copy missing the other's key.
-                        .with_for_update()
-                    )
-                ).scalar_one_or_none()
-                if row is None:
-                    return False
-                merged = {**(row.snapshot_data or {}), "written": written}
-                if prior is not None:
-                    merged["prior"] = prior
-                if extra:
-                    merged.update(extra)
-                row.snapshot_data = merged
-                await s.commit()
-                return True
-
-        return await asyncio.wait_for(_write(), timeout=self._timeout)
+        state since. Runs on the MUTATION's own ``session`` and never
+        commits: the snapshot update commits or rolls back together with the
+        state change itself, so no crash or cancellation after that commit
+        can leave a change whose revert lacks its written state (codex P1 on
+        #652). ``prior``, when given, replaces the pre-dispatch prior state
+        (read inside the call's own transaction, it is exact where the
+        pre-dispatch read could be overtaken by a concurrent write);
+        ``extra`` top-level fields replace their pre-dispatch values for the
+        same reason. Raises LookupError when the snapshot row is missing, so
+        the mutation rolls back rather than commit unrevertibly."""
+        row = (
+            await session.execute(
+                select(CompensationSnapshot)
+                .where(CompensationSnapshot.ledger_entry_id == ledger_entry_id)
+                .where(CompensationSnapshot.agent_id == self._agent_id)
+                .limit(1)
+                # Row-locked read-modify-write: the card marker and the
+                # written state are merged into one JSONB value by different
+                # tasks, and an unlocked merge could write back a copy
+                # missing the other's key.
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise LookupError(f"compensation snapshot for ledger entry {ledger_entry_id} is missing")
+        merged = {**(row.snapshot_data or {}), "written": written}
+        if prior is not None:
+            merged["prior"] = prior
+        if extra:
+            merged.update(extra)
+        row.snapshot_data = merged
+        await session.flush()
 
     async def check_enabled(self, name: str) -> bool | None:
         """Whether dynamic check ``name`` is enabled right now, or None when
@@ -616,9 +616,9 @@ def snapshot_is_revertible(tool_name: str, snapshot_data: dict[str, Any]) -> boo
     """Whether a snapshot records everything its compensator's guard needs.
 
     A card must not offer Revert for a snapshot its compensator would refuse:
-    the DB tools need the ``written`` state (recorded after the call, so a
-    call whose outcome was lost has none); write_file records what it writes
-    before dispatch.
+    the DB tools need the ``written`` state (recorded inside the call's own
+    transaction, so a call that never committed has none); write_file
+    records what it writes before dispatch.
     """
     data = snapshot_data or {}
     if tool_name == "write_file":
@@ -697,7 +697,7 @@ async def compensate_resolve_decision(
 
     Uses the Brain's public ``db`` / ``agent_id``. Stale guard: the update
     applies only while the decision still carries EVERY review field this
-    call wrote (``written``, read right after the call succeeded), so a
+    call wrote (``written``, recorded in the call's own transaction), so a
     later re-review -- even one keeping the same outcome with a new note,
     reviewer or timestamp -- is never silently undone. A snapshot without
     the written state cannot make that distinction and is refused.

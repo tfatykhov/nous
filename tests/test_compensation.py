@@ -1830,46 +1830,50 @@ async def test_concurrent_writes_revert_restores_first_not_original(tmp_path) ->
 
 
 @pytest.mark.asyncio
-async def test_after_compensable_call_records_the_transactional_decision_state() -> None:
-    """codex P1 #652 (runner.py:530/660): the written AND prior review states
-    come from the resolving transaction (CallOutcome.review_capture) -- never
-    a post-dispatch re-read that could adopt a later review."""
+async def test_after_compensable_call_only_confirms_the_transactional_record() -> None:
+    """codex P1 #652 (runner.py:607): the written AND prior review states are
+    recorded by the resolving transaction itself (capture["persist"]); the
+    post-dispatch hook never writes them -- it only confirms the mutation
+    did, and reports the change unrevertible when it did not."""
     from unittest.mock import AsyncMock
 
     from nous.api.call_outcome import CallOutcome
 
     store = AsyncMock()
-    store.decision_state.return_value = {**_WRITTEN_DECISION, "outcome_result": "a later review"}
     runner = _bare_runner(store)
     runner._settings = SimpleNamespace(compensation_auto_review_enabled=False)
     runner._action_review_pusher = None
-    did = str(uuid4())
     entry = uuid4()
-    prior = {**_WRITTEN_DECISION, "outcome_result": "concurrent review", "reviewer": "someone"}
-    outcome = CallOutcome(review_capture={"prior": prior, "written": _WRITTEN_DECISION})
-    kwargs = dict(snapshotted=True, tool_input={"decision_id": did, "outcome": "noise"})
-    await runner._after_compensable_call(
-        ExecutionContext(kind="subtask"), "resolve_decision", entry, "s1", status="success", outcome=outcome, **kwargs
+    kwargs = dict(snapshotted=True, tool_input={"decision_id": str(uuid4()), "outcome": "noise"})
+    persisted = CallOutcome(review_capture={"prior": {}, "written": _WRITTEN_DECISION, "persisted": True})
+    note = await runner._after_compensable_call(
+        ExecutionContext(kind="subtask"), "resolve_decision", entry, "s1", status="success", outcome=persisted, **kwargs
     )
-    store.decision_state.assert_not_awaited()
-    store.record_written_state.assert_awaited_once_with(entry, _WRITTEN_DECISION, prior=prior)
-    # no transactional capture -> nothing recorded (the revert is refused)
-    store.reset_mock()
-    await runner._after_compensable_call(
+    assert note is None
+    assert store.method_calls == []  # no snapshot write after the call
+    # captured but never persisted in the transaction -> not revertible
+    for outcome in (CallOutcome(review_capture={"prior": {}, "written": _WRITTEN_DECISION}), CallOutcome()):
+        note = await runner._after_compensable_call(
+            ExecutionContext(kind="subtask"),
+            "resolve_decision",
+            entry,
+            "s1",
+            status="success",
+            outcome=outcome,
+            **kwargs,
+        )
+        assert note and "NOT be made revertible" in note
+    # a failed call changed nothing: no note
+    note = await runner._after_compensable_call(
         ExecutionContext(kind="subtask"),
         "resolve_decision",
         entry,
         "s1",
-        status="success",
+        status="error",
         outcome=CallOutcome(),
         **kwargs,
     )
-    store.record_written_state.assert_not_awaited()
-    # a failed call records nothing
-    await runner._after_compensable_call(
-        ExecutionContext(kind="subtask"), "resolve_decision", entry, "s1", status="error", outcome=outcome, **kwargs
-    )
-    store.record_written_state.assert_not_awaited()
+    assert note is None and store.method_calls == []
 
 
 @pytest.mark.asyncio
@@ -1989,13 +1993,13 @@ async def test_check_revert_refused_after_a_later_disable() -> None:
 
 
 @pytest.mark.asyncio
-async def test_disable_captures_its_state_token_and_runner_records_it() -> None:
-    """codex P1 #652 (compensation.py:432): manage_check(disable, capture=)
-    reports the token it stamped, and the runner records it as the written
-    state of the snapshot."""
+async def test_disable_captures_its_state_token_and_persists_it_before_commit() -> None:
+    """codex P1 #652 (compensation.py:432, runner.py:607): manage_check(disable,
+    capture=) reports the token it stamped and awaits capture["persist"] on
+    its own session BEFORE committing, so the snapshot record shares the
+    disable's transaction."""
     from unittest.mock import AsyncMock, MagicMock
 
-    from nous.api.call_outcome import CallOutcome
     from nous.heartbeat.dynamic import DynamicCheckLoader
 
     loader = object.__new__(DynamicCheckLoader)
@@ -2005,34 +2009,25 @@ async def test_disable_captures_its_state_token_and_runner_records_it() -> None:
     model = SimpleNamespace(id=uuid4(), enabled=True, metadata_={"other": 1}, updated_at=None)
     session = MagicMock()
     session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=model)))
-    session.commit = AsyncMock()
+    order: list[str] = []
+    session.commit = AsyncMock(side_effect=lambda: order.append("commit"))
     ctx = MagicMock()
     ctx.__aenter__ = AsyncMock(return_value=session)
     ctx.__aexit__ = AsyncMock(return_value=False)
     loader._db = SimpleNamespace(session=lambda: ctx)
     loader._agent_id = "a"
-    capture: dict = {}
+
+    async def persist(sess, cap):
+        assert sess is session and "written" in cap and "prior_enabled" in cap
+        order.append("persist")
+
+    capture: dict = {"persist": persist}
     await loader.manage_check("disable", name="c", capture=capture)
     token = model.metadata_["enabled_state_token"]
     assert model.metadata_["other"] == 1 and model.enabled is False
-    assert capture == {"prior_enabled": True, "written": {"check_id": str(model.id), "enabled_state_token": token}}
-
-    store = AsyncMock()
-    runner = _bare_runner(store)
-    runner._settings = SimpleNamespace(compensation_auto_review_enabled=False)
-    runner._action_review_pusher = None
-    entry = uuid4()
-    await runner._after_compensable_call(
-        ExecutionContext(kind="subtask"),
-        "heartbeat_check_manage",
-        entry,
-        "s1",
-        snapshotted=True,
-        status="success",
-        tool_input={"name": "c", "action": "disable"},
-        outcome=CallOutcome(check_capture=capture),
-    )
-    store.record_written_state.assert_awaited_once_with(entry, capture["written"], extra={"prior_enabled": True})
+    assert capture["prior_enabled"] is True
+    assert capture["written"] == {"check_id": str(model.id), "enabled_state_token": token}
+    assert order == ["persist", "commit"]
 
 
 @pytest.mark.asyncio
@@ -2076,39 +2071,27 @@ async def test_snapshot_reads_the_validated_path_not_a_retargeted_symlink(tmp_pa
 async def test_check_revert_uses_the_disable_transactions_prior_state() -> None:
     """codex P1 #652 (runner.py:557): the pre-dispatch read said the check was
     enabled, but a concurrent disable landed first, so THIS disable's
-    transaction saw prior_enabled=False. The runner must persist that actual
-    prior state; a capture without it records nothing (revert refused)."""
+    transaction saw prior_enabled=False. The persister records that actual
+    prior state, on the mutation's session."""
     from unittest.mock import AsyncMock
-
-    from nous.api.call_outcome import CallOutcome
 
     store = AsyncMock()
     runner = _bare_runner(store)
-    runner._settings = SimpleNamespace(compensation_auto_review_enabled=False)
-    runner._action_review_pusher = None
     entry = uuid4()
-    kwargs = dict(snapshotted=True, status="success", tool_input={"name": "c", "action": "disable"})
+    session = object()
     capture = {"prior_enabled": False, "written": _WRITTEN_CHECK}
-    await runner._after_compensable_call(
-        ExecutionContext(kind="subtask"),
-        "heartbeat_check_manage",
-        entry,
-        "s1",
-        outcome=CallOutcome(check_capture=capture),
-        **kwargs,
+    await runner._written_state_persister("heartbeat_check_manage", entry)(session, capture)
+    store.record_written_state_in.assert_awaited_once_with(
+        session, entry, _WRITTEN_CHECK, extra={"prior_enabled": False}
     )
-    store.record_written_state.assert_awaited_once_with(entry, _WRITTEN_CHECK, extra={"prior_enabled": False})
+    assert capture["persisted"] is True
 
     store.reset_mock()
-    await runner._after_compensable_call(
-        ExecutionContext(kind="subtask"),
-        "heartbeat_check_manage",
-        entry,
-        "s1",
-        outcome=CallOutcome(check_capture={"written": _WRITTEN_CHECK}),
-        **kwargs,
-    )
-    store.record_written_state.assert_not_awaited()
+    prior = {**_WRITTEN_DECISION, "outcome": None}
+    capture = {"prior": prior, "written": _WRITTEN_DECISION}
+    await runner._written_state_persister("resolve_decision", entry)(session, capture)
+    store.record_written_state_in.assert_awaited_once_with(session, entry, _WRITTEN_DECISION, prior=prior)
+    assert capture["persisted"] is True
 
 
 @pytest.mark.asyncio
@@ -2174,12 +2157,10 @@ async def test_unknown_outcome_still_gets_a_review_card() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool", ["resolve_decision", "heartbeat_check_manage"])
-async def test_unknown_db_outcome_records_its_written_state(tool) -> None:
+async def test_unknown_db_outcome_with_a_transactional_record_is_revertible(tool) -> None:
     """codex P1 #652 (runner.py:645): a DB call cancelled after its commit
-    landed was closed `unknown` and its written state -- already captured
-    before the commit -- was dropped, so the change could never be reverted.
-    It is recorded for `unknown` too; the revert's exact-match guard makes a
-    write that never committed unrevertible, never mis-reverted."""
+    landed is closed `unknown`; its written state committed with it, so it
+    gets a card and no "not revertible" note."""
     from unittest.mock import AsyncMock
 
     from nous.api.call_outcome import CallOutcome
@@ -2187,12 +2168,13 @@ async def test_unknown_db_outcome_records_its_written_state(tool) -> None:
     runner = _bare_runner(AsyncMock())
     runner._settings = SimpleNamespace(compensation_auto_review_enabled=True)
     runner._action_review_pusher = pusher = AsyncMock()
-    runner._snap_store.record_written_state.return_value = True
     entry = uuid4()
     if tool == "resolve_decision":
-        outcome = CallOutcome(review_capture={"prior": {"outcome": None}, "written": _WRITTEN_DECISION})
+        outcome = CallOutcome(
+            review_capture={"prior": {"outcome": None}, "written": _WRITTEN_DECISION, "persisted": True}
+        )
     else:
-        outcome = CallOutcome(check_capture={"prior_enabled": True, "written": _WRITTEN_CHECK})
+        outcome = CallOutcome(check_capture={"prior_enabled": True, "written": _WRITTEN_CHECK, "persisted": True})
     note = await runner._after_compensable_call(
         ExecutionContext(kind="dag_node", undoable=True),
         tool,
@@ -2204,16 +2186,14 @@ async def test_unknown_db_outcome_records_its_written_state(tool) -> None:
         outcome=outcome,
     )
     assert note is None
-    runner._snap_store.record_written_state.assert_awaited_once()
     pusher.assert_awaited_once_with(tool, entry, "s1")
 
 
 @pytest.mark.asyncio
-async def test_unrecorded_written_state_is_retried_then_never_advertised_as_revertible() -> None:
-    """codex P1 #652 (runner.py:545): a failed record_written_state was only
-    logged, then a review card advertised a revert the compensator refuses.
-    It is now retried; if it still fails the caller is told the change is
-    applied but not revertible, and the card offers no Revert."""
+async def test_unrecorded_written_state_is_never_advertised_as_revertible() -> None:
+    """codex P1 #652 (runner.py:545): a call whose transaction did not record
+    its written state is reported applied but not revertible, and the card
+    (still published, so the change is on record) offers no Revert."""
     from unittest.mock import AsyncMock
 
     from nous.api.call_outcome import CallOutcome
@@ -2221,31 +2201,19 @@ async def test_unrecorded_written_state_is_retried_then_never_advertised_as_reve
     runner = _bare_runner(AsyncMock())
     runner._settings = SimpleNamespace(compensation_auto_review_enabled=True)
     runner._action_review_pusher = pusher = AsyncMock()
-    entry = uuid4()
     outcome = CallOutcome(check_capture={"prior_enabled": True, "written": _WRITTEN_CHECK})
-    kwargs = dict(snapshotted=True, status="success", tool_input={"name": "c", "action": "disable"}, outcome=outcome)
-    ctx = ExecutionContext(kind="dag_node", undoable=True)
-
-    store = runner._snap_store
-    store.record_written_state.side_effect = [TimeoutError(), True]
-    with patch("nous.api.runner.asyncio.sleep", new=AsyncMock()):
-        note = await runner._after_compensable_call(ctx, "heartbeat_check_manage", entry, "s1", **kwargs)
-    assert note is None and store.record_written_state.await_count == 2
+    note = await runner._after_compensable_call(
+        ExecutionContext(kind="dag_node", undoable=True),
+        "heartbeat_check_manage",
+        uuid4(),
+        "s1",
+        snapshotted=True,
+        status="success",
+        tool_input={"name": "c", "action": "disable"},
+        outcome=outcome,
+    )
+    assert note and "NOT be made revertible" in note
     pusher.assert_awaited_once()
-
-    for failure in (TimeoutError(), False):
-        pusher.reset_mock()
-        store.record_written_state.reset_mock(side_effect=True)
-        if isinstance(failure, Exception):
-            store.record_written_state.side_effect = failure
-        else:
-            store.record_written_state.return_value = failure
-        with patch("nous.api.runner.asyncio.sleep", new=AsyncMock()):
-            note = await runner._after_compensable_call(ctx, "heartbeat_check_manage", entry, "s1", **kwargs)
-        assert note and "NOT be made revertible" in note
-        # The card is still published so the change is on record -- its
-        # Revert is derived server-side and not offered (snapshot_is_revertible).
-        pusher.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -2921,25 +2889,93 @@ async def test_write_file_over_a_fifo_is_refused_without_blocking(tmp_path) -> N
     assert snap.get("capture_error")
 
 
-def test_absent_create_falls_back_to_rename_only_when_links_are_unsupported(tmp_path) -> None:
-    """The no-clobber link degrades to a rename only where the filesystem has
-    no hard links; any other link failure propagates and writes nothing."""
+@pytest.mark.parametrize("err", ["EPERM", "ENOTSUP", "EOPNOTSUPP", "EXDEV"])
+def test_absent_create_refuses_when_links_are_unsupported(tmp_path, err) -> None:
+    """codex P2 #652 (builtin_tools.py:467): with no hard links a create-only
+    write fell back to a plain rename, clobbering a file created after the
+    absence check (its revert then deleted that file). It now refuses and
+    writes nothing; any other link failure still propagates."""
     import errno
+
+    from nous.api.builtin_tools import ABSENT, PreconditionFailed, atomic_replace_bytes
+
+    code = getattr(errno, err)
+
+    def _link_after_concurrent_create(*a, **k):
+        (tmp_path / "a.txt").write_bytes(b"theirs")  # created after the absence check
+        raise OSError(code, os.strerror(code))
+
+    with (
+        patch("nous.api.builtin_tools.os.link", _link_after_concurrent_create),
+        pytest.raises(PreconditionFailed, match="no-clobber"),
+    ):
+        atomic_replace_bytes(tmp_path / "a.txt", b"ours", expected=ABSENT, root=tmp_path)
+    assert (tmp_path / "a.txt").read_bytes() == b"theirs"
+
+    def _link_unsupported(*a, **k):
+        raise OSError(code, os.strerror(code))
+
+    with patch("nous.api.builtin_tools.os.link", _link_unsupported), pytest.raises(PreconditionFailed):
+        atomic_replace_bytes(tmp_path / "b.txt", b"b", expected=ABSENT, root=tmp_path)
+    assert not (tmp_path / "b.txt").exists()
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(".write_file_")]
+
+
+def test_absent_create_link_failures_and_success(tmp_path) -> None:
+    """Other link failures propagate and write nothing; with working links an
+    ABSENT create still lands, and an overwrite (hash precondition) never
+    needs a link."""
+    import errno
+    import hashlib
 
     from nous.api.builtin_tools import ABSENT, atomic_replace_bytes
 
-    def _link(err):
-        def fail(*a, **k):
-            raise OSError(err, os.strerror(err))
+    def _enospc(*a, **k):
+        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
 
-        return fail
-
-    with patch("nous.api.builtin_tools.os.link", _link(errno.EOPNOTSUPP)):
-        atomic_replace_bytes(tmp_path / "a.txt", b"a", expected=ABSENT, root=tmp_path)
-    assert (tmp_path / "a.txt").read_bytes() == b"a"
-    with patch("nous.api.builtin_tools.os.link", _link(errno.ENOSPC)), pytest.raises(OSError):
+    with patch("nous.api.builtin_tools.os.link", _enospc), pytest.raises(OSError):
         atomic_replace_bytes(tmp_path / "b.txt", b"b", expected=ABSENT, root=tmp_path)
     assert not (tmp_path / "b.txt").exists()
+
+    atomic_replace_bytes(tmp_path / "c.txt", b"c", expected=ABSENT, root=tmp_path)
+    assert (tmp_path / "c.txt").read_bytes() == b"c"
+    with patch("nous.api.builtin_tools.os.link", _enospc):
+        atomic_replace_bytes(tmp_path / "c.txt", b"c2", expected=hashlib.sha256(b"c").hexdigest(), root=tmp_path)
+    assert (tmp_path / "c.txt").read_bytes() == b"c2"
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(".write_file_")]
+
+
+@pytest.mark.asyncio
+async def test_write_file_tool_refuses_absent_create_without_links(tmp_path) -> None:
+    """Through the tool: a snapshotted create-only write on a filesystem with
+    no hard links is reported failed (so no card claims a revertible change)
+    and leaves a concurrently created file untouched."""
+    import errno
+    from unittest.mock import AsyncMock
+
+    from nous.api import call_outcome
+    from nous.api.builtin_tools import write_file_tool
+
+    runner = _bare_runner(AsyncMock())
+    runner._workspace_dir = str(tmp_path)
+    outcome = await _held("new.txt", str(tmp_path))
+    assert await runner._capture_compensation_snapshot(
+        ExecutionContext(kind="subtask"), "write_file", {"path": "new.txt", "content": "ours"}, uuid4(), outcome=outcome
+    )
+
+    def _link(*a, **k):
+        (tmp_path / "new.txt").write_text("theirs")
+        raise OSError(errno.EPERM, os.strerror(errno.EPERM))
+
+    token = call_outcome._current.set(outcome)
+    try:
+        with patch("nous.api.builtin_tools.os.link", _link):
+            result = await write_file_tool("new.txt", "ours", _workspace_dir=str(tmp_path))
+    finally:
+        call_outcome._current.reset(token)
+    assert result.get("is_error") is True
+    assert "nothing was written" in result["content"][0]["text"]
+    assert (tmp_path / "new.txt").read_text() == "theirs"
     assert not [p for p in tmp_path.iterdir() if p.name.startswith(".write_file_")]
 
 
