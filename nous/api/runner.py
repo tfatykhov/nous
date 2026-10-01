@@ -602,6 +602,9 @@ class AgentRunner:
             capture = None
             if outcome is not None:
                 capture = outcome.review_capture if tool_name == "resolve_decision" else outcome.check_capture
+            # Advisory: set inside the transaction, so a commit cancelled in
+            # flight may still have rolled it back. The DB snapshot stays
+            # authoritative (the card derives Revert from it).
             recorded = isinstance(capture, dict) and capture.get("persisted") is True
         # The card is published either way: when the written state is
         # missing it says the change is NOT revertible (its revert would be

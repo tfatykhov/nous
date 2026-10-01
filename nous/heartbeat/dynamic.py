@@ -784,11 +784,18 @@ class DynamicCheckLoader:
             raise ValueError("Name required for action: " + action)
 
         async with self._db.session() as session:
-            result = await session.execute(
+            stmt = (
                 select(DynamicCheckModel)
                 .where(DynamicCheckModel.agent_id == self._agent_id)
                 .where(DynamicCheckModel.name == name)
             )
+            if capture is not None:
+                # Row-locked for a recorded disable: a concurrent revert
+                # (enable_if_unchanged, outside _mutation_lock) cannot commit
+                # between this read and the commit, so the prior state
+                # recorded in this transaction is exact.
+                stmt = stmt.with_for_update()
+            result = await session.execute(stmt)
             model = result.scalar_one_or_none()
             if model is None:
                 raise ValueError(f"Dynamic check '{name}' not found")

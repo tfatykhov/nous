@@ -335,7 +335,10 @@ class SnapshotStore:
             )
         ).scalar_one_or_none()
         if row is None:
-            raise LookupError(f"compensation snapshot for ledger entry {ledger_entry_id} is missing")
+            raise LookupError(
+                f"refused to keep the change revertible: its compensation snapshot (ledger entry "
+                f"{ledger_entry_id}) is missing, so nothing was changed; retrying is safe"
+            )
         merged = {**(row.snapshot_data or {}), "written": written}
         if prior is not None:
             merged["prior"] = prior
