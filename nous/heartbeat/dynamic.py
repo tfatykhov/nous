@@ -826,35 +826,38 @@ class DynamicCheckLoader:
                         f"check '{name}' has an active run; disabling it now would cancel that run, "
                         "which is not undoable. Nothing was changed; retry once the run has finished"
                     )
-                prior_enabled = model.enabled
-                token = uuid4().hex
-                model.enabled = False
-                model.metadata_ = {**_meta(model), _STATE_TOKEN_KEY: token}
-                model.updated_at = datetime.now(UTC)
-                # Filled BEFORE the commit: a call cancelled while the commit
-                # is in flight still reports the token it may have written.
-                # The revert matches on that token, so a disable that never
-                # committed can never be "reverted".
-                if capture is not None:
-                    capture["prior_enabled"] = prior_enabled
-                    capture["written"] = {"check_id": str(model.id), _STATE_TOKEN_KEY: token}
-                    # The compensation snapshot is written in THIS
-                    # transaction: the disable and its revert record commit
-                    # (or roll back) together. A disable that cancels a run
-                    # records no written state, so it is never revertible.
-                    persist = capture.get("persist")
-                    if persist is not None and not cancels_run:
-                        await persist(session, capture)
-                # A recorded disable that cancels nothing must stay that way:
-                # no run of this check may start while the commit is in
-                # flight (run() re-checks _self_disabled synchronously before
-                # registering in _active_runs). Undone if the commit fails.
-                gate = self._registry.get_check(name) if capture is not None else None
+                # From the check above until the commit lands, no run of this
+                # check may start (run() re-checks _self_disabled before it
+                # registers in _active_runs, with no await between), so the
+                # answer cannot go stale. Undone if the disable does not land.
+                # Not for a disable that cancels anyway: a run finishing
+                # mid-commit would then report a self-disable it did not make.
+                gate = self._registry.get_check(name) if capture is not None and not cancels_run else None
                 if not (isinstance(gate, DynamicCheck) and not gate._self_disabled):
                     gate = None
                 if gate is not None:
                     gate._self_disabled = True
                 try:
+                    prior_enabled = model.enabled
+                    token = uuid4().hex
+                    model.enabled = False
+                    model.metadata_ = {**_meta(model), _STATE_TOKEN_KEY: token}
+                    model.updated_at = datetime.now(UTC)
+                    # Filled BEFORE the commit: a call cancelled while the
+                    # commit is in flight still reports the token it may have
+                    # written. The revert matches on that token, so a disable
+                    # that never committed can never be "reverted".
+                    if capture is not None:
+                        capture["prior_enabled"] = prior_enabled
+                        capture["written"] = {"check_id": str(model.id), _STATE_TOKEN_KEY: token}
+                        # The compensation snapshot is written in THIS
+                        # transaction: the disable and its revert record
+                        # commit (or roll back) together. A disable that
+                        # cancels a run records no written state, so it is
+                        # never revertible.
+                        persist = capture.get("persist")
+                        if persist is not None and not cancels_run:
+                            await persist(session, capture)
                     await session.commit()
                 except BaseException:
                     if gate is not None:

@@ -2876,7 +2876,7 @@ class TestUndoableDisableOfRunningCheck:
     @pytest.mark.asyncio
     async def test_no_run_can_start_while_a_recorded_disable_commits(self):
         """The active-run check and the disable cannot race: a run that tries
-        to start while the commit is in flight is skipped, so there is never
+        to start while the record or the commit is in flight is skipped, so there is never
         a run for the disable to cancel."""
         registry = CheckRegistry()
         loader = _loader_with_disable_row(registry, "racy")
@@ -2888,11 +2888,14 @@ class TestUndoableDisableOfRunningCheck:
         async def _commit():
             results.append(await check.run())  # a tick firing mid-commit
 
+        async def _persist(sess, cap):
+            results.append(await check.run())  # ... or while its record is written
+
         session.commit = AsyncMock(side_effect=_commit)
         await loader.manage_check(
-            action="disable", name="racy", capture={"refuse_if_running": True, "persist": AsyncMock()}
+            action="disable", name="racy", capture={"refuse_if_running": True, "persist": _persist}
         )
-        assert results and results[0].skipped
+        assert len(results) == 2 and all(r.skipped for r in results)
         runner.run_turn.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -2907,6 +2910,43 @@ class TestUndoableDisableOfRunningCheck:
                 action="disable", name="flaky", capture={"refuse_if_running": True, "persist": AsyncMock()}
             )
         assert check._self_disabled is False
+
+    @pytest.mark.asyncio
+    async def test_failed_persist_reopens_the_gate(self):
+        registry = CheckRegistry()
+        loader = _loader_with_disable_row(registry, "flaky")
+        session = loader._db.session.return_value.__aenter__.return_value
+        check = _tracked_check(loader, "flaky", AsyncMock())
+        persist = AsyncMock(side_effect=LookupError("snapshot missing"))
+        with pytest.raises(LookupError):
+            await loader.manage_check(
+                action="disable", name="flaky", capture={"refuse_if_running": True, "persist": persist}
+            )
+        assert check._self_disabled is False
+        session.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_recorded_cancelling_disable_does_not_claim_a_run_finishing_mid_commit(self):
+        """A background (non-undoable) disable that cancels a run sets no
+        gate: a run that finishes during the commit is its own normal run,
+        not a self-disabling final run."""
+        registry = CheckRegistry()
+        loader = _loader_with_disable_row(registry, "busy")
+        session = loader._db.session.return_value.__aenter__.return_value
+        started, release, effects = asyncio.Event(), asyncio.Event(), []
+        check = _tracked_check(loader, "busy", _blocking_runner(started, release, effects))
+        run = asyncio.create_task(check.run())
+        await asyncio.wait_for(started.wait(), 1)
+
+        async def _commit():
+            release.set()
+            await asyncio.wait({run}, timeout=1)  # the run completes mid-commit
+
+        session.commit = AsyncMock(side_effect=_commit)
+        await loader.manage_check(
+            action="disable", name="busy", capture={"refuse_if_running": False, "persist": AsyncMock()}
+        )
+        assert run.result().self_disabled is False
 
     @pytest.mark.asyncio
     async def test_undoable_self_disable_from_own_run_is_allowed(self):
