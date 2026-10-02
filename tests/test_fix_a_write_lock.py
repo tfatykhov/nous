@@ -302,3 +302,37 @@ async def test_stream_contended_path_lock_refuses_the_call_after_a_bounded_wait(
     assert store.events[-1] == ("close", "id-write_file", "blocked")
     second_call_messages = runner._call_api_stream.call_args_list[1][0][1]
     assert "still held its lock" in str(second_call_messages[-1]["content"])
+
+
+@pytest.mark.asyncio
+async def test_revert_does_not_wait_forever_for_the_path_lock(tmp_path, monkeypatch):
+    """The revert takes the same lock. Tapped while a write to that path is
+    still in flight -- or pinned by a thread that never returns -- it reports
+    failure and leaves the card live for a retry, instead of holding its
+    surface's lock (and the HTTP request) forever."""
+    import hashlib
+    import uuid
+
+    from nous.api.compensation import compensate_write_file
+
+    monkeypatch.setattr(compensation, "_REVERT_LOCK_WAIT_SECONDS", 0.05, raising=False)
+    target = tmp_path / "busy.txt"
+    target.write_text("ours", encoding="utf-8")
+    snap = {
+        "full_path": str(target.resolve()),
+        "workspace_root": str(tmp_path.resolve()),
+        "existed": False,
+        "prior_b64": None,
+        "written_content_hash": hashlib.sha256(b"ours").hexdigest(),
+        "written_size": 4,
+    }
+    held = compensation.write_path_lock("busy.txt", str(tmp_path))
+    await held.acquire()
+    try:
+        result = await asyncio.wait_for(compensate_write_file(uuid.uuid4(), snap, None), timeout=5)
+    finally:
+        compensation.release_write_path_lock(held)
+
+    assert not result.success and "still in flight" in result.message
+    assert target.read_text(encoding="utf-8") == "ours"  # nothing was changed
+    assert compensation.write_path_key("busy.txt", str(tmp_path)) not in compensation._write_path_locks

@@ -35,6 +35,10 @@ logger = logging.getLogger(__name__)
 # Cap for file snapshots: matches the read_file tool's 1 MiB limit.
 _FILE_SNAPSHOT_MAX_BYTES = 1 * 1024 * 1024
 
+# How long a revert waits for its target's write-path lock (a write_file to
+# that path is in flight) before it reports failure and leaves the card live.
+_REVERT_LOCK_WAIT_SECONDS = 5.0
+
 # One lock per resolved target path, shared by every runner fork in the
 # process: a write_file's snapshot capture and its write run inside one
 # critical section, so two concurrent writes to a path cannot both snapshot
@@ -548,7 +552,13 @@ async def compensate_write_file(
     # held across the check AND the restore, no runner write can land between
     # them and be overwritten by this revert.
     lock = write_path_lock(full_path, "")
-    await lock.acquire()
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=_REVERT_LOCK_WAIT_SECONDS)
+    except TimeoutError:
+        # Never wait forever: this runs under the card's surface lock.
+        return CompensationResult(
+            False, f"revert not attempted: a write to {full_path!r} is still in flight; nothing was changed, retry"
+        )
     try:
         return await _check_and_restore_write_file(
             entry_id, full_path, workspace_root, existed, prior, written_size, written_content_hash
