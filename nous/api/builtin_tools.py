@@ -552,6 +552,66 @@ def remove_if_matches(target: Path, expected: str, *, limit: int, root: Path) ->
         return False
 
 
+def _write_text_in_place(target: Path, content: str, root: Path) -> None:
+    """Write ``content`` to ``target`` itself, as text: a file that is there
+    keeps its inode, owner, group, mode and hard links; a new one, and every
+    missing directory on the way, gets the umask default.
+
+    The file is reached as a snapshotted write reaches it: from the workspace
+    ``root`` without following a symlink at any level (_parent_dir), so a path
+    swapped for a symlink after validation is refused instead of leading the
+    write out of the workspace. Every directory on the way is opened, so it
+    has to be readable, not only searchable. The open of the file neither
+    waits nor truncates, and the type is checked on the open descriptor
+    before anything is changed: a FIFO, a socket or a device is refused and
+    left as it was. These refusals are PreconditionFailed, in the snapshotted
+    write's words; any other failure is the OSError of a write by path,
+    naming the whole path.
+
+    Where the platform has no descriptor-relative calls the write is by path,
+    as it was before Phase 2.8, and none of the above is refused.
+    """
+    if not _DIR_FD:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        return
+    if target == root:
+        # The workspace itself has no parent inside the workspace to walk to;
+        # a write by path reports it as the directory it is.
+        raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), str(target))
+    try:
+        with _parent_dir(target, root, create=True) as (dfd, name):
+
+            def opener(_path: str, flags: int) -> int:
+                try:
+                    # open()'s own flags for "w" without the truncation: that
+                    # waits for the type check below.
+                    return os.open(name, (flags & ~os.O_TRUNC) | _NOFOLLOW | _NONBLOCK, 0o666, dir_fd=dfd)
+                except OSError as exc:
+                    if exc.errno == errno.ELOOP:
+                        raise PreconditionFailed(f"{name!r} is a symlink") from exc
+                    if exc.errno == errno.ENXIO:
+                        # A FIFO nobody reads, a socket: no descriptor to check
+                        # the type on, so the name is asked -- only to word
+                        # this refusal; nothing is opened on its answer.
+                        _require_regular_file(os.stat(name, dir_fd=dfd, follow_symlinks=False), name)
+                    raise
+
+            # Text mode: newlines and the encoding as Path.write_text had them.
+            with open(target, "w", encoding="utf-8", opener=opener) as f:
+                _require_regular_file(os.fstat(f.fileno()), name)
+                os.ftruncate(f.fileno(), 0)
+                f.write(content)
+    except _ParentMissing as exc:  # the workspace was removed under the walk
+        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(target)) from exc
+    except OSError as exc:
+        # A descriptor-relative call names one path component; a write by path
+        # named the whole path. A failed write names none, then or now.
+        if exc.filename is None:
+            raise
+        raise OSError(exc.errno, exc.strerror, str(target)) from exc
+
+
 async def write_file_tool(
     path: str,
     content: str,
@@ -573,26 +633,15 @@ async def write_file_tool(
         outcome = current_outcome()
         if outcome is None or outcome.write_target is None:
             # No snapshot is bound to this call (compensation off, or a call
-            # nothing can revert): write in place exactly as before Phase 2.8
-            # -- the same file, so the same inode, owner, mode and hard links.
-            # One departure: content that cannot be encoded fails here, before
-            # a directory is made or the file is opened (and truncated).
+            # nothing can revert): the file itself is written, as before
+            # Phase 2.8 -- the same inode, owner, mode and hard links. Two
+            # things differ from then. Content that cannot be encoded fails
+            # here, before a directory is made or the file is opened (and
+            # truncated). And the file is reached and opened as
+            # _write_text_in_place describes: a path swapped for a symlink,
+            # and a FIFO, socket or device, are refused.
             content.encode("utf-8")
-            # The other: a FIFO, socket or device as the target is refused as
-            # the snapshotted write refuses it, before it is opened -- a FIFO
-            # with no reader would block this write's thread for good. The
-            # check follows links, as the open does. A directory, and a path
-            # the check cannot reach, are left to the write, which reports
-            # them itself as it always did; a target that does not exist yet
-            # is simply created.
-            try:
-                found = await asyncio.to_thread(os.stat, target)
-            except (OSError, ValueError):
-                found = None
-            if found is not None and not stat.S_ISDIR(found.st_mode):
-                _require_regular_file(found, target.name)
-            await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
-            write = asyncio.to_thread(target.write_text, content, encoding="utf-8")
+            write = asyncio.to_thread(_write_text_in_place, target, content, Path(_workspace_dir).resolve())
             if outcome is not None and outcome.write_lock is not None:
                 # Compensation is wired and the runner holds this path's lock:
                 # as for the snapshotted write below, it stays held until the

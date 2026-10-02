@@ -10,7 +10,11 @@ different refusals) with all flags off.
 from __future__ import annotations
 
 import asyncio
+import errno
 import os
+import shutil
+import socket
+import stat
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,11 +23,58 @@ import pytest
 from test_fix_a_write_lock import _streamed_write
 from test_runner_ledger import _FakeSnapStore, _FakeStore, _stream_runner
 
-from nous.api import compensation
+from nous.api import builtin_tools, compensation
 from nous.api.builtin_tools import PreconditionFailed, atomic_replace_bytes, register_builtin_tools, write_file_tool
 from nous.api.tools import ToolDispatcher
 
 _FIFO = pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX FIFOs only")
+_POSIX = pytest.mark.skipif(os.name != "posix", reason="POSIX links, file types, modes, dir_fd calls")
+_NOT_REGULAR = "Refused to write '{0}': '{0}' is not a regular file; nothing was written."
+
+
+def _after_validation(monkeypatch, swap) -> None:
+    """Run ``swap`` once, right after write_file's own path validation has
+    passed: from then on the path is trusted, and it has just stopped being
+    what was validated."""
+    real = builtin_tools._validate_path
+    pending = [swap]
+
+    def validate(path_str, workspace_dir):
+        target = real(path_str, workspace_dir)
+        if pending:
+            pending.pop()()
+        return target
+
+    monkeypatch.setattr(builtin_tools, "_validate_path", validate)
+
+
+def _hold_the_write(monkeypatch) -> tuple[threading.Event, threading.Event]:
+    """Stop the in-place write's thread before it touches anything, until
+    ``gate`` is set; ``entered`` says the thread got that far."""
+    entered, gate = threading.Event(), threading.Event()
+    real = builtin_tools._write_text_in_place
+
+    def held(*args):
+        entered.set()
+        assert gate.wait(20)
+        return real(*args)
+
+    monkeypatch.setattr(builtin_tools, "_write_text_in_place", held)
+    return entered, gate
+
+
+def _tree(root: Path) -> dict[str, str]:
+    """Every entry below ``root``: a link's destination, a directory, or a file's content."""
+    out = {}
+    for p in sorted(root.rglob("*")):
+        rel = p.relative_to(root).as_posix()
+        if p.is_symlink():
+            out[rel] = f"<link to {os.readlink(p)}>"
+        elif p.is_dir():
+            out[rel] = "<dir>"
+        else:
+            out[rel] = p.read_text(encoding="utf-8")
+    return out
 
 
 @pytest.mark.asyncio
@@ -57,15 +108,7 @@ async def test_unsnapshotted_write_keeps_a_held_path_lock_until_its_thread_ends(
     from nous.api.call_outcome import CallOutcome
     from nous.api.compensation import release_write_path_lock_after, write_path_lock
 
-    entered, gate = threading.Event(), threading.Event()
-    real_write_text = Path.write_text
-
-    def gated(self, *args, **kwargs):
-        entered.set()
-        assert gate.wait(10)
-        return real_write_text(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "write_text", gated)
+    entered, gate = _hold_the_write(monkeypatch)
     lock = write_path_lock("f.txt", str(tmp_path))
     await lock.acquire()
     outcome = CallOutcome(write_lock=lock)
@@ -137,15 +180,7 @@ async def test_stream_timeout_mid_write_keeps_the_lock_until_the_thread_ends(tmp
     """stream_chat is the loop that cuts a tool call off at tool_timeout, so
     it orphans a write's thread in ordinary operation. The path stays locked
     until that thread ends: the next write must not snapshot a half-written file."""
-    entered, gate = threading.Event(), threading.Event()
-    real_write_text = Path.write_text
-
-    def gated(self, *args, **kwargs):
-        entered.set()
-        assert gate.wait(20)
-        return real_write_text(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "write_text", gated)
+    entered, gate = _hold_the_write(monkeypatch)
     store = _FakeStore()
     runner, _, _ = _stream_with_the_real_handler(tmp_path, store)  # tool_timeout is 0.05 s in this harness
     key = compensation.write_path_key("late.txt", str(tmp_path))
@@ -190,35 +225,26 @@ async def test_unencodable_content_leaves_the_target_alone(tmp_path):
 @_FIFO
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["pipe", "link"], ids=["fifo", "link-to-the-fifo"])
-async def test_in_place_write_to_a_fifo_is_refused_before_anything_is_opened(tmp_path, monkeypatch, path):
+async def test_in_place_write_to_a_fifo_is_refused_at_once(tmp_path, path):
     """A FIFO with no reader blocks whoever opens it for writing, for good.
-    The in-place write refuses it first, with the refusal a snapshotted write
-    gives, so the call returns at once and no thread is left blocked -- also
-    when the path is a link to the FIFO."""
+    The in-place write opens without waiting and refuses it with the refusal
+    a snapshotted write gives, so the call returns at once and no thread is
+    left in open() -- also when the path is a link to the FIFO."""
     pipe = tmp_path / "pipe"
     os.mkfifo(pipe)
     (tmp_path / "link").symlink_to(pipe)
-    started: list[Path] = []
-    real_write_text = Path.write_text
-
-    def spy(self, *args, **kwargs):
-        started.append(self)
-        return real_write_text(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "write_text", spy)
     try:
         result = await asyncio.wait_for(write_file_tool(path, "x", _workspace_dir=str(tmp_path)), timeout=2)
     finally:
-        if started:
-            # A write did start and sits in open(): give the FIFO a reader, so
-            # that thread can end and a failure here cannot hang the whole run.
-            os.close(os.open(pipe, os.O_RDONLY | os.O_NONBLOCK))
+        # A reader, so that a write that did block in open() can end and a
+        # failure here cannot hang the whole run.
+        os.close(os.open(pipe, os.O_RDONLY | os.O_NONBLOCK))
 
     assert result.get("is_error") is True
     assert result["content"][0]["text"] == (
         f"Refused to write '{path}': 'pipe' is not a regular file; nothing was written."
     )
-    assert started == []  # nothing was opened, so no thread can be sitting in open()
+    assert stat.S_ISFIFO(pipe.lstat().st_mode)
 
 
 @_FIFO
@@ -232,27 +258,212 @@ def test_the_compare_and_replace_write_gives_the_same_refusal(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_directory_as_the_target_is_still_the_writes_own_error(tmp_path):
+@pytest.mark.parametrize("path", ["sub", ""], ids=["a-directory", "the-workspace-itself"])
+async def test_a_directory_as_the_target_is_still_the_writes_own_error(tmp_path, path):
     """Guard: the refusal is for files that can block or misbehave when
-    opened. A directory never did; the write reports it itself, with the text
-    it had before #652."""
-    (tmp_path / "sub").mkdir()
+    opened. A directory never did, nor does the workspace itself, which an
+    empty path names: the write reports it with the text it had before #652,
+    the error of the open with the whole path in it."""
+    ws = tmp_path.resolve()
+    (ws / "sub").mkdir()
 
-    result = await write_file_tool("sub", "x", _workspace_dir=str(tmp_path))
+    result = await write_file_tool(path, "x", _workspace_dir=str(ws))
 
-    text = result["content"][0]["text"]
+    said = "[Errno 21] Is a directory" if os.name == "posix" else "[Errno 13] Permission denied"
     assert result.get("is_error") is True
-    assert text.startswith("Error writing file: ") and "not a regular file" not in text
+    assert result["content"][0]["text"] == f"Error writing file: {said}: {str(ws / path)!r}"
 
 
 @pytest.mark.asyncio
-async def test_a_path_the_check_cannot_look_at_gets_the_writes_own_error(tmp_path):
-    """Guard: the look at the target never speaks for itself. A path it cannot
-    stat -- on Windows a NUL byte gets this far -- is left to the write, which
-    refuses it with the text it had before #652."""
-    result = await write_file_tool("a\x00b.txt", "x", _workspace_dir=str(tmp_path))
+async def test_a_workspace_removed_under_the_write_is_the_writes_own_error(tmp_path, monkeypatch):
+    """The workspace directory disappears right after the write made sure it
+    is there. That ends as it does for a write by path: the file's path does
+    not exist."""
+    ws = tmp_path.resolve() / "ws"
+    real_mkdir = Path.mkdir
 
-    text = result["content"][0]["text"]
+    def made_then_removed(self, *args, **kwargs):
+        real_mkdir(self, *args, **kwargs)
+        if self == ws:
+            ws.rmdir()
+
+    monkeypatch.setattr(Path, "mkdir", made_then_removed)
+
+    result = await write_file_tool("f.txt", "x", _workspace_dir=str(ws))
+
     assert result.get("is_error") is True
-    assert not text.startswith("stat:")
-    assert list(tmp_path.iterdir()) == []
+    assert result["content"][0]["text"] == (
+        f"Error writing file: [Errno 2] No such file or directory: {str(ws / 'f.txt')!r}"
+    )
+
+
+@_POSIX
+@pytest.mark.asyncio
+async def test_a_failure_of_the_write_itself_is_reported_as_it_is(tmp_path, monkeypatch):
+    """An error of the write itself -- an I/O error, a full disk -- names no
+    file. It is reported as a write by path reported it, without a path."""
+
+    def fails(fd, length):
+        raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+    (tmp_path / "f.txt").write_text("v1", encoding="utf-8")
+    monkeypatch.setattr(os, "ftruncate", fails)
+
+    result = await write_file_tool("f.txt", "x", _workspace_dir=str(tmp_path))
+
+    assert result.get("is_error") is True
+    assert result["content"][0]["text"] == f"Error writing file: [Errno {errno.EIO}] {os.strerror(errno.EIO)}"
+
+
+@_POSIX
+@pytest.mark.asyncio
+async def test_a_workspace_named_through_a_symlink_is_written(tmp_path):
+    """The workspace setting may reach the workspace through a symlink (a
+    linked mount; /tmp on macOS). The walk starts from the workspace as
+    resolved, so that link is no reason to refuse."""
+    (tmp_path / "real").mkdir()
+    (tmp_path / "ws").symlink_to(tmp_path / "real", target_is_directory=True)
+
+    result = await write_file_tool("d/f.txt", "x", _workspace_dir=str(tmp_path / "ws"))
+
+    assert not result.get("is_error"), result
+    assert (tmp_path / "real" / "d" / "f.txt").read_text(encoding="utf-8") == "x"
+
+
+@_POSIX
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "swapped", "said"),
+    [
+        pytest.param("a/b/c.txt", "ancestor", "on the way", id="ancestor-of-an-existing-file"),
+        pytest.param("a/b/new.txt", "ancestor", "on the way", id="ancestor-of-a-new-file"),
+        pytest.param("a/x/y/new.txt", "ancestor", "on the way", id="ancestor-of-new-directories"),
+        pytest.param("f.txt", "victim.txt", "link", id="file-for-a-link-to-an-outside-file"),
+        pytest.param("f.txt", "not-there-yet.txt", "link", id="file-for-a-link-to-a-new-outside-path"),
+    ],
+)
+async def test_a_path_swapped_for_a_symlink_after_validation_is_refused(tmp_path, monkeypatch, path, swapped, said):
+    """The path is inside the workspace when it is validated. Before the write
+    opens it, a directory on the way -- or the file itself -- becomes a symlink
+    that leads out of the workspace. The write does not follow it: it is
+    refused with the snapshotted write's words, and nothing outside the
+    workspace is written, created or changed."""
+    ws, outside = tmp_path / "ws", tmp_path / "outside"
+    (ws / "a" / "b").mkdir(parents=True)
+    (ws / "a" / "b" / "c.txt").write_text("inside", encoding="utf-8")
+    (ws / "f.txt").write_text("inside", encoding="utf-8")
+    (outside / "b").mkdir(parents=True)
+    (outside / "b" / "c.txt").write_text("theirs", encoding="utf-8")
+    (outside / "victim.txt").write_text("theirs", encoding="utf-8")
+    before = _tree(outside)
+
+    def swap():
+        if swapped == "ancestor":
+            shutil.rmtree(ws / "a")
+            (ws / "a").symlink_to(outside, target_is_directory=True)
+        else:
+            (ws / "f.txt").unlink()
+            (ws / "f.txt").symlink_to(outside / swapped)
+
+    _after_validation(monkeypatch, swap)
+
+    result = await write_file_tool(path, "written by the tool", _workspace_dir=str(ws))
+
+    refusal = {
+        "on the way": f"a directory on the way to {ws.resolve() / path} is a symlink or not a directory; refused",
+        "link": "'f.txt' is a symlink",
+    }[said]
+    assert _tree(outside) == before
+    assert result.get("is_error") is True
+    assert result["content"][0]["text"] == f"Refused to write '{path}': {refusal}; nothing was written."
+
+
+@_FIFO
+@pytest.mark.asyncio
+async def test_a_file_swapped_for_a_fifo_after_validation_is_refused_not_waited_for(tmp_path, monkeypatch):
+    """Guard for the same stretch: the file becomes a FIFO nobody reads after
+    the path was validated. The open cannot block on it, so the call is
+    refused at once instead of holding its thread until a reader appears."""
+    target = tmp_path / "f.txt"
+    target.write_text("v1", encoding="utf-8")
+
+    def swap():
+        target.unlink()
+        os.mkfifo(target)
+
+    _after_validation(monkeypatch, swap)
+    try:
+        result = await asyncio.wait_for(write_file_tool("f.txt", "x", _workspace_dir=str(tmp_path)), timeout=2)
+    finally:
+        # A reader, so that a write that did block in open() can end and a
+        # failure here cannot hang the whole run.
+        os.close(os.open(target, os.O_RDONLY | os.O_NONBLOCK))
+
+    assert result["content"][0]["text"] == _NOT_REGULAR.format("f.txt")
+    assert stat.S_ISFIFO(target.lstat().st_mode)
+
+
+@_FIFO
+@pytest.mark.asyncio
+async def test_a_fifo_somebody_reads_is_refused_and_receives_nothing(tmp_path):
+    """With a reader on its other end a FIFO can be opened for writing. Its
+    type is checked on the open descriptor before anything is truncated or
+    written: the call is refused and the reader gets no byte."""
+    pipe = tmp_path / "pipe"
+    os.mkfifo(pipe)
+    reader = os.open(pipe, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        result = await asyncio.wait_for(write_file_tool("pipe", "x", _workspace_dir=str(tmp_path)), timeout=2)
+        received = os.read(reader, 16)
+    finally:
+        os.close(reader)
+
+    assert result["content"][0]["text"] == _NOT_REGULAR.format("pipe")
+    assert received == b""  # the writer came and went without writing
+
+
+@_POSIX
+@pytest.mark.asyncio
+async def test_a_socket_is_refused_with_the_same_words(tmp_path, monkeypatch):
+    """A socket cannot be opened at all, so its type is read from the name."""
+    monkeypatch.chdir(tmp_path)  # a relative name: a socket path is short
+    with socket.socket(socket.AF_UNIX) as bound:
+        bound.bind("sock")
+
+        result = await write_file_tool("sock", "x", _workspace_dir=str(tmp_path))
+
+    assert result["content"][0]["text"] == _NOT_REGULAR.format("sock")
+    assert stat.S_ISSOCK((tmp_path / "sock").lstat().st_mode)
+
+
+@pytest.mark.skipif(not hasattr(os, "mknod") or os.geteuid() != 0, reason="making a device node takes root")
+@pytest.mark.asyncio
+async def test_a_device_node_is_refused_and_stays_what_it_was(tmp_path):
+    """A device node opens without blocking, too: it is refused on its type
+    and stays the device it was."""
+    node = tmp_path / "null"
+    try:
+        os.mknod(node, 0o666 | stat.S_IFCHR, os.makedev(1, 3))
+    except PermissionError:
+        pytest.skip("this root may not make device nodes")
+
+    result = await write_file_tool("null", "x", _workspace_dir=str(tmp_path))
+
+    assert result["content"][0]["text"] == _NOT_REGULAR.format("null")
+    after = node.lstat()
+    assert stat.S_ISCHR(after.st_mode) and after.st_rdev == os.makedev(1, 3)
+
+
+@_POSIX
+@pytest.mark.asyncio
+async def test_a_new_file_and_its_directories_get_the_default_modes(tmp_path):
+    """What the in-place write creates has the mode any created file or
+    directory gets, the umask applied: it was never the temp file's 0600."""
+    umask = os.umask(0o022)
+    os.umask(umask)
+
+    result = await write_file_tool("made/new.txt", "x", _workspace_dir=str(tmp_path))
+
+    assert not result.get("is_error"), result
+    assert stat.S_IMODE((tmp_path / "made" / "new.txt").stat().st_mode) == 0o666 & ~umask
+    assert stat.S_IMODE((tmp_path / "made").stat().st_mode) == 0o777 & ~umask
