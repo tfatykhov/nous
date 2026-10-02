@@ -940,7 +940,12 @@ def create_app(
         active_param = request.query_params.get("active")
         active_only = active_param != "false" if active_param else True
         try:
-            procs, total = await heart.list_procedures(limit=limit, offset=offset, domain=domain, active_only=active_only)
+            # The dashboard browse is the one reader that lists strategy cards
+            # alongside how-to procedures (it is how an operator inspects them).
+            procs, total = await heart.list_procedures(
+                limit=limit, offset=offset, domain=domain, active_only=active_only,
+                include_strategy_cards=True,
+            )
             return JSONResponse({"procedures": [p.model_dump(mode="json") for p in procs], "total": total, "limit": limit, "offset": offset})
         except Exception as e:
             logger.error("List procedures error: %s", e)

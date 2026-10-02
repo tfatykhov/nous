@@ -281,6 +281,12 @@ class FactSummary(BaseModel):
 
 # --- Procedures ---
 
+# Reasoning Maps L1: the ``kind`` that marks a distilled strategy card. ONE
+# definition shared by the distiller (write), ProcedureManager (SQL filters)
+# and ContextEngine (prompt gate): a card is a lesson, not a how-to procedure,
+# and every read path has to agree on which rows are cards.
+STRATEGY_CARD_KIND = "strategy"
+
 
 class ProcedureInput(BaseModel):
     """Input for storing a new procedure."""

@@ -26,7 +26,7 @@ from sqlalchemy.exc import IntegrityError
 
 from nous.brain.schemas import GRADED_OUTCOMES
 from nous.handlers import LLMClient, call_background_llm_structured
-from nous.heart.schemas import ProcedureInput
+from nous.heart.schemas import STRATEGY_CARD_KIND, ProcedureInput
 
 logger = logging.getLogger(__name__)
 
@@ -269,7 +269,7 @@ class StrategyCardDistiller:
             description=description,
             implementation_notes=[lesson],
             tags=tags,
-            kind="strategy",
+            kind=STRATEGY_CARD_KIND,
             runtime_metadata={
                 "source_decision_id": str(decision_id),
                 "outcome": outcome,
@@ -371,7 +371,7 @@ class StrategyCardDistiller:
             result = await session.execute(
                 select(Procedure.id)
                 .where(Procedure.agent_id == self._brain.agent_id)
-                .where(Procedure.kind == "strategy")
+                .where(Procedure.kind == STRATEGY_CARD_KIND)
                 .where(Procedure.active.is_(True))
                 .where(Procedure.runtime_metadata["source_decision_id"].astext == str(decision_id))
                 .limit(1)
@@ -391,7 +391,7 @@ class StrategyCardDistiller:
         result = await session.execute(
             select(Procedure.id)
             .where(Procedure.agent_id == self._brain.agent_id)
-            .where(Procedure.kind == "strategy")
+            .where(Procedure.kind == STRATEGY_CARD_KIND)
             .where(Procedure.active.is_(True))
             .where(Procedure.runtime_metadata["source_decision_id"].astext == str(decision_id))
             .limit(1)
