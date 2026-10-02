@@ -829,16 +829,27 @@ async def test_the_await_chain_walks_through_a_generator_based_awaitable():
 
 
 class _TelegramRecorder:
-    """Stands in for the runner's shared httpx client and records every post."""
+    """Stands in for the runner's shared httpx client and records every post.
 
-    def __init__(self, error: Exception | None = None) -> None:
+    A post answers with ``response``, or raises ``error`` if one is given. With
+    ``hold`` it first waits for that event: the send stays in flight until then.
+    """
+
+    def __init__(
+        self, error: Exception | None = None, response: object = None, hold: asyncio.Event | None = None
+    ) -> None:
         self.posts: list[dict] = []
         self._error = error
+        self._response = response
+        self._hold = hold
 
-    async def post(self, url: str, *, json: dict, timeout: float) -> None:
+    async def post(self, url: str, *, json: dict, timeout: float) -> object:
         self.posts.append({"url": url, **json})
+        if self._hold is not None:
+            await self._hold.wait()
         if self._error is not None:
             raise self._error
+        return self._response
 
 
 def _hung_tick_runner(telegram: _TelegramRecorder, **settings) -> HeartbeatRunner:
@@ -934,3 +945,77 @@ async def test_the_telegram_text_is_cut_to_what_telegram_accepts(caplog, monkeyp
     assert len(critical) > 4096, "the scripted await chain is too short to need cutting"
     assert len(text) <= 4096, "Telegram rejects a text over 4096 characters"
     assert f"[Heartbeat] {critical}".startswith(text)
+
+
+async def test_a_report_that_telegram_rejects_is_logged_once_and_never_with_the_bot_token(caplog):
+    """Telegram answers a wrong token, a rate limit or a bad request with an
+    HTTP error, not an exception. The URL of the send holds the bot token, so
+    the log line carries the status and nothing else."""
+    secret = "7351:AAH-never-in-a-log"
+    telegram = _TelegramRecorder(response=SimpleNamespace(status_code=401))
+    runner = _hung_tick_runner(telegram, telegram_bot_token=secret, telegram_chat_id="chat")
+    with caplog.at_level(logging.DEBUG):  # every logger, not only the runner's
+        async with _started(runner):
+            await _until(lambda: telegram.posts, "a hung tick was never reported on Telegram")
+            skips = _skips(caplog)
+            await _until(lambda: _skips(caplog) >= skips + 3, "the DAG loop stopped after Telegram rejected the report")
+            await _stop(runner)
+
+    assert secret in telegram.posts[0]["url"], "the send did not go out with the configured token"
+    about_telegram = [(r.levelname, r.getMessage()) for r in _runner_log(caplog) if "Telegram" in r.getMessage()]
+    assert about_telegram == [("WARNING", "Heartbeat Telegram notification rejected: HTTP 401")]
+    assert secret not in caplog.text, "the bot token reached a log line"
+    assert "api.telegram.org" not in caplog.text, "the URL of the send reached a log line"
+
+
+@pytest.mark.parametrize(
+    ("response", "logged"),
+    [
+        (SimpleNamespace(status_code=400), ["Heartbeat Telegram notification rejected: HTTP 400"]),
+        (SimpleNamespace(status_code=200), []),
+        (MagicMock(), []),
+        (None, []),
+    ],
+    ids=["an error status", "a success status", "the answer of a mocked client", "no answer object"],
+)
+async def test_the_telegram_sender_logs_an_error_status_and_nothing_else(caplog, response, logged):
+    """Only an integer status of 400 or more is a rejection. A send that
+    succeeds logs nothing, and neither does a test double whose answer has no
+    integer status, such as the mocked http client other tests pass in."""
+    runner = _runner(_settings(telegram_bot_token="token", telegram_chat_id="chat"), tick=None)
+    runner._http = _TelegramRecorder(response=response)  # what HeartbeatRunner(http_client=...) sets
+    with caplog.at_level(logging.DEBUG, logger="nous.heartbeat.runner"):
+        await runner._send_telegram("text")
+
+    assert [r.getMessage() for r in _runner_log(caplog)] == logged
+
+
+async def test_a_tick_that_returns_while_its_report_is_being_sent_is_not_logged_as_still_running(caplog):
+    release, send_done, second_started = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def tick():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await release.wait()
+        else:
+            second_started.set()
+
+    telegram = _TelegramRecorder(hold=send_done)
+    runner = _runner(_settings(dag_tick_timeout=0.1, telegram_bot_token="token", telegram_chat_id="chat"), tick)
+    runner._http = telegram  # what HeartbeatRunner(http_client=...) sets
+    with caplog.at_level(logging.DEBUG, logger="nous.heartbeat.runner"):
+        async with _started(runner):
+            await _until(lambda: telegram.posts, "a hung tick was never reported on Telegram")
+            # The DAG loop is inside the send now: it logs nothing more until the send returns.
+            skips = _skips(caplog)
+            reported = runner._dag_pending_task
+            release.set()
+            await asyncio.wait({reported}, timeout=WAIT)
+            assert reported.done(), "the reported tick did not return"
+            send_done.set()
+
+            await _expect(second_started, "ticking did not resume after the reported tick returned")
+            assert _skips(caplog) == skips, "a tick that had returned was logged as still running in background"
+            await _stop(runner)

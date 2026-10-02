@@ -390,9 +390,12 @@ class HeartbeatRunner:
                     ):
                         self._dag_stall_escalated = True
                         await self._escalate_dag_stall(pending_for)
-                    logger.warning(
-                        "F038: DAG tick skipped — previous tick timed out and is still running in background",
-                    )
+                    # Look again before saying so: the tick can return while
+                    # its report is being sent. The next pass harvests it.
+                    if not self._dag_pending_task.done():
+                        logger.warning(
+                            "F038: DAG tick skipped — previous tick timed out and is still running in background",
+                        )
                     continue
                 # Fix 3 (Codex P2): harvest the result of a completed pending
                 # task so that (a) last_dag_tick reflects its success and
@@ -525,17 +528,18 @@ class HeartbeatRunner:
         )
         logger.critical("%s", reason)
         # Nothing reads a CRITICAL line, so a person is told as well. The
-        # sender returns at once when Telegram is not configured and only
-        # logs a send that fails; the line above has the text in full.
+        # sender returns at once when Telegram is not configured, and it only
+        # logs a send that fails or that Telegram rejects; the line above has
+        # the text in full.
         await self._send_telegram(f"[Heartbeat] {reason}"[:_TELEGRAM_MAX_CHARS])
         if self.dag_stall_action is not None:
             self.dag_stall_action(reason)
 
     def _record_dag_tick(self, task: asyncio.Task, failure_message: str) -> None:
         """Record a finished DAG tick: a success advances last_dag_tick,
-        anything else is logged. Never raises — ``task.result()`` would
-        re-raise a cancelled tick's CancelledError into the caller, past
-        every ``except Exception``.
+        anything else is logged. Never raises for a finished task —
+        ``task.result()`` would re-raise a cancelled tick's CancelledError
+        into the caller, past every ``except Exception``.
         """
         failure = asyncio.CancelledError() if task.cancelled() else task.exception()
         if failure is None:
@@ -1220,7 +1224,7 @@ class HeartbeatRunner:
         try:
             client = self._http or httpx.AsyncClient()
             try:
-                await client.post(
+                response = await client.post(
                     url,
                     json={"chat_id": chat_id, "text": text},
                     timeout=10,
@@ -1228,6 +1232,14 @@ class HeartbeatRunner:
             finally:
                 if self._http is None:
                     await client.aclose()
+            # Telegram answers a wrong token, a rate limit or a bad request
+            # with an HTTP error, not an exception. Only the status is
+            # logged: the URL holds the bot token, so neither it, the request
+            # nor an httpx error text may reach a log line. (The isinstance:
+            # a mocked client answers with no integer status.)
+            status = getattr(response, "status_code", None)
+            if isinstance(status, int) and status >= 400:
+                logger.warning("Heartbeat Telegram notification rejected: HTTP %s", status)
         except Exception:
             logger.warning("Heartbeat Telegram notification failed")
 
