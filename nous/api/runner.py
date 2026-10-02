@@ -774,7 +774,10 @@ class AgentRunner:
                 # write under another path's lock, where a concurrent write
                 # to the real target could snapshot the same prior content.
                 held = outcome.write_lock if outcome is not None else None
-                if held is None or not write_path_lock_is(snap_data["full_path"], held):
+                if held is None:
+                    # No lock at all: _acquire_write_lock could not take one.
+                    return _unrevertible(f"the path lock for {path!r} could not be taken")
+                if not write_path_lock_is(snap_data["full_path"], held):
                     return _unrevertible(f"{path!r} resolved to a different file while waiting for its lock")
                 # Record what's about to be written so compensate_write_file can
                 # detect if the file was modified between the write and the revert.

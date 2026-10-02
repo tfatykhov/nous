@@ -161,9 +161,10 @@ async def test_acquire_write_lock_takes_no_lock_for_a_path_without_a_key(tmp_pat
 async def test_a_lock_that_cannot_be_taken_does_not_let_an_undoable_write_through(tmp_path, monkeypatch, caplog):
     """The helper is total. A failure nobody expected while taking the lock is
     logged and means "no lock", so the snapshot capture still runs -- and it
-    refuses an undoable write it cannot serialize. Raised into the loop
-    instead, the failure would be dropped there together with the capture,
-    and the write dispatched with neither lock nor snapshot."""
+    refuses an undoable write it cannot serialize, naming the lock as the
+    reason. Raised into the loop instead, the failure would be dropped there
+    together with the capture, and the write dispatched with neither lock nor
+    snapshot."""
 
     def unavailable(path, workspace_dir):
         raise RuntimeError("lock table unavailable")
@@ -182,6 +183,9 @@ async def test_a_lock_that_cannot_be_taken_does_not_let_an_undoable_write_throug
 
     assert d.calls == []  # never dispatched
     assert tool_results[0].result is None and "write_file refused" in tool_results[0].error
+    # the reason given is the lock, not a symlink that was never retargeted
+    assert "the path lock for 'notes.txt' could not be taken" in tool_results[0].error
+    assert "different file" not in tool_results[0].error
     assert store.events == [("open", "write_file", "dag_node"), ("close", "id-write_file", "blocked")]
     assert snaps.captured == []
     assert [rec.getMessage() for rec in caplog.records if "no path lock" in rec.getMessage()] == [
@@ -336,3 +340,9 @@ async def test_revert_does_not_wait_forever_for_the_path_lock(tmp_path, monkeypa
     assert not result.success and "still in flight" in result.message
     assert target.read_text(encoding="utf-8") == "ours"  # nothing was changed
     assert compensation.write_path_key("busy.txt", str(tmp_path)) not in compensation._write_path_locks
+
+
+def test_the_two_lock_waits_are_the_bounds_that_were_decided():
+    # Seconds a person waits: every other test patches these, so a typo (3000.0) would pass unnoticed.
+    assert runner_module._WRITE_LOCK_WAIT_SECONDS == 30.0
+    assert compensation._REVERT_LOCK_WAIT_SECONDS == 5.0
