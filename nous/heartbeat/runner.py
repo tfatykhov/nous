@@ -199,11 +199,7 @@ class HeartbeatRunner:
                 # last_dag_tick reflects a successful tick and any exception
                 # is routed through the structured failure log rather than
                 # silently dropped as an unhandled task exception.
-                try:
-                    _pending.result()
-                    self._last_dag_tick = datetime.now(UTC)
-                except Exception:
-                    logger.exception("F038: DAG pending tick raised (already completed at shutdown)")
+                self._record_dag_tick(_pending, "F038: DAG pending tick raised (already completed at shutdown)")
             else:
                 # Fix 8 (Codex P1 round-6): honour any budget already spent
                 # by _dag_loop's own shutdown drain.  If _dag_loop set a
@@ -243,10 +239,7 @@ class HeartbeatRunner:
                     except (asyncio.CancelledError, Exception):
                         pass
                 else:
-                    try:
-                        _pending.result()
-                    except Exception:
-                        logger.exception("F038: Timed-out DAG tick raised during shutdown drain")
+                    self._record_dag_tick(_pending, "F038: Timed-out DAG tick raised during shutdown drain")
 
         # Clean up dedicated runner and its API client
         if self._dedicated_runner is not None:
@@ -351,11 +344,7 @@ class HeartbeatRunner:
                 # (b) any exception is logged via the structured failure path
                 # rather than emitted as an unhandled task exception.
                 if self._dag_pending_task is not None:  # done — consume it
-                    try:
-                        self._dag_pending_task.result()
-                        self._last_dag_tick = datetime.now(UTC)
-                    except Exception:
-                        logger.exception("F038: DAG tick raised after timing out")
+                    self._record_dag_tick(self._dag_pending_task, "F038: DAG tick raised after timing out")
                 self._dag_pending_task = None  # clear any completed reference
 
                 async with self._dag_tick_lock:
@@ -402,6 +391,7 @@ class HeartbeatRunner:
                                 asyncio.shield(inner_task),
                                 timeout=self._settings.dag_tick_timeout,
                             )
+                            self._last_dag_tick = datetime.now(UTC)
                         except TimeoutError:
                             logger.warning(
                                 "F038: In-flight DAG tick did not finish within "
@@ -418,7 +408,6 @@ class HeartbeatRunner:
                             logger.exception("F038: DAG orchestrator tick failed during shutdown drain")
                         if not _shutdown_drain_timed_out:
                             self._dag_pending_task = None
-                        self._last_dag_tick = datetime.now(UTC)
                         raise
                     except Exception:
                         logger.exception("F038: DAG orchestrator tick failed")
@@ -431,6 +420,18 @@ class HeartbeatRunner:
                 break
             except Exception:
                 logger.exception("F038: DAG tick loop iteration failed")
+
+    def _record_dag_tick(self, task: asyncio.Task, failure_message: str) -> None:
+        """Record a finished DAG tick: a success advances last_dag_tick,
+        anything else is logged. Never raises — ``task.result()`` would
+        re-raise a cancelled tick's CancelledError into the caller, past
+        every ``except Exception``.
+        """
+        failure = asyncio.CancelledError() if task.cancelled() else task.exception()
+        if failure is None:
+            self._last_dag_tick = datetime.now(UTC)
+        else:
+            logger.error(failure_message, exc_info=failure)
 
     async def _record_run_stats(
         self,
