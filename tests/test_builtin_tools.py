@@ -5,10 +5,13 @@ the pytest tmp_path fixture for workspace isolation. Platform-aware
 commands use python -c for cross-platform compatibility.
 """
 
+import contextlib
+import hashlib
 import sys
 
 import pytest
 
+from nous.api import call_outcome
 from nous.api.builtin_tools import (
     _MAX_FILE_SIZE,
     bash_tool,
@@ -20,6 +23,23 @@ from nous.api.builtin_tools import (
 def _extract_text(result: dict) -> str:
     """Extract text from MCP-format response."""
     return result["content"][0]["text"]
+
+
+@contextlib.contextmanager
+def _snapshot_bound(target, prior: str):
+    """Bind the call to a compensation snapshot of ``target`` holding
+    ``prior``, as the runner does for a write that can be reverted: only
+    such a write takes the atomic compare-and-replace path."""
+    token = call_outcome._current.set(
+        call_outcome.CallOutcome(
+            write_target=str(target.resolve()),
+            write_expected=hashlib.sha256(prior.encode("utf-8")).hexdigest(),
+        )
+    )
+    try:
+        yield
+    finally:
+        call_outcome._current.reset(token)
 
 
 # ---------------------------------------------------------------------------
@@ -322,8 +342,8 @@ class TestWriteFileTool:
 
     @pytest.mark.asyncio
     async def test_write_file_atomic_preserves_original_on_failure(self, tmp_path, monkeypatch):
-        """Codex P1 on #652: write_file is atomic — an I/O failure mid-write
-        (e.g. ENOSPC during fsync) must leave the original file untouched."""
+        """Codex P1 on #652: a snapshotted write_file is atomic — an I/O failure
+        mid-write (e.g. ENOSPC during fsync) must leave the original file untouched."""
         import errno
         import os
 
@@ -339,11 +359,12 @@ class TestWriteFileTool:
 
         monkeypatch.setattr(os, "fsync", failing_fsync)
 
-        result = await write_file_tool(
-            path="existing.txt",
-            content="new content that should not stick",
-            _workspace_dir=str(tmp_path),
-        )
+        with _snapshot_bound(target, original_content):
+            result = await write_file_tool(
+                path="existing.txt",
+                content="new content that should not stick",
+                _workspace_dir=str(tmp_path),
+            )
 
         text = _extract_text(result)
         assert "Error" in text
@@ -362,11 +383,12 @@ class TestWriteFileTool:
         target.write_text("#!/bin/bash\necho hello", encoding="utf-8")
         target.chmod(0o755)
 
-        result = await write_file_tool(
-            path="executable.sh",
-            content="#!/bin/bash\necho updated",
-            _workspace_dir=str(tmp_path),
-        )
+        with _snapshot_bound(target, "#!/bin/bash\necho hello"):
+            result = await write_file_tool(
+                path="executable.sh",
+                content="#!/bin/bash\necho updated",
+                _workspace_dir=str(tmp_path),
+            )
         text = _extract_text(result)
         assert "written successfully" in text.lower()
 

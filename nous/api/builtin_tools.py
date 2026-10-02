@@ -564,11 +564,26 @@ async def write_file_tool(
     """
     try:
         target = _validate_path(path, _workspace_dir)
+        outcome = current_outcome()
+        if outcome is None or outcome.write_target is None:
+            # No snapshot is bound to this call (compensation off, or a call
+            # nothing can revert): write in place exactly as before Phase 2.8
+            # -- the same file, so the same inode, owner, mode and hard links.
+            await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
+            write = asyncio.to_thread(target.write_text, content, encoding="utf-8")
+            if outcome is not None and outcome.write_lock is not None:
+                # Compensation is wired and the runner holds this path's lock:
+                # as for the snapshotted write below, it stays held until the
+                # thread ends (compensation.release_write_path_lock_after).
+                outcome.write_worker = asyncio.ensure_future(write)
+                await asyncio.shield(outcome.write_worker)
+            else:
+                await write
+            return _mcp_response(f"File written successfully: {target}\nSize: {len(content):,} bytes")
         # Phase 2.8: a snapshotted write is bound to the path its snapshot
         # recorded AND to the state it recorded there -- a change made since
         # (another writer) is refused, never overwritten and later "restored"
         # away by a revert.
-        outcome = current_outcome()
         expected: str | None = None
         fence: WriteFence | None = None
         if outcome is not None and outcome.write_target is not None:
