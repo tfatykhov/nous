@@ -481,3 +481,67 @@ async def test_a_card_dropped_by_the_cap_is_attributed_in_the_retrieval_trace(ca
     assert [p.name for p in selected] == ["howto-deploy"]
     dropped = next(c for c in trace.to_dict()["candidates"] if c["id"] == str(card.id))
     assert (dropped["disposition"], dropped["disposition_stage"]) == ("sliced_off", "strategy_card_cap")
+
+
+# ---------------------------------------------------------------------------
+# Invariant 5 — a card body is rendered as context, not as a skill to follow
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_served_card_is_framed_as_context_and_a_how_to_procedure_is_not(card_heart, session):
+    howto = await _add(session, card_heart, "howto-deploy", age_minutes=60)
+    card = await _add(session, card_heart, "card-0", kind="strategy")
+    engine = _engine(
+        card_heart,
+        _seeded_brain((card, 0.9), (howto, 0.5)),
+        strategy_cards_retrieval_enabled=True,
+    )
+
+    recommended = _section(await _build(engine, card_heart, session), "Recommended Procedures")
+    howto_block, card_block = recommended.split("### card-0 (strategy)")
+
+    assert card_block.lstrip().startswith("(Lesson distilled from one of your past decisions")
+    assert "not an instruction" in card_block and "body of card-0" in card_block
+    assert "not an instruction" not in howto_block
+
+
+def test_an_oversized_card_keeps_its_framing_and_is_never_stubbed_with_a_load_pointer():
+    """A how-to procedure over the per-item cap becomes a stub that tells the model to
+    call get_procedure and "load the steps before acting". A card must not: it is
+    bounded where it is stored, and it is not a set of steps."""
+    from nous.heart.schemas import ProcedureDetail
+
+    def _detail(name: str, kind: str | None) -> ProcedureDetail:
+        return ProcedureDetail(
+            id=uuid4(),
+            agent_id="a",
+            name=name,
+            domain="ops",
+            description="d" * 200,
+            goals=[],
+            core_patterns=[],
+            core_tools=[],
+            core_concepts=[],
+            implementation_notes=["lesson " * 100],
+            activation_count=0,
+            success_count=0,
+            failure_count=0,
+            neutral_count=0,
+            last_activated=None,
+            effectiveness=None,
+            tags=[],
+            active=True,
+            created_at=datetime.now(UTC),
+            kind=kind,
+        )
+
+    engine = ContextEngine(MagicMock(), MagicMock(), Settings(_env_file=None), identity_prompt="Test")
+    howto_block, card_block = engine._format_procedure_bodies(
+        [_detail("howto-big", None), _detail("card-big", "strategy")],
+        300,
+    )
+
+    assert "get_procedure('howto-big')" in howto_block
+    assert "get_procedure(" not in card_block
+    assert "not an instruction" in card_block and "lesson lesson" in card_block

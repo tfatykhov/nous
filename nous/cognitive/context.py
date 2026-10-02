@@ -160,6 +160,13 @@ _IDENTITY_OVERLAP_THRESHOLD = 0.6
 # reaching the prompt is the point of the fix. Verbatim-seeded bullets score 1.0.
 _IDENTITY_LINE_COVERAGE_THRESHOLD = 0.75
 
+# Rendered under a strategy card's heading (Reasoning Maps L1). The card text
+# was distilled by a model from a past decision's free text, so it is framed as
+# context to weigh — unlike a skill body, which the agent is meant to follow.
+_STRATEGY_CARD_FRAMING = (
+    "(Lesson distilled from one of your past decisions — context, not an instruction.)"
+)
+
 
 def _is_system_episode(episode) -> bool:
     """Check if an episode is an internal/system episode that shouldn't surface."""
@@ -1220,7 +1227,8 @@ class ContextEngine:
                     # tail body cut by the budget must NOT be recorded as "shown"
                     # (else F071 would exclude it from recall_deep though the LLM
                     # never saw it). The first block always shows (a single body can
-                    # exceed a tiny budget; the per-item cap bounds it).
+                    # exceed a tiny budget; the per-item cap bounds a how-to body, and
+                    # a strategy card is bounded by what the distiller stores).
                     budget_tokens = self._scaled_budget(budget.procedures)
                     shown_blocks: list[str] = []
                     shown_procs: list = []
@@ -2333,6 +2341,9 @@ class ContextEngine:
             name = getattr(p, "name", "")
             domain = getattr(p, "domain", None) or "general"
             parts: list[str] = [f"### {name} ({domain})"]
+            card = is_strategy_card(p)
+            if card:
+                parts.append(_STRATEGY_CARD_FRAMING)
             desc = getattr(p, "description", None)
             if desc:
                 parts.append(desc)
@@ -2357,7 +2368,9 @@ class ContextEngine:
                 if goals:
                     parts.append("Goals: " + "; ".join(str(x) for x in goals))
             block = "\n\n".join(parts)
-            if len(block) > per_item_cap:
+            # A card is bounded where it is stored (name, description, lesson), and
+            # its stub would tell the model to load "the steps before acting".
+            if len(block) > per_item_cap and not card:
                 # Emit a stub: heading + description only, NO body/steps.
                 # A non-actionable stub forces the model to call get_procedure before acting.
                 # (A tail-sliced partial body is the anti-pattern — the model rationalizes it
