@@ -771,7 +771,7 @@ The dashboard is a Svelte SPA under `dashboard-app/`. Build with `cd dashboard-a
 | GET | `/dashboard/execution` | Harness dashboard: the durable execution ledger (`window`, `context`, `status`, `effect`, `q`, `limit`, `before` keyset); `attention` = keyed sends with an unknown outcome |
 | GET | `/dashboard/harness` | Harness dashboard: per-rule warn/enforce evidence (offered-tool rule, context policy, claim checks), grouped by each event's mode, never summed across rules |
 | GET | `/dashboard/attention` | Harness dashboard: questions waiting + sends in doubt (same predicates as the DAG and Ledger tabs) for the nav badges and the Overview strip |
-| GET | `/heartbeat/status` | Heartbeat status, checks, budget |
+| GET | `/heartbeat/status` | Heartbeat status, checks, budget, and DAG tick liveness: `last_dag_tick` (last tick that succeeded) and `dag_tick_pending_since` (start of the tick in flight, null when none) |
 | POST | `/heartbeat/trigger` | Force immediate heartbeat tick |
 | PUT | `/heartbeat/config` | Update heartbeat intervals/budget at runtime |
 | POST | `/heartbeat/check/{name}/trigger` | Force a specific check to run |

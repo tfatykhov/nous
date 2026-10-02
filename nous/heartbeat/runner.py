@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import Counter
+from collections.abc import Callable
 from datetime import UTC, date, datetime
 from uuid import uuid4
 
@@ -42,6 +43,14 @@ logger = logging.getLogger(__name__)
 # straight to "high". _should_escalate gates the timing per current urgency.
 _ESCALATION_LADDER: dict[str, str] = {"low": "normal", "normal": "high", "high": "high"}
 
+# A DAG tick still running after this many dag_tick_timeout periods is treated
+# as hung and reported (HeartbeatRunner._escalate_dag_stall). It is a reporting
+# threshold, not proof: a tick is as slow as the slowest thing it awaits.
+_DAG_STALL_TIMEOUTS = 3
+
+# Telegram rejects a text over 4096 characters (nous/dag/delivery.py cuts at the same length).
+_TELEGRAM_MAX_CHARS = 3900
+
 
 def _cancelled_by_sibling_run(exc: BaseException) -> bool:
     """Whether ``exc`` is a run cancelled because a SIBLING run disabled the check."""
@@ -60,6 +69,32 @@ def _is_final_run(check: BaseCheck, sibling_cancelled: bool, outcome: dict[str, 
     if "final_run" in outcome:
         return outcome["final_run"]
     return getattr(check, "_self_disabled", False) is True and not sibling_cancelled
+
+
+def _await_chain(task: asyncio.Task) -> str:
+    """Where a suspended task is waiting, outermost coroutine first.
+
+    Thread stacks cannot show this — a task waiting on an await is on no
+    thread — and ``Task.get_stack()`` stops at the outermost coroutine.
+    """
+    hops: list[str] = []
+    awaitable = task.get_coro()
+    while awaitable is not None:
+        frame = getattr(awaitable, "cr_frame", None) or getattr(awaitable, "gi_frame", None)
+        if frame is None:
+            break
+        hops.append(f"{frame.f_code.co_name} ({frame.f_code.co_filename}:{frame.f_lineno})")
+        awaitable = getattr(awaitable, "cr_await", None) or getattr(awaitable, "gi_yieldfrom", None)
+    return " > ".join(hops) or "unknown"
+
+
+def _cancel_requested() -> bool:
+    """Whether the running task itself is being cancelled (stop(), event-loop
+    teardown). False when a CancelledError only came out of something the
+    task awaited: that is the awaited thing's failure, not a request to stop.
+    """
+    task = asyncio.current_task()
+    return task is None or task.cancelling() > 0
 
 
 class HeartbeatRunner:
@@ -104,6 +139,17 @@ class HeartbeatRunner:
         # The next iteration checks this to maintain single-flight even after
         # the lock has been released by the timeout path.
         self._dag_pending_task: asyncio.Task | None = None
+        # When the tick in _dag_pending_task started. Never cleared: readers
+        # go through dag_tick_pending_since, which is None once it finishes.
+        self._dag_pending_since: datetime | None = None
+        # The same start on the event loop's monotonic clock — the stall
+        # clock, so a wall-clock step can never look like a hung tick — and
+        # whether that tick has been escalated already.
+        self._dag_pending_started: float = 0.0
+        self._dag_stall_escalated = False
+        # What to do about a DAG tick treated as hung, besides reporting it.
+        # Injected from outside, like dag_orchestrator above; None = report only.
+        self.dag_stall_action: Callable[[str], None] | None = None
         # Absolute loop.time() deadline set when _dag_loop begins draining an
         # in-flight tick during shutdown.  stop() reads this so the two drain
         # windows share one total budget instead of each taking dag_tick_timeout.
@@ -199,11 +245,7 @@ class HeartbeatRunner:
                 # last_dag_tick reflects a successful tick and any exception
                 # is routed through the structured failure log rather than
                 # silently dropped as an unhandled task exception.
-                try:
-                    _pending.result()
-                    self._last_dag_tick = datetime.now(UTC)
-                except Exception:
-                    logger.exception("F038: DAG pending tick raised (already completed at shutdown)")
+                self._record_dag_tick(_pending, "F038: DAG pending tick raised (already completed at shutdown)")
             else:
                 # Fix 8 (Codex P1 round-6): honour any budget already spent
                 # by _dag_loop's own shutdown drain.  If _dag_loop set a
@@ -243,10 +285,7 @@ class HeartbeatRunner:
                     except (asyncio.CancelledError, Exception):
                         pass
                 else:
-                    try:
-                        _pending.result()
-                    except Exception:
-                        logger.exception("F038: Timed-out DAG tick raised during shutdown drain")
+                    self._record_dag_tick(_pending, "F038: Timed-out DAG tick raised during shutdown drain")
 
         # Clean up dedicated runner and its API client
         if self._dedicated_runner is not None:
@@ -304,7 +343,9 @@ class HeartbeatRunner:
                 await self._maybe_tune()
 
             except asyncio.CancelledError:
-                break
+                if _cancel_requested():
+                    break
+                logger.exception("Heartbeat tick was cancelled from within — the loop continues")
             except Exception:
                 logger.exception("Heartbeat tick failed")
 
@@ -322,10 +363,15 @@ class HeartbeatRunner:
         is shielded from cancellation so that CancelledError cannot land
         between a primitive-creation commit and the node's running
         transition (Codex P1: untracked subtask / duplicate launch).
+
+        A tick still pending after its deadline is reported once it has been
+        pending for _DAG_STALL_TIMEOUTS x dag_tick_timeout: on the way through
+        the sleep between two passes (_sleep_one_dag_interval), or by the pass
+        on which that moment falls. The report never brings a pass forward.
         """
         while self._running:
             try:
-                await asyncio.sleep(self._settings.dag_tick_interval)
+                await self._sleep_one_dag_interval()
                 if self.dag_orchestrator is None:
                     continue
 
@@ -342,26 +388,35 @@ class HeartbeatRunner:
                 # checking the pending-task reference (the lock was released
                 # when the timeout path exited `async with`).
                 if self._dag_pending_task is not None and not self._dag_pending_task.done():
-                    logger.warning(
-                        "F038: DAG tick skipped — previous tick timed out and is still running in background",
-                    )
+                    pending_for = asyncio.get_running_loop().time() - self._dag_pending_started
+                    if (
+                        not self._dag_stall_escalated
+                        and pending_for >= _DAG_STALL_TIMEOUTS * self._settings.dag_tick_timeout
+                    ):
+                        self._dag_stall_escalated = True
+                        await self._escalate_dag_stall(pending_for)
+                    # Look again before saying so: the tick can return while
+                    # its report is being sent. The next pass harvests it.
+                    if not self._dag_pending_task.done():
+                        logger.warning(
+                            "F038: DAG tick skipped — previous tick timed out and is still running in background",
+                        )
                     continue
                 # Fix 3 (Codex P2): harvest the result of a completed pending
                 # task so that (a) last_dag_tick reflects its success and
                 # (b) any exception is logged via the structured failure path
                 # rather than emitted as an unhandled task exception.
                 if self._dag_pending_task is not None:  # done — consume it
-                    try:
-                        self._dag_pending_task.result()
-                        self._last_dag_tick = datetime.now(UTC)
-                    except Exception:
-                        logger.exception("F038: DAG tick raised after timing out")
+                    self._record_dag_tick(self._dag_pending_task, "F038: DAG tick raised after timing out")
                 self._dag_pending_task = None  # clear any completed reference
 
                 async with self._dag_tick_lock:
                     inner_task: asyncio.Task = asyncio.create_task(self.dag_orchestrator.tick())
                     # Track for post-timeout single-flight (see check above).
                     self._dag_pending_task = inner_task
+                    self._dag_pending_since = datetime.now(UTC)
+                    self._dag_pending_started = asyncio.get_running_loop().time()
+                    self._dag_stall_escalated = False
                     try:
                         # Enforce the configured deadline. asyncio.wait_for
                         # cancels only the shield wrapper on timeout — the
@@ -374,6 +429,14 @@ class HeartbeatRunner:
                             timeout=self._settings.dag_tick_timeout,
                         )
                     except TimeoutError:
+                        if inner_task.done():
+                            # Not the deadline. wait_for passes through what
+                            # the tick itself raised, and a builtin
+                            # TimeoutError from inside it (a connect timeout,
+                            # socket.timeout) has the deadline's type.
+                            self._record_dag_tick(inner_task, "F038: DAG orchestrator tick failed")
+                            self._dag_pending_task = None
+                            continue
                         logger.error(
                             "F038: DAG orchestrator tick timed out after %ds — "
                             "tick is still running in background; "
@@ -384,6 +447,13 @@ class HeartbeatRunner:
                         # reference so the single-flight check above prevents
                         # a new tick from starting while it is still running.
                     except asyncio.CancelledError:
+                        if inner_task.cancelled() and not _cancel_requested():
+                            # The tick itself finished cancelled (something
+                            # it awaited was cancelled elsewhere). Nobody
+                            # asked this loop to stop: a failed tick.
+                            logger.error("F038: DAG orchestrator tick was cancelled from within — a failed tick")
+                            self._dag_pending_task = None
+                            continue
                         # Outer task was cancelled. inner_task is STILL
                         # RUNNING — drain it with a bounded deadline so
                         # shutdown cannot hang indefinitely on a hung DB or
@@ -402,23 +472,30 @@ class HeartbeatRunner:
                                 asyncio.shield(inner_task),
                                 timeout=self._settings.dag_tick_timeout,
                             )
+                            self._last_dag_tick = datetime.now(UTC)
                         except TimeoutError:
-                            logger.warning(
-                                "F038: In-flight DAG tick did not finish within "
-                                "%ds during shutdown drain — stop() will drain it",
-                                self._settings.dag_tick_timeout,
-                            )
-                            # Fix 5 (Codex P1 round-4): do NOT clear
-                            # _dag_pending_task when the drain times out.
-                            # inner_task is still running; stop() reads the
-                            # reference and drains it via asyncio.wait before
-                            # shutdown_components() closes the DB pool.
-                            _shutdown_drain_timed_out = True
+                            if inner_task.done():
+                                # The tick finished: the TimeoutError is its
+                                # own, as in the deadline handler above.
+                                self._record_dag_tick(
+                                    inner_task, "F038: DAG orchestrator tick failed during shutdown drain"
+                                )
+                            else:
+                                logger.warning(
+                                    "F038: In-flight DAG tick did not finish within "
+                                    "%ds during shutdown drain — stop() will drain it",
+                                    self._settings.dag_tick_timeout,
+                                )
+                                # Fix 5 (Codex P1 round-4): do NOT clear
+                                # _dag_pending_task when the drain times out.
+                                # inner_task is still running; stop() reads the
+                                # reference and drains it via asyncio.wait before
+                                # shutdown_components() closes the DB pool.
+                                _shutdown_drain_timed_out = True
                         except Exception:
                             logger.exception("F038: DAG orchestrator tick failed during shutdown drain")
                         if not _shutdown_drain_timed_out:
                             self._dag_pending_task = None
-                        self._last_dag_tick = datetime.now(UTC)
                         raise
                     except Exception:
                         logger.exception("F038: DAG orchestrator tick failed")
@@ -428,9 +505,76 @@ class HeartbeatRunner:
                         self._dag_pending_task = None
 
             except asyncio.CancelledError:
-                break
+                if _cancel_requested():
+                    break
+                logger.exception("F038: DAG tick loop iteration was cancelled from within — the loop continues")
             except Exception:
                 logger.exception("F038: DAG tick loop iteration failed")
+
+    async def _sleep_one_dag_interval(self) -> None:
+        """Sleep one tick interval. On the way, report a pending tick that reaches its stall threshold.
+
+        The sleep is split in two only for a pending tick, not reported yet,
+        that reaches _DAG_STALL_TIMEOUTS x dag_tick_timeout before the interval
+        is over. Both parts together are one interval, so the next pass, and
+        with it the next tick, is never brought forward by a report.
+        """
+        interval = self._settings.dag_tick_interval
+        pending = self._dag_pending_task
+        if pending is not None and not pending.done() and not self._dag_stall_escalated:
+            loop = asyncio.get_running_loop()
+            report_at = self._dag_pending_started + _DAG_STALL_TIMEOUTS * self._settings.dag_tick_timeout
+            until_report = max(report_at - loop.time(), 0.0)
+            if until_report < interval:
+                await asyncio.sleep(until_report)
+                # The clock is not read again: a timer may fire a clock tick
+                # early, and the tick is due now unless it has returned.
+                if not pending.done():
+                    self._dag_stall_escalated = True
+                    await self._escalate_dag_stall(loop.time() - self._dag_pending_started)
+                interval -= until_report
+        await asyncio.sleep(interval)
+
+    async def _escalate_dag_stall(self, pending_for: float) -> None:
+        """The pending DAG tick is treated as hung: say so, tell a person, then run the stall action, if any.
+
+        Every later tick is skipped behind it, and nothing but stop() ever
+        cancels it (cancelling a shielded tick mid-launch is unsafe), so no
+        DAG advances again until it returns or the process restarts. The log
+        line carries the tick's await chain because nothing else can show
+        where it is waiting.
+        """
+        try:
+            waiting_at = _await_chain(self._dag_pending_task)
+        except Exception:  # it reads other libraries' coroutine objects
+            logger.exception("F038: could not read where the pending DAG tick is waiting")
+            waiting_at = "unknown"
+        reason = (
+            f"F038: DAG tick has not returned after {pending_for:.0f}s "
+            f"({_DAG_STALL_TIMEOUTS} x dag_tick_timeout={self._settings.dag_tick_timeout}s); "
+            f"every tick since it started at {self._dag_pending_since} was skipped. "
+            f"Waiting at: {waiting_at}"
+        )
+        logger.critical("%s", reason)
+        # Nothing reads a CRITICAL line, so a person is told as well. The
+        # sender returns at once when Telegram is not configured, and it only
+        # logs a send that fails or that Telegram rejects; the line above has
+        # the text in full.
+        await self._send_telegram(f"[Heartbeat] {reason}"[:_TELEGRAM_MAX_CHARS])
+        if self.dag_stall_action is not None:
+            self.dag_stall_action(reason)
+
+    def _record_dag_tick(self, task: asyncio.Task, failure_message: str) -> None:
+        """Record a finished DAG tick: a success advances last_dag_tick,
+        anything else is logged. Never raises for a finished task —
+        ``task.result()`` would re-raise a cancelled tick's CancelledError
+        into the caller, past every ``except Exception``.
+        """
+        failure = asyncio.CancelledError() if task.cancelled() else task.exception()
+        if failure is None:
+            self._last_dag_tick = datetime.now(UTC)
+        else:
+            logger.error(failure_message, exc_info=failure)
 
     async def _record_run_stats(
         self,
@@ -609,6 +753,27 @@ class HeartbeatRunner:
                 logger.warning("Heartbeat check '%s' timed out", check.name)
                 # F034.5: Record timeout as error for dynamic checks
                 await self._record_run_stats(check, success=False, error_msg="timeout")
+                run_succeeded = False
+            except asyncio.CancelledError:
+                if _cancel_requested():
+                    raise
+                # Something awaited for this check was cancelled elsewhere.
+                # Nobody asked this loop to stop: a failed run of this check.
+                check.mark_failure()
+                # The arm also covers the stats write that follows a successful run.
+                successful_checks.discard(check.name)
+                if run_succeeded:
+                    # It was that write. Whether its record landed is unknown,
+                    # and the write is a relative increment: one run gets no
+                    # second write (see NO RETRY in _record_run_stats).
+                    logger.error(
+                        "Heartbeat check '%s': the write of its success stats was cancelled from within — "
+                        "the record may or may not have landed and is not written again",
+                        check.name,
+                    )
+                else:
+                    logger.error("Heartbeat check '%s' was cancelled from within — a failed run", check.name)
+                    await self._record_run_stats(check, success=False, error_msg="cancelled")
                 run_succeeded = False
             except Exception as exc:
                 check.mark_failure()
@@ -1100,7 +1265,7 @@ class HeartbeatRunner:
         try:
             client = self._http or httpx.AsyncClient()
             try:
-                await client.post(
+                response = await client.post(
                     url,
                     json={"chat_id": chat_id, "text": text},
                     timeout=10,
@@ -1108,6 +1273,14 @@ class HeartbeatRunner:
             finally:
                 if self._http is None:
                     await client.aclose()
+            # Telegram answers a wrong token, a rate limit or a bad request
+            # with an HTTP error, not an exception. Only the status is
+            # logged: the URL holds the bot token, so neither it, the request
+            # nor an httpx error text may reach a log line. (The isinstance:
+            # a mocked client answers with no integer status.)
+            status = getattr(response, "status_code", None)
+            if isinstance(status, int) and status >= 400:
+                logger.warning("Heartbeat Telegram notification rejected: HTTP %s", status)
         except Exception:
             logger.warning("Heartbeat Telegram notification failed")
 
@@ -1245,6 +1418,18 @@ class HeartbeatRunner:
     @property
     def last_dag_tick(self) -> datetime | None:
         return self._last_dag_tick
+
+    @property
+    def dag_tick_pending_since(self) -> datetime | None:
+        """When the in-flight DAG tick started, or None when none is in flight.
+
+        Read next to last_dag_tick: a tick that never returns leaves
+        last_dag_tick stale and this value old.
+        """
+        task = self._dag_pending_task
+        if task is None or task.done():
+            return None
+        return self._dag_pending_since
 
     def get_stats(self) -> dict:
         """F035.1: Return heartbeat runner statistics."""
