@@ -99,6 +99,18 @@ async def test_unsnapshotted_write_keeps_the_same_file(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_content_is_written_as_utf_8(tmp_path):
+    """Whatever the locale's encoding, the file holds the content as UTF-8,
+    as Path.write_text(encoding="utf-8") wrote it before #652."""
+    content = "héllo 世界"
+
+    result = await write_file_tool("u.txt", content, _workspace_dir=str(tmp_path))
+
+    assert not result.get("is_error"), result
+    assert (tmp_path / "u.txt").read_bytes() == content.encode("utf-8")
+
+
+@pytest.mark.asyncio
 async def test_unsnapshotted_write_keeps_a_held_path_lock_until_its_thread_ends(tmp_path, monkeypatch):
     """With compensation wired the runner holds the path's lock around every
     write_file. A cancelled call returns before its thread does, so the
@@ -131,6 +143,27 @@ async def test_unsnapshotted_write_keeps_a_held_path_lock_until_its_thread_ends(
     await asyncio.sleep(0)  # the done-callback runs on the next loop pass
     assert not lock.locked()
     assert (tmp_path / "f.txt").read_text(encoding="utf-8") == "late"
+
+
+@pytest.mark.asyncio
+async def test_a_write_with_no_lock_held_is_awaited_by_the_call(tmp_path):
+    """Both loops give every call an outcome; with compensation off it holds
+    no lock. Such a write is awaited by the call itself, as before #652, and
+    not handed to a task of its own: a call cancelled before its thread has
+    started then never writes."""
+    from nous.api import call_outcome
+    from nous.api.call_outcome import CallOutcome
+
+    outcome = CallOutcome()
+    token = call_outcome._current.set(outcome)
+    try:
+        result = await write_file_tool("f.txt", "x", _workspace_dir=str(tmp_path))
+    finally:
+        call_outcome._current.reset(token)
+
+    assert not result.get("is_error"), result
+    assert (tmp_path / "f.txt").read_text(encoding="utf-8") == "x"
+    assert outcome.write_worker is None
 
 
 def _stream_with_the_real_handler(tmp_path, store):
@@ -182,7 +215,8 @@ async def test_stream_timeout_mid_write_keeps_the_lock_until_the_thread_ends(tmp
     until that thread ends: the next write must not snapshot a half-written file."""
     entered, gate = _hold_the_write(monkeypatch)
     store = _FakeStore()
-    runner, _, _ = _stream_with_the_real_handler(tmp_path, store)  # tool_timeout is 0.05 s in this harness
+    runner, _, _ = _stream_with_the_real_handler(tmp_path, store)
+    runner._settings.tool_timeout = 1
     key = compensation.write_path_key("late.txt", str(tmp_path))
     runner._call_api_stream = _streamed_write("late.txt")
     try:

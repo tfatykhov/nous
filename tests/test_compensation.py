@@ -2921,7 +2921,12 @@ async def test_write_file_over_a_fifo_is_refused_without_blocking(tmp_path) -> N
     from nous.api.builtin_tools import write_file_tool
 
     os.mkfifo(tmp_path / "pipe")
-    result = await asyncio.wait_for(write_file_tool("pipe", "x", _workspace_dir=str(tmp_path)), timeout=5)
+    try:
+        result = await asyncio.wait_for(write_file_tool("pipe", "x", _workspace_dir=str(tmp_path)), timeout=5)
+    finally:
+        # A reader, so that a write that did block in open() can end and a
+        # failure here cannot hang the whole run.
+        os.close(os.open(tmp_path / "pipe", os.O_RDONLY | os.O_NONBLOCK))
     assert result.get("is_error") is True
     snap = await asyncio.wait_for(snapshot_for_write_file("pipe", str(tmp_path)), timeout=5)
     assert snap.get("capture_error")
