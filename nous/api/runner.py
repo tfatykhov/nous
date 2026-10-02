@@ -100,6 +100,12 @@ class Suppressed:
 MAX_CONVERSATIONS = 100
 MAX_HISTORY_MESSAGES = 20
 
+# Harness Phase 2.8: how long a write_file waits for its path's lock before
+# the call is refused. A legitimate holder (a snapshot insert, one file write,
+# a ledger close) is done in well under a second; a lock held this long is
+# pinned by a write whose thread never returned.
+_WRITE_LOCK_WAIT_SECONDS = 30.0
+
 # Re-export StreamEvent for backward compatibility
 __all__ = ["AgentRunner", "StreamEvent", "FRAME_TOOLS"]
 
@@ -542,14 +548,35 @@ class AgentRunner:
         snapshot capture AND its write, in every context. Two writes to one
         path otherwise both snapshot the same prior content, and reverting
         the later one would erase the earlier write while passing the stale
-        check. Keyed on the repaired path the handler will write."""
-        if tool_name != "write_file":
+        check. Keyed on the repaired path the handler will write.
+
+        None when there is nothing to serialize: compensation is not wired
+        (no snapshot store, so no snapshot and no revert), or no key can be
+        computed for the path (a NUL byte, an unencodable name -- write_file
+        refuses such a path itself). The wait is bounded: a lock still held
+        after ``_WRITE_LOCK_WAIT_SECONDS`` refuses the call, and that
+        SnapshotBlocksDispatch is the only thing raised here. Any other
+        failure is logged and means no lock, so the snapshot capture that
+        follows still runs -- and refuses an undoable write it has no lock for."""
+        if tool_name != "write_file" or self._snap_store is None:
             return None
-        path = self._handler_args(tool_name, tool_input).get("path")
-        if not isinstance(path, str) or not path:
+        path = None
+        try:
+            path = self._handler_args(tool_name, tool_input).get("path")
+            if not isinstance(path, str) or not path:
+                return None
+            lock = write_path_lock(path, self._workspace_dir)
+            await asyncio.wait_for(lock.acquire(), timeout=_WRITE_LOCK_WAIT_SECONDS)
+        except TimeoutError:
+            from nous.api.compensation import SnapshotBlocksDispatch
+
+            raise SnapshotBlocksDispatch(
+                f"write_file refused: another write to {path!r} still held its lock after "
+                f"{_WRITE_LOCK_WAIT_SECONDS:g}s; nothing was written"
+            ) from None
+        except Exception as exc:
+            logger.warning("Harness Phase 2.8: no path lock for write_file %r (%s: %s)", path, type(exc).__name__, exc)
             return None
-        lock = write_path_lock(path, self._workspace_dir)
-        await lock.acquire()
         return lock
 
     def _written_state_persister(self, tool_name: str, entry_id: Any) -> Any:
@@ -2397,15 +2424,21 @@ class AgentRunner:
                             )
                             # Phase 2.8: a write_file's snapshot and its write share one
                             # per-path critical section (see compensation.write_path_lock).
-                            _write_lock = await self._acquire_write_lock(tc["name"], dispatch_input)
+                            # Taken inside the try: a lock that cannot be had in time
+                            # refuses the call as a snapshot that cannot be captured
+                            # does, and nothing before dispatch can raise out of the loop.
+                            _write_lock = None
                             try:
                                 # Phase 2.8: capture pre-dispatch snapshot for compensable
                                 # calls in background contexts. Fail-open except in undoable
                                 # contexts, which refuse rather than proceed without a snapshot.
                                 _snap_blocked: str | None = None
                                 _snapshotted = False
-                                outcome = CallOutcome(write_lock=_write_lock)
+                                outcome = CallOutcome()
                                 try:
+                                    _write_lock = outcome.write_lock = await self._acquire_write_lock(
+                                        tc["name"], dispatch_input
+                                    )
                                     _snapshotted = await self._capture_compensation_snapshot(
                                         _ctx,
                                         tc["name"],
@@ -3041,15 +3074,21 @@ class AgentRunner:
                             )
                             # Phase 2.8: a write_file's snapshot and its write share one
                             # per-path critical section (see compensation.write_path_lock).
-                            _write_lock2 = await self._acquire_write_lock(tool_name, tool_input)
+                            # Taken inside the try: a lock that cannot be had in time
+                            # refuses the call as a snapshot that cannot be captured
+                            # does, and nothing before dispatch can raise out of the loop.
+                            _write_lock2 = None
                             try:
                                 # Phase 2.8: capture pre-dispatch snapshot for compensable
                                 # calls in background contexts. Fail-open except in undoable
                                 # contexts, which refuse rather than proceed without a snapshot.
                                 _snap_blocked2: str | None = None
                                 _snapshotted2 = False
-                                outcome = CallOutcome(write_lock=_write_lock2)
+                                outcome = CallOutcome()
                                 try:
+                                    _write_lock2 = outcome.write_lock = await self._acquire_write_lock(
+                                        tool_name, tool_input
+                                    )
                                     _snapshotted2 = await self._capture_compensation_snapshot(
                                         ctx,
                                         tool_name,

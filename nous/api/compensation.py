@@ -95,7 +95,9 @@ class SnapshotBlocksDispatch(Exception):
     """Raised when a required snapshot cannot be captured, preventing the dispatch.
 
     Only raised in undoable contexts where a missing snapshot would silently
-    allow a non-revertible side effect past the undoable guarantee.
+    allow a non-revertible side effect past the undoable guarantee -- and, in
+    any context, when a write_file's path lock is still held after its bounded
+    wait (``AgentRunner._acquire_write_lock``): refused the same way.
     """
 
 
