@@ -1226,16 +1226,18 @@ class ContextEngine:
                     # the recalled-ids set in sync with what actually survives — a
                     # tail body cut by the budget must NOT be recorded as "shown"
                     # (else F071 would exclude it from recall_deep though the LLM
-                    # never saw it). The first block always shows (a single body can
-                    # exceed a tiny budget; the per-item cap bounds a how-to body, and
-                    # a strategy card is bounded by what the distiller stores).
+                    # never saw it). A how-to body that is the first block always
+                    # shows (a single body can exceed a tiny budget; the per-item cap
+                    # bounds it). A strategy card is never capped per item, so the
+                    # budget is what bounds it: it shows only if it fits, also when
+                    # it is the first block because no how-to procedure was selected.
                     budget_tokens = self._scaled_budget(budget.procedures)
                     shown_blocks: list[str] = []
                     shown_procs: list = []
                     used = 0
                     for p, block in zip(selected, blocks):
                         cost = self._estimate_tokens(block)
-                        if shown_blocks and used + cost > budget_tokens:
+                        if (shown_blocks or is_strategy_card(p)) and used + cost > budget_tokens:
                             break
                         shown_blocks.append(block)
                         shown_procs.append(p)

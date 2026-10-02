@@ -12,7 +12,7 @@ SQL that the SQLite lane cannot run.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -49,13 +49,15 @@ async def vector_heart(db, mock_embeddings):
     await h.close()
 
 
-async def _add(session, heart, name, *, kind=None, age_minutes=0, embedding=None, body=None) -> Procedure:
+async def _add(
+    session, heart, name, *, kind=None, age_minutes=0, embedding=None, body=None, description=None
+) -> Procedure:
     """Insert one active procedure row. ``age_minutes`` orders newest-first reads."""
     row = Procedure(
         agent_id=heart.agent_id,
         name=name,
         domain="strategy" if kind else "ops",
-        description=f"about {name}",
+        description=description or f"about {name}",
         implementation_notes=[body or f"body of {name}"],
         kind=kind,
         active=True,
@@ -484,6 +486,46 @@ async def test_two_cards_share_what_the_how_to_procedures_left(card_heart, sessi
     assert "### card-0 (strategy)" in recommended
     assert "card-1" not in recommended
     assert result.recalled_ids["procedure"] == [str(fits.id), str(cards[0].id)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("budget", "shown", "traced_as"),
+    [
+        (500, False, ("budget_truncated", "procedure_budget_accumulation")),
+        (1000, True, ("rendered", "final")),
+    ],
+    ids=["budget-below-the-card", "budget-above-the-card"],
+)
+async def test_a_card_that_is_the_only_block_is_shown_only_if_it_fits_the_budget(
+    card_heart, session, budget, shown, traced_as
+):
+    """No how-to procedure is selected, so the card is the first block of the
+    section. The first HOW-TO block is shown whatever its size; a card is not.
+    This one is as large as the distiller stores them (name 80, description 1000,
+    lesson 2000 characters: about 800 tokens). In a procedure budget of 500 tokens
+    it is left out and attributed as cut by the budget; in a budget of 1000 it is
+    shown."""
+    from nous.observability.retrieval_logger import RetrievalLogger
+
+    card = await _add(session, card_heart, "n" * 80, kind="strategy", description="d" * 1000, body="l" * 2000)
+    engine = _engine(
+        card_heart,
+        _seeded_brain((card, 0.9)),
+        strategy_cards_retrieval_enabled=True,
+        proc_catalog_enabled=False,
+        context_budget_overrides={"procedures": budget},
+        budget_scale_enabled=False,
+    )
+
+    tracing = RetrievalLogger(candidate_sample_rate=1.0)
+    with patch("nous.cognitive.context.get_active_retrieval_logger", return_value=tracing):
+        result = await _build(engine, card_heart, session)
+
+    assert ("l" * 2000 in result.system_prompt) is shown
+    assert result.recalled_ids["procedure"] == ([str(card.id)] if shown else [])
+    traced = next(c for c in result.retrieval_trace.to_dict()["candidates"] if c["id"] == str(card.id))
+    assert (traced["disposition"], traced["disposition_stage"]) == traced_as
 
 
 @pytest.mark.asyncio
