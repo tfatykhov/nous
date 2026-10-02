@@ -144,8 +144,11 @@ def distiller(mock_brain, mock_heart, mock_llm):
 async def test_skip_noise_outcome(distiller, mock_brain):
     """Handler skips 'noise' outcome — no LLM call, no procedure stored.
 
-    Mutation: remove `if outcome not in GRADED_OUTCOMES: return` guard in
-    _on_decision_reviewed → asyncio.create_task fires → mock_brain.get called.
+    The decision row is still read: the noise branch reconciles the decision's
+    cards with it.
+
+    Mutation: send the noise outcome down the distillation path in
+    _on_decision_reviewed → the model is called.
     """
     decision_id = uuid4()
     event = {"decision_id": str(decision_id), "outcome": "noise"}
@@ -157,7 +160,6 @@ async def test_skip_noise_outcome(distiller, mock_brain):
         await distiller._on_decision_reviewed(event)
         await asyncio.sleep(0)  # flush event loop
         mock_call.assert_not_called()
-    mock_brain.get.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +182,6 @@ async def test_skip_superseded_outcome(distiller, mock_brain):
         await distiller._on_decision_reviewed(event)
         await asyncio.sleep(0)
         mock_call.assert_not_called()
-    mock_brain.get.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -272,20 +273,38 @@ async def test_distil_failure_outcome(distiller, mock_brain, mock_heart):
 
 @pytest.mark.asyncio
 async def test_idempotency_deactivates_old_card(distiller, mock_brain, mock_heart):
-    """When an existing card is found, deactivation and insertion share ONE transaction.
+    """The old card is deactivated in the SAME transaction that stores its
+    replacement, and before the store.
 
-    Mutation: remove existing_id != None branch → session.execute (UPDATE) is
-    never called and the old card remains active alongside the new one.
+    Mutation: remove the `if existing_id is not None:` UPDATE in _do_distil →
+    no statement deactivates the old card → `order` is ["store new card"].
     """
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.sql.dml import Update
+
     decision_id = uuid4()
     existing_id = uuid4()
     mock_brain.get = AsyncMock(return_value=_make_decision(decision_id=decision_id))
+    # The lookup _do_distil actually calls (this test used to patch a second
+    # lookup that _do_distil never called, and so pinned nothing).
+    distiller._find_existing_card_in_session = AsyncMock(return_value=existing_id)
 
-    # Patch _find_existing_card to return an existing ID
-    async def _fake_find(did: UUID) -> UUID:
-        return existing_id
+    order: list[str] = []
 
-    distiller._find_existing_card = _fake_find
+    async def _execute(stmt, *args, **kwargs):
+        if isinstance(stmt, Update):
+            params = stmt.compile(dialect=postgresql.dialect()).params
+            if params.get("active") is False and existing_id in params.values():
+                order.append("deactivate old card")
+        return MagicMock(scalar_one_or_none=MagicMock(return_value=None))
+
+    async def _store(inp, session=None):
+        order.append("store new card")
+        return _make_procedure_detail()
+
+    session_mock = mock_heart.db.session.return_value.__aenter__.return_value
+    session_mock.execute = AsyncMock(side_effect=_execute)
+    mock_heart.procedures.store = AsyncMock(side_effect=_store)
 
     with patch(
         "nous.handlers.strategy_card_distiller.call_background_llm_structured",
@@ -294,11 +313,8 @@ async def test_idempotency_deactivates_old_card(distiller, mock_brain, mock_hear
     ):
         await distiller._do_distil(decision_id, "success")
 
-    # Deactivation runs inside the same session as the store —
-    # session.execute is called at least once (for the UPDATE).
-    session_mock = mock_heart.db.session.return_value.__aenter__.return_value
-    assert session_mock.execute.call_count >= 1, "Expected session.execute to be called for the deactivation UPDATE"
-    mock_heart.procedures.store.assert_called_once()
+    assert order == ["deactivate old card", "store new card"]
+    assert mock_heart.procedures.store.call_args.kwargs["session"] is session_mock
 
 
 # ---------------------------------------------------------------------------
@@ -407,8 +423,10 @@ async def test_handler_reads_event_data_not_top_level_attrs(distiller, mock_brai
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 
-    # The handler parsed the Event correctly and scheduled distillation
-    mock_brain.get.assert_called_once_with(decision_id)
+    # The handler parsed the Event correctly and scheduled distillation. (The
+    # decision is read twice: before the model call, and again inside the
+    # transaction that writes the card.)
+    assert mock_brain.get.call_args.args == (decision_id,)
 
 
 # ---------------------------------------------------------------------------
@@ -471,7 +489,7 @@ async def test_bus_wiring_decision_reviewed_triggers_distillation(mock_brain, mo
 
     await bus.stop()
 
-    mock_brain.get.assert_called_once_with(decision_id)
+    assert mock_brain.get.call_args.args == (decision_id,)
     mock_heart.procedures.store.assert_called_once()
     stored_inp: ProcedureInput = mock_heart.procedures.store.call_args[0][0]
     assert stored_inp.kind == "strategy"
@@ -855,15 +873,16 @@ async def test_pending_outcome_runs_after_first_distillation(mock_brain, mock_he
 
 @pytest.mark.asyncio
 async def test_ungraded_review_schedules_deactivation(mock_brain, mock_heart, mock_llm):
-    """A noise/superseded review schedules deactivation of the existing card.
+    """A noise/superseded review schedules the reconcile of the decision's cards.
 
     Before the fix: outcome not in GRADED_OUTCOMES → early return before UUID
     parsing, so an existing strategy card was never deactivated even after the
     decision was marked noise/superseded.
 
     Mutation: revert to early return on ungraded outcomes →
-    _deactivate_card_for_decision is never scheduled → the existing card stays
-    active (deactivate_procedure not called).
+    _deactivate_card_for_decision is never scheduled → _retire_stale_cards is
+    not awaited. What the reconcile does to real rows is pinned in
+    tests/test_fix_e_strategy_card_distiller.py.
     """
     settings = _make_settings()
     distiller = StrategyCardDistiller(
@@ -874,11 +893,7 @@ async def test_ungraded_review_schedules_deactivation(mock_brain, mock_heart, mo
         llm_client=mock_llm,
     )
     decision_id = uuid4()
-    existing_card_id = uuid4()
-
-    # Wire _find_existing_card to report an existing card.
-    distiller._find_existing_card = AsyncMock(return_value=existing_card_id)
-    distiller._deactivate_procedure = AsyncMock()
+    distiller._retire_stale_cards = AsyncMock(return_value=None)
 
     event = {"decision_id": str(decision_id), "outcome": "noise"}
     await distiller._on_decision_reviewed(event)
@@ -886,7 +901,9 @@ async def test_ungraded_review_schedules_deactivation(mock_brain, mock_heart, mo
     await asyncio.sleep(0)
     await asyncio.sleep(0)
 
-    distiller._deactivate_procedure.assert_called_once_with(existing_card_id)
+    distiller._retire_stale_cards.assert_awaited_once()
+    assert distiller._retire_stale_cards.await_args.args[0] == decision_id
+    mock_heart.db.session.return_value.__aenter__.return_value.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio

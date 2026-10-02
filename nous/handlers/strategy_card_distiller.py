@@ -246,10 +246,20 @@ class StrategyCardDistiller:
             logger.debug("StrategyCardDistiller: no LLM client wired, skipping %s", decision_id)
             return
 
-        decision = await self._brain.get(decision_id)
+        # The decision row is the truth, not the event that queued this run: it may
+        # have been re-graded or un-graded since, or graded by the auto-reviewer.
+        # Reconcile FIRST, in its own transaction, so a card distilled for another
+        # outcome is retired even when everything below fails (LLM error,
+        # incomplete card).
+        async with self._heart.db.session() as session:
+            decision = await self._retire_stale_cards(decision_id, session)
+            await session.commit()
         if decision is None:
-            logger.warning("StrategyCardDistiller: decision %s not found, skipping", decision_id)
+            logger.debug(
+                "StrategyCardDistiller: no card for decision %s (ungraded, auto-reviewed or gone)", decision_id
+            )
             return
+        outcome = decision.outcome
 
         user_msg = (
             f"{_field('decision', decision.description, _MAX_DESCRIPTION_CHARS)}\n"
@@ -308,8 +318,10 @@ class StrategyCardDistiller:
             },
         )
 
-        # Deactivate old card and create new one in a single transaction so a
-        # failure on insertion or edge creation preserves the previous card.
+        # Deactivate the card being replaced and create the new one in a single
+        # transaction, so a failed insert keeps the card it would have replaced.
+        # (A failed edge no longer fails the transaction, and a card distilled for
+        # another outcome was already retired above.)
         # The idempotency lookup is done INSIDE the transaction so the check
         # and the deactivate/insert are atomic — preventing a concurrent task
         # that also passed the _in_flight guard from racing to insert a second
@@ -328,6 +340,20 @@ class StrategyCardDistiller:
             inp = inp.model_copy(update={"name": original_inp_name})
             try:
                 async with self._heart.db.session() as session:
+                    # Re-read inside the transaction that writes the card: a review
+                    # that landed while the model ran must not get a card for the
+                    # outcome it replaced. That review's own decision_reviewed event
+                    # re-distils (coalesced through _pending if this run is in flight).
+                    fresh = await self._retire_stale_cards(decision_id, session)
+                    if fresh is None or fresh.outcome != outcome:
+                        await session.commit()
+                        logger.info(
+                            "StrategyCardDistiller: decision %s was reviewed again while its %s card "
+                            "was being distilled, card not written",
+                            decision_id,
+                            outcome,
+                        )
+                        return
                     existing_id = await self._find_existing_card_in_session(decision_id, session)
                     if existing_id is not None:
                         from sqlalchemy import update as sa_update
@@ -351,16 +377,22 @@ class StrategyCardDistiller:
                     detail = await self._heart.procedures.store(inp, session=session)
                     if self._graph_linker is not None:
                         try:
-                            await self._graph_linker.create_edge(
-                                source_id=detail.id,
-                                source_type="procedure",
-                                target_id=decision_id,
-                                target_type="decision",
-                                relation="extracted_from",
-                                weight=1.0,
-                                session=session,
-                                provenance_source="strategy_card_distiller",
-                            )
+                            # SAVEPOINT: the edge is best-effort, so a database error
+                            # on it must not abort the transaction that carries the
+                            # card. Without it Postgres answers the commit below with
+                            # a rollback, and nothing raises: the card is gone while
+                            # the log line after the commit says it was distilled.
+                            async with session.begin_nested():
+                                await self._graph_linker.create_edge(
+                                    source_id=detail.id,
+                                    source_type="procedure",
+                                    target_id=decision_id,
+                                    target_type="decision",
+                                    relation="extracted_from",
+                                    weight=1.0,
+                                    session=session,
+                                    provenance_source="strategy_card_distiller",
+                                )
                         except Exception:
                             logger.warning(
                                 "StrategyCardDistiller: edge creation failed for card %s",
@@ -389,26 +421,43 @@ class StrategyCardDistiller:
     # Idempotency helpers
     # ------------------------------------------------------------------
 
-    async def _find_existing_card(self, decision_id: UUID) -> UUID | None:
-        """Return the id of an existing active strategy card for this decision.
+    async def _retire_stale_cards(self, decision_id: UUID, session: Any) -> Any | None:
+        """Make the stored cards agree with the decision row as it is NOW, inside ``session``.
 
-        Opens its own session — use only outside a transaction. For transactional
-        callers use _find_existing_card_in_session instead.
+        The row decides both things a card depends on. Its outcome: every active
+        card distilled for a different outcome is soft-deleted. Who reviewed it: a
+        card stands for an outcome that somebody observed, so a decision that is
+        not graded, was graded by the auto-reviewer's heuristic, or is gone keeps
+        no card at all. Returns the decision when it may have a card, else None.
+        The caller commits.
         """
-        from sqlalchemy import select
+        from sqlalchemy import update as sa_update
 
         from nous.storage.models import Procedure
 
-        async with self._heart.db.session() as session:
-            result = await session.execute(
-                select(Procedure.id)
-                .where(Procedure.agent_id == self._brain.agent_id)
-                .where(Procedure.kind == STRATEGY_CARD_KIND)
-                .where(Procedure.active.is_(True))
-                .where(Procedure.runtime_metadata["source_decision_id"].astext == str(decision_id))
-                .limit(1)
+        decision = await self._brain.get(decision_id, session=session)
+        if decision is None:
+            logger.warning("StrategyCardDistiller: decision %s not found", decision_id)
+        elif decision.outcome not in GRADED_OUTCOMES or decision.reviewer == AUTO_REVIEWER:
+            decision = None
+        stale = (
+            sa_update(Procedure)
+            .where(Procedure.agent_id == self._brain.agent_id)
+            .where(Procedure.kind == STRATEGY_CARD_KIND)
+            .where(Procedure.active.is_(True))
+            .where(Procedure.runtime_metadata["source_decision_id"].astext == str(decision_id))
+        )
+        if decision is not None:
+            stale = stale.where(Procedure.runtime_metadata["outcome"].astext.is_distinct_from(decision.outcome))
+        result = await session.execute(stale.values(active=False).execution_options(synchronize_session=False))
+        if result.rowcount:
+            logger.info(
+                "StrategyCardDistiller: retired %s card(s) of decision %s (%s)",
+                result.rowcount,
+                decision_id,
+                f"its outcome is now {decision.outcome}" if decision is not None else "ungraded, auto-reviewed or gone",
             )
-            return result.scalar_one_or_none()
+        return decision
 
     async def _find_existing_card_in_session(self, decision_id: UUID, session: Any) -> UUID | None:
         """Return the id of an existing active strategy card within a session.
@@ -431,16 +480,16 @@ class StrategyCardDistiller:
         return result.scalar_one_or_none()
 
     async def _deactivate_card_for_decision(self, decision_id: UUID) -> None:
-        """Deactivate any active strategy card for a decision (noise/superseded review)."""
+        """Reconcile a decision's cards with its row after a review that distils none.
+
+        The row decides, not the event that queued this: a noise, superseded or
+        auto-reviewed decision loses every card it has, and a stale event leaves
+        the card of a decision that has been graded since alone.
+        """
         try:
-            existing_id = await self._find_existing_card(decision_id)
-            if existing_id is not None:
-                await self._deactivate_procedure(existing_id)
-                logger.info(
-                    "StrategyCardDistiller: deactivated card %s for decision %s (ungraded review)",
-                    existing_id,
-                    decision_id,
-                )
+            async with self._heart.db.session() as session:
+                await self._retire_stale_cards(decision_id, session)
+                await session.commit()
         except Exception:
             logger.warning(
                 "StrategyCardDistiller: failed to deactivate card for decision %s",
@@ -474,28 +523,6 @@ class StrategyCardDistiller:
         # Exhausted retries; return the last candidate and let the store call
         # raise the constraint error rather than silently losing the card.
         return candidate
-
-    async def _deactivate_procedure(self, procedure_id: UUID) -> None:
-        """Soft-delete an existing strategy card."""
-        from sqlalchemy import update
-
-        from nous.storage.models import Procedure
-
-        try:
-            async with self._heart.db.session() as session:
-                await session.execute(
-                    update(Procedure)
-                    .where(Procedure.id == procedure_id)
-                    .where(Procedure.agent_id == self._brain.agent_id)
-                    .values(active=False)
-                )
-                await session.commit()
-        except Exception:
-            logger.warning(
-                "StrategyCardDistiller: failed to deactivate old card %s",
-                procedure_id,
-                exc_info=True,
-            )
 
     async def shutdown(self) -> None:
         """Await all in-flight distillation tasks before process shutdown.

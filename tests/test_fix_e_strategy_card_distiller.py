@@ -242,3 +242,264 @@ async def test_the_stored_card_name_is_one_line_of_at_most_80_chars(rig):
         assert len(name) <= 80 and "\n" not in name
     for c in cards:
         assert "\n" not in c.description and "\n" not in c.implementation_notes[0]
+
+
+# ---------------------------------------------------------------------------
+# Invariants 6 and 7 — a card reflects its decision's current outcome
+# (the card lookups are JSONB queries, so these run on the Postgres lane)
+# ---------------------------------------------------------------------------
+
+
+_LOG = "nous.handlers.strategy_card_distiller"
+
+
+async def _edges(rig, card_id) -> list[tuple]:
+    async with rig.db.session() as s:
+        result = await s.execute(
+            select(
+                GraphEdge.source_type,
+                GraphEdge.target_id,
+                GraphEdge.target_type,
+                GraphEdge.relation,
+                GraphEdge.agent_id,
+            ).where(GraphEdge.source_id == card_id)
+        )
+        return [tuple(row) for row in result.all()]
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_card_follows_its_decision_through_a_regrade_and_a_noise_review(rig):
+    """distil -> re-review to another graded outcome -> re-review with the same
+    outcome -> re-review to noise, on real rows: the active flags, the
+    extracted_from edge, and agent_id scoping (another agent's card naming the
+    same decision id is never touched). No row is ever deleted."""
+    decision = await rig.record()
+    other_agent = f"{rig.agent_id}-other"
+    async with rig.db.session() as s:
+        s.add(
+            Procedure(
+                agent_id=other_agent,
+                name="another agent's card",
+                kind="strategy",
+                active=True,
+                runtime_metadata={"source_decision_id": str(decision.id), "outcome": "success"},
+            )
+        )
+        await s.commit()
+
+    answers = [_card("Blue-green works"), _card("Blue-green hid drift"), _card("Blue-green hid drift")]
+    with patch(LLM, new_callable=AsyncMock, side_effect=answers):
+        await rig.brain.review(decision.id, outcome="success", result="zero downtime", reviewer="agent")
+        await rig.settle()
+        cards = await _cards(rig)
+        assert _state(cards) == [(True, "success")]
+        assert cards[0].runtime_metadata["source_decision_id"] == str(decision.id)
+        assert await _edges(rig, cards[0].id) == [
+            ("procedure", decision.id, "decision", "extracted_from", rig.agent_id),
+        ]
+
+        await rig.brain.review(decision.id, outcome="failure", result="config drifted afterwards", reviewer="agent")
+        await rig.settle()
+        cards = await _cards(rig)
+        assert _state(cards) == [(False, "success"), (True, "failure")]
+        assert await _edges(rig, cards[1].id) == [
+            ("procedure", decision.id, "decision", "extracted_from", rig.agent_id),
+        ]
+
+        await rig.brain.review(decision.id, outcome="failure", result="drift confirmed by the audit", reviewer="agent")
+        await rig.settle()
+        cards = await _cards(rig)
+        assert _state(cards) == [(False, "success"), (False, "failure"), (True, "failure")]
+        assert cards[2].name == "Blue-green hid drift"  # the name was freed in the same transaction
+
+        await rig.brain.review(decision.id, outcome="noise", result="not a real decision", reviewer="agent")
+        await rig.settle()
+        assert _state(await _cards(rig)) == [(False, "success"), (False, "failure"), (False, "failure")]
+
+    assert _state(await _cards(rig, other_agent)) == [(True, "success")]
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_failed_redistillation_still_retires_the_card_for_the_old_outcome(rig, caplog):
+    """success -> card. Re-graded to failure, and the model call fails: the
+    'validated strategy' card must not stay active on a decision that failed. The
+    decision now has no card and nothing retries, so the retirement is logged."""
+    decision = await rig.record()
+    with patch(LLM, new_callable=AsyncMock, side_effect=[_card(), None]), caplog.at_level("INFO", logger=_LOG):
+        await rig.brain.review(decision.id, outcome="success", result="zero downtime", reviewer="agent")
+        await rig.settle()
+        await rig.brain.review(decision.id, outcome="failure", result="config drifted", reviewer="agent")
+        await rig.settle()
+
+    assert _state(await _cards(rig)) == [(False, "success")]
+    assert f"retired 1 card(s) of decision {decision.id} (its outcome is now failure)" in caplog.text
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_failed_redistillation_for_the_same_outcome_keeps_the_card(rig):
+    """The other half of the rule above: only a card distilled for ANOTHER outcome
+    is retired before the model call. A second review that keeps the outcome, and
+    whose model call fails, leaves the card that is still right."""
+    decision = await rig.record()
+    with patch(LLM, new_callable=AsyncMock, side_effect=[_card(), None]):
+        await rig.brain.review(decision.id, outcome="success", result="zero downtime", reviewer="agent")
+        await rig.settle()
+        await rig.brain.review(decision.id, outcome="success", result="still fine a week later", reviewer="agent")
+        await rig.settle()
+
+    assert _state(await _cards(rig)) == [(True, "success")]
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_stale_event_mints_no_card_for_an_outcome_the_decision_no_longer_has(rig):
+    """The decision row is the truth, not the event: a distillation that runs for
+    'success' after the decision became noise writes nothing."""
+    decision = await rig.record()
+    await rig.brain.review(decision.id, outcome="success", result="zero downtime", reviewer="agent")
+    await rig.brain.review(decision.id, outcome="noise", result="not a real decision", reviewer="agent")
+
+    with patch(LLM, new_callable=AsyncMock, return_value=_card()):
+        await rig.distiller._do_distil(decision.id, "success")
+
+    assert await _cards(rig) == []
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_an_agent_event_read_after_an_auto_review_mints_no_card(rig):
+    """The row decides who reviewed, as it decides the outcome. The agent's review
+    and then an auto review are both written before the distiller reads anything.
+    The agent's event starts a run; the row says failure/auto; nothing is
+    distilled from the heuristic's 'Low confidence' note."""
+    decision = await rig.record()
+    with patch(LLM, new_callable=AsyncMock, return_value=_card()) as llm:
+        await rig.brain.review(decision.id, outcome="success", result="zero downtime", reviewer="agent")
+        await rig.brain.review(
+            decision.id,
+            outcome="failure",
+            result="Low confidence (0.30) indicates uncertain/failed decision",
+            reviewer="auto",
+        )
+        await rig.settle()
+
+    assert await _cards(rig) == []
+    llm.assert_not_awaited()
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_stale_ungraded_event_leaves_the_card_of_a_graded_decision_alone(rig):
+    """The branch for reviews that distil no card reads the row as well. A 'noise'
+    event handled after the decision has been graded again must not retire the
+    card of that grade."""
+    from nous.events import Event as BusEvent
+
+    decision = await rig.record()
+    with patch(LLM, new_callable=AsyncMock, return_value=_card()):
+        await rig.brain.review(decision.id, outcome="success", result="zero downtime", reviewer="agent")
+        await rig.settle()
+        await rig.bus.emit(
+            BusEvent(
+                type="decision_reviewed",
+                agent_id=rig.agent_id,
+                data={"decision_id": str(decision.id), "outcome": "noise", "reviewer": "agent"},
+            )
+        )
+        await rig.settle()
+
+    assert _state(await _cards(rig)) == [(True, "success")]
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_review_that_distils_no_card_retires_every_card_of_the_decision(rig):
+    """Nothing in the schema stops a decision from having two active cards. A noise
+    review retires both, not only the first one a lookup happens to return."""
+    decision = await rig.record()
+    async with rig.db.session() as s:
+        for n in range(2):
+            s.add(
+                Procedure(
+                    agent_id=rig.agent_id,
+                    name=f"card {n}",
+                    kind="strategy",
+                    active=True,
+                    runtime_metadata={"source_decision_id": str(decision.id), "outcome": "success"},
+                )
+            )
+        await s.commit()
+
+    await rig.brain.review(decision.id, outcome="noise", result="not a real decision", reviewer="agent")
+    await rig.settle()
+
+    assert _state(await _cards(rig)) == [(False, "success"), (False, "success")]
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_review_landing_during_the_model_call_gets_no_card_for_the_old_outcome(rig, caplog):
+    """The decision is re-read inside the transaction that writes the card, and the
+    result that is thrown away is logged."""
+    decision = await rig.record()
+    await rig.brain.review(decision.id, outcome="success", result="zero downtime", reviewer="agent")
+
+    async def _regrade_then_answer(**_kwargs):
+        await rig.brain.review(decision.id, outcome="failure", result="config drifted", reviewer="agent")
+        return _card()
+
+    with patch(LLM, new=AsyncMock(side_effect=_regrade_then_answer)), caplog.at_level("INFO", logger=_LOG):
+        await rig.distiller._do_distil(decision.id, "success")
+
+    assert await _cards(rig) == []
+    assert "was reviewed again while its success card was being distilled, card not written" in caplog.text
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_run_for_a_decision_that_is_gone_retires_its_card_and_says_so(rig, caplog):
+    """A review event can outlive its decision. The run that finds no row retires
+    the card the decision left behind, calls no model, and logs a WARNING."""
+    decision = await rig.record()
+    with patch(LLM, new_callable=AsyncMock, return_value=_card()) as llm:
+        await rig.brain.review(decision.id, outcome="success", result="zero downtime", reviewer="agent")
+        await rig.settle()
+        await rig.brain.delete(decision.id)
+        with caplog.at_level("INFO", logger=_LOG):
+            await rig.distiller._do_distil(decision.id, "success")
+
+    assert _state(await _cards(rig)) == [(False, "success")]
+    assert llm.await_count == 1
+    assert [r.levelname for r in caplog.records if f"decision {decision.id} not found" in r.getMessage()] == ["WARNING"]
+    assert f"retired 1 card(s) of decision {decision.id} (ungraded, auto-reviewed or gone)" in caplog.text
+
+
+class _EdgeTheDatabaseRejects(GraphLinker):
+    """The production create_edge statement, with a relation the ck_edges_relation
+    CHECK constraint rejects: a real database error inside the card's transaction."""
+
+    async def create_edge(self, *, relation, **kwargs):
+        return await super().create_edge(relation="not_a_relation", **kwargs)
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_database_error_on_the_edge_does_not_roll_the_card_back(rig):
+    """The edge is best-effort, but without a SAVEPOINT a database error on it
+    aborts the transaction that carries the card. Postgres then answers the commit
+    with a rollback, and nothing raises: the card is gone while the log says it was
+    distilled. (SQLite does not abort a transaction on a failed statement, so only
+    the Postgres lane can show this.)"""
+    rig.distiller._graph_linker = _EdgeTheDatabaseRejects(rig.db, rig.linker.embedder, rig.settings, rig.agent_id)
+    decision = await rig.record()
+
+    with patch(LLM, new_callable=AsyncMock, return_value=_card()):
+        await rig.brain.review(decision.id, outcome="success", result="zero downtime", reviewer="agent")
+        await rig.settle()
+
+    cards = await _cards(rig)
+    assert _state(cards) == [(True, "success")]
+    assert await _edges(rig, cards[0].id) == []
