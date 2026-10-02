@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import types
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -22,7 +23,7 @@ from httpx import ASGITransport, AsyncClient, ConnectError
 
 from nous.config import Settings
 from nous.heartbeat.registry import BaseCheck, CheckRegistry
-from nous.heartbeat.runner import HeartbeatRunner
+from nous.heartbeat.runner import HeartbeatRunner, _await_chain
 from nous.heartbeat.schemas import CheckResult
 
 WAIT = 10.0
@@ -192,10 +193,12 @@ async def test_shutdown_drain_that_times_out_does_not_stamp_last_dag_tick():
     runner = _runner(settings, tick)
     async with _started(runner):
         await _expect(started, "the tick never started")
+        inner = runner._dag_pending_task
 
         await _stop(runner)
 
         assert runner.last_dag_tick is None, "a tick that never finished was recorded as a successful one"
+        assert inner.cancelled(), "stop() returned with the tick still running"
 
 
 async def test_a_loop_cancelled_in_the_step_its_tick_finishes_cancelled_still_ends():
@@ -234,13 +237,15 @@ async def test_shutdown_drain_that_sees_the_tick_return_records_it():
 
     runner = _runner(_settings(), tick)  # 30 s deadline: stop() finds the loop still awaiting this tick
     async with _started(runner):
-        await _expect(started, "the tick never started")
-        stopping = asyncio.create_task(_stop(runner))
-        await _until(
-            lambda: runner._dag_shutdown_drain_deadline is not None,
-            "stop() never reached the loop's shutdown drain",
-        )
-        release.set()
+        try:
+            await _expect(started, "the tick never started")
+            stopping = asyncio.create_task(_stop(runner))
+            await _until(
+                lambda: runner._dag_shutdown_drain_deadline is not None,
+                "stop() never reached the loop's shutdown drain",
+            )
+        finally:
+            release.set()  # or a failure above leaves teardown draining this tick for 30 s
         await asyncio.wait_for(stopping, WAIT)
 
     assert runner.last_dag_tick is not None, "a tick that returned during the shutdown drain was not recorded"
@@ -251,7 +256,7 @@ async def test_shutdown_drain_that_sees_the_tick_return_records_it():
 # ---------------------------------------------------------------------------
 
 
-async def test_a_tick_that_finishes_cancelled_does_not_end_the_dag_loop():
+async def test_a_tick_that_finishes_cancelled_does_not_end_the_dag_loop(caplog):
     second_started = asyncio.Event()
     calls = 0
     last_dag_tick_seen_by_second: list = []
@@ -265,16 +270,22 @@ async def test_a_tick_that_finishes_cancelled_does_not_end_the_dag_loop():
         second_started.set()
 
     runner = _runner(_settings(), tick)
-    async with _started(runner):
-        await _expect(second_started, "the DAG loop ended when a tick finished cancelled")
+    with caplog.at_level(logging.DEBUG, logger="nous.heartbeat.runner"):
+        async with _started(runner):
+            await _expect(second_started, "the DAG loop ended when a tick finished cancelled")
 
-        assert last_dag_tick_seen_by_second == [None], "the cancelled tick was recorded as a successful one"
-        assert runner._dag_shutdown_drain_deadline is None, "a tick's own cancellation spent stop()'s drain budget"
-        assert not runner._dag_task.done()
-        await _stop(runner)
+            assert last_dag_tick_seen_by_second == [None], "the cancelled tick was recorded as a successful one"
+            assert runner._dag_shutdown_drain_deadline is None, "a tick's own cancellation spent stop()'s drain budget"
+            assert not runner._dag_task.done()
+            await _stop(runner)
+
+    errors = [r.getMessage() for r in _runner_log(caplog) if r.levelno >= logging.ERROR]
+    assert errors == ["F038: DAG orchestrator tick was cancelled from within — a failed tick"], (
+        "a tick cancelled from within is reported once, as a failed tick"
+    )
 
 
-async def test_a_cancelled_error_raised_while_starting_a_tick_does_not_end_the_dag_loop():
+async def test_a_cancelled_error_raised_while_starting_a_tick_does_not_end_the_dag_loop(caplog):
     """Pins the loop's outermost handler. Nothing in the loop body reaches it
     today except the task's own cancellation, so the test injects one at the
     only seam there is: the call that creates the tick coroutine."""
@@ -290,11 +301,15 @@ async def test_a_cancelled_error_raised_while_starting_a_tick_does_not_end_the_d
         return asyncio.sleep(0)
 
     runner = _runner(_settings(), tick)
-    async with _started(runner):
-        await _expect(second_called, "the DAG loop ended on a CancelledError that was not its own cancellation")
+    with caplog.at_level(logging.DEBUG, logger="nous.heartbeat.runner"):
+        async with _started(runner):
+            await _expect(second_called, "the DAG loop ended on a CancelledError that was not its own cancellation")
 
-        assert not runner._dag_task.done()
-        await _stop(runner)
+            assert not runner._dag_task.done()
+            await _stop(runner)
+
+    errors = [r.getMessage() for r in _runner_log(caplog) if r.levelno >= logging.ERROR]
+    assert errors == ["F038: DAG tick loop iteration was cancelled from within — the loop continues"]
 
 
 class _ScriptedCheck(BaseCheck):
@@ -309,7 +324,7 @@ class _ScriptedCheck(BaseCheck):
         return await self._run()
 
 
-async def test_a_cancelled_error_out_of_a_check_does_not_end_the_heartbeat_loop():
+async def test_a_cancelled_error_out_of_a_check_does_not_end_the_heartbeat_loop(caplog):
     second_run = asyncio.Event()
     calls = 0
 
@@ -324,11 +339,15 @@ async def test_a_cancelled_error_out_of_a_check_does_not_end_the_heartbeat_loop(
     runner = _runner(_settings(heartbeat_tick_interval=0.01), tick=None)
     runner.dag_orchestrator = None  # the DAG loop idles
     runner.registry.register(_ScriptedCheck(run))
-    async with _started(runner):
-        await _expect(second_run, "the heartbeat check loop ended when a check raised CancelledError")
+    with caplog.at_level(logging.DEBUG, logger="nous.heartbeat.runner"):
+        async with _started(runner):
+            await _expect(second_run, "the heartbeat check loop ended when a check raised CancelledError")
 
-        assert not runner._task.done()
-        await _stop(runner)
+            assert not runner._task.done()
+            await _stop(runner)
+
+    errors = [r.getMessage() for r in _runner_log(caplog) if r.levelno >= logging.ERROR]
+    assert errors == ["Heartbeat tick was cancelled from within — the loop continues"]
 
 
 async def test_cancelling_a_loop_task_still_ends_it():
@@ -386,6 +405,7 @@ async def test_a_timeout_error_raised_by_the_tick_is_logged_as_a_failed_tick(cap
     )
     failed = [r for r in _runner_log(caplog) if r.getMessage() == "F038: DAG orchestrator tick failed"]
     assert len(failed) == 1 and isinstance(failed[0].exc_info[1], TimeoutError)
+    assert not [m for m in messages if "raised after timing out" in m], "the same finished tick was recorded twice"
     assert last_dag_tick_seen_by_second == [None], "the failed tick was recorded as a successful one"
 
 
@@ -400,13 +420,15 @@ async def test_a_timeout_error_raised_during_the_shutdown_drain_is_logged_as_a_f
     runner = _runner(_settings(), tick)  # 30 s deadline: stop() finds the loop still awaiting this tick
     with caplog.at_level(logging.DEBUG, logger="nous.heartbeat.runner"):
         async with _started(runner):
-            await _expect(started, "the tick never started")
-            stopping = asyncio.create_task(_stop(runner))
-            await _until(
-                lambda: runner._dag_shutdown_drain_deadline is not None,
-                "stop() never reached the loop's shutdown drain",
-            )
-            release.set()
+            try:
+                await _expect(started, "the tick never started")
+                stopping = asyncio.create_task(_stop(runner))
+                await _until(
+                    lambda: runner._dag_shutdown_drain_deadline is not None,
+                    "stop() never reached the loop's shutdown drain",
+                )
+            finally:
+                release.set()  # or a failure above leaves teardown draining this tick for 30 s
             await asyncio.wait_for(stopping, WAIT)
 
     messages = [r.getMessage() for r in _runner_log(caplog)]
@@ -583,6 +605,39 @@ async def test_a_tick_that_never_returns_is_escalated_once_after_three_timeouts(
         assert fired == []
 
 
+async def test_a_hung_tick_is_escalated_at_three_timeouts_not_before_and_not_later(caplog):
+    settings = _settings(dag_tick_timeout=0.05)
+    loop = asyncio.get_running_loop()
+    started, never = asyncio.Event(), asyncio.Event()
+
+    async def tick():
+        # The loop stamps the start before this runs. From here the stall clock is the test's.
+        runner._dag_pending_started = loop.time() + 1_000_000
+        started.set()
+        await never.wait()
+
+    runner = _runner(settings, tick)
+    with caplog.at_level(logging.DEBUG, logger="nous.heartbeat.runner"):
+        async with _started(runner):
+            try:
+                await _expect(started, "the tick never started")
+                await _until(lambda: not runner._dag_tick_lock.locked(), "the tick's deadline never passed")
+                settings.dag_tick_timeout = 1000  # the threshold is now 3000 s on the stall clock
+
+                runner._dag_pending_started = loop.time() - 2990
+                skips = _skips(caplog)
+                await _until(lambda: _skips(caplog) >= skips + 5, "the loop stopped iterating")
+                assert not _criticals(caplog), "escalated before 3 x dag_tick_timeout"
+
+                runner._dag_pending_started = loop.time() - 3000
+                skips = _skips(caplog)
+                await _until(lambda: _skips(caplog) >= skips + 5, "the loop stopped iterating")
+                assert len(_criticals(caplog)) == 1, "not escalated at 3 x dag_tick_timeout"
+            finally:
+                settings.dag_tick_timeout = 0.05  # or stop() drains this tick for 1000 s
+            await _stop(runner)
+
+
 async def test_each_hung_tick_is_escalated_once():
     settings = _settings(dag_tick_timeout=0.1)
     release_first = asyncio.Event()
@@ -635,6 +690,35 @@ async def test_a_failed_read_of_the_await_chain_costs_the_detail_not_the_report(
     assert fired == [critical]
     unread = [r for r in _runner_log(caplog) if r.getMessage().startswith("F038: could not read where")]
     assert len(unread) == 1 and isinstance(unread[0].exc_info[1], RuntimeError)
+
+
+async def test_the_await_chain_walks_through_a_generator_based_awaitable():
+    """A generator-based awaitable (types.coroutine, which older libraries
+    still use) keeps its frame and what it waits on in gi_frame and
+    gi_yieldfrom, where a coroutine has cr_frame and cr_await."""
+    reached, never = asyncio.Event(), asyncio.Event()
+
+    async def _leaf():
+        reached.set()
+        await never.wait()
+
+    @types.coroutine
+    def _generator_based():
+        yield from _leaf()
+
+    async def _outermost():
+        await _generator_based()
+
+    task = asyncio.create_task(_outermost())
+    try:
+        await _expect(reached, "the chain never reached its innermost coroutine")
+        chain = _await_chain(task)
+    finally:
+        task.cancel()
+        await asyncio.wait({task}, timeout=WAIT)
+
+    names = [hop.split(" (", 1)[0] for hop in chain.split(" > ")]
+    assert names[:3] == ["_outermost", "_generator_based", "_leaf"], chain
 
 
 # ---------------------------------------------------------------------------
