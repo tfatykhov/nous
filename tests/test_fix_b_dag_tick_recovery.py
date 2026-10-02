@@ -16,12 +16,13 @@ import types
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 from httpx import ASGITransport, AsyncClient, ConnectError
 
 from nous.config import Settings
+from nous.heartbeat.dynamic import DynamicCheck
 from nous.heartbeat.registry import BaseCheck, CheckRegistry
 from nous.heartbeat.runner import HeartbeatRunner, _await_chain
 from nous.heartbeat.schemas import CheckResult
@@ -347,6 +348,82 @@ async def test_a_cancelled_error_out_of_a_check_does_not_end_the_heartbeat_loop(
             await _stop(runner)
 
     errors = [r.getMessage() for r in _runner_log(caplog) if r.levelno >= logging.ERROR]
+    assert errors == ["Heartbeat check 'scripted' was cancelled from within — a failed run"]
+
+
+async def test_a_check_cancelled_from_within_is_a_failed_check_and_the_tick_goes_on(caplog):
+    """A check that ends cancelled when nobody cancelled the loop has failed:
+    its breaker counts the run and its stats record it, and the checks after
+    it and the rest of the tick still run."""
+    cancelled_runs = 0
+    later_runs = 0
+    later_ran_five_times = asyncio.Event()
+
+    async def ends_cancelled() -> CheckResult:
+        nonlocal cancelled_runs
+        cancelled_runs += 1
+        raise asyncio.CancelledError  # something the check awaited was cancelled elsewhere
+
+    async def runs_after_it() -> CheckResult:
+        nonlocal later_runs
+        later_runs += 1
+        if later_runs == 5:
+            later_ran_five_times.set()
+        return CheckResult()
+
+    loader = MagicMock()  # where the runs of a dynamic check are recorded
+    loader.sync = AsyncMock(return_value=0)
+    loader.update_run_stats = AsyncMock()
+    failing = DynamicCheck(check_id="failing-id", name="failing", prompt="", tools=[], interval=0)
+    failing.run = ends_cancelled
+
+    runner = _runner(_settings(heartbeat_tick_interval=0.01), tick=None)
+    runner.dag_orchestrator = None  # the DAG loop idles
+    runner._dynamic_loader = loader  # what HeartbeatRunner(dynamic_loader=...) sets
+    runner.registry.register(failing)
+    runner.registry.register(_ScriptedCheck(runs_after_it))
+    with caplog.at_level(logging.DEBUG, logger="nous.heartbeat.runner"):
+        async with _started(runner):
+            await _expect(later_ran_five_times, "the check after one that ended cancelled never ran")
+            await _stop(runner)
+
+    assert cancelled_runs == failing.max_failures, "its breaker never opened: it ran on every tick"
+    assert failing.consecutive_failures == failing.max_failures
+    assert runner.last_tick is not None, "the tick was abandoned at the check that ended cancelled"
+    errors = [r.getMessage() for r in _runner_log(caplog) if r.levelno >= logging.ERROR]
+    assert errors == ["Heartbeat check 'failing' was cancelled from within — a failed run"] * failing.max_failures
+    assert loader.update_run_stats.await_args_list == (
+        [call("failing-id", success=False, error_msg="cancelled")] * failing.max_failures
+    )
+
+
+async def test_a_cancelled_error_out_of_the_loop_body_does_not_end_the_heartbeat_loop(caplog):
+    """Pins the check loop's own handler. A check that ends cancelled is dealt
+    with inside the tick and never reaches it, so the test raises one from the
+    loop body after the tick: the tuning pass."""
+    second_pass = asyncio.Event()
+    calls = 0
+
+    async def tune() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise asyncio.CancelledError  # something the loop awaited was cancelled elsewhere
+        second_pass.set()
+
+    runner = _runner(_settings(heartbeat_tick_interval=0.01), tick=None)
+    runner.dag_orchestrator = None  # the DAG loop idles
+    runner._maybe_tune = tune
+    with caplog.at_level(logging.DEBUG, logger="nous.heartbeat.runner"):
+        async with _started(runner):
+            await _expect(
+                second_pass, "the heartbeat check loop ended on a CancelledError that was not its own cancellation"
+            )
+
+            assert not runner._task.done()
+            await _stop(runner)
+
+    errors = [r.getMessage() for r in _runner_log(caplog) if r.levelno >= logging.ERROR]
     assert errors == ["Heartbeat tick was cancelled from within — the loop continues"]
 
 
@@ -368,6 +445,31 @@ async def test_cancelling_a_loop_task_still_ends_it():
         done, _ = await asyncio.wait({dag_task, check_task}, timeout=WAIT)
 
         assert done == {dag_task, check_task}, "a cancelled loop task kept running"
+
+
+async def test_cancelling_the_check_loop_while_a_check_is_running_still_ends_it():
+    """The loop's own cancellation passes through the per-check handler: it is
+    not a failed run of the check that happened to be running."""
+    running, never = asyncio.Event(), asyncio.Event()
+
+    async def run() -> CheckResult:
+        running.set()
+        await never.wait()
+        return CheckResult()
+
+    check = _ScriptedCheck(run)
+    runner = _runner(_settings(heartbeat_tick_interval=0.01), tick=None)
+    runner.dag_orchestrator = None  # the DAG loop idles
+    runner.registry.register(check)
+    async with _started(runner):
+        await _expect(running, "the check never started")
+        check_task = runner._task
+
+        check_task.cancel()
+        done, _ = await asyncio.wait({check_task}, timeout=WAIT)
+
+        assert done == {check_task}, "the check loop swallowed its own cancellation"
+        assert check.consecutive_failures == 0, "the loop's own cancellation was counted as a failed run of the check"
 
 
 # ---------------------------------------------------------------------------

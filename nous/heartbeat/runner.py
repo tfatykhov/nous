@@ -721,6 +721,15 @@ class HeartbeatRunner:
                 # F034.5: Record timeout as error for dynamic checks
                 await self._record_run_stats(check, success=False, error_msg="timeout")
                 run_succeeded = False
+            except asyncio.CancelledError:
+                if _cancel_requested():
+                    raise
+                # Something the check awaited was cancelled elsewhere. Nobody
+                # asked this loop to stop: a failed run of this check.
+                check.mark_failure()
+                logger.error("Heartbeat check '%s' was cancelled from within — a failed run", check.name)
+                await self._record_run_stats(check, success=False, error_msg="cancelled")
+                run_succeeded = False
             except Exception as exc:
                 check.mark_failure()
                 logger.exception("Heartbeat check '%s' failed", check.name)
