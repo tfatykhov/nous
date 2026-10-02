@@ -6,8 +6,9 @@ snapshot of the state before the call. The registry is separate from
 compensator needs the database and domain objects at runtime.
 
 Snapshot lifecycle:
-  1. Before dispatch of a compensable tool in a background context,
-     ``SnapshotStore.capture`` persists the prior state.
+  1. Before dispatch of a compensable tool -- in an undoable context, or in
+     a background one whose review card can be published, so that something
+     can revert from it -- ``SnapshotStore.capture`` persists the prior state.
      Spawning tools (schedule_task, heartbeat_check_create) are deliberately
      NOT compensable: cancelling after the first fire does not undo the work
      it already started.

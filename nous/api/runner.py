@@ -651,6 +651,18 @@ class AgentRunner:
             )
         return None
 
+    def _review_card_possible(self, ctx: ExecutionContext) -> bool:
+        """Whether the harness can publish its own action_review card -- the
+        surface it offers Revert on -- for a call from ``ctx``: a background
+        turn, with the pusher wired and auto-review on. The one definition
+        the snapshot capture, its write-ahead card intent and the post-call
+        publish all read."""
+        return bool(
+            ctx.is_background
+            and self._action_review_pusher is not None
+            and self._settings.compensation_auto_review_enabled
+        )
+
     async def _maybe_push_action_review(
         self,
         ctx: ExecutionContext,
@@ -670,9 +682,7 @@ class AgentRunner:
         failed publish or clear leaves the intent (stored before dispatch)
         for the pending-card sweep, never an error for the call.
         """
-        if not (snapshotted and ctx.is_background):
-            return
-        if not self._settings.compensation_auto_review_enabled or self._action_review_pusher is None:
+        if not (snapshotted and self._review_card_possible(ctx)):
             return
         try:
             if status in ("success", "unknown"):
@@ -696,10 +706,11 @@ class AgentRunner:
     ) -> bool:
         """Capture a pre-dispatch snapshot for compensable calls in background contexts.
 
-        Fires for every background context (``is_background``) -- undoable or
-        not -- when the call is compensable (``is_compensable_call``) and the
-        snapshot store is wired: the snapshot is what makes a revert, and the
-        auto action_review card, possible where no human is in the loop.
+        Fires when something can revert from the snapshot -- an undoable
+        context, or a background one whose review card can be published
+        (``_review_card_possible``) -- and the call is compensable
+        (``is_compensable_call``) and the snapshot store is wired. A snapshot
+        nothing could revert from is never stored.
         ``undoable`` only decides whether a missing snapshot BLOCKS the call
         (compensation not wired, no durable ledger row, an oversized file,
         unreadable prior state, a failed write); elsewhere capture is
@@ -716,7 +727,8 @@ class AgentRunner:
         from nous.api.tool_classes import is_compensable_call, tool_class
 
         undoable = getattr(ctx, "undoable", False)
-        if not (undoable or ctx.is_background):
+        card = self._review_card_possible(ctx)
+        if not (undoable or card):
             return False
         cls = tool_class(tool_name)
         if cls is None or not cls.compensable:
@@ -816,11 +828,7 @@ class AgentRunner:
                 snapshot_data=snap_data,
                 # Write-ahead card intent (codex P1 on #652): stored before
                 # the side effect, so no crash after it can lose the card.
-                card_pending=bool(
-                    ctx.is_background
-                    and self._settings.compensation_auto_review_enabled
-                    and self._action_review_pusher is not None
-                ),
+                card_pending=card,
             )
             if tool_name in ("resolve_decision", "heartbeat_check_manage") and outcome is not None:
                 # The written state is recorded by the mutation itself, in
