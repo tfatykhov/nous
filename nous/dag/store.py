@@ -129,6 +129,20 @@ def open_approval_clause():
     )
 
 
+def dag_check_nodes(agent_id: str):
+    """SELECT of the check-type nodes in ``agent_id``'s DAGs that own a
+    heartbeat check (``check_name``). The ONE definition of a DAG-managed
+    check: the leaked-check sweep and the compensation snapshot gate
+    (``SnapshotStore.is_dag_managed_check``) both build on it."""
+    return (
+        select(DAGNode)
+        .join(ExecutionDAG, DAGNode.dag_id == ExecutionDAG.id)
+        .where(ExecutionDAG.agent_id == agent_id)
+        .where(DAGNode.node_type == "check")
+        .where(DAGNode.check_name.is_not(None))
+    )
+
+
 class DAGStore:
     """CRUD operations for DAG orchestration."""
 
@@ -843,16 +857,12 @@ class DAGStore:
         """
         async with self._db.session() as session:
             result = await session.execute(
-                select(DAGNode)
-                .join(ExecutionDAG, DAGNode.dag_id == ExecutionDAG.id)
+                dag_check_nodes(self._agent_id)
                 .join(
                     DynamicCheckModel,
                     DynamicCheckModel.name == DAGNode.check_name,
                 )
-                .where(ExecutionDAG.agent_id == self._agent_id)
                 .where(DynamicCheckModel.agent_id == self._agent_id)
-                .where(DAGNode.node_type == "check")
-                .where(DAGNode.check_name.is_not(None))
                 .where(DAGNode.status.in_(_TERMINAL_CHECK_NODE_STATUSES))
                 .where(DynamicCheckModel.enabled == sa_true())
                 .order_by(DAGNode.completed_at.asc().nulls_last())

@@ -787,6 +787,21 @@ class AgentRunner:
                 # already-disabled check succeeds, and its revert must leave
                 # it disabled rather than start it.
                 check_name = tool_input.get("name", "")
+                # A compensable call is one no other component acts on before
+                # a revert. A DAG node's check is not: the DAG loop reads its
+                # disable as the node's completion. Refused on an undoable
+                # node; anywhere else it runs with no snapshot, so no Revert.
+                # (`is True`: a stand-in store's mock answer is not a yes.)
+                # Nor is a lookup that failed a no: the call counts as unrevertible.
+                try:
+                    dag_managed = await self._snap_store.is_dag_managed_check(check_name)
+                except Exception:
+                    logger.warning("Harness Phase 2.8: DAG lookup failed for check %r", check_name, exc_info=True)
+                    return _unrevertible(f"whether check {check_name!r} belongs to a DAG node could not be read")
+                if dag_managed is True:
+                    if undoable:
+                        return _unrevertible(f"check {check_name!r} belongs to a DAG node, which its disable completes")
+                    return False
                 try:
                     prior_enabled = await self._snap_store.check_enabled(check_name)
                 except Exception:

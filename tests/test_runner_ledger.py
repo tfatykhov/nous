@@ -688,6 +688,9 @@ class _FakeSnapStore:
     async def mark_card_published(self, ledger_entry_id):
         return True
 
+    async def is_dag_managed_check(self, name):
+        return False
+
 
 async def _undoable_write(tmp_path, *, auto_review: bool, dispatch_error: bool = False):
     from test_runner_authorization import _one_tool_call_then_done_with

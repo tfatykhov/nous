@@ -384,6 +384,21 @@ class SnapshotStore:
 
         return await asyncio.wait_for(_read(), timeout=self._timeout)
 
+    async def is_dag_managed_check(self, name: str) -> bool:
+        """Whether dynamic check ``name`` belongs to a DAG check node. Its
+        disable is not compensable: the DAG loop reads it as that node's
+        completion and launches its successors, which re-enabling cannot
+        take back."""
+        from nous.dag.store import dag_check_nodes
+        from nous.storage.models import DAGNode
+
+        async def _read() -> bool:
+            async with self._db.session() as s:
+                result = await s.execute(dag_check_nodes(self._agent_id).where(DAGNode.check_name == name).limit(1))
+                return result.first() is not None
+
+        return await asyncio.wait_for(_read(), timeout=self._timeout)
+
     async def decision_state(self, decision_id: str) -> dict[str, Any] | None:
         """The review fields ``Brain.review`` overwrites, as they are now, or
         None when this agent has no such decision. Read before a
