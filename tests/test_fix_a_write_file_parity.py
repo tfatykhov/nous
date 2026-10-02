@@ -20,8 +20,10 @@ from test_fix_a_write_lock import _streamed_write
 from test_runner_ledger import _FakeSnapStore, _FakeStore, _stream_runner
 
 from nous.api import compensation
-from nous.api.builtin_tools import register_builtin_tools, write_file_tool
+from nous.api.builtin_tools import PreconditionFailed, atomic_replace_bytes, register_builtin_tools, write_file_tool
 from nous.api.tools import ToolDispatcher
+
+_FIFO = pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX FIFOs only")
 
 
 @pytest.mark.asyncio
@@ -183,3 +185,74 @@ async def test_unencodable_content_leaves_the_target_alone(tmp_path):
     assert existing.get("is_error") is True and new.get("is_error") is True
     assert target.read_text(encoding="utf-8") == "v1"
     assert sorted(p.name for p in tmp_path.iterdir()) == ["notes.txt"]
+
+
+@_FIFO
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["pipe", "link"], ids=["fifo", "link-to-the-fifo"])
+async def test_in_place_write_to_a_fifo_is_refused_before_anything_is_opened(tmp_path, monkeypatch, path):
+    """A FIFO with no reader blocks whoever opens it for writing, for good.
+    The in-place write refuses it first, with the refusal a snapshotted write
+    gives, so the call returns at once and no thread is left blocked -- also
+    when the path is a link to the FIFO."""
+    pipe = tmp_path / "pipe"
+    os.mkfifo(pipe)
+    (tmp_path / "link").symlink_to(pipe)
+    started: list[Path] = []
+    real_write_text = Path.write_text
+
+    def spy(self, *args, **kwargs):
+        started.append(self)
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", spy)
+    try:
+        result = await asyncio.wait_for(write_file_tool(path, "x", _workspace_dir=str(tmp_path)), timeout=2)
+    finally:
+        if started:
+            # A write did start and sits in open(): give the FIFO a reader, so
+            # that thread can end and a failure here cannot hang the whole run.
+            os.close(os.open(pipe, os.O_RDONLY | os.O_NONBLOCK))
+
+    assert result.get("is_error") is True
+    assert result["content"][0]["text"] == (
+        f"Refused to write '{path}': 'pipe' is not a regular file; nothing was written."
+    )
+    assert started == []  # nothing was opened, so no thread can be sitting in open()
+
+
+@_FIFO
+def test_the_compare_and_replace_write_gives_the_same_refusal(tmp_path):
+    """One definition: the primitive a snapshot-bound write goes through
+    refuses a FIFO with the same words, and does not block on it either."""
+    os.mkfifo(tmp_path / "pipe")
+
+    with pytest.raises(PreconditionFailed, match="^'pipe' is not a regular file$"):
+        atomic_replace_bytes(tmp_path / "pipe", b"x", root=tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_a_directory_as_the_target_is_still_the_writes_own_error(tmp_path):
+    """Guard: the refusal is for files that can block or misbehave when
+    opened. A directory never did; the write reports it itself, with the text
+    it had before #652."""
+    (tmp_path / "sub").mkdir()
+
+    result = await write_file_tool("sub", "x", _workspace_dir=str(tmp_path))
+
+    text = result["content"][0]["text"]
+    assert result.get("is_error") is True
+    assert text.startswith("Error writing file: ") and "not a regular file" not in text
+
+
+@pytest.mark.asyncio
+async def test_a_path_the_check_cannot_look_at_gets_the_writes_own_error(tmp_path):
+    """Guard: the look at the target never speaks for itself. A path it cannot
+    stat -- on Windows a NUL byte gets this far -- is left to the write, which
+    refuses it with the text it had before #652."""
+    result = await write_file_tool("a\x00b.txt", "x", _workspace_dir=str(tmp_path))
+
+    text = result["content"][0]["text"]
+    assert result.get("is_error") is True
+    assert not text.startswith("stat:")
+    assert list(tmp_path.iterdir()) == []

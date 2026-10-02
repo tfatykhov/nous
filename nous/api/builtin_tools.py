@@ -346,6 +346,13 @@ def _parent_dir(target: Path, root: Path, *, create: bool = False) -> Iterator[t
         os.close(dfd)
 
 
+def _require_regular_file(st: os.stat_result, name: str) -> None:
+    """Refuse a write target that exists and is not a regular file -- a FIFO,
+    a socket, a device: opening one can block its thread for good."""
+    if not stat.S_ISREG(st.st_mode):
+        raise PreconditionFailed(f"{name!r} is not a regular file")
+
+
 def _read_state(dfd: int | None, name: str, limit: int) -> _State:
     try:
         # O_NONBLOCK: a FIFO with no writer would otherwise block this open
@@ -359,8 +366,7 @@ def _read_state(dfd: int | None, name: str, limit: int) -> _State:
         raise
     with os.fdopen(fd, "rb") as f:
         st = os.fstat(f.fileno())
-        if not stat.S_ISREG(st.st_mode):
-            raise PreconditionFailed(f"{name!r} is not a regular file")
+        _require_regular_file(st, name)
         data = f.read(limit + 1)
     if len(data) > limit:
         return _State("oversized", st)
@@ -572,6 +578,19 @@ async def write_file_tool(
             # One departure: content that cannot be encoded fails here, before
             # a directory is made or the file is opened (and truncated).
             content.encode("utf-8")
+            # The other: a FIFO, socket or device as the target is refused as
+            # the snapshotted write refuses it, before it is opened -- a FIFO
+            # with no reader would block this write's thread for good. The
+            # check follows links, as the open does. A directory, and a path
+            # the check cannot reach, are left to the write, which reports
+            # them itself as it always did; a target that does not exist yet
+            # is simply created.
+            try:
+                found = await asyncio.to_thread(os.stat, target)
+            except (OSError, ValueError):
+                found = None
+            if found is not None and not stat.S_ISDIR(found.st_mode):
+                _require_regular_file(found, target.name)
             await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
             write = asyncio.to_thread(target.write_text, content, encoding="utf-8")
             if outcome is not None and outcome.write_lock is not None:
