@@ -2028,7 +2028,10 @@ class DAGOrchestrator:
                     proc.communicate(), timeout=_CHECK_CMD_TIMEOUT,
                 )
             except asyncio.TimeoutError:
-                await kill_process_group(proc)
+                # even_if_exited: a job that outlived the check's shell is
+                # stopped as well, or every timed-out poll would leave one
+                # more process and two more open pipes behind.
+                await kill_process_group(proc, even_if_exited=True)
                 logger.warning(
                     "Completion check command timed out (%.0fs) for node %s",
                     _CHECK_CMD_TIMEOUT, node.name,
@@ -2037,7 +2040,7 @@ class DAGOrchestrator:
             except asyncio.CancelledError:
                 # The tick was cancelled mid-check (shutdown): the command
                 # must not outlive it.
-                await kill_process_group(proc)
+                await kill_process_group(proc, even_if_exited=True)
                 raise
 
             if proc.returncode == 0:

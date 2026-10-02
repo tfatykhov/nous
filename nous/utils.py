@@ -40,8 +40,8 @@ async def _discard(stream: asyncio.StreamReader | None) -> None:
         pass
 
 
-async def kill_process_group(proc: asyncio.subprocess.Process) -> None:
-    """Kill a shell command that is still running, as a whole, and wait for its shell, but not forever.
+async def kill_process_group(proc: asyncio.subprocess.Process, *, even_if_exited: bool = False) -> None:
+    """Kill a shell command as a whole, and wait for its shell, but not forever.
 
     ``proc`` must have been started with ``start_new_session=True``, which
     makes its pid its process group. ``proc.kill()`` alone signals only the
@@ -52,12 +52,21 @@ async def kill_process_group(proc: asyncio.subprocess.Process) -> None:
     the shell's exit at once in their current releases (3.13.16, 3.14.8;
     CPython gh-119710).
 
-    A shell whose exit is already known (``returncode`` is set) is left
-    alone, and so is a job it left running: ``proc.wait()`` returns at once
-    for it, so nothing holds the caller, and its pid is no longer ours to
-    signal.
+    By default a shell whose exit is already known (``returncode`` is set)
+    is left alone, and so is a job it left running: ``proc.wait()`` returns
+    at once for it, so nothing holds the caller, and its pid is no longer
+    ours to signal. ``bash_tool`` relies on that: a job that outlived its
+    shell survives the timeout of the call that started it.
+
+    With ``even_if_exited=True`` the group is killed all the same. A DAG
+    completion check asks for that: it is polled again and again, and a job
+    that outlived its shell would otherwise leave one more process and two
+    more open pipes behind after every timed-out poll. The group is then
+    named by the pid the shell had. That is exact for as long as anything
+    the command started is still in the group. Once the group is empty the
+    number is free again, and could in principle belong to a newer group.
     """
-    if proc.returncode is not None:
+    if proc.returncode is not None and not even_if_exited:
         return
     try:
         if hasattr(os, "killpg"):

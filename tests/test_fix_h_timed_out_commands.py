@@ -191,18 +191,26 @@ async def test_a_command_that_ignores_sigterm_is_still_stopped(workspace, monkey
 
 
 @OUTLIVED_ITS_SHELL
-async def test_a_job_that_outlived_its_shell_survives_the_timeout_of_its_check(workspace, monkeypatch, command):
-    """Parity pin: green before this change too. The shell has exited by the
-    time the timeout fires, so nothing is killed: the job it left behind runs
-    on, and the caller gets control back at the timeout."""
+async def test_a_job_that_outlived_its_shell_is_stopped_at_the_timeout_of_its_check(
+    workspace, monkeypatch, caplog, command
+):
+    """The shell has exited by the time the timeout fires, and the job it left
+    behind still holds the command's output. A completion check is polled again
+    and again, so the job is stopped with the rest of the group: the pipes
+    close, and the caller is back at the timeout with nothing logged."""
     monkeypatch.setattr(orchestrator_module, "_CHECK_CMD_TIMEOUT", 1.0)
     orchestrator, node = _check_node(workspace, command)
 
-    result = await asyncio.wait_for(orchestrator._run_completion_check(node), LIMIT)
+    with caplog.at_level(logging.WARNING, logger="nous.utils"):
+        try:
+            result = await asyncio.wait_for(orchestrator._run_completion_check(node), LIMIT)
+        except TimeoutError:
+            pytest.fail(f"the completion check had not returned after {LIMIT:.0f}s, with a 1s timeout")
 
     assert result == CheckResult("pending", "command timed out")
     job = await _recorded_pid(workspace, "job.pid")
-    await _assert_still_running(job, "a job that had outlived its shell was killed at the timeout")
+    await _assert_gone(job, "a job that had outlived its shell was still running after the timeout of its check")
+    assert [r.getMessage() for r in caplog.records if r.name == "nous.utils"] == []
 
 
 async def test_a_descendant_outside_the_group_cannot_hold_the_caller(workspace, monkeypatch, caplog):
@@ -327,6 +335,34 @@ async def test_a_cancelled_completion_check_stops_its_command(workspace, monkeyp
     await _assert_gone(child, "the command's child was left running after the check was cancelled")
 
 
+async def test_a_cancelled_completion_check_stops_a_job_that_outlived_its_shell(workspace, monkeypatch):
+    # The cancel has to land once the shell's exit is known, which is when only
+    # the job is left. So keep the process the check started, to see that.
+    started = []
+    start_shell = asyncio.create_subprocess_shell
+
+    async def start_shell_and_keep_it(*args, **kwargs):
+        proc = await start_shell(*args, **kwargs)
+        started.append(proc)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", start_shell_and_keep_it)
+    orchestrator, node = _check_node(workspace, BACKGROUND)  # the module's 10 s timeout: the cancel lands mid-command
+    check = asyncio.create_task(orchestrator._run_completion_check(node))
+    job = await _recorded_pid(workspace, "job.pid")
+    deadline = time.monotonic() + LIMIT
+    while not (started and started[0].returncode is not None):
+        if time.monotonic() > deadline:
+            pytest.fail("the shell's exit was never reported")
+        await asyncio.sleep(0.02)
+
+    check.cancel()
+    done, _ = await asyncio.wait({check}, timeout=LIMIT)
+
+    assert done == {check} and check.cancelled(), "the cancelled check did not end as cancelled"
+    await _assert_gone(job, "a job that had outlived its shell was left running after the check was cancelled")
+
+
 # ---------------------------------------------------------------------------
 # bash_tool's timeout stops the command too
 # ---------------------------------------------------------------------------
@@ -346,8 +382,9 @@ async def test_a_timed_out_bash_command_returns_and_stops_its_command(workspace,
 
 @OUTLIVED_ITS_SHELL
 async def test_a_job_that_outlived_its_shell_survives_the_timeout_of_its_bash_command(workspace, command):
-    """Parity pin: green before this change too. As for the completion check:
-    the shell has exited, so the timeout kills nothing and the job runs on."""
+    """Parity pin: green before this change too. Unlike a completion check,
+    bash_tool leaves a job that outlived its shell alone: the shell has exited,
+    so the timeout kills nothing and the job runs on."""
     result = await asyncio.wait_for(bash_tool(command, timeout=1, _workspace_dir=str(workspace)), LIMIT)
 
     assert "Command timed out after 1s." in result["content"][0]["text"]
