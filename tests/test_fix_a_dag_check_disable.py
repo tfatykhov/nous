@@ -39,7 +39,7 @@ from nous.api.tools import ToolDispatcher, register_heartbeat_tools
 from nous.cognitive.ledger_store import LedgerStore
 from nous.dag.orchestrator import DAGOrchestrator
 from nous.dag.schemas import DAGCreateRequest, DAGNodeSpec, DAGNodeType
-from nous.dag.store import DAGStore
+from nous.dag.store import DAG_CHECK_NAME_PREFIX, DAGStore
 from nous.heartbeat.dynamic import DynamicCheckLoader
 from nous.heartbeat.registry import CheckRegistry
 from nous.storage.models import CompensationSnapshot, DynamicCheckModel
@@ -222,6 +222,7 @@ async def test_an_undoable_disable_in_the_launch_window_is_refused(db, tmp_path)
     try:
         await asyncio.wait_for(in_window.wait(), timeout=20)
         check = recording["check"]
+        assert check.startswith(DAG_CHECK_NAME_PREFIX)  # the launch builds the name from the gate's prefix
         # the window: the check exists and no node has recorded it yet
         assert await _enabled(scene, check) is True
         assert (await scene.store.get_dag(scene.dag.id)).nodes[0].check_name is None

@@ -84,6 +84,7 @@ from nous.dag.approval import (
 from nous.dag.schemas import PREDECESSOR_EDGE_TYPES, DAGNodeStatus
 from nous.dag.store import (
     _TERMINAL_DAG_STATUSES,
+    DAG_CHECK_NAME_PREFIX,
     LIVE_DAG_STATUSES,
     MAX_ACTIVE_DAGS,
     TERMINAL_DAG_STATUSES,
@@ -3360,7 +3361,7 @@ class DAGOrchestrator:
             return
 
         augmented = await self._build_predecessor_context(node, dag)
-        check_name = f"dag-{dag.id.hex[:8]}-{node.name}"
+        check_name = f"{DAG_CHECK_NAME_PREFIX}{dag.id.hex[:8]}-{node.name}"
 
         created = False
         try:

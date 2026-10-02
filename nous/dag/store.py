@@ -129,9 +129,10 @@ def open_approval_clause():
     )
 
 
-# The orchestrator names a DAG check ``dag-<dag id prefix>-<node name>`` and
-# creates it before its node records the name. The prefix covers that window;
-# it errs towards "no Revert" for a standalone check somebody named that way.
+# The orchestrator builds a DAG check's name from this prefix
+# (``dag-<dag id prefix>-<node name>``) and creates the check before its node
+# records the name. The prefix covers that window; it errs towards "no Revert"
+# for a standalone check somebody named that way.
 DAG_CHECK_NAME_PREFIX = "dag-"
 
 
