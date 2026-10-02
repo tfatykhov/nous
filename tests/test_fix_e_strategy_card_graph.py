@@ -55,7 +55,7 @@ async def stored(db, graph):
     its rows under its own agent_id and this fixture deletes them again."""
     yield graph
     async with db.session() as s:
-        for model in (GraphEdge, Procedure, Decision, Event):
+        for model in (GraphEdge, Procedure, Decision, Fact, Event):
             await s.execute(delete(model).where(model.agent_id == graph.agent_id))
         await s.commit()
 
@@ -567,6 +567,89 @@ async def test_recall_pipeline_one_hop_returns_the_how_to_neighbour_and_not_the_
     by_id = {r.id: r for r in results}
     assert by_id[howto.id].type == "procedure"  # the graph leg ran and still returns procedures
     assert card.id not in by_id
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_cards_do_not_use_up_the_spreading_activation_window(stored, db):
+    """run_recall_pipeline's spreading-activation leg reads the 40 most activated
+    nodes and returns at most 20 of them. The recalled decision is linked to 30
+    decisions that are recalled as well, each with its own card, and by weaker
+    edges to 25 facts. With a decay of 0.5 a card is activated at 0.9 x 0.5 x
+    0.7 x 0.5 = 0.16 and a fact at 0.9 x 0.3 x 0.5 = 0.14, so the 30 cards
+    outrank every fact. The leg still returns 20 facts: a card is left out of
+    the 40 rows, not dropped after them. (The spreading CTE is Postgres-only
+    SQL.)"""
+    seed = uuid4()
+    others = [uuid4() for _ in range(30)]
+    async with db.session() as s:
+        cards = []
+        for i, other in enumerate(others):
+            s.add(
+                GraphEdge(
+                    agent_id=stored.agent_id,
+                    source_id=seed,
+                    source_type="decision",
+                    target_id=other,
+                    target_type="decision",
+                    relation="related_to",
+                    weight=1.0,
+                    auto_linked=True,
+                    extraction_method="heuristic",
+                )
+            )
+            cards.append(await _link(s, stored, other, f"card-{i}", 0.7, kind="strategy"))
+        for i in range(25):
+            fact = Fact(id=uuid4(), agent_id=stored.agent_id, content=f"a fact about the deploy {i}", active=True)
+            s.add(fact)
+            s.add(
+                GraphEdge(
+                    agent_id=stored.agent_id,
+                    source_id=fact.id,
+                    source_type="fact",
+                    target_id=seed,
+                    target_type="decision",
+                    relation="evidence_for",
+                    weight=0.3,
+                    auto_linked=True,
+                    extraction_method="heuristic",
+                )
+            )
+        await s.commit()
+    recalled = [
+        DecisionSummary(
+            id=decision_id,
+            description="chose blue-green deploys",
+            confidence=0.8,
+            category="process",
+            stakes="medium",
+            outcome="success",
+            score=0.9 - rank / 100,
+            created_at=datetime.now(UTC),
+        )
+        for rank, decision_id in enumerate([seed, *others])
+    ]
+    settings = stored.settings.model_copy(
+        update={
+            "spreading_activation_enabled": "true",
+            "spreading_activation_decay": 0.5,
+            "graph_recall_max_expand": 1,  # the recalled decision is the one seed
+        }
+    )
+
+    with patch.object(stored.brain, "query", AsyncMock(return_value=recalled)):
+        results, stats = await run_recall_pipeline(
+            "blue-green deploys",
+            MagicMock(),
+            stored.brain,
+            settings,
+            memory_types=["decision"],
+        )
+
+    spread = [r for r in results if r.source == "spreading_activation"]
+    assert stats.spreading_activation_used
+    assert [r.type for r in spread] == ["fact"] * 20
+    assert not {c.id for c in cards} & {r.id for r in results}
 
 
 @pytest.mark.postgres_only
