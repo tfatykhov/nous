@@ -1,4 +1,4 @@
-"""PR A: a reverted snapshot does not go on holding the file's prior bytes.
+"""Post-merge review of #652: a reverted snapshot does not go on holding the file's prior bytes.
 
 A write_file snapshot stores the previous file content so a revert can put
 it back. Once the revert is recorded nothing reads those bytes again, but on

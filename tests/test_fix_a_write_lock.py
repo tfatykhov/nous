@@ -1,4 +1,4 @@
-"""PR A: the per-path write lock (#652) engages only when compensation is
+"""Post-merge review of #652: the per-path write lock engages only when compensation is
 wired, can never raise out of a tool loop, and is never waited for forever.
 
 On 236c110 every write_file -- with every flag off -- computed a lock key one

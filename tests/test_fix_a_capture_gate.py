@@ -1,4 +1,4 @@
-"""PR A: a compensation snapshot is stored only when something can revert from it.
+"""Post-merge review of #652: a compensation snapshot is stored only when something can revert from it.
 
 On 236c110 every compensable background call was snapshotted as soon as
 compensation was enabled -- for write_file, the previous file content, into

@@ -1,4 +1,4 @@
-"""PR A (P2-15): a file that write_file replaces keeps its owner and group.
+"""Post-merge review of #652 (P2-15): a file that write_file replaces keeps its owner and group.
 
 Phase 2.8 (#652) made every write_file a temp file renamed over the target
 and copied only the mode onto the new file. With every flag off the file

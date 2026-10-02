@@ -1131,7 +1131,7 @@ async def test_capture_snapshots_heartbeat_check_manage_disable_only(inp, expect
 
 # ---------------------------------------------------------------------------
 # codex P2 (runner.py:525): background contexts snapshot regardless of undoable
-# (PR A: when their review card can be published -- auto-review is wired here)
+# (now only when their review card can be published -- auto-review is wired here)
 # ---------------------------------------------------------------------------
 
 
