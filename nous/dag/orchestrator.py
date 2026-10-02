@@ -94,6 +94,7 @@ from nous.dag.store import (
 from nous.heart.subtasks import SubtaskQueueFull
 from nous.heartbeat.dynamic import DynamicCheckLimitReached
 from nous.storage.models import DAGNode, ExecutionDAG
+from nous.utils import kill_process_group
 
 if TYPE_CHECKING:
     from nous.dag.delivery import DAGResultDelivery
@@ -2018,14 +2019,16 @@ class DAGOrchestrator:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd_arg,
+                # Own process group, so that a timeout stops the whole
+                # command and not only the /bin/sh that started it.
+                start_new_session=True,
             )
             try:
                 stdout, stderr = await asyncio.wait_for(
                     proc.communicate(), timeout=_CHECK_CMD_TIMEOUT,
                 )
             except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
+                await kill_process_group(proc)
                 logger.warning(
                     "Completion check command timed out (%.0fs) for node %s",
                     _CHECK_CMD_TIMEOUT, node.name,
