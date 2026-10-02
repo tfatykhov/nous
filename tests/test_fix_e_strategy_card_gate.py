@@ -431,6 +431,61 @@ async def test_a_card_that_does_not_fit_in_what_the_how_to_procedures_left_is_no
     assert result.recalled_ids["procedure"] == [str(fits.id)]
 
 
+_TIGHT = dict(
+    proc_catalog_enabled=False,
+    context_budget_overrides={"procedures": 400},
+    budget_scale_enabled=False,
+    proc_recommended_body_max_chars=8000,
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retrieval", [False, True])
+async def test_a_how_to_body_after_the_budget_cut_is_still_not_shown(card_heart, session, retrieval):
+    """What the budget loop does on 236c110: it stops at the first how-to body that does
+    not fit, and a later, smaller one is not shown. The pass that lets a card through
+    must leave that alone. Mutation: let the second pass admit any procedure."""
+    fits = await _add(session, card_heart, "howto-fits", age_minutes=60, body="s" * 800)
+    cut = await _add(session, card_heart, "howto-cut", age_minutes=61, body="s" * 6000)
+    small = await _add(session, card_heart, "howto-small", age_minutes=62)
+    engine = _engine(
+        card_heart,
+        _seeded_brain((fits, 0.9), (cut, 0.8), (small, 0.7)),
+        strategy_cards_retrieval_enabled=retrieval,
+        **_TIGHT,
+    )
+
+    result = await _build(engine, card_heart, session)
+
+    assert "### howto-fits (ops)" in _section(result, "Recommended Procedures")
+    assert "howto-small" not in result.system_prompt
+    assert result.recalled_ids["procedure"] == [str(fits.id)]
+
+
+@pytest.mark.asyncio
+async def test_two_cards_share_what_the_how_to_procedures_left(card_heart, session):
+    """Allowance two. The first how-to body takes about 210 of 400 tokens and the second
+    is cut; each card is about 160. One card fits in what is left, two do not.
+    Mutation: the second pass does not count what a card it showed used."""
+    fits = await _add(session, card_heart, "howto-fits", age_minutes=60, body="s" * 800)
+    cut = await _add(session, card_heart, "howto-cut", age_minutes=61, body="s" * 6000)
+    cards = [await _add(session, card_heart, f"card-{i}", kind="strategy", body="c" * 500) for i in range(2)]
+    engine = _engine(
+        card_heart,
+        _seeded_brain((fits, 0.9), (cut, 0.8), (cards[0], 0.7), (cards[1], 0.6)),
+        strategy_cards_retrieval_enabled=True,
+        strategy_cards_max_per_turn=2,
+        **_TIGHT,
+    )
+
+    result = await _build(engine, card_heart, session)
+    recommended = _section(result, "Recommended Procedures")
+
+    assert "### card-0 (strategy)" in recommended
+    assert "card-1" not in recommended
+    assert result.recalled_ids["procedure"] == [str(fits.id), str(cards[0].id)]
+
+
 @pytest.mark.asyncio
 async def test_max_per_turn_zero_serves_no_card(card_heart, session):
     """0 means none (it used to mean unlimited)."""

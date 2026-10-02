@@ -130,9 +130,10 @@ async def test_a_card_never_takes_a_row_of_the_procedure_window(graph, session):
 @pytest.mark.asyncio
 async def test_the_untyped_fan_out_returns_its_other_neighbours_and_no_card(graph, session):
     """No ``neighbor_type``: the call shape of recall_deep's decision one-hop
-    (retrieval_pipeline.py:1747) and of the companion's expandGraphNode
-    (a2ui/actions.py:837). Three cards outrank a fact on the decision's edges;
-    with one row asked for, the fact comes back."""
+    (``_run_stages`` in retrieval_pipeline.py) and of the companion's
+    expandGraphNode (``expand_graph_node`` in a2ui/actions.py). Three cards
+    outrank a fact on the decision's edges; with one row asked for, the fact
+    comes back."""
     seed = uuid4()
     fact = Fact(id=uuid4(), agent_id=graph.agent_id, content="a fact about the deploy", active=True)
     session.add(fact)
@@ -158,9 +159,65 @@ async def test_the_untyped_fan_out_returns_its_other_neighbours_and_no_card(grap
 
 
 @pytest.mark.asyncio
+async def test_a_card_on_the_target_side_of_an_edge_is_filtered_the_same_way(graph, session):
+    """The distiller writes card -> decision. Other writers (hub bridging, backfill) can
+    put the card on the target side: decision -> card. Three such cards outrank the
+    how-to procedure and a fact. Mutations: drop either source-side predicate of
+    Brain._neighbors (the exclusion, or the cards-only restriction)."""
+    seed = uuid4()
+    howto = Procedure(
+        id=uuid4(),
+        agent_id=graph.agent_id,
+        name="howto-deploy",
+        domain="ops",
+        description="about howto-deploy",
+        active=True,
+    )
+    cards = [
+        Procedure(
+            id=uuid4(),
+            agent_id=graph.agent_id,
+            name=f"card-{i}",
+            domain="strategy",
+            description=f"about card-{i}",
+            kind="strategy",
+            active=True,
+        )
+        for i in range(3)
+    ]
+    other = Fact(id=uuid4(), agent_id=graph.agent_id, content="a fact about the deploy", active=True)
+    session.add_all([howto, other, *cards])
+    targets = [(c, "procedure", 0.9 - i / 100) for i, c in enumerate(cards)]
+    targets += [(howto, "procedure", 0.5), (other, "fact", 0.4)]
+    for target, ttype, weight in targets:
+        session.add(
+            GraphEdge(
+                agent_id=graph.agent_id,
+                source_id=seed,
+                source_type="decision",
+                target_id=target.id,
+                target_type=ttype,
+                relation="related_to",
+                weight=weight,
+                auto_linked=True,
+                extraction_method="heuristic",
+            )
+        )
+    await session.flush()
+
+    typed = await graph.brain.neighbors(seed, node_type="decision", neighbor_type="procedure", limit=1, session=session)
+    assert [n.id for n in typed] == [howto.id]
+    untyped = await graph.brain.neighbors(seed, node_type="decision", limit=1, session=session)
+    assert [n.id for n in untyped] == [howto.id]
+    asked = await graph.brain.neighbors(seed, node_type="decision", limit=5, session=session, cards_only=True)
+    assert [n.id for n in asked] == [c.id for c in cards]
+
+
+@pytest.mark.asyncio
 async def test_the_resolver_leaves_a_card_absent_unless_asked(graph, session):
-    """recall_deep's spreading-activation branch resolves its hits here
-    (retrieval_pipeline.py:1635) and drops an id that is absent from the map."""
+    """recall_deep's spreading-activation branch (in ``_run_stages``,
+    retrieval_pipeline.py) resolves its hits here and drops an id that is absent
+    from the map."""
     seed = uuid4()
     howto = await _link(session, graph, seed, "howto-deploy", 0.5)
     card = await _link(session, graph, seed, "card-0", 0.7, kind="strategy")
@@ -171,6 +228,24 @@ async def test_the_resolver_leaves_a_card_absent_unless_asked(graph, session):
 
     asked = await graph.brain._resolve_node_descriptions(session, ids, include_strategy_cards=True)
     assert set(asked) == {howto.id, card.id}
+
+
+@pytest.mark.asyncio
+async def test_the_readers_that_ask_for_cards_get_them_with_or_without_a_session(stored, db):
+    """Brain.neighbors(cards_only=True) without a session, and list_procedures(
+    include_strategy_cards=True) with one. Mutations: either wrapper drops the flag
+    on the branch no current caller takes."""
+    seed = uuid4()
+    async with db.session() as s:
+        await _link(s, stored, seed, "howto-deploy", 0.9)
+        card = await _link(s, stored, seed, "card-0", 0.7, kind="strategy")
+        await s.commit()
+
+    asked = await stored.brain.neighbors(seed, node_type="decision", limit=5, cards_only=True)
+    assert [n.id for n in asked] == [card.id]
+    async with db.session() as s:
+        rows, total = await stored.heart.list_procedures(limit=10, session=s, include_strategy_cards=True)
+    assert {p.name for p in rows} == {"howto-deploy", "card-0"} and total == 2
 
 
 @pytest.mark.asyncio
@@ -382,6 +457,74 @@ async def test_retrieval_on_a_card_past_the_allowance_is_dropped_before_its_body
     assert "### card-first (strategy)" in recommended
     assert "card-second" not in recommended
     assert served.id in fetched and dropped.id not in fetched
+
+
+@pytest.mark.asyncio
+async def test_a_card_dropped_before_its_body_is_fetched_is_attributed_in_the_retrieval_trace(graph, session):
+    """The drop a real Brain produces: the card came from the cards-only window and the
+    allowance is used. Mutation: remove that drop's trace line (the card then has no
+    disposition and lands in `unaccounted`)."""
+    from nous.observability.retrieval_trace import RetrievalTrace
+
+    first, second = uuid4(), uuid4()
+    await _link(session, graph, first, "card-first", 0.7, kind="strategy")
+    dropped = await _link(session, graph, second, "card-second", 0.7, kind="strategy")
+    engine = _engine(graph, first, second, strategy_cards_retrieval_enabled=True)
+    trace = RetrievalTrace(query="q", path="context")
+
+    selected = await engine._select_procedures(
+        slots=5,
+        critic_skills=[],
+        recalled_ids={"fact": [], "decision": [str(first), str(second)]},
+        recalled_score_map={str(first): 0.9, str(second): 0.8},
+        session=session,
+        trace=trace,
+        card_slots=1,
+    )
+
+    assert [p.name for p in selected] == ["card-first"]
+    row = next(c for c in trace.to_dict()["candidates"] if c["id"] == str(dropped.id))
+    assert (row["disposition"], row["disposition_stage"]) == ("sliced_off", "strategy_card_cap")
+
+
+@pytest.mark.asyncio
+async def test_an_allowance_of_two_serves_both_cards_of_one_seed(graph, session):
+    """Mutations: a cards-only window of one row instead of the allowance; an
+    allowance that never goes above one."""
+    seed = uuid4()
+    await _link(session, graph, seed, "howto-deploy", 0.9)
+    await _link(session, graph, seed, "card-0", 0.7, kind="strategy")
+    await _link(session, graph, seed, "card-1", 0.6, kind="strategy")
+    await _link(session, graph, seed, "card-2", 0.5, kind="strategy")
+    engine = _engine(graph, seed, strategy_cards_retrieval_enabled=True, strategy_cards_max_per_turn=2)
+
+    recommended = _recommended(await _build(engine, graph, session))
+
+    assert [recommended.count(f"### card-{i} (strategy)") for i in range(3)] == [1, 1, 0]
+    assert recommended.index("### howto-deploy") < recommended.index("### card-0") < recommended.index("### card-1")
+
+
+@pytest.mark.asyncio
+async def test_retrieval_off_makes_no_cards_only_call(graph, session):
+    """With the flag off the turn costs what it cost before: one neighbour query per
+    seed. Mutation: make the cards-only call whatever the allowance is."""
+    seed = uuid4()
+    await _link(session, graph, seed, "howto-deploy", 0.9)
+    await _link(session, graph, seed, "card-0", 0.7, kind="strategy")
+    real = graph.brain.neighbors
+    asked_for_cards: list[bool] = []
+
+    async def _recording(*args, **kwargs):
+        asked_for_cards.append(bool(kwargs.get("cards_only")))
+        return await real(*args, **kwargs)
+
+    await _build(_engine(graph, seed, neighbors=_recording), graph, session)
+    assert asked_for_cards == [False]
+
+    asked_for_cards.clear()
+    engine = _engine(graph, seed, neighbors=_recording, strategy_cards_retrieval_enabled=True)
+    await _build(engine, graph, session)
+    assert asked_for_cards == [False, True]
 
 
 # ---------------------------------------------------------------------------
