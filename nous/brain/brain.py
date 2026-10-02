@@ -1586,7 +1586,12 @@ class Brain:
 
         _cards = select(Procedure.id).where(Procedure.kind == STRATEGY_CARD_KIND)
         if cards_only:
-            _active_cards = _cards.where(Procedure.active == True)  # noqa: E712
+            # The agent's own active cards. Another agent's card would take a
+            # row of the window and then be dropped by the agent-scoped resolver.
+            _active_cards = _cards.where(
+                Procedure.active == True,  # noqa: E712
+                Procedure.agent_id == self.agent_id,
+            )
             source_q = source_q.where(
                 GraphEdge.target_type == "procedure", GraphEdge.target_id.in_(_active_cards)
             )
@@ -1594,6 +1599,8 @@ class Brain:
                 GraphEdge.source_type == "procedure", GraphEdge.source_id.in_(_active_cards)
             )
         elif neighbor_type in (None, "procedure"):
+            # Not agent-scoped, on purpose: a card of ANY agent is left out
+            # before the LIMIT.
             source_q = source_q.where(
                 or_(GraphEdge.target_type != "procedure",
                     GraphEdge.target_id.notin_(_cards))

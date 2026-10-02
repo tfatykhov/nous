@@ -214,6 +214,56 @@ async def test_a_card_on_the_target_side_of_an_edge_is_filtered_the_same_way(gra
 
 
 @pytest.mark.asyncio
+async def test_another_agents_cards_do_not_take_the_cards_only_window(graph, session):
+    """Three edges of this agent point at cards that belong to ANOTHER agent, and
+    they outrank the edges to its own card and to its own how-to procedure. Asked
+    for one card, Brain.neighbors returns the agent's own card: a foreign card is
+    left out before the LIMIT, where it would take the row and then be dropped by
+    the agent-scoped resolver. The default call leaves a card of any agent out
+    before the LIMIT as well, and returns the how-to procedure."""
+    seed = uuid4()
+    own_card = await _link(session, graph, seed, "card-own", 0.5, kind="strategy")
+    own_howto = await _link(session, graph, seed, "howto-deploy", 0.4)
+    for i in range(3):
+        foreign = Procedure(
+            id=uuid4(),
+            agent_id=f"{graph.agent_id}-other",
+            name=f"card-foreign-{i}",
+            domain="strategy",
+            description=f"about card-foreign-{i}",
+            kind="strategy",
+            active=True,
+        )
+        session.add(foreign)
+        session.add(
+            GraphEdge(
+                agent_id=graph.agent_id,
+                source_id=foreign.id,
+                source_type="procedure",
+                target_id=seed,
+                target_type="decision",
+                relation="extracted_from",
+                weight=0.9,
+                auto_linked=True,
+                extraction_method="heuristic",
+            )
+        )
+    await session.flush()
+
+    asked = await graph.brain.neighbors(seed, node_type="decision", limit=1, session=session, cards_only=True)
+    assert [n.id for n in asked] == [own_card.id]
+
+    default = await graph.brain.neighbors(
+        seed,
+        node_type="decision",
+        neighbor_type="procedure",
+        limit=1,
+        session=session,
+    )
+    assert [n.id for n in default] == [own_howto.id]
+
+
+@pytest.mark.asyncio
 async def test_the_resolver_leaves_a_card_absent_unless_asked(graph, session):
     """recall_deep's spreading-activation branch (in ``_run_stages``,
     retrieval_pipeline.py) resolves its hits here and drops an id that is absent
