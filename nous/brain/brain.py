@@ -1469,6 +1469,7 @@ class Brain:
         session: AsyncSession | None = None,
         *,
         neighbor_type: str | None = None,
+        cards_only: bool = False,
     ) -> list[NeighborResult]:
         """Get nodes connected to the given node via graph edges.
 
@@ -1478,16 +1479,22 @@ class Brain:
         ``heart_graph_neighbors`` — without it, ``LIMIT 2`` over the
         full union can return zero decisions when a fact also has
         ``summarized_by`` chunk neighbors.
+
+        Strategy cards (procedures with ``kind='strategy'``) are returned only
+        when ``cards_only`` is set, and then nothing else is: the active cards
+        among the node's neighbours. A card is a lesson distilled from a
+        decision, not a memory or a how-to procedure; the one caller that serves
+        cards (the K-line rung of procedure selection) asks.
         """
         if session is None:
             async with self.db.session() as session:
                 return await self._neighbors(
                     node_id, node_type, relation, limit, session,
-                    neighbor_type=neighbor_type,
+                    neighbor_type=neighbor_type, cards_only=cards_only,
                 )
         return await self._neighbors(
             node_id, node_type, relation, limit, session,
-            neighbor_type=neighbor_type,
+            neighbor_type=neighbor_type, cards_only=cards_only,
         )
 
     async def _neighbors(
@@ -1499,6 +1506,7 @@ class Brain:
         session: AsyncSession,
         *,
         neighbor_type: str | None = None,
+        cards_only: bool = False,
     ) -> list[NeighborResult]:
         # Find edges where this node is source or target, matching node type.
         # F065: SELECT extraction_method so neighbors carry provenance tier
@@ -1565,6 +1573,35 @@ class Brain:
                 _active_fact = select(Fact.id).where(Fact.active == True)  # noqa: E712
                 source_q = source_q.where(GraphEdge.target_id.in_(_active_fact))
                 target_q = target_q.where(GraphEdge.source_id.in_(_active_fact))
+
+        # Strategy cards (kind='strategy') go only to a caller that asks for them
+        # (cards_only), and then only the active ones, whatever neighbor_type is.
+        # Pushed down BEFORE the LIMIT like the F080 filter above, so a card never
+        # takes a neighbour row from a how-to procedure, and type-aware like the
+        # decision pushdown below, so the untyped fan-out keeps its other
+        # neighbours. An explicit `relation=` does not lift it (the F080 filter
+        # has no such override either). Imported here like nous.heart.search in
+        # _query: nous.brain does not load nous.heart.
+        from nous.heart.schemas import STRATEGY_CARD_KIND
+
+        _cards = select(Procedure.id).where(Procedure.kind == STRATEGY_CARD_KIND)
+        if cards_only:
+            _active_cards = _cards.where(Procedure.active == True)  # noqa: E712
+            source_q = source_q.where(
+                GraphEdge.target_type == "procedure", GraphEdge.target_id.in_(_active_cards)
+            )
+            target_q = target_q.where(
+                GraphEdge.source_type == "procedure", GraphEdge.source_id.in_(_active_cards)
+            )
+        elif neighbor_type in (None, "procedure"):
+            source_q = source_q.where(
+                or_(GraphEdge.target_type != "procedure",
+                    GraphEdge.target_id.notin_(_cards))
+            )
+            target_q = target_q.where(
+                or_(GraphEdge.source_type != "procedure",
+                    GraphEdge.source_id.notin_(_cards))
+            )
 
         # codex #577 r3/r5: pushdown for demoted decision outcomes, applied
         # OUTSIDE the neighbor_type block — Stage 3's one-hop call passes no
@@ -1674,6 +1711,7 @@ class Brain:
         # nothing. Mirrors _query's explicit-`outcome=`-wins rule.
         descriptions = await self._resolve_node_descriptions(
             session, ids_by_type, apply_outcome_filter=not relation,
+            include_strategy_cards=cards_only,
         )
 
         # Build results
@@ -1733,6 +1771,7 @@ class Brain:
         session: AsyncSession,
         ids_by_type: dict[str, list[UUID]],
         apply_outcome_filter: bool = True,
+        include_strategy_cards: bool = False,
     ) -> dict[UUID, tuple[str, datetime | None]]:
         """Resolve real content + created_at for graph node ids, batched per type.
 
@@ -1743,7 +1782,8 @@ class Brain:
         Inactive facts and procedures are filtered out (for those types,
         ``active=false`` is a soft-delete / supersession marker) and are simply
         ABSENT from the returned map — callers must treat a missing id as
-        "drop this node".
+        "drop this node". Strategy cards (procedures with ``kind='strategy'``)
+        are absent the same way unless ``include_strategy_cards`` is set.
 
         Every lookup is agent-scoped (codex P2 round 2, PR #555):
         ``graph_edges`` endpoints are polymorphic and not FK-protected, so a
@@ -1847,7 +1887,7 @@ class Brain:
         # ``descriptions`` and dropped by the caller (this also fixes
         # a live Path-A resurrection of dead skills via auto_linked edges).
         if ids_by_type.get("procedure"):
-            p_result = await session.execute(
+            proc_stmt = (
                 select(
                     Procedure.id,
                     Procedure.name,
@@ -1858,6 +1898,15 @@ class Brain:
                 .where(Procedure.active == True)  # noqa: E712
                 .where(Procedure.agent_id == self.agent_id)
             )
+            if not include_strategy_cards:
+                # Absent unless asked for, like an inactive procedure: this is
+                # what keeps a card out of the spreading-activation results.
+                from nous.heart.schemas import STRATEGY_CARD_KIND
+
+                proc_stmt = proc_stmt.where(
+                    Procedure.kind.is_distinct_from(STRATEGY_CARD_KIND)
+                )
+            p_result = await session.execute(proc_stmt)
             for p in p_result.all():
                 # Procedure.description is nullable — fall back to the NAME
                 # (NOT NULL; matches how recall formats descriptionless
@@ -1994,9 +2043,15 @@ class Brain:
 
         proc_ids = [_as_uuid(h.node_id) for h in hubs if h.node_type == "procedure"]
         if proc_ids:
+            from nous.heart.schemas import STRATEGY_CARD_KIND
             from nous.storage.models import Procedure
+            # A strategy card that is a hub is listed without its name (it falls
+            # back to "[procedure] <id>" below): these labels go into the
+            # recall_hubs tool result and the hub-shift notice in the system prompt.
             proc_result = await session.execute(
-                select(Procedure.id, Procedure.name).where(Procedure.id.in_(proc_ids))
+                select(Procedure.id, Procedure.name)
+                .where(Procedure.id.in_(proc_ids))
+                .where(Procedure.kind.is_distinct_from(STRATEGY_CARD_KIND))
             )
             for p in proc_result.all():
                 labels[p.id] = p.name or f"[procedure] {p.id}"

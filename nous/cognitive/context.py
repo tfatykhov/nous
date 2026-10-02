@@ -2176,6 +2176,7 @@ class ContextEngine:
         # fetching bodies (codex P2: avoid up to seeds*per_seed get_procedure calls
         # just to keep `slots`). Bodies are fetched once, ranked, in phase 2.
         scores: dict[UUID, float] = {}
+        card_ids: set[UUID] = set()  # what the cards-only window returned
         for mid, stype in seeds[:_SEED_CAP]:
             try:
                 seed_uuid = UUID(mid)
@@ -2190,6 +2191,21 @@ class ContextEngine:
             except Exception as e:
                 logger.warning("F080 §14.7: neighbor fetch failed for seed %s: %s", mid, e)
                 continue
+            if card_slots > 0:
+                # Brain.neighbors returns no card unless asked. Cards get a second,
+                # cards-only window, so a card and a how-to procedure never compete
+                # for one seed's rows; if this call fails, the how-to neighbours
+                # fetched above are kept.
+                try:
+                    card_neighbors = await self._brain.neighbors(
+                        seed_uuid, node_type=stype, neighbor_type="procedure",
+                        limit=card_slots, session=session, cards_only=True,
+                    )
+                except Exception as e:
+                    logger.warning("StrategyCards: card fetch failed for seed %s: %s", mid, e)
+                    card_neighbors = []
+                card_ids.update(n.id for n in card_neighbors)
+                neighbors = [*neighbors, *card_neighbors]
             for n in neighbors:
                 score = (getattr(n, "edge_weight", 0.0) or 0.0) * seed_score
                 # F091: Path B has its own graph expansion (F080 §14.7 K-line
@@ -2226,7 +2242,13 @@ class ContextEngine:
                 trace.add(_pid, "procedure", "context_procedures_graph",
                           score=_sc, rank=_rank + 1)
         for pid, _score in _ranked:
-            if len(selected) >= slots:
+            # `slots` bounds the how-to procedures; a card has its own allowance,
+            # and once that is used a card is dropped without fetching its body.
+            if pid in card_ids and len(cards) >= card_slots:
+                if trace is not None:
+                    trace.drop(pid, "procedure", SLICED_OFF, "strategy_card_cap")
+                continue
+            if pid not in card_ids and len(selected) >= slots:
                 if trace is not None:
                     trace.drop(pid, "procedure", SLICED_OFF, "kline_slot_limit")
                 continue  # keep going so every remaining candidate is attributed
