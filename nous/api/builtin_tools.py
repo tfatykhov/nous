@@ -414,11 +414,12 @@ def atomic_replace_bytes(
     """Replace ``target`` with ``data`` atomically, or change nothing.
 
     The bytes go to a fresh temp file in the same directory (every byte
-    written, fsynced, the existing mode kept -- a new file gets the umask
-    default), which is then renamed over the target. With ``expected`` (a
-    sha256 hex, or ABSENT) the target must hold exactly that right before
-    the rename -- an ABSENT target is created no-clobber -- else
-    PreconditionFailed. A symlink target is never followed. The one window
+    written, fsynced; the existing mode, owner and group kept as far as the
+    process may, a set-id bit only together with the id it refers to -- a
+    new file gets the umask default), which is then renamed over the target.
+    With ``expected`` (a sha256 hex, or ABSENT) the target must hold exactly
+    that right before the rename -- an ABSENT target is created no-clobber --
+    else PreconditionFailed. A symlink target is never followed. The one window
     left, between that last check and the rename, cannot be closed against
     a writer that takes no lock (POSIX has no compare-and-swap rename).
     The parent is reached from the workspace ``root`` without following a
