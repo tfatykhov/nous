@@ -1127,8 +1127,10 @@ class DAGOrchestrator:
             held = [n for n in ready_nodes if not self._costs_nothing(n)]
             ready_nodes = [n for n in ready_nodes if self._costs_nothing(n)]
             if held:
+                # "approved" is a person's answer; a default that applied is not one.
                 self._held_this_tick[dag.id] = any(
-                    n.node_type == "approval" and n.status == "completed" for n in dag.nodes
+                    n.node_type == "approval" and n.status == "completed" and n.answer_source == "companion"
+                    for n in dag.nodes
                 )
                 logger.info(
                     "DAG %s holds %d ready node(s): %d of %d working slots in use",
@@ -3023,6 +3025,30 @@ class DAGOrchestrator:
         for node in waiting:
             deadline = as_utc(node.answer_deadline)
             if deadline is not None and deadline <= now:  # pre-filter; SQL decides
+                spec = node.approval_spec or {}
+                default = option_by_id(spec, spec.get("default_option")) or {}
+                if default.get("outcome") == "proceed":
+                    # Harness Phase 2.8: a proceed default applies only while
+                    # its flag is on (a kill switch, not only a creation gate)
+                    # and a card is linked: with none, nothing says the
+                    # question is in front of anyone. Otherwise the node stops,
+                    # with no answer recorded, under the same conditions as the
+                    # deadline answer below (still parked, DAG live, deadline
+                    # passed): a tap, a cancel or an ended DAG wins.
+                    why = None
+                    if not self._settings.dag_approval_proceed_default_enabled:
+                        why = "proceed defaults are turned off"
+                    elif node.surface_id is None:
+                        why = "no approval card is linked"
+                    if why is not None:
+                        if await self._store.transition_node(
+                            node.id, from_statuses={"awaiting_input"}, dag_statuses=LIVE_DAG_STATUSES,
+                            due_by=now, status="failed", completed_at=now,
+                            error=f"{why}; default '{default.get('label')}' ({default.get('id')}) not applied",
+                        ):
+                            await self._close_card(node.surface_id, node_id=node.id)
+                            await self._refresh_node(node)  # this tick's propagation sees it
+                        continue
                 result = await self.answer_node(
                     node.id, (node.approval_spec or {}).get("default_option", ""),
                     source="deadline", actor=DEADLINE_ACTOR,
@@ -3491,6 +3517,9 @@ class DAGOrchestrator:
                             f"[Input from '{inner_name}' — the card at '{pred.name}' "
                             f"showed only the first {n} of {len(inner_result)} chars]"
                         )
+                    elif pred.answer_source == "deadline":
+                        # Nobody answered and the default applied: not approved.
+                        label = f"[Input from '{inner_name}' — nobody answered '{pred.name}'; its default applied]"
                     else:
                         label = f"[Approved input from '{inner_name}' (approved at '{pred.name}')]"
                     parts.append(f"{label}: {inner_result}")
