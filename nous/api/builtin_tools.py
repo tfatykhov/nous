@@ -640,6 +640,10 @@ async def write_file_tool(
             # truncated). And the file is reached and opened as
             # _write_text_in_place describes: a path swapped for a symlink,
             # and a FIFO, socket or device, are refused.
+            if not isinstance(content, str):
+                # A number, null or a bool from the model: refused here too,
+                # in the words Path.write_text had for it.
+                raise TypeError(f"data must be str, not {type(content).__name__}")
             content.encode("utf-8")
             write = asyncio.to_thread(_write_text_in_place, target, content, Path(_workspace_dir).resolve())
             if outcome is not None and outcome.write_lock is not None:

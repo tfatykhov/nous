@@ -222,6 +222,25 @@ async def test_unencodable_content_leaves_the_target_alone(tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == ["notes.txt"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", [123, None, True], ids=["a-number", "null", "a-bool"])
+async def test_content_that_is_not_a_string_keeps_its_error(tmp_path, content):
+    """A model can send a number, null or a bool as the content, and the
+    dispatcher passes it on. It is refused with the words the write had for
+    it before #652, before anything is opened or made."""
+    target = tmp_path / "notes.txt"
+    target.write_text("v1", encoding="utf-8")
+
+    existing = await write_file_tool("notes.txt", content, _workspace_dir=str(tmp_path))
+    new = await write_file_tool("sub/new.txt", content, _workspace_dir=str(tmp_path))
+
+    said = f"Error writing file: data must be str, not {type(content).__name__}"
+    assert existing.get("is_error") is True and new.get("is_error") is True
+    assert [existing["content"][0]["text"], new["content"][0]["text"]] == [said, said]
+    assert target.read_text(encoding="utf-8") == "v1"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["notes.txt"]
+
+
 @_FIFO
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["pipe", "link"], ids=["fifo", "link-to-the-fifo"])
