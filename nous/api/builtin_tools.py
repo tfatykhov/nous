@@ -444,12 +444,17 @@ def atomic_replace_bytes(
                 view = memoryview(data)
                 while view:
                     view = view[os.write(fd, view) :]
+                # A set-id bit survives a replace only together with the id it
+                # refers to: it is never on the new file while that file has
+                # another owner (setuid) or group (setgid) than the replaced
+                # file's.
+                set_id = stat.S_ISUID | stat.S_ISGID
                 if mode is not None and hasattr(os, "fchmod"):
-                    # The mode first, while the temp file is still this
-                    # process's own: once the file is given away, changing its
-                    # mode takes CAP_FOWNER, and the owner step below is best
-                    # effort -- it must not fail the write.
-                    os.fchmod(fd, mode)
+                    # So the mode goes on first WITHOUT those bits, while the
+                    # temp file is still this process's own: once it is given
+                    # away, changing its mode takes CAP_FOWNER, and the owner
+                    # step below is best effort -- it must not fail the write.
+                    os.fchmod(fd, mode & ~set_id)
                 if pre.stat is not None and hasattr(os, "fchown"):
                     # Then the replaced file's owner and group. Best effort:
                     # only root may give a file away, and a process that may
@@ -461,18 +466,28 @@ def atomic_replace_bytes(
                             os.fchown(fd, -1, pre.stat.st_gid)
                         except OSError:
                             pass
-                    if mode is not None and mode & (stat.S_ISUID | stat.S_ISGID) and hasattr(os, "fchmod"):
-                        # chown cleared the set-id bits. Putting them back
-                        # needs the file to be ours still, or CAP_FOWNER.
+                    if mode is not None and mode & set_id and hasattr(os, "fchmod"):
+                        # Last, each set-id bit whose id the file now really
+                        # has: read back, not assumed from the chown above, so
+                        # a refused chown drops the bit (and a platform with
+                        # no chown never gets one). Best effort too: it needs
+                        # the file to be ours still, or CAP_FOWNER.
                         try:
-                            os.fchmod(fd, mode)
+                            now = os.fstat(fd)
+                            bits = 0
+                            if now.st_uid == pre.stat.st_uid:
+                                bits |= mode & stat.S_ISUID
+                            if now.st_gid == pre.stat.st_gid:
+                                bits |= mode & stat.S_ISGID
+                            if bits:
+                                os.fchmod(fd, (mode & ~set_id) | bits)
                         except OSError:
                             pass
                 os.fsync(fd)
                 os.close(fd)
                 fd = None
                 if mode is not None and not hasattr(os, "fchmod"):
-                    os.chmod(tmp, mode)  # only reached path-based (no fchmod => no dir_fd either)
+                    os.chmod(tmp, mode & ~set_id)  # only reached path-based (no fchmod => no dir_fd either)
                 with fence.lock if fence is not None else contextlib.nullcontext():
                     if fence is not None and fence.revoked:
                         raise PreconditionFailed("the write was revoked by a revert")
