@@ -1,4 +1,6 @@
-"""PR B: the DAG tick loop recovers from a tick that fails, is cancelled, or never returns.
+"""The DAG tick loop recovers from a tick that fails, is cancelled, or never returns.
+
+From the post-merge review of #656.
 
 Every test drives the real HeartbeatRunner. The only collaborator replaced is
 the orchestrator, whose ``tick()`` is scripted per test. Timing is gated on
@@ -92,7 +94,7 @@ async def _started(runner: HeartbeatRunner):
 
 
 # ---------------------------------------------------------------------------
-# Task B1: a finished tick is read without raising, whatever it ended with
+# A finished tick is read without raising, whatever it ended with
 # ---------------------------------------------------------------------------
 
 
@@ -245,7 +247,7 @@ async def test_shutdown_drain_that_sees_the_tick_return_records_it():
 
 
 # ---------------------------------------------------------------------------
-# Task B2: only this task's own cancellation ends a loop
+# Only this task's own cancellation ends a loop
 # ---------------------------------------------------------------------------
 
 
@@ -350,7 +352,7 @@ async def test_cancelling_a_loop_task_still_ends_it():
 
 
 # ---------------------------------------------------------------------------
-# Task B3: a TimeoutError the tick raised is a failed tick, not a deadline
+# A TimeoutError the tick raised is a failed tick, not a deadline
 # ---------------------------------------------------------------------------
 
 
@@ -416,7 +418,7 @@ async def test_a_timeout_error_raised_during_the_shutdown_drain_is_logged_as_a_f
 
 
 # ---------------------------------------------------------------------------
-# Task B4: status says when the in-flight tick started
+# Status says when the in-flight tick started
 # ---------------------------------------------------------------------------
 
 
@@ -524,7 +526,7 @@ async def test_dashboard_heartbeat_reports_the_in_flight_dag_tick(db):
 
 
 # ---------------------------------------------------------------------------
-# Task B6: a tick that never returns is escalated, not skipped forever
+# A tick that never returns is escalated, not skipped forever
 # ---------------------------------------------------------------------------
 
 
@@ -636,7 +638,7 @@ async def test_a_failed_read_of_the_await_chain_costs_the_detail_not_the_report(
 
 
 # ---------------------------------------------------------------------------
-# Task B8: the report of a hung tick reaches a person
+# The report of a hung tick reaches a person
 # ---------------------------------------------------------------------------
 
 
