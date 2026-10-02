@@ -2358,8 +2358,8 @@ class ContextEngine:
         follows, not the keywords that matched it. Oversized bodies are capped
         with a pointer to ``get_procedure`` for the untruncated full skill.
         A strategy card is rendered differently: a framing line under its
-        heading, its description and its body on one line each, and never the
-        capped stub.
+        heading, every part of its block on one line, and never the capped
+        stub.
         Returns one block per procedure (aligned with ``details``) so the caller
         can fit them to budget and keep recalled-ids in sync.
         """
@@ -2372,13 +2372,6 @@ class ContextEngine:
             if card:
                 parts.append(_STRATEGY_CARD_FRAMING)
             desc = getattr(p, "description", None)
-            # A card is one block whoever wrote its row. The distiller stores
-            # one-line fields, but a row it did not write can carry line breaks,
-            # and a line starting with "### " would open a block of its own under
-            # the one framing line. So a card's text is collapsed where it is
-            # rendered; a how-to body keeps its line breaks.
-            if card and desc:
-                desc = " ".join(desc.split())
             if desc:
                 parts.append(desc)
             notes = getattr(p, "implementation_notes", None) or []
@@ -2386,8 +2379,6 @@ class ContextEngine:
                 str(n) for n in notes
                 if not str(n).startswith(("source:", "version:"))
             )
-            if card:
-                body = " ".join(body.split())
             if body:
                 parts.append(body)
             if "skill" not in (getattr(p, "tags", None) or []):
@@ -2403,6 +2394,15 @@ class ContextEngine:
                     parts.append("Patterns: " + "; ".join(str(x) for x in patterns))
                 if goals:
                     parts.append("Goals: " + "; ".join(str(x) for x in goals))
+            # A card is one block whoever wrote its row. The distiller stores
+            # one-line fields, but a row it did not write can carry a line break
+            # in any field printed above (name, domain, description, a note, a
+            # pattern, a goal), and a line starting with "### " would open a block
+            # of its own under the one framing line. So every part of a card's
+            # block is collapsed to one line; a how-to procedure keeps its line
+            # breaks.
+            if card:
+                parts = [" ".join(part.split()) for part in parts]
             block = "\n\n".join(parts)
             # A card is bounded where it is stored (name, description, lesson), and
             # its stub would tell the model to load "the steps before acting".
