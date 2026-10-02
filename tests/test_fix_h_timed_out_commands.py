@@ -392,6 +392,39 @@ async def test_a_job_that_outlived_its_shell_survives_the_timeout_of_its_bash_co
     await _assert_still_running(job, "a job that had outlived its shell was killed at the timeout")
 
 
+@OUTLIVED_ITS_SHELL
+async def test_a_job_that_outlived_its_shell_survives_the_cancellation_of_its_bash_command(
+    workspace, monkeypatch, command
+):
+    """Parity pin: green before this change too. A bash_tool call cancelled
+    once its shell has exited leaves the job the shell left behind running,
+    as its timeout does: the guard holds in both arms."""
+    # The cancel has to land once the shell's exit is known, which is when only
+    # the job is left. So keep the process the call started, to see that.
+    started = []
+    start_shell = asyncio.create_subprocess_shell
+
+    async def start_shell_and_keep_it(*args, **kwargs):
+        proc = await start_shell(*args, **kwargs)
+        started.append(proc)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", start_shell_and_keep_it)
+    call = asyncio.create_task(bash_tool(command, timeout=30, _workspace_dir=str(workspace)))
+    job = await _recorded_pid(workspace, "job.pid")
+    deadline = time.monotonic() + LIMIT
+    while not (started and started[0].returncode is not None):
+        if time.monotonic() > deadline:
+            pytest.fail("the shell's exit was never reported")
+        await asyncio.sleep(0.02)
+
+    call.cancel()
+    done, _ = await asyncio.wait({call}, timeout=LIMIT)
+
+    assert done == {call} and call.cancelled(), "the cancelled call did not end as cancelled"
+    await _assert_still_running(job, "a job that had outlived its shell was killed when its call was cancelled")
+
+
 @pytest.mark.parametrize("command", [WRITING, WRITING_TO_STDERR], ids=["writing to stdout", "writing to stderr"])
 async def test_a_command_still_writing_at_its_timeout_cannot_hold_the_caller(workspace, caplog, command):
     """Once the timeout has cancelled the reading, nobody reads the command's
