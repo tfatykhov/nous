@@ -731,6 +731,8 @@ class HeartbeatRunner:
                 # Something the check awaited was cancelled elsewhere. Nobody
                 # asked this loop to stop: a failed run of this check.
                 check.mark_failure()
+                # The arm also covers the stats write that follows a successful run.
+                successful_checks.discard(check.name)
                 logger.error("Heartbeat check '%s' was cancelled from within — a failed run", check.name)
                 await self._record_run_stats(check, success=False, error_msg="cancelled")
                 run_succeeded = False

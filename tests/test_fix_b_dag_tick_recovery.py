@@ -23,9 +23,10 @@ from httpx import ASGITransport, AsyncClient, ConnectError
 
 from nous.config import Settings
 from nous.heartbeat.dynamic import DynamicCheck
+from nous.heartbeat.finding_store import FindingStore
 from nous.heartbeat.registry import BaseCheck, CheckRegistry
 from nous.heartbeat.runner import HeartbeatRunner, _await_chain
-from nous.heartbeat.schemas import CheckResult
+from nous.heartbeat.schemas import CheckResult, Finding, FindingState
 
 WAIT = 10.0
 
@@ -429,6 +430,54 @@ async def test_a_cancellation_that_lands_after_the_run_succeeded_is_still_a_fail
     assert runner.registry.self_disabled_run_failed("worker"), (
         "a final run whose success was never recorded read as completion"
     )
+
+
+async def test_a_run_cancelled_after_it_succeeded_is_not_counted_among_the_successful_checks():
+    """A successful check that no longer reports a tracked finding gives that
+    finding an absent tick, and two of them resolve it. A run whose stats write
+    is cancelled from elsewhere has failed, and its result, which still reports
+    the finding, is never read: the check must not count as successful."""
+    runs = 0
+
+    async def reports_the_finding() -> CheckResult:
+        nonlocal runs
+        runs += 1
+        return CheckResult(has_updates=True, findings=[Finding(source="disk", summary="the disk is nearly full")])
+
+    async def update_run_stats(check_id, *, success, error_msg=None):
+        if success and runs > 1:
+            raise asyncio.CancelledError  # the write was cancelled elsewhere
+
+    loader = MagicMock()
+    loader.update_run_stats = update_run_stats
+    check = DynamicCheck(check_id="disk-id", name="disk", prompt="", tools=[], interval=0)
+    check.run = reports_the_finding
+    store = FindingStore()
+    store._startup_suppression_seconds = 0  # or a finding of its first five minutes is suppressed, not tracked
+    runner = _runner(_settings(), tick=None)
+    runner._dynamic_loader = loader  # what HeartbeatRunner(dynamic_loader=...) sets
+    runner._finding_store = store  # what HeartbeatRunner(finding_store=...) sets
+    runner.registry.register(check)
+    counted_successful: list[set[str]] = []
+    auto_resolve = runner._auto_resolve_absent_findings
+
+    def recording(successful_checks, current_fingerprints):
+        counted_successful.append(set(successful_checks))
+        auto_resolve(successful_checks, current_fingerprints)
+
+    runner._auto_resolve_absent_findings = recording
+
+    await runner._tick()  # the finding is reported, triaged and tracked
+    (fingerprint,) = store.get_active_by_check("disk")
+    tracked = store.get_tracked(fingerprint)
+    assert tracked.state is FindingState.ACKNOWLEDGED and counted_successful == [{"disk"}]
+
+    await runner._tick()  # reported again, but the write of the stats of that run is cancelled
+    await runner._tick()  # and once more: two ticks of absence resolve a finding
+
+    assert tracked.state is FindingState.ACKNOWLEDGED, "a finding its check still reports was resolved"
+    assert tracked.absent_ticks == 0, "a finding its check still reports was counted as absent"
+    assert counted_successful[1:] == [set(), set()], "a run that ended cancelled was counted as a successful check"
 
 
 async def test_a_cancelled_error_out_of_the_loop_body_does_not_end_the_heartbeat_loop(caplog):
