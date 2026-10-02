@@ -757,13 +757,23 @@ class HeartbeatRunner:
             except asyncio.CancelledError:
                 if _cancel_requested():
                     raise
-                # Something the check awaited was cancelled elsewhere. Nobody
-                # asked this loop to stop: a failed run of this check.
+                # Something awaited for this check was cancelled elsewhere.
+                # Nobody asked this loop to stop: a failed run of this check.
                 check.mark_failure()
                 # The arm also covers the stats write that follows a successful run.
                 successful_checks.discard(check.name)
-                logger.error("Heartbeat check '%s' was cancelled from within — a failed run", check.name)
-                await self._record_run_stats(check, success=False, error_msg="cancelled")
+                if run_succeeded:
+                    # It was that write. Whether its record landed is unknown,
+                    # and the write is a relative increment: one run gets no
+                    # second write (see NO RETRY in _record_run_stats).
+                    logger.error(
+                        "Heartbeat check '%s': the write of its success stats was cancelled from within — "
+                        "the record may or may not have landed and is not written again",
+                        check.name,
+                    )
+                else:
+                    logger.error("Heartbeat check '%s' was cancelled from within — a failed run", check.name)
+                    await self._record_run_stats(check, success=False, error_msg="cancelled")
                 run_succeeded = False
             except Exception as exc:
                 check.mark_failure()

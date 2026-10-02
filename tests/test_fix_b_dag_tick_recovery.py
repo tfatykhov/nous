@@ -425,11 +425,44 @@ async def test_a_cancellation_that_lands_after_the_run_succeeded_is_still_a_fail
 
     await runner._tick()
 
-    assert stats == [(True, None), (False, "cancelled")]
+    assert stats == [(True, None)], "a run whose success write was cancelled got a second stats write"
     assert worker.consecutive_failures == 1
     assert runner.registry.self_disabled_run_failed("worker"), (
         "a final run whose success was never recorded read as completion"
     )
+
+
+async def test_a_run_whose_success_write_was_cancelled_is_not_written_a_second_time(caplog):
+    """One execution of a check writes its stats at most once. The write is a
+    relative increment, and one that was cancelled from elsewhere may have
+    landed all the same: a second write for the same run could count it twice."""
+    writes: list[tuple[bool, str | None]] = []
+
+    async def update_run_stats(check_id, *, success, error_msg=None):
+        writes.append((success, error_msg))
+        if success:
+            raise asyncio.CancelledError  # the write was cancelled elsewhere, landed or not
+
+    async def run() -> CheckResult:
+        return CheckResult()
+
+    loader = MagicMock()
+    loader.update_run_stats = update_run_stats
+    worker = DynamicCheck(check_id="worker-id", name="worker", prompt="", tools=[], interval=0)
+    worker.run = run
+    runner = _runner(_settings(), tick=None)
+    runner._dynamic_loader = loader  # what HeartbeatRunner(dynamic_loader=...) sets
+    runner.registry.register(worker)
+
+    with caplog.at_level(logging.DEBUG, logger="nous.heartbeat.runner"):
+        await runner._tick()
+
+    assert writes == [(True, None)], "one run wrote its stats twice"
+    errors = [r.getMessage() for r in _runner_log(caplog) if r.levelno >= logging.ERROR]
+    assert errors == [
+        "Heartbeat check 'worker': the write of its success stats was cancelled from within — "
+        "the record may or may not have landed and is not written again"
+    ]
 
 
 async def test_a_run_cancelled_after_it_succeeded_is_not_counted_among_the_successful_checks():
