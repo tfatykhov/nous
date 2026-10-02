@@ -91,6 +91,28 @@ async def test_due_by_predicate(store):
     )
 
 
+@pytest.mark.parametrize(
+    "surface_id, linked, applies",
+    [
+        (None, True, False),
+        ("card-1", True, True),
+        (None, False, True),
+        ("card-1", False, False),
+        (None, None, True),
+        ("card-1", None, True),
+    ],
+)
+async def test_linked_predicate(store, surface_id, linked, applies):
+    _, node = await _one_node(store)
+    await store.transition_node(
+        node.id, from_statuses={"ready"}, status="awaiting_input", surface_id=surface_id
+    )
+
+    applied = await store.transition_node(
+        node.id, from_statuses={"awaiting_input"}, linked=linked, error="x"
+    )
+
+    assert applied is applies
 
 
 def _approval_spec(name: str = "approve") -> DAGNodeSpec:

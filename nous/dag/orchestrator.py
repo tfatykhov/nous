@@ -2970,6 +2970,10 @@ class DAGOrchestrator:
             dag_statuses=LIVE_DAG_STATUSES,
             card=surface_id,
             due_by=now if source == "deadline" else None,
+            # A deadline applies a proceed default only to a row that is linked
+            # to a card when the write lands: the tick's copy of the link may
+            # predate another tick's unlink of a dead card.
+            linked=True if source == "deadline" and option.get("outcome") == "proceed" else None,
             **values,
         )
         if won:
@@ -3034,16 +3038,19 @@ class DAGOrchestrator:
                     # question is in front of anyone. Otherwise the node stops,
                     # with no answer recorded, under the same conditions as the
                     # deadline answer below (still parked, DAG live, deadline
-                    # passed): a tap, a cancel or an ended DAG wins.
-                    why = None
+                    # passed): a tap, a cancel or an ended DAG wins. Where the
+                    # reason is the missing card, the write also requires the
+                    # row to be unlinked: another tick may have linked one
+                    # since this copy was loaded.
+                    why, no_card = None, False
                     if not self._settings.dag_approval_proceed_default_enabled:
                         why = "proceed defaults are turned off"
-                    elif node.surface_id is None:
-                        why = "no approval card is linked"
+                    elif node.surface_id is None:  # pre-filter; SQL decides
+                        why, no_card = "no approval card is linked", True
                     if why is not None:
                         if await self._store.transition_node(
                             node.id, from_statuses={"awaiting_input"}, dag_statuses=LIVE_DAG_STATUSES,
-                            due_by=now, status="failed", completed_at=now,
+                            due_by=now, linked=False if no_card else None, status="failed", completed_at=now,
                             error=f"{why}; default '{default.get('label')}' ({default.get('id')}) not applied",
                         ):
                             await self._close_card(node.surface_id, node_id=node.id)

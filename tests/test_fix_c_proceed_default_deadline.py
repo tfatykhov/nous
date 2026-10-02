@@ -197,6 +197,63 @@ async def test_a_stop_does_not_land_on_a_row_that_changed_under_the_tick(store, 
     assert list(surfaces.live()) == [node.surface_id]
 
 
+async def test_a_stop_does_not_land_on_a_row_that_was_linked_under_the_tick(store, subtask_mgr, surfaces):
+    """Guard: "no approval card is linked" is decided by the write, not by the
+    tick's copy. Another tick pushed and linked a card after this one loaded
+    the node as unlinked: the question is in front of someone now, so the stop
+    must not land, and that card stays open."""
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag = await _parked_past_its_deadline(store, orch, surfaces, delivered=False)
+    stale = await store.get_dag(dag.id)  # the tick's copy: parked, unlinked, past its deadline
+    theirs = await store.get_dag(dag.id)  # another tick's copy: it pushes the card and links it
+    await orch._push_and_link(next(n for n in theirs.nodes if n.name == "approve"), theirs)
+    card = (await _node(store, dag.id, "approve")).surface_id
+    assert card in surfaces.live()
+
+    await orch._poll_awaiting_input(stale)
+
+    approve = await _node(store, dag.id, "approve")
+    assert (approve.status, approve.error, approve.surface_id) == ("awaiting_input", None, card)
+    assert list(surfaces.live()) == [card]
+
+
+async def test_a_proceed_default_is_not_recorded_on_a_row_that_was_unlinked_under_the_tick(
+    store, subtask_mgr, surfaces
+):
+    """The link is part of the deadline write itself. Another tick unlinks the
+    card after answer_node has read the row and before it writes: no default is
+    recorded on a row with no card, and nothing below it is released. The node
+    stays parked, and the next tick, on fresh state, stops it."""
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag = await _parked_past_its_deadline(store, orch, surfaces, delivered=True)
+    stale = await store.get_dag(dag.id)  # the tick's copy: parked, linked, past its deadline
+    node = next(n for n in stale.nodes if n.name == "approve")
+    read = store.get_node_with_dag_status
+
+    async def read_then_another_tick_unlinks(node_id):
+        loaded = await read(node_id)
+        if node_id == node.id:
+            store.get_node_with_dag_status = read  # once: after answer_node's own read
+            await store.update_node(node_id, surface_id=None)
+        return loaded
+
+    store.get_node_with_dag_status = read_then_another_tick_unlinks
+
+    await orch._advance_dag(stale)
+
+    approve = await _node(store, dag.id, "approve")
+    assert (approve.status, approve.answer, approve.answer_source) == ("awaiting_input", None, None)
+    send = await _node(store, dag.id, "send")
+    assert (send.status, send.subtask_id) == ("pending", None)
+
+    await orch._advance_dag(await store.get_dag(dag.id))  # the next tick, on fresh state
+
+    approve = await _node(store, dag.id, "approve")
+    assert (approve.status, approve.answer_source) == ("failed", None)
+    assert approve.error == "no approval card is linked; default 'Send it' (send) not applied"
+    assert (await _node(store, dag.id, "send")).status == "blocked"
+
+
 async def test_a_stop_does_not_land_on_a_node_that_was_retried_but_not_yet_reparked(store, subtask_mgr, surfaces):
     """Guard for the "still parked" condition: after a decline and the
     companion's retry the node is `pending` and keeps its answer_deadline, so

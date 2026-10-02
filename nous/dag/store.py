@@ -593,6 +593,7 @@ class DAGStore:
         dag_statuses: Collection[str] | None = None,
         card: str | None = None,
         due_by: datetime | None = None,
+        linked: bool | None = None,
         **values: object,
     ) -> bool:
         """Harness Phase 3 §3.3: one conditional node write.
@@ -610,6 +611,9 @@ class DAGStore:
         ``due_by``: the node's deadline must have passed; decided in SQL,
         because SQLite returns stored timestamps naive and a Python comparison
         against an aware ``now`` raises TypeError.
+        ``linked``: the node must be linked to a card (``True``) or to none
+        (``False``) when the write lands — what a deadline may apply depends
+        on the link, and the caller's copy of it may be stale.
         """
         dag_scope = select(ExecutionDAG.id).where(ExecutionDAG.agent_id == self._agent_id)
         if dag_statuses is not None:
@@ -625,6 +629,8 @@ class DAGStore:
             stmt = stmt.where(or_(DAGNode.surface_id.is_(None), DAGNode.surface_id == card))
         if due_by is not None:
             stmt = stmt.where(DAGNode.answer_deadline <= due_by)
+        if linked is not None:
+            stmt = stmt.where(DAGNode.surface_id.is_not(None) if linked else DAGNode.surface_id.is_(None))
         async with self._db.session() as session:
             result = await session.execute(stmt)
             await session.commit()
