@@ -1,4 +1,4 @@
-"""Fix PR E, Task E7 (post-merge review of #651) — strategy cards and the decision graph.
+"""Post-merge review of #651 — strategy cards and the decision graph.
 
 A strategy card is linked to the decision it was distilled from by an
 ``extracted_from`` edge, so it is a graph neighbour of that decision. These tests

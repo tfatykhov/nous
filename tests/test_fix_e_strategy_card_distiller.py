@@ -1,4 +1,4 @@
-"""Fix PR E (post-merge review of #651) — when the distiller mints, bounds and retires a card.
+"""Post-merge review of #651 — when the distiller mints, bounds and retires a card.
 
 Every test drives the production chain — ``Brain.review`` -> the in-process
 ``EventBus`` -> ``StrategyCardDistiller`` — on real rows under a fresh
@@ -125,7 +125,7 @@ def _state(cards: list[Procedure]) -> list[tuple[bool, str]]:
 
 
 # ---------------------------------------------------------------------------
-# Invariant 4 — a heuristic auto-review never mints a card and retires the one that is there
+# A heuristic auto-review never mints a card and retires the one that is there
 # ---------------------------------------------------------------------------
 
 
@@ -176,7 +176,7 @@ async def test_an_auto_review_of_a_decision_that_has_a_card_retires_it_and_mints
 
 
 # ---------------------------------------------------------------------------
-# Invariant 5 — what the distiller sends and stores is bounded and marked as data
+# What the distiller sends and stores is bounded and marked as data
 # ---------------------------------------------------------------------------
 
 
@@ -245,7 +245,7 @@ async def test_the_stored_card_name_is_one_line_of_at_most_80_chars(rig):
 
 
 # ---------------------------------------------------------------------------
-# Invariants 6 and 7 — a card reflects its decision's current outcome
+# A card reflects its decision's current outcome
 # (the card lookups are JSONB queries, so these run on the Postgres lane)
 # ---------------------------------------------------------------------------
 

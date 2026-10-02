@@ -1,4 +1,4 @@
-"""Fix PR E (post-merge review of #651) — where a strategy card may reach a prompt.
+"""Post-merge review of #651 — where a strategy card may reach a prompt.
 
 A strategy card is a ``heart.procedures`` row with ``kind='strategy'``: a lesson
 distilled from a decision, not a how-to procedure. These tests pin that it stays
@@ -105,7 +105,7 @@ def _section(result, label) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Invariant 2 — the how-to catalog never lists a card, flag on or off
+# The how-to catalog never lists a card, flag on or off
 # ---------------------------------------------------------------------------
 
 
@@ -138,7 +138,7 @@ async def test_catalog_never_lists_cards_and_a_new_card_leaves_its_bytes_alone(
 
 
 # ---------------------------------------------------------------------------
-# Invariant 1 — the Critic's skill menu never offers a card
+# The Critic's skill menu never offers a card
 # ---------------------------------------------------------------------------
 
 
@@ -185,7 +185,7 @@ async def test_critic_skill_menu_never_offers_cards(card_heart, db):
 
 
 # ---------------------------------------------------------------------------
-# Invariants 1 and 3 — the search-driven reads return how-to procedures only
+# The search-driven reads return how-to procedures only
 # ---------------------------------------------------------------------------
 
 
@@ -288,7 +288,7 @@ async def test_dashboard_procedure_list_still_shows_cards(card_heart, db):
 
 
 # ---------------------------------------------------------------------------
-# Invariants 1 and 3 — Recommended Procedures: gate, cap, and slot accounting
+# Recommended Procedures: gate, cap, and slot accounting
 # ---------------------------------------------------------------------------
 
 
@@ -484,7 +484,7 @@ async def test_a_card_dropped_by_the_cap_is_attributed_in_the_retrieval_trace(ca
 
 
 # ---------------------------------------------------------------------------
-# Invariant 5 — a card body is rendered as context, not as a skill to follow
+# A card body is rendered as context, not as a skill to follow
 # ---------------------------------------------------------------------------
 
 
