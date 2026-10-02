@@ -859,3 +859,401 @@ async def test_the_cards_only_probe_passes_the_flag_on_without_a_session(vector_
             await s.commit()
 
     assert [p.id for p in found] == [card.id]
+
+
+# ---------------------------------------------------------------------------
+# The card allowance is topped up by the cards nearest the query (cosine probe)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_card_allowance_is_topped_up_by_the_card_nearest_the_query(
+    vector_heart,
+    mock_embeddings,
+    session,
+):
+    """No recalled decision, so the graph rung offers no card. The cards-only
+    cosine probe serves the card nearest the query (never one under the score
+    floor), after the how-to procedure (pgvector SQL — Postgres lane only)."""
+    query = "rotate the api keys"
+    await _add(
+        session, vector_heart, "howto-rotate-keys", embedding=await mock_embeddings.embed_near(query, noise=0.01)
+    )
+    await _add(session, vector_heart, "card-near", kind="strategy", embedding=await mock_embeddings.embed(query))
+    await _add(
+        session,
+        vector_heart,
+        "card-far",
+        kind="strategy",
+        embedding=await mock_embeddings.embed("an unrelated lesson about tax filing"),
+    )
+    engine = _engine(
+        vector_heart,
+        proc_catalog_enabled=False,
+        strategy_cards_retrieval_enabled=True,
+        strategy_cards_max_per_turn=2,
+    )
+
+    recommended = _section(await _build(engine, vector_heart, session, text=query), "Recommended Procedures")
+
+    assert "body of card-near" in recommended
+    assert "card-far" not in recommended
+    assert recommended.index("card-near") > recommended.index("body of howto-rotate-keys")
+
+
+def _card_probes(engine) -> list[dict]:
+    """Record the cards-only cosine probes this engine sends. The how-to cosine
+    rung calls the same method without ``cards_only``; those are not recorded."""
+    real = engine._heart.find_similar_procedures
+    calls: list[dict] = []
+
+    async def _recording(*args, **kwargs):
+        if kwargs.get("cards_only"):
+            calls.append(kwargs)
+        return await real(*args, **kwargs)
+
+    engine._heart.find_similar_procedures = _recording
+    return calls
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("floor", "served"), [(0.40, True), (0.95, False)], ids=["floor-below", "floor-above"])
+async def test_the_probe_serves_a_card_only_at_or_above_the_procedure_score_floor(
+    vector_heart, mock_embeddings, session, floor, served
+):
+    """The floor is the one the how-to cosine rung already uses,
+    ``procedure_score_floor``. A card at cosine about 0.93 to the query is served
+    with the default floor of 0.40 and is not served with a floor of 0.95."""
+    query = "rotate the api keys"
+    await _add(
+        session,
+        vector_heart,
+        "card-near",
+        kind="strategy",
+        embedding=await mock_embeddings.embed_near(query, noise=0.01),
+    )
+    engine = _engine(
+        vector_heart,
+        proc_catalog_enabled=False,
+        strategy_cards_retrieval_enabled=True,
+        procedure_score_floor=floor,
+    )
+
+    result = await _build(engine, vector_heart, session, text=query)
+
+    assert ("### card-near (strategy)" in result.system_prompt) is served
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_the_graph_rung_and_the_probe_share_one_allowance(vector_heart, mock_embeddings, session):
+    """An allowance of three. The card of the recalled decision comes from the
+    graph rung, and the probe finds three more cards near the query. Three cards
+    are served in all: the graph rung's first, then the two nearest the query.
+    The fourth is not served."""
+    query = "rotate the api keys"
+    graph_card = await _add(session, vector_heart, "card-graph", kind="strategy")
+    near = [
+        await _add(
+            session,
+            vector_heart,
+            f"card-near-{i}",
+            kind="strategy",
+            embedding=await mock_embeddings.embed_near(query, noise=0.01 + i / 1000),
+        )
+        for i in range(3)
+    ]
+    engine = _engine(
+        vector_heart,
+        _seeded_brain((graph_card, 0.9)),
+        proc_catalog_enabled=False,
+        strategy_cards_retrieval_enabled=True,
+        strategy_cards_max_per_turn=3,
+    )
+
+    result = await _build(engine, vector_heart, session, text=query)
+
+    assert result.recalled_ids["procedure"] == [str(graph_card.id), str(near[0].id), str(near[1].id)]
+    assert "card-near-2" not in result.system_prompt
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_card_the_graph_rung_served_is_not_served_again_by_the_probe(vector_heart, mock_embeddings, session):
+    """The card of the recalled decision is also the card nearest the query. It is
+    in the prompt once; the room left in an allowance of two goes to the next
+    nearest card."""
+    query = "rotate the api keys"
+    graph_card = await _add(
+        session, vector_heart, "card-graph", kind="strategy", embedding=await mock_embeddings.embed(query)
+    )
+    near = await _add(
+        session,
+        vector_heart,
+        "card-near",
+        kind="strategy",
+        embedding=await mock_embeddings.embed_near(query, noise=0.01),
+    )
+    engine = _engine(
+        vector_heart,
+        _seeded_brain((graph_card, 0.9)),
+        proc_catalog_enabled=False,
+        strategy_cards_retrieval_enabled=True,
+        strategy_cards_max_per_turn=2,
+    )
+
+    result = await _build(engine, vector_heart, session, text=query)
+    recommended = _section(result, "Recommended Procedures")
+
+    assert [recommended.count(f"### {name} (strategy)") for name in ("card-graph", "card-near")] == [1, 1]
+    assert result.recalled_ids["procedure"] == [str(graph_card.id), str(near.id)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("flags", "card_on_the_graph_rung", "probes"),
+    [
+        ({}, False, 0),
+        ({"strategy_cards_retrieval_enabled": True, "strategy_cards_max_per_turn": 0}, False, 0),
+        ({"strategy_cards_retrieval_enabled": True}, True, 0),
+        ({"strategy_cards_retrieval_enabled": True}, False, 1),
+        ({"strategy_cards_retrieval_enabled": True, "strategy_cards_max_per_turn": 3}, True, 1),
+    ],
+    ids=[
+        "retrieval-off",
+        "allowance-zero",
+        "allowance-used-by-the-graph-rung",
+        "room-for-one",
+        "room-for-two-of-three",
+    ],
+)
+async def test_the_probe_is_sent_at_most_once_a_turn_and_only_while_the_allowance_has_room(
+    card_heart, session, flags, card_on_the_graph_rung, probes
+):
+    """What the probe costs: one cards-only query a turn at most, and none when
+    retrieval is off, when the allowance is 0, or when the graph rung already used
+    the allowance. It asks for as many rows as the allowance, no more."""
+    howto = await _add(session, card_heart, "howto-deploy", age_minutes=60)
+    card = await _add(session, card_heart, "card-0", kind="strategy")
+    neighbours = [(howto, 0.5)] + ([(card, 0.9)] if card_on_the_graph_rung else [])
+    engine = _engine(card_heart, _seeded_brain(*neighbours), proc_catalog_enabled=False, **flags)
+    calls = _card_probes(engine)
+
+    await _build(engine, card_heart, session)
+
+    assert len(calls) == probes
+    assert [call["limit"] for call in calls] == [engine._settings.strategy_cards_max_per_turn] * probes
+
+
+@pytest.mark.asyncio
+async def test_the_probe_is_not_sent_without_a_query(card_heart, session):
+    """Like the how-to cosine rung, the probe needs a query to compare cards with.
+    A selection made with an empty query sends none, although the allowance has
+    room."""
+    await _add(session, card_heart, "card-0", kind="strategy")
+    engine = _engine(card_heart, proc_catalog_enabled=False, strategy_cards_retrieval_enabled=True)
+    calls = _card_probes(engine)
+
+    selected = await engine._select_procedures(
+        slots=5,
+        critic_skills=[],
+        recalled_ids={"fact": [], "decision": []},
+        recalled_score_map={},
+        session=session,
+        card_slots=1,
+    )
+
+    assert selected == []
+    assert calls == []
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("budget", "shown"),
+    [(500, False), (1000, True)],
+    ids=["budget-below-the-card", "budget-above-the-card"],
+)
+async def test_a_card_from_the_probe_is_framed_and_shown_only_if_it_fits_the_budget(
+    vector_heart, mock_embeddings, session, budget, shown
+):
+    """No how-to procedure and no recalled decision: the one block is a card the
+    probe found, as large as the distiller stores them (about 800 tokens). It is
+    rendered like a card from the graph rung, one heading and the framing line
+    under it, and only if it fits the procedure budget."""
+    query = "rotate the api keys"
+    card = await _add(
+        session,
+        vector_heart,
+        "n" * 80,
+        kind="strategy",
+        description="d" * 1000,
+        body="l" * 2000,
+        embedding=await mock_embeddings.embed(query),
+    )
+    engine = _engine(
+        vector_heart,
+        proc_catalog_enabled=False,
+        strategy_cards_retrieval_enabled=True,
+        context_budget_overrides={"procedures": budget},
+        budget_scale_enabled=False,
+    )
+
+    result = await _build(engine, vector_heart, session, text=query)
+    recommended = _section(result, "Recommended Procedures") or ""
+
+    assert result.recalled_ids["procedure"] == ([str(card.id)] if shown else [])
+    assert recommended.count("### ") == int(shown)
+    assert recommended.count("(Lesson distilled from one of your past decisions") == int(shown)
+
+
+@pytest.mark.asyncio
+async def test_a_failing_probe_keeps_the_how_to_procedures_and_the_graph_rung_cards(card_heart, session):
+    """The probe is a query of its own. When it fails, what was selected before it
+    is still recommended: the how-to procedure and the card of the recalled
+    decision."""
+    howto = await _add(session, card_heart, "howto-deploy", age_minutes=60)
+    card = await _add(session, card_heart, "card-graph", kind="strategy")
+    engine = _engine(
+        card_heart,
+        _seeded_brain((howto, 0.5), (card, 0.9)),
+        proc_catalog_enabled=False,
+        strategy_cards_retrieval_enabled=True,
+        strategy_cards_max_per_turn=2,
+    )
+    real = engine._heart.find_similar_procedures
+    failed: list[dict] = []
+
+    async def _probe_fails(*args, **kwargs):
+        if kwargs.get("cards_only"):
+            failed.append(kwargs)
+            raise RuntimeError("the cards-only probe failed")
+        return await real(*args, **kwargs)
+
+    engine._heart.find_similar_procedures = _probe_fails
+
+    result = await _build(engine, card_heart, session)
+
+    assert len(failed) == 1
+    assert result.recalled_ids["procedure"] == [str(howto.id), str(card.id)]
+
+
+def _probe_finds(engine, *found) -> None:
+    """Stand in for the cards-only probe: it returns ``found``, given nearest
+    first as (id, score) pairs. The how-to cosine rung, the same method without
+    ``cards_only``, gets nothing."""
+    from nous.heart.schemas import ProcedureSummary
+
+    summaries = [
+        ProcedureSummary(id=pid, name="a card", domain="strategy", activation_count=0, effectiveness=None, score=score)
+        for pid, score in found
+    ]
+
+    async def _probe(*_args, **kwargs):
+        return summaries if kwargs.get("cards_only") else []
+
+    engine._heart.find_similar_procedures = _probe
+
+
+@pytest.mark.asyncio
+async def test_a_card_at_the_score_floor_is_served_and_a_card_under_it_is_not(card_heart, session):
+    """The floor is compared with the score the probe returned for the card. A
+    card exactly at the floor is served, as on the how-to cosine rung. A card
+    under it is not, although the allowance has room for both."""
+    at = await _add(session, card_heart, "card-at-the-floor", kind="strategy")
+    under = await _add(session, card_heart, "card-under-the-floor", kind="strategy")
+    engine = _engine(
+        card_heart,
+        proc_catalog_enabled=False,
+        strategy_cards_retrieval_enabled=True,
+        strategy_cards_max_per_turn=2,
+        procedure_score_floor=0.5,
+    )
+    _probe_finds(engine, (at.id, 0.5), (under.id, 0.49))
+
+    result = await _build(engine, card_heart, session)
+
+    assert result.recalled_ids["procedure"] == [str(at.id)]
+
+
+@pytest.mark.asyncio
+async def test_the_probe_serves_only_a_card_that_is_still_there_and_still_active(card_heart, session):
+    """What the probe returned is checked again when the body is fetched. A card
+    retired since, and one that is gone, are passed over, and the next card is
+    served."""
+    retired = await _add(session, card_heart, "card-retired", kind="strategy")
+    retired.active = False
+    served = await _add(session, card_heart, "card-served", kind="strategy")
+    await session.flush()
+    engine = _engine(
+        card_heart,
+        proc_catalog_enabled=False,
+        strategy_cards_retrieval_enabled=True,
+        strategy_cards_max_per_turn=3,
+    )
+    _probe_finds(engine, (retired.id, 0.9), (uuid4(), 0.9), (served.id, 0.9))
+
+    result = await _build(engine, card_heart, session)
+
+    assert result.recalled_ids["procedure"] == [str(served.id)]
+
+
+@pytest.mark.asyncio
+async def test_a_card_whose_body_cannot_be_fetched_is_passed_over(card_heart, session):
+    """Fetching the body of one card fails. That card is passed over: the how-to
+    procedure selected before it and the next card are still recommended."""
+    howto = await _add(session, card_heart, "howto-deploy", age_minutes=60)
+    unreadable = await _add(session, card_heart, "card-unreadable", kind="strategy")
+    served = await _add(session, card_heart, "card-served", kind="strategy")
+    engine = _engine(
+        card_heart,
+        _seeded_brain((howto, 0.5)),
+        proc_catalog_enabled=False,
+        strategy_cards_retrieval_enabled=True,
+        strategy_cards_max_per_turn=2,
+    )
+    _probe_finds(engine, (unreadable.id, 0.9), (served.id, 0.8))
+    real = engine._heart.get_procedure
+
+    async def _get_procedure(procedure_id, *args, **kwargs):
+        if procedure_id == unreadable.id:
+            raise RuntimeError("the body fetch failed")
+        return await real(procedure_id, *args, **kwargs)
+
+    engine._heart.get_procedure = _get_procedure
+
+    result = await _build(engine, card_heart, session)
+
+    assert result.recalled_ids["procedure"] == [str(howto.id), str(served.id)]
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_card_from_the_probe_has_a_leg_of_its_own_in_the_retrieval_trace(
+    vector_heart, mock_embeddings, session
+):
+    """F091: a card the probe served is registered under the probe's own leg, with
+    its cosine to the query as the entry score, so it is counted neither as a
+    how-to cosine pick nor under the ladder's catch-all leg."""
+    from nous.observability.retrieval_logger import RetrievalLogger
+
+    query = "rotate the api keys"
+    card = await _add(
+        session,
+        vector_heart,
+        "card-near",
+        kind="strategy",
+        embedding=await mock_embeddings.embed_near(query, noise=0.01),
+    )
+    engine = _engine(vector_heart, proc_catalog_enabled=False, strategy_cards_retrieval_enabled=True)
+
+    tracing = RetrievalLogger(candidate_sample_rate=1.0)
+    with patch("nous.cognitive.context.get_active_retrieval_logger", return_value=tracing):
+        result = await _build(engine, vector_heart, session, text=query)
+
+    traced = next((c for c in result.retrieval_trace.to_dict()["candidates"] if c["id"] == str(card.id)), {})
+    assert traced.get("entry_leg") == "context_strategy_cards_cosine"
+    assert traced["entry_score"] == pytest.approx(0.93, abs=0.02)
+    assert (traced["disposition"], traced["disposition_stage"]) == ("rendered", "final")
