@@ -44,6 +44,10 @@ FOREGROUND_WITH_JOB = "sleep 30 & echo $! > job.pid; " + FOREGROUND
 BACKGROUND = "sleep 30 & echo $! > job.pid"
 # The same job with its output redirected: it holds nothing, so the command ends when its shell does:
 REDIRECTED = "sleep 30 > /dev/null 2>&1 & echo $! > job.pid"
+# The command starts to write, as fast as it can, a moment before the timeout fires:
+WRITING = "sleep 0.9; yes"
+# The same, to stderr:
+WRITING_TO_STDERR = "sleep 0.9; yes 1>&2"
 # The child started a session of its own, so it is no longer in the shell's process group:
 ESCAPED = f"{shlex.quote(sys.executable)} -c 'import os, time; os.setsid(); time.sleep(30)' & echo $! > child.pid; wait"
 
@@ -300,6 +304,22 @@ async def test_a_job_that_outlived_its_shell_survives_the_timeout_of_its_bash_co
     assert "Command timed out after 1s." in result["content"][0]["text"]
     job = await _recorded_pid(workspace, "job.pid")
     await _assert_still_running(job, "a job that had outlived its shell was killed at the timeout")
+
+
+@pytest.mark.parametrize("command", [WRITING, WRITING_TO_STDERR], ids=["writing to stdout", "writing to stderr"])
+async def test_a_command_still_writing_at_its_timeout_cannot_hold_the_caller(workspace, caplog, command):
+    """Once the timeout has cancelled the reading, nobody reads the command's
+    pipes, and asyncio stops watching a pipe that has more than 128 KiB unread:
+    left alone it never sees the killed command's pipes close. Either pipe can
+    be the one, so each has its case."""
+    with caplog.at_level(logging.WARNING, logger="nous.utils"):
+        try:
+            result = await asyncio.wait_for(bash_tool(command, timeout=1, _workspace_dir=str(workspace)), LIMIT)
+        except TimeoutError:
+            pytest.fail(f"bash_tool had not returned after {LIMIT:.0f}s, with timeout=1")
+
+    assert "Command timed out after 1s." in result["content"][0]["text"]
+    assert [r.getMessage() for r in caplog.records if r.name == "nous.utils"] == []
 
 
 async def test_a_job_that_holds_no_output_outlives_a_bash_command_that_ended_in_time(workspace):

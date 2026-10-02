@@ -11,7 +11,8 @@ logger = logging.getLogger(__name__)
 
 # How long kill_process_group waits for the shell it killed. Killing the whole
 # group closes the command's pipes and the wait ends in milliseconds; the
-# bound is for a descendant outside the group that still holds them.
+# bound is for a process outside the group that still holds them, or for a
+# kill the kernel refused.
 _KILL_WAIT_SECONDS = 5.0
 
 
@@ -31,6 +32,12 @@ def text_overlap(a: str, b: str) -> float:
     overlap = len(words_a & words_b)
     smaller = min(len(words_a), len(words_b))
     return overlap / smaller
+
+
+async def _discard(stream: asyncio.StreamReader | None) -> None:
+    """Read a stream to its end and throw the data away."""
+    while stream is not None and await stream.read(65536):
+        pass
 
 
 async def kill_process_group(proc: asyncio.subprocess.Process) -> None:
@@ -58,7 +65,13 @@ async def kill_process_group(proc: asyncio.subprocess.Process) -> None:
     except (ProcessLookupError, PermissionError):
         pass  # nothing is left in the group, or nothing in it may be signalled
     try:
-        await asyncio.wait_for(proc.wait(), timeout=_KILL_WAIT_SECONDS)
+        # Read the pipes to their end while waiting: once communicate() has
+        # been cancelled nobody reads them, and asyncio stops watching a pipe
+        # that has more than 128 KiB unread, so it would never see it close.
+        await asyncio.wait_for(
+            asyncio.gather(_discard(proc.stdout), _discard(proc.stderr), proc.wait()),
+            timeout=_KILL_WAIT_SECONDS,
+        )
     except TimeoutError:
         logger.warning(
             "Shell command (pid %d) had not ended %.1fs after the attempt to kill it: "
