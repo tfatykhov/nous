@@ -5005,6 +5005,11 @@ def register_dag_tools(
     approvals_advertised = bool(
         getattr(cfg, "dag_approval_nodes_enabled", False) and getattr(cfg, "a2ui_enabled", False)
     )
+    # Harness Phase 2.8: `undoable` exists only where it can be honored. The
+    # ONE read: the schema advertises it and dag_create stores it only while
+    # compensation is on. Off, the key is ignored as it was before #652 — a
+    # node that set it could not write at all, with nothing wired to snapshot.
+    undoable_accepted = bool(getattr(cfg, "compensation_enabled", False))
 
     async def dag_create(**kwargs: Any) -> dict:
         """Create a DAG with dependency-tracked nodes."""
@@ -5071,8 +5076,9 @@ def register_dag_tools(
                 # default (1) applies otherwise.
                 if "max_fix_attempts" in n:
                     node_data["max_fix_attempts"] = n["max_fix_attempts"]
-                # Harness Phase 2.8: undoable declaration.
-                if "undoable" in n:
+                # Harness Phase 2.8: undoable declaration. Empty values count
+                # as not given (LLM-authored JSON emits null / "" for "none").
+                if undoable_accepted and n.get("undoable"):
                     node_data["undoable"] = n["undoable"]
                 # Harness Phase 3: approval-node fields — threaded explicitly
                 # (the F066.1 silent-drop lesson above).
@@ -5302,13 +5308,29 @@ def register_dag_tools(
             logger.exception("dag_manage failed")
             return _tool_error(f"Error: {e}")
 
+    undoable_properties: dict[str, Any] = {}
+    if undoable_accepted:
+        undoable_properties = {
+            "undoable": {
+                "type": "boolean",
+                "description": (
+                    "Harness Phase 2.8: declare that this node's effects can be undone. When true, the "
+                    "harness enforces at runtime that every tool call from this node uses a "
+                    "compensable tool. Required for all acting nodes downstream of a proceed-default "
+                    "approval."
+                ),
+            }
+        }
+
     node_type_enum = ["subtask", "check", "gate", "callback", "fix"]
     approval_help = ""
     approval_properties: dict[str, Any] = {}
     if approvals_advertised:
         node_type_enum.append("approval")
         proceed_note = "default_option (applied if nobody answers) MUST be a 'stop' option"
+        default_rule = "Must be a 'stop' option."
         if getattr(cfg, "dag_approval_proceed_default_enabled", False):
+            default_rule = "Must be a 'stop' option unless every acting node downstream is declared undoable=true."
             proceed_note = (
                 "default_option (applied if nobody answers) must be a 'stop' option "
                 "UNLESS every acting node downstream is declared undoable=true — in that "
@@ -5344,7 +5366,7 @@ def register_dag_tools(
             },
             "default_option": {
                 "type": "string",
-                "description": "(type='approval' only) option id applied at the deadline. Must be a 'stop' option.",
+                "description": f"(type='approval' only) option id applied at the deadline. {default_rule}",
             },
             "recommended_option": {
                 "type": "string",
@@ -5487,15 +5509,7 @@ def register_dag_tools(
                                     "Phase 1 ignores this field."
                                 ),
                             },
-                            "undoable": {
-                                "type": "boolean",
-                                "description": (
-                                    "Harness Phase 2.8: declare that this node's effects can be undone. When true, the "
-                                    "harness enforces at runtime that every tool call from this node uses a "
-                                    "compensable tool. Required for all acting nodes downstream of a proceed-default "
-                                    "approval."
-                                ),
-                            },
+                            **undoable_properties,
                             **approval_properties,
                         },
                         "required": ["name", "type", "instructions"],

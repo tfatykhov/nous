@@ -1888,7 +1888,10 @@ class Settings(BaseSettings):
     compensation_auto_review_enabled: bool = False
     # Allow approval nodes to default to 'proceed' when all downstream
     # nodes are declared undoable. Requires compensation_enabled and
-    # compensation_auto_review_enabled.
+    # compensation_auto_review_enabled. Also read at the deadline: with it
+    # off, a proceed default that is already parked is not applied and the
+    # node fails with no answer recorded. The orchestrator reads the
+    # settings it was built with, so turning it off takes effect at restart.
     dag_approval_proceed_default_enabled: bool = False
 
     # F087: act on tokens_consumed, which only becomes non-zero once the

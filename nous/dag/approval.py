@@ -161,7 +161,7 @@ def answer_values(
     label, outcome = option.get("label", option_id), option.get("outcome")
     if source == "deadline":
         text = f"no answer by {fmt_time(deadline)}; default '{label}' ({option_id}) applied"
-        if outcome == "proceed":  # unreachable in v1: the validator requires a stop default
+        if outcome == "proceed":  # the flag is on and a card is linked: the orchestrator stops any other
             return {"status": "completed", "error": None, "result": text[0].upper() + text[1:]}
         return {"status": "failed", "error": text}
     when = f"at {fmt_time(at)}{_by(actor)}"
@@ -201,6 +201,8 @@ def refusal_message(result: AnswerResult, option_id: str) -> str:
                 f"no answer by the deadline — '{result.option_label}' was applied at "
                 f"{fmt_time(result.answered_at)}"
             )
+        if not result.answer_source:  # stopped with no answer: a card failure, or a default that may not apply
+            return "this question was closed without an answer"
         return f"already answered '{result.option_label}' at {fmt_time(result.answered_at)}"
     if result.outcome == "not_open":
         return "this question will be asked again on a new card"

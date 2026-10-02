@@ -791,17 +791,19 @@ class DynamicCheckLoader:
             raise ValueError("Name required for action: " + action)
 
         async with self._db.session() as session:
+            # Row-locked: every action below is a read-modify-write of this
+            # row, and a concurrent revert (enable_if_unchanged, outside
+            # _mutation_lock) must not commit between this read and the
+            # commit. Unlocked, a disable of an already-disabled row flushes
+            # no `enabled` at all and leaves the revert's enable in place.
+            # For a recorded disable the lock also makes the prior state
+            # recorded in this transaction exact.
             stmt = (
                 select(DynamicCheckModel)
                 .where(DynamicCheckModel.agent_id == self._agent_id)
                 .where(DynamicCheckModel.name == name)
+                .with_for_update()
             )
-            if capture is not None:
-                # Row-locked for a recorded disable: a concurrent revert
-                # (enable_if_unchanged, outside _mutation_lock) cannot commit
-                # between this read and the commit, so the prior state
-                # recorded in this transaction is exact.
-                stmt = stmt.with_for_update()
             result = await session.execute(stmt)
             model = result.scalar_one_or_none()
             if model is None:

@@ -151,3 +151,95 @@ async def test_create_stores_the_spec_and_keeps_the_not_null_timeout(store):
     assert node.approval_spec["default_option"] == "hold"
     assert node.approval_spec["answer_timeout_seconds"] == 7200  # clamped
     assert [o["outcome"] for o in node.approval_spec["options"]] == ["proceed", "stop"]
+
+
+# ---------------------------------------------------------------------------
+# Post-merge review P2-5: what an approval's answer releases
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def proceed_defaults_on(monkeypatch):
+    """The validator builds a real Settings() per DAG, so the flag and its
+    prerequisites come from the environment, as in prod."""
+    for name in (
+        "NOUS_DAG_APPROVAL_PROCEED_DEFAULT_ENABLED",
+        "NOUS_COMPENSATION_ENABLED",
+        "NOUS_COMPENSATION_AUTO_REVIEW_ENABLED",
+        "NOUS_EXECUTION_LEDGER_PERSIST_ENABLED",
+        "NOUS_A2UI_ENABLED",
+    ):
+        monkeypatch.setenv(name, "true")
+
+
+def _undoable(name: str = "u") -> DAGNodeSpec:
+    return DAGNodeSpec(name=name, type=DAGNodeType.subtask, instructions="write the report", undoable=True)
+
+
+def _fix(name: str, parent: str, action: str = "skip_and_continue") -> DAGNodeSpec:
+    return DAGNodeSpec(name=name, type=DAGNodeType.fix, parent_node=parent, fix_actions=[action])
+
+
+def _proceed_default_dag(nodes, edges) -> DAGCreateRequest:
+    return DAGCreateRequest(
+        name="proceed-default", nodes=[_approval(default_option="send"), *nodes], edges=edges
+    )
+
+
+def test_proceed_default_rejects_a_non_undoable_node_directly_below(proceed_defaults_on):
+    with pytest.raises(ValidationError, match=r"\['send'\] are not declared undoable"):
+        _proceed_default_dag([_send()], [DAGEdgeSpec(from_node="approve", to_node="send")])
+
+
+def test_proceed_default_accepts_an_undoable_node_directly_below(proceed_defaults_on):
+    dag = _proceed_default_dag([_undoable()], [DAGEdgeSpec(from_node="approve", to_node="u")])
+    assert dag.nodes[0].default_option == "send"
+
+
+def test_proceed_default_rejects_a_non_undoable_node_below_a_fix_node(proceed_defaults_on):
+    """approve -> u -on_failure-> fx -> send. The fix node ends `completed`
+    whether `u` fails or succeeds, so `send` runs once the default applies and
+    is blocked when the approval is declined: it waits on the approval through
+    the on_failure edge."""
+    with pytest.raises(ValidationError, match=r"\['send'\] are not declared undoable"):
+        _proceed_default_dag(
+            [_undoable(), _fix("fx", "u"), _send()],
+            [
+                DAGEdgeSpec(from_node="approve", to_node="u", edge_type="context_flow"),
+                DAGEdgeSpec(from_node="u", to_node="fx", edge_type="on_failure"),
+                DAGEdgeSpec(from_node="fx", to_node="send"),
+            ],
+        )
+
+
+def test_proceed_default_accepts_a_non_undoable_cancel_cascade_target(proceed_defaults_on):
+    """Pin for the choice of edge set: a cancel_cascade target does not wait
+    for the approval -- it starts with its own wave -- so no answer releases
+    it, and the DAG validates as it did before. The Phase 3 amended-prompt
+    rule uses the same walk."""
+    dag = _proceed_default_dag(
+        [_undoable(), _send()],
+        [
+            DAGEdgeSpec(from_node="approve", to_node="u", edge_type="context_flow"),
+            DAGEdgeSpec(from_node="approve", to_node="send", edge_type="cancel_cascade"),
+        ],
+    )
+    assert dag.nodes[0].default_option == "send"
+
+
+def test_a_fix_may_not_amend_a_node_below_a_fix_under_an_approval():
+    """Phase 3 rule, same walk: `send` hangs below a fix node under the
+    approval, so a fix that rewrites its instructions runs text nobody approved."""
+    extra = [
+        DAGNodeSpec(name="draft", type=DAGNodeType.subtask, instructions="draft it"),
+        _fix("fix_draft", "draft"),
+        _fix("fix_send", "send", "retry_with_amended_prompt"),
+    ]
+    edges = [
+        DAGEdgeSpec(from_node="approve", to_node="draft", edge_type="context_flow"),
+        DAGEdgeSpec(from_node="draft", to_node="fix_draft", edge_type="on_failure"),
+        DAGEdgeSpec(from_node="fix_draft", to_node="send"),
+        DAGEdgeSpec(from_node="send", to_node="fix_send", edge_type="on_failure"),
+    ]
+    with pytest.raises(ValidationError, match="retry_with_amended_prompt"):
+        _gated(extra=extra, edges=edges)
