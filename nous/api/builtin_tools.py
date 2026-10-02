@@ -444,6 +444,18 @@ def atomic_replace_bytes(
                 view = memoryview(data)
                 while view:
                     view = view[os.write(fd, view) :]
+                if pre.stat is not None and hasattr(os, "fchown"):
+                    # The replaced file's owner and group go with its mode.
+                    # Best effort: only root may give a file away, and a
+                    # process that may not can still keep a group it is in.
+                    # Before fchmod, because chown clears the set-id bits.
+                    try:
+                        os.fchown(fd, pre.stat.st_uid, pre.stat.st_gid)
+                    except OSError:
+                        try:
+                            os.fchown(fd, -1, pre.stat.st_gid)
+                        except OSError:
+                            pass
                 if mode is not None and hasattr(os, "fchmod"):
                     os.fchmod(fd, mode)
                 os.fsync(fd)
