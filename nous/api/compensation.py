@@ -388,9 +388,13 @@ class SnapshotStore:
         """Whether dynamic check ``name`` belongs to a DAG check node. Its
         disable is not compensable: the DAG loop reads it as that node's
         completion and launches its successors, which re-enabling cannot
-        take back."""
-        from nous.dag.store import dag_check_nodes
+        take back. A name with the orchestrator's prefix counts without a
+        query: the check exists before its node has recorded the name."""
+        from nous.dag.store import DAG_CHECK_NAME_PREFIX, dag_check_nodes
         from nous.storage.models import DAGNode
+
+        if isinstance(name, str) and name.startswith(DAG_CHECK_NAME_PREFIX):
+            return True
 
         async def _read() -> bool:
             async with self._db.session() as s:

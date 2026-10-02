@@ -16,6 +16,7 @@ snapshotted also gets a card.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from types import SimpleNamespace
@@ -46,9 +47,10 @@ from nous.storage.models import CompensationSnapshot, DynamicCheckModel
 STANDALONE = "nightly"
 
 
-async def _scene(db, tmp_path) -> SimpleNamespace:
+async def _scene(db, tmp_path, *, launch: bool = True) -> SimpleNamespace:
     """A running DAG check node with the heartbeat check its launch created,
-    one standalone check, and a compensating runner for the same agent."""
+    one standalone check, and a compensating runner for the same agent. With
+    ``launch=False`` the DAG is created and its node is not launched yet."""
     agent = f"test-fixa-chk-{uuid.uuid4().hex[:8]}"
     settings = _settings(compensation_enabled=True, compensation_auto_review_enabled=True)
     loader = DynamicCheckLoader(db=db, registry=CheckRegistry(), agent_id=agent)
@@ -61,9 +63,12 @@ async def _scene(db, tmp_path) -> SimpleNamespace:
             nodes=[DAGNodeSpec(name="wait", type=DAGNodeType.check, instructions="wait for the payment")],
         )
     )
-    await orch.start_dag(dag.id)
-    node = (await store.get_dag(dag.id)).nodes[0]
-    assert node.status == "running" and node.check_name
+    dag_check = None
+    if launch:
+        await orch.start_dag(dag.id)
+        node = (await store.get_dag(dag.id)).nodes[0]
+        assert node.status == "running" and node.check_name
+        dag_check = node.check_name
     await loader.create_check(name=STANDALONE, description="d", prompt="p")
 
     runner = AgentRunner(_MockCognitive(), _MockBrain(), _MockHeart(), settings)
@@ -78,7 +83,17 @@ async def _scene(db, tmp_path) -> SimpleNamespace:
         cards.append(tool_name)
 
     runner.set_action_review_pusher(publish_card)
-    return SimpleNamespace(db=db, agent=agent, runner=runner, dag_check=node.check_name, cards=cards)
+    return SimpleNamespace(
+        db=db,
+        agent=agent,
+        runner=runner,
+        dag_check=dag_check,
+        cards=cards,
+        loader=loader,
+        store=store,
+        orch=orch,
+        dag=dag,
+    )
 
 
 async def _another_agents_dag_owns(db, check_name: str) -> None:
@@ -181,5 +196,78 @@ async def test_a_failed_dag_lookup_is_named_and_leaves_nothing_to_revert(db, tmp
         assert result.error is None
         assert await _enabled(scene, STANDALONE) is False  # it ran
         assert any(reason in rec.getMessage() for rec in caplog.records)
+    assert await _snapshots(scene) == []
+    assert scene.cards == []
+
+
+async def test_an_undoable_disable_in_the_launch_window_is_refused(db, tmp_path):
+    """The launch creates the check first and writes its name on the node
+    afterwards. In between no node owns the check, but its name already says
+    whose it is, so the disable is refused there as well. The real launch is
+    paused in that window; the name it is about to record is the one tried."""
+    scene = await _scene(db, tmp_path, launch=False)
+    in_window, resume = asyncio.Event(), asyncio.Event()
+    real_transition = scene.store.transition_node
+    recording: dict[str, str] = {}
+
+    async def paused_transition(*args, **kwargs):
+        if kwargs.get("check_name"):
+            recording["check"] = kwargs["check_name"]
+            in_window.set()
+            await resume.wait()
+        return await real_transition(*args, **kwargs)
+
+    scene.store.transition_node = paused_transition
+    launch = asyncio.create_task(scene.orch.start_dag(scene.dag.id))
+    try:
+        await asyncio.wait_for(in_window.wait(), timeout=20)
+        check = recording["check"]
+        # the window: the check exists and no node has recorded it yet
+        assert await _enabled(scene, check) is True
+        assert (await scene.store.get_dag(scene.dag.id)).nodes[0].check_name is None
+
+        result = await _disable(scene, check, ExecutionContext(kind="dag_node", session_id="s1", undoable=True))
+
+        assert result.error is not None and "belongs to a DAG node" in result.error
+        assert await _enabled(scene, check) is True
+        assert await _snapshots(scene) == []
+        assert scene.cards == []
+    finally:
+        resume.set()
+        await asyncio.wait_for(launch, timeout=20)
+    node = (await scene.store.get_dag(scene.dag.id)).nodes[0]
+    assert node.status == "running" and node.check_name == check
+
+
+async def test_a_standalone_check_named_like_a_dag_nodes_counts_as_one(db, tmp_path):
+    """The cost of deciding by name: a standalone check somebody named
+    ``dag-...`` is treated as a DAG node's -- refused on an undoable node, so
+    no snapshot and no Revert -- although no node owns it."""
+    scene = await _scene(db, tmp_path)
+    await scene.loader.create_check(name="dag-nightly", description="d", prompt="p")
+
+    result = await _disable(scene, "dag-nightly", ExecutionContext(kind="dag_node", session_id="s1", undoable=True))
+
+    assert result.error is not None and "belongs to a DAG node" in result.error
+    assert await _enabled(scene, "dag-nightly") is True
+    assert await _snapshots(scene) == []
+    assert scene.cards == []
+
+
+async def test_a_check_a_node_recorded_under_another_name_is_found_by_the_query(db, tmp_path):
+    """Guard for the other half of the lookup: a name without the
+    orchestrator's prefix is decided by the query, so a check that one of this
+    agent's DAG nodes has recorded is that node's, whatever it is called. (The
+    orchestrator's own checks never get that far: their name decides.)"""
+    scene = await _scene(db, tmp_path)
+    dag = await scene.store.create(
+        DAGCreateRequest(name="older", nodes=[DAGNodeSpec(name="wait", type=DAGNodeType.check, instructions="wait")])
+    )
+    await scene.store.update_node(dag.nodes[0].id, status="running", check_name=STANDALONE)
+
+    result = await _disable(scene, STANDALONE, ExecutionContext(kind="dag_node", session_id="s1", undoable=True))
+
+    assert result.error is not None and "belongs to a DAG node" in result.error
+    assert await _enabled(scene, STANDALONE) is True
     assert await _snapshots(scene) == []
     assert scene.cards == []

@@ -129,11 +129,18 @@ def open_approval_clause():
     )
 
 
+# The orchestrator names a DAG check ``dag-<dag id prefix>-<node name>`` and
+# creates it before its node records the name. The prefix covers that window;
+# it errs towards "no Revert" for a standalone check somebody named that way.
+DAG_CHECK_NAME_PREFIX = "dag-"
+
+
 def dag_check_nodes(agent_id: str):
     """SELECT of the check-type nodes in ``agent_id``'s DAGs that own a
-    heartbeat check (``check_name``). The ONE definition of a DAG-managed
-    check: the leaked-check sweep and the compensation snapshot gate
-    (``SnapshotStore.is_dag_managed_check``) both build on it."""
+    heartbeat check (``check_name``). The ONE query for a DAG-managed check:
+    the leaked-check sweep and the compensation snapshot gate
+    (``SnapshotStore.is_dag_managed_check``) both build on it; the gate also
+    goes by ``DAG_CHECK_NAME_PREFIX``, before a node has recorded its check."""
     return (
         select(DAGNode)
         .join(ExecutionDAG, DAGNode.dag_id == ExecutionDAG.id)
