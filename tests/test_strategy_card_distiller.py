@@ -398,9 +398,8 @@ async def test_handler_reads_event_data_not_top_level_attrs(distiller, mock_brai
     is always None for a real Event — the handler must read event.data["outcome"].
 
     Mutation: change `data.get("outcome")` back to `getattr(event, "outcome", None)`
-    → outcome is None → handler returns at the graded-outcome guard →
-    mock_brain.get is never called, but we set up a real card_response so it
-    WOULD be called if the event is parsed correctly.
+    → outcome is None → the handler sends the event down the branch that distils
+    no card → the model is never called.
     """
     from nous.events import Event as BusEvent
 
@@ -417,15 +416,16 @@ async def test_handler_reads_event_data_not_top_level_attrs(distiller, mock_brai
         "nous.handlers.strategy_card_distiller.call_background_llm_structured",
         new_callable=AsyncMock,
         return_value=_make_card_response(),
-    ):
+    ) as mock_call:
         await distiller._on_decision_reviewed(event)
         # Let the created task run
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 
-    # The handler parsed the Event correctly and scheduled distillation. (The
-    # decision is read twice: before the model call, and again inside the
-    # transaction that writes the card.)
+    # The handler read the outcome from event.data and scheduled a distillation:
+    # the model was called. That the decision row was read does not show it (the
+    # branch that distils no card reads the row too); it shows the id was parsed.
+    mock_call.assert_awaited_once()
     assert mock_brain.get.call_args.args == (decision_id,)
 
 
@@ -904,6 +904,42 @@ async def test_ungraded_review_schedules_deactivation(mock_brain, mock_heart, mo
     distiller._retire_stale_cards.assert_awaited_once()
     assert distiller._retire_stale_cards.await_args.args[0] == decision_id
     mock_heart.db.session.return_value.__aenter__.return_value.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("as_bus_event", [False, True], ids=["dict", "bus_event"])
+async def test_auto_tagged_review_schedules_the_reconcile_and_no_distillation(
+    mock_brain, mock_heart, mock_llm, as_bus_event
+):
+    """A review tagged reviewer="auto" is routed like a noise review even when its
+    outcome is graded: the handler schedules the retire-only reconcile and never
+    a distillation. The tag is read from a plain dict and from a bus Event's data.
+
+    Mutation: stop reading the reviewer from the dict (or from Event.data), or
+    drop `or reviewer == AUTO_REVIEWER` from the handler's branch → the event is
+    scheduled as a distillation.
+    """
+    from nous.events import Event as BusEvent
+
+    settings = _make_settings()
+    distiller = StrategyCardDistiller(
+        brain=mock_brain,
+        heart=mock_heart,
+        settings=settings,
+        bus=None,
+        llm_client=mock_llm,
+    )
+    decision_id = uuid4()
+    distiller._deactivate_card_for_decision = AsyncMock()
+    distiller._distil = AsyncMock()
+
+    payload = {"decision_id": str(decision_id), "outcome": "failure", "reviewer": "auto"}
+    event = BusEvent(type="decision_reviewed", agent_id="test-agent", data=payload) if as_bus_event else payload
+    await distiller._on_decision_reviewed(event)
+    await distiller.shutdown()  # let the scheduled task run
+
+    distiller._deactivate_card_for_decision.assert_awaited_once_with(decision_id)
+    distiller._distil.assert_not_called()
 
 
 @pytest.mark.asyncio

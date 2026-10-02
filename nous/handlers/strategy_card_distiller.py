@@ -154,11 +154,15 @@ class StrategyCardDistiller:
         if outcome not in GRADED_OUTCOMES or reviewer == AUTO_REVIEWER:
             # A review that distils no card: noise/superseded, or the
             # auto-reviewer's grade, which is a heuristic (a low stated
-            # confidence, a PR state) and not an observed outcome.
-            # Retire any existing card.
-            # Coalesce with any in-flight distillation: record the ungraded
-            # outcome in _pending so the follow-up deactivates rather than
-            # creating a fresh card for a decision that is now noise/superseded.
+            # confidence, a PR state) and not an observed outcome. It goes
+            # to the retire-only reconcile, which reads the outcome and the
+            # reviewer from the decision row and retires the cards that row
+            # does not call for.
+            # While a distillation for the decision is in flight, the event
+            # is coalesced: its outcome goes into _pending and picks the
+            # follow-up. An ungraded outcome runs the reconcile; a graded
+            # one (an auto-tagged event) runs _distil again, which reconciles
+            # first and distils only if the row is graded by somebody.
             key = str(decision_id)
             if key in self._in_flight:
                 self._pending[key] = outcome
