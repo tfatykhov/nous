@@ -13,7 +13,8 @@ Snapshot lifecycle:
      NOT compensable: cancelling after the first fire does not undo the work
      it already started.
   2. On ``review.revert``, the handler reads the snapshot and calls the
-     compensator. ``mark_reverted`` is idempotent (double revert = no-op).
+     compensator. ``mark_reverted`` is idempotent (double revert = no-op)
+     and drops the prior file bytes, which nothing reads after a revert.
 """
 
 from __future__ import annotations
@@ -198,17 +199,29 @@ class SnapshotStore:
         *,
         result_message: str,
     ) -> bool:
-        """Mark a snapshot as reverted. Returns False if already reverted (idempotent)."""
+        """Mark a snapshot as reverted. Returns False if already reverted (idempotent).
+
+        The prior file bytes (``prior_b64``) are dropped in the same write:
+        once the revert is recorded nothing reads them again."""
         async with self._db.session() as s:
-            res = await s.execute(
-                update(CompensationSnapshot)
-                .where(CompensationSnapshot.id == snapshot_id)
-                .where(CompensationSnapshot.agent_id == self._agent_id)
-                .where(CompensationSnapshot.reverted_at.is_(None))
-                .values(reverted_at=datetime.now(UTC), revert_result=result_message)
-            )
+            row = (
+                await s.execute(
+                    select(CompensationSnapshot)
+                    .where(CompensationSnapshot.id == snapshot_id)
+                    .where(CompensationSnapshot.agent_id == self._agent_id)
+                    .where(CompensationSnapshot.reverted_at.is_(None))
+                    # Row-locked read-modify-write, as mark_card_published:
+                    # the JSONB value is shared with the card marker.
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return False
+            row.reverted_at = datetime.now(UTC)
+            row.revert_result = result_message
+            row.snapshot_data = {k: v for k, v in (row.snapshot_data or {}).items() if k != "prior_b64"}
             await s.commit()
-            return (res.rowcount or 0) == 1
+            return True
 
     async def mark_card_published(
         self,

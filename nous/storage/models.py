@@ -1578,6 +1578,11 @@ class CompensationSnapshot(Base):
     See migration 080. Linked to an execution ledger row; the compensator
     reads ``snapshot_data`` to undo the call on ``review.revert``.
     ``reverted_at IS NOT NULL`` makes double revert a no-op.
+
+    For write_file, ``snapshot_data`` holds the previous file CONTENT
+    (``prior_b64``, up to 1 MiB, not encrypted) -- unlike the ledger, which
+    keeps only a hash of what was written. It is dropped when the snapshot
+    is reverted; the row itself goes when its ledger row is pruned.
     """
 
     __tablename__ = "compensation_snapshots"
