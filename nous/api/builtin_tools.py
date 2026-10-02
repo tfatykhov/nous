@@ -13,7 +13,6 @@ import errno
 import hashlib
 import logging
 import os
-import signal
 import stat
 import threading
 import uuid
@@ -25,6 +24,7 @@ from typing import Any
 from nous.api.call_outcome import current_outcome
 from nous.api.tools import ToolDispatcher, _tool_error
 from nous.config import Settings
+from nous.utils import kill_process_group
 
 logger = logging.getLogger(__name__)
 
@@ -89,29 +89,20 @@ async def bash_tool(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(workspace),
-            # Own process group, so a cancelled turn can stop the whole
-            # command (``a; b``, pipelines), not only the /bin/sh parent.
+            # Own process group, so a timeout or a cancelled turn can stop the
+            # whole command (``a; b``, pipelines), not only the /bin/sh parent.
             start_new_session=True,
         )
 
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=effective_timeout)
         except TimeoutError:
-            proc.kill()
-            await proc.wait()
+            await kill_process_group(proc)
             return _tool_error(f"Command timed out after {effective_timeout}s.\nCommand: {command}")
         except asyncio.CancelledError:
             # The calling turn was cancelled (e.g. its heartbeat check was
             # disabled by the DAG mid-run): don't leave the command running.
-            if proc.returncode is None:
-                try:
-                    if hasattr(os, "killpg"):
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    else:
-                        proc.kill()
-                except ProcessLookupError:
-                    pass
-                await proc.wait()
+            await kill_process_group(proc)
             raise
 
         # Decode and truncate

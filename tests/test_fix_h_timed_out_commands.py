@@ -25,6 +25,7 @@ from uuid import uuid4
 
 import pytest
 
+from nous.api.builtin_tools import bash_tool
 from nous.config import Settings
 from nous.dag import orchestrator as orchestrator_module
 from nous.dag.orchestrator import CheckResult, DAGOrchestrator
@@ -272,3 +273,40 @@ async def test_a_cancelled_completion_check_stops_its_command(workspace, monkeyp
     assert done == {check} and check.cancelled(), "the cancelled check did not end as cancelled"
     await _assert_gone(shell, "the shell was left running after the check was cancelled")
     await _assert_gone(child, "the command's child was left running after the check was cancelled")
+
+
+# ---------------------------------------------------------------------------
+# bash_tool's timeout stops the command too
+# ---------------------------------------------------------------------------
+
+
+@SHELL_STILL_RUNNING
+async def test_a_timed_out_bash_command_returns_and_stops_its_command(workspace, command, recorded):
+    try:
+        result = await asyncio.wait_for(bash_tool(command, timeout=1, _workspace_dir=str(workspace)), LIMIT)
+    except TimeoutError:
+        pytest.fail(f"bash_tool had not returned after {LIMIT:.0f}s, with timeout=1")
+
+    assert "Command timed out after 1s." in result["content"][0]["text"]
+    for name in recorded:
+        await _assert_gone(await _recorded_pid(workspace, name), f"{name} was still running after the timeout")
+
+
+async def test_a_job_that_outlived_its_shell_survives_the_timeout_of_its_bash_command(workspace):
+    """Parity pin: green before this change too. As for the completion check:
+    the shell has exited, so the timeout kills nothing and the job runs on."""
+    result = await asyncio.wait_for(bash_tool(BACKGROUND, timeout=1, _workspace_dir=str(workspace)), LIMIT)
+
+    assert "Command timed out after 1s." in result["content"][0]["text"]
+    job = await _recorded_pid(workspace, "job.pid")
+    await _assert_still_running(job, "a job that had outlived its shell was killed at the timeout")
+
+
+async def test_a_job_that_holds_no_output_outlives_a_bash_command_that_ended_in_time(workspace):
+    """Parity pin: green before this change too. A server started with its
+    output redirected keeps running after the tool call that started it."""
+    result = await asyncio.wait_for(bash_tool(REDIRECTED, timeout=3, _workspace_dir=str(workspace)), LIMIT)
+
+    assert "timed out" not in result["content"][0]["text"]
+    job = await _recorded_pid(workspace, "job.pid")
+    await _assert_still_running(job, "a job that held none of the command's output was killed")
