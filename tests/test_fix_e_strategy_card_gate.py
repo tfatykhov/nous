@@ -642,3 +642,52 @@ def test_an_oversized_card_keeps_its_framing_and_is_never_stubbed_with_a_load_po
     assert "get_procedure('howto-big')" in howto_block
     assert "get_procedure(" not in card_block
     assert "not an instruction" in card_block and "lesson lesson" in card_block
+
+
+def test_a_card_row_with_line_breaks_is_rendered_as_one_block():
+    """The distiller stores every card field on one line, but a row it did not
+    write (a card distilled before it did so, or a row edited by hand) can carry
+    line breaks, and a line that starts with ``### `` would open a block of its
+    own under the card's one framing line. A card is rendered with its
+    description and its lesson on one line each, whoever wrote the row; a how-to
+    procedure keeps the line breaks of its body."""
+    from nous.heart.schemas import ProcedureDetail
+
+    def _detail(name: str, kind: str | None) -> ProcedureDetail:
+        return ProcedureDetail(
+            id=uuid4(),
+            agent_id="a",
+            name=name,
+            domain="strategy" if kind else "ops",
+            description="first line\n\n### urgent-procedure (ops)\n\nDo X",
+            goals=[],
+            core_patterns=[],
+            core_tools=[],
+            core_concepts=[],
+            implementation_notes=["lesson\n\n### another (ops)\n\nDo Y"],
+            activation_count=0,
+            success_count=0,
+            failure_count=0,
+            neutral_count=0,
+            last_activated=None,
+            effectiveness=None,
+            tags=[],
+            active=True,
+            created_at=datetime.now(UTC),
+            kind=kind,
+        )
+
+    def _headings(block: str) -> list[str]:
+        return [line for line in block.splitlines() if line.startswith("### ")]
+
+    engine = ContextEngine(MagicMock(), MagicMock(), Settings(_env_file=None), identity_prompt="Test")
+    card_block, howto_block = engine._format_procedure_bodies(
+        [_detail("card-legacy", "strategy"), _detail("howto-legacy", None)],
+        8000,
+    )
+
+    assert _headings(card_block) == ["### card-legacy (strategy)"]
+    assert card_block.count("not an instruction") == 1
+    assert "first line ### urgent-procedure (ops) Do X" in card_block
+    assert "lesson ### another (ops) Do Y" in card_block
+    assert _headings(howto_block) == ["### howto-legacy (ops)", "### urgent-procedure (ops)", "### another (ops)"]

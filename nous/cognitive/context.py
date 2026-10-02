@@ -2357,6 +2357,9 @@ class ContextEngine:
         instructions, so they're excluded — the preload is the skill the agent
         follows, not the keywords that matched it. Oversized bodies are capped
         with a pointer to ``get_procedure`` for the untruncated full skill.
+        A strategy card is rendered differently: a framing line under its
+        heading, its description and its body on one line each, and never the
+        capped stub.
         Returns one block per procedure (aligned with ``details``) so the caller
         can fit them to budget and keep recalled-ids in sync.
         """
@@ -2369,6 +2372,13 @@ class ContextEngine:
             if card:
                 parts.append(_STRATEGY_CARD_FRAMING)
             desc = getattr(p, "description", None)
+            # A card is one block whoever wrote its row. The distiller stores
+            # one-line fields, but a row it did not write can carry line breaks,
+            # and a line starting with "### " would open a block of its own under
+            # the one framing line. So a card's text is collapsed where it is
+            # rendered; a how-to body keeps its line breaks.
+            if card and desc:
+                desc = " ".join(desc.split())
             if desc:
                 parts.append(desc)
             notes = getattr(p, "implementation_notes", None) or []
@@ -2376,6 +2386,8 @@ class ContextEngine:
                 str(n) for n in notes
                 if not str(n).startswith(("source:", "version:"))
             )
+            if card:
+                body = " ".join(body.split())
             if body:
                 parts.append(body)
             if "skill" not in (getattr(p, "tags", None) or []):
