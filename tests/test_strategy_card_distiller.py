@@ -1041,9 +1041,13 @@ async def test_make_unique_name_returns_original_when_no_collision(mock_brain, m
 async def test_make_unique_name_appends_suffix_on_collision(mock_brain, mock_heart):
     """_make_unique_name appends ' (N)' when the exact name already exists.
 
+    A long name is cut to make room for the suffix; the cut base does not end
+    in a space, so one space separates it from the suffix.
+
     Mutation: remove the collision check → _make_unique_name always returns
     the original name → the store call later hits the unique-constraint
     violation and leaves the decision without a card.
+    Mutation: drop the `.rstrip()` of the cut base → two spaces before ' (2)'.
     """
     settings = _make_settings()
     distiller = StrategyCardDistiller(
@@ -1066,6 +1070,17 @@ async def test_make_unique_name_appends_suffix_on_collision(mock_brain, mock_hea
 
     result = await distiller._make_unique_name("Validate Before Deploying", session)
     assert result == "Validate Before Deploying (2)", f"Expected 'Validate Before Deploying (2)', got {result!r}"
+
+    # An 80-character name with a space at index 74: the cut that makes room
+    # for ' (NN)' falls right after that space.
+    session.execute = AsyncMock(
+        side_effect=[
+            MagicMock(scalar_one_or_none=MagicMock(return_value=existing_id)),  # collision
+            MagicMock(scalar_one_or_none=MagicMock(return_value=None)),  # unique
+        ]
+    )
+    result = await distiller._make_unique_name("x" * 74 + " " + "y" * 5, session)
+    assert result == "x" * 74 + " (2)", f"Expected one space before the suffix, got {result!r}"
 
 
 # ---------------------------------------------------------------------------

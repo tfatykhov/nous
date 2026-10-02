@@ -299,7 +299,8 @@ class StrategyCardDistiller:
         description = " ".join((card.get("description") or "").split())[:1000].strip()
         lesson = " ".join((card.get("lesson") or "").split())[:2000].strip()
         raw_tags = card.get("tags") or []
-        tags = [str(t)[:100] for t in raw_tags[:6]] if isinstance(raw_tags, list) else []
+        tags = [" ".join(str(t).split())[:100].strip() for t in raw_tags[:6]] if isinstance(raw_tags, list) else []
+        tags = [t for t in tags if t]
 
         if not name or not lesson:
             logger.warning(
@@ -511,7 +512,7 @@ class StrategyCardDistiller:
 
         from nous.storage.models import Procedure
 
-        base = name[: _MAX_NAME_CHARS - 5]  # reserve room for ' (NN)' suffix
+        base = name[: _MAX_NAME_CHARS - 5].rstrip()  # reserve room for ' (NN)' suffix
         candidate = name
         for suffix_n in range(2, 21):
             result = await session.execute(
