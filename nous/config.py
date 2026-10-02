@@ -213,10 +213,13 @@ class Settings(BaseSettings):
 
     # Reasoning Maps L1: strategy card distillation (off by default)
     strategy_cards_enabled: bool = False
-    # Reasoning Maps L1: cap strategy cards injected per turn (requires retrieval enabled)
+    # Reasoning Maps L1: let strategy cards reach a prompt. Off = no card is put into
+    # any prompt section, whatever strategy_cards_enabled is (distillation alone only
+    # accumulates cards).
     strategy_cards_retrieval_enabled: bool = False
-    # Reasoning Maps L1: max strategy cards injected per turn (1 = ReasoningBank default)
-    strategy_cards_max_per_turn: int = 1
+    # Reasoning Maps L1: max strategy cards per turn when retrieval is on, on top of
+    # (never instead of) the how-to procedure slots. 0 = none; 1 = ReasoningBank default.
+    strategy_cards_max_per_turn: int = Field(default=1, ge=0)
 
     # F079 catalog-first procedure delivery (progressive disclosure, à la Claude Code):
     #   BREADTH — a static `## Procedure Catalog` listing active procedure names+descs

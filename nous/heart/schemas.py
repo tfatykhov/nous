@@ -288,6 +288,11 @@ class FactSummary(BaseModel):
 STRATEGY_CARD_KIND = "strategy"
 
 
+def is_strategy_card(procedure: object) -> bool:
+    """True for a procedure row or DTO (ORM, ProcedureDetail, ProcedureSummary) that is a card."""
+    return getattr(procedure, "kind", None) == STRATEGY_CARD_KIND
+
+
 class ProcedureInput(BaseModel):
     """Input for storing a new procedure."""
 

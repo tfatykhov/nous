@@ -285,3 +285,199 @@ async def test_dashboard_procedure_list_still_shows_cards(card_heart, db):
     data = resp.json()
     assert {p["name"] for p in data["procedures"]} == {"deploy-skill", "card-0"}
     assert data["total"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Invariants 1 and 3 — Recommended Procedures: gate, cap, and slot accounting
+# ---------------------------------------------------------------------------
+
+
+def _seeded_brain(*neighbors) -> MagicMock:
+    """Brain double: one recalled decision and its procedure neighbours, given as
+    (row, edge_weight) pairs. A call that asks for cards only gets the cards among
+    them; every other call gets all of them, cards included. A real Brain returns
+    no card on that other call, so these tests pin what ``_select_procedures``
+    itself does with a card that reaches it."""
+    from nous.brain.schemas import DecisionSummary, NeighborResult
+
+    now = datetime.now(UTC)
+    decision = DecisionSummary(
+        id=uuid4(),
+        description="chose blue-green deploys",
+        confidence=0.8,
+        category="process",
+        stakes="medium",
+        outcome="success",
+        score=0.9,
+        created_at=now,
+    )
+    rows = [
+        (
+            NeighborResult(
+                id=row.id,
+                node_type="procedure",
+                description=row.name,
+                edge_relation="extracted_from",
+                edge_weight=weight,
+                created_at=now,
+            ),
+            row.kind == "strategy",
+        )
+        for row, weight in neighbors
+    ]
+
+    async def _neighbors(*_args, cards_only=False, **_kwargs):
+        return [n for n, is_card in rows if is_card or not cards_only]
+
+    brain = MagicMock()
+    brain.embeddings = None
+    brain.query = AsyncMock(return_value=[decision])
+    brain.neighbors = AsyncMock(side_effect=_neighbors)
+    return brain
+
+
+@pytest.mark.asyncio
+async def test_retrieval_off_puts_no_card_anywhere_in_the_prompt(card_heart, session):
+    """Distillation alone only accumulates: with retrieval off, the card of a
+    recalled decision is not recommended, and no card is in the prompt at all."""
+    howto = await _add(session, card_heart, "howto-deploy", age_minutes=60)
+    card = await _add(session, card_heart, "card-0", kind="strategy")
+    engine = _engine(card_heart, _seeded_brain((card, 0.9), (howto, 0.5)))
+
+    result = await _build(engine, card_heart, session)
+
+    assert "body of howto-deploy" in _section(result, "Recommended Procedures")
+    assert "card-" not in result.system_prompt
+
+
+@pytest.mark.asyncio
+async def test_retrieval_on_serves_one_card_after_all_five_how_to_procedures(card_heart, session):
+    """Two cards outrank five how-to neighbors on the graph rung. All five how-to
+    procedures keep their slots; exactly one card (the stronger) follows them."""
+    howtos = [await _add(session, card_heart, f"howto-{i}", age_minutes=60 + i) for i in range(5)]
+    cards = [await _add(session, card_heart, f"card-{i}", kind="strategy") for i in range(2)]
+    brain = _seeded_brain(
+        (cards[0], 0.95),
+        (cards[1], 0.9),
+        *[(h, 0.8 - 0.1 * i) for i, h in enumerate(howtos)],
+    )
+    engine = _engine(card_heart, brain, strategy_cards_retrieval_enabled=True)
+
+    result = await _build(engine, card_heart, session)
+    recommended = _section(result, "Recommended Procedures")
+
+    for i in range(5):
+        assert f"body of howto-{i}" in recommended
+    assert "body of card-0" in recommended
+    assert "card-1" not in result.system_prompt
+    assert recommended.index("card-0") > recommended.index("body of howto-4")
+    assert "card-" not in _section(result, "Procedure Catalog")
+
+
+@pytest.mark.asyncio
+async def test_a_card_that_still_fits_is_shown_when_the_budget_cuts_a_how_to_body(card_heart, session):
+    """A procedure budget of 400 tokens. The first how-to body takes about 210 of
+    them and the second (about 1,500) is cut. The card comes after the how-to
+    procedures and is small (about 35): it still fits in what the first one left,
+    so it is shown. The how-to body that did not fit stays cut, and only what is
+    shown is recorded as recalled."""
+    fits = await _add(session, card_heart, "howto-fits", age_minutes=60, body="s" * 800)
+    cut = await _add(session, card_heart, "howto-cut", age_minutes=61, body="s" * 6000)
+    card = await _add(session, card_heart, "card-0", kind="strategy")
+    engine = _engine(
+        card_heart,
+        _seeded_brain((fits, 0.9), (cut, 0.8), (card, 0.7)),
+        strategy_cards_retrieval_enabled=True,
+        proc_catalog_enabled=False,
+        context_budget_overrides={"procedures": 400},
+        budget_scale_enabled=False,
+        proc_recommended_body_max_chars=8000,
+    )
+
+    result = await _build(engine, card_heart, session)
+    recommended = _section(result, "Recommended Procedures")
+
+    assert "### howto-fits (ops)" in recommended
+    assert "### howto-cut (ops)" not in recommended
+    assert "### card-0 (strategy)" in recommended
+    assert recommended.index("### card-0") > recommended.index("### howto-fits")
+    assert result.recalled_ids["procedure"] == [str(fits.id), str(card.id)]
+
+
+@pytest.mark.asyncio
+async def test_a_card_that_does_not_fit_in_what_the_how_to_procedures_left_is_not_shown(card_heart, session):
+    """The other half: the budget still bounds the card, and the card takes nothing
+    from a how-to procedure. This card (about 280 tokens) would fit in the whole
+    budget of 400, but not in the 190 the first how-to body left of it, so it is
+    not shown and not recorded."""
+    fits = await _add(session, card_heart, "howto-fits", age_minutes=60, body="s" * 800)
+    cut = await _add(session, card_heart, "howto-cut", age_minutes=61, body="s" * 6000)
+    card = await _add(session, card_heart, "card-0", kind="strategy", body="c" * 1000)
+    engine = _engine(
+        card_heart,
+        _seeded_brain((fits, 0.9), (cut, 0.8), (card, 0.7)),
+        strategy_cards_retrieval_enabled=True,
+        proc_catalog_enabled=False,
+        context_budget_overrides={"procedures": 400},
+        budget_scale_enabled=False,
+        proc_recommended_body_max_chars=8000,
+    )
+
+    result = await _build(engine, card_heart, session)
+    recommended = _section(result, "Recommended Procedures")
+
+    assert "### howto-fits (ops)" in recommended
+    assert "card-0" not in recommended
+    assert result.recalled_ids["procedure"] == [str(fits.id)]
+
+
+@pytest.mark.asyncio
+async def test_max_per_turn_zero_serves_no_card(card_heart, session):
+    """0 means none (it used to mean unlimited)."""
+    howto = await _add(session, card_heart, "howto-deploy", age_minutes=60)
+    card = await _add(session, card_heart, "card-0", kind="strategy")
+    engine = _engine(
+        card_heart,
+        _seeded_brain((card, 0.9), (howto, 0.5)),
+        strategy_cards_retrieval_enabled=True,
+        strategy_cards_max_per_turn=0,
+    )
+
+    result = await _build(engine, card_heart, session)
+
+    assert "body of howto-deploy" in _section(result, "Recommended Procedures")
+    assert "card-" not in result.system_prompt
+
+
+def test_negative_max_per_turn_is_rejected():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, strategy_cards_max_per_turn=-1)
+
+
+@pytest.mark.asyncio
+async def test_a_card_dropped_by_the_cap_is_attributed_in_the_retrieval_trace(card_heart, session):
+    """F091: a candidate the gate removes must carry a disposition, or it lands
+    in `unaccounted` (the drift alarm). Retrieval off -> allowance 0."""
+    from nous.observability.retrieval_trace import RetrievalTrace
+
+    howto = await _add(session, card_heart, "howto-deploy", age_minutes=60)
+    card = await _add(session, card_heart, "card-0", kind="strategy")
+    brain = _seeded_brain((card, 0.9), (howto, 0.5))
+    engine = _engine(card_heart, brain)
+    seed = str(uuid4())
+    trace = RetrievalTrace(query="q", path="context")
+
+    selected = await engine._select_procedures(
+        slots=5,
+        critic_skills=[],
+        recalled_ids={"fact": [], "decision": [seed]},
+        recalled_score_map={seed: 0.9},
+        session=session,
+        trace=trace,
+    )
+
+    assert [p.name for p in selected] == ["howto-deploy"]
+    dropped = next(c for c in trace.to_dict()["candidates"] if c["id"] == str(card.id))
+    assert (dropped["disposition"], dropped["disposition_stage"]) == ("sliced_off", "strategy_card_cap")
