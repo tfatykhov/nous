@@ -37,6 +37,9 @@ class Event:
     event_id: str = field(default_factory=lambda: uuid4().hex[:12])
     trace_id: str | None = None       # root cause identifier (shared across chain)
     caused_by: str | None = None      # event_id of the direct parent event
+    # False when the producer already wrote this event's audit row inside its
+    # own transaction: handlers still run, the bus does not write a second row.
+    persist: bool = True
 
 
 @dataclass
@@ -230,7 +233,7 @@ class EventBus:
         """Dispatch event to all registered handlers + DB persister."""
         start = time.monotonic()
         # DB persistence (fire-and-forget, errors logged)
-        if self._db_persister:
+        if self._db_persister and event.persist:
             try:
                 await self._db_persister(event)
             except Exception:
