@@ -113,6 +113,9 @@ class HeartbeatRunner:
         # The next iteration checks this to maintain single-flight even after
         # the lock has been released by the timeout path.
         self._dag_pending_task: asyncio.Task | None = None
+        # When the tick in _dag_pending_task started. Never cleared: readers
+        # go through dag_tick_pending_since, which is None once it finishes.
+        self._dag_pending_since: datetime | None = None
         # Absolute loop.time() deadline set when _dag_loop begins draining an
         # in-flight tick during shutdown.  stop() reads this so the two drain
         # windows share one total budget instead of each taking dag_tick_timeout.
@@ -362,6 +365,7 @@ class HeartbeatRunner:
                     inner_task: asyncio.Task = asyncio.create_task(self.dag_orchestrator.tick())
                     # Track for post-timeout single-flight (see check above).
                     self._dag_pending_task = inner_task
+                    self._dag_pending_since = datetime.now(UTC)
                     try:
                         # Enforce the configured deadline. asyncio.wait_for
                         # cancels only the shield wrapper on timeout — the
@@ -1281,6 +1285,18 @@ class HeartbeatRunner:
     @property
     def last_dag_tick(self) -> datetime | None:
         return self._last_dag_tick
+
+    @property
+    def dag_tick_pending_since(self) -> datetime | None:
+        """When the in-flight DAG tick started, or None when none is in flight.
+
+        Read next to last_dag_tick: a tick that never returns leaves
+        last_dag_tick stale and this value old.
+        """
+        task = self._dag_pending_task
+        if task is None or task.done():
+            return None
+        return self._dag_pending_since
 
     def get_stats(self) -> dict:
         """F035.1: Return heartbeat runner statistics."""

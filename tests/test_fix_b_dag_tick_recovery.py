@@ -11,10 +11,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 
 from nous.config import Settings
 from nous.heartbeat.registry import BaseCheck, CheckRegistry
@@ -411,3 +413,111 @@ async def test_a_timeout_error_raised_during_the_shutdown_drain_is_logged_as_a_f
     )
     assert "F038: DAG orchestrator tick failed during shutdown drain" in messages
     assert runner.last_dag_tick is None, "the failed tick was recorded as a successful one"
+
+
+# ---------------------------------------------------------------------------
+# Task B4: status says when the in-flight tick started
+# ---------------------------------------------------------------------------
+
+
+async def test_dag_tick_pending_since_is_the_start_of_the_in_flight_tick_and_none_otherwise():
+    settings = _settings(dag_tick_timeout=0.05)
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def tick():
+        started.set()
+        settings.dag_tick_interval = 3600  # after this tick's deadline the loop sleeps until stop()
+        await release.wait()
+
+    runner = _runner(settings, tick)
+    assert runner.dag_tick_pending_since is None, "no tick has started yet"
+    before = datetime.now(UTC)
+    async with _started(runner):
+        await _expect(started, "the tick never started")
+        since = runner.dag_tick_pending_since
+        assert since is not None and before <= since <= datetime.now(UTC)
+
+        await _until(lambda: not runner._dag_tick_lock.locked(), "the tick's deadline never passed")
+        assert runner.dag_tick_pending_since == since, "a tick past its deadline is still the in-flight tick"
+
+        pending = runner._dag_pending_task
+        release.set()
+        await asyncio.wait({pending}, timeout=WAIT)
+        assert runner.dag_tick_pending_since is None, "a finished tick is not in flight"
+        await _stop(runner)
+    assert runner.dag_tick_pending_since is None
+
+
+async def _get_json(app, path: str) -> dict:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(path)
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+async def test_heartbeat_status_reports_the_in_flight_dag_tick():
+    from nous.api.rest import create_app
+
+    settings = _settings()
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def tick():
+        started.set()
+        await release.wait()
+
+    runner = _runner(settings, tick)
+    app = create_app(
+        runner=MagicMock(),
+        brain=MagicMock(),
+        heart=MagicMock(),
+        cognitive=MagicMock(),
+        database=MagicMock(),
+        settings=settings,
+        heartbeat_runner=runner,
+    )
+
+    assert (await _get_json(app, "/heartbeat/status"))["dag_tick_pending_since"] is None
+    async with _started(runner):
+        try:
+            await _expect(started, "the tick never started")
+
+            body = await _get_json(app, "/heartbeat/status")
+
+            assert body["dag_tick_pending_since"] == runner.dag_tick_pending_since.isoformat()
+            assert body["last_dag_tick"] is None
+        finally:
+            release.set()  # or a failure above leaves teardown draining this tick for 30 s
+
+
+async def test_dashboard_heartbeat_reports_the_in_flight_dag_tick(db):
+    from nous.api.rest import create_app
+
+    settings = _settings()
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def tick():
+        started.set()
+        await release.wait()
+
+    runner = _runner(settings, tick)
+    app = create_app(
+        runner=MagicMock(),
+        brain=MagicMock(),
+        heart=MagicMock(),
+        cognitive=MagicMock(),
+        database=db,
+        settings=settings,
+        heartbeat_runner=runner,
+    )
+
+    assert (await _get_json(app, "/dashboard/heartbeat"))["status"]["dag_tick_pending_since"] is None
+    async with _started(runner):
+        try:
+            await _expect(started, "the tick never started")
+
+            status = (await _get_json(app, "/dashboard/heartbeat"))["status"]
+
+            assert status["dag_tick_pending_since"] == runner.dag_tick_pending_since.isoformat()
+            assert status["last_dag_tick"] is None
+        finally:
+            release.set()  # or a failure above leaves teardown draining this tick for 30 s
