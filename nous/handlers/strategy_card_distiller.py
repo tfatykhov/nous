@@ -2,7 +2,8 @@
 
 Listens to decision_reviewed events and distils a strategy card
 (kind='strategy' procedure) for graded outcomes (success/partial/failure).
-Skips noise and superseded. Idempotent per decision_id.
+For a decision that is noise, superseded, auto-reviewed or gone, it distils
+nothing and retires the cards the decision has. Idempotent per decision_id.
 
 Flags:
   NOUS_STRATEGY_CARDS_ENABLED=false  (distillation off by default)
