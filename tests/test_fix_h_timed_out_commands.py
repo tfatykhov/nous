@@ -215,8 +215,8 @@ async def test_a_job_that_outlived_its_shell_is_stopped_at_the_timeout_of_its_ch
 
 async def test_a_descendant_outside_the_group_cannot_hold_the_caller(workspace, monkeypatch, caplog):
     """The group kill cannot reach a process that started its own session, and
-    that process still holds the command's pipes. The wait for the killed
-    shell is bounded, so the caller gets control back anyway."""
+    that process still holds the command's pipes. The wait after the kill is
+    bounded, so the caller gets control back anyway."""
     monkeypatch.setattr(orchestrator_module, "_CHECK_CMD_TIMEOUT", 1.0)
     # raising=False: if the constant is ever gone, the test has to fail on
     # what the code does, not on this line.
@@ -231,12 +231,12 @@ async def test_a_descendant_outside_the_group_cannot_hold_the_caller(workspace, 
 
     assert result == CheckResult("pending", "command timed out")
     assert not _gone(await _recorded_pid(workspace)), "the escaped child died: this run did not test the bounded wait"
-    # Whether a real shell's exit can go unreported is the interpreter's
-    # business: up to Python 3.12 asyncio reports it only once the pipes are
-    # closed, 3.13 and 3.14 now report it at once (CPython gh-119710), and then
-    # nothing is logged here. The bound and its WARNING are pinned below.
+    # The helper waits for the command's pipes as well as for its shell, so an
+    # escaped process that holds them runs into the bound, and the WARNING is
+    # logged, whatever proc.wait() does: up to Python 3.12 it returns only once
+    # the pipes are closed, 3.13 and 3.14 now return at once (CPython gh-119710).
     warnings = [r.getMessage() for r in caplog.records if r.name == "nous.utils"]
-    assert len(warnings) <= 1 and all("may still be running" in w for w in warnings), warnings
+    assert len(warnings) == 1 and "may still be running" in warnings[0], warnings
 
 
 @pytest.mark.parametrize(

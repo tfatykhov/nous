@@ -9,10 +9,10 @@ import signal
 
 logger = logging.getLogger(__name__)
 
-# How long kill_process_group waits for the shell it killed. Killing the whole
-# group closes the command's pipes and the wait ends in milliseconds; the
-# bound is for a process outside the group that still holds them, or for a
-# kill the kernel refused.
+# How long kill_process_group waits, after the kill, for the shell and for the
+# command's pipes. Killing the whole group closes the pipes and the wait ends
+# in milliseconds; the bound is for a process outside the group that still
+# holds them, or for a kill the kernel refused.
 _KILL_WAIT_SECONDS = 5.0
 
 
@@ -41,7 +41,7 @@ async def _discard(stream: asyncio.StreamReader | None) -> None:
 
 
 async def kill_process_group(proc: asyncio.subprocess.Process, *, even_if_exited: bool = False) -> None:
-    """Kill a shell command as a whole, and wait for its shell, but not forever.
+    """Kill a shell command as a whole, and wait for its shell and its pipes, but not forever.
 
     ``proc`` must have been started with ``start_new_session=True``, which
     makes its pid its process group. ``proc.kill()`` alone signals only the
@@ -50,7 +50,11 @@ async def kill_process_group(proc: asyncio.subprocess.Process, *, even_if_exited
     returns only once those pipes are closed, so the caller would wait for
     the whole command. That holds up to Python 3.12; 3.13 and 3.14 report
     the shell's exit at once in their current releases (3.13.16, 3.14.8;
-    CPython gh-119710).
+    CPython gh-119710). It explains only why waiting for the shell alone
+    held the caller. This helper waits for the command's pipes as well, so
+    its bound and its WARNING do not depend on the interpreter: a process
+    outside the group that still holds the pipes runs into the bound on all
+    of them.
 
     By default a shell whose exit is already known (``returncode`` is set)
     is left alone, and so is a job it left running: ``proc.wait()`` returns
