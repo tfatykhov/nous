@@ -9,6 +9,7 @@ only ever reached when the behaviour under test is broken.
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -344,3 +345,69 @@ async def test_cancelling_a_loop_task_still_ends_it():
         done, _ = await asyncio.wait({dag_task, check_task}, timeout=WAIT)
 
         assert done == {dag_task, check_task}, "a cancelled loop task kept running"
+
+
+# ---------------------------------------------------------------------------
+# Task B3: a TimeoutError the tick raised is a failed tick, not a deadline
+# ---------------------------------------------------------------------------
+
+
+def _runner_log(caplog) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == "nous.heartbeat.runner"]
+
+
+async def test_a_timeout_error_raised_by_the_tick_is_logged_as_a_failed_tick(caplog):
+    second_started = asyncio.Event()
+    calls = 0
+    last_dag_tick_seen_by_second: list = []
+
+    async def tick():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise TimeoutError("connect timed out")  # an asyncpg connect timeout, socket.timeout
+        if calls == 2:
+            last_dag_tick_seen_by_second.append(runner.last_dag_tick)
+            second_started.set()
+
+    runner = _runner(_settings(), tick)
+    with caplog.at_level(logging.DEBUG, logger="nous.heartbeat.runner"):
+        async with _started(runner):
+            await _expect(second_started, "no tick ran after one raised TimeoutError")
+            await _stop(runner)
+
+    messages = [r.getMessage() for r in _runner_log(caplog)]
+    assert not [m for m in messages if "still running in background" in m], (
+        "a tick that had already finished was reported as still running past its deadline"
+    )
+    failed = [r for r in _runner_log(caplog) if r.getMessage() == "F038: DAG orchestrator tick failed"]
+    assert len(failed) == 1 and isinstance(failed[0].exc_info[1], TimeoutError)
+    assert last_dag_tick_seen_by_second == [None], "the failed tick was recorded as a successful one"
+
+
+async def test_a_timeout_error_raised_during_the_shutdown_drain_is_logged_as_a_failed_tick(caplog):
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def tick():
+        started.set()
+        await release.wait()
+        raise TimeoutError("connect timed out")
+
+    runner = _runner(_settings(), tick)  # 30 s deadline: stop() finds the loop still awaiting this tick
+    with caplog.at_level(logging.DEBUG, logger="nous.heartbeat.runner"):
+        async with _started(runner):
+            await _expect(started, "the tick never started")
+            stopping = asyncio.create_task(_stop(runner))
+            await _until(
+                lambda: runner._dag_shutdown_drain_deadline is not None,
+                "stop() never reached the loop's shutdown drain",
+            )
+            release.set()
+            await asyncio.wait_for(stopping, WAIT)
+
+    messages = [r.getMessage() for r in _runner_log(caplog)]
+    assert not [m for m in messages if "did not finish within" in m], (
+        "a tick that had already finished was reported as still running past the drain deadline"
+    )
+    assert "F038: DAG orchestrator tick failed during shutdown drain" in messages
+    assert runner.last_dag_tick is None, "the failed tick was recorded as a successful one"

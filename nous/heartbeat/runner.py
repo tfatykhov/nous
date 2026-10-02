@@ -374,6 +374,14 @@ class HeartbeatRunner:
                             timeout=self._settings.dag_tick_timeout,
                         )
                     except TimeoutError:
+                        if inner_task.done():
+                            # Not the deadline. wait_for passes through what
+                            # the tick itself raised, and a builtin
+                            # TimeoutError from inside it (a connect timeout,
+                            # socket.timeout) has the deadline's type.
+                            self._record_dag_tick(inner_task, "F038: DAG orchestrator tick failed")
+                            self._dag_pending_task = None
+                            continue
                         logger.error(
                             "F038: DAG orchestrator tick timed out after %ds — "
                             "tick is still running in background; "
@@ -411,17 +419,24 @@ class HeartbeatRunner:
                             )
                             self._last_dag_tick = datetime.now(UTC)
                         except TimeoutError:
-                            logger.warning(
-                                "F038: In-flight DAG tick did not finish within "
-                                "%ds during shutdown drain — stop() will drain it",
-                                self._settings.dag_tick_timeout,
-                            )
-                            # Fix 5 (Codex P1 round-4): do NOT clear
-                            # _dag_pending_task when the drain times out.
-                            # inner_task is still running; stop() reads the
-                            # reference and drains it via asyncio.wait before
-                            # shutdown_components() closes the DB pool.
-                            _shutdown_drain_timed_out = True
+                            if inner_task.done():
+                                # The tick finished: the TimeoutError is its
+                                # own, as in the deadline handler above.
+                                self._record_dag_tick(
+                                    inner_task, "F038: DAG orchestrator tick failed during shutdown drain"
+                                )
+                            else:
+                                logger.warning(
+                                    "F038: In-flight DAG tick did not finish within "
+                                    "%ds during shutdown drain — stop() will drain it",
+                                    self._settings.dag_tick_timeout,
+                                )
+                                # Fix 5 (Codex P1 round-4): do NOT clear
+                                # _dag_pending_task when the drain times out.
+                                # inner_task is still running; stop() reads the
+                                # reference and drains it via asyncio.wait before
+                                # shutdown_components() closes the DB pool.
+                                _shutdown_drain_timed_out = True
                         except Exception:
                             logger.exception("F038: DAG orchestrator tick failed during shutdown drain")
                         if not _shutdown_drain_timed_out:
