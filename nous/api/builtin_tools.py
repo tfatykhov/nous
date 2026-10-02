@@ -414,11 +414,12 @@ def atomic_replace_bytes(
     """Replace ``target`` with ``data`` atomically, or change nothing.
 
     The bytes go to a fresh temp file in the same directory (every byte
-    written, fsynced, the existing mode kept -- a new file gets the umask
-    default), which is then renamed over the target. With ``expected`` (a
-    sha256 hex, or ABSENT) the target must hold exactly that right before
-    the rename -- an ABSENT target is created no-clobber -- else
-    PreconditionFailed. A symlink target is never followed. The one window
+    written, fsynced; the existing mode, owner and group kept as far as the
+    process may, a set-id bit only together with the id it refers to -- a
+    new file gets the umask default), which is then renamed over the target.
+    With ``expected`` (a sha256 hex, or ABSENT) the target must hold exactly
+    that right before the rename -- an ABSENT target is created no-clobber --
+    else PreconditionFailed. A symlink target is never followed. The one window
     left, between that last check and the rename, cannot be closed against
     a writer that takes no lock (POSIX has no compare-and-swap rename).
     The parent is reached from the workspace ``root`` without following a
@@ -444,13 +445,50 @@ def atomic_replace_bytes(
                 view = memoryview(data)
                 while view:
                     view = view[os.write(fd, view) :]
+                # A set-id bit survives a replace only together with the id it
+                # refers to: it is never on the new file while that file has
+                # another owner (setuid) or group (setgid) than the replaced
+                # file's.
+                set_id = stat.S_ISUID | stat.S_ISGID
                 if mode is not None and hasattr(os, "fchmod"):
-                    os.fchmod(fd, mode)
+                    # So the mode goes on first WITHOUT those bits, while the
+                    # temp file is still this process's own: once it is given
+                    # away, changing its mode takes CAP_FOWNER, and the owner
+                    # step below is best effort -- it must not fail the write.
+                    os.fchmod(fd, mode & ~set_id)
+                if pre.stat is not None and hasattr(os, "fchown"):
+                    # Then the replaced file's owner and group. Best effort:
+                    # only root may give a file away, and a process that may
+                    # not can still keep a group it is in.
+                    try:
+                        os.fchown(fd, pre.stat.st_uid, pre.stat.st_gid)
+                    except OSError:
+                        try:
+                            os.fchown(fd, -1, pre.stat.st_gid)
+                        except OSError:
+                            pass
+                    if mode is not None and mode & set_id and hasattr(os, "fchmod"):
+                        # Last, each set-id bit whose id the file now really
+                        # has: read back, not assumed from the chown above, so
+                        # a refused chown drops the bit (and a platform with
+                        # no chown never gets one). Best effort too: it needs
+                        # the file to be ours still, or CAP_FOWNER.
+                        try:
+                            now = os.fstat(fd)
+                            bits = 0
+                            if now.st_uid == pre.stat.st_uid:
+                                bits |= mode & stat.S_ISUID
+                            if now.st_gid == pre.stat.st_gid:
+                                bits |= mode & stat.S_ISGID
+                            if bits:
+                                os.fchmod(fd, (mode & ~set_id) | bits)
+                        except OSError:
+                            pass
                 os.fsync(fd)
                 os.close(fd)
                 fd = None
                 if mode is not None and not hasattr(os, "fchmod"):
-                    os.chmod(tmp, mode)  # only reached path-based (no fchmod => no dir_fd either)
+                    os.chmod(tmp, mode & ~set_id)  # only reached path-based (no fchmod => no dir_fd either)
                 with fence.lock if fence is not None else contextlib.nullcontext():
                     if fence is not None and fence.revoked:
                         raise PreconditionFailed("the write was revoked by a revert")

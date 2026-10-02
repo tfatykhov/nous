@@ -83,7 +83,10 @@ def is_compensable_call(name: str, tool_input: Mapping[str, object]) -> bool:
     a snapshot cannot take back. A disable is undoable only while the check
     has no active run -- cancelling one cannot be undone -- which is decided
     at dispatch, not here: ``DynamicCheckLoader.manage_check`` refuses it in an
-    undoable context and records no revertible state anywhere else."""
+    undoable context and records no revertible state anywhere else. Nor is the
+    disable of a DAG node's check compensable -- the DAG loop reads it as that
+    node's completion -- which needs the database, so the runner's snapshot
+    gate (``AgentRunner._capture_compensation_snapshot``) decides it."""
     cls = TOOL_CLASSES.get(name)
     if cls is None or not cls.compensable:
         return False

@@ -1117,8 +1117,8 @@ async def test_capture_snapshots_heartbeat_check_manage_disable_only(inp, expect
     from nous.api.runner import AgentRunner
 
     runner = object.__new__(AgentRunner)
-    runner._settings = SimpleNamespace(compensation_auto_review_enabled=False)
-    runner._action_review_pusher = None
+    runner._settings = SimpleNamespace(compensation_auto_review_enabled=True)
+    runner._action_review_pusher = AsyncMock()
     runner._snap_store = AsyncMock()
     runner._workspace_dir = "/"
     runner._dispatcher = SimpleNamespace()
@@ -1131,6 +1131,7 @@ async def test_capture_snapshots_heartbeat_check_manage_disable_only(inp, expect
 
 # ---------------------------------------------------------------------------
 # codex P2 (runner.py:525): background contexts snapshot regardless of undoable
+# (now only when their review card can be published -- auto-review is wired here)
 # ---------------------------------------------------------------------------
 
 
@@ -1143,8 +1144,8 @@ async def test_capture_snapshot_in_background_non_undoable_context() -> None:
     from nous.api.runner import AgentRunner
 
     runner = object.__new__(AgentRunner)
-    runner._settings = SimpleNamespace(compensation_auto_review_enabled=False)
-    runner._action_review_pusher = None
+    runner._settings = SimpleNamespace(compensation_auto_review_enabled=True)
+    runner._action_review_pusher = AsyncMock()
     runner._snap_store = AsyncMock()
     runner._workspace_dir = tempfile.gettempdir()
     runner._dispatcher = SimpleNamespace()
@@ -1172,8 +1173,8 @@ async def test_oversized_write_blocks_only_when_undoable() -> None:
     from nous.api.runner import AgentRunner
 
     runner = object.__new__(AgentRunner)
-    runner._settings = SimpleNamespace(compensation_auto_review_enabled=False)
-    runner._action_review_pusher = None
+    runner._settings = SimpleNamespace(compensation_auto_review_enabled=True)
+    runner._action_review_pusher = AsyncMock()
     runner._snap_store = AsyncMock()
     runner._workspace_dir = "/"
     runner._dispatcher = SimpleNamespace()
@@ -1252,8 +1253,8 @@ async def test_capture_records_prior_enabled_state_of_the_check(state, recorded)
     from nous.api.runner import AgentRunner
 
     runner = object.__new__(AgentRunner)
-    runner._settings = SimpleNamespace(compensation_auto_review_enabled=False)
-    runner._action_review_pusher = None
+    runner._settings = SimpleNamespace(compensation_auto_review_enabled=True)
+    runner._action_review_pusher = AsyncMock()
     runner._snap_store = AsyncMock()
     if state is RuntimeError:
         runner._snap_store.check_enabled.side_effect = RuntimeError("db down")
@@ -1372,11 +1373,15 @@ def test_undoable_allows_compensable_and_reads_when_policy_is_off() -> None:
 
 
 def _bare_runner(snap_store=None):
+    from unittest.mock import AsyncMock
+
     from nous.api.runner import AgentRunner
 
     runner = object.__new__(AgentRunner)
-    runner._settings = SimpleNamespace(compensation_auto_review_enabled=False)
-    runner._action_review_pusher = None
+    # Auto-review wired: a background call is snapshotted only when its
+    # review card can be published (AgentRunner._review_card_possible).
+    runner._settings = SimpleNamespace(compensation_auto_review_enabled=True)
+    runner._action_review_pusher = AsyncMock()
     runner._snap_store = snap_store
     runner._workspace_dir = tempfile.gettempdir()
     runner._dispatcher = SimpleNamespace()
@@ -1786,10 +1791,18 @@ async def test_concurrent_writes_to_one_path_snapshot_and_write_in_turn(tmp_path
             captured.append(snapshot_data)
             return uuid4()
 
+        async def mark_card_published(self, ledger_entry_id):
+            return True
+
+    async def _pusher(tool_name, entry_id, session_id):
+        return None
+
     runners = []
     for content in ("A", "B"):
-        r, d = _ledger_runner(_FakeStore(), compensation_enabled=True)
+        # auto-review wired: a background write is snapshotted only when its card can be published
+        r, d = _ledger_runner(_FakeStore(), compensation_enabled=True, compensation_auto_review_enabled=True)
         r.set_snapshot_store(_Store(), str(tmp_path))
+        r.set_action_review_pusher(_pusher)
 
         async def dispatch(name, inp, _content=content, **kw):
             await asyncio.sleep(0.05)  # the write is slow: the other call must wait
@@ -2428,10 +2441,11 @@ async def test_enable_if_unchanged_succeeds_despite_sync_failure() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("kind", "auto_review", "expected"),
-    [("subtask", True, True), ("subtask", False, False), ("dag_node", True, True)],
+    ("kind", "undoable", "auto_review", "expected"),
+    # an undoable node is snapshotted with auto-review off: no card will come
+    [("subtask", False, True, True), ("dag_node", True, False, False), ("dag_node", False, True, True)],
 )
-async def test_card_intent_is_stored_with_the_pre_dispatch_snapshot(kind, auto_review, expected) -> None:
+async def test_card_intent_is_stored_with_the_pre_dispatch_snapshot(kind, undoable, auto_review, expected) -> None:
     """codex P1 on #652 (runner.py:658): the review-card intent used to be
     written only after the side effect returned, so a process that died in
     between left a mutation no sweep could ever card. It is now part of the
@@ -2443,7 +2457,10 @@ async def test_card_intent_is_stored_with_the_pre_dispatch_snapshot(kind, auto_r
     runner._action_review_pusher = AsyncMock()
     runner._snap_store.check_enabled.return_value = True
     assert await runner._capture_compensation_snapshot(
-        ExecutionContext(kind=kind), "heartbeat_check_manage", {"name": "c", "action": "disable"}, uuid4()
+        ExecutionContext(kind=kind, undoable=undoable),
+        "heartbeat_check_manage",
+        {"name": "c", "action": "disable"},
+        uuid4(),
     )
     assert runner._snap_store.capture.await_args.kwargs["card_pending"] is expected
 

@@ -100,6 +100,12 @@ class Suppressed:
 MAX_CONVERSATIONS = 100
 MAX_HISTORY_MESSAGES = 20
 
+# Harness Phase 2.8: how long a write_file waits for its path's lock before
+# the call is refused. A legitimate holder (a snapshot insert, one file write,
+# a ledger close) is done in well under a second; a lock held this long is
+# pinned by a write whose thread never returned.
+_WRITE_LOCK_WAIT_SECONDS = 30.0
+
 # Re-export StreamEvent for backward compatibility
 __all__ = ["AgentRunner", "StreamEvent", "FRAME_TOOLS"]
 
@@ -542,14 +548,35 @@ class AgentRunner:
         snapshot capture AND its write, in every context. Two writes to one
         path otherwise both snapshot the same prior content, and reverting
         the later one would erase the earlier write while passing the stale
-        check. Keyed on the repaired path the handler will write."""
-        if tool_name != "write_file":
+        check. Keyed on the repaired path the handler will write.
+
+        None when there is nothing to serialize: compensation is not wired
+        (no snapshot store, so no snapshot and no revert), or no key can be
+        computed for the path (a NUL byte, an unencodable name -- write_file
+        refuses such a path itself). The wait is bounded: a lock still held
+        after ``_WRITE_LOCK_WAIT_SECONDS`` refuses the call, and that
+        SnapshotBlocksDispatch is the only thing raised here. Any other
+        failure is logged and means no lock, so the snapshot capture that
+        follows still runs -- and refuses an undoable write it has no lock for."""
+        if tool_name != "write_file" or self._snap_store is None:
             return None
-        path = self._handler_args(tool_name, tool_input).get("path")
-        if not isinstance(path, str) or not path:
+        path = None
+        try:
+            path = self._handler_args(tool_name, tool_input).get("path")
+            if not isinstance(path, str) or not path:
+                return None
+            lock = write_path_lock(path, self._workspace_dir)
+            await asyncio.wait_for(lock.acquire(), timeout=_WRITE_LOCK_WAIT_SECONDS)
+        except TimeoutError:
+            from nous.api.compensation import SnapshotBlocksDispatch
+
+            raise SnapshotBlocksDispatch(
+                f"write_file refused: another write to {path!r} still held its lock after "
+                f"{_WRITE_LOCK_WAIT_SECONDS:g}s; nothing was written"
+            ) from None
+        except Exception as exc:
+            logger.warning("Harness Phase 2.8: no path lock for write_file %r (%s: %s)", path, type(exc).__name__, exc)
             return None
-        lock = write_path_lock(path, self._workspace_dir)
-        await lock.acquire()
         return lock
 
     def _written_state_persister(self, tool_name: str, entry_id: Any) -> Any:
@@ -624,6 +651,18 @@ class AgentRunner:
             )
         return None
 
+    def _review_card_possible(self, ctx: ExecutionContext) -> bool:
+        """Whether the harness can publish its own action_review card -- the
+        surface it offers Revert on -- for a call from ``ctx``: a background
+        turn, with the pusher wired and auto-review on. The one definition
+        the snapshot capture, its write-ahead card intent and the post-call
+        publish all read."""
+        return bool(
+            ctx.is_background
+            and self._action_review_pusher is not None
+            and self._settings.compensation_auto_review_enabled
+        )
+
     async def _maybe_push_action_review(
         self,
         ctx: ExecutionContext,
@@ -643,9 +682,7 @@ class AgentRunner:
         failed publish or clear leaves the intent (stored before dispatch)
         for the pending-card sweep, never an error for the call.
         """
-        if not (snapshotted and ctx.is_background):
-            return
-        if not self._settings.compensation_auto_review_enabled or self._action_review_pusher is None:
+        if not (snapshotted and self._review_card_possible(ctx)):
             return
         try:
             if status in ("success", "unknown"):
@@ -669,10 +706,11 @@ class AgentRunner:
     ) -> bool:
         """Capture a pre-dispatch snapshot for compensable calls in background contexts.
 
-        Fires for every background context (``is_background``) -- undoable or
-        not -- when the call is compensable (``is_compensable_call``) and the
-        snapshot store is wired: the snapshot is what makes a revert, and the
-        auto action_review card, possible where no human is in the loop.
+        Fires when something can revert from the snapshot -- an undoable
+        context, or a background one whose review card can be published
+        (``_review_card_possible``) -- and the call is compensable
+        (``is_compensable_call``) and the snapshot store is wired. A snapshot
+        nothing could revert from is never stored.
         ``undoable`` only decides whether a missing snapshot BLOCKS the call
         (compensation not wired, no durable ledger row, an oversized file,
         unreadable prior state, a failed write); elsewhere capture is
@@ -689,7 +727,8 @@ class AgentRunner:
         from nous.api.tool_classes import is_compensable_call, tool_class
 
         undoable = getattr(ctx, "undoable", False)
-        if not (undoable or ctx.is_background):
+        card = self._review_card_possible(ctx)
+        if not (undoable or card):
             return False
         cls = tool_class(tool_name)
         if cls is None or not cls.compensable:
@@ -735,7 +774,10 @@ class AgentRunner:
                 # write under another path's lock, where a concurrent write
                 # to the real target could snapshot the same prior content.
                 held = outcome.write_lock if outcome is not None else None
-                if held is None or not write_path_lock_is(snap_data["full_path"], held):
+                if held is None:
+                    # No lock at all: _acquire_write_lock could not take one.
+                    return _unrevertible(f"the path lock for {path!r} could not be taken")
+                if not write_path_lock_is(snap_data["full_path"], held):
                     return _unrevertible(f"{path!r} resolved to a different file while waiting for its lock")
                 # Record what's about to be written so compensate_write_file can
                 # detect if the file was modified between the write and the revert.
@@ -748,6 +790,21 @@ class AgentRunner:
                 # already-disabled check succeeds, and its revert must leave
                 # it disabled rather than start it.
                 check_name = tool_input.get("name", "")
+                # A compensable call is one no other component acts on before
+                # a revert. A DAG node's check is not: the DAG loop reads its
+                # disable as the node's completion. Refused on an undoable
+                # node; anywhere else it runs with no snapshot, so no Revert.
+                # (`is True`: a stand-in store's mock answer is not a yes.)
+                # Nor is a lookup that failed a no: the call counts as unrevertible.
+                try:
+                    dag_managed = await self._snap_store.is_dag_managed_check(check_name)
+                except Exception:
+                    logger.warning("Harness Phase 2.8: DAG lookup failed for check %r", check_name, exc_info=True)
+                    return _unrevertible(f"whether check {check_name!r} belongs to a DAG node could not be read")
+                if dag_managed is True:
+                    if undoable:
+                        return _unrevertible(f"check {check_name!r} belongs to a DAG node, which its disable completes")
+                    return False
                 try:
                     prior_enabled = await self._snap_store.check_enabled(check_name)
                 except Exception:
@@ -789,11 +846,7 @@ class AgentRunner:
                 snapshot_data=snap_data,
                 # Write-ahead card intent (codex P1 on #652): stored before
                 # the side effect, so no crash after it can lose the card.
-                card_pending=bool(
-                    ctx.is_background
-                    and self._settings.compensation_auto_review_enabled
-                    and self._action_review_pusher is not None
-                ),
+                card_pending=card,
             )
             if tool_name in ("resolve_decision", "heartbeat_check_manage") and outcome is not None:
                 # The written state is recorded by the mutation itself, in
@@ -2397,15 +2450,21 @@ class AgentRunner:
                             )
                             # Phase 2.8: a write_file's snapshot and its write share one
                             # per-path critical section (see compensation.write_path_lock).
-                            _write_lock = await self._acquire_write_lock(tc["name"], dispatch_input)
+                            # Taken inside the try: a lock that cannot be had in time
+                            # refuses the call as a snapshot that cannot be captured
+                            # does, and nothing before dispatch can raise out of the loop.
+                            _write_lock = None
                             try:
                                 # Phase 2.8: capture pre-dispatch snapshot for compensable
                                 # calls in background contexts. Fail-open except in undoable
                                 # contexts, which refuse rather than proceed without a snapshot.
                                 _snap_blocked: str | None = None
                                 _snapshotted = False
-                                outcome = CallOutcome(write_lock=_write_lock)
+                                outcome = CallOutcome()
                                 try:
+                                    _write_lock = outcome.write_lock = await self._acquire_write_lock(
+                                        tc["name"], dispatch_input
+                                    )
                                     _snapshotted = await self._capture_compensation_snapshot(
                                         _ctx,
                                         tc["name"],
@@ -3041,15 +3100,21 @@ class AgentRunner:
                             )
                             # Phase 2.8: a write_file's snapshot and its write share one
                             # per-path critical section (see compensation.write_path_lock).
-                            _write_lock2 = await self._acquire_write_lock(tool_name, tool_input)
+                            # Taken inside the try: a lock that cannot be had in time
+                            # refuses the call as a snapshot that cannot be captured
+                            # does, and nothing before dispatch can raise out of the loop.
+                            _write_lock2 = None
                             try:
                                 # Phase 2.8: capture pre-dispatch snapshot for compensable
                                 # calls in background contexts. Fail-open except in undoable
                                 # contexts, which refuse rather than proceed without a snapshot.
                                 _snap_blocked2: str | None = None
                                 _snapshotted2 = False
-                                outcome = CallOutcome(write_lock=_write_lock2)
+                                outcome = CallOutcome()
                                 try:
+                                    _write_lock2 = outcome.write_lock = await self._acquire_write_lock(
+                                        tool_name, tool_input
+                                    )
                                     _snapshotted2 = await self._capture_compensation_snapshot(
                                         ctx,
                                         tool_name,

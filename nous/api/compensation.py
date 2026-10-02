@@ -6,13 +6,15 @@ snapshot of the state before the call. The registry is separate from
 compensator needs the database and domain objects at runtime.
 
 Snapshot lifecycle:
-  1. Before dispatch of a compensable tool in a background context,
-     ``SnapshotStore.capture`` persists the prior state.
+  1. Before dispatch of a compensable tool -- in an undoable context, or in
+     a background one whose review card can be published, so that something
+     can revert from it -- ``SnapshotStore.capture`` persists the prior state.
      Spawning tools (schedule_task, heartbeat_check_create) are deliberately
      NOT compensable: cancelling after the first fire does not undo the work
      it already started.
   2. On ``review.revert``, the handler reads the snapshot and calls the
-     compensator. ``mark_reverted`` is idempotent (double revert = no-op).
+     compensator. ``mark_reverted`` is idempotent (double revert = no-op)
+     and drops the prior file bytes, which nothing reads after a revert.
 """
 
 from __future__ import annotations
@@ -34,6 +36,10 @@ logger = logging.getLogger(__name__)
 
 # Cap for file snapshots: matches the read_file tool's 1 MiB limit.
 _FILE_SNAPSHOT_MAX_BYTES = 1 * 1024 * 1024
+
+# How long a revert waits for its target's write-path lock (a write_file to
+# that path is in flight) before it reports failure and leaves the card live.
+_REVERT_LOCK_WAIT_SECONDS = 5.0
 
 # One lock per resolved target path, shared by every runner fork in the
 # process: a write_file's snapshot capture and its write run inside one
@@ -95,7 +101,9 @@ class SnapshotBlocksDispatch(Exception):
     """Raised when a required snapshot cannot be captured, preventing the dispatch.
 
     Only raised in undoable contexts where a missing snapshot would silently
-    allow a non-revertible side effect past the undoable guarantee.
+    allow a non-revertible side effect past the undoable guarantee -- and, in
+    any context, when a write_file's path lock is still held after its bounded
+    wait (``AgentRunner._acquire_write_lock``): refused the same way.
     """
 
 
@@ -191,17 +199,29 @@ class SnapshotStore:
         *,
         result_message: str,
     ) -> bool:
-        """Mark a snapshot as reverted. Returns False if already reverted (idempotent)."""
+        """Mark a snapshot as reverted. Returns False if already reverted (idempotent).
+
+        The prior file bytes (``prior_b64``) are dropped in the same write:
+        once the revert is recorded nothing reads them again."""
         async with self._db.session() as s:
-            res = await s.execute(
-                update(CompensationSnapshot)
-                .where(CompensationSnapshot.id == snapshot_id)
-                .where(CompensationSnapshot.agent_id == self._agent_id)
-                .where(CompensationSnapshot.reverted_at.is_(None))
-                .values(reverted_at=datetime.now(UTC), revert_result=result_message)
-            )
+            row = (
+                await s.execute(
+                    select(CompensationSnapshot)
+                    .where(CompensationSnapshot.id == snapshot_id)
+                    .where(CompensationSnapshot.agent_id == self._agent_id)
+                    .where(CompensationSnapshot.reverted_at.is_(None))
+                    # Row-locked read-modify-write, as mark_card_published:
+                    # the JSONB value is shared with the card marker.
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return False
+            row.reverted_at = datetime.now(UTC)
+            row.revert_result = result_message
+            row.snapshot_data = {k: v for k, v in (row.snapshot_data or {}).items() if k != "prior_b64"}
             await s.commit()
-            return (res.rowcount or 0) == 1
+            return True
 
     async def mark_card_published(
         self,
@@ -361,6 +381,25 @@ class SnapshotStore:
                     .where(DynamicCheckModel.name == name)
                 )
                 return result.scalar_one_or_none()
+
+        return await asyncio.wait_for(_read(), timeout=self._timeout)
+
+    async def is_dag_managed_check(self, name: str) -> bool:
+        """Whether dynamic check ``name`` belongs to a DAG check node. Its
+        disable is not compensable: the DAG loop reads it as that node's
+        completion and launches its successors, which re-enabling cannot
+        take back. A name with the orchestrator's prefix counts without a
+        query: the check exists before its node has recorded the name."""
+        from nous.dag.store import DAG_CHECK_NAME_PREFIX, dag_check_nodes
+        from nous.storage.models import DAGNode
+
+        if isinstance(name, str) and name.startswith(DAG_CHECK_NAME_PREFIX):
+            return True
+
+        async def _read() -> bool:
+            async with self._db.session() as s:
+                result = await s.execute(dag_check_nodes(self._agent_id).where(DAGNode.check_name == name).limit(1))
+                return result.first() is not None
 
         return await asyncio.wait_for(_read(), timeout=self._timeout)
 
@@ -546,7 +585,13 @@ async def compensate_write_file(
     # held across the check AND the restore, no runner write can land between
     # them and be overwritten by this revert.
     lock = write_path_lock(full_path, "")
-    await lock.acquire()
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=_REVERT_LOCK_WAIT_SECONDS)
+    except TimeoutError:
+        # Never wait forever: this runs under the card's surface lock.
+        return CompensationResult(
+            False, f"revert not attempted: a write to {full_path!r} is still in flight; nothing was changed, retry"
+        )
     try:
         return await _check_and_restore_write_file(
             entry_id, full_path, workspace_root, existed, prior, written_size, written_content_hash
