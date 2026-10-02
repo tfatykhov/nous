@@ -18,7 +18,7 @@ import pytest
 import pytest_asyncio
 from test_dag_approval import FakeSurfaceService, _approve, _node, _orch, _settings, _working_dag
 
-from nous.dag.approval import refusal_message
+from nous.dag.approval import approval_dedup_key, refusal_message
 from nous.dag.schemas import DAGCreateRequest, DAGEdgeSpec, DAGNodeSpec, DAGNodeType
 from nous.dag.store import MAX_ACTIVE_DAGS, DAGStore
 
@@ -195,6 +195,42 @@ async def test_a_stop_does_not_land_on_a_row_that_changed_under_the_tick(store, 
     approve = await _node(store, dag.id, "approve")
     assert (approve.status, approve.error) == ("awaiting_input", None)
     assert list(surfaces.live()) == [node.surface_id]
+
+
+async def test_a_stop_does_not_land_on_a_node_that_was_retried_but_not_yet_reparked(store, subtask_mgr, surfaces):
+    """Guard for the "still parked" condition: after a decline and the
+    companion's retry the node is `pending` and keeps its answer_deadline, so
+    its DAG is live and its deadline has passed. Only the status condition
+    keeps a stale tick from failing the new attempt."""
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag = await _parked_past_its_deadline(store, orch, surfaces, delivered=True)
+    restarted = _orch(store, subtask_mgr, surfaces, dag_approval_proceed_default_enabled=False)
+    stale = await store.get_dag(dag.id)  # the tick's copy: parked, past its deadline
+    node = next(n for n in stale.nodes if n.name == "approve")
+    await orch.answer_node(node.id, "hold", source="companion", actor=None, surface_id=node.surface_id)
+    await orch.retry_node(dag.id, "approve", allow_declined=True)
+    retried = await _node(store, dag.id, "approve")
+    assert retried.status == "pending" and retried.answer_deadline is not None
+
+    await restarted._poll_awaiting_input(stale)
+
+    approve = await _node(store, dag.id, "approve")
+    assert (approve.status, approve.error) == ("pending", None)
+
+
+async def test_an_unlinked_live_card_with_the_nodes_key_is_closed_by_the_stop(store, subtask_mgr, surfaces):
+    """A push that landed but was never linked (a crash between push and
+    link) leaves a live card under the node's key. The stop has no linked id
+    to close it by, so it closes it by that key."""
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag = await _parked_past_its_deadline(store, orch, surfaces, delivered=False)
+    node = await _node(store, dag.id, "approve")
+    surfaces.cards["orphan"] = {"dedup_key": approval_dedup_key(node.id), "status": "live", "built": None}
+
+    await orch._advance_dag(await store.get_dag(dag.id))
+
+    assert (await _node(store, dag.id, "approve")).status == "failed"
+    assert surfaces.live() == {}
 
 
 async def test_an_undelivered_card_still_applies_a_stop_default(store, subtask_mgr, surfaces):

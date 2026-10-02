@@ -1,4 +1,4 @@
-"""PR C: a disable that races a revert is not lost (P2-4).
+"""A disable that races a revert is not lost (post-merge review of #652, finding P2-4).
 
 postgres_only: ``SELECT ... FOR UPDATE`` is silently dropped on SQLite, and
 ``enable_if_unchanged`` uses JSONB operators SQLite does not have. On the
@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, select, text
+from sqlalchemy.exc import DBAPIError
 
 from nous.heartbeat.dynamic import DynamicCheckLoader
 from nous.heartbeat.registry import CheckRegistry
@@ -38,11 +39,18 @@ class _HeldAtCommit:
     def __init__(self, db) -> None:
         self._db = db
         self._hold_next = False
+        self._hold_after_read = False
         self.at_commit = asyncio.Event()
+        self.at_read = asyncio.Event()
         self.release = asyncio.Event()
 
     def hold_next(self) -> None:
         self._hold_next = True
+
+    def hold_next_after_read(self) -> None:
+        """Stop the next session earlier instead: as soon as its first
+        statement has returned. Every action has one, ``list`` included."""
+        self._hold_after_read = True
 
     @asynccontextmanager
     async def session(self):
@@ -57,6 +65,18 @@ class _HeldAtCommit:
                     await commit()
 
                 session.commit = held_commit
+            if self._hold_after_read:
+                self._hold_after_read = False
+                execute = session.execute
+
+                async def held_execute(*args, **kwargs):
+                    result = await execute(*args, **kwargs)
+                    if not self.at_read.is_set():
+                        self.at_read.set()
+                        await self.release.wait()
+                    return result
+
+                session.execute = held_execute
             yield session
 
 
@@ -159,3 +179,58 @@ async def test_a_revert_that_commits_first_is_seen_by_the_next_disable(world):
     assert registry.get_check(NAME) is None
     # The token moved twice since the recorded disable: its revert is refused now.
     assert await loader.enable_if_unchanged(NAME, check_id, token) is False
+
+
+async def _row_is_locked(db, check_id: str) -> bool:
+    """Whether another transaction holds the check's row: a third session's
+    ``SELECT ... FOR UPDATE NOWAIT`` fails at once if one does."""
+    async with db.session() as session:
+        try:
+            await session.execute(
+                select(DynamicCheckModel.id)
+                .where(DynamicCheckModel.id == uuid.UUID(check_id))
+                .with_for_update(nowait=True)
+            )
+        except DBAPIError as exc:
+            if "could not obtain lock" not in str(exc):
+                raise
+            return True
+        finally:
+            await session.rollback()  # the probe must not keep the row itself
+    return False
+
+
+@pytest.mark.parametrize("action", ["enable", "disable", "delete", "update"])
+async def test_every_state_changing_action_holds_the_row_from_its_read(db, world, action):
+    """Each of these actions is a read-modify-write of the row, so each locks
+    it at its read: with the action stopped right after that read, nothing
+    written yet, a third session cannot lock the row."""
+    loader, held, _registry, check_id, _token, _row = world
+    updates = {"description": "changed"} if action == "update" else None
+
+    held.hold_next_after_read()
+    acting = asyncio.create_task(loader.manage_check(action=action, name=NAME, updates=updates))
+    await asyncio.wait_for(held.at_read.wait(), WAIT)
+    locked = await _row_is_locked(db, check_id)
+
+    held.release.set()
+    await asyncio.wait_for(acting, WAIT)
+
+    assert locked, f"{action}: the row is not locked between the read and the commit"
+    assert not await _row_is_locked(db, check_id)  # released by the commit
+
+
+async def test_list_takes_no_row_lock(db, world):
+    """Guard: ``list`` only reads. Stopped right after its read, it holds no row."""
+    loader, held, _registry, check_id, _token, _row = world
+
+    held.hold_next_after_read()
+    listing = asyncio.create_task(loader.manage_check(action="list"))
+    await asyncio.wait_for(held.at_read.wait(), WAIT)
+    locked = await _row_is_locked(db, check_id)
+
+    held.release.set()
+    listed = await asyncio.wait_for(listing, WAIT)
+
+    assert not locked
+    assert [check["name"] for check in listed["checks"]] == [NAME]
