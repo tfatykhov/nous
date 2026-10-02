@@ -178,6 +178,22 @@ async def spreading_activation_search(
         "))"
     )
 
+    # Same reason as A6, for strategy cards: the resolver leaves a card
+    # (a procedure of the strategy kind) out unless its caller asks for cards,
+    # and the caller of this search does not. Kept out here, a card no longer
+    # uses a row of the result window. The traversal is unchanged: activation
+    # still spreads through a card to its other neighbours. Imported here like
+    # in Brain._neighbors: nous.brain does not load nous.heart.
+    from nous.heart.schemas import STRATEGY_CARD_KIND
+
+    params["strategy_kind"] = STRATEGY_CARD_KIND
+    conditions.append(
+        "NOT (act.node_type = 'procedure' AND EXISTS ("
+        "  SELECT 1 FROM heart.procedures p"
+        "  WHERE p.id = act.id AND p.kind = :strategy_kind"
+        "))"
+    )
+
     where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     for i, (nid, ntype, score) in enumerate(seed_nodes):
         values_parts.append(f"(CAST(:id_{i} AS UUID), CAST(:type_{i} AS VARCHAR), CAST(:score_{i} AS FLOAT))")

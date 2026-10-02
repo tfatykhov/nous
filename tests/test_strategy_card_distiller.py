@@ -144,8 +144,11 @@ def distiller(mock_brain, mock_heart, mock_llm):
 async def test_skip_noise_outcome(distiller, mock_brain):
     """Handler skips 'noise' outcome — no LLM call, no procedure stored.
 
-    Mutation: remove `if outcome not in GRADED_OUTCOMES: return` guard in
-    _on_decision_reviewed → asyncio.create_task fires → mock_brain.get called.
+    The decision row is still read: the noise branch reconciles the decision's
+    cards with it.
+
+    Mutation: send the noise outcome down the distillation path in
+    _on_decision_reviewed → the model is called.
     """
     decision_id = uuid4()
     event = {"decision_id": str(decision_id), "outcome": "noise"}
@@ -157,7 +160,6 @@ async def test_skip_noise_outcome(distiller, mock_brain):
         await distiller._on_decision_reviewed(event)
         await asyncio.sleep(0)  # flush event loop
         mock_call.assert_not_called()
-    mock_brain.get.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +182,6 @@ async def test_skip_superseded_outcome(distiller, mock_brain):
         await distiller._on_decision_reviewed(event)
         await asyncio.sleep(0)
         mock_call.assert_not_called()
-    mock_brain.get.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -272,20 +273,38 @@ async def test_distil_failure_outcome(distiller, mock_brain, mock_heart):
 
 @pytest.mark.asyncio
 async def test_idempotency_deactivates_old_card(distiller, mock_brain, mock_heart):
-    """When an existing card is found, deactivation and insertion share ONE transaction.
+    """The old card is deactivated in the SAME transaction that stores its
+    replacement, and before the store.
 
-    Mutation: remove existing_id != None branch → session.execute (UPDATE) is
-    never called and the old card remains active alongside the new one.
+    Mutation: remove the `if existing_id is not None:` UPDATE in _do_distil →
+    no statement deactivates the old card → `order` is ["store new card"].
     """
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.sql.dml import Update
+
     decision_id = uuid4()
     existing_id = uuid4()
     mock_brain.get = AsyncMock(return_value=_make_decision(decision_id=decision_id))
+    # The lookup _do_distil actually calls (this test used to patch a second
+    # lookup that _do_distil never called, and so pinned nothing).
+    distiller._find_existing_card_in_session = AsyncMock(return_value=existing_id)
 
-    # Patch _find_existing_card to return an existing ID
-    async def _fake_find(did: UUID) -> UUID:
-        return existing_id
+    order: list[str] = []
 
-    distiller._find_existing_card = _fake_find
+    async def _execute(stmt, *args, **kwargs):
+        if isinstance(stmt, Update):
+            params = stmt.compile(dialect=postgresql.dialect()).params
+            if params.get("active") is False and existing_id in params.values():
+                order.append("deactivate old card")
+        return MagicMock(scalar_one_or_none=MagicMock(return_value=None))
+
+    async def _store(inp, session=None):
+        order.append("store new card")
+        return _make_procedure_detail()
+
+    session_mock = mock_heart.db.session.return_value.__aenter__.return_value
+    session_mock.execute = AsyncMock(side_effect=_execute)
+    mock_heart.procedures.store = AsyncMock(side_effect=_store)
 
     with patch(
         "nous.handlers.strategy_card_distiller.call_background_llm_structured",
@@ -294,48 +313,8 @@ async def test_idempotency_deactivates_old_card(distiller, mock_brain, mock_hear
     ):
         await distiller._do_distil(decision_id, "success")
 
-    # Deactivation runs inside the same session as the store —
-    # session.execute is called at least once (for the UPDATE).
-    session_mock = mock_heart.db.session.return_value.__aenter__.return_value
-    assert session_mock.execute.call_count >= 1, "Expected session.execute to be called for the deactivation UPDATE"
-    mock_heart.procedures.store.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# 7. test_context_cap_strategy_cards
-# ---------------------------------------------------------------------------
-
-
-def test_context_cap_strategy_cards():
-    """Cap of 1 keeps exactly 1 strategy card; excess are dropped.
-
-    Mutation: change `strategy_hits[:max_sc]` to `strategy_hits` →
-    all 3 strategy cards pass → len(embedding_procedures) == 5 (not 3).
-    """
-
-    def _proc(name: str, kind: str | None = None) -> MagicMock:
-        p = MagicMock()
-        p.name = name
-        p.kind = kind
-        p.score = 0.8
-        return p
-
-    non_strategy = [_proc("proc-a"), _proc("proc-b")]
-    strategy_cards = [_proc("sc-1", "strategy"), _proc("sc-2", "strategy"), _proc("sc-3", "strategy")]
-    embedding_procedures = non_strategy + strategy_cards
-
-    settings = _make_settings(strategy_cards_retrieval_enabled=True, strategy_cards_max_per_turn=1)
-
-    max_sc = max(0, settings.strategy_cards_max_per_turn)
-    s_hits = [p for p in embedding_procedures if getattr(p, "kind", None) == "strategy"]
-    non_s = [p for p in embedding_procedures if getattr(p, "kind", None) != "strategy"]
-    served = s_hits[:max_sc]
-    result = non_s + served
-
-    assert len(result) == 3  # 2 non-strategy + 1 strategy
-    strategy_in_result = [p for p in result if p.kind == "strategy"]
-    assert len(strategy_in_result) == 1
-    assert strategy_in_result[0].name == "sc-1"
+    assert order == ["deactivate old card", "store new card"]
+    assert mock_heart.procedures.store.call_args.kwargs["session"] is session_mock
 
 
 # ---------------------------------------------------------------------------
@@ -419,9 +398,8 @@ async def test_handler_reads_event_data_not_top_level_attrs(distiller, mock_brai
     is always None for a real Event — the handler must read event.data["outcome"].
 
     Mutation: change `data.get("outcome")` back to `getattr(event, "outcome", None)`
-    → outcome is None → handler returns at the graded-outcome guard →
-    mock_brain.get is never called, but we set up a real card_response so it
-    WOULD be called if the event is parsed correctly.
+    → outcome is None → the handler sends the event down the branch that distils
+    no card → the model is never called.
     """
     from nous.events import Event as BusEvent
 
@@ -431,21 +409,24 @@ async def test_handler_reads_event_data_not_top_level_attrs(distiller, mock_brai
     event = BusEvent(
         type="decision_reviewed",
         agent_id="test-agent",
-        data={"decision_id": str(decision_id), "outcome": "success", "reviewer": "auto"},
+        data={"decision_id": str(decision_id), "outcome": "success", "reviewer": "agent"},
     )
 
     with patch(
         "nous.handlers.strategy_card_distiller.call_background_llm_structured",
         new_callable=AsyncMock,
         return_value=_make_card_response(),
-    ):
+    ) as mock_call:
         await distiller._on_decision_reviewed(event)
         # Let the created task run
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 
-    # The handler parsed the Event correctly and scheduled distillation
-    mock_brain.get.assert_called_once_with(decision_id)
+    # The handler read the outcome from event.data and scheduled a distillation:
+    # the model was called. That the decision row was read does not show it (the
+    # branch that distils no card reads the row too); it shows the id was parsed.
+    mock_call.assert_awaited_once()
+    assert mock_brain.get.call_args.args == (decision_id,)
 
 
 # ---------------------------------------------------------------------------
@@ -499,7 +480,7 @@ async def test_bus_wiring_decision_reviewed_triggers_distillation(mock_brain, mo
             BusEvent(
                 type="decision_reviewed",
                 agent_id="test-agent",
-                data={"decision_id": str(decision_id), "outcome": "success", "reviewer": "auto"},
+                data={"decision_id": str(decision_id), "outcome": "success", "reviewer": "agent"},
             )
         )
         # Let the bus drain its queue and the distil task run
@@ -508,7 +489,7 @@ async def test_bus_wiring_decision_reviewed_triggers_distillation(mock_brain, mo
 
     await bus.stop()
 
-    mock_brain.get.assert_called_once_with(decision_id)
+    assert mock_brain.get.call_args.args == (decision_id,)
     mock_heart.procedures.store.assert_called_once()
     stored_inp: ProcedureInput = mock_heart.procedures.store.call_args[0][0]
     assert stored_inp.kind == "strategy"
@@ -708,45 +689,6 @@ async def test_in_flight_guard_cleared_on_error(distiller, mock_brain):
 
 
 # ---------------------------------------------------------------------------
-# 18. test_context_cap_applies_on_graph_primary_path (Finding P1 — context.py:1400)
-# ---------------------------------------------------------------------------
-
-
-def test_context_cap_applies_on_graph_primary_path():
-    """Strategy card cap is enforced on the graph-primary procedure path.
-
-    Mutation: remove the cap block from the graph-primary branch →
-    all 3 strategy cards pass through → result contains 3 strategy cards,
-    not 1.
-    """
-
-    def _proc(name: str, kind: str | None = None) -> MagicMock:
-        p = MagicMock()
-        p.name = name
-        p.kind = kind
-        p.score = 0.8
-        return p
-
-    # Simulate what _select_procedures() returns on the graph-primary path
-    non_strategy = [_proc("proc-a"), _proc("proc-b")]
-    strategy_cards = [_proc("sc-1", "strategy"), _proc("sc-2", "strategy"), _proc("sc-3", "strategy")]
-    selected = non_strategy + strategy_cards
-
-    settings = _make_settings(strategy_cards_retrieval_enabled=True, strategy_cards_max_per_turn=1)
-
-    # Apply the same cap logic that lives in the graph-primary branch of context.py
-    _max_sc = max(0, settings.strategy_cards_max_per_turn)
-    _sc_hits = [p for p in selected if getattr(p, "kind", None) == "strategy"]
-    _non_sc = [p for p in selected if getattr(p, "kind", None) != "strategy"]
-    _sc_served = _sc_hits[:_max_sc]
-    result = _non_sc + _sc_served
-
-    assert len(result) == 3, f"Expected 2 non-strategy + 1 strategy = 3 total, got {len(result)}"
-    strategy_in_result = [p for p in result if getattr(p, "kind", None) == "strategy"]
-    assert len(strategy_in_result) == 1, f"Expected exactly 1 strategy card after cap, got {len(strategy_in_result)}"
-
-
-# ---------------------------------------------------------------------------
 # 19. test_strategy_card_distiller_initialized_without_bus (Finding P1 — main.py:1203)
 # ---------------------------------------------------------------------------
 
@@ -925,130 +867,22 @@ async def test_pending_outcome_runs_after_first_distillation(mock_brain, mock_he
 
 
 # ---------------------------------------------------------------------------
-# 22. test_strategy_cap_preserves_ranking (Finding P2 — context.py:1213)
-# ---------------------------------------------------------------------------
-
-
-def test_strategy_cap_preserves_ranking():
-    """The strategy cap filters excess cards in-place, preserving original ranking.
-
-    Before the fix: the cap rebuilt the list as `_non_sc + _sc_served`,
-    moving a high-ranked strategy card to the tail where the token-budget loop
-    could cut it while letting lower-ranked non-strategy items through.
-
-    Mutation: restore `selected = _non_sc + _sc_served` → a strategy card
-    that was originally at position 0 (highest rank) is pushed to the end,
-    breaking the ordering assertion.
-    """
-
-    def _proc(name: str, kind: str | None = None, score: float = 0.5) -> MagicMock:
-        p = MagicMock()
-        p.name = name
-        p.kind = kind
-        p.score = score
-        return p
-
-    # Strategy card ranked first (highest score), then two non-strategy items.
-    sc1 = _proc("sc-1", "strategy", score=0.95)
-    sc2 = _proc("sc-2", "strategy", score=0.60)
-    proc_a = _proc("proc-a", score=0.70)
-    proc_b = _proc("proc-b", score=0.50)
-    selected = [sc1, proc_a, sc2, proc_b]  # ranking: sc1, proc-a, sc2, proc-b
-
-    _max_sc = 1
-    _sc_hits = [p for p in selected if getattr(p, "kind", None) == "strategy"]
-    _sc_served = _sc_hits[:_max_sc]
-    # Fixed logic: filter in-place, preserving original order.
-    _excess_ids = {id(p) for p in _sc_hits[_max_sc:]}
-    result = [p for p in selected if id(p) not in _excess_ids]
-
-    assert len(result) == 3, f"Expected 3 items after cap, got {len(result)}"
-    # sc1 must remain at position 0 (highest rank preserved).
-    assert result[0].name == "sc-1", (
-        f"Highest-ranked strategy card must stay at rank 0 — got {result[0].name!r} instead"
-    )
-    # sc2 must be removed (excess, over cap).
-    names = [p.name for p in result]
-    assert "sc-2" not in names, "Second strategy card (excess) must be removed"
-
-
-# ---------------------------------------------------------------------------
-# 23. test_strategy_cap_attributes_removed_cards_in_trace (Finding P2 — context.py:1213)
-# ---------------------------------------------------------------------------
-
-
-def test_strategy_cap_attributes_removed_cards_in_trace():
-    """Excess strategy cards removed by the cap are recorded in the retrieval trace.
-
-    Before the fix: discarded cards were never passed to `_tr_filtered`, so
-    they appeared as `unaccounted` in the retrieval trace, corrupting drift
-    instrumentation.
-
-    Mutation: remove the `_tr_filtered(_sc_hits, _sc_served, ...)` call →
-    `dropped_items` stays empty and the assertion fails.
-    """
-
-    def _proc(name: str, kind: str | None = None) -> MagicMock:
-        p = MagicMock()
-        p.name = name
-        p.kind = kind
-        p.id = uuid4()
-        p.score = 0.8
-        return p
-
-    sc1 = _proc("sc-1", "strategy")
-    sc2 = _proc("sc-2", "strategy")
-    sc3 = _proc("sc-3", "strategy")
-    proc_a = _proc("proc-a")
-    selected = [sc1, proc_a, sc2, sc3]
-
-    _max_sc = 1
-    _sc_hits = [p for p in selected if getattr(p, "kind", None) == "strategy"]
-    _sc_served = _sc_hits[:_max_sc]
-
-    # Simulate the _tr_filtered helper.
-    dropped_items: list[tuple] = []
-
-    def fake_tr_filtered(before, after, mem_type, disposition, stage):
-        kept = {str(getattr(i, "id", "")) for i in (after or [])}
-        for it in before or []:
-            iid = str(getattr(it, "id", ""))
-            if iid and iid not in kept:
-                dropped_items.append((iid, mem_type, disposition, stage))
-        return after
-
-    # Apply the fixed cap logic with trace attribution.
-    if len(_sc_hits) > _max_sc:
-        _excess_ids = {id(p) for p in _sc_hits[_max_sc:]}
-        selected = [p for p in selected if id(p) not in _excess_ids]
-        fake_tr_filtered(_sc_hits, _sc_served, "procedure", "sliced_off", "strategy_card_cap")
-
-    # Two excess cards (sc2, sc3) must be recorded as dropped.
-    assert len(dropped_items) == 2, (
-        f"Expected 2 dropped trace entries for excess strategy cards, got {len(dropped_items)}: {dropped_items}"
-    )
-    dropped_stages = {stage for _, _, _, stage in dropped_items}
-    assert dropped_stages == {"strategy_card_cap"}, (
-        f"Dropped cards must be attributed to 'strategy_card_cap', got {dropped_stages}"
-    )
-
-
-# ---------------------------------------------------------------------------
 # 24. test_ungraded_review_deactivates_existing_card (Finding P2 #1 — distiller.py:115)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_ungraded_review_schedules_deactivation(mock_brain, mock_heart, mock_llm):
-    """A noise/superseded review schedules deactivation of the existing card.
+    """A noise/superseded review schedules the reconcile of the decision's cards.
 
     Before the fix: outcome not in GRADED_OUTCOMES → early return before UUID
     parsing, so an existing strategy card was never deactivated even after the
     decision was marked noise/superseded.
 
     Mutation: revert to early return on ungraded outcomes →
-    _deactivate_card_for_decision is never scheduled → the existing card stays
-    active (deactivate_procedure not called).
+    _deactivate_card_for_decision is never scheduled → _retire_stale_cards is
+    not awaited. What the reconcile does to real rows is pinned in
+    tests/test_fix_e_strategy_card_distiller.py.
     """
     settings = _make_settings()
     distiller = StrategyCardDistiller(
@@ -1059,11 +893,7 @@ async def test_ungraded_review_schedules_deactivation(mock_brain, mock_heart, mo
         llm_client=mock_llm,
     )
     decision_id = uuid4()
-    existing_card_id = uuid4()
-
-    # Wire _find_existing_card to report an existing card.
-    distiller._find_existing_card = AsyncMock(return_value=existing_card_id)
-    distiller._deactivate_procedure = AsyncMock()
+    distiller._retire_stale_cards = AsyncMock(return_value=None)
 
     event = {"decision_id": str(decision_id), "outcome": "noise"}
     await distiller._on_decision_reviewed(event)
@@ -1071,7 +901,45 @@ async def test_ungraded_review_schedules_deactivation(mock_brain, mock_heart, mo
     await asyncio.sleep(0)
     await asyncio.sleep(0)
 
-    distiller._deactivate_procedure.assert_called_once_with(existing_card_id)
+    distiller._retire_stale_cards.assert_awaited_once()
+    assert distiller._retire_stale_cards.await_args.args[0] == decision_id
+    mock_heart.db.session.return_value.__aenter__.return_value.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("as_bus_event", [False, True], ids=["dict", "bus_event"])
+async def test_auto_tagged_review_schedules_the_reconcile_and_no_distillation(
+    mock_brain, mock_heart, mock_llm, as_bus_event
+):
+    """A review tagged reviewer="auto" is routed like a noise review even when its
+    outcome is graded: the handler schedules the retire-only reconcile and never
+    a distillation. The tag is read from a plain dict and from a bus Event's data.
+
+    Mutation: stop reading the reviewer from the dict (or from Event.data), or
+    drop `or reviewer == AUTO_REVIEWER` from the handler's branch → the event is
+    scheduled as a distillation.
+    """
+    from nous.events import Event as BusEvent
+
+    settings = _make_settings()
+    distiller = StrategyCardDistiller(
+        brain=mock_brain,
+        heart=mock_heart,
+        settings=settings,
+        bus=None,
+        llm_client=mock_llm,
+    )
+    decision_id = uuid4()
+    distiller._deactivate_card_for_decision = AsyncMock()
+    distiller._distil = AsyncMock()
+
+    payload = {"decision_id": str(decision_id), "outcome": "failure", "reviewer": "auto"}
+    event = BusEvent(type="decision_reviewed", agent_id="test-agent", data=payload) if as_bus_event else payload
+    await distiller._on_decision_reviewed(event)
+    await distiller.shutdown()  # let the scheduled task run
+
+    distiller._deactivate_card_for_decision.assert_awaited_once_with(decision_id)
+    distiller._distil.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1173,9 +1041,13 @@ async def test_make_unique_name_returns_original_when_no_collision(mock_brain, m
 async def test_make_unique_name_appends_suffix_on_collision(mock_brain, mock_heart):
     """_make_unique_name appends ' (N)' when the exact name already exists.
 
+    A long name is cut to make room for the suffix; the cut base does not end
+    in a space, so one space separates it from the suffix.
+
     Mutation: remove the collision check → _make_unique_name always returns
     the original name → the store call later hits the unique-constraint
     violation and leaves the decision without a card.
+    Mutation: drop the `.rstrip()` of the cut base → two spaces before ' (2)'.
     """
     settings = _make_settings()
     distiller = StrategyCardDistiller(
@@ -1199,112 +1071,16 @@ async def test_make_unique_name_appends_suffix_on_collision(mock_brain, mock_hea
     result = await distiller._make_unique_name("Validate Before Deploying", session)
     assert result == "Validate Before Deploying (2)", f"Expected 'Validate Before Deploying (2)', got {result!r}"
 
-
-# ---------------------------------------------------------------------------
-# 26. test_zero_max_per_turn_is_unlimited (Finding P2 #4 — context.py:1211)
-# ---------------------------------------------------------------------------
-
-
-def test_zero_max_per_turn_is_unlimited_graph_primary():
-    """When strategy_cards_max_per_turn=0, ALL strategy cards pass through (unlimited).
-
-    Before the fix: max(0, 0) = 0, and _sc_hits[:0] = [] removed every card,
-    so an operator using the documented escape hatch disabled retrieval entirely.
-
-    Mutation: remove the `if _max_sc == 0` guard → _sc_served = _sc_hits[:0]
-    → result contains zero strategy cards, not three.
-    """
-
-    def _proc(name: str, kind: str | None = None) -> MagicMock:
-        p = MagicMock()
-        p.name = name
-        p.kind = kind
-        p.score = 0.8
-        return p
-
-    strategy_cards = [_proc("sc-1", "strategy"), _proc("sc-2", "strategy"), _proc("sc-3", "strategy")]
-    non_strategy = [_proc("proc-a"), _proc("proc-b")]
-    selected = non_strategy + strategy_cards
-
-    # Apply the fixed graph-primary cap logic with max_sc=0 (unlimited).
-    _max_sc = max(0, 0)  # 0 = unlimited
-    _sc_hits = [p for p in selected if getattr(p, "kind", None) == "strategy"]
-    _sc_served = _sc_hits if _max_sc == 0 else _sc_hits[:_max_sc]
-
-    assert len(_sc_served) == 3, (
-        f"With max_per_turn=0 (unlimited), all 3 strategy cards must pass — got {len(_sc_served)}"
+    # An 80-character name with a space at index 74: the cut that makes room
+    # for ' (NN)' falls right after that space.
+    session.execute = AsyncMock(
+        side_effect=[
+            MagicMock(scalar_one_or_none=MagicMock(return_value=existing_id)),  # collision
+            MagicMock(scalar_one_or_none=MagicMock(return_value=None)),  # unique
+        ]
     )
-
-
-def test_zero_max_per_turn_is_unlimited_passive_path():
-    """Same unlimited contract for the passive (embedding+critic) path."""
-
-    def _proc(name: str, kind: str | None = None) -> MagicMock:
-        p = MagicMock()
-        p.name = name
-        p.kind = kind
-        return p
-
-    embedding_procedures = [
-        _proc("sc-1", "strategy"),
-        _proc("sc-2", "strategy"),
-        _proc("proc-a"),
-    ]
-    max_sc = max(0, 0)  # 0 = unlimited
-    strategy_hits = [p for p in embedding_procedures if getattr(p, "kind", None) == "strategy"]
-    non_strategy = [p for p in embedding_procedures if getattr(p, "kind", None) != "strategy"]
-    # Fixed logic: 0 means unlimited.
-    strategy_served = strategy_hits if max_sc == 0 else strategy_hits[:max_sc]
-    result = non_strategy + strategy_served
-
-    assert len([p for p in result if p.kind == "strategy"]) == 2, (
-        "With max_per_turn=0 (unlimited), all strategy cards must pass through"
-    )
-
-
-# ---------------------------------------------------------------------------
-# 27. test_combined_critic_cap_enforced (Finding P2 #3 — context.py:1424)
-# ---------------------------------------------------------------------------
-
-
-def test_combined_critic_cap_enforced():
-    """Strategy card cap applies to the combined critic+embedding list.
-
-    Before the fix: the cap ran only on embedding_procedures; critic_procedures
-    were prepended afterwards, so two critic strategy cards + one embedding card
-    could exceed a cap of one.
-
-    Mutation: remove the post-merge combined-cap block → all_procedures keeps
-    3 strategy cards, breaking the assertion.
-    """
-
-    def _proc(name: str, kind: str | None = None) -> MagicMock:
-        p = MagicMock()
-        p.name = name
-        p.kind = kind
-        p.id = uuid4()
-        p.score = 0.8
-        return p
-
-    # Two strategy cards from critic, one from embedding — all pass the
-    # embedding-only pre-filter (it only sees the embedding card).
-    critic_procedures = [_proc("sc-critic-1", "strategy"), _proc("sc-critic-2", "strategy")]
-    embedding_procedures = [_proc("sc-embed-1", "strategy"), _proc("proc-a")]
-    all_procedures = critic_procedures + embedding_procedures
-
-    # Apply the combined cap (max_sc=1, non-zero so cap fires).
-    _max_sc_combined = 1
-    _sc_combined = [p for p in all_procedures if getattr(p, "kind", None) == "strategy"]
-    if len(_sc_combined) > _max_sc_combined:
-        _sc_combined_served = _sc_combined[:_max_sc_combined]
-        _sc_excess_ids = {id(p) for p in _sc_combined[_max_sc_combined:]}
-        all_procedures = [p for p in all_procedures if id(p) not in _sc_excess_ids]
-
-    strategy_in_result = [p for p in all_procedures if getattr(p, "kind", None) == "strategy"]
-    assert len(strategy_in_result) == 1, (
-        f"Combined cap of 1 must leave exactly 1 strategy card after merging critic+embedding, "
-        f"got {len(strategy_in_result)}"
-    )
+    result = await distiller._make_unique_name("x" * 74 + " " + "y" * 5, session)
+    assert result == "x" * 74 + " (2)", f"Expected one space before the suffix, got {result!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -1446,164 +1222,6 @@ async def test_name_retry_on_concurrent_conflict(mock_brain, mock_heart):
 
 
 # ---------------------------------------------------------------------------
-# 31. test_catalog_strategy_card_cap (Finding P2 #1 — context.py:1211)
-# ---------------------------------------------------------------------------
-
-
-def test_catalog_strategy_card_cap_limits_catalog_entries():
-    """Strategy-card cap is applied to the procedure catalog deduped list.
-
-    Before the fix: deduped included ALL active procedures including every
-    strategy card, so with strategy_cards_retrieval_enabled=True and a cap
-    of 1 the catalog still rendered all 3 card titles+descriptions and they
-    could crowd out ordinary procedures from the catalog's char budget.
-
-    Mutation: remove the catalog-cap block → all 3 strategy cards survive in
-    deduped → the assertion len(sc_in_deduped) == 1 fails.
-    """
-
-    def _proc(name: str, kind: str | None = None) -> MagicMock:
-        p = MagicMock()
-        p.name = name
-        p.kind = kind
-        return p
-
-    ordinary = [_proc("proc-a"), _proc("proc-b"), _proc("proc-c")]
-    strategy_cards = [_proc("sc-1", "strategy"), _proc("sc-2", "strategy"), _proc("sc-3", "strategy")]
-    deduped = ordinary + strategy_cards  # 6 entries total
-
-    settings = _make_settings(strategy_cards_retrieval_enabled=True, strategy_cards_max_per_turn=1)
-
-    # Apply the catalog-cap logic from context.py (the fix).
-    if getattr(settings, "strategy_cards_retrieval_enabled", False):
-        _cat_max_sc = max(0, getattr(settings, "strategy_cards_max_per_turn", 1))
-        if _cat_max_sc > 0:
-            _cat_sc = [p for p in deduped if getattr(p, "kind", None) == "strategy"]
-            if len(_cat_sc) > _cat_max_sc:
-                _cat_sc_excess_ids = {id(p) for p in _cat_sc[_cat_max_sc:]}
-                deduped = [p for p in deduped if id(p) not in _cat_sc_excess_ids]
-
-    sc_in_deduped = [p for p in deduped if getattr(p, "kind", None) == "strategy"]
-    assert len(sc_in_deduped) == 1, f"Catalog must contain at most 1 strategy card (cap=1), got {len(sc_in_deduped)}"
-    assert sc_in_deduped[0].name == "sc-1", "First strategy card must be the one retained"
-    # Ordinary procedures must all survive (cap only removes excess strategy cards).
-    assert len([p for p in deduped if getattr(p, "kind", None) != "strategy"]) == 3
-
-
-def test_catalog_strategy_card_cap_zero_is_unlimited():
-    """A catalog-cap of 0 passes all strategy cards through (unlimited).
-
-    Mutation: remove the `if _cat_max_sc > 0` guard → _cat_sc_excess_ids
-    includes all cards, deduped loses every strategy card.
-    """
-
-    def _proc(name: str, kind: str | None = None) -> MagicMock:
-        p = MagicMock()
-        p.name = name
-        p.kind = kind
-        return p
-
-    strategy_cards = [_proc("sc-1", "strategy"), _proc("sc-2", "strategy")]
-    deduped = [_proc("proc-a")] + strategy_cards
-
-    settings = _make_settings(strategy_cards_retrieval_enabled=True, strategy_cards_max_per_turn=0)
-
-    # Apply the catalog-cap logic — 0 means unlimited, so deduped is unchanged.
-    if getattr(settings, "strategy_cards_retrieval_enabled", False):
-        _cat_max_sc = max(0, getattr(settings, "strategy_cards_max_per_turn", 1))
-        if _cat_max_sc > 0:
-            _cat_sc = [p for p in deduped if getattr(p, "kind", None) == "strategy"]
-            if len(_cat_sc) > _cat_max_sc:
-                _cat_sc_excess_ids = {id(p) for p in _cat_sc[_cat_max_sc:]}
-                deduped = [p for p in deduped if id(p) not in _cat_sc_excess_ids]
-
-    sc_in_deduped = [p for p in deduped if getattr(p, "kind", None) == "strategy"]
-    assert len(sc_in_deduped) == 2, "With max_per_turn=0 (unlimited) all strategy cards must survive in catalog"
-
-
-# ---------------------------------------------------------------------------
-# 32. test_passive_cap_preserves_ranking (Finding P2 #2 — context.py:1438)
-# ---------------------------------------------------------------------------
-
-
-def test_passive_cap_preserves_ranking():
-    """Passive-path strategy-card cap filters in-place to preserve ranking.
-
-    Before the fix: the code partitioned embedding_procedures into
-    non_strategy + strategy_served, moving every strategy card to the tail
-    regardless of rank.  A top-ranked strategy card was therefore vulnerable
-    to being cut by the token-budget loop while lower-ranked ordinary
-    procedures remained.
-
-    Mutation: revert to `non_strategy + strategy_served` →
-    strategy cards are always last → a high-ranked sc at index 0 ends up
-    after proc-a at index 2, breaking the position assertion.
-    """
-
-    def _proc(name: str, kind: str | None = None) -> MagicMock:
-        p = MagicMock()
-        p.name = name
-        p.kind = kind
-        p.id = name  # unique id per proc
-        return p
-
-    # Strategy card ranked FIRST (highest score), followed by ordinary procs.
-    sc_top = _proc("sc-top", "strategy")
-    proc_a = _proc("proc-a")
-    proc_b = _proc("proc-b")
-    sc_low = _proc("sc-low", "strategy")  # second strategy card, lower rank
-    embedding_procedures = [sc_top, proc_a, proc_b, sc_low]
-
-    max_sc = 1  # cap at 1 strategy card
-
-    # Apply the FIXED in-place cap logic from context.py.
-    strategy_hits = [p for p in embedding_procedures if getattr(p, "kind", None) == "strategy"]
-    if max_sc > 0 and len(strategy_hits) > max_sc:
-        _sc_excess_ids = {id(p) for p in strategy_hits[max_sc:]}
-        result = [p for p in embedding_procedures if id(p) not in _sc_excess_ids]
-    else:
-        result = embedding_procedures
-
-    # sc-top (index 0) must stay at the front — it was first in the original list.
-    assert result[0].name == "sc-top", f"Top-ranked strategy card must remain at index 0, got {result[0].name!r}"
-    assert len([p for p in result if getattr(p, "kind", None) == "strategy"]) == 1
-    assert len(result) == 3  # sc-top, proc-a, proc-b (sc-low dropped)
-
-
-def test_passive_cap_zero_is_unlimited_preserves_order():
-    """Passive-path cap=0 keeps all strategy cards in their original positions.
-
-    Mutation: remove the `if max_sc > 0 and ...` guard → all strategy cards
-    are dropped (max(0,0)=0, sliced to [:0]=empty).
-    """
-
-    def _proc(name: str, kind: str | None = None) -> MagicMock:
-        p = MagicMock()
-        p.name = name
-        p.kind = kind
-        return p
-
-    sc1 = _proc("sc-1", "strategy")
-    sc2 = _proc("sc-2", "strategy")
-    proc_a = _proc("proc-a")
-    embedding_procedures = [sc1, proc_a, sc2]
-
-    max_sc = max(0, 0)  # 0 = unlimited
-
-    strategy_hits = [p for p in embedding_procedures if getattr(p, "kind", None) == "strategy"]
-    if max_sc > 0 and len(strategy_hits) > max_sc:
-        _sc_excess_ids = {id(p) for p in strategy_hits[max_sc:]}
-        result = [p for p in embedding_procedures if id(p) not in _sc_excess_ids]
-    else:
-        result = embedding_procedures
-
-    assert len([p for p in result if getattr(p, "kind", None) == "strategy"]) == 2, (
-        "With max_sc=0 (unlimited) all strategy cards must survive"
-    )
-    assert result == embedding_procedures, "Order must be unchanged when cap is unlimited"
-
-
-# ---------------------------------------------------------------------------
 # P2 round 5 findings
 # ---------------------------------------------------------------------------
 
@@ -1685,95 +1303,6 @@ def test_bus_disabled_strategy_cards_logs_warning(caplog):
     assert distiller._in_flight == set()
 
 
-def test_catalog_cap_backfills_from_tail():
-    """Strategy-cap removal backfills from the fetched tail (finding #3).
-
-    Mutation: remove the backfill loop → deduped is shorter than catalog_max
-    even though non-strategy procedures are available in the tail.
-    """
-    from unittest.mock import MagicMock
-
-    def _proc(name: str, kind: str | None = None) -> MagicMock:
-        p = MagicMock()
-        p.name = name
-        p.kind = kind
-        return p
-
-    sc1 = _proc("sc-1", "strategy")
-    sc2 = _proc("sc-2", "strategy")
-    proc_a = _proc("proc-a")
-    proc_b = _proc("proc-b")
-
-    # order[:catalog_max=2] → [sc1, sc2] (both strategy)
-    # order[catalog_max:] → [proc-a, proc-b] (tail — not initially in deduped)
-    catalog_max = 2
-    order = ["sc-1", "sc-2", "proc-a", "proc-b"]
-    winners = {"sc-1": sc1, "sc-2": sc2, "proc-a": proc_a, "proc-b": proc_b}
-    deduped = [winners[k] for k in order[:catalog_max]]
-
-    _sc_max = 1  # cap: allow at most 1 strategy card
-    _sc_turn_used = 0
-    _cat_cap = max(0, _sc_max - _sc_turn_used)
-
-    _cat_sc = [p for p in deduped if getattr(p, "kind", None) == "strategy"]
-    if len(_cat_sc) > _cat_cap:
-        _pre_filter_len = len(deduped)
-        _cat_sc_excess_ids = {id(p) for p in _cat_sc[_cat_cap:]}
-        deduped = [p for p in deduped if id(p) not in _cat_sc_excess_ids]
-        # Backfill
-        _n_to_backfill = _pre_filter_len - len(deduped)
-        _sc_in_deduped = sum(1 for p in deduped if getattr(p, "kind", None) == "strategy")
-        for _tail_key in order[catalog_max:]:
-            if _n_to_backfill <= 0:
-                break
-            _tail_p = winners[_tail_key]
-            if getattr(_tail_p, "kind", None) == "strategy":
-                if _sc_in_deduped >= _cat_cap:
-                    continue
-                _sc_in_deduped += 1
-            deduped.append(_tail_p)
-            _n_to_backfill -= 1
-
-    assert len(deduped) == catalog_max, (
-        f"Backfill must restore deduped to catalog_max={catalog_max} items, got {len(deduped)}"
-    )
-    strategy_count = sum(1 for p in deduped if getattr(p, "kind", None) == "strategy")
-    assert strategy_count == 1, f"Exactly 1 strategy card should remain, got {strategy_count}"
-    assert any(getattr(p, "kind", None) != "strategy" for p in deduped), (
-        "At least one non-strategy procedure should have been backfilled"
-    )
-
-
-def test_shared_sc_cap_catalog_reduces_recommendations_allowance():
-    """Strategy-card cap is shared: catalog usage reduces the recommendations allowance.
-
-    Mutation: remove the shared _sc_turn_used counter → each section gets a fresh
-    cap → 2 different strategy cards appear when the cap is 1.
-    """
-    # Simulate the shared counter logic used by catalog + recommendations.
-    _sc_max = 1
-    _sc_turn_used = 0
-
-    # --- Catalog section allows 1 strategy card ---
-    catalog_sc_count = 1  # 1 strategy card survived the catalog cap
-    _sc_turn_used += catalog_sc_count
-
-    # --- Recommendations section computes effective remaining cap ---
-    _max_sc = max(0, _sc_max - _sc_turn_used)  # must be 0 after catalog used 1
-
-    assert _max_sc == 0, (
-        f"After catalog uses {catalog_sc_count} of {_sc_max} allowance, "
-        f"recommendations must have 0 slots left, got {_max_sc}"
-    )
-
-    # Simulate how the recommendations cap is applied:
-    # When _sc_max (global) > 0 and _max_sc (remaining) == 0, no strategy card passes.
-    _sc_unlimited = _sc_max == 0
-    recommendation_sc = ["sc-candidate"]
-    _sc_served = recommendation_sc if _sc_unlimited else recommendation_sc[:_max_sc]
-    assert len(_sc_served) == 0, "No strategy card should pass to recommendations when catalog exhausted the cap"
-
-
 # ---------------------------------------------------------------------------
 # Round 6 tests (four findings)
 # ---------------------------------------------------------------------------
@@ -1824,111 +1353,6 @@ async def test_shutdown_drains_follow_up_tasks(mock_brain, mock_heart):
     assert "followup" in completed, (
         "Follow-up task registered while shutdown was draining must also complete"
     )
-
-
-def test_catalog_sc_counter_uses_rendered_rows_not_deduped():
-    """_sc_turn_used counts only strategy cards that survive budget truncation.
-
-    Pass 3 (drop whole rows from end) can remove a low-priority strategy card.
-    The counter must reflect what the model actually sees, not the pre-truncation
-    deduped list.
-
-    Mutation: move the counter update before pass-3 truncation → counter
-    increments for a card that was dropped from row_lines, exhausting the
-    cap for later sections even though no card appeared in the prompt.
-    """
-    def _proc(name, kind=None):
-        p = MagicMock()
-        p.name = name
-        p.kind = kind
-        return p
-
-    ordinary = _proc("ordinary-1")
-    sc1 = _proc("sc-1", "strategy")
-
-    # Strategy card is LOW priority: at index 1 in deduped (last).
-    # Pass 3 drops from the end, so with budget for 1 row, sc1 is dropped.
-    deduped = [ordinary, sc1]
-    row_lines = ["- ordinary-1 (general)", "- sc-1 (general)"]
-    row_lines = row_lines[:1]  # pass-3 keeps only the first (ordinary); sc1 dropped
-    shown = len(row_lines)  # 1
-
-    # Post-truncation count: only rows in deduped[:shown] — sc1 is NOT in that slice.
-    rendered_sc_count = sum(
-        1 for p in deduped[:shown] if getattr(p, "kind", None) == "strategy"
-    )
-    assert rendered_sc_count == 0, (
-        f"Strategy card dropped by pass-3 must not increment the counter; "
-        f"rendered_sc_count={rendered_sc_count}"
-    )
-
-    # Pre-truncation count (the bug): would be 1, incorrectly consuming the cap.
-    premature_count = sum(1 for p in deduped if getattr(p, "kind", None) == "strategy")
-    assert premature_count == 1, "Sanity: pre-truncation count sees the dropped card"
-    assert premature_count != rendered_sc_count, (
-        "Post-truncation count must differ from pre-truncation count for this scenario"
-    )
-
-
-def test_passive_path_backfills_after_combined_cap():
-    """Ordinary procedures backfill slots freed by the combined strategy-card cap.
-
-    When Critic returns 2 strategy cards and only 1 fits the cap, the freed
-    slot must be filled from the tail that was cut by total_slots.
-
-    Mutation: remove the backfill loop → all_procedures has 1 fewer item
-    than total_slots even though a non-strategy candidate was available.
-    """
-    def _proc(name, kind=None):
-        p = MagicMock()
-        p.name = name
-        p.kind = kind
-        return p
-
-    crit_sc1 = _proc("sc-1", "strategy")
-    crit_sc2 = _proc("sc-2", "strategy")
-    emb1 = _proc("emb-1")
-    emb2 = _proc("emb-2")
-    emb3 = _proc("emb-3")  # cut by total_slots; should be backfilled
-
-    total_slots = 4
-    _sc_max = 1
-    _sc_turn_used = 0
-    _max_sc_combined = max(0, _sc_max - _sc_turn_used)
-
-    # Critic + embedding merge, then total_slots cut
-    _before_slots = [crit_sc1, crit_sc2, emb1, emb2, emb3]
-    all_procedures = _before_slots[:total_slots]  # [sc1, sc2, emb1, emb2]
-
-    # Apply strategy cap: sc2 removed
-    _sc_combined = [p for p in all_procedures if getattr(p, "kind", None) == "strategy"]
-    assert len(_sc_combined) == 2
-    _sc_excess_ids = {id(p) for p in _sc_combined[_max_sc_combined:]}
-    all_procedures = [p for p in all_procedures if id(p) not in _sc_excess_ids]
-    # → [sc1, emb1, emb2]  (3 items — 1 below total_slots)
-
-    # Backfill freed slot from tail
-    _combined_ids = {id(p) for p in all_procedures}
-    _sc_now = sum(1 for p in all_procedures if getattr(p, "kind", None) == "strategy")
-    for _tail_p in _before_slots[total_slots:]:
-        if len(all_procedures) >= total_slots:
-            break
-        if id(_tail_p) in _combined_ids:
-            continue
-        if getattr(_tail_p, "kind", None) == "strategy":
-            if _sc_now >= _max_sc_combined:
-                continue
-            _sc_now += 1
-        all_procedures.append(_tail_p)
-        _combined_ids.add(id(_tail_p))
-
-    assert len(all_procedures) == total_slots, (
-        f"Backfill must restore all_procedures to total_slots={total_slots}, "
-        f"got {len(all_procedures)}"
-    )
-    sc_count = sum(1 for p in all_procedures if getattr(p, "kind", None) == "strategy")
-    assert sc_count == 1, f"Exactly 1 strategy card should remain, got {sc_count}"
-    assert emb3 in all_procedures, "emb3 (from tail) must have been backfilled"
 
 
 async def test_bus_emit_fires_after_commit(mock_brain, mock_heart):

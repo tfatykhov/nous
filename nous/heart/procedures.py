@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain.embeddings import EmbeddingProvider
 from nous.heart.schemas import (
+    STRATEGY_CARD_KIND,
     EvolutionCandidate,
     ProcedureDetail,
     ProcedureInput,
@@ -396,8 +397,11 @@ class ProcedureManager:
             except Exception:
                 logger.warning("Embedding generation failed for procedure search")
 
-        extra_where = " AND t.active = true"
-        extra_params: dict = {}
+        # Reasoning Maps L1: a strategy card is a lesson, not a how-to
+        # procedure, so no search-driven read returns one (passive Track B, the
+        # recall tool's procedure scope, the K-line learner's "auto:" sweep).
+        extra_where = " AND t.active = true AND t.kind IS DISTINCT FROM :strategy_kind"
+        extra_params: dict = {"strategy_kind": STRATEGY_CARD_KIND}
         if domain:
             extra_where += " AND t.domain = :domain"
             extra_params["domain"] = domain
@@ -548,11 +552,13 @@ class ProcedureManager:
             WHERE agent_id = :agent_id
               AND active = true
               AND embedding IS NOT NULL
+              AND kind IS DISTINCT FROM :strategy_kind
             ORDER BY embedding <=> CAST(:embedding AS vector)
             LIMIT :limit
         """), {
             "embedding": embedding_str,
             "agent_id": self.agent_id,
+            "strategy_kind": STRATEGY_CARD_KIND,
             "limit": limit,
         })).all()
         if not rows:
@@ -688,16 +694,32 @@ class ProcedureManager:
         active_only: bool = True,
         min_activations: int | None = None,
         session: AsyncSession | None = None,
+        *,
+        include_strategy_cards: bool = False,
     ) -> tuple[list[ProcedureSummary], int]:
-        """Paginated procedure list with filters (F021)."""
+        """Paginated procedure list with filters (F021).
+
+        Strategy cards (Reasoning Maps L1) are left out of both the rows and the
+        total unless ``include_strategy_cards``: the Procedure Catalog and the
+        Critic's skill menu list how-to procedures, and a card must never use up
+        their row windows. Only the dashboard browse asks for both.
+        """
         if session is None:
             async with self.db.session() as session:
-                return await self._list_all(limit, offset, domain, active_only, min_activations, session)
-        return await self._list_all(limit, offset, domain, active_only, min_activations, session)
+                return await self._list_all(
+                    limit, offset, domain, active_only, min_activations, session, include_strategy_cards,
+                )
+        return await self._list_all(
+            limit, offset, domain, active_only, min_activations, session, include_strategy_cards,
+        )
 
-    async def _list_all(self, limit, offset, domain, active_only, min_activations, session):
+    async def _list_all(
+        self, limit, offset, domain, active_only, min_activations, session, include_strategy_cards=False,
+    ):
         from sqlalchemy import func as sa_func
         conditions = [Procedure.agent_id == self.agent_id]
+        if not include_strategy_cards:
+            conditions.append(Procedure.kind.is_distinct_from(STRATEGY_CARD_KIND))
         if active_only:
             conditions.append(Procedure.active == True)  # noqa: E712
         if domain:

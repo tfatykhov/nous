@@ -178,29 +178,6 @@ class TestBuildSurfaces:
         assert "ask to list" not in content.lower()
 
     @pytest.mark.asyncio
-    async def test_catalog_strategy_cap_backfills_beyond_fetch_window(self):
-        """Slots freed by the strategy-card cap are filled from OLDER procedures even
-        when the whole first fetch window (catalog_max*3) is strategy cards.
-        Mutation: backfill only from the first fetched window -> 1 row, not 2."""
-        cards = [_proc_summary(f"sc{i}").model_copy(update={"kind": "strategy"}) for i in range(6)]
-        older = [_proc_summary("older-a"), _proc_summary("older-b")]
-        all_procs = cards + older
-        engine = self._engine(proc_catalog_enabled=True, proc_catalog_max=2,
-                              strategy_cards_retrieval_enabled=True, strategy_cards_max_per_turn=1)
-
-        async def _page(limit, offset=0, **_kw):
-            return all_procs[offset:offset + limit], len(all_procs)
-
-        from unittest.mock import AsyncMock
-        engine._heart.list_procedures = AsyncMock(side_effect=_page)
-        r = await self._build(engine)
-        content = next(s.content for s in r.sections if s.label == "Procedure Catalog")
-        rows = [ln for ln in content.splitlines() if ln.startswith("- ")]
-        assert len(rows) == 2, rows
-        assert any(ln.startswith("- sc0 ") for ln in rows)
-        assert any(ln.startswith("- older-a ") for ln in rows)
-
-    @pytest.mark.asyncio
     async def test_catalog_truncates_long_descriptions(self):
         """Per-row description cap bounds size while keeping every name (description is
         unbounded Text)."""
