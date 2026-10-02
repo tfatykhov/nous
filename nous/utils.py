@@ -48,7 +48,9 @@ async def kill_process_group(proc: asyncio.subprocess.Process) -> None:
     shell: what the shell started runs on and keeps the stdout/stderr pipes
     open, and a ``proc.wait()`` entered before the shell's exit is known
     returns only once those pipes are closed, so the caller would wait for
-    the whole command.
+    the whole command. That holds up to Python 3.12; 3.13 and 3.14 report
+    the shell's exit at once in their current releases (3.13.16, 3.14.8;
+    CPython gh-119710).
 
     A shell whose exit is already known (``returncode`` is set) is left
     alone, and so is a job it left running: ``proc.wait()`` returns at once

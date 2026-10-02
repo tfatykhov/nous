@@ -1,11 +1,12 @@
 """A shell command that reached its timeout is stopped as a whole, and its caller gets control back.
 
-Every test runs a real shell command through the production coroutine
+Every test but one runs a real shell command through the production coroutine
 (``DAGOrchestrator._run_completion_check`` or ``bash_tool``). The shell, the
 timeout and the kill are all real. Each command writes the pids that matter
 to ``*.pid`` files in its working directory, and the ``workspace`` fixture
 kills whatever is recorded there when the test ends, so a failing test leaves
-no process running.
+no process running. The one exception calls the helper alone, with a stand-in
+for a shell whose exit is never reported.
 
 Process groups are POSIX, so the module is skipped on Windows.
 """
@@ -42,6 +43,11 @@ FOREGROUND = "echo $$ > shell.pid; sh -c 'echo $$ > child.pid; exec sleep 30'; t
 FOREGROUND_WITH_JOB = "sleep 30 & echo $! > job.pid; " + FOREGROUND
 # The shell has exited, and the job it left runs on, holding the command's output:
 BACKGROUND = "sleep 30 & echo $! > job.pid"
+# The same, from a shell that exits with a status other than 0 (a completion check's "still pending"):
+BACKGROUND_EXIT_2 = BACKGROUND + "; exit 2"
+OUTLIVED_ITS_SHELL = pytest.mark.parametrize(
+    "command", [BACKGROUND, BACKGROUND_EXIT_2], ids=["the shell exited 0", "the shell exited 2"]
+)
 # The same job with its output redirected: it holds nothing, so the command ends when its shell does:
 REDIRECTED = "sleep 30 > /dev/null 2>&1 & echo $! > job.pid"
 # The command starts to write, as fast as it can, a moment before the timeout fires:
@@ -184,12 +190,13 @@ async def test_a_command_that_ignores_sigterm_is_still_stopped(workspace, monkey
     await _assert_gone(await _recorded_pid(workspace), "the command's child was still running after the timeout")
 
 
-async def test_a_job_that_outlived_its_shell_survives_the_timeout_of_its_check(workspace, monkeypatch):
+@OUTLIVED_ITS_SHELL
+async def test_a_job_that_outlived_its_shell_survives_the_timeout_of_its_check(workspace, monkeypatch, command):
     """Parity pin: green before this change too. The shell has exited by the
     time the timeout fires, so nothing is killed: the job it left behind runs
     on, and the caller gets control back at the timeout."""
     monkeypatch.setattr(orchestrator_module, "_CHECK_CMD_TIMEOUT", 1.0)
-    orchestrator, node = _check_node(workspace, BACKGROUND)
+    orchestrator, node = _check_node(workspace, command)
 
     result = await asyncio.wait_for(orchestrator._run_completion_check(node), LIMIT)
 
@@ -216,6 +223,47 @@ async def test_a_descendant_outside_the_group_cannot_hold_the_caller(workspace, 
 
     assert result == CheckResult("pending", "command timed out")
     assert not _gone(await _recorded_pid(workspace)), "the escaped child died: this run did not test the bounded wait"
+    # Whether a real shell's exit can go unreported is the interpreter's
+    # business: up to Python 3.12 asyncio reports it only once the pipes are
+    # closed, 3.13 and 3.14 now report it at once (CPython gh-119710), and then
+    # nothing is logged here. The bound and its WARNING are pinned below.
+    warnings = [r.getMessage() for r in caplog.records if r.name == "nous.utils"]
+    assert len(warnings) <= 1 and all("may still be running" in w for w in warnings), warnings
+
+
+@pytest.mark.parametrize(
+    "refusal", [None, ProcessLookupError, PermissionError], ids=["the kill is sent", "no such group", "not permitted"]
+)
+async def test_the_wait_for_a_killed_shell_is_bounded_and_says_so(monkeypatch, caplog, refusal):
+    """The helper alone, with a shell whose exit is never reported. A kill the
+    kernel refuses must not come out of the helper: in a cancellation arm it
+    would replace the cancellation."""
+    # Imported here and not at the top: where the helper does not exist, this
+    # test fails and the others still run.
+    from nous.utils import kill_process_group
+
+    monkeypatch.setattr("nous.utils._KILL_WAIT_SECONDS", 0.5, raising=False)
+    signalled = []
+
+    def killpg(pgid, sig):
+        signalled.append((pgid, sig))
+        if refusal is not None:
+            raise refusal()
+
+    monkeypatch.setattr(os, "killpg", killpg)
+
+    async def never_reported():
+        await asyncio.Event().wait()
+
+    shell = SimpleNamespace(pid=4242, returncode=None, wait=never_reported, stdout=None, stderr=None)
+
+    with caplog.at_level(logging.WARNING, logger="nous.utils"):
+        try:
+            await asyncio.wait_for(kill_process_group(shell), LIMIT)
+        except TimeoutError:
+            pytest.fail(f"the helper had not returned after {LIMIT:.0f}s, with a 0.5s bound")
+
+    assert signalled == [(4242, signal.SIGKILL)]
     warnings = [r.getMessage() for r in caplog.records if r.name == "nous.utils"]
     assert len(warnings) == 1 and "may still be running" in warnings[0], warnings
 
@@ -296,10 +344,11 @@ async def test_a_timed_out_bash_command_returns_and_stops_its_command(workspace,
         await _assert_gone(await _recorded_pid(workspace, name), f"{name} was still running after the timeout")
 
 
-async def test_a_job_that_outlived_its_shell_survives_the_timeout_of_its_bash_command(workspace):
+@OUTLIVED_ITS_SHELL
+async def test_a_job_that_outlived_its_shell_survives_the_timeout_of_its_bash_command(workspace, command):
     """Parity pin: green before this change too. As for the completion check:
     the shell has exited, so the timeout kills nothing and the job runs on."""
-    result = await asyncio.wait_for(bash_tool(BACKGROUND, timeout=1, _workspace_dir=str(workspace)), LIMIT)
+    result = await asyncio.wait_for(bash_tool(command, timeout=1, _workspace_dir=str(workspace)), LIMIT)
 
     assert "Command timed out after 1s." in result["content"][0]["text"]
     job = await _recorded_pid(workspace, "job.pid")
