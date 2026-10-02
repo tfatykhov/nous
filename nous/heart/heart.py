@@ -649,7 +649,7 @@ class Heart:
         await self.procedures.retire(procedure_id, session)
 
     async def get_procedure_by_name(self, name: str, session: AsyncSession | None = None) -> ProcedureDetail | None:
-        """Fetch active procedure by exact name."""
+        """Fetch the active how-to procedure with this name (never a strategy card)."""
         return await self.procedures.get_by_name(name, session)
 
     async def is_procedure_name_superseded(self, name: str, session: AsyncSession | None = None) -> bool:

@@ -13,13 +13,15 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.exc import IntegrityError
 
+from nous.api.tools import create_nous_tools
+from nous.brain.brain import Brain
 from nous.config import Settings
 from nous.heart import Heart, ProcedureInput
 from nous.heart.schemas import STRATEGY_CARD_KIND
-from nous.skills.bootstrap import reactivate_skills
+from nous.skills.bootstrap import bootstrap_local_skills, reactivate_skills
 from nous.storage.models import Event, Procedure
 
 pytestmark = pytest.mark.postgres_only
@@ -208,3 +210,107 @@ async def test_a_skill_is_reactivated_when_a_card_holds_its_name(heart, monkeypa
     rows = await _rows(heart)
     assert (rows[skill_id]["name"], rows[skill_id]["active"]) == (NAME, True)
     assert (rows[card_id]["name"], rows[card_id]["active"]) == (_moved(NAME, card_id), True)
+
+
+# ---------------------------------------------------------------------------
+# A lookup of a skill by name never finds a card
+# ---------------------------------------------------------------------------
+
+SKILL_MD = f"---\nname: {NAME.lower()}\ndescription: How to deploy\n---\nRun the checks, then deploy.\n"
+
+
+@pytest_asyncio.fixture
+async def tools(heart):
+    """The agent's tools (learn_skill, get_procedure) over the real Heart."""
+    brain = Brain(database=heart.db, settings=heart.settings)
+    yield create_nous_tools(brain, heart, settings=heart.settings)
+    await brain.close()
+
+
+def _skill_on_disk(tmp_path, name: str) -> str:
+    """A workspace with one SKILL.md; returns the workspace directory."""
+    skill_dir = tmp_path / "skills" / "deploy"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: How to deploy\n---\nRun the checks, then deploy.\n", encoding="utf-8"
+    )
+    return str(tmp_path)
+
+
+async def test_bootstrap_registers_a_skill_whose_name_a_card_holds(heart, tmp_path):
+    """The bootstrap asked "is this skill registered" with a lookup that returned
+    the card, and skipped the skill at every start for as long as the card was
+    active."""
+    card = await _card(heart, NAME.lower())
+    workspace = _skill_on_disk(tmp_path, NAME)
+
+    assert await bootstrap_local_skills(workspace, heart) == 1
+    assert await bootstrap_local_skills(workspace, heart) == 0  # the next start finds the skill
+
+    rows = await _rows(heart)
+    skill = next(row for row_id, row in rows.items() if row_id != card.id)
+    assert (skill["name"], skill["kind"], skill["active"]) == (NAME, None, True)
+    assert (rows[card.id]["kind"], rows[card.id]["active"]) == (STRATEGY_CARD_KIND, True)
+
+
+async def test_learn_skill_registers_the_skill_and_leaves_the_card_a_card(heart, tools):
+    """learn_skill refreshes an existing skill in place. With the card as the
+    "existing skill" it rewrote the card's row: the lesson and the link to the
+    decision were gone, and the reply said "updated"."""
+    card = await _card(heart)
+
+    reply = await tools["learn_skill"](source="inline", content=SKILL_MD)
+
+    assert "Skill registered successfully" in reply["content"][0]["text"]
+    rows = await _rows(heart)
+    assert len(rows) == 2
+    assert rows[card.id]["kind"] == STRATEGY_CARD_KIND
+    assert rows[card.id]["body"] == LESSON
+    assert rows[card.id]["source"] == DECISION_ID
+
+
+async def test_a_skill_lookup_by_name_does_not_find_a_card(heart, tools):
+    """get_procedure_by_name is what the bootstrap, learn_skill, the get_procedure
+    tool and the Critic's skill picks use. None of them means a card. Asked by
+    id, the tool returns the row whatever its kind, as before: a hub listing
+    shows a card by its id."""
+    card = await _card(heart)
+
+    assert await heart.get_procedure_by_name(NAME) is None
+    reply = await tools["get_procedure"](procedure_id=NAME)
+    assert reply["content"][0]["text"] == f"No procedure found for '{NAME}'."
+    reply = await tools["get_procedure"](procedure_id=str(card.id))
+    assert reply["content"][0]["text"].startswith(f"**{NAME}** (strategy)")
+
+
+async def test_a_superseded_card_does_not_stop_the_import_of_a_skill(heart, tmp_path):
+    """The bootstrap does not re-import a skill that was consolidated into another
+    procedure. A card archived that way is not that skill."""
+    canonical = await heart.store_procedure(_how_to("Rollback Runbook"))
+    card = await _card(heart)
+    async with heart.db.session() as s:
+        await s.execute(
+            text("UPDATE heart.procedures SET active=false, archived_at=now(), superseded_by=:c WHERE id=:i"),
+            {"c": canonical.id, "i": card.id},
+        )
+        await s.commit()
+
+    assert await bootstrap_local_skills(_skill_on_disk(tmp_path, NAME), heart) == 1
+
+
+async def test_without_a_card_the_bootstrap_and_learn_skill_do_what_they_did(heart, tools, tmp_path):
+    """No card row (the state with both strategy-card flags off): a skill is
+    registered once, found again by name in any casing, and refreshed in place."""
+    workspace = _skill_on_disk(tmp_path, NAME)
+
+    assert await bootstrap_local_skills(workspace, heart) == 1
+    assert await bootstrap_local_skills(workspace, heart) == 0
+    (skill_id,) = await _rows(heart)
+
+    reply = await tools["learn_skill"](source="inline", content=SKILL_MD)
+
+    assert "Skill updated successfully" in reply["content"][0]["text"]
+    rows = await _rows(heart)
+    assert list(rows) == [skill_id]
+    assert rows[skill_id]["name"] == NAME.lower()
+    assert (await heart.get_procedure_by_name(NAME.upper())).id == skill_id

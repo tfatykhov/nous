@@ -951,12 +951,13 @@ class ProcedureManager:
             .where(func.lower(Procedure.name) == name.lower())
             .where(Procedure.agent_id == self.agent_id)
             .where(Procedure.superseded_by.isnot(None))
+            .where(Procedure.kind.is_distinct_from(STRATEGY_CARD_KIND))
             .limit(1)
         )
         return result.scalars().first() is not None
 
     async def get_by_name(self, name: str, session: AsyncSession | None = None) -> ProcedureDetail | None:
-        """Fetch active procedure by exact name match."""
+        """Fetch the active how-to procedure with this name (never a strategy card)."""
         if session is None:
             async with self.db.session() as session:
                 return await self._get_by_name(name, session)
@@ -976,6 +977,8 @@ class ProcedureManager:
             .where(func.lower(Procedure.name) == name.lower())
             .where(Procedure.agent_id == self.agent_id)
             .where(Procedure.active == True)  # noqa: E712
+            # Every caller means a skill: a strategy card with this name is not one.
+            .where(Procedure.kind.is_distinct_from(STRATEGY_CARD_KIND))
             .order_by(Procedure.created_at.desc(), Procedure.id)
             .limit(1)
         )
