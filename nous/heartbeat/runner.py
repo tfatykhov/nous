@@ -48,6 +48,9 @@ _ESCALATION_LADDER: dict[str, str] = {"low": "normal", "normal": "high", "high":
 # threshold, not proof: a tick is as slow as the slowest thing it awaits.
 _DAG_STALL_TIMEOUTS = 3
 
+# Telegram rejects a text over 4096 characters (nous/dag/delivery.py cuts at the same length).
+_TELEGRAM_MAX_CHARS = 3900
+
 
 def _cancelled_by_sibling_run(exc: BaseException) -> bool:
     """Whether ``exc`` is a run cancelled because a SIBLING run disabled the check."""
@@ -386,7 +389,7 @@ class HeartbeatRunner:
                         and pending_for >= _DAG_STALL_TIMEOUTS * self._settings.dag_tick_timeout
                     ):
                         self._dag_stall_escalated = True
-                        self._escalate_dag_stall(pending_for)
+                        await self._escalate_dag_stall(pending_for)
                     logger.warning(
                         "F038: DAG tick skipped — previous tick timed out and is still running in background",
                     )
@@ -500,8 +503,8 @@ class HeartbeatRunner:
             except Exception:
                 logger.exception("F038: DAG tick loop iteration failed")
 
-    def _escalate_dag_stall(self, pending_for: float) -> None:
-        """The pending DAG tick is treated as hung: say so, then run the stall action, if any.
+    async def _escalate_dag_stall(self, pending_for: float) -> None:
+        """The pending DAG tick is treated as hung: say so, tell a person, then run the stall action, if any.
 
         Every later tick is skipped behind it, and nothing but stop() ever
         cancels it (cancelling a shielded tick mid-launch is unsafe), so no
@@ -521,6 +524,10 @@ class HeartbeatRunner:
             f"Waiting at: {waiting_at}"
         )
         logger.critical("%s", reason)
+        # Nothing reads a CRITICAL line, so a person is told as well. The
+        # sender returns at once when Telegram is not configured and only
+        # logs a send that fails; the line above has the text in full.
+        await self._send_telegram(f"[Heartbeat] {reason}"[:_TELEGRAM_MAX_CHARS])
         if self.dag_stall_action is not None:
             self.dag_stall_action(reason)
 

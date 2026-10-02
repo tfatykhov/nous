@@ -16,7 +16,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, ConnectError
 
 from nous.config import Settings
 from nous.heartbeat.registry import BaseCheck, CheckRegistry
@@ -633,3 +633,116 @@ async def test_a_failed_read_of_the_await_chain_costs_the_detail_not_the_report(
     assert fired == [critical]
     unread = [r for r in _runner_log(caplog) if r.getMessage().startswith("F038: could not read where")]
     assert len(unread) == 1 and isinstance(unread[0].exc_info[1], RuntimeError)
+
+
+# ---------------------------------------------------------------------------
+# Task B8: the report of a hung tick reaches a person
+# ---------------------------------------------------------------------------
+
+
+class _TelegramRecorder:
+    """Stands in for the runner's shared httpx client and records every post."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.posts: list[dict] = []
+        self._error = error
+
+    async def post(self, url: str, *, json: dict, timeout: float) -> None:
+        self.posts.append({"url": url, **json})
+        if self._error is not None:
+            raise self._error
+
+
+def _hung_tick_runner(telegram: _TelegramRecorder, **settings) -> HeartbeatRunner:
+    """A runner whose first tick never returns, with ``telegram`` as its HTTP client."""
+    never = asyncio.Event()
+
+    async def tick():
+        await never.wait()
+
+    runner = _runner(_settings(dag_tick_timeout=0.1, **settings), tick)
+    runner._http = telegram  # what HeartbeatRunner(http_client=...) sets
+    return runner
+
+
+async def test_a_hung_tick_is_reported_on_telegram_once(caplog):
+    telegram = _TelegramRecorder()
+    runner = _hung_tick_runner(telegram, telegram_bot_token="token", telegram_chat_id="chat")
+    with caplog.at_level(logging.DEBUG, logger="nous.heartbeat.runner"):
+        async with _started(runner):
+            await _until(lambda: telegram.posts, "a hung tick was never reported on Telegram")
+            # "Once": the loop keeps iterating behind the hung tick; let it.
+            skips = _skips(caplog)
+            await _until(lambda: _skips(caplog) >= skips + 20, "the loop stopped iterating after the report")
+
+            assert len(telegram.posts) == 1, "the same hung tick was reported more than once"
+            await _stop(runner)
+
+    (critical,) = _criticals(caplog)
+    assert telegram.posts == [
+        {"url": "https://api.telegram.org/bottoken/sendMessage", "chat_id": "chat", "text": f"[Heartbeat] {critical}"}
+    ]
+
+
+async def test_a_failed_telegram_send_stops_neither_the_stall_action_nor_the_loop(caplog):
+    telegram = _TelegramRecorder(error=ConnectError("telegram is unreachable"))
+    fired: list[str] = []
+    posts_when_fired: list[int] = []
+
+    def action(reason: str) -> None:
+        fired.append(reason)
+        posts_when_fired.append(len(telegram.posts))
+
+    runner = _hung_tick_runner(telegram, telegram_bot_token="token", telegram_chat_id="chat")
+    runner.dag_stall_action = action
+    with caplog.at_level(logging.DEBUG, logger="nous.heartbeat.runner"):
+        async with _started(runner):
+            await _until(lambda: telegram.posts, "a hung tick was never reported on Telegram")
+            await _until(lambda: fired, "the stall action did not run after the Telegram send failed")
+            skips = _skips(caplog)
+            await _until(lambda: _skips(caplog) >= skips + 3, "the DAG loop stopped after the Telegram send failed")
+
+            assert not runner._dag_task.done()
+            await _stop(runner)
+
+    assert fired == _criticals(caplog)
+    # The message first: a stall action that ends the process must not get there before it.
+    assert posts_when_fired == [1], "the stall action ran before the message was sent"
+    assert len(telegram.posts) == 1
+    assert "F038: DAG tick loop iteration failed" not in [r.getMessage() for r in _runner_log(caplog)]
+
+
+@pytest.mark.parametrize(
+    "configured",
+    [{}, {"telegram_bot_token": "token"}, {"telegram_chat_id": "chat"}],
+    ids=["neither", "no chat id", "no token"],
+)
+async def test_nothing_is_sent_when_telegram_is_not_configured(caplog, configured):
+    """Control: green before this change too. It pins that the report goes
+    through the runner's own sender, which returns when either value is missing."""
+    telegram = _TelegramRecorder()
+    runner = _hung_tick_runner(telegram, **configured)
+    with caplog.at_level(logging.DEBUG, logger="nous.heartbeat.runner"):
+        async with _started(runner):
+            await _until(lambda: _criticals(caplog), "a tick that never returns was never escalated")
+            skips = _skips(caplog)
+            await _until(lambda: _skips(caplog) >= skips + 3, "the loop stopped iterating after the escalation")
+            await _stop(runner)
+
+    assert telegram.posts == []
+
+
+async def test_the_telegram_text_is_cut_to_what_telegram_accepts(caplog, monkeypatch):
+    monkeypatch.setattr("nous.heartbeat.runner._await_chain", lambda task: " > ".join(["hop (file.py:1)"] * 400))
+    telegram = _TelegramRecorder()
+    runner = _hung_tick_runner(telegram, telegram_bot_token="token", telegram_chat_id="chat")
+    with caplog.at_level(logging.DEBUG, logger="nous.heartbeat.runner"):
+        async with _started(runner):
+            await _until(lambda: telegram.posts, "a hung tick was never reported on Telegram")
+            await _stop(runner)
+
+    (critical,) = _criticals(caplog)
+    text = telegram.posts[0]["text"]
+    assert len(critical) > 4096, "the scripted await chain is too short to need cutting"
+    assert len(text) <= 4096, "Telegram rejects a text over 4096 characters"
+    assert f"[Heartbeat] {critical}".startswith(text)
