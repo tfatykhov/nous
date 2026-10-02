@@ -19,8 +19,8 @@ import pytest
 from nous.api.builtin_tools import atomic_replace_bytes, write_file_tool
 
 _POSIX = pytest.mark.skipif(not hasattr(os, "fchown"), reason="POSIX ownership; proven by CI (Linux), not on Windows")
-# setgid with group-execute: any chown clears it, so a mode copied BEFORE the
-# chown would come back without it.
+# setgid with group-execute: any chown clears it, so it has to be put back
+# after the file is given to its owner.
 _SETGID = 0o2750
 
 
@@ -66,7 +66,7 @@ async def test_write_file_leaves_the_file_with_its_owner_and_group(tmp_path):
 def test_snapshotted_replace_keeps_the_owner_and_group(tmp_path):
     """The compare-and-replace form of the same primitive: what a snapshotted
     write and its revert call. The mode comes back whole, set-id bits
-    included, because the chown is made before the mode is copied."""
+    included: the chown clears them, and the mode is copied again after it."""
     target, someone = _someone_elses_file(tmp_path, _SETGID)
 
     atomic_replace_bytes(target, b"new", expected=hashlib.sha256(b"old").hexdigest(), root=tmp_path)
@@ -119,3 +119,42 @@ def test_a_refused_chown_does_not_fail_the_write(tmp_path, monkeypatch):
     assert target.read_bytes() == b"new"
     assert stat.S_IMODE(target.stat().st_mode) == 0o640
     assert sorted(p.name for p in tmp_path.iterdir()) == ["f.txt"]
+
+
+@_POSIX
+@pytest.mark.parametrize(
+    ("mode", "kept"),
+    [
+        pytest.param(0o640, 0o640, id="plain-mode"),
+        # the chown cleared the setgid bit, and it could not be put back
+        pytest.param(_SETGID, 0o750, id="setgid"),
+    ],
+)
+def test_a_chmod_refused_after_the_chown_does_not_fail_the_write(tmp_path, monkeypatch, mode, kept):
+    """Root with CAP_CHOWN and without CAP_FOWNER can give a file away but can
+    no longer change its mode once it is someone else's. The mode is copied
+    first, while the temp file is still the process's own, so the write lands
+    with the owner, the group and the permission bits; only a set-id bit,
+    which the chown clears, is lost."""
+    target, someone = _someone_elses_file(tmp_path, mode)
+    real_fchown, real_fchmod = os.fchown, os.fchmod
+    given_away: set[int] = set()
+
+    def fchown(fd, uid, gid):
+        real_fchown(fd, uid, gid)
+        given_away.add(fd)
+
+    def fchmod(fd, bits):
+        if fd in given_away:
+            raise PermissionError(errno.EPERM, "Operation not permitted")
+        real_fchmod(fd, bits)
+
+    monkeypatch.setattr(os, "fchown", fchown)
+    monkeypatch.setattr(os, "fchmod", fchmod)
+
+    atomic_replace_bytes(target, b"new", expected=hashlib.sha256(b"old").hexdigest(), root=tmp_path)
+
+    after = target.stat()
+    assert target.read_bytes() == b"new"
+    assert (after.st_uid, after.st_gid) == someone
+    assert stat.S_IMODE(after.st_mode) == kept

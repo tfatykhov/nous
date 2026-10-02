@@ -444,11 +444,16 @@ def atomic_replace_bytes(
                 view = memoryview(data)
                 while view:
                     view = view[os.write(fd, view) :]
+                if mode is not None and hasattr(os, "fchmod"):
+                    # The mode first, while the temp file is still this
+                    # process's own: once the file is given away, changing its
+                    # mode takes CAP_FOWNER, and the owner step below is best
+                    # effort -- it must not fail the write.
+                    os.fchmod(fd, mode)
                 if pre.stat is not None and hasattr(os, "fchown"):
-                    # The replaced file's owner and group go with its mode.
-                    # Best effort: only root may give a file away, and a
-                    # process that may not can still keep a group it is in.
-                    # Before fchmod, because chown clears the set-id bits.
+                    # Then the replaced file's owner and group. Best effort:
+                    # only root may give a file away, and a process that may
+                    # not can still keep a group it is in.
                     try:
                         os.fchown(fd, pre.stat.st_uid, pre.stat.st_gid)
                     except OSError:
@@ -456,8 +461,13 @@ def atomic_replace_bytes(
                             os.fchown(fd, -1, pre.stat.st_gid)
                         except OSError:
                             pass
-                if mode is not None and hasattr(os, "fchmod"):
-                    os.fchmod(fd, mode)
+                    if mode is not None and mode & (stat.S_ISUID | stat.S_ISGID) and hasattr(os, "fchmod"):
+                        # chown cleared the set-id bits. Putting them back
+                        # needs the file to be ours still, or CAP_FOWNER.
+                        try:
+                            os.fchmod(fd, mode)
+                        except OSError:
+                            pass
                 os.fsync(fd)
                 os.close(fd)
                 fd = None
