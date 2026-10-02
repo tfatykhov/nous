@@ -16,8 +16,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from nous.config import Settings
-from nous.heartbeat.registry import CheckRegistry
+from nous.heartbeat.registry import BaseCheck, CheckRegistry
 from nous.heartbeat.runner import HeartbeatRunner
+from nous.heartbeat.schemas import CheckResult
 
 WAIT = 10.0
 
@@ -238,3 +239,108 @@ async def test_shutdown_drain_that_sees_the_tick_return_records_it():
         await asyncio.wait_for(stopping, WAIT)
 
     assert runner.last_dag_tick is not None, "a tick that returned during the shutdown drain was not recorded"
+
+
+# ---------------------------------------------------------------------------
+# Task B2: only this task's own cancellation ends a loop
+# ---------------------------------------------------------------------------
+
+
+async def test_a_tick_that_finishes_cancelled_does_not_end_the_dag_loop():
+    second_started = asyncio.Event()
+    calls = 0
+    last_dag_tick_seen_by_second: list = []
+
+    async def tick():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise asyncio.CancelledError  # something the tick awaited was cancelled elsewhere
+        last_dag_tick_seen_by_second.append(runner.last_dag_tick)
+        second_started.set()
+
+    runner = _runner(_settings(), tick)
+    async with _started(runner):
+        await _expect(second_started, "the DAG loop ended when a tick finished cancelled")
+
+        assert last_dag_tick_seen_by_second == [None], "the cancelled tick was recorded as a successful one"
+        assert runner._dag_shutdown_drain_deadline is None, "a tick's own cancellation spent stop()'s drain budget"
+        assert not runner._dag_task.done()
+        await _stop(runner)
+
+
+async def test_a_cancelled_error_raised_while_starting_a_tick_does_not_end_the_dag_loop():
+    """Pins the loop's outermost handler. Nothing in the loop body reaches it
+    today except the task's own cancellation, so the test injects one at the
+    only seam there is: the call that creates the tick coroutine."""
+    second_called = asyncio.Event()
+    calls = 0
+
+    def tick():  # not a coroutine function: raises when called, before any task exists
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise asyncio.CancelledError
+        second_called.set()
+        return asyncio.sleep(0)
+
+    runner = _runner(_settings(), tick)
+    async with _started(runner):
+        await _expect(second_called, "the DAG loop ended on a CancelledError that was not its own cancellation")
+
+        assert not runner._dag_task.done()
+        await _stop(runner)
+
+
+class _ScriptedCheck(BaseCheck):
+    name = "scripted"
+    interval = 0  # due on every heartbeat tick
+
+    def __init__(self, run) -> None:
+        super().__init__()
+        self._run = run
+
+    async def run(self) -> CheckResult:
+        return await self._run()
+
+
+async def test_a_cancelled_error_out_of_a_check_does_not_end_the_heartbeat_loop():
+    second_run = asyncio.Event()
+    calls = 0
+
+    async def run() -> CheckResult:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise asyncio.CancelledError  # something the check awaited was cancelled elsewhere
+        second_run.set()
+        return CheckResult()
+
+    runner = _runner(_settings(heartbeat_tick_interval=0.01), tick=None)
+    runner.dag_orchestrator = None  # the DAG loop idles
+    runner.registry.register(_ScriptedCheck(run))
+    async with _started(runner):
+        await _expect(second_run, "the heartbeat check loop ended when a check raised CancelledError")
+
+        assert not runner._task.done()
+        await _stop(runner)
+
+
+async def test_cancelling_a_loop_task_still_ends_it():
+    """The guard must not swallow a real cancellation: stop() is not the only
+    one (the event loop cancels every task on teardown)."""
+    started = asyncio.Event()
+
+    async def tick():
+        started.set()
+
+    runner = _runner(_settings(), tick)
+    async with _started(runner):
+        await _expect(started, "the tick never started")
+        dag_task, check_task = runner._dag_task, runner._task
+
+        dag_task.cancel()
+        check_task.cancel()
+        done, _ = await asyncio.wait({dag_task, check_task}, timeout=WAIT)
+
+        assert done == {dag_task, check_task}, "a cancelled loop task kept running"

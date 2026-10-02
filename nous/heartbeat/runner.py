@@ -62,6 +62,15 @@ def _is_final_run(check: BaseCheck, sibling_cancelled: bool, outcome: dict[str, 
     return getattr(check, "_self_disabled", False) is True and not sibling_cancelled
 
 
+def _cancel_requested() -> bool:
+    """Whether the running task itself is being cancelled (stop(), event-loop
+    teardown). False when a CancelledError only came out of something the
+    task awaited: that is the awaited thing's failure, not a request to stop.
+    """
+    task = asyncio.current_task()
+    return task is None or task.cancelling() > 0
+
+
 class HeartbeatRunner:
     """Background heartbeat loop with check execution and triage.
 
@@ -297,7 +306,9 @@ class HeartbeatRunner:
                 await self._maybe_tune()
 
             except asyncio.CancelledError:
-                break
+                if _cancel_requested():
+                    break
+                logger.exception("Heartbeat tick was cancelled from within — the loop continues")
             except Exception:
                 logger.exception("Heartbeat tick failed")
 
@@ -373,6 +384,13 @@ class HeartbeatRunner:
                         # reference so the single-flight check above prevents
                         # a new tick from starting while it is still running.
                     except asyncio.CancelledError:
+                        if inner_task.cancelled() and not _cancel_requested():
+                            # The tick itself finished cancelled (something
+                            # it awaited was cancelled elsewhere). Nobody
+                            # asked this loop to stop: a failed tick.
+                            logger.error("F038: DAG orchestrator tick was cancelled from within — a failed tick")
+                            self._dag_pending_task = None
+                            continue
                         # Outer task was cancelled. inner_task is STILL
                         # RUNNING — drain it with a bounded deadline so
                         # shutdown cannot hang indefinitely on a hung DB or
@@ -417,7 +435,9 @@ class HeartbeatRunner:
                         self._dag_pending_task = None
 
             except asyncio.CancelledError:
-                break
+                if _cancel_requested():
+                    break
+                logger.exception("F038: DAG tick loop iteration was cancelled from within — the loop continues")
             except Exception:
                 logger.exception("F038: DAG tick loop iteration failed")
 
