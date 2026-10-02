@@ -81,7 +81,7 @@ from nous.dag.approval import (
     stopped_at_approval,
     stopped_summary,
 )
-from nous.dag.schemas import PREDECESSOR_EDGE_TYPES, DAGNodeStatus
+from nous.dag.schemas import PREDECESSOR_EDGE_TYPES, WAIT_EDGE_TYPES, DAGNodeStatus
 from nous.dag.store import (
     _TERMINAL_DAG_STATUSES,
     LIVE_DAG_STATUSES,
@@ -966,9 +966,7 @@ class DAGOrchestrator:
         # and so is anything below the fix.
         adj: dict[str, list[str]] = {str(n.id): [] for n in dag.nodes}
         for edge in dag.edges:
-            if edge.edge_type in PREDECESSOR_EDGE_TYPES or edge.edge_type in (
-                "cancel_cascade", "on_failure",
-            ):
+            if edge.edge_type in WAIT_EDGE_TYPES or edge.edge_type == "cancel_cascade":
                 adj[str(edge.from_node_id)].append(str(edge.to_node_id))
 
         reachable: set[str] = set()

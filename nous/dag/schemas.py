@@ -71,6 +71,16 @@ EdgeType = Literal["dependency", "cancel_cascade", "context_flow", "on_failure"]
 # successor stayed pending forever and wedged its DAG `running`.
 PREDECESSOR_EDGE_TYPES: frozenset[str] = frozenset({"dependency", "context_flow"})
 
+# Harness Phase 2.8: the ONE set of edges a node waits along. A node waits for
+# its predecessors, and a fix node for its parent (on_failure): the fix fires
+# when the parent fails and is retired as completed when the parent finishes
+# without failing, which releases whatever hangs below the fix. The approval
+# validator (what an answer releases) and retry_node (what a retry unblocks)
+# both read it — the validator used to follow predecessor edges alone, so a
+# node hung below a fix node ran after an unanswered proceed default unchecked.
+# Not cancel_cascade: its target waits for nothing and starts with its wave.
+WAIT_EDGE_TYPES: frozenset[str] = PREDECESSOR_EDGE_TYPES | {"on_failure"}
+
 
 # F066.1 — vocabulary for the `fix_actions` field on fix nodes.
 FixAction = Literal[
@@ -532,10 +542,10 @@ class DAGCreateRequest(BaseModel):
                 )
 
     def _downstream_of(self, roots: set[str]) -> set[str]:
-        """Every node reachable from ``roots`` along PREDECESSOR_EDGE_TYPES."""
+        """Every node reachable from ``roots`` along WAIT_EDGE_TYPES."""
         adj: dict[str, list[str]] = defaultdict(list)
         for e in self.edges:
-            if e.edge_type in PREDECESSOR_EDGE_TYPES:
+            if e.edge_type in WAIT_EDGE_TYPES:
                 adj[e.from_node].append(e.to_node)
         seen: set[str] = set()
         stack = list(roots)
