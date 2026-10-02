@@ -1169,6 +1169,8 @@ class Brain:
                 "outcome": outcome,
                 "reviewer": reviewer,
             },
+            # _review already wrote this event's row in the review transaction.
+            persist=False,
         ))
 
     async def _review(
