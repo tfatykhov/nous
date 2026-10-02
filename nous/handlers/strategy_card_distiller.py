@@ -26,6 +26,7 @@ from sqlalchemy.exc import IntegrityError
 
 from nous.brain.schemas import GRADED_OUTCOMES
 from nous.handlers import LLMClient, call_background_llm_structured
+from nous.handlers.decision_reviewer import AUTO_REVIEWER
 from nous.heart.schemas import STRATEGY_CARD_KIND, ProcedureInput
 
 logger = logging.getLogger(__name__)
@@ -112,10 +113,12 @@ class StrategyCardDistiller:
         if isinstance(event, dict):
             outcome = event.get("outcome")
             decision_id_raw = event.get("decision_id")
+            reviewer = event.get("reviewer")
         else:
             data: dict = getattr(event, "data", {}) or {}
             outcome = data.get("outcome")
             decision_id_raw = data.get("decision_id")
+            reviewer = data.get("reviewer")
         if not decision_id_raw:
             return
         try:
@@ -126,8 +129,11 @@ class StrategyCardDistiller:
                 decision_id_raw,
             )
             return
-        if outcome not in GRADED_OUTCOMES:
-            # Ungraded review (noise/superseded): retire any existing card.
+        if outcome not in GRADED_OUTCOMES or reviewer == AUTO_REVIEWER:
+            # A review that distils no card: noise/superseded, or the
+            # auto-reviewer's grade, which is a heuristic (a low stated
+            # confidence, a PR state) and not an observed outcome.
+            # Retire any existing card.
             # Coalesce with any in-flight distillation: record the ungraded
             # outcome in _pending so the follow-up deactivates rather than
             # creating a fresh card for a decision that is now noise/superseded.

@@ -394,7 +394,7 @@ async def test_handler_reads_event_data_not_top_level_attrs(distiller, mock_brai
     event = BusEvent(
         type="decision_reviewed",
         agent_id="test-agent",
-        data={"decision_id": str(decision_id), "outcome": "success", "reviewer": "auto"},
+        data={"decision_id": str(decision_id), "outcome": "success", "reviewer": "agent"},
     )
 
     with patch(
@@ -462,7 +462,7 @@ async def test_bus_wiring_decision_reviewed_triggers_distillation(mock_brain, mo
             BusEvent(
                 type="decision_reviewed",
                 agent_id="test-agent",
-                data={"decision_id": str(decision_id), "outcome": "success", "reviewer": "auto"},
+                data={"decision_id": str(decision_id), "outcome": "success", "reviewer": "agent"},
             )
         )
         # Let the bus drain its queue and the distil task run

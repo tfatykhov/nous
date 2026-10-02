@@ -22,6 +22,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# The reviewer tag on every review this module writes. Consumers of the
+# decision_reviewed event (the strategy-card distiller) read it to tell a
+# heuristic auto-review from a review somebody actually made.
+AUTO_REVIEWER = "auto"
+
 
 # ---------------------------------------------------------------------------
 # ReviewResult + ReviewSignal protocol
@@ -271,7 +276,7 @@ class DecisionReviewer:
                         decision.id,
                         outcome=outcome.result,
                         result=outcome.explanation,
-                        reviewer="auto",
+                        reviewer=AUTO_REVIEWER,
                     )
         except Exception:
             logger.exception("Error reviewing session %s decisions", session_id)
@@ -292,7 +297,7 @@ class DecisionReviewer:
                     decision.id,
                     outcome=outcome.result,
                     result=outcome.explanation,
-                    reviewer="auto",
+                    reviewer=AUTO_REVIEWER,
                 )
                 results.append(outcome)
         return results
