@@ -21,6 +21,7 @@ from nous.heart.schemas import (
     ProcedureInput,
     ProcedureOutcome,
     ProcedureSummary,
+    is_strategy_card,
 )
 from nous.heart.search import hybrid_search, hybrid_search_multi
 from nous.storage.database import Database
@@ -163,6 +164,8 @@ class ProcedureManager:
             # Reasoning Maps L1 (migration 079)
             kind=input.kind,
         )
+        if procedure.active and not is_strategy_card(procedure):
+            await self._take_name_from_card(procedure.name, session)
         session.add(procedure)
         await session.flush()
 
@@ -843,6 +846,8 @@ class ProcedureManager:
             .where(Procedure.agent_id == self.agent_id)
             .where(Procedure.active == True)  # noqa: E712
             .where(Procedure.id != procedure_id)
+            # A strategy card is not that live row: it gives the name up below.
+            .where(Procedure.kind.is_distinct_from(STRATEGY_CARD_KIND))
             .limit(1)
         )
         if clash.scalars().first() is not None:
@@ -851,6 +856,7 @@ class ProcedureManager:
                 procedure.name,
             )
             return
+        await self._take_name_from_card(procedure.name, session)
         procedure.active = True
         await session.flush()
 
@@ -988,6 +994,36 @@ class ProcedureManager:
             select(Procedure).where(Procedure.id == procedure_id).where(Procedure.agent_id == self.agent_id)
         )
         return result.scalars().first()
+
+    async def _take_name_from_card(self, name: str, session: AsyncSession) -> None:
+        """Make an active strategy card called ``name`` give the name up.
+
+        Called when a how-to procedure is about to hold ``name`` as an active row.
+        Cards and how-to procedures share the (agent_id, lower(name)) WHERE active
+        unique index, so a card holding the name would block the insert or the
+        reactivation. Nothing looks a card up by its name (its source decision
+        identifies it), so the card is renamed, with a suffix from its own id,
+        and stays active.
+        """
+        result = await session.execute(
+            select(Procedure)
+            .where(Procedure.agent_id == self.agent_id)
+            .where(Procedure.kind == STRATEGY_CARD_KIND)
+            .where(Procedure.active == True)  # noqa: E712
+            # Compared the way the index compares: lower() in the database, both sides.
+            .where(func.lower(Procedure.name) == func.lower(name))
+        )
+        cards = result.scalars().all()
+        for card in cards:
+            card.name = f"{card.name} ({card.id.hex[:6]})"
+        # Flushed here, before the caller's own write: a reactivation is an UPDATE
+        # like the rename, and a flush sends UPDATEs in primary-key order.
+        await session.flush()
+        # Logged after the flush: only for a rename that went out.
+        for card in cards:
+            logger.info(
+                "Strategy card %s renamed to %r: a how-to procedure takes the name %r", card.id, card.name, name
+            )
 
     def _compute_effectiveness(self, procedure: Procedure) -> float | None:
         """P3-4: Laplace smoothing for effectiveness.
