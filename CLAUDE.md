@@ -37,6 +37,7 @@ nous/
 │   ├── events.py               # Event bus (async pub/sub)
 │   ├── utils.py                # Shared utilities
 │   ├── loop_watchdog.py        # Event-loop stall watchdog (stack dump + exit)
+│   ├── log_redaction.py        # Logging setup for both entry points: keeps the bot token and the API key out of the logs
 │   ├── storage/                # Database layer (async SQLAlchemy)
 │   │   ├── database.py         # Connection pool, session management
 │   │   ├── models.py           # ORM models for all 28 tables

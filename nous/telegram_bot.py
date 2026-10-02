@@ -28,6 +28,7 @@ import httpx
 
 from nous.api.attachments import classify_attachment, sanitize_filename
 from nous.api.models import Attachment
+from nous.log_redaction import configure_logging
 
 logger = logging.getLogger(__name__)
 
@@ -953,10 +954,7 @@ class NousTelegramBot:
 
 async def main() -> None:
     """Entry point."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-    )
+    configure_logging(logging.INFO)
 
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not bot_token:

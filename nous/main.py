@@ -30,6 +30,7 @@ from nous.cognitive import CognitiveLayer
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart import Heart
+from nous.log_redaction import configure_logging
 from nous.loop_watchdog import start_event_loop_watchdog, stop_event_loop_watchdog
 from nous.storage.database import Database
 from nous.storage.migrator import run_migrations
@@ -1711,10 +1712,7 @@ def main() -> None:
     settings = Settings()
 
     # Configure logging
-    logging.basicConfig(
-        level=getattr(logging, settings.log_level.upper(), logging.INFO),
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-    )
+    configure_logging(getattr(logging, settings.log_level.upper(), logging.INFO))
 
     logger.info("Starting Nous agent: %s (%s)", settings.agent_name, settings.agent_id)
     logger.info("Model: %s", settings.model)
