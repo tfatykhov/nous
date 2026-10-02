@@ -790,8 +790,12 @@ async def test_a_tick_that_never_returns_is_escalated_once_after_three_timeouts(
         assert fired == []
 
 
-async def test_a_hung_tick_is_escalated_at_three_timeouts_not_before_and_not_later(caplog):
-    settings = _settings(dag_tick_timeout=0.05)
+@pytest.mark.parametrize("interval", [0.01, 0], ids=["between two passes", "on a pass"])
+async def test_a_hung_tick_is_escalated_at_three_timeouts_not_before_and_not_later(caplog, interval):
+    """The report is made on the way through the sleep between two passes of
+    the loop, or by the pass on which the threshold falls. With an interval of
+    0 there is no sleep for it to fall in: every report is made by a pass."""
+    settings = _settings(dag_tick_timeout=0.05, dag_tick_interval=interval)
     loop = asyncio.get_running_loop()
     started, never = asyncio.Event(), asyncio.Event()
 
@@ -821,6 +825,156 @@ async def test_a_hung_tick_is_escalated_at_three_timeouts_not_before_and_not_lat
             finally:
                 settings.dag_tick_timeout = 0.05  # or stop() drains this tick for 1000 s
             await _stop(runner)
+
+
+async def test_a_hung_tick_is_reported_at_its_threshold_however_long_the_tick_interval_is(caplog):
+    """A tick that reaches its threshold is reported then: the report does not
+    wait for the next pass of the loop, 30 s away here. It comes after 0.15 s;
+    the bound of the wait is ten."""
+    settings = _settings(dag_tick_timeout=0.05)  # a tick still pending after 0.15 s is reported
+    never = asyncio.Event()
+
+    async def tick():
+        settings.dag_tick_interval = 30  # from here on the next tick interval is 30 s away
+        await never.wait()
+
+    runner = _runner(settings, tick)
+    with caplog.at_level(logging.DEBUG, logger="nous.heartbeat.runner"):
+        async with _started(runner):
+            await _until(lambda: _criticals(caplog), "a hung tick was not reported before the next tick interval")
+            await _stop(runner)
+
+    assert len(_criticals(caplog)) == 1
+
+
+async def test_a_tick_that_outlives_its_deadline_does_not_bring_the_next_tick_forward():
+    """The loop looks at a pending tick when it is due to be reported, but its
+    next pass, and with it the next tick, still comes a whole tick interval
+    after the last one. This test waits that interval out: nearly two seconds."""
+    settings = _settings(dag_tick_timeout=0.2)  # due to be reported after 0.6 s; it returns before that
+    loop = asyncio.get_running_loop()
+    release, second_started = asyncio.Event(), asyncio.Event()
+    starts: list[float] = []
+
+    async def tick():
+        starts.append(loop.time())
+        if len(starts) == 1:
+            settings.dag_tick_interval = 1.5
+            await release.wait()
+        else:
+            second_started.set()
+
+    runner = _runner(settings, tick)
+    async with _started(runner):
+        await _until(lambda: starts, "the first tick never started")
+        await _until(lambda: not runner._dag_tick_lock.locked(), "the first tick's deadline never passed")
+        release.set()
+        await _expect(second_started, "no tick followed the one that outlived its deadline")
+        await _stop(runner)
+
+    # A lower bound: a slow machine only makes the second tick later.
+    assert starts[1] - starts[0] >= settings.dag_tick_interval, "the next tick came before a whole interval had passed"
+
+
+async def _sleeps_of_one_dag_interval(runner, monkeypatch, pending_for=None, on_sleep=None) -> list[float]:
+    """The sleeps one runner._sleep_one_dag_interval() asks for, in order.
+
+    Nothing is waited out. The loop clock stands at 1000 and only those sleeps
+    move it, by what they ask for, so every value is exact. ``pending_for`` is
+    how long the pending tick has been pending when the sleep begins, and
+    ``on_sleep(n)`` runs when the n-th sleep is asked for."""
+    loop = asyncio.get_running_loop()
+    now = 1000.0
+    asked: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def sleep(delay: float) -> None:
+        nonlocal now
+        asked.append(delay)
+        now += delay
+        if on_sleep is not None:
+            on_sleep(len(asked))
+        await real_sleep(0)
+
+    if pending_for is not None:
+        runner._dag_pending_started = now - pending_for
+    with monkeypatch.context() as patched:
+        patched.setattr(loop, "time", lambda: now)
+        patched.setattr(asyncio, "sleep", sleep)
+        await runner._sleep_one_dag_interval()
+    return asked
+
+
+async def test_one_dag_interval_is_one_sleep_when_no_tick_is_due_to_be_reported_before_it_ends(caplog, monkeypatch):
+    settings = _settings(dag_tick_interval=30, dag_tick_timeout=10)  # a pending tick is reported after 30 s
+    runner = _runner(settings, tick=None)
+    pending = asyncio.get_running_loop().create_future()
+    with caplog.at_level(logging.DEBUG, logger="nous.heartbeat.runner"):
+        assert await _sleeps_of_one_dag_interval(runner, monkeypatch) == [30], "no tick is pending"
+
+        runner._dag_pending_task = pending
+        # Due exactly when the interval ends: that pass reports it, the sleep is not split for it.
+        assert await _sleeps_of_one_dag_interval(runner, monkeypatch, pending_for=0) == [30]
+        assert not runner._dag_stall_escalated
+
+        runner._dag_stall_escalated = True
+        assert await _sleeps_of_one_dag_interval(runner, monkeypatch, pending_for=20) == [30], "already reported"
+
+        runner._dag_stall_escalated = False
+        pending.set_result(None)
+        assert await _sleeps_of_one_dag_interval(runner, monkeypatch, pending_for=20) == [30], "the tick is done"
+
+    assert not _criticals(caplog)
+
+
+@pytest.mark.parametrize(
+    ("pending_for", "sleeps"),
+    [(20, [10.0, 20.0]), (1000, [0.0, 30.0])],
+    ids=["due in 10 s", "overdue"],
+)
+async def test_a_pending_tick_that_reaches_its_threshold_within_the_interval_is_reported_on_the_way(
+    caplog, monkeypatch, pending_for, sleeps
+):
+    settings = _settings(dag_tick_interval=30, dag_tick_timeout=10)  # a pending tick is reported after 30 s
+    runner = _runner(settings, tick=None)
+    never = asyncio.Event()
+    reports_when_asked: list[int] = []
+    runner._dag_pending_task = pending = asyncio.create_task(never.wait())
+    try:
+        with caplog.at_level(logging.DEBUG, logger="nous.heartbeat.runner"):
+            asked = await _sleeps_of_one_dag_interval(
+                runner,
+                monkeypatch,
+                pending_for=pending_for,
+                on_sleep=lambda n: reports_when_asked.append(len(_criticals(caplog))),
+            )
+    finally:
+        pending.cancel()
+        await asyncio.wait({pending}, timeout=WAIT)
+
+    assert asked == sleeps, "the two sleeps are not one whole interval, split where the report is due"
+    assert reports_when_asked == [0, 1], "the report does not come between the two sleeps"
+    assert runner._dag_stall_escalated, "the pass that follows would report the tick again"
+    (critical,) = _criticals(caplog)
+    assert f"has not returned after {max(pending_for, 30)}s (3 x dag_tick_timeout=10s)" in critical
+
+
+async def test_a_pending_tick_that_returns_before_its_threshold_is_not_reported(caplog, monkeypatch):
+    settings = _settings(dag_tick_interval=30, dag_tick_timeout=10)  # a pending tick is reported after 30 s
+    runner = _runner(settings, tick=None)
+    runner._dag_pending_task = pending = asyncio.get_running_loop().create_future()
+
+    def returns_during_the_first_sleep(n: int) -> None:
+        if n == 1:
+            pending.set_result(None)
+
+    with caplog.at_level(logging.DEBUG, logger="nous.heartbeat.runner"):
+        asked = await _sleeps_of_one_dag_interval(
+            runner, monkeypatch, pending_for=20, on_sleep=returns_during_the_first_sleep
+        )
+
+    assert not _criticals(caplog) and not runner._dag_stall_escalated, "a tick that had returned was reported"
+    assert asked == [10.0, 20.0], "the interval is not whole: the next tick would come early or late"
 
 
 async def test_each_hung_tick_is_escalated_once():
@@ -1073,7 +1227,11 @@ async def test_the_telegram_sender_logs_an_error_status_and_nothing_else(caplog,
     assert [r.getMessage() for r in _runner_log(caplog)] == logged
 
 
-async def test_a_tick_that_returns_while_its_report_is_being_sent_is_not_logged_as_still_running(caplog):
+@pytest.mark.parametrize("interval", [0.01, 0], ids=["sent between two passes", "sent by a pass"])
+async def test_a_tick_that_returns_while_its_report_is_being_sent_is_not_logged_as_still_running(caplog, interval):
+    """A pass that sends the report itself looks at the tick again before it
+    says the tick is still running. With an interval of 0 every report is sent
+    by a pass."""
     release, send_done, second_started = asyncio.Event(), asyncio.Event(), asyncio.Event()
     calls = 0
 
@@ -1086,7 +1244,10 @@ async def test_a_tick_that_returns_while_its_report_is_being_sent_is_not_logged_
             second_started.set()
 
     telegram = _TelegramRecorder(hold=send_done)
-    runner = _runner(_settings(dag_tick_timeout=0.1, telegram_bot_token="token", telegram_chat_id="chat"), tick)
+    settings = _settings(
+        dag_tick_interval=interval, dag_tick_timeout=0.1, telegram_bot_token="token", telegram_chat_id="chat"
+    )
+    runner = _runner(settings, tick)
     runner._http = telegram  # what HeartbeatRunner(http_client=...) sets
     with caplog.at_level(logging.DEBUG, logger="nous.heartbeat.runner"):
         async with _started(runner):

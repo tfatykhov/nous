@@ -363,10 +363,15 @@ class HeartbeatRunner:
         is shielded from cancellation so that CancelledError cannot land
         between a primitive-creation commit and the node's running
         transition (Codex P1: untracked subtask / duplicate launch).
+
+        A tick still pending after its deadline is reported once it has been
+        pending for _DAG_STALL_TIMEOUTS x dag_tick_timeout: on the way through
+        the sleep between two passes (_sleep_one_dag_interval), or by the pass
+        on which that moment falls. The report never brings a pass forward.
         """
         while self._running:
             try:
-                await asyncio.sleep(self._settings.dag_tick_interval)
+                await self._sleep_one_dag_interval()
                 if self.dag_orchestrator is None:
                     continue
 
@@ -505,6 +510,30 @@ class HeartbeatRunner:
                 logger.exception("F038: DAG tick loop iteration was cancelled from within — the loop continues")
             except Exception:
                 logger.exception("F038: DAG tick loop iteration failed")
+
+    async def _sleep_one_dag_interval(self) -> None:
+        """Sleep one tick interval. On the way, report a pending tick that reaches its stall threshold.
+
+        The sleep is split in two only for a pending tick, not reported yet,
+        that reaches _DAG_STALL_TIMEOUTS x dag_tick_timeout before the interval
+        is over. Both parts together are one interval, so the next pass, and
+        with it the next tick, is never brought forward by a report.
+        """
+        interval = self._settings.dag_tick_interval
+        pending = self._dag_pending_task
+        if pending is not None and not pending.done() and not self._dag_stall_escalated:
+            loop = asyncio.get_running_loop()
+            report_at = self._dag_pending_started + _DAG_STALL_TIMEOUTS * self._settings.dag_tick_timeout
+            until_report = max(report_at - loop.time(), 0.0)
+            if until_report < interval:
+                await asyncio.sleep(until_report)
+                # The clock is not read again: a timer may fire a clock tick
+                # early, and the tick is due now unless it has returned.
+                if not pending.done():
+                    self._dag_stall_escalated = True
+                    await self._escalate_dag_stall(loop.time() - self._dag_pending_started)
+                interval -= until_report
+        await asyncio.sleep(interval)
 
     async def _escalate_dag_stall(self, pending_for: float) -> None:
         """The pending DAG tick is treated as hung: say so, tell a person, then run the stall action, if any.
