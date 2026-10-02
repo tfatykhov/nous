@@ -314,3 +314,42 @@ async def test_without_a_card_the_bootstrap_and_learn_skill_do_what_they_did(hea
     assert list(rows) == [skill_id]
     assert rows[skill_id]["name"] == NAME.lower()
     assert (await heart.get_procedure_by_name(NAME.upper())).id == skill_id
+
+
+# ---------------------------------------------------------------------------
+# A how-to body never replaces a card's row
+# ---------------------------------------------------------------------------
+
+
+async def test_a_how_to_body_does_not_replace_a_card(heart):
+    """update_body refreshes a skill in place. Handed a card's id and a how-to
+    body it rewrote the card into that skill under the card's own id: the lesson
+    and the link to the decision were gone. It refuses, and the card keeps its
+    row."""
+    card = await _card(heart)
+    before = (await _rows(heart))[card.id]
+
+    with pytest.raises(ValueError, match="is a strategy card"):
+        await heart.update_procedure_body(card.id, _how_to())
+
+    assert (await _rows(heart))[card.id] == before
+
+
+async def test_a_card_body_still_refreshes_a_card(heart):
+    """Only a how-to body is refused. A card input for a card's row is applied as
+    before, and the row stays a card."""
+    card = await _card(heart)
+
+    await heart.update_procedure_body(
+        card.id,
+        ProcedureInput(
+            name=NAME,
+            domain="strategy",
+            implementation_notes=["A newer lesson."],
+            kind=STRATEGY_CARD_KIND,
+            runtime_metadata={"source_decision_id": DECISION_ID, "outcome": "success"},
+        ),
+    )
+
+    row = (await _rows(heart))[card.id]
+    assert (row["kind"], row["body"], row["source"]) == (STRATEGY_CARD_KIND, "A newer lesson.", DECISION_ID)

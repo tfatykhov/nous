@@ -192,6 +192,8 @@ class ProcedureManager:
         Used by learn_skill on a name collision instead of retire+store, which
         reset activation/success/failure counts and orphaned task affinity
         (audit bug 9). Counts, created_at, and supersession state are untouched.
+        Raises ValueError for a strategy card's row and a how-to input: a how-to
+        body never replaces a card.
         """
         if session is None:
             async with self.db.session() as session:
@@ -206,6 +208,10 @@ class ProcedureManager:
         procedure = await self._get_procedure_orm(procedure_id, session)
         if procedure is None:
             raise ValueError(f"Procedure {procedure_id} not found")
+        if is_strategy_card(procedure) and not is_strategy_card(input):
+            # The card's lesson and the link to its decision would be gone, and
+            # the decision's graph edge would start at a how-to row.
+            raise ValueError(f"Procedure {procedure_id} is a strategy card: a how-to body does not replace it")
 
         embedding = procedure.embedding
         if self.embeddings:
@@ -230,8 +236,8 @@ class ProcedureManager:
         procedure.implementation_notes = input.implementation_notes or None
         procedure.tags = input.tags or None
         procedure.runtime_metadata = input.runtime_metadata
-        # Propagate kind so an in-place skill update does not silently inherit
-        # a prior 'strategy' kind (or vice-versa) from the existing row.
+        # Propagate kind from the input. (A how-to input over a card's row was
+        # refused above: a card is not turned into a skill here.)
         procedure.kind = input.kind
         if input.active is not None:
             procedure.active = input.active
