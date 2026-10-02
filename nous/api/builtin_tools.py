@@ -569,6 +569,9 @@ async def write_file_tool(
             # No snapshot is bound to this call (compensation off, or a call
             # nothing can revert): write in place exactly as before Phase 2.8
             # -- the same file, so the same inode, owner, mode and hard links.
+            # One departure: content that cannot be encoded fails here, before
+            # a directory is made or the file is opened (and truncated).
+            content.encode("utf-8")
             await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
             write = asyncio.to_thread(target.write_text, content, encoding="utf-8")
             if outcome is not None and outcome.write_lock is not None:

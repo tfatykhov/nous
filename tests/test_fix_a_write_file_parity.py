@@ -166,3 +166,20 @@ async def test_stream_timeout_mid_write_keeps_the_lock_until_the_thread_ends(tmp
         await asyncio.sleep(0.01)
     assert key not in compensation._write_path_locks
     assert (tmp_path / "late.txt").read_text(encoding="utf-8") == "c"
+
+
+@pytest.mark.asyncio
+async def test_unencodable_content_leaves_the_target_alone(tmp_path):
+    """Content that cannot be encoded as UTF-8 (a lone surrogate) is refused
+    before anything is opened: an existing file keeps its content, and no
+    file or directory is created. Written in place without that check, the
+    file is truncated first and the encode fails afterwards."""
+    target = tmp_path / "notes.txt"
+    target.write_text("v1", encoding="utf-8")
+
+    existing = await write_file_tool("notes.txt", "x\ud83dy", _workspace_dir=str(tmp_path))
+    new = await write_file_tool("sub/new.txt", "x\ud83dy", _workspace_dir=str(tmp_path))
+
+    assert existing.get("is_error") is True and new.get("is_error") is True
+    assert target.read_text(encoding="utf-8") == "v1"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["notes.txt"]
