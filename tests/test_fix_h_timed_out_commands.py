@@ -240,3 +240,35 @@ async def test_a_job_that_holds_no_output_outlives_a_check_that_ended_in_time(wo
     assert await asyncio.wait_for(orchestrator._run_completion_check(node), LIMIT) == CheckResult("success")
     job = await _recorded_pid(workspace, "job.pid")
     await _assert_still_running(job, "a job that held none of the command's output was killed")
+
+
+# ---------------------------------------------------------------------------
+# A completion check cancelled mid-command stops the command
+# ---------------------------------------------------------------------------
+
+
+async def test_a_cancelled_completion_check_stops_its_command(workspace, monkeypatch):
+    # The cancel has to land while the check waits for its command, not while
+    # the shell is still being started: asyncio handles that window itself and
+    # the check has no process to stop yet. So learn when the start has returned.
+    shell_started = asyncio.Event()
+    start_shell = asyncio.create_subprocess_shell
+
+    async def start_shell_and_say_so(*args, **kwargs):
+        proc = await start_shell(*args, **kwargs)
+        shell_started.set()
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", start_shell_and_say_so)
+    orchestrator, node = _check_node(workspace, FOREGROUND)  # the module's 10 s timeout: the cancel lands mid-command
+    check = asyncio.create_task(orchestrator._run_completion_check(node))
+    await asyncio.wait_for(shell_started.wait(), LIMIT)
+    child = await _recorded_pid(workspace)
+    shell = await _recorded_pid(workspace, "shell.pid")
+
+    check.cancel()
+    done, _ = await asyncio.wait({check}, timeout=LIMIT)
+
+    assert done == {check} and check.cancelled(), "the cancelled check did not end as cancelled"
+    await _assert_gone(shell, "the shell was left running after the check was cancelled")
+    await _assert_gone(child, "the command's child was left running after the check was cancelled")

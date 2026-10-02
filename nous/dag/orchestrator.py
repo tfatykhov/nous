@@ -2034,6 +2034,11 @@ class DAGOrchestrator:
                     _CHECK_CMD_TIMEOUT, node.name,
                 )
                 return CheckResult("pending", "command timed out")
+            except asyncio.CancelledError:
+                # The tick was cancelled mid-check (shutdown): the command
+                # must not outlive it.
+                await kill_process_group(proc)
+                raise
 
             if proc.returncode == 0:
                 return CheckResult("success")
