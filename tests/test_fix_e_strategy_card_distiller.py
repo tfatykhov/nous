@@ -441,6 +441,26 @@ async def test_a_review_that_distils_no_card_retires_every_card_of_the_decision(
 
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
+async def test_a_review_touches_only_the_cards_of_its_own_decision(rig):
+    """The reconcile is scoped to one decision: grading, re-grading or un-grading
+    decision A leaves the card of decision B alone, whatever outcome it is for."""
+    a = await rig.record()
+    b = await rig.record()
+    with patch(LLM, new_callable=AsyncMock, side_effect=[_card("A worked"), _card("B failed")]):
+        await rig.brain.review(a.id, outcome="success", result="zero downtime", reviewer="agent")
+        await rig.settle()
+        await rig.brain.review(b.id, outcome="failure", result="rolled back twice", reviewer="agent")
+        await rig.settle()
+        assert _state(await _cards(rig)) == [(True, "success"), (True, "failure")]
+
+        await rig.brain.review(a.id, outcome="noise", result="not a real decision", reviewer="agent")
+        await rig.settle()
+
+    assert _state(await _cards(rig)) == [(False, "success"), (True, "failure")]
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
 async def test_a_review_landing_during_the_model_call_gets_no_card_for_the_old_outcome(rig, caplog):
     """The decision is re-read inside the transaction that writes the card, and the
     result that is thrown away is logged."""
@@ -456,6 +476,31 @@ async def test_a_review_landing_during_the_model_call_gets_no_card_for_the_old_o
 
     assert await _cards(rig) == []
     assert "was reviewed again while its success card was being distilled, card not written" in caplog.text
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["noise", "auto", "deleted"])
+async def test_a_decision_that_stops_being_graded_during_the_model_call_gets_no_card(rig, change):
+    """The in-transaction re-read also refuses the write when the decision is no
+    longer graded by somebody: un-graded, auto-reviewed, or deleted (no event
+    follows a delete, so nothing would retire that card later)."""
+    decision = await rig.record()
+    await rig.brain.review(decision.id, outcome="success", result="zero downtime", reviewer="agent")
+
+    async def _change_then_answer(**_kwargs):
+        if change == "deleted":
+            await rig.brain.delete(decision.id)
+        elif change == "auto":
+            await rig.brain.review(decision.id, outcome="success", result="PR #1 merged", reviewer="auto")
+        else:
+            await rig.brain.review(decision.id, outcome="noise", result="not a real decision", reviewer="agent")
+        return _card()
+
+    with patch(LLM, new=AsyncMock(side_effect=_change_then_answer)):
+        await rig.distiller._do_distil(decision.id, "success")
+
+    assert await _cards(rig) == []
 
 
 @pytest.mark.postgres_only
