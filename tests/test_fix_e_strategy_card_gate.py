@@ -529,6 +529,30 @@ async def test_a_card_that_is_the_only_block_is_shown_only_if_it_fits_the_budget
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("retrieval", [False, True])
+async def test_a_how_to_body_that_is_the_first_block_is_shown_whatever_the_budget(card_heart, session, retrieval):
+    """The exemption a card does not get: a how-to body that is the first block is
+    shown although it is larger than the procedure budget (the per-item cap is what
+    bounds it), as on 236c110. Mutation: hold the first block to the budget whatever
+    it is."""
+    big = await _add(session, card_heart, "howto-big", age_minutes=60, body="s" * 6000)
+    engine = _engine(
+        card_heart,
+        _seeded_brain((big, 0.9)),
+        strategy_cards_retrieval_enabled=retrieval,
+        proc_catalog_enabled=False,
+        context_budget_overrides={"procedures": 400},
+        budget_scale_enabled=False,
+        proc_recommended_body_max_chars=8000,
+    )
+
+    result = await _build(engine, card_heart, session)
+
+    assert "### howto-big (ops)" in _section(result, "Recommended Procedures")
+    assert result.recalled_ids["procedure"] == [str(big.id)]
+
+
+@pytest.mark.asyncio
 async def test_max_per_turn_zero_serves_no_card(card_heart, session):
     """0 means none (it used to mean unlimited)."""
     howto = await _add(session, card_heart, "howto-deploy", age_minutes=60)
