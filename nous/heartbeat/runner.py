@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import Counter
+from collections.abc import Callable
 from datetime import UTC, date, datetime
 from uuid import uuid4
 
@@ -42,6 +43,11 @@ logger = logging.getLogger(__name__)
 # straight to "high". _should_escalate gates the timing per current urgency.
 _ESCALATION_LADDER: dict[str, str] = {"low": "normal", "normal": "high", "high": "high"}
 
+# A DAG tick still running after this many dag_tick_timeout periods is treated
+# as hung and reported (HeartbeatRunner._escalate_dag_stall). It is a reporting
+# threshold, not proof: a tick is as slow as the slowest thing it awaits.
+_DAG_STALL_TIMEOUTS = 3
+
 
 def _cancelled_by_sibling_run(exc: BaseException) -> bool:
     """Whether ``exc`` is a run cancelled because a SIBLING run disabled the check."""
@@ -60,6 +66,23 @@ def _is_final_run(check: BaseCheck, sibling_cancelled: bool, outcome: dict[str, 
     if "final_run" in outcome:
         return outcome["final_run"]
     return getattr(check, "_self_disabled", False) is True and not sibling_cancelled
+
+
+def _await_chain(task: asyncio.Task) -> str:
+    """Where a suspended task is waiting, outermost coroutine first.
+
+    Thread stacks cannot show this — a task waiting on an await is on no
+    thread — and ``Task.get_stack()`` stops at the outermost coroutine.
+    """
+    hops: list[str] = []
+    awaitable = task.get_coro()
+    while awaitable is not None:
+        frame = getattr(awaitable, "cr_frame", None) or getattr(awaitable, "gi_frame", None)
+        if frame is None:
+            break
+        hops.append(f"{frame.f_code.co_name} ({frame.f_code.co_filename}:{frame.f_lineno})")
+        awaitable = getattr(awaitable, "cr_await", None) or getattr(awaitable, "gi_yieldfrom", None)
+    return " > ".join(hops) or "unknown"
 
 
 def _cancel_requested() -> bool:
@@ -116,6 +139,14 @@ class HeartbeatRunner:
         # When the tick in _dag_pending_task started. Never cleared: readers
         # go through dag_tick_pending_since, which is None once it finishes.
         self._dag_pending_since: datetime | None = None
+        # The same start on the event loop's monotonic clock — the stall
+        # clock, so a wall-clock step can never look like a hung tick — and
+        # whether that tick has been escalated already.
+        self._dag_pending_started: float = 0.0
+        self._dag_stall_escalated = False
+        # What to do about a DAG tick treated as hung, besides reporting it.
+        # Injected from outside, like dag_orchestrator above; None = report only.
+        self.dag_stall_action: Callable[[str], None] | None = None
         # Absolute loop.time() deadline set when _dag_loop begins draining an
         # in-flight tick during shutdown.  stop() reads this so the two drain
         # windows share one total budget instead of each taking dag_tick_timeout.
@@ -349,6 +380,13 @@ class HeartbeatRunner:
                 # checking the pending-task reference (the lock was released
                 # when the timeout path exited `async with`).
                 if self._dag_pending_task is not None and not self._dag_pending_task.done():
+                    pending_for = asyncio.get_running_loop().time() - self._dag_pending_started
+                    if (
+                        not self._dag_stall_escalated
+                        and pending_for >= _DAG_STALL_TIMEOUTS * self._settings.dag_tick_timeout
+                    ):
+                        self._dag_stall_escalated = True
+                        self._escalate_dag_stall(pending_for)
                     logger.warning(
                         "F038: DAG tick skipped — previous tick timed out and is still running in background",
                     )
@@ -366,6 +404,8 @@ class HeartbeatRunner:
                     # Track for post-timeout single-flight (see check above).
                     self._dag_pending_task = inner_task
                     self._dag_pending_since = datetime.now(UTC)
+                    self._dag_pending_started = asyncio.get_running_loop().time()
+                    self._dag_stall_escalated = False
                     try:
                         # Enforce the configured deadline. asyncio.wait_for
                         # cancels only the shield wrapper on timeout — the
@@ -459,6 +499,30 @@ class HeartbeatRunner:
                 logger.exception("F038: DAG tick loop iteration was cancelled from within — the loop continues")
             except Exception:
                 logger.exception("F038: DAG tick loop iteration failed")
+
+    def _escalate_dag_stall(self, pending_for: float) -> None:
+        """The pending DAG tick is treated as hung: say so, then run the stall action, if any.
+
+        Every later tick is skipped behind it, and nothing but stop() ever
+        cancels it (cancelling a shielded tick mid-launch is unsafe), so no
+        DAG advances again until it returns or the process restarts. The log
+        line carries the tick's await chain because nothing else can show
+        where it is waiting.
+        """
+        try:
+            waiting_at = _await_chain(self._dag_pending_task)
+        except Exception:  # it reads other libraries' coroutine objects
+            logger.exception("F038: could not read where the pending DAG tick is waiting")
+            waiting_at = "unknown"
+        reason = (
+            f"F038: DAG tick has not returned after {pending_for:.0f}s "
+            f"({_DAG_STALL_TIMEOUTS} x dag_tick_timeout={self._settings.dag_tick_timeout}s); "
+            f"every tick since it started at {self._dag_pending_since} was skipped. "
+            f"Waiting at: {waiting_at}"
+        )
+        logger.critical("%s", reason)
+        if self.dag_stall_action is not None:
+            self.dag_stall_action(reason)
 
     def _record_dag_tick(self, task: asyncio.Task, failure_message: str) -> None:
         """Record a finished DAG tick: a success advances last_dag_tick,

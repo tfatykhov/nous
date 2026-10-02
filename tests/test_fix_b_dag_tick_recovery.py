@@ -521,3 +521,115 @@ async def test_dashboard_heartbeat_reports_the_in_flight_dag_tick(db):
             assert status["last_dag_tick"] is None
         finally:
             release.set()  # or a failure above leaves teardown draining this tick for 30 s
+
+
+# ---------------------------------------------------------------------------
+# Task B6: a tick that never returns is escalated, not skipped forever
+# ---------------------------------------------------------------------------
+
+
+def _skips(caplog) -> int:
+    return sum("DAG tick skipped" in r.getMessage() for r in _runner_log(caplog))
+
+
+def _criticals(caplog) -> list[str]:
+    return [r.getMessage() for r in _runner_log(caplog) if r.levelno == logging.CRITICAL]
+
+
+@pytest.mark.parametrize("wired", [True, False], ids=["stall action wired", "no stall action"])
+async def test_a_tick_that_never_returns_is_escalated_once_after_three_timeouts(caplog, wired):
+    settings = _settings(dag_tick_timeout=0.2)
+    loop = asyncio.get_running_loop()
+    never = asyncio.Event()
+    ticks_started = 0
+    fired: list[tuple[float, str]] = []
+
+    async def _stuck_in_the_database():
+        await never.wait()
+
+    async def tick():
+        nonlocal ticks_started
+        ticks_started += 1
+        await _stuck_in_the_database()
+
+    runner = _runner(settings, tick)
+    if wired:
+        runner.dag_stall_action = lambda reason: fired.append((loop.time(), reason))
+    with caplog.at_level(logging.DEBUG, logger="nous.heartbeat.runner"):
+        before_start = loop.time()
+        async with _started(runner):
+            await _until(lambda: _criticals(caplog), "a tick that never returns was never escalated")
+            # "Once": the loop keeps iterating behind the hung tick; let it.
+            skips = _skips(caplog)
+            await _until(lambda: _skips(caplog) >= skips + 20, "the loop stopped iterating after the escalation")
+
+            assert len(_criticals(caplog)) == 1, "the same hung tick was escalated more than once"
+            assert ticks_started == 1, "a second tick started behind the hung one"
+            assert not runner._dag_task.done()
+            await _stop(runner)
+
+    (critical,) = _criticals(caplog)
+    assert "_stuck_in_the_database" in critical, "the log does not say where the tick is waiting"
+    assert "(3 x dag_tick_timeout=0.2s)" in critical, "the report does not state the documented threshold"
+    if wired:
+        assert [reason for _, reason in fired] == [critical]
+        # 3 = the documented contract (runner._DAG_STALL_TIMEOUTS). The text
+        # above pins the number; this pins that the wait really happened. It is
+        # measured from before start(), so a slow machine only adds.
+        assert fired[0][0] - before_start >= 3 * settings.dag_tick_timeout, "escalated too early"
+    else:
+        assert fired == []
+
+
+async def test_each_hung_tick_is_escalated_once():
+    settings = _settings(dag_tick_timeout=0.1)
+    release_first = asyncio.Event()
+    never = asyncio.Event()
+    escalated = [asyncio.Event(), asyncio.Event()]
+    calls = 0
+    fired_during_call: list[int] = []
+
+    async def tick():
+        nonlocal calls
+        calls += 1
+        await (release_first if calls == 1 else never).wait()
+
+    def action(reason: str) -> None:
+        fired_during_call.append(calls)
+        escalated[len(fired_during_call) - 1].set()
+
+    runner = _runner(settings, tick)
+    runner.dag_stall_action = action
+    async with _started(runner):
+        await _expect(escalated[0], "the first hung tick was never escalated")
+        release_first.set()
+
+        await _expect(escalated[1], "a second hung tick in the same process was never escalated")
+
+        assert fired_during_call == [1, 2]
+        await _stop(runner)
+
+
+async def test_a_failed_read_of_the_await_chain_costs_the_detail_not_the_report(caplog, monkeypatch):
+    def _unreadable(task):
+        raise RuntimeError("this coroutine object has no cr_await")
+
+    monkeypatch.setattr("nous.heartbeat.runner._await_chain", _unreadable)
+    never = asyncio.Event()
+    fired: list[str] = []
+
+    async def tick():
+        await never.wait()
+
+    runner = _runner(_settings(dag_tick_timeout=0.1), tick)
+    runner.dag_stall_action = fired.append
+    with caplog.at_level(logging.DEBUG, logger="nous.heartbeat.runner"):
+        async with _started(runner):
+            await _until(lambda: fired, "a hung tick was not escalated when its await chain could not be read")
+            await _stop(runner)
+
+    (critical,) = _criticals(caplog)
+    assert critical.endswith("Waiting at: unknown")
+    assert fired == [critical]
+    unread = [r for r in _runner_log(caplog) if r.getMessage().startswith("F038: could not read where")]
+    assert len(unread) == 1 and isinstance(unread[0].exc_info[1], RuntimeError)
