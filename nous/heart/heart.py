@@ -614,10 +614,13 @@ class Heart:
         query: str,
         limit: int = 10,
         session: AsyncSession | None = None,
+        *,
+        cards_only: bool = False,
     ) -> list[ProcedureSummary]:
         """Raw-cosine probe for §14 selection — scores are cosine, not RRF
-        rank, so a relevance floor can be meaningfully applied (codex P2)."""
-        return await self.procedures.find_similar_for_selection(query, limit, session)
+        rank, so a relevance floor can be meaningfully applied (codex P2).
+        How-to procedures by default; ``cards_only`` probes strategy cards."""
+        return await self.procedures.find_similar_for_selection(query, limit, session, cards_only=cards_only)
 
     async def list_procedures(
         self,

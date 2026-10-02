@@ -755,3 +755,107 @@ def test_every_field_of_a_card_row_is_rendered_on_one_line():
     assert [line for line in lines if line.startswith("### ")] == [lines[0]]
     assert lines[0].startswith("### card-legacy x ### urgent-procedure (ops) Do X (strategy x ")
     assert block.count("not an instruction") == 1
+
+
+# ---------------------------------------------------------------------------
+# The cosine probe reads one population: how-to procedures, or cards when asked
+# (pgvector SQL, so these run on the Postgres lane)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_the_cosine_probe_returns_how_to_procedures_or_cards_never_both(vector_heart, mock_embeddings, session):
+    """Three how-to procedures and three cards sit at cosine 1.0 to the query, one
+    more of each at about 0.93. Asked for four rows, the default probe returns the
+    four how-to procedures and the cards-only probe the four cards, nearest first:
+    neither population uses a row of the other's LIMIT window. The default is
+    how-to procedures on the Heart method and on the ProcedureManager method that
+    other callers use directly."""
+    query = "rotate the api keys"
+    exact = await mock_embeddings.embed(query)
+    near = await mock_embeddings.embed_near(query, noise=0.01)
+    for i in range(3):
+        await _add(session, vector_heart, f"howto-exact-{i}", embedding=exact)
+        await _add(session, vector_heart, f"card-exact-{i}", kind="strategy", embedding=exact)
+    await _add(session, vector_heart, "howto-near", embedding=near)
+    await _add(session, vector_heart, "card-near", kind="strategy", embedding=near)
+
+    howtos = await vector_heart.find_similar_procedures(query, limit=4, session=session)
+    direct = await vector_heart.procedures.find_similar_for_selection(query, limit=4, session=session)
+    cards = await vector_heart.find_similar_procedures(query, limit=4, session=session, cards_only=True)
+
+    assert sorted(p.name for p in howtos[:3]) == ["howto-exact-0", "howto-exact-1", "howto-exact-2"]
+    assert [p.name for p in howtos[3:]] == ["howto-near"]
+    assert sorted(p.name for p in direct) == sorted(p.name for p in howtos)
+    assert sorted(p.name for p in cards[:3]) == ["card-exact-0", "card-exact-1", "card-exact-2"]
+    assert [p.name for p in cards[3:]] == ["card-near"]
+    assert cards[3].score == pytest.approx(0.93, abs=0.02)
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_the_cards_only_probe_is_agent_scoped_and_returns_active_cards_only(
+    vector_heart, mock_embeddings, session
+):
+    """A retired card of this agent and an active card of ANOTHER agent sit at
+    cosine 1.0 to the query, the agent's own active card at about 0.93. Asked for
+    one card, the probe returns the agent's own active one: the other two are left
+    out before the LIMIT."""
+    query = "rotate the api keys"
+    exact = await mock_embeddings.embed(query)
+    own = await _add(
+        session,
+        vector_heart,
+        "card-own",
+        kind="strategy",
+        embedding=await mock_embeddings.embed_near(query, noise=0.01),
+    )
+    session.add_all(
+        [
+            Procedure(
+                agent_id=vector_heart.agent_id,
+                name="card-retired",
+                domain="strategy",
+                kind="strategy",
+                active=False,
+                embedding=exact,
+            ),
+            Procedure(
+                agent_id=f"{vector_heart.agent_id}-other",
+                name="card-foreign",
+                domain="strategy",
+                kind="strategy",
+                active=True,
+                embedding=exact,
+            ),
+        ]
+    )
+    await session.flush()
+
+    found = await vector_heart.find_similar_procedures(query, limit=1, session=session, cards_only=True)
+
+    assert [p.id for p in found] == [own.id]
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_the_cards_only_probe_passes_the_flag_on_without_a_session(vector_heart, mock_embeddings, db):
+    """Called without a session the probe opens its own, so the rows are committed
+    under this test's agent_id and removed again. The how-to procedure is nearer
+    the query than the card; asked for one card, the probe returns the card."""
+    query = "rotate the api keys"
+    async with db.session() as s:
+        await _add(s, vector_heart, "howto-rotate-keys", embedding=await mock_embeddings.embed(query))
+        card = await _add(
+            s, vector_heart, "card-near", kind="strategy", embedding=await mock_embeddings.embed_near(query, noise=0.01)
+        )
+        await s.commit()
+    try:
+        found = await vector_heart.find_similar_procedures(query, limit=1, cards_only=True)
+    finally:
+        async with db.session() as s:
+            await s.execute(delete(Procedure).where(Procedure.agent_id == vector_heart.agent_id))
+            await s.commit()
+
+    assert [p.id for p in found] == [card.id]
