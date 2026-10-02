@@ -1257,3 +1257,144 @@ async def test_a_card_from_the_probe_has_a_leg_of_its_own_in_the_retrieval_trace
     assert traced.get("entry_leg") == "context_strategy_cards_cosine"
     assert traced["entry_score"] == pytest.approx(0.93, abs=0.02)
     assert (traced["disposition"], traced["disposition_stage"]) == ("rendered", "final")
+
+
+# ---------------------------------------------------------------------------
+# What the probe leaves as it was: a prompt built with retrieval off, a prompt
+# built when there is no card to serve, and the how-to selection
+# (pgvector SQL, so these run on the Postgres lane)
+# ---------------------------------------------------------------------------
+
+
+def _prompt(result) -> list[tuple[str, str]]:
+    """Every prompt section but the clock, as (label, content)."""
+    return [(s.label, s.content) for s in result.sections if s.label != "Current Date/Time"]
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_with_retrieval_off_cards_near_the_query_change_no_section_and_no_probe_is_sent(
+    vector_heart, mock_embeddings, session
+):
+    """Retrieval off. The prompt is built before any card exists, and again after
+    three cards are stored at cosine 1.0 to the query, nearer than every how-to
+    procedure. Every section is byte-identical, the recalled ids are the same, and
+    the cards-only probe is not sent."""
+    query = "rotate the api keys"
+    for i in range(3):
+        await _add(
+            session,
+            vector_heart,
+            f"howto-{i}",
+            embedding=await mock_embeddings.embed_near(query, noise=0.01 + i / 500),
+        )
+    engine = _engine(vector_heart)
+    calls = _card_probes(engine)
+    before = await _build(engine, vector_heart, session, text=query)
+
+    exact = await mock_embeddings.embed(query)
+    for i in range(3):
+        await _add(session, vector_heart, f"card-{i}", kind="strategy", embedding=exact)
+    after = await _build(engine, vector_heart, session, text=query)
+
+    assert "body of howto-0" in _section(before, "Recommended Procedures")
+    assert _prompt(after) == _prompt(before)
+    assert after.recalled_ids == before.recalled_ids
+    assert calls == []
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cards_that_may_not_be_served", [False, True], ids=["no-card-row", "retired-and-foreign"])
+async def test_with_no_card_to_serve_retrieval_on_builds_the_prompt_of_retrieval_off(
+    vector_heart, mock_embeddings, session, cards_that_may_not_be_served
+):
+    """The agent has how-to procedures near the query and no card that may be
+    served: either no card row at all, or a retired card of its own and an active
+    card of ANOTHER agent, both at cosine 1.0 to the query. With retrieval on the
+    probe is sent once and nothing comes of it: every section and the recalled ids
+    are what they are with retrieval off."""
+    query = "rotate the api keys"
+    for i in range(3):
+        await _add(
+            session,
+            vector_heart,
+            f"howto-{i}",
+            embedding=await mock_embeddings.embed_near(query, noise=0.01 + i / 500),
+        )
+    if cards_that_may_not_be_served:
+        exact = await mock_embeddings.embed(query)
+        retired = await _add(session, vector_heart, "card-retired", kind="strategy", embedding=exact)
+        retired.active = False
+        session.add(
+            Procedure(
+                agent_id=f"{vector_heart.agent_id}-other",
+                name="card-foreign",
+                domain="strategy",
+                kind="strategy",
+                active=True,
+                embedding=exact,
+            )
+        )
+        await session.flush()
+    engine = _engine(vector_heart, strategy_cards_retrieval_enabled=True, strategy_cards_max_per_turn=2)
+    calls = _card_probes(engine)
+
+    off = await _build(_engine(vector_heart), vector_heart, session, text=query)
+    on = await _build(engine, vector_heart, session, text=query)
+
+    assert "body of howto-0" in _section(off, "Recommended Procedures")
+    assert _prompt(on) == _prompt(off)
+    assert on.recalled_ids == off.recalled_ids
+    assert len(calls) == 1
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_the_how_to_selection_is_the_same_with_and_without_the_probe(vector_heart, mock_embeddings, session):
+    """The ladder fills its five slots: one how-to procedure from the graph rung
+    and the four nearest of twelve from the cosine rung, whose window of ten rows
+    is full. Three cards are nearer the query than any of the twelve. With
+    retrieval on and an allowance of two, the probe adds the two nearest cards
+    after the how-to procedures. The how-to part of Recommended Procedures is
+    byte-identical to the section built with retrieval off, the how-to ids are
+    recalled in the same order, and no other section differs."""
+    query = "rotate the api keys"
+    from_the_graph = await _add(session, vector_heart, "howto-graph", age_minutes=60)
+    near = [
+        await _add(
+            session,
+            vector_heart,
+            f"howto-{i}",
+            embedding=await mock_embeddings.embed_near(query, noise=0.01 + i / 500),
+        )
+        for i in range(12)
+    ]
+    cards = [
+        await _add(
+            session,
+            vector_heart,
+            f"card-{i}",
+            kind="strategy",
+            embedding=await mock_embeddings.embed_near(query, noise=i / 500),
+        )
+        for i in range(3)
+    ]
+    brain = _seeded_brain((from_the_graph, 0.5))
+
+    off = await _build(_engine(vector_heart, brain), vector_heart, session, text=query)
+    on = await _build(
+        _engine(vector_heart, brain, strategy_cards_retrieval_enabled=True, strategy_cards_max_per_turn=2),
+        vector_heart,
+        session,
+        text=query,
+    )
+
+    how_to_ids = [str(p.id) for p in (from_the_graph, *near[:4])]
+    assert off.recalled_ids["procedure"] == how_to_ids
+    assert on.recalled_ids["procedure"] == how_to_ids + [str(cards[0].id), str(cards[1].id)]
+    recommended = _section(off, "Recommended Procedures")
+    assert _section(on, "Recommended Procedures").startswith(recommended + "\n\n### card-0 (strategy)")
+    assert [s for s in _prompt(on) if s[0] != "Recommended Procedures"] == [
+        s for s in _prompt(off) if s[0] != "Recommended Procedures"
+    ]
