@@ -397,6 +397,40 @@ async def test_a_check_cancelled_from_within_is_a_failed_check_and_the_tick_goes
     )
 
 
+async def test_a_cancellation_that_lands_after_the_run_succeeded_is_still_a_failed_run():
+    """The per-check handler also covers the one await that follows a
+    successful run: the write of its stats. A cancellation from elsewhere there
+    must not leave a run whose success was never recorded reading as one."""
+    from nous.heartbeat.dynamic import RUN_OUTCOME
+
+    stats: list[tuple[bool, str | None]] = []
+
+    async def update_run_stats(check_id, *, success, error_msg=None):
+        stats.append((success, error_msg))
+        if success:
+            raise asyncio.CancelledError  # the write was cancelled elsewhere
+
+    async def final_run() -> CheckResult:
+        RUN_OUTCOME.get()["final_run"] = True  # this run disabled its own check: its last run
+        return CheckResult()
+
+    loader = MagicMock()
+    loader.update_run_stats = update_run_stats
+    worker = DynamicCheck(check_id="worker-id", name="worker", prompt="", tools=[], interval=0)
+    worker.run = final_run
+    runner = _runner(_settings(), tick=None)
+    runner._dynamic_loader = loader  # what HeartbeatRunner(dynamic_loader=...) sets
+    runner.registry.register(worker)
+
+    await runner._tick()
+
+    assert stats == [(True, None), (False, "cancelled")]
+    assert worker.consecutive_failures == 1
+    assert runner.registry.self_disabled_run_failed("worker"), (
+        "a final run whose success was never recorded read as completion"
+    )
+
+
 async def test_a_cancelled_error_out_of_the_loop_body_does_not_end_the_heartbeat_loop(caplog):
     """Pins the check loop's own handler. A check that ends cancelled is dealt
     with inside the tick and never reaches it, so the test raises one from the
