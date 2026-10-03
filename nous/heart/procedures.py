@@ -22,7 +22,7 @@ from nous.heart.schemas import (
     ProcedureOutcome,
     ProcedureSummary,
 )
-from nous.heart.search import hybrid_search, hybrid_search_multi
+from nous.heart.search import cosine_similarity, hybrid_search, hybrid_search_multi
 from nous.storage.database import Database
 from nous.storage.models import Event, Procedure, ProcedureTaskAffinity
 
@@ -593,6 +593,45 @@ class ProcedureManager:
             for pid in ids
             if (p := procedures.get(pid)) is not None
         ]
+
+    async def similarities(
+        self,
+        query: str,
+        ids: list[UUID],
+        session: AsyncSession | None = None,
+    ) -> dict[UUID, float]:
+        """Cosine of each of this agent's procedures in ``ids`` to ``query``.
+
+        The raw cosine find_similar_for_selection scores with, for given rows
+        instead of the nearest ones. A row of another agent, without an
+        embedding, with a zero-length one, or not found is absent; so is every
+        row when there is no embedding provider, the embed fails, or the query's
+        vector has zero length.
+        """
+        if not ids or not self.embeddings:
+            return {}
+        try:
+            vector = await self.embeddings.embed(query)
+        except Exception:
+            logger.warning("Embedding generation failed for procedure similarities")
+            return {}
+        # A zero-length vector has no direction, so no cosine: pgvector's is NaN,
+        # where cosine_similarity would say 0.0. Neither such a query nor such a
+        # row gets one.
+        if not any(vector):
+            return {}
+        stmt = (
+            select(Procedure.id, Procedure.embedding)
+            .where(Procedure.agent_id == self.agent_id)
+            .where(Procedure.id.in_(ids))
+            .where(Procedure.embedding.is_not(None))
+        )
+        if session is None:
+            async with self.db.session() as session:
+                rows = (await session.execute(stmt)).all()
+        else:
+            rows = (await session.execute(stmt)).all()
+        return {row.id: cosine_similarity(vector, list(row.embedding)) for row in rows if any(row.embedding)}
 
     # ------------------------------------------------------------------
     # get_evolution_candidates() — F037 Part 3
