@@ -932,6 +932,50 @@ async def test_a_once_schedule_whose_continuation_write_was_cancelled_from_withi
     assert (sorted(subtask.task for subtask in await subtasks.list()), fired) == (["first", "second"], [2, 0])
 
 
+@pytest.mark.postgres_only
+async def test_cancelling_the_scheduler_while_it_writes_continuation_state_ends_it(db):
+    """Parity pin: green before this change too. The scheduler's own
+    cancellation, landing in a continuation write, is not taken for that
+    write's failure: the loop ends, and the next due schedule is not fired."""
+    agent = f"test-fix-m-{uuid4().hex[:8]}"
+    schedules = ScheduleManager(db, agent)
+    subtasks = SubtaskManager(db, agent)
+    now = datetime.now(UTC)
+    first = await schedules.create(
+        task="first", schedule_type="once", fire_at=now - timedelta(seconds=10), continuation_turns=3
+    )
+    await schedules.create(task="second", schedule_type="once", fire_at=now - timedelta(seconds=5))
+
+    writing = asyncio.Event()
+    write_continuation = schedules.set_continuation_session
+
+    async def set_continuation_session(schedule_id: Any, session_id: str) -> None:
+        if schedule_id == first.id:
+            writing.set()
+            await asyncio.Event().wait()
+        await write_continuation(schedule_id, session_id)
+
+    schedules.set_continuation_session = set_continuation_session  # type: ignore[method-assign]
+    scheduler = TaskScheduler(
+        SimpleNamespace(schedules=schedules, subtasks=subtasks, db=db),
+        Settings(agent_id=agent, schedule_continuation_enabled=True).model_copy(
+            update={"schedule_check_interval": TICK}
+        ),
+    )
+
+    await scheduler.start()
+    task = scheduler._task
+    try:
+        await _expect(writing, "the scheduler never wrote continuation state")
+        task.cancel()
+        _, pending = await asyncio.wait({task}, timeout=WAIT)
+        assert not pending, "the scheduler went on after its task was cancelled"
+    finally:
+        await asyncio.wait_for(scheduler.stop(), WAIT)
+
+    assert [subtask.task for subtask in await subtasks.list()] == ["first"]
+
+
 def test_cancelling_the_scheduler_while_it_fires_a_schedule_ends_it():
     """Parity pin: green before this change too. The scheduler's own
     cancellation, landing inside one schedule, is not taken for that
