@@ -243,12 +243,17 @@ def _can_pass(exc: BaseException) -> bool:
     transaction the server rolled back, such as a deadlock (40), the server
     short of resources (53), a lock or statement timeout (55P03, 57014) and the
     server going away (57P0x) can pass; any other is final. An error without
-    one can pass when it is the database's (a dropped connection), the pool's
-    timeout, or the network's (a refused connection)."""
+    one can pass only when the connection was lost or never obtained: a
+    database error on a connection SQLAlchemy then invalidated (it saw the
+    connection closed), the pool's timeout, or an OSError, which is how the
+    driver fails to open a connection (refused, unreachable, timed out). Any
+    other error without a SQLSTATE is final."""
     sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None)
     if sqlstate:
         return sqlstate[:2] in ("08", "40", "53") or sqlstate in ("55P03", "57014") or sqlstate.startswith("57P0")
-    return isinstance(exc, (DBAPIError, PoolTimeoutError, OSError))
+    if isinstance(exc, DBAPIError):
+        return exc.connection_invalidated
+    return isinstance(exc, (PoolTimeoutError, OSError))
 
 
 # Completion check polling

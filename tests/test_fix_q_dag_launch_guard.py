@@ -161,10 +161,11 @@ class _ServerError(Exception):
         self.sqlstate = sqlstate
 
 
-def _db_error(cls, message: str, sqlstate: str | None = None):
-    """A SQLAlchemy error the way a statement raises it."""
+def _db_error(cls, message: str, sqlstate: str | None = None, *, invalidated: bool = False):
+    """A SQLAlchemy error the way a statement raises it; ``invalidated`` when
+    SQLAlchemy saw the connection closed under it."""
     orig = _ServerError(message, sqlstate) if sqlstate else Exception(message)
-    return cls("UPDATE nous_system.dag_nodes SET status=$1", {}, orig)
+    return cls("UPDATE nous_system.dag_nodes SET status=$1", {}, orig, connection_invalidated=invalidated)
 
 
 def _lock_timeout() -> DBAPIError:
@@ -271,7 +272,7 @@ _CAN_PASS = [
     pytest.param(lambda: _db_error(DBAPIError, "sorry, too many clients already", "53300"), id="too-many-connections"),
     pytest.param(lambda: _db_error(DBAPIError, "terminating connection", "57P01"), id="server-shutting-down"),
     pytest.param(lambda: _db_error(DBAPIError, "connection failure", "08006"), id="connection-failure"),
-    pytest.param(lambda: _db_error(InterfaceError, "connection is closed"), id="connection-closed"),
+    pytest.param(lambda: _db_error(InterfaceError, "connection is closed", invalidated=True), id="connection-closed"),
     pytest.param(lambda: PoolTimeoutError("QueuePool limit of size 10 overflow 5 reached"), id="pool-exhausted"),
     pytest.param(lambda: ConnectionRefusedError("connection refused"), id="database-unreachable"),
 ]
@@ -281,6 +282,11 @@ _CANNOT_PASS = [
     pytest.param(lambda: _db_error(DBAPIError, "value too long for type character varying(200)", "22001"), id="data"),
     pytest.param(lambda: _db_error(ProgrammingError, "column does not exist", "42703"), id="programming"),
     pytest.param(lambda: _db_error(DBAPIError, "raised by a trigger", "P0001"), id="raised-by-the-server"),
+    pytest.param(lambda: _db_error(DBAPIError, "a driver error without a SQLSTATE"), id="no-sqlstate"),
+    pytest.param(
+        lambda: _db_error(InterfaceError, "cannot perform operation: another operation is in progress"),
+        id="interface-misuse",
+    ),
     pytest.param(lambda: RuntimeError("a bug in the launch"), id="not-a-database-error"),
 ]
 
@@ -659,3 +665,29 @@ async def test_a_leftover_check_that_holds_the_last_slot_is_replaced(parts, monk
     assert [(c["name"], c["enabled"]) for c in await _checks(parts)] == [(name, True)]
     assert parts.loader._registry.get_check(name).check_id != leftover  # replaced, so only one of them runs
     assert parts.orch._defer_counts == {}
+
+
+# ---------------------------------------------------------------------------
+# An error without a SQLSTATE passes only when the connection was lost
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+async def test_a_real_lost_connection_without_a_sqlstate_leaves_the_node_launchable(db, parts):
+    """Postgres only: the driver is asyncpg. A statement on a connection the
+    driver has closed raises an error with no SQLSTATE, and SQLAlchemy
+    invalidates the connection: that error can pass."""
+    async with db.engine.connect() as conn:
+        raw = await conn.get_raw_connection()
+        await raw.driver_connection.close()
+        with pytest.raises(DBAPIError) as caught:
+            await conn.execute(text("SELECT 1"))
+    assert getattr(caught.value.orig, "sqlstate", None) is None
+    assert caught.value.connection_invalidated
+    dag = await _one_node_dag(parts, DAGNodeType.subtask)
+    _fail_running_write(parts.store, caught.value)
+
+    await parts.orch.start_dag(dag.id)
+
+    assert (await _node(parts, dag.id)).status == "pending"
+    assert await _subtask_statuses(parts) == ["cancelled"]
