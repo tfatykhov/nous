@@ -4862,6 +4862,21 @@ def create_programmatic_tools(
                 settled = time.monotonic() + _KILL_SETTLE_SECONDS
                 while not finished.is_set() and time.monotonic() < settled:
                     await asyncio.sleep(0.02)
+            if not finished.is_set():
+                # Blocked where neither the trace hook nor a kill reaches it:
+                # "timed out" must not read as "stopped".
+                logger.warning(
+                    "run_python: a script timed out after %ss and is still running (%d chars of code); "
+                    "it keeps its run slot until it returns (%d/%d in use)",
+                    timeout,
+                    len(code),
+                    run_python_active_runs(),
+                    max_concurrent,
+                )
+                text += (
+                    "; the script is still running: it is blocked in a call that cannot be "
+                    "interrupted and keeps its run slot until that call returns"
+                )
             return _fail(text)
         except Exception as e:
             return _fail(f"Error: {type(e).__name__}: {e}")

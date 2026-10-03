@@ -330,3 +330,15 @@ async def test_a_refused_memory_call_does_not_turn_the_deadline_off(tmp_path):
     assert stopped, "the script ran on past its deadline"
     assert not looped.exists(), "the loop ran to its end: the script had lost its deadline"
     assert not late.exists(), "a process started after the call had given up went on running"
+
+
+async def test_a_timed_out_script_that_is_still_running_is_reported_as_such(caplog):
+    with caplog.at_level(logging.WARNING, logger="nous.api.tools"):
+        result = await _run_python()(code="import time\ntime.sleep(4.0)\n")
+
+    assert result["content"][0]["text"] == _TIMED_OUT + (
+        "; the script is still running: it is blocked in a call that cannot be "
+        "interrupted and keeps its run slot until that call returns"
+    )
+    assert run_python_active_runs() == 1
+    assert "is still running" in caplog.text and "(1/4 in use)" in caplog.text
