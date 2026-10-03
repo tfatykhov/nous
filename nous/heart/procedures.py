@@ -509,6 +509,8 @@ class ProcedureManager:
         query: str,
         limit: int = 10,
         session: AsyncSession | None = None,
+        *,
+        cards_only: bool = False,
     ) -> list[ProcedureSummary]:
         """Raw-cosine nearest-neighbor probe for §14 procedure selection.
 
@@ -519,19 +521,24 @@ class ProcedureManager:
         leg needs a score a floor can be calibrated against; this returns
         ``score`` = raw cosine similarity. Active procedures only.
 
+        Probes ONE population: how-to procedures by default, strategy cards
+        alone with ``cards_only`` (Reasoning Maps L1) — never both, so neither
+        can use up the other's LIMIT window.
+
         Returns [] when embeddings are unavailable or the embed fails —
         the §14 ladder then simply leaves the remaining slots empty.
         """
         if session is None:
             async with self.db.session() as session:
-                return await self._find_similar_for_selection(query, limit, session)
-        return await self._find_similar_for_selection(query, limit, session)
+                return await self._find_similar_for_selection(query, limit, session, cards_only)
+        return await self._find_similar_for_selection(query, limit, session, cards_only)
 
     async def _find_similar_for_selection(
         self,
         query: str,
         limit: int,
         session: AsyncSession,
+        cards_only: bool = False,
     ) -> list[ProcedureSummary]:
         if not self.embeddings:
             return []
@@ -552,13 +559,14 @@ class ProcedureManager:
             WHERE agent_id = :agent_id
               AND active = true
               AND embedding IS NOT NULL
-              AND kind IS DISTINCT FROM :strategy_kind
+              AND (kind IS NOT DISTINCT FROM :strategy_kind) = :cards_only
             ORDER BY embedding <=> CAST(:embedding AS vector)
             LIMIT :limit
         """), {
             "embedding": embedding_str,
             "agent_id": self.agent_id,
             "strategy_kind": STRATEGY_CARD_KIND,
+            "cards_only": cards_only,
             "limit": limit,
         })).all()
         if not rows:

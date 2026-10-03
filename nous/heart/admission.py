@@ -178,6 +178,7 @@ class AdmissionLLMClient:
                     "cache_control": {"type": "ephemeral"},
                 },
             ],
+            # No cache breakpoint on the message: it differs on every call, so a cached copy would never be read.
             "messages": [
                 {
                     "role": "user",
@@ -185,7 +186,6 @@ class AdmissionLLMClient:
                         {
                             "type": "text",
                             "text": prompt,
-                            "cache_control": {"type": "ephemeral"},
                         }
                     ],
                 }

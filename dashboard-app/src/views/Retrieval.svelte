@@ -474,6 +474,7 @@
     'context_procedures_critic',
     'context_procedures_critic_fallback',
     'context_procedures_cosine_fallback',
+    'context_strategy_cards_cosine',
   ]);
 
   function nodeLabel(id: string): string {

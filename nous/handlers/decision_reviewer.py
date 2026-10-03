@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
+from nous.brain.brain import DecisionAlreadyReviewed, DecisionNotFound
 from nous.cancellation import cancel_requested
 
 if TYPE_CHECKING:
@@ -276,12 +277,7 @@ class DecisionReviewer:
                     continue
                 outcome = await self._check_signals(decision)
                 if outcome:
-                    await self._brain.review(
-                        decision.id,
-                        outcome=outcome.result,
-                        result=outcome.explanation,
-                        reviewer=AUTO_REVIEWER,
-                    )
+                    await self._write(decision, outcome)
         except Exception:
             logger.exception("Error reviewing session %s decisions", session_id)
 
@@ -296,15 +292,32 @@ class DecisionReviewer:
         results = []
         for decision in unreviewed:
             outcome = await self._check_signals(decision)
-            if outcome:
-                await self._brain.review(
-                    decision.id,
-                    outcome=outcome.result,
-                    result=outcome.explanation,
-                    reviewer=AUTO_REVIEWER,
-                )
+            if outcome and await self._write(decision, outcome):
                 results.append(outcome)
         return results
+
+    async def _write(self, decision: DecisionSummary, outcome: ReviewResult) -> bool:
+        """Write an automatic review, unless the decision was reviewed or deleted meanwhile.
+
+        ``decision`` comes from a list that was read before the signals were
+        checked (the pull-request signal is an HTTP call), so it may have been
+        reviewed since: by the agent, by a person, or by another pass of this
+        reviewer. That review stands: the write is conditional in
+        Brain.review, and a refused one writes nothing. The decision may also
+        be gone by now. Either way the pass goes on to the next decision.
+        Returns whether the review was written.
+        """
+        try:
+            await self._brain.review(
+                decision.id,
+                outcome=outcome.result,
+                result=outcome.explanation,
+                reviewer=AUTO_REVIEWER,
+                only_if_unreviewed=True,
+            )
+        except (DecisionAlreadyReviewed, DecisionNotFound):
+            return False
+        return True
 
     async def _check_signals(self, decision) -> ReviewResult | None:
         """Run signals in order. First confident match wins."""
