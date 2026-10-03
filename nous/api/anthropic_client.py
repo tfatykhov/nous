@@ -507,6 +507,8 @@ class HttpxAnthropicClient:
                     f"Anthropic API error ({response.status_code}): "
                     f"{error_type} - {error_msg}"
                 )
+                # Not retryable, or out of retries: the same request would be refused again.
+                break
 
             except httpx.TimeoutException as e:
                 last_error = RuntimeError(f"API request timed out: {e}")
