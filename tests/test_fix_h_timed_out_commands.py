@@ -1,12 +1,13 @@
 """A shell command that reached its timeout is stopped as a whole, and its caller gets control back.
 
-Every test but one runs a real shell command through the production coroutine
+Most tests run a real shell command through the production coroutine
 (``DAGOrchestrator._run_completion_check`` or ``bash_tool``). The shell, the
-timeout and the kill are all real. Each command writes the pids that matter
-to ``*.pid`` files in its working directory, and the ``workspace`` fixture
-kills whatever is recorded there when the test ends, so a failing test leaves
-no process running. The one exception calls the helper alone, with a stand-in
-for a shell whose exit is never reported.
+timeout and the kill are all real. The commands write the pids that matter
+to ``*.pid`` files in their working directory, and the ``workspace`` fixture
+kills whatever is recorded there when the test ends. The two commands that
+are still writing at their timeout record none: a test of them that fails
+can leave its writer running, blocked on a full pipe, until that pipe is
+closed. The other tests call the helper alone, with a stand-in for the shell.
 
 Process groups are POSIX, so the module is skipped on Windows.
 """
@@ -274,6 +275,26 @@ async def test_the_wait_for_a_killed_shell_is_bounded_and_says_so(monkeypatch, c
     assert signalled == [(4242, signal.SIGKILL)]
     warnings = [r.getMessage() for r in caplog.records if r.name == "nous.utils"]
     assert len(warnings) == 1 and "may still be running" in warnings[0], warnings
+
+
+async def test_the_group_of_an_exited_shell_is_not_signalled_once_its_pid_is_in_use_again(monkeypatch):
+    """The helper alone. A shell whose exit has been collected has given its
+    pid back; a process that has that pid now is a newer one, and its process
+    group is not the command's. This process's own pid stands in for it."""
+    from nous.utils import kill_process_group
+
+    monkeypatch.setattr("nous.utils._KILL_WAIT_SECONDS", 0.5, raising=False)
+    signalled = []
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: signalled.append((pgid, sig)))
+
+    async def exited():
+        return 2
+
+    shell = SimpleNamespace(pid=os.getpid(), returncode=2, wait=exited, stdout=None, stderr=None)
+
+    await asyncio.wait_for(kill_process_group(shell, even_if_exited=True), LIMIT)
+
+    assert signalled == []
 
 
 @pytest.mark.parametrize(

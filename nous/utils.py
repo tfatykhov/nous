@@ -40,6 +40,17 @@ async def _discard(stream: asyncio.StreamReader | None) -> None:
         pass
 
 
+def _pid_in_use(pid: int) -> bool:
+    """Whether some process has this pid now, whoever it belongs to."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 async def kill_process_group(proc: asyncio.subprocess.Process, *, even_if_exited: bool = False) -> None:
     """Kill a shell command as a whole, and wait for its shell and its pipes, but not forever.
 
@@ -66,17 +77,18 @@ async def kill_process_group(proc: asyncio.subprocess.Process, *, even_if_exited
     completion check asks for that: it is polled again and again, and a job
     that outlived its shell would otherwise leave one more process and two
     more open pipes behind after every timed-out poll. The group is then
-    named by the pid the shell had. That is exact for as long as anything
-    the command started is still in the group. Once the group is empty the
-    number is free again, and could in principle belong to a newer group.
+    named by the pid the shell had, and it is signalled only if no process
+    has that pid now. The kernel does not give the number to a new process
+    while anything of the command is still in the group. A process that has
+    it now is therefore a newer one, whose group is not the command's.
     """
     if proc.returncode is not None and not even_if_exited:
         return
     try:
-        if hasattr(os, "killpg"):
-            os.killpg(proc.pid, signal.SIGKILL)
-        else:  # Windows has no process groups: the shell only
+        if not hasattr(os, "killpg"):  # Windows has no process groups: the shell only
             proc.kill()
+        elif proc.returncode is None or not _pid_in_use(proc.pid):
+            os.killpg(proc.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass  # nothing is left in the group, or nothing in it may be signalled
     try:
