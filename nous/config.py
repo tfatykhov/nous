@@ -2314,6 +2314,15 @@ class Settings(BaseSettings):
             "mentioned') raises temporal_recency, flipping the episode-budget rescue + temporal_boost."
         ),
     )
+    followup_greeting_request_detection_enabled: bool = Field(
+        default=True,
+        description=(
+            "Kill-switch. When true, a turn that starts with a greeting is judged by what "
+            "follows the greeting, as any turn is (the short-input rule): if that carries a "
+            "request, the turn is classified and planned as that request alone. Set false to "
+            "restore the old rule: any turn that starts with a greeting skips retrieval."
+        ),
+    )
     recall_before_clarify_prompt: bool = Field(
         default=True,
         description=(

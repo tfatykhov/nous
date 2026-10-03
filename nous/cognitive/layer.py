@@ -681,6 +681,7 @@ class CognitiveLayer:
                 is_question=signals.is_question,
                 is_greeting=signals.is_greeting,
                 topic_keywords=signals.topic_keywords,
+                text=signals.text,
             )
             plan = self._intent_classifier.plan_retrieval(signals, input_text=user_input)
 
