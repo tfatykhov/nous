@@ -540,3 +540,17 @@ async def test_what_processes_start_while_the_kill_looks_is_killed_too(tmp_path,
     finally:
         for pid in marked():
             os.kill(pid, signal.SIGKILL)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="preexec_fn is POSIX only")
+async def test_a_process_whose_popen_has_not_returned_yet_is_killed(tmp_path):
+    """`Popen.__init__` returns once the child has exec'd. A child held before
+    its exec, here by a slow `preexec_fn`, is found and killed all the same."""
+    code = (
+        "import subprocess, time\n"
+        f"subprocess.run({_child(tmp_path / 'survived', nap=0.5)}, preexec_fn=lambda: time.sleep(6))\n"
+    )
+    result = await _run_python()(code=code)
+
+    assert result["content"][0]["text"] == _TIMED_OUT + "; killed 1 process(es) the script had started"
+    assert run_python_active_runs() == 0, "the timed-out script still holds its run slot"

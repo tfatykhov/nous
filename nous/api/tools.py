@@ -3972,8 +3972,8 @@ def _deadline_tracer(deadline: float, timeout: float):  # noqa: ANN202 - CPython
     not interruptible — the same documented limit as a blocking C call.
 
     One library frame does get a hook, which never raises:
-    `subprocess.Popen.__init__`. As that frame returns, the hook notes the new
-    `Popen` in `.children` of the tracer, so a call that times out can find
+    `subprocess.Popen.__init__`. As that frame starts, the new `Popen` is
+    noted in `.children` of the tracer, so a call that times out can find
     and kill what its script started. It notes a weak reference: the object
     lives exactly as long as the script keeps it, as it does without the hook.
     """
@@ -4002,17 +4002,9 @@ def _deadline_tracer(deadline: float, timeout: float):  # noqa: ANN202 - CPython
 
     def _popen_hook(frame, event, arg):  # noqa: ANN001, ANN202 - CPython trace signature
         # Local hook of `subprocess.Popen.__init__`. It never raises: as that
-        # frame returns it notes the `Popen` the script has just created.
-        if event == "return":
-            proc = frame.f_locals.get("self")
-            try:
-                # Weakly: a pipe or a process entry the script has let go of
-                # must not be kept alive by this list.
-                _tracer.children.append(weakref.ref(proc))
-            except TypeError:
-                pass  # `__init__` was called on something that is not a `Popen`
-            if _tracer.expired:
-                _kill_script_processes([proc])  # nothing it starts from here on may live
+        # frame returns after the call gave up, it kills the new process.
+        if event == "return" and _tracer.expired:
+            _kill_script_processes([frame.f_locals.get("self")])  # nothing it starts from here on may live
         return _popen_hook
 
     def _tracer(frame, event, arg):  # noqa: ANN001, ANN202 - CPython trace signature
@@ -4020,6 +4012,15 @@ def _deadline_tracer(deadline: float, timeout: float):  # noqa: ANN202 - CPython
         # generator resumes — which keeps its own hook, so its history spans
         # resumes and a loop inside it shows its back-edges.
         if frame.f_code is _POPEN_INIT_CODE:
+            # Noted as the constructor starts, not as it returns: it can block
+            # after its fork (a slow `preexec_fn`), and its process must then
+            # be there for the kill to find.
+            try:
+                # Weakly: a pipe or a process entry the script has let go of
+                # must not be kept alive by this list.
+                _tracer.children.append(weakref.ref(frame.f_locals.get("self")))
+            except TypeError:
+                pass  # `__init__` was called on something that is not a `Popen`
             return _popen_hook
         local = frame.f_trace
         if getattr(local, "owner", None) is not _tracer:
