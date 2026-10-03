@@ -463,3 +463,25 @@ async def test_a_worker_reported_back_has_already_freed_its_slot(tmp_path, monke
 
     assert result["content"][0]["text"] == _TIMED_OUT + "; killed 1 process(es) the script had started"
     assert run_python_active_runs() == 0, "the call answered before its worker had freed the slot"
+
+
+async def test_a_memory_call_running_when_the_call_gives_up_does_not_land_after_it(monkeypatch):
+    """A memory call that is on the event loop when the call gives up is
+    stopped before the call answers, so it cannot land after "timed out"."""
+    gate, landed = asyncio.Event(), []
+
+    async def slow_learn(*args, **kwargs):
+        await gate.wait()
+        landed.append(True)
+
+    heart = AsyncMock()
+    heart.learn.side_effect = slow_learn
+    # The call gives up while the write waits on the loop: a grace below zero
+    # makes that moment come before the script's own deadline.
+    monkeypatch.setattr(T, "_TIMEOUT_GRACE", -0.5)
+    result = await _run_python(heart)(code="learn_fact('written while the call gave up')\n")
+    gate.set()
+    await asyncio.sleep(0.2)
+
+    assert result["is_error"] is True
+    assert landed == [], "a memory write landed after the call had answered"

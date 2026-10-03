@@ -4263,6 +4263,25 @@ def create_programmatic_tools(
             # would starve every later run_python of slots (codex P1).
             timeout = max(1.0, min(float(timeout), float(_timeout_override)))
         deadline = time.monotonic() + timeout
+        # The script's memory calls that have started on the main loop. Weak:
+        # one that has ended drops out by itself.
+        _memory_tasks: weakref.WeakSet = weakref.WeakSet()
+
+        async def _on_loop(coro):  # noqa: ANN001, ANN202 - any memory coroutine
+            """Run one memory call of the script on the main loop.
+
+            The call's timeout arm runs on this loop too, so the check here and
+            the arm cannot interleave: once the call has given up, no memory
+            call starts, and one that had started is in `_memory_tasks` for the
+            arm to cancel before it answers.
+            """
+            if _tracer.expired:
+                # The call has returned as timed out: what the script wrote to
+                # memory from here on, a retry would write again.
+                coro.close()  # it never started
+                raise ScriptDeadlineExceeded(f"execution timed out ({timeout}s)")
+            _memory_tasks.add(asyncio.current_task())
+            return await coro
 
         def _schedule(coro):
             """Schedule a coroutine on the main loop and block the thread until done.
@@ -4279,13 +4298,8 @@ def create_programmatic_tools(
             that has already been committed. Latent before, and much likelier
             now that a single call is a ~5s retrieval rather than a fact lookup.
             """
-            if _tracer.expired:
-                # The call has returned as timed out: what the script wrote to
-                # memory from here on, a retry would write again.
-                coro.close()  # it never started
-                raise ScriptDeadlineExceeded(f"execution timed out ({timeout}s)")
             remaining = max(0.1, deadline - time.monotonic())
-            fut = asyncio.run_coroutine_threadsafe(coro, loop)
+            fut = asyncio.run_coroutine_threadsafe(_on_loop(coro), loop)
             try:
                 return fut.result(timeout=remaining)
             except TimeoutError:
@@ -4849,6 +4863,8 @@ def create_programmatic_tools(
             # reach, so the kill is also what brings it, and its run slot,
             # back: the call waits a moment for that.
             _tracer.expired = True  # first: the hook kills whatever starts after this line
+            for task in list(_memory_tasks):
+                task.cancel()  # a memory call still running does not land after this answer
             killed = _kill_script_processes([ref() for ref in _tracer.children])
             if killed:
                 logger.warning(
