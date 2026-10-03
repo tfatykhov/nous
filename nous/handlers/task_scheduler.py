@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 
+from nous.cancellation import cancel_requested
 from nous.config import Settings
 from nous.heart.heart import Heart
 from nous.storage.models import Subtask
@@ -72,7 +73,9 @@ class TaskScheduler:
                 if fired:
                     logger.info("Fired %d due schedule(s)", fired)
             except asyncio.CancelledError:
-                break
+                if cancel_requested():
+                    break
+                logger.exception("Schedule check was cancelled from within — the loop continues")
             except Exception:
                 logger.exception("Schedule check failed")
 
@@ -228,7 +231,9 @@ class TaskScheduler:
                             await self._heart.schedules.reset_continuation(
                                 schedule.id
                             )
-                    except Exception:
+                    except (asyncio.CancelledError, Exception) as exc:
+                        if isinstance(exc, asyncio.CancelledError) and cancel_requested():
+                            raise
                         logger.exception(
                             "Failed to update continuation state for schedule %s — "
                             "lifecycle advance will proceed regardless",
@@ -257,7 +262,11 @@ class TaskScheduler:
                     schedule.id.hex[:8],
                     exc,
                 )
-            except Exception:
+            except (asyncio.CancelledError, Exception) as exc:
+                # A schedule cancelled from within fails alone, like a
+                # schedule that raised; the other due schedules still fire.
+                if isinstance(exc, asyncio.CancelledError) and cancel_requested():
+                    raise
                 logger.exception(
                     "Failed to fire schedule %s", schedule.id.hex[:8]
                 )

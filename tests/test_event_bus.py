@@ -1442,13 +1442,14 @@ class TestSessionTimeoutMonitor:
 
     @pytest.mark.asyncio
     async def test_cancelled_child_propagates_to_caller(self):
-        """28g. CancelledError raised inside a closure must NOT be swallowed.
+        """28g. A check cancelled mid-closure ends as cancelled.
 
-        ``asyncio.gather(..., return_exceptions=True)`` captures CancelledError
-        the same way it captures other exceptions. If the monitor task is
-        cancelled mid-closure (via stop() -> task.cancel()), each child gets
-        a CancelledError. Without explicit re-raise, _check_loop would not
-        see the cancel and shutdown would hang. This test pins the re-raise.
+        If the monitor task is cancelled mid-closure (via stop() ->
+        task.cancel()), each child gets a CancelledError and the check must
+        end as cancelled, or _check_loop would not see the cancel and shutdown
+        would hang. The cancellation is a real one: a closure that raises
+        CancelledError while nobody cancels the check is a failed closure,
+        not a shutdown.
         """
         from nous.handlers.session_monitor import SessionTimeoutMonitor
 
@@ -1456,8 +1457,14 @@ class TestSessionTimeoutMonitor:
         settings = _mock_settings(
             session_idle_timeout=0, sleep_timeout=9999, sleep_check_interval=1
         )
+        closing = asyncio.Event()
+
+        async def never_ends(*args, **kwargs):
+            closing.set()
+            await asyncio.Event().wait()
+
         runner = AsyncMock()
-        runner.end_conversation.side_effect = asyncio.CancelledError()
+        runner.end_conversation.side_effect = never_ends
 
         monitor = SessionTimeoutMonitor(bus, settings, runner=runner)
         await monitor.on_activity(
@@ -1465,8 +1472,11 @@ class TestSessionTimeoutMonitor:
         )
         monitor._last_activity["s"] = time.monotonic() - 10
 
+        check = asyncio.create_task(monitor._check_timeouts())
+        await closing.wait()
+        check.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await monitor._check_timeouts()
+            await check
 
     @pytest.mark.asyncio
     async def test_missing_last_agent_falls_back_to_settings_agent_id(self):

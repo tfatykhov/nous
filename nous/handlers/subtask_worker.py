@@ -23,12 +23,25 @@ from datetime import UTC, datetime
 import httpx
 
 from nous.api.execution_context import ExecutionContext
+from nous.cancellation import cancel_requested
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart.heart import Heart
 from nous.storage.models import Subtask
 
 logger = logging.getLogger(__name__)
+
+
+def _error_text(exc: BaseException) -> str:
+    """What the row of a subtask whose turn failed says about the failure.
+
+    A CancelledError that reaches the turn's error handling came out of
+    something the turn awaited (the worker's own cancellation is re-raised
+    before this), so it gets a text that does not read like a stop.
+    """
+    if isinstance(exc, asyncio.CancelledError):
+        return "CancelledError: a call inside the turn was cancelled; the worker was not stopped"
+    return f"{type(exc).__name__}: {exc}"
 
 
 class SubtaskWorkerPool:
@@ -117,7 +130,10 @@ class SubtaskWorkerPool:
                 await self._process_subtask(subtask)
 
             except asyncio.CancelledError:
-                break
+                if cancel_requested():
+                    break
+                logger.exception("Worker %s was cancelled from within — the worker continues", worker_id)
+                await asyncio.sleep(self._settings.subtask_poll_interval)
             except Exception:
                 logger.exception("Worker %s encountered unexpected error", worker_id)
                 await asyncio.sleep(self._settings.subtask_poll_interval)
@@ -256,16 +272,19 @@ class SubtaskWorkerPool:
                         "Subtask %s done outcome=%s",
                         subtask.id.hex[:8], _result.outcome,
                     )
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
+                except (asyncio.CancelledError, Exception) as exc:
+                    if isinstance(exc, asyncio.CancelledError) and cancel_requested():
+                        raise
+                    # A CancelledError that gets here while nobody is stopping
+                    # this worker came out of something the turn awaited: a
+                    # failed subtask, like any other error.
                     # execute_hardened catches per-attempt exceptions, but
                     # defensive: a programmer error in execute_hardened itself
                     # must still surface visibly. ``executed`` flag prevents
                     # double-persist when the exception happened AFTER
                     # execute_hardened's _persist_outcome already wrote the
                     # row (e.g., post-finally response-formatting code).
-                    error_msg = f"{type(exc).__name__}: {exc}"
+                    error_msg = _error_text(exc)
                     logger.exception(
                         "Subtask %s hardened-path errored",
                         subtask.id.hex[:8],
@@ -366,10 +385,13 @@ class SubtaskWorkerPool:
             await self._emit_event("subtask_completed", subtask, result=response_text)
             await self._notify_telegram(subtask, result=response_text)
             logger.info("Subtask %s completed", subtask.id.hex[:8])
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            error_msg = f"{type(exc).__name__}: {exc}"
+        except (asyncio.CancelledError, Exception) as exc:
+            if isinstance(exc, asyncio.CancelledError) and cancel_requested():
+                raise
+            # A CancelledError that gets here while nobody is stopping this
+            # worker came out of something the turn awaited: a failed
+            # subtask, like any other error.
+            error_msg = _error_text(exc)
             logger.exception("Subtask %s failed", subtask.id.hex[:8])
             await self._heart.subtasks.fail(
                 subtask.id, error_msg, final_outcome="errored", attempts=1,

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
 from nous.brain.brain import DecisionAlreadyReviewed, DecisionNotFound
+from nous.cancellation import cancel_requested
 
 if TYPE_CHECKING:
     from nous.brain.schemas import DecisionSummary
@@ -257,7 +258,9 @@ class DecisionReviewer:
                 if results:
                     logger.info("Periodic sweep reviewed %d decision(s)", len(results))
             except asyncio.CancelledError:
-                break
+                if cancel_requested():
+                    break
+                logger.exception("Periodic decision review sweep was cancelled from within — the loop continues")
             except Exception:
                 logger.exception("Periodic decision review sweep failed")
 
