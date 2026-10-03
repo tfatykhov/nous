@@ -497,6 +497,47 @@ def test_the_surface_sweep_invalidates_heartbeat_surfaces_once_and_expires_every
     assert surfaces.invalidated == 1
 
 
+@every_loop
+def test_a_loop_waits_its_interval_between_two_passes(build, monkeypatch):
+    """About thirty passes in 0.3 s at an interval of 0.01 s, and never a
+    hundred: a loop that lost its wait runs thousands."""
+    _short_intervals(monkeypatch)
+    loop = build(None)
+    passes = {
+        "execution_ledger_task": lambda: loop.parts["cards"].swept,
+        "retrieval_log_retention_task": lambda: loop.parts["database"].commits,
+        "context_log_retention_task": lambda: loop.parts["database"].commits,
+        "a2ui_sweep_task": lambda: loop.parts["surfaces"].expired,
+    }[loop.key]
+
+    async def scenario() -> None:
+        await loop.start()
+        await _until(lambda: passes() >= 1, f"the {loop.name} never ran")
+        await asyncio.sleep(0.3)
+        await _stop(loop)
+
+    _run(scenario)
+
+    assert passes() < 100, passes()
+
+
+def test_the_retrieval_log_sweep_runs_at_startup_before_its_first_wait(monkeypatch):
+    """A process restarted every day would never prune under a loop that
+    waits first."""
+    _short_intervals(monkeypatch, 3600)
+    loop = _retrieval_log_retention(None)
+    database = loop.parts["database"]
+
+    async def scenario() -> None:
+        await loop.start()
+        await _expect(loop.went_on, "no sweep at startup")
+        await _stop(loop)
+
+    _run(scenario)
+
+    assert database.commits == 1
+
+
 def test_production_waits_a_day_between_two_retention_sweeps_and_a_minute_after_a_failed_ledger_pass():
     assert (main._RETENTION_SWEEP_INTERVAL_SECONDS, main._EXECUTION_LEDGER_RETRY_SECONDS) == (86400, 60)
 
