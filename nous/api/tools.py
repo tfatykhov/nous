@@ -44,9 +44,11 @@ from nous.heart.schemas import (
     FactRejected,
     FactSummary,
 )
+from nous.heart.subtasks import INLINE_WORKER_ID
 from nous.observability.retrieval_logger import get_active as get_active_retrieval_logger
 from nous.observability.retrieval_trace import RETURNED_TO_SCRIPT, SLICED_OFF
 from nous.skills.parser import SkillParser
+from nous.utils import leaked_markup_start as _leak_tail_start
 
 logger = logging.getLogger(__name__)
 
@@ -76,63 +78,9 @@ def _tool_error(text: str) -> dict[str, Any]:
     return {"is_error": True, "content": [{"type": "text", "text": text}]}
 
 
-# Trailing run of leaked XML tool syntax inside a JSON string arg. The model
-# can slip from JSON tool-input into Claude's internal XML tool-call format
-# mid-string (observed in prod 2026-07-13: record_decision's description
-# string ended with '</description>\n<parameter name="confidence">0.55', so
-# the parsed input had no top-level confidence key). Anchored to end-of-string
-# so legitimate XML/HTML quoted mid-string is never touched.
-#
-# The run must END in an UNTERMINATED <parameter> tag. That is the actual
-# evidence of a syntax transition: the model stopped emitting JSON and never
-# closed what it started. A well-formed '<parameter name="x">v</parameter>' at
-# the end of a string is far more likely to be prose QUOTING the format --
-# a decision describing this very bug would otherwise have its text truncated
-# and a value invented from the example. When the evidence is ambiguous we do
-# not guess: salvage declines, and the missing-arg error tells the model to
-# re-emit. Being told beats being silently repaired from a quotation.
-# Located by a backward walk rather than one combined pattern. A single regex
-# has to lead with `\s*`, which forces the engine to retry that greedy run at
-# every start position and rescan the suffix -- quadratic. Measured on the
-# combined form: 2k spaces 0.10s, 5k 0.62s, 10k 2.50s, 20k 10.78s, all inside
-# an async dispatcher, so one whitespace-heavy arg on a call that is missing a
-# required key stalls the shared event loop. Each pattern below is anchored at
-# `\Z` and led by a literal, so every non-matching start position is rejected
-# on its first character and the whole locator is linear.
-_XML_LEAK_FINAL = re.compile(r'<parameter\s+name="[^"]+">[^<]*\Z')
-_XML_LEAK_COMPLETE = re.compile(r'<parameter\s+name="[^"]+">[^<]*</parameter>\s*\Z')
-_XML_LEAK_CLOSER = re.compile(r"</\w+>\s*\Z")
+# The trailing run of leaked XML tool syntax, and how it is located, are shared
+# with the strategy-card distiller: see nous.utils.leaked_markup_start.
 _XML_PARAM_LEAK_PAIR = re.compile(r'<parameter\s+name="([^"]+)">\s*([^<]*)')
-
-
-def _leak_tail_start(value: str) -> int | None:
-    """Index where the trailing XML-leak run begins, or None if there is none.
-
-    Walks right to left: the final UNTERMINATED tag (the syntax-transition
-    evidence -- see the note above), then any complete tags immediately before
-    it, then an optional closing tag, then preceding whitespace. Equivalent to
-    the old single-regex match, without its backtracking.
-    """
-    final = _XML_LEAK_FINAL.search(value)
-    if final is None:
-        return None
-    start = final.start()
-    # Step to each preceding tag via rfind rather than re-searching the whole
-    # prefix. `search(value, 0, start)` rescans from offset zero on every
-    # iteration, which is quadratic in the tag count -- measured on that form:
-    # 500 tags 0.015s, 1000 0.067s, 2500 0.40s, 5000 (202 KB) 1.67s. rfind
-    # walks backward over each gap exactly once, so the whole loop is linear.
-    # ("</parameter>" cannot false-match "<parameter" -- the slash is inside.)
-    while (cand := value.rfind("<parameter", 0, start)) != -1:
-        complete = _XML_LEAK_COMPLETE.match(value, cand, start)
-        if complete is None:
-            break
-        start = cand
-    if (closer := _XML_LEAK_CLOSER.search(value, 0, start)) is not None:
-        start = closer.start()
-    while start > 0 and value[start - 1].isspace():
-        start -= 1
-    return start
 
 
 def _satisfies_schema_constraints(value: Any, prop_schema: dict[str, Any]) -> bool:
@@ -2922,6 +2870,24 @@ async def _persist_and_emit_inline_outcome(
         )
 
 
+async def _close_cancelled_inline_subtask(heart: Heart, subtask_id: UUID) -> bool:
+    """The call that was running this subtask inline was cancelled: cancel the row.
+
+    The row was claimed for that call when it was created, so no worker will
+    run or close it. The write is shielded, so a second cancellation of the
+    caller cannot interrupt it, and a failed write is logged rather than
+    raised, so the cancellation itself always gets through. Returns whether
+    this write closed the row (not when the row already had its outcome).
+    """
+    import asyncio
+
+    try:
+        return await asyncio.shield(heart.subtasks.cancel(subtask_id))
+    except Exception:
+        logger.warning("Could not mark inline subtask %s cancelled", subtask_id.hex[:8], exc_info=True)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Subtask & Schedule tool closures (011.1)
 # ---------------------------------------------------------------------------
@@ -3062,6 +3028,9 @@ def create_subtask_tools(
                 success_criteria=success_criteria,
                 # F062: caller-supplied JSON Schema for the result payload.
                 payload_schema=effective_payload_schema,
+                # Run inline below, in this turn: claimed as it is created,
+                # so an idle worker cannot take it and run it a second time.
+                worker_id=INLINE_WORKER_ID if await_result and runner is not None else None,
             )
 
             if not await_result:
@@ -3103,6 +3072,7 @@ def create_subtask_tools(
                     emit_outcome_event,
                     execute_hardened,
                 )
+                from nous.heart.subtask_validator import ValidationResult
 
                 # F061 PR-3: pass an emit_event callback so inline subtasks
                 # also produce subtask_outcome telemetry. ``bus`` is captured
@@ -3149,6 +3119,22 @@ def create_subtask_tools(
                     if not _result.ok:
                         return _tool_error(body)
                     return {"content": [{"type": "text", "text": body}]}
+                except _asyncio.CancelledError:
+                    # This call was cancelled (its turn, or the dispatcher's
+                    # tool timeout): close the row it claimed, or nothing will.
+                    # execute_hardened leaves the outcome event to this caller
+                    # too; emitted only when this close set the row's outcome.
+                    if await _close_cancelled_inline_subtask(heart, subtask.id) and _outcome_emitter is not None:
+                        await _outcome_emitter(
+                            subtask,
+                            ValidationResult.failed("cancelled", "Inline call cancelled"),
+                            None,
+                            attempts=state.attempts,
+                            tokens_in=state.tokens_in,
+                            tokens_out=state.tokens_out,
+                            tool_calls_made=state.tool_calls_made,
+                        )
+                    raise
                 except TimeoutError:
                     if not executed:
                         await _persist_and_emit_inline_outcome(
@@ -3213,6 +3199,10 @@ def create_subtask_tools(
                     ]
                 }
 
+            except _asyncio.CancelledError:
+                # As on the hardened path above.
+                await _close_cancelled_inline_subtask(heart, subtask.id)
+                raise
             except TimeoutError:
                 # F061 PR-3 Codex review: attempts=1 because one execution
                 # attempt definitely happened before the timeout.
@@ -3458,10 +3448,9 @@ def create_subtask_tools(
 
         report = match.report_jsonb or {}
         # Codex round-9 P2: inline subtasks (await_result=True) bypass the
-        # worker pool's dequeue path, so started_at remains NULL. Fall back
-        # to created_at — inline runs start essentially immediately after
-        # creation, so the difference is negligible and the metric is no
-        # longer systematically 0.0 for the spawn_sync's primary use case.
+        # worker pool's dequeue path; they get started_at when they are
+        # created, claimed for the calling turn. created_at stays the
+        # fallback for a row without one.
         elapsed = 0.0
         if match.completed_at:
             start_anchor = match.started_at or match.created_at

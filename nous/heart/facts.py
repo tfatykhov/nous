@@ -712,10 +712,18 @@ class FactManager:
         # Postgres-only (pg_advisory_xact_lock); the SQLite test backend is
         # serial, so there is no cross-connection race to protect there.
         if session.bind is not None and session.bind.dialect.name == "postgresql":
+            # The racer waits for the first learner however long that takes, as
+            # it always has: the lock timeout is lifted for this one statement.
+            # DEFAULT is the value the connection was opened with.
+            lifted = bool(self.db.lock_timeout_seconds)
+            if lifted:
+                await session.execute(text("SET LOCAL lock_timeout = 0"))
             await session.execute(
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
                 {"k": f"fact_learn:{self.agent_id}:{input.content}"},
             )
+            if lifted:
+                await session.execute(text("SET LOCAL lock_timeout = DEFAULT"))
 
         # Generate embedding (retry once; persistent failure logs ERROR and
         # stores a NULL-embed row rather than dropping the fact — 1b).

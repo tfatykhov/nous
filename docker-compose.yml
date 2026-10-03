@@ -82,6 +82,8 @@ services:
       # Event-loop watchdog: dump every thread's stack and exit on a stall
       - NOUS_EVENT_LOOP_WATCHDOG_ENABLED=${NOUS_EVENT_LOOP_WATCHDOG_ENABLED:-true}
       - NOUS_EVENT_LOOP_WATCHDOG_TIMEOUT_SECONDS=${NOUS_EVENT_LOOP_WATCHDOG_TIMEOUT_SECONDS:-120}
+      # Database lock waits: a statement that waits longer than this fails (0 = no limit)
+      - NOUS_DB_LOCK_TIMEOUT_SECONDS=${NOUS_DB_LOCK_TIMEOUT_SECONDS:-0}
       # F042: Cross-encoder reranking
       - NOUS_CROSS_ENCODER_ENABLED=${NOUS_CROSS_ENCODER_ENABLED:-false}
       - NOUS_CROSS_ENCODER_MODEL=${NOUS_CROSS_ENCODER_MODEL:-cross-encoder/ms-marco-MiniLM-L-6-v2}

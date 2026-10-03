@@ -348,6 +348,9 @@ def _engine(graph, *decision_ids: UUID, neighbors=None, **flags) -> ContextEngin
         "search_procedures",
     ):
         setattr(heart, m, getattr(graph.heart, m))
+    # Every card the graph rung offers counts as close to the turn here: these tests
+    # are about the graph's windows, not about which card is close.
+    heart.procedure_similarities = AsyncMock(side_effect=lambda query, ids, **_: dict.fromkeys(ids, 1.0))
     brain = MagicMock()
     brain.embeddings = None
     brain.query = AsyncMock(
@@ -528,6 +531,7 @@ async def test_a_card_dropped_before_its_body_is_fetched_is_attributed_in_the_re
         recalled_ids={"fact": [], "decision": [str(first), str(second)]},
         recalled_score_map={str(first): 0.9, str(second): 0.8},
         session=session,
+        query="q",
         trace=trace,
         card_slots=1,
     )

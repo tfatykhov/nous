@@ -23,7 +23,7 @@ from sqlalchemy.sql import func
 from nous.brain.brain import Brain
 from nous.cognitive.context import ContextEngine
 from nous.cognitive.dedup import ConversationDeduplicator
-from nous.cognitive.deliberation import DeliberationEngine
+from nous.cognitive.deliberation import DESCRIPTION_CAPTURE_CHARS, DeliberationEngine
 from nous.cognitive.frames import FrameEngine
 from nous.cognitive.intent import IntentClassifier, IntentSignals
 from nous.cognitive.monitor import MonitorEngine
@@ -679,8 +679,12 @@ class CognitiveLayer:
                 temporal_recency=_effective_recency,
                 memory_type_hints=signals.memory_type_hints,
                 is_question=signals.is_question,
-                is_greeting=signals.is_greeting,
+                # A recap asked for after a greeting ("hey, give me a recap") is
+                # a request, as the deictic rescue above says of a follow-up;
+                # the greeting rule's switch restores the old copy of the flag.
+                is_greeting=signals.is_greeting and not self._settings.followup_greeting_request_detection_enabled,
                 topic_keywords=signals.topic_keywords,
+                text=signals.text,
             )
             plan = self._intent_classifier.plan_retrieval(signals, input_text=user_input)
 
@@ -815,7 +819,7 @@ class CognitiveLayer:
         try:
             if await self._deliberation.should_deliberate(frame):
                 decision_id = await self._deliberation.start(
-                    agent_id, user_input[:500], frame,
+                    agent_id, user_input[:DESCRIPTION_CAPTURE_CHARS], frame,
                     session_id=session_id, session=session,
                 )
         except Exception:
@@ -1209,7 +1213,7 @@ class CognitiveLayer:
 
                     await self._deliberation.finalize(
                         decision_id,
-                        description=turn_result.response_text[:500],
+                        description=turn_result.response_text[:DESCRIPTION_CAPTURE_CHARS],
                         confidence=confidence,
                         has_tool_errors=has_tool_errors,
                         session=session,

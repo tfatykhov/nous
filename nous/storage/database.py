@@ -14,13 +14,20 @@ from nous.config import Settings
 
 
 class Database:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, lock_timeout_seconds: int = 0) -> None:
+        self.lock_timeout_seconds = lock_timeout_seconds
+        options: dict = {}
+        if lock_timeout_seconds:
+            # In the startup packet, so every pooled connection carries it.
+            # At 0 nothing is sent and the server's default applies.
+            options["connect_args"] = {"server_settings": {"lock_timeout": str(lock_timeout_seconds * 1000)}}
         self.engine = create_async_engine(
             settings.db_url,
             pool_size=settings.db_pool_size,
             max_overflow=settings.db_max_overflow,
             pool_pre_ping=True,
             echo=settings.log_level == "debug",
+            **options,
         )
         self.session_factory = async_sessionmaker(self.engine, class_=AsyncSession, expire_on_commit=False)
 

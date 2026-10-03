@@ -27,6 +27,9 @@ class IntentSignals:
     is_question: bool = False
     is_greeting: bool = False
     topic_keywords: list[str] = field(default_factory=list)
+    # The part of the input the signals describe when it is not all of it:
+    # what follows a greeting. plan_retrieval's F27 fallback queries it.
+    text: str | None = None
 
 
 @dataclass
@@ -92,6 +95,17 @@ _MEMORY_HINTS = {
 }
 
 
+def _is_short_input(signals: IntentSignals) -> bool:
+    """F20: no question, no memory hint, no topic keyword and no strong recency:
+    a short acknowledgement ("ok", "yes", "sure") that needs no retrieval."""
+    return (
+        not signals.is_question
+        and not signals.memory_type_hints
+        and not signals.topic_keywords
+        and signals.temporal_recency <= 0.5
+    )
+
+
 class IntentClassifier:
     """Extract intent signals from user input. No LLM -- pattern matching only."""
 
@@ -104,6 +118,8 @@ class IntentClassifier:
         r"|howdy|greetings|what'?s up)\b",
         re.IGNORECASE,
     )
+    # Every greeting at the start of a turn, with the non-word characters after each.
+    _GREETING_RUN = re.compile(r"(?:" + _GREETING_PATTERNS.pattern.removeprefix("^") + r"\W*)+", re.IGNORECASE)
 
     # F18: Extended question starters with did|will|would|could|has|have|was|were|might
     _QUESTION_STARTERS = re.compile(
@@ -118,7 +134,18 @@ class IntentClassifier:
         stripped = input_text.strip()
 
         # Greeting detection
-        signals.is_greeting = bool(self._GREETING_PATTERNS.match(stripped))
+        greeting = self._GREETING_PATTERNS.match(stripped)
+        if greeting and self._settings.followup_greeting_request_detection_enabled:
+            # What follows the greeting is judged as any turn is (F20): the turn
+            # is a greeting only if that carries no request. Either way it is
+            # classified, and planned, on what follows -- its own signals and
+            # text -- so a greeting never changes how a request is planned.
+            rest_text = stripped[self._GREETING_RUN.match(stripped).end():]  # "hi hey, ...": every greeting
+            rest = self.classify(rest_text, frame)
+            rest.is_greeting = _is_short_input(rest)
+            rest.text = rest_text
+            return rest
+        signals.is_greeting = bool(greeting)
 
         # Question detection (F18: expanded starters)
         signals.is_question = stripped.endswith("?") or bool(
@@ -199,12 +226,7 @@ class IntentClassifier:
         # Inputs with no extractable keywords, no memory hints, and not a question
         # are likely short acknowledgements ("ok", "yes", "thanks") -- skip retrieval
         # 008.6: Don't skip if temporal recency is high (recap queries)
-        if (
-            not signals.is_question
-            and not signals.memory_type_hints
-            and not signals.topic_keywords
-            and signals.temporal_recency <= 0.5
-        ):
+        if _is_short_input(signals):
             return RetrievalPlan(
                 queries=[],
                 skip_types={"decision", "fact", "procedure", "episode"},
@@ -217,9 +239,10 @@ class IntentClassifier:
             )
 
         plan = RetrievalPlan()
-        # F27: Fall back to original input_text, not empty string
+        # F27: Fall back to original input_text, not empty string -- or to the part
+        # of it the signals describe, when that is not all of it
         query_text = (
-            " ".join(signals.topic_keywords) if signals.topic_keywords else input_text
+            " ".join(signals.topic_keywords) if signals.topic_keywords else signals.text or input_text
         )
 
         # If strong memory type hints, bias toward those types

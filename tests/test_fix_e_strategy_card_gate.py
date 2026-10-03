@@ -82,6 +82,14 @@ def _engine(heart, brain=None, **flags) -> ContextEngine:
         "search_procedures",
     ):
         setattr(h, m, getattr(heart, m))
+    # Without an embedder no closeness can be read, so every card the graph rung
+    # offers counts as close here: these tests are about what happens to a card once
+    # it is offered, not about which is close. A heart with stored vectors gets the
+    # real closeness read.
+    if heart.procedures.embeddings is None:
+        h.procedure_similarities = AsyncMock(side_effect=lambda query, ids, **_: dict.fromkeys(ids, 1.0))
+    else:
+        h.procedure_similarities = heart.procedure_similarities
     if brain is None:
         brain = MagicMock()
         brain.embeddings = None
@@ -954,7 +962,13 @@ async def test_the_graph_rung_and_the_probe_share_one_allowance(vector_heart, mo
     are served in all: the graph rung's first, then the two nearest the query.
     The fourth is not served."""
     query = "rotate the api keys"
-    graph_card = await _add(session, vector_heart, "card-graph", kind="strategy")
+    graph_card = await _add(
+        session,
+        vector_heart,
+        "card-graph",
+        kind="strategy",
+        embedding=await mock_embeddings.embed_near(query, noise=0.005),
+    )
     near = [
         await _add(
             session,

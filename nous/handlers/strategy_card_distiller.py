@@ -2,8 +2,9 @@
 
 Listens to decision_reviewed events and distils a strategy card
 (kind='strategy' procedure) for graded outcomes (success/partial/failure).
-For a decision that is noise, superseded, auto-reviewed or gone, it distils
-nothing and retires the cards the decision has. Idempotent per decision_id.
+For a decision that is noise, superseded, auto-reviewed or gone, or whose
+stored text cannot carry a lesson, it distils nothing and retires the cards the
+decision has. Idempotent per decision_id.
 
 Flags:
   NOUS_STRATEGY_CARDS_ENABLED=false  (distillation off by default)
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -26,9 +28,11 @@ if TYPE_CHECKING:
 from sqlalchemy.exc import IntegrityError
 
 from nous.brain.schemas import GRADED_OUTCOMES
+from nous.cognitive.deliberation import description_was_cut_by_capture
 from nous.handlers import LLMClient, call_background_llm_structured
 from nous.handlers.decision_reviewer import AUTO_REVIEWER
 from nous.heart.schemas import STRATEGY_CARD_KIND, ProcedureInput
+from nous.utils import leaked_markup_start
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +42,23 @@ _MAX_NAME_CHARS = 80
 _MAX_DESCRIPTION_CHARS = 2000
 _MAX_CONTEXT_CHARS = 4000
 _MAX_RESULT_CHARS = 2000
+
+# A failure or a partial grade says that the decision went wrong, or half wrong,
+# but not why: the lesson's "because" can only come from the result notes.
+_OUTCOMES_THAT_NEED_NOTES = frozenset({"failure", "partial"})
+
+
+def _text_can_carry_a_lesson(decision: Any) -> bool:
+    """Whether the decision row holds the text a lesson is distilled from.
+
+    Not an empty description, not a description the deliberation capture cut at
+    its cap (a fragment of a turn), and result notes for a failure or a partial
+    grade. Otherwise the model would supply what the row does not say.
+    """
+    description = decision.description or ""
+    if not description.strip() or description_was_cut_by_capture(description, decision.reasons, decision.created_at):
+        return False
+    return decision.outcome not in _OUTCOMES_THAT_NEED_NOTES or bool((decision.outcome_result or "").strip())
 
 
 def _field(tag: str, text: str | None, cap: int) -> str:
@@ -75,6 +96,31 @@ _CARD_SCHEMA: dict[str, Any] = {
     },
     "required": ["name", "description", "lesson"],
 }
+
+# The model can leave JSON for its tool-call markup inside a string: one card's
+# lesson ended with '.</lesson> <parameter name="tags">[...]', and the call had
+# no tags. A field's trailing run of that markup is cut only when a tag in it
+# names an argument of the card that the call does not have. That is one of
+# the conditions under which the tool dispatcher salvages a leaked argument;
+# the dispatcher also needs the leaked value to fit the argument's type, but
+# here the value is not used, whatever follows the tag. A field whose markup
+# names nothing the call lacks keeps it.
+_LEAKED_ARGUMENT = re.compile(r'<parameter\s+name="([^"]+)">')
+
+
+def _cut_leaked_arguments(card: dict[str, Any]) -> dict[str, Any]:
+    """``card`` with each string field cut where the model wrote another of the
+    card's arguments into it as tool-call markup (see the note above)."""
+    missing = set(_CARD_SCHEMA["properties"]) - set(card)
+    cut = dict(card)
+    for key, value in card.items():
+        if not isinstance(value, str):
+            continue
+        start = leaked_markup_start(value)
+        if start is not None and missing.intersection(_LEAKED_ARGUMENT.findall(value, start)):
+            cut[key] = value[:start]
+    return cut
+
 
 _SYSTEM_PROMPT = (
     "You extract concise strategy cards from decision outcomes.\n\n"
@@ -261,7 +307,9 @@ class StrategyCardDistiller:
             await session.commit()
         if decision is None:
             logger.debug(
-                "StrategyCardDistiller: no card for decision %s (ungraded, auto-reviewed or gone)", decision_id
+                "StrategyCardDistiller: no card for decision %s (ungraded, auto-reviewed, gone, "
+                "or its text cannot carry a lesson)",
+                decision_id,
             )
             return
         outcome = decision.outcome
@@ -291,6 +339,12 @@ class StrategyCardDistiller:
                 decision_id,
             )
             return
+        cut = _cut_leaked_arguments(card)
+        if cut != card:
+            logger.warning(
+                "StrategyCardDistiller: cut leaked tool-call markup from the card of decision %s", decision_id
+            )
+            card = cut
 
         # Every stored field is one line. The name becomes a prompt heading and is
         # no longer than the schema promises; a line break in the description or the
@@ -434,18 +488,22 @@ class StrategyCardDistiller:
         card distilled for a different outcome is soft-deleted. Who reviewed it: a
         card stands for an outcome that somebody observed, so a decision that is
         not graded, was graded by the auto-reviewer's heuristic, or is gone keeps
-        no card at all. Returns the decision when it may have a card, else None.
-        The caller commits.
+        no card at all. Its text: a decision whose stored text cannot carry a
+        lesson keeps no card either. Returns the decision when it may have a
+        card, else None. The caller commits.
         """
         from sqlalchemy import update as sa_update
 
         from nous.storage.models import Procedure
 
         decision = await self._brain.get(decision_id, session=session)
+        why = "ungraded, auto-reviewed or gone"
         if decision is None:
             logger.warning("StrategyCardDistiller: decision %s not found", decision_id)
         elif decision.outcome not in GRADED_OUTCOMES or decision.reviewer == AUTO_REVIEWER:
             decision = None
+        elif not _text_can_carry_a_lesson(decision):
+            decision, why = None, "its text cannot carry a lesson"
         stale = (
             sa_update(Procedure)
             .where(Procedure.agent_id == self._brain.agent_id)
@@ -461,7 +519,7 @@ class StrategyCardDistiller:
                 "StrategyCardDistiller: retired %s card(s) of decision %s (%s)",
                 result.rowcount,
                 decision_id,
-                f"its outcome is now {decision.outcome}" if decision is not None else "ungraded, auto-reviewed or gone",
+                f"its outcome is now {decision.outcome}" if decision is not None else why,
             )
         return decision
 

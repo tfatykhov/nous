@@ -47,6 +47,12 @@ class Settings(BaseSettings):
 
     db_pool_size: int = 10
     db_max_overflow: int = 5
+    # A statement that waits longer than this for a lock fails (SQLSTATE 55P03)
+    # instead of waiting for ever; 0 = no limit. Only the service's own engine
+    # gets it (nous.main), never a script that builds its own Database. Whole
+    # seconds: a fraction could round to 0 ms, which Postgres reads as no limit.
+    # The upper bound is Postgres's own, 2147483647 ms.
+    db_lock_timeout_seconds: int = Field(default=0, ge=0, le=2_147_483)
     agent_id: str = "nous-default"
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
@@ -2312,6 +2318,15 @@ class Settings(BaseSettings):
             "F083 C1 kill-switch. When true, on the FIRST turn of a new session a deictic/"
             "continuation follow-up ('continue what we were doing', 'the second option you "
             "mentioned') raises temporal_recency, flipping the episode-budget rescue + temporal_boost."
+        ),
+    )
+    followup_greeting_request_detection_enabled: bool = Field(
+        default=True,
+        description=(
+            "Kill-switch. When true, a turn that starts with a greeting is judged by what "
+            "follows the greeting, as any turn is (the short-input rule): if that carries a "
+            "request, the turn is classified and planned as that request alone. Set false to "
+            "restore the behavior from before this setting was added."
         ),
     )
     recall_before_clarify_prompt: bool = Field(
