@@ -852,7 +852,8 @@ class ProcedureManager:
         # with a warning instead (the live row already provides the capability).
         query = (
             select(Procedure.id)
-            .where(func.lower(Procedure.name) == (procedure.name or "").lower())
+            # Compared the way the index compares: lower() in the database, both sides.
+            .where(func.lower(Procedure.name) == func.lower(procedure.name or ""))
             .where(Procedure.agent_id == self.agent_id)
             .where(Procedure.active == True)  # noqa: E712
             .where(Procedure.id != procedure_id)
@@ -870,8 +871,7 @@ class ProcedureManager:
             )
             return
         if not is_strategy_card(procedure):
-            # The check above lowers the name in Python and can miss a card the index
-            # sees: a card's row then fails on the index rather than take the name.
+            # Only a how-to row makes a card give its name up.
             await self._take_name_from_card(procedure.name, session)
         procedure.active = True
         await session.flush()
@@ -964,7 +964,8 @@ class ProcedureManager:
     async def _is_name_superseded(self, name: str, session: AsyncSession) -> bool:
         result = await session.execute(
             select(Procedure.id)
-            .where(func.lower(Procedure.name) == name.lower())
+            # Compared the way the index compares: lower() in the database, both sides.
+            .where(func.lower(Procedure.name) == func.lower(name))
             .where(Procedure.agent_id == self.agent_id)
             .where(Procedure.superseded_by.isnot(None))
             .where(Procedure.kind.is_distinct_from(STRATEGY_CARD_KIND))
@@ -990,7 +991,8 @@ class ProcedureManager:
         # (agent_id, lower(name)) WHERE active unique index so a casing variant still resolves.
         result = await session.execute(
             select(Procedure)
-            .where(func.lower(Procedure.name) == name.lower())
+            # Compared the way the index compares: lower() in the database, both sides.
+            .where(func.lower(Procedure.name) == func.lower(name))
             .where(Procedure.agent_id == self.agent_id)
             .where(Procedure.active == True)  # noqa: E712
             # Every caller means a skill: a strategy card with this name is not one.
