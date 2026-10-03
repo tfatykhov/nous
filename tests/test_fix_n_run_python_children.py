@@ -351,3 +351,24 @@ async def test_a_timed_out_call_waits_for_its_worker_only_until_it_is_back(tmp_p
 
     assert time.monotonic() - started < 10, "the call waited out the whole settle time"
     assert result["content"][0]["text"] == _TIMED_OUT + "; killed 1 process(es) the script had started"
+
+
+async def test_a_class_the_script_puts_in_place_of_subprocess_popen_is_left_alone(tmp_path):
+    """The kill compares with the `Popen` of before any script ran: a script
+    can rebind `subprocess.Popen` for the whole process."""
+    code = (
+        "import subprocess\n"
+        "class Own(subprocess.Popen):\n"
+        "    def poll(self):\n"
+        "        raise ValueError('a poll of its own')\n"
+        "subprocess.Popen = Own\n"
+        f"subprocess.run({_child(tmp_path / 'survived', nap=4.0)})\n"
+    )
+    real = subprocess.Popen
+    try:
+        result = await _run_python()(code=code)
+    finally:
+        subprocess.Popen = real
+
+    text = result["content"][0]["text"]
+    assert text.startswith(_TIMED_OUT) and "killed" not in text

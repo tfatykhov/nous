@@ -3897,7 +3897,8 @@ _run_state = threading.local()
 
 # Every process a script starts through `subprocess` is created by this one
 # function, on the script's own thread. Bound at import, like the hooks above.
-_POPEN_INIT_CODE = subprocess.Popen.__init__.__code__
+_POPEN = subprocess.Popen
+_POPEN_INIT_CODE = _POPEN.__init__.__code__
 
 # How long a timed-out call waits for its worker after killing what the script
 # had started; a worker that was waiting for one of those processes is back in
@@ -4096,7 +4097,7 @@ def _kill_script_processes(procs: list[Any]) -> list[int]:
     running = [
         proc
         for proc in procs
-        if type(proc) is subprocess.Popen and getattr(proc, "pid", None) is not None and proc.poll() is None
+        if type(proc) is _POPEN and getattr(proc, "pid", None) is not None and proc.poll() is None
     ]
     below = _descendants([proc.pid for proc in running])  # read before a parent is gone
     killed: list[int] = []
