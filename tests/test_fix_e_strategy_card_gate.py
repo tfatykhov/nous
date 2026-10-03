@@ -1198,6 +1198,28 @@ async def test_a_score_floor_of_zero_serves_a_card_with_a_low_score(card_heart, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("score", [float("nan"), None], ids=["not-a-number", "no-score"])
+async def test_a_card_whose_score_is_not_a_number_is_not_served(card_heart, session, score):
+    """A card under the floor is never served. A cosine that is NaN (a zero-norm
+    embedding) is not under anything: ``nan < floor`` is False, so such a card would
+    be served whatever the floor is. A card without a score is not known to clear
+    the floor either (the probe computes one for every row it returns)."""
+    nan_card = await _add(session, card_heart, "card-nan", kind="strategy")
+    good = await _add(session, card_heart, "card-good", kind="strategy")
+    engine = _engine(
+        card_heart,
+        proc_catalog_enabled=False,
+        strategy_cards_retrieval_enabled=True,
+        strategy_cards_max_per_turn=2,
+    )
+    _probe_finds(engine, (good.id, 0.9), (nan_card.id, score))
+
+    result = await _build(engine, card_heart, session)
+
+    assert result.recalled_ids["procedure"] == [str(good.id)]
+
+
+@pytest.mark.asyncio
 async def test_the_ladder_serves_a_probe_card_when_it_is_given_no_trace(card_heart, session):
     """``_select_procedures`` takes ``trace=None`` by default and every rung guards
     its trace calls. build() always passes one, so only a direct caller gets here.

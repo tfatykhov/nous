@@ -2362,7 +2362,7 @@ class ContextEngine:
             for summ in near:
                 if len(cards) >= card_slots:
                     break
-                if summ.id in have or (summ.score is not None and summ.score < floor):
+                if summ.id in have or not (summ.score is not None and summ.score >= floor):
                     continue
                 try:
                     detail = await self._heart.get_procedure(summ.id, session=session)
