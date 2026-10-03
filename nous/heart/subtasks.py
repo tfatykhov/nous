@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 _PRIORITY_MAP = {"urgent": 50, "normal": 100, "low": 200}
 _MAX_PENDING = 5
 
+# worker_id of a subtask its caller runs itself, in the calling turn
+# (spawn_task with await_result, spawn_sync) instead of leaving it to a worker.
+INLINE_WORKER_ID = "inline"
+
 
 class SubtaskQueueFull(ValueError):
     """Raised when the pending-subtask limit is reached.
@@ -57,8 +61,14 @@ class SubtaskManager:
         # create leaves an untrackable window. Pre-generating the id closes
         # it: the guard stamp carries the id first, then the row commits.
         subtask_id: UUID | None = None,
+        # A caller that runs the subtask itself claims it in this INSERT, so
+        # dequeue() never sees it pending and no worker runs it a second time.
+        worker_id: str | None = None,
     ) -> Subtask:
-        """Create a new pending subtask. Raises ValueError if pending limit reached."""
+        """Create a new subtask: pending, or already running for ``worker_id``.
+
+        Raises ValueError if the pending limit is reached.
+        """
         pri_val = _PRIORITY_MAP.get(priority, 100)
 
         async with self._db.session() as session:
@@ -89,6 +99,11 @@ class SubtaskManager:
                 success_criteria=success_criteria,
                 dag_node_id=dag_node_id,
                 payload_schema=payload_schema,
+                **(
+                    {"status": "running", "worker_id": worker_id, "started_at": datetime.now(UTC)}
+                    if worker_id is not None
+                    else {}
+                ),
             )
             session.add(subtask)
             await session.commit()

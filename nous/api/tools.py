@@ -44,6 +44,7 @@ from nous.heart.schemas import (
     FactRejected,
     FactSummary,
 )
+from nous.heart.subtasks import INLINE_WORKER_ID
 from nous.observability.retrieval_logger import get_active as get_active_retrieval_logger
 from nous.observability.retrieval_trace import RETURNED_TO_SCRIPT, SLICED_OFF
 from nous.skills.parser import SkillParser
@@ -3062,6 +3063,9 @@ def create_subtask_tools(
                 success_criteria=success_criteria,
                 # F062: caller-supplied JSON Schema for the result payload.
                 payload_schema=effective_payload_schema,
+                # Run inline below, in this turn: claimed as it is created,
+                # so an idle worker cannot take it and run it a second time.
+                worker_id=INLINE_WORKER_ID if await_result and runner is not None else None,
             )
 
             if not await_result:
@@ -3458,10 +3462,9 @@ def create_subtask_tools(
 
         report = match.report_jsonb or {}
         # Codex round-9 P2: inline subtasks (await_result=True) bypass the
-        # worker pool's dequeue path, so started_at remains NULL. Fall back
-        # to created_at — inline runs start essentially immediately after
-        # creation, so the difference is negligible and the metric is no
-        # longer systematically 0.0 for the spawn_sync's primary use case.
+        # worker pool's dequeue path; they get started_at when they are
+        # created, claimed for the calling turn. created_at stays the
+        # fallback for a row without one.
         elapsed = 0.0
         if match.completed_at:
             start_anchor = match.started_at or match.created_at
