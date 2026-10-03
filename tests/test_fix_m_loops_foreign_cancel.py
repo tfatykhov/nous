@@ -29,8 +29,10 @@ from uuid import uuid4
 
 import pytest
 
-# The subtask worker imports nous.api.tools on a turn's first run. Importing it
-# here keeps that cold import out of every test's timed window.
+# The subtask worker imports nous.api.tools on a turn's first run, and
+# nous.api.tools imports nous.api.runner on its first subtask prefix. Importing
+# both here keeps those cold imports out of every test's timed window.
+import nous.api.runner  # noqa: F401
 import nous.api.tools  # noqa: F401
 from nous.config import Settings
 from nous.events import Event, EventBus
