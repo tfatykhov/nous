@@ -455,3 +455,82 @@ async def test_a_real_lock_timeout_on_a_subtask_launch_is_launched_again(db):
         assert await _subtask_statuses(p) == ["cancelled", "pending"]
     finally:
         await database.disconnect()
+
+
+# ---------------------------------------------------------------------------
+# A subtask that could not be stopped is stopped by the node's next launch
+# ---------------------------------------------------------------------------
+
+
+async def _launch_while_the_database_is_away(p, launch) -> None:
+    """The `running` write, the cancel and the failure write all fail, as they
+    do while the database is away for a moment, during `launch`."""
+    real_write, real_cancel = p.store.transition_node, p.subtasks.cancel
+
+    async def away(node_id, **kwargs):
+        if kwargs.get("status") in ("running", "failed"):
+            raise _lock_timeout()
+        return await real_write(node_id, **kwargs)
+
+    async def cancel_away(_subtask_id):
+        raise _lock_timeout()
+
+    p.store.transition_node, p.subtasks.cancel = away, cancel_away
+    try:
+        await launch()
+    finally:
+        p.store.transition_node, p.subtasks.cancel = real_write, real_cancel
+
+
+async def test_a_subtask_whose_stop_failed_is_stopped_by_the_next_launch(parts, monkeypatch):
+    dag = await _one_node_dag(parts, DAGNodeType.subtask)
+    await _launch_while_the_database_is_away(parts, lambda: parts.orch.start_dag(dag.id))
+    assert (await _node(parts, dag.id)).status == "ready"  # the failure write failed too
+    assert await _subtask_statuses(parts) == ["pending"]  # the first subtask, still queued
+
+    monkeypatch.setattr(orchestrator_module, "_STALE_READY_GRACE_SECONDS", 0)
+    await parts.orch.tick()  # the stale-ready sweep hands the node back
+
+    node = await _node(parts, dag.id)
+    assert node.status == "running"
+    assert await _subtask_statuses(parts) == ["cancelled", "pending"]  # the first stopped, one new
+    assert (await parts.subtasks.get(node.subtask_id)).status == "pending"
+
+
+async def test_a_stop_that_fails_again_is_tried_again_at_the_launch_after(parts, monkeypatch):
+    dag = await _one_node_dag(parts, DAGNodeType.subtask)
+    await _launch_while_the_database_is_away(parts, lambda: parts.orch.start_dag(dag.id))
+    monkeypatch.setattr(orchestrator_module, "_STALE_READY_GRACE_SECONDS", 0)
+
+    await _launch_while_the_database_is_away(parts, parts.orch.tick)  # still away at the next launch
+
+    assert (await _node(parts, dag.id)).status == "ready"
+    assert await _subtask_statuses(parts) == ["pending"]  # nothing new beside the first
+
+    await parts.orch.tick()
+
+    assert (await _node(parts, dag.id)).status == "running"
+    assert await _subtask_statuses(parts) == ["cancelled", "pending"]
+
+
+async def test_a_leftover_subtask_a_worker_took_ends_the_node(parts, monkeypatch):
+    """Between the two launches a worker took the subtask the first one could
+    not stop: its work runs, so the next launch fails the node instead of
+    starting the work a second time. A retry after that starts it afresh."""
+    dag = await _one_node_dag(parts, DAGNodeType.subtask)
+    await _launch_while_the_database_is_away(parts, lambda: parts.orch.start_dag(dag.id))
+    await parts.subtasks.dequeue("worker-1")
+
+    monkeypatch.setattr(orchestrator_module, "_STALE_READY_GRACE_SECONDS", 0)
+    await parts.orch.tick()
+
+    node = await _node(parts, dag.id)
+    assert node.status == "failed"
+    assert "earlier launch" in node.error
+    assert await _subtask_statuses(parts) == ["cancelled"]  # the one a worker took, and no other
+
+    await parts.orch.retry_node(dag.id, "work")
+    await parts.orch.tick()
+
+    assert (await _node(parts, dag.id)).status == "running"
+    assert await _subtask_statuses(parts) == ["cancelled", "pending"]

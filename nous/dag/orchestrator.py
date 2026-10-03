@@ -338,6 +338,11 @@ class DAGOrchestrator:
         # fails with a clear error. Counts reset on a successful launch and on
         # process restart (a benign backstop reset).
         self._defer_counts: dict = {}
+        # A subtask a launch created and could not stop (its cancel failed),
+        # by node: the node's next launch takes it out, stops it first and
+        # starts another only if it never ran. Lost on a restart, like the
+        # counts.
+        self._unstopped_subtasks: dict = {}
 
     @property
     def approvals_wired(self) -> bool:
@@ -3327,6 +3332,15 @@ class DAGOrchestrator:
             )
             return
 
+        # A subtask an earlier launch of this node could not stop may still
+        # be queued: stop it first, and start another only if it never ran.
+        leftover = self._unstopped_subtasks.pop(node.id, None)
+        if leftover is not None and not await self._abandon_subtask(leftover, node.id):
+            await self._finish_launch(
+                node, status="failed", error=f"subtask {leftover} of an earlier launch has run or could not be stopped"
+            )
+            return
+
         # Build augmented instructions with predecessor context
         augmented = await self._build_predecessor_context(node, dag)
 
@@ -3397,7 +3411,7 @@ class DAGOrchestrator:
             if subtask is not None and not await self._launch_landed(
                 node, subtask_id=subtask.id
             ):
-                never_ran = await self._abandon_subtask(subtask.id)
+                never_ran = await self._abandon_subtask(subtask.id, node.id)
                 # A fault that can pass (a lock timeout, a lost connection) is
                 # no reason to fail the node: the next tick launches it again,
                 # but only once its subtask is stopped and no worker ever took
@@ -3500,9 +3514,11 @@ class DAGOrchestrator:
             getattr(fresh, key) == value for key, value in primitive.items()
         )
 
-    async def _abandon_subtask(self, subtask_id: UUID) -> bool:
+    async def _abandon_subtask(self, subtask_id: UUID, node_id: UUID | None = None) -> bool:
         """Cancel a subtask its node does not own (§3.3). True only when it is
-        now stopped and no worker ever took it, so its work never ran."""
+        now stopped and no worker ever took it, so its work never ran. When the
+        cancel itself fails, the subtask is kept for ``node_id``'s next launch
+        to stop first."""
         try:
             await self._subtask_mgr.cancel(subtask_id)
             # Read once the cancel has committed: a worker's dequeue stamps
@@ -3512,6 +3528,8 @@ class DAGOrchestrator:
             return subtask.started_at is None
         except Exception:
             logger.exception("Could not cancel orphaned subtask %s", subtask_id)
+            if node_id is not None:
+                self._unstopped_subtasks[node_id] = subtask_id
             return False
 
     async def _abandon_check(self, node_id: UUID, check_name: str) -> None:
