@@ -3608,6 +3608,10 @@ class DAGOrchestrator:
 
     async def _cancel_node(self, node: DAGNode) -> None:
         """Cancel the underlying primitive for a node."""
+        # A subtask an earlier launch of this node could not stop is its work too.
+        leftover = self._unstopped_subtasks.pop(node.id, None)
+        if leftover is not None:
+            await self._abandon_subtask(leftover)
         if node.node_type in _SUBTASK_BACKED and node.subtask_id and self._subtask_mgr:
             try:
                 subtask = await self._subtask_mgr.get(node.subtask_id)

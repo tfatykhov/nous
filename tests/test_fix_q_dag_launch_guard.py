@@ -534,3 +534,18 @@ async def test_a_leftover_subtask_a_worker_took_ends_the_node(parts, monkeypatch
 
     assert (await _node(parts, dag.id)).status == "running"
     assert await _subtask_statuses(parts) == ["cancelled", "pending"]
+
+
+async def test_a_cancelled_node_stops_the_subtask_its_launch_could_not_stop(parts):
+    """A cancel_dag, a budget cancel and a cancel_cascade end a node through
+    _cancel_node, which stops a kept subtask too, so it does not run inside a
+    cancelled DAG once the database is back."""
+    dag = await _one_node_dag(parts, DAGNodeType.subtask)
+    await _launch_while_the_database_is_away(parts, lambda: parts.orch.start_dag(dag.id))
+    assert await _subtask_statuses(parts) == ["pending"]
+
+    await parts.orch.cancel_dag(dag.id)
+
+    assert (await _node(parts, dag.id)).status == "cancelled"
+    assert await _subtask_statuses(parts) == ["cancelled"]
+    assert parts.orch._unstopped_subtasks == {}
