@@ -50,7 +50,7 @@ async def create_components(settings: Settings) -> dict:
     5. CognitiveLayer - orchestrator
     6. AgentRunner - LLM integration
     """
-    database = Database(settings)
+    database = Database(settings, lock_timeout_seconds=settings.db_lock_timeout_seconds)
     await database.connect()  # F1: connect() not initialize()
     await run_migrations(database.engine)  # Apply pending SQL migrations
 

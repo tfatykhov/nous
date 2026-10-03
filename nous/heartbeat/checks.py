@@ -1140,7 +1140,7 @@ class BehaviorDriftCheck(BaseCheck):
                         inactive_fact_count = len(inactive_ids)
                         counts_ok = True
             except Exception:
-                logger.debug("Snapshot: DB query failed", exc_info=True)
+                logger.warning("Snapshot: DB query failed", exc_info=True)
 
         if not counts_ok:
             # The count query failed (or returned nothing) and the exception
@@ -1254,7 +1254,7 @@ class BehaviorDriftCheck(BaseCheck):
                 )
                 await session.commit()
         except Exception:
-            logger.debug("Snapshot store failed", exc_info=True)
+            logger.warning("Snapshot store failed", exc_info=True)
 
     async def _load_baseline(self, hours: int = 168) -> list:
         if not self._db:
@@ -1301,5 +1301,5 @@ class BehaviorDriftCheck(BaseCheck):
                 snapshots.append(BehaviorSnapshot(**kwargs))
             return snapshots
         except Exception:
-            logger.debug("Baseline load failed", exc_info=True)
+            logger.warning("Baseline load failed", exc_info=True)
             return []

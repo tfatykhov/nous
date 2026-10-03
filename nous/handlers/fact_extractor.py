@@ -37,7 +37,7 @@ from nous.handlers.exemplar_ingest import ingest_exemplars
 from nous.heart.category_prompts import TIER1_CATEGORY_GUIDANCE
 from nous.heart.exemplars import is_exemplar_stream
 from nous.heart.heart import Heart
-from nous.heart.schemas import FactInput, FactRejected
+from nous.heart.schemas import FactDetail, FactInput, FactRejected
 
 logger = logging.getLogger(__name__)
 
@@ -318,6 +318,20 @@ class FactExtractor:
             return []
         return await self._store_extracted_facts(candidates, episode_id, transcript)
 
+    async def _learn_one(
+        self, fact_input: FactInput, exclude_ids: list[UUID], episode_id: str
+    ) -> FactDetail | FactRejected | None:
+        """Store one fact of an episode. None when it could not be stored (a
+        lock timeout, a lost connection): that is logged, and it does not cost
+        the rest of the episode's facts. Shared by both producer paths."""
+        try:
+            if exclude_ids:
+                return await self._heart.learn(fact_input, exclude_ids=exclude_ids)
+            return await self._heart.learn(fact_input)
+        except Exception:
+            logger.exception("Could not store a fact from episode %s", episode_id)
+            return None
+
     async def _store_extracted_facts(
         self,
         candidates: list[dict],
@@ -399,10 +413,9 @@ class FactExtractor:
             )
             # F377: exclude tiebreaker-DISTINCT hits from native (Leg-2) dedup so
             # learn can't re-merge what the tiebreaker already cleared.
-            if exclude_ids:
-                result = await self._heart.learn(fact_input, exclude_ids=exclude_ids)
-            else:
-                result = await self._heart.learn(fact_input)
+            result = await self._learn_one(fact_input, exclude_ids, episode_id)
+            if result is None:
+                continue
             if isinstance(result, FactRejected):
                 logger.debug("Admission rejected extracted fact: %s", content[:50])
                 continue
@@ -517,10 +530,9 @@ class FactExtractor:
                 event_date_classified_at=classified_at,
             )
             # F377: exclude tiebreaker-DISTINCT hits from native (Leg-2) dedup.
-            if exclude_ids:
-                result = await self._heart.learn(fact_input, exclude_ids=exclude_ids)
-            else:
-                result = await self._heart.learn(fact_input)
+            result = await self._learn_one(fact_input, exclude_ids, episode_id)
+            if result is None:
+                continue
             if isinstance(result, FactRejected):
                 logger.debug("Admission rejected candidate fact: %s", content[:50])
                 continue
