@@ -83,6 +83,56 @@ async def call_background_llm(
         return None
 
 
+# Models that answered a forced tool_choice with "not supported for this model"
+# (Claude Sonnet 5.5, Opus 5.5 and Fable 5.1 do), for the life of the process.
+_REJECTS_FORCED_TOOL_CHOICE: set[str] = set()
+
+
+def _rejects_forced_tool_choice(error: Exception) -> bool:
+    """True only for the API's refusal of a forced tool_choice, as both backends word it."""
+    message = str(error)
+    return (
+        "invalid_request_error" in message
+        and "tool_choice: type" in message
+        and "not supported for this model" in message
+    )
+
+
+def _asking_for_the_tool(payload: dict[str, Any]) -> dict[str, Any]:
+    """``payload`` without its forced tool_choice, with the system prompt asking for the tool instead."""
+    instruction = (
+        f"Respond only by calling the {payload['tool_choice']['name']} tool. Do not write any text before or "
+        "after the call: work through any steps silently and put only the result in the call."
+    )
+    asked = {key: value for key, value in payload.items() if key != "tool_choice"}
+    system = payload["system"]
+    if isinstance(system, str):
+        asked["system"] = f"{system}\n\n{instruction}" if system else instruction
+    else:
+        asked["system"] = [*system, {"type": "text", "text": instruction}]
+    return asked
+
+
+async def call_with_tool_choice(client: LLMClient, payload: dict[str, Any]) -> Any:
+    """Send a request that forces its one tool, or asks for it where the model rejects forcing.
+
+    The first request for a model is ``payload`` exactly. If the API answers that a
+    forced tool_choice is not supported for the model, the model is remembered and this
+    and every later request for it go without tool_choice, the system prompt asking for
+    the tool. Any other error is raised.
+    """
+    model = payload["model"]
+    if model not in _REJECTS_FORCED_TOOL_CHOICE:
+        try:
+            return await client.call(payload)
+        except Exception as e:
+            if not _rejects_forced_tool_choice(e):
+                raise
+            _REJECTS_FORCED_TOOL_CHOICE.add(model)
+            logger.info("Model %s rejects a forced tool_choice; asking for the tool in the prompt", model)
+    return await client.call(_asking_for_the_tool(payload))
+
+
 async def call_background_llm_structured(
     client: LLMClient,
     model: str,
@@ -93,11 +143,12 @@ async def call_background_llm_structured(
     output_schema: dict[str, Any],
     max_tokens: int = 1500,
 ) -> dict[str, Any] | None:
-    """Call LLM using tool_use trick for guaranteed structured JSON output.
+    """Call LLM using tool_use trick for structured JSON output.
 
     Defines a fake tool whose input_schema matches the desired output schema,
-    then forces the model to "call" it via tool_choice. The API enforces valid
-    JSON matching the schema at generation time — no post-hoc parsing needed.
+    then forces the model to "call" it via tool_choice; on a model that rejects
+    a forced tool_choice, call_with_tool_choice asks for the tool in the system
+    prompt instead.
 
     Returns the structured dict, or None on failure.
     """
@@ -139,8 +190,8 @@ async def call_background_llm_structured(
     }
 
     try:
-        response = await client.call(payload)
-        # Extract tool_use block — guaranteed by tool_choice
+        response = await call_with_tool_choice(client, payload)
+        # Extract the tool_use block; an unforced reply may open with text or thinking
         for block in response.content:
             if isinstance(block, dict) and block.get("type") == "tool_use":
                 return block["input"]
