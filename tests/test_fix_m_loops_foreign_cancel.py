@@ -23,6 +23,7 @@ import logging
 import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
@@ -40,6 +41,8 @@ from nous.handlers.decision_reviewer import DecisionReviewer
 from nous.handlers.session_monitor import SessionTimeoutMonitor
 from nous.handlers.subtask_worker import SubtaskWorkerPool
 from nous.handlers.task_scheduler import TaskScheduler
+from nous.heart.schedules import ScheduleManager
+from nous.heart.subtasks import SubtaskManager
 
 # How long a test waits for something that should happen at once. Only reached
 # when the behaviour under test is broken.
@@ -882,6 +885,51 @@ def test_a_schedule_cancelled_from_within_fails_alone_and_the_other_due_schedule
     _run(scenario)
 
     assert (created, deactivated, fired) == (["second"], [second.id], [1])
+
+
+@pytest.mark.postgres_only
+async def test_a_once_schedule_whose_continuation_write_was_cancelled_from_within_still_runs_once(db):
+    """The continuation state is written after the subtask is committed. A
+    cancellation from within that write fails the write alone, as an error
+    there does: the schedule still advances, so it does not fire again once
+    its subtask has ended, and the next due schedule fires in the same check."""
+    agent = f"test-fix-m-{uuid4().hex[:8]}"
+    schedules = ScheduleManager(db, agent)
+    subtasks = SubtaskManager(db, agent)
+    now = datetime.now(UTC)
+    first = await schedules.create(
+        task="first", schedule_type="once", fire_at=now - timedelta(seconds=10), continuation_turns=3
+    )
+    await schedules.create(task="second", schedule_type="once", fire_at=now - timedelta(seconds=5))
+
+    cancel = _Once(True)
+    write_continuation = schedules.set_continuation_session
+
+    async def set_continuation_session(schedule_id: Any, session_id: str) -> None:
+        if schedule_id == first.id and cancel():
+            await _cancelled_from_within()
+        await write_continuation(schedule_id, session_id)
+
+    schedules.set_continuation_session = set_continuation_session  # type: ignore[method-assign]
+    scheduler = TaskScheduler(
+        SimpleNamespace(schedules=schedules, subtasks=subtasks, db=db),
+        Settings(agent_id=agent, schedule_continuation_enabled=True),
+    )
+
+    async def check() -> int:
+        try:
+            return await scheduler._fire_due_tasks()
+        except asyncio.CancelledError:
+            pytest.fail("the check ended with the continuation write's cancellation; the second was never fired")
+
+    fired = [await check()]
+    # The subtasks end, as a worker ends them: the debounce on an active
+    # subtask no longer holds back a schedule that is still due.
+    while (subtask := await subtasks.dequeue("worker")) is not None:
+        await subtasks.complete(subtask.id, "done")
+    fired.append(await check())
+
+    assert (sorted(subtask.task for subtask in await subtasks.list()), fired) == (["first", "second"], [2, 0])
 
 
 def test_cancelling_the_scheduler_while_it_fires_a_schedule_ends_it():
