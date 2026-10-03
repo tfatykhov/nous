@@ -277,6 +277,50 @@ async def test_the_wait_for_a_killed_shell_is_bounded_and_says_so(monkeypatch, c
     assert len(warnings) == 1 and "may still be running" in warnings[0], warnings
 
 
+class _PausedPipe:
+    """Stands in for a pipe asyncio has stopped watching: it reaches its end only once it is read again."""
+
+    def __init__(self, reader: asyncio.StreamReader) -> None:
+        self._reader = reader
+
+    def pause_reading(self) -> None:
+        pass
+
+    def resume_reading(self) -> None:
+        self._reader.feed_eof()
+
+
+@pytest.mark.parametrize("unread", ["stdout", "stderr"])
+async def test_the_wait_reads_both_pipes_to_their_end(monkeypatch, caplog, unread):
+    """The helper alone, with a shell that has been killed and a pipe that is
+    paused with unread output in it. Real commands reach that state only when
+    they write faster than the event loop reads, which a loaded machine does
+    not always give them."""
+    from nous.utils import kill_process_group
+
+    monkeypatch.setattr("nous.utils._KILL_WAIT_SECONDS", 0.5, raising=False)
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: None)
+    streams = {"stdout": asyncio.StreamReader(), "stderr": asyncio.StreamReader()}
+    for name, reader in streams.items():
+        reader.set_transport(_PausedPipe(reader))
+        if name == unread:
+            reader.feed_data(b"x" * 200_000)  # more than twice the limit: the reader pauses its pipe
+        else:
+            reader.feed_eof()
+
+    async def exit_reported_once_the_pipes_are_closed():
+        while not all(reader.at_eof() for reader in streams.values()):
+            await asyncio.sleep(0.01)
+        return -9
+
+    shell = SimpleNamespace(pid=4242, returncode=None, wait=exit_reported_once_the_pipes_are_closed, **streams)
+
+    with caplog.at_level(logging.WARNING, logger="nous.utils"):
+        await asyncio.wait_for(kill_process_group(shell), LIMIT)
+
+    assert [r.getMessage() for r in caplog.records if r.name == "nous.utils"] == []
+
+
 async def test_the_group_of_an_exited_shell_is_not_signalled_once_its_pid_is_in_use_again(monkeypatch):
     """The helper alone. A shell whose exit has been collected has given its
     pid back; a process that has that pid now is a newer one, and its process
