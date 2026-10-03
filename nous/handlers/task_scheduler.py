@@ -231,7 +231,9 @@ class TaskScheduler:
                             await self._heart.schedules.reset_continuation(
                                 schedule.id
                             )
-                    except Exception:
+                    except (asyncio.CancelledError, Exception) as exc:
+                        if isinstance(exc, asyncio.CancelledError) and cancel_requested():
+                            raise
                         logger.exception(
                             "Failed to update continuation state for schedule %s — "
                             "lifecycle advance will proceed regardless",
