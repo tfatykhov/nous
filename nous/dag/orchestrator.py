@@ -56,7 +56,8 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
 from nous.config import Settings
 from nous.dag._workspace import assert_inside_root, compute_workspace_path
@@ -230,6 +231,20 @@ def _registry_unprotect_from_eviction(registry: object, name: str | None) -> Non
     fn = getattr(registry, "unprotect_from_eviction", None)
     if name and callable(fn):
         fn(name)
+
+
+def _can_pass(exc: BaseException) -> bool:
+    """Whether a launch that raised ``exc`` is worth another try. The server's
+    SQLSTATE decides when there is one: a lost connection (class 08), a
+    transaction the server rolled back, such as a deadlock (40), the server
+    short of resources (53), a lock or statement timeout (55P03, 57014) and the
+    server going away (57P0x) can pass; any other is final. An error without
+    one can pass when it is the database's (a dropped connection), the pool's
+    timeout, or the network's (a refused connection)."""
+    sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None)
+    if sqlstate:
+        return sqlstate[:2] in ("08", "40", "53") or sqlstate in ("55P03", "57014") or sqlstate.startswith("57P0")
+    return isinstance(exc, (DBAPIError, PoolTimeoutError, OSError))
 
 
 # Completion check polling
@@ -3382,7 +3397,15 @@ class DAGOrchestrator:
             if subtask is not None and not await self._launch_landed(
                 node, subtask_id=subtask.id
             ):
-                await self._abandon_subtask(subtask.id)
+                never_ran = await self._abandon_subtask(subtask.id)
+                # A fault that can pass (a lock timeout, a lost connection) is
+                # no reason to fail the node: the next tick launches it again,
+                # but only once its subtask is stopped and no worker ever took
+                # it. Work a worker took has run, or still runs, and a second
+                # launch would do it twice.
+                if never_ran and _can_pass(e):
+                    await self._defer_node(node, dag, f"launch not recorded: {e}")
+                    return
             await self._finish_launch(node, status="failed", error=str(e))
 
     async def _launch_check_node(self, node: DAGNode, dag: ExecutionDAG) -> None:
@@ -3455,6 +3478,11 @@ class DAGOrchestrator:
             # As on the subtask path: stop the check before the failure write.
             if created and not await self._launch_landed(node, check_name=check_name):
                 await self._abandon_check(node.id, check_name)
+                # As on the subtask path. A check that could not be disabled
+                # does not block this: the next launch replaces it by name.
+                if _can_pass(e):
+                    await self._defer_node(node, dag, f"launch not recorded: {e}")
+                    return
             await self._finish_launch(node, status="failed", error=str(e))
 
     async def _launch_landed(self, node: DAGNode, **primitive: object) -> bool:
@@ -3472,12 +3500,19 @@ class DAGOrchestrator:
             getattr(fresh, key) == value for key, value in primitive.items()
         )
 
-    async def _abandon_subtask(self, subtask_id: UUID) -> None:
-        """Cancel a subtask its node does not own (§3.3)."""
+    async def _abandon_subtask(self, subtask_id: UUID) -> bool:
+        """Cancel a subtask its node does not own (§3.3). True only when it is
+        now stopped and no worker ever took it, so its work never ran."""
         try:
             await self._subtask_mgr.cancel(subtask_id)
+            # Read once the cancel has committed: a worker's dequeue stamps
+            # started_at in the transaction that takes the row, so a row read
+            # without it was cancelled before any worker could take it.
+            subtask = await self._subtask_mgr.get(subtask_id)
+            return subtask.started_at is None
         except Exception:
             logger.exception("Could not cancel orphaned subtask %s", subtask_id)
+            return False
 
     async def _abandon_check(self, node_id: UUID, check_name: str) -> None:
         """Disable a check its node does not own (§3.3). Record it on the node
