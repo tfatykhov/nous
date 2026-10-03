@@ -3899,6 +3899,9 @@ _run_state = threading.local()
 # function, on the script's own thread. Bound at import, like the hooks above.
 _POPEN = subprocess.Popen
 _POPEN_INIT_CODE = _POPEN.__init__.__code__
+# What `Popen` calls once its fork has set `pid`, before it waits for the exec.
+# Private, so looked up with care: where it is missing, nothing is done there.
+_POPEN_FORKED_CODE = getattr(getattr(_POPEN, "_close_pipe_fds", None), "__code__", None)
 
 # How long a timed-out call waits for its worker after killing what the script
 # had started; a worker that was waiting for one of those processes is back in
@@ -3976,6 +3979,9 @@ def _deadline_tracer(deadline: float, timeout: float):  # noqa: ANN202 - CPython
     noted in `.children` of the tracer, so a call that times out can find
     and kill what its script started. It notes a weak reference: the object
     lives exactly as long as the script keeps it, as it does without the hook.
+    Once the call has given up, a new process is killed as `Popen` enters
+    `_close_pipe_fds`, right after its fork: the constructor returns only
+    after the exec, which a slow `preexec_fn` can hold for as long as it likes.
     """
     owned: dict[Any, bool] = {}  # verdict per code object; dies with the run
     message = f"execution timed out ({timeout}s)"
@@ -4022,6 +4028,8 @@ def _deadline_tracer(deadline: float, timeout: float):  # noqa: ANN202 - CPython
             except TypeError:
                 pass  # `__init__` was called on something that is not a `Popen`
             return _popen_hook
+        if frame.f_code is _POPEN_FORKED_CODE and _tracer.expired:
+            _kill_script_processes([frame.f_locals.get("self")])  # the frame itself is stdlib: left untraced below
         local = frame.f_trace
         if getattr(local, "owner", None) is not _tracer:
             code = frame.f_code

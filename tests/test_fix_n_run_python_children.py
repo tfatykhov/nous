@@ -556,6 +556,24 @@ async def test_a_process_whose_popen_has_not_returned_yet_is_killed(tmp_path):
     assert run_python_active_runs() == 0, "the timed-out script still holds its run slot"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="preexec_fn is POSIX only")
+async def test_a_process_started_after_the_call_gave_up_is_killed_before_its_popen_returns(tmp_path):
+    """A process started once the call has given up is killed as soon as it
+    exists. Killed only as its `Popen` returns, it would run on, with the
+    worker and its run slot, for as long as a slow `preexec_fn` held it."""
+    code = (
+        "import subprocess, time\n"
+        "time.sleep(4.0)\n"  # the call gives up while the script sleeps
+        f"subprocess.run({_child(tmp_path / 'survived', nap=0.5)}, preexec_fn=lambda: time.sleep(4))\n"
+    )
+    result = await _run_python()(code=code)
+
+    assert result["content"][0]["text"].startswith(_TIMED_OUT + "; the script is still running")
+    # `run` waits for its process, so a free slot means it has ended; left
+    # alone, its `preexec_fn` holds it until 8 s after the call started
+    assert await _idle(limit=2.5), "a process started after the call gave up held its script's run slot"
+
+
 @pytest.mark.skipif(not hasattr(signal, "SIGSTOP"), reason="needs POSIX signals")
 def test_a_look_that_fails_still_kills_what_was_stopped(monkeypatch, caplog):
     """The script's processes are stopped before the kill looks: a look that
