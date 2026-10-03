@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import case, delete, func, or_, select, text
+from sqlalchemy import case, delete, func, or_, select, text, update
 from sqlalchemy import event as sa_event
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -65,6 +65,17 @@ _NOISE_KEYWORDS = frozenset({
     "completed", "done", "finished", "success", "started",
     "status", "progress", "update", "checked", "confirmed",
 })
+
+
+class DecisionNotFound(ValueError):
+    """``Brain.review`` was asked about a decision this agent does not have."""
+
+
+class DecisionAlreadyReviewed(ValueError):
+    """``Brain.review(only_if_unreviewed=True)`` found the decision reviewed.
+
+    Nothing was written: no review field, no audit row, no bus event.
+    """
 
 
 def _review_state(decision: Decision) -> dict:
@@ -1059,6 +1070,7 @@ class Brain:
         session: AsyncSession | None = None,
         preserve_graded: bool = False,
         capture: dict | None = None,
+        only_if_unreviewed: bool = False,
     ) -> DecisionDetail:
         """Record outcome for a decision.
 
@@ -1072,12 +1084,18 @@ class Brain:
         between them (harness Phase 2.8 compensation snapshots). A
         ``capture["persist"]`` coroutine is awaited with this session before
         the commit, recording them in the same transaction.
+        only_if_unreviewed: write the review only if the decision has none at
+        the moment of the write, and raise DecisionAlreadyReviewed otherwise.
+        "Still unreviewed" is tested by the write itself, in the database, not
+        on a row the caller read earlier. The automatic reviewer sets this: it
+        works from a list it read before it checked its signals, and a review
+        that somebody made meanwhile has to stand.
         """
         if session is None:
             async with self.db.session() as session:
                 detail = await self._review(
                     decision_id, outcome, result, reviewer, superseded_by, session,
-                    preserve_graded, capture,
+                    preserve_graded, capture, only_if_unreviewed,
                 )
                 await session.commit()
             # Emit AFTER commit so bus subscribers see the persisted row.
@@ -1085,7 +1103,7 @@ class Brain:
             return detail
         return await self._review(
             decision_id, outcome, result, reviewer, superseded_by, session,
-            preserve_graded, capture,
+            preserve_graded, capture, only_if_unreviewed,
         )
 
     async def review_many(
@@ -1183,6 +1201,7 @@ class Brain:
         session: AsyncSession,
         preserve_graded: bool = False,
         capture: dict | None = None,
+        only_if_unreviewed: bool = False,
     ) -> DecisionDetail:
         # Validate via Pydantic (P2-18)
         validated = ReviewInput(
@@ -1198,7 +1217,7 @@ class Brain:
             decision_id, session, for_update=preserve_graded or capture is not None
         )
         if decision is None:
-            raise ValueError(f"Decision {decision_id} not found")
+            raise DecisionNotFound(f"Decision {decision_id} not found")
         if validated.outcome == "superseded":
             # Checked here rather than left to the FK: a hallucinated UUID gets
             # a message the caller can act on, and a successor owned by
@@ -1224,6 +1243,31 @@ class Brain:
 
         if capture is not None:
             capture["prior"] = _review_state(decision)
+        if only_if_unreviewed:
+            # Claim the row before writing it. The caller decided on a copy it
+            # read earlier, and the row loaded above may be stale as well, so
+            # "still unreviewed" is the predicate of this UPDATE: the database
+            # tests it on the row as it is now, waiting first for a review
+            # that is being committed (READ COMMITTED, the level the engine
+            # runs at). A claimed row stays locked until this transaction ends.
+            # synchronize_session=False: the ORM would otherwise stamp the
+            # session's copy on that copy's own reviewed_at, matched or not.
+            claimed = await session.execute(
+                update(Decision)
+                .where(Decision.id == decision_id)
+                .where(Decision.reviewed_at.is_(None))
+                .values(reviewed_at=datetime.now(UTC))
+                .execution_options(synchronize_session=False)
+            )
+            if not claimed.rowcount:
+                raise DecisionAlreadyReviewed(
+                    f"Decision {decision_id} is already reviewed; this review is only written to an unreviewed decision"
+                )
+            # The assignments below reach the database as a diff against the
+            # session's copy. Read the review fields again from the claimed
+            # row, so that a field whose new value equals a stale one in that
+            # copy is still written.
+            await session.refresh(decision, ["outcome", "outcome_result", "reviewed_at", "reviewer", "superseded_by"])
         decision.outcome = validated.outcome
         decision.outcome_result = validated.result
         decision.reviewed_at = datetime.now(UTC)
