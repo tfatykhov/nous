@@ -342,3 +342,12 @@ async def test_a_timed_out_script_that_is_still_running_is_reported_as_such(capl
     )
     assert run_python_active_runs() == 1
     assert "is still running" in caplog.text and "(1/4 in use)" in caplog.text
+
+
+async def test_a_timed_out_call_waits_for_its_worker_only_until_it_is_back(tmp_path, monkeypatch):
+    monkeypatch.setattr(T, "_KILL_SETTLE_SECONDS", 30.0)  # far longer than a worker needs to come back
+    started = time.monotonic()
+    result = await _run_python()(code=f"import subprocess\nsubprocess.run({_child(tmp_path / 'survived')})\n")
+
+    assert time.monotonic() - started < 10, "the call waited out the whole settle time"
+    assert result["content"][0]["text"] == _TIMED_OUT + "; killed 1 process(es) the script had started"
