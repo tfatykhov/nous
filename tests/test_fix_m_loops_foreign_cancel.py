@@ -23,11 +23,18 @@ import logging
 import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 import pytest
 
+# The subtask worker imports nous.api.tools on a turn's first run. Importing it
+# here keeps that cold import out of every test's timed window.
+import nous.api.tools  # noqa: F401
+from nous.config import Settings
 from nous.events import Event, EventBus
+from nous.handlers.subtask_worker import SubtaskWorkerPool
 
 # How long a test waits for something that should happen at once. Only reached
 # when the behaviour under test is broken.
@@ -172,9 +179,137 @@ def _event_bus_dispatch(cancelled: bool) -> _Loop:
     )
 
 
+def _subtask(task: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=uuid4(),
+        task=task,
+        frame_type=None,
+        timeout_seconds=60,
+        model=None,
+        notify=False,
+        parent_session_id=None,
+        dag_node_id=None,
+        metadata_=None,
+        agent_id="test",
+        output_format=None,
+        success_criteria=None,
+        payload_schema=None,
+    )
+
+
+class _Subtasks:
+    """Stands in for heart.subtasks: hands out the subtasks it was given, then nothing."""
+
+    def __init__(self, pending: list[SimpleNamespace], went_on: asyncio.Event, cancel_a_dequeue: bool) -> None:
+        self._pending = list(pending)
+        self._last = pending[-1].id
+        self._went_on = went_on
+        self._cancel_a_dequeue = _Once(cancel_a_dequeue)
+        # (subtask id, status, final_outcome, error), in the order the rows were written
+        self.settled: list[tuple[Any, str, Any, str | None]] = []
+
+    async def reclaim_stale(self) -> int:
+        return 0
+
+    async def dequeue(self, worker_id: str) -> SimpleNamespace | None:
+        if self._cancel_a_dequeue():
+            await _cancelled_from_within()
+        return self._pending.pop(0) if self._pending else None
+
+    async def complete(self, subtask_id: Any, result: str, **outcome: Any) -> None:
+        self._settle(subtask_id, "completed", outcome, None)
+
+    async def fail(self, subtask_id: Any, error: str, **outcome: Any) -> None:
+        self._settle(subtask_id, "failed", outcome, error)
+
+    def _settle(self, subtask_id: Any, status: str, outcome: dict, error: str | None) -> None:
+        self.settled.append((subtask_id, status, outcome.get("final_outcome"), error))
+        if subtask_id == self._last:
+            self._went_on.set()
+
+
+class _Turns:
+    """Stands in for the AgentRunner: the turn of the subtask named "cancelled" is cancelled from within."""
+
+    def __init__(self) -> None:
+        self.ended: list[str] = []
+
+    async def run_turn(self, *, user_message: str, **_: Any) -> tuple[str, None, dict]:
+        if user_message == "cancelled":
+            await _cancelled_from_within()
+        return "done", None, {}
+
+    async def end_conversation(self, session_id: str, **_: Any) -> None:
+        self.ended.append(session_id)
+
+
+class _TurnThatNeverEnds(_Turns):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+
+    async def run_turn(self, **_: Any) -> None:
+        self.started.set()
+        await asyncio.Event().wait()
+
+
+def _worker_settings(hardened: bool = False, poll: float = TICK) -> Settings:
+    return Settings.model_construct(
+        subtask_workers=1,
+        subtask_poll_interval=poll,
+        subtask_default_timeout=60,
+        subtask_hardening_enabled=hardened,
+        subtask_max_attempts=1,
+        subtask_cleanup_timeout_seconds=5,
+        agent_id="test",
+        telegram_bot_token=None,
+        telegram_chat_id=None,
+    )
+
+
+def _worker_pool(name: str, cancelled: bool, *, in_its_dequeue: bool = False, hardened: bool = False) -> _Loop:
+    went_on = asyncio.Event()
+    in_its_turn = cancelled and not in_its_dequeue
+    pending = ([_subtask("cancelled")] if in_its_turn else []) + [_subtask("next")]
+    subtasks = _Subtasks(pending, went_on, cancel_a_dequeue=cancelled and in_its_dequeue)
+    turns = _Turns()
+    pool = SubtaskWorkerPool(
+        runner=turns, heart=SimpleNamespace(subtasks=subtasks), settings=_worker_settings(hardened)
+    )
+    if in_its_dequeue:
+        says = "cancelled from within"
+    else:
+        says = f"Subtask {pending[0].id.hex[:8]} " + ("hardened-path errored" if hardened else "failed")
+    return _Loop(
+        name,
+        pool.start,
+        pool.stop,
+        lambda: list(pool._workers),
+        went_on,
+        "nous.handlers.subtask_worker",
+        says,
+        {"subtasks": subtasks, "turns": turns, "pending": pending},
+    )
+
+
+def _subtask_worker_turn(cancelled: bool) -> _Loop:
+    return _worker_pool("subtask worker (its turn)", cancelled)
+
+
+def _subtask_worker_hardened_turn(cancelled: bool) -> _Loop:
+    return _worker_pool("subtask worker (its hardened turn)", cancelled, hardened=True)
+
+
+def _subtask_worker_dequeue(cancelled: bool) -> _Loop:
+    return _worker_pool("subtask worker (its dequeue)", cancelled, in_its_dequeue=True)
+
+
 LOOPS = [
     _event_bus,
     _event_bus_dispatch,
+    _subtask_worker_turn,
+    _subtask_worker_hardened_turn,
+    _subtask_worker_dequeue,
 ]
 every_loop = pytest.mark.parametrize(
     "build", LOOPS, ids=[build.__name__.strip("_").replace("_", " ") for build in LOOPS]
@@ -421,3 +556,114 @@ def test_stopping_the_event_bus_drains_past_a_handler_cancelled_from_within():
     # The handler cancelled from within failed. The one stop() itself cancelled did not.
     assert errors.get(handler_cancelled_from_within.__qualname__) == 1, errors
     assert not errors.get(keeps_the_loop_busy.__qualname__), errors
+
+
+# ---------------------------------------------------------------------------
+# The subtask worker: the subtask it had claimed
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("build", "the_following_ends_as"),
+    [
+        (_subtask_worker_turn, ("completed", "completed")),
+        (_subtask_worker_hardened_turn, ("failed", "incomplete_no_terminal")),
+    ],
+    ids=["legacy path", "hardened path"],
+)
+def test_a_subtask_whose_turn_was_cancelled_from_within_is_failed_not_left_running(build, the_following_ends_as):
+    loop = build(cancelled=True)
+    subtasks, turns = loop.parts["subtasks"], loop.parts["turns"]
+    cancelled, following = loop.parts["pending"]
+
+    async def scenario() -> None:
+        await loop.start()
+        try:
+            await _expect(loop.went_on, "the worker never ran the subtask that followed")
+        finally:
+            await _stop(loop)
+
+    _run(scenario)
+
+    assert [row[:3] for row in subtasks.settled] == [
+        (cancelled.id, "failed", "errored"),
+        (following.id, *the_following_ends_as),
+    ]
+    assert subtasks.settled[0][3] == "CancelledError: a call inside the turn was cancelled; the worker was not stopped"
+    assert turns.ended == [f"subtask-{cancelled.id.hex[:8]}", f"subtask-{following.id.hex[:8]}"]
+
+
+def test_a_worker_cancelled_from_within_again_and_again_waits_between_its_tries():
+    tries = 0
+
+    class _NeverAnswers:
+        async def reclaim_stale(self) -> int:
+            return 0
+
+        async def dequeue(self, worker_id: str) -> None:
+            nonlocal tries
+            tries += 1
+            await asyncio.sleep(0)  # a real query gives the event loop a turn before it fails
+            await _cancelled_from_within()
+
+    pool = SubtaskWorkerPool(
+        runner=_Turns(), heart=SimpleNamespace(subtasks=_NeverAnswers()), settings=_worker_settings(poll=0.05)
+    )
+
+    async def scenario() -> None:
+        await pool.start()
+        await asyncio.sleep(0.5)
+        await asyncio.wait_for(pool.stop(), WAIT)
+
+    _run(scenario)
+
+    # One try per poll interval: about ten in half a second, not one and not thousands.
+    assert 2 <= tries < 50, tries
+
+
+BOTH_PATHS = pytest.mark.parametrize("hardened", [False, True], ids=["legacy path", "hardened path"])
+
+
+@BOTH_PATHS
+def test_stopping_the_pool_mid_turn_leaves_the_subtask_for_the_next_start(hardened):
+    """Parity pin: green before this change too. A worker stopped mid-turn
+    does not fail its subtask: the row stays as it is and the next start
+    reclaims it."""
+    turns = _TurnThatNeverEnds()
+    subtasks = _Subtasks([_subtask("never ends")], asyncio.Event(), cancel_a_dequeue=False)
+    pool = SubtaskWorkerPool(
+        runner=turns, heart=SimpleNamespace(subtasks=subtasks), settings=_worker_settings(hardened)
+    )
+
+    async def scenario() -> None:
+        await pool.start()
+        await _expect(turns.started, "the worker never started the turn")
+        await asyncio.wait_for(pool.stop(), WAIT)
+
+    _run(scenario)
+
+    assert subtasks.settled == []
+
+
+@BOTH_PATHS
+def test_a_turn_that_runs_out_of_time_is_still_recorded_as_timed_out(hardened):
+    """Parity pin: green before this change too. The timeout cancels the turn
+    through the worker's own task, which is not a cancellation from within."""
+    slow = _subtask("never ends")
+    slow.timeout_seconds = 0.05
+    went_on = asyncio.Event()
+    subtasks = _Subtasks([slow], went_on, cancel_a_dequeue=False)
+    pool = SubtaskWorkerPool(
+        runner=_TurnThatNeverEnds(), heart=SimpleNamespace(subtasks=subtasks), settings=_worker_settings(hardened)
+    )
+
+    async def scenario() -> None:
+        await pool.start()
+        try:
+            await _expect(went_on, "the subtask that ran out of time was never settled")
+        finally:
+            await asyncio.wait_for(pool.stop(), WAIT)
+
+    _run(scenario)
+
+    assert [row[:3] for row in subtasks.settled] == [(slow.id, "failed", "timed_out")]
