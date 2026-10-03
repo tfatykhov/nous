@@ -85,9 +85,9 @@ async def kill_process_group(proc: asyncio.subprocess.Process, *, even_if_exited
     Two ways remain in which that kill reaches a newer group, and both need
     the pid counter to come round to the number: a new group leader is given
     it between the probe and the kill, which are two consecutive system
-    calls; or a newer group lives on after its leader has exited. Closing
-    them needs a handle the kernel cannot give out again, such as a shell
-    that is not reaped until its group has been killed.
+    calls; or a newer group lives on after its leader has exited and been
+    collected. Closing them needs a handle the kernel cannot give out again,
+    such as a shell that is not reaped until its group has been killed.
     """
     if proc.returncode is not None and not even_if_exited:
         return
