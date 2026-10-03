@@ -3456,12 +3456,15 @@ class DAGOrchestrator:
         try:
             try:
                 await create_check()
-            except IntegrityError:
-                # The name is taken. Replace the check only when an earlier
-                # launch of this node created it (a launch that could not be
-                # recorded, or the attempt before a retry): a new attempt gets a
-                # new check. One this node did not create, the agent's or another
-                # DAG's, is left alone, and the node fails on its name.
+            except (IntegrityError, DynamicCheckLimitReached):
+                # The name is taken, or the pool is full; either can be the
+                # check an earlier launch of this node created (a launch that
+                # could not be recorded, or the attempt before a retry), which
+                # still holds a slot when it could not be disabled. Replace
+                # that one only: a new attempt gets a new check, in the slot
+                # the old one frees. One this node did not create, the agent's
+                # or another DAG's, is left alone: the node fails on its name,
+                # or waits for the pool, as before.
                 metadata = await self._dynamic_loader.check_metadata(check_name)
                 if metadata.get(_CHECK_OWNER_KEY) != str(node.id):
                     raise

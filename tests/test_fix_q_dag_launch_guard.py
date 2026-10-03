@@ -622,3 +622,40 @@ async def test_a_check_of_the_nodes_name_that_it_did_not_create_is_left_alone(db
     assert "duplicate key value violates unique constraint" in node.error
     assert await _checks(parts) == before  # the same row, still enabled
     assert parts.loader._registry.get_check(name) is registered  # and still registered
+
+
+# ---------------------------------------------------------------------------
+# A leftover check that still holds a slot of the check pool
+# ---------------------------------------------------------------------------
+
+
+async def test_a_leftover_check_that_holds_the_last_slot_is_replaced(parts, monkeypatch):
+    """The pool has one slot, and the check the first launch could not disable
+    still holds it. The relaunch replaces that check, which frees its slot,
+    instead of waiting for a slot until the deferral cap fails the node."""
+    monkeypatch.setattr(parts.loader, "_max_checks", 1)
+    dag = await _one_node_dag(parts, DAGNodeType.check)
+    name = f"dag-{dag.id.hex[:8]}-work"
+    _fail_running_write(parts.store, _lock_timeout())
+    real_manage = parts.loader.manage_check
+
+    async def disable_fails(action, name=None, **kwargs):
+        if action == "disable":
+            raise _lock_timeout()
+        return await real_manage(action, name, **kwargs)
+
+    parts.loader.manage_check = disable_fails
+
+    await parts.orch.start_dag(dag.id)
+
+    assert (await _node(parts, dag.id)).status == "pending"
+    assert [(c["name"], c["enabled"]) for c in await _checks(parts)] == [(name, True)]  # it holds the slot
+    leftover = parts.loader._registry.get_check(name).check_id
+
+    await parts.orch.tick()
+
+    node = await _node(parts, dag.id)
+    assert (node.status, node.check_name) == ("running", name)
+    assert [(c["name"], c["enabled"]) for c in await _checks(parts)] == [(name, True)]
+    assert parts.loader._registry.get_check(name).check_id != leftover  # replaced, so only one of them runs
+    assert parts.orch._defer_counts == {}
