@@ -118,6 +118,8 @@ class IntentClassifier:
         r"|howdy|greetings|what'?s up)\b",
         re.IGNORECASE,
     )
+    # Every greeting at the start of a turn, with the non-word characters after each.
+    _GREETING_RUN = re.compile(r"(?:" + _GREETING_PATTERNS.pattern.removeprefix("^") + r"\W*)+", re.IGNORECASE)
 
     # F18: Extended question starters with did|will|would|could|has|have|was|were|might
     _QUESTION_STARTERS = re.compile(
@@ -138,10 +140,7 @@ class IntentClassifier:
             # is a greeting only if that carries no request. Either way it is
             # classified, and planned, on what follows -- its own signals and
             # text -- so a greeting never changes how a request is planned.
-            rest_text = stripped
-            while greeting:  # "hi hey, ...": every leading greeting
-                rest_text = re.sub(r"^\W+", "", rest_text[greeting.end():])
-                greeting = self._GREETING_PATTERNS.match(rest_text)
+            rest_text = stripped[self._GREETING_RUN.match(stripped).end():]  # "hi hey, ...": every greeting
             rest = self.classify(rest_text, frame)
             rest.is_greeting = _is_short_input(rest)
             rest.text = rest_text

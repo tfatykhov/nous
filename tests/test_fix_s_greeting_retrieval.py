@@ -10,6 +10,7 @@ decisions, facts, procedures or episodes. Every test string here is made up.
 
 from __future__ import annotations
 
+import time
 import uuid
 
 import pytest
@@ -66,13 +67,33 @@ def test_a_greeting_and_a_request_are_planned_as_the_request_alone(text, what_fo
 
 
 def test_a_long_run_of_greetings_is_passed_over_without_recursion():
-    """Every leading greeting is stripped in one loop, so a message of thousands
-    of greetings does not reach the interpreter's recursion limit."""
+    """Every leading greeting is stripped at once, so a message of thousands of
+    greetings does not reach the interpreter's recursion limit."""
     signals, plan = _classify_and_plan("hi " * 2000 + "can u check redis")
     _, alone = _classify_and_plan("can u check redis")
 
     assert signals.is_greeting is False
     assert plan == alone
+
+
+def test_a_long_run_of_greetings_is_stripped_in_linear_time():
+    """One pass over the input: classifying a run of greetings costs no more
+    than classifying the same text with the greeting rule off. Stripping one
+    greeting at a time copied the rest of the input each time."""
+    text = "hi " * 128_000 + "what did we decide?"
+    frame = FrameSelection(frame_id="conversation", frame_name="Conversation", confidence=0.9, match_method="pattern")
+    on = IntentClassifier(Settings(_env_file=None))
+    off = IntentClassifier(Settings(_env_file=None, followup_greeting_request_detection_enabled=False))
+
+    def fastest_of_three(classifier: IntentClassifier) -> float:
+        times = []
+        for _ in range(3):
+            started = time.perf_counter()
+            classifier.classify(text, frame)
+            times.append(time.perf_counter() - started)
+        return min(times)
+
+    assert fastest_of_three(on) <= 2 * fastest_of_three(off) + 0.05
 
 
 @pytest.mark.parametrize(
