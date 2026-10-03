@@ -622,6 +622,15 @@ class Heart:
         How-to procedures by default; ``cards_only`` probes strategy cards."""
         return await self.procedures.find_similar_for_selection(query, limit, session, cards_only=cards_only)
 
+    async def procedure_similarities(
+        self,
+        query: str,
+        ids: list[UUID],
+        session: AsyncSession | None = None,
+    ) -> dict[UUID, float]:
+        """Cosine of each given procedure to ``query``: the probe's cosine, for given rows."""
+        return await self.procedures.similarities(query, ids, session)
+
     async def list_procedures(
         self,
         limit: int = 50,

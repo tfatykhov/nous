@@ -2229,6 +2229,20 @@ class ContextEngine:
                 if score > scores.get(n.id, -1.0):
                     scores[n.id] = score
 
+        # A card the graph rung offers is shown only if it is close to the turn:
+        # its cosine to the query at or above procedure_score_floor, the floor the
+        # cosine probe below holds its cards to. The graph link ranks the cards;
+        # the floor decides whether one may be shown at all. A card whose cosine
+        # is not known (no embedding, a zero-length one, no query, a failed read)
+        # is not shown.
+        card_floor = float(getattr(self._settings, "procedure_score_floor", 0.40) or 0.0)
+        card_cosines: dict = {}
+        if card_ids and query:
+            try:
+                card_cosines = await self._heart.procedure_similarities(query, list(card_ids), session=session)
+            except Exception as e:
+                logger.warning("StrategyCards: closeness of the graph rung's cards failed: %s", e)
+
         # Phase 2: rank by score, fetch bodies only for enough top candidates to
         # fill the slots (skip stale/inactive and continue down the ranked list).
         selected: list = []
@@ -2249,6 +2263,12 @@ class ContextEngine:
             if pid in card_ids and len(cards) >= card_slots:
                 if trace is not None:
                     trace.drop(pid, "procedure", SLICED_OFF, "strategy_card_cap")
+                continue
+            if pid in card_ids and not (card_cosines.get(pid) is not None and card_cosines[pid] >= card_floor):
+                # Its cosine is known already: a card under the floor is dropped
+                # before its body is fetched.
+                if trace is not None:
+                    trace.drop(pid, "procedure", FILTER_DROPPED, "strategy_card_floor")
                 continue
             if pid not in card_ids and len(selected) >= slots:
                 if trace is not None:
@@ -2272,10 +2292,17 @@ class ContextEngine:
             if is_strategy_card(detail):
                 # A card never takes a how-to slot: it goes to its own allowance
                 # or is dropped (always dropped while retrieval is off).
-                if len(cards) < card_slots:
+                # A card that did not come through the cards-only window was not
+                # measured, so it has no cosine and is not shown.
+                cosine = card_cosines.get(pid)
+                if len(cards) >= card_slots:
+                    if trace is not None:
+                        trace.drop(pid, "procedure", SLICED_OFF, "strategy_card_cap")
+                elif not (cosine is not None and cosine >= card_floor):
+                    if trace is not None:
+                        trace.drop(pid, "procedure", FILTER_DROPPED, "strategy_card_floor")
+                else:
                     cards.append(detail)
-                elif trace is not None:
-                    trace.drop(pid, "procedure", SLICED_OFF, "strategy_card_cap")
                 continue
             selected.append(detail)
 
