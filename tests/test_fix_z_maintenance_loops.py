@@ -112,7 +112,10 @@ def _run(scenario: Callable[[], Awaitable[None]], seconds: float = 4 * WAIT) -> 
     thread.start()
     thread.join(seconds)
     if thread.is_alive():
-        pytest.fail("the event loop could not shut down: a loop did not end when its task was cancelled")
+        pytest.fail(
+            f"the scenario had not finished after {seconds:.0f}s: "
+            "a loop that ignores its cancellation, or a machine too slow for this budget"
+        )
     if raised:
         raise raised[0]
 
