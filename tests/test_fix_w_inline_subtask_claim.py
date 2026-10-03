@@ -326,3 +326,81 @@ async def test_a_start_cancels_the_inline_subtasks_a_killed_process_left_running
     assert [line for line in said if "a previous process left running" in line] == [
         "Cancelled 2 inline subtasks a previous process left running"
     ], said
+
+
+# ---------------------------------------------------------------------------
+# A cancelled hardened inline call emits its outcome, as its other outcomes do
+# ---------------------------------------------------------------------------
+
+
+class _Bus:
+    """Stands in for the EventBus: keeps what is emitted."""
+
+    def __init__(self) -> None:
+        self.events: list = []
+
+    async def emit(self, event) -> None:
+        self.events.append(event)
+
+
+class _RetriedTurn(_Turn):
+    """The first attempt ends without a final report, after using tokens and
+    tools, so the hardened executor tries again; the second runs on."""
+
+    first_done = False
+
+    async def run_turn(self, **kwargs: object) -> tuple[str, None, dict]:
+        if not self.first_done:
+            self.first_done = True
+            return "no report", None, {"input_tokens": 11, "output_tokens": 7, "tool_calls": 3}
+        return await super().run_turn(**kwargs)
+
+
+async def test_a_cancelled_hardened_inline_call_emits_its_outcome(db):
+    """execute_hardened leaves a cancelled run's outcome event to its caller."""
+    heart = _heart(db)
+    bus = _Bus()
+    settings = _settings(hardened=True)
+    settings.subtask_max_attempts = 2
+    turn = _RetriedTurn(heart.subtasks, until=asyncio.Event())
+    tools = create_subtask_tools(heart, settings, runner=turn, bus=bus)
+
+    call = await _cancelled_inline_call(tools, turn)
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+    (row,) = await heart.subtasks.list(limit=10)
+    outcomes = [event.data for event in bus.events if event.type == "subtask_outcome"]
+    assert outcomes, "a cancelled hardened inline call emitted no outcome"
+    assert [(d["subtask_id"], d["final_outcome"], d["ok"]) for d in outcomes] == [(str(row.id), "cancelled", False)]
+    (data,) = outcomes
+    assert data["validator_reason"] == "Inline call cancelled"
+    assert (data["attempts"], data["tokens_in"], data["tokens_out"], data["tool_calls_made"]) == (2, 11, 7, 3)
+
+
+@pytest.mark.parametrize("how", ["finished first", "close failed"])
+async def test_a_cancelled_inline_call_emits_no_outcome_its_row_does_not_have(db, how):
+    """Parity pin: green before this change too. A cancellation whose close
+    changed nothing (the row already had its outcome, or the write failed)
+    must not emit a 'cancelled' that contradicts the row."""
+    heart = _heart(db)
+    bus = _Bus()
+    turn = _Turn(heart.subtasks, until=asyncio.Event())
+    tools = create_subtask_tools(heart, _settings(hardened=True), runner=turn, bus=bus)
+    if how == "close failed":
+
+        async def broken_cancel(subtask_id):
+            raise RuntimeError("database gone")
+
+        heart.subtasks.cancel = broken_cancel
+
+    call = asyncio.create_task(tools["spawn_task"](task="inline work", await_result=True, _session_id="parent"))
+    await _expect(turn.started, "the inline turn never started")
+    if how == "finished first":
+        (row,) = await heart.subtasks.list(limit=10)
+        await heart.subtasks.complete(row.id, "done", final_outcome="completed")
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+    assert [event.data for event in bus.events if event.type == "subtask_outcome"] == []

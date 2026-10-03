@@ -2923,20 +2923,22 @@ async def _persist_and_emit_inline_outcome(
         )
 
 
-async def _close_cancelled_inline_subtask(heart: Heart, subtask_id: UUID) -> None:
+async def _close_cancelled_inline_subtask(heart: Heart, subtask_id: UUID) -> bool:
     """The call that was running this subtask inline was cancelled: cancel the row.
 
     The row was claimed for that call when it was created, so no worker will
     run or close it. The write is shielded, so a second cancellation of the
     caller cannot interrupt it, and a failed write is logged rather than
-    raised, so the cancellation itself always gets through.
+    raised, so the cancellation itself always gets through. Returns whether
+    this write closed the row (not when the row already had its outcome).
     """
     import asyncio
 
     try:
-        await asyncio.shield(heart.subtasks.cancel(subtask_id))
+        return await asyncio.shield(heart.subtasks.cancel(subtask_id))
     except Exception:
         logger.warning("Could not mark inline subtask %s cancelled", subtask_id.hex[:8], exc_info=True)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -3123,6 +3125,7 @@ def create_subtask_tools(
                     emit_outcome_event,
                     execute_hardened,
                 )
+                from nous.heart.subtask_validator import ValidationResult
 
                 # F061 PR-3: pass an emit_event callback so inline subtasks
                 # also produce subtask_outcome telemetry. ``bus`` is captured
@@ -3172,7 +3175,18 @@ def create_subtask_tools(
                 except _asyncio.CancelledError:
                     # This call was cancelled (its turn, or the dispatcher's
                     # tool timeout): close the row it claimed, or nothing will.
-                    await _close_cancelled_inline_subtask(heart, subtask.id)
+                    # execute_hardened leaves the outcome event to this caller
+                    # too; emitted only when this close set the row's outcome.
+                    if await _close_cancelled_inline_subtask(heart, subtask.id) and _outcome_emitter is not None:
+                        await _outcome_emitter(
+                            subtask,
+                            ValidationResult.failed("cancelled", "Inline call cancelled"),
+                            None,
+                            attempts=state.attempts,
+                            tokens_in=state.tokens_in,
+                            tokens_out=state.tokens_out,
+                            tool_calls_made=state.tool_calls_made,
+                        )
                     raise
                 except TimeoutError:
                     if not executed:
