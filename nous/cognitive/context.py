@@ -2161,9 +2161,9 @@ class ContextEngine:
         full body and drop inactive/superseded skills. Active ``ProcedureDetail``.
 
         Strategy cards (Reasoning Maps L1) never take one of ``slots``: the how-to
-        ladder skips them, and at most ``card_slots`` of the cards met on the graph
-        rung (0 unless strategy-card retrieval is on) are appended AFTER the how-to
-        procedures.
+        ladder skips them, and at most ``card_slots`` of them (0 unless strategy-card
+        retrieval is on) are appended AFTER the how-to procedures — the cards met on
+        the graph rung first, then the cards nearest ``query``.
         """
         # Top-N seeds by recall score keep the per-turn graph fan-out bounded.
         _SEED_CAP = 8
@@ -2343,6 +2343,36 @@ class ContextEngine:
                                   score=summ.score)
                     selected.append(detail)
                     have.add(detail.id)
+
+        # Strategy cards: what the graph rung left of their allowance is topped up
+        # with the cards nearest the query. A second, cards-only probe, so cards
+        # and how-to procedures never compete for one LIMIT window.
+        if len(cards) < card_slots and query:
+            have = {getattr(d, "id", None) for d in cards}
+            try:
+                near = await self._heart.find_similar_procedures(
+                    query, limit=card_slots, session=session, cards_only=True,
+                )
+            except Exception as e:
+                logger.warning("Strategy-card cosine probe failed: %s", e)
+                near = []
+            floor = float(
+                getattr(self._settings, "procedure_score_floor", 0.40) or 0.0
+            )
+            for summ in near:
+                if len(cards) >= card_slots:
+                    break
+                if summ.id in have or not (summ.score is not None and summ.score >= floor):
+                    continue
+                try:
+                    detail = await self._heart.get_procedure(summ.id, session=session)
+                except Exception:
+                    continue
+                if detail is not None and getattr(detail, "active", False):
+                    if trace is not None:
+                        trace.add(detail.id, "procedure", "context_strategy_cards_cosine",
+                                  score=summ.score)
+                    cards.append(detail)
         if cards:
             logger.debug("StrategyCards: served=%d (cap=%d)", len(cards), card_slots)
         return selected[:slots] + cards
