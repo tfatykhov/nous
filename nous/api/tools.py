@@ -4118,10 +4118,11 @@ def _kill_script_processes(procs: list[Any]) -> list[int]:
                 proc.send_signal(signal.SIGSTOP)
             except OSError:
                 continue  # not ours to signal
-    below: list[int] = []
+    below: list[int] = []  # what the looks found and stopped: only these are killed
+    seen: list[int] = []
     for _ in range(8):
         try:
-            found = [pid for pid in _descendants([proc.pid for proc in running]) if pid not in below]
+            found = [pid for pid in _descendants([proc.pid for proc in running]) if pid not in seen]
         except Exception:
             # The script's processes are stopped by now. A look that fails
             # ends the looking, and what was found is killed, rather than left
@@ -4134,8 +4135,9 @@ def _kill_script_processes(procs: list[Any]) -> list[int]:
             try:
                 os.kill(pid, signal.SIGSTOP)
             except OSError:
-                continue  # it has ended, or is not ours to signal
-        below += found
+                continue  # not ours to signal, or it has ended and by the kill its pid may be another's
+            below.append(pid)
+        seen += found
     killed: list[int] = []
     for proc in running:
         try:

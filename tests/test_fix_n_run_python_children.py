@@ -592,3 +592,34 @@ def test_a_look_that_fails_still_kills_what_was_stopped(monkeypatch, caplog):
     finally:
         running.kill()
         running.wait()
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGSTOP"), reason="needs POSIX signals")
+def test_a_process_that_ended_before_its_stop_is_not_killed(monkeypatch):
+    """A process a look found that had ended before it could be stopped is not
+    signalled again: by the kill its pid can be another process's. Here that
+    other process is `bystander`, which the script never started."""
+    running = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    real_kill, looks = os.kill, []
+
+    def kill(pid, sig):
+        if pid == bystander.pid and sig == signal.SIGSTOP:
+            raise ProcessLookupError(pid)  # what the look found had ended; its pid is taken again below
+        real_kill(pid, sig)
+
+    def look(pids):
+        looks.append(pids)
+        return [bystander.pid]
+
+    monkeypatch.setattr(T, "_descendants", look)
+    monkeypatch.setattr(T.os, "kill", kill)
+    try:
+        assert T._kill_script_processes([running]) == [running.pid]
+        with pytest.raises(subprocess.TimeoutExpired):
+            bystander.wait(timeout=0.5)  # a bystander that was killed ends at once
+        assert len(looks) == 2, "a pid that could not be stopped was looked for as new again"
+    finally:
+        for proc in (running, bystander):
+            proc.kill()
+            proc.wait()
