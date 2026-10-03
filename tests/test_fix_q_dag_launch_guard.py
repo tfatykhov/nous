@@ -691,3 +691,16 @@ async def test_a_real_lost_connection_without_a_sqlstate_leaves_the_node_launcha
 
     assert (await _node(parts, dag.id)).status == "pending"
     assert await _subtask_statuses(parts) == ["cancelled"]
+
+
+async def test_the_record_of_a_checks_node_is_read_for_this_agent_only(db, parts):
+    """Agents that share the database each have their own checks, and both can
+    hold the same name: the record a launch reads is its own agent's."""
+    name = f"dag-{uuid.uuid4().hex[:8]}-work"
+    other = DynamicCheckLoader(db=db, registry=CheckRegistry(), agent_id=f"{parts.loader._agent_id}-other")
+    await other.create_check(
+        name=name, description="d", prompt="p", interval_seconds=300, metadata={"dag_node_id": _FOREIGN_NODE}
+    )
+
+    assert await other.check_metadata(name) == {"dag_node_id": _FOREIGN_NODE}
+    assert await parts.loader.check_metadata(name) == {}
