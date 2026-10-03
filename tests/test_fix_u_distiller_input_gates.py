@@ -19,16 +19,19 @@ double is the model.
 from __future__ import annotations
 
 import uuid
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
 from test_fix_e_strategy_card_distiller import LLM, _card, _cards, _Rig, _state
 
 from nous.brain.brain import Brain
+from nous.cognitive.context import ContextEngine
 from nous.cognitive.deliberation import DeliberationEngine
 from nous.cognitive.layer import CognitiveLayer
 from nous.cognitive.schemas import FrameSelection, TurnResult
+from nous.config import Settings
 from nous.storage.models import Decision
 
 _LOG = "nous.handlers.strategy_card_distiller"
@@ -229,3 +232,105 @@ async def test_the_cognitive_layer_cuts_a_decision_where_the_gate_looks_for_the_
     assert finalized.description == _REPLY[:DESCRIPTION_CAPTURE_CHARS]
     assert description_was_cut_by_capture(planned.description, planned.reasons)
     assert description_was_cut_by_capture(finalized.description, finalized.reasons)
+
+
+# ---------------------------------------------------------------------------
+# Tool-call markup the model leaks into a field of the card is not stored
+# ---------------------------------------------------------------------------
+
+
+class _Model:
+    """A client that answers every call with one tool call carrying ``tool_input``."""
+
+    def __init__(self, tool_input: dict) -> None:
+        self.tool_input = tool_input
+
+    async def call(self, payload: dict) -> SimpleNamespace:
+        name = payload["tool_choice"]["name"]
+        return SimpleNamespace(content=[{"type": "tool_use", "name": name, "input": self.tool_input}])
+
+
+_LESSON = "When a release can be switched back in one step, ship it that way: recovery is fast."
+
+
+async def _distilled(rig, tool_input: dict) -> list:
+    """The cards the distiller stores for one reviewed decision when the model answers with ``tool_input``."""
+    # The rig wires a placeholder client; these tests need the model's own tool call.
+    rig.distiller._llm = _Model(tool_input)
+    decision = await rig.record()
+    await rig.brain.review(decision.id, outcome="success", result="zero downtime", reviewer="agent")
+    await rig.settle()
+    return await _cards(rig)
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_markup_leaked_into_the_lesson_is_neither_stored_nor_rendered(rig, caplog):
+    """The model ended the lesson with its own closing tag and then wrote the tags
+    argument as tool-call markup inside the lesson string; the call has no tags.
+    The card keeps the lesson's own text, its rendered block carries none of that
+    markup, and the log says that markup was cut (the lesson is stored in a
+    Postgres array, which the SQLite lane hands back as text: Postgres lane)."""
+    with caplog.at_level("WARNING", logger=_LOG):
+        (card,) = await _distilled(
+            rig,
+            {
+                "name": "Prefer reversible rollouts",
+                "description": "Reversible rollouts keep an outage short",
+                "lesson": _LESSON + '</lesson> <parameter name="tags">["deploy", "rollback"]',
+            },
+        )
+
+    assert card.implementation_notes == [_LESSON]
+    assert "cut leaked tool-call markup" in caplog.text
+    detail = await rig.heart.get_procedure(card.id)
+    engine = ContextEngine(MagicMock(), MagicMock(), Settings(_env_file=None), identity_prompt="Test")
+    (block,) = engine._format_procedure_bodies([detail], 8000)
+    assert _LESSON in block
+    assert "<parameter" not in block and "</lesson>" not in block
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("lesson", "tags"),
+    [
+        (
+            'When a tool takes a row limit, write it as <parameter name="limit"> with a number,'
+            " never a word: the call then fails before it runs.",
+            None,
+        ),
+        (
+            'When a card needs labels, the model writes them as <parameter name="tags"> and a JSON'
+            " list, never inside the lesson.",
+            ["labels"],
+        ),
+        ('A leaked argument looks like <parameter name="tags">["a"]</parameter>', None),
+        (
+            'Write the labels as <parameter name="tags">["a"]</parameter>, and a row limit as'
+            ' <parameter name="limit"> with a number.',
+            None,
+        ),
+    ],
+    ids=[
+        "a-tag-the-card-does-not-have",
+        "a-card-argument-the-call-has",
+        "a-complete-tag-at-the-end",
+        "a-card-tag-before-the-end",
+    ],
+)
+async def test_a_lesson_that_mentions_the_markup_keeps_it(rig, caplog, lesson, tags):
+    """Only a tag that names an argument of the card the call left out is a slip
+    into the tool-call syntax, and only a tag in the run that ends the string
+    counts. A lesson that mentions an unclosed tag in its last sentence, one that
+    names something else or an argument the call has, or that quotes a complete
+    tag, is stored as the model wrote it."""
+    tool_input = {"name": "Write tool arguments as values", "description": "Arguments are values", "lesson": lesson}
+    if tags is not None:
+        tool_input["tags"] = tags
+
+    with caplog.at_level("WARNING", logger=_LOG):
+        (card,) = await _distilled(rig, tool_input)
+
+    assert card.implementation_notes == [lesson]
+    assert "leaked tool-call markup" not in caplog.text

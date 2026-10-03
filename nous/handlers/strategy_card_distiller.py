@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -31,6 +32,7 @@ from nous.cognitive.deliberation import description_was_cut_by_capture
 from nous.handlers import LLMClient, call_background_llm_structured
 from nous.handlers.decision_reviewer import AUTO_REVIEWER
 from nous.heart.schemas import STRATEGY_CARD_KIND, ProcedureInput
+from nous.utils import leaked_markup_start
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +96,29 @@ _CARD_SCHEMA: dict[str, Any] = {
     },
     "required": ["name", "description", "lesson"],
 }
+
+# The model can leave JSON for its tool-call markup inside a string: one card's
+# lesson ended with '.</lesson> <parameter name="tags">[...]', and the call had
+# no tags. A field's trailing run of that markup is cut only when a tag in it
+# names an argument of the card that the call does not have, the evidence the
+# tool dispatcher's salvage of leaked arguments uses too. A field that only
+# mentions such markup keeps it, and the leaked value itself is not used.
+_LEAKED_ARGUMENT = re.compile(r'<parameter\s+name="([^"]+)">')
+
+
+def _cut_leaked_arguments(card: dict[str, Any]) -> dict[str, Any]:
+    """``card`` with each string field cut where the model wrote another of the
+    card's arguments into it as tool-call markup (see the note above)."""
+    missing = set(_CARD_SCHEMA["properties"]) - set(card)
+    cut = dict(card)
+    for key, value in card.items():
+        if not isinstance(value, str):
+            continue
+        start = leaked_markup_start(value)
+        if start is not None and missing.intersection(_LEAKED_ARGUMENT.findall(value, start)):
+            cut[key] = value[:start]
+    return cut
+
 
 _SYSTEM_PROMPT = (
     "You extract concise strategy cards from decision outcomes.\n\n"
@@ -312,6 +337,12 @@ class StrategyCardDistiller:
                 decision_id,
             )
             return
+        cut = _cut_leaked_arguments(card)
+        if cut != card:
+            logger.warning(
+                "StrategyCardDistiller: cut leaked tool-call markup from the card of decision %s", decision_id
+            )
+            card = cut
 
         # Every stored field is one line. The name becomes a prompt heading and is
         # no longer than the schema promises; a line break in the description or the

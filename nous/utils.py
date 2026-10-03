@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import signal
 
 logger = logging.getLogger(__name__)
@@ -113,3 +114,61 @@ async def kill_process_group(proc: asyncio.subprocess.Process, *, even_if_exited
             proc.pid,
             _KILL_WAIT_SECONDS,
         )
+
+
+# Trailing run of leaked XML tool syntax inside a JSON string arg. The model
+# can slip from JSON tool-input into Claude's internal XML tool-call format
+# mid-string (observed in prod 2026-07-13: record_decision's description
+# string ended with '</description>\n<parameter name="confidence">0.55', so
+# the parsed input had no top-level confidence key). Anchored to end-of-string
+# so legitimate XML/HTML quoted mid-string is never touched.
+#
+# The run must END in an UNTERMINATED <parameter> tag. That is the actual
+# evidence of a syntax transition: the model stopped emitting JSON and never
+# closed what it started. A well-formed '<parameter name="x">v</parameter>' at
+# the end of a string is far more likely to be prose QUOTING the format --
+# a decision describing this very bug would otherwise have its text truncated
+# and a value invented from the example. When the evidence is ambiguous we do
+# not guess: salvage declines, and the missing-arg error tells the model to
+# re-emit. Being told beats being silently repaired from a quotation.
+# Located by a backward walk rather than one combined pattern. A single regex
+# has to lead with `\s*`, which forces the engine to retry that greedy run at
+# every start position and rescan the suffix -- quadratic. Measured on the
+# combined form: 2k spaces 0.10s, 5k 0.62s, 10k 2.50s, 20k 10.78s, all inside
+# an async dispatcher, so one whitespace-heavy arg on a call that is missing a
+# required key stalls the shared event loop. Each pattern below is anchored at
+# `\Z` and led by a literal, so every non-matching start position is rejected
+# on its first character and the whole locator is linear.
+_XML_LEAK_FINAL = re.compile(r'<parameter\s+name="[^"]+">[^<]*\Z')
+_XML_LEAK_COMPLETE = re.compile(r'<parameter\s+name="[^"]+">[^<]*</parameter>\s*\Z')
+_XML_LEAK_CLOSER = re.compile(r"</\w+>\s*\Z")
+
+
+def leaked_markup_start(value: str) -> int | None:
+    """Index where the trailing XML-leak run begins, or None if there is none.
+
+    Walks right to left: the final UNTERMINATED tag (the syntax-transition
+    evidence -- see the note above), then any complete tags immediately before
+    it, then an optional closing tag, then preceding whitespace. Equivalent to
+    the old single-regex match, without its backtracking.
+    """
+    final = _XML_LEAK_FINAL.search(value)
+    if final is None:
+        return None
+    start = final.start()
+    # Step to each preceding tag via rfind rather than re-searching the whole
+    # prefix. `search(value, 0, start)` rescans from offset zero on every
+    # iteration, which is quadratic in the tag count -- measured on that form:
+    # 500 tags 0.015s, 1000 0.067s, 2500 0.40s, 5000 (202 KB) 1.67s. rfind
+    # walks backward over each gap exactly once, so the whole loop is linear.
+    # ("</parameter>" cannot false-match "<parameter" -- the slash is inside.)
+    while (cand := value.rfind("<parameter", 0, start)) != -1:
+        complete = _XML_LEAK_COMPLETE.match(value, cand, start)
+        if complete is None:
+            break
+        start = cand
+    if (closer := _XML_LEAK_CLOSER.search(value, 0, start)) is not None:
+        start = closer.start()
+    while start > 0 and value[start - 1].isspace():
+        start -= 1
+    return start
