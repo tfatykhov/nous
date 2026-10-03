@@ -28,7 +28,7 @@ from test_fix_e_strategy_card_distiller import LLM, _card, _cards, _Rig, _state
 
 from nous.brain.brain import Brain
 from nous.cognitive.context import ContextEngine
-from nous.cognitive.deliberation import DeliberationEngine
+from nous.cognitive.deliberation import DeliberationEngine, description_was_cut_by_capture
 from nous.cognitive.layer import CognitiveLayer
 from nous.cognitive.schemas import FrameSelection, TurnResult
 from nous.config import Settings
@@ -232,6 +232,36 @@ async def test_the_cognitive_layer_cuts_a_decision_where_the_gate_looks_for_the_
     assert finalized.description == _REPLY[:DESCRIPTION_CAPTURE_CHARS]
     assert description_was_cut_by_capture(planned.description, planned.reasons)
     assert description_was_cut_by_capture(finalized.description, finalized.reasons)
+
+
+# Written by DeliberationEngine.start() since 2026-02-22, so every captured row carries it.
+_STORED = "Frame 'Decision' triggered deliberation for: Should the nightly import move"
+
+
+@pytest.mark.parametrize(
+    ("description", "reason", "cut"),
+    [
+        ("x" * 500, _STORED, True),
+        ("Plan: " + "x" * 200, _STORED, True),
+        ("x" * 500, "The log read: " + _STORED, False),
+        ("x" * 500, "Frame 'Decision' was picked by the router", False),
+        ("Plan: " + "x" * 300, _STORED, False),
+        ("x" * 506, _STORED, False),
+    ],
+    ids=[
+        "a-reply-in-the-words-rows-carry",
+        "a-request-in-the-words-rows-carry",
+        "an-agent-reason-quoting-the-capture",
+        "a-reason-that-only-starts-like-it",
+        "a-request-the-capture-did-not-cut",
+        "a-request-length-without-the-prefix",
+    ],
+)
+def test_a_captured_row_is_recognised_by_its_stored_reason_and_length(description, reason, cut):
+    """The reason is matched in the words the capture has always written (rewording
+    it would leave every row already stored unrecognised), from its start; and only a
+    "Plan: " request cut at a cap counts, not every request."""
+    assert description_was_cut_by_capture(description, [SimpleNamespace(text=reason)]) is cut
 
 
 # ---------------------------------------------------------------------------
