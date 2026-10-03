@@ -1,0 +1,258 @@
+"""A run_python script's processes do not outlive a call that timed out.
+
+The deadline of a script is a trace hook, and a trace hook does not fire
+while the worker thread is inside a blocking C call. A script waiting for a
+process it had started therefore stayed where it was: the call returned as
+timed out, while the thread, the process and one run slot stayed until the
+process ended by itself.
+
+Everything here runs the real tool, real worker threads and real processes.
+A child is this interpreter running `_CHILD`: it sleeps, then writes a marker
+file. A marker that never appears is a process that was killed.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import re
+import shlex
+import signal
+import subprocess
+import sys
+import time
+from unittest.mock import AsyncMock
+
+import pytest
+import pytest_asyncio
+
+from nous.api import tools as T
+from nous.api.tools import create_programmatic_tools, run_python_active_runs
+from nous.config import Settings
+
+_CHILD = "import pathlib, sys, time; time.sleep(float(sys.argv[2])); pathlib.Path(sys.argv[1]).write_text('survived')"
+# A timed-out call returns about 3 s after it started: a 1 s deadline plus the
+# grace. A child that is left alone writes its marker after this many seconds.
+_NAP = 4.5
+_TIMED_OUT = "Error: execution timed out (1s)"
+
+
+def _run_python(heart=None, slots: int = 4):
+    settings = Settings(
+        programmatic_tools_enabled=True, programmatic_tools_timeout=1, programmatic_tools_max_concurrent=slots
+    )
+    return create_programmatic_tools(AsyncMock(), heart or AsyncMock(), settings)["run_python"]
+
+
+def _child(marker, nap: float = _NAP) -> str:
+    """Script source of the argv that starts one child."""
+    return repr([sys.executable, "-c", _CHILD, str(marker), str(nap)])
+
+
+async def _idle(limit: float = 3.0) -> bool:
+    """Wait until no script holds a run slot; False if one still does."""
+    end = time.monotonic() + limit
+    while run_python_active_runs() and time.monotonic() < end:
+        await asyncio.sleep(0.02)
+    return run_python_active_runs() == 0
+
+
+async def _after_the_nap(started: float) -> None:
+    """Wait until a child started at `started` and left alone would have written its marker."""
+    await asyncio.sleep(max(0.0, started + _NAP + 1.0 - time.monotonic()))
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def no_script_running():
+    assert await _idle(), "a script from another test is still running"
+    yield
+    assert await _idle(limit=_NAP + 3.0), "this test left a script running"
+
+
+async def test_a_process_the_script_was_waiting_for_is_killed(tmp_path, caplog):
+    marker = tmp_path / "survived"
+    started = time.monotonic()
+    with caplog.at_level(logging.WARNING, logger="nous.api.tools"):
+        result = await _run_python()(code=f"import subprocess\nsubprocess.run({_child(marker)})\n")
+
+    assert result["is_error"] is True
+    assert run_python_active_runs() == 0, "the timed-out script still holds its run slot"
+    assert result["content"][0]["text"] == _TIMED_OUT + "; killed 1 process(es) the script had started"
+    assert "killed 1 process(es) it had started" in caplog.text
+    await _after_the_nap(started)
+    assert not marker.exists(), "the process outlived the call that timed out"
+
+
+async def test_every_slot_is_free_again_after_scripts_that_timed_out(tmp_path):
+    run_python = _run_python(slots=2)
+    code = f"import subprocess\nsubprocess.run({_child(tmp_path / 'survived')})\n"
+
+    blocked = await asyncio.gather(run_python(code=code), run_python(code=code))
+    after = await run_python(code="result = 'ran'")
+
+    assert [r["is_error"] for r in blocked] == [True, True]
+    assert after == {"content": [{"type": "text", "text": "ran"}]}
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self"), reason="what a process started is read from Linux /proc")
+async def test_what_the_scripts_process_started_is_killed_with_it(tmp_path):
+    """A shell pipeline holds the pipe the script reads: with only the shell
+    killed, the worker would go on waiting for that pipe to close."""
+    marker = tmp_path / "survived"
+    command = f"(sleep {_NAP}; echo survived > {shlex.quote(str(marker))}) | cat"
+    started = time.monotonic()
+    result = await _run_python()(
+        code=f"import subprocess\nsubprocess.run({command!r}, shell=True, capture_output=True)\n"
+    )
+
+    assert run_python_active_runs() == 0, "the timed-out script still holds its run slot"
+    killed = re.search(r"killed (\d+) process", result["content"][0]["text"])
+    assert killed and int(killed.group(1)) > 1
+    await _after_the_nap(started)
+    assert not marker.exists(), "part of the pipeline outlived the call that timed out"
+
+
+async def test_a_process_the_script_did_not_wait_for_is_killed_when_the_deadline_stops_the_script(tmp_path):
+    marker = tmp_path / "survived"
+    started = time.monotonic()
+    result = await _run_python()(
+        code=f"import subprocess\np = subprocess.Popen({_child(marker)})\nwhile True:\n    pass\n"
+    )
+
+    await _after_the_nap(started)
+    assert not marker.exists(), "the process outlived the call that timed out"
+    assert result["content"][0]["text"] == _TIMED_OUT + "; killed 1 process(es) the script had started"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="on Windows `subprocess` does not keep a `Popen` its owner let go of")
+async def test_a_process_whose_popen_the_script_let_go_of_is_killed_all_the_same(tmp_path):
+    marker = tmp_path / "survived"
+    started = time.monotonic()
+    result = await _run_python()(code=f"import subprocess\nsubprocess.Popen({_child(marker)})\nwhile True:\n    pass\n")
+
+    await _after_the_nap(started)
+    assert not marker.exists(), "the process outlived the call that timed out"
+    assert result["content"][0]["text"] == _TIMED_OUT + "; killed 1 process(es) the script had started"
+
+
+async def test_a_popen_the_script_lets_go_of_is_released_as_it_was_before():
+    """The hook must not keep the object alive: with it would stay the pipes
+    the script left open and the entry of a process it never waited for."""
+    code = (
+        "import subprocess, sys, weakref\n"
+        "proc = subprocess.Popen([sys.executable, '-c', 'pass'])\n"
+        "proc.wait()\n"
+        "released = []\n"
+        "weakref.finalize(proc, released.append, True)\n"
+        "del proc\n"
+        "result = 'released' if released else 'still held'\n"
+    )
+
+    assert await _run_python()(code=code) == {"content": [{"type": "text", "text": "released"}]}
+
+
+async def test_the_hook_does_not_raise_for_something_that_is_not_a_popen():
+    """A trace hook that raises is removed, and with it the script's deadline."""
+    code = (
+        "import subprocess, time\n"
+        "try:\n"
+        "    subprocess.Popen.__init__(object(), ['true'])\n"  # no weak reference can point to an `object()`
+        "except AttributeError:\n"
+        "    pass\n"
+        "end = time.monotonic() + 6\n"
+        "while time.monotonic() < end:\n"
+        "    pass\n"
+    )
+    result = await _run_python()(code=code)
+
+    assert result["content"][0]["text"] == _TIMED_OUT
+
+
+async def test_what_never_started_and_what_the_script_let_go_of_are_not_looked_for():
+    code = (
+        "import subprocess, sys\n"
+        "try:\n"
+        "    subprocess.Popen(['true'], bufsize='not a number')\n"  # refused before anything is started
+        "except TypeError as refused:\n"
+        "    kept = refused\n"  # its traceback keeps the object that never got a process
+        "subprocess.Popen([sys.executable, '-c', 'pass']).wait()\n"  # ended, and nothing holds it any more
+        "while True:\n"
+        "    pass\n"
+    )
+    result = await _run_python()(code=code)
+
+    assert result["content"][0]["text"] == _TIMED_OUT
+
+
+async def test_a_popen_subclass_the_script_wrote_is_left_alone(tmp_path):
+    """The kill runs on the event loop, which never runs a script's code: the
+    `poll` and `kill` of a class the script wrote are not called there."""
+    code = (
+        "import subprocess\n"
+        "class Own(subprocess.Popen):\n"
+        "    def poll(self):\n"
+        "        raise ValueError('a poll of its own')\n"
+        "    def kill(self):\n"
+        "        raise ValueError('a kill of its own')\n"
+        f"Own({_child(tmp_path / 'survived', nap=4.0)}).wait()\n"
+    )
+    result = await _run_python()(code=code)
+
+    text = result["content"][0]["text"]
+    assert text.startswith(_TIMED_OUT) and "killed" not in text
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGKILL"), reason="needs POSIX signals")
+def test_a_process_that_may_not_be_signalled_is_skipped(monkeypatch):
+    running = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+
+    def refused(pid, sig):
+        raise PermissionError(pid)
+
+    monkeypatch.setattr(T, "_descendants", lambda pids: [])
+    monkeypatch.setattr(T.os, "kill", refused)  # what `Popen.kill` signals with
+
+    try:
+        assert T._kill_script_processes([running]) == []
+    finally:
+        monkeypatch.undo()
+        running.kill()
+        running.wait()
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGKILL"), reason="needs POSIX signals")
+def test_what_has_already_ended_is_not_signalled(monkeypatch):
+    ended = subprocess.Popen([sys.executable, "-c", "pass"])
+    ended.wait()
+    monkeypatch.setattr(T, "_descendants", lambda pids: [ended.pid])  # a pid nothing has any more
+    running = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+
+    try:
+        assert T._kill_script_processes([ended, running]) == [running.pid]
+        assert running.wait(timeout=5) == -signal.SIGKILL
+    finally:
+        running.kill()
+        running.wait()
+
+
+def test_where_there_is_no_proc_nothing_is_found(monkeypatch):
+    def no_proc(path):
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(T.os, "listdir", no_proc)
+
+    assert T._descendants([os.getpid()]) == []
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self"), reason="reads Linux /proc")
+def test_a_process_that_ends_during_the_scan_is_skipped(monkeypatch):
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    listed = os.listdir("/proc")
+    monkeypatch.setattr(T.os, "listdir", lambda path: [*listed, "4194999"])  # above pid_max: no such process
+
+    try:
+        assert child.pid in T._descendants([os.getpid()])
+    finally:
+        child.kill()
+        child.wait()
