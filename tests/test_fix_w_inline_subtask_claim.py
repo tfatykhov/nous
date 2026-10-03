@@ -130,9 +130,12 @@ async def test_the_worker_pool_does_not_run_an_inline_subtask_a_second_time(db, 
     class _InlineTurn(_Turn):
         async def run_turn(self, **kwargs: object) -> tuple[str, None, dict]:
             # Let the idle worker poll the queue a few times while this runs.
+            # Its polls go through the shared test database, which a loaded
+            # machine can stall for seconds: allow 30 s, which a passing run
+            # never comes near.
             seen = polls
             loop = asyncio.get_running_loop()
-            deadline = loop.time() + WAIT
+            deadline = loop.time() + 30
             while polls < seen + 3 and loop.time() < deadline:
                 await asyncio.sleep(0.01)
             return "done", None, {}

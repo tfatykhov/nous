@@ -396,6 +396,10 @@ class SubtaskManager:
         redeploy kills a turn instead of cancelling it. It ends as a cancelled
         inline call does and is never re-queued, so no worker runs it again.
         Run before reclaim_stale(), which would re-queue it once past its timeout.
+
+        Assumes one Nous process per (database, agent_id), as the execution
+        ledger does: a second process starting would cancel the first one's
+        running inline calls (no call runs twice either way).
         """
         async with self._db.session() as session:
             result = await session.execute(
