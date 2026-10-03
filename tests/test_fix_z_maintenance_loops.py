@@ -98,7 +98,7 @@ class _Loop:
         await main.shutdown_components({self.key: self.task})
 
 
-def _run(scenario: Callable[[], Awaitable[None]]) -> None:
+def _run(scenario: Callable[[], Awaitable[None]], seconds: float = 4 * WAIT) -> None:
     """Run a scenario to its end on an event loop and a thread of its own."""
     raised: list[BaseException] = []
 
@@ -110,7 +110,7 @@ def _run(scenario: Callable[[], Awaitable[None]]) -> None:
 
     thread = threading.Thread(target=target, daemon=True)
     thread.start()
-    thread.join(4 * WAIT)
+    thread.join(seconds)
     if thread.is_alive():
         pytest.fail("the event loop could not shut down: a loop did not end when its task was cancelled")
     if raised:
@@ -546,3 +546,135 @@ def test_create_components_starts_each_loop_behind_its_own_switch_with_its_own_c
             ["settings.retrieval_telemetry_enabled", "getattr(settings, 'retrieval_telemetry_retention_days', 0) > 0"],
         ),
     ], f"create_components starts its loops differently: {started}"
+
+
+# ---------------------------------------------------------------------------
+# A cancellation from within does not end a loop
+# ---------------------------------------------------------------------------
+
+
+@every_loop
+def test_a_loop_goes_on_after_a_cancellation_from_within(build, monkeypatch, caplog):
+    _short_intervals(monkeypatch)
+    loop = build("cancelled")
+
+    async def scenario() -> None:
+        await loop.start()
+        try:
+            await _expect(loop.went_on, f"the {loop.name} did nothing more after something it awaited was cancelled")
+            assert not loop.task.done(), f"the {loop.name} has ended"
+        finally:
+            await _stop(loop)
+        assert loop.task.done(), f"shutdown_components left the {loop.name} running"
+
+    with caplog.at_level(logging.ERROR, logger="nous.main"):
+        _run(scenario)
+
+    said = [record for record in caplog.records if record.name == "nous.main"]
+    # With its traceback: the only way to find where the cancellation came from.
+    assert any("cancelled from within" in record.getMessage() and record.exc_info for record in said), [
+        (record.getMessage(), bool(record.exc_info)) for record in said
+    ]
+
+
+def test_a_ledger_pass_cancelled_from_within_again_and_again_is_tried_again_once_per_retry_interval(monkeypatch):
+    _short_intervals(monkeypatch, 0.05)
+    always_cancelled = _First("cancelled", every_time=True)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            main._execution_ledger_maintenance_loop(
+                _settings(), _Ledger(None, always_cancelled), _Cards(None, _First(None))
+            )
+        )
+        await asyncio.sleep(0.5)
+        await asyncio.wait_for(main.shutdown_components({"execution_ledger_task": task}), WAIT)
+
+    _run(scenario)
+
+    # One try per retry interval: about ten in half a second, not one and not thousands.
+    assert 2 <= always_cancelled.calls < 50, always_cancelled.calls
+
+
+@pytest.mark.parametrize(
+    "build", [_retrieval_log_retention, _context_log_retention], ids=["retrieval log", "context log"]
+)
+def test_a_retention_sweep_cancelled_from_within_commits_nothing_and_is_run_again_after_the_interval(
+    build, monkeypatch
+):
+    _short_intervals(monkeypatch)
+    loop = build("cancelled")
+    database = loop.parts["database"]
+
+    async def scenario() -> None:
+        await loop.start()
+        try:
+            await _expect(loop.went_on, "the sweep was never run again")
+        finally:
+            await _stop(loop)
+
+    _run(scenario)
+
+    # The session of the cancelled sweep was left by the CancelledError, which
+    # is a rollback; the sweep after it went through and committed.
+    assert database.left_with[:2] == [asyncio.CancelledError, None]
+    assert database.commits >= 1
+
+
+@pytest.mark.postgres_only
+def test_the_loops_create_components_starts_go_on_after_a_cancellation_from_within(monkeypatch):
+    """Through the real create_components, with the parts these loops do not
+    need switched off. The ledger loop and the surface sweep call the runner
+    and the surface service on every pass, so the cancellation goes in there."""
+    from uuid import uuid4
+
+    from sqlalchemy import text
+
+    from nous.config import Settings
+
+    agent_id = f"test-maintenance-loops-{uuid4().hex[:8]}"
+
+    async def already_migrated(engine: Any) -> None:
+        """The test database is migrated before the run. The boot writes rows:
+        they go to an agent of this test's own."""
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO nous_system.agents (id, name, config) VALUES (:id, 'x', '{}')"), {"id": agent_id}
+            )
+
+    monkeypatch.setattr(main, "run_migrations", already_migrated)
+    monkeypatch.setattr(main, "_EXECUTION_LEDGER_RETRY_SECONDS", TICK, raising=False)
+    settings = Settings(
+        _env_file=None,
+        ANTHROPIC_API_KEY="test-key",
+        agent_id=agent_id,
+        heartbeat_enabled=False,
+        subtask_enabled=False,
+        schedule_enabled=False,
+        dag_enabled=False,
+        mcp_enabled=False,
+    )
+    # Below the fields' minimums, so set after validation; read on every pass.
+    settings.execution_ledger_sweep_interval_seconds = 0.05
+    settings.a2ui_sweep_interval_seconds = 0.05
+    keys = ("execution_ledger_task", "retrieval_log_retention_task", "context_log_retention_task", "a2ui_sweep_task")
+
+    async def scenario() -> None:
+        components = await main.create_components(settings)
+        tasks = {key: components[key] for key in keys}
+        ledger, sweep = tasks["execution_ledger_task"], tasks["a2ui_sweep_task"]
+        cards, surfaces = _First("cancelled", every_time=True), _First("cancelled", every_time=True)
+        try:
+            components["runner"].sweep_pending_cards = cards
+            components["surface_service"].expire_sweep = surfaces
+            await _until(
+                lambda: (cards.calls >= 2 or ledger.done()) and (surfaces.calls >= 2 or sweep.done()),
+                "the ledger loop or the surface sweep neither went on nor ended",
+            )
+            ended = [key for key, task in tasks.items() if task.done()]
+            assert not ended, f"ended by a cancellation from within: {ended}"
+        finally:
+            await main.shutdown_components(components)
+        assert all(task.done() for task in tasks.values())
+
+    _run(scenario, seconds=60)

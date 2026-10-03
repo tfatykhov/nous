@@ -27,6 +27,7 @@ from nous.api.tools import ToolDispatcher, register_nous_tools
 from nous.api.web_tools import register_web_tools
 from nous.brain import Brain
 from nous.brain.embeddings import EmbeddingProvider
+from nous.cancellation import cancel_requested
 from nous.cognitive import CognitiveLayer
 from nous.config import Settings
 from nous.events import Event, EventBus
@@ -82,7 +83,10 @@ async def _execution_ledger_maintenance_loop(
             except Exception:
                 logger.warning("Harness: sweep_pending_cards failed", exc_info=True)
         except asyncio.CancelledError:
-            break
+            if cancel_requested():
+                break
+            logger.exception("Harness: execution ledger maintenance was cancelled from within — the loop continues")
+            await asyncio.sleep(_EXECUTION_LEDGER_RETRY_SECONDS)
         except Exception:
             logger.warning("Harness: execution ledger maintenance failed", exc_info=True)
             await asyncio.sleep(_EXECUTION_LEDGER_RETRY_SECONDS)
@@ -123,7 +127,9 @@ async def _retrieval_log_retention_loop(settings: Settings, database: Database) 
                 settings.agent_id,
             )
         except asyncio.CancelledError:
-            break
+            if cancel_requested():
+                break
+            logger.exception("F091: retrieval retention sweep was cancelled from within — the loop continues")
         except Exception:
             logger.debug("F091: retrieval retention sweep failed", exc_info=True)
 
@@ -150,7 +156,9 @@ async def _context_log_retention_loop(settings: Settings, database: Database) ->
                 await s.commit()
             logger.info("OB-1: context_log/behavior_snapshots retention sweep (>%dd) done", days)
         except asyncio.CancelledError:
-            break
+            if cancel_requested():
+                break
+            logger.exception("OB-1: retention sweep was cancelled from within — the loop continues")
         except Exception:
             logger.debug("OB-1: retention sweep failed", exc_info=True)
 
@@ -179,7 +187,9 @@ async def _a2ui_sweep_loop(settings: Settings, surface_service: SurfaceService) 
             if expired:
                 logger.info("F092: expiry sweep expired %d surface(s)", expired)
         except asyncio.CancelledError:
-            break
+            if cancel_requested():
+                break
+            logger.exception("F092: expiry sweep was cancelled from within — the loop continues")
         except Exception:
             logger.warning("F092: expiry sweep failed", exc_info=True)
 
