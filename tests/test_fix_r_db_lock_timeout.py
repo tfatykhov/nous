@@ -11,6 +11,7 @@ import logging
 import time
 import uuid
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
@@ -23,6 +24,7 @@ from nous.events import Event
 from nous.handlers.fact_extractor import FactExtractor
 from nous.heart import Heart
 from nous.heart.schemas import FactInput
+from nous.heartbeat.checks import BehaviorDriftCheck
 from nous.storage.database import Database
 from nous.storage.models import Fact
 
@@ -398,3 +400,29 @@ async def test_a_real_lock_timeout_in_the_middle_of_an_episode_costs_one_fact(db
         await asyncio.wait_for(extractor.handle(_summarized(candidate_facts=facts)), timeout=30)
 
     assert await _stored(timed.database, tag) == [f["content"] for f in facts[1:]]
+
+
+# ---------------------------------------------------------------------------
+# The drift check says when it could not read or write its numbers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize(
+    ("table", "mode", "message"),
+    [
+        ("heart.facts", "ACCESS EXCLUSIVE", "Snapshot: DB query failed"),
+        ("nous_system.behavior_snapshots", "ACCESS EXCLUSIVE", "Baseline load failed"),
+        ("nous_system.behavior_snapshots", "EXCLUSIVE", "Snapshot store failed"),
+    ],
+    ids=["count-query", "baseline-load", "snapshot-store"],
+)
+async def test_a_drift_check_that_cannot_reach_its_table_logs_a_warning(db, timed, caplog, table, mode, message):
+    check = BehaviorDriftCheck(heart=MagicMock(), brain=MagicMock(), settings=_own_agent(), db=timed.database)
+    async with db.engine.connect() as holder:
+        await _hold(holder, text(f"LOCK TABLE {table} IN {mode} MODE"))
+        await asyncio.wait_for(check.run(), timeout=15)
+        await holder.rollback()
+    warned = [r for r in caplog.records if r.levelno == logging.WARNING and r.getMessage() == message]
+    assert len(warned) == 1
+    assert "lock timeout" in str(warned[0].exc_info[1])
