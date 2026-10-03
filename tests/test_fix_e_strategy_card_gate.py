@@ -1179,6 +1179,47 @@ async def test_a_card_at_the_score_floor_is_served_and_a_card_under_it_is_not(ca
 
 
 @pytest.mark.asyncio
+async def test_a_score_floor_of_zero_serves_a_card_with_a_low_score(card_heart, session):
+    """``procedure_score_floor = 0`` means no floor above zero, as on the how-to
+    cosine rung: a card the probe returns with a cosine of 0.05 is served.
+    Mutation: a floor of 0 falls back to the default of 0.40."""
+    low = await _add(session, card_heart, "card-low", kind="strategy")
+    engine = _engine(
+        card_heart,
+        proc_catalog_enabled=False,
+        strategy_cards_retrieval_enabled=True,
+        procedure_score_floor=0.0,
+    )
+    _probe_finds(engine, (low.id, 0.05))
+
+    result = await _build(engine, card_heart, session)
+
+    assert result.recalled_ids["procedure"] == [str(low.id)]
+
+
+@pytest.mark.asyncio
+async def test_the_ladder_serves_a_probe_card_when_it_is_given_no_trace(card_heart, session):
+    """``_select_procedures`` takes ``trace=None`` by default and every rung guards
+    its trace calls. build() always passes one, so only a direct caller gets here.
+    Mutation: the probe's trace call is made without the guard."""
+    card = await _add(session, card_heart, "card-0", kind="strategy")
+    engine = _engine(card_heart, proc_catalog_enabled=False, strategy_cards_retrieval_enabled=True)
+    _probe_finds(engine, (card.id, 0.9))
+
+    selected = await engine._select_procedures(
+        slots=5,
+        critic_skills=[],
+        recalled_ids={"fact": [], "decision": []},
+        recalled_score_map={},
+        session=session,
+        query="rotate the api keys",
+        card_slots=1,
+    )
+
+    assert [p.id for p in selected] == [card.id]
+
+
+@pytest.mark.asyncio
 async def test_the_probe_serves_only_a_card_that_is_still_there_and_still_active(card_heart, session):
     """What the probe returned is checked again when the body is fetched. A card
     retired since, and one that is gone, are passed over, and the next card is
