@@ -36,8 +36,8 @@ async def call_background_llm(
 ) -> str | None:
     """Call LLM for background tasks using the same API contract as the runner.
 
-    Builds a proper payload with system blocks + cache_control (matching
-    runner._build_api_payload format), then delegates to client.call()
+    Builds a proper payload with system blocks + cache_control (on the
+    preamble and the system prompt only), then delegates to client.call()
     which handles auth, retries, HTTP/2, and beta headers.
 
     Returns the text content from the response, or None on failure.
@@ -57,6 +57,7 @@ async def call_background_llm(
                 "cache_control": {"type": "ephemeral"},
             },
         ],
+        # No cache breakpoint on the message: it differs on every call, so a cached copy would never be read.
         "messages": [
             {
                 "role": "user",
@@ -64,7 +65,6 @@ async def call_background_llm(
                     {
                         "type": "text",
                         "text": user_message,
-                        "cache_control": {"type": "ephemeral"},
                     }
                 ],
             }
@@ -116,6 +116,7 @@ async def call_background_llm_structured(
                 "cache_control": {"type": "ephemeral"},
             },
         ],
+        # No cache breakpoint on the message: it differs on every call, so a cached copy would never be read.
         "messages": [
             {
                 "role": "user",
@@ -123,7 +124,6 @@ async def call_background_llm_structured(
                     {
                         "type": "text",
                         "text": user_message,
-                        "cache_control": {"type": "ephemeral"},
                     }
                 ],
             }
