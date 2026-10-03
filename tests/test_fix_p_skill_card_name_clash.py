@@ -488,17 +488,77 @@ async def test_a_card_row_is_not_reactivated_over_a_card_of_its_name(heart, capl
     assert f"Skipping reactivation of {NAME}" in caplog.text
 
 
-async def test_a_card_row_never_takes_a_card_name_however_the_name_is_spelled(heart):
-    """The clash check lowers the name in Python and misses an active card called
-    "\u0130stanbul Deploy" that the index (lower() in the database) sees. The
-    card's row then fails on the index, as before cards gave names up: the active
-    card keeps its name."""
+async def test_a_card_row_never_takes_a_card_name_however_the_name_is_spelled(heart, caplog):
+    """A card's row next to an active card of its name is skipped whatever the
+    spelling: the check compares names the way the index does, lower() in the
+    database. Lowered in Python, it missed an active card called
+    "\u0130stanbul Deploy", and the card's row failed on the index."""
     name = "\u0130stanbul Deploy"
     retired = await _row(heart, name=name, active=False)
     card = await _card(heart, name)
 
-    with pytest.raises(IntegrityError):
+    with caplog.at_level("WARNING", logger="nous.heart.procedures"):
         await heart.reactivate_procedure(retired)
 
     rows = await _rows(heart)
     assert (rows[retired]["active"], rows[card.id]["name"], rows[card.id]["active"]) == (False, name, True)
+    assert f"Skipping reactivation of {name}" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# A name is compared the way the index compares it
+# ---------------------------------------------------------------------------
+# The unique index lowers names in the database. Python lowers "\u0130stanbul
+# Deploy" to two code points where Postgres lowers it to "i", so a name lowered
+# in Python misses the row the index sees.
+
+
+async def test_a_skill_whose_name_an_active_skill_holds_is_skipped_whatever_its_name(heart, monkeypatch):
+    """At start-up, a skill whose name an active skill holds is skipped with a
+    warning and the other skills are reactivated. Lowered in Python, the check
+    missed the active "\u0130stanbul Deploy": the reactivation failed on the index,
+    and the IntegrityError ended reactivate_skills."""
+    name = "\u0130stanbul Deploy"
+    var = f"FIX_P_REQ_{uuid4().hex[:8].upper()}"
+    skill = dict(kind=None, active=False, tags=["skill"], core_concepts=[f"requires:{var}"])
+    retired = await _row(heart, name=name, **skill)
+    other = await _row(heart, name="Other Skill", **skill)
+    holder = await heart.store_procedure(_how_to(name))
+    monkeypatch.setenv(var, "1")
+
+    assert await reactivate_skills(heart) == 1
+
+    rows = await _rows(heart)
+    assert (rows[retired]["active"], rows[other]["active"], rows[holder.id]["name"]) == (False, True, name)
+
+
+async def test_a_consolidated_skill_is_not_imported_again_whatever_its_name(heart, tmp_path):
+    """The bootstrap does not re-import a skill that was consolidated into another
+    procedure. Lowered in Python, the check missed a consolidated
+    "\u0130stanbul Deploy", and every start stored the skill again."""
+    name = "\u0130stanbul Deploy"
+    canonical = await heart.store_procedure(_how_to("Rollback Runbook"))
+    skill = await heart.store_procedure(_how_to(name))
+    async with heart.db.session() as s:
+        await s.execute(
+            text("UPDATE heart.procedures SET active=false, archived_at=now(), superseded_by=:c WHERE id=:i"),
+            {"c": canonical.id, "i": skill.id},
+        )
+        await s.commit()
+
+    assert await bootstrap_local_skills(_skill_on_disk(tmp_path, name), heart) == 0
+    assert await heart.is_procedure_name_superseded(name)
+
+
+async def test_a_skill_is_found_by_its_name_whatever_its_name(heart, tools):
+    """A lookup by name finds the active skill of that name. Lowered in Python,
+    it missed "\u0130stanbul Deploy": the lookup found nothing, and learn_skill
+    stored the skill a second time, which the index refused."""
+    name = "\u0130stanbul Deploy"
+    skill = await heart.store_procedure(_how_to(name))
+
+    found = await heart.get_procedure_by_name(name)
+    assert (found.id if found else None) == skill.id
+    reply = await tools["learn_skill"](source="inline", content=SKILL_MD.replace(NAME.lower(), name))
+    assert "Skill updated successfully" in reply["content"][0]["text"]
+    assert list(await _rows(heart)) == [skill.id]
