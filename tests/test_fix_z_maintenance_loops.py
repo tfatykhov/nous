@@ -703,7 +703,7 @@ def test_the_loops_create_components_starts_go_on_after_a_cancellation_from_with
     settings.a2ui_sweep_interval_seconds = 0.05
     keys = ("execution_ledger_task", "retrieval_log_retention_task", "context_log_retention_task", "a2ui_sweep_task")
 
-    async def scenario() -> None:
+    async def boot_and_cancel() -> None:
         components = await main.create_components(settings)
         tasks = {key: components[key] for key in keys}
         ledger, sweep = tasks["execution_ledger_task"], tasks["a2ui_sweep_task"]
@@ -720,5 +720,23 @@ def test_the_loops_create_components_starts_go_on_after_a_cancellation_from_with
         finally:
             await main.shutdown_components(components)
         assert all(task.done() for task in tasks.values())
+
+    async def scenario() -> None:
+        try:
+            await boot_and_cancel()
+        finally:
+            # The two rows the boot wrote: its agent and that agent's rubric version.
+            from nous.storage.database import Database
+
+            database = Database(settings)
+            try:
+                async with database.session() as session:
+                    await session.execute(
+                        text("DELETE FROM heart.rubric_versions WHERE agent_id = :a"), {"a": agent_id}
+                    )
+                    await session.execute(text("DELETE FROM nous_system.agents WHERE id = :a"), {"a": agent_id})
+                    await session.commit()
+            finally:
+                await database.disconnect()
 
     _run(scenario, seconds=60)
