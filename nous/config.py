@@ -47,6 +47,12 @@ class Settings(BaseSettings):
 
     db_pool_size: int = 10
     db_max_overflow: int = 5
+    # A statement that waits longer than this for a lock fails (SQLSTATE 55P03)
+    # instead of waiting for ever; 0 = no limit. Only the service's own engine
+    # gets it (nous.main), never a script that builds its own Database. Whole
+    # seconds: a fraction could round to 0 ms, which Postgres reads as no limit.
+    # The upper bound is Postgres's own, 2147483647 ms.
+    db_lock_timeout_seconds: int = Field(default=0, ge=0, le=2_147_483)
     agent_id: str = "nous-default"
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
