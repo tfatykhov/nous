@@ -56,7 +56,7 @@ def _text_can_carry_a_lesson(decision: Any) -> bool:
     grade. Otherwise the model would supply what the row does not say.
     """
     description = decision.description or ""
-    if not description.strip() or description_was_cut_by_capture(description, decision.reasons):
+    if not description.strip() or description_was_cut_by_capture(description, decision.reasons, decision.created_at):
         return False
     return decision.outcome not in _OUTCOMES_THAT_NEED_NOTES or bool((decision.outcome_result or "").strip())
 

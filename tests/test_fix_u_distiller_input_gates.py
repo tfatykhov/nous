@@ -19,11 +19,13 @@ double is the model.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import update
 from test_fix_e_strategy_card_distiller import LLM, _card, _cards, _Rig, _state
 
 from nous.brain.brain import Brain
@@ -138,16 +140,32 @@ async def test_a_decision_with_an_empty_description_gets_no_card(rig, descriptio
 _FRAME = FrameSelection(frame_id="decision", frame_name="Decision", confidence=0.9, match_method="test")
 _REQUEST = "Should the nightly import move to a queue so that one failed batch can be retried alone? " * 12
 _REPLY = "The import moves to a queue: the worker pool drains it and a failed batch is retried alone. " * 12
+# A row the capture wrote while its cap was still 200 characters.
+_BEFORE_THE_CAP_ROSE = datetime(2026, 3, 1, tzinfo=UTC)
 
 
-async def _captured(rig, cap: int, *, finalized: bool, reply: str = _REPLY) -> uuid.UUID:
+async def _captured(
+    rig,
+    cap: int,
+    *,
+    finalized: bool,
+    reply: str = _REPLY,
+    request: str = _REQUEST,
+    captured_at: datetime | None = None,
+) -> uuid.UUID:
     """A decision as the deliberation capture writes it during a turn: start() with
     the user's request, then finalize() with the reply, each cut at ``cap``
-    characters as the cognitive layer cuts them (500 since 2026-03-29, 200 before)."""
+    characters as the cognitive layer cuts them (500 since 2026-03-29, 200 before).
+    ``captured_at`` dates the row back to when it would have been captured."""
     engine = DeliberationEngine(rig.brain, rig.settings)
-    decision_id = await engine.start(rig.agent_id, _REQUEST[:cap], _FRAME)
+    decision_id = await engine.start(rig.agent_id, request[:cap], _FRAME)
     if finalized:
         await engine.finalize(decision_id, description=reply[:cap], confidence=0.8)
+    if captured_at is not None:
+        async with rig.db.session() as s:
+            row = update(Decision).where(Decision.id == uuid.UUID(decision_id)).values(created_at=captured_at)
+            await s.execute(row)
+            await s.commit()
     return uuid.UUID(decision_id)
 
 
@@ -160,8 +178,11 @@ async def _captured(rig, cap: int, *, finalized: bool, reply: str = _REPLY) -> u
 async def test_a_description_cut_by_the_deliberation_capture_gets_no_card(rig, cap, finalized):
     """The capture keeps the reply (or, until the turn ends, "Plan: " and the
     request) cut at its cap. A row cut there holds a fragment, not a decision, and
-    the model fills in the rest: no model call, no card."""
-    decision_id = await _captured(rig, cap, finalized=finalized)
+    the model fills in the rest: no model call, no card. (A row cut at 200 was
+    captured before the cap rose to 500.)"""
+    decision_id = await _captured(
+        rig, cap, finalized=finalized, captured_at=_BEFORE_THE_CAP_ROSE if cap == 200 else None
+    )
     stored = await rig.brain.get(decision_id)
     if finalized:
         assert stored.description == _REPLY[:cap]
@@ -178,15 +199,28 @@ async def test_a_description_cut_by_the_deliberation_capture_gets_no_card(rig, c
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "case", ["reply-shorter-than-the-cap", "longer-than-any-cap", "the-agent-wrote-the-cap-length"]
+    "case",
+    [
+        "reply-shorter-than-the-cap",
+        "longer-than-any-cap",
+        "the-agent-wrote-the-cap-length",
+        "a-whole-reply-of-200-since-the-cap-rose",
+        "a-whole-request-of-200-since-the-cap-rose",
+    ],
 )
 async def test_a_description_the_capture_did_not_cut_still_gets_a_card(rig, case):
     """The control: a reply one character shorter than the cap is stored whole by
     the capture; a description one character longer than the cap is not one the
     capture wrote; and a description exactly as long as the cap that carries no
-    capture reason is the agent's own text, not a cut reply."""
+    capture reason is the agent's own text, not a cut reply. A reply or a request
+    of exactly 200 characters captured since the cap rose to 500 is whole: the
+    earlier cap counts only for a row captured before."""
     if case == "reply-shorter-than-the-cap":
         decision_id = await _captured(rig, 500, finalized=True, reply=_REPLY[:499])
+    elif case == "a-whole-reply-of-200-since-the-cap-rose":
+        decision_id = await _captured(rig, 500, finalized=True, reply=_REPLY[:200])
+    elif case == "a-whole-request-of-200-since-the-cap-rose":
+        decision_id = await _captured(rig, 500, finalized=False, request=_REQUEST[:200])
     else:
         async with rig.db.session() as s:
             s.add(
@@ -230,19 +264,21 @@ async def test_the_cognitive_layer_cuts_a_decision_where_the_gate_looks_for_the_
 
     assert planned.description == "Plan: " + _REQUEST[:DESCRIPTION_CAPTURE_CHARS]
     assert finalized.description == _REPLY[:DESCRIPTION_CAPTURE_CHARS]
-    assert description_was_cut_by_capture(planned.description, planned.reasons)
-    assert description_was_cut_by_capture(finalized.description, finalized.reasons)
+    assert description_was_cut_by_capture(planned.description, planned.reasons, planned.created_at)
+    assert description_was_cut_by_capture(finalized.description, finalized.reasons, finalized.created_at)
 
 
 # Written by DeliberationEngine.start() since 2026-02-22, so every captured row carries it.
 _STORED = "Frame 'Decision' triggered deliberation for: Should the nightly import move"
+# The change that raised the capture's cap from 200 to 500 characters was merged then.
+_CAP_ROSE_AT = datetime(2026, 3, 29, 17, 47, 39, tzinfo=UTC)
 
 
 @pytest.mark.parametrize(
     ("description", "reason", "cut"),
     [
         ("x" * 500, _STORED, True),
-        ("Plan: " + "x" * 200, _STORED, True),
+        ("Plan: " + "x" * 500, _STORED, True),
         ("x" * 500, "The log read: " + _STORED, False),
         ("x" * 500, "Frame 'Decision' was picked by the router", False),
         ("Plan: " + "x" * 300, _STORED, False),
@@ -261,7 +297,36 @@ def test_a_captured_row_is_recognised_by_its_stored_reason_and_length(descriptio
     """The reason is matched in the words the capture has always written (rewording
     it would leave every row already stored unrecognised), from its start; and only a
     "Plan: " request cut at a cap counts, not every request."""
-    assert description_was_cut_by_capture(description, [SimpleNamespace(text=reason)]) is cut
+    assert description_was_cut_by_capture(description, [SimpleNamespace(text=reason)], _CAP_ROSE_AT) is cut
+
+
+@pytest.mark.parametrize(
+    ("description", "created_at", "cut"),
+    [
+        ("x" * 200, _CAP_ROSE_AT - timedelta(seconds=1), True),
+        ("Plan: " + "x" * 200, _CAP_ROSE_AT - timedelta(seconds=1), True),
+        ("x" * 200, _CAP_ROSE_AT.replace(tzinfo=None) - timedelta(seconds=1), True),
+        ("x" * 200, _CAP_ROSE_AT, False),
+        ("Plan: " + "x" * 200, _CAP_ROSE_AT, False),
+        ("x" * 200, None, False),
+        ("x" * 500, _CAP_ROSE_AT, True),
+    ],
+    ids=[
+        "a-reply-captured-before-the-cap-rose",
+        "a-request-captured-before-the-cap-rose",
+        "a-time-without-a-zone-is-utc",
+        "a-reply-captured-since",
+        "a-request-captured-since",
+        "no-time-counts-as-since",
+        "the-current-cap-since",
+    ],
+)
+def test_the_earlier_cap_counts_only_for_a_row_captured_before_the_cap_rose(description, created_at, cut):
+    """The capture cut at 200 characters until the cap rose to 500 on 2026-03-29.
+    A whole reply or request of 200 characters captured since then is not a cut
+    one. A time without a zone is read as UTC (the SQLite lane hands one back),
+    and a row without a time counts as captured since."""
+    assert description_was_cut_by_capture(description, [SimpleNamespace(text=_STORED)], created_at) is cut
 
 
 # ---------------------------------------------------------------------------

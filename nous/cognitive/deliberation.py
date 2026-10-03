@@ -36,23 +36,34 @@ _DELIBERATION_FRAMES = {"decision", "debug"}
 # <request>", which is how a captured row is told from one the agent recorded.
 DESCRIPTION_CAPTURE_CHARS = 500
 _EARLIER_DESCRIPTION_CAPTURE_CHARS = 200
+# When the change that raised the cap from 200 to 500 was merged. A row created
+# since was not captured at 200, so a whole reply or request of 200 characters
+# is not taken for a cut one. (Until the change was deployed the capture still
+# cut at 200: a row cut then, but created after the merge, is not recognised.)
+_DESCRIPTION_CAPTURE_CAP_ROSE_AT = datetime(2026, 3, 29, 17, 47, 39, tzinfo=UTC)
 _PLAN_PREFIX = "Plan: "
 _CAPTURE_REASON_PREFIX = "Frame '"
 _CAPTURE_REASON_MARK = "' triggered deliberation for: "
 
 
-def description_was_cut_by_capture(description: str, reasons: list) -> bool:
+def description_was_cut_by_capture(description: str, reasons: list, created_at: datetime | None) -> bool:
     """Whether ``description`` is a request or a reply that the capture cut at its cap.
 
     Such a row holds a fragment of a turn, not a decision. The row must carry
     the capture's reason (``reasons`` are the decision's), and a cut reply has
     exactly as many characters as a cap; a cut request is "Plan: " and exactly
-    that many after it. A reply that was exactly as long as the cap cannot be
-    told from a cut one, and counts as cut.
+    that many after it. The earlier cap counts only for a row created before
+    the cap rose (``created_at``; a time without a zone is read as UTC, and a
+    row without one counts as created since). A reply that was exactly as long
+    as the cap cannot be told from a cut one, and counts as cut.
     """
     if not any(r.text.startswith(_CAPTURE_REASON_PREFIX) and _CAPTURE_REASON_MARK in r.text for r in reasons):
         return False
-    for cap in (DESCRIPTION_CAPTURE_CHARS, _EARLIER_DESCRIPTION_CAPTURE_CHARS):
+    caps = [DESCRIPTION_CAPTURE_CHARS]
+    when = created_at.replace(tzinfo=created_at.tzinfo or UTC) if created_at is not None else None
+    if when is not None and when < _DESCRIPTION_CAPTURE_CAP_ROSE_AT:
+        caps.append(_EARLIER_DESCRIPTION_CAPTURE_CHARS)
+    for cap in caps:
         if len(description) == cap:
             return True
         if description.startswith(_PLAN_PREFIX) and len(description) == len(_PLAN_PREFIX) + cap:
