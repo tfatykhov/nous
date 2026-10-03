@@ -18,6 +18,7 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
+from nous.cancellation import cancel_requested
 from nous.config import Settings
 from nous.events import Event, EventBus
 
@@ -169,7 +170,9 @@ class SessionTimeoutMonitor:
                 await asyncio.sleep(self._settings.sleep_check_interval)
                 await self._check_timeouts()
             except asyncio.CancelledError:
-                break
+                if cancel_requested():
+                    break
+                logger.exception("Session monitor check was cancelled from within — the loop continues")
             except Exception:
                 logger.exception("Session monitor check failed")
 
@@ -281,13 +284,13 @@ class SessionTimeoutMonitor:
                 ),
                 return_exceptions=True,
             )
-            # return_exceptions=True captures CancelledError too. If any
-            # child was cancelled (monitor shutdown via stop() -> task.cancel()),
-            # we MUST re-raise so _check_loop sees the cancel and breaks the
-            # loop. Otherwise shutdown hangs until process kill.
-            for result in results:
-                if isinstance(result, asyncio.CancelledError):
-                    raise result
+            # return_exceptions=True captures CancelledError too: a closure
+            # that was cancelled while nobody is stopping the monitor. It is a
+            # failed closure like any other and is handled below, so that the
+            # sessions closed in this same check are still dropped from
+            # tracking. When the monitor itself is cancelled (stop() ->
+            # task.cancel()), gather raises at the await above and returns
+            # no results.
             for (sid, _, _), result in zip(expired, results):
                 if isinstance(result, BaseException):
                     # Failed closure: log + drop from tracking. The F060

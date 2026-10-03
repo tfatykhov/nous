@@ -34,6 +34,7 @@ import pytest
 import nous.api.tools  # noqa: F401
 from nous.config import Settings
 from nous.events import Event, EventBus
+from nous.handlers.session_monitor import SessionTimeoutMonitor
 from nous.handlers.subtask_worker import SubtaskWorkerPool
 
 # How long a test waits for something that should happen at once. Only reached
@@ -304,12 +305,91 @@ def _subtask_worker_dequeue(cancelled: bool) -> _Loop:
     return _worker_pool("subtask worker (its dequeue)", cancelled, in_its_dequeue=True)
 
 
+def _session_monitor_sweep(cancelled: bool) -> _Loop:
+    went_on = asyncio.Event()
+    cancel = _Once(cancelled)
+
+    class _WorkingMemory:
+        async def cleanup_stale(self, **_: Any) -> None:
+            if cancel():
+                await _cancelled_from_within()
+            went_on.set()
+
+    settings = SimpleNamespace(
+        sleep_check_interval=TICK,
+        session_idle_timeout=3600,
+        sleep_timeout=3600,
+        agent_id="test",
+        working_memory_ttl_hours=1,
+        working_memory_sweep_interval_seconds=0,
+        working_memory_sweep_batch_size=10,
+    )
+    monitor = SessionTimeoutMonitor(EventBus(), settings, heart=SimpleNamespace(working_memory=_WorkingMemory()))
+    return _Loop(
+        "session monitor (its sweep)",
+        monitor.start,
+        monitor.stop,
+        lambda: [monitor._task],
+        went_on,
+        "nous.handlers.session_monitor",
+        "cancelled from within",
+    )
+
+
+def _session_monitor_closure(cancelled: bool) -> _Loop:
+    went_on = asyncio.Event()
+    reached = asyncio.Event()
+    closed: list[str] = []
+
+    class _Runner:
+        async def end_conversation(self, session_id: str, **_: Any) -> bool:
+            closed.append(session_id)
+            if session_id == "cancelled":
+                reached.set()
+                await _cancelled_from_within()
+            if session_id == "next":
+                went_on.set()
+            return True
+
+    # Idle for longer than -1 s: every tracked session is due at the next check.
+    settings = SimpleNamespace(
+        sleep_check_interval=TICK,
+        session_idle_timeout=-1,
+        sleep_timeout=3600,
+        agent_id="test",
+        working_memory_ttl_hours=0,
+    )
+    monitor = SessionTimeoutMonitor(EventBus(), settings, runner=_Runner())
+
+    async def start() -> None:
+        if cancelled:
+            monitor.touch("cancelled", "test")
+            monitor.touch("same check", "test")
+        await monitor.start()
+        if cancelled:
+            await _expect(reached, "the monitor never tried to close the idle session")
+        monitor.touch("next", "test")  # due at a later check than the one that was cancelled from within
+
+    return _Loop(
+        "session monitor (a closure)",
+        start,
+        monitor.stop,
+        lambda: [monitor._task],
+        went_on,
+        "nous.handlers.session_monitor",
+        "Failed to end timed-out session cancelled",
+        {"monitor": monitor, "closed": closed},
+    )
+
+
 LOOPS = [
     _event_bus,
     _event_bus_dispatch,
     _subtask_worker_turn,
     _subtask_worker_hardened_turn,
     _subtask_worker_dequeue,
+    _session_monitor_sweep,
+    _session_monitor_closure,
 ]
 every_loop = pytest.mark.parametrize(
     "build", LOOPS, ids=[build.__name__.strip("_").replace("_", " ") for build in LOOPS]
@@ -667,3 +747,26 @@ def test_a_turn_that_runs_out_of_time_is_still_recorded_as_timed_out(hardened):
     _run(scenario)
 
     assert [row[:3] for row in subtasks.settled] == [(slow.id, "failed", "timed_out")]
+
+
+# ---------------------------------------------------------------------------
+# The session monitor: the other sessions of the same check
+# ---------------------------------------------------------------------------
+
+
+def test_a_closure_cancelled_from_within_fails_alone_and_its_check_is_not_repeated():
+    loop = _session_monitor_closure(cancelled=True)
+    monitor, closed = loop.parts["monitor"], loop.parts["closed"]
+
+    async def scenario() -> None:
+        await loop.start()
+        try:
+            await _expect(loop.went_on, "the monitor never ran a later check")
+            await asyncio.sleep(5 * TICK)  # a few more checks: none of them may close a session again
+        finally:
+            await _stop(loop)
+
+    _run(scenario)
+
+    assert sorted(closed) == ["cancelled", "next", "same check"], closed
+    assert monitor.get_stats()["tracked_sessions"] == 0
