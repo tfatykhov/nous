@@ -216,6 +216,9 @@ class _Subtasks:
         # (subtask id, status, final_outcome, error), in the order the rows were written
         self.settled: list[tuple[Any, str, Any, str | None]] = []
 
+    async def cancel_orphaned_inline(self) -> None:
+        pass
+
     async def reclaim_stale(self) -> int:
         return 0
 
@@ -733,6 +736,9 @@ def test_a_worker_cancelled_from_within_again_and_again_waits_between_its_tries(
     tries = 0
 
     class _NeverAnswers:
+        async def cancel_orphaned_inline(self) -> None:
+            pass
+
         async def reclaim_stale(self) -> int:
             return 0
 
