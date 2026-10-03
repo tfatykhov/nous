@@ -679,8 +679,12 @@ class CognitiveLayer:
                 temporal_recency=_effective_recency,
                 memory_type_hints=signals.memory_type_hints,
                 is_question=signals.is_question,
-                is_greeting=signals.is_greeting,
+                # A recap asked for after a greeting ("hey, give me a recap") is
+                # a request, as the deictic rescue above says of a follow-up;
+                # the greeting rule's switch restores the old copy of the flag.
+                is_greeting=signals.is_greeting and not self._settings.followup_greeting_request_detection_enabled,
                 topic_keywords=signals.topic_keywords,
+                text=signals.text,
             )
             plan = self._intent_classifier.plan_retrieval(signals, input_text=user_input)
 
