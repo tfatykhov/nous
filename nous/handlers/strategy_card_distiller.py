@@ -100,9 +100,11 @@ _CARD_SCHEMA: dict[str, Any] = {
 # The model can leave JSON for its tool-call markup inside a string: one card's
 # lesson ended with '.</lesson> <parameter name="tags">[...]', and the call had
 # no tags. A field's trailing run of that markup is cut only when a tag in it
-# names an argument of the card that the call does not have, the evidence the
-# tool dispatcher's salvage of leaked arguments uses too. A field that only
-# mentions such markup keeps it, and the leaked value itself is not used.
+# names an argument of the card that the call does not have. That is one of
+# the conditions under which the tool dispatcher salvages a leaked argument;
+# the dispatcher also needs the leaked value to fit the argument's type, but
+# here the value is not used, whatever follows the tag. A field whose markup
+# names nothing the call lacks keeps it.
 _LEAKED_ARGUMENT = re.compile(r'<parameter\s+name="([^"]+)">')
 
 
