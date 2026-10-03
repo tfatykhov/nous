@@ -293,7 +293,7 @@ class DecisionReviewer:
                 results.append(outcome)
         return results
 
-    async def _write(self, decision, outcome: ReviewResult) -> bool:
+    async def _write(self, decision: DecisionSummary, outcome: ReviewResult) -> bool:
         """Write an automatic review, unless the decision was reviewed or deleted meanwhile.
 
         ``decision`` comes from a list that was read before the signals were
