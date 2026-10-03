@@ -256,3 +256,77 @@ def test_a_process_that_ends_during_the_scan_is_skipped(monkeypatch):
     finally:
         child.kill()
         child.wait()
+
+
+async def test_a_process_started_after_the_call_gave_up_is_killed_at_birth(tmp_path):
+    late = tmp_path / "late"
+    code = (
+        "import subprocess\n"
+        f"subprocess.run({_child(tmp_path / 'first')})\n"  # the call times out while the script waits here
+        f"subprocess.run({_child(late, nap=0.5)})\n"  # started by the script once its first process is gone
+    )
+    result = await _run_python()(code=code)
+    await asyncio.sleep(1.5)  # a second child left alone writes its marker after half a second
+
+    assert result["is_error"] is True
+    assert not late.exists(), "a process started after the call had timed out went on running"
+
+
+async def test_a_script_the_call_gave_up_on_gets_no_memory_function(tmp_path):
+    import gc
+    import warnings
+
+    refusal = tmp_path / "refusal"
+    code = (
+        "import time\n"
+        "time.sleep(4.5)\n"
+        "try:\n"
+        "    learn_fact('written after the call had returned')\n"
+        "except BaseException as exc:\n"
+        f"    open({str(refusal)!r}, 'w').write(type(exc).__name__)\n"
+    )
+    heart = AsyncMock()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = await _run_python(heart)(code=code)
+        assert await _idle(limit=4.0)
+        gc.collect()
+
+    assert result["is_error"] is True
+    heart.learn.assert_not_awaited()
+    assert refusal.read_text() == "ScriptDeadlineExceeded"  # not one `except Exception` would catch
+    assert not [w for w in caught if "never awaited" in str(w.message)]
+
+
+async def test_a_refused_memory_call_does_not_turn_the_deadline_off(tmp_path):
+    """A script can catch the refusal (`except:`). It keeps its deadline and the
+    hook that kills what it starts: `_fail_trace` turns the trace hook back on
+    after a refused recall, as it does after one that failed."""
+    from nous.observability.retrieval_logger import RetrievalLogger, get_active, set_active
+
+    late, looped = tmp_path / "late", tmp_path / "looped"
+    code = (
+        "import subprocess, time\n"
+        "time.sleep(4.0)\n"  # the call returns as timed out while the script sleeps
+        "try:\n"
+        "    recall_deep('anything')\n"
+        "except:\n"
+        "    pass\n"
+        f"subprocess.run({_child(late, nap=0.5)})\n"
+        "end = time.monotonic() + 3\n"
+        "while time.monotonic() < end:\n"
+        "    pass\n"
+        f"open({str(looped)!r}, 'w').write('looped')\n"
+    )
+    previous = get_active()
+    set_active(RetrievalLogger(db_writer=None, enabled=True))  # main.py wires one by default
+    try:
+        result = await _run_python()(code=code)
+        stopped = await _idle(limit=4.0)
+    finally:
+        set_active(previous)
+
+    assert result["is_error"] is True
+    assert stopped, "the script ran on past its deadline"
+    assert not looped.exists(), "the loop ran to its end: the script had lost its deadline"
+    assert not late.exists(), "a process started after the call had given up went on running"

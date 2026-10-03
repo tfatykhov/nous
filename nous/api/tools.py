@@ -4010,6 +4010,8 @@ def _deadline_tracer(deadline: float, timeout: float):  # noqa: ANN202 - CPython
                 _tracer.children.append(weakref.ref(proc))
             except TypeError:
                 pass  # `__init__` was called on something that is not a `Popen`
+            if _tracer.expired:
+                _kill_script_processes([proc])  # nothing it starts from here on may live
         return _popen_hook
 
     def _tracer(frame, event, arg):  # noqa: ANN001, ANN202 - CPython trace signature
@@ -4045,6 +4047,7 @@ def _deadline_tracer(deadline: float, timeout: float):  # noqa: ANN202 - CPython
         return local
 
     _tracer.children = []  # weak references to the `subprocess.Popen` objects the script has created
+    _tracer.expired = False  # True once the call has returned as timed out
     return _tracer
 
 
@@ -4275,6 +4278,11 @@ def create_programmatic_tools(
             that has already been committed. Latent before, and much likelier
             now that a single call is a ~5s retrieval rather than a fact lookup.
             """
+            if _tracer.expired:
+                # The call has returned as timed out: what the script wrote to
+                # memory from here on, a retry would write again.
+                coro.close()  # it never started
+                raise ScriptDeadlineExceeded(f"execution timed out ({timeout}s)")
             remaining = max(0.1, deadline - time.monotonic())
             fut = asyncio.run_coroutine_threadsafe(coro, loop)
             try:
@@ -4396,15 +4404,15 @@ def create_programmatic_tools(
                 """
                 if _tr is None:
                     return
-                # Off for the duration of cleanup, then RESTORED unless the
-                # script is already dead. An ordinary Exception here is
-                # catchable: a script doing `try: recall_deep(...) except
-                # Exception: pass` carries on running, and leaving the tracer
-                # off would hand it a thread with no deadline enforcement at all
-                # — reopening the `while True: pass` hole the tracer exists to
-                # close, holding a worker and a concurrency slot indefinitely.
-                # Only ScriptDeadlineExceeded means the script cannot continue.
-                _is_deadline = isinstance(exc, ScriptDeadlineExceeded)
+                # Off for the duration of cleanup, then RESTORED, whatever the
+                # exception. A script can catch it and carry on running: an
+                # ordinary Exception with `try: recall_deep(...) except
+                # Exception: pass`, and ScriptDeadlineExceeded too, with a bare
+                # `except:`. Leaving the tracer off would hand it a thread with
+                # no deadline enforcement at all — reopening the `while True:
+                # pass` hole the tracer exists to close, holding a worker and a
+                # concurrency slot indefinitely. A script that is dying loses
+                # the hook anyway: `_run`'s finally clears it.
                 try:
                     _REAL_SETTRACE(None)
                 except Exception:  # pragma: no cover - defensive
@@ -4415,11 +4423,10 @@ def create_programmatic_tools(
                     _tr.finalize([])
                     _commit(_tr)
                 finally:
-                    if not _is_deadline:
-                        try:
-                            _REAL_SETTRACE(_tracer)
-                        except Exception:  # pragma: no cover - defensive
-                            pass
+                    try:
+                        _REAL_SETTRACE(_tracer)
+                    except Exception:  # pragma: no cover - defensive
+                        pass
 
             # EVERYTHING that decides what the script receives sits inside this
             # try, and the success trace is committed only after `out` exists.
@@ -4840,6 +4847,7 @@ def create_programmatic_tools(
             # for a process its script started is out of the trace hook's
             # reach, so the kill is also what brings it, and its run slot,
             # back: the call waits a moment for that.
+            _tracer.expired = True  # first: the hook kills whatever starts after this line
             killed = _kill_script_processes([ref() for ref in _tracer.children])
             if killed:
                 logger.warning(
