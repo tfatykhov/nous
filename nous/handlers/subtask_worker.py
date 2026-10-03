@@ -63,7 +63,13 @@ class SubtaskWorkerPool:
         self._inflight_state: dict[Any, "HardenedRunState"] = {}
 
     async def start(self) -> None:
-        """Spawn worker tasks and reclaim any stale subtasks from prior crash."""
+        """Spawn worker tasks, after closing what a prior crash left behind.
+
+        The inline subtasks it left running are cancelled first: reclaim_stale()
+        would re-queue one past its timeout, and no worker may run an inline
+        subtask.
+        """
+        await self._heart.subtasks.cancel_orphaned_inline()
         reclaimed = await self._heart.subtasks.reclaim_stale()
         if reclaimed:
             logger.info("Reclaimed %d stale subtasks on startup", reclaimed)

@@ -387,6 +387,28 @@ class SubtaskManager:
                 logger.warning("Reclaimed %d stale subtasks", result.rowcount)
             return result.rowcount
 
+    async def cancel_orphaned_inline(self) -> None:
+        """Cancel the inline subtasks a previous process left running.
+
+        An inline subtask (worker ``INLINE_WORKER_ID``) runs in its caller's
+        turn, so it never outlives the process that ran it. One still running
+        when the worker pool starts was cut off without being closed: a
+        redeploy kills a turn instead of cancelling it. It ends as a cancelled
+        inline call does and is never re-queued, so no worker runs it again.
+        Run before reclaim_stale(), which would re-queue it once past its timeout.
+        """
+        async with self._db.session() as session:
+            result = await session.execute(
+                update(Subtask)
+                .where(Subtask.agent_id == self._agent_id)
+                .where(Subtask.status == "running")
+                .where(Subtask.worker_id == INLINE_WORKER_ID)
+                .values(status="cancelled", final_outcome="cancelled", completed_at=datetime.now(UTC))
+            )
+            await session.commit()
+            if result.rowcount > 0:
+                logger.warning("Cancelled %d inline subtasks a previous process left running", result.rowcount)
+
     async def count_by_status(self) -> dict[str, int]:
         """Count subtasks grouped by status."""
         async with self._db.session() as session:

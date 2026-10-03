@@ -13,16 +13,18 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import update
 
 from nous.api.tools import create_subtask_tools
 from nous.config import Settings
 from nous.handlers.subtask_worker import SubtaskWorkerPool
 from nous.heart.subtasks import SubtaskManager
+from nous.storage.models import Subtask
 
 # How long a test waits for something that should happen at once. Only
 # reached when the behaviour under test is broken.
@@ -268,3 +270,56 @@ async def test_a_failed_close_still_lets_the_cancellation_through(db, caplog):
 
     said = [r.getMessage() for r in caplog.records if r.name == "nous.api.tools"]
     assert any("Could not mark inline subtask" in line for line in said), f"the failed close was not logged: {said}"
+
+
+# ---------------------------------------------------------------------------
+# What a killed process left running is closed when the next one starts
+# ---------------------------------------------------------------------------
+
+
+async def test_a_start_cancels_the_inline_subtasks_a_killed_process_left_running(db, caplog):
+    """A redeploy kills the process, so a cut-off call never closed its row.
+
+    The rows as a killed process leaves them: two inline calls cut off, one
+    just now and one long past its timeout, an inline call that had finished,
+    and a worker's row long past its timeout. Another agent's inline call is
+    running in the same database.
+    """
+    heart = _heart(db)
+    subtasks = heart.subtasks
+    await subtasks.create(task="inline, cut off just now", worker_id="inline")
+    cut_off_long_ago = await subtasks.create(task="inline, cut off long ago", timeout=60, worker_id="inline")
+    finished = await subtasks.create(task="inline, finished", worker_id="inline")
+    await subtasks.complete(finished.id, "done", final_outcome="completed")
+    stale = await subtasks.create(task="a worker's, cut off long ago", timeout=60)
+    assert (await subtasks.dequeue("worker-0")).id == stale.id
+    async with db.session() as session:
+        await session.execute(
+            update(Subtask)
+            .where(Subtask.id.in_([cut_off_long_ago.id, stale.id]))
+            .values(started_at=datetime.now(UTC) - timedelta(hours=1))
+        )
+        await session.commit()
+    other_agent = SubtaskManager(db, f"test-fix-w-{uuid.uuid4().hex[:8]}")
+    elsewhere = await other_agent.create(task="another agent's inline call", worker_id="inline")
+
+    settings = _settings()
+    settings.subtask_workers = 0  # start() only closes what was left; nothing runs
+    pool = SubtaskWorkerPool(runner=_Turn(subtasks), heart=heart, settings=settings)
+    for _ in range(2):  # the second start finds nothing left
+        await pool.start()
+        await pool.stop()
+
+    rows = {row.task: row for row in await subtasks.list(limit=10)}
+    for task in ("inline, cut off just now", "inline, cut off long ago"):
+        assert (rows[task].status, rows[task].final_outcome) == ("cancelled", "cancelled"), f"left open: {task}"
+        assert rows[task].completed_at is not None
+    assert rows["inline, finished"].status == "completed", "a start rewrote a finished inline subtask"
+    claimed = await subtasks.dequeue("worker-0")
+    assert claimed is not None and claimed.task == "a worker's, cut off long ago", "the stale row was not re-queued"
+    assert await subtasks.dequeue("worker-0") is None, "a worker could take an inline subtask a killed process left"
+    assert (await other_agent.get(elsewhere.id)).status == "running", "a start closed another agent's inline call"
+    said = [r.getMessage() for r in caplog.records if r.name == "nous.heart.subtasks"]
+    assert [line for line in said if "a previous process left running" in line] == [
+        "Cancelled 2 inline subtasks a previous process left running"
+    ], said
