@@ -34,8 +34,10 @@ import pytest
 import nous.api.tools  # noqa: F401
 from nous.config import Settings
 from nous.events import Event, EventBus
+from nous.handlers.decision_reviewer import DecisionReviewer
 from nous.handlers.session_monitor import SessionTimeoutMonitor
 from nous.handlers.subtask_worker import SubtaskWorkerPool
+from nous.handlers.task_scheduler import TaskScheduler
 
 # How long a test waits for something that should happen at once. Only reached
 # when the behaviour under test is broken.
@@ -382,6 +384,53 @@ def _session_monitor_closure(cancelled: bool) -> _Loop:
     )
 
 
+def _task_scheduler(cancelled: bool) -> _Loop:
+    went_on = asyncio.Event()
+    cancel = _Once(cancelled)
+
+    class _Schedules:
+        async def get_due(self, now: Any) -> list:
+            if cancel():
+                await _cancelled_from_within()
+            went_on.set()
+            return []
+
+    scheduler = TaskScheduler(SimpleNamespace(schedules=_Schedules()), SimpleNamespace(schedule_check_interval=TICK))
+    return _Loop(
+        "task scheduler",
+        scheduler.start,
+        scheduler.stop,
+        lambda: [scheduler._task],
+        went_on,
+        "nous.handlers.task_scheduler",
+        "cancelled from within",
+    )
+
+
+def _decision_review_sweep(cancelled: bool) -> _Loop:
+    went_on = asyncio.Event()
+    cancel = _Once(cancelled)
+
+    class _Brain:
+        async def get_unreviewed(self, max_age_days: int = 30) -> list:
+            if cancel():
+                await _cancelled_from_within()
+            went_on.set()
+            return []
+
+    settings = SimpleNamespace(decision_sweep_interval=TICK, github_token="")
+    reviewer = DecisionReviewer(_Brain(), settings, EventBus())
+    return _Loop(
+        "decision review sweep",
+        reviewer.start,
+        reviewer.stop,
+        lambda: [reviewer._sweep_task],
+        went_on,
+        "nous.handlers.decision_reviewer",
+        "cancelled from within",
+    )
+
+
 LOOPS = [
     _event_bus,
     _event_bus_dispatch,
@@ -390,6 +439,8 @@ LOOPS = [
     _subtask_worker_dequeue,
     _session_monitor_sweep,
     _session_monitor_closure,
+    _task_scheduler,
+    _decision_review_sweep,
 ]
 every_loop = pytest.mark.parametrize(
     "build", LOOPS, ids=[build.__name__.strip("_").replace("_", " ") for build in LOOPS]
@@ -770,3 +821,96 @@ def test_a_closure_cancelled_from_within_fails_alone_and_its_check_is_not_repeat
 
     assert sorted(closed) == ["cancelled", "next", "same check"], closed
     assert monitor.get_stats()["tracked_sessions"] == 0
+
+
+# ---------------------------------------------------------------------------
+# The task scheduler: the other schedules of the same check
+# ---------------------------------------------------------------------------
+
+
+def _schedule(task: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=uuid4(),
+        task=task,
+        created_by_session=None,
+        timeout_seconds=60,
+        notify=False,
+        model=None,
+        frame_type=None,
+        schedule_type="once",
+        continuation_turns=0,
+        continuation_session_id=None,
+        continuation_count=0,
+        fire_count=0,
+    )
+
+
+def test_a_schedule_cancelled_from_within_fails_alone_and_the_other_due_schedules_still_fire():
+    first, second = _schedule("first"), _schedule("second")
+    created: list[str] = []
+    deactivated: list[str] = []
+    cancel = _Once(True)
+
+    class _Subtasks:
+        async def create(self, *, task: str, **_: Any) -> None:
+            if task == "first" and cancel():
+                await _cancelled_from_within()
+            created.append(task)
+
+    class _Schedules:
+        async def get_due(self, now: Any) -> list:
+            return [first, second]
+
+        async def deactivate(self, schedule_id: Any) -> None:
+            deactivated.append(schedule_id)
+
+    # No database: the check for a still-active subtask fails open, as it does on any error.
+    scheduler = TaskScheduler(
+        SimpleNamespace(schedules=_Schedules(), subtasks=_Subtasks()),
+        SimpleNamespace(schedule_check_interval=TICK, schedule_continuation_enabled=False, agent_id="test"),
+    )
+    fired: list[int] = []
+
+    async def scenario() -> None:
+        try:
+            fired.append(await scheduler._fire_due_tasks())
+        except asyncio.CancelledError:
+            pytest.fail("the check ended with the first schedule's cancellation; the second was never fired")
+
+    _run(scenario)
+
+    assert (created, deactivated, fired) == (["second"], [second.id], [1])
+
+
+def test_cancelling_the_scheduler_while_it_fires_a_schedule_ends_it():
+    """Parity pin: green before this change too. The scheduler's own
+    cancellation, landing inside one schedule, is not taken for that
+    schedule's failure."""
+    creating = asyncio.Event()
+
+    class _Subtasks:
+        async def create(self, **_: Any) -> None:
+            creating.set()
+            await asyncio.Event().wait()
+
+    class _Schedules:
+        async def get_due(self, now: Any) -> list:
+            return [_schedule("never created")]
+
+    scheduler = TaskScheduler(
+        SimpleNamespace(schedules=_Schedules(), subtasks=_Subtasks()),
+        SimpleNamespace(schedule_check_interval=TICK, schedule_continuation_enabled=False, agent_id="test"),
+    )
+
+    async def scenario() -> None:
+        await scheduler.start()
+        task = scheduler._task
+        try:
+            await _expect(creating, "the scheduler never fired the schedule")
+            task.cancel()
+            _, pending = await asyncio.wait({task}, timeout=WAIT)
+            assert not pending, "the scheduler went on after its task was cancelled"
+        finally:
+            await asyncio.wait_for(scheduler.stop(), WAIT)
+
+    _run(scenario)
