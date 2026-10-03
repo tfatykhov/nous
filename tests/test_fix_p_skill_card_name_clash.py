@@ -395,3 +395,24 @@ async def test_a_card_row_turned_active_does_not_take_the_name_from_a_card(heart
 
     rows = await _rows(heart)
     assert (rows[retired]["active"], rows[card.id]["name"], rows[card.id]["active"]) == (False, NAME, True)
+
+
+# ---------------------------------------------------------------------------
+# A card row never takes a name from a card
+# ---------------------------------------------------------------------------
+
+
+async def test_a_card_row_is_not_reactivated_over_a_card_of_its_name(heart, caplog):
+    """Only a how-to procedure makes a card give its name up. A card's row that
+    reaches the reactivation next to an active card of the same name is skipped,
+    as before cards gave names up: the active card keeps its name and the retired
+    one stays retired."""
+    retired = await _row(heart, active=False)
+    card = await _card(heart)
+
+    with caplog.at_level("WARNING", logger="nous.heart.procedures"):
+        await heart.reactivate_procedure(retired)
+
+    rows = await _rows(heart)
+    assert (rows[retired]["active"], rows[card.id]["name"], rows[card.id]["active"]) == (False, NAME, True)
+    assert f"Skipping reactivation of {NAME}" in caplog.text

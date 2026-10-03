@@ -850,16 +850,19 @@ class ProcedureManager:
         # one active would violate the (agent_id, lower(name)) WHERE active unique index
         # (migration 058) and, uncaught, abort the whole reactivate_skills loop. Skip
         # with a warning instead (the live row already provides the capability).
-        clash = await session.execute(
+        query = (
             select(Procedure.id)
             .where(func.lower(Procedure.name) == (procedure.name or "").lower())
             .where(Procedure.agent_id == self.agent_id)
             .where(Procedure.active == True)  # noqa: E712
             .where(Procedure.id != procedure_id)
-            # A strategy card is not that live row: it gives the name up below.
-            .where(Procedure.kind.is_distinct_from(STRATEGY_CARD_KIND))
-            .limit(1)
         )
+        if not is_strategy_card(procedure):
+            # For a how-to procedure a strategy card is not that live row: it gives
+            # the name up below. A card's row keeps the check as it was, so it is
+            # skipped next to another card and never takes that card's name.
+            query = query.where(Procedure.kind.is_distinct_from(STRATEGY_CARD_KIND))
+        clash = await session.execute(query.limit(1))
         if clash.scalars().first() is not None:
             logger.warning(
                 "Skipping reactivation of %s — an active procedure with the same name exists",
