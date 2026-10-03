@@ -4099,7 +4099,27 @@ def _kill_script_processes(procs: list[Any]) -> list[int]:
         for proc in procs
         if type(proc) is _POPEN and getattr(proc, "pid", None) is not None and proc.poll() is None
     ]
-    below = _descendants([proc.pid for proc in running])  # read before a parent is gone
+    # Stop them before looking, and stop what each look finds: a stopped
+    # process starts nothing, so a look that finds nothing new has found all
+    # there is below them. Read before a parent is gone. A tree still changing
+    # after eight looks is killed as far as it was found.
+    if hasattr(signal, "SIGSTOP"):
+        for proc in running:
+            try:
+                proc.send_signal(signal.SIGSTOP)
+            except OSError:
+                continue  # not ours to signal
+    below: list[int] = []
+    for _ in range(8):
+        found = [pid for pid in _descendants([proc.pid for proc in running]) if pid not in below]
+        if not found:
+            break
+        for pid in found:
+            try:
+                os.kill(pid, signal.SIGSTOP)
+            except OSError:
+                continue  # it has ended, or is not ours to signal
+        below += found
     killed: list[int] = []
     for proc in running:
         try:

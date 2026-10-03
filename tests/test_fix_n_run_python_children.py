@@ -485,3 +485,58 @@ async def test_a_memory_call_running_when_the_call_gives_up_does_not_land_after_
 
     assert result["is_error"] is True
     assert landed == [], "a memory write landed after the call had answered"
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self"), reason="what a process started is read from Linux /proc")
+async def test_what_processes_start_while_the_kill_looks_is_killed_too(tmp_path, monkeypatch):
+    """Processes that keep starting others are stopped before the kill looks
+    again, so nothing they start meanwhile is left running. The script's own
+    process starts processes and a second starter, which starts processes."""
+    mark = "spawned-by-" + tmp_path.name
+    forks = (
+        "while True:\n"  # a sleep every 50 ms, each marked in its environment
+        "    subprocess.Popen(['sleep', '30'], env={'SPAWNED_BY': sys.argv[1]})\n"
+        "    time.sleep(0.05)\n"
+    )
+    second = "import subprocess, sys, time\n" + forks
+    first = (
+        "import subprocess, sys, time\n"
+        "time.sleep(2.5)\n"
+        f"subprocess.Popen([sys.executable, '-c', {second!r}, sys.argv[1]])\n" + forks
+    )
+
+    def marked() -> list[int]:
+        found = []
+        for entry in os.listdir("/proc"):
+            if entry.isdigit():
+                for name in ("cmdline", "environ"):
+                    try:
+                        with open(f"/proc/{entry}/{name}", "rb") as f:
+                            if mark.encode() in f.read():
+                                found.append(int(entry))
+                                break
+                    except OSError:
+                        pass
+        return found
+
+    real, looks = T._descendants, []
+
+    def slow(pids):
+        found = real(pids)
+        looks.append(found)
+        time.sleep(0.5)  # a process that is not stopped starts more meanwhile
+        return found
+
+    monkeypatch.setattr(T, "_descendants", slow)
+    try:
+        result = await _run_python()(
+            code=f"import subprocess, sys\nsubprocess.run([sys.executable, '-c', {first!r}, {mark!r}])\n"
+        )
+        await asyncio.sleep(0.5)
+
+        assert result["is_error"] is True
+        assert marked() == [], "processes started while the kill was looking went on running"
+        assert len(looks) < 8, "the kill went on looking after a look had found nothing new"
+    finally:
+        for pid in marked():
+            os.kill(pid, signal.SIGKILL)
