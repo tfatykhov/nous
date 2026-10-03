@@ -96,6 +96,31 @@ async def test_the_service_database_carries_the_setting(monkeypatch):
 
 
 @pytest.mark.postgres_only
+async def test_at_zero_the_service_database_keeps_the_server_default(monkeypatch):
+    """The other side of the test above: at the default the service sends no
+    limit at all."""
+    import nous.main
+
+    built: list[Database] = []
+
+    class _Stop(Exception):
+        pass
+
+    async def stop_at_connect(self):
+        built.append(self)
+        raise _Stop
+
+    monkeypatch.delenv("NOUS_DB_LOCK_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.setattr(Database, "connect", stop_at_connect)
+    with pytest.raises(_Stop):
+        await nous.main.create_components(_settings())
+    try:
+        assert await _lock_timeout_of(built[0]) == ("0", "default")
+    finally:
+        await built[0].disconnect()
+
+
+@pytest.mark.postgres_only
 async def test_a_database_built_without_the_keyword_keeps_the_server_default():
     """Scripts and tests build Database(settings) from the service's
     environment. Only the service passes the setting on."""
@@ -357,6 +382,34 @@ async def test_on_the_model_path_too_one_fact_does_not_cost_the_rest(db, own_hea
     await extractor.handle(_summarized())
 
     assert await _stored(db, tag) == [f["content"] for f in facts[1:]]
+
+
+@pytest.mark.postgres_only
+async def test_a_fact_that_fails_for_another_reason_costs_that_fact_only(db, own_heart):
+    """Not only a database error: any error in one fact's write."""
+    tag = uuid.uuid4().hex[:8]
+    facts = _episode_facts(tag)
+    _first_learn_fails(own_heart, RuntimeError("a bug in one write"))
+    extractor = FactExtractor(own_heart, _settings(), None, dedup_via_search=False)
+
+    await extractor.handle(_summarized(candidate_facts=facts))
+
+    assert await _stored(db, tag) == [f["content"] for f in facts[1:]]
+
+
+@pytest.mark.postgres_only
+async def test_a_cancelled_extraction_still_stops(db, own_heart):
+    """The guard does not swallow a cancellation: it ends the extraction, and
+    nothing more is stored."""
+    tag = uuid.uuid4().hex[:8]
+    facts = _episode_facts(tag)
+    _first_learn_fails(own_heart, asyncio.CancelledError())
+    extractor = FactExtractor(own_heart, _settings(), None, dedup_via_search=False)
+
+    with pytest.raises(asyncio.CancelledError):
+        await extractor.handle(_summarized(candidate_facts=facts))
+
+    assert await _stored(db, tag) == []
 
 
 @pytest.mark.postgres_only
