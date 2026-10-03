@@ -311,12 +311,13 @@ async def test_a_refused_memory_call_does_not_turn_the_deadline_off(tmp_path):
         "try:\n"
         "    recall_deep('anything')\n"
         "except:\n"
-        "    pass\n"
-        f"subprocess.run({_child(late, nap=0.5)})\n"
-        "end = time.monotonic() + 3\n"
-        "while time.monotonic() < end:\n"
-        "    pass\n"
-        f"open({str(looped)!r}, 'w').write('looped')\n"
+        # Inside the handler: past its deadline, the first line after an
+        # `except` block is itself a point where the trace hook raises.
+        f"    subprocess.run({_child(late, nap=0.5)})\n"
+        "    end = time.monotonic() + 3\n"
+        "    while time.monotonic() < end:\n"
+        "        pass\n"
+        f"    open({str(looped)!r}, 'w').write('looped')\n"
     )
     previous = get_active()
     set_active(RetrievalLogger(db_writer=None, enabled=True))  # main.py wires one by default
