@@ -321,20 +321,33 @@ async def test_the_wait_reads_both_pipes_to_their_end(monkeypatch, caplog, unrea
     assert [r.getMessage() for r in caplog.records if r.name == "nous.utils"] == []
 
 
-async def test_the_group_of_an_exited_shell_is_not_signalled_once_its_pid_is_in_use_again(monkeypatch):
+@pytest.mark.parametrize("owner", ["this process", "another user"])
+async def test_the_group_of_an_exited_shell_is_not_signalled_once_its_pid_is_in_use_again(monkeypatch, owner):
     """The helper alone. A shell whose exit has been collected has given its
     pid back; a process that has that pid now is a newer one, and its process
-    group is not the command's. This process's own pid stands in for it."""
+    group is not the command's. This process's own pid stands in for it, and
+    so does a pid whose probe answers PermissionError, as a process of another
+    user does: it is in use all the same."""
     from nous.utils import kill_process_group
 
     monkeypatch.setattr("nous.utils._KILL_WAIT_SECONDS", 0.5, raising=False)
     signalled = []
     monkeypatch.setattr(os, "killpg", lambda pgid, sig: signalled.append((pgid, sig)))
+    pid = os.getpid()
+    if owner == "another user":
+        pid, probe = 4242, os.kill
+
+        def kill(target, sig):
+            if target == pid:
+                raise PermissionError(1, "Operation not permitted")
+            return probe(target, sig)
+
+        monkeypatch.setattr(os, "kill", kill)
 
     async def exited():
         return 2
 
-    shell = SimpleNamespace(pid=os.getpid(), returncode=2, wait=exited, stdout=None, stderr=None)
+    shell = SimpleNamespace(pid=pid, returncode=2, wait=exited, stdout=None, stderr=None)
 
     await asyncio.wait_for(kill_process_group(shell, even_if_exited=True), LIMIT)
 
