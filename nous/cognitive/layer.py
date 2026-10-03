@@ -679,7 +679,9 @@ class CognitiveLayer:
                 temporal_recency=_effective_recency,
                 memory_type_hints=signals.memory_type_hints,
                 is_question=signals.is_question,
-                is_greeting=signals.is_greeting,
+                # A recap asked for after a greeting ("hey, give me a recap") is
+                # a request, as the deictic rescue above says of a follow-up.
+                is_greeting=False,
                 topic_keywords=signals.topic_keywords,
                 text=signals.text,
             )

@@ -156,3 +156,12 @@ async def test_the_recap_rebuild_plans_on_what_follows_the_greeting(cognitive, s
     plan = await _plan_handed_to_the_context_build(cognitive, session, "hi, can u recap?")
 
     assert {q.query_text for q in plan.queries} == {"can u recap?"}
+
+
+async def test_pre_turn_plans_a_recap_after_a_greeting_as_a_recap(cognitive, session):
+    """The recap rebuild in pre_turn copied the greeting flag, so a recap asked
+    for after a greeting ("hey, give me a recap") kept the empty greeting plan."""
+    plan = await _plan_handed_to_the_context_build(cognitive, session, "hey, give me a recap")
+
+    assert {q.query_text for q in plan.queries} == {"give me a recap"}
+    assert next(q.limit for q in plan.queries if q.memory_type == "episode") >= 8
