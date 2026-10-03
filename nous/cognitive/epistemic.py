@@ -74,8 +74,6 @@ _EPISTEMIC_TOOL: dict[str, Any] = {
     },
 }
 
-_EPISTEMIC_TOOL_CHOICE: dict[str, str] = {"type": "tool", "name": "route_turn"}
-
 _VALID_CLASSES = frozenset({"grounded", "world_knowledge", "abstain"})
 
 # Sliding-window budget bucket size (seconds). 1 hour == 3600 s.

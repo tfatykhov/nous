@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import sqlalchemy.exc
 from sqlalchemy import text
 
+from nous.handlers import call_with_tool_choice
 from nous.heart.hashing import canonical_input_hash
 
 if TYPE_CHECKING:
@@ -339,7 +340,7 @@ class QueryExpander:
 
         try:
             resp = await asyncio.wait_for(
-                self._llm.call(payload),
+                call_with_tool_choice(self._llm, payload),
                 timeout=self._settings.query_expansion_timeout_seconds,
             )
         except asyncio.CancelledError:
@@ -352,7 +353,7 @@ class QueryExpander:
             self._log_haiku_error(exc)
             return []
 
-        # Extract tool_use block (forced via tool_choice — should always be present)
+        # Extract tool_use block (forced, or asked for in the prompt on a model that rejects forcing)
         for block in resp.content or []:
             if block.get("type") == "tool_use" and block.get("name") == "expand_query":
                 raw = block.get("input", {}).get("alternative_queries", [])
