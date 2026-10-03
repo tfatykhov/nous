@@ -56,6 +56,8 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
+from sqlalchemy.exc import IntegrityError
+
 from nous.config import Settings
 from nous.dag._workspace import assert_inside_root, compute_workspace_path
 from nous.dag.approval import (
@@ -3394,8 +3396,7 @@ class DAGOrchestrator:
         augmented = await self._build_predecessor_context(node, dag)
         check_name = f"{DAG_CHECK_NAME_PREFIX}{dag.id.hex[:8]}-{node.name}"
 
-        created = False
-        try:
+        async def create_check() -> None:
             await self._dynamic_loader.create_check(
                 name=check_name,
                 description=node.description or f"DAG check: {node.name}",
@@ -3408,6 +3409,17 @@ class DAGOrchestrator:
                 # heartbeat worker actually runs when the node is created at night.
                 urgent=True,
             )
+
+        created = False
+        try:
+            try:
+                await create_check()
+            except IntegrityError:
+                # The name is held by the check an earlier launch of this node
+                # created (a launch that could not be recorded, or the attempt
+                # before a retry). Replace it: a new attempt gets a new check.
+                await self._dynamic_loader.manage_check(action="delete", name=check_name)
+                await create_check()
             created = True
             # Protect the check's failure entry from eviction so
             # _sync_check_node can consume it even if many other checks fail.
