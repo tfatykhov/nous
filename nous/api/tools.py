@@ -4112,7 +4112,14 @@ def _kill_script_processes(procs: list[Any]) -> list[int]:
                 continue  # not ours to signal
     below: list[int] = []
     for _ in range(8):
-        found = [pid for pid in _descendants([proc.pid for proc in running]) if pid not in below]
+        try:
+            found = [pid for pid in _descendants([proc.pid for proc in running]) if pid not in below]
+        except Exception:
+            # The script's processes are stopped by now. A look that fails
+            # ends the looking, and what was found is killed, rather than left
+            # stopped, holding its worker and the run slot for good.
+            logger.warning("run_python: could not look for what a script's processes started", exc_info=True)
+            break
         if not found:
             break
         for pid in found:

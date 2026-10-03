@@ -554,3 +554,23 @@ async def test_a_process_whose_popen_has_not_returned_yet_is_killed(tmp_path):
 
     assert result["content"][0]["text"] == _TIMED_OUT + "; killed 1 process(es) the script had started"
     assert run_python_active_runs() == 0, "the timed-out script still holds its run slot"
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGSTOP"), reason="needs POSIX signals")
+def test_a_look_that_fails_still_kills_what_was_stopped(monkeypatch, caplog):
+    """The script's processes are stopped before the kill looks: a look that
+    fails must not leave them stopped, holding their worker for good."""
+    running = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+
+    def failing(pids):
+        raise RuntimeError("a look that fails")
+
+    monkeypatch.setattr(T, "_descendants", failing)
+    try:
+        with caplog.at_level(logging.WARNING, logger="nous.api.tools"):
+            assert T._kill_script_processes([running]) == [running.pid]
+        assert running.wait(timeout=5) == -signal.SIGKILL
+        assert caplog.text.count("could not look for what") == 1
+    finally:
+        running.kill()
+        running.wait()
