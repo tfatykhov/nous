@@ -2561,11 +2561,9 @@ async def test_short_os_write_is_completed_not_truncated(tmp_path, monkeypatch) 
     """codex P1 #652 (builtin_tools.py:220): a short os.write() was ignored,
     so a truncated temp file replaced the target and write_file reported
     success. Every byte is now written."""
-    from nous.api.builtin_tools import write_file_tool
-
     real_write = os.write
     monkeypatch.setattr(os, "write", lambda fd, data: real_write(fd, bytes(data[:3])))
-    result = await write_file_tool("out.txt", "hello partial world", _workspace_dir=str(tmp_path))
+    _, _, result = await _snapshotted_write(tmp_path, "out.txt", "hello partial world")
     assert not result.get("is_error")
     assert (tmp_path / "out.txt").read_text() == "hello partial world"
 
@@ -2576,11 +2574,10 @@ async def test_new_file_gets_the_umask_default_mode_not_0600(tmp_path) -> None:
     0600, where write_text gave the umask default (0644 under umask 022)."""
     import stat
 
-    from nous.api.builtin_tools import write_file_tool
-
     umask = os.umask(0o022)
     os.umask(umask)
-    await write_file_tool("new.txt", "x", _workspace_dir=str(tmp_path))
+    _, _, result = await _snapshotted_write(tmp_path, "new.txt", "x")
+    assert not result.get("is_error")
     assert stat.S_IMODE((tmp_path / "new.txt").stat().st_mode) == 0o666 & ~umask
 
 
@@ -2924,7 +2921,12 @@ async def test_write_file_over_a_fifo_is_refused_without_blocking(tmp_path) -> N
     from nous.api.builtin_tools import write_file_tool
 
     os.mkfifo(tmp_path / "pipe")
-    result = await asyncio.wait_for(write_file_tool("pipe", "x", _workspace_dir=str(tmp_path)), timeout=5)
+    try:
+        result = await asyncio.wait_for(write_file_tool("pipe", "x", _workspace_dir=str(tmp_path)), timeout=5)
+    finally:
+        # A reader, so that a write that did block in open() can end and a
+        # failure here cannot hang the whole run.
+        os.close(os.open(tmp_path / "pipe", os.O_RDONLY | os.O_NONBLOCK))
     assert result.get("is_error") is True
     snap = await asyncio.wait_for(snapshot_for_write_file("pipe", str(tmp_path)), timeout=5)
     assert snap.get("capture_error")
