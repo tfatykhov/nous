@@ -437,3 +437,61 @@ async def test_a_card_that_reached_the_rung_outside_the_cards_only_window_is_not
     assert selected == []
     dropped = next((c for c in trace.to_dict()["candidates"] if c["id"] == str(card.id)), {})
     assert (dropped.get("disposition"), dropped.get("disposition_stage")) == ("filter_dropped", "strategy_card_floor")
+
+
+@pytest.mark.asyncio
+async def test_a_floor_of_zero_lets_any_known_cosine_through_on_the_graph_rung(card_heart, session):
+    """A floor of 0 is a legal setting: a graph rung card with a low but known
+    cosine is served, as the probe would serve it."""
+    card = await _add(session, card_heart, "card-0", kind="strategy")
+    engine = _engine(card_heart, _seeded_brain((card, 0.9)), procedure_score_floor=0.0)
+    engine._heart.procedure_similarities = AsyncMock(return_value={card.id: 0.1})
+
+    assert await _recommended_ids(engine, card_heart, session) == [str(card.id)]
+
+
+@pytest.mark.asyncio
+async def test_a_card_past_the_allowance_is_cut_by_the_cap_however_far_it_is(card_heart, session):
+    """The allowance is checked before the floor: a card the rung can no longer
+    serve is reported as cut by the cap, not as kept out by the floor, so the
+    floor's count in the trace holds only the cards it actually kept out."""
+    near = await _add(session, card_heart, "card-near", kind="strategy")
+    far = await _add(session, card_heart, "card-far", kind="strategy")
+    engine = _engine(card_heart, _seeded_brain((near, 0.9), (far, 0.8)))
+    engine._heart.procedure_similarities = AsyncMock(return_value={near.id: 0.9, far.id: 0.1})
+    seed = str(uuid4())
+    trace = RetrievalTrace(query=_QUERY, path="context")
+
+    selected = await engine._select_procedures(
+        slots=5,
+        critic_skills=[],
+        recalled_ids={"fact": [], "decision": [seed]},
+        recalled_score_map={seed: 0.9},
+        session=session,
+        query=_QUERY,
+        trace=trace,
+        card_slots=1,
+    )
+
+    assert [d.id for d in selected] == [near.id]
+    cut = next((c for c in trace.to_dict()["candidates"] if c["id"] == str(far.id)), {})
+    assert (cut.get("disposition"), cut.get("disposition_stage")) == ("sliced_off", "strategy_card_cap")
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_the_closeness_read_measures_only_the_rows_asked_for(vector_heart, mock_embeddings, session):
+    """Only the given ids are read: another card of the same agent, with an
+    embedding, is not."""
+    asked = await _add(
+        session, vector_heart, "card-asked", kind="strategy", embedding=await mock_embeddings.embed_near(_QUERY, 0.01)
+    )
+    await _add(
+        session,
+        vector_heart,
+        "card-not-asked",
+        kind="strategy",
+        embedding=await mock_embeddings.embed_near(_QUERY, 0.02),
+    )
+
+    assert set(await vector_heart.procedure_similarities(_QUERY, [asked.id], session=session)) == {asked.id}
