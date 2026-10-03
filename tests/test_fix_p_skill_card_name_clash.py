@@ -353,3 +353,20 @@ async def test_a_card_body_still_refreshes_a_card(heart):
 
     row = (await _rows(heart))[card.id]
     assert (row["kind"], row["body"], row["source"]) == (STRATEGY_CARD_KIND, "A newer lesson.", DECISION_ID)
+
+
+@pytest.mark.parametrize("active", [True, False])
+async def test_a_body_refresh_of_an_inactive_skill_whose_name_a_card_holds(heart, active):
+    """update_body can turn an inactive skill active: the skill re-import does once
+    the skill's requirement is set. That is the third way a how-to procedure becomes
+    the active row of a name, after an insert and a reactivation, and the card gives
+    the name up. A refresh that leaves the skill inactive leaves the card its name."""
+    skill = await heart.store_procedure(_how_to(active=False))
+    card = await _card(heart)
+
+    await heart.update_procedure_body(skill.id, _how_to(active=active))
+
+    rows = await _rows(heart)
+    assert rows[skill.id]["active"] is active
+    assert rows[card.id]["name"] == (_moved(NAME, card.id) if active else NAME)
+    assert (rows[card.id]["kind"], rows[card.id]["active"]) == (STRATEGY_CARD_KIND, True)

@@ -226,6 +226,10 @@ class ProcedureManager:
             # embedding and reembed_all can't tell it needs repair.
             embedding = await self._embed_with_retry(embed_text)
 
+        if input.active and not procedure.active and not is_strategy_card(input):
+            # This refresh turns the row active (the skill re-import does, once the
+            # skill's requirement is set): as for an insert, a card gives the name up.
+            await self._take_name_from_card(input.name, session)
         procedure.name = input.name
         procedure.domain = input.domain
         procedure.description = input.description
