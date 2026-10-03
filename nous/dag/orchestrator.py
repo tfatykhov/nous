@@ -3492,8 +3492,10 @@ class DAGOrchestrator:
             # As on the subtask path: stop the check before the failure write.
             if created and not await self._launch_landed(node, check_name=check_name):
                 await self._abandon_check(node.id, check_name)
-                # As on the subtask path. A check that could not be disabled
-                # does not block this: the next launch replaces it by name.
+                # Unlike the subtask path, whether the check ran is not read:
+                # the disable cancels a run in flight, and the next launch
+                # replaces the check by name and runs it again, even one that
+                # could not be disabled.
                 if _can_pass(e):
                     await self._defer_node(node, dag, f"launch not recorded: {e}")
                     return

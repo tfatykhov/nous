@@ -144,7 +144,7 @@ async def test_a_real_lock_held_through_a_check_launch_is_launched_again(db, mon
 
 
 # ---------------------------------------------------------------------------
-# A launch that could not be recorded is launched again, unless its work ran
+# A launch that could not be recorded is launched again; a subtask only if it never ran
 # ---------------------------------------------------------------------------
 
 
