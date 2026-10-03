@@ -197,6 +197,18 @@ async def test_a_card_whose_new_name_is_held_takes_the_next_free_one(heart, name
     assert (rows[how_to.id]["name"], rows[card.id]["name"], rows[card.id]["active"]) == (name, second, True)
 
 
+async def test_a_card_whose_new_name_another_card_holds_takes_the_next_free_one(heart):
+    """A card holds a name as well as a how-to procedure does: the card that
+    gives its name up passes over a name another active card holds."""
+    card = await _card(heart)
+    await _row(heart, name=_moved(NAME, card.id))
+
+    how_to = await heart.store_procedure(_how_to(NAME))
+
+    rows = await _rows(heart)
+    assert (rows[how_to.id]["name"], rows[card.id]["name"]) == (NAME, f"{NAME} ({card.id.hex[:6]}-2)")
+
+
 @pytest.mark.parametrize("space_at_the_cut", [False, True])
 async def test_a_card_name_as_long_as_the_column_still_moves(heart, space_at_the_cut):
     """A card name can fill the column (500 characters). The name it moves to is
@@ -474,3 +486,19 @@ async def test_a_card_row_is_not_reactivated_over_a_card_of_its_name(heart, capl
     rows = await _rows(heart)
     assert (rows[retired]["active"], rows[card.id]["name"], rows[card.id]["active"]) == (False, NAME, True)
     assert f"Skipping reactivation of {NAME}" in caplog.text
+
+
+async def test_a_card_row_never_takes_a_card_name_however_the_name_is_spelled(heart):
+    """The clash check lowers the name in Python and misses an active card called
+    "\u0130stanbul Deploy" that the index (lower() in the database) sees. The
+    card's row then fails on the index, as before cards gave names up: the active
+    card keeps its name."""
+    name = "\u0130stanbul Deploy"
+    retired = await _row(heart, name=name, active=False)
+    card = await _card(heart, name)
+
+    with pytest.raises(IntegrityError):
+        await heart.reactivate_procedure(retired)
+
+    rows = await _rows(heart)
+    assert (rows[retired]["active"], rows[card.id]["name"], rows[card.id]["active"]) == (False, name, True)
