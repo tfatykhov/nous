@@ -100,8 +100,9 @@ def test_a_turn_with_no_request_and_no_greeting_is_still_not_planned(text):
 @pytest.mark.parametrize(
     "text", ["hi can u check redis", "Hi, the Postgres migration failed", "hello, tell me about the plan"]
 )
-def test_with_the_switch_off_any_turn_that_starts_with_a_greeting_skips_retrieval(text):
-    """Pin: the switch restores the old rule."""
+def test_with_the_switch_off_any_greeting_led_turn_is_classified_as_a_greeting(text):
+    """Pin: with the switch off, classify and plan work as they did before the
+    setting was added."""
     signals, plan = _classify_and_plan(text, followup_greeting_request_detection_enabled=False)
 
     assert signals.is_greeting is True

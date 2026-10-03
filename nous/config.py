@@ -2320,7 +2320,7 @@ class Settings(BaseSettings):
             "Kill-switch. When true, a turn that starts with a greeting is judged by what "
             "follows the greeting, as any turn is (the short-input rule): if that carries a "
             "request, the turn is classified and planned as that request alone. Set false to "
-            "restore the old rule: any turn that starts with a greeting skips retrieval."
+            "restore the behavior from before this setting was added."
         ),
     )
     recall_before_clarify_prompt: bool = Field(
