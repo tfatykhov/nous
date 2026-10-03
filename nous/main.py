@@ -14,6 +14,7 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 
 import httpx
 import uvicorn
@@ -35,7 +36,152 @@ from nous.loop_watchdog import start_event_loop_watchdog, stop_event_loop_watchd
 from nous.storage.database import Database
 from nous.storage.migrator import run_migrations
 
+if TYPE_CHECKING:
+    from nous.a2ui.service import SurfaceService
+    from nous.cognitive.ledger_store import LedgerStore
+
 logger = logging.getLogger(__name__)
+
+# Seconds between two sweeps of a retention loop.
+_RETENTION_SWEEP_INTERVAL_SECONDS = 86400
+# Seconds the execution-ledger maintenance loop waits after a pass that failed.
+_EXECUTION_LEDGER_RETRY_SECONDS = 60
+
+
+async def _execution_ledger_maintenance_loop(
+    settings: Settings, ledger_store: LedgerStore, runner: AgentRunner
+) -> None:
+    """Prune the execution ledger, sweep its orphaned rows and retry pending compensation cards."""
+    from nous.cognitive.ledger_store import effective_orphan_threshold
+
+    # Prune at startup (a process restarted daily must still prune -
+    # the F091 lesson) and then at most daily; sweep stale pending rows
+    # every interval; retry pending compensation cards (codex P1 #652).
+    last_prune: float | None = None
+    loop = asyncio.get_running_loop()
+    while True:
+        try:
+            if settings.execution_ledger_retention_days > 0 and (
+                last_prune is None or loop.time() - last_prune >= 86400
+            ):
+                pruned = await ledger_store.prune(
+                    retention_days=settings.execution_ledger_retention_days,
+                )
+                last_prune = loop.time()
+                logger.info("Harness: execution ledger retention pruned %d rows", pruned)
+            await asyncio.sleep(settings.execution_ledger_sweep_interval_seconds)
+            await ledger_store.mark_orphans_unknown(
+                older_than_seconds=effective_orphan_threshold(settings),
+            )
+            # codex P1 on #652: retry pending compensation cards that
+            # failed to publish on the original call.
+            try:
+                published = await runner.sweep_pending_cards()
+                if published:
+                    logger.info("Harness: retried %d pending compensation card(s)", published)
+            except Exception:
+                logger.warning("Harness: sweep_pending_cards failed", exc_info=True)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            logger.warning("Harness: execution ledger maintenance failed", exc_info=True)
+            await asyncio.sleep(_EXECUTION_LEDGER_RETRY_SECONDS)
+
+
+async def _retrieval_log_retention_loop(settings: Settings, database: Database) -> None:
+    """Delete this agent's retrieval-log rows that are past their retention."""
+    # Sweep once at startup, THEN daily. These rows are 10-100x
+    # larger than context_log's, so a process restarted daily would
+    # never prune under a sleep-first loop.
+    first = True
+    while True:
+        try:
+            if first:
+                first = False
+            else:
+                await asyncio.sleep(_RETENTION_SWEEP_INTERVAL_SECONDS)
+            days = settings.retrieval_telemetry_retention_days
+            async with database.session() as s:
+                from sqlalchemy import text
+
+                # agent-scoped: the table is agent-scoped and the
+                # retention setting is per-process, so an unscoped
+                # DELETE lets a default-configured agent destroy
+                # the rows of one configured to keep them longer.
+                await s.execute(
+                    text(
+                        "DELETE FROM nous_system.retrieval_log "
+                        "WHERE agent_id = :agent_id "
+                        "AND timestamp < now() - make_interval(days => :d)"
+                    ),
+                    {"d": days, "agent_id": settings.agent_id},
+                )
+                await s.commit()
+            logger.info(
+                "F091: retrieval_log retention sweep (>%dd, agent=%s) done",
+                days,
+                settings.agent_id,
+            )
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            logger.debug("F091: retrieval retention sweep failed", exc_info=True)
+
+
+async def _context_log_retention_loop(settings: Settings, database: Database) -> None:
+    """Delete context-log and behavior-snapshot rows that are past their retention."""
+    while True:
+        try:
+            await asyncio.sleep(_RETENTION_SWEEP_INTERVAL_SECONDS)  # daily
+            days = settings.context_log_retention_days
+            async with database.session() as s:
+                from sqlalchemy import text
+
+                await s.execute(
+                    text("DELETE FROM nous_system.context_log WHERE timestamp < now() - make_interval(days => :d)"),
+                    {"d": days},
+                )
+                await s.execute(
+                    text(
+                        "DELETE FROM nous_system.behavior_snapshots WHERE timestamp < now() - make_interval(days => :d)"
+                    ),
+                    {"d": days},
+                )
+                await s.commit()
+            logger.info("OB-1: context_log/behavior_snapshots retention sweep (>%dd) done", days)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            logger.debug("OB-1: retention sweep failed", exc_info=True)
+
+
+async def _a2ui_sweep_loop(settings: Settings, surface_service: SurfaceService) -> None:
+    """Expire companion surfaces: once at startup, then every sweep interval."""
+    # Sweep once at startup, then periodically. The sweep must run
+    # unobserved: expiry writes no_objection evidence ("silence
+    # counts", spec 6.2) even if no client ever connects, so it
+    # cannot be piggybacked on client activity.
+    first = True
+    while True:
+        try:
+            if first:
+                first = False
+                # Restart invalidation: live heartbeat surfaces
+                # reference an in-memory finding store that no longer
+                # exists — every button on them is dead. Expire them
+                # up front instead of serving 72h of "not found".
+                stale = await surface_service.invalidate_heartbeat_surfaces()
+                if stale:
+                    logger.info("F092: invalidated %d stale heartbeat surface(s)", stale)
+            else:
+                await asyncio.sleep(settings.a2ui_sweep_interval_seconds)
+            expired = await surface_service.expire_sweep()
+            if expired:
+                logger.info("F092: expiry sweep expired %d surface(s)", expired)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            logger.warning("F092: expiry sweep failed", exc_info=True)
 
 
 async def create_components(settings: Settings) -> dict:
@@ -615,7 +761,7 @@ async def create_components(settings: Settings) -> dict:
     ledger_store = None
     execution_ledger_task = None
     if settings.execution_ledger_persist_enabled:
-        from nous.cognitive.ledger_store import LedgerStore, effective_orphan_threshold
+        from nous.cognitive.ledger_store import LedgerStore
 
         ledger_store = LedgerStore(
             database,
@@ -642,41 +788,7 @@ async def create_components(settings: Settings) -> dict:
         except Exception:
             logger.warning("Harness: startup execution-ledger sweep failed", exc_info=True)
 
-        async def _execution_ledger_maintenance_loop():
-            # Prune at startup (a process restarted daily must still prune -
-            # the F091 lesson) and then at most daily; sweep stale pending rows
-            # every interval; retry pending compensation cards (codex P1 #652).
-            last_prune: float | None = None
-            loop = asyncio.get_running_loop()
-            while True:
-                try:
-                    if settings.execution_ledger_retention_days > 0 and (
-                        last_prune is None or loop.time() - last_prune >= 86400
-                    ):
-                        pruned = await ledger_store.prune(
-                            retention_days=settings.execution_ledger_retention_days,
-                        )
-                        last_prune = loop.time()
-                        logger.info("Harness: execution ledger retention pruned %d rows", pruned)
-                    await asyncio.sleep(settings.execution_ledger_sweep_interval_seconds)
-                    await ledger_store.mark_orphans_unknown(
-                        older_than_seconds=effective_orphan_threshold(settings),
-                    )
-                    # codex P1 on #652: retry pending compensation cards that
-                    # failed to publish on the original call.
-                    try:
-                        published = await runner.sweep_pending_cards()
-                        if published:
-                            logger.info("Harness: retried %d pending compensation card(s)", published)
-                    except Exception:
-                        logger.warning("Harness: sweep_pending_cards failed", exc_info=True)
-                except asyncio.CancelledError:
-                    break
-                except Exception:
-                    logger.warning("Harness: execution ledger maintenance failed", exc_info=True)
-                    await asyncio.sleep(60)
-
-        execution_ledger_task = asyncio.create_task(_execution_ledger_maintenance_loop())
+        execution_ledger_task = asyncio.create_task(_execution_ledger_maintenance_loop(settings, ledger_store, runner))
 
     # Late-bind runner into SessionTimeoutMonitor so idle-timeout closures
     # take the canonical runner.end_conversation path (full cleanup + reflection)
@@ -776,46 +888,7 @@ async def create_components(settings: Settings) -> dict:
         )
 
         if getattr(settings, "retrieval_telemetry_retention_days", 0) > 0:
-
-            async def _retrieval_log_retention_loop():
-                # Sweep once at startup, THEN daily. These rows are 10-100x
-                # larger than context_log's, so a process restarted daily would
-                # never prune under a sleep-first loop.
-                first = True
-                while True:
-                    try:
-                        if first:
-                            first = False
-                        else:
-                            await asyncio.sleep(86400)
-                        days = settings.retrieval_telemetry_retention_days
-                        async with database.session() as s:
-                            from sqlalchemy import text
-
-                            # agent-scoped: the table is agent-scoped and the
-                            # retention setting is per-process, so an unscoped
-                            # DELETE lets a default-configured agent destroy
-                            # the rows of one configured to keep them longer.
-                            await s.execute(
-                                text(
-                                    "DELETE FROM nous_system.retrieval_log "
-                                    "WHERE agent_id = :agent_id "
-                                    "AND timestamp < now() - make_interval(days => :d)"
-                                ),
-                                {"d": days, "agent_id": settings.agent_id},
-                            )
-                            await s.commit()
-                        logger.info(
-                            "F091: retrieval_log retention sweep (>%dd, agent=%s) done",
-                            days,
-                            settings.agent_id,
-                        )
-                    except asyncio.CancelledError:
-                        break
-                    except Exception:
-                        logger.debug("F091: retrieval retention sweep failed", exc_info=True)
-
-            retrieval_log_retention_task = asyncio.create_task(_retrieval_log_retention_loop())
+            retrieval_log_retention_task = asyncio.create_task(_retrieval_log_retention_loop(settings, database))
 
     # F035.4: Context Logger
     context_logger = None
@@ -912,38 +985,8 @@ async def create_components(settings: Settings) -> dict:
         # documented context_log_retention_days had zero consumers before this.
         # (context_log_retention_task initialized to None above the conditional.)
         if getattr(settings, "context_log_retention_days", 0) > 0:
-
-            async def _context_log_retention_loop():
-                while True:
-                    try:
-                        await asyncio.sleep(86400)  # daily
-                        days = settings.context_log_retention_days
-                        async with database.session() as s:
-                            from sqlalchemy import text
-
-                            await s.execute(
-                                text(
-                                    "DELETE FROM nous_system.context_log "
-                                    "WHERE timestamp < now() - make_interval(days => :d)"
-                                ),
-                                {"d": days},
-                            )
-                            await s.execute(
-                                text(
-                                    "DELETE FROM nous_system.behavior_snapshots "
-                                    "WHERE timestamp < now() - make_interval(days => :d)"
-                                ),
-                                {"d": days},
-                            )
-                            await s.commit()
-                        logger.info("OB-1: context_log/behavior_snapshots retention sweep (>%dd) done", days)
-                    except asyncio.CancelledError:
-                        break
-                    except Exception:
-                        logger.debug("OB-1: retention sweep failed", exc_info=True)
-
             context_log_retention_task = asyncio.create_task(
-                _context_log_retention_loop(), name="context-log-retention"
+                _context_log_retention_loop(settings, database), name="context-log-retention"
             )
 
     # 011.1 + 012.2: Register subtask/schedule tools (after runner for inline execution)
@@ -1359,34 +1402,7 @@ async def create_components(settings: Settings) -> dict:
             except Exception:
                 logger.warning("Harness: startup pending-card sweep failed", exc_info=True)
 
-        async def _a2ui_sweep_loop():
-            # Sweep once at startup, then periodically. The sweep must run
-            # unobserved: expiry writes no_objection evidence ("silence
-            # counts", spec 6.2) even if no client ever connects, so it
-            # cannot be piggybacked on client activity.
-            first = True
-            while True:
-                try:
-                    if first:
-                        first = False
-                        # Restart invalidation: live heartbeat surfaces
-                        # reference an in-memory finding store that no longer
-                        # exists — every button on them is dead. Expire them
-                        # up front instead of serving 72h of "not found".
-                        stale = await surface_service.invalidate_heartbeat_surfaces()
-                        if stale:
-                            logger.info("F092: invalidated %d stale heartbeat surface(s)", stale)
-                    else:
-                        await asyncio.sleep(settings.a2ui_sweep_interval_seconds)
-                    expired = await surface_service.expire_sweep()
-                    if expired:
-                        logger.info("F092: expiry sweep expired %d surface(s)", expired)
-                except asyncio.CancelledError:
-                    break
-                except Exception:
-                    logger.warning("F092: expiry sweep failed", exc_info=True)
-
-        a2ui_sweep_task = asyncio.create_task(_a2ui_sweep_loop())
+        a2ui_sweep_task = asyncio.create_task(_a2ui_sweep_loop(settings, surface_service))
         logger.info("F092: A2UI companion enabled (push_surface + /a2ui routes + sweep)")
 
     return {
