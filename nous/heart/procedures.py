@@ -869,7 +869,10 @@ class ProcedureManager:
                 procedure.name,
             )
             return
-        await self._take_name_from_card(procedure.name, session)
+        if not is_strategy_card(procedure):
+            # The check above lowers the name in Python and can miss a card the index
+            # sees: a card's row then fails on the index rather than take the name.
+            await self._take_name_from_card(procedure.name, session)
         procedure.active = True
         await session.flush()
 
