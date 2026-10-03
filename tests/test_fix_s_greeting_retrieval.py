@@ -165,3 +165,20 @@ async def test_pre_turn_plans_a_recap_after_a_greeting_as_a_recap(cognitive, ses
 
     assert {q.query_text for q in plan.queries} == {"give me a recap"}
     assert next(q.limit for q in plan.queries if q.memory_type == "episode") >= 8
+
+
+@pytest.mark.parametrize(
+    "text, planned", [("hey, recap", False), ("hi, catch me up", False), ("give me a recap", True)]
+)
+async def test_with_the_switch_off_a_recap_is_planned_as_before(db, heart, settings, session, text, planned):
+    """The switch restores the old recap rebuild too: a recap asked for after a
+    greeting keeps the empty greeting plan, and one without a greeting is planned."""
+    off = settings.model_copy(update={"followup_greeting_request_detection_enabled": False})
+    brain = Brain(database=db, settings=off, embedding_provider=MockEmbeddingProvider())
+    try:
+        layer = CognitiveLayer(brain, heart, off, identity_prompt="You are Nous.")
+        plan = await _plan_handed_to_the_context_build(layer, session, text)
+    finally:
+        await brain.close()
+
+    assert (plan != GREETING_PLAN) is planned

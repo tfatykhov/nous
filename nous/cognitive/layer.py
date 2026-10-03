@@ -680,8 +680,9 @@ class CognitiveLayer:
                 memory_type_hints=signals.memory_type_hints,
                 is_question=signals.is_question,
                 # A recap asked for after a greeting ("hey, give me a recap") is
-                # a request, as the deictic rescue above says of a follow-up.
-                is_greeting=False,
+                # a request, as the deictic rescue above says of a follow-up;
+                # the greeting rule's switch restores the old copy of the flag.
+                is_greeting=signals.is_greeting and not self._settings.followup_greeting_request_detection_enabled,
                 topic_keywords=signals.topic_keywords,
                 text=signals.text,
             )
