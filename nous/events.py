@@ -18,6 +18,8 @@ from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
+from nous.cancellation import cancel_requested
+
 logger = logging.getLogger(__name__)
 
 # Handler type: async function taking an Event
@@ -225,7 +227,9 @@ class EventBus:
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
-                break
+                if cancel_requested():
+                    break
+                logger.exception("Event bus: a dispatch was cancelled from within — the loop continues")
             except Exception:
                 logger.exception("Unexpected error in event bus loop")
 
@@ -236,6 +240,10 @@ class EventBus:
         if self._db_persister and event.persist:
             try:
                 await self._db_persister(event)
+            except asyncio.CancelledError:
+                if cancel_requested():
+                    raise
+                logger.warning("DB persist was cancelled from within for event %s", event.type)
             except Exception:
                 logger.warning("DB persist failed for event %s", event.type)
 
@@ -252,9 +260,11 @@ class EventBus:
         self.stats.record_event(event.type, len(handlers), failed, duration_ms, event.session_id)
 
     async def _safe_handle(self, handler: EventHandler, event: Event) -> bool:
-        """Run handler with error isolation. Never propagates (except CancelledError).
+        """Run handler with error isolation. Never propagates (except its own cancellation).
 
-        P0-13 fix: catch BaseException, re-raise CancelledError.
+        P0-13 fix: catch BaseException, re-raise CancelledError when it is this
+        handler's own task that is being cancelled. One that came out of
+        something the handler awaited is the handler's failure, like any other.
         F035.1: Returns True on success, False on error. Records handler stats.
         """
         handler_name = handler.__qualname__
@@ -264,11 +274,12 @@ class EventBus:
             duration_ms = (time.monotonic() - start) * 1000
             self.stats.record_handler_success(handler_name, duration_ms)
             return True
-        except asyncio.CancelledError:
-            raise  # Propagate cancellation
         except BaseException as exc:
+            if isinstance(exc, asyncio.CancelledError) and cancel_requested():
+                raise  # Propagate cancellation
             duration_ms = (time.monotonic() - start) * 1000
-            self.stats.record_handler_error(handler_name, str(exc))
+            # A CancelledError carries no message; its name says what failed.
+            self.stats.record_handler_error(handler_name, str(exc) or type(exc).__name__)
             logger.exception(
                 "Handler %s failed for event %s",
                 handler_name,
