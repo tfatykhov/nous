@@ -549,3 +549,28 @@ async def test_a_cancelled_node_stops_the_subtask_its_launch_could_not_stop(part
     assert (await _node(parts, dag.id)).status == "cancelled"
     assert await _subtask_statuses(parts) == ["cancelled"]
     assert parts.orch._unstopped_subtasks == {}
+
+
+@pytest.mark.postgres_only
+async def test_a_relaunch_whose_leftover_check_cannot_be_deleted_fails_the_node(parts):
+    """Postgres only: one check per name is a constraint of the Postgres schema.
+    The create step, the delete of a leftover check included, is outside the
+    requeue: an error there fails the node, as a failed create always has."""
+    dag = await _one_node_dag(parts, DAGNodeType.check)
+    _fail_running_write(parts.store, _lock_timeout())
+    await parts.orch.start_dag(dag.id)
+    assert (await _node(parts, dag.id)).status == "pending"
+    real_manage = parts.loader.manage_check
+
+    async def delete_fails(action, name=None, **kwargs):
+        if action == "delete":
+            raise _lock_timeout()
+        return await real_manage(action, name, **kwargs)
+
+    parts.loader.manage_check = delete_fails
+
+    await parts.orch.tick()
+
+    node = await _node(parts, dag.id)
+    assert node.status == "failed"
+    assert "lock timeout" in node.error
