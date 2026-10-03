@@ -1031,7 +1031,7 @@ class ProcedureManager:
         )
         cards = result.scalars().all()
         for card in cards:
-            card.name = f"{card.name} ({card.id.hex[:6]})"
+            card.name = await self._free_card_name(card, session)
         # Flushed here, before the caller's own write: a reactivation is an UPDATE
         # like the rename, and a flush sends UPDATEs in primary-key order.
         await session.flush()
@@ -1040,6 +1040,29 @@ class ProcedureManager:
             logger.info(
                 "Strategy card %s renamed to %r: a how-to procedure takes the name %r", card.id, card.name, name
             )
+
+    async def _free_card_name(self, card: Procedure, session: AsyncSession) -> str:
+        """The name a card moves to when it gives its name up.
+
+        ``<name> (<6 hex of its id>)``, or ``(<6 hex>-2)``, ``-3`` and so on while an
+        active row of the agent holds it, compared the way the index compares. The
+        name is cut so that the whole fits the column.
+        """
+        width = Procedure.name.type.length
+        n = 1
+        while True:
+            tail = f" ({card.id.hex[:6]})" if n == 1 else f" ({card.id.hex[:6]}-{n})"
+            moved = card.name[: width - len(tail)].rstrip() + tail
+            held = await session.execute(
+                select(Procedure.id)
+                .where(Procedure.agent_id == self.agent_id)
+                .where(Procedure.active == True)  # noqa: E712
+                .where(func.lower(Procedure.name) == func.lower(moved))
+                .limit(1)
+            )
+            if held.scalars().first() is None:
+                return moved
+            n += 1
 
     def _compute_effectiveness(self, procedure: Procedure) -> float | None:
         """P3-4: Laplace smoothing for effectiveness.

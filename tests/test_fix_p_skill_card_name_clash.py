@@ -9,6 +9,7 @@ hold a name. Every test runs production code on real rows under its own
 
 from __future__ import annotations
 
+import asyncio
 from uuid import uuid4
 
 import pytest
@@ -178,17 +179,74 @@ async def test_the_card_is_found_the_way_the_index_compares_names(heart):
     assert (await _rows(heart))[card.id]["name"] == _moved(name, card.id)
 
 
-async def test_a_rename_that_did_not_go_out_is_not_logged(heart, caplog):
-    """The name a card moves to can be held by another active row. The rename
-    then fails on the same index and the how-to procedure is not stored: a known
-    limit. What this pins is the log, which must not report that rename."""
+@pytest.mark.parametrize("name", [NAME, "\u0130stanbul Deploy"])
+async def test_a_card_whose_new_name_is_held_takes_the_next_free_one(heart, name):
+    """The name a card moves to can be held already. The card then takes the next
+    free one, "(<6 hex>-2)", and the how-to procedure is stored. A row outside the
+    index (inactive, or another agent's) does not hold a name, and names compare
+    the way the index compares them, whatever their casing."""
+    card = await _card(heart, name)
+    second = f"{name} ({card.id.hex[:6]}-2)"
+    await heart.store_procedure(_how_to(_moved(name, card.id).upper()))
+    await _row(heart, name=second, active=False)
+    await _row(heart, name=second, agent_id=f"{heart.agent_id}-other")
+
+    how_to = await heart.store_procedure(_how_to(name))
+
+    rows = await _rows(heart)
+    assert (rows[how_to.id]["name"], rows[card.id]["name"], rows[card.id]["active"]) == (name, second, True)
+
+
+@pytest.mark.parametrize("space_at_the_cut", [False, True])
+async def test_a_card_name_as_long_as_the_column_still_moves(heart, space_at_the_cut):
+    """A card name can fill the column (500 characters). The name it moves to is
+    cut so that the suffix fits, with no space left before the suffix, and the
+    how-to procedure is stored."""
+    long_name = "a" * 490 + (" " if space_at_the_cut else "a") + "b" * 9
+    card = await _card(heart, long_name)
+
+    how_to = await heart.store_procedure(_how_to(long_name))
+
+    rows = await _rows(heart)
+    kept = "a" * 490 if space_at_the_cut else "a" * 491
+    assert (rows[how_to.id]["name"], rows[card.id]["name"]) == (long_name, f"{kept} ({card.id.hex[:6]})")
+
+
+async def _until_a_session_waits_on_a_lock(heart) -> None:
+    """Return once a session of this database waits on a lock: the store, here."""
+    for _ in range(100):
+        async with heart.db.session() as s:
+            waiting = await s.scalar(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity"
+                    " WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                )
+            )
+        if waiting:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("the store never waited on the other transaction")
+
+
+async def test_a_rename_lost_to_a_race_is_not_logged(heart, caplog):
+    """Another transaction can take the card's new name between the look for a
+    free name and the rename. The how-to procedure then fails once on the index,
+    and no log line reports the rename that did not go out."""
     card = await _card(heart)
-    await heart.store_procedure(_how_to(_moved(NAME, card.id)))
+    async with heart.db.engine.connect() as other:
+        # Not committed yet: the look for a free name cannot see it, the index can.
+        await other.execute(
+            text("INSERT INTO heart.procedures (agent_id, name, active) VALUES (:a, :n, true)"),
+            {"a": heart.agent_id, "n": _moved(NAME, card.id)},
+        )
+        with caplog.at_level("INFO", logger="nous.heart.procedures"):
+            store = asyncio.create_task(heart.store_procedure(_how_to(NAME.lower())))
+            await _until_a_session_waits_on_a_lock(heart)
+            await other.commit()
+            with pytest.raises(IntegrityError):
+                await store
 
-    with caplog.at_level("INFO", logger="nous.heart.procedures"), pytest.raises(IntegrityError):
-        await heart.store_procedure(_how_to(NAME.lower()))
-
-    assert sorted(row["name"] for row in (await _rows(heart)).values()) == [NAME, _moved(NAME, card.id)]
+    assert (await _rows(heart))[card.id]["name"] == NAME
     assert "renamed to" not in caplog.text
 
 
