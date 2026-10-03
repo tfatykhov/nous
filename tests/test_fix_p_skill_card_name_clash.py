@@ -513,7 +513,7 @@ async def test_a_card_row_never_takes_a_card_name_however_the_name_is_spelled(he
 # in Python misses the row the index sees.
 
 
-async def test_a_skill_whose_name_an_active_skill_holds_is_skipped_whatever_its_name(heart, monkeypatch):
+async def test_a_skill_whose_name_an_active_skill_holds_is_skipped_whatever_its_name(heart, monkeypatch, caplog):
     """At start-up, a skill whose name an active skill holds is skipped with a
     warning and the other skills are reactivated. Lowered in Python, the check
     missed the active "\u0130stanbul Deploy": the reactivation failed on the index,
@@ -526,10 +526,12 @@ async def test_a_skill_whose_name_an_active_skill_holds_is_skipped_whatever_its_
     holder = await heart.store_procedure(_how_to(name))
     monkeypatch.setenv(var, "1")
 
-    assert await reactivate_skills(heart) == 1
+    with caplog.at_level("WARNING", logger="nous.heart.procedures"):
+        await reactivate_skills(heart)
 
     rows = await _rows(heart)
     assert (rows[retired]["active"], rows[other]["active"], rows[holder.id]["name"]) == (False, True, name)
+    assert f"Skipping reactivation of {name}" in caplog.text
 
 
 async def test_a_consolidated_skill_is_not_imported_again_whatever_its_name(heart, tmp_path):
