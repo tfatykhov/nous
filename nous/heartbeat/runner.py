@@ -22,6 +22,7 @@ from nous.api.anthropic_client import AnthropicClient
 from nous.api.execution_context import ExecutionContext
 from nous.api.runner import AgentRunner
 from nous.brain import Brain
+from nous.cancellation import cancel_requested as _cancel_requested
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart import Heart
@@ -86,15 +87,6 @@ def _await_chain(task: asyncio.Task) -> str:
         hops.append(f"{frame.f_code.co_name} ({frame.f_code.co_filename}:{frame.f_lineno})")
         awaitable = getattr(awaitable, "cr_await", None) or getattr(awaitable, "gi_yieldfrom", None)
     return " > ".join(hops) or "unknown"
-
-
-def _cancel_requested() -> bool:
-    """Whether the running task itself is being cancelled (stop(), event-loop
-    teardown). False when a CancelledError only came out of something the
-    task awaited: that is the awaited thing's failure, not a request to stop.
-    """
-    task = asyncio.current_task()
-    return task is None or task.cancelling() > 0
 
 
 class HeartbeatRunner:

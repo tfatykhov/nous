@@ -914,3 +914,17 @@ def test_cancelling_the_scheduler_while_it_fires_a_schedule_ends_it():
             await asyncio.wait_for(scheduler.stop(), WAIT)
 
     _run(scenario)
+
+
+# ---------------------------------------------------------------------------
+# One definition
+# ---------------------------------------------------------------------------
+
+
+def test_the_heartbeat_loops_ask_the_same_predicate():
+    """The heartbeat and DAG tick loops follow the same rule. They ask the one
+    predicate, not a copy of it that could drift."""
+    from nous import cancellation
+    from nous.heartbeat import runner
+
+    assert runner._cancel_requested is cancellation.cancel_requested, "the heartbeat runner has a definition of its own"
