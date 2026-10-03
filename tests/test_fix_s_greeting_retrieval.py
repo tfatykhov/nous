@@ -44,6 +44,8 @@ def _classify_and_plan(text: str, **settings):
     [
         ("hi can u check redis", "can u check redis"),
         ("hi, can u check redis", "can u check redis"),
+        # Leading whitespace is stripped before the greeting is passed over.
+        ("  hello, can u check redis", "can u check redis"),
         ("hey, what's new?", "what's new?"),
         ("Hi, the Postgres migration failed", "the Postgres migration failed"),
         ("hello, tell me about the plan", "tell me about the plan"),
@@ -108,10 +110,11 @@ def test_a_greeting_with_no_request_after_it_still_skips_retrieval(text):
     assert plan == GREETING_PLAN
 
 
-@pytest.mark.parametrize("text", ["ok", "yes", "sure"])
+@pytest.mark.parametrize("text", ["ok", "yes", "sure", "last week"])
 def test_a_turn_with_no_request_and_no_greeting_is_still_not_planned(text):
     """Pin: the short-input rule the greeting branch now shares still decides
-    a turn that has no greeting."""
+    a turn that has no greeting. "last week" has a recency of 0.5, the
+    strongest the rule still takes for no request."""
     signals, plan = _classify_and_plan(text)
 
     assert signals.is_greeting is False
