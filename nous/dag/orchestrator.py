@@ -94,6 +94,7 @@ from nous.dag.store import (
 from nous.heart.subtasks import SubtaskQueueFull
 from nous.heartbeat.dynamic import DynamicCheckLimitReached
 from nous.storage.models import DAGNode, ExecutionDAG
+from nous.utils import kill_process_group
 
 if TYPE_CHECKING:
     from nous.dag.delivery import DAGResultDelivery
@@ -2018,19 +2019,30 @@ class DAGOrchestrator:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd_arg,
+                # Own process group, so that a timeout stops the whole
+                # command and not only the /bin/sh that started it.
+                start_new_session=True,
             )
             try:
                 stdout, stderr = await asyncio.wait_for(
                     proc.communicate(), timeout=_CHECK_CMD_TIMEOUT,
                 )
             except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
+                # even_if_exited: a job that outlived the check's shell and is
+                # still in its process group is stopped as well, or every
+                # timed-out poll would leave one more process and two more
+                # open pipes behind.
+                await kill_process_group(proc, even_if_exited=True)
                 logger.warning(
                     "Completion check command timed out (%.0fs) for node %s",
                     _CHECK_CMD_TIMEOUT, node.name,
                 )
                 return CheckResult("pending", "command timed out")
+            except asyncio.CancelledError:
+                # The tick was cancelled mid-check (shutdown): the command
+                # must not outlive it.
+                await kill_process_group(proc, even_if_exited=True)
+                raise
 
             if proc.returncode == 0:
                 return CheckResult("success")
