@@ -564,9 +564,10 @@ def _write_text_in_place(target: Path, content: str, root: Path) -> None:
     has to be readable, not only searchable. The open of the file neither
     waits nor truncates, and the type is checked on the open descriptor
     before anything is changed: a FIFO, a socket or a device is refused and
-    left as it was. These refusals are PreconditionFailed, in the snapshotted
-    write's words; any other failure is the OSError of a write by path,
-    naming the whole path.
+    left as it was. These refusals are PreconditionFailed, worded as the
+    snapshotted write words its refusal of a FIFO or a device (a snapshotted
+    write answers a socket with the error of its open instead); any other
+    failure is the OSError of a write by path, naming the whole path.
 
     Where the platform has no descriptor-relative calls the write is by path,
     as it was before Phase 2.8, and none of the above is refused.
