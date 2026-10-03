@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 _PRIORITY_MAP = {"urgent": 50, "normal": 100, "low": 200}
 _MAX_PENDING = 5
 
+# worker_id of a subtask its caller runs itself, in the calling turn
+# (spawn_task with await_result, spawn_sync) instead of leaving it to a worker.
+INLINE_WORKER_ID = "inline"
+
 
 class SubtaskQueueFull(ValueError):
     """Raised when the pending-subtask limit is reached.
@@ -57,8 +61,14 @@ class SubtaskManager:
         # create leaves an untrackable window. Pre-generating the id closes
         # it: the guard stamp carries the id first, then the row commits.
         subtask_id: UUID | None = None,
+        # A caller that runs the subtask itself claims it in this INSERT, so
+        # dequeue() never sees it pending and no worker runs it a second time.
+        worker_id: str | None = None,
     ) -> Subtask:
-        """Create a new pending subtask. Raises ValueError if pending limit reached."""
+        """Create a new subtask: pending, or already running for ``worker_id``.
+
+        Raises ValueError if the pending limit is reached.
+        """
         pri_val = _PRIORITY_MAP.get(priority, 100)
 
         async with self._db.session() as session:
@@ -89,6 +99,11 @@ class SubtaskManager:
                 success_criteria=success_criteria,
                 dag_node_id=dag_node_id,
                 payload_schema=payload_schema,
+                **(
+                    {"status": "running", "worker_id": worker_id, "started_at": datetime.now(UTC)}
+                    if worker_id is not None
+                    else {}
+                ),
             )
             session.add(subtask)
             await session.commit()
@@ -371,6 +386,32 @@ class SubtaskManager:
             if result.rowcount > 0:
                 logger.warning("Reclaimed %d stale subtasks", result.rowcount)
             return result.rowcount
+
+    async def cancel_orphaned_inline(self) -> None:
+        """Cancel the inline subtasks a previous process left running.
+
+        An inline subtask (worker ``INLINE_WORKER_ID``) runs in its caller's
+        turn, so it never outlives the process that ran it. One still running
+        when the worker pool starts was cut off without being closed: a
+        redeploy kills a turn instead of cancelling it. It ends as a cancelled
+        inline call does and is never re-queued, so no worker runs it again.
+        Run before reclaim_stale(), which would re-queue it once past its timeout.
+
+        Assumes one Nous process per (database, agent_id), as the execution
+        ledger does: a second process starting would cancel the first one's
+        running inline calls (no call runs twice either way).
+        """
+        async with self._db.session() as session:
+            result = await session.execute(
+                update(Subtask)
+                .where(Subtask.agent_id == self._agent_id)
+                .where(Subtask.status == "running")
+                .where(Subtask.worker_id == INLINE_WORKER_ID)
+                .values(status="cancelled", final_outcome="cancelled", completed_at=datetime.now(UTC))
+            )
+            await session.commit()
+            if result.rowcount > 0:
+                logger.warning("Cancelled %d inline subtasks a previous process left running", result.rowcount)
 
     async def count_by_status(self) -> dict[str, int]:
         """Count subtasks grouped by status."""

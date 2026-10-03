@@ -44,6 +44,7 @@ from nous.heart.schemas import (
     FactRejected,
     FactSummary,
 )
+from nous.heart.subtasks import INLINE_WORKER_ID
 from nous.observability.retrieval_logger import get_active as get_active_retrieval_logger
 from nous.observability.retrieval_trace import RETURNED_TO_SCRIPT, SLICED_OFF
 from nous.skills.parser import SkillParser
@@ -2922,6 +2923,24 @@ async def _persist_and_emit_inline_outcome(
         )
 
 
+async def _close_cancelled_inline_subtask(heart: Heart, subtask_id: UUID) -> bool:
+    """The call that was running this subtask inline was cancelled: cancel the row.
+
+    The row was claimed for that call when it was created, so no worker will
+    run or close it. The write is shielded, so a second cancellation of the
+    caller cannot interrupt it, and a failed write is logged rather than
+    raised, so the cancellation itself always gets through. Returns whether
+    this write closed the row (not when the row already had its outcome).
+    """
+    import asyncio
+
+    try:
+        return await asyncio.shield(heart.subtasks.cancel(subtask_id))
+    except Exception:
+        logger.warning("Could not mark inline subtask %s cancelled", subtask_id.hex[:8], exc_info=True)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Subtask & Schedule tool closures (011.1)
 # ---------------------------------------------------------------------------
@@ -3062,6 +3081,9 @@ def create_subtask_tools(
                 success_criteria=success_criteria,
                 # F062: caller-supplied JSON Schema for the result payload.
                 payload_schema=effective_payload_schema,
+                # Run inline below, in this turn: claimed as it is created,
+                # so an idle worker cannot take it and run it a second time.
+                worker_id=INLINE_WORKER_ID if await_result and runner is not None else None,
             )
 
             if not await_result:
@@ -3103,6 +3125,7 @@ def create_subtask_tools(
                     emit_outcome_event,
                     execute_hardened,
                 )
+                from nous.heart.subtask_validator import ValidationResult
 
                 # F061 PR-3: pass an emit_event callback so inline subtasks
                 # also produce subtask_outcome telemetry. ``bus`` is captured
@@ -3149,6 +3172,22 @@ def create_subtask_tools(
                     if not _result.ok:
                         return _tool_error(body)
                     return {"content": [{"type": "text", "text": body}]}
+                except _asyncio.CancelledError:
+                    # This call was cancelled (its turn, or the dispatcher's
+                    # tool timeout): close the row it claimed, or nothing will.
+                    # execute_hardened leaves the outcome event to this caller
+                    # too; emitted only when this close set the row's outcome.
+                    if await _close_cancelled_inline_subtask(heart, subtask.id) and _outcome_emitter is not None:
+                        await _outcome_emitter(
+                            subtask,
+                            ValidationResult.failed("cancelled", "Inline call cancelled"),
+                            None,
+                            attempts=state.attempts,
+                            tokens_in=state.tokens_in,
+                            tokens_out=state.tokens_out,
+                            tool_calls_made=state.tool_calls_made,
+                        )
+                    raise
                 except TimeoutError:
                     if not executed:
                         await _persist_and_emit_inline_outcome(
@@ -3213,6 +3252,10 @@ def create_subtask_tools(
                     ]
                 }
 
+            except _asyncio.CancelledError:
+                # As on the hardened path above.
+                await _close_cancelled_inline_subtask(heart, subtask.id)
+                raise
             except TimeoutError:
                 # F061 PR-3 Codex review: attempts=1 because one execution
                 # attempt definitely happened before the timeout.
@@ -3458,10 +3501,9 @@ def create_subtask_tools(
 
         report = match.report_jsonb or {}
         # Codex round-9 P2: inline subtasks (await_result=True) bypass the
-        # worker pool's dequeue path, so started_at remains NULL. Fall back
-        # to created_at — inline runs start essentially immediately after
-        # creation, so the difference is negligible and the metric is no
-        # longer systematically 0.0 for the spawn_sync's primary use case.
+        # worker pool's dequeue path; they get started_at when they are
+        # created, claimed for the calling turn. created_at stays the
+        # fallback for a row without one.
         elapsed = 0.0
         if match.completed_at:
             start_anchor = match.started_at or match.created_at
