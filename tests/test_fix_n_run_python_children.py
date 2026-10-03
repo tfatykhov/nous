@@ -304,7 +304,7 @@ async def test_a_refused_memory_call_does_not_turn_the_deadline_off(tmp_path):
     after a refused recall, as it does after one that failed."""
     from nous.observability.retrieval_logger import RetrievalLogger, get_active, set_active
 
-    late, looped = tmp_path / "late", tmp_path / "looped"
+    caught, late, looped = tmp_path / "caught", tmp_path / "late", tmp_path / "looped"
     code = (
         "import subprocess, time\n"
         "time.sleep(4.0)\n"  # the call returns as timed out while the script sleeps
@@ -313,6 +313,7 @@ async def test_a_refused_memory_call_does_not_turn_the_deadline_off(tmp_path):
         "except:\n"
         # Inside the handler: past its deadline, the first line after an
         # `except` block is itself a point where the trace hook raises.
+        f"    open({str(caught)!r}, 'w').write('refused')\n"
         f"    subprocess.run({_child(late, nap=0.5)})\n"
         "    end = time.monotonic() + 3\n"
         "    while time.monotonic() < end:\n"
@@ -328,6 +329,7 @@ async def test_a_refused_memory_call_does_not_turn_the_deadline_off(tmp_path):
         set_active(previous)
 
     assert result["is_error"] is True
+    assert caught.exists(), "the recall was not refused: the handler never ran"
     assert stopped, "the script ran on past its deadline"
     assert not looped.exists(), "the loop ran to its end: the script had lost its deadline"
     assert not late.exists(), "a process started after the call had given up went on running"
