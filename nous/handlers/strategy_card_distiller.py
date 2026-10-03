@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 from sqlalchemy.exc import IntegrityError
 
 from nous.brain.schemas import GRADED_OUTCOMES
+from nous.cognitive.deliberation import description_was_cut_by_capture
 from nous.handlers import LLMClient, call_background_llm_structured
 from nous.handlers.decision_reviewer import AUTO_REVIEWER
 from nous.heart.schemas import STRATEGY_CARD_KIND, ProcedureInput
@@ -48,11 +49,12 @@ _OUTCOMES_THAT_NEED_NOTES = frozenset({"failure", "partial"})
 def _text_can_carry_a_lesson(decision: Any) -> bool:
     """Whether the decision row holds the text a lesson is distilled from.
 
-    Not an empty description, and result notes for a failure or a partial
+    Not an empty description, not a description the deliberation capture cut at
+    its cap (a fragment of a turn), and result notes for a failure or a partial
     grade. Otherwise the model would supply what the row does not say.
     """
     description = decision.description or ""
-    if not description.strip():
+    if not description.strip() or description_was_cut_by_capture(description, decision.reasons):
         return False
     return decision.outcome not in _OUTCOMES_THAT_NEED_NOTES or bool((decision.outcome_result or "").strip())
 

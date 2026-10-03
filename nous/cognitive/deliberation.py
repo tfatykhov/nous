@@ -28,6 +28,38 @@ logger = logging.getLogger(__name__)
 # Frames that trigger deliberation (D8, 009.5: removed task)
 _DELIBERATION_FRAMES = {"decision", "debug"}
 
+# What the capture keeps of a turn: start() records "Plan: " and the user's
+# request, finalize() replaces it with the reply, and the cognitive layer cuts
+# each at DESCRIPTION_CAPTURE_CHARS characters. Before 2026-03-29 the cut was
+# at 200; decisions captured then are still in the database. start() also gives
+# every row it writes the reason "Frame '<frame>' triggered deliberation for:
+# <request>", which is how a captured row is told from one the agent recorded.
+DESCRIPTION_CAPTURE_CHARS = 500
+_EARLIER_DESCRIPTION_CAPTURE_CHARS = 200
+_PLAN_PREFIX = "Plan: "
+_CAPTURE_REASON_PREFIX = "Frame '"
+_CAPTURE_REASON_MARK = "' triggered deliberation for: "
+
+
+def description_was_cut_by_capture(description: str, reasons: list) -> bool:
+    """Whether ``description`` is a request or a reply that the capture cut at its cap.
+
+    Such a row holds a fragment of a turn, not a decision. The row must carry
+    the capture's reason (``reasons`` are the decision's), and a cut reply has
+    exactly as many characters as a cap; a cut request is "Plan: " and exactly
+    that many after it. A reply that was exactly as long as the cap cannot be
+    told from a cut one, and counts as cut.
+    """
+    if not any(r.text.startswith(_CAPTURE_REASON_PREFIX) and _CAPTURE_REASON_MARK in r.text for r in reasons):
+        return False
+    for cap in (DESCRIPTION_CAPTURE_CHARS, _EARLIER_DESCRIPTION_CAPTURE_CHARS):
+        if len(description) == cap:
+            return True
+        if description.startswith(_PLAN_PREFIX) and len(description) == len(_PLAN_PREFIX) + cap:
+            return True
+    return False
+
+
 # 009.5: Dedup constants
 _DEDUP_WINDOW_MINUTES = 5
 _DEDUP_EMBEDDING_THRESHOLD = 0.85
@@ -111,7 +143,7 @@ class DeliberationEngine:
 
         # P1-2: Build RecordInput with at least 1 reason
         record_input = RecordInput(
-            description=f"Plan: {description}",
+            description=f"{_PLAN_PREFIX}{description}",
             confidence=0.5,
             category=frame.default_category or "process",
             stakes=frame.default_stakes or "low",
@@ -119,7 +151,7 @@ class DeliberationEngine:
             reasons=[
                 ReasonInput(
                     type="analysis",
-                    text=f"Frame '{frame.frame_name}' triggered deliberation for: {description[:100]}",
+                    text=f"{_CAPTURE_REASON_PREFIX}{frame.frame_name}{_CAPTURE_REASON_MARK}{description[:100]}",
                 )
             ],
             session_id=session_id,
