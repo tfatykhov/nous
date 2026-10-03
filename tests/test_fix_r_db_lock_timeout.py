@@ -7,6 +7,7 @@ statement wait is staged, by a second session.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import uuid
 from types import SimpleNamespace
@@ -14,13 +15,16 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 from pydantic import ValidationError
-from sqlalchemy import event, text
+from sqlalchemy import event, select, text
 from sqlalchemy.exc import DBAPIError
 
 from nous.config import Settings
+from nous.events import Event
+from nous.handlers.fact_extractor import FactExtractor
 from nous.heart import Heart
 from nous.heart.schemas import FactInput
 from nous.storage.database import Database
+from nous.storage.models import Fact
 
 _LOCK_TIMEOUT = text("SELECT setting, source FROM pg_settings WHERE name = 'lock_timeout'")
 
@@ -275,3 +279,122 @@ async def test_without_a_timeout_the_fact_write_sends_what_it_always_sent(db, ow
         event.remove(db.engine.sync_engine, "before_cursor_execute", record)
     assert any("pg_advisory_xact_lock" in statement for statement in sent)
     assert not any("lock_timeout" in statement for statement in sent)
+
+
+# ---------------------------------------------------------------------------
+# One fact that cannot be stored does not cost the rest of the episode
+# ---------------------------------------------------------------------------
+
+_EPISODE = "episode-fix-r"  # not a UUID, so the facts reference no episode row
+
+
+def _episode_facts(tag: str) -> list[dict]:
+    return [
+        {"content": f"The fix-r rule number {n} of run {tag} is long enough to keep", "subject": "fix-r"}
+        for n in range(3)
+    ]
+
+
+def _summarized(**data) -> Event:
+    data = {"summary": {"summary": "s"}, "episode_id": _EPISODE, **data}
+    return Event(type="episode_summarized", agent_id="fix-r", data=data)
+
+
+async def _stored(database, tag: str) -> list[str]:
+    async with database.session() as session:
+        rows = await session.execute(select(Fact.content).where(Fact.content.like(f"% of run {tag} %")))
+        return sorted(rows.scalars())
+
+
+def _lock_timeout() -> DBAPIError:
+    return DBAPIError("INSERT INTO heart.facts", {}, Exception("canceling statement due to lock timeout"))
+
+
+def _first_learn_fails(heart: Heart, error: BaseException) -> None:
+    real = heart.learn
+    calls = []
+
+    async def learn(fact_input, **kwargs):
+        calls.append(fact_input)
+        if len(calls) == 1:
+            raise error
+        return await real(fact_input, **kwargs)
+
+    heart.learn = learn
+
+
+@pytest.mark.postgres_only
+async def test_one_fact_that_cannot_be_stored_does_not_cost_the_rest(db, own_heart, caplog):
+    """Postgres only, as every test here that stores a fact: the fact write
+    searches by vector."""
+    tag = uuid.uuid4().hex[:8]
+    facts = _episode_facts(tag)
+    _first_learn_fails(own_heart, _lock_timeout())
+
+    await FactExtractor(own_heart, _settings(), None, dedup_via_search=False).handle(_summarized(candidate_facts=facts))
+
+    assert await _stored(db, tag) == [f["content"] for f in facts[1:]]
+    failed = [r for r in caplog.records if r.levelno >= logging.WARNING and _EPISODE in r.getMessage()]
+    assert [(r.levelname, r.exc_info[0]) for r in failed] == [("ERROR", DBAPIError)]
+
+
+@pytest.mark.postgres_only
+async def test_on_the_model_path_too_one_fact_does_not_cost_the_rest(db, own_heart):
+    """Without candidate facts the extractor asks the model; the model is
+    replaced here by its answer."""
+    tag = uuid.uuid4().hex[:8]
+    facts = _episode_facts(tag)
+    extractor = FactExtractor(own_heart, _settings(), None, dedup_via_search=False)
+
+    async def the_model_answers(_summary):
+        return facts
+
+    extractor._extract_facts = the_model_answers
+    _first_learn_fails(own_heart, _lock_timeout())
+
+    await extractor.handle(_summarized())
+
+    assert await _stored(db, tag) == [f["content"] for f in facts[1:]]
+
+
+@pytest.mark.postgres_only
+async def test_the_tiebreakers_exclusions_still_reach_the_fact_write(db, own_heart):
+    """The extractor's search finds a stored fact with the same words; the
+    tiebreaker (the model, replaced here by its answer) calls them distinct, so
+    the fact write must not fold the candidate into the stored one."""
+    tag = uuid.uuid4().hex[:8]
+    content = f"The fix-r rule number 9 of run {tag} is long enough to keep"
+    await own_heart.learn(FactInput(content=content, subject="fix-r", category="technical"))
+
+    async def the_model_says_distinct(_stored, _candidate):
+        return True
+
+    own_heart.facts.is_distinct_fact = the_model_says_distinct
+    extractor = FactExtractor(own_heart, _settings(fact_dedup_tiebreaker_enabled=True), None)
+    await extractor.handle(_summarized(candidate_facts=[{"content": content, "subject": "fix-r"}]))
+
+    assert await _stored(db, tag) == [content, content]
+
+
+@pytest.mark.postgres_only
+async def test_a_real_lock_timeout_in_the_middle_of_an_episode_costs_one_fact(db, timed):
+    """Another session blocks every write to heart.facts and lets go once the
+    first fact's write has timed out."""
+    tag = uuid.uuid4().hex[:8]
+    facts = _episode_facts(tag)
+    async with db.engine.connect() as holder:
+        await _hold(holder, text("LOCK TABLE heart.facts IN EXCLUSIVE MODE"))
+        real = timed.heart.learn
+
+        async def release_when_it_times_out(fact_input, **kwargs):
+            try:
+                return await real(fact_input, **kwargs)
+            except DBAPIError:
+                await holder.rollback()
+                raise
+
+        timed.heart.learn = release_when_it_times_out
+        extractor = FactExtractor(timed.heart, _settings(), None, dedup_via_search=False)
+        await asyncio.wait_for(extractor.handle(_summarized(candidate_facts=facts)), timeout=30)
+
+    assert await _stored(timed.database, tag) == [f["content"] for f in facts[1:]]
