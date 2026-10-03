@@ -574,3 +574,51 @@ async def test_a_relaunch_whose_leftover_check_cannot_be_deleted_fails_the_node(
     node = await _node(parts, dag.id)
     assert node.status == "failed"
     assert "lock timeout" in node.error
+
+
+# ---------------------------------------------------------------------------
+# A check of the node's name that this node did not create
+# ---------------------------------------------------------------------------
+
+
+_FOREIGN_NODE = "00000000-0000-4000-8000-000000000001"
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize(
+    "holder",
+    [
+        pytest.param(None, id="made-by-the-agent"),
+        pytest.param(_FOREIGN_NODE, id="another-dags-node"),
+    ],
+)
+async def test_a_check_of_the_nodes_name_that_it_did_not_create_is_left_alone(db, parts, holder):
+    """Postgres only: one check per name is a constraint of the Postgres schema.
+    The name is held by a check this node did not create: one the agent made,
+    or one of another DAG whose id starts with the same eight hex digits and
+    whose node has the same name (staged: the row carries that node's id). The
+    launch fails on the name, as before, and that check is not touched."""
+    dag = await _one_node_dag(parts, DAGNodeType.check)
+    name = f"dag-{dag.id.hex[:8]}-work"
+    await parts.loader.create_check(name=name, description="not this node's", prompt="p", interval_seconds=300)
+    if holder is not None:
+        async with db.session() as session:
+            await session.execute(
+                text(
+                    "UPDATE nous_system.dynamic_checks"
+                    " SET metadata = jsonb_build_object('dag_node_id', CAST(:node AS text))"
+                    " WHERE agent_id = :agent AND name = :name"
+                ),
+                {"node": holder, "agent": parts.loader._agent_id, "name": name},
+            )
+            await session.commit()
+    before = await _checks(parts)
+    registered = parts.loader._registry.get_check(name)
+
+    await parts.orch.start_dag(dag.id)
+
+    node = await _node(parts, dag.id)
+    assert node.status == "failed"
+    assert "duplicate key value violates unique constraint" in node.error
+    assert await _checks(parts) == before  # the same row, still enabled
+    assert parts.loader._registry.get_check(name) is registered  # and still registered

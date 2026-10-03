@@ -173,6 +173,10 @@ _SETTLED_SUBTASK_STATUSES = frozenset({"completed", "failed", "cancelled"})
 # line and nothing else.
 _SUBTASK_BACKED = frozenset({"subtask", "callback"})
 
+# Where a DAG check's row records the node whose launch created it: a later
+# launch of that node replaces only a check that carries the node's id.
+_CHECK_OWNER_KEY = "dag_node_id"
+
 # How many consecutive ticks the reaper will defer when it cannot confirm that
 # cancellation took effect. Bounded so an orphaned row — whose worker died and
 # will therefore never settle — is still eventually reaped, rather than
@@ -3445,6 +3449,7 @@ class DAGOrchestrator:
                 # urgent=True exempts them from quiet-hour suppression so the
                 # heartbeat worker actually runs when the node is created at night.
                 urgent=True,
+                metadata={_CHECK_OWNER_KEY: str(node.id)},
             )
 
         created = False
@@ -3452,9 +3457,14 @@ class DAGOrchestrator:
             try:
                 await create_check()
             except IntegrityError:
-                # The name is held by the check an earlier launch of this node
-                # created (a launch that could not be recorded, or the attempt
-                # before a retry). Replace it: a new attempt gets a new check.
+                # The name is taken. Replace the check only when an earlier
+                # launch of this node created it (a launch that could not be
+                # recorded, or the attempt before a retry): a new attempt gets a
+                # new check. One this node did not create, the agent's or another
+                # DAG's, is left alone, and the node fails on its name.
+                metadata = await self._dynamic_loader.check_metadata(check_name)
+                if metadata.get(_CHECK_OWNER_KEY) != str(node.id):
+                    raise
                 await self._dynamic_loader.manage_check(action="delete", name=check_name)
                 await create_check()
             created = True

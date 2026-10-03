@@ -566,6 +566,20 @@ class DynamicCheckLoader:
             )
             return result.scalar_one_or_none()
 
+    async def check_metadata(self, name: str) -> dict:
+        """Return the metadata of this agent's check of that name, empty when
+        there is no such check."""
+        from nous.storage.models import DynamicCheckModel
+
+        async with self._db.session() as session:
+            result = await session.execute(
+                select(DynamicCheckModel.metadata_)
+                .where(DynamicCheckModel.agent_id == self._agent_id)
+                .where(DynamicCheckModel.name == name)
+            )
+            metadata = result.scalars().first()
+        return metadata if isinstance(metadata, dict) else {}
+
     async def is_check_disabled(self, name: str) -> bool | None:
         """Return whether a dynamic check's row exists and is disabled
         (enabled=False), or None if no row exists at all.
@@ -626,8 +640,10 @@ class DynamicCheckLoader:
         urgent: bool = False,
         on_complete_prompt: str | None = None,
         on_complete_tools: list[str] | None = None,
+        metadata: dict | None = None,
     ) -> dict[str, Any]:
-        """Create a new dynamic check. Returns the check dict."""
+        """Create a new dynamic check. Returns the check dict. ``metadata``,
+        when given, is stored on the row: a DAG check records its node there."""
         async with self._mutation_lock:
             return await self._create_check_locked(
                 name,
@@ -640,6 +656,7 @@ class DynamicCheckLoader:
                 urgent,
                 on_complete_prompt,
                 on_complete_tools,
+                metadata,
             )
 
     async def _create_check_locked(
@@ -654,6 +671,7 @@ class DynamicCheckLoader:
         urgent: bool = False,
         on_complete_prompt: str | None = None,
         on_complete_tools: list[str] | None = None,
+        metadata: dict | None = None,
     ) -> dict[str, Any]:
         """create_check() body; the caller holds ``_mutation_lock``."""
         if timeout_seconds is None:
@@ -709,6 +727,8 @@ class DynamicCheckLoader:
                 on_complete_prompt=on_complete_prompt,
                 on_complete_tools=validated_on_complete_tools,
             )
+            if metadata:
+                model.metadata_ = dict(metadata)
             session.add(model)
             await session.commit()
             await session.refresh(model)
