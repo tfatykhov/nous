@@ -2923,6 +2923,22 @@ async def _persist_and_emit_inline_outcome(
         )
 
 
+async def _close_cancelled_inline_subtask(heart: Heart, subtask_id: UUID) -> None:
+    """The call that was running this subtask inline was cancelled: cancel the row.
+
+    The row was claimed for that call when it was created, so no worker will
+    run or close it. The write is shielded, so a second cancellation of the
+    caller cannot interrupt it, and a failed write is logged rather than
+    raised, so the cancellation itself always gets through.
+    """
+    import asyncio
+
+    try:
+        await asyncio.shield(heart.subtasks.cancel(subtask_id))
+    except Exception:
+        logger.warning("Could not mark inline subtask %s cancelled", subtask_id.hex[:8], exc_info=True)
+
+
 # ---------------------------------------------------------------------------
 # Subtask & Schedule tool closures (011.1)
 # ---------------------------------------------------------------------------
@@ -3153,6 +3169,11 @@ def create_subtask_tools(
                     if not _result.ok:
                         return _tool_error(body)
                     return {"content": [{"type": "text", "text": body}]}
+                except _asyncio.CancelledError:
+                    # This call was cancelled (its turn, or the dispatcher's
+                    # tool timeout): close the row it claimed, or nothing will.
+                    await _close_cancelled_inline_subtask(heart, subtask.id)
+                    raise
                 except TimeoutError:
                     if not executed:
                         await _persist_and_emit_inline_outcome(
@@ -3217,6 +3238,10 @@ def create_subtask_tools(
                     ]
                 }
 
+            except _asyncio.CancelledError:
+                # As on the hardened path above.
+                await _close_cancelled_inline_subtask(heart, subtask.id)
+                raise
             except TimeoutError:
                 # F061 PR-3 Codex review: attempts=1 because one execution
                 # attempt definitely happened before the timeout.

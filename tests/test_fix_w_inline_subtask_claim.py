@@ -184,3 +184,87 @@ async def test_a_subtask_created_without_a_worker_id_is_left_for_a_worker(db):
 
     claimed = await heart.subtasks.dequeue("worker-0")
     assert claimed is not None and claimed.task == "queued work"
+
+
+# ---------------------------------------------------------------------------
+# A cancelled inline call leaves its row to nobody
+# ---------------------------------------------------------------------------
+
+
+async def _expect(event: asyncio.Event, what: str) -> None:
+    try:
+        await asyncio.wait_for(event.wait(), WAIT)
+    except TimeoutError:
+        pytest.fail(f"{what} (waited {WAIT:.0f}s)")
+
+
+async def _cancelled_inline_call(tools: dict, turn: _Turn) -> asyncio.Task:
+    """Start an inline spawn whose turn never ends, and cancel it once the turn runs."""
+    call = asyncio.create_task(tools["spawn_task"](task="inline work", await_result=True, _session_id="parent"))
+    await _expect(turn.started, "the inline turn never started")
+    call.cancel()
+    return call
+
+
+@BOTH_PATHS
+async def test_a_cancelled_inline_call_cancels_its_subtask(db, hardened):
+    heart = _heart(db)
+    turn = _Turn(heart.subtasks, until=asyncio.Event())
+    tools = create_subtask_tools(heart, _settings(hardened=hardened), runner=turn)
+
+    call = await _cancelled_inline_call(tools, turn)
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+    (row,) = await heart.subtasks.list(limit=10)
+    assert (row.status, row.final_outcome) == ("cancelled", "cancelled"), (
+        "a cancelled inline call left its subtask open"
+    )
+    assert await heart.subtasks.dequeue("worker-0") is None
+
+
+async def test_a_second_cancellation_does_not_keep_the_subtask_open(db):
+    heart = _heart(db)
+    closing, may_close, closed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    cancel = heart.subtasks.cancel
+
+    async def slow_cancel(subtask_id):
+        closing.set()
+        try:
+            await may_close.wait()
+            return await cancel(subtask_id)
+        finally:
+            closed.set()
+
+    heart.subtasks.cancel = slow_cancel
+    turn = _Turn(heart.subtasks, until=asyncio.Event())
+    tools = create_subtask_tools(heart, _settings(), runner=turn)
+
+    call = await _cancelled_inline_call(tools, turn)
+    await _expect(closing, "a cancelled inline call never closed its subtask")
+    call.cancel()  # the caller is cancelled again while its subtask is being closed
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    may_close.set()
+    await _expect(closed, "the closing of the subtask never ended")
+
+    (row,) = await heart.subtasks.list(limit=10)
+    assert row.status == "cancelled", "the second cancellation interrupted the closing of the subtask"
+
+
+async def test_a_failed_close_still_lets_the_cancellation_through(db, caplog):
+    heart = _heart(db)
+
+    async def broken_cancel(subtask_id):
+        raise RuntimeError("database gone")
+
+    heart.subtasks.cancel = broken_cancel
+    turn = _Turn(heart.subtasks, until=asyncio.Event())
+    tools = create_subtask_tools(heart, _settings(), runner=turn)
+
+    call = await _cancelled_inline_call(tools, turn)
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+    said = [r.getMessage() for r in caplog.records if r.name == "nous.api.tools"]
+    assert any("Could not mark inline subtask" in line for line in said), f"the failed close was not logged: {said}"
