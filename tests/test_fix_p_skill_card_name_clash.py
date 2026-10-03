@@ -370,3 +370,28 @@ async def test_a_body_refresh_of_an_inactive_skill_whose_name_a_card_holds(heart
     assert rows[skill.id]["active"] is active
     assert rows[card.id]["name"] == (_moved(NAME, card.id) if active else NAME)
     assert (rows[card.id]["kind"], rows[card.id]["active"]) == (STRATEGY_CARD_KIND, True)
+
+
+async def test_a_card_row_turned_active_does_not_take_the_name_from_a_card(heart):
+    """Only a how-to procedure takes a name from a card. A card's row that a
+    refresh turns active, next to an active card of that name, still fails on the
+    index, as the insert of a second card does, and the active card keeps its
+    name."""
+    retired = await _row(heart, active=False)
+    card = await _card(heart)
+
+    with pytest.raises(IntegrityError):
+        await heart.update_procedure_body(
+            retired,
+            ProcedureInput(
+                name=NAME,
+                domain="strategy",
+                implementation_notes=[LESSON],
+                kind=STRATEGY_CARD_KIND,
+                active=True,
+                runtime_metadata={"source_decision_id": DECISION_ID, "outcome": "success"},
+            ),
+        )
+
+    rows = await _rows(heart)
+    assert (rows[retired]["active"], rows[card.id]["name"], rows[card.id]["active"]) == (False, NAME, True)
