@@ -372,3 +372,91 @@ async def test_a_class_the_script_puts_in_place_of_subprocess_popen_is_left_alon
 
     text = result["content"][0]["text"]
     assert text.startswith(_TIMED_OUT) and "killed" not in text
+
+
+async def test_the_wait_for_a_worker_that_does_not_come_back_keeps_the_event_loop_turning(tmp_path):
+    """After the kill the script goes on blocking: the call waits the whole
+    settle time for it, and does so without holding the event loop."""
+    gaps: list[float] = []
+
+    async def heartbeat() -> None:
+        while True:
+            before = time.monotonic()
+            await asyncio.sleep(0.01)
+            gaps.append(time.monotonic() - before)
+
+    run_python = _run_python()
+    await run_python(code="result = 'warm'")  # the first call of a process also pays for imports
+    beat = asyncio.ensure_future(heartbeat())
+    started = time.monotonic()
+    try:
+        result = await run_python(
+            code=f"import subprocess, time\nsubprocess.run({_child(tmp_path / 'survived')})\ntime.sleep(3)\n"
+        )
+        answered = time.monotonic() - started
+        await asyncio.sleep(0.1)  # the heartbeat notes the gap it is in
+    finally:
+        beat.cancel()
+
+    assert result["content"][0]["text"].startswith(
+        _TIMED_OUT + "; killed 1 process(es) the script had started; the script is still running"
+    )
+    assert answered < 1 + T._TIMEOUT_GRACE + 1.5, "the call waited far longer than half a second for its worker"
+    assert max(gaps) < 0.25, "the event loop stopped turning while the call waited for its worker"
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self"), reason="reads Linux /proc")
+def test_a_process_whose_name_holds_a_parenthesis_is_still_found():
+    """`/proc/<pid>/stat` is "pid (comm) state ppid ...", and a process may name itself anything."""
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; open('/proc/self/comm', 'w').write('a) b 1'); time.sleep(30)"]
+    )
+    try:
+        renamed = time.monotonic() + 5
+        while time.monotonic() < renamed:
+            with open(f"/proc/{child.pid}/stat", "rb") as stat:
+                if b"(a) b 1)" in stat.read():
+                    break
+            time.sleep(0.01)
+
+        assert child.pid in T._descendants([os.getpid()])
+    finally:
+        child.kill()
+        child.wait()
+
+
+async def test_a_process_started_while_the_call_is_killing_is_killed_at_birth(tmp_path, monkeypatch):
+    """The call marks the script as given up on before it looks for processes."""
+    real, calls = T._descendants, []
+
+    def slow(pids):
+        calls.append(pids)
+        if len(calls) == 1:
+            time.sleep(1.0)  # the call's own scan: the script wakes meanwhile and starts a process
+        return real(pids)
+
+    monkeypatch.setattr(T, "_descendants", slow)
+    late = tmp_path / "late"
+    run_python = _run_python()
+    await run_python(code="result = 'warm'")  # the first call of a process also pays for imports
+    result = await run_python(
+        code=f"import subprocess, time\ntime.sleep(3.4)\nsubprocess.run({_child(late, nap=2.0)})\n"
+    )
+    await asyncio.sleep(2.5)  # a late child left alone writes its marker 2 s after it started
+
+    assert result["is_error"] is True
+    assert not late.exists(), "a process started while the call was killing went on running"
+
+
+async def test_a_worker_reported_back_has_already_freed_its_slot(tmp_path, monkeypatch):
+    real = T._release_run_slot
+
+    def slow_release():
+        time.sleep(0.1)  # a slot that takes a moment to come back
+        real()
+
+    monkeypatch.setattr(T, "_release_run_slot", slow_release)
+    result = await _run_python()(code=f"import subprocess\nsubprocess.run({_child(tmp_path / 'survived')})\n")
+
+    assert result["content"][0]["text"] == _TIMED_OUT + "; killed 1 process(es) the script had started"
+    assert run_python_active_runs() == 0, "the call answered before its worker had freed the slot"
