@@ -14,8 +14,9 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, false, select, text
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.api.tools import create_nous_tools
 from nous.brain.brain import Brain
@@ -503,6 +504,31 @@ async def test_a_card_row_never_takes_a_card_name_however_the_name_is_spelled(he
     rows = await _rows(heart)
     assert (rows[retired]["active"], rows[card.id]["name"], rows[card.id]["active"]) == (False, name, True)
     assert f"Skipping reactivation of {name}" in caplog.text
+
+
+async def test_a_card_row_never_takes_a_card_name_the_check_missed(heart, monkeypatch):
+    """The clash check and the rename are two reads, and a card can take the name
+    in between. The check is made to miss the active card, as it does when the
+    card arrives after it: the card's row still never makes the card give its
+    name up, and fails on the index."""
+    retired = await _row(heart, active=False)
+    card = await _card(heart)
+    missed = []
+    execute = AsyncSession.execute
+
+    async def the_clash_check_misses(self, statement, *args, **kwargs):
+        if not missed and "heart.procedures.id !=" in str(statement):
+            missed.append(statement)
+            statement = statement.where(false())
+        return await execute(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "execute", the_clash_check_misses)
+    with pytest.raises(IntegrityError):
+        await heart.reactivate_procedure(retired)
+
+    assert missed, "the reactivation never ran its clash check"
+    rows = await _rows(heart)
+    assert (rows[retired]["active"], rows[card.id]["name"], rows[card.id]["active"]) == (False, NAME, True)
 
 
 # ---------------------------------------------------------------------------
