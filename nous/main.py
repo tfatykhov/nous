@@ -197,7 +197,7 @@ async def _a2ui_sweep_loop(settings: Settings, surface_service: SurfaceService) 
 
 async def _result_reconciler_loop(reconciler: TerminalSubtaskReconciler) -> None:
     """F098: run the terminal-subtask reconciler at startup, then every interval."""
-    from nous.heart.result_reconciler import RECONCILE_INTERVAL_SECONDS
+    from nous.heart import result_reconciler
 
     # Startup first: a worker cancelled at shutdown lost its inbox write in
     # the previous process, and this is what repairs it.
@@ -207,7 +207,7 @@ async def _result_reconciler_loop(reconciler: TerminalSubtaskReconciler) -> None
             if first:
                 first = False
             else:
-                await asyncio.sleep(RECONCILE_INTERVAL_SECONDS)
+                await asyncio.sleep(result_reconciler.RECONCILE_INTERVAL_SECONDS)
             await reconciler.run_once()
         except asyncio.CancelledError:
             if cancel_requested():
@@ -1027,9 +1027,9 @@ async def create_components(settings: Settings) -> dict:
     if settings.result_inbox_enabled:
         from nous.heart.result_reconciler import build_reconciler
 
+        result_reconciler = build_reconciler(database, heart.result_inbox, settings)
         result_reconciler_task = asyncio.create_task(
-            _result_reconciler_loop(build_reconciler(database, heart.result_inbox, settings)),
-            name="result-reconciler",
+            _result_reconciler_loop(result_reconciler), name="result-reconciler"
         )
 
     # 011.1 + 012.2: Register subtask/schedule tools (after runner for inline execution)
