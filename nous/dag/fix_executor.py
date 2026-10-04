@@ -34,7 +34,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from nous.handlers import call_with_tool_choice
+from nous.handlers import UnusableToolReply, call_with_tool_choice
 
 logger = logging.getLogger(__name__)
 
@@ -208,9 +208,9 @@ async def choose_action_llm(
 
     Forces the choose_fix_action tool (asked for in the prompt on a model
     that rejects forcing) so the model returns a structured action
-    from ``fix_actions``. Any failure (timeout, parse error, unsupported
-    action) raises — the caller (orchestrator) catches and falls back to
-    the rule-based ``choose_action``.
+    from ``fix_actions``. Any failure (timeout, a reply that is cut off,
+    refused or no whole tool call, unsupported action) raises — the caller
+    (orchestrator) catches and falls back to the rule-based ``choose_action``.
 
     Args:
         parent_name: parent node name (string label only).
@@ -262,21 +262,15 @@ async def choose_action_llm(
         ],
     }
 
-    response = await asyncio.wait_for(
-        call_with_tool_choice(llm_client, payload),
-        timeout=timeout_seconds,
-    )
-
-    # Extract the tool_use block.
-    tool_input: dict | None = None
-    for block in (response.content or []):
-        if block.get("type") == "tool_use" and block.get("name") == _CHOOSE_FIX_ACTION_TOOL_NAME:
-            tool_input = block.get("input") or {}
-            break
-    if tool_input is None:
-        raise ValueError(
-            f"LLM dispatch: no {_CHOOSE_FIX_ACTION_TOOL_NAME} tool_use block in response"
+    try:
+        tool_input = await asyncio.wait_for(
+            call_with_tool_choice(llm_client, payload),
+            timeout=timeout_seconds,
         )
+    except UnusableToolReply as e:
+        raise ValueError(
+            f"LLM dispatch: no {_CHOOSE_FIX_ACTION_TOOL_NAME} call to use ({e})"
+        ) from e
 
     action = tool_input.get("action")
     if action not in fix_actions:

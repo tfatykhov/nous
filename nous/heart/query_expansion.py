@@ -339,7 +339,7 @@ class QueryExpander:
         }
 
         try:
-            resp = await asyncio.wait_for(
+            tool_input = await asyncio.wait_for(
                 call_with_tool_choice(self._llm, payload),
                 timeout=self._settings.query_expansion_timeout_seconds,
             )
@@ -349,18 +349,14 @@ class QueryExpander:
             # Re-raise so the outer except in expand() logs once with elapsed_ms
             # context and falls back uniformly.
             raise
-        except Exception as exc:  # broad: AnthropicClient.call raises RuntimeError
+        except Exception as exc:  # broad: RuntimeError from the client, UnusableToolReply from an unusable reply
             self._log_haiku_error(exc)
             return []
 
-        # Extract tool_use block (forced, or asked for in the prompt on a model that rejects forcing)
-        for block in resp.content or []:
-            if block.get("type") == "tool_use" and block.get("name") == "expand_query":
-                raw = block.get("input", {}).get("alternative_queries", [])
-                if not isinstance(raw, list):
-                    return []
-                return [v for v in raw if isinstance(v, str)]
-        return []
+        raw = tool_input["alternative_queries"]
+        if not isinstance(raw, list):
+            return []
+        return [v for v in raw if isinstance(v, str)]
 
     def _maybe_log_success(
         self,

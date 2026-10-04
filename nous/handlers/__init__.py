@@ -113,24 +113,50 @@ def _asking_for_the_tool(payload: dict[str, Any]) -> dict[str, Any]:
     return asked
 
 
-async def call_with_tool_choice(client: LLMClient, payload: dict[str, Any]) -> Any:
-    """Send a request that forces its one tool, or asks for it where the model rejects forcing.
+class UnusableToolReply(Exception):
+    """A reply that is no whole call of the requested tool: cut off, refused, without the call or a required key."""
+
+
+def _tool_input(response: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    """The input of the reply's call of ``payload``'s one tool, if the reply is a whole answer."""
+    (tool,) = payload["tools"]
+    stop_reason = getattr(response, "stop_reason", None)
+    missing: list[str] = []
+    # A tool call cut off at max_tokens lacks the fields not yet written; a refusal is no answer.
+    if stop_reason not in ("max_tokens", "refusal"):
+        # Extract the tool_use block; an unforced reply may open with text or thinking
+        for block in response.content:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                # Nothing enforces the schema, so a reply without a required key is no answer either.
+                missing = [key for key in tool["input_schema"].get("required", []) if key not in block["input"]]
+                if not missing:
+                    return block["input"]
+                break
+    blocks = [block.get("type") for block in response.content if isinstance(block, dict)]
+    raise UnusableToolReply(f"stop_reason={stop_reason}, blocks={blocks}, missing={missing}")
+
+
+async def call_with_tool_choice(client: LLMClient, payload: dict[str, Any]) -> dict[str, Any]:
+    """Send a request that forces its one tool, or asks for it where the model rejects forcing; return the call's input.
 
     The first request for a model is ``payload`` exactly. If the API answers that a
     forced tool_choice is not supported for the model, the model is remembered and this
     and every later request for it go without tool_choice, the system prompt asking for
-    the tool. Any other error is raised.
+    the tool. Any other error is raised, and a reply that is no whole call of the tool
+    raises UnusableToolReply.
     """
     model = payload["model"]
     if model not in _REJECTS_FORCED_TOOL_CHOICE:
         try:
-            return await client.call(payload)
+            response = await client.call(payload)
         except Exception as e:
             if not _rejects_forced_tool_choice(e):
                 raise
             _REJECTS_FORCED_TOOL_CHOICE.add(model)
             logger.info("Model %s rejects a forced tool_choice; asking for the tool in the prompt", model)
-    return await client.call(_asking_for_the_tool(payload))
+        else:
+            return _tool_input(response, payload)
+    return _tool_input(await client.call(_asking_for_the_tool(payload)), payload)
 
 
 async def call_background_llm_structured(
@@ -191,28 +217,9 @@ async def call_background_llm_structured(
     }
 
     try:
-        response = await call_with_tool_choice(client, payload)
-        stop_reason = getattr(response, "stop_reason", None)
-        missing: list[str] = []
-        # A tool call cut off at max_tokens lacks the fields not yet written; a refusal is no answer.
-        if stop_reason not in ("max_tokens", "refusal"):
-            # Extract the tool_use block; an unforced reply may open with text or thinking
-            for block in response.content:
-                if isinstance(block, dict) and block.get("type") == "tool_use":
-                    # Nothing enforces the schema, so a reply without a required key is no answer either.
-                    missing = [key for key in output_schema.get("required", []) if key not in block["input"]]
-                    if not missing:
-                        return block["input"]
-                    break
-        blocks = [block.get("type") for block in response.content if isinstance(block, dict)]
-        logger.warning(
-            "Structured LLM call %s (model=%s) not used: stop_reason=%s, blocks=%s, missing=%s",
-            tool_name,
-            model,
-            stop_reason,
-            blocks,
-            missing,
-        )
+        return await call_with_tool_choice(client, payload)
+    except UnusableToolReply as e:
+        logger.warning("Structured LLM call %s (model=%s) not used: %s", tool_name, model, e)
         return None
     except Exception as e:
         logger.warning("Structured LLM call %s (model=%s) failed: %s", tool_name, model, e)
