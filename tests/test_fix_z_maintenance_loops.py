@@ -615,7 +615,11 @@ def test_create_components_starts_each_loop_behind_its_own_switch_with_its_own_c
             ["settings", "ledger_store", "runner"],
             ["settings.execution_ledger_persist_enabled"],
         ),
-        ("_result_reconciler_loop", ["result_reconciler"], ["settings.result_inbox_enabled"]),
+        (
+            "_result_reconciler_loop",
+            ["result_reconciler"],
+            ["settings.result_inbox_enabled or settings.result_memory_enabled"],
+        ),
         (
             "_retrieval_log_retention_loop",
             ["settings", "database"],

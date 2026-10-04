@@ -8,8 +8,9 @@ runs on a maintenance loop and re-does that write. A finished DAG's write,
 made by the F087 delivery path, is repaired the same way.
 
 It is built from passes: each pass owns its own query over terminal rows
-and its own idempotent write, and runs isolated from the others, so a later
-pass (the Phase C memory writer) is one more ``register`` call.
+and its own idempotent write, and runs isolated from the others. Phase C
+registers one more, :class:`~nous.heart.result_memory.ResultMemoryPass`,
+which writes finished results to memory.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ from nous.heart.result_inbox import (
     record_dag_result,
     subtask_envelope,
 )
+from nous.heart.result_memory import ResultMemoryPass, ResultMemoryWriter
 from nous.heart.subtasks import INLINE_WORKER_ID
 from nous.storage.database import Database
 from nous.storage.models import ExecutionDAG, ResultInbox, Subtask
@@ -237,10 +239,18 @@ class TerminalSubtaskReconciler:
         return results
 
 
-def build_reconciler(database: Database, store: ResultInboxStore, settings: Settings) -> TerminalSubtaskReconciler:
-    """The reconciler with every pass its flags enable (Phase A: the inbox passes)."""
+def build_reconciler(
+    database: Database,
+    store: ResultInboxStore,
+    settings: Settings,
+    memory: ResultMemoryWriter | None = None,
+) -> TerminalSubtaskReconciler:
+    """The reconciler with every pass its flags enable: the inbox passes
+    (Phase A) and the result memory pass (Phase C)."""
     reconciler = TerminalSubtaskReconciler()
     if settings.result_inbox_enabled:
         reconciler.register(InboxSubtaskPass(database, store, settings))
         reconciler.register(InboxDagPass(database, store, settings))
+    if settings.result_memory_enabled and memory is not None:
+        reconciler.register(ResultMemoryPass(memory, settings))
     return reconciler
