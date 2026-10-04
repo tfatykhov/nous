@@ -156,14 +156,29 @@ async def test_the_rejection_is_remembered_per_model(backend, monkeypatch, caplo
     ]
 
 
+# Other 400s on the 5.5 generation that also say "not supported for this model", as the API words them,
+# and a tool_choice error that is not the rejection.
+_OTHER_400S = [
+    "tools.0.input_schema: bad",
+    '"thinking.type.disabled" is not supported for this model. Use "thinking.type.adaptive" and '
+    '"output_config.effort" to control thinking behavior.',
+    '"thinking.type.between_tools" is not supported for this model.',
+    "tool_choice.name: Tool 'emit_verdict' not found in provided tools",
+]
+
+
+@pytest.mark.parametrize(
+    "message", _OTHER_400S, ids=["schema", "thinking disabled", "between_tools", "tool_choice name"]
+)
 @pytest.mark.parametrize("backend", ["httpx", "sdk"])
-async def test_any_other_400_still_fails_the_call(backend, monkeypatch):
-    schema_error = {"type": "error", "error": {"type": "invalid_request_error", "message": "tools.0.input_schema: bad"}}
-    bodies = _serve(monkeypatch, lambda body: (400, schema_error))
+async def test_any_other_400_still_fails_the_call(backend, message, monkeypatch):
+    error = {"type": "error", "error": {"type": "invalid_request_error", "message": message}}
+    bodies = _serve(monkeypatch, lambda body: (400, error))
 
     assert await _structured_calls(backend, _OAUTH, ["claude-sonnet-5-5", "claude-sonnet-5-5"]) == [None, None]
 
     assert ["tool_choice" in body for body in bodies] == [True, True], "a different 400 was taken for the rejection"
+    assert nous.handlers._REJECTS_FORCED_TOOL_CHOICE == set()
 
 
 _THINKING = {"type": "thinking", "thinking": "", "signature": "sig_1"}
