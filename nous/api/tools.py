@@ -20,10 +20,13 @@ import logging
 import math
 import os
 import re
+import signal
+import subprocess
 import sys
 import sysconfig
 import threading
 import time
+import weakref
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
@@ -3881,6 +3884,24 @@ _REAL_SETPROFILE = sys.setprofile
 # `.tracer`: the deadline tracer of the script running on THIS thread, or None.
 _run_state = threading.local()
 
+# Every process a script starts through `subprocess` is created by this one
+# function, on the script's own thread. Bound at import, like the hooks above.
+_POPEN = subprocess.Popen
+_POPEN_INIT_CODE = _POPEN.__init__.__code__
+# What `Popen` calls once its fork has set `pid`, before it waits for the exec.
+# Private, so looked up with care: where it is missing, nothing is done there.
+_POPEN_FORKED_CODE = getattr(getattr(_POPEN, "_close_pipe_fds", None), "__code__", None)
+
+# How long a timed-out call waits, after killing what the script had started,
+# for its worker and for the memory calls it cancelled, both together; a worker
+# that was waiting for one of those processes is back in milliseconds, and a
+# cancelled memory call that finishes a write first takes as long as that write.
+# Stays under the second that
+# `Settings._validate_programmatic_tools_timeout` leaves between
+# `timeout + grace` and `tool_timeout`, so the dispatcher's own timeout cannot
+# replace this call's result.
+_KILL_SETTLE_SECONDS = 0.5
+
 
 def _guarded_settrace(func):  # noqa: ANN001, ANN202 - mirrors sys.settrace
     """`sys.settrace` once run_python has been used.
@@ -3943,6 +3964,15 @@ def _deadline_tracer(deadline: float, timeout: float):  # noqa: ANN202 - CPython
     and cleanup code that itself loops can be cut short; only process
     isolation closes that. A runaway living entirely inside library code is
     not interruptible — the same documented limit as a blocking C call.
+
+    One library frame does get a hook, which never raises:
+    `subprocess.Popen.__init__`. As that frame starts, the new `Popen` is
+    noted in `.children` of the tracer, so a call that times out can find
+    and kill what its script started. It notes a weak reference: the object
+    lives exactly as long as the script keeps it, as it does without the hook.
+    Once the call has given up, a new process is killed as `Popen` enters
+    `_close_pipe_fds`, right after its fork: the constructor returns only
+    after the exec, which a slow `preexec_fn` can hold for as long as it likes.
     """
     owned: dict[Any, bool] = {}  # verdict per code object; dies with the run
     message = f"execution timed out ({timeout}s)"
@@ -3967,10 +3997,30 @@ def _deadline_tracer(deadline: float, timeout: float):  # noqa: ANN202 - CPython
         _local.state = state
         return _local
 
+    def _popen_hook(frame, event, arg):  # noqa: ANN001, ANN202 - CPython trace signature
+        # Local hook of `subprocess.Popen.__init__`. It never raises: as that
+        # frame returns after the call gave up, it kills the new process.
+        if event == "return" and _tracer.expired:
+            _kill_script_processes([frame.f_locals.get("self")])  # nothing it starts from here on may live
+        return _popen_hook
+
     def _tracer(frame, event, arg):  # noqa: ANN001, ANN202 - CPython trace signature
         # Global hook: 'call' for every new frame, and again each time a
         # generator resumes — which keeps its own hook, so its history spans
         # resumes and a loop inside it shows its back-edges.
+        if frame.f_code is _POPEN_INIT_CODE:
+            # Noted as the constructor starts, not as it returns: it can block
+            # after its fork (a slow `preexec_fn`), and its process must then
+            # be there for the kill to find.
+            try:
+                # Weakly: a pipe or a process entry the script has let go of
+                # must not be kept alive by this list.
+                _tracer.children.append(weakref.ref(frame.f_locals.get("self")))
+            except TypeError:
+                pass  # `__init__` was called on something that is not a `Popen`
+            return _popen_hook
+        if frame.f_code is _POPEN_FORKED_CODE and _tracer.expired:
+            _kill_script_processes([frame.f_locals.get("self")])  # the frame itself is stdlib: left untraced below
         local = frame.f_trace
         if getattr(local, "owner", None) is not _tracer:
             code = frame.f_code
@@ -3997,7 +4047,105 @@ def _deadline_tracer(deadline: float, timeout: float):  # noqa: ANN202 - CPython
                 site[1], site[2] = lasti, 1
         return local
 
+    _tracer.children = []  # weak references to the `subprocess.Popen` objects the script has created
+    _tracer.expired = False  # True once the call has returned as timed out
     return _tracer
+
+
+def _descendants(pids: list[int]) -> list[int]:
+    """Every process that one of `pids` started, directly or through others,
+    and that still has it as an ancestor. Read from Linux `/proc`; where there
+    is none, nothing is found."""
+    started: dict[int, list[int]] = {}
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return []
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat", "rb") as stat:
+                # "pid (comm) state ppid ...", and comm may contain a ")".
+                parent = int(stat.read().rpartition(b")")[2].split()[1])
+        except OSError:
+            continue  # it ended while this was reading
+        started.setdefault(parent, []).append(int(entry))
+    found: list[int] = []
+    queue = list(pids)
+    while queue:
+        for pid in started.get(queue.pop(), ()):
+            found.append(pid)
+            queue.append(pid)
+    return found
+
+
+def _kill_script_processes(procs: list[Any]) -> list[int]:
+    """Kill each of `procs` that is still running, and whatever it started.
+
+    `procs` are what the trace hook noted: objects a script created with
+    `subprocess.Popen` or a subclass of it, or `None` where the script has let
+    go of one. Only a `subprocess.Popen` itself is acted on. Its `poll` and
+    `kill` take the object's own lock without waiting for it, so this is safe
+    from another thread while the script's thread waits for the process.
+    Returns the pids that were signalled.
+    """
+    # Only `subprocess.Popen` itself, which skips `None` too. A subclass the
+    # script wrote is left alone: its own `poll` and `kill` would run here, on
+    # the event loop or inside the trace hook. A `Popen` whose process never
+    # started has no pid.
+    running = [
+        proc
+        for proc in procs
+        if type(proc) is _POPEN and getattr(proc, "pid", None) is not None and proc.poll() is None
+    ]
+    # Stop them before looking, and stop what each look finds: a stopped
+    # process starts nothing, so a look that finds nothing new has found all
+    # there is below them. Read before a parent is gone. A tree still changing
+    # after eight looks is killed as far as it was found.
+    if hasattr(signal, "SIGSTOP"):
+        for proc in running:
+            try:
+                proc.send_signal(signal.SIGSTOP)
+            except OSError:
+                continue  # not ours to signal
+        # One that ended before its stop was collected by it, so its pid may
+        # be another process's by now: nothing under it is looked for or killed.
+        running = [proc for proc in running if proc.returncode is None]
+    below: list[int] = []  # what the looks found and stopped: only these are killed
+    seen: list[int] = []
+    for _ in range(8):
+        try:
+            found = [pid for pid in _descendants([proc.pid for proc in running]) if pid not in seen]
+        except Exception:
+            # The script's processes are stopped by now. A look that fails
+            # ends the looking, and what was found is killed, rather than left
+            # stopped, holding its worker and the run slot for good.
+            logger.warning("run_python: could not look for what a script's processes started", exc_info=True)
+            break
+        if not found:
+            break
+        for pid in found:
+            try:
+                os.kill(pid, signal.SIGSTOP)
+            except OSError:
+                continue  # not ours to signal, or it has ended and by the kill its pid may be another's
+            below.append(pid)
+        seen += found
+    killed: list[int] = []
+    for proc in running:
+        try:
+            proc.kill()
+        except OSError:
+            continue  # not ours to signal
+        killed.append(proc.pid)
+    for pid in below:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            continue  # it has ended, or is not ours to signal
+        killed.append(pid)
+    return killed
 
 
 def run_python_active_runs() -> int:
@@ -4147,6 +4295,25 @@ def create_programmatic_tools(
             # would starve every later run_python of slots (codex P1).
             timeout = max(1.0, min(float(timeout), float(_timeout_override)))
         deadline = time.monotonic() + timeout
+        # The script's memory calls that have started on the main loop. Weak:
+        # one that has ended drops out by itself.
+        _memory_tasks: weakref.WeakSet = weakref.WeakSet()
+
+        async def _on_loop(coro):  # noqa: ANN001, ANN202 - any memory coroutine
+            """Run one memory call of the script on the main loop.
+
+            The call's timeout arm runs on this loop too, so the check here and
+            the arm cannot interleave: once the call has given up, no memory
+            call starts, and one that had started is in `_memory_tasks` for the
+            arm to cancel, and wait for, before it answers.
+            """
+            if _tracer.expired:
+                # The call has returned as timed out: what the script wrote to
+                # memory from here on, a retry would write again.
+                coro.close()  # it never started
+                raise ScriptDeadlineExceeded(f"execution timed out ({timeout}s)")
+            _memory_tasks.add(asyncio.current_task())
+            return await coro
 
         def _schedule(coro):
             """Schedule a coroutine on the main loop and block the thread until done.
@@ -4164,7 +4331,7 @@ def create_programmatic_tools(
             now that a single call is a ~5s retrieval rather than a fact lookup.
             """
             remaining = max(0.1, deadline - time.monotonic())
-            fut = asyncio.run_coroutine_threadsafe(coro, loop)
+            fut = asyncio.run_coroutine_threadsafe(_on_loop(coro), loop)
             try:
                 return fut.result(timeout=remaining)
             except TimeoutError:
@@ -4284,15 +4451,15 @@ def create_programmatic_tools(
                 """
                 if _tr is None:
                     return
-                # Off for the duration of cleanup, then RESTORED unless the
-                # script is already dead. An ordinary Exception here is
-                # catchable: a script doing `try: recall_deep(...) except
-                # Exception: pass` carries on running, and leaving the tracer
-                # off would hand it a thread with no deadline enforcement at all
-                # — reopening the `while True: pass` hole the tracer exists to
-                # close, holding a worker and a concurrency slot indefinitely.
-                # Only ScriptDeadlineExceeded means the script cannot continue.
-                _is_deadline = isinstance(exc, ScriptDeadlineExceeded)
+                # Off for the duration of cleanup, then RESTORED, whatever the
+                # exception. A script can catch it and carry on running: an
+                # ordinary Exception with `try: recall_deep(...) except
+                # Exception: pass`, and ScriptDeadlineExceeded too, with a bare
+                # `except:`. Leaving the tracer off would hand it a thread with
+                # no deadline enforcement at all — reopening the `while True:
+                # pass` hole the tracer exists to close, holding a worker and a
+                # concurrency slot indefinitely. A script that is dying loses
+                # the hook anyway: `_run`'s finally clears it.
                 try:
                     _REAL_SETTRACE(None)
                 except Exception:  # pragma: no cover - defensive
@@ -4303,11 +4470,10 @@ def create_programmatic_tools(
                     _tr.finalize([])
                     _commit(_tr)
                 finally:
-                    if not _is_deadline:
-                        try:
-                            _REAL_SETTRACE(_tracer)
-                        except Exception:  # pragma: no cover - defensive
-                            pass
+                    try:
+                        _REAL_SETTRACE(_tracer)
+                    except Exception:  # pragma: no cover - defensive
+                        pass
 
             # EVERYTHING that decides what the script receives sits inside this
             # try, and the success trace is committed only after `out` exists.
@@ -4634,6 +4800,9 @@ def create_programmatic_tools(
         # GIL) inside the API process forever. A trace hook fires on every line
         # of the executing script and raises once the deadline passes.
         _tracer = _deadline_tracer(deadline, timeout)
+        # Set when the worker thread leaves `_run`: from then on the script
+        # runs nothing and its slot is free.
+        finished = threading.Event()
 
         def _run() -> None:
             try:
@@ -4690,6 +4859,7 @@ def create_programmatic_tools(
                 _REAL_SETTRACE(None)
                 _run_state.tracer = None
                 _release_run_slot()
+                finished.set()
 
         max_concurrent = settings.programmatic_tools_max_concurrent
         if not _acquire_run_slot(max_concurrent):
@@ -4719,7 +4889,56 @@ def create_programmatic_tools(
             # tool_result block, compaction bulk-failure detection)
             # distinguish a real execution failure from a successful run
             # whose OUTPUT merely begins with "Error: ".
-            return _fail(f"Error: execution timed out ({timeout}s)")
+            text = f"Error: execution timed out ({timeout}s)"
+            # A timed-out script leaves no process behind. A worker waiting
+            # for a process its script started is out of the trace hook's
+            # reach, so the kill is also what brings it, and its run slot,
+            # back: the call waits a moment for that.
+            _tracer.expired = True  # first: the hook kills whatever starts after this line
+            cancelled = list(_memory_tasks)
+            for task in cancelled:
+                task.cancel()  # a memory call still running does not land after this answer
+            killed = _kill_script_processes([ref() for ref in _tracer.children])
+            # On the loop, not on a thread: the default executor can be busy
+            # for longer than this call has left. One bound for both waits.
+            settled = time.monotonic() + _KILL_SETTLE_SECONDS
+            if cancelled:
+                # A cancel is a request: a write under way, a commit, can still finish.
+                _, pending = await asyncio.wait(cancelled, timeout=_KILL_SETTLE_SECONDS)
+                if pending:
+                    logger.warning(
+                        "run_python: a script timed out after %ss; %d memory call(s) it had started "
+                        "did not stop within %ss of their cancel and may still write",
+                        timeout,
+                        len(pending),
+                        _KILL_SETTLE_SECONDS,
+                    )
+            if killed:
+                logger.warning(
+                    "run_python: a script timed out after %ss; killed %d process(es) it had started (pids %s)",
+                    timeout,
+                    len(killed),
+                    ", ".join(str(pid) for pid in killed),
+                )
+                text += f"; killed {len(killed)} process(es) the script had started"
+                while not finished.is_set() and time.monotonic() < settled:
+                    await asyncio.sleep(0.02)
+            if not finished.is_set():
+                # Blocked where neither the trace hook nor a kill reaches it:
+                # "timed out" must not read as "stopped".
+                logger.warning(
+                    "run_python: a script timed out after %ss and is still running (%d chars of code); "
+                    "it keeps its run slot until it returns (%d/%d in use)",
+                    timeout,
+                    len(code),
+                    run_python_active_runs(),
+                    max_concurrent,
+                )
+                text += (
+                    "; the script is still running: it is blocked in a call that cannot be "
+                    "interrupted and keeps its run slot until that call returns"
+                )
+            return _fail(text)
         except Exception as e:
             return _fail(f"Error: {type(e).__name__}: {e}")
         except BaseException as exc:
