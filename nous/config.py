@@ -1203,6 +1203,12 @@ class Settings(BaseSettings):
     # Route DAGs with no origin channel (scheduler/heartbeat) to
     # telegram:<telegram_chat_id>. Off: such DAGs keep only the F087 push.
     result_inbox_dag_scheduled: bool = False
+    # F098 Phase B: the Telegram bot polls /inbox/wake and runs a wake turn
+    # that reports conversation-originated results unprompted. Requires
+    # result_inbox_enabled. Set on BOTH the server and the bot process.
+    result_wake_enabled: bool = False
+    result_wake_max_per_hour: int = Field(default=6, ge=1)
+    result_wake_debounce_seconds: int = Field(default=20, ge=0)
 
     # F022: Graph-Augmented Recall
     graph_recall_enabled: bool = True

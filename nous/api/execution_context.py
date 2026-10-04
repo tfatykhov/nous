@@ -25,6 +25,7 @@ ContextKind = Literal[
     "heartbeat_check",     # F034.5 DynamicCheck run
     "heartbeat_callback",  # F034.6 on_complete callback
     "dag_summary",         # F087 agent-authored DAG summary
+    "result_wake",         # F098 bot-initiated turn reporting background results
     "background",          # a background turn whose caller named no kind
 ]
 CONTEXT_KINDS: tuple[str, ...] = get_args(ContextKind)

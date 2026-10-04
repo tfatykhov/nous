@@ -33,7 +33,8 @@ from nous.api.idempotency import SUMMARY_SESSION_PREFIX
 from nous.config import Settings
 from nous.dag.approval import approval_line, is_answered_approval, stopped_at_approval
 from nous.events import Event
-from nous.heart.result_inbox import ResultInboxStore, record_dag_result
+from nous.heart.result_inbox import SOURCE_DAG, ResultInboxStore, record_dag_result
+from nous.heart.result_wake import will_wake
 from nous.storage.models import ExecutionDAG
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -149,8 +150,9 @@ class DAGResultDelivery:
                 summary = authored
                 summary_authored = True
 
+        inbox_written = False
         if self._inbox is not None:
-            await record_dag_result(
+            inbox_written = await record_dag_result(
                 self._inbox,
                 self._settings,
                 dag_id=dag.id,
@@ -167,7 +169,12 @@ class DAGResultDelivery:
             legs.append(await self._leg_bus(dag, summary))
 
         if self._settings.dag_delivery_telegram_enabled:
-            legs.append(await self._leg_telegram(dag, summary))
+            if await self._superseded_by_wake(dag, inbox_written):
+                # F098 Phase B: the wake turn reports it on the origin chat.
+                # Not required (rather than ok), so the leg reads as skipped.
+                legs.append(LegResult("telegram", ok=False, required=False, detail="superseded_by_wake"))
+            else:
+                legs.append(await self._leg_telegram(dag, summary))
 
         delivered = all(leg.ok for leg in legs if leg.required)
         return DeliveryOutcome(
@@ -361,6 +368,22 @@ class DAGResultDelivery:
                 None,
             )
         return LegResult("summary", ok=True, required=False), text
+
+    async def _superseded_by_wake(self, dag: ExecutionDAG, inbox_written: bool) -> bool:
+        """Whether a wake turn will report this DAG, so the push stands down.
+
+        Only when the inbox row really exists: if its write failed, the push
+        is the user's only notice and keeps its required retry.
+        """
+        if self._inbox is None or not will_wake(self._settings, getattr(dag, "origin_channel", None)):
+            return False
+        if inbox_written:
+            return True
+        try:
+            return await self._inbox.has(SOURCE_DAG, dag.id, dag.delivery_generation or 0)
+        except Exception:
+            logger.warning("F098: inbox lookup failed for DAG %s; pushing to Telegram", str(dag.id)[:8], exc_info=True)
+            return False
 
     async def _leg_telegram(self, dag: ExecutionDAG, summary: str) -> LegResult:
         """Push the outcome to Telegram.

@@ -1890,6 +1890,7 @@ class AgentRunner:
         platform: str | None = None,
         system_prompt_prefix: str | None = None,
         channel: str | None = None,  # F098: where the conversation lives
+        wake: bool = False,  # F098 Phase B: a bot-initiated result_wake turn
     ) -> AsyncGenerator[StreamEvent, None]:
         """Full chat turn with streaming, including tool loops.
 
@@ -1900,8 +1901,11 @@ class AgentRunner:
             raise RuntimeError("No tool dispatcher set -- call set_dispatcher() first")
 
         _agent_id = agent_id or self._settings.agent_id
-        # stream_chat serves REST /chat/stream only — a person is in the loop.
-        _ctx = ExecutionContext(kind="interactive", session_id=session_id, channel=channel)
+        # stream_chat serves REST /chat/stream only — a person is in the loop,
+        # except for a wake turn (F098), which the bot starts on its own.
+        _ctx = ExecutionContext(
+            kind="result_wake" if wake else "interactive", session_id=session_id, channel=channel,
+        )
 
         # Sync activity refresh before any long-running work. See run_turn
         # for rationale — the bus is queued, so message_received emission

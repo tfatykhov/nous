@@ -182,6 +182,18 @@ class ResultInboxStore:
             await session.commit()
             return bool(result.rowcount)
 
+    async def has(self, source_kind: str, source_id: UUID, source_generation: int = 0) -> bool:
+        """Whether this result already has an inbox row."""
+        async with self._db.session() as session:
+            found = await session.execute(
+                select(ResultInbox.id).where(
+                    ResultInbox.source_kind == source_kind,
+                    ResultInbox.source_id == source_id,
+                    ResultInbox.source_generation == source_generation,
+                )
+            )
+            return found.first() is not None
+
     async def claim(
         self,
         *,

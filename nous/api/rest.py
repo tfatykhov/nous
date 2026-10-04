@@ -62,6 +62,7 @@ from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart import Heart
 from nous.heart.result_inbox import derive_channel
+from nous.heart.result_wake import WAKE_NOTE, WakeGate, wake_enabled
 from nous.observability.retrieval_logger import RETRIEVAL_PATHS as _RETRIEVAL_PATHS
 from nous.observability.snapshots import (
     SNAPSHOT_METRICS_VERSION,
@@ -96,6 +97,9 @@ def create_app(
     dag_orchestrator: Any | None = None,
 ) -> Starlette:
     """Create the Starlette ASGI app with all routes."""
+
+    # F098 Phase B: one gate per process, so its counters are the metrics.
+    wake_gate = WakeGate(database, settings.agent_id, settings) if wake_enabled(settings) else None
 
     def _parse_attachments(body: dict) -> list[Attachment]:
         from nous.api.attachments import classify_attachment, sanitize_filename, validate_base64_size
@@ -191,8 +195,9 @@ def create_app(
         except Exception:
             return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
-        message = body.get("message")
-        attachments = _parse_attachments(body) if settings.attachments_enabled else []
+        wake = body.get("wake") is True  # F098 Phase B: bot-initiated report turn
+        message = WAKE_NOTE if wake else body.get("message")
+        attachments = _parse_attachments(body) if settings.attachments_enabled and not wake else []
         if not message and not attachments:
             return JSONResponse({"error": "Missing required field: message"}, status_code=400)
         if not message:
@@ -205,6 +210,14 @@ def create_app(
         user_display_name = body.get("user_display_name")
 
         channel = derive_channel(body, settings.telegram_chat_id)  # F098
+        if wake:
+            if wake_gate is None or not channel:
+                return JSONResponse({"wake": False, "reason": "disabled"}, status_code=409)
+            # Re-decided here and stamped: a user turn that claimed the rows
+            # since the bot's poll leaves nothing, and no empty turn runs.
+            decision = await wake_gate.begin(channel)
+            if not decision.wake:
+                return JSONResponse(decision.as_dict(), status_code=409)
 
         async def event_generator():
             stream = runner.stream_chat(
@@ -212,6 +225,7 @@ def create_app(
                 user_id=user_id, user_display_name=user_display_name,
                 attachments=attachments or None,
                 **({"channel": channel} if channel else {}),
+                **({"wake": True} if wake else {}),
             )
             aiter = stream.__aiter__()
             ping_interval = settings.sse_ping_interval
@@ -279,6 +293,23 @@ def create_app(
                 "X-Accel-Buffering": "no",
             },
         )
+
+    async def inbox_wake(request: Request) -> JSONResponse:
+        """GET /inbox/wake[?channel=] - F098 Phase B: which chats to wake now.
+
+        Read-only. Without ``channel``: every Telegram channel with results
+        that could wake, so a restarted bot still finds them.
+        """
+        if wake_gate is None:
+            return JSONResponse({"enabled": False, "channels": []})
+        try:
+            channel = request.query_params.get("channel")
+            channels = [channel] if channel else await wake_gate.pending_channels()
+            decisions = [await wake_gate.decide(c) for c in channels]
+            return JSONResponse({"enabled": True, "channels": [d.as_dict() for d in decisions]})
+        except Exception as e:
+            logger.error("F098: wake poll failed: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
 
     async def end_chat(request: Request) -> JSONResponse:
         """DELETE /chat/{session_id} - End a conversation."""
@@ -2218,6 +2249,8 @@ def create_app(
                         "7d": await heart.result_inbox.metrics(7),
                         "30d": await heart.result_inbox.metrics(30),
                     }
+                    if wake_gate is not None:  # F098 Phase B
+                        data["result_inbox"]["wake"] = wake_gate.metrics()
                 except Exception:
                     logger.warning("F098: result inbox metrics failed", exc_info=True)
             return JSONResponse(data)
@@ -3320,6 +3353,7 @@ def create_app(
     routes = [
         Route("/chat", chat, methods=["POST"]),
         Route("/chat/stream", chat_stream, methods=["POST"]),
+        Route("/inbox/wake", inbox_wake),
         Route("/chat/{session_id}", end_chat, methods=["DELETE"]),
         Route("/status", status),
         Route("/decisions", list_decisions),

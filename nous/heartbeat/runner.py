@@ -89,6 +89,22 @@ def _await_chain(task: asyncio.Task) -> str:
     return " > ".join(hops) or "unknown"
 
 
+def in_quiet_hours(settings: Settings, now: datetime | None = None) -> bool:
+    """Whether ``now`` (default: the current UTC hour) is in quiet hours.
+
+    Module-level so the F098 wake gate honours the same window as heartbeat.
+    """
+    hour = (now or datetime.now(UTC)).hour
+    start = settings.heartbeat_quiet_start
+    end = settings.heartbeat_quiet_end
+
+    if start <= end:
+        # Simple range: e.g. 9-17
+        return start <= hour < end
+    # Wraps midnight: e.g. 23-8
+    return hour >= start or hour < end
+
+
 class HeartbeatRunner:
     """Background heartbeat loop with check execution and triage.
 
@@ -1282,16 +1298,7 @@ class HeartbeatRunner:
 
     def _in_quiet_hours(self) -> bool:
         """Check if current hour falls in quiet range."""
-        hour = datetime.now(UTC).hour
-        start = self._settings.heartbeat_quiet_start
-        end = self._settings.heartbeat_quiet_end
-
-        if start <= end:
-            # Simple range: e.g. 9-17
-            return start <= hour < end
-        else:
-            # Wraps midnight: e.g. 23-8
-            return hour >= start or hour < end
+        return in_quiet_hours(self._settings)
 
     def _has_budget(self) -> bool:
         """Check if daily token budget is not exhausted."""

@@ -19,6 +19,7 @@ from nous.cognitive.execution_ledger import classify_side_effect
 _ALL = frozenset({"none", "write", "external", "irreversible"})
 _WORK = frozenset({"none", "write", "external"})
 _LOCAL = frozenset({"none", "write"})
+_READ = frozenset({"none"})
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,11 @@ CONTEXT_POLICY: Mapping[str, ContextPolicy] = MappingProxyType(
         "heartbeat_check": ContextPolicy(_WORK, spawn=False),
         "heartbeat_callback": ContextPolicy(_WORK, spawn=False),
         "background": ContextPolicy(_LOCAL, spawn=False),
+        # F098: a wake turn REPORTS results it was handed. Its input is
+        # untrusted subtask/DAG output, so nothing with a side effect: no
+        # send, no spawn, no write (the <result_message> envelope is the
+        # barrier while this policy runs in warn mode).
+        "result_wake": ContextPolicy(_READ, spawn=False),
     }
 )
 

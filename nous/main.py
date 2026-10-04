@@ -1024,6 +1024,11 @@ async def create_components(settings: Settings) -> dict:
 
     # F098: repair inbox writes the subtask worker lost (codex P1 on #694).
     result_reconciler_task = None
+    if settings.result_wake_enabled and not settings.result_inbox_enabled:
+        logger.warning(
+            "F098: NOUS_RESULT_WAKE_ENABLED is on but NOUS_RESULT_INBOX_ENABLED is off; "
+            "wake turns stay disabled until the inbox is on"
+        )
     if settings.result_inbox_enabled:
         from nous.heart.result_reconciler import build_reconciler
 

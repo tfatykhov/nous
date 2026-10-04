@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import mimetypes
@@ -41,6 +42,11 @@ SESSION_TTL_SECONDS = 1800
 
 # Max Telegram message length
 TG_MAX_LEN = 4096
+
+# F098 Phase B: how often the bot asks the server which chats have results
+# to report (GET /inbox/wake). The server owns the decision; the bot only
+# knows whether a chat has a live turn.
+WAKE_POLL_SECONDS = 30
 
 # Regex patterns for markdown sanitization
 import html as html_module
@@ -480,6 +486,7 @@ class NousTelegramBot:
         allowed_users: set[int] | None = None,
         attachments_enabled: bool = False,
         attachments_default_prompt: str = "What can you tell me about this?",
+        wake_enabled: bool = False,
     ):
         self.bot_token = bot_token
         self.nous_url = nous_url.rstrip("/")
@@ -491,6 +498,11 @@ class NousTelegramBot:
         self._sessions: dict[int, str] = {}
         # Track last activity time per chat to detect stale sessions
         self._session_last_active: dict[int, float] = {}
+        # F098 Phase B: chats with a turn in flight (count, so overlapping
+        # turns on one chat cannot clear each other's mark).
+        self.wake_enabled = wake_enabled
+        self._busy: dict[int, int] = {}
+        self._wake_task: asyncio.Task | None = None
         self._http = httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=300, write=10, pool=10))
 
     async def start(self) -> None:
@@ -498,6 +510,8 @@ class NousTelegramBot:
         me = await self._tg("getMe")
         logger.info("Bot started: @%s (%s)", me.get("username"), me.get("id"))
         print(f"Nous Telegram bot started: @{me.get('username')}")
+        if self.wake_enabled:
+            self._wake_task = asyncio.create_task(self._wake_loop(), name="result-wake")
 
         while True:
             try:
@@ -507,12 +521,62 @@ class NousTelegramBot:
                 )
                 for update in updates:
                     self._offset = update["update_id"] + 1
-                    await self._handle_update(update)
+                    chat_id = ((update.get("message") or {}).get("chat") or {}).get("id")
+                    with self._busy_chat(chat_id):
+                        await self._handle_update(update)
             except httpx.ReadTimeout:
                 continue  # Normal for long polling
             except Exception as e:
                 logger.error("Polling error: %s", e)
                 await asyncio.sleep(5)
+
+    @contextlib.contextmanager
+    def _busy_chat(self, chat_id: int | None):
+        """Mark ``chat_id`` as having a live turn, so no wake races it."""
+        if chat_id is None:
+            yield
+            return
+        self._busy[chat_id] = self._busy.get(chat_id, 0) + 1
+        try:
+            yield
+        finally:
+            self._busy[chat_id] -= 1
+            if not self._busy[chat_id]:
+                del self._busy[chat_id]
+
+    async def _wake_loop(self) -> None:
+        """F098 Phase B: poll the server and run due wake turns."""
+        while True:
+            await asyncio.sleep(WAKE_POLL_SECONDS)
+            try:
+                await self._wake_tick()
+            except Exception as e:
+                logger.warning("F098: wake poll failed: %s", e)
+
+    async def _wake_tick(self) -> None:
+        """Wake each chat the server reports ready, unless it is mid-turn.
+
+        The server lists the chats (not only those seen by this process), so
+        results that landed while the bot was restarting still wake. The
+        wake turn uses this chat's own session, the one the user's reply
+        will continue.
+        """
+        resp = await self._http.get(f"{self.nous_url}/inbox/wake", timeout=10)
+        if resp.status_code != 200:
+            logger.warning("F098: wake poll returned HTTP %s", resp.status_code)
+            return
+        for decision in resp.json().get("channels") or []:
+            channel = str(decision.get("channel") or "")
+            if not decision.get("wake") or not channel.startswith("telegram:"):
+                continue
+            try:
+                chat_id = int(channel.removeprefix("telegram:"))
+            except ValueError:
+                continue
+            if self._busy.get(chat_id):
+                continue
+            with self._busy_chat(chat_id):
+                await self._chat_streaming(chat_id, "", wake=True)
 
     async def _download_telegram_file(self, file_id: str) -> bytes:
         """Resolve file_id via getFile, then GET the file-download URL.
@@ -777,8 +841,14 @@ class NousTelegramBot:
         self, chat_id: int, text: str,
         user_id: str | None = None, user_display_name: str | None = None,
         attachments: list[Attachment] | None = None,
+        wake: bool = False,
     ) -> None:
-        """Send message to Nous streaming API and progressively edit Telegram message."""
+        """Send message to Nous streaming API and progressively edit Telegram message.
+
+        ``wake`` (F098 Phase B): a bot-initiated turn reporting background
+        results; the server supplies the turn's text and answers 409 when
+        there is nothing to report any more, which is not an error here.
+        """
         from uuid import uuid4
 
         await self._tg("sendChatAction", params={"chat_id": chat_id, "action": "typing"})
@@ -796,6 +866,8 @@ class NousTelegramBot:
             "message": text, "session_id": session_id, "platform": "telegram",
             "chat_id": chat_id,  # F098: the server routes background results by it
         }
+        if wake:
+            payload["wake"] = True
         # 007.4: Pass user identity for episode tracking
         if user_id:
             payload["user_id"] = user_id
@@ -845,6 +917,10 @@ class NousTelegramBot:
             ) as response:
                 if response.status_code != 200:
                     error_body = await response.aread()
+                    if wake:
+                        if response.status_code != 409:
+                            logger.warning("F098: wake turn refused: HTTP %s", response.status_code)
+                        return
                     await self._send(chat_id, f"\u274c Error: {error_body.decode()[:200]}")
                     return
 
@@ -953,6 +1029,10 @@ class NousTelegramBot:
 
     async def close(self) -> None:
         """Cleanup."""
+        if self._wake_task is not None:
+            self._wake_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._wake_task
         await self._http.aclose()
 
 
@@ -978,6 +1058,7 @@ async def main() -> None:
         bot_token, nous_url, allowed_users,
         attachments_enabled=_settings.attachments_enabled,
         attachments_default_prompt=_settings.attachments_default_prompt,
+        wake_enabled=_settings.result_wake_enabled,
     )
     try:
         await bot.start()

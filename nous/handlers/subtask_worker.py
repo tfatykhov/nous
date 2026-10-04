@@ -27,7 +27,8 @@ from nous.cancellation import cancel_requested
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart.heart import Heart
-from nous.heart.result_inbox import record_subtask_result
+from nous.heart.result_inbox import is_dag_node_subtask, record_subtask_result
+from nous.heart.result_wake import will_wake
 from nous.storage.models import Subtask
 
 logger = logging.getLogger(__name__)
@@ -525,6 +526,11 @@ class SubtaskWorkerPool:
     ) -> None:
         """Send Telegram notification if configured and subtask has notify=True."""
         if not subtask.notify:
+            return
+        # F098 Phase B: a conversation-spawned result is reported by the wake
+        # turn on its chat; pinging here too would be a double notification.
+        # A lost inbox write is re-inserted by the result reconciler.
+        if not is_dag_node_subtask(subtask) and will_wake(self._settings, getattr(subtask, "parent_channel", None)):
             return
 
         token = self._settings.telegram_bot_token

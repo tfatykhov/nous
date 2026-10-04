@@ -100,3 +100,12 @@ Acceptance tests for C:
 5. With wake on, there is no `_notify_telegram` ping and the F087 Telegram leg is not required.
 6. A wake turn followed by a reply from Tim stays in the same `session_id`.
 7. Flag off: no polling task starts and behaviour is identical to Phase A.
+
+## 5. As built (Option C)
+
+- `nous/heart/result_wake.py::WakeGate` holds the whole decision (origin filter, `telegram:*` only, quiet hours via `heartbeat.runner.in_quiet_hours`, rate limit, debounce). `GET /inbox/wake` without `?channel=` returns every Telegram channel with waiting results, so a restarted bot (empty in-memory chat map) still wakes them; the bot polls once per 30 s for all chats rather than once per chat.
+- `POST /chat/stream {wake: true}` re-runs the decision and stamps `wake_attempted_at` on the rows; zero rows stamped → 409 and no turn (a user turn claimed them since the poll). The stamp is also the rate-limit counter (distinct stamps per rolling hour), so no migration was needed. The server supplies the turn text (`[system:wake] Background results arrived; report them briefly.`).
+- Policy row `result_wake`: only side-effect level `none`, no spawn — stricter than §3's `_LOCAL`, per the task brief (no write tools either). Mode unchanged (`warn`).
+- Subtask notify suppression relies on the Phase A reconciler for a lost inbox write; the DAG leg checks the inbox row exists before standing down.
+- Not built: `POST /inbox/release` (optional nicety in §3). A wake turn that fails after `pre_turn` has claimed its rows loses the report, as Phase A deviation #3.
+- Config: `NOUS_RESULT_WAKE_ENABLED` (server **and** bot), `NOUS_RESULT_WAKE_MAX_PER_HOUR=6`, `NOUS_RESULT_WAKE_DEBOUNCE_SECONDS=20`.

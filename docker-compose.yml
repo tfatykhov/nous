@@ -106,6 +106,8 @@ services:
       - NOUS_A2UI_PUSH_MAX_INSTALLATIONS=${NOUS_A2UI_PUSH_MAX_INSTALLATIONS:-10}
       # Card pings on Telegram. Off = push only; Telegram still fires for any card push would not carry.
       - NOUS_A2UI_TELEGRAM_NOTIFY_ENABLED=${NOUS_A2UI_TELEGRAM_NOTIFY_ENABLED:-false}
+      # F098 Phase B: also set on the telegram service below.
+      - NOUS_RESULT_WAKE_ENABLED=${NOUS_RESULT_WAKE_ENABLED:-false}
     volumes:
       # F042: persist downloaded cross-encoder models across container restarts
       - huggingface_cache:/root/.cache/huggingface
@@ -130,6 +132,8 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       NOUS_API_URL: http://nous:8000
       NOUS_ALLOWED_USERS: ${NOUS_ALLOWED_USERS:-}
+      # F098 Phase B: the bot runs the wake poll only when this is on.
+      NOUS_RESULT_WAKE_ENABLED: ${NOUS_RESULT_WAKE_ENABLED:-false}
     depends_on:
       - nous
     restart: unless-stopped
