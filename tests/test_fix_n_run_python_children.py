@@ -765,3 +765,26 @@ def test_a_process_of_the_script_that_ended_before_its_stop_is_not_looked_under(
         for proc in (root, bystander):
             proc.kill()
             proc.wait()
+
+
+async def test_the_call_cancels_a_memory_call_it_finds_running(monkeypatch):
+    """The call cancels a memory call that is running when it gives up; it
+    does not merely wait for it until the worker's own deadline cancels it."""
+    gate, landed = asyncio.Event(), []
+
+    async def slow_learn(*args, **kwargs):
+        await gate.wait()
+        landed.append(True)
+
+    heart = AsyncMock()
+    heart.learn.side_effect = slow_learn
+    # The call gives up half a second before the script's deadline, and its
+    # wait for the memory calls it cancelled ends before that deadline does.
+    monkeypatch.setattr(T, "_TIMEOUT_GRACE", -0.5)
+    monkeypatch.setattr(T, "_KILL_SETTLE_SECONDS", 0.2)
+    result = await _run_python(heart)(code="learn_fact('written while the call gave up')\n")
+    gate.set()
+    await asyncio.sleep(0.2)
+
+    assert result["is_error"] is True
+    assert landed == [], "a memory call the call had found running was not cancelled"
