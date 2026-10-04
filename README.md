@@ -272,7 +272,7 @@ Both projects evolve independently. The shared asset is the philosophy, not the 
 
 ## Configuration
 
-Key environment variables. See the [Quickstart Guide](docs/quickstart.md) and [CLAUDE.md](CLAUDE.md) for the full list — Nous exposes 150+ env vars covering retrieval, calibration, heartbeat, DAGs, and the eval harness.
+Key environment variables. See the [Quickstart Guide](docs/quickstart.md) and the [environment variable reference](docs/reference/environment-variables.md) for the full list — Nous exposes 150+ env vars covering retrieval, calibration, heartbeat, DAGs, and the eval harness.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -308,7 +308,7 @@ Key environment variables. See the [Quickstart Guide](docs/quickstart.md) and [C
 | `NOUS_CLAIM_VERIFICATION_ENABLED` | `true` | Post-turn claim verification against execution ledger (F026) |
 | `NOUS_RUBRIC_ENABLED` | `true` | Self-modifying decision-quality rubric (F024-3b) |
 
-For the full set — heartbeat tuning, DAG timeouts, sleep cycle, eval harness — see [CLAUDE.md](CLAUDE.md).
+For the full set — heartbeat tuning, DAG timeouts, sleep cycle, eval harness — see the [environment variable reference](docs/reference/environment-variables.md).
 
 ## Status
 
