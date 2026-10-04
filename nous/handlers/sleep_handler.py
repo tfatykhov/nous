@@ -849,7 +849,10 @@ class SleepHandler:
                 tool_name="store_reflection",
                 tool_description="Store the structured sleep reflection output. Call this with all reflection results.",
                 output_schema=_REFLECTION_SCHEMA,
-                max_tokens=1500,
+                # Ten 500-character episodes plus orient facts: Sonnet 5.5 wrote
+                # 2,078-2,510 tokens and Opus 5.5 up to 3,310; at 1,500 the call
+                # stopped before its facts on every model measured.
+                max_tokens=6000,
             )
 
             if not reflection:

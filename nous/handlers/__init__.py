@@ -150,7 +150,8 @@ async def call_background_llm_structured(
     a forced tool_choice, call_with_tool_choice asks for the tool in the system
     prompt instead.
 
-    Returns the structured dict, or None on failure.
+    Returns the structured dict, or None on failure: an error, or a reply cut off
+    at max_tokens, refused, without a tool call or without a required key.
     """
     payload: dict[str, Any] = {
         "model": model,
@@ -191,14 +192,30 @@ async def call_background_llm_structured(
 
     try:
         response = await call_with_tool_choice(client, payload)
-        # Extract the tool_use block; an unforced reply may open with text or thinking
-        for block in response.content:
-            if isinstance(block, dict) and block.get("type") == "tool_use":
-                return block["input"]
-        logger.warning("No tool_use block in structured LLM response")
+        stop_reason = getattr(response, "stop_reason", None)
+        missing: list[str] = []
+        # A tool call cut off at max_tokens lacks the fields not yet written; a refusal is no answer.
+        if stop_reason not in ("max_tokens", "refusal"):
+            # Extract the tool_use block; an unforced reply may open with text or thinking
+            for block in response.content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    # Nothing enforces the schema, so a reply without a required key is no answer either.
+                    missing = [key for key in output_schema.get("required", []) if key not in block["input"]]
+                    if not missing:
+                        return block["input"]
+                    break
+        blocks = [block.get("type") for block in response.content if isinstance(block, dict)]
+        logger.warning(
+            "Structured LLM call %s (model=%s) not used: stop_reason=%s, blocks=%s, missing=%s",
+            tool_name,
+            model,
+            stop_reason,
+            blocks,
+            missing,
+        )
         return None
     except Exception as e:
-        logger.warning("Structured background LLM call failed: %s", e)
+        logger.warning("Structured LLM call %s (model=%s) failed: %s", tool_name, model, e)
         return None
 
 

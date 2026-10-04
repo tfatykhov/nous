@@ -554,7 +554,7 @@ class TestPhaseClusterConsolidation:
 
     @pytest.mark.asyncio
     async def test_happy_path_merge(self):
-        merge_result = {"merged_content": "consolidated fact", "confidence": 0.85}
+        merge_result = {"should_merge": True, "merged_content": "consolidated fact", "confidence": 0.85}
         client = _mock_llm_response(merge_result)
         handler, heart = self._make_handler(llm_client=client)
         handler._interrupted = False
