@@ -195,8 +195,9 @@ def _should_retry(status_code: int, headers: httpx.Headers) -> bool:
             return True
         else:
             logger.info(
-                "x-should-retry: false (status %d) — retrying anyway per policy",
+                "x-should-retry: false (status %d) — %s",
                 status_code,
+                "retrying anyway per policy" if is_retryable else "not retrying",
             )
 
     return is_retryable
@@ -507,6 +508,8 @@ class HttpxAnthropicClient:
                     f"Anthropic API error ({response.status_code}): "
                     f"{error_type} - {error_msg}"
                 )
+                # Not retryable, or out of retries: the same request would be refused again.
+                break
 
             except httpx.TimeoutException as e:
                 last_error = RuntimeError(f"API request timed out: {e}")
