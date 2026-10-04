@@ -648,3 +648,91 @@ def test_a_stopped_process_that_ends_before_the_kill_is_skipped(monkeypatch):
         for proc in (running, below):
             proc.kill()
             proc.wait()
+
+
+async def test_a_cancelled_memory_call_that_finishes_its_write_ends_before_the_call_answers(monkeypatch):
+    """Cancelling a memory call is a request: a write under way, such as a
+    commit, can still finish. The call answers only once a memory call it
+    cancelled has ended, so that write cannot land after "timed out"."""
+    landed = []
+
+    async def committing_learn(*args, **kwargs):
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.2)  # the commit under way
+            landed.append(True)
+            raise
+
+    heart = AsyncMock()
+    heart.learn.side_effect = committing_learn
+    monkeypatch.setattr(T, "_TIMEOUT_GRACE", -0.5)  # the call gives up while the write is on the loop
+    monkeypatch.setattr(T, "_KILL_SETTLE_SECONDS", 5.0)  # far more than the write takes
+    result = await _run_python(heart)(code="learn_fact('written while the call gave up')\n")
+
+    assert result["is_error"] is True
+    assert landed == [True], "the call answered before a memory call it had cancelled had ended"
+
+
+def _learn_that_runs_on(tasks: list) -> object:
+    """A memory write whose cleanup, once cancelled, runs on for 3 s through
+    every further cancel (the worker's own, at its deadline, among them)."""
+
+    async def learn(*args, **kwargs):
+        tasks.append(asyncio.current_task())
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            end = time.monotonic() + 3.0
+            while time.monotonic() < end:
+                try:
+                    await asyncio.sleep(end - time.monotonic())
+                except asyncio.CancelledError:
+                    pass
+            raise
+
+    return learn
+
+
+async def test_a_cancelled_memory_call_that_runs_on_is_waited_for_only_so_long(monkeypatch, caplog):
+    """A cancelled memory call that does not end is waited for only up to the
+    bound, and a WARNING says that it may still write."""
+    tasks = []
+    heart = AsyncMock()
+    heart.learn.side_effect = _learn_that_runs_on(tasks)
+    monkeypatch.setattr(T, "_TIMEOUT_GRACE", -0.5)
+    started = time.monotonic()
+    with caplog.at_level(logging.WARNING, logger="nous.api.tools"):
+        result = await _run_python(heart)(code="learn_fact('written while the call gave up')\n")
+    answered = time.monotonic() - started
+    await asyncio.wait(tasks, timeout=5)  # not into the next test
+
+    assert result["is_error"] is True
+    assert answered < 2.0, "the call waited for a cancelled memory call past its bound"
+    assert caplog.text.count("did not stop") == 1
+
+
+async def test_the_waits_for_memory_calls_and_for_the_worker_share_one_bound(tmp_path, monkeypatch):
+    """The call waits for the memory calls it cancelled and for its worker
+    within one bound, not a bound each: together they have to stay inside the
+    room that the dispatcher's own timeout leaves."""
+    tasks = []
+    heart = AsyncMock()
+    heart.learn.side_effect = _learn_that_runs_on(tasks)
+    monkeypatch.setattr(T, "_TIMEOUT_GRACE", -0.5)  # the call gives up while the write is on the loop
+    monkeypatch.setattr(T, "_KILL_SETTLE_SECONDS", 1.5)
+    code = (
+        "import subprocess, time\n"
+        f"subprocess.Popen({_child(tmp_path / 'survived')})\n"  # killed, so the call then waits for its worker
+        "try:\n"
+        "    learn_fact('written while the call gave up')\n"
+        "finally:\n"
+        "    time.sleep(3)\n"  # the worker is not back within the bound
+    )
+    started = time.monotonic()
+    result = await _run_python(heart)(code=code)
+    answered = time.monotonic() - started
+    await asyncio.wait(tasks, timeout=5)  # not into the next test
+
+    assert "; killed 1 process(es) the script had started" in result["content"][0]["text"]
+    assert answered < 2.75, "after the bound had gone on a memory call, the call still waited for its worker"

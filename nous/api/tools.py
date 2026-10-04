@@ -3903,9 +3903,11 @@ _POPEN_INIT_CODE = _POPEN.__init__.__code__
 # Private, so looked up with care: where it is missing, nothing is done there.
 _POPEN_FORKED_CODE = getattr(getattr(_POPEN, "_close_pipe_fds", None), "__code__", None)
 
-# How long a timed-out call waits for its worker after killing what the script
-# had started; a worker that was waiting for one of those processes is back in
-# milliseconds. Stays under the second that
+# How long a timed-out call waits, after killing what the script had started,
+# for its worker and for the memory calls it cancelled, both together; a worker
+# that was waiting for one of those processes is back in milliseconds, and a
+# cancelled memory call that finishes a write first takes as long as that write.
+# Stays under the second that
 # `Settings._validate_programmatic_tools_timeout` leaves between
 # `timeout + grace` and `tool_timeout`, so the dispatcher's own timeout cannot
 # replace this call's result.
@@ -4311,7 +4313,7 @@ def create_programmatic_tools(
             The call's timeout arm runs on this loop too, so the check here and
             the arm cannot interleave: once the call has given up, no memory
             call starts, and one that had started is in `_memory_tasks` for the
-            arm to cancel before it answers.
+            arm to cancel, and wait for, before it answers.
             """
             if _tracer.expired:
                 # The call has returned as timed out: what the script wrote to
@@ -4901,9 +4903,24 @@ def create_programmatic_tools(
             # reach, so the kill is also what brings it, and its run slot,
             # back: the call waits a moment for that.
             _tracer.expired = True  # first: the hook kills whatever starts after this line
-            for task in list(_memory_tasks):
+            cancelled = list(_memory_tasks)
+            for task in cancelled:
                 task.cancel()  # a memory call still running does not land after this answer
             killed = _kill_script_processes([ref() for ref in _tracer.children])
+            # On the loop, not on a thread: the default executor can be busy
+            # for longer than this call has left. One bound for both waits.
+            settled = time.monotonic() + _KILL_SETTLE_SECONDS
+            if cancelled:
+                # A cancel is a request: a write under way, a commit, can still finish.
+                _, pending = await asyncio.wait(cancelled, timeout=_KILL_SETTLE_SECONDS)
+                if pending:
+                    logger.warning(
+                        "run_python: a script timed out after %ss; %d memory call(s) it had started "
+                        "did not stop within %ss of their cancel and may still write",
+                        timeout,
+                        len(pending),
+                        _KILL_SETTLE_SECONDS,
+                    )
             if killed:
                 logger.warning(
                     "run_python: a script timed out after %ss; killed %d process(es) it had started (pids %s)",
@@ -4912,9 +4929,6 @@ def create_programmatic_tools(
                     ", ".join(str(pid) for pid in killed),
                 )
                 text += f"; killed {len(killed)} process(es) the script had started"
-                # On the loop, not on a thread: the default executor can be
-                # busy for longer than this call has left.
-                settled = time.monotonic() + _KILL_SETTLE_SECONDS
                 while not finished.is_set() and time.monotonic() < settled:
                     await asyncio.sleep(0.02)
             if not finished.is_set():
