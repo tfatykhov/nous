@@ -623,3 +623,28 @@ def test_a_process_that_ended_before_its_stop_is_not_killed(monkeypatch):
         for proc in (running, bystander):
             proc.kill()
             proc.wait()
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGSTOP"), reason="needs POSIX signals")
+def test_a_stopped_process_that_ends_before_the_kill_is_skipped(monkeypatch):
+    """Something else can end a process the kill has stopped before the kill
+    reaches it: that process is skipped and not counted, and the rest is killed."""
+    running = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    below = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    real_kill = os.kill
+
+    def kill(pid, sig):
+        if pid == below.pid and sig == signal.SIGKILL:
+            raise ProcessLookupError(pid)  # ended by something else after its stop
+        real_kill(pid, sig)
+
+    monkeypatch.setattr(T, "_descendants", lambda pids: [below.pid])
+    monkeypatch.setattr(T.os, "kill", kill)
+    try:
+        assert T._kill_script_processes([running]) == [running.pid]
+        assert running.wait(timeout=5) == -signal.SIGKILL
+    finally:
+        monkeypatch.undo()
+        for proc in (running, below):
+            proc.kill()
+            proc.wait()
