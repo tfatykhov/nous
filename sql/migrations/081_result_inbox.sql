@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS heart.result_inbox (
     session_id TEXT,
     source_kind VARCHAR(20) NOT NULL,
     source_id UUID NOT NULL,
+    -- A DAG's execution_dags.delivery_generation (0 for subtasks): retry_node
+    -- bumps it, and the retried run's outcome is a new result, not a duplicate.
+    source_generation INTEGER NOT NULL DEFAULT 0,
     msg_type VARCHAR(20) NOT NULL,
     correlation_id TEXT,
     reply_to TEXT,
@@ -25,7 +28,7 @@ CREATE TABLE IF NOT EXISTS heart.result_inbox (
     delivered_at TIMESTAMPTZ,
     delivered_session_id TEXT,
     wake_attempted_at TIMESTAMPTZ,
-    CONSTRAINT uq_result_inbox_source UNIQUE (source_kind, source_id),
+    CONSTRAINT uq_result_inbox_source UNIQUE (source_kind, source_id, source_generation),
     CONSTRAINT chk_result_inbox_source_kind CHECK (source_kind IN ('subtask', 'dag')),
     CONSTRAINT chk_result_inbox_msg_type CHECK (msg_type IN ('INFORM', 'FAILURE', 'BLOCKED'))
 );

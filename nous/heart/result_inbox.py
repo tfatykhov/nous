@@ -6,7 +6,9 @@ result that finished after the rollover was never injected. Results are now
 keyed to the conversation's channel (``telegram:<chat_id>``), which outlives
 any one session, and both subtask and DAG results flow through this one table.
 
-Every writer is idempotent (``UNIQUE(source_kind, source_id)``); the reader
+Every writer is idempotent (``UNIQUE(source_kind, source_id,
+source_generation)`` — the generation is a DAG's ``delivery_generation``, so a
+DAG reactivated by ``retry_node`` reports its new outcome); the reader
 claims rows with ``UPDATE ... WHERE delivered_at IS NULL RETURNING`` so a row
 is injected into exactly one turn even when two turns race on one channel.
 """
@@ -149,6 +151,7 @@ class ResultInboxStore:
         channel: str | None = None,
         session_id: str | None = None,
         correlation_id: str | None = None,
+        source_generation: int = 0,
     ) -> bool:
         """Insert one result; True if a row was written, False if it existed."""
         stmt = (
@@ -159,6 +162,7 @@ class ResultInboxStore:
                 session_id=session_id,
                 source_kind=source_kind,
                 source_id=source_id,
+                source_generation=source_generation,
                 msg_type=msg_type,
                 correlation_id=correlation_id,
                 reply_to=channel,
@@ -166,7 +170,7 @@ class ResultInboxStore:
                 body=body,
                 created_at=datetime.now(UTC),
             )
-            .on_conflict_do_nothing(index_elements=["source_kind", "source_id"])
+            .on_conflict_do_nothing(index_elements=["source_kind", "source_id", "source_generation"])
         )
         async with self._db.session() as session:
             result = await session.execute(stmt)
@@ -323,8 +327,14 @@ async def record_dag_result(
     blocked: bool,
     origin_channel: str | None,
     origin_session_id: str | None,
+    generation: int = 0,
 ) -> bool:
-    """Write a terminal DAG's outcome to the inbox. Idempotent; never raises."""
+    """Write a terminal DAG's outcome to the inbox. Idempotent; never raises.
+
+    ``generation`` is the DAG's ``delivery_generation`` read together with its
+    terminal status: one row per generation, so the outcome of a run that
+    ``retry_node`` reactivated is delivered even after the first was.
+    """
     if not settings.result_inbox_enabled:
         return False
     try:
@@ -339,6 +349,7 @@ async def record_dag_result(
         return await store.insert(
             source_kind=SOURCE_DAG,
             source_id=dag_uuid,
+            source_generation=int(generation or 0),
             msg_type=dag_msg_type(status, blocked),
             title=name or "DAG",
             body=body,
@@ -356,7 +367,7 @@ class ResultInboxDagListener:
 
     The bus drops on QueueFull, so this is not the only writer: the F087
     delivery path inserts the same row directly, and the UNIQUE constraint
-    collapses the two.
+    collapses the two (both key on the payload's ``delivery_generation``).
     """
 
     def __init__(self, store: ResultInboxStore, settings: Settings) -> None:
@@ -381,6 +392,7 @@ class ResultInboxDagListener:
             blocked=bool(data.get("blocked")),
             origin_channel=data.get("origin_channel"),
             origin_session_id=data.get("origin_session_id"),
+            generation=data.get("delivery_generation") or 0,
         )
 
 

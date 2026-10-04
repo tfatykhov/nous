@@ -458,3 +458,60 @@ async def test_dag_origin_and_delivery_backstop(db):
     rows = await inbox.claim(channel=CHAN, session_id=None, max_age_hours=72)
     assert len(rows) == 1
     assert rows[0].source_kind == "dag" and "nightly-report" in rows[0].body
+
+
+async def test_retried_dag_delivers_its_new_outcome_once(db):
+    """Codex P1: retry_node bumps delivery_generation, so the retried run's
+    outcome is a NEW inbox row — not swallowed by the first one's conflict."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from nous.dag.delivery import DAGResultDelivery
+    from nous.dag.orchestrator import DAGOrchestrator
+    from nous.dag.schemas import DAGCreateRequest, DAGNodeSpec, DAGNodeType
+    from nous.dag.store import DAGStore
+
+    agent = _agent()
+    s = _settings(agent_id=agent, dag_delivery_telegram_enabled=False)
+    dags = DAGStore(db, agent, s)
+    dag = await dags.create(DAGCreateRequest(
+        name="flaky-report",
+        nodes=[DAGNodeSpec(name="work", type=DAGNodeType.subtask, instructions="x", timeout_seconds=120)],
+        origin_channel=CHAN, origin_session_id="S1",
+    ))
+    inbox = ResultInboxStore(db, agent)
+    emitted: list = []
+
+    class _CapturingBus:
+        async def emit(self, event):
+            emitted.append(event)
+
+    delivery = DAGResultDelivery(s, agent_id=agent, bus=_CapturingBus(), inbox=inbox)
+    listener = ResultInboxDagListener(inbox, s)
+
+    # Run 1 fails and is delivered.
+    await dags.update_dag_status(dag.id, "running")
+    await dags.update_node(dag.nodes[0].id, status="failed", error="boom")
+    await dags.update_dag_status(dag.id, "failed", result_summary="run 1 failed")
+    await delivery.deliver(await dags.get_dag(dag.id))
+    await listener.handle(emitted[-1])
+    first = await inbox.claim(channel=CHAN, session_id=None, max_age_hours=72)
+    assert [r.msg_type for r in first] == ["FAILURE"]
+
+    # retry_node reactivates it; run 2 completes.
+    loader = AsyncMock()
+    loader._registry = MagicMock()
+    orch = DAGOrchestrator(store=dags, subtask_mgr=AsyncMock(), dynamic_loader=loader, settings=s)
+    orch.clock_wired = True
+    await orch.retry_node(dag.id, "work")
+    await dags.update_node(dag.nodes[0].id, status="completed", result="ok")
+    await dags.update_dag_status(dag.id, "completed", result_summary="run 2 succeeded")
+    retried = await dags.get_dag(dag.id)
+    assert retried.delivery_generation == dag.delivery_generation + 1
+    await delivery.deliver(retried)
+    await listener.handle(emitted[-1])  # bus copy of the same outcome: no-op
+
+    second = await inbox.claim(channel=CHAN, session_id=None, max_age_hours=72)
+    assert len(second) == 1
+    assert second[0].msg_type == "INFORM" and "run 2 succeeded" in second[0].body
+    assert second[0].source_generation == retried.delivery_generation
+    assert await inbox.claim(channel=CHAN, session_id=None, max_age_hours=72) == []

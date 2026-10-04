@@ -114,7 +114,7 @@ class DAGResultDelivery:
         self._http = http
         # F098: the result inbox. Written here directly as well as by the
         # dag.completed/dag.failed listener, because the bus drops on
-        # QueueFull; the inbox's UNIQUE(source) collapses the two.
+        # QueueFull; the inbox's UNIQUE(source, generation) collapses the two.
         self._inbox = inbox
 
     # ------------------------------------------------------------------
@@ -160,6 +160,7 @@ class DAGResultDelivery:
                 blocked=self._is_blocked(dag),
                 origin_channel=getattr(dag, "origin_channel", None),
                 origin_session_id=getattr(dag, "origin_session_id", None),
+                generation=dag.delivery_generation,
             )
 
         if self._settings.dag_delivery_bus_enabled:
@@ -274,6 +275,7 @@ class DAGResultDelivery:
                         "origin_channel": getattr(dag, "origin_channel", None),
                         "origin_session_id": getattr(dag, "origin_session_id", None),
                         "blocked": self._is_blocked(dag),
+                        "delivery_generation": dag.delivery_generation,
                         "tokens_consumed": dag.tokens_consumed,
                         "token_budget": dag.token_budget,
                         "nodes": [

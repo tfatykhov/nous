@@ -907,14 +907,15 @@ class ResultInbox(Base):
     """F098: one finished background result waiting for the conversation.
 
     Routed by ``channel`` (preferred) or ``session_id``; claimed exactly once
-    by setting ``delivered_at``. ``UNIQUE(source_kind, source_id)`` makes
-    every writer idempotent, so the DAG bus listener and the F087 delivery
-    backstop can both insert.
+    by setting ``delivered_at``. ``UNIQUE(source_kind, source_id,
+    source_generation)`` makes every writer idempotent, so the DAG bus
+    listener and the F087 delivery backstop can both insert; a retried DAG
+    (new ``delivery_generation``) gets a row of its own.
     """
 
     __tablename__ = "result_inbox"
     __table_args__ = (
-        UniqueConstraint("source_kind", "source_id", name="uq_result_inbox_source"),
+        UniqueConstraint("source_kind", "source_id", "source_generation", name="uq_result_inbox_source"),
         CheckConstraint("source_kind IN ('subtask', 'dag')", name="chk_result_inbox_source_kind"),
         CheckConstraint("msg_type IN ('INFORM', 'FAILURE', 'BLOCKED')", name="chk_result_inbox_msg_type"),
         {"schema": "heart"},
@@ -928,6 +929,7 @@ class ResultInbox(Base):
     session_id: Mapped[str | None] = mapped_column(Text)
     source_kind: Mapped[str] = mapped_column(String(20), nullable=False)
     source_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    source_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     msg_type: Mapped[str] = mapped_column(String(20), nullable=False)
     correlation_id: Mapped[str | None] = mapped_column(Text)
     reply_to: Mapped[str | None] = mapped_column(Text)
