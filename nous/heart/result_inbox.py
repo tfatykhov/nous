@@ -152,8 +152,13 @@ class ResultInboxStore:
         session_id: str | None = None,
         correlation_id: str | None = None,
         source_generation: int = 0,
+        created_at: datetime | None = None,
     ) -> bool:
-        """Insert one result; True if a row was written, False if it existed."""
+        """Insert one result; True if a row was written, False if it existed.
+
+        ``created_at`` defaults to now; the reconciler passes the subtask's
+        ``completed_at`` so a repaired row keeps its real age.
+        """
         stmt = (
             pg_insert(ResultInbox)
             .values(
@@ -168,7 +173,7 @@ class ResultInboxStore:
                 reply_to=channel,
                 title=title[:_TITLE_MAX],
                 body=body,
-                created_at=datetime.now(UTC),
+                created_at=created_at or datetime.now(UTC),
             )
             .on_conflict_do_nothing(index_elements=["source_kind", "source_id", "source_generation"])
         )
