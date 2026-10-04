@@ -195,8 +195,9 @@ def _should_retry(status_code: int, headers: httpx.Headers) -> bool:
             return True
         else:
             logger.info(
-                "x-should-retry: false (status %d) — retrying anyway per policy",
+                "x-should-retry: false (status %d) — %s",
                 status_code,
+                "retrying anyway per policy" if is_retryable else "not retrying",
             )
 
     return is_retryable

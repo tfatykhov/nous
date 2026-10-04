@@ -8,6 +8,7 @@ Every request goes to a stubbed transport: nothing reaches the network.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import httpx
@@ -26,7 +27,7 @@ _OK = {"id": "m", "type": "message", "role": "assistant", "model": "m", "content
 _OK |= {"stop_reason": "end_turn", "stop_sequence": None, "usage": {"input_tokens": 1, "output_tokens": 1}}
 
 
-async def _call(monkeypatch, statuses: list[int]) -> tuple[Any, int]:
+async def _call(monkeypatch, statuses: list[int], headers: dict[str, str] | None = None) -> tuple[Any, int]:
     sent: list[int] = []
 
     def answer(request: httpx.Request) -> httpx.Response:
@@ -34,7 +35,8 @@ async def _call(monkeypatch, statuses: list[int]) -> tuple[Any, int]:
         sent.append(status)
         if status == 200:
             return httpx.Response(200, json=_OK)
-        return httpx.Response(status, json={"type": "error", "error": {"type": "some_error", "message": "refused"}})
+        error = {"type": "error", "error": {"type": "some_error", "message": "refused"}}
+        return httpx.Response(status, json=error, headers=headers or {})
 
     async def no_wait(_delay: float) -> None:
         return None
@@ -70,3 +72,17 @@ async def test_a_retryable_status_is_still_retried(status, monkeypatch):
 
     assert response.content == [{"type": "text", "text": "ok"}]
     assert sent == 2
+
+
+@pytest.mark.parametrize(
+    ("status", "sent_requests", "decision"),
+    [(400, 1, "not retrying"), (429, 2, "retrying anyway per policy")],
+)
+async def test_the_x_should_retry_log_line_says_what_happens(status, sent_requests, decision, monkeypatch, caplog):
+    """The API's x-should-retry: false header is logged with what the client then does."""
+    with caplog.at_level(logging.INFO, logger="nous.api.anthropic_client"):
+        _, sent = await _call(monkeypatch, [status, 200], headers={"x-should-retry": "false"})
+
+    assert sent == sent_requests
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("x-should-retry")]
+    assert lines == [f"x-should-retry: false (status {status}) — {decision}"]
