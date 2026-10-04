@@ -4120,6 +4120,9 @@ def _kill_script_processes(procs: list[Any]) -> list[int]:
                 proc.send_signal(signal.SIGSTOP)
             except OSError:
                 continue  # not ours to signal
+        # One that ended before its stop was collected by it, so its pid may
+        # be another process's by now: nothing under it is looked for or killed.
+        running = [proc for proc in running if proc.returncode is None]
     below: list[int] = []  # what the looks found and stopped: only these are killed
     seen: list[int] = []
     for _ in range(8):

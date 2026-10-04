@@ -736,3 +736,32 @@ async def test_the_waits_for_memory_calls_and_for_the_worker_share_one_bound(tmp
 
     assert "; killed 1 process(es) the script had started" in result["content"][0]["text"]
     assert answered < 2.75, "after the bound had gone on a memory call, the call still waited for its worker"
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGSTOP"), reason="needs POSIX signals")
+def test_a_process_of_the_script_that_ended_before_its_stop_is_not_looked_under(monkeypatch):
+    """A process of the script that ends just before its stop is collected by
+    that stop, and from then on its pid can be another process's: nothing is
+    looked for under it, and nothing is killed. Here what that pid would lead
+    to is `bystander`, which the script never started."""
+    root = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    real_kill = os.kill
+
+    def send_signal(sig):
+        # It ends just before the stop, which collects it: `Popen.send_signal`
+        # looks first, and signals nothing that has ended.
+        if root.returncode is None:
+            real_kill(root.pid, signal.SIGKILL)
+            root.wait()
+
+    monkeypatch.setattr(root, "send_signal", send_signal)
+    monkeypatch.setattr(T, "_descendants", lambda pids: [bystander.pid] if root.pid in pids else [])
+    try:
+        assert T._kill_script_processes([root]) == []
+        with pytest.raises(subprocess.TimeoutExpired):
+            bystander.wait(timeout=0.5)  # a bystander that was killed ends at once
+    finally:
+        for proc in (root, bystander):
+            proc.kill()
+            proc.wait()
