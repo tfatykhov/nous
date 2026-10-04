@@ -422,10 +422,9 @@ def format_inbox_messages(rows: list[ResultInbox], max_items: int) -> str:
     older = ordered[: len(ordered) - len(shown)]
     parts = [_HEADER]
     if older:
-        ids = ", ".join(f"{r.source_kind}-{r.source_id.hex[:8]}" for r in older)
-        parts.append(
-            f"({len(older)} older results not shown: {ids} — use list_tasks / dag_manage to read them.)"
-        )
+        # The count only: listing every hidden id would let a backlog grow
+        # the prompt past what max_items is meant to bound.
+        parts.append(f"({len(older)} older results not shown — use list_tasks / dag_manage to read them.)")
     for r in shown:
         ts = _aware(r.created_at).strftime("%Y-%m-%d %H:%M UTC")
         parts.append(
