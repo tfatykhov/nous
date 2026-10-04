@@ -95,6 +95,9 @@ async def test_all_tables_exist(db):
         ("heart", "rubric_versions"),
         ("heart", "outcome_signals"),
         ("heart", "procedure_task_affinity"),
+        # F098: result inbox + channel identity (migration 081)
+        ("heart", "result_inbox"),
+        ("heart", "channel_sessions"),
     }
     async with db.engine.connect() as conn:
         result = await conn.execute(
