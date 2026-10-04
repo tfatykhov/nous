@@ -723,7 +723,7 @@ async def test_the_waits_for_memory_calls_and_for_the_worker_share_one_bound(tmp
     monkeypatch.setattr(T, "_KILL_SETTLE_SECONDS", 1.5)
     code = (
         "import subprocess, time\n"
-        f"subprocess.Popen({_child(tmp_path / 'survived')})\n"  # killed, so the call then waits for its worker
+        f"child = subprocess.Popen({_child(tmp_path / 'survived')})\n"  # killed, so the call then waits for its worker
         "try:\n"
         "    learn_fact('written while the call gave up')\n"
         "finally:\n"
