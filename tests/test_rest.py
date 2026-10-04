@@ -191,6 +191,20 @@ async def test_chat_with_session(client, mock_runner):
     assert ctx.kind == "interactive" and ctx.session_id == session_id
 
 
+async def test_chat_telegram_channel(client, mock_runner):
+    """F098: a Telegram request's chat_id becomes the turn's channel."""
+    resp = await client.post("/chat", json={"message": "Hi", "platform": "telegram", "chat_id": 55})
+    assert resp.status_code == 200
+    assert mock_runner.run_turn_contexts[0].channel == "telegram:55"
+
+
+async def test_chat_without_channel(client, mock_runner):
+    """F098: a plain API request has no channel (session-only routing)."""
+    resp = await client.post("/chat", json={"message": "Hi"})
+    assert resp.status_code == 200
+    assert mock_runner.run_turn_contexts[0].channel is None
+
+
 async def test_end_chat(client, mock_runner):
     """DELETE /chat/{session_id} -> 200."""
     session_id = f"test-session-{uuid.uuid4().hex[:8]}"

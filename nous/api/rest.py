@@ -61,6 +61,7 @@ from nous.cognitive.context import PROFILE_CORE_TAG, TIER1_FACT_CATEGORIES
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart import Heart
+from nous.heart.result_inbox import derive_channel
 from nous.observability.retrieval_logger import RETRIEVAL_PATHS as _RETRIEVAL_PATHS
 from nous.observability.snapshots import (
     SNAPSHOT_METRICS_VERSION,
@@ -143,11 +144,14 @@ def create_app(
             # 007.4: Extract optional user identity
             user_id = body.get("user_id")
             user_display_name = body.get("user_display_name")
+            # F098: the channel outlives the session (Telegram rolls sessions
+            # after 30 min idle); background results are routed by it.
+            channel = derive_channel(body, settings.telegram_chat_id)
             response_text, turn_context, usage = await runner.run_turn(
                 session_id, message, platform=platform,
                 user_id=user_id, user_display_name=user_display_name,
                 attachments=attachments or None,
-                context=ExecutionContext(kind="interactive", session_id=session_id),
+                context=ExecutionContext(kind="interactive", session_id=session_id, channel=channel),
             )
             result: dict[str, Any] = {
                 "response": response_text,
@@ -200,11 +204,14 @@ def create_app(
         user_id = body.get("user_id")
         user_display_name = body.get("user_display_name")
 
+        channel = derive_channel(body, settings.telegram_chat_id)  # F098
+
         async def event_generator():
             stream = runner.stream_chat(
                 session_id, message, platform=platform,
                 user_id=user_id, user_display_name=user_display_name,
                 attachments=attachments or None,
+                **({"channel": channel} if channel else {}),
             )
             aiter = stream.__aiter__()
             ping_interval = settings.sse_ping_interval
@@ -2204,6 +2211,15 @@ def create_app(
                 data = await get_subtask_dashboard_data(
                     session, settings.agent_id, hours=hours,
                 )
+            if settings.result_inbox_enabled:
+                # F098 §3.6: delivery rate + latency of the result inbox.
+                try:
+                    data["result_inbox"] = {
+                        "7d": await heart.result_inbox.metrics(7),
+                        "30d": await heart.result_inbox.metrics(30),
+                    }
+                except Exception:
+                    logger.warning("F098: result inbox metrics failed", exc_info=True)
             return JSONResponse(data)
         except Exception as e:
             logger.exception("Dashboard subtasks error")

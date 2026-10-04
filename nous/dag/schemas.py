@@ -312,6 +312,11 @@ class DAGCreateRequest(BaseModel):
         ),
     )
 
+    # F098: where dag_create was called from; routes the outcome to the
+    # conversation's result inbox. None for scheduler/heartbeat DAGs.
+    origin_channel: str | None = None
+    origin_session_id: str | None = None
+
     @model_validator(mode="after")
     def validate_dag(self) -> DAGCreateRequest:
         """Validate DAG structure: unique names, valid edges, no cycles, wave/parallel limits.

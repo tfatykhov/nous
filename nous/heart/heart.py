@@ -32,6 +32,7 @@ from nous.heart.episodes import EpisodeManager
 from nous.heart.facts import FactManager
 from nous.heart.procedures import ProcedureManager
 from nous.heart.reranker import CROSS_ENCODER_AVAILABLE, cross_encoder_rerank
+from nous.heart.result_inbox import ResultInboxStore
 from nous.heart.schedules import ScheduleManager
 from nous.heart.schemas import (
     CensorDetail,
@@ -125,6 +126,7 @@ class Heart:
         self.censors = CensorManager(database, embedding_provider, settings.agent_id)
         self.working_memory = WorkingMemoryManager(database, settings.agent_id)
         self.subtasks = SubtaskManager(database, settings.agent_id)
+        self.result_inbox = ResultInboxStore(database, settings.agent_id)  # F098
         self.schedules = ScheduleManager(database, settings.agent_id)
 
         # F022 Phase 2: Optional EventBus for fact_learned emission.

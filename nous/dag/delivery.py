@@ -33,6 +33,7 @@ from nous.api.idempotency import SUMMARY_SESSION_PREFIX
 from nous.config import Settings
 from nous.dag.approval import approval_line, is_answered_approval, stopped_at_approval
 from nous.events import Event
+from nous.heart.result_inbox import ResultInboxStore, record_dag_result
 from nous.storage.models import ExecutionDAG
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -104,12 +105,17 @@ class DAGResultDelivery:
         bus: EventBus | None = None,
         runner: Any | None = None,
         http: httpx.AsyncClient | None = None,
+        inbox: ResultInboxStore | None = None,
     ) -> None:
         self._settings = settings
         self._agent_id = agent_id
         self._bus = bus
         self._runner = runner
         self._http = http
+        # F098: the result inbox. Written here directly as well as by the
+        # dag.completed/dag.failed listener, because the bus drops on
+        # QueueFull; the inbox's UNIQUE(source) collapses the two.
+        self._inbox = inbox
 
     # ------------------------------------------------------------------
     # Public API
@@ -142,6 +148,19 @@ class DAGResultDelivery:
             if authored:
                 summary = authored
                 summary_authored = True
+
+        if self._inbox is not None:
+            await record_dag_result(
+                self._inbox,
+                self._settings,
+                dag_id=dag.id,
+                name=dag.name,
+                status=dag.status,
+                summary=summary,
+                blocked=self._is_blocked(dag),
+                origin_channel=getattr(dag, "origin_channel", None),
+                origin_session_id=getattr(dag, "origin_session_id", None),
+            )
 
         if self._settings.dag_delivery_bus_enabled:
             legs.append(await self._leg_bus(dag, summary))
@@ -251,6 +270,10 @@ class DAGResultDelivery:
                         "source": dag.source,
                         "result_summary": dag.result_summary,
                         "summary": summary,
+                        # F098: routing for the result-inbox listener.
+                        "origin_channel": getattr(dag, "origin_channel", None),
+                        "origin_session_id": getattr(dag, "origin_session_id", None),
+                        "blocked": self._is_blocked(dag),
                         "tokens_consumed": dag.tokens_consumed,
                         "token_budget": dag.token_budget,
                         "nodes": [
@@ -406,6 +429,11 @@ class DAGResultDelivery:
             for name, result in results:
                 parts.append(f"[{name}]: {result[:_SUMMARY_RESULT_CHARS]}")
         return "\n".join(parts)
+
+    @staticmethod
+    def _is_blocked(dag: ExecutionDAG) -> bool:
+        """A failed DAG that stopped at an approval (Harness Phase 3)."""
+        return dag.status == "failed" and stopped_at_approval(list(dag.nodes or []))
 
     @staticmethod
     def _extract_text(result: Any) -> str:

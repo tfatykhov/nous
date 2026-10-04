@@ -861,6 +861,9 @@ class Subtask(Base):
     )
     agent_id: Mapped[str] = mapped_column(String(100), nullable=False)
     parent_session_id: Mapped[str | None] = mapped_column(String(200))
+    # F098: the channel (e.g. 'telegram:<chat_id>') the spawning turn ran on.
+    # Unlike parent_session_id it outlives a session rollover.
+    parent_channel: Mapped[str | None] = mapped_column(Text, nullable=True)
     task: Mapped[str] = mapped_column(Text, nullable=False)
     priority: Mapped[int] = mapped_column(Integer, nullable=False, server_default="100")
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="pending")
@@ -898,6 +901,54 @@ class Subtask(Base):
     # F062: typed spawn_sync — caller-supplied schema + tri-state validation flag.
     payload_schema: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     payload_schema_valid: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+
+class ResultInbox(Base):
+    """F098: one finished background result waiting for the conversation.
+
+    Routed by ``channel`` (preferred) or ``session_id``; claimed exactly once
+    by setting ``delivered_at``. ``UNIQUE(source_kind, source_id)`` makes
+    every writer idempotent, so the DAG bus listener and the F087 delivery
+    backstop can both insert.
+    """
+
+    __tablename__ = "result_inbox"
+    __table_args__ = (
+        UniqueConstraint("source_kind", "source_id", name="uq_result_inbox_source"),
+        CheckConstraint("source_kind IN ('subtask', 'dag')", name="chk_result_inbox_source_kind"),
+        CheckConstraint("msg_type IN ('INFORM', 'FAILURE', 'BLOCKED')", name="chk_result_inbox_msg_type"),
+        {"schema": "heart"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, server_default=func.gen_random_uuid()
+    )
+    agent_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    channel: Mapped[str | None] = mapped_column(Text)
+    session_id: Mapped[str | None] = mapped_column(Text)
+    source_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    source_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    msg_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    correlation_id: Mapped[str | None] = mapped_column(Text)
+    reply_to: Mapped[str | None] = mapped_column(Text)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivered_session_id: Mapped[str | None] = mapped_column(Text)
+    wake_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ChannelSession(Base):
+    """F098: the latest session on a channel, persisted across restarts."""
+
+    __tablename__ = "channel_sessions"
+    __table_args__ = ({"schema": "heart"},)
+
+    agent_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    channel: Mapped[str] = mapped_column(Text, primary_key=True)
+    session_id: Mapped[str] = mapped_column(Text, nullable=False)
+    last_active: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
 class Schedule(Base):
@@ -1080,6 +1131,10 @@ class ExecutionDAG(Base):
     delivery_generation: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
+    # F098: where dag_create was called from. NULL for scheduler/heartbeat
+    # DAGs. The result inbox routes the DAG's outcome to origin_channel.
+    origin_channel: Mapped[str | None] = mapped_column(Text, nullable=True)
+    origin_session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     nodes: Mapped[list["DAGNode"]] = relationship(
         "DAGNode",

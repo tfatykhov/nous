@@ -1239,7 +1239,15 @@ async def create_components(settings: Settings) -> dict:
                 agent_id=settings.agent_id,
                 bus=bus,
                 runner=runner,
+                # F098: durability backstop for the inbox listener below.
+                inbox=heart.result_inbox if settings.result_inbox_enabled else None,
             )
+            if bus is not None and settings.result_inbox_enabled:
+                from nous.heart.result_inbox import ResultInboxDagListener
+
+                # F098: the first consumer of dag.completed / dag.failed.
+                ResultInboxDagListener(heart.result_inbox, settings).register(bus)
+                logger.info("F098: result inbox listening for DAG terminal events")
             dag_orchestrator = DAGOrchestrator(
                 store=dag_store,
                 subtask_mgr=heart.subtasks,

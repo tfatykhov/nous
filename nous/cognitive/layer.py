@@ -33,6 +33,7 @@ from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart.censor_actions import CensorActionExecutor
 from nous.heart.heart import Heart
+from nous.heart.result_inbox import format_inbox_messages
 from nous.heart.schemas import EpisodeInput, FactInput, OpenThread, WorkingMemoryItem
 from nous.storage.models import Agent
 
@@ -413,6 +414,56 @@ class CognitiveLayer:
             logger.debug("warm_active_episode failed (suppressed)", exc_info=True)
         return None
 
+    async def _inject_result_inbox(
+        self,
+        session_id: str,
+        channel: str | None,
+        system_prompt: str,
+        sections_by_tier: dict | None,
+    ) -> str:
+        """F098: claim this channel's/session's inbox rows and inject them.
+
+        Claiming is one ``UPDATE ... WHERE delivered_at IS NULL RETURNING``,
+        so two turns racing on one channel never inject the same row. Like
+        the legacy path, rows are marked delivered when injected, not when
+        the turn succeeds. Never raises.
+        """
+        inbox = self._heart.result_inbox
+        if channel:
+            try:
+                await inbox.touch_channel(channel, session_id)
+            except Exception:
+                logger.warning("F098: channel_sessions upsert failed for %s", channel, exc_info=True)
+        try:
+            rows = await inbox.claim(
+                channel=channel,
+                session_id=session_id,
+                max_age_hours=self._settings.result_inbox_max_age_hours,
+                delivered_session_id=session_id,
+            )
+        except Exception:
+            logger.warning("F098: result inbox claim failed for session %s", session_id, exc_info=True)
+            return system_prompt
+        if not rows:
+            return system_prompt
+        subtask_ids = [r.source_id for r in rows if r.source_kind == "subtask"]
+        if subtask_ids:
+            # Keep heart.subtasks.delivered coherent for legacy metrics.
+            try:
+                await self._heart.subtasks.mark_delivered(subtask_ids)
+            except Exception:
+                logger.warning("F098: mark_delivered failed for %d subtasks", len(subtask_ids), exc_info=True)
+        text = format_inbox_messages(rows, self._settings.result_inbox_max_items)
+        # Audit CL-1: the F036 cache-split path reads only the tiers, so the
+        # results must land in the dynamic tier too or they are lost.
+        if sections_by_tier:
+            existing = sections_by_tier.get("dynamic", "")
+            sections_by_tier["dynamic"] = existing + "\n\n" + text if existing else text
+        logger.info(
+            "F098: injected %d inbox results (channel=%s, session=%s)", len(rows), channel, session_id,
+        )
+        return system_prompt + "\n\n" + text
+
     async def pre_turn(
         self,
         agent_id: str,
@@ -433,6 +484,9 @@ class CognitiveLayer:
         # retrieval "1" while context_log called it 7, breaking the documented
         # (agent_id, session_id, turn_number) join precisely on restart.
         turn_number: int | None = None,
+        # F098: where the conversation lives ('telegram:<chat_id>'). Routes
+        # background results across session rollover. None = session only.
+        channel: str | None = None,
     ) -> TurnContext:
         """SENSE -> FRAME -> RECALL -> DELIBERATE — prepare for LLM turn.
 
@@ -765,54 +819,63 @@ class CognitiveLayer:
             build_result = None
 
         # 3b. SUBTASK RESULTS — inject undelivered results into context
-        try:
-            undelivered = await self._heart.subtasks.get_undelivered(session_id)
-            if undelivered:
-                subtask_context = _format_subtask_results(undelivered)
-                # F061: mark ALL undelivered as delivered, even when the
-                # formatted context is empty. Otherwise legacy empty-result
-                # rows would reload on every parent turn forever
-                # (architecture review P1-2 finding from spec stage).
-                # Nested try so a mark_delivered failure (DB unavailable, FK
-                # violation) doesn't masquerade as a format failure in logs.
-                delivered_ids = [s.id for s in undelivered]
-                try:
-                    await self._heart.subtasks.mark_delivered(delivered_ids)
-                except Exception:
-                    logger.warning(
-                        "mark_delivered failed for %d subtask rows in session %s "
-                        "— they will reload next turn",
-                        len(delivered_ids), session_id, exc_info=True,
-                    )
-                if subtask_context:
-                    system_prompt = system_prompt + "\n\n" + subtask_context
-                    # Audit CL-1 (2026-06-09): also route into the dynamic tier.
-                    # The F036 cache-split path (default-on) ignores the flat
-                    # system_prompt, so without this the parent agent never saw
-                    # any subtask result even though the rows were marked
-                    # delivered above — permanent silent loss. Mirrors the F078
-                    # censor fix; same guard (only when build populated tiers).
-                    if sections_by_tier:
-                        _existing_dyn = sections_by_tier.get("dynamic", "")
-                        sections_by_tier["dynamic"] = (
-                            _existing_dyn + "\n\n" + subtask_context
-                            if _existing_dyn
-                            else subtask_context
-                        )
-                    logger.info(
-                        "Injected %d subtask results into session %s",
-                        len(undelivered), session_id,
-                    )
-                else:
-                    logger.debug(
-                        "Skipped %d empty subtask rows (still marked delivered)",
-                        len(undelivered),
-                    )
-        except Exception:
-            logger.warning(
-                "Failed to inject subtask results for session %s",
-                session_id, exc_info=True,
+        # F098: with the result inbox on, subtask AND DAG results arrive
+        # through one channel-keyed inbox instead of the session-keyed
+        # get_undelivered (which lost every result finishing after a
+        # Telegram session rolled over). Off: the legacy path, unchanged.
+        if getattr(self._settings, "result_inbox_enabled", False) is True:
+            system_prompt = await self._inject_result_inbox(
+                session_id, channel, system_prompt, sections_by_tier,
             )
+        else:
+            try:
+                undelivered = await self._heart.subtasks.get_undelivered(session_id)
+                if undelivered:
+                    subtask_context = _format_subtask_results(undelivered)
+                    # F061: mark ALL undelivered as delivered, even when the
+                    # formatted context is empty. Otherwise legacy empty-result
+                    # rows would reload on every parent turn forever
+                    # (architecture review P1-2 finding from spec stage).
+                    # Nested try so a mark_delivered failure (DB unavailable, FK
+                    # violation) doesn't masquerade as a format failure in logs.
+                    delivered_ids = [s.id for s in undelivered]
+                    try:
+                        await self._heart.subtasks.mark_delivered(delivered_ids)
+                    except Exception:
+                        logger.warning(
+                            "mark_delivered failed for %d subtask rows in session %s "
+                            "— they will reload next turn",
+                            len(delivered_ids), session_id, exc_info=True,
+                        )
+                    if subtask_context:
+                        system_prompt = system_prompt + "\n\n" + subtask_context
+                        # Audit CL-1 (2026-06-09): also route into the dynamic tier.
+                        # The F036 cache-split path (default-on) ignores the flat
+                        # system_prompt, so without this the parent agent never saw
+                        # any subtask result even though the rows were marked
+                        # delivered above — permanent silent loss. Mirrors the F078
+                        # censor fix; same guard (only when build populated tiers).
+                        if sections_by_tier:
+                            _existing_dyn = sections_by_tier.get("dynamic", "")
+                            sections_by_tier["dynamic"] = (
+                                _existing_dyn + "\n\n" + subtask_context
+                                if _existing_dyn
+                                else subtask_context
+                            )
+                        logger.info(
+                            "Injected %d subtask results into session %s",
+                            len(undelivered), session_id,
+                        )
+                    else:
+                        logger.debug(
+                            "Skipped %d empty subtask rows (still marked delivered)",
+                            len(undelivered),
+                        )
+            except Exception:
+                logger.warning(
+                    "Failed to inject subtask results for session %s",
+                    session_id, exc_info=True,
+                )
 
         # 4. DELIBERATE — start if frame warrants it
         decision_id: str | None = None

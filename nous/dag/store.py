@@ -211,6 +211,8 @@ class DAGStore:
                 # F064.2: per-DAG per-frame-type concurrency caps. NULL when
                 # the request omits the field — fully backward compatible.
                 max_concurrent_by_frame_type=request.max_concurrent_by_frame_type,
+                origin_channel=request.origin_channel,
+                origin_session_id=request.origin_session_id,
             )
             session.add(dag)
             await session.flush()  # Get dag.id
