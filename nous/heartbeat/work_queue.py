@@ -27,6 +27,7 @@ from nous.heartbeat.schemas import CheckResult, Finding
 if TYPE_CHECKING:
     from nous.config import Settings
     from nous.dag.orchestrator import DAGOrchestrator
+    from nous.dag.schemas import DAGCreateRequest
     from nous.dag.store import DAGStore
     from nous.heart.work_queue import WorkQueueItemManager
 
@@ -358,14 +359,15 @@ class WorkQueueCheck(BaseCheck):
         return True
 
     @staticmethod
-    def _with_reason(request, item: WorkItem):
+    def _with_reason(request: DAGCreateRequest, item: WorkItem) -> DAGCreateRequest:
         """F099 Phase 0a: the DAG records the item it was dispatched for.
 
         A request factory that set its own original_request keeps it.
         """
-        if request.original_request or not item.title:
+        title = item.title.strip()
+        if request.original_request or not title:
             return request
-        return request.model_copy(update={"original_request": item.title})
+        return request.model_copy(update={"original_request": title})
 
     def _dispatch_finding(self, item: WorkItem, dag_id, started: bool) -> Finding:
         if started:

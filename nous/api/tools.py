@@ -5341,6 +5341,7 @@ def register_dag_tools(
                     )
                 )
 
+            description = kwargs.get("description")
             request = DAGCreateRequest(
                 name=kwargs["name"],
                 description=kwargs.get("description", ""),
@@ -5353,7 +5354,7 @@ def register_dag_tools(
                 origin_session_id=kwargs.get("_session_id"),
                 # F099 Phase 0a: why the DAG exists. Before Phase 1 the only
                 # reason text a dag_create call carries is its description.
-                original_request=(kwargs.get("description") or "").strip() or None,
+                original_request=(description.strip() or None) if isinstance(description, str) else None,
             )
 
             dag = await store.create(request)

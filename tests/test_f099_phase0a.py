@@ -331,3 +331,13 @@ async def test_an_orphan_redispatch_records_the_item_title(tmp_path, db):
     )
     assert await check._reconcile_orphan(row.id, item, []) is True
     assert (await _dag_of(db, agent)).original_request == "Renew the TLS cert"
+
+
+@pytest.mark.parametrize("title", ["", "   "])
+async def test_a_blank_item_title_leaves_original_request_null(tmp_path, db, title):
+    path = tmp_path / "queue.jsonl"
+    path.write_text(json.dumps({"external_id": "b1", "title": title, "body": "do it"}))
+    agent = f"f099-0a-{uuid.uuid4().hex[:8]}"
+    check, _ = _wq(db, agent, path)
+    await check.run()
+    assert (await _dag_of(db, agent)).original_request is None

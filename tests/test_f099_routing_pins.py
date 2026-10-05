@@ -42,9 +42,8 @@ def _settings(agent: str, **over) -> Settings:
         _env_file=None,
         agent_id=agent,
         result_inbox_enabled=True,
-        # Phase C's classifier reads this (tier 2). Ignored by Settings until
-        # #696 merges. result_memory_enabled stays off: the pins call the
-        # pure classifier, and the background memory writes must not race teardown.
+        # Phase C's classifier reads this (tier 2). result_memory_enabled stays
+        # off: the pins call the pure classifier, and the background memory writes must not race teardown.
         result_memory_scheduled=True,
         subtask_payload_schema_enabled=True,
         subtask_hardening_enabled=False,
@@ -227,10 +226,11 @@ async def test_phase_a_routing_of_each_spawned_row(make_env, path, routing, inbo
     ],
 )
 async def test_phase_c_classification_of_each_spawned_row(make_env, path, expected):
-    memory = pytest.importorskip("nous.heart.result_memory")  # F098 Phase C (#696)
+    from nous.heart.result_memory import classify_for_memory
+
     env = await make_env(**PATH_SETTINGS.get(path, {}))
     row = await BUILD[path](env)
-    decision = memory.classify_for_memory(row, env.settings)
+    decision = classify_for_memory(row, env.settings)
     assert (decision.decision, decision.reason) == expected
 
 
