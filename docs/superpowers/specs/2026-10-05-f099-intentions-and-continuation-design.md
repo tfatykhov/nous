@@ -233,13 +233,16 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
    - have their pending proposals expired (a later tap is refused);
    - are closed with `close_reason = 'legacy'`.
 
-   This runs whenever `brain.intentions` exists, even if `NOUS_INTENTIONS_ENABLED` is off too. If `NOUS_RESULT_INBOX_ENABLED` is also off, re-routed rows would be invisible, so the raw result is sent by Telegram instead. Turning the flags off never strands a result (G6).
+   This runs whenever `brain.intentions` exists, even if `NOUS_INTENTIONS_ENABLED` is off too. If `NOUS_RESULT_INBOX_ENABLED` is also off, re-routed rows would be invisible, so the raw result is sent by Telegram instead.
+
+   **Work still running when the flags go off** is handled without the rollback. Its routing fields on the work row were never changed (I5), and the Phase 2 intention-only routing is chosen when the result is written, under the flag value at that moment. So a result that finishes after the flags are off is routed by F098 Phase A, or by the legacy per-session path when the inbox is off too, exactly as before F099. Only its intention row stays `pending`. That row is closed by the next startup's rollback, or by the close pass if a reconciler runs. Turning the flags off never strands a result (G6); at worst it leaves an intention row open until the next start.
 
 ### 4.4 Tool surface and enforcement
 
 **New `ContextKind`: `continuation`.**
 - Its `CONTEXT_POLICY` row is `ContextPolicy(_LOCAL, spawn=frozenset({"spawn_task", "dag_create"}))`.
 - `ExecutionContext` gains `intention_id`, `root_intention_id`, `authority` and `decision_id`.
+- **For a batch, the context's `intention_id` is the deepest claimed intention.** A claim can hold several intentions, and on a retry a failed attempt may already have spawned a deeper child. Ties are broken by the earliest `created_at`, then the lowest id. Every child spawned in that turn therefore has `parent_id` = that intention and `depth` = the batch's maximum depth + 1, so the depth limit cannot be reset or undercounted by choosing a shallower member.
 
 **One helper builds the offered set for both loops:** `_offered_tools(ctx, frame_id, is_subtask, tool_filter, refuse_active)`, used by `_tool_loop` and `stream_chat`. For `authority = internal_only`:
 
@@ -523,6 +526,7 @@ The F098 A and C classification of scheduled, inline and spawn rows is pinned, a
 - **Limits.** Each bound escalates at its limit.
   - The depth and spawn limits remove the spawn tools, make `resolve_intention` refuse `continue` and `revise`, and make the gate escalate the next claim without running a turn.
   - A cancel cascades, blocks further spawns, cancels a running continuation task, and makes every later tool call in the lineage refused.
+- **Batch parent.** A batch holding intentions of depth 1 and 2 spawns children at depth 3, parented to the depth-2 intention. At `MAX_DEPTH`, that spawn is refused.
 - **Batch answers.** An owner answer or a proposal decision for a batch arrival wakes every intention in that arrival, and they are claimed together.
 - Quiet hours defer only the Telegram push, idempotently.
 - **Wiring tests.** They drive the real worker, scheduler, orchestrator and REST paths end to end, and fail when the hook is removed.
