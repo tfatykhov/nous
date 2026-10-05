@@ -440,6 +440,67 @@ class CalibrationSnapshot(Base):
     snapshot_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class Intention(Base):
+    """F099: why a piece of background work was spawned (one row per spawn).
+
+    Written by the store that creates the work row, in the same transaction.
+    A root has ``root_id == id``; ``root_cancelled_at`` / ``root_expired_at``
+    live on root rows only and are what "the root is open" means.
+    """
+
+    __tablename__ = "intentions"
+    __table_args__ = (
+        UniqueConstraint("agent_id", "source_kind", "source_id", name="uq_intentions_source"),
+        CheckConstraint("source_kind IN ('subtask', 'dag', 'schedule')", name="chk_intentions_source_kind"),
+        CheckConstraint(
+            "wake_policy IN ('continue', 'remember', 'report', 'none', 'container')",
+            name="chk_intentions_wake_policy",
+        ),
+        CheckConstraint("authority IN ('owner', 'internal_only')", name="chk_intentions_authority"),
+        CheckConstraint(
+            "state IN ('pending', 'result_ready', 'deciding', 'awaiting_owner', 'closed', 'cancelled', 'expired')",
+            name="chk_intentions_state",
+        ),
+        CheckConstraint(
+            "close_reason IS NULL OR close_reason IN "
+            "('resolved', 'legacy', 'delivered', 'cancelled', 'expired', 'fallback_report', 'failed_report')",
+            name="chk_intentions_close_reason",
+        ),
+        {"schema": "brain"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, server_default=func.gen_random_uuid()
+    )
+    agent_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    root_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("brain.intentions.id"), nullable=False)
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("brain.intentions.id"))
+    depth: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    source_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    source_id: Mapped[str] = mapped_column(Text, nullable=False)
+    intent: Mapped[str] = mapped_column(Text, nullable=False)
+    origin_kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    origin_session_id: Mapped[str | None] = mapped_column(Text)
+    origin_channel: Mapped[str | None] = mapped_column(Text)
+    origin_decision_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    wake_policy: Mapped[str] = mapped_column(String(20), nullable=False)
+    authority: Mapped[str] = mapped_column(String(20), nullable=False, default="owner", server_default="owner")
+    expected_result: Mapped[str | None] = mapped_column(Text)
+    assumptions: Mapped[list | None] = mapped_column(JSONB)
+    deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    state: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", server_default="pending")
+    close_reason: Mapped[str | None] = mapped_column(String(20))
+    root_cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    root_expired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claim_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    result_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 # =============================================================================
 # HEART SCHEMA (8 tables)
 # =============================================================================
@@ -939,6 +1000,9 @@ class ResultInbox(Base):
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     delivered_session_id: Mapped[str | None] = mapped_column(Text)
     wake_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # F099: the intention this result belongs to (no FK: a failed check must
+    # never cost a result its row). Phase 1 records it; nothing routes on it.
+    intention_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
 
 
 class ChannelSession(Base):
