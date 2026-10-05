@@ -1,7 +1,7 @@
 # What's Shipped
 
-Per-feature ship log: what each feature does, why it is built that way, and the invariants it relies on. Part of the [Nous development guide](../../CLAUDE.md).
-For current status of every feature (shipped, planned, deferred) see the [Feature Index](../features/INDEX.md).
+Ship notes for features whose rationale and invariants were written down: what each does, why it is built that way, and what it relies on. It is a curated subset. Part of the [Nous development guide](../../CLAUDE.md).
+The [Feature Index](../features/INDEX.md) is the complete list of features and their status (shipped, planned, deferred).
 
 | Spec | Component | PR |
 |------|-----------|----|

@@ -48,7 +48,7 @@ nous/
 └── docs/                   # research/, features/, implementation/, plans/, reviews/, reference/
 ```
 
-Per-file map with annotations: [docs/reference/project-structure.md](docs/reference/project-structure.md).
+Annotated map of the main modules: [docs/reference/project-structure.md](docs/reference/project-structure.md).
 
 ## How to Work
 
@@ -135,8 +135,8 @@ Detailed reference lives in `docs/reference/` so it is read only when a task nee
 | Doc | Contents | Read when |
 |-----|----------|-----------|
 | [Environment variables](docs/reference/environment-variables.md) | Settings with a documented default, rationale, measured evidence or rollback notes (`nous/config.py` is the full list) | Adding or changing a setting or feature flag, or debugging config. It is large: search it for the variable name. |
-| [Shipped features](docs/reference/shipped-features.md) | Per-feature ship log with design rationale and invariants | Touching a shipped feature (an `F0xx` number, a harness phase) |
-| [Project structure](docs/reference/project-structure.md) | Per-file map of `nous/` and `nous_eval/` | Locating a module |
+| [Shipped features](docs/reference/shipped-features.md) | Ship notes with design rationale and invariants (a curated subset; the [Feature Index](docs/features/INDEX.md) lists every feature) | Touching a shipped feature (an `F0xx` number, a harness phase) |
+| [Project structure](docs/reference/project-structure.md) | Annotated map of the main modules in `nous/` and `nous_eval/` (not every file) | Locating a module |
 | [REST API](docs/reference/rest-api.md) | Documented endpoints (`nous/api/rest.py` is the full list) | Adding or changing an endpoint or dashboard route |
 | [Agent tools](docs/reference/agent-tools.md) | Documented agent tools and their frame access (the `dispatcher.register()` calls are the full list) | Adding or changing a tool |
 

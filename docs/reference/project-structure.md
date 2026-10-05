@@ -1,6 +1,6 @@
 # Project Structure
 
-Full annotated file map. Part of the [Nous development guide](../../CLAUDE.md).
+Annotated map of the main modules. It is curated, not every file is listed, and the source tree is the full list. Part of the [Nous development guide](../../CLAUDE.md).
 
 ```
 nous/
@@ -8,7 +8,7 @@ nous/
 ├── Dockerfile                  # Python container with OAT support
 ├── sql/
 │   ├── init.sql                # Base schema (24 tables, 3 schemas)
-│   ├── migrations/             # Schema migrations (006-078)
+│   ├── migrations/             # Schema migrations, numbered from 006; the highest prefix is the latest
 │   └── seed.sql                # Default agent, frames, guardrails
 ├── nous/                       # Python package (~30,000 lines)
 │   ├── config.py               # Settings via pydantic-settings
