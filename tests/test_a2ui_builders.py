@@ -288,6 +288,21 @@ def test_heartbeat_findings_renders_a_card_per_finding() -> None:
     assert built.data_model["findings"] == {"abc123def456": "open", "999888777666": "open"}
 
 
+def test_heartbeat_findings_explains_its_buttons_and_binds_a_status_line() -> None:
+    """Tim, 2026-10-05: pressing a button showed nothing, and the three verbs
+    were unexplained. The card now carries a legend and a per-finding status
+    line bound to /status/<fp>, which the action handler patches."""
+    built = heartbeat_findings(FINDINGS_PARAMS)
+    built.validate()
+
+    legend = _text_of(built, "legend")
+    for verb in ("Acknowledge", "Resolve", "Dismiss"):
+        assert verb in legend
+    assert _by_id(built, "f0_status")["text"] == {"path": "/status/abc123def456"}
+    assert built.data_model["status"]["abc123def456"].startswith("Status: open")
+    assert "f0_status" in _by_id(built, "f0_col")["children"]
+
+
 def test_heartbeat_findings_wires_every_verb_to_each_finding() -> None:
     built = heartbeat_findings(FINDINGS_PARAMS)
 
@@ -313,7 +328,7 @@ def test_heartbeat_findings_renders_an_empty_state() -> None:
     built.validate()
 
     assert _text_of(built, "empty") == "No open findings."
-    assert _by_id(built, "root")["children"] == ["header", "empty"]
+    assert _by_id(built, "root")["children"] == ["header", "empty"]  # no legend when empty
 
 
 def test_heartbeat_findings_defaults_its_title_to_the_count() -> None:
@@ -485,3 +500,18 @@ async def test_push_surface_offers_revert_when_snapshot_and_compensator_exist() 
     built = captured.get("_last_built")
     assert built is not None, f"push failed: {result}"
     assert "review.revert" in built.allowed_actions, "Revert must be offered when snapshot and compensator both exist"
+
+
+def test_ack_status_does_not_promise_auto_close_for_agent_findings() -> None:
+    """Codex P2 on #699: agent-raised findings (check 'agent:…') are never
+    auto-resolved by the heartbeat runner, so their acknowledge text and the
+    legend must not promise auto-close for them."""
+    from nous.a2ui.builders.heartbeat_findings import LEGEND, status_after
+
+    agent_ack = status_after("acknowledge", "agent:facts:1a2b3c4d")
+    assert "auto-close" not in agent_ack
+    assert "Resolve or Dismiss" in agent_ack
+    assert "auto-close" in status_after("acknowledge", "disk_usage")
+    assert "auto-close" in status_after("acknowledge", None)
+    assert status_after("resolve", "agent:x:1") == status_after("resolve", "disk_usage")
+    assert "agent:" in LEGEND
