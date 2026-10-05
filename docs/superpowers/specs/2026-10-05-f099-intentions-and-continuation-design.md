@@ -152,7 +152,7 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
   - `app.act`.
 
   A child intention is inserted only if its root is still open, meaning `root_cancelled_at` and `root_expired_at` are both NULL. The root row is read `FOR SHARE` in the same transaction, and a cancel always writes `root_cancelled_at` on it, so a cancel and a spawn conflict on the root row and the cancel stops new spawns.
-- **I2. Intent source.** `spawn_task`, `dag_create`, `schedule_task` and `spawn_sync` take a required `intent` and an optional `wake_policy`, **only while `NOUS_INTENTIONS_ENABLED` is on**; with it off, the tool schemas are byte-identical to today. A missing or blank `intent` is refused with a tool error that says what to write. Code paths generate the intent:
+- **I2. Intent source.** `spawn_task`, `dag_create`, `schedule_task` and `spawn_sync` take a required `intent` and an optional `wake_policy`, **only while `NOUS_INTENTIONS_ENABLED` is on**; with it off, the tool schemas are byte-identical to today. A missing or blank `intent` is **refused only in foreground and continuation turns** (`interactive`, `mcp`, `continuation`), with a tool error that says what to write. In every other kind (`dag_summary`, `scheduled`, `subtask`, `heartbeat_*`, `agent_action`, `dag_node`, `background`), a missing `intent` is generated as `"<origin_kind>: <first line of the task or description>"` and the spawn goes ahead. Existing background prompts were written before `intent` existed, and a refused spawn there (for example the F087 summary turn's email subtask) would silently break delivery. Code paths generate the intent:
   - **schedule fire:** the schedule's task text;
   - **work queue:** the item title;
   - **`app.act`:** the action label;
@@ -227,7 +227,7 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
    - For a `continue` source, the subtask worker's raw Telegram push (suppressed inside `_notify_telegram`, which covers all four call sites) and the F087 Telegram leg are suppressed.
    - The F087 leg becomes `ok=False, required=False, detail='superseded_by_continuation'`.
    - Because that leaves no required leg, **a `continue` DAG is never marked delivered without its inbox row.** The reconciler's DAG pass (`InboxDagPass`, added by #694) repairs a missing row, keyed by `delivery_generation`. Its filter is extended to continuation DAGs (item 1).
-6. **Rollback.** At startup with `NOUS_CONTINUATION_ENABLED` off, open `continue` intentions in `result_ready`, `deciding` or `awaiting_owner`:
+6. **Rollback.** At startup with `NOUS_CONTINUATION_ENABLED` off, open `continue` intentions in `result_ready`, `deciding` or `awaiting_owner`, and `pending` ones whose source is already terminal:
    - have their undelivered inbox rows re-routed to `origin_channel` (or the default chat);
    - have their pending proposals expired (a later tap is refused);
    - are closed with `close_reason = 'legacy'`.
