@@ -18,7 +18,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
-from sqlalchemy import exists, func, or_, select, update
+from sqlalchemy import exists, or_, select, update
 
 from nous.heart.result_inbox import SOURCE_SUBTASK, ResultInboxStore, is_dag_node_subtask, subtask_envelope
 from nous.heart.subtasks import INLINE_WORKER_ID
@@ -53,11 +53,11 @@ class InboxSubtaskPass:
     not a DAG node, with a routing key, not yet delivered, finished inside
     the inbox age bound, and with no inbox row. Two more bounds:
 
-    * Only subtasks created at or after the inbox's first row. That is when
-      this agent's inbox started receiving writes, so turning the flag on
-      never backfills the historical backlog (F098 §4.6). The cost: a
-      subtask whose own write failed before the inbox held any row is not
-      repaired.
+    * Only subtasks that FINISHED at or after the inbox was first switched
+      on (``heart.result_inbox_state``), so turning the flag on never
+      backfills the historical backlog (F098 §4.6), while every result
+      finished since is repaired — the agent's first write included, and a
+      task that was already running when the flag came on.
     * A subtask with nothing to say gets no row, so it is marked delivered
       instead; otherwise it would come back every tick and, past
       ``RECONCILE_BATCH_SIZE`` of them, starve the rows that need repair.
@@ -76,12 +76,9 @@ class InboxSubtaskPass:
     async def run(self, *, limit: int) -> int:
         agent_id = self._settings.agent_id
         since = datetime.now(UTC) - timedelta(hours=self._settings.result_inbox_max_age_hours)
+        # Recorded at startup; recorded here instead if that write failed.
+        enabled_at = await self._store.ensure_enabled_at()
         async with self._db.session() as session:
-            epoch = (
-                await session.execute(select(func.min(ResultInbox.created_at)).where(ResultInbox.agent_id == agent_id))
-            ).scalar_one_or_none()
-            if epoch is None:
-                return 0
             has_row = exists().where(ResultInbox.source_kind == SOURCE_SUBTASK, ResultInbox.source_id == Subtask.id)
             candidates = (
                 (
@@ -90,7 +87,7 @@ class InboxSubtaskPass:
                         .where(Subtask.agent_id == agent_id)
                         .where(Subtask.status.in_(("completed", "failed")))
                         .where(Subtask.completed_at.is_not(None), Subtask.completed_at > since)
-                        .where(Subtask.created_at >= epoch)
+                        .where(Subtask.completed_at >= enabled_at)
                         .where(or_(Subtask.worker_id.is_(None), Subtask.worker_id != INLINE_WORKER_ID))
                         .where(Subtask.dag_node_id.is_(None))
                         .where(Subtask.delivered.is_(False))

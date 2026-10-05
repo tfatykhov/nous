@@ -52,6 +52,14 @@ CREATE TABLE IF NOT EXISTS heart.channel_sessions (
     PRIMARY KEY (agent_id, channel)
 );
 
+-- When the inbox was first switched on for an agent, written once by the
+-- first process that starts with the flag on. The reconciler repairs only
+-- results that finished after it, so enabling the flag never backfills.
+CREATE TABLE IF NOT EXISTS heart.result_inbox_state (
+    agent_id VARCHAR(100) PRIMARY KEY,
+    enabled_at TIMESTAMPTZ NOT NULL
+);
+
 -- Origin capture: where a subtask / DAG was started from.
 ALTER TABLE heart.subtasks
     ADD COLUMN IF NOT EXISTS parent_channel TEXT;

@@ -953,6 +953,21 @@ class ChannelSession(Base):
     last_active: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class ResultInboxState(Base):
+    """F098: when the result inbox was first switched on for an agent.
+
+    Written once, by the first process that starts with the flag on. The
+    reconciler repairs only results that finished after it, so enabling the
+    flag never backfills history (F098 §4.6).
+    """
+
+    __tablename__ = "result_inbox_state"
+    __table_args__ = ({"schema": "heart"},)
+
+    agent_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    enabled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class Schedule(Base):
     """Scheduled or recurring task."""
 

@@ -1027,6 +1027,13 @@ async def create_components(settings: Settings) -> dict:
     if settings.result_inbox_enabled:
         from nous.heart.result_reconciler import build_reconciler
 
+        # The reconciler's no-backfill watermark, recorded the first time a
+        # process starts with the flag on — before any worker can finish a
+        # subtask. A failure here is retried by every reconciler tick.
+        try:
+            await heart.result_inbox.ensure_enabled_at()
+        except Exception:
+            logger.warning("F098: could not record when the result inbox was enabled", exc_info=True)
         result_reconciler = build_reconciler(database, heart.result_inbox, settings)
         result_reconciler_task = asyncio.create_task(
             _result_reconciler_loop(result_reconciler), name="result-reconciler"

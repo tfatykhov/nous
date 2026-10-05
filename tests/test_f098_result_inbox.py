@@ -553,42 +553,50 @@ async def test_retried_dag_delivers_its_new_outcome_once(db):
 # ---------------------------------------------------------------------------
 
 
-async def _anchor_inbox(env) -> None:
-    """Give the agent's inbox a first row, a minute old (the reconciler's epoch).
+def _fail_first_insert(monkeypatch, store: ResultInboxStore) -> dict:
+    """The next ``store.insert`` raises once (a DB blip); later ones go through."""
+    real_insert = store.insert
+    calls = {"n": 0}
 
-    Backdated because SQLite keeps ``subtasks.created_at`` to the second.
-    """
-    await _finish_subtask(env, session_id="S0", channel=CHAN, result="earlier result")
+    async def flaky_insert(**kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionError("db blip")
+        return await real_insert(**kw)
+
+    monkeypatch.setattr(store, "insert", flaky_insert)
+    return calls
+
+
+async def _backdate_subtask(env, subtask_id, **columns) -> None:
+    from nous.storage.models import Subtask
+
     async with env.heart.db.session() as s:
-        await s.execute(
-            update(ResultInbox).where(ResultInbox.agent_id == env.settings.agent_id)
-            .values(created_at=datetime.now(UTC) - timedelta(minutes=1))
-        )
+        await s.execute(update(Subtask).where(Subtask.id == subtask_id).values(**columns))
         await s.commit()
 
 
 class TestReconciler:
+    async def test_enabled_at_is_recorded_once(self, db):
+        store = ResultInboxStore(db, _agent())
+        first = await store.ensure_enabled_at()
+        assert await store.ensure_enabled_at() == first
+
     async def test_lost_insert_is_repaired_and_delivered_once(self, inbox_env, monkeypatch):
+        """Codex P1: even the agent's FIRST inbox write is repaired.
+
+        The inbox is empty when it fails, so a watermark taken from the
+        inbox's first row could never cover it; the enablement time does.
+        """
         from nous.heart.result_reconciler import build_reconciler
 
         env = inbox_env
         agent = env.settings.agent_id
-        # The inbox is live: an earlier result went through.
-        await _anchor_inbox(env)
-        await env.layer.pre_turn(agent, "S0", "hi", channel=CHAN)
+        store = env.heart.result_inbox
+        await store.ensure_enabled_at()  # the process started with the flag on
 
         # The worker's one-shot write fails once.
-        store = env.heart.result_inbox
-        real_insert = store.insert
-        calls = {"n": 0}
-
-        async def flaky_insert(**kw):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                raise ConnectionError("db blip")
-            return await real_insert(**kw)
-
-        monkeypatch.setattr(store, "insert", flaky_insert)
+        calls = _fail_first_insert(monkeypatch, store)
         st = await _finish_subtask(env, session_id="S1", channel=CHAN, result="Powder: 40cm")
         assert calls["n"] == 1
         assert await store.claim(channel="telegram:nobody", session_id="S1", max_age_hours=72) == []
@@ -604,24 +612,40 @@ class TestReconciler:
         assert "Powder: 40cm" not in _prompt(ctx)
         assert await reconciler.run_once() == {"inbox": 0}
 
-    async def test_no_backfill_before_the_inbox_existed(self, inbox_env):
-        """§4.6: subtasks from before the inbox's first row are never re-inserted."""
+    async def test_task_running_at_enablement_is_repaired(self, inbox_env, monkeypatch):
+        """Codex P1: created before the flag was on (and before the inbox's
+        first row), finished after it, write lost: still repaired."""
+        from nous.heart.result_reconciler import build_reconciler
+
+        env = inbox_env
+        store = env.heart.result_inbox
+        long_job = await env.heart.subtasks.create(task="long job", parent_session_id="S1", parent_channel=CHAN)
+        await _backdate_subtask(env, long_job.id, created_at=datetime.now(UTC) - timedelta(hours=1))
+        await store.ensure_enabled_at()
+        # Another result reaches the inbox first while the long job runs.
+        await _finish_subtask(env, session_id="S1", channel=CHAN, result="quick result")
+
+        _fail_first_insert(monkeypatch, store)
+        await env.heart.subtasks.complete(long_job.id, "long job done", final_outcome="completed", attempts=1)
+        await env.pool._record_inbox(long_job)
+
+        reconciler = build_reconciler(env.heart.db, store, env.settings)
+        assert await reconciler.run_once() == {"inbox": 1}
+        ctx = await env.layer.pre_turn(env.settings.agent_id, "S2", "hi", channel=CHAN)
+        assert "long job done" in _prompt(ctx) and "quick result" in _prompt(ctx)
+
+    async def test_no_backfill_of_results_finished_before_enablement(self, inbox_env):
+        """§4.6: a result that finished before the flag was first on is never inserted."""
         from nous.heart.result_reconciler import build_reconciler
 
         env = inbox_env
         old = await env.heart.subtasks.create(task="old", parent_session_id="S0", parent_channel=CHAN)
         await env.heart.subtasks.complete(old.id, "old result", final_outcome="completed", attempts=1)
+        await _backdate_subtask(env, old.id, completed_at=datetime.now(UTC) - timedelta(minutes=1))
         reconciler = build_reconciler(env.heart.db, env.heart.result_inbox, env.settings)
-        assert await reconciler.run_once() == {"inbox": 0}  # empty inbox: nothing to anchor on
+        # The first tick of a process with the flag on records the watermark.
+        assert await reconciler.run_once() == {"inbox": 0}
 
-        async with env.heart.db.session() as s:
-            from nous.storage.models import Subtask
-
-            await s.execute(
-                update(Subtask).where(Subtask.id == old.id)
-                .values(created_at=datetime.now(UTC) - timedelta(hours=1))
-            )
-            await s.commit()
         await _finish_subtask(env, session_id="S1", channel=CHAN, result="new result")
         assert await reconciler.run_once() == {"inbox": 0}
         ctx = await env.layer.pre_turn(env.settings.agent_id, "S2", "hi", channel=CHAN)
@@ -632,7 +656,7 @@ class TestReconciler:
         from nous.heart.subtasks import INLINE_WORKER_ID
 
         env = inbox_env
-        await _anchor_inbox(env)
+        await env.heart.result_inbox.ensure_enabled_at()
         inline = await env.heart.subtasks.create(
             task="inline", parent_session_id="S1", parent_channel=CHAN, worker_id=INLINE_WORKER_ID,
         )

@@ -27,7 +27,7 @@ from sqlalchemy import and_, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from nous.storage.database import Database
-from nous.storage.models import ChannelSession, ResultInbox
+from nous.storage.models import ChannelSession, ResultInbox, ResultInboxState
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from nous.config import Settings
@@ -241,6 +241,27 @@ class ResultInboxStore:
         async with self._db.session() as session:
             await session.execute(stmt)
             await session.commit()
+
+    async def ensure_enabled_at(self) -> datetime:
+        """When the inbox was first switched on for this agent.
+
+        The first call records now; every later call, in any process, returns
+        that first value, so the watermark never moves. Python's clock, like
+        the ``completed_at`` stamps it is compared with.
+        """
+        async with self._db.session() as session:
+            await session.execute(
+                pg_insert(ResultInboxState)
+                .values(agent_id=self._agent_id, enabled_at=datetime.now(UTC))
+                .on_conflict_do_nothing(index_elements=["agent_id"])
+            )
+            enabled_at = (
+                await session.execute(
+                    select(ResultInboxState.enabled_at).where(ResultInboxState.agent_id == self._agent_id)
+                )
+            ).scalar_one()
+            await session.commit()
+        return enabled_at
 
     async def get_channel_session(self, channel: str) -> ChannelSession | None:
         async with self._db.session() as session:
