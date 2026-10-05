@@ -384,6 +384,9 @@ class ResultMemoryWriter:
         chunks, chunk_reason = 0, None
         if len(text) <= settings.result_memory_summary_chars:
             chunk_reason = "short"  # the summary already holds the whole text
+        elif getattr(self._heart, "_embeddings", None) is None:
+            # Every ingest would fail on embed_batch, so a retry cannot help: keep the episode.
+            chunk_reason = "no_embeddings"
         else:
             res = await _ingest_chunks(
                 self._heart, settings, content=text, source_ref=chunk_source_ref(subtask.id), episode_id=episode_id

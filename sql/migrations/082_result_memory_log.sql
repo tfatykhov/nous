@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS heart.result_memory_log (
                   CHECK (state IN ('pending', 'written', 'skipped', 'failed')),
     episode_id    UUID NULL REFERENCES heart.episodes(id) ON DELETE SET NULL,
     chunks        INT  NOT NULL DEFAULT 0,
-    -- Why a written row has no chunks: short (fits the summary), ingest_disabled, too_short.
+    -- Why a written row has no chunks: short (fits the summary), ingest_disabled, too_short,
+    -- no_embeddings (no embedding provider, so chunks cannot be embedded).
     chunk_reason  VARCHAR(40) NULL,
     attempts      INT  NOT NULL DEFAULT 0,
     last_error    TEXT NULL,

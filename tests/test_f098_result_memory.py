@@ -509,6 +509,27 @@ async def test_ingest_disabled_still_writes_the_episode(mem_env, monkeypatch):
     assert len(await _episodes(env, st.id)) == 1
 
 
+async def test_no_embedding_provider_writes_the_episode_and_never_retries(mem_env, monkeypatch):
+    """Without an embedding provider every chunk ingest fails: keep the episode, skip the chunks."""
+    from nous.heart import Heart
+
+    env = mem_env
+    monkeypatch.setattr(result_memory, "_ingest_chunks", _real_ingest)
+    heart = Heart(env.db, env.settings, embedding_provider=None)
+    try:
+        st = await _finished(env)
+        assert len(LONG) > env.settings.result_memory_summary_chars  # long enough to be chunked
+        assert await heart.result_memory.record(st) == "written"
+        row = await _log(env, st.id)
+        assert (row.state, row.chunks, row.chunk_reason, row.attempts) == ("written", 0, "no_embeddings", 0)
+        assert len(await _episodes(env, st.id)) == 1
+        await _age(env, st.id)
+        assert await ResultMemoryPass(heart.result_memory, env.settings).run(limit=50) == 0  # nothing to retry
+        assert (await _log(env, st.id)).state == "written"
+    finally:
+        await heart.close()
+
+
 # The production chunk step, captured at import, before mem_env swaps in _FakeIngest.
 _real_ingest = result_memory._ingest_chunks
 
