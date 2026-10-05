@@ -394,7 +394,7 @@ The same commit also:
 | `NOUS_CONTINUATION_MAX_DEPTH` | 3 | Spawn tools removed, and `continue`/`revise` refused for the rest of the turn; the gate escalates the next claim at once. |
 | `NOUS_CONTINUATION_MAX_SPAWNS_PER_ROOT` | 12 | Same as depth. |
 | `NOUS_CONTINUATION_MAX_TURNS_PER_ROOT` | 8 | Escalate. |
-| `NOUS_CONTINUATION_MAX_TOKENS_PER_ROOT` | 400000 | Escalate. Root tokens = the lineage's subtask `tokens_in/out` **excluding DAG-node subtasks** (their usage is already rolled into `tokens_consumed` by `DAGStore.claim_and_add_node_tokens`) + its DAGs' `tokens_consumed` + its arrivals' tokens. |
+| `NOUS_CONTINUATION_MAX_TOKENS_PER_ROOT` | 400000 | Escalate. Root tokens = the lineage's subtask `tokens_in/out` **excluding DAG-node subtasks** (their usage is already rolled into `tokens_consumed` by `DAGStore.claim_and_add_node_tokens`) + its DAGs' `tokens_consumed` + its arrivals' tokens. Phase 2 also adds DAG check-node usage to `tokens_consumed` (today `HeartbeatRunner._tick` counts a dynamic check's tokens only in its daily total), so a repeatedly running lineage check uses up the root budget. |
 | `NOUS_CONTINUATION_STALL_LIMIT` | 2 consecutive verified `progress=false` | Escalate. |
 | `NOUS_INTENTION_ROOT_TTL_HOURS` | 72 | Report what exists, then close. |
 | `NOUS_CONTINUATION_MAX_CONCURRENT` | 2 | Wait for a slot. |
