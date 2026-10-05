@@ -325,11 +325,16 @@ class ResultMemoryWriter:
 
         A new row is inserted with the decision (a skip goes straight to
         ``skipped``). An existing write row is taken over only when it is
-        retryable: ``failed`` under the attempt cap, or ``pending`` and
-        abandoned (its writer crashed), in either case untouched for
-        ``RETRY_AFTER``. The takeover is one conditional UPDATE, so of two
+        retryable: ``failed`` or ``pending`` and abandoned (its writer
+        crashed or was cancelled), untouched for ``RETRY_AFTER``, and under
+        the attempt cap. The takeover is one conditional UPDATE, so of two
         racing writers exactly one wins. A taken-over row keeps its original
         decision.
+
+        Every claim of a write row counts an attempt, because a cancelled
+        write (the reconciler's pass timeout) raises ``CancelledError`` past
+        the failure handler and would otherwise never count. An abandoned
+        ``pending`` row already at the cap is failed for good instead.
         """
         now = datetime.now(UTC)
         stmt = (
@@ -341,6 +346,7 @@ class ResultMemoryWriter:
                 decision=decision.decision,
                 reason=decision.reason,
                 state="pending" if decision.write else "skipped",
+                attempts=1 if decision.write else 0,
                 created_at=now,
                 updated_at=now,
             )
@@ -349,26 +355,28 @@ class ResultMemoryWriter:
         async with self._db.session() as session:
             inserted = (await session.execute(stmt)).rowcount
             if not inserted:
-                stale = now - RETRY_AFTER
+                retryable = and_(
+                    self._pk(source_id),
+                    ResultMemoryLog.decision == "write",
+                    ResultMemoryLog.updated_at < now - RETRY_AFTER,
+                    ResultMemoryLog.state.in_(("failed", "pending")),
+                )
                 taken = (
                     await session.execute(
                         update(ResultMemoryLog)
-                        .where(self._pk(source_id))
-                        .where(ResultMemoryLog.decision == "write")
-                        .where(ResultMemoryLog.updated_at < stale)
-                        .where(
-                            or_(
-                                and_(
-                                    ResultMemoryLog.state == "failed",
-                                    ResultMemoryLog.attempts < self._settings.result_memory_max_attempts,
-                                ),
-                                ResultMemoryLog.state == "pending",
-                            )
-                        )
-                        .values(state="pending", updated_at=now)
+                        .where(retryable)
+                        .where(ResultMemoryLog.attempts < self._settings.result_memory_max_attempts)
+                        .values(state="pending", attempts=ResultMemoryLog.attempts + 1, updated_at=now)
                     )
                 ).rowcount
                 if not taken:
+                    # Still retryable means at the cap; only a 'pending' one is left to close.
+                    await session.execute(
+                        update(ResultMemoryLog)
+                        .where(retryable)
+                        .where(ResultMemoryLog.state == "pending")
+                        .values(state="failed", last_error="abandoned_after_timeouts", updated_at=now)
+                    )
                     await session.commit()
                     return None
             await session.commit()
@@ -446,8 +454,7 @@ class ResultMemoryWriter:
                     update(ResultMemoryLog)
                     .where(self._pk(source_id))
                     .values(
-                        state="failed",
-                        attempts=ResultMemoryLog.attempts + 1,
+                        state="failed",  # the claim counted the attempt
                         last_error=f"{type(exc).__name__}: {exc}"[:_ERROR_MAX],
                         updated_at=datetime.now(UTC),
                     )

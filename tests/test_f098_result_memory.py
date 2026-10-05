@@ -337,7 +337,7 @@ async def test_worker_terminal_path_writes_result_memory(mem_env):
 
     row = await _log(env, st.id)
     assert (row.decision, row.reason, row.state) == ("write", "tier1", "written")
-    assert row.chunks > 0 and row.attempts == 0
+    assert row.chunks > 0 and row.attempts == 1  # the claim counts the attempt
     [ep] = await _episodes(env, st.id)
     assert ep.id == row.episode_id
     assert ep.title == "Subtask result: Research ski resorts near Innsbruck"
@@ -468,6 +468,41 @@ async def test_retry_cap(mem_env):
     assert len(await _episodes(env, st.id)) == 1
 
 
+async def test_a_write_cancelled_every_time_is_abandoned_at_the_cap(mem_env):
+    """The reconciler's pass timeout cancels record(), and CancelledError skips ``except Exception``.
+
+    So the claim itself counts the attempt, and a stale 'pending' row is
+    taken over only under the cap; at the cap it is failed for good.
+    """
+    env = mem_env
+    env.ingest.gate = asyncio.Event()  # every chunk step hangs until it is cancelled
+    st = await _finished(env)
+    writer = env.heart.result_memory
+    cap = env.settings.result_memory_max_attempts
+    for attempt in range(1, cap + 1):
+        task = asyncio.create_task(writer.record(st))
+        for _ in range(500):
+            if len(env.ingest.calls) == attempt:
+                break
+            await asyncio.sleep(0.01)
+        assert len(env.ingest.calls) == attempt  # in flight, hung in the chunk step
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task  # propagated, never swallowed
+        row = await _log(env, st.id)
+        assert (row.state, row.attempts) == ("pending", attempt)
+        await _age(env, st.id)
+
+    assert await asyncio.wait_for(writer.record(st), 5) is None  # not taken over again
+    row = await _log(env, st.id)
+    assert (row.state, row.attempts) == ("failed", cap)
+    assert row.last_error == "abandoned_after_timeouts"
+    assert len(env.ingest.calls) == cap
+    await _age(env, st.id)
+    assert await _pass(env).run(limit=50) == 0
+    assert (await _log(env, st.id)).state == "failed"
+
+
 # ---------------------------------------------------------------------------
 # 6. DAG node + background skipped; 7. tier 2
 # ---------------------------------------------------------------------------
@@ -549,7 +584,7 @@ async def test_no_embedding_provider_writes_the_episode_and_never_retries(mem_en
         assert len(LONG) > env.settings.result_memory_summary_chars  # long enough to be chunked
         assert await heart.result_memory.record(st) == "written"
         row = await _log(env, st.id)
-        assert (row.state, row.chunks, row.chunk_reason, row.attempts) == ("written", 0, "no_embeddings", 0)
+        assert (row.state, row.chunks, row.chunk_reason, row.attempts) == ("written", 0, "no_embeddings", 1)
         assert len(await _episodes(env, st.id)) == 1
         await _age(env, st.id)
         assert await ResultMemoryPass(heart.result_memory, env.settings).run(limit=50) == 0  # nothing to retry
