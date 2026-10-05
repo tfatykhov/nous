@@ -9,6 +9,7 @@ import asyncio
 import contextvars
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -96,6 +97,37 @@ def _meta(model: Any) -> dict:
 
 
 CALLBACK_RETRY_DELAY_SECONDS = 30
+
+# F099 Phase 0b: what a check's final, self-disabling run found travels to its
+# consumers: the on_complete callback, and the DAG node the check runs for.
+FINAL_RUN_FINDINGS_KEY = "final_run_findings"
+MAX_FINAL_RUN_FINDINGS = 20
+# Any case and any whitespace, as F098 neutralises <result_message>.
+_FINDINGS_DELIMITER = re.compile(r"<(\s*/?\s*check_findings)", re.IGNORECASE)
+
+
+def findings_payload(findings: list[Finding]) -> list[dict[str, Any]]:
+    """A run's findings as the JSON that is stored and rendered."""
+    return [
+        {"summary": f.summary, "urgency": f.urgency, "needs_action": bool(f.needs_action)}
+        for f in findings[:MAX_FINAL_RUN_FINDINGS]
+    ]
+
+
+def render_findings(items: list[dict[str, Any]]) -> str:
+    """One line per finding. A summary is text the check's model wrote, so its
+    whitespace is collapsed (a newline would forge another finding line) and a
+    delimiter inside it is neutralised; "" when there is nothing to show."""
+    lines = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        summary = _FINDINGS_DELIMITER.sub(r"&lt;\1", " ".join(str(item.get("summary") or "").split()))
+        if not summary:
+            continue
+        flag = " (needs action)" if item.get("needs_action") else ""
+        lines.append(f"- [{item.get('urgency') or 'normal'}] {summary}{flag}")
+    return "\n".join(lines)
 
 
 class DynamicCheck(BaseCheck):
