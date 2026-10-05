@@ -101,7 +101,7 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
 | `outcome` | How the arrival ended: `resolved`, `fallback_report` or `failed_report`. |
 
 **States.**
-- Normal path: `pending` → `result_ready` → `deciding` → `closed`, or → `awaiting_owner`, which returns to `result_ready` when the owner answers or a proposal is decided.
+- Normal path: `pending` → `result_ready` → `deciding` → `closed`, or → `awaiting_owner`, which returns to `result_ready` when every proposal and question of that arrival is terminal (§4.4 item 6).
 - `cancelled` and `expired` are terminal.
 - Every transition is a conditional `UPDATE … WHERE state IN (<expected>) RETURNING`.
 
@@ -217,7 +217,7 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
    - The continuation runner reads the rows by `intention_id`. It stamps `delivered_at` and `delivered_session_id = 'intent-<root>'` **in the fenced commit** (§4.5), from `arrival.inbox_ids`, not when it reads them. A released lease or a rollback therefore still finds them undelivered, and F098's delivery-rate metric stays meaningful.
    - F098's reconciler DAG pass (`InboxDagPass`) selects a DAG when it has an origin **or** an open `continue` intention. A DAG spawned by a continuation has no origin session, and without the second condition its lost row would never be repaired.
 2. **Same-transaction transition.** `ResultInboxStore.insert` accepts a session (or the write uses one `WITH t AS (UPDATE brain.intentions … RETURNING id) INSERT …` statement). The inbox row and the move from `pending`/`awaiting_owner` to `result_ready` then commit together.
-   - **A work result that arrives while the intention is `awaiting_owner` is inserted and held.** It does not move the intention. Only the owner's answer, or the last terminal proposal of that arrival, moves it to `result_ready` (§4.4 item 6). The held rows then join that batch.
+   - **A work result that arrives while the intention is `awaiting_owner` is inserted and held.** It does not move the intention. It moves to `result_ready` only when that arrival is fully terminal: every proposal and question, per §4.4 item 6. The held rows then join that batch.
 3. **Re-arrivals.**
    - A DAG `retry_node` bumps `delivery_generation`, and a decided proposal or an owner answer produces a new result.
    - If the intention is `closed`, its policy is `continue`, and its root is still open, the writer reopens it to `result_ready`. Otherwise (any other policy, or a closed root) the result becomes an `intention_report` carrying the raw result.
@@ -531,7 +531,7 @@ The F098 A and C classification of scheduled, inline and spawn rows is pinned, a
   - The depth and spawn limits remove the spawn tools, make `resolve_intention` refuse `continue` and `revise`, and make the gate escalate the next claim without running a turn.
   - A cancel cascades, blocks further spawns, and cancels a running continuation task. Every later tool call in the lineage is refused, including calls from the `owner` root task itself if it was already running.
 - **Batch parent.** A batch holding intentions of depth 1 and 2 spawns children at depth 3, parented to the depth-2 intention. At `MAX_DEPTH`, that spawn is refused.
-- **Re-arrival during an ask.** A row arriving while a turn decides `ask` leaves the intention `awaiting_owner`. The row is consumed only in the batch that wakes after the owner's answer.
+- **Re-arrival during an ask.** A row arriving while a turn decides `ask` leaves the intention `awaiting_owner`. The row is consumed only in the batch that wakes when the arrival is fully terminal (§4.4 item 6).
 - **Batch answers.** An owner answer or a proposal decision for a batch arrival wakes every intention in that arrival, and they are claimed together.
 - Quiet hours defer only the Telegram push, idempotently.
 - **Wiring tests.** They drive the real worker, scheduler, orchestrator and REST paths end to end, and fail when the hook is removed.
