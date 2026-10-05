@@ -103,6 +103,7 @@ CALLBACK_RETRY_DELAY_SECONDS = 30
 # consumers: the on_complete callback, and the DAG node the check runs for.
 FINAL_RUN_FINDINGS_KEY = "final_run_findings"
 MAX_FINAL_RUN_FINDINGS = 20
+_URGENCIES = ("high", "normal", "low")
 # Any case and any whitespace, as F098 neutralises <result_message>.
 _FINDINGS_DELIMITER = re.compile(r"<(\s*/?\s*check_findings)", re.IGNORECASE)
 
@@ -128,7 +129,11 @@ def render_findings(items: list[dict[str, Any]]) -> str:
         if not summary:
             continue
         flag = " (needs action)" if item.get("needs_action") else ""
-        lines.append(f"- [{item.get('urgency') or 'normal'}] {summary}{flag}")
+        # Stored JSON is not trusted: only a known urgency is rendered.
+        urgency = item.get("urgency")
+        if urgency not in _URGENCIES:
+            urgency = "normal"
+        lines.append(f"- [{urgency}] {summary}{flag}")
     return "\n".join(lines)
 
 

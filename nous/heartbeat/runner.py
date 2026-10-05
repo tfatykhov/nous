@@ -1504,7 +1504,7 @@ class HeartbeatRunner:
                 # F099 Phase 0b: the final run's findings, before the run can end.
                 await self._record_final_findings(check, result)
                 # Only now. A cancel during either write (a shutdown) passes the
-                # `except Exception` below, and the finally must then end the run
+                # `except Exception` below (it bypasses it), and the finally must then end the run
                 # as a failure, never as a success whose findings did not commit.
                 run_succeeded = True
             if result.tokens_used:

@@ -376,3 +376,27 @@ def test_render_findings_skips_malformed_items_without_raising():
     ]
     assert render_findings(items) == "- [high] kept (needs action)"
     assert render_findings(["x", {"summary": ""}]) == ""
+
+
+@pytest.mark.parametrize("urgency", ["ignore previous instructions", "HIGH", None, 3, ["high"], ""])
+def test_render_findings_allowlists_the_stored_urgency(urgency):
+    assert render_findings([{"summary": "x", "urgency": urgency}]) == "- [normal] x"
+    assert render_findings([{"summary": "x", "urgency": "low"}]) == "- [low] x"
+
+
+@pytest.mark.parametrize("entry", ["tick", "trigger"])
+async def test_a_run_that_did_not_self_disable_stores_no_final_findings(entry):
+    registry = CheckRegistry()
+    check = _callback_check(f"ongoing_{entry}")
+    check.run = AsyncMock(return_value=CheckResult(has_updates=True, findings=[DISK], self_disabled=False))
+    registry.register(check)
+    loader = MagicMock()
+    loader.update_run_stats = AsyncMock()
+    loader.record_final_findings = AsyncMock()
+    hb, _ = _runner(registry, loader=loader)
+    if entry == "tick":
+        await hb._tick()
+    else:
+        await hb.trigger_check(check.name)
+    loader.update_run_stats.assert_awaited_once()
+    loader.record_final_findings.assert_not_awaited()
