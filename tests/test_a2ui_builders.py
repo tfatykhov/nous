@@ -288,6 +288,21 @@ def test_heartbeat_findings_renders_a_card_per_finding() -> None:
     assert built.data_model["findings"] == {"abc123def456": "open", "999888777666": "open"}
 
 
+def test_heartbeat_findings_explains_its_buttons_and_binds_a_status_line() -> None:
+    """Tim, 2026-10-05: pressing a button showed nothing, and the three verbs
+    were unexplained. The card now carries a legend and a per-finding status
+    line bound to /status/<fp>, which the action handler patches."""
+    built = heartbeat_findings(FINDINGS_PARAMS)
+    built.validate()
+
+    legend = _text_of(built, "legend")
+    for verb in ("Acknowledge", "Resolve", "Dismiss"):
+        assert verb in legend
+    assert _by_id(built, "f0_status")["text"] == {"path": "/status/abc123def456"}
+    assert built.data_model["status"]["abc123def456"].startswith("Status: open")
+    assert "f0_status" in _by_id(built, "f0_col")["children"]
+
+
 def test_heartbeat_findings_wires_every_verb_to_each_finding() -> None:
     built = heartbeat_findings(FINDINGS_PARAMS)
 
@@ -313,7 +328,7 @@ def test_heartbeat_findings_renders_an_empty_state() -> None:
     built.validate()
 
     assert _text_of(built, "empty") == "No open findings."
-    assert _by_id(built, "root")["children"] == ["header", "empty"]
+    assert _by_id(built, "root")["children"] == ["header", "empty"]  # no legend when empty
 
 
 def test_heartbeat_findings_defaults_its_title_to_the_count() -> None:

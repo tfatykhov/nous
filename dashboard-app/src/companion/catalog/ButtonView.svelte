@@ -26,6 +26,10 @@
 
   let busy = $state(false);
   let error = $state('');
+  // Success feedback: a press that worked must look different from a press
+  // that did nothing. The server's message ("✓ Resolved — …") is shown
+  // inline under the button.
+  let notice = $state('');
 
   const ctx = $derived({ dataModel: store.surfaces[surfaceId]?.dataModel ?? {}, scope });
   const failures = $derived(runChecks(comp.checks as CheckRule[] | undefined, ctx));
@@ -33,6 +37,7 @@
 
   async function onClick() {
     error = '';
+    notice = '';
     const action = comp.action as
       | { event?: { name: string; context?: Record<string, unknown> }; functionCall?: { call: string; args?: Record<string, unknown> } }
       | undefined;
@@ -53,7 +58,8 @@
     busy = true;
     try {
       const result = await transport.postAction(surfaceId, action.event.name, comp.id, resolved);
-      if (!result.ok) error = result.message;
+      if (!result.ok) error = result.message || 'action failed';
+      else notice = result.message || 'Done ✓';
     } finally {
       busy = false;
     }
@@ -73,6 +79,8 @@
   </button>
   {#if error}
     <span class="err" role="alert">{error}</span>
+  {:else if notice}
+    <span class="ok" role="status">{notice}</span>
   {/if}
 </span>
 
@@ -117,6 +125,10 @@
   }
   .err {
     color: var(--crit);
+    font-size: 0.8rem;
+  }
+  .ok {
+    color: var(--ok, var(--accent));
     font-size: 0.8rem;
   }
 </style>

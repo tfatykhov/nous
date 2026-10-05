@@ -497,6 +497,10 @@ async def test_heartbeat_verbs_delegate_to_the_finding_store(
     surface = await _surface_row(db, surface_id)
     assert surface.status == "live"
     assert surface.data_model["findings"]["fp-abc-123"] == "resolve"
+    # Visible feedback: the card's status line and the response message both
+    # say what happened, so a press never looks like a no-op.
+    assert surface.data_model["status"]["fp-abc-123"].startswith("✓ Resolved")
+    assert payload["message"].startswith("✓ Resolved")
     assert payload["resolved"] is False
 
 

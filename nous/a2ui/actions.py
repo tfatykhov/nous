@@ -646,10 +646,16 @@ def _register_default_handlers(router: ActionRouter) -> None:
                 store.record_outcome(fingerprint, OutcomeSignal.POSITIVE)
             except Exception:
                 logger.debug("F092 outcome signal failed", exc_info=True)
-        return ActionResult(
-            message=f"{verb}d {fingerprint[:12]}",
-            data_patches=[(f"/findings/{_escape_pointer(fingerprint)}", verb)],
-        )
+        from .builders.heartbeat_findings import STATUS_AFTER
+
+        status_text = STATUS_AFTER.get(verb, f"{verb}d")
+        patches: list[tuple[str, Any]] = [(f"/findings/{_escape_pointer(fingerprint)}", verb)]
+        # Only cards built with a /status map get the visible status patch:
+        # on an older card the parent is missing, and an all-digit
+        # fingerprint would make the pointer upsert create a LIST parent.
+        if isinstance((ctx.surface.data_model or {}).get("status"), dict):
+            patches.append((f"/status/{_escape_pointer(fingerprint)}", status_text))
+        return ActionResult(message=status_text, data_patches=patches)
 
     async def hb_ack(ctx: ActionContext) -> ActionResult:
         return await _heartbeat_verb(ctx, "acknowledge")
