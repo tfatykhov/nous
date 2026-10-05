@@ -2220,6 +2220,15 @@ def create_app(
                     }
                 except Exception:
                     logger.warning("F098: result inbox metrics failed", exc_info=True)
+            if settings.result_memory_enabled:
+                # F098 Phase C §3.8: what became memory, what was skipped and why.
+                try:
+                    data["result_memory"] = {
+                        "7d": await heart.result_memory.metrics(7),
+                        "30d": await heart.result_memory.metrics(30),
+                    }
+                except Exception:
+                    logger.warning("F098: result memory metrics failed", exc_info=True)
             return JSONResponse(data)
         except Exception as e:
             logger.exception("Dashboard subtasks error")

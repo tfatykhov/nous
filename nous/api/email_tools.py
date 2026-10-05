@@ -33,6 +33,7 @@ from nous.api.call_outcome import current_outcome
 from nous.api.idempotency import normalize_recipients
 from nous.api.tools import _tool_error
 from nous.config import Settings
+from nous.security.secrets import scan_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -41,15 +42,6 @@ class DeliveryUncertain(Exception):
     """The server may have accepted the message: the connection failed during
     the send transaction. Never reported as a definite failure (harness 2b):
     a definite failure frees the send's idempotency key, and this one must not."""
-
-# Secret patterns scanned across subject + body. A hit rejects the send.
-_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"sk-[A-Za-z0-9]{16,}"),
-    re.compile(r"AKIA[0-9A-Z]{12,}"),
-    re.compile(r"password\s*[:=]", re.IGNORECASE),
-    re.compile(r"Bearer [A-Za-z0-9._-]{20,}"),
-)
-
 
 def _ok(text: str) -> dict[str, Any]:
     """MCP-compliant success response."""
@@ -100,11 +92,6 @@ def _read_allowlist_file(path: str, cache: dict[str, Any]) -> set[str]:
     cache["mtime"] = mtime
     cache["addrs"] = addrs
     return addrs
-
-
-def _scan_secrets(text: str) -> bool:
-    """Return True if the text matches any known secret pattern."""
-    return any(p.search(text) for p in _SECRET_PATTERNS)
 
 
 def _strip_tags(s: str) -> str:
@@ -722,7 +709,7 @@ def create_send_email_tool(settings: Settings):
             if html_body
             else ""
         )
-        if _scan_secrets(f"{subject}\n{body}\n{html_body or ''}{html_views}"):
+        if scan_secrets(f"{subject}\n{body}\n{html_body or ''}{html_views}"):
             return _error(
                 "email appears to contain a secret (API key, password, or token); "
                 "refusing to send."

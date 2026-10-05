@@ -192,21 +192,28 @@ class SubtaskWorkerPool:
             await self._record_inbox(subtask)
 
     async def _record_inbox(self, subtask: Subtask) -> None:
-        """F098: queue the finished result for the conversation that spawned it.
+        """F098: queue the finished result for the conversation that spawned it,
+        and (Phase C) write it to memory.
 
         One site for every worker path (hardened, legacy, timeout): the row
-        is re-read so the inbox sees the status that was actually committed.
-        Inline subtasks never come through here — their result is returned
-        in the calling turn. Never raises.
+        is re-read once so both writers see the status that was actually
+        committed. Inline subtasks never come through here — their result is
+        returned in the calling turn. The two writers are independent: each
+        swallows its own errors. Never raises.
         """
-        if getattr(self._settings, "result_inbox_enabled", False) is not True:
+        inbox = getattr(self._settings, "result_inbox_enabled", False) is True
+        memory = getattr(self._settings, "result_memory_enabled", False) is True
+        if not inbox and not memory:
             return
         try:
             row = await self._heart.subtasks.get(subtask.id)
         except Exception:
             logger.warning("F098: could not re-read subtask %s for the inbox", subtask.id.hex[:8], exc_info=True)
             return
-        await record_subtask_result(self._heart.result_inbox, row, self._settings)
+        if inbox:
+            await record_subtask_result(self._heart.result_inbox, row, self._settings)
+        if memory:
+            await self._heart.result_memory.record(row)
 
     async def _execute_subtask(self, subtask: Subtask) -> None:
         """Run the subtask as an agent turn via AgentRunner.

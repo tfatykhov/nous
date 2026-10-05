@@ -99,6 +99,8 @@ async def test_all_tables_exist(db):
         ("heart", "result_inbox"),
         ("heart", "channel_sessions"),
         ("heart", "result_inbox_state"),
+        # F098 Phase C: result memory log (migration 082)
+        ("heart", "result_memory_log"),
     }
     async with db.engine.connect() as conn:
         result = await conn.execute(
