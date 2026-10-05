@@ -100,6 +100,22 @@ def result_text(subtask: Any) -> str:
     return result
 
 
+def memory_status(subtask: Any) -> str:
+    """The status a result memory records.
+
+    A hardened ``incomplete_blocked`` run is stored as ``status='completed'``
+    with ``final_outcome='incomplete_blocked'``; it is a partial result, not
+    a success, so it is recorded as ``blocked``.
+    """
+    if subtask.status == "completed" and getattr(subtask, "final_outcome", None) == "incomplete_blocked":
+        return "blocked"
+    return subtask.status
+
+
+# A blocked partial is neither a success nor a failure (ck_episodes_outcome).
+_EPISODE_OUTCOME = {"completed": "success", "blocked": "partial", "failed": "failure"}
+
+
 def has_conversation_origin(subtask: Any) -> bool:
     return bool(getattr(subtask, "parent_channel", None) or subtask.parent_session_id)
 
@@ -133,6 +149,8 @@ def classify_for_memory(subtask: Any, settings: Settings) -> MemoryDecision:
             return _skip("scheduled_off")
         if subtask.status == "failed":
             return _skip("scheduled_failure")  # the scheduler/heartbeat already surface it
+        if memory_status(subtask) == "blocked":
+            return _skip("scheduled_blocked")  # a partial: tier 2 keeps only substantive results
         if is_launcher_stub(subtask.task, text):
             return _skip("launcher_stub")
         decision = _write("tier2")
@@ -176,16 +194,17 @@ def template_key(task: str) -> str:
 def build_episode_input(subtask: Any, text: str, tier: str, settings: Settings) -> EpisodeInput:
     first_line = (subtask.task or "subtask").strip().splitlines()[0] if (subtask.task or "").strip() else "subtask"
     finished = subtask.completed_at.isoformat() if subtask.completed_at else "unknown"
+    status = memory_status(subtask)
     summary = "\n".join(
         [
             HEADER,
             f"Task: {_one_line(subtask.task or '', _SUMMARY_TASK_CHARS)}",
-            f"Status: {subtask.status} · Finished: {finished} · Subtask: {subtask.id}",
+            f"Status: {status} · Finished: {finished} · Subtask: {subtask.id}",
             _head(text, settings.result_memory_summary_chars),
         ]
     )
     frame = subtask.frame_type or "task"
-    tags = ["subtask-result", f"tier:{tier[-1]}", f"status:{subtask.status}", f"frame:{frame}"]
+    tags = ["subtask-result", f"tier:{tier[-1]}", f"status:{status}", f"frame:{frame}"]
     if tier == "tier2":
         tags.append(f"recurring:{template_key(subtask.task)}")
     return EpisodeInput(
@@ -390,9 +409,7 @@ class ResultMemoryWriter:
             if episode.session_id != ep_input.session_id:
                 # Never close someone else's episode.
                 raise RuntimeError(f"episode start returned unrelated episode {episode.id}")
-            await heart.end_episode(
-                episode.id, "success" if subtask.status == "completed" else "failure", session=session
-            )
+            await heart.end_episode(episode.id, _EPISODE_OUTCOME[memory_status(subtask)], session=session)
             await session.execute(
                 update(ResultMemoryLog)
                 .where(self._pk(subtask.id))

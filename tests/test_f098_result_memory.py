@@ -116,6 +116,19 @@ _CASES = [
         {"result_memory_scheduled": True},
         ("skip", "launcher_stub"),
     ),
+    ("conversation blocked written", {"final_outcome": "incomplete_blocked"}, {}, ("write", "tier1")),
+    (
+        "scheduled blocked",
+        {
+            "parent_session_id": None,
+            "parent_channel": None,
+            "notify": True,
+            "result": BRIEFING,
+            "final_outcome": "incomplete_blocked",
+        },
+        {"result_memory_scheduled": True},
+        ("skip", "scheduled_blocked"),
+    ),
     ("background", {"parent_session_id": None, "parent_channel": None}, {}, ("skip", "background")),
     ("secret", {"result": "token sk-" + "a" * 30 + " " + "x" * 300}, {}, ("skip", "secret_detected")),
 ]
@@ -216,13 +229,13 @@ async def mem_env(db, mock_embeddings, monkeypatch):
     await heart.close()
 
 
-async def _finished(env, *, result=LONG, status="completed", **create):
+async def _finished(env, *, result=LONG, status="completed", final_outcome="completed", **create):
     create.setdefault("task", "Research ski resorts near Innsbruck")
     if "parent_session_id" not in create and "notify" not in create:
         create["parent_session_id"] = "S1"
     st = await env.heart.subtasks.create(**create)
     if status == "completed":
-        await env.heart.subtasks.complete(st.id, result, final_outcome="completed", attempts=1)
+        await env.heart.subtasks.complete(st.id, result, final_outcome=final_outcome, attempts=1)
     else:
         await env.heart.subtasks.fail(st.id, result, final_outcome="errored", attempts=1)
     return await env.heart.subtasks.get(st.id)
@@ -456,6 +469,17 @@ async def test_conversation_failure_is_written_as_failure(mem_env):
     [ep] = await _episodes(env, st.id)
     assert ep.outcome == "failure" and "status:failed" in _tags(ep)
     assert "Error: Could not reach" in ep.summary
+
+
+async def test_blocked_result_is_not_written_as_success(mem_env):
+    """incomplete_blocked is status='completed' with final_outcome='incomplete_blocked' (P2-2)."""
+    env = mem_env
+    st = await _finished(env, final_outcome="incomplete_blocked", result="Partial: two resorts checked. " * 14)
+    assert await env.heart.result_memory.record(st) == "written"
+    [ep] = await _episodes(env, st.id)
+    assert ep.outcome == "partial"
+    assert "status:blocked" in _tags(ep) and "status:completed" not in _tags(ep)
+    assert "Status: blocked" in ep.summary
 
 
 # ---------------------------------------------------------------------------
