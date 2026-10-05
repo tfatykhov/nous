@@ -37,6 +37,7 @@ from nous.api.call_outcome import CallOutcome
 from nous.api.call_outcome import _current as _outcome_var  # the one setter (harness 2b)
 from nous.api.execution_context import ExecutionContext, resolve_context
 from nous.brain.brain import Brain
+from nous.brain.intentions import AUTHORITY_INTERNAL
 from nous.brain.schemas import NON_PREDICTION_OUTCOMES, ReasonInput, RecordInput
 from nous.config import PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS, Settings
 from nous.heart.exemplars import parse_label
@@ -280,6 +281,30 @@ def _required_handler_params(handler: Callable[..., Any]) -> set[str] | None:
     return None if accepts_var_kw else named
 
 
+# Sent as _intention_id when the turn's lineage stamp could not be read:
+# spec_from_tool_call refuses it (IntentionParentMissing) instead of letting the
+# spawn become a new owner root.
+UNREADABLE_LINEAGE = "unreadable-lineage"
+
+
+def _origin_args(ctx: ExecutionContext) -> dict[str, Any]:
+    """F099 section 4.2: the spawning turn's origin, as a spawn tool's hidden arguments."""
+    out: dict[str, Any] = {"_origin_kind": ctx.kind}
+    if ctx.session_id is not None:
+        out["_origin_session_id"] = ctx.session_id
+    if ctx.channel:
+        out["_origin_channel"] = ctx.channel
+    if ctx.decision_id:
+        out["_decision_id"] = ctx.decision_id
+    if ctx.intention_id is not None:
+        out["_intention_id"] = str(ctx.intention_id)
+    elif ctx.authority == AUTHORITY_INTERNAL:
+        # A damaged stamp failed closed in lineage_from_stamp (no id, but
+        # internal_only): refuse the spawn rather than make it a root.
+        out["_intention_id"] = UNREADABLE_LINEAGE
+    return out
+
+
 class ToolDispatcher:
     """Registers tool handlers and dispatches tool calls from the API.
 
@@ -311,15 +336,30 @@ class ToolDispatcher:
         # Repair model-emitted input where a required arg leaked as an XML
         # <parameter> tag inside another string arg (see _salvage_leaked_args).
         self._arg_salvage_enabled = arg_salvage_enabled
+        # F099: spawn tools that record an intention, so dispatch passes them
+        # where the call came from. Opt-in per registration, set only while
+        # NOUS_INTENTIONS_ENABLED is on: with it off no handler sees a new argument.
+        self._origin_aware: set[str] = set()
 
     def is_registered(self, name: str) -> bool:
         """True when ``name`` has a handler -- the only way a call can run."""
         return name in self._handlers
 
-    def register(self, name: str, handler: Callable[..., Any], schema: dict[str, Any]) -> None:
-        """Register a tool handler with its JSON schema."""
+    def register(
+        self, name: str, handler: Callable[..., Any], schema: dict[str, Any], *, origin_aware: bool = False
+    ) -> None:
+        """Register a tool handler with its JSON schema.
+
+        ``origin_aware`` (F099 section 4.2): dispatch passes the handler the
+        spawning turn's origin (``_origin_kind`` and the rest, see
+        ``_origin_args``), for its intention row.
+        """
         self._handlers[name] = handler
         self._schemas[name] = schema
+        if origin_aware:
+            self._origin_aware.add(name)
+        else:
+            self._origin_aware.discard(name)
         self._tool_schema_cache.clear()  # F036: invalidate on registration
 
     def _repair(self, name: str, args: dict[str, Any]) -> tuple[dict[str, Any], list[str], list[str]]:
@@ -418,6 +458,15 @@ class ToolDispatcher:
                     True,
                 )
 
+            # F099 (security): an argument whose name starts with "_" is the
+            # dispatcher's to set, never the model's. Drop every one the model
+            # sent, for every tool, before anything below injects the real value.
+            # A forged _intention_id would join a foreign lineage, a forged
+            # _channel or _session_id would re-route a result (F098), and a
+            # forged _lookup_token would make spawn_sync read another row. No
+            # tool schema declares a "_" property; _schema_type_errors and the
+            # missing-argument error already treat these keys as not the model's.
+            args = {k: v for k, v in args.items() if not k.startswith("_")}
             if name in self._BACKGROUND_AWARE_TOOLS:
                 # compose_surface derives origin from it: a heartbeat or
                 # scheduled turn composes origin="agent" apps (F092.1 push
@@ -425,14 +474,14 @@ class ToolDispatcher:
                 args = {**args, "_is_background": is_background}
             if session_id is not None and name == "spawn_task":
                 args = {**args, "_session_id": session_id}
-            if name in ("spawn_task", "spawn_sync"):
+            if ctx.decision_id and name in ("spawn_task", "spawn_sync"):
                 # F099 Phase 0a: the spawning turn's Plan decision, stored on the
                 # subtask row so its reason outlives the turn. Not a routing key.
-                # A value the model sent itself is dropped first: only the
-                # dispatcher may name the turn's decision.
-                args = {k: v for k, v in args.items() if k != "_decision_id"}
-                if ctx.decision_id:
-                    args = {**args, "_decision_id": ctx.decision_id}
+                args = {**args, "_decision_id": ctx.decision_id}
+            if name in self._origin_aware:
+                # F099 section 4.2: where the spawn came from, for its intention
+                # row only. _session_id / _channel below stay the routing keys (I5).
+                args = {**args, **_origin_args(ctx)}
             if ctx.channel and name in ("spawn_task", "dag_create"):
                 # F098: the channel outlives the session, so the result can
                 # reach the conversation after the session has expired.
