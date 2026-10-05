@@ -5351,6 +5351,9 @@ def register_dag_tools(
                 # F098: injected by ToolDispatcher on a conversation turn.
                 origin_channel=kwargs.get("_channel"),
                 origin_session_id=kwargs.get("_session_id"),
+                # F099 Phase 0a: why the DAG exists. Before Phase 1 the only
+                # reason text a dag_create call carries is its description.
+                original_request=(kwargs.get("description") or "").strip() or None,
             )
 
             dag = await store.create(request)

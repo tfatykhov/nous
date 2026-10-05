@@ -316,7 +316,7 @@ class WorkQueueCheck(BaseCheck):
             return False
         dag = None
         try:
-            request = self._request_factory(item)
+            request = self._with_reason(self._request_factory(item), item)
             dag = await self._dag_store.create(request)
             await self._items.mark_dispatched(claimed.id, dag.id)
         except Exception as e:
@@ -356,6 +356,16 @@ class WorkQueueCheck(BaseCheck):
         started = await self._safe_start_dag(dag.id)
         findings.append(self._dispatch_finding(item, dag.id, started))
         return True
+
+    @staticmethod
+    def _with_reason(request, item: WorkItem):
+        """F099 Phase 0a: the DAG records the item it was dispatched for.
+
+        A request factory that set its own original_request keeps it.
+        """
+        if request.original_request or not item.title:
+            return request
+        return request.model_copy(update={"original_request": item.title})
 
     def _dispatch_finding(self, item: WorkItem, dag_id, started: bool) -> Finding:
         if started:
@@ -412,7 +422,7 @@ class WorkQueueCheck(BaseCheck):
         """
         dag = None
         try:
-            request = self._request_factory(item)
+            request = self._with_reason(self._request_factory(item), item)
             dag = await self._dag_store.create(request)
             await self._items.mark_dispatched(row_id, dag.id)
         except Exception as e:

@@ -203,3 +203,131 @@ async def test_spawn_sync_forwards_the_decision_to_the_row_it_creates(db):
     (row,) = await manager.list(limit=10)
     assert row.metadata_["plan_decision_id"] == PLAN
     assert row.parent_session_id is None  # I5: spawn_sync still records no session
+
+
+# ---------------------------------------------------------------------------
+# original_request (D1: dag_create stores its description; the work queue
+# stores the item title)
+# ---------------------------------------------------------------------------
+
+
+class _Orch:
+    clock_wired = True
+    approvals_wired = False
+
+    def __init__(self, settings):
+        self._settings = settings
+        self.start_dag = AsyncMock()
+
+
+async def _dag_of(db, agent):
+    from nous.storage.models import ExecutionDAG
+
+    async with db.session() as s:
+        return (await s.execute(select(ExecutionDAG).where(ExecutionDAG.agent_id == agent))).scalar_one()
+
+
+@pytest.mark.parametrize(
+    ("description", "expected"),
+    [
+        ("  Summarise overnight alerts for the morning brief ", "Summarise overnight alerts for the morning brief"),
+        ("", None),
+    ],
+)
+async def test_dag_create_stores_its_description_as_the_original_request(db, description, expected):
+    from nous.api.tools import register_dag_tools
+    from nous.dag.store import DAGStore
+
+    agent = f"f099-0a-{uuid.uuid4().hex[:8]}"
+    settings = Settings(_env_file=None, agent_id=agent)
+    d = ToolDispatcher()
+    register_dag_tools(d, DAGStore(db, agent, settings), _Orch(settings), settings=settings)
+    text, is_error = await d.dispatch(
+        "dag_create",
+        {
+            "name": "nightly",
+            "description": description,
+            "nodes": [{"name": "n", "type": "subtask", "instructions": "x"}],
+        },
+        session_id="S1",
+        context=ExecutionContext(kind="interactive", session_id="S1"),
+    )
+    assert not is_error, text
+    assert (await _dag_of(db, agent)).original_request == expected
+
+
+def _wq(db, agent, path, request_factory=None):
+    from nous.dag.orchestrator import DAGOrchestrator
+    from nous.dag.store import DAGStore
+    from nous.heart.work_queue import WorkQueueItemManager
+    from nous.heartbeat.work_queue import FileJsonlAdapter, WorkQueueCheck
+
+    settings = Settings(_env_file=None, agent_id=agent, work_queue_enabled=True, work_queue_source="file_jsonl")
+    store = DAGStore(db, agent, settings)
+    orch = DAGOrchestrator(store=store, subtask_mgr=AsyncMock(), dynamic_loader=MagicMock(), settings=settings)
+    items = WorkQueueItemManager(db, agent)
+    check = WorkQueueCheck(
+        adapter=FileJsonlAdapter(str(path)),
+        items_mgr=items,
+        dag_store=store,
+        orchestrator=orch,
+        settings=settings,
+        request_factory=request_factory,
+    )
+    return check, items
+
+
+async def test_work_queue_dag_records_the_item_title(tmp_path, db):
+    path = tmp_path / "queue.jsonl"
+    path.write_text(json.dumps({"external_id": "a1", "title": "Fix the flaky login test", "body": "do it"}))
+    agent = f"f099-0a-{uuid.uuid4().hex[:8]}"
+    check, _ = _wq(db, agent, path)
+    await check.run()
+    assert (await _dag_of(db, agent)).original_request == "Fix the flaky login test"
+
+
+async def test_a_custom_request_factory_still_records_the_item_title(tmp_path, db):
+    from nous.dag.schemas import DAGCreateRequest, DAGNodeSpec, DAGNodeType
+
+    def factory(item):
+        return DAGCreateRequest(
+            name="wq-custom", nodes=[DAGNodeSpec(name="n", type=DAGNodeType.subtask, instructions=item.body)]
+        )
+
+    path = tmp_path / "queue.jsonl"
+    path.write_text(json.dumps({"external_id": "a2", "title": "Rotate the API keys", "body": "do it"}))
+    agent = f"f099-0a-{uuid.uuid4().hex[:8]}"
+    check, _ = _wq(db, agent, path, request_factory=factory)
+    await check.run()
+    assert (await _dag_of(db, agent)).original_request == "Rotate the API keys"
+
+
+async def test_a_factory_that_sets_its_own_original_request_keeps_it(tmp_path, db):
+    from nous.dag.schemas import DAGCreateRequest, DAGNodeSpec, DAGNodeType
+
+    def factory(item):
+        return DAGCreateRequest(
+            name="wq-own",
+            original_request="from the factory",
+            nodes=[DAGNodeSpec(name="n", type=DAGNodeType.subtask, instructions=item.body)],
+        )
+
+    path = tmp_path / "queue.jsonl"
+    path.write_text(json.dumps({"external_id": "a3", "title": "ignored", "body": "do it"}))
+    agent = f"f099-0a-{uuid.uuid4().hex[:8]}"
+    check, _ = _wq(db, agent, path, request_factory=factory)
+    await check.run()
+    assert (await _dag_of(db, agent)).original_request == "from the factory"
+
+
+async def test_an_orphan_redispatch_records_the_item_title(tmp_path, db):
+    from nous.heartbeat.work_queue import WorkItem
+
+    agent = f"f099-0a-{uuid.uuid4().hex[:8]}"
+    check, items = _wq(db, agent, tmp_path / "unused.jsonl")
+    row = await items.claim_for_dispatch(source="file_jsonl", external_id="o1", payload={"title": "Renew the TLS cert"})
+    item = WorkItem(
+        external_id="o1", title="Renew the TLS cert", body="do it", state="open", terminal=False, payload={}
+    )
+    assert await check._reconcile_orphan(row.id, item, []) is True
+    assert (await _dag_of(db, agent)).original_request == "Renew the TLS cert"
