@@ -112,7 +112,7 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
 - I3 below guarantees that authority only ever narrows.
 
 **Default wake policy, by origin.**
-- Outside a lineage, a spawn tool's optional `wake_policy` argument overrides the default, but cannot widen `none` to `continue` for a code path.
+- Outside a lineage, a spawn tool's optional `wake_policy` argument overrides the default. **Only foreground turns (`interactive`, `mcp`) may widen `none` to `continue`.** Code paths and background model turns cannot, so a background monitor cannot turn its own work into an autonomous chain.
 - **Inside an `internal_only` lineage the argument is ignored.** The policy is always `continue`, or `none` for an inline spawn, so no lineage result is ever routed anywhere except back to the continuation.
 
 | Origin of the spawn | Default |
@@ -170,9 +170,10 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
   - **Who may spawn:** within a lineage, **only `continuation` turns** are offered `spawn_task` and `dag_create`. A lineage subtask, DAG node or check gets no spawn tools at all, which matches its `CONTEXT_POLICY` (`spawn=False`) in every policy mode.
   - **F087 summary turn:** it is skipped for **every DAG whose intention is `internal_only`**, whatever its wake policy, so it never runs with outward tools for a lineage DAG. The continuation is the consumer.
   - **Approval nodes:** an `internal_only` `dag_create` that includes an `approval` node is refused. Owner-facing questions from a lineage go only through proposals and questions (§4.4), which respect quiet hours.
+  - **Dynamic checks created from a lineage** (`heartbeat_check_create` is denylisted for `internal_only`, but a lineage DAG's check node creates a check through the orchestrator) carry the lineage stamp into the check's metadata, so the narrowed tool set applies to every run of that check. Phase 2 must test this.
 - **I4. One turn consumer per arrival.**
   - `continue` → the continuation runner.
-  - `report` → the chat inbox, as F098 Phase A. The writer inserts the inbox row and closes the intention (`close_reason = 'delivered'`) in one transaction, so a `report` intention never becomes `result_ready` and is never claimed by a continuation.
+  - `report` → the chat inbox, as F098 Phase A. In Phase 2 the writer inserts the inbox row and closes the intention (`close_reason = 'delivered'`) in one transaction, so a `report` intention never becomes `result_ready` and is never claimed by a continuation. In Phase 1 every close is `legacy`.
   - `remember` → today's delivery (the notify push and any F098 row), plus a memory write when F098 Phase C is on.
   - `none` → today's behaviour.
 
