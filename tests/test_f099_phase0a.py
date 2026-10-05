@@ -400,3 +400,39 @@ async def test_a_decision_nothing_spawned_from_is_still_deleted(_plan_env, path)
     else:
         assert await engine.finalize(decision_id, description="short", confidence=0.8) is None
     assert not await _decision_exists(brain, decision_id)
+
+
+async def test_a_crash_between_claim_and_link_keeps_the_title_for_the_reconciler(tmp_path, db, monkeypatch):
+    """An adapter with payload={} still gets its title into original_request after recovery."""
+    from datetime import timedelta
+
+    from nous.heartbeat import work_queue as wq
+    from nous.heartbeat.work_queue import WorkItem
+    from nous.storage.models import ExecutionDAG
+
+    class _EmptyPayloadAdapter(wq.FileJsonlAdapter):
+        async def list_active(self):
+            return [WorkItem(external_id="ext-9", title="Real title", body="b", state="open", terminal=False)]
+
+    agent = f"f099-0a-{uuid.uuid4().hex[:8]}"
+    check, items = _wq(db, agent, tmp_path / "unused.jsonl")
+    check._adapter = _EmptyPayloadAdapter(str(tmp_path / "unused.jsonl"))
+    monkeypatch.setattr(wq, "_RECONCILER_GRACE", timedelta(0))
+
+    real_mark = items.mark_dispatched
+    items.mark_dispatched = AsyncMock(side_effect=RuntimeError("simulated crash"))
+    await check.run()  # claimed, DAG created then cancelled, row left undispatched
+    items.mark_dispatched = real_mark
+    await check.run()  # the reconciler rebuilds the item from the row
+
+    async with db.session() as s:
+        dags = (
+            (
+                await s.execute(
+                    select(ExecutionDAG).where(ExecutionDAG.agent_id == agent).order_by(ExecutionDAG.created_at)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert dags[-1].original_request == "Real title"
