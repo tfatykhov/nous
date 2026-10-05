@@ -1,6 +1,6 @@
 # Environment Variables
 
-Every setting Nous reads, with its default and the reasoning behind it. Part of the [Nous development guide](../../CLAUDE.md).
+Settings Nous reads, with their defaults and the reasoning behind them. `nous/config.py` is the full list; a setting without a row here has no documented rationale yet. Part of the [Nous development guide](../../CLAUDE.md).
 Settings are defined in `nous/config.py`; this file is large, so search it for the variable name rather than reading it top to bottom.
 
 DB connection vars are **unprefixed** (shared with docker-compose). All others use `NOUS_` prefix:

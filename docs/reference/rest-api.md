@@ -1,6 +1,6 @@
 # REST Endpoints
 
-Routes served by `nous/api/rest.py`. Part of the [Nous development guide](../../CLAUDE.md).
+Documented routes served by `nous/api/rest.py`, which is the full list. Part of the [Nous development guide](../../CLAUDE.md).
 
 | Method | Path | Description |
 |--------|------|-------------|

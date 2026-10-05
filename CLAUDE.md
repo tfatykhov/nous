@@ -122,7 +122,7 @@ uv run python -m nous.main
 
 ### Environment Variables
 
-DB connection vars are **unprefixed** (shared with docker-compose). All others use `NOUS_` prefix. Settings are defined in `nous/config.py`; every variable, its default and its rationale is in [docs/reference/environment-variables.md](docs/reference/environment-variables.md).
+DB connection vars are **unprefixed** (shared with docker-compose). All others use `NOUS_` prefix. Settings are defined in `nous/config.py`, which is the source of truth; [docs/reference/environment-variables.md](docs/reference/environment-variables.md) documents defaults and rationale for the settings that have a row there.
 
 ### Dashboard (Svelte v2)
 
@@ -134,11 +134,11 @@ Detailed reference lives in `docs/reference/` so it is read only when a task nee
 
 | Doc | Contents | Read when |
 |-----|----------|-----------|
-| [Environment variables](docs/reference/environment-variables.md) | Every setting: default, rationale, measured evidence, rollback notes | Adding or changing a setting or feature flag, or debugging config. It is large: search it for the variable name. |
+| [Environment variables](docs/reference/environment-variables.md) | Settings with a documented default, rationale, measured evidence or rollback notes (`nous/config.py` is the full list) | Adding or changing a setting or feature flag, or debugging config. It is large: search it for the variable name. |
 | [Shipped features](docs/reference/shipped-features.md) | Per-feature ship log with design rationale and invariants | Touching a shipped feature (an `F0xx` number, a harness phase) |
 | [Project structure](docs/reference/project-structure.md) | Per-file map of `nous/` and `nous_eval/` | Locating a module |
-| [REST API](docs/reference/rest-api.md) | Every endpoint | Adding or changing an endpoint or dashboard route |
-| [Agent tools](docs/reference/agent-tools.md) | Every agent tool and its frame access | Adding or changing a tool |
+| [REST API](docs/reference/rest-api.md) | Documented endpoints (`nous/api/rest.py` is the full list) | Adding or changing an endpoint or dashboard route |
+| [Agent tools](docs/reference/agent-tools.md) | Documented agent tools and their frame access (the `dispatcher.register()` calls are the full list) | Adding or changing a tool |
 
 **Keep them in sync:** a new setting, shipped feature, module, endpoint or tool gets its row in the matching reference doc in the same PR, not in this file. Feature status also goes in `docs/features/INDEX.md`. Older specs that say "update the CLAUDE.md env table" mean `docs/reference/environment-variables.md`.
 

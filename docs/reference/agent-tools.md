@@ -1,6 +1,6 @@
 # Agent Tools
 
-Tools the agent can call, and the cognitive frames each is offered in. Part of the [Nous development guide](../../CLAUDE.md).
+Documented tools the agent can call, and the cognitive frames each is offered in; the `dispatcher.register()` calls are the full list. Part of the [Nous development guide](../../CLAUDE.md).
 
 | Tool | Frame Access | Description |
 |------|-------------|-------------|
