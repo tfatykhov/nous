@@ -5810,174 +5810,177 @@ def register_dag_tools(
     dispatcher.register(
         "dag_create",
         dag_create,
-        _with_intent_params(
-            {
-                "type": "object",
-                "description": (
-                    "Create a DAG to orchestrate subtasks and checks with dependency tracking. "
-                    "You do NOT need to poll for the result: when the DAG reaches a terminal "
-                    "state its outcome is delivered to you automatically (F087), so create it "
-                    "and move on. Use dag_manage only when the user asks about progress "
-                    "mid-flight, to cancel or retry, or to look up a DAG whose delivery you "
-                    "missed or that finished before this session (dag_manage action='recent')."
-                ),
-                "properties": {
-                    "name": {"type": "string", "description": "DAG name"},
-                    "description": {"type": "string"},
-                    "nodes": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "name": {"type": "string"},
-                                # F066.1 (2026-05-23): added "fix" so fix-stage
-                                # recovery nodes are authorable. Phase 1 ships
-                                # rule-based dispatch; Phase 1.5 (NOUS_DAG_FIX_LLM_
-                                # DISPATCH_ENABLED) routes to Haiku tool-use.
-                                "type": {
-                                    "type": "string",
-                                    "enum": node_type_enum,
-                                    "description": (
-                                        "'callback' runs AFTER its predecessors and receives "
-                                        "their results as context — use it to interpret or act "
-                                        "on what earlier nodes produced (point a context_flow "
-                                        "edge at it). It accepts frame_type / model / "
-                                        "timeout_seconds like a subtask. Requires "
-                                        "NOUS_DAG_CALLBACK_EXECUTION_ENABLED=true; with the flag "
-                                        "off a callback completes instantly without running. "
-                                        "'gate' currently auto-passes — it is a marker, not an "
-                                        "enforced quality check. Note: 'tools' below is honored "
-                                        "ONLY for 'check' nodes — on every other node type "
-                                        "(subtask, callback, gate, fix) it is silently ignored."
-                                    )
-                                    + approval_help,
-                                },
-                                "instructions": {"type": "string"},
-                                "tools": {"type": "array", "items": {"type": "string"}},
-                                "frame_type": {"type": "string"},
-                                "model": {"type": "string"},
-                                "timeout_seconds": {
-                                    "type": "integer",
-                                    "minimum": 1,
-                                    "description": (
-                                        "Execution timeout in seconds (default: NOUS_DAG_NODE_DEFAULT_TIMEOUT, ceiling: "
-                                        "NOUS_DAG_NODE_MAX_TIMEOUT). F087: now a REAL bound — a node still executing past "
-                                        "this plus NOUS_DAG_NODE_TIMEOUT_GRACE_SECONDS is cancelled and failed, so size it "
-                                        "to the work rather than leaving the default on a long job."
-                                    ),
-                                },
-                                "stall_timeout_seconds": {
-                                    "type": "integer",
-                                    "minimum": 0,
-                                    "description": (
-                                        "F064.1: max seconds without activity before failing this node. 0 = disabled for "
-                                        "this node. Unset = inherit NOUS_DAG_NODE_DEFAULT_STALL_TIMEOUT."
-                                    ),
-                                },
-                                "completion_condition": {"type": "string"},
-                                "completion_check": {
-                                    "type": "string",
-                                    "description": (
-                                        "Shell command polled each tick. Exit 0 = success, 1 = failed, 2 = still running."
-                                    ),
-                                },
-                                "completion_check_interval": {
-                                    "type": "integer",
-                                    "description": "Seconds between completion check polls (default: every tick)",
-                                },
-                                "max_check_attempts": {
-                                    "type": "integer",
-                                    "description": "Max poll attempts before node fails",
-                                },
-                                # F066.1 — fix-stage recovery fields. Only meaningful
-                                # when type='fix'; the DAGCreateRequest validator
-                                # enforces parent_node + non-empty fix_actions for
-                                # fix nodes and rejects these fields on non-fix nodes.
-                                "parent_node": {
-                                    "type": "string",
-                                    "description": (
-                                        "F066.1 (type='fix' only): name of the node this fix attaches to. Fires when the "
-                                        "parent transitions to 'failed'. The matching 'on_failure' edge MUST point from "
-                                        "the parent to this fix node — i.e. from_node = (this parent_node value), to_node "
-                                        "= (the fix node's own name). Pointing the edge the other direction fails "
-                                        "validation."
-                                    ),
-                                },
-                                "fix_actions": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "string",
-                                        "enum": [
-                                            "retry_as_is",
-                                            "retry_with_amended_prompt",
-                                            "mark_unrecoverable",
-                                            "skip_and_continue",
-                                        ],
-                                    },
-                                    "description": (
-                                        "F066.1 (type='fix' only): allowed action vocabulary. Phase 1 dispatcher rules: "
-                                        "incomplete/validation_failed errors → retry_as_is; timed_out → skip_and_continue "
-                                        "(or mark_unrecoverable); other errors → skip_and_continue then mark_unrecoverable "
-                                        "as final fallback. retry_with_amended_prompt only acts when "
-                                        "NOUS_DAG_FIX_LLM_DISPATCH_ENABLED=true."
-                                    ),
-                                },
-                                "max_fix_attempts": {
-                                    "type": "integer",
-                                    "minimum": 1,
-                                    "maximum": 3,
-                                    "description": (
-                                        "F066.1 (type='fix' only): max fix attempts per parent failure. Default 1."
-                                    ),
-                                },
-                                "expected_modes": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                    "description": (
-                                        "F066.1 (type='fix' only): declared failure modes for typed dispatch (Phase 2). "
-                                        "Phase 1 ignores this field."
-                                    ),
-                                },
-                                **undoable_properties,
-                                **approval_properties,
+        {
+            "type": "object",
+            "description": (
+                "Create a DAG to orchestrate subtasks and checks with dependency tracking. "
+                "You do NOT need to poll for the result: when the DAG reaches a terminal "
+                "state its outcome is delivered to you automatically (F087), so create it "
+                "and move on. Use dag_manage only when the user asks about progress "
+                "mid-flight, to cancel or retry, or to look up a DAG whose delivery you "
+                "missed or that finished before this session (dag_manage action='recent')."
+            ),
+            "properties": {
+                "name": {"type": "string", "description": "DAG name"},
+                "description": {"type": "string"},
+                "nodes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            # F066.1 (2026-05-23): added "fix" so fix-stage
+                            # recovery nodes are authorable. Phase 1 ships
+                            # rule-based dispatch; Phase 1.5 (NOUS_DAG_FIX_LLM_
+                            # DISPATCH_ENABLED) routes to Haiku tool-use.
+                            "type": {
+                                "type": "string",
+                                "enum": node_type_enum,
+                                "description": (
+                                    "'callback' runs AFTER its predecessors and receives "
+                                    "their results as context — use it to interpret or act "
+                                    "on what earlier nodes produced (point a context_flow "
+                                    "edge at it). It accepts frame_type / model / "
+                                    "timeout_seconds like a subtask. Requires "
+                                    "NOUS_DAG_CALLBACK_EXECUTION_ENABLED=true; with the flag "
+                                    "off a callback completes instantly without running. "
+                                    "'gate' currently auto-passes — it is a marker, not an "
+                                    "enforced quality check. Note: 'tools' below is honored "
+                                    "ONLY for 'check' nodes — on every other node type "
+                                    "(subtask, callback, gate, fix) it is silently ignored."
+                                )
+                                + approval_help,
                             },
-                            "required": ["name", "type", "instructions"],
-                        },
-                    },
-                    "edges": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "from_node": {"type": "string"},
-                                "to_node": {"type": "string"},
-                                # F066.1: added "on_failure" so the fix-node attach
-                                # edge is authorable. The validator requires exactly
-                                # one on_failure inbound edge per fix node, with
-                                # from_node == fix.parent_node.
-                                "edge_type": {
-                                    "type": "string",
-                                    "enum": ["dependency", "cancel_cascade", "context_flow", "on_failure"],
-                                },
+                            "instructions": {"type": "string"},
+                            "tools": {"type": "array", "items": {"type": "string"}},
+                            "frame_type": {"type": "string"},
+                            "model": {"type": "string"},
+                            "timeout_seconds": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": (
+                                    "Execution timeout in seconds (default: NOUS_DAG_NODE_DEFAULT_TIMEOUT, ceiling: "
+                                    "NOUS_DAG_NODE_MAX_TIMEOUT). F087: now a REAL bound — a node still executing past "
+                                    "this plus NOUS_DAG_NODE_TIMEOUT_GRACE_SECONDS is cancelled and failed, so size it "
+                                    "to the work rather than leaving the default on a long job."
+                                ),
                             },
-                            "required": ["from_node", "to_node"],
+                            "stall_timeout_seconds": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "description": (
+                                    "F064.1: max seconds without activity before failing this node. 0 = disabled for "
+                                    "this node. Unset = inherit NOUS_DAG_NODE_DEFAULT_STALL_TIMEOUT."
+                                ),
+                            },
+                            "completion_condition": {"type": "string"},
+                            "completion_check": {
+                                "type": "string",
+                                "description": (
+                                    "Shell command polled each tick. Exit 0 = success, 1 = failed, 2 = still running."
+                                ),
+                            },
+                            "completion_check_interval": {
+                                "type": "integer",
+                                "description": "Seconds between completion check polls (default: every tick)",
+                            },
+                            "max_check_attempts": {
+                                "type": "integer",
+                                "description": "Max poll attempts before node fails",
+                            },
+                            # F066.1 — fix-stage recovery fields. Only meaningful
+                            # when type='fix'; the DAGCreateRequest validator
+                            # enforces parent_node + non-empty fix_actions for
+                            # fix nodes and rejects these fields on non-fix nodes.
+                            "parent_node": {
+                                "type": "string",
+                                "description": (
+                                    "F066.1 (type='fix' only): name of the node this fix attaches to. Fires when the "
+                                    "parent transitions to 'failed'. The matching 'on_failure' edge MUST point from "
+                                    "the parent to this fix node — i.e. from_node = (this parent_node value), to_node "
+                                    "= (the fix node's own name). Pointing the edge the other direction fails "
+                                    "validation."
+                                ),
+                            },
+                            "fix_actions": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string",
+                                    "enum": [
+                                        "retry_as_is",
+                                        "retry_with_amended_prompt",
+                                        "mark_unrecoverable",
+                                        "skip_and_continue",
+                                    ],
+                                },
+                                "description": (
+                                    "F066.1 (type='fix' only): allowed action vocabulary. Phase 1 dispatcher rules: "
+                                    "incomplete/validation_failed errors → retry_as_is; timed_out → skip_and_continue "
+                                    "(or mark_unrecoverable); other errors → skip_and_continue then mark_unrecoverable "
+                                    "as final fallback. retry_with_amended_prompt only acts when "
+                                    "NOUS_DAG_FIX_LLM_DISPATCH_ENABLED=true."
+                                ),
+                            },
+                            "max_fix_attempts": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 3,
+                                "description": (
+                                    "F066.1 (type='fix' only): max fix attempts per parent failure. Default 1."
+                                ),
+                            },
+                            "expected_modes": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": (
+                                    "F066.1 (type='fix' only): declared failure modes for typed dispatch (Phase 2). "
+                                    "Phase 1 ignores this field."
+                                ),
+                            },
+                            **undoable_properties,
+                            **approval_properties,
                         },
+                        "required": ["name", "type", "instructions"],
                     },
-                    "source": {"type": "string"},
-                    "token_budget": {"type": "integer"},
                 },
-                # `edges` is NOT required: the handler reads kwargs.get("edges", []) and
-                # DAGCreateRequest.edges is default_factory=list, so a single-node DAG
-                # legitimately omits it. Listing it here told the model a lie, and once
-                # required-arg validation began trusting the schema for variadic
-                # handlers that lie became a rejection. `nodes` stays required — its
-                # .get default hits DAGCreateRequest's min_length=1 and fails anyway.
-                "required": ["name", "nodes"],
+                "edges": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "from_node": {"type": "string"},
+                            "to_node": {"type": "string"},
+                            # F066.1: added "on_failure" so the fix-node attach
+                            # edge is authorable. The validator requires exactly
+                            # one on_failure inbound edge per fix node, with
+                            # from_node == fix.parent_node.
+                            "edge_type": {
+                                "type": "string",
+                                "enum": ["dependency", "cancel_cascade", "context_flow", "on_failure"],
+                            },
+                        },
+                        "required": ["from_node", "to_node"],
+                    },
+                },
+                "source": {"type": "string"},
+                "token_budget": {"type": "integer"},
             },
-            intentions_on,
-        ),
-        origin_aware=intentions_on,
+            # `edges` is NOT required: the handler reads kwargs.get("edges", []) and
+            # DAGCreateRequest.edges is default_factory=list, so a single-node DAG
+            # legitimately omits it. Listing it here told the model a lie, and once
+            # required-arg validation began trusting the schema for variadic
+            # handlers that lie became a rejection. `nodes` stays required — its
+            # .get default hits DAGCreateRequest's min_length=1 and fails anyway.
+            "required": ["name", "nodes"],
+        },
     )
+
+    if intentions_on:
+        # F099 I2: the same schema plus intent / wake_policy. Off, the registration
+        # above stands untouched (tests/fixtures/f099_spawn_tool_schemas.json).
+        dispatcher.register(
+            "dag_create", dag_create, _with_intent_params(dispatcher._schemas["dag_create"], True), origin_aware=True
+        )
 
     dispatcher.register(
         "dag_manage",
