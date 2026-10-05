@@ -968,6 +968,7 @@ async def ingest_document_text(
     source_ref: str,
     session_id: str | None = None,
     episode_id: str | None = None,
+    chunk_prefix: str = "",
 ) -> dict[str, Any]:
     """Chunk + embed + persist document text to heart.episode_chunks.
 
@@ -975,6 +976,10 @@ async def ingest_document_text(
       {"inserted": N, "source_ref": ..., "episode_id": ...}  on success
       {"error": "..."}                                        on failure
     Honors settings.document_ingest_enabled and the chunk-size settings.
+
+    ``chunk_prefix`` (F098) is stored in front of every chunk's content, so
+    every path that reads the chunk back shows it; each embedding is still
+    computed from the unprefixed chunk text.
     """
     from uuid import UUID as _UUID
 
@@ -1147,7 +1152,7 @@ async def ingest_document_text(
                         "a": heart.agent_id,
                         "e": str(target_episode_id),
                         "i": start_idx + offset,
-                        "c": chunk_text,
+                        "c": chunk_prefix + chunk_text,
                         "emb": vec_lit,
                         "ref": source_ref,
                     },
