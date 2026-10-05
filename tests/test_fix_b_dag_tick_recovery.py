@@ -460,8 +460,8 @@ async def test_a_run_whose_success_write_was_cancelled_is_not_written_a_second_t
     assert writes == [(True, None)], "one run wrote its stats twice"
     errors = [r.getMessage() for r in _runner_log(caplog) if r.levelno >= logging.ERROR]
     assert errors == [
-        "Heartbeat check 'worker': the write of its success stats was cancelled from within — "
-        "the record may or may not have landed and is not written again"
+        "Heartbeat check 'worker': the write of its success stats or final-run findings was "
+        "cancelled from within — the record may or may not have landed and is not written again"
     ]
 
 
