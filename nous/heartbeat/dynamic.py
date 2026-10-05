@@ -9,12 +9,14 @@ import asyncio
 import contextvars
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from croniter import croniter
-from sqlalchemy import func, select, update
+from sqlalchemy import cast, func, select, update
+from sqlalchemy.dialects.postgresql import JSONB
 
 from nous.api.execution_context import ExecutionContext
 from nous.heartbeat.registry import BaseCheck
@@ -96,6 +98,43 @@ def _meta(model: Any) -> dict:
 
 
 CALLBACK_RETRY_DELAY_SECONDS = 30
+
+# F099 Phase 0b: what a check's final, self-disabling run found travels to its
+# consumers: the on_complete callback, and the DAG node the check runs for.
+FINAL_RUN_FINDINGS_KEY = "final_run_findings"
+MAX_FINAL_RUN_FINDINGS = 20
+_URGENCIES = ("high", "normal", "low")
+# Any case and any whitespace, as F098 neutralises <result_message>.
+_FINDINGS_DELIMITER = re.compile(r"<(\s*/?\s*check_findings)", re.IGNORECASE)
+
+
+def findings_payload(findings: list[Finding]) -> list[dict[str, Any]]:
+    """A run's findings as the JSON that is stored and rendered."""
+    return [
+        {"summary": f.summary, "urgency": f.urgency, "needs_action": bool(f.needs_action)}
+        for f in findings[:MAX_FINAL_RUN_FINDINGS]
+    ]
+
+
+def render_findings(items: list[dict[str, Any]]) -> str:
+    """One line per finding. A summary is text the check's model wrote, so its
+    whitespace is collapsed (a newline would forge another finding line) and a
+    delimiter inside it is neutralised; "" when there is nothing to show.
+    At most MAX_FINAL_RUN_FINDINGS are rendered."""
+    lines = []
+    for item in items[:MAX_FINAL_RUN_FINDINGS]:  # stored JSON is not trusted to be capped
+        if not isinstance(item, dict):
+            continue
+        summary = _FINDINGS_DELIMITER.sub(r"&lt;\1", " ".join(str(item.get("summary") or "").split()))
+        if not summary:
+            continue
+        flag = " (needs action)" if item.get("needs_action") else ""
+        # Stored JSON is not trusted: only a known urgency is rendered.
+        urgency = item.get("urgency")
+        if urgency not in _URGENCIES:
+            urgency = "normal"
+        lines.append(f"- [{urgency}] {summary}{flag}")
+    return "\n".join(lines)
 
 
 class DynamicCheck(BaseCheck):
@@ -536,6 +575,34 @@ class DynamicCheckLoader:
                         updated_at=datetime.now(UTC),
                     )
                 )
+            await session.commit()
+
+    async def record_final_findings(self, check_id: str, findings: list[dict[str, Any]]) -> None:
+        """F099 Phase 0b: keep what the check's final, self-disabling run found.
+
+        Merged into the row's metadata in SQL, so the DAG owner key and the
+        enabled_state_token other paths wrote are kept. The DAG orchestrator
+        reads it back through check_metadata() when it completes the node.
+        Its own write, not part of update_run_stats (whose NO RETRY contract
+        is about a relative increment).
+        """
+        from nous.storage.models import DynamicCheckModel
+
+        # Python objects only, never a pre-serialised string: cast(<str>, JSONB)
+        # would JSON-encode the string a second time, and `metadata || <jsonb
+        # string>` yields an ARRAY (review M1). The cast is needed so the list
+        # is bound as JSON, not as a Postgres ARRAY. Same pattern as
+        # enable_if_unchanged's merge.
+        merged = func.coalesce(DynamicCheckModel.metadata_, func.jsonb_build_object()).op("||")(
+            func.jsonb_build_object(FINAL_RUN_FINDINGS_KEY, cast(findings, JSONB))
+        )
+        async with self._db.session() as session:
+            await session.execute(
+                update(DynamicCheckModel)
+                .where(DynamicCheckModel.id == check_id)  # as update_run_stats: no UUID import needed
+                .where(DynamicCheckModel.agent_id == self._agent_id)
+                .values(metadata_=merged, updated_at=datetime.now(UTC))
+            )
             await session.commit()
 
     async def get_successful_run_count(self, name: str) -> int | None:

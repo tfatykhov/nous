@@ -95,7 +95,7 @@ from nous.dag.store import (
     DAGStore,
 )
 from nous.heart.subtasks import SubtaskQueueFull
-from nous.heartbeat.dynamic import DynamicCheckLimitReached
+from nous.heartbeat.dynamic import FINAL_RUN_FINDINGS_KEY, DynamicCheckLimitReached, render_findings
 from nous.storage.models import DAGNode, ExecutionDAG
 from nous.utils import kill_process_group
 
@@ -1441,6 +1441,24 @@ class DAGOrchestrator:
                 "F087: token accounting failed for node %s", node.name
             )
 
+    async def _final_run_result(self, check_name: str | None, fallback: str) -> str:
+        """F099 Phase 0b: a completed check node's result is what its final run found.
+
+        The heartbeat runner stores the findings on the check's row before
+        the run ends (record_final_findings). No stored findings, or a row
+        that cannot be read: the fixed text the node always had.
+        """
+        if not check_name or not self._dynamic_loader:
+            return fallback
+        try:
+            metadata = await self._dynamic_loader.check_metadata(check_name)
+        except Exception:
+            logger.warning("Could not read the final-run findings of check %s", check_name, exc_info=True)
+            return fallback
+        items = metadata.get(FINAL_RUN_FINDINGS_KEY) if isinstance(metadata, dict) else None
+        rendered = render_findings(items) if isinstance(items, list) else ""
+        return f"Check findings (final run):\n{rendered}" if rendered else fallback
+
     async def _sync_check_node(self, node: DAGNode) -> None:
         """Sync a check node's status from the check registry."""
         if not self._dynamic_loader:
@@ -1503,10 +1521,11 @@ class DAGOrchestrator:
         if check is None:
             # Check was unregistered — for DAG-managed checks this means
             # self-disable completed (DynamicCheckLoader unregisters on disable).
+            result = await self._final_run_result(node.check_name, "Check completed (self-disabled)")
             await self._store.update_node(
                 node.id,
                 status="completed",
-                result="Check completed (self-disabled)",
+                result=result,
                 completed_at=datetime.now(UTC),
             )
             node.status = "completed"
@@ -1516,10 +1535,11 @@ class DAGOrchestrator:
 
         # Use check.active to detect disabled checks (review fix)
         if not check.active:
+            result = await self._final_run_result(node.check_name, "Check completed (disabled itself)")
             await self._store.update_node(
                 node.id,
                 status="completed",
-                result="Check completed (disabled itself)",
+                result=result,
                 completed_at=datetime.now(UTC),
             )
             node.status = "completed"
