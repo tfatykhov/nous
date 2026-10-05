@@ -30,6 +30,7 @@ nous/
 │   │   ├── embeddings.py       # pgvector embedding provider
 │   │   ├── graph_linker.py     # Cross-type auto-linking (common-template embedding)
 │   │   ├── guardrails.py       # CEL expression guardrails
+│   │   ├── intentions.py       # F099: brain.intentions — spec, wake-policy defaults, lineage (a fire only under an open container), in-transaction insert, legacy close
 │   │   ├── quality.py          # Decision quality scoring
 │   │   ├── schemas.py          # Pydantic models
 │   │   └── spreading_activation.py  # Density-gated multi-hop graph traversal
