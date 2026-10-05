@@ -602,15 +602,15 @@ class TestReconciler:
         assert await store.claim(channel="telegram:nobody", session_id="S1", max_age_hours=72) == []
 
         reconciler = build_reconciler(env.heart.db, store, env.settings)
-        assert await reconciler.run_once() == {"inbox": 1}
-        assert await reconciler.run_once() == {"inbox": 0}  # idempotent
+        assert await reconciler.run_once() == {"inbox": 1, "dag": 0}
+        assert await reconciler.run_once() == {"inbox": 0, "dag": 0}  # idempotent
 
         ctx = await env.layer.pre_turn(agent, "S2", "hi again", channel=CHAN)
         assert _prompt(ctx).count("Powder: 40cm") == 1
         assert (await env.heart.subtasks.get(st.id)).delivered is True
         ctx = await env.layer.pre_turn(agent, "S2", "more?", channel=CHAN)
         assert "Powder: 40cm" not in _prompt(ctx)
-        assert await reconciler.run_once() == {"inbox": 0}
+        assert await reconciler.run_once() == {"inbox": 0, "dag": 0}
 
     async def test_task_running_at_enablement_is_repaired(self, inbox_env, monkeypatch):
         """Codex P1: created before the flag was on (and before the inbox's
@@ -630,7 +630,7 @@ class TestReconciler:
         await env.pool._record_inbox(long_job)
 
         reconciler = build_reconciler(env.heart.db, store, env.settings)
-        assert await reconciler.run_once() == {"inbox": 1}
+        assert await reconciler.run_once() == {"inbox": 1, "dag": 0}
         ctx = await env.layer.pre_turn(env.settings.agent_id, "S2", "hi", channel=CHAN)
         assert "long job done" in _prompt(ctx) and "quick result" in _prompt(ctx)
 
@@ -644,12 +644,106 @@ class TestReconciler:
         await _backdate_subtask(env, old.id, completed_at=datetime.now(UTC) - timedelta(minutes=1))
         reconciler = build_reconciler(env.heart.db, env.heart.result_inbox, env.settings)
         # The first tick of a process with the flag on records the watermark.
-        assert await reconciler.run_once() == {"inbox": 0}
+        assert await reconciler.run_once() == {"inbox": 0, "dag": 0}
 
         await _finish_subtask(env, session_id="S1", channel=CHAN, result="new result")
-        assert await reconciler.run_once() == {"inbox": 0}
+        assert await reconciler.run_once() == {"inbox": 0, "dag": 0}
         ctx = await env.layer.pre_turn(env.settings.agent_id, "S2", "hi", channel=CHAN)
         assert "new result" in _prompt(ctx) and "old result" not in _prompt(ctx)
+
+    async def test_lost_dag_inbox_write_is_repaired_without_a_second_push(self, db, monkeypatch):
+        """Codex P1: F087's direct inbox write fails, its Telegram push lands,
+        so the real delivery sweep marks the DAG delivered with no inbox row.
+        The reconciler's DAG pass re-inserts it once, and the push is never
+        repeated (a required inbox leg would re-send it on every retry)."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from nous.dag.delivery import DAGResultDelivery
+        from nous.dag.orchestrator import DAGOrchestrator
+        from nous.dag.schemas import DAGCreateRequest, DAGNodeSpec, DAGNodeType
+        from nous.dag.store import DAGStore
+        from nous.heart.result_reconciler import build_reconciler
+
+        agent = _agent()
+        s = _settings(agent_id=agent, telegram_bot_token="test-token", telegram_chat_id="77")
+        inbox = ResultInboxStore(db, agent)
+        await inbox.ensure_enabled_at()
+        dags = DAGStore(db, agent, s)
+        dag = await dags.create(DAGCreateRequest(
+            name="nightly-report",
+            nodes=[DAGNodeSpec(name="n", type=DAGNodeType.callback, instructions="x")],
+            origin_channel=CHAN, origin_session_id="S1",
+        ))
+        await dags.update_dag_status(dag.id, "completed", result_summary="All good")
+
+        pushes: list[dict] = []
+
+        class _Http:
+            async def post(self, url, json=None, timeout=None):
+                pushes.append(json)
+                return SimpleNamespace(status_code=200)
+
+        delivery = DAGResultDelivery(s, agent_id=agent, http=_Http(), inbox=inbox)
+        loader = AsyncMock()
+        loader._registry = MagicMock()
+        orch = DAGOrchestrator(
+            store=dags, subtask_mgr=AsyncMock(), dynamic_loader=loader, settings=s, delivery=delivery,
+        )
+        _fail_first_insert(monkeypatch, inbox)
+        await orch._deliver_terminal_dags()
+        delivered = await dags.get_dag(dag.id)
+        assert len(pushes) == 1 and delivered.delivered_at is not None
+        assert await inbox.claim(channel=CHAN, session_id=None, max_age_hours=72) == []
+
+        reconciler = build_reconciler(db, inbox, s)
+        assert await reconciler.run_once() == {"inbox": 0, "dag": 1}
+        assert await reconciler.run_once() == {"inbox": 0, "dag": 0}  # idempotent
+        rows = await inbox.claim(channel=CHAN, session_id=None, max_age_hours=72)
+        assert len(rows) == 1
+        assert rows[0].source_kind == "dag" and "nightly-report" in rows[0].body
+        assert rows[0].source_generation == delivered.delivery_generation
+        assert rows[0].created_at == delivered.completed_at
+        await orch._deliver_terminal_dags()
+        assert len(pushes) == 1
+
+    async def test_dag_pass_skips_unroutable_and_pre_enablement_dags(self, db):
+        """A DAG finished before enablement is never backfilled, and an
+        unroutable one never takes a batch slot from one that needs repair."""
+        from nous.dag.schemas import DAGCreateRequest, DAGNodeSpec, DAGNodeType
+        from nous.dag.store import DAGStore
+        from nous.heart.result_reconciler import InboxDagPass, TerminalSubtaskReconciler
+        from nous.storage.models import ExecutionDAG
+
+        agent = _agent()
+        s = _settings(agent_id=agent)
+        inbox = ResultInboxStore(db, agent)
+        dags = DAGStore(db, agent, s)
+
+        async def delivered_dag(name, **origin):
+            # Marked delivered with no inbox row: the lost-write shape.
+            dag = await dags.create(DAGCreateRequest(
+                name=name, nodes=[DAGNodeSpec(name="n", type=DAGNodeType.callback, instructions="x")], **origin,
+            ))
+            await dags.update_dag_status(dag.id, "completed", result_summary=f"{name} done")
+            await dags.mark_delivered(dag.id, 0)
+            return dag
+
+        early = await delivered_dag("early", origin_channel=CHAN)
+        async with db.session() as session:
+            await session.execute(
+                update(ExecutionDAG).where(ExecutionDAG.id == early.id)
+                .values(completed_at=datetime.now(UTC) - timedelta(minutes=1))
+            )
+            await session.commit()
+        await inbox.ensure_enabled_at()
+        await delivered_dag("scheduled")  # no origin and scheduled routing off
+        await delivered_dag("routed", origin_channel=CHAN)
+
+        reconciler = TerminalSubtaskReconciler([InboxDagPass(db, inbox, s)], batch_size=1)
+        assert await reconciler.run_once() == {"dag": 1}
+        assert await reconciler.run_once() == {"dag": 0}
+        rows = await inbox.claim(channel=CHAN, session_id=None, max_age_hours=72)
+        assert [r.title for r in rows] == ["routed"]
 
     async def test_skips_inline_and_settles_empty_results(self, inbox_env):
         from nous.heart.result_reconciler import build_reconciler
@@ -665,7 +759,7 @@ class TestReconciler:
         await env.heart.subtasks.complete(empty.id, "", final_outcome="completed", attempts=1)
 
         reconciler = build_reconciler(env.heart.db, env.heart.result_inbox, env.settings)
-        assert await reconciler.run_once() == {"inbox": 0}
+        assert await reconciler.run_once() == {"inbox": 0, "dag": 0}
         # Nothing to say: settled, so it never comes back to crowd the batch.
         assert (await env.heart.subtasks.get(empty.id)).delivered is True
         assert (await env.heart.subtasks.get(inline.id)).delivered is False

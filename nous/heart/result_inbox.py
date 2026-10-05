@@ -355,12 +355,14 @@ async def record_dag_result(
     origin_channel: str | None,
     origin_session_id: str | None,
     generation: int = 0,
+    created_at: datetime | None = None,
 ) -> bool:
     """Write a terminal DAG's outcome to the inbox. Idempotent; never raises.
 
     ``generation`` is the DAG's ``delivery_generation`` read together with its
     terminal status: one row per generation, so the outcome of a run that
     ``retry_node`` reactivated is delivered even after the first was.
+    ``created_at`` defaults to now; the reconciler passes ``completed_at``.
     """
     if not settings.result_inbox_enabled:
         return False
@@ -383,6 +385,7 @@ async def record_dag_result(
             channel=channel,
             session_id=origin_session_id,
             correlation_id=str(dag_uuid),
+            created_at=created_at,
         )
     except Exception:
         logger.warning("F098: inbox write failed for DAG %s", dag_id, exc_info=True)

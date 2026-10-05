@@ -4,9 +4,10 @@ The subtask worker writes a finished result to the inbox exactly once, and a
 failed write (a transient DB error, a worker cancelled at shutdown) is
 swallowed. With ``NOUS_RESULT_INBOX_ENABLED`` the inbox is the ONLY place
 ``pre_turn`` looks, so such a result would be lost for good. The reconciler
-runs on a maintenance loop and re-does that write.
+runs on a maintenance loop and re-does that write. A finished DAG's write,
+made by the F087 delivery path, is repaired the same way.
 
-It is built from passes: each pass owns its own query over terminal subtasks
+It is built from passes: each pass owns its own query over terminal rows
 and its own idempotent write, and runs isolated from the others, so a later
 pass (the Phase C memory writer) is one more ``register`` call.
 """
@@ -19,11 +20,19 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
 from sqlalchemy import exists, or_, select, update
+from sqlalchemy.orm import selectinload
 
-from nous.heart.result_inbox import SOURCE_SUBTASK, ResultInboxStore, is_dag_node_subtask, subtask_envelope
+from nous.heart.result_inbox import (
+    SOURCE_DAG,
+    SOURCE_SUBTASK,
+    ResultInboxStore,
+    is_dag_node_subtask,
+    record_dag_result,
+    subtask_envelope,
+)
 from nous.heart.subtasks import INLINE_WORKER_ID
 from nous.storage.database import Database
-from nous.storage.models import ResultInbox, Subtask
+from nous.storage.models import ExecutionDAG, ResultInbox, Subtask
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from nous.config import Settings
@@ -129,6 +138,83 @@ class InboxSubtaskPass:
         return fixed
 
 
+class InboxDagPass:
+    """Re-insert terminal DAGs whose inbox write never landed.
+
+    F087's delivery writes the DAG's row on every attempt, but that write is
+    best-effort: when it fails on the attempt whose Telegram push succeeds,
+    the DAG is marked delivered with no row. Making the row a required leg
+    would not help, because a retry re-runs every leg and re-sends the push.
+
+    Candidates: terminal and already delivered by F087 (until then its own
+    retries write the row, with the summary they announce), finished at or
+    after the inbox was first switched on and inside the age bound, routable
+    (an origin, or scheduled routing on), and with no row for their current
+    ``delivery_generation``. The body is the summary F087 cached, else its
+    template; the row is stamped ``created_at = completed_at``.
+    """
+
+    name = "dag"
+
+    def __init__(self, database: Database, store: ResultInboxStore, settings: Settings) -> None:
+        self._db = database
+        self._store = store
+        self._settings = settings
+
+    async def run(self, *, limit: int) -> int:
+        # Late imports: nous.dag.delivery imports nous.heart.result_inbox.
+        from nous.dag.delivery import DAGResultDelivery
+        from nous.dag.store import TERMINAL_DAG_STATUSES
+
+        settings = self._settings
+        since = datetime.now(UTC) - timedelta(hours=settings.result_inbox_max_age_hours)
+        enabled_at = await self._store.ensure_enabled_at()
+        has_row = exists().where(
+            ResultInbox.source_kind == SOURCE_DAG,
+            ResultInbox.source_id == ExecutionDAG.id,
+            ResultInbox.source_generation == ExecutionDAG.delivery_generation,
+        )
+        query = (
+            select(ExecutionDAG)
+            .where(ExecutionDAG.agent_id == settings.agent_id)
+            .where(ExecutionDAG.status.in_(sorted(TERMINAL_DAG_STATUSES)))
+            .where(ExecutionDAG.delivered_at.is_not(None))
+            .where(ExecutionDAG.completed_at.is_not(None), ExecutionDAG.completed_at > since)
+            .where(ExecutionDAG.completed_at >= enabled_at)
+            .where(~has_row)
+            .options(selectinload(ExecutionDAG.nodes))
+            .order_by(ExecutionDAG.completed_at)
+            .limit(limit)
+        )
+        if not (settings.result_inbox_dag_scheduled and settings.telegram_chat_id):
+            query = query.where(
+                or_(ExecutionDAG.origin_channel.is_not(None), ExecutionDAG.origin_session_id.is_not(None))
+            )
+        async with self._db.session() as session:
+            candidates = (await session.execute(query)).scalars().all()
+
+        template = DAGResultDelivery(settings, agent_id=settings.agent_id)
+        fixed = 0
+        for dag in candidates:
+            written = await record_dag_result(
+                self._store,
+                settings,
+                dag_id=dag.id,
+                name=dag.name,
+                status=dag.status,
+                summary=dag.delivery_summary or template.build_template(dag),
+                blocked=DAGResultDelivery._is_blocked(dag),
+                origin_channel=dag.origin_channel,
+                origin_session_id=dag.origin_session_id,
+                generation=dag.delivery_generation,
+                created_at=dag.completed_at,
+            )
+            if written:
+                fixed += 1
+                logger.info("F098: reconciler re-inserted the inbox row of DAG %s", dag.id.hex[:8])
+        return fixed
+
+
 class TerminalSubtaskReconciler:
     """Runs the registered passes, each isolated and bounded."""
 
@@ -152,8 +238,9 @@ class TerminalSubtaskReconciler:
 
 
 def build_reconciler(database: Database, store: ResultInboxStore, settings: Settings) -> TerminalSubtaskReconciler:
-    """The reconciler with every pass its flags enable (Phase A: the inbox pass)."""
+    """The reconciler with every pass its flags enable (Phase A: the inbox passes)."""
     reconciler = TerminalSubtaskReconciler()
     if settings.result_inbox_enabled:
         reconciler.register(InboxSubtaskPass(database, store, settings))
+        reconciler.register(InboxDagPass(database, store, settings))
     return reconciler
