@@ -570,6 +570,20 @@ class HeartbeatRunner:
         else:
             logger.error(failure_message, exc_info=failure)
 
+    async def _record_final_findings(self, check: BaseCheck, result: CheckResult) -> None:
+        """F099 Phase 0b: store what a self-disabling final run found, for its DAG node.
+
+        Called inside the run bracket, before end_run, so the DAG loop never
+        reads a finished run without its findings. Never raises: on failure
+        the node keeps its old fixed result.
+        """
+        if not isinstance(check, DynamicCheck) or self._dynamic_loader is None or not result.self_disabled:
+            return
+        try:
+            await self._dynamic_loader.record_final_findings(check.check_id, findings_payload(result.findings))
+        except Exception:
+            logger.warning("F099: could not store the final-run findings of check '%s'", check.name, exc_info=True)
+
     async def _record_run_stats(
         self,
         check: BaseCheck,
@@ -731,6 +745,8 @@ class HeartbeatRunner:
 
                 # F034.5: Update run stats in DB for dynamic checks
                 await self._record_run_stats(check, success=True)
+                # F099 Phase 0b: the final run's findings, before the run can end.
+                await self._record_final_findings(check, result)
 
                 # #273: Collect self-disabled checks with callbacks
                 if isinstance(check, DynamicCheck) and result.self_disabled and check.on_complete_prompt:
@@ -751,19 +767,25 @@ class HeartbeatRunner:
                 run_succeeded = False
             except asyncio.CancelledError:
                 if _cancel_requested():
+                    # F099 Phase 0b: a shutdown that lands during the success
+                    # writes (stats, final-run findings) ends the run as a
+                    # failure, not as a success whose findings may not have
+                    # committed.
+                    run_succeeded = False
                     raise
                 # Something awaited for this check was cancelled elsewhere.
                 # Nobody asked this loop to stop: a failed run of this check.
                 check.mark_failure()
-                # The arm also covers the stats write that follows a successful run.
+                # The arm also covers the stats write and the final-run findings write
+                # that follow a successful run.
                 successful_checks.discard(check.name)
                 if run_succeeded:
                     # It was that write. Whether its record landed is unknown,
                     # and the write is a relative increment: one run gets no
                     # second write (see NO RETRY in _record_run_stats).
                     logger.error(
-                        "Heartbeat check '%s': the write of its success stats was cancelled from within — "
-                        "the record may or may not have landed and is not written again",
+                        "Heartbeat check '%s': the write of its success stats or final-run findings was "
+                        "cancelled from within — the record may or may not have landed and is not written again",
                         check.name,
                     )
                 else:
@@ -1477,9 +1499,14 @@ class HeartbeatRunner:
                 run_succeeded = None
             else:
                 check.mark_success()
-                run_succeeded = True
                 # F034.5: Update DB stats for dynamic checks
                 await self._record_run_stats(check, success=True)
+                # F099 Phase 0b: the final run's findings, before the run can end.
+                await self._record_final_findings(check, result)
+                # Only now. A cancel during either write (a shutdown) passes the
+                # `except Exception` below, and the finally must then end the run
+                # as a failure, never as a success whose findings did not commit.
+                run_succeeded = True
             if result.tokens_used:
                 self._tokens_used_today += result.tokens_used
             # #273: Fire callback if check self-disabled

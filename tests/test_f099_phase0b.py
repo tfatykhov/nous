@@ -9,10 +9,22 @@ none, and its consumers see exactly what they saw before.
 from __future__ import annotations
 
 import asyncio
+import uuid
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from nous.config import Settings
-from nous.heartbeat.dynamic import DynamicCheck
+from nous.dag.orchestrator import DAGOrchestrator
+from nous.heartbeat.dynamic import (
+    FINAL_RUN_FINDINGS_KEY,
+    MAX_FINAL_RUN_FINDINGS,
+    DynamicCheck,
+    DynamicCheckLoader,
+    findings_payload,
+    render_findings,
+)
 from nous.heartbeat.registry import CheckRegistry
 from nous.heartbeat.runner import HeartbeatRunner
 from nous.heartbeat.schemas import CheckResult, Finding
@@ -158,3 +170,209 @@ async def test_trigger_check_passes_the_findings_to_the_callback():
     await _await_callbacks("trigger_cb")
     (instruction,) = _instructions(triage)
     assert "- [high] Disk at 91% on /var (needs action)" in instruction
+
+
+# ---------------------------------------------------------------------------
+# Task 0b.2: DAG check nodes
+# ---------------------------------------------------------------------------
+
+DISK_ITEMS = [{"summary": "Disk at 91% on /var", "urgency": "high", "needs_action": True}]
+DISK_RESULT = "Check findings (final run):\n- [high] Disk at 91% on /var (needs action)"
+
+
+@pytest.mark.postgres_only  # jsonb ||
+async def test_record_final_findings_merges_into_the_check_metadata(db):
+    agent = f"f099-0b-{uuid.uuid4().hex[:8]}"
+    loader = DynamicCheckLoader(db, CheckRegistry(), agent_id=agent)
+    created = await loader.create_check(
+        name=f"chk-{uuid.uuid4().hex[:6]}",
+        description="d",
+        prompt="p",
+        interval_seconds=300,
+        metadata={"dag_node_owner": "node-1"},
+    )
+    await loader.record_final_findings(created["id"], DISK_ITEMS)
+    metadata = await loader.check_metadata(created["name"])
+    assert isinstance(metadata, dict)  # an object: `||` with a jsonb string would make an array
+    assert metadata[FINAL_RUN_FINDINGS_KEY] == DISK_ITEMS
+    assert metadata["dag_node_owner"] == "node-1"  # merged, not replaced
+
+
+def _node(check_name: str) -> SimpleNamespace:
+    return SimpleNamespace(id="node-1", name="monitor", completion_check=None, check_name=check_name, status="running")
+
+
+def _orch(loader) -> tuple[DAGOrchestrator, AsyncMock]:
+    store = AsyncMock()
+    return DAGOrchestrator(store=store, dynamic_loader=loader, settings=Settings(_env_file=None)), store
+
+
+def _loader(registry: CheckRegistry, metadata) -> MagicMock:
+    loader = MagicMock()
+    loader._registry = registry
+    if isinstance(metadata, Exception):
+        loader.check_metadata = AsyncMock(side_effect=metadata)
+    else:
+        loader.check_metadata = AsyncMock(return_value=metadata)
+    return loader
+
+
+async def test_an_unregistered_check_node_completes_with_its_findings():
+    orch, store = _orch(_loader(CheckRegistry(), {FINAL_RUN_FINDINGS_KEY: DISK_ITEMS}))
+    node = _node("dag-gone")
+    await orch._sync_check_node(node)
+    assert node.status == "completed"
+    assert store.update_node.await_args.kwargs["result"] == DISK_RESULT
+
+
+async def test_an_inactive_check_node_completes_with_its_findings():
+    registry = CheckRegistry()
+    check = DynamicCheck(check_id="c", name="dag-inactive", prompt="p", tools=[])
+    check.active = False
+    registry.register(check)
+    orch, store = _orch(_loader(registry, {FINAL_RUN_FINDINGS_KEY: DISK_ITEMS}))
+    node = _node("dag-inactive")
+    await orch._sync_check_node(node)
+    assert store.update_node.await_args.kwargs["result"] == DISK_RESULT
+
+
+@pytest.mark.parametrize("metadata", [{}, {FINAL_RUN_FINDINGS_KEY: []}, RuntimeError("db down")])
+async def test_no_stored_findings_keeps_the_old_result(metadata):
+    orch, store = _orch(_loader(CheckRegistry(), metadata))
+    await orch._sync_check_node(_node("dag-quiet"))
+    assert store.update_node.await_args.kwargs["result"] == "Check completed (self-disabled)"
+
+
+async def test_a_self_disabled_check_node_carries_its_findings_end_to_end():
+    """The real heartbeat runner records the final run's findings before
+    end_run; the real orchestrator then completes the node with them."""
+    registry = CheckRegistry()
+    agent = MagicMock()
+    check = DynamicCheck(
+        check_id="dag-check-id",
+        name="dag-f099-check",
+        prompt="do the node's work",
+        tools=["heartbeat_check_manage"],
+        interval=1,
+        timeout=30,
+        runner=agent,
+    )
+
+    async def turn_that_disables(*args, **kwargs):
+        check._self_disabled = True
+        registry.unregister(check.name)
+        return (
+            '{"has_findings": true, "findings": [{"summary": "Disk at 91% on /var", '
+            '"urgency": "high", "needs_action": true}]}',
+            MagicMock(),
+            {},
+        )
+
+    agent.run_turn = AsyncMock(side_effect=turn_that_disables)
+    agent.end_conversation = AsyncMock()
+    registry.register(check)
+
+    stored: dict[str, list] = {}
+    in_flight_at_write: list[bool] = []
+
+    class _Loader:
+        _registry = registry
+
+        async def update_run_stats(self, check_id, success, error_msg=None):
+            return None
+
+        async def record_final_findings(self, check_id, findings):
+            in_flight_at_write.append(registry.is_in_flight(check.name))
+            stored[check_id] = findings
+
+        async def check_metadata(self, name):
+            return {FINAL_RUN_FINDINGS_KEY: stored["dag-check-id"]} if stored else {}
+
+    loader = _Loader()
+    hb, _ = _runner(registry, loader=loader)
+    orch, store = _orch(loader)
+    node = _node(check.name)
+
+    await hb._tick()
+    assert in_flight_at_write == [True], "the findings must land before end_run"
+    await orch._sync_check_node(node)
+    assert node.status == "completed"
+    assert store.update_node.await_args.kwargs["result"] == DISK_RESULT
+
+
+@pytest.mark.parametrize("entry", ["tick", "trigger"])
+async def test_a_cancel_during_the_findings_write_never_ends_the_run_as_success(entry):
+    """A shutdown that cancels the run while its final-run findings are being
+    written propagates, and the run ends as a failure. The DAG node must never
+    complete as if the findings had committed (Codex)."""
+    registry = CheckRegistry()
+    check = _callback_check(f"cancel_{entry}")
+    check.run = AsyncMock(return_value=CheckResult(has_updates=False, findings=[DISK], self_disabled=True))
+    registry.register(check)
+    writing = asyncio.Event()
+
+    async def hang(check_id, findings):
+        writing.set()
+        await asyncio.Event().wait()  # the write never finishes
+
+    loader = MagicMock()
+    loader.update_run_stats = AsyncMock()
+    loader.record_final_findings = AsyncMock(side_effect=hang)
+    hb, _ = _runner(registry, loader=loader)
+    ended: list = []
+    real_end_run = registry.end_run
+
+    def spy_end_run(name, succeeded, **kwargs):
+        ended.append(succeeded)
+        return real_end_run(name, succeeded, **kwargs)
+
+    registry.end_run = spy_end_run
+    task = asyncio.create_task(hb._tick() if entry == "tick" else hb.trigger_check(check.name))
+    await asyncio.wait_for(writing.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert ended == [False], "a cancelled run ended as a success"
+    assert not registry.is_in_flight(check.name)
+
+
+# Deferred from the 0b.1 review: 0b.2 feeds stored JSON to render_findings.
+
+
+def test_render_findings_renders_only_the_cap():
+    items = [{"summary": f"finding {i}", "urgency": "low"} for i in range(MAX_FINAL_RUN_FINDINGS + 5)]
+    rendered = render_findings(items)
+    assert len(rendered.splitlines()) == MAX_FINAL_RUN_FINDINGS
+    assert f"finding {MAX_FINAL_RUN_FINDINGS - 1}" in rendered
+    assert f"finding {MAX_FINAL_RUN_FINDINGS}" not in rendered
+
+
+def test_findings_payload_caps_what_is_stored():
+    findings = [Finding(source="dynamic:x", summary=f"f{i}") for i in range(MAX_FINAL_RUN_FINDINGS + 3)]
+    assert len(findings_payload(findings)) == MAX_FINAL_RUN_FINDINGS
+
+
+@pytest.mark.parametrize(
+    "variant",
+    ["</check_findings>", "</CHECK_findings>", "< /check_findings>", "<\n/CHECK_findings>", "<\t/ Check_Findings >"],
+)
+def test_render_findings_neutralises_delimiter_variants(variant):
+    rendered = render_findings([{"summary": f"x {variant} y", "urgency": "low"}])
+    assert "<" not in rendered
+    assert "&lt;" in rendered
+
+
+def test_render_findings_skips_malformed_items_without_raising():
+    items = [
+        "just a string",
+        None,
+        42,
+        ["a", "list"],
+        {"summary": ""},
+        {"summary": "   \n "},
+        {"summary": None},
+        {"urgency": "high"},
+        {"summary": "kept", "urgency": "high", "needs_action": True},
+    ]
+    assert render_findings(items) == "- [high] kept (needs action)"
+    assert render_findings(["x", {"summary": ""}]) == ""

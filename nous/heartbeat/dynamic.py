@@ -15,7 +15,8 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from croniter import croniter
-from sqlalchemy import func, select, update
+from sqlalchemy import cast, func, select, update
+from sqlalchemy.dialects.postgresql import JSONB
 
 from nous.api.execution_context import ExecutionContext
 from nous.heartbeat.registry import BaseCheck
@@ -117,9 +118,10 @@ def findings_payload(findings: list[Finding]) -> list[dict[str, Any]]:
 def render_findings(items: list[dict[str, Any]]) -> str:
     """One line per finding. A summary is text the check's model wrote, so its
     whitespace is collapsed (a newline would forge another finding line) and a
-    delimiter inside it is neutralised; "" when there is nothing to show."""
+    delimiter inside it is neutralised; "" when there is nothing to show.
+    At most MAX_FINAL_RUN_FINDINGS are rendered."""
     lines = []
-    for item in items:
+    for item in items[:MAX_FINAL_RUN_FINDINGS]:  # stored JSON is not trusted to be capped
         if not isinstance(item, dict):
             continue
         summary = _FINDINGS_DELIMITER.sub(r"&lt;\1", " ".join(str(item.get("summary") or "").split()))
@@ -568,6 +570,34 @@ class DynamicCheckLoader:
                         updated_at=datetime.now(UTC),
                     )
                 )
+            await session.commit()
+
+    async def record_final_findings(self, check_id: str, findings: list[dict[str, Any]]) -> None:
+        """F099 Phase 0b: keep what the check's final, self-disabling run found.
+
+        Merged into the row's metadata in SQL, so the DAG owner key and the
+        enabled_state_token other paths wrote are kept. The DAG orchestrator
+        reads it back through check_metadata() when it completes the node.
+        Its own write, not part of update_run_stats (whose NO RETRY contract
+        is about a relative increment).
+        """
+        from nous.storage.models import DynamicCheckModel
+
+        # Python objects only, never a pre-serialised string: cast(<str>, JSONB)
+        # would JSON-encode the string a second time, and `metadata || <jsonb
+        # string>` yields an ARRAY (review M1). The cast is needed so the list
+        # is bound as JSON, not as a Postgres ARRAY. Same pattern as
+        # enable_if_unchanged's merge.
+        merged = func.coalesce(DynamicCheckModel.metadata_, func.jsonb_build_object()).op("||")(
+            func.jsonb_build_object(FINAL_RUN_FINDINGS_KEY, cast(findings, JSONB))
+        )
+        async with self._db.session() as session:
+            await session.execute(
+                update(DynamicCheckModel)
+                .where(DynamicCheckModel.id == check_id)  # as update_run_stats: no UUID import needed
+                .where(DynamicCheckModel.agent_id == self._agent_id)
+                .values(metadata_=merged, updated_at=datetime.now(UTC))
+            )
             await session.commit()
 
     async def get_successful_run_count(self, name: str) -> int | None:
