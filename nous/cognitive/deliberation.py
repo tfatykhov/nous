@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import select as sa_select
+from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain.brain import Brain
@@ -270,8 +271,26 @@ class DeliberationEngine:
         Informational responses shouldn't create decision records at all.
         Instead of marking as failure (which pollutes Brain with noise),
         remove the record entirely.
+
+        F099 Phase 0a: a decision a spawned subtask names as its
+        ``plan_decision_id`` is kept. The turn started work, so it is not
+        an informational one, and the subtask would point at nothing.
         """
+        if await self._is_spawn_reason(decision_id, session):
+            logger.info("Decision %s kept: a spawned subtask names it as its plan decision", decision_id)
+            return
         await self._brain.delete(UUID(decision_id), session=session)
+
+    async def _is_spawn_reason(self, decision_id: str, session: AsyncSession | None) -> bool:
+        """True when any subtask's metadata.plan_decision_id is this decision."""
+        stmt = sa_text(
+            "SELECT 1 FROM heart.subtasks WHERE agent_id = :a AND metadata->>'plan_decision_id' = :d LIMIT 1"
+        )
+        agent = self._brain.agent_id
+        if session is None:
+            async with self._brain.db.session() as own:
+                return (await own.execute(stmt, {"d": decision_id, "a": agent})).first() is not None
+        return (await session.execute(stmt, {"d": decision_id, "a": agent})).first() is not None
 
     async def should_deliberate(self, frame: FrameSelection) -> bool:
         """Should this frame trigger deliberation?

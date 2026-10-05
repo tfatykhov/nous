@@ -425,6 +425,14 @@ class ToolDispatcher:
                 args = {**args, "_is_background": is_background}
             if session_id is not None and name == "spawn_task":
                 args = {**args, "_session_id": session_id}
+            if name in ("spawn_task", "spawn_sync"):
+                # F099 Phase 0a: the spawning turn's Plan decision, stored on the
+                # subtask row so its reason outlives the turn. Not a routing key.
+                # A value the model sent itself is dropped first: only the
+                # dispatcher may name the turn's decision.
+                args = {k: v for k, v in args.items() if k != "_decision_id"}
+                if ctx.decision_id:
+                    args = {**args, "_decision_id": ctx.decision_id}
             if ctx.channel and name in ("spawn_task", "dag_create"):
                 # F098: the channel outlives the session, so the result can
                 # reach the conversation after the session has expired.
@@ -2969,6 +2977,7 @@ def create_subtask_tools(
         _lookup_token: str | None = None,
         _session_id: str | None = None,
         _channel: str | None = None,  # F098: injected by ToolDispatcher
+        _decision_id: str | None = None,  # F099 Phase 0a: injected by ToolDispatcher
     ) -> dict[str, Any]:
         """Spawn a subtask, optionally waiting for its result inline.
 
@@ -3032,6 +3041,9 @@ def create_subtask_tools(
             _metadata: dict | None = None
             if _lookup_token:
                 _metadata = {"f062_spawn_sync_token": _lookup_token}
+            if _decision_id:
+                # F099 Phase 0a: why this work was started (the turn's Plan decision).
+                _metadata = {**(_metadata or {}), "plan_decision_id": _decision_id}
             subtask = await heart.subtasks.create(
                 task=task,
                 priority=priority,
@@ -3414,6 +3426,7 @@ def create_subtask_tools(
         model: str | None = None,
         success_criteria: str | None = None,
         _session_id: str | None = None,
+        _decision_id: str | None = None,
     ) -> dict[str, Any]:
         import json as _json
         import uuid as _uuid
@@ -3444,6 +3457,7 @@ def create_subtask_tools(
             payload_schema=payload_schema,
             _lookup_token=sync_lookup_token,
             _session_id=_session_id,  # preserve caller's parent_session_id
+            _decision_id=_decision_id,
         )
 
         # spawn_task always returns {"content": [{"type":"text","text":...}]}.
@@ -5327,6 +5341,7 @@ def register_dag_tools(
                     )
                 )
 
+            description = kwargs.get("description")
             request = DAGCreateRequest(
                 name=kwargs["name"],
                 description=kwargs.get("description", ""),
@@ -5337,6 +5352,9 @@ def register_dag_tools(
                 # F098: injected by ToolDispatcher on a conversation turn.
                 origin_channel=kwargs.get("_channel"),
                 origin_session_id=kwargs.get("_session_id"),
+                # F099 Phase 0a: why the DAG exists. Before Phase 1 the only
+                # reason text a dag_create call carries is its description.
+                original_request=(description.strip() or None) if isinstance(description, str) else None,
             )
 
             dag = await store.create(request)

@@ -71,6 +71,10 @@ class ExecutionContext:
     # session id. Set by REST chat; spawn_task / dag_create store it so the
     # result reaches the conversation after its session has expired.
     channel: str | None = None
+    # F099 Phase 0a: the spawning turn's Plan decision (TurnContext.decision_id).
+    # pre_turn sets it after this frozen context was built, so the runner
+    # carries it in with dataclasses.replace once pre_turn returns.
+    decision_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in CONTEXT_KINDS:

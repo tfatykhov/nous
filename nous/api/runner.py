@@ -8,6 +8,7 @@ Manages the tool use loop internally.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import time
@@ -1277,6 +1278,10 @@ class AgentRunner:
                 # append, so both name the same turn.
                 turn_number=(len(conversation.messages) + 2) // 2,
             )
+            if turn_context.decision_id:
+                # F099 Phase 0a: the Plan decision reaches dispatch(), so a spawn
+                # tool can record why the work was started.
+                _ctx = dataclasses.replace(_ctx, decision_id=turn_context.decision_id)
 
             # 3. Append user message (text-only; upgraded to multimodal after censor check)
             conversation.messages.append(Message(role="user", content=user_message, text_content=user_message))
@@ -1937,6 +1942,10 @@ class AgentRunner:
                 turn_number=(len(conversation.messages) + 2) // 2,  # F091, see run_turn
                 **({"channel": _ctx.channel} if _ctx.channel else {}),  # F098
             )
+            if turn_context.decision_id:
+                # F099 Phase 0a: the Plan decision reaches dispatch(), so a spawn
+                # tool can record why the work was started.
+                _ctx = dataclasses.replace(_ctx, decision_id=turn_context.decision_id)
 
             # Append user message (text-only; upgraded to multimodal after censor check)
             conversation.messages.append(Message(role="user", content=user_message, text_content=user_message))

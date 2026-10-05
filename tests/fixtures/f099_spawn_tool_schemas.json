@@ -1,0 +1,318 @@
+[
+  {
+    "name": "spawn_task",
+    "description": "Spawn a subtask. Use await_result=true to wait for the result inline, or leave false for fire-and-forget background execution.",
+    "input_schema": {
+      "type": "object",
+      "description": "Spawn a subtask. Use await_result=true to wait for the result inline, or leave false for fire-and-forget background execution.",
+      "properties": {
+        "task": {
+          "type": "string",
+          "description": "Natural-language instruction for the subtask"
+        },
+        "priority": {
+          "type": "string",
+          "description": "Task priority",
+          "enum": [
+            "urgent",
+            "normal",
+            "low"
+          ],
+          "default": "normal"
+        },
+        "timeout": {
+          "type": "integer",
+          "description": "Max execution seconds (clamped to server max)",
+          "minimum": 10
+        },
+        "notify": {
+          "type": "boolean",
+          "description": "Notify on completion",
+          "default": false
+        },
+        "frame_type": {
+          "type": "string",
+          "description": "Cognitive frame for the subtask. If omitted, auto-detected.",
+          "enum": [
+            "task",
+            "research",
+            "conversation",
+            "decision",
+            "debug"
+          ]
+        },
+        "await_result": {
+          "type": "boolean",
+          "description": "If true, wait for subtask completion and return result inline. Default false (fire-and-forget).",
+          "default": false
+        },
+        "model": {
+          "type": "string",
+          "description": "Model to use for this subtask. If omitted, uses default background model. Use a smaller model for fast lookup/summarization tasks."
+        },
+        "output_format": {
+          "type": "string",
+          "description": "How the subtask should structure its final report. Optional; sensible default applied per frame_type."
+        },
+        "success_criteria": {
+          "type": "string",
+          "description": "What 'done' looks like. Optional; default 'summary directly addresses the task and is internally consistent'."
+        },
+        "payload_schema": {
+          "type": [
+            "object",
+            "boolean"
+          ],
+          "description": "F062: optional JSON Schema (draft 2020-12 compatible) for the subtask's result payload. When supplied, the executor validates submit_final_report.payload against this schema; on mismatch the subtask retries (per F061) and ultimately persists final_outcome='validation_failed'. Accepts a JSON object or a boolean (true accepts any payload, false rejects)."
+        }
+      },
+      "required": [
+        "task"
+      ]
+    }
+  },
+  {
+    "name": "schedule_task",
+    "description": "Schedule a task for later or recurring execution. Provide exactly one of 'when' or 'every'.",
+    "input_schema": {
+      "type": "object",
+      "description": "Schedule a task for later or recurring execution. Provide exactly one of 'when' or 'every'.",
+      "properties": {
+        "task": {
+          "type": "string",
+          "description": "Natural-language instruction for the task"
+        },
+        "when": {
+          "type": "string",
+          "description": "One-shot time: 'in 2 hours', ISO 8601, or natural language"
+        },
+        "every": {
+          "type": "string",
+          "description": "Recurring pattern: 'daily at 8am', '30 minutes', 'every monday at 10am'"
+        },
+        "notify": {
+          "type": "boolean",
+          "description": "Notify on each fire",
+          "default": false
+        },
+        "model": {
+          "type": "string",
+          "description": "Model to use for this scheduled task. If omitted, uses default background model."
+        },
+        "frame_type": {
+          "type": "string",
+          "description": "Cognitive frame for the task (e.g. 'research', 'task')",
+          "enum": [
+            "task",
+            "research",
+            "conversation",
+            "decision",
+            "debug"
+          ]
+        }
+      },
+      "required": [
+        "task"
+      ]
+    }
+  },
+  {
+    "name": "spawn_sync",
+    "description": "Run a subtask synchronously (inline) and return a typed SubtaskResult containing status, structured payload, raw text, and confidence. Pass payload_schema to require the subtask's report.payload to validate against a JSON Schema; on mismatch the SubtaskResult will have status='validation_failed'. Use spawn_task for fire-and-forget.",
+    "input_schema": {
+      "type": "object",
+      "description": "Run a subtask synchronously (inline) and return a typed SubtaskResult containing status, structured payload, raw text, and confidence. Pass payload_schema to require the subtask's report.payload to validate against a JSON Schema; on mismatch the SubtaskResult will have status='validation_failed'. Use spawn_task for fire-and-forget.",
+      "properties": {
+        "task": {
+          "type": "string",
+          "description": "Natural-language instruction for the subtask"
+        },
+        "payload_schema": {
+          "type": [
+            "object",
+            "boolean"
+          ],
+          "description": "Optional JSON Schema (draft 2020-12 compatible). When set, the subtask is instructed to populate submit_final_report's `payload` field with data matching this schema; the executor validates the result post-hoc. May be a JSON object or a boolean (draft 2020-12 boolean-as-schema)."
+        },
+        "frame_type": {
+          "type": "string",
+          "description": "Cognitive frame for the subtask. Defaults to current.",
+          "enum": [
+            "task",
+            "research",
+            "conversation",
+            "decision",
+            "debug"
+          ]
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "description": "Max execution seconds (clamped to server max).",
+          "minimum": 10
+        },
+        "model": {
+          "type": "string",
+          "description": "Model to use for this subtask. Defaults to background model."
+        },
+        "success_criteria": {
+          "type": "string",
+          "description": "What 'done' looks like. Optional; defaults to a generic check."
+        }
+      },
+      "required": [
+        "task"
+      ]
+    }
+  },
+  {
+    "name": "dag_create",
+    "description": "Create a DAG to orchestrate subtasks and checks with dependency tracking. You do NOT need to poll for the result: when the DAG reaches a terminal state its outcome is delivered to you automatically (F087), so create it and move on. Use dag_manage only when the user asks about progress mid-flight, to cancel or retry, or to look up a DAG whose delivery you missed or that finished before this session (dag_manage action='recent').",
+    "input_schema": {
+      "type": "object",
+      "description": "Create a DAG to orchestrate subtasks and checks with dependency tracking. You do NOT need to poll for the result: when the DAG reaches a terminal state its outcome is delivered to you automatically (F087), so create it and move on. Use dag_manage only when the user asks about progress mid-flight, to cancel or retry, or to look up a DAG whose delivery you missed or that finished before this session (dag_manage action='recent').",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "DAG name"
+        },
+        "description": {
+          "type": "string"
+        },
+        "nodes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "subtask",
+                  "check",
+                  "gate",
+                  "callback",
+                  "fix"
+                ],
+                "description": "'callback' runs AFTER its predecessors and receives their results as context — use it to interpret or act on what earlier nodes produced (point a context_flow edge at it). It accepts frame_type / model / timeout_seconds like a subtask. Requires NOUS_DAG_CALLBACK_EXECUTION_ENABLED=true; with the flag off a callback completes instantly without running. 'gate' currently auto-passes — it is a marker, not an enforced quality check. Note: 'tools' below is honored ONLY for 'check' nodes — on every other node type (subtask, callback, gate, fix) it is silently ignored."
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "tools": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "frame_type": {
+                "type": "string"
+              },
+              "model": {
+                "type": "string"
+              },
+              "timeout_seconds": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Execution timeout in seconds (default: NOUS_DAG_NODE_DEFAULT_TIMEOUT, ceiling: NOUS_DAG_NODE_MAX_TIMEOUT). F087: now a REAL bound — a node still executing past this plus NOUS_DAG_NODE_TIMEOUT_GRACE_SECONDS is cancelled and failed, so size it to the work rather than leaving the default on a long job."
+              },
+              "stall_timeout_seconds": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "F064.1: max seconds without activity before failing this node. 0 = disabled for this node. Unset = inherit NOUS_DAG_NODE_DEFAULT_STALL_TIMEOUT."
+              },
+              "completion_condition": {
+                "type": "string"
+              },
+              "completion_check": {
+                "type": "string",
+                "description": "Shell command polled each tick. Exit 0 = success, 1 = failed, 2 = still running."
+              },
+              "completion_check_interval": {
+                "type": "integer",
+                "description": "Seconds between completion check polls (default: every tick)"
+              },
+              "max_check_attempts": {
+                "type": "integer",
+                "description": "Max poll attempts before node fails"
+              },
+              "parent_node": {
+                "type": "string",
+                "description": "F066.1 (type='fix' only): name of the node this fix attaches to. Fires when the parent transitions to 'failed'. The matching 'on_failure' edge MUST point from the parent to this fix node — i.e. from_node = (this parent_node value), to_node = (the fix node's own name). Pointing the edge the other direction fails validation."
+              },
+              "fix_actions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "retry_as_is",
+                    "retry_with_amended_prompt",
+                    "mark_unrecoverable",
+                    "skip_and_continue"
+                  ]
+                },
+                "description": "F066.1 (type='fix' only): allowed action vocabulary. Phase 1 dispatcher rules: incomplete/validation_failed errors → retry_as_is; timed_out → skip_and_continue (or mark_unrecoverable); other errors → skip_and_continue then mark_unrecoverable as final fallback. retry_with_amended_prompt only acts when NOUS_DAG_FIX_LLM_DISPATCH_ENABLED=true."
+              },
+              "max_fix_attempts": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3,
+                "description": "F066.1 (type='fix' only): max fix attempts per parent failure. Default 1."
+              },
+              "expected_modes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "F066.1 (type='fix' only): declared failure modes for typed dispatch (Phase 2). Phase 1 ignores this field."
+              }
+            },
+            "required": [
+              "name",
+              "type",
+              "instructions"
+            ]
+          }
+        },
+        "edges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "from_node": {
+                "type": "string"
+              },
+              "to_node": {
+                "type": "string"
+              },
+              "edge_type": {
+                "type": "string",
+                "enum": [
+                  "dependency",
+                  "cancel_cascade",
+                  "context_flow",
+                  "on_failure"
+                ]
+              }
+            },
+            "required": [
+              "from_node",
+              "to_node"
+            ]
+          }
+        },
+        "source": {
+          "type": "string"
+        },
+        "token_budget": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "nodes"
+      ]
+    }
+  }
+]

@@ -27,6 +27,7 @@ from nous.heartbeat.schemas import CheckResult, Finding
 if TYPE_CHECKING:
     from nous.config import Settings
     from nous.dag.orchestrator import DAGOrchestrator
+    from nous.dag.schemas import DAGCreateRequest
     from nous.dag.store import DAGStore
     from nous.heart.work_queue import WorkQueueItemManager
 
@@ -271,7 +272,7 @@ class WorkQueueCheck(BaseCheck):
                 payload = row.payload or {}
                 item = WorkItem(
                     external_id=row.external_id,
-                    title=str(payload.get("title", row.external_id)),
+                    title=str(payload["_title"] if "_title" in payload else payload.get("title", row.external_id)),
                     body=str(payload.get("body", "")),
                     state=str(payload.get("state", "open")),
                     terminal=bool(payload.get("terminal", False)),
@@ -308,7 +309,9 @@ class WorkQueueCheck(BaseCheck):
         claimed = await self._items.claim_for_dispatch(
             source=self._adapter.source_name,
             external_id=item.external_id,
-            payload=item.payload,
+            # F099 Phase 0a: the title rides in the row, so a crash-recovered
+            # re-dispatch records it even when the adapter's payload is empty.
+            payload={**(item.payload or {}), "_title": item.title},
         )
         if claimed is None:
             # Already seen (this tick or a prior tick). The reconciler
@@ -316,7 +319,7 @@ class WorkQueueCheck(BaseCheck):
             return False
         dag = None
         try:
-            request = self._request_factory(item)
+            request = self._with_reason(self._request_factory(item), item)
             dag = await self._dag_store.create(request)
             await self._items.mark_dispatched(claimed.id, dag.id)
         except Exception as e:
@@ -356,6 +359,17 @@ class WorkQueueCheck(BaseCheck):
         started = await self._safe_start_dag(dag.id)
         findings.append(self._dispatch_finding(item, dag.id, started))
         return True
+
+    @staticmethod
+    def _with_reason(request: DAGCreateRequest, item: WorkItem) -> DAGCreateRequest:
+        """F099 Phase 0a: the DAG records the item it was dispatched for.
+
+        A request factory that set its own original_request keeps it.
+        """
+        title = item.title.strip()
+        if request.original_request or not title:
+            return request
+        return request.model_copy(update={"original_request": title})
 
     def _dispatch_finding(self, item: WorkItem, dag_id, started: bool) -> Finding:
         if started:
@@ -412,7 +426,7 @@ class WorkQueueCheck(BaseCheck):
         """
         dag = None
         try:
-            request = self._request_factory(item)
+            request = self._with_reason(self._request_factory(item), item)
             dag = await self._dag_store.create(request)
             await self._items.mark_dispatched(row_id, dag.id)
         except Exception as e:
