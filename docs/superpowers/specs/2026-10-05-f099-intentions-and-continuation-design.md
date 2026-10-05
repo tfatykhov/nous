@@ -61,7 +61,7 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
 | Where a continuation runs | **One thread per root intention.** Reports and proposals reach the owner through the chat inbox and Telegram. |
 | Delivery | **Phased** (§8), each phase dark behind its own flag. |
 | Tool enforcement | For `internal_only` contexts, both the offered tool set and dispatch are narrowed **whatever `tool_context_policy_mode` and `tool_offered_set_enforcement_mode` say**. This is the one stated exception to the warn-mode rule. |
-| `web_fetch` | Allowed in an internal-only chain. Its exfiltration path is an accepted risk for v1, and those fetches are logged (§9). |
+| `web_fetch`, `web_search` | Allowed in an internal-only chain. Both send model-chosen text to an outside service (a URL, a search query), so both are an exfiltration path. That is an accepted risk for v1, and those calls are logged (§9). |
 | `run_python` | **Denied** in an internal-only chain. It runs in-process with full Python, its network check is a regex, and it can reach Nous's own send paths. |
 
 ## 4. Design
@@ -89,11 +89,11 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
 | `claimed_at`, `claim_token`, `attempts` | Claim lease (§4.5). |
 | `created_at`, `result_at`, `closed_at`, `updated_at` | Timestamps. |
 
-**`brain.intention_arrivals`** (Phase 2): one row per arrival decision. It holds the chain's history, its budgets and its calibration data.
+**`brain.intention_arrivals`** (Phase 2): one row per arrival decision. It holds the chain's history, its budgets and its calibration data. **One arrival consumes a batch**: every intention of the root that the claim moved to `deciding` (§4.5). The turn sees all their results and makes one decision for the batch.
 
 | Column | Meaning |
 |---|---|
-| `id`, `agent_id`, `intention_id`, `root_id`, `n` | One per claim, in order. |
+| `id`, `agent_id`, `root_id`, `n`, `intention_ids` | One per claim, in order. `intention_ids` lists every intention the claim took. |
 | `inbox_ids` | The result rows this arrival consumed. |
 | `decision`, `note`, `progress`, `confidence` | Taken from `resolve_intention`, or from the fallback (§4.5). |
 | `tokens_in`, `tokens_out` | Usage of the continuation turn. |
@@ -172,7 +172,7 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
   - **Approval nodes:** an `internal_only` `dag_create` that includes an `approval` node is refused. Owner-facing questions from a lineage go only through proposals and questions (§4.4), which respect quiet hours.
 - **I4. One turn consumer per arrival.**
   - `continue` → the continuation runner.
-  - `report` → the chat inbox, as F098 Phase A.
+  - `report` → the chat inbox, as F098 Phase A. The writer inserts the inbox row and closes the intention (`close_reason = 'delivered'`) in one transaction, so a `report` intention never becomes `result_ready` and is never claimed by a continuation.
   - `remember` → today's delivery (the notify push and any F098 row), plus a memory write when F098 Phase C is on.
   - `none` → today's behaviour.
 
@@ -309,7 +309,7 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
 SELECT 1 FROM brain.intentions WHERE agent_id = :agent AND id = :root FOR UPDATE;  -- per-root mutex
 UPDATE brain.intentions i
    SET state = 'deciding', claimed_at = now(), claim_token = :token, updated_at = now()
- WHERE i.agent_id = :agent AND i.root_id = :root AND i.state = 'result_ready'
+ WHERE i.agent_id = :agent AND i.root_id = :root AND i.state = 'result_ready' AND i.wake_policy = 'continue'
    AND NOT EXISTS (SELECT 1 FROM brain.intentions d
                     WHERE d.agent_id = :agent AND d.root_id = :root AND d.state = 'deciding')
    AND (   (SELECT max(result_at) FROM brain.intentions
@@ -364,17 +364,20 @@ The depth and spawn limits act earlier: they remove the spawn tools (§4.4). Whe
 
 **5. If `resolve_intention` is missing.** That is the common case, not the exception. Forcing a tool call is not a guarantee: it applies only with thinking off and near the turn cap, a prose reply ends the loop earlier, and 5.5-generation models reject a forced `tool_choice` with a 400. So the runner then makes **one bounded follow-up call within the same claim**, asking for `resolve_intention` in the prompt (the #692 pattern). Only if that also fails is the arrival closed as `report` (`outcome = fallback_report`), with the turn's text, or with the raw result if there is no text. Both outcomes are counted.
 
-**6. Commit.** One transaction fenced on `claim_token` writes the arrival row, the state change and a Brain decision record:
-- description: the decision and its note;
-- confidence: taken from the tool call;
-- category `process`, stakes `low`;
-- context: the intention and root ids.
+**6. Commit.** The claim may have taken several intentions of the root, for example the results of a fan-out that finished inside the debounce window. The arrival consumes them as one batch, and `resolve_intention`'s decision applies to the whole batch. One transaction fenced on `claim_token` writes:
+- the arrival row, with `intention_ids` set to every claimed intention;
+- each claimed intention's state change;
+- one Brain decision record:
+  - description: the decision and its note;
+  - confidence: taken from the tool call;
+  - category `process`, stakes `low`;
+  - context: the root id and the intention ids.
 
 The same commit also:
 - stamps `delivered_at` on the inbox rows in `arrival.inbox_ids`;
-- sends the intention back to `result_ready`, instead of the decision's next state, if unconsumed rows for it arrived meanwhile.
+- sends any claimed intention that received unconsumed rows meanwhile back to `result_ready`, instead of the decision's next state.
 
-**7. Failure.** If the turn raises, or the lease expires, `attempts` goes up. After `NOUS_CONTINUATION_MAX_ATTEMPTS` (default 3), the intention closes as `report` with the **raw result** (`outcome = failed_report`).
+**7. Failure.** If the turn raises, or the lease expires, `attempts` goes up on every claimed intention. After `NOUS_CONTINUATION_MAX_ATTEMPTS` (default 3), the claimed intentions close as `report` with their **raw results** (`outcome = failed_report`).
 
 **8. Quiet hours.**
 - `HeartbeatRunner._in_quiet_hours` is extracted into a module function. It compares UTC hours, so prod's settings must be in UTC.
@@ -389,7 +392,7 @@ The same commit also:
 | `NOUS_CONTINUATION_MAX_DEPTH` | 3 | Spawn tools removed; the next arrival escalates. |
 | `NOUS_CONTINUATION_MAX_SPAWNS_PER_ROOT` | 12 | Spawn tools removed; the next arrival escalates. |
 | `NOUS_CONTINUATION_MAX_TURNS_PER_ROOT` | 8 | Escalate. |
-| `NOUS_CONTINUATION_MAX_TOKENS_PER_ROOT` | 400000 | Escalate. Root tokens = the lineage's subtask `tokens_in/out` + its DAGs' `tokens_consumed` + its arrivals' tokens. |
+| `NOUS_CONTINUATION_MAX_TOKENS_PER_ROOT` | 400000 | Escalate. Root tokens = the lineage's subtask `tokens_in/out` **excluding DAG-node subtasks** (their usage is already rolled into `tokens_consumed` by `DAGStore.claim_and_add_node_tokens`) + its DAGs' `tokens_consumed` + its arrivals' tokens. |
 | `NOUS_CONTINUATION_STALL_LIMIT` | 2 consecutive verified `progress=false` | Escalate. |
 | `NOUS_INTENTION_ROOT_TTL_HOURS` | 72 | Report what exists, then close. |
 | `NOUS_CONTINUATION_MAX_CONCURRENT` | 2 | Wait for a slot. |
@@ -489,7 +492,7 @@ The F098 A and C classification of scheduled, inline and spawn rows is pinned, a
 - **Forged calls.** A forged `tool_use` for `send_email`, `run_python` or `bash` is refused in both loops.
 - `write_file` outside `intentions/<root>/` is refused. `cancel_task` on foreign work is refused. A continuation's `dag_create` creates a child, not a root. The F087 summary turn does not run for `internal_only` DAGs.
 - **Injection test.** A result body that asks for `send_email` produces no send. The test asserts the refusal, not the model's behaviour.
-- **Claim.** Concurrent claimers with an arrival committed in between get exactly one continuation per root. A killed process's claim is released by the lease. A stale token cannot commit. Debounce has a max-wait.
+- **Claim.** Concurrent claimers with an arrival committed in between get exactly one continuation per root. A fan-out whose results land inside the debounce window is consumed as one batch arrival. `report` intentions are never claimed; they close at write time. A killed process's claim is released by the lease. A stale token cannot commit. Debounce has a max-wait.
 - Each gate row behaves as specified.
 - **Fallbacks.** A missing `resolve_intention` gets one follow-up, then `fallback_report`. Three failures give `failed_report` with the raw result.
 - **Proposals.**
@@ -535,9 +538,9 @@ The F098 A and C classification of scheduled, inline and spawn rows is pinned, a
 
 ## 9. Risks and accepted residuals
 
-- **`web_fetch` in an internal-only chain (accepted for v1).**
-  - The risk: untrusted page text could steer a fetch URL that carries private data. Subtasks have the same exposure today.
-  - Mitigation: fetches in an `internal_only` lineage are logged with their root.
+- **`web_fetch` and `web_search` in an internal-only chain (accepted for v1).**
+  - The risk: untrusted text could steer a fetch URL or a search query that carries private data. Subtasks have the same exposure today.
+  - Mitigation: fetches and searches in an `internal_only` lineage are logged with their root.
   - If this ever needs closing: a lineage may either fetch from the web or read private memory, not both.
 - **Ahead of the evidence.** No benchmark measures an agent waking on its own result in a later turn. The decision rule therefore stays in code (gate, states, bounds, lease, fenced commit). The model is asked one narrow question, and `report` is the fallback on every failure path.
 - **The REST routes have no auth (existing posture, accepted).**
