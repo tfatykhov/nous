@@ -18,6 +18,10 @@ SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     # GitHub classic (ghp/gho/ghu/ghs/ghr) and fine-grained tokens.
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}"),
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,}"),
+    # Slack bot, user and app tokens.
+    re.compile(r"\bxox[bpa]-[0-9A-Za-z-]{20,}"),
+    # Google API key: AIza plus 35 characters.
+    re.compile(r"\bAIza[0-9A-Za-z_-]{35}"),
     # Telegram bot token: bot id, colon, 35-char secret.
     re.compile(r"\b\d{8,10}:[A-Za-z0-9_-]{35}\b"),
     # Credentials embedded in a URL: scheme://user:pass@

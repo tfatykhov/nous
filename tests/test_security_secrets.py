@@ -30,6 +30,10 @@ _HITS = [
     ("yaml api_key", "api_key: " + "Zq9" * 7),
     ("json api_key", '{"api_key": "' + "Zq9" * 7 + '"}'),
     ("header x-api-key", "x-api-key: " + "Zq9-" * 5),
+    ("slack bot token", "SLACK=" + "xox" + "b-" + "1234567890-1234567890-" + "Ab3D" * 6),
+    ("slack user token", "xox" + "p-" + "1234567890-1234567890-" + "Ab3D" * 6),
+    ("slack app token", "xox" + "a-" + "2-" + "1234567890-" + "Ab3D" * 6),
+    ("google api key", "key=" + "AI" + "za" + "Sy" + "Ab3_-" * 6 + "Ab3"),
 ]
 
 _MISSES = [
@@ -46,6 +50,8 @@ _MISSES = [
     ("ratio", "Throughput 1234567890:1 is impossible."),
     ("short telegram-like", "123456789:short"),
     ("eyJ word", "eyJust a coincidence.eyJ nope"),
+    ("slack prefix prose", "A bot token starts with xoxb- and a user token with xoxp-."),
+    ("google prefix prose", "A Google key starts with AIza; Aizawl is a city."),
 ]
 
 
