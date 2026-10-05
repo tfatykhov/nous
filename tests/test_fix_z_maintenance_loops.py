@@ -1,7 +1,7 @@
 """The maintenance loops that nous/main.py starts end only when their own task is cancelled.
 
-``create_components`` starts four loops (execution-ledger maintenance, two
-retention sweeps and the companion surface sweep) and ``shutdown_components``
+``create_components`` starts five loops (execution-ledger maintenance, two
+retention sweeps, the companion surface sweep and the F098 result reconciler) and ``shutdown_components``
 cancels them. Each test runs one of them, through the coroutine production
 runs, with stand-ins for what it sweeps.
 
@@ -31,6 +31,7 @@ import pytest
 
 import nous.main as main
 from nous.cognitive.ledger_store import effective_orphan_threshold
+from nous.heart import result_reconciler
 
 # How long a test waits for something that should happen at once. Only reached
 # when the behaviour under test is broken.
@@ -44,6 +45,7 @@ def _short_intervals(monkeypatch: pytest.MonkeyPatch, seconds: float = TICK) -> 
     a failed ledger pass; a test cannot."""
     monkeypatch.setattr(main, "_RETENTION_SWEEP_INTERVAL_SECONDS", seconds)
     monkeypatch.setattr(main, "_EXECUTION_LEDGER_RETRY_SECONDS", seconds)
+    monkeypatch.setattr(result_reconciler, "RECONCILE_INTERVAL_SECONDS", seconds)
 
 
 async def _cancelled_from_within() -> None:
@@ -306,12 +308,40 @@ def _surface_sweep(first: str | None) -> _Loop:
     )
 
 
+class _Reconciler:
+    """Stands in for the TerminalSubtaskReconciler."""
+
+    def __init__(self, went_on: asyncio.Event, first: _First) -> None:
+        self.ticks = 0
+        self._went_on, self._first = went_on, first
+
+    async def run_once(self) -> dict[str, int]:
+        await self._first()
+        self.ticks += 1
+        self._went_on.set()
+        return {}
+
+
+def _result_reconciler(first: str | None) -> _Loop:
+    went_on = asyncio.Event()
+    reconciler = _Reconciler(went_on, _First(first))
+    return _Loop(
+        "result reconciler loop",
+        "result_reconciler_task",
+        lambda: main._result_reconciler_loop(reconciler),
+        went_on,
+        "F098: result reconciler tick failed",
+        {"reconciler": reconciler},
+    )
+
+
 LOOPS = [
     _execution_ledger_cards,
     _execution_ledger_prune,
     _retrieval_log_retention,
     _context_log_retention,
     _surface_sweep,
+    _result_reconciler,
 ]
 every_loop = pytest.mark.parametrize(
     "build", LOOPS, ids=[build.__name__.strip("_").replace("_", " ") for build in LOOPS]
@@ -511,6 +541,7 @@ def test_a_loop_waits_its_interval_between_two_passes(build, monkeypatch):
         "retrieval_log_retention_task": lambda: loop.parts["database"].commits,
         "context_log_retention_task": lambda: loop.parts["database"].commits,
         "a2ui_sweep_task": lambda: loop.parts["surfaces"].expired,
+        "result_reconciler_task": lambda: loop.parts["reconciler"].ticks,
     }[loop.key]
 
     async def scenario() -> None:
@@ -584,6 +615,7 @@ def test_create_components_starts_each_loop_behind_its_own_switch_with_its_own_c
             ["settings", "ledger_store", "runner"],
             ["settings.execution_ledger_persist_enabled"],
         ),
+        ("_result_reconciler_loop", ["result_reconciler"], ["settings.result_inbox_enabled"]),
         (
             "_retrieval_log_retention_loop",
             ["settings", "database"],

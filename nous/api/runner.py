@@ -1268,6 +1268,9 @@ class AgentRunner:
                 user_display_name=user_display_name,
                 skip_episode=skip_episode,
                 is_subtask=is_subtask,
+                # F098: only passed when known, so callers without a channel
+                # (and test doubles of pre_turn) see the call unchanged.
+                **({"channel": _ctx.channel} if _ctx.channel else {}),
                 # F091: same conversation-derived number context_log records,
                 # computed here BEFORE the user message is appended below —
                 # matching how _current_turn_number is derived after the
@@ -1886,6 +1889,7 @@ class AgentRunner:
         user_display_name: str | None = None,
         platform: str | None = None,
         system_prompt_prefix: str | None = None,
+        channel: str | None = None,  # F098: where the conversation lives
     ) -> AsyncGenerator[StreamEvent, None]:
         """Full chat turn with streaming, including tool loops.
 
@@ -1897,7 +1901,7 @@ class AgentRunner:
 
         _agent_id = agent_id or self._settings.agent_id
         # stream_chat serves REST /chat/stream only — a person is in the loop.
-        _ctx = ExecutionContext(kind="interactive", session_id=session_id)
+        _ctx = ExecutionContext(kind="interactive", session_id=session_id, channel=channel)
 
         # Sync activity refresh before any long-running work. See run_turn
         # for rationale — the bus is queued, so message_received emission
@@ -1931,6 +1935,7 @@ class AgentRunner:
                 user_id=user_id,
                 user_display_name=user_display_name,
                 turn_number=(len(conversation.messages) + 2) // 2,  # F091, see run_turn
+                **({"channel": _ctx.channel} if _ctx.channel else {}),  # F098
             )
 
             # Append user message (text-only; upgraded to multimodal after censor check)

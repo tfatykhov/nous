@@ -64,6 +64,8 @@ class SubtaskManager:
         # A caller that runs the subtask itself claims it in this INSERT, so
         # dequeue() never sees it pending and no worker runs it a second time.
         worker_id: str | None = None,
+        # F098: channel the spawning turn ran on (routes the result).
+        parent_channel: str | None = None,
     ) -> Subtask:
         """Create a new subtask: pending, or already running for ``worker_id``.
 
@@ -88,6 +90,7 @@ class SubtaskManager:
                 **({"id": subtask_id} if subtask_id is not None else {}),
                 agent_id=self._agent_id,
                 parent_session_id=parent_session_id,
+                parent_channel=parent_channel,
                 task=task,
                 priority=pri_val,
                 timeout_seconds=timeout,
