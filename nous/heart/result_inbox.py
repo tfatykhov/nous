@@ -23,11 +23,11 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, func, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from nous.storage.database import Database
-from nous.storage.models import ChannelSession, ResultInbox, ResultInboxState
+from nous.storage.models import ChannelSession, ResultInbox, ResultInboxState, Subtask
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from nous.config import Settings
@@ -189,13 +189,19 @@ class ResultInboxStore:
         channel: str | None,
         session_id: str | None,
         max_age_hours: int,
+        max_items: int,
         delivered_session_id: str | None = None,
-    ) -> list[ResultInbox]:
+    ) -> tuple[list[ResultInbox], int]:
         """Atomically claim every undelivered row for this channel or session.
 
-        Rows older than ``max_age_hours`` are neither claimed nor returned.
-        Only rows THIS call flipped are returned, so concurrent readers never
-        inject the same row twice.
+        Returns the newest ``max_items`` rows (oldest first, with bodies) and
+        the COUNT of the older rows claimed with them. Those are flipped by
+        one set-based UPDATE whose ids and bodies never leave the database,
+        so a backlog of any size costs two statements; the subtasks behind
+        them are marked delivered in that same statement, as the caller does
+        for the rows it shows. Rows older than ``max_age_hours`` are neither
+        claimed nor counted. Both UPDATEs re-check ``delivered_at IS NULL``
+        on the locked row, so concurrent readers never claim a row twice.
         """
         keys = []
         if channel:
@@ -203,30 +209,58 @@ class ResultInboxStore:
         if session_id:
             keys.append(ResultInbox.session_id == session_id)
         if not keys:
-            return []
-        cutoff = datetime.now(UTC) - timedelta(hours=max_age_hours)
+            return [], 0
+        now = datetime.now(UTC)
+        pending = and_(
+            ResultInbox.agent_id == self._agent_id,
+            ResultInbox.delivered_at.is_(None),
+            ResultInbox.created_at > now - timedelta(hours=max_age_hours),
+            or_(*keys),
+        )
+        stamp = {"delivered_at": now, "delivered_session_id": delivered_session_id}
+        newest = (
+            select(ResultInbox.id)
+            .where(pending)
+            .order_by(ResultInbox.created_at.desc(), ResultInbox.id.desc())
+            .limit(max_items)
+        )
         async with self._db.session() as session:
-            ids = (
-                await session.execute(
-                    select(ResultInbox.id)
-                    .where(ResultInbox.agent_id == self._agent_id)
-                    .where(ResultInbox.delivered_at.is_(None))
-                    .where(ResultInbox.created_at > cutoff)
-                    .where(or_(*keys))
-                )
-            ).scalars().all()
-            if not ids:
-                return []
-            claimed = (
-                await session.execute(
+            claimed = list(
+                (
+                    await session.execute(
+                        update(ResultInbox)
+                        .where(ResultInbox.id.in_(newest), ResultInbox.delivered_at.is_(None))
+                        .values(**stamp)
+                        .returning(ResultInbox)
+                        .execution_options(synchronize_session=False)
+                    )
+                ).scalars().all()
+            )
+            older = 0
+            if len(claimed) == max_items:
+                # Only rows older than the oldest one shown: a row committed
+                # between the two statements and newer than that is left for
+                # the next turn instead of being counted unseen.
+                edge = min(claimed, key=lambda r: (r.created_at, r.id))
+                overflow = (
                     update(ResultInbox)
-                    .where(and_(ResultInbox.id.in_(ids), ResultInbox.delivered_at.is_(None)))
-                    .values(delivered_at=datetime.now(UTC), delivered_session_id=delivered_session_id)
-                    .returning(ResultInbox)
+                    .where(pending, tuple_(ResultInbox.created_at, ResultInbox.id) < tuple_(edge.created_at, edge.id))
+                    .values(**stamp)
+                    .returning(ResultInbox.source_kind, ResultInbox.source_id)
+                    .cte("overflow")
                 )
-            ).scalars().all()
+                settle = (
+                    update(Subtask)
+                    .where(Subtask.agent_id == self._agent_id)
+                    .where(
+                        Subtask.id.in_(select(overflow.c.source_id).where(overflow.c.source_kind == SOURCE_SUBTASK))
+                    )
+                    .values(delivered=True)
+                    .cte("settle")
+                )
+                older = (await session.execute(select(func.count()).select_from(overflow).add_cte(settle))).scalar_one()
             await session.commit()
-        return sorted(claimed, key=lambda r: r.created_at)
+        return sorted(claimed, key=lambda r: r.created_at), older
 
     async def touch_channel(self, channel: str, session_id: str) -> None:
         """Record ``session_id`` as the latest session on ``channel``."""
@@ -448,18 +482,22 @@ def _neutralize(text: str) -> str:
     return _DELIMITER.sub(r"&lt;\1", text)
 
 
-def format_inbox_messages(rows: list[ResultInbox], max_items: int) -> str:
-    """Render claimed rows: the ``max_items`` newest, plus a note on the rest."""
+def format_inbox_messages(rows: list[ResultInbox], max_items: int, older: int = 0) -> str:
+    """Render claimed rows: the ``max_items`` newest, plus a note on the rest.
+
+    ``older`` counts rows claimed together with ``rows`` but never loaded
+    (see ``ResultInboxStore.claim``); the note includes them.
+    """
     if not rows:
         return ""
     ordered = sorted(rows, key=lambda r: r.created_at)
     shown = ordered[-max_items:]
-    older = ordered[: len(ordered) - len(shown)]
+    hidden = len(ordered) - len(shown) + older
     parts = [_HEADER]
-    if older:
+    if hidden:
         # The count only: listing every hidden id would let a backlog grow
         # the prompt past what max_items is meant to bound.
-        parts.append(f"({len(older)} older results not shown — use list_tasks / dag_manage to read them.)")
+        parts.append(f"({hidden} older results not shown — use list_tasks / dag_manage to read them.)")
     for r in shown:
         ts = _aware(r.created_at).strftime("%Y-%m-%d %H:%M UTC")
         parts.append(

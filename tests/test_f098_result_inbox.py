@@ -82,36 +82,115 @@ async def _insert(store: ResultInboxStore, **over) -> bool:
     return await store.insert(**kw)
 
 
+async def _claim(store: ResultInboxStore, **kw) -> list[ResultInbox]:
+    """Claim with the default caps; the shown rows only (the count of older
+    rows is asserted by the tests that are about it)."""
+    rows, _older = await store.claim(max_age_hours=72, max_items=10, **kw)
+    return rows
+
+
+async def _delivered_to(db, agent: str) -> dict[str | None, int]:
+    """delivered_session_id -> rows, over every row of ``agent`` (None: unclaimed)."""
+    from sqlalchemy import func, select
+
+    async with db.session() as s:
+        rows = (
+            await s.execute(
+                select(ResultInbox.delivered_session_id, func.count())
+                .where(ResultInbox.agent_id == agent)
+                .group_by(ResultInbox.delivered_session_id)
+            )
+        ).all()
+    return {sid: n for sid, n in rows}
+
+
+class _Rendezvous:
+    """A Database whose sessions start work only once ``n`` of them hold a
+    connection, so racing claims always run their statements side by side
+    (``gather`` alone often lets one finish before the other connects)."""
+
+    def __init__(self, db, n: int) -> None:
+        self._db = db
+        self._barrier = asyncio.Barrier(n)
+
+    def session(self):
+        return _SessionAtBarrier(self._db.session(), self._barrier)
+
+
+class _SessionAtBarrier:
+    def __init__(self, cm, barrier: asyncio.Barrier) -> None:
+        self._cm = cm
+        self._barrier = barrier
+
+    async def __aenter__(self):
+        session = await self._cm.__aenter__()
+        await session.connection()  # checked out, transaction begun
+        await self._barrier.wait()
+        return session
+
+    async def __aexit__(self, *exc):
+        return await self._cm.__aexit__(*exc)
+
+
 class TestStore:
     async def test_insert_is_idempotent(self, db):
         store = ResultInboxStore(db, _agent())
         sid = uuid.uuid4()
         assert await _insert(store, source_id=sid) is True
         assert await _insert(store, source_id=sid) is False
-        claimed = await store.claim(channel=CHAN, session_id=None, max_age_hours=72)
+        claimed = await _claim(store, channel=CHAN, session_id=None)
         assert len(claimed) == 1
 
     async def test_claim_by_session_when_no_channel(self, db):
         store = ResultInboxStore(db, _agent())
         await _insert(store, channel=None, session_id="only-session")
-        assert await store.claim(channel=CHAN, session_id="other", max_age_hours=72) == []
-        rows = await store.claim(channel=None, session_id="only-session", max_age_hours=72)
+        assert await _claim(store, channel=CHAN, session_id="other") == []
+        rows = await _claim(store, channel=None, session_id="only-session")
         assert len(rows) == 1
         assert rows[0].delivered_at is not None
 
     async def test_concurrent_claims_inject_each_row_once(self, db):
-        """§6.5: two readers race on one channel; every row goes to one of them."""
-        store = ResultInboxStore(db, _agent())
-        for _ in range(5):
-            await _insert(store)
-        a, b = await asyncio.gather(
-            store.claim(channel=CHAN, session_id="s-a", max_age_hours=72, delivered_session_id="s-a"),
-            store.claim(channel=CHAN, session_id="s-b", max_age_hours=72, delivered_session_id="s-b"),
+        """§6.5: two readers race on one channel; every row goes to one of
+        them, the shown rows and the older ones claimed unshown alike."""
+        agent = _agent()
+        for _ in range(25):
+            await _insert(ResultInboxStore(db, agent))
+        store = ResultInboxStore(_Rendezvous(db, 2), agent)
+        (rows_a, older_a), (rows_b, older_b) = await asyncio.gather(
+            store.claim(channel=CHAN, session_id="s-a", max_age_hours=72, max_items=10, delivered_session_id="s-a"),
+            store.claim(channel=CHAN, session_id="s-b", max_age_hours=72, max_items=10, delivered_session_id="s-b"),
         )
-        ids_a = {r.id for r in a}
-        ids_b = {r.id for r in b}
-        assert not ids_a & ids_b
-        assert len(ids_a | ids_b) == 5
+        assert not {r.id for r in rows_a} & {r.id for r in rows_b}
+        assert len(rows_a) + older_a + len(rows_b) + older_b == 25
+        delivered = await _delivered_to(db, agent)
+        assert delivered.get(None, 0) == 0
+        assert delivered.get("s-a", 0) == len(rows_a) + older_a
+        assert delivered.get("s-b", 0) == len(rows_b) + older_b
+
+    async def test_claim_returns_only_the_newest_bodies(self, db):
+        """Codex P2: the newest max_items rows come back with their bodies; the
+        older ones are claimed by one set-based UPDATE and only counted, and
+        their subtasks are marked delivered too (a flag-off rollback must not
+        re-inject them through the legacy path)."""
+        agent = _agent()
+        store = ResultInboxStore(db, agent)
+        mgr = SubtaskManager(db, agent)
+        base = datetime.now(UTC) - timedelta(minutes=30)
+        subtasks = []
+        for i in range(15):
+            st = await mgr.create(task=f"t{i}", parent_session_id="s1", parent_channel=CHAN)
+            await mgr.complete(st.id, f"r{i}", final_outcome="completed", attempts=1)
+            await _insert(store, source_id=st.id, title=f"r{i}", created_at=base + timedelta(minutes=i))
+            subtasks.append(st)
+
+        rows, older = await store.claim(
+            channel=CHAN, session_id=None, max_age_hours=72, max_items=10, delivered_session_id="S2",
+        )
+        assert [r.title for r in rows] == [f"r{i}" for i in range(5, 15)]
+        assert older == 5
+        assert await _delivered_to(db, agent) == {"S2": 15}
+        assert await store.claim(channel=CHAN, session_id=None, max_age_hours=72, max_items=10) == ([], 0)
+        assert all([(await mgr.get(st.id)).delivered for st in subtasks[:5]])
 
     async def test_age_bound_excludes_old_rows(self, db):
         """§6.6: a row past max_age is never claimed (no backlog flood)."""
@@ -126,7 +205,7 @@ class TestStore:
                 .values(created_at=datetime.now(UTC) - timedelta(hours=100))
             )
             await s.commit()
-        rows = await store.claim(channel=CHAN, session_id=None, max_age_hours=72)
+        rows = await _claim(store, channel=CHAN, session_id=None)
         assert [r.title for r in rows] == ["new"]
 
     async def test_channel_session_upsert(self, db):
@@ -140,7 +219,7 @@ class TestStore:
         store = ResultInboxStore(db, _agent())
         await _insert(store)
         await _insert(store, channel="telegram:other", session_id=None)
-        await store.claim(channel=CHAN, session_id=None, max_age_hours=72)
+        await _claim(store, channel=CHAN, session_id=None)
         m = await store.metrics(7)
         assert m["subtask"]["created"] == 2
         assert m["subtask"]["delivered"] == 1
@@ -175,6 +254,11 @@ class TestFormat:
         assert text.count("<result_message ") == 10
         assert "task 12" in text and "task 2" not in text.split("not shown")[1]
         assert "3 older results not shown" in text
+
+    def test_note_counts_rows_claimed_but_not_loaded(self):
+        text = format_inbox_messages([_row(i) for i in range(3)], max_items=10, older=7)
+        assert text.count("<result_message ") == 3
+        assert "(7 older results not shown" in text
 
     def test_overflow_note_is_bounded(self):
         """Codex P2: the note carries a count, never the hidden ids."""
@@ -255,7 +339,7 @@ class TestSubtaskWriter:
     async def test_flag_off_writes_nothing(self, db):
         store = ResultInboxStore(db, _agent())
         assert await record_subtask_result(store, _subtask(), _settings(result_inbox_enabled=False)) is False
-        assert await store.claim(channel=CHAN, session_id="s1", max_age_hours=72) == []
+        assert await _claim(store, channel=CHAN, session_id="s1") == []
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +371,7 @@ class TestDagListener:
         })
         await bus.handlers["dag.completed"][0](ev)
         await bus.handlers["dag.completed"][0](ev)
-        rows = await store.claim(channel=CHAN, session_id=None, max_age_hours=72)
+        rows = await _claim(store, channel=CHAN, session_id=None)
         assert len(rows) == 1
         assert rows[0].source_kind == "dag" and rows[0].msg_type == "INFORM"
         assert rows[0].body == "all good"
@@ -299,7 +383,7 @@ class TestDagListener:
         assert await record_dag_result(store, _settings(), dag_id=uuid.uuid4(), blocked=True, **common) is False
         s = _settings(result_inbox_dag_scheduled=True, telegram_chat_id="77")
         assert await record_dag_result(store, s, dag_id=uuid.uuid4(), blocked=True, **common) is True
-        rows = await store.claim(channel="telegram:77", session_id=None, max_age_hours=72)
+        rows = await _claim(store, channel="telegram:77", session_id=None)
         assert rows[0].msg_type == "BLOCKED"
 
 
@@ -392,13 +476,26 @@ class TestEndToEnd:
         ctx = await env.layer.pre_turn(env.settings.agent_id, "api-1", "hi")
         assert "api result" in _prompt(ctx)
 
+    async def test_backlog_shows_the_newest_and_counts_the_rest(self, inbox_env):
+        env = inbox_env
+        finished = [
+            await _finish_subtask(env, session_id="S1", channel=CHAN, result=f"result number {i:02d}")
+            for i in range(12)
+        ]
+        ctx = await env.layer.pre_turn(env.settings.agent_id, "S2", "hi", channel=CHAN)
+        prompt = _prompt(ctx)
+        assert prompt.count("<result_message ") == env.settings.result_inbox_max_items == 10
+        assert "(2 older results not shown" in prompt
+        assert "result number 11" in prompt and "result number 01" not in prompt
+        assert all([(await env.heart.subtasks.get(st.id)).delivered for st in finished])
+
     async def test_flag_off_keeps_legacy_session_path(self, inbox_env):
         """§6.3: flag off — no inbox writes, legacy get_undelivered injects in S1 only."""
         env = inbox_env
         env.settings.result_inbox_enabled = False
         agent = env.settings.agent_id
         st = await _finish_subtask(env, session_id="S1", channel=CHAN, result="legacy result")
-        assert await env.heart.result_inbox.claim(channel=CHAN, session_id="S1", max_age_hours=72) == []
+        assert await _claim(env.heart.result_inbox, channel=CHAN, session_id="S1") == []
 
         ctx = await env.layer.pre_turn(agent, "S2", "hi", channel=CHAN)
         assert "legacy result" not in _prompt(ctx)
@@ -486,7 +583,7 @@ async def test_dag_origin_and_delivery_backstop(db):
     assert emitted[0].data["origin_channel"] == CHAN
     # ...and the listener re-inserting the same DAG is a no-op.
     await ResultInboxDagListener(inbox, s).handle(emitted[0])
-    rows = await inbox.claim(channel=CHAN, session_id=None, max_age_hours=72)
+    rows = await _claim(inbox, channel=CHAN, session_id=None)
     assert len(rows) == 1
     assert rows[0].source_kind == "dag" and "nightly-report" in rows[0].body
 
@@ -525,7 +622,7 @@ async def test_retried_dag_delivers_its_new_outcome_once(db):
     await dags.update_dag_status(dag.id, "failed", result_summary="run 1 failed")
     await delivery.deliver(await dags.get_dag(dag.id))
     await listener.handle(emitted[-1])
-    first = await inbox.claim(channel=CHAN, session_id=None, max_age_hours=72)
+    first = await _claim(inbox, channel=CHAN, session_id=None)
     assert [r.msg_type for r in first] == ["FAILURE"]
 
     # retry_node reactivates it; run 2 completes.
@@ -541,11 +638,11 @@ async def test_retried_dag_delivers_its_new_outcome_once(db):
     await delivery.deliver(retried)
     await listener.handle(emitted[-1])  # bus copy of the same outcome: no-op
 
-    second = await inbox.claim(channel=CHAN, session_id=None, max_age_hours=72)
+    second = await _claim(inbox, channel=CHAN, session_id=None)
     assert len(second) == 1
     assert second[0].msg_type == "INFORM" and "run 2 succeeded" in second[0].body
     assert second[0].source_generation == retried.delivery_generation
-    assert await inbox.claim(channel=CHAN, session_id=None, max_age_hours=72) == []
+    assert await _claim(inbox, channel=CHAN, session_id=None) == []
 
 
 # ---------------------------------------------------------------------------
@@ -599,7 +696,7 @@ class TestReconciler:
         calls = _fail_first_insert(monkeypatch, store)
         st = await _finish_subtask(env, session_id="S1", channel=CHAN, result="Powder: 40cm")
         assert calls["n"] == 1
-        assert await store.claim(channel="telegram:nobody", session_id="S1", max_age_hours=72) == []
+        assert await _claim(store, channel="telegram:nobody", session_id="S1") == []
 
         reconciler = build_reconciler(env.heart.db, store, env.settings)
         assert await reconciler.run_once() == {"inbox": 1, "dag": 0}
@@ -693,12 +790,12 @@ class TestReconciler:
         await orch._deliver_terminal_dags()
         delivered = await dags.get_dag(dag.id)
         assert len(pushes) == 1 and delivered.delivered_at is not None
-        assert await inbox.claim(channel=CHAN, session_id=None, max_age_hours=72) == []
+        assert await _claim(inbox, channel=CHAN, session_id=None) == []
 
         reconciler = build_reconciler(db, inbox, s)
         assert await reconciler.run_once() == {"inbox": 0, "dag": 1}
         assert await reconciler.run_once() == {"inbox": 0, "dag": 0}  # idempotent
-        rows = await inbox.claim(channel=CHAN, session_id=None, max_age_hours=72)
+        rows = await _claim(inbox, channel=CHAN, session_id=None)
         assert len(rows) == 1
         assert rows[0].source_kind == "dag" and "nightly-report" in rows[0].body
         assert rows[0].source_generation == delivered.delivery_generation
@@ -742,7 +839,7 @@ class TestReconciler:
         reconciler = TerminalSubtaskReconciler([InboxDagPass(db, inbox, s)], batch_size=1)
         assert await reconciler.run_once() == {"dag": 1}
         assert await reconciler.run_once() == {"dag": 0}
-        rows = await inbox.claim(channel=CHAN, session_id=None, max_age_hours=72)
+        rows = await _claim(inbox, channel=CHAN, session_id=None)
         assert [r.title for r in rows] == ["routed"]
 
     async def test_skips_inline_and_settles_empty_results(self, inbox_env):

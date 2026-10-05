@@ -423,10 +423,12 @@ class CognitiveLayer:
     ) -> str:
         """F098: claim this channel's/session's inbox rows and inject them.
 
-        Claiming is one ``UPDATE ... WHERE delivered_at IS NULL RETURNING``,
-        so two turns racing on one channel never inject the same row. Like
+        Claiming re-checks ``delivered_at IS NULL`` on every row it flips, so
+        two turns racing on one channel never inject the same row. Like
         the legacy path, rows are marked delivered when injected, not when
-        the turn succeeds. Never raises.
+        the turn succeeds. Only the newest ``result_inbox_max_items`` come
+        back with their bodies; older ones are claimed and counted. Never
+        raises.
         """
         inbox = self._heart.result_inbox
         if channel:
@@ -435,10 +437,11 @@ class CognitiveLayer:
             except Exception:
                 logger.warning("F098: channel_sessions upsert failed for %s", channel, exc_info=True)
         try:
-            rows = await inbox.claim(
+            rows, older = await inbox.claim(
                 channel=channel,
                 session_id=session_id,
                 max_age_hours=self._settings.result_inbox_max_age_hours,
+                max_items=self._settings.result_inbox_max_items,
                 delivered_session_id=session_id,
             )
         except Exception:
@@ -448,12 +451,13 @@ class CognitiveLayer:
             return system_prompt
         subtask_ids = [r.source_id for r in rows if r.source_kind == "subtask"]
         if subtask_ids:
-            # Keep heart.subtasks.delivered coherent for legacy metrics.
+            # Keep heart.subtasks.delivered coherent for legacy metrics (the
+            # claim already did this for the older rows it only counted).
             try:
                 await self._heart.subtasks.mark_delivered(subtask_ids)
             except Exception:
                 logger.warning("F098: mark_delivered failed for %d subtasks", len(subtask_ids), exc_info=True)
-        text = format_inbox_messages(rows, self._settings.result_inbox_max_items)
+        text = format_inbox_messages(rows, self._settings.result_inbox_max_items, older)
         # Audit CL-1: the F036 cache-split path reads only the tiers, so the
         # results must land in the dynamic tier too or they are lost.
         if sections_by_tier:
