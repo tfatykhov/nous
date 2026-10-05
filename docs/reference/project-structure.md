@@ -43,6 +43,8 @@ nous/
 │   │   ├── working_memory.py   # Short-term scratch space
 │   │   ├── search.py           # Full-text + vector search
 │   │   ├── subtasks.py         # Subtask CRUD operations
+│   │   ├── result_inbox.py     # F098: channel-keyed result inbox (store, subtask/DAG writers, pre_turn formatting)
+│   │   ├── result_reconciler.py  # F098: repairs lost inbox writes (subtask and DAG passes)
 │   │   ├── schedules.py        # Schedule CRUD operations
 │   │   └── schemas.py          # Pydantic models
 │   ├── cognitive/              # Cognitive layer (Nous Loop)

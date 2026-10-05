@@ -40,6 +40,7 @@ from nous.storage.migrator import run_migrations
 if TYPE_CHECKING:
     from nous.a2ui.service import SurfaceService
     from nous.cognitive.ledger_store import LedgerStore
+    from nous.heart.result_reconciler import TerminalSubtaskReconciler
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +193,28 @@ async def _a2ui_sweep_loop(settings: Settings, surface_service: SurfaceService) 
             logger.exception("F092: expiry sweep was cancelled from within — the loop continues")
         except Exception:
             logger.warning("F092: expiry sweep failed", exc_info=True)
+
+
+async def _result_reconciler_loop(reconciler: TerminalSubtaskReconciler) -> None:
+    """F098: run the terminal-subtask reconciler at startup, then every interval."""
+    from nous.heart import result_reconciler
+
+    # Startup first: a worker cancelled at shutdown lost its inbox write in
+    # the previous process, and this is what repairs it.
+    first = True
+    while True:
+        try:
+            if first:
+                first = False
+            else:
+                await asyncio.sleep(result_reconciler.RECONCILE_INTERVAL_SECONDS)
+            await reconciler.run_once()
+        except asyncio.CancelledError:
+            if cancel_requested():
+                break
+            logger.exception("F098: result reconciler was cancelled from within — the loop continues")
+        except Exception:
+            logger.warning("F098: result reconciler tick failed", exc_info=True)
 
 
 async def create_components(settings: Settings) -> dict:
@@ -999,6 +1022,23 @@ async def create_components(settings: Settings) -> dict:
                 _context_log_retention_loop(settings, database), name="context-log-retention"
             )
 
+    # F098: repair inbox writes the subtask worker lost (codex P1 on #694).
+    result_reconciler_task = None
+    if settings.result_inbox_enabled:
+        from nous.heart.result_reconciler import build_reconciler
+
+        # The reconciler's no-backfill watermark, recorded the first time a
+        # process starts with the flag on — before any worker can finish a
+        # subtask. A failure here is retried by every reconciler tick.
+        try:
+            await heart.result_inbox.ensure_enabled_at()
+        except Exception:
+            logger.warning("F098: could not record when the result inbox was enabled", exc_info=True)
+        result_reconciler = build_reconciler(database, heart.result_inbox, settings)
+        result_reconciler_task = asyncio.create_task(
+            _result_reconciler_loop(result_reconciler), name="result-reconciler"
+        )
+
     # 011.1 + 012.2: Register subtask/schedule tools (after runner for inline execution)
     # F061 PR-3: pass bus so inline hardened subtasks emit subtask_outcome telemetry.
     if settings.subtask_enabled:
@@ -1239,7 +1279,15 @@ async def create_components(settings: Settings) -> dict:
                 agent_id=settings.agent_id,
                 bus=bus,
                 runner=runner,
+                # F098: durability backstop for the inbox listener below.
+                inbox=heart.result_inbox if settings.result_inbox_enabled else None,
             )
+            if bus is not None and settings.result_inbox_enabled:
+                from nous.heart.result_inbox import ResultInboxDagListener
+
+                # F098: the first consumer of dag.completed / dag.failed.
+                ResultInboxDagListener(heart.result_inbox, settings).register(bus)
+                logger.info("F098: result inbox listening for DAG terminal events")
             dag_orchestrator = DAGOrchestrator(
                 store=dag_store,
                 subtask_mgr=heart.subtasks,
@@ -1440,6 +1488,7 @@ async def create_components(settings: Settings) -> dict:
         "dag_orchestrator": dag_orchestrator,
         "context_logger": context_logger,
         "context_log_retention_task": context_log_retention_task,
+        "result_reconciler_task": result_reconciler_task,
         "retrieval_log_retention_task": retrieval_log_retention_task,
         "retrieval_logger": retrieval_logger,
         "ledger_store": ledger_store,
@@ -1483,6 +1532,15 @@ async def shutdown_components(components: dict) -> None:
         a2ui_sweep.cancel()
         try:
             await a2ui_sweep
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    # F098: stop the result reconciler
+    result_reconciler = components.get("result_reconciler_task")
+    if result_reconciler:
+        result_reconciler.cancel()
+        try:
+            await result_reconciler
         except (asyncio.CancelledError, Exception):
             pass
 

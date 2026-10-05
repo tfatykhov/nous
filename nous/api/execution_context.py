@@ -67,6 +67,10 @@ class ExecutionContext:
     # Phase 2.8: the DAG node is declared undoable — every tool call from
     # this turn must use a compensable tool.
     undoable: bool = False
+    # F098: where the conversation lives ('telegram:<chat_id>'), never a
+    # session id. Set by REST chat; spawn_task / dag_create store it so the
+    # result reaches the conversation after its session has expired.
+    channel: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in CONTEXT_KINDS:

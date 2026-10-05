@@ -424,6 +424,14 @@ class ToolDispatcher:
                 args = {**args, "_is_background": is_background}
             if session_id is not None and name == "spawn_task":
                 args = {**args, "_session_id": session_id}
+            if ctx.channel and name in ("spawn_task", "dag_create"):
+                # F098: the channel outlives the session, so the result can
+                # reach the conversation after the session has expired.
+                args = {**args, "_channel": ctx.channel}
+            if session_id is not None and name == "dag_create" and not ctx.is_background:
+                # Every foreground kind (interactive, MCP): an MCP turn has no
+                # channel, so its session is the DAG's only routing key.
+                args = {**args, "_session_id": session_id}
             if session_id is not None and name == "cache_retrieve":
                 args = {**args, "session_id": session_id}
             if session_id is not None and name == "run_python":
@@ -2954,6 +2962,7 @@ def create_subtask_tools(
         # tool schema.
         _lookup_token: str | None = None,
         _session_id: str | None = None,
+        _channel: str | None = None,  # F098: injected by ToolDispatcher
     ) -> dict[str, Any]:
         """Spawn a subtask, optionally waiting for its result inline.
 
@@ -3023,6 +3032,7 @@ def create_subtask_tools(
                 timeout=effective_timeout,
                 notify=notify,
                 parent_session_id=_session_id,
+                parent_channel=_channel,
                 frame_type=frame_type,
                 model=effective_model,
                 metadata=_metadata,
@@ -5313,6 +5323,9 @@ def register_dag_tools(
                 token_budget=kwargs.get("token_budget"),
                 nodes=node_specs,
                 edges=edge_specs,
+                # F098: injected by ToolDispatcher on a conversation turn.
+                origin_channel=kwargs.get("_channel"),
+                origin_session_id=kwargs.get("_session_id"),
             )
 
             dag = await store.create(request)

@@ -53,6 +53,7 @@ Documented routes served by `nous/api/rest.py`, which is the full list. Part of 
 | GET | `/dashboard/admission/rejected` | Rejected admission entries |
 | GET | `/dashboard/ledger` | Execution ledger dashboard data |
 | GET | `/dashboard/heartbeat` | Heartbeat dashboard data |
+| GET | `/dashboard/subtasks` | Subtask dashboard data (`hours`, default 24, max 168). With `NOUS_RESULT_INBOX_ENABLED`, also `result_inbox: {7d, 30d}`: per source kind (`subtask`, `dag`) the rows `created` and `delivered`, `delivery_rate`, `latency_p50_s`, `latency_p95_s` (F098) |
 | GET | `/dashboard/density` | Graph density dashboard data (F040) |
 | GET | `/dashboard/retrieval` | F091 recent retrievals + window-level disposition/leg rollup |
 | GET | `/dashboard/retrieval/{entry_id}` | F091 one retrieval's candidates (grouped by disposition) + graph-expansion edges |

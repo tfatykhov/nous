@@ -1192,6 +1192,18 @@ class Settings(BaseSettings):
         default_factory=dict,
     )
 
+    # F098: result inbox — subtask/DAG results routed to the conversation by
+    # channel (telegram:<chat_id>) instead of the ephemeral session id. Off:
+    # nothing is written to heart.result_inbox / channel_sessions and pre_turn
+    # runs the legacy get_undelivered(session_id) path unchanged.
+    result_inbox_enabled: bool = False
+    result_inbox_max_age_hours: int = Field(default=72, ge=1)
+    result_inbox_max_items: int = Field(default=10, ge=1)
+    result_inbox_body_max_chars: int = Field(default=4000, ge=200)
+    # Route DAGs with no origin channel (scheduler/heartbeat) to
+    # telegram:<telegram_chat_id>. Off: such DAGs keep only the F087 push.
+    result_inbox_dag_scheduled: bool = False
+
     # F022: Graph-Augmented Recall
     graph_recall_enabled: bool = True
     graph_recall_max_expand: int = 5

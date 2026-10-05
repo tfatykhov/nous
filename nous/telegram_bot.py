@@ -692,7 +692,8 @@ class NousTelegramBot:
                         self._sessions[chat_id], time.time() - last_active)
             del self._sessions[chat_id]
         session_id = self._sessions.get(chat_id)
-        payload: dict[str, Any] = {"message": text, "platform": "telegram"}
+        # F098: the server routes background results by chat_id (the channel).
+        payload: dict[str, Any] = {"message": text, "platform": "telegram", "chat_id": chat_id}
         if session_id:
             payload["session_id"] = session_id
         if debug:
@@ -791,7 +792,10 @@ class NousTelegramBot:
             del self._sessions[chat_id]
         session_id = self._sessions.setdefault(chat_id, str(uuid4()))
         self._session_last_active[chat_id] = time.time()
-        payload: dict[str, Any] = {"message": text, "session_id": session_id, "platform": "telegram"}
+        payload: dict[str, Any] = {
+            "message": text, "session_id": session_id, "platform": "telegram",
+            "chat_id": chat_id,  # F098: the server routes background results by it
+        }
         # 007.4: Pass user identity for episode tracking
         if user_id:
             payload["user_id"] = user_id

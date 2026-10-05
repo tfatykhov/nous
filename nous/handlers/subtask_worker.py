@@ -27,6 +27,7 @@ from nous.cancellation import cancel_requested
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart.heart import Heart
+from nous.heart.result_inbox import record_subtask_result
 from nous.storage.models import Subtask
 
 logger = logging.getLogger(__name__)
@@ -188,6 +189,24 @@ class SubtaskWorkerPool:
             await self._notify_telegram(subtask, error=error_msg)
         finally:
             self._inflight_state.pop(subtask.id, None)
+            await self._record_inbox(subtask)
+
+    async def _record_inbox(self, subtask: Subtask) -> None:
+        """F098: queue the finished result for the conversation that spawned it.
+
+        One site for every worker path (hardened, legacy, timeout): the row
+        is re-read so the inbox sees the status that was actually committed.
+        Inline subtasks never come through here — their result is returned
+        in the calling turn. Never raises.
+        """
+        if getattr(self._settings, "result_inbox_enabled", False) is not True:
+            return
+        try:
+            row = await self._heart.subtasks.get(subtask.id)
+        except Exception:
+            logger.warning("F098: could not re-read subtask %s for the inbox", subtask.id.hex[:8], exc_info=True)
+            return
+        await record_subtask_result(self._heart.result_inbox, row, self._settings)
 
     async def _execute_subtask(self, subtask: Subtask) -> None:
         """Run the subtask as an agent turn via AgentRunner.
