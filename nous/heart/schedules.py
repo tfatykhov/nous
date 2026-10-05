@@ -7,6 +7,8 @@ from uuid import UUID
 from croniter import croniter
 from sqlalchemy import select, update
 
+from nous.brain import intentions
+from nous.brain.intentions import IntentionSpec
 from nous.storage.database import Database
 from nous.storage.models import Schedule
 
@@ -36,6 +38,7 @@ class ScheduleManager:
         frame_type: str | None = None,
         continuation_turns: int = 0,
         continuation_prompt: str | None = None,
+        intention: IntentionSpec | None = None,
     ) -> Schedule:
         """Create a new schedule."""
         # Compute next_fire_at
@@ -51,6 +54,12 @@ class ScheduleManager:
             raise ValueError("Recurring schedule needs interval_seconds or cron_expr")
 
         async with self._db.session() as session:
+            # F099 I1: a schedule's intention is its container (section 4.1 Schedules).
+            prepared = (
+                await intentions.prepare_intention(session, self._agent_id, intention)
+                if intention is not None
+                else None
+            )
             schedule = Schedule(
                 agent_id=self._agent_id,
                 task=task,
@@ -70,6 +79,11 @@ class ScheduleManager:
                 continuation_prompt=continuation_prompt,
             )
             session.add(schedule)
+            await session.flush()
+            if prepared is not None:
+                await intentions.insert_prepared(
+                    session, self._agent_id, prepared, source_kind=intentions.SOURCE_SCHEDULE, source_id=schedule.id
+                )
             await session.commit()
             await session.refresh(schedule)
             logger.info(

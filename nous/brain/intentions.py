@@ -146,6 +146,11 @@ def intention_kwargs(spec: IntentionSpec | None) -> dict[str, IntentionSpec]:
     return {"intention": spec} if spec is not None else {}
 
 
+def enabled(settings: Any) -> bool:
+    """NOUS_INTENTIONS_ENABLED, read so that a mocked Settings counts as off."""
+    return getattr(settings, "intentions_enabled", False) is True
+
+
 @dataclass(frozen=True, slots=True)
 class ParentView:
     """What a child's resolution needs from its parent intention."""

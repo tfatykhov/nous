@@ -500,3 +500,104 @@ async def test_heart_has_an_intention_store(db, mock_embeddings):
         assert isinstance(heart.intentions, intentions.IntentionStore)
     finally:
         await heart.close()
+
+
+# ---------------------------------------------------------------------------
+# Task 1.3: every store writes its row and the intention atomically (I1)
+# ---------------------------------------------------------------------------
+
+from nous.dag.schemas import DAGCreateRequest, DAGNodeSpec, DAGNodeType  # noqa: E402
+from nous.dag.store import DAGStore  # noqa: E402
+from nous.heart.schedules import ScheduleManager  # noqa: E402
+from nous.heart.subtasks import SubtaskManager  # noqa: E402
+from nous.storage.models import ExecutionDAG, Schedule, Subtask  # noqa: E402
+
+_WORK = {"subtask": Subtask, "schedule": Schedule, "dag": ExecutionDAG}
+STORES = pytest.mark.parametrize("store", ["subtask", "schedule", "dag"])
+
+
+async def _create(store: str, db, agent, spec):
+    if store == "subtask":
+        return await SubtaskManager(db, agent).create(task="t", **intentions.intention_kwargs(spec))
+    if store == "schedule":
+        return await ScheduleManager(db, agent).create(
+            task="t", schedule_type="recurring", interval_seconds=1800, **intentions.intention_kwargs(spec)
+        )
+    request = DAGCreateRequest(name="d", nodes=[DAGNodeSpec(name="n", type=DAGNodeType.subtask, instructions="x")])
+    return await DAGStore(db, agent, Settings(_env_file=None)).create(request, **intentions.intention_kwargs(spec))
+
+
+def _store_spec(store: str, **over) -> IntentionSpec:
+    return _spec(container=(store == "schedule"), **over)
+
+
+async def _count(db, model, agent) -> int:
+    async with db.session() as s:
+        return len((await s.execute(select(model).where(model.agent_id == agent))).scalars().all())
+
+
+@STORES
+async def test_a_store_writes_its_row_and_one_intention(db, store):
+    agent = _agent()
+    row = await _create(store, db, agent, _store_spec(store))
+    found = await intentions.IntentionStore(db, agent).get_for_source(store, row.id)
+    assert found is not None and found.intent == "Check the snow report"
+    assert await _count(db, Intention, agent) == 1
+
+
+async def test_a_subtask_row_carries_its_lineage_stamp(db):
+    agent = _agent()
+    row = await SubtaskManager(db, agent).create(task="t", metadata={"k": "v"}, intention=_spec())
+    found = await intentions.IntentionStore(db, agent).get_for_source("subtask", row.id)
+    assert row.metadata_ == {
+        "k": "v",
+        "intention": {"id": str(found.id), "root_id": str(found.root_id), "authority": "owner"},
+    }
+
+
+@STORES
+async def test_no_spec_writes_no_intention(db, store):
+    agent = _agent()
+    await _create(store, db, agent, None)
+    assert await _count(db, Intention, agent) == 0
+
+
+@STORES
+@pytest.mark.parametrize("order", ["after_the_work_row", "after_the_intention_row"])
+async def test_a_fault_after_either_insert_leaves_neither_row(db, monkeypatch, store, order):
+    real = intentions.insert_prepared
+
+    async def faulty(session, *args, **kwargs):
+        # Both rows must be in THIS session's transaction: a store that wrote
+        # either one through a second session would leave it behind.
+        assert await session.get(_WORK[store], kwargs["source_id"]) is not None
+        if order == "after_the_intention_row":
+            await real(session, *args, **kwargs)
+            prepared = args[1]
+            assert await session.get(Intention, prepared.id) is not None
+        raise RuntimeError("injected fault")
+
+    monkeypatch.setattr(intentions, "insert_prepared", faulty)
+    agent = _agent()
+    with pytest.raises(RuntimeError, match="injected fault"):
+        await _create(store, db, agent, _store_spec(store))
+    assert await _count(db, _WORK[store], agent) == 0
+    assert await _count(db, Intention, agent) == 0
+
+
+@STORES
+async def test_a_spawn_under_a_closed_root_leaves_no_row(db, store):
+    agent = _agent()
+    root = await _root(db, agent, cancelled=True)
+    with pytest.raises(intentions.IntentionRootClosed):
+        await _create(store, db, agent, _store_spec(store, origin_kind="subtask", parent_id=root.id))
+    assert await _count(db, _WORK[store], agent) == 0
+    assert await _count(db, Intention, agent) == 1  # the root alone
+
+
+def test_enabled_reads_only_a_real_true():
+    from unittest.mock import MagicMock
+
+    assert intentions.enabled(Settings(_env_file=None, result_inbox_enabled=True, intentions_enabled=True))
+    assert not intentions.enabled(Settings(_env_file=None))
+    assert not intentions.enabled(MagicMock())  # a mocked Settings is not "on"

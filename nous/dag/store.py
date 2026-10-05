@@ -12,6 +12,8 @@ from sqlalchemy import String, and_, cast, exists, func, or_, select, update
 from sqlalchemy import true as sa_true
 from sqlalchemy.orm import aliased, selectinload
 
+from nous.brain import intentions
+from nous.brain.intentions import IntentionSpec
 from nous.config import Settings
 from nous.dag.schemas import PREDECESSOR_EDGE_TYPES, DAGCreateRequest, DAGNodeType
 from nous.storage.database import Database
@@ -159,11 +161,15 @@ class DAGStore:
         self._agent_id = agent_id
         self._settings = settings
 
-    async def create(self, request: DAGCreateRequest) -> ExecutionDAG:
+    async def create(self, request: DAGCreateRequest, intention: IntentionSpec | None = None) -> ExecutionDAG:
         """Create a DAG with nodes and edges from a validated request.
 
         Wave-0 nodes are set to 'ready' status; all others start 'pending'.
         Raises ValueError if the active DAG limit is reached.
+
+        With ``intention``, the DAG's ``brain.intentions`` row is written in this
+        transaction (F099 I1). Its nodes get the lineage at launch, from the
+        orchestrator.
         """
         async with self._db.session() as session:
             live = (
@@ -197,6 +203,13 @@ class DAGStore:
                         "answer or cancel some first."
                     )
 
+            # F099 I1: resolved before any row, so a closed root refuses cleanly.
+            prepared = (
+                await intentions.prepare_intention(session, self._agent_id, intention)
+                if intention is not None
+                else None
+            )
+
             # Compute wave assignments
             waves = request.compute_waves()
 
@@ -216,6 +229,10 @@ class DAGStore:
             )
             session.add(dag)
             await session.flush()  # Get dag.id
+            if prepared is not None:
+                await intentions.insert_prepared(
+                    session, self._agent_id, prepared, source_kind=intentions.SOURCE_DAG, source_id=dag.id
+                )
 
             # Create nodes
             node_map: dict[str, DAGNode] = {}
