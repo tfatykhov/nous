@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -504,6 +505,170 @@ class TestEndToEnd:
         assert "legacy result" in _prompt(ctx)
         assert (await env.heart.subtasks.get(st.id)).delivered is True
         assert await env.heart.result_inbox.get_channel_session(CHAN) is None
+
+
+# ---------------------------------------------------------------------------
+# Production wiring (review P2): each link is driven through the code that
+# calls it, so deleting the call fails a test.
+# ---------------------------------------------------------------------------
+
+
+async def test_worker_terminal_hook_writes_the_inbox(inbox_env):
+    """The real _process_subtask (legacy path) runs a subtask to completion;
+    its ``finally`` hook writes the inbox row."""
+    from nous.handlers.subtask_worker import SubtaskWorkerPool
+
+    class _Runner:
+        async def run_turn(self, **kwargs):
+            return "Powder: 40cm overnight", None, {"input_tokens": 1, "output_tokens": 1}
+
+        async def end_conversation(self, *args, **kwargs):
+            return None
+
+    env = inbox_env
+    assert env.settings.subtask_hardening_enabled is False
+    pool = SubtaskWorkerPool(_Runner(), env.heart, env.settings)
+    await env.heart.subtasks.create(task="Check the snow report", parent_session_id="S1", parent_channel=CHAN)
+    st = await env.heart.subtasks.dequeue("worker-0")
+    await pool._process_subtask(st)
+
+    assert (await env.heart.subtasks.get(st.id)).status == "completed"
+    rows = await _claim(env.heart.result_inbox, channel=CHAN, session_id=None)
+    assert [r.source_id for r in rows] == [st.id]
+    assert "Powder: 40cm overnight" in rows[0].body
+
+
+class _SpyCognitive:
+    """Records what pre_turn receives; every turn runs in the task frame."""
+
+    def __init__(self) -> None:
+        from nous.cognitive.schemas import FrameSelection, TurnContext
+
+        self.pre_turn_kwargs: list[dict] = []
+        self._ctx = TurnContext(
+            system_prompt="You are Nous.",
+            frame=FrameSelection(frame_id="task", frame_name="Task", confidence=0.9, match_method="default"),
+            decision_id=None,
+            active_censors=[],
+            context_token_estimate=100,
+        )
+
+    async def pre_turn(self, agent_id, session_id, user_input, **kwargs):
+        self.pre_turn_kwargs.append(kwargs)
+        return self._ctx
+
+    async def post_turn(self, agent_id, session_id, turn_result, turn_context, **kwargs):
+        from nous.cognitive.schemas import Assessment
+
+        return Assessment(actual=turn_result.response_text[:200])
+
+    async def end_session(self, *args, **kwargs):
+        return None
+
+    async def list_frames(self, *args, **kwargs):
+        return []
+
+
+class _StubBrain:
+    async def close(self):
+        pass
+
+
+class _StubHeart:
+    async def close(self):
+        pass
+
+
+@pytest.fixture
+async def wired_chat(db, mock_embeddings):
+    """The REST app over a real AgentRunner and ToolDispatcher. The fake model
+    calls spawn_task once on either API path; spawn_task is the real tool,
+    writing heart.subtasks. pre_turn is a spy."""
+    from unittest.mock import MagicMock
+
+    from httpx import ASGITransport, AsyncClient
+
+    from nous.api.anthropic_client import StreamEvent
+    from nous.api.rest import create_app
+    from nous.api.runner import AgentRunner, ApiResponse
+    from nous.api.tools import ToolDispatcher, register_subtask_tools
+    from nous.brain.brain import Brain
+    from nous.heart import Heart
+
+    settings = _settings(agent_id=_agent(), ANTHROPIC_API_KEY="test-key")
+    brain = Brain(database=db, settings=settings)
+    heart = Heart(db, settings, embedding_provider=mock_embeddings)
+    cognitive = _SpyCognitive()
+    runner = AgentRunner(cognitive, _StubBrain(), _StubHeart(), settings)
+    dispatcher = ToolDispatcher()
+    register_subtask_tools(dispatcher, heart, settings, runner=runner)
+    runner.set_dispatcher(dispatcher)
+
+    spawn = {"task": "Check the snow report"}
+    calls = {"api": 0, "stream": 0}
+
+    async def fake_call_api(*args, **kwargs):
+        calls["api"] += 1
+        if calls["api"] == 1:
+            return ApiResponse(
+                content=[{"type": "tool_use", "id": "t1", "name": "spawn_task", "input": dict(spawn)}],
+                stop_reason="tool_use",
+            )
+        return ApiResponse(content=[{"type": "text", "text": "On it."}], stop_reason="end_turn")
+
+    async def fake_stream(*args, **kwargs):
+        calls["stream"] += 1
+        if calls["stream"] == 1:
+            yield StreamEvent(type="tool_start", tool_name="spawn_task", tool_id="t1", block_index=1)
+            yield StreamEvent(type="tool_input_delta", text=json.dumps(spawn), block_index=1)
+            yield StreamEvent(type="block_stop", block_index=1)
+            yield StreamEvent(type="done", stop_reason="tool_use")
+        else:
+            yield StreamEvent(type="text_delta", text="On it.")
+            yield StreamEvent(type="done", stop_reason="end_turn")
+
+    runner._call_api = fake_call_api
+    runner._call_api_stream = MagicMock(side_effect=fake_stream)
+
+    app = create_app(runner, brain, heart, cognitive, db, settings)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        yield SimpleNamespace(client=client, cognitive=cognitive, heart=heart, settings=settings)
+    runner._api_shared = True
+    await runner.close()
+    await heart.close()
+    await brain.close()
+
+
+async def _spawned_in(env, session_id: str) -> list:
+    from sqlalchemy import select
+
+    from nous.storage.models import Subtask
+
+    async with env.heart.db.session() as s:
+        return list(
+            (
+                await s.execute(
+                    select(Subtask)
+                    .where(Subtask.agent_id == env.settings.agent_id)
+                    .where(Subtask.parent_session_id == session_id)
+                )
+            ).scalars().all()
+        )
+
+
+@pytest.mark.parametrize("route", ["/chat/stream", "/chat"])
+async def test_telegram_chat_id_reaches_pre_turn_and_the_spawned_subtask(wired_chat, route):
+    """The bot's ordinary messages go through /chat/stream (and /chat): the
+    chat_id becomes the turn's channel, pre_turn reads the inbox by it, and a
+    subtask spawned in that turn stores it."""
+    env = wired_chat
+    session_id = f"tg-{uuid.uuid4().hex[:8]}"
+    resp = await env.client.post(route, json={
+        "message": "check the snow", "platform": "telegram", "chat_id": 55, "session_id": session_id,
+    })
+    assert resp.status_code == 200, resp.text
+    assert [kw.get("channel") for kw in env.cognitive.pre_turn_kwargs] == ["telegram:55"]
+    assert [st.parent_channel for st in await _spawned_in(env, session_id)] == ["telegram:55"]
 
 
 # ---------------------------------------------------------------------------
