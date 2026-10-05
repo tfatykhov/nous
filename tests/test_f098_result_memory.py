@@ -177,6 +177,34 @@ def test_flags_default_off():
     assert s.result_memory_scheduled is False
 
 
+@pytest.mark.parametrize(
+    "memory,chunks,warned",
+    [(True, False, True), (True, True, False), (False, False, False), (False, True, False)],
+)
+async def test_startup_warns_when_result_chunks_are_not_searchable(monkeypatch, caplog, memory, chunks, warned):
+    """Recall's chunk leg runs only with NOUS_EPISODE_CHUNKS_ENABLED; result chunks are written either way.
+
+    Drives the real create_components and stops it at the database connect.
+    """
+    import nous.main
+    from nous.storage.database import Database
+
+    class _Stop(Exception):
+        pass
+
+    async def stop_at_connect(self):
+        raise _Stop
+
+    monkeypatch.setattr(Database, "connect", stop_at_connect)
+    settings = _settings(result_memory_enabled=memory, episode_chunks_enabled=chunks)
+    with caplog.at_level(logging.WARNING, logger="nous.main"), pytest.raises(_Stop):
+        await nous.main.create_components(settings)
+    hits = [r for r in caplog.records if "NOUS_EPISODE_CHUNKS_ENABLED" in r.getMessage()]
+    assert [r.levelno for r in hits] == ([logging.WARNING] if warned else [])
+    if warned:
+        assert "not searchable until NOUS_EPISODE_CHUNKS_ENABLED=true" in hits[0].getMessage()
+
+
 # ---------------------------------------------------------------------------
 # DB fixtures
 # ---------------------------------------------------------------------------
@@ -599,6 +627,8 @@ async def test_recall_deep_shows_the_marker_on_result_chunks(mem_env, monkeypatc
     assert await env.heart.result_memory.record(st) == "written"
     first, _ = (await _real_chunks(env, source_ref=f"subtask:{st.id}"))[0]
 
+    # Recall's chunk leg runs only with NOUS_EPISODE_CHUNKS_ENABLED (default off); the
+    # writer stores result chunks either way, so this turns on the path under test.
     env.settings.episode_chunks_enabled = True
     brain = Brain(database=env.db, settings=env.settings, embedding_provider=env.heart._embeddings)
     try:

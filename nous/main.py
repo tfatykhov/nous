@@ -217,6 +217,17 @@ async def _result_reconciler_loop(reconciler: TerminalSubtaskReconciler) -> None
             logger.warning("F098: result reconciler tick failed", exc_info=True)
 
 
+def _warn_on_f098_flags(settings: Settings) -> None:
+    """F098: warn about flag combinations that leave part of a feature unreachable."""
+    if settings.result_memory_enabled and not settings.episode_chunks_enabled:
+        # The writer stores chunks either way, so they become searchable once the flag is on.
+        logger.warning(
+            "NOUS_RESULT_MEMORY_ENABLED=true but NOUS_EPISODE_CHUNKS_ENABLED=false: subtask result chunks "
+            "are stored but not searchable until NOUS_EPISODE_CHUNKS_ENABLED=true (recall's chunk leg is off). "
+            "Result episodes are searchable."
+        )
+
+
 async def create_components(settings: Settings) -> dict:
     """Initialize all components in dependency order.
 
@@ -229,6 +240,7 @@ async def create_components(settings: Settings) -> dict:
     5. CognitiveLayer - orchestrator
     6. AgentRunner - LLM integration
     """
+    _warn_on_f098_flags(settings)
     database = Database(settings, lock_timeout_seconds=settings.db_lock_timeout_seconds)
     await database.connect()  # F1: connect() not initialize()
     await run_migrations(database.engine)  # Apply pending SQL migrations
