@@ -1,6 +1,6 @@
 # F098 Phase C — Result Memory Writer
 
-Status: In build (stacked on Phase A, PR #694). Open questions decided by the user on 2026-10-04 (§8).
+Status: In review (#696); Phase A (#694) is merged. Open questions decided by the user on 2026-10-04 (§8).
 Author: Nous, 2026-10-04
 Verified against: PR #694 head `eaaacfc` + prod DB (30-day window, queried 2026-10-04 22:3x UTC)
 Parent spec: `docs/features/F098-result-inbox-and-wake.md` §3.5 (this document supersedes §3.5)
