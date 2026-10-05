@@ -36,6 +36,7 @@ from uuid import UUID
 from nous.api.call_outcome import CallOutcome
 from nous.api.call_outcome import _current as _outcome_var  # the one setter (harness 2b)
 from nous.api.execution_context import ExecutionContext, resolve_context
+from nous.brain import intentions
 from nous.brain.brain import Brain
 from nous.brain.intentions import AUTHORITY_INTERNAL
 from nous.brain.schemas import NON_PREDICTION_OUTCOMES, ReasonInput, RecordInput
@@ -432,6 +433,12 @@ class ToolDispatcher:
                 hard_missing = (
                     list(missing) if handler_required is None else [k for k in missing if k in handler_required]
                 )
+                if name in self._origin_aware:
+                    # F099 I2: a spawn tool's handler owns the intent rule (refused
+                    # in a foreground turn, generated in any other). dag_create's
+                    # handler takes **kwargs, so without this every missing intent
+                    # would be refused here, background ones included.
+                    hard_missing = [k for k in hard_missing if k != "intent"]
                 if hard_missing:
                     provided = sorted(k for k in args if not k.startswith("_"))
                     return (
@@ -3019,6 +3026,10 @@ def create_subtask_tools(
         # subtask row even when dropped at execute time — operators can
         # inspect via /dashboard/subtasks.
         payload_schema: dict | None = None,
+        # F099 I2: required while NOUS_INTENTIONS_ENABLED is on (only then is
+        # it in the schema); ignored with the flag off.
+        intent: str | None = None,
+        wake_policy: str | None = None,
         # F062: internal-only lookup token written to metadata so spawn_sync
         # can find the row it just created without overriding the caller's
         # parent_session_id (Codex round-14 P2). Not exposed in the public
@@ -3027,6 +3038,11 @@ def create_subtask_tools(
         _session_id: str | None = None,
         _channel: str | None = None,  # F098: injected by ToolDispatcher
         _decision_id: str | None = None,  # F099 Phase 0a: injected by ToolDispatcher
+        # F099 section 4.2: the spawning turn's origin, for the intention row only (I5).
+        _origin_kind: str | None = None,
+        _origin_session_id: str | None = None,
+        _origin_channel: str | None = None,
+        _intention_id: str | None = None,
     ) -> dict[str, Any]:
         """Spawn a subtask, optionally waiting for its result inline.
 
@@ -3043,6 +3059,22 @@ def create_subtask_tools(
             MCP-compliant response with subtask ID or inline result
         """
         try:
+            # F099 I2: the intention behind this spawn, built first, so a
+            # refused intent creates nothing.
+            spec = None
+            if intentions.enabled(settings):
+                spec = intentions.spec_from_tool_call(
+                    intent=intent,
+                    wake_policy=wake_policy,
+                    origin_kind=_origin_kind,
+                    fallback_text=task,
+                    # As worker_id below: without a runner the row is left to a worker.
+                    inline=bool(await_result and runner is not None),
+                    origin_session_id=_origin_session_id,
+                    origin_channel=_origin_channel,
+                    decision_id=_decision_id,
+                    intention_id=_intention_id,
+                )
             # 012.2: Apply frame-default model mapping
             effective_model = model
             if not effective_model and frame_type:
@@ -3111,6 +3143,7 @@ def create_subtask_tools(
                 # Run inline below, in this turn: claimed as it is created,
                 # so an idle worker cannot take it and run it a second time.
                 worker_id=INLINE_WORKER_ID if await_result and runner is not None else None,
+                **intentions.intention_kwargs(spec),
             )
 
             if not await_result:
@@ -3321,6 +3354,13 @@ def create_subtask_tools(
         notify: bool = False,
         model: str | None = None,
         frame_type: str | None = None,
+        intent: str | None = None,
+        wake_policy: str | None = None,
+        _decision_id: str | None = None,
+        _origin_kind: str | None = None,
+        _origin_session_id: str | None = None,
+        _origin_channel: str | None = None,
+        _intention_id: str | None = None,
     ) -> dict[str, Any]:
         """Schedule a task for later or recurring execution.
 
@@ -3339,6 +3379,23 @@ def create_subtask_tools(
             if bool(when) == bool(every):
                 return _tool_error("Exactly one of 'when' or 'every' must be provided.")
 
+            # F099: a schedule's intention is its container (section 4.1 Schedules).
+            # wake_policy is accepted for a uniform schema but has no meaning
+            # here: each fire takes remember/none from notify (plan D3).
+            spec = None
+            if intentions.enabled(settings):
+                spec = intentions.spec_from_tool_call(
+                    intent=intent,
+                    wake_policy=None,
+                    origin_kind=_origin_kind,
+                    fallback_text=task,
+                    container=True,
+                    origin_session_id=_origin_session_id,
+                    origin_channel=_origin_channel,
+                    decision_id=_decision_id,
+                    intention_id=_intention_id,
+                )
+
             from nous.handlers.time_parser import parse_every, parse_when
 
             if when:
@@ -3351,6 +3408,7 @@ def create_subtask_tools(
                     timeout=settings.subtask_default_timeout,
                     model=model,
                     frame_type=frame_type,
+                    **intentions.intention_kwargs(spec),
                 )
             else:
                 interval_seconds, cron_expr = parse_every(every)  # type: ignore[arg-type]
@@ -3363,6 +3421,7 @@ def create_subtask_tools(
                     timeout=settings.subtask_default_timeout,
                     model=model,
                     frame_type=frame_type,
+                    **intentions.intention_kwargs(spec),
                 )
 
             next_fire = schedule.next_fire_at.isoformat() if schedule.next_fire_at else "N/A"
@@ -3474,8 +3533,14 @@ def create_subtask_tools(
         timeout_seconds: int | None = None,
         model: str | None = None,
         success_criteria: str | None = None,
+        intent: str | None = None,
+        wake_policy: str | None = None,
         _session_id: str | None = None,
         _decision_id: str | None = None,
+        _origin_kind: str | None = None,
+        _origin_session_id: str | None = None,
+        _origin_channel: str | None = None,
+        _intention_id: str | None = None,
     ) -> dict[str, Any]:
         import json as _json
         import uuid as _uuid
@@ -3507,6 +3572,12 @@ def create_subtask_tools(
             _lookup_token=sync_lookup_token,
             _session_id=_session_id,  # preserve caller's parent_session_id
             _decision_id=_decision_id,
+            intent=intent,
+            wake_policy=wake_policy,
+            _origin_kind=_origin_kind,
+            _origin_session_id=_origin_session_id,
+            _origin_channel=_origin_channel,
+            _intention_id=_intention_id,
         )
 
         # spawn_task always returns {"content": [{"type":"text","text":...}]}.
@@ -3529,7 +3600,7 @@ def create_subtask_tools(
                 raw_text=text,
                 confidence=None,
                 elapsed_seconds=0.0,
-                validator_reason="spawn_sync: no subtask row created (censor or runner unavailable)",
+                validator_reason=f"spawn_sync: no subtask row created: {text}",
             )
             return _tool_error(_json.dumps(result.to_dict(), indent=2))
 
@@ -3839,6 +3910,29 @@ def _build_spawn_task_schema(payload_schema_enabled: bool) -> dict[str, Any]:
     return schema
 
 
+def _with_intent_params(schema: dict[str, Any], enabled: bool) -> dict[str, Any]:
+    """F099 I2: ``intent`` (required) and ``wake_policy`` on a spawn tool's schema.
+
+    Only while NOUS_INTENTIONS_ENABLED is on. Off, the very same schema
+    object, so the wire bytes and the prompt-cache prefix do not change
+    (tests/fixtures/f099_spawn_tool_schemas.json).
+    """
+    if not enabled:
+        return schema
+    out = copy.deepcopy(schema)
+    out["properties"]["intent"] = {"type": "string", "description": intentions.INTENT_HELP}
+    out["properties"]["wake_policy"] = {
+        "type": "string",
+        "enum": list(intentions.MODEL_WAKE_POLICIES),
+        "description": (
+            "Optional. What happens when the result arrives: 'continue' (come back to it; the default "
+            "for a conversation), 'remember', 'report' or 'none'. Ignored for an inline or scheduled spawn."
+        ),
+    }
+    out["required"] = [*out.get("required", []), "intent"]
+    return out
+
+
 def register_subtask_tools(
     dispatcher: ToolDispatcher,
     heart: Heart,
@@ -3868,8 +3962,15 @@ def register_subtask_tools(
     spawn_task_schema = _build_spawn_task_schema(
         settings.subtask_payload_schema_enabled and settings.subtask_hardening_enabled
     )
-    dispatcher.register("spawn_task", closures["spawn_task"], spawn_task_schema)
-    dispatcher.register("schedule_task", closures["schedule_task"], _SCHEDULE_TASK_SCHEMA)
+    # F099 I2: intent/wake_policy and the origin arguments exist only while
+    # NOUS_INTENTIONS_ENABLED is on.
+    on = intentions.enabled(settings)
+    dispatcher.register(
+        "spawn_task", closures["spawn_task"], _with_intent_params(spawn_task_schema, on), origin_aware=on
+    )
+    dispatcher.register(
+        "schedule_task", closures["schedule_task"], _with_intent_params(_SCHEDULE_TASK_SCHEMA, on), origin_aware=on
+    )
     dispatcher.register("list_tasks", closures["list_tasks"], _LIST_TASKS_SCHEMA)
     dispatcher.register("cancel_task", closures["cancel_task"], _CANCEL_TASK_SCHEMA)
     # F062 requires F061's hardened executor — without subtask_hardening_enabled
@@ -3881,7 +3982,9 @@ def register_subtask_tools(
     # with a tool that creates pending subtask rows and synthesizes false
     # error results (Codex round-10 P2).
     if settings.subtask_payload_schema_enabled and settings.subtask_hardening_enabled and runner is not None:
-        dispatcher.register("spawn_sync", closures["spawn_sync"], _SPAWN_SYNC_SCHEMA)
+        dispatcher.register(
+            "spawn_sync", closures["spawn_sync"], _with_intent_params(_SPAWN_SYNC_SCHEMA, on), origin_aware=on
+        )
     elif settings.subtask_payload_schema_enabled and settings.subtask_hardening_enabled:
         logger.warning(
             "F062: both NOUS_SUBTASK_PAYLOAD_SCHEMA_ENABLED and "
@@ -5302,6 +5405,7 @@ def register_dag_tools(
     # compensation is on. Off, the key is ignored as it was before #652 — a
     # node that set it could not write at all, with nothing wired to snapshot.
     undoable_accepted = bool(getattr(cfg, "compensation_enabled", False))
+    intentions_on = intentions.enabled(cfg)
 
     async def dag_create(**kwargs: Any) -> dict:
         """Create a DAG with dependency-tracked nodes."""
@@ -5328,6 +5432,20 @@ def register_dag_tools(
                     "process — the question could never be shown."
                 )
         try:
+            # F099 I2: the DAG's intention, built first, so a refused intent creates nothing.
+            spec = None
+            if intentions_on:
+                spec = intentions.spec_from_tool_call(
+                    intent=kwargs.get("intent"),
+                    wake_policy=kwargs.get("wake_policy"),
+                    origin_kind=kwargs.get("_origin_kind"),
+                    fallback_text=(kwargs.get("description") or "").strip() or kwargs.get("name"),
+                    origin_session_id=kwargs.get("_origin_session_id"),
+                    origin_channel=kwargs.get("_origin_channel"),
+                    decision_id=kwargs.get("_decision_id"),
+                    intention_id=kwargs.get("_intention_id"),
+                )
+
             # Parse nodes
             node_specs: list[DAGNodeSpec] = []
             for n in kwargs.get("nodes", []):
@@ -5403,10 +5521,17 @@ def register_dag_tools(
                 origin_session_id=kwargs.get("_session_id"),
                 # F099 Phase 0a: why the DAG exists. Before Phase 1 the only
                 # reason text a dag_create call carries is its description.
-                original_request=(description.strip() or None) if isinstance(description, str) else None,
+                # F099: why the DAG exists. The model's own intent when it wrote
+                # one; otherwise (flag off, or a generated intent) the stripped
+                # description, as in Phase 0a (plan D1).
+                original_request=(
+                    spec.intent
+                    if spec is not None and intentions.intent_line(kwargs.get("intent"))
+                    else ((description.strip() or None) if isinstance(description, str) else None)
+                ),
             )
 
-            dag = await store.create(request)
+            dag = await store.create(request, **intentions.intention_kwargs(spec))
             await orchestrator.start_dag(dag.id)
 
             # Re-fetch to get actual status
@@ -5432,6 +5557,10 @@ def register_dag_tools(
                     "companion to answer."
                 )
             return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+        except (intentions.IntentArgumentError, intentions.IntentionRootClosed, intentions.IntentionParentMissing) as e:
+            # F099: a refused spawn is the model's to fix, not a crash; spec_from_tool_call
+            # already logged the refusal at INFO.
+            return _tool_error(f"Error creating DAG: {e}")
         except Exception as e:
             logger.exception("dag_create failed")
             return _tool_error(f"Error creating DAG: {e}")
@@ -5681,169 +5810,173 @@ def register_dag_tools(
     dispatcher.register(
         "dag_create",
         dag_create,
-        {
-            "type": "object",
-            "description": (
-                "Create a DAG to orchestrate subtasks and checks with dependency tracking. "
-                "You do NOT need to poll for the result: when the DAG reaches a terminal "
-                "state its outcome is delivered to you automatically (F087), so create it "
-                "and move on. Use dag_manage only when the user asks about progress "
-                "mid-flight, to cancel or retry, or to look up a DAG whose delivery you "
-                "missed or that finished before this session (dag_manage action='recent')."
-            ),
-            "properties": {
-                "name": {"type": "string", "description": "DAG name"},
-                "description": {"type": "string"},
-                "nodes": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            # F066.1 (2026-05-23): added "fix" so fix-stage
-                            # recovery nodes are authorable. Phase 1 ships
-                            # rule-based dispatch; Phase 1.5 (NOUS_DAG_FIX_LLM_
-                            # DISPATCH_ENABLED) routes to Haiku tool-use.
-                            "type": {
-                                "type": "string",
-                                "enum": node_type_enum,
-                                "description": (
-                                    "'callback' runs AFTER its predecessors and receives "
-                                    "their results as context — use it to interpret or act "
-                                    "on what earlier nodes produced (point a context_flow "
-                                    "edge at it). It accepts frame_type / model / "
-                                    "timeout_seconds like a subtask. Requires "
-                                    "NOUS_DAG_CALLBACK_EXECUTION_ENABLED=true; with the flag "
-                                    "off a callback completes instantly without running. "
-                                    "'gate' currently auto-passes — it is a marker, not an "
-                                    "enforced quality check. Note: 'tools' below is honored "
-                                    "ONLY for 'check' nodes — on every other node type "
-                                    "(subtask, callback, gate, fix) it is silently ignored."
-                                )
-                                + approval_help,
-                            },
-                            "instructions": {"type": "string"},
-                            "tools": {"type": "array", "items": {"type": "string"}},
-                            "frame_type": {"type": "string"},
-                            "model": {"type": "string"},
-                            "timeout_seconds": {
-                                "type": "integer",
-                                "minimum": 1,
-                                "description": (
-                                    "Execution timeout in seconds (default: NOUS_DAG_NODE_DEFAULT_TIMEOUT, ceiling: "
-                                    "NOUS_DAG_NODE_MAX_TIMEOUT). F087: now a REAL bound — a node still executing past "
-                                    "this plus NOUS_DAG_NODE_TIMEOUT_GRACE_SECONDS is cancelled and failed, so size it "
-                                    "to the work rather than leaving the default on a long job."
-                                ),
-                            },
-                            "stall_timeout_seconds": {
-                                "type": "integer",
-                                "minimum": 0,
-                                "description": (
-                                    "F064.1: max seconds without activity before failing this node. 0 = disabled for "
-                                    "this node. Unset = inherit NOUS_DAG_NODE_DEFAULT_STALL_TIMEOUT."
-                                ),
-                            },
-                            "completion_condition": {"type": "string"},
-                            "completion_check": {
-                                "type": "string",
-                                "description": (
-                                    "Shell command polled each tick. Exit 0 = success, 1 = failed, 2 = still running."
-                                ),
-                            },
-                            "completion_check_interval": {
-                                "type": "integer",
-                                "description": "Seconds between completion check polls (default: every tick)",
-                            },
-                            "max_check_attempts": {
-                                "type": "integer",
-                                "description": "Max poll attempts before node fails",
-                            },
-                            # F066.1 — fix-stage recovery fields. Only meaningful
-                            # when type='fix'; the DAGCreateRequest validator
-                            # enforces parent_node + non-empty fix_actions for
-                            # fix nodes and rejects these fields on non-fix nodes.
-                            "parent_node": {
-                                "type": "string",
-                                "description": (
-                                    "F066.1 (type='fix' only): name of the node this fix attaches to. Fires when the "
-                                    "parent transitions to 'failed'. The matching 'on_failure' edge MUST point from "
-                                    "the parent to this fix node — i.e. from_node = (this parent_node value), to_node "
-                                    "= (the fix node's own name). Pointing the edge the other direction fails "
-                                    "validation."
-                                ),
-                            },
-                            "fix_actions": {
-                                "type": "array",
-                                "items": {
+        _with_intent_params(
+            {
+                "type": "object",
+                "description": (
+                    "Create a DAG to orchestrate subtasks and checks with dependency tracking. "
+                    "You do NOT need to poll for the result: when the DAG reaches a terminal "
+                    "state its outcome is delivered to you automatically (F087), so create it "
+                    "and move on. Use dag_manage only when the user asks about progress "
+                    "mid-flight, to cancel or retry, or to look up a DAG whose delivery you "
+                    "missed or that finished before this session (dag_manage action='recent')."
+                ),
+                "properties": {
+                    "name": {"type": "string", "description": "DAG name"},
+                    "description": {"type": "string"},
+                    "nodes": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                # F066.1 (2026-05-23): added "fix" so fix-stage
+                                # recovery nodes are authorable. Phase 1 ships
+                                # rule-based dispatch; Phase 1.5 (NOUS_DAG_FIX_LLM_
+                                # DISPATCH_ENABLED) routes to Haiku tool-use.
+                                "type": {
                                     "type": "string",
-                                    "enum": [
-                                        "retry_as_is",
-                                        "retry_with_amended_prompt",
-                                        "mark_unrecoverable",
-                                        "skip_and_continue",
-                                    ],
+                                    "enum": node_type_enum,
+                                    "description": (
+                                        "'callback' runs AFTER its predecessors and receives "
+                                        "their results as context — use it to interpret or act "
+                                        "on what earlier nodes produced (point a context_flow "
+                                        "edge at it). It accepts frame_type / model / "
+                                        "timeout_seconds like a subtask. Requires "
+                                        "NOUS_DAG_CALLBACK_EXECUTION_ENABLED=true; with the flag "
+                                        "off a callback completes instantly without running. "
+                                        "'gate' currently auto-passes — it is a marker, not an "
+                                        "enforced quality check. Note: 'tools' below is honored "
+                                        "ONLY for 'check' nodes — on every other node type "
+                                        "(subtask, callback, gate, fix) it is silently ignored."
+                                    )
+                                    + approval_help,
                                 },
-                                "description": (
-                                    "F066.1 (type='fix' only): allowed action vocabulary. Phase 1 dispatcher rules: "
-                                    "incomplete/validation_failed errors → retry_as_is; timed_out → skip_and_continue "
-                                    "(or mark_unrecoverable); other errors → skip_and_continue then mark_unrecoverable "
-                                    "as final fallback. retry_with_amended_prompt only acts when "
-                                    "NOUS_DAG_FIX_LLM_DISPATCH_ENABLED=true."
-                                ),
+                                "instructions": {"type": "string"},
+                                "tools": {"type": "array", "items": {"type": "string"}},
+                                "frame_type": {"type": "string"},
+                                "model": {"type": "string"},
+                                "timeout_seconds": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "description": (
+                                        "Execution timeout in seconds (default: NOUS_DAG_NODE_DEFAULT_TIMEOUT, ceiling: "
+                                        "NOUS_DAG_NODE_MAX_TIMEOUT). F087: now a REAL bound — a node still executing past "
+                                        "this plus NOUS_DAG_NODE_TIMEOUT_GRACE_SECONDS is cancelled and failed, so size it "
+                                        "to the work rather than leaving the default on a long job."
+                                    ),
+                                },
+                                "stall_timeout_seconds": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "description": (
+                                        "F064.1: max seconds without activity before failing this node. 0 = disabled for "
+                                        "this node. Unset = inherit NOUS_DAG_NODE_DEFAULT_STALL_TIMEOUT."
+                                    ),
+                                },
+                                "completion_condition": {"type": "string"},
+                                "completion_check": {
+                                    "type": "string",
+                                    "description": (
+                                        "Shell command polled each tick. Exit 0 = success, 1 = failed, 2 = still running."
+                                    ),
+                                },
+                                "completion_check_interval": {
+                                    "type": "integer",
+                                    "description": "Seconds between completion check polls (default: every tick)",
+                                },
+                                "max_check_attempts": {
+                                    "type": "integer",
+                                    "description": "Max poll attempts before node fails",
+                                },
+                                # F066.1 — fix-stage recovery fields. Only meaningful
+                                # when type='fix'; the DAGCreateRequest validator
+                                # enforces parent_node + non-empty fix_actions for
+                                # fix nodes and rejects these fields on non-fix nodes.
+                                "parent_node": {
+                                    "type": "string",
+                                    "description": (
+                                        "F066.1 (type='fix' only): name of the node this fix attaches to. Fires when the "
+                                        "parent transitions to 'failed'. The matching 'on_failure' edge MUST point from "
+                                        "the parent to this fix node — i.e. from_node = (this parent_node value), to_node "
+                                        "= (the fix node's own name). Pointing the edge the other direction fails "
+                                        "validation."
+                                    ),
+                                },
+                                "fix_actions": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string",
+                                        "enum": [
+                                            "retry_as_is",
+                                            "retry_with_amended_prompt",
+                                            "mark_unrecoverable",
+                                            "skip_and_continue",
+                                        ],
+                                    },
+                                    "description": (
+                                        "F066.1 (type='fix' only): allowed action vocabulary. Phase 1 dispatcher rules: "
+                                        "incomplete/validation_failed errors → retry_as_is; timed_out → skip_and_continue "
+                                        "(or mark_unrecoverable); other errors → skip_and_continue then mark_unrecoverable "
+                                        "as final fallback. retry_with_amended_prompt only acts when "
+                                        "NOUS_DAG_FIX_LLM_DISPATCH_ENABLED=true."
+                                    ),
+                                },
+                                "max_fix_attempts": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 3,
+                                    "description": (
+                                        "F066.1 (type='fix' only): max fix attempts per parent failure. Default 1."
+                                    ),
+                                },
+                                "expected_modes": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": (
+                                        "F066.1 (type='fix' only): declared failure modes for typed dispatch (Phase 2). "
+                                        "Phase 1 ignores this field."
+                                    ),
+                                },
+                                **undoable_properties,
+                                **approval_properties,
                             },
-                            "max_fix_attempts": {
-                                "type": "integer",
-                                "minimum": 1,
-                                "maximum": 3,
-                                "description": (
-                                    "F066.1 (type='fix' only): max fix attempts per parent failure. Default 1."
-                                ),
-                            },
-                            "expected_modes": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": (
-                                    "F066.1 (type='fix' only): declared failure modes for typed dispatch (Phase 2). "
-                                    "Phase 1 ignores this field."
-                                ),
-                            },
-                            **undoable_properties,
-                            **approval_properties,
+                            "required": ["name", "type", "instructions"],
                         },
-                        "required": ["name", "type", "instructions"],
                     },
-                },
-                "edges": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "from_node": {"type": "string"},
-                            "to_node": {"type": "string"},
-                            # F066.1: added "on_failure" so the fix-node attach
-                            # edge is authorable. The validator requires exactly
-                            # one on_failure inbound edge per fix node, with
-                            # from_node == fix.parent_node.
-                            "edge_type": {
-                                "type": "string",
-                                "enum": ["dependency", "cancel_cascade", "context_flow", "on_failure"],
+                    "edges": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "from_node": {"type": "string"},
+                                "to_node": {"type": "string"},
+                                # F066.1: added "on_failure" so the fix-node attach
+                                # edge is authorable. The validator requires exactly
+                                # one on_failure inbound edge per fix node, with
+                                # from_node == fix.parent_node.
+                                "edge_type": {
+                                    "type": "string",
+                                    "enum": ["dependency", "cancel_cascade", "context_flow", "on_failure"],
+                                },
                             },
+                            "required": ["from_node", "to_node"],
                         },
-                        "required": ["from_node", "to_node"],
                     },
+                    "source": {"type": "string"},
+                    "token_budget": {"type": "integer"},
                 },
-                "source": {"type": "string"},
-                "token_budget": {"type": "integer"},
+                # `edges` is NOT required: the handler reads kwargs.get("edges", []) and
+                # DAGCreateRequest.edges is default_factory=list, so a single-node DAG
+                # legitimately omits it. Listing it here told the model a lie, and once
+                # required-arg validation began trusting the schema for variadic
+                # handlers that lie became a rejection. `nodes` stays required — its
+                # .get default hits DAGCreateRequest's min_length=1 and fails anyway.
+                "required": ["name", "nodes"],
             },
-            # `edges` is NOT required: the handler reads kwargs.get("edges", []) and
-            # DAGCreateRequest.edges is default_factory=list, so a single-node DAG
-            # legitimately omits it. Listing it here told the model a lie, and once
-            # required-arg validation began trusting the schema for variadic
-            # handlers that lie became a rejection. `nodes` stays required — its
-            # .get default hits DAGCreateRequest's min_length=1 and fails anyway.
-            "required": ["name", "nodes"],
-        },
+            intentions_on,
+        ),
+        origin_aware=intentions_on,
     )
 
     dispatcher.register(

@@ -16,8 +16,10 @@ Documented tools the agent can call, and the cognitive frames each is offered in
 | `bash` | task, debug, conversation, question | Execute shell commands |
 | `read_file` | task, debug, question | Read file contents |
 | `write_file` | task, creative | Write/create files |
-| `spawn_task` | conversation, debug | Spawn a background subtask |
-| `schedule_task` | conversation, debug | Schedule a recurring/one-shot task |
+| `spawn_task` | conversation, debug | Spawn a background subtask. F099: while `NOUS_INTENTIONS_ENABLED` is on, takes `intent` (one line: why, and what will be done with the result; refused if missing in a chat or MCP turn, generated in a background one) and `wake_policy` |
+| `spawn_sync` | conversation, debug | Spawn a subtask and wait for its typed result. F099: while `NOUS_INTENTIONS_ENABLED` is on, takes `intent` (one line: why, and what will be done with the result; refused if missing in a chat or MCP turn, generated in a background one) and `wake_policy` |
+| `schedule_task` | conversation, debug | Schedule a recurring/one-shot task. F099: while `NOUS_INTENTIONS_ENABLED` is on, takes `intent` (one line: why, and what will be done with the result; refused if missing in a chat or MCP turn, generated in a background one) and `wake_policy` |
+| `dag_create` | conversation, debug | Create a dependency-tracked DAG of subtasks and checks. F099: while `NOUS_INTENTIONS_ENABLED` is on, takes `intent` (one line: why, and what will be done with the result; refused if missing in a chat or MCP turn, generated in a background one) and `wake_policy` |
 | `list_tasks` | conversation, question, decision, debug | List subtasks and schedules |
 | `cancel_task` | conversation, question, decision, debug | Cancel a subtask or schedule |
 | `web_search` | all | Search via multi-tier routing (Tavily/Exa/Brave) |
