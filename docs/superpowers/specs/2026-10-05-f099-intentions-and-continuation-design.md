@@ -1,6 +1,6 @@
 # F099: Intentions and Continuation (design)
 
-Status: design agreed with the owner 2026-10-05, revised the same day after a code-level spec review. Phase 1 is next.
+Status: design agreed with the owner 2026-10-05, revised the same day after a code-level spec review. Phase 0a (#698) is in review.
 Depends on F098 Phase A, the result inbox (#694). F098 Phase C (#696) supplies the memory write.
 Supersedes F098 Phase B, the report-only wake turn (#695).
 Research basis: a survey of 2025–2026 frameworks, protocols, literature and safety work on agents acting on background results. Key sources are in §10.
@@ -47,7 +47,7 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
 
 **Non-goals**
 - Widening autonomy beyond internal-only. That is decided later, from the recorded decisions (§4.7).
-- Checking structured assumptions. They are recorded in Phase 1 and checked no earlier than Phase 3.
+- Checking structured assumptions. The `expected_result` and `assumptions` columns exist from Phase 1 but nothing writes them yet. A later phase fills them, and no earlier than Phase 3 checks them.
 - Giving heartbeat triage or check callbacks new spawn rights. Their tool sets stay as they are.
 - External agent protocols (A2A, MCP tasks), and backfilling historical results.
 
@@ -76,13 +76,13 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
 | `root_id`, `parent_id`, `depth` | Lineage. A root has `root_id = id`, `depth 0`. Budgets and cancels are per `root_id`. |
 | `source_kind`, `source_id` | `subtask`, `dag` or `schedule`, plus the id as TEXT. `UNIQUE (agent_id, source_kind, source_id)`. |
 | `intent` | One line: why this is needed and what will be done with the result. |
-| `origin_kind` | The spawning turn's `ContextKind`, or a code-path label: `scheduler`, `work_queue`, `app_act`. |
+| `origin_kind` | The spawning turn's `ContextKind`, or a code-path label: `scheduler`, `work_queue`, `app_act`, `rest` (REST `POST /schedules`). |
 | `origin_session_id`, `origin_channel` | Where it was spawned. The channel is where owner-facing output goes; when it is NULL, output goes to the default chat. **Neither is a routing key on the work row** (see I5). |
 | `origin_decision_id` | The spawning turn's Plan decision, if there was one. |
 | `wake_policy` | `continue`, `remember`, `report`, `none` or `container`. |
 | `authority` | `owner` (today's tool set) or `internal_only`. |
 | `expected_result`, `assumptions` | Optional. Recorded, not checked yet. |
-| `deadline` | When a late result stops being acted on. A root gets `created + root TTL`; a child gets `min(parent.deadline, created + TTL)`. |
+| `deadline` | When a late result stops being acted on. A root gets `created + root TTL`; a child gets `min(parent.deadline, created + TTL)`. Phase 1 writes NULL (the TTL setting arrives in Phase 2), and a NULL deadline means "no deadline". |
 | `state` | `pending`, `result_ready`, `deciding`, `awaiting_owner`, `closed`, `cancelled` or `expired`. |
 | `close_reason` | Why the row closed: `resolved`, `legacy`, `delivered`, `cancelled`, `expired`, `fallback_report` or `failed_report`. |
 | `root_cancelled_at`, `root_expired_at` | Set on **root rows only**, and always written by a cancel or by the TTL sweep. A root row can close after its own first arrival while its lineage lives on. These markers, not `state`, are what "the root is open" means. |
@@ -139,7 +139,7 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
 
 **Closing.**
 - A `none` intention, and a `remember` intention once its delivery is done, are closed by the writer that sees the source terminal, with `close_reason = 'legacy'` in Phase 1 and `'delivered'` in Phase 2. **The close happens before that writer's routing-key check**, since F098's writers return early when a row has no routing key. The reconciler also closes intentions whose source is terminal, whatever their routing key, so a failed worker hook does not leave one `pending`.
-- Inline intentions are closed in `spawn_task`'s inline path, in the same `finally` that F098 Phase C uses (Phase 1 adds that `finally` itself if #696 has not merged), because inline runs never reach a worker writer.
+- Inline intentions are closed in `spawn_task`'s inline path, in the same `finally` that F098 Phase C uses, because inline runs never reach a worker writer.
 - The TTL sweep (§4.6) expires only roots that have a `continue` or `report` intention, never containers.
 - The repair sweep (§4.5) only considers `continue` and `report` intentions.
 
@@ -149,13 +149,15 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
   - the spawn tools;
   - scheduler fires;
   - both work-queue DAG creation sites;
-  - `app.act`.
+  - `app.act`;
+  - REST `POST /schedules`, which records a container like `schedule_task`.
 
   A child intention is inserted only if its root is still open, meaning `root_cancelled_at` and `root_expired_at` are both NULL. The root row is read `FOR SHARE` in the same transaction, and a cancel always writes `root_cancelled_at` on it, so a cancel and a spawn conflict on the root row and the cancel stops new spawns.
 - **I2. Intent source.** `spawn_task`, `dag_create`, `schedule_task` and `spawn_sync` take a required `intent` and an optional `wake_policy`, **only while `NOUS_INTENTIONS_ENABLED` is on**; with it off, the tool schemas are byte-identical to today. A missing or blank `intent` is **refused only in foreground and continuation turns** (`interactive`, `mcp`, `continuation`), with a tool error that says what to write. In every other kind (`dag_summary`, `scheduled`, `subtask`, `heartbeat_*`, `agent_action`, `dag_node`, `background`), a missing `intent` is generated as `"<origin_kind>: <first line of the task or description>"` and the spawn goes ahead. Existing background prompts were written before `intent` existed, and a refused spawn there (for example the F087 summary turn's email subtask) would silently break delivery. Code paths generate the intent:
   - **schedule fire:** the schedule's task text;
   - **work queue:** the item title;
   - **`app.act`:** the action label;
+  - **REST `POST /schedules`:** `"rest: <first line of the task>"`;
   - **`dag_create`:** also fills `original_request`.
 - **I3. Authority only narrows, through every kind of turn in a lineage.** Every turn descended from an `internal_only` intention gets `authority = internal_only`, `intention_id` and `root_intention_id` in its `ExecutionContext`. That covers:
   - the continuation;
@@ -188,11 +190,12 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
 | `dag_create` (model) | `intent` argument; fills `original_request` | same injections |
 | `schedule_task` (model) | `intent` argument → container | same injections |
 | `spawn_sync`, inline `spawn_task` (model) | `intent` argument, `none` | same injections |
-
-**The `_origin_*` arguments go only into the intention row (I5).** The dispatcher's existing `_session_id` and `_channel` injections, and what each tool does with them, stay exactly as they are; F098 #694's MCP `dag_create` fix included. In particular, `spawn_sync` still sets no `parent_session_id`, and `schedule_task` still leaves `created_by_session` empty.
 | Scheduler fire | the schedule's task text | `origin_kind = scheduler`; new root under the container |
 | Work queue → DAG (two creation sites) | the item title | `origin_kind = work_queue` |
 | Companion `app.act` | the action label | `origin_kind = app_act`; the channel comes from the surface's recorded session |
+| REST `POST /schedules` | `"rest: <first line>"` → container | `origin_kind = rest`; authority `owner` |
+
+**The `_origin_*` arguments go only into the intention row (I5).** The dispatcher's existing `_session_id` and `_channel` injections, and what each tool does with them, stay exactly as they are; F098 #694's MCP `dag_create` fix included. In particular, `spawn_sync` still sets no `parent_session_id`, and `schedule_task` still leaves `created_by_session` empty.
 
 **Plan decision id.** `TurnContext.decision_id` is set in `pre_turn`, after `ExecutionContext` (a frozen dataclass) has been built. The runner passes it to `dispatch()` through `dataclasses.replace(ctx, decision_id=…)` once `pre_turn` returns.
 
@@ -214,9 +217,10 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
    - The continuation runner reads the rows by `intention_id`. It stamps `delivered_at` and `delivered_session_id = 'intent-<root>'` **in the fenced commit** (§4.5), from `arrival.inbox_ids`, not when it reads them. A released lease or a rollback therefore still finds them undelivered, and F098's delivery-rate metric stays meaningful.
    - F098's reconciler DAG pass (`InboxDagPass`) selects a DAG when it has an origin **or** an open `continue` intention. A DAG spawned by a continuation has no origin session, and without the second condition its lost row would never be repaired.
 2. **Same-transaction transition.** `ResultInboxStore.insert` accepts a session (or the write uses one `WITH t AS (UPDATE brain.intentions … RETURNING id) INSERT …` statement). The inbox row and the move from `pending`/`awaiting_owner` to `result_ready` then commit together.
+   - **A work result that arrives while the intention is `awaiting_owner` is inserted and held.** It does not move the intention. Only the owner's answer, or the last terminal proposal of that arrival, moves it to `result_ready` (§4.4 item 6). The held rows then join that batch.
 3. **Re-arrivals.**
    - A DAG `retry_node` bumps `delivery_generation`, and a decided proposal or an owner answer produces a new result.
-   - If the intention is `closed` and its root is still open, the writer reopens it to `result_ready`. Otherwise the result becomes an `intention_report` carrying the raw result.
+   - If the intention is `closed`, its policy is `continue`, and its root is still open, the writer reopens it to `result_ready`. Otherwise (any other policy, or a closed root) the result becomes an `intention_report` carrying the raw result.
    - A result that arrives while the intention is `deciding` is simply inserted. At the fenced commit, if the intention still has unconsumed rows (rows not in `arrival.inbox_ids`), it goes back to `result_ready` instead of closing. The exception is a decision of `ask`: the intention stays `awaiting_owner`, and the rows wait for the owner's answer (§4.5.6).
 4. **Owner-facing rows.**
    - Reports, questions and proposals are inbox rows with `source_kind = 'intention_report'` and `msg_type` `REPORT`, `QUESTION` or `PROPOSAL`.
@@ -296,7 +300,7 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
    - **At most once, for every tool.** The fence is the proposal row's conditional transition `approved → executing`, made before the call. **The same statement requires the root to be open**: `UPDATE … SET state='executing' WHERE id=:id AND state='approved' AND NOT EXISTS (root with root_cancelled_at or root_expired_at)`. A cancel racing an approval therefore wins whenever it commits first. A crash while `executing` leaves a visible in-doubt proposal that is never re-run automatically. An outward call already in flight is not pre-empted; a send cannot be recalled.
    - **Context.** The call runs under `ContextKind` **`approved_action`**, whose `CONTEXT_POLICY` row admits exactly the one declared tool (`declared_tools = (tool,)`). It passes through `_authorize_tool_call` and the execution ledger's open/close (`_open_for_call`) like any loop call, so it is recorded. The ledger keys the call with a new `proposal:{id}` idempotency scope in `api/idempotency.py`.
    - **Authority.** This is the `owner_approved` authority: one call, the one the owner saw. It is the only way an outward tool runs on behalf of a lineage.
-6. The execution result, a rejection or an expiry is recorded on the proposal. **The batch wakes only when every proposal of that arrival is terminal** (`executed`, `failed`, `rejected`, `expired` or `cancelled`). Then all of them become the next result of every intention in the arrival (`awaiting_owner → result_ready` for each). The proposal records its `arrival_id`, and the arrival lists its `intention_ids`, so the next claim takes them together as one batch, and the continuation sees every decision at once. A sibling can never be approved after the chain has moved on.
+6. The execution result, a rejection or an expiry is recorded on the proposal. **The batch wakes only when every proposal and every question of that arrival is terminal.** A proposal is terminal when `executed`, `failed`, `rejected`, `expired` or `cancelled`; a question is terminal once it is answered or has expired at its deadline. This is the single wake rule for an `ask`, and §4.3 item 2 and §4.5.6 refer to it. Then all of them become the next result of every intention in the arrival (`awaiting_owner → result_ready` for each). The proposal records its `arrival_id`, and the arrival lists its `intention_ids`, so the next claim takes them together as one batch, and the continuation sees every decision at once. A sibling can never be approved after the chain has moved on.
 
 **Questions** (`ask` with no proposal) are an `intention_report` of type `QUESTION`.
 - The owner answers by replying to the question's Telegram message (the runner stores the pushed message's `message_id` on the report row, so the bot can map a reply to the intention), or with `/answer <id> <text>`. The bot recognises either in code and calls `POST /intentions/{id}/answer`.
@@ -420,7 +424,7 @@ All budgets are derived from rows when checked; there are no counters to drift.
   - moves every open intention of the root to `cancelled`;
   - cancels the lineage's pending subtasks and DAGs;
   - moves pending and approved (not yet executing) proposals to `cancelled`, so none of them can start;
-  - deactivates a container's schedule;
+  - deactivates a container's schedule, and cancels the open roots of that container's fires (`parent_id` = the container). Each fire is its own root, so the root cascade alone would not reach them;
   - **stops a running continuation turn.** The runner keeps a map from root to its running turn task (one process per agent) and cancels that task. `_authorize_tool_call` also refuses every call from **any** context that carries a cancelled root, whatever its authority. That includes an `owner` root's own subtask that was already running when the owner cancelled it. Every subtask created with an intention carries `metadata.intention` (I1/I3), so `ExecutionContext.for_subtask` knows its root for `owner` authority too. That check reads the root row and caches it for the turn, invalidated by the cancel. Lineage subtasks already running on workers are not pre-empted, but their next tool call is refused and the gate drops their late result.
 - **TTL.** The continuation runner's sweep handles roots past their TTL that have a `continue` or `report` intention: it writes `root_expired_at`, reports what exists and closes them. Containers are excluded. This also covers roots that never get an arrival, so no gate ever runs for them.
 - Child inserts check that the root is open (I1), so a turn already running cannot spawn under a cancelled root.
@@ -487,7 +491,7 @@ The F098 A and C classification of scheduled, inline and spawn rows is pinned, a
   - no rows are written;
   - tool definitions are byte-identical (snapshot);
   - F098 inbox rows and Phase C classification are identical to before (I5).
-- A missing or blank `intent` is refused.
+- A missing or blank `intent` is refused in `interactive`/`mcp` turns and generated as `"<origin_kind>: <first line>"` in every other kind.
 - Code paths generate intents. The default wake policy is correct for every origin in §4.1. Schedule containers and per-fire roots work as specified.
 - `none`, inline and `remember` intentions close. Phase 1 routing is identical to F098 A, and intentions close as `legacy`.
 
@@ -541,7 +545,7 @@ The F098 A and C classification of scheduled, inline and spawn rows is pinned, a
 | Phase | Content | Flag | Precondition |
 |---|---|---|---|
 | 0a | **Carry the reason**, storage only and routing-neutral (I5): `dag_create` and the work queue fill `original_request`; the Plan decision id is carried into **subtask** metadata. (`execution_dags` has no metadata column; a DAG's decision id waits for its intention row in Phase 1.) | none | #694 merged |
-| 0b | **Carry the result**: heartbeat callbacks receive their check's findings; DAG check nodes store their findings as the node result. | none (a behaviour fix with its own tests and review) | #694 merged |
+| 0b | **Carry the result**: heartbeat callbacks receive their check's findings; DAG check nodes store their findings as the node result. A check run cancelled during its success writes now ends as a failure, never a success. | none (a behaviour fix with its own tests and review) | #694 merged |
 | 1 | §4.1–4.2 and §4.3 Phase 1: intentions, capture on every path, lineage stamps, `legacy` closing. | `NOUS_INTENTIONS_ENABLED` | 0a |
 | 2 | §4.3 Phase 2 routing, §4.4–4.6. | `NOUS_CONTINUATION_ENABLED` | 1 |
 | 3 | §4.7 dashboard, metrics and calibration; an assumption re-check if the data calls for it. | – | 2 |
