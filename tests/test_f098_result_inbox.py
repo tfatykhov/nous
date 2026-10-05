@@ -76,8 +76,13 @@ def test_flags_default_off():
 
 async def _insert(store: ResultInboxStore, **over) -> bool:
     kw = dict(
-        source_kind="subtask", source_id=uuid.uuid4(), msg_type="INFORM",
-        title="t", body="b", channel=CHAN, session_id="s1",
+        source_kind="subtask",
+        source_id=uuid.uuid4(),
+        msg_type="INFORM",
+        title="t",
+        body="b",
+        channel=CHAN,
+        session_id="s1",
     )
     kw.update(over)
     return await store.insert(**kw)
@@ -185,7 +190,11 @@ class TestStore:
             subtasks.append(st)
 
         rows, older = await store.claim(
-            channel=CHAN, session_id=None, max_age_hours=72, max_items=10, delivered_session_id="S2",
+            channel=CHAN,
+            session_id=None,
+            max_age_hours=72,
+            max_items=10,
+            delivered_session_id="S2",
         )
         assert [r.title for r in rows] == [f"r{i}" for i in range(5, 15)]
         assert older == 5
@@ -236,8 +245,14 @@ class TestStore:
 
 def _row(i: int, body: str = "result") -> ResultInbox:
     return ResultInbox(
-        id=uuid.uuid4(), agent_id="a", channel=CHAN, source_kind="subtask",
-        source_id=uuid.uuid4(), msg_type="INFORM", title=f"task {i}", body=body,
+        id=uuid.uuid4(),
+        agent_id="a",
+        channel=CHAN,
+        source_kind="subtask",
+        source_id=uuid.uuid4(),
+        msg_type="INFORM",
+        title=f"task {i}",
+        body=body,
         created_at=datetime(2026, 10, 4, 12, 0, tzinfo=UTC) + timedelta(minutes=i),
     )
 
@@ -296,9 +311,18 @@ class TestFormat:
 
 def _subtask(**over):
     base = dict(
-        id=uuid.uuid4(), task="Research snow", status="completed", result="Snow is deep",
-        error=None, final_outcome="completed", report_jsonb=None, parent_session_id="s1",
-        parent_channel=CHAN, dag_node_id=None, metadata_={}, notify=False,
+        id=uuid.uuid4(),
+        task="Research snow",
+        status="completed",
+        result="Snow is deep",
+        error=None,
+        final_outcome="completed",
+        report_jsonb=None,
+        parent_session_id="s1",
+        parent_channel=CHAN,
+        dag_node_id=None,
+        metadata_={},
+        notify=False,
     )
     base.update(over)
     return SimpleNamespace(**base)
@@ -366,10 +390,18 @@ class TestDagListener:
         assert set(bus.handlers) == {"dag.completed", "dag.failed"}
 
         dag_id = str(uuid.uuid4())
-        ev = Event(type="dag.completed", agent_id=agent, data={
-            "dag_id": dag_id, "name": "nightly", "status": "completed",
-            "summary": "all good", "origin_channel": CHAN, "origin_session_id": "s1",
-        })
+        ev = Event(
+            type="dag.completed",
+            agent_id=agent,
+            data={
+                "dag_id": dag_id,
+                "name": "nightly",
+                "status": "completed",
+                "summary": "all good",
+                "origin_channel": CHAN,
+                "origin_session_id": "s1",
+            },
+        )
         await bus.handlers["dag.completed"][0](ev)
         await bus.handlers["dag.completed"][0](ev)
         rows = await _claim(store, channel=CHAN, session_id=None)
@@ -435,7 +467,9 @@ async def inbox_env(db, mock_embeddings):
 
 async def _finish_subtask(env, *, session_id: str, channel: str | None, result: str):
     st = await env.heart.subtasks.create(
-        task="Check the snow report", parent_session_id=session_id, parent_channel=channel,
+        task="Check the snow report",
+        parent_session_id=session_id,
+        parent_channel=channel,
     )
     await env.heart.subtasks.complete(st.id, result, final_outcome="completed", attempts=1)
     await env.pool._record_inbox(st)  # the worker's terminal hook
@@ -652,7 +686,9 @@ async def _spawned_in(env, session_id: str) -> list:
                     .where(Subtask.agent_id == env.settings.agent_id)
                     .where(Subtask.parent_session_id == session_id)
                 )
-            ).scalars().all()
+            )
+            .scalars()
+            .all()
         )
 
 
@@ -663,9 +699,15 @@ async def test_telegram_chat_id_reaches_pre_turn_and_the_spawned_subtask(wired_c
     subtask spawned in that turn stores it."""
     env = wired_chat
     session_id = f"tg-{uuid.uuid4().hex[:8]}"
-    resp = await env.client.post(route, json={
-        "message": "check the snow", "platform": "telegram", "chat_id": 55, "session_id": session_id,
-    })
+    resp = await env.client.post(
+        route,
+        json={
+            "message": "check the snow",
+            "platform": "telegram",
+            "chat_id": 55,
+            "session_id": session_id,
+        },
+    )
     assert resp.status_code == 200, resp.text
     assert [kw.get("channel") for kw in env.cognitive.pre_turn_kwargs] == ["telegram:55"]
     assert [st.parent_channel for st in await _spawned_in(env, session_id)] == ["telegram:55"]
@@ -686,6 +728,7 @@ async def test_dispatcher_injects_channel_and_origin_session():
         async def h(**kwargs):
             seen[name] = kwargs
             return {"content": [{"type": "text", "text": "ok"}]}
+
         return h
 
     d = ToolDispatcher()
@@ -723,11 +766,14 @@ async def test_dag_origin_and_delivery_backstop(db):
     agent = _agent()
     s = _settings(agent_id=agent)
     dags = DAGStore(db, agent, s)
-    dag = await dags.create(DAGCreateRequest(
-        name="nightly-report",
-        nodes=[DAGNodeSpec(name="n", type=DAGNodeType.callback, instructions="x")],
-        origin_channel=CHAN, origin_session_id="S1",
-    ))
+    dag = await dags.create(
+        DAGCreateRequest(
+            name="nightly-report",
+            nodes=[DAGNodeSpec(name="n", type=DAGNodeType.callback, instructions="x")],
+            origin_channel=CHAN,
+            origin_session_id="S1",
+        )
+    )
     await dags.update_dag_status(dag.id, "completed", result_summary="All good")
     dag = await dags.get_dag(dag.id)
     assert dag.origin_channel == CHAN and dag.origin_session_id == "S1"
@@ -741,7 +787,9 @@ async def test_dag_origin_and_delivery_backstop(db):
 
     delivery = DAGResultDelivery(
         s.model_copy(update={"dag_delivery_telegram_enabled": False}),
-        agent_id=agent, bus=_CapturingBus(), inbox=inbox,
+        agent_id=agent,
+        bus=_CapturingBus(),
+        inbox=inbox,
     )
     await delivery.deliver(dag)
     # The bus payload carries the routing the listener needs...
@@ -766,11 +814,14 @@ async def test_retried_dag_delivers_its_new_outcome_once(db):
     agent = _agent()
     s = _settings(agent_id=agent, dag_delivery_telegram_enabled=False)
     dags = DAGStore(db, agent, s)
-    dag = await dags.create(DAGCreateRequest(
-        name="flaky-report",
-        nodes=[DAGNodeSpec(name="work", type=DAGNodeType.subtask, instructions="x", timeout_seconds=120)],
-        origin_channel=CHAN, origin_session_id="S1",
-    ))
+    dag = await dags.create(
+        DAGCreateRequest(
+            name="flaky-report",
+            nodes=[DAGNodeSpec(name="work", type=DAGNodeType.subtask, instructions="x", timeout_seconds=120)],
+            origin_channel=CHAN,
+            origin_session_id="S1",
+        )
+    )
     inbox = ResultInboxStore(db, agent)
     emitted: list = []
 
@@ -931,11 +982,14 @@ class TestReconciler:
         inbox = ResultInboxStore(db, agent)
         await inbox.ensure_enabled_at()
         dags = DAGStore(db, agent, s)
-        dag = await dags.create(DAGCreateRequest(
-            name="nightly-report",
-            nodes=[DAGNodeSpec(name="n", type=DAGNodeType.callback, instructions="x")],
-            origin_channel=CHAN, origin_session_id="S1",
-        ))
+        dag = await dags.create(
+            DAGCreateRequest(
+                name="nightly-report",
+                nodes=[DAGNodeSpec(name="n", type=DAGNodeType.callback, instructions="x")],
+                origin_channel=CHAN,
+                origin_session_id="S1",
+            )
+        )
         await dags.update_dag_status(dag.id, "completed", result_summary="All good")
 
         pushes: list[dict] = []
@@ -949,7 +1003,11 @@ class TestReconciler:
         loader = AsyncMock()
         loader._registry = MagicMock()
         orch = DAGOrchestrator(
-            store=dags, subtask_mgr=AsyncMock(), dynamic_loader=loader, settings=s, delivery=delivery,
+            store=dags,
+            subtask_mgr=AsyncMock(),
+            dynamic_loader=loader,
+            settings=s,
+            delivery=delivery,
         )
         _fail_first_insert(monkeypatch, inbox)
         await orch._deliver_terminal_dags()
@@ -983,9 +1041,13 @@ class TestReconciler:
 
         async def delivered_dag(name, **origin):
             # Marked delivered with no inbox row: the lost-write shape.
-            dag = await dags.create(DAGCreateRequest(
-                name=name, nodes=[DAGNodeSpec(name="n", type=DAGNodeType.callback, instructions="x")], **origin,
-            ))
+            dag = await dags.create(
+                DAGCreateRequest(
+                    name=name,
+                    nodes=[DAGNodeSpec(name="n", type=DAGNodeType.callback, instructions="x")],
+                    **origin,
+                )
+            )
             await dags.update_dag_status(dag.id, "completed", result_summary=f"{name} done")
             await dags.mark_delivered(dag.id, 0)
             return dag
@@ -993,7 +1055,8 @@ class TestReconciler:
         early = await delivered_dag("early", origin_channel=CHAN)
         async with db.session() as session:
             await session.execute(
-                update(ExecutionDAG).where(ExecutionDAG.id == early.id)
+                update(ExecutionDAG)
+                .where(ExecutionDAG.id == early.id)
                 .values(completed_at=datetime.now(UTC) - timedelta(minutes=1))
             )
             await session.commit()
@@ -1014,7 +1077,10 @@ class TestReconciler:
         env = inbox_env
         await env.heart.result_inbox.ensure_enabled_at()
         inline = await env.heart.subtasks.create(
-            task="inline", parent_session_id="S1", parent_channel=CHAN, worker_id=INLINE_WORKER_ID,
+            task="inline",
+            parent_session_id="S1",
+            parent_channel=CHAN,
+            worker_id=INLINE_WORKER_ID,
         )
         await env.heart.subtasks.complete(inline.id, "inline result", final_outcome="completed", attempts=1)
         empty = await env.heart.subtasks.create(task="empty", parent_session_id="S1", parent_channel=CHAN)

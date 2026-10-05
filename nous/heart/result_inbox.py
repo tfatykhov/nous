@@ -234,7 +234,9 @@ class ResultInboxStore:
                         .returning(ResultInbox)
                         .execution_options(synchronize_session=False)
                     )
-                ).scalars().all()
+                )
+                .scalars()
+                .all()
             )
             older = 0
             if len(claimed) == max_items:
@@ -252,9 +254,7 @@ class ResultInboxStore:
                 settle = (
                     update(Subtask)
                     .where(Subtask.agent_id == self._agent_id)
-                    .where(
-                        Subtask.id.in_(select(overflow.c.source_id).where(overflow.c.source_kind == SOURCE_SUBTASK))
-                    )
+                    .where(Subtask.id.in_(select(overflow.c.source_id).where(overflow.c.source_kind == SOURCE_SUBTASK)))
                     .values(delivered=True)
                     .cte("settle")
                 )
@@ -266,7 +266,10 @@ class ResultInboxStore:
         """Record ``session_id`` as the latest session on ``channel``."""
         now = datetime.now(UTC)
         stmt = pg_insert(ChannelSession).values(
-            agent_id=self._agent_id, channel=channel, session_id=session_id, last_active=now,
+            agent_id=self._agent_id,
+            channel=channel,
+            session_id=session_id,
+            last_active=now,
         )
         stmt = stmt.on_conflict_do_update(
             index_elements=["agent_id", "channel"],
@@ -315,9 +318,7 @@ class ResultInboxStore:
         out: dict[str, Any] = {}
         for kind in (SOURCE_SUBTASK, SOURCE_DAG):
             mine = [r for r in rows if r[0] == kind]
-            latencies = sorted(
-                (_aware(r[2]) - _aware(r[1])).total_seconds() for r in mine if r[2] is not None
-            )
+            latencies = sorted((_aware(r[2]) - _aware(r[1])).total_seconds() for r in mine if r[2] is not None)
             out[kind] = {
                 "created": len(mine),
                 "delivered": len(latencies),
@@ -407,8 +408,11 @@ async def record_dag_result(
                 return False
             channel = f"telegram:{settings.telegram_chat_id}"
         dag_uuid = dag_id if isinstance(dag_id, UUID) else UUID(str(dag_id))
-        body = _cap(summary or f"DAG '{name}' {status}", settings.result_inbox_body_max_chars,
-                    f"dag_manage status {dag_uuid.hex[:8]}")
+        body = _cap(
+            summary or f"DAG '{name}' {status}",
+            settings.result_inbox_body_max_chars,
+            f"dag_manage status {dag_uuid.hex[:8]}",
+        )
         return await store.insert(
             source_kind=SOURCE_DAG,
             source_id=dag_uuid,
