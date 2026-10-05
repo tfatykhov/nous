@@ -288,12 +288,12 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
    - **At most once, for every tool.** The fence is the proposal row's conditional transition `approved → executing`, made before the call. A crash while `executing` leaves a visible in-doubt proposal that is never re-run automatically.
    - **Context.** The call runs under `ContextKind` **`approved_action`**, whose `CONTEXT_POLICY` row admits exactly the one declared tool (`declared_tools = (tool,)`). It passes through `_authorize_tool_call` and the execution ledger's open/close (`_open_for_call`) like any loop call, so it is recorded. The ledger keys the call with a new `proposal:{id}` idempotency scope in `api/idempotency.py`.
    - **Authority.** This is the `owner_approved` authority: one call, the one the owner saw. It is the only way an outward tool runs on behalf of a lineage.
-6. The execution result, a rejection or an expiry becomes **the next result of the same intention** (`awaiting_owner → result_ready`), so the chain continues.
+6. The execution result, a rejection or an expiry becomes **the next result of every intention in the arrival that made the proposal** (`awaiting_owner → result_ready` for each). The proposal records its `arrival_id`, and the arrival lists its `intention_ids`, so the next claim takes them together as one batch, and the chain continues.
 
 **Questions** (`ask` with no proposal) are an `intention_report` of type `QUESTION`.
 - The owner answers by replying to the question's Telegram message (the runner stores the pushed message's `message_id` on the report row, so the bot can map a reply to the intention), or with `/answer <id> <text>`. The bot recognises either in code and calls `POST /intentions/{id}/answer`.
 - When A2UI is on, the question also shows as a card with fixed options.
-- The answer arrives as the next result of that intention. The model never routes the answer, so text inside a result cannot pose as the owner's answer.
+- The answer arrives as the next result of every intention in the asking arrival (the report row carries the `arrival_id`), so the next claim takes them together. The model never routes the answer, so text inside a result cannot pose as the owner's answer.
 
 ### 4.5 Arrival pipeline
 
@@ -332,9 +332,10 @@ RETURNING i.*;
 | Cancelled, expired or superseded | Drop and record why. |
 | Past `deadline` | Report the result without acting on it. |
 | Root over its turn, token or stall budget | Escalate: report, with the reason. |
+| Root at its depth or spawn limit | Escalate now: report the claimed results, with the reason. No turn runs, because a `continue` or `revise` decision could not spawn anything and the result would wait for the TTL. |
 | Originating Plan decision resolved as `superseded` or `noise` | Drop. |
 
-The depth and spawn limits act earlier: they remove the spawn tools (§4.4). When one of them is hit, the turn can only resolve, and the gate escalates at the next arrival.
+The depth and spawn limits act in two places. While a turn runs, reaching one removes the spawn tools (§4.4), and `resolve_intention` then refuses `continue` and `revise`. At the next claim, the gate escalates right away.
 
 **4. The continuation turn.**
 - It is a `run_turn` with:
@@ -389,8 +390,8 @@ The same commit also:
 
 | Setting | Default | On reaching it |
 |---|---|---|
-| `NOUS_CONTINUATION_MAX_DEPTH` | 3 | Spawn tools removed; the next arrival escalates. |
-| `NOUS_CONTINUATION_MAX_SPAWNS_PER_ROOT` | 12 | Spawn tools removed; the next arrival escalates. |
+| `NOUS_CONTINUATION_MAX_DEPTH` | 3 | Spawn tools removed, and `continue`/`revise` refused for the rest of the turn; the gate escalates the next claim at once. |
+| `NOUS_CONTINUATION_MAX_SPAWNS_PER_ROOT` | 12 | Same as depth. |
 | `NOUS_CONTINUATION_MAX_TURNS_PER_ROOT` | 8 | Escalate. |
 | `NOUS_CONTINUATION_MAX_TOKENS_PER_ROOT` | 400000 | Escalate. Root tokens = the lineage's subtask `tokens_in/out` **excluding DAG-node subtasks** (their usage is already rolled into `tokens_consumed` by `DAGStore.claim_and_add_node_tokens`) + its DAGs' `tokens_consumed` + its arrivals' tokens. |
 | `NOUS_CONTINUATION_STALL_LIMIT` | 2 consecutive verified `progress=false` | Escalate. |
@@ -411,9 +412,8 @@ All budgets are derived from rows when checked; there are no counters to drift.
   - moves every open intention of the root to `cancelled`;
   - cancels the lineage's pending subtasks and DAGs;
   - expires pending proposals;
-  - deactivates a container's schedule.
-
-  A running worker is not pre-empted; the gate drops its late result.
+  - deactivates a container's schedule;
+  - **stops a running continuation turn.** The runner keeps a map from root to its running turn task (one process per agent) and cancels that task. `_authorize_tool_call` also refuses every call from an `internal_only` context whose root has `root_cancelled_at` set. That check reads the root row and caches it for the turn, invalidated by the cancel. Lineage subtasks already running on workers are not pre-empted, but their next tool call is refused and the gate drops their late result.
 - **TTL.** The continuation runner's sweep handles roots past their TTL that have a `continue` or `report` intention: it writes `root_expired_at`, reports what exists and closes them. Containers are excluded. This also covers roots that never get an arrival, so no gate ever runs for them.
 - Child inserts check that the root is open (I1), so a turn already running cannot spawn under a cancelled root.
 - `GET /intentions` lists open roots with their lineage and budget use. It has the same no-auth LAN posture as the rest of the REST API.
@@ -513,7 +513,10 @@ The F098 A and C classification of scheduled, inline and spawn rows is pinned, a
 - **Lease.** A turn longer than the turn timeout is cancelled and counted as an attempt. A released lease plus a late commit attempt is refused.
 - **Commit.** `delivered_at` is stamped only at the fenced commit. A result arriving while `deciding` sends the intention back to `result_ready`.
 - **Routing.** `continue` rows are never claimed by a chat turn, nor by the continuation's own `pre_turn`. Re-arrivals reopen or report. A `continue` DAG is never marked delivered without its row, and `InboxDagPass` selects continuation DAGs. The rollback rule re-routes, expires proposals and closes, even with both flags off.
-- **Limits.** Each bound escalates at its limit, the depth and spawn limits remove the spawn tools, and a cancel cascades and blocks further spawns.
+- **Limits.** Each bound escalates at its limit.
+  - The depth and spawn limits remove the spawn tools, make `resolve_intention` refuse `continue` and `revise`, and make the gate escalate the next claim without running a turn.
+  - A cancel cascades, blocks further spawns, cancels a running continuation task, and makes every later tool call in the lineage refused.
+- **Batch answers.** An owner answer or a proposal decision for a batch arrival wakes every intention in that arrival, and they are claimed together.
 - Quiet hours defer only the Telegram push, idempotently.
 - **Wiring tests.** They drive the real worker, scheduler, orchestrator and REST paths end to end, and fail when the hook is removed.
 
