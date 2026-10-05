@@ -341,3 +341,62 @@ async def test_a_blank_item_title_leaves_original_request_null(tmp_path, db, tit
     check, _ = _wq(db, agent, path)
     await check.run()
     assert (await _dag_of(db, agent)).original_request is None
+
+
+# ---------------------------------------------------------------------------
+# A plan decision a subtask records is not deleted by post_turn's cleanup
+# ---------------------------------------------------------------------------
+
+
+async def _decision_exists(brain, decision_id: str) -> bool:
+    return await brain.get(uuid.UUID(decision_id)) is not None
+
+
+@pytest.fixture
+async def _plan_env(db):
+    from nous.brain.brain import Brain
+    from nous.cognitive.deliberation import DeliberationEngine
+
+    settings = Settings(_env_file=None, agent_id=f"f099-0a-{uuid.uuid4().hex[:8]}")
+    brain = Brain(database=db, settings=settings)
+    yield brain, DeliberationEngine(brain, settings), SubtaskManager(db, settings.agent_id), settings.agent_id
+    await brain.close()
+
+
+async def _plan_decision(brain, agent: str) -> str:
+    from nous.brain.schemas import ReasonInput, RecordInput
+
+    out = await brain.record(
+        RecordInput(
+            description="Plan for a turn that spawns work",
+            confidence=0.8,
+            category="process",
+            stakes="medium",
+            reasons=[ReasonInput(type="analysis", text="t")],
+        ),
+    )
+    return str(out.id)
+
+
+@pytest.mark.parametrize("path", ["informational", "quality_gate"])
+async def test_a_plan_decision_a_subtask_names_survives_cleanup(_plan_env, path):
+    brain, engine, mgr, agent = _plan_env
+    decision_id = await _plan_decision(brain, agent)
+    await mgr.create(task="spawned", metadata={"plan_decision_id": decision_id})
+    if path == "informational":
+        await engine.delete(decision_id)
+    else:
+        assert await engine.finalize(decision_id, description="short", confidence=0.8) is None
+    assert await _decision_exists(brain, decision_id)
+
+
+@pytest.mark.parametrize("path", ["informational", "quality_gate"])
+async def test_a_decision_nothing_spawned_from_is_still_deleted(_plan_env, path):
+    brain, engine, mgr, agent = _plan_env
+    decision_id = await _plan_decision(brain, agent)
+    await mgr.create(task="unrelated", metadata={"plan_decision_id": str(uuid.uuid4())})
+    if path == "informational":
+        await engine.delete(decision_id)
+    else:
+        assert await engine.finalize(decision_id, description="short", confidence=0.8) is None
+    assert not await _decision_exists(brain, decision_id)
