@@ -402,7 +402,10 @@ async def test_a_decision_nothing_spawned_from_is_still_deleted(_plan_env, path)
     assert not await _decision_exists(brain, decision_id)
 
 
-async def test_a_crash_between_claim_and_link_keeps_the_title_for_the_reconciler(tmp_path, db, monkeypatch):
+@pytest.mark.parametrize(("title", "expected"), [("Real title", "Real title"), ("", None)])
+async def test_a_crash_between_claim_and_link_keeps_the_title_for_the_reconciler(
+    tmp_path, db, monkeypatch, title, expected
+):
     """An adapter with payload={} still gets its title into original_request after recovery."""
     from datetime import timedelta
 
@@ -412,7 +415,7 @@ async def test_a_crash_between_claim_and_link_keeps_the_title_for_the_reconciler
 
     class _EmptyPayloadAdapter(wq.FileJsonlAdapter):
         async def list_active(self):
-            return [WorkItem(external_id="ext-9", title="Real title", body="b", state="open", terminal=False)]
+            return [WorkItem(external_id="ext-9", title=title, body="b", state="open", terminal=False)]
 
     agent = f"f099-0a-{uuid.uuid4().hex[:8]}"
     check, items = _wq(db, agent, tmp_path / "unused.jsonl")
@@ -435,4 +438,14 @@ async def test_a_crash_between_claim_and_link_keeps_the_title_for_the_reconciler
             .scalars()
             .all()
         )
-    assert dags[-1].original_request == "Real title"
+    assert dags[-1].original_request == expected
+
+
+async def test_another_agents_subtask_does_not_protect_a_decision(_plan_env, db):
+    brain, engine, _mgr, agent = _plan_env
+    decision_id = await _plan_decision(brain, agent)
+    await SubtaskManager(db, f"f099-0a-other-{uuid.uuid4().hex[:8]}").create(
+        task="foreign", metadata={"plan_decision_id": decision_id}
+    )
+    await engine.delete(decision_id)
+    assert not await _decision_exists(brain, decision_id)

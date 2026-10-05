@@ -277,17 +277,20 @@ class DeliberationEngine:
         an informational one, and the subtask would point at nothing.
         """
         if await self._is_spawn_reason(decision_id, session):
-            logger.debug("Keeping decision %s: a subtask records it as its plan", decision_id)
+            logger.info("Decision %s kept: a spawned subtask names it as its plan decision", decision_id)
             return
         await self._brain.delete(UUID(decision_id), session=session)
 
     async def _is_spawn_reason(self, decision_id: str, session: AsyncSession | None) -> bool:
         """True when any subtask's metadata.plan_decision_id is this decision."""
-        stmt = sa_text("SELECT 1 FROM heart.subtasks WHERE metadata->>'plan_decision_id' = :d LIMIT 1")
+        stmt = sa_text(
+            "SELECT 1 FROM heart.subtasks WHERE agent_id = :a AND metadata->>'plan_decision_id' = :d LIMIT 1"
+        )
+        agent = self._brain.agent_id
         if session is None:
             async with self._brain.db.session() as own:
-                return (await own.execute(stmt, {"d": decision_id})).first() is not None
-        return (await session.execute(stmt, {"d": decision_id})).first() is not None
+                return (await own.execute(stmt, {"d": decision_id, "a": agent})).first() is not None
+        return (await session.execute(stmt, {"d": decision_id, "a": agent})).first() is not None
 
     async def should_deliberate(self, frame: FrameSelection) -> bool:
         """Should this frame trigger deliberation?

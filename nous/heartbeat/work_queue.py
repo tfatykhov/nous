@@ -272,7 +272,7 @@ class WorkQueueCheck(BaseCheck):
                 payload = row.payload or {}
                 item = WorkItem(
                     external_id=row.external_id,
-                    title=str(payload.get("_title") or payload.get("title", row.external_id)),
+                    title=str(payload["_title"] if "_title" in payload else payload.get("title", row.external_id)),
                     body=str(payload.get("body", "")),
                     state=str(payload.get("state", "open")),
                     terminal=bool(payload.get("terminal", False)),
@@ -311,7 +311,7 @@ class WorkQueueCheck(BaseCheck):
             external_id=item.external_id,
             # F099 Phase 0a: the title rides in the row, so a crash-recovered
             # re-dispatch records it even when the adapter's payload is empty.
-            payload={**item.payload, "_title": item.title},
+            payload={**(item.payload or {}), "_title": item.title},
         )
         if claimed is None:
             # Already seen (this tick or a prior tick). The reconciler
