@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -414,8 +415,13 @@ _HEADER = (
 )
 
 
+# Any case and any whitespace: the model reads `</ RESULT_MESSAGE >` as a
+# delimiter just as readily as the exact lowercase form.
+_DELIMITER = re.compile(r"<(\s*/?\s*result_message)", re.IGNORECASE)
+
+
 def _neutralize(text: str) -> str:
-    return text.replace("</result_message", "&lt;/result_message").replace("<result_message", "&lt;result_message")
+    return _DELIMITER.sub(r"&lt;\1", text)
 
 
 def format_inbox_messages(rows: list[ResultInbox], max_items: int) -> str:
