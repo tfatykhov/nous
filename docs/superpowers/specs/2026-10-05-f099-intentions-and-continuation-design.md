@@ -119,14 +119,14 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
 |---|---|
 | `interactive`, `mcp` | `continue` |
 | A continuation, or anything in its lineage | `continue` |
-| `heartbeat_check` / `heartbeat_callback` (only where their declared tools allow spawning) | `continue` |
+| `heartbeat_check` / `heartbeat_callback` (only where their declared tools allow spawning) | `continue` (they are Nous's own follow-up work) |
 | A `schedule_task` call | `container` (see Schedules) |
 | A scheduler fire | `remember` if `notify=true`, otherwise `none` |
 | Work-queue DAG | `remember` |
 | Companion `app.act` | `none` (its watcher already consumes the result) |
 | `dag_summary` | `none` (delivery mechanics) |
 | Inline `spawn_task(await_result=true)` and `spawn_sync` | `none` (the result comes back in the same turn) |
-| A model spawn from another background turn (`subtask`, `scheduled`, `dag_node`, `agent_action`, `heartbeat_*`, `background`), for example a scheduled "create a DAG and exit" launcher | That turn's own intention's policy. With no intention: `none` |
+| A model spawn from another background turn (`subtask`, `scheduled`, `dag_node`, `agent_action`, `heartbeat_triage`, `background`), for example a scheduled "create a DAG and exit" launcher | That turn's own intention's policy. With no intention: `none` |
 | DAG node subtasks | No row of their own; the DAG's intention covers them, and they carry its lineage stamp (I3). |
 
 **Schedules.**
@@ -138,9 +138,9 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
 - `schedules.continuation_*` (the F064.5 episode reuse across fires) is unrelated and stays unchanged.
 
 **Closing.**
-- A `none` intention, and a `remember` intention once its delivery is done, are closed by the writer that sees the source terminal. **The close happens before that writer's routing-key check**, since F098's writers return early when a row has no routing key.
-- Inline intentions are closed in `spawn_task`'s inline path, in the same `finally` that F098 Phase C uses, because inline runs never reach a worker writer.
-- The TTL sweep (§4.6) expires roots, never containers.
+- A `none` intention, and a `remember` intention once its delivery is done, are closed by the writer that sees the source terminal, with `close_reason = 'legacy'` in Phase 1 and `'delivered'` in Phase 2. **The close happens before that writer's routing-key check**, since F098's writers return early when a row has no routing key. The reconciler also closes intentions whose source is terminal, whatever their routing key, so a failed worker hook does not leave one `pending`.
+- Inline intentions are closed in `spawn_task`'s inline path, in the same `finally` that F098 Phase C uses (Phase 1 adds that `finally` itself if #696 has not merged), because inline runs never reach a worker writer.
+- The TTL sweep (§4.6) expires only roots that have a `continue` or `report` intention, never containers.
 - The repair sweep (§4.5) only considers `continue` and `report` intentions.
 
 **Invariants**
@@ -226,13 +226,13 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
 5. **Duplicate pushes are suppressed.**
    - For a `continue` source, the subtask worker's raw Telegram push (suppressed inside `_notify_telegram`, which covers all four call sites) and the F087 Telegram leg are suppressed.
    - The F087 leg becomes `ok=False, required=False, detail='superseded_by_continuation'`.
-   - Because that leaves no required leg, **a `continue` DAG is never marked delivered without its inbox row.** Either the inbox write is a required leg for `continue` DAGs, or the reconciler's DAG pass repairs it, keyed by `delivery_generation`; F098's own fix for this (#694) decides which.
+   - Because that leaves no required leg, **a `continue` DAG is never marked delivered without its inbox row.** The reconciler's DAG pass (`InboxDagPass`, added by #694) repairs a missing row, keyed by `delivery_generation`. Its filter is extended to continuation DAGs (item 1).
 6. **Rollback.** At startup with `NOUS_CONTINUATION_ENABLED` off, open `continue` intentions in `result_ready`, `deciding` or `awaiting_owner`:
    - have their undelivered inbox rows re-routed to `origin_channel` (or the default chat);
    - have their pending proposals expired (a later tap is refused);
    - are closed with `close_reason = 'legacy'`.
 
-   This runs whenever `brain.intentions` exists, even if `NOUS_INTENTIONS_ENABLED` is off too. Turning the flags off never strands a result (G6).
+   This runs whenever `brain.intentions` exists, even if `NOUS_INTENTIONS_ENABLED` is off too. If `NOUS_RESULT_INBOX_ENABLED` is also off, re-routed rows would be invisible, so the raw result is sent by Telegram instead. Turning the flags off never strands a result (G6).
 
 ### 4.4 Tool surface and enforcement
 
@@ -282,16 +282,16 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
    - a Telegram inline-button callback;
    - a bot command parsed by code (`/approve <id>`, `/reject <id>`).
 
-   The Telegram bot handles these itself, before anything reaches the agent, and calls `POST /intentions/proposals/{id}/decide`. **No agent tool can approve, reject or answer.** A poisoned result in a chat turn therefore cannot cause an approval. The REST route has the same no-auth LAN posture as the rest of the API (§9).
+   The Telegram bot handles these itself, before anything reaches the agent, and calls `POST /intentions/proposals/{id}/decide`. **No agent tool can approve, reject or answer.** No model-callable approval path exists. (An `owner`-authority chat turn that has `bash` could still call the REST route with `curl`, but that adds no capability it lacks today: it can already send outward directly.) The REST route has the same no-auth LAN posture as the rest of the API (§9).
 4. **The default at the deadline is reject**: an expired proposal never runs.
 5. On approve, the runner method `execute_approved_proposal(proposal_id)` runs exactly the stored `(tool, arguments)`, with no model in between:
    - **At most once, for every tool.** The fence is the proposal row's conditional transition `approved → executing`, made before the call. A crash while `executing` leaves a visible in-doubt proposal that is never re-run automatically.
-   - **Context.** The call runs under `ContextKind` **`approved_action`**, whose `CONTEXT_POLICY` row admits exactly the one declared tool (`declared_tools = (tool,)`). It passes through `_authorize_tool_call` and the execution ledger's open/close (`_open_for_call`) like any loop call, so it is recorded. External sends also get their usual idempotency key.
+   - **Context.** The call runs under `ContextKind` **`approved_action`**, whose `CONTEXT_POLICY` row admits exactly the one declared tool (`declared_tools = (tool,)`). It passes through `_authorize_tool_call` and the execution ledger's open/close (`_open_for_call`) like any loop call, so it is recorded. The ledger keys the call with a new `proposal:{id}` idempotency scope in `api/idempotency.py`.
    - **Authority.** This is the `owner_approved` authority: one call, the one the owner saw. It is the only way an outward tool runs on behalf of a lineage.
 6. The execution result, a rejection or an expiry becomes **the next result of the same intention** (`awaiting_owner → result_ready`), so the chain continues.
 
 **Questions** (`ask` with no proposal) are an `intention_report` of type `QUESTION`.
-- The owner answers by replying to the question's Telegram message, or with `/answer <id> <text>`. The bot recognises either in code and calls `POST /intentions/{id}/answer`.
+- The owner answers by replying to the question's Telegram message (the runner stores the pushed message's `message_id` on the report row, so the bot can map a reply to the intention), or with `/answer <id> <text>`. The bot recognises either in code and calls `POST /intentions/{id}/answer`.
 - When A2UI is on, the question also shows as a card with fixed options.
 - The answer arrives as the next result of that intention. The model never routes the answer, so text inside a result cannot pose as the owner's answer.
 
@@ -341,7 +341,7 @@ The depth and spawn limits act earlier: they remove the spawn tools (§4.4). Whe
   - session `intent-<root id>`, `channel=None` and `skip_episode=True`;
   - `ExecutionContext(kind="continuation", authority="internal_only", …)`.
 - Session-monitor reflection is skipped for `intent-` sessions.
-- For the `continuation` kind, `pre_turn` skips two steps:
+- For the `continuation` kind, `pre_turn` skips two steps. It gains a `context_kind` argument for this, because today it receives `is_subtask`, `skip_episode` and `channel` but not the `ExecutionContext`.
   - F098's generic inbox injection; the runner supplies the results itself.
   - The deliberation step that records a "Plan:" Brain decision; the arrival's own decision is the record, so calibration gets one record per arrival, not two.
 - The turn's input is built from the rows, not from conversation state, which the idle monitor deletes after 30 minutes:
@@ -411,7 +411,7 @@ All budgets are derived from rows when checked; there are no counters to drift.
   - deactivates a container's schedule.
 
   A running worker is not pre-empted; the gate drops its late result.
-- **TTL.** The continuation runner's sweep handles roots past their TTL: it writes `root_expired_at`, reports what exists and closes them. Containers are excluded. This also covers roots that never get an arrival, so no gate ever runs for them.
+- **TTL.** The continuation runner's sweep handles roots past their TTL that have a `continue` or `report` intention: it writes `root_expired_at`, reports what exists and closes them. Containers are excluded. This also covers roots that never get an arrival, so no gate ever runs for them.
 - Child inserts check that the root is open (I1), so a turn already running cannot spawn under a cancelled root.
 - `GET /intentions` lists open roots with their lineage and budget use. It has the same no-auth LAN posture as the rest of the REST API.
 
@@ -458,7 +458,7 @@ These decisions are the evidence for any later widening of autonomy.
 
 **Phase 2:**
 - `brain.intention_arrivals` and `brain.intention_proposals`;
-- the inbox CHECK and UNIQUE changes (§4.3.4), plus `push_after` and `pushed_at`.
+- the inbox CHECK and UNIQUE changes (§4.3.4), plus `push_after`, `pushed_at` and `push_message_id`.
 
 **In the same PR as each phase:** update `tests/test_database.py::test_all_tables_exist` and the CLAUDE.md table count.
 
@@ -483,12 +483,11 @@ The F098 A and C classification of scheduled, inline and spawn rows is pinned, a
 **Phase 2**
 - **Lineage narrowing.** Assert the offered set contains no `external` tool and no denylisted tool, under every policy and offered-set mode, for each of:
   - a continuation;
-  - a subtask it spawns, including inline;
-  - that subtask's `dag_create` children;
-  - DAG node, callback and fix subtasks;
-  - a lineage DAG's dynamic check.
+  - a subtask it spawns, including inline (offered no spawn tools);
+  - the node, callback and fix subtasks of a DAG it creates;
+  - that DAG's dynamic checks.
 - **Forged calls.** A forged `tool_use` for `send_email`, `run_python` or `bash` is refused in both loops.
-- `write_file` outside `intentions/<root>/` is refused. `cancel_task` on foreign work is refused. A lineage subtask's `dag_create` creates a child, not a root. The F087 summary turn does not run for `continue` DAGs.
+- `write_file` outside `intentions/<root>/` is refused. `cancel_task` on foreign work is refused. A continuation's `dag_create` creates a child, not a root. The F087 summary turn does not run for `internal_only` DAGs.
 - **Injection test.** A result body that asks for `send_email` produces no send. The test asserts the refusal, not the model's behaviour.
 - **Claim.** Concurrent claimers with an arrival committed in between get exactly one continuation per root. A killed process's claim is released by the lease. A stale token cannot commit. Debounce has a max-wait.
 - Each gate row behaves as specified.
