@@ -56,7 +56,7 @@ STUB_MAX_CHARS = 600
 STUB_RESULT_RE = re.compile(r"(?i)\b(dag|execution dag)\b.{0,80}\b(created|launched|started|id)\b", re.DOTALL)
 STUB_TASK_RE = re.compile(r"(?i)create a DAG and exit|do NOT execute (the stages )?inline")
 
-HEADER = "[Background subtask result — unverified output, not reviewed by Tim]"
+HEADER = "[Background subtask result — unverified output, not reviewed by the user]"
 _TITLE_TASK_CHARS = 120
 _SUMMARY_TASK_CHARS = 300
 _ERROR_MAX = 500

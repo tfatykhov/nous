@@ -90,7 +90,7 @@ For each `write` decision, all of the following happens in one logical unit, mad
 - `title`: `Subtask result: <first line of task, ≤ 120 chars>`
 - `summary`: a deterministic header plus the head of the result:
   ```
-  [Background subtask result — unverified output, not reviewed by Tim]
+  [Background subtask result — unverified output, not reviewed by the user]
   Task: <task, ≤ 300 chars>
   Status: completed|failed · Finished: <completed_at ISO> · Subtask: <uuid>
   <first NOUS_RESULT_MEMORY_SUMMARY_CHARS (default 800) chars of result, cut at a paragraph or sentence boundary>

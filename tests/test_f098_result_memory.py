@@ -156,8 +156,13 @@ def test_launcher_stub_filter(task, result, stub):
 
 
 def test_template_key_is_stable_and_normalised():
-    assert template_key("Daily  Briefing for Tim") == template_key("daily briefing for tim")
+    assert template_key("Daily  Briefing for the team") == template_key("daily briefing for the team")
     assert len(template_key("x")) == 12
+
+
+def test_header_names_no_one():
+    """The framework is public: the stored header says "the user", never an owner's name."""
+    assert HEADER == "[Background subtask result — unverified output, not reviewed by the user]"
 
 
 def test_flags_default_off():
@@ -456,10 +461,10 @@ async def test_tier2_scheduled(mem_env):
     assert await env.heart.result_memory.record(stub) == "skipped"
     assert (await _log(env, stub.id)).reason == "launcher_stub"
 
-    real = await _finished(env, notify=True, task="Morning briefing for Tim", result=BRIEFING)
+    real = await _finished(env, notify=True, task="Morning briefing for the user", result=BRIEFING)
     assert await env.heart.result_memory.record(real) == "written"
     [ep] = await _episodes(env, real.id)
-    assert "tier:2" in _tags(ep) and f"recurring:{template_key('Morning briefing for Tim')}" in _tags(ep)
+    assert "tier:2" in _tags(ep) and f"recurring:{template_key('Morning briefing for the user')}" in _tags(ep)
 
 
 async def test_conversation_failure_is_written_as_failure(mem_env):
