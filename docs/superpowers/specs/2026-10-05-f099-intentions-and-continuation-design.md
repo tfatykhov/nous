@@ -112,7 +112,7 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
 - I3 below guarantees that authority only ever narrows.
 
 **Default wake policy, by origin.**
-- Outside a lineage, a spawn tool's optional `wake_policy` argument overrides the default. **Only foreground turns (`interactive`, `mcp`) may widen `none` to `continue`.** Code paths and background model turns cannot, so a background monitor cannot turn its own work into an autonomous chain.
+- Outside a lineage, a spawn tool's optional `wake_policy` argument overrides the default. **Only foreground turns (`interactive`, `mcp`) may use the argument to ask for `continue` when their default is something else.** A request for `continue` from a code path or a background model turn whose default is not `continue` falls back to the default. A background monitor or a scheduled `remember` fire therefore cannot turn its own work into an autonomous chain. The defaults in the table above are owner-approved and stand as written: a heartbeat check or callback defaults to `continue`, because it is Nous's own follow-up work.
 - **Inside an `internal_only` lineage the argument is ignored.** The policy is always `continue`, or `none` for an inline spawn, so no lineage result is ever routed anywhere except back to the continuation.
 
 | Origin of the spawn | Default |
