@@ -1204,6 +1204,20 @@ class Settings(BaseSettings):
     # telegram:<telegram_chat_id>. Off: such DAGs keep only the F087 push.
     result_inbox_dag_scheduled: bool = False
 
+    # F098 Phase C: result memory — a finished background subtask result
+    # becomes an episode (+ document chunks), so recall_deep can find it.
+    # Independent of result_inbox_enabled. Off: the hooks and the reconciler
+    # pass return at once and nothing is written, not even log rows.
+    result_memory_enabled: bool = False
+    # Tier 2: scheduled notify=true results (launcher stubs filtered out).
+    result_memory_scheduled: bool = False
+    result_memory_min_chars: int = Field(default=200, ge=0)
+    result_memory_summary_chars: int = Field(default=800, ge=100)
+    # Text beyond this is cut (with a marker) before chunking: bounds embedding cost.
+    result_memory_max_chars: int = Field(default=200_000, ge=1000)
+    result_memory_sweep_lookback_hours: int = Field(default=72, ge=1)
+    result_memory_max_attempts: int = Field(default=3, ge=1)
+
     # F022: Graph-Augmented Recall
     graph_recall_enabled: bool = True
     graph_recall_max_expand: int = 5

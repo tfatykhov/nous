@@ -58,30 +58,37 @@ class EpisodeManager:
     # start()
     # ------------------------------------------------------------------
 
-    async def start(self, input: EpisodeInput, session: AsyncSession | None = None) -> EpisodeDetail:
-        """Start a new episode."""
+    async def start(
+        self, input: EpisodeInput, session: AsyncSession | None = None, *, dedup: bool = True
+    ) -> EpisodeDetail:
+        """Start a new episode.
+
+        ``dedup=False`` always creates one, never reusing a similar ongoing
+        episode: for a writer that must own the episode it closes.
+        """
         if session is None:
             async with self.db.session() as session:
-                result = await self._start(input, session)
+                result = await self._start(input, session, dedup=dedup)
                 await session.commit()
                 return result
-        return await self._start(input, session)
+        return await self._start(input, session, dedup=dedup)
 
-    async def _start(self, input: EpisodeInput, session: AsyncSession) -> EpisodeDetail:
+    async def _start(self, input: EpisodeInput, session: AsyncSession, *, dedup: bool = True) -> EpisodeDetail:
         # 006.2: Dedup — check for similar ongoing episodes in recent window
-        cutoff = datetime.now(UTC) - timedelta(minutes=self._DEDUP_WINDOW_MINUTES)
-        recent_result = await session.execute(
-            select(Episode).where(
-                Episode.agent_id == self.agent_id,
-                Episode.ended_at.is_(None),  # ongoing = not ended
-                Episode.started_at >= cutoff,
+        if dedup:
+            cutoff = datetime.now(UTC) - timedelta(minutes=self._DEDUP_WINDOW_MINUTES)
+            recent_result = await session.execute(
+                select(Episode).where(
+                    Episode.agent_id == self.agent_id,
+                    Episode.ended_at.is_(None),  # ongoing = not ended
+                    Episode.started_at >= cutoff,
+                )
             )
-        )
-        for existing_ep in recent_result.scalars().all():
-            if text_overlap(existing_ep.summary or "", input.summary or "") > self._DEDUP_THRESHOLD:
-                logger.debug("Reusing existing episode %s (similar summary)", existing_ep.id)
-                reloaded = await self._get_episode_orm(existing_ep.id, session)
-                return self._to_detail(reloaded)
+            for existing_ep in recent_result.scalars().all():
+                if text_overlap(existing_ep.summary or "", input.summary or "") > self._DEDUP_THRESHOLD:
+                    logger.debug("Reusing existing episode %s (similar summary)", existing_ep.id)
+                    reloaded = await self._get_episode_orm(existing_ep.id, session)
+                    return self._to_detail(reloaded)
 
         # Generate embedding from title + summary
         embedding = None

@@ -44,7 +44,8 @@ nous/
 │   │   ├── search.py           # Full-text + vector search
 │   │   ├── subtasks.py         # Subtask CRUD operations
 │   │   ├── result_inbox.py     # F098: channel-keyed result inbox (store, subtask/DAG writers, pre_turn formatting)
-│   │   ├── result_reconciler.py  # F098: repairs lost inbox writes (subtask and DAG passes)
+│   │   ├── result_reconciler.py  # F098: repairs lost inbox writes (subtask and DAG passes); Phase C adds the memory pass
+│   │   ├── result_memory.py    # F098 Phase C: a finished subtask result becomes an episode + marked chunks (log, writer, reconciler pass)
 │   │   ├── schedules.py        # Schedule CRUD operations
 │   │   └── schemas.py          # Pydantic models
 │   ├── cognitive/              # Cognitive layer (Nous Loop)
@@ -111,6 +112,8 @@ nous/
 │   │   ├── push.py             # F097 FCM leg (data-only messages)
 │   │   ├── dsl.py / builders/  # Template-first surface construction
 │   │   └── catalogs/           # A2UI v1.0 vendored @ pinned commit d9086fb
+│   ├── security/
+│   │   └── secrets.py          # scan_secrets: shared by send_email (refuse) and the F098 result memory writer (skip)
 │   └── api/                    # External interfaces
 │       ├── rest.py             # Starlette REST API (52 endpoints)
 │       ├── mcp.py              # MCP server (nous_chat, nous_decide, etc.)

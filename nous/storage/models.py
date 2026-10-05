@@ -968,6 +968,41 @@ class ResultInboxState(Base):
     enabled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class ResultMemoryLog(Base):
+    """F098 Phase C: one write-or-skip decision per finished result.
+
+    The primary key decides which writer owns a source. ``episode_id`` is
+    committed in the same transaction as the episode, so a retry resumes at
+    the chunk step instead of writing a second episode.
+    """
+
+    __tablename__ = "result_memory_log"
+    __table_args__ = (
+        CheckConstraint("source_kind IN ('subtask')", name="result_memory_log_source_kind_check"),
+        CheckConstraint("decision IN ('write', 'skip')", name="result_memory_log_decision_check"),
+        CheckConstraint(
+            "state IN ('pending', 'written', 'skipped', 'failed')", name="result_memory_log_state_check"
+        ),
+        {"schema": "heart"},
+    )
+
+    agent_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    source_kind: Mapped[str] = mapped_column(String(20), primary_key=True)
+    source_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    decision: Mapped[str] = mapped_column(String(10), nullable=False)
+    reason: Mapped[str] = mapped_column(String(40), nullable=False)
+    state: Mapped[str] = mapped_column(String(10), nullable=False, default="pending", server_default="pending")
+    episode_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("heart.episodes.id", ondelete="SET NULL"), nullable=True
+    )
+    chunks: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    chunk_reason: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class Schedule(Base):
     """Scheduled or recurring task."""
 

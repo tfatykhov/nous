@@ -217,6 +217,17 @@ async def _result_reconciler_loop(reconciler: TerminalSubtaskReconciler) -> None
             logger.warning("F098: result reconciler tick failed", exc_info=True)
 
 
+def _warn_on_f098_flags(settings: Settings) -> None:
+    """F098: warn about flag combinations that leave part of a feature unreachable."""
+    if settings.result_memory_enabled and not settings.episode_chunks_enabled:
+        # The writer stores chunks either way, so they become searchable once the flag is on.
+        logger.warning(
+            "NOUS_RESULT_MEMORY_ENABLED=true but NOUS_EPISODE_CHUNKS_ENABLED=false: subtask result chunks "
+            "are stored but not searchable until NOUS_EPISODE_CHUNKS_ENABLED=true (recall's chunk leg is off). "
+            "Result episodes are searchable."
+        )
+
+
 async def create_components(settings: Settings) -> dict:
     """Initialize all components in dependency order.
 
@@ -229,6 +240,7 @@ async def create_components(settings: Settings) -> dict:
     5. CognitiveLayer - orchestrator
     6. AgentRunner - LLM integration
     """
+    _warn_on_f098_flags(settings)
     database = Database(settings, lock_timeout_seconds=settings.db_lock_timeout_seconds)
     await database.connect()  # F1: connect() not initialize()
     await run_migrations(database.engine)  # Apply pending SQL migrations
@@ -1022,19 +1034,23 @@ async def create_components(settings: Settings) -> dict:
                 _context_log_retention_loop(settings, database), name="context-log-retention"
             )
 
-    # F098: repair inbox writes the subtask worker lost (codex P1 on #694).
+    # F098: repair inbox writes the subtask worker lost (codex P1 on #694),
+    # and (Phase C) write results to memory that no hook wrote.
     result_reconciler_task = None
-    if settings.result_inbox_enabled:
+    if settings.result_inbox_enabled or settings.result_memory_enabled:
         from nous.heart.result_reconciler import build_reconciler
 
-        # The reconciler's no-backfill watermark, recorded the first time a
-        # process starts with the flag on — before any worker can finish a
-        # subtask. A failure here is retried by every reconciler tick.
-        try:
-            await heart.result_inbox.ensure_enabled_at()
-        except Exception:
-            logger.warning("F098: could not record when the result inbox was enabled", exc_info=True)
-        result_reconciler = build_reconciler(database, heart.result_inbox, settings)
+        if settings.result_inbox_enabled:
+            # The inbox reconciler's no-backfill watermark, recorded the first
+            # time a process starts with the inbox flag on — before any worker
+            # can finish a subtask. A failure here is retried by every
+            # reconciler tick. Only the inbox flag records it: a process with
+            # only the memory flag on must not start the inbox's clock.
+            try:
+                await heart.result_inbox.ensure_enabled_at()
+            except Exception:
+                logger.warning("F098: could not record when the result inbox was enabled", exc_info=True)
+        result_reconciler = build_reconciler(database, heart.result_inbox, settings, heart.result_memory)
         result_reconciler_task = asyncio.create_task(
             _result_reconciler_loop(result_reconciler), name="result-reconciler"
         )

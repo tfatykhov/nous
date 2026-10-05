@@ -41,6 +41,7 @@ from nous.brain.schemas import NON_PREDICTION_OUTCOMES, ReasonInput, RecordInput
 from nous.config import PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS, Settings
 from nous.heart.exemplars import parse_label
 from nous.heart.heart import Heart
+from nous.heart.result_memory import schedule_subtask_memory
 from nous.heart.schemas import (
     CensorInput,
     FactInput,
@@ -967,6 +968,7 @@ async def ingest_document_text(
     source_ref: str,
     session_id: str | None = None,
     episode_id: str | None = None,
+    chunk_prefix: str = "",
 ) -> dict[str, Any]:
     """Chunk + embed + persist document text to heart.episode_chunks.
 
@@ -974,6 +976,10 @@ async def ingest_document_text(
       {"inserted": N, "source_ref": ..., "episode_id": ...}  on success
       {"error": "..."}                                        on failure
     Honors settings.document_ingest_enabled and the chunk-size settings.
+
+    ``chunk_prefix`` (F098) is stored in front of every chunk's content, so
+    every path that reads the chunk back shows it; each embedding is still
+    computed from the unprefixed chunk text.
     """
     from uuid import UUID as _UUID
 
@@ -1146,7 +1152,7 @@ async def ingest_document_text(
                         "a": heart.agent_id,
                         "e": str(target_episode_id),
                         "i": start_idx + offset,
-                        "c": chunk_text,
+                        "c": chunk_prefix + chunk_text,
                         "emb": vec_lit,
                         "ref": source_ref,
                     },
@@ -3066,175 +3072,180 @@ def create_subtask_tools(
             if runner is None:
                 return _tool_error("Cannot execute inline subtask: runner not available. Use await_result=false.")
 
-            import asyncio as _asyncio
+            # F098 Phase C: once the inline run below is over, however it ends,
+            # write its result to memory in the background (never awaited here).
+            try:
+                import asyncio as _asyncio
 
-            subtask_session_id = f"subtask-{subtask.id.hex[:8]}"
+                subtask_session_id = f"subtask-{subtask.id.hex[:8]}"
 
-            # F061: route inline path through the SAME hardened executor as
-            # the worker pool when the flag is on. Closes the silent-failure
-            # gap (P1.1 from spec review): otherwise the new prompt would
-            # mention submit_final_report on a path where that tool isn't
-            # registered, relocating the exact failure F061 fixes.
-            if settings.subtask_hardening_enabled:
-                # Late import: nous.handlers.subtask_executor imports
-                # build_subtask_prefix from THIS module — top-level import
-                # would deadlock at startup. (functools.partial is stdlib
-                # and circular-safe; imported at module top.)
-                from nous.handlers.subtask_executor import (
-                    HardenedRunState,
-                    emit_outcome_event,
-                    execute_hardened,
-                )
-                from nous.heart.subtask_validator import ValidationResult
+                # F061: route inline path through the SAME hardened executor as
+                # the worker pool when the flag is on. Closes the silent-failure
+                # gap (P1.1 from spec review): otherwise the new prompt would
+                # mention submit_final_report on a path where that tool isn't
+                # registered, relocating the exact failure F061 fixes.
+                if settings.subtask_hardening_enabled:
+                    # Late import: nous.handlers.subtask_executor imports
+                    # build_subtask_prefix from THIS module — top-level import
+                    # would deadlock at startup. (functools.partial is stdlib
+                    # and circular-safe; imported at module top.)
+                    from nous.handlers.subtask_executor import (
+                        HardenedRunState,
+                        emit_outcome_event,
+                        execute_hardened,
+                    )
+                    from nous.heart.subtask_validator import ValidationResult
 
-                # F061 PR-3: pass an emit_event callback so inline subtasks
-                # also produce subtask_outcome telemetry. ``bus`` is captured
-                # by the outer create_subtask_tools closure when available.
-                _outcome_emitter = partial(emit_outcome_event, bus, settings=settings) if bus is not None else None
+                    # F061 PR-3: pass an emit_event callback so inline subtasks
+                    # also produce subtask_outcome telemetry. ``bus`` is captured
+                    # by the outer create_subtask_tools closure when available.
+                    _outcome_emitter = partial(emit_outcome_event, bus, settings=settings) if bus is not None else None
 
-                # F061 round 4: HardenedRunState side channel so the timeout
-                # / exception handlers below can read accurate attempts +
-                # token counts, persist them on the row, AND emit a
-                # subtask_outcome event (execute_hardened skips persist+emit
-                # on cancel — outer handler is the authoritative classifier).
-                state = HardenedRunState()
+                    # F061 round 4: HardenedRunState side channel so the timeout
+                    # / exception handlers below can read accurate attempts +
+                    # token counts, persist them on the row, AND emit a
+                    # subtask_outcome event (execute_hardened skips persist+emit
+                    # on cancel — outer handler is the authoritative classifier).
+                    state = HardenedRunState()
 
-                # `executed` flag prevents double-persist on programming-
-                # error in the response-formatting code below: if any
-                # AttributeError leaks from the body builder after
-                # execute_hardened has already persisted via _persist_outcome,
-                # the outer `except Exception` below would overwrite the row
-                # with status='failed' even though it was already 'completed'.
-                executed = False
+                    # `executed` flag prevents double-persist on programming-
+                    # error in the response-formatting code below: if any
+                    # AttributeError leaks from the body builder after
+                    # execute_hardened has already persisted via _persist_outcome,
+                    # the outer `except Exception` below would overwrite the row
+                    # with status='failed' even though it was already 'completed'.
+                    executed = False
+                    try:
+                        final_text, _result = await _asyncio.wait_for(
+                            execute_hardened(
+                                subtask,
+                                subtask_session_id,
+                                runner=runner,
+                                heart=heart,
+                                settings=settings,
+                                emit_event=_outcome_emitter,
+                                state=state,
+                            ),
+                            timeout=effective_timeout,
+                        )
+                        executed = True
+                        if _result.ok:
+                            body = f"[Subtask {subtask.id.hex[:8]} completed]\n\n{final_text}"
+                        elif _result.outcome == "incomplete_blocked":
+                            body = f"[Subtask {subtask.id.hex[:8]} blocked: {_result.reason}]"
+                        else:
+                            body = f"[Subtask {subtask.id.hex[:8]} {_result.outcome}: {_result.reason}]"
+                        # Mixed path: `body` is a completion OR a blocked/failed
+                        # outcome, so the flag follows _result.ok rather than being
+                        # set blanket either way.
+                        if not _result.ok:
+                            return _tool_error(body)
+                        return {"content": [{"type": "text", "text": body}]}
+                    except _asyncio.CancelledError:
+                        # This call was cancelled (its turn, or the dispatcher's
+                        # tool timeout): close the row it claimed, or nothing will.
+                        # execute_hardened leaves the outcome event to this caller
+                        # too; emitted only when this close set the row's outcome.
+                        if await _close_cancelled_inline_subtask(heart, subtask.id) and _outcome_emitter is not None:
+                            await _outcome_emitter(
+                                subtask,
+                                ValidationResult.failed("cancelled", "Inline call cancelled"),
+                                None,
+                                attempts=state.attempts,
+                                tokens_in=state.tokens_in,
+                                tokens_out=state.tokens_out,
+                                tool_calls_made=state.tool_calls_made,
+                            )
+                        raise
+                    except TimeoutError:
+                        if not executed:
+                            await _persist_and_emit_inline_outcome(
+                                heart=heart,
+                                bus=bus,
+                                settings=settings,
+                                subtask=subtask,
+                                final_outcome="timed_out",
+                                error_msg=f"Timeout after {effective_timeout}s",
+                                state=state,
+                            )
+                        return _tool_error(f"[Subtask {subtask.id.hex[:8]} timed out after {effective_timeout}s]")
+                    except Exception as e:
+                        if not executed:
+                            await _persist_and_emit_inline_outcome(
+                                heart=heart,
+                                bus=bus,
+                                settings=settings,
+                                subtask=subtask,
+                                final_outcome="errored",
+                                error_msg=str(e),
+                                state=state,
+                            )
+                        return _tool_error(f"[Subtask {subtask.id.hex[:8]} failed: {e}]")
+
+                # Legacy inline path — bytewise unchanged from pre-F061.
+                system_prefix = build_subtask_prefix(task, frame_type)
+
                 try:
-                    final_text, _result = await _asyncio.wait_for(
-                        execute_hardened(
-                            subtask,
-                            subtask_session_id,
-                            runner=runner,
-                            heart=heart,
-                            settings=settings,
-                            emit_event=_outcome_emitter,
-                            state=state,
+                    response_text, _ctx, _usage = await _asyncio.wait_for(
+                        runner.run_turn(
+                            session_id=subtask_session_id,
+                            user_message=task,
+                            agent_id=settings.agent_id,
+                            system_prompt_prefix=system_prefix,
+                            skip_episode=True,
+                            is_subtask=True,
+                            max_tool_calls=settings.subtask_tool_call_limit,
+                            model_override=effective_model,
+                            is_background=True,
+                            context=ExecutionContext.for_subtask(  # harness Phase 1a
+                                subtask,
+                                subtask_session_id,
+                            ),
                         ),
                         timeout=effective_timeout,
                     )
-                    executed = True
-                    if _result.ok:
-                        body = f"[Subtask {subtask.id.hex[:8]} completed]\n\n{final_text}"
-                    elif _result.outcome == "incomplete_blocked":
-                        body = f"[Subtask {subtask.id.hex[:8]} blocked: {_result.reason}]"
-                    else:
-                        body = f"[Subtask {subtask.id.hex[:8]} {_result.outcome}: {_result.reason}]"
-                    # Mixed path: `body` is a completion OR a blocked/failed
-                    # outcome, so the flag follows _result.ok rather than being
-                    # set blanket either way.
-                    if not _result.ok:
-                        return _tool_error(body)
-                    return {"content": [{"type": "text", "text": body}]}
+
+                    # F061 PR-1: record outcome on legacy path so dashboard rows
+                    # are never NULL between PR-1 ship and PR-2 hardened-executor ship.
+                    await heart.subtasks.complete(
+                        subtask.id,
+                        response_text,
+                        final_outcome="completed",
+                    )
+                    return {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"[Subtask {subtask.id.hex[:8]} completed]\n\n{response_text}",
+                            }
+                        ]
+                    }
+
                 except _asyncio.CancelledError:
-                    # This call was cancelled (its turn, or the dispatcher's
-                    # tool timeout): close the row it claimed, or nothing will.
-                    # execute_hardened leaves the outcome event to this caller
-                    # too; emitted only when this close set the row's outcome.
-                    if await _close_cancelled_inline_subtask(heart, subtask.id) and _outcome_emitter is not None:
-                        await _outcome_emitter(
-                            subtask,
-                            ValidationResult.failed("cancelled", "Inline call cancelled"),
-                            None,
-                            attempts=state.attempts,
-                            tokens_in=state.tokens_in,
-                            tokens_out=state.tokens_out,
-                            tool_calls_made=state.tool_calls_made,
-                        )
+                    # As on the hardened path above.
+                    await _close_cancelled_inline_subtask(heart, subtask.id)
                     raise
                 except TimeoutError:
-                    if not executed:
-                        await _persist_and_emit_inline_outcome(
-                            heart=heart,
-                            bus=bus,
-                            settings=settings,
-                            subtask=subtask,
-                            final_outcome="timed_out",
-                            error_msg=f"Timeout after {effective_timeout}s",
-                            state=state,
-                        )
+                    # F061 PR-3 Codex review: attempts=1 because one execution
+                    # attempt definitely happened before the timeout.
+                    await heart.subtasks.fail(
+                        subtask.id,
+                        f"Timeout after {effective_timeout}s",
+                        final_outcome="timed_out",
+                        attempts=1,
+                    )
+                    # Flagged like the hardened inline path above.
                     return _tool_error(f"[Subtask {subtask.id.hex[:8]} timed out after {effective_timeout}s]")
                 except Exception as e:
-                    if not executed:
-                        await _persist_and_emit_inline_outcome(
-                            heart=heart,
-                            bus=bus,
-                            settings=settings,
-                            subtask=subtask,
-                            final_outcome="errored",
-                            error_msg=str(e),
-                            state=state,
-                        )
+                    await heart.subtasks.fail(
+                        subtask.id,
+                        str(e),
+                        final_outcome="errored",
+                        attempts=1,
+                    )
                     return _tool_error(f"[Subtask {subtask.id.hex[:8]} failed: {e}]")
-
-            # Legacy inline path — bytewise unchanged from pre-F061.
-            system_prefix = build_subtask_prefix(task, frame_type)
-
-            try:
-                response_text, _ctx, _usage = await _asyncio.wait_for(
-                    runner.run_turn(
-                        session_id=subtask_session_id,
-                        user_message=task,
-                        agent_id=settings.agent_id,
-                        system_prompt_prefix=system_prefix,
-                        skip_episode=True,
-                        is_subtask=True,
-                        max_tool_calls=settings.subtask_tool_call_limit,
-                        model_override=effective_model,
-                        is_background=True,
-                        context=ExecutionContext.for_subtask(  # harness Phase 1a
-                            subtask,
-                            subtask_session_id,
-                        ),
-                    ),
-                    timeout=effective_timeout,
-                )
-
-                # F061 PR-1: record outcome on legacy path so dashboard rows
-                # are never NULL between PR-1 ship and PR-2 hardened-executor ship.
-                await heart.subtasks.complete(
-                    subtask.id,
-                    response_text,
-                    final_outcome="completed",
-                )
-                return {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": f"[Subtask {subtask.id.hex[:8]} completed]\n\n{response_text}",
-                        }
-                    ]
-                }
-
-            except _asyncio.CancelledError:
-                # As on the hardened path above.
-                await _close_cancelled_inline_subtask(heart, subtask.id)
-                raise
-            except TimeoutError:
-                # F061 PR-3 Codex review: attempts=1 because one execution
-                # attempt definitely happened before the timeout.
-                await heart.subtasks.fail(
-                    subtask.id,
-                    f"Timeout after {effective_timeout}s",
-                    final_outcome="timed_out",
-                    attempts=1,
-                )
-                # Flagged like the hardened inline path above.
-                return _tool_error(f"[Subtask {subtask.id.hex[:8]} timed out after {effective_timeout}s]")
-            except Exception as e:
-                await heart.subtasks.fail(
-                    subtask.id,
-                    str(e),
-                    final_outcome="errored",
-                    attempts=1,
-                )
-                return _tool_error(f"[Subtask {subtask.id.hex[:8]} failed: {e}]")
+            finally:
+                schedule_subtask_memory(getattr(heart, "result_memory", None), subtask.id)
 
         except ValueError as e:
             return _tool_error(f"Cannot spawn subtask: {e}")
