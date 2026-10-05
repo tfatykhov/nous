@@ -1751,8 +1751,9 @@ async def get_dag_phase2_signals(
     ALSO write canned text on two of its completion paths ("Check
     completed (self-disabled)", "Check completed (disabled itself)"), or,
     since F099 Phase 0b, its final run's findings ("Check findings (final
-    run): ..."), with no per-row signal distinguishing canned text from a
-    genuine finding, so it is excluded rather than trusted case-by-case. Left in, any of these push
+    run): ..."). A findings result can be told apart by its prefix, but
+    matching on result text is exactly the case-by-case trust the allowlist
+    above refuses, so check nodes stay excluded. Left in, any of these push
     the reading in the OPPOSITE direction from the floor caveat above:
     boilerplate reads as "siblings duplicated work" when nothing was
     produced at all. Measured on the dev DB before the callback/gate
