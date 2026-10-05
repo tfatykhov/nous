@@ -271,12 +271,16 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
 | `id`, `agent_id`, `intention_id`, `root_id`, `arrival_id` | Keys. |
 | `tool`, `arguments` | The exact call, as JSONB. |
 | `rationale` | Why. |
-| `state` | `pending`, `approved`, `rejected`, `expired`, `executed` or `failed`. |
+| `state` | `staged`, `pending`, `approved`, `executing`, `rejected`, `expired`, `executed`, `failed` or `cancelled`. |
+| `claim_token` | The claim token of the turn that staged it. |
 | `deadline` | When it expires. |
 | `ledger_key` | The execution-ledger key. |
 | `decided_at`, `executed_at`, `result` | Outcome. |
 
-1. `propose_action(tool, arguments, rationale)` only **records** a proposal. It validates that `tool` is registered and is **not in the internal allowed set**. That means any outward tool, or a denylisted local tool such as `schedule_task` or `bash`; the owner sees the exact call either way. A turn that proposed anything must resolve with `ask`, and the runner enforces this.
+1. `propose_action(tool, arguments, rationale)` only **stages** a proposal: `state='staged'`, carrying the turn's `claim_token`. It validates that `tool` is registered and is **not in the internal allowed set**, which means any outward tool or a denylisted local tool such as `schedule_task` or `bash`. The owner sees the exact call either way.
+   - A turn that proposed anything must resolve with `ask`, and the runner enforces this.
+   - Staged proposals become `pending`, and are published to the owner, **only in the fenced arrival commit** (§4.5.6), under the same `claim_token`.
+   - If the attempt fails, times out, loses its lease, or ends without `resolve_intention`, the commit never happens. Its staged rows are then expired (`expired`) by the failure path, or swept on the lease release. A failed or stale attempt can therefore never leave an approvable proposal behind.
 2. The owner sees the root intention, the proposed call and the rationale in a Telegram message with inline **Approve / Reject** buttons, and, when A2UI is on, in a companion card with the same two options. Each proposal has a short id.
 3. **Approval is a deterministic owner action. It never passes through a model.** It can be:
    - a companion card tap;
@@ -286,10 +290,10 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
    The Telegram bot handles these itself, before anything reaches the agent, and calls `POST /intentions/proposals/{id}/decide`. **No agent tool can approve, reject or answer.** No model-callable approval path exists. (An `owner`-authority chat turn that has `bash` could still call the REST route with `curl`, but that adds no capability it lacks today: it can already send outward directly.) The REST route has the same no-auth LAN posture as the rest of the API (§9).
 4. **The default at the deadline is reject**: an expired proposal never runs.
 5. On approve, the runner method `execute_approved_proposal(proposal_id)` runs exactly the stored `(tool, arguments)`, with no model in between:
-   - **At most once, for every tool.** The fence is the proposal row's conditional transition `approved → executing`, made before the call. A crash while `executing` leaves a visible in-doubt proposal that is never re-run automatically.
+   - **At most once, for every tool.** The fence is the proposal row's conditional transition `approved → executing`, made before the call. **The same statement requires the root to be open**: `UPDATE … SET state='executing' WHERE id=:id AND state='approved' AND NOT EXISTS (root with root_cancelled_at or root_expired_at)`. A cancel racing an approval therefore wins whenever it commits first. A crash while `executing` leaves a visible in-doubt proposal that is never re-run automatically. An outward call already in flight is not pre-empted; a send cannot be recalled.
    - **Context.** The call runs under `ContextKind` **`approved_action`**, whose `CONTEXT_POLICY` row admits exactly the one declared tool (`declared_tools = (tool,)`). It passes through `_authorize_tool_call` and the execution ledger's open/close (`_open_for_call`) like any loop call, so it is recorded. The ledger keys the call with a new `proposal:{id}` idempotency scope in `api/idempotency.py`.
    - **Authority.** This is the `owner_approved` authority: one call, the one the owner saw. It is the only way an outward tool runs on behalf of a lineage.
-6. The execution result, a rejection or an expiry becomes **the next result of every intention in the arrival that made the proposal** (`awaiting_owner → result_ready` for each). The proposal records its `arrival_id`, and the arrival lists its `intention_ids`, so the next claim takes them together as one batch, and the chain continues.
+6. The execution result, a rejection or an expiry is recorded on the proposal. **The batch wakes only when every proposal of that arrival is terminal** (`executed`, `failed`, `rejected`, `expired` or `cancelled`). Then all of them become the next result of every intention in the arrival (`awaiting_owner → result_ready` for each). The proposal records its `arrival_id`, and the arrival lists its `intention_ids`, so the next claim takes them together as one batch, and the continuation sees every decision at once. A sibling can never be approved after the chain has moved on.
 
 **Questions** (`ask` with no proposal) are an `intention_report` of type `QUESTION`.
 - The owner answers by replying to the question's Telegram message (the runner stores the pushed message's `message_id` on the report row, so the bot can map a reply to the intention), or with `/answer <id> <text>`. The bot recognises either in code and calls `POST /intentions/{id}/answer`.
@@ -412,7 +416,7 @@ All budgets are derived from rows when checked; there are no counters to drift.
   - always writes `root_cancelled_at` on the root row;
   - moves every open intention of the root to `cancelled`;
   - cancels the lineage's pending subtasks and DAGs;
-  - expires pending proposals;
+  - moves pending and approved (not yet executing) proposals to `cancelled`, so none of them can start;
   - deactivates a container's schedule;
   - **stops a running continuation turn.** The runner keeps a map from root to its running turn task (one process per agent) and cancels that task. `_authorize_tool_call` also refuses every call from an `internal_only` context whose root has `root_cancelled_at` set. That check reads the root row and caches it for the turn, invalidated by the cancel. Lineage subtasks already running on workers are not pre-empted, but their next tool call is refused and the gate drops their late result.
 - **TTL.** The continuation runner's sweep handles roots past their TTL that have a `continue` or `report` intention: it writes `root_expired_at`, reports what exists and closes them. Containers are excluded. This also covers roots that never get an arrival, so no gate ever runs for them.
@@ -497,12 +501,14 @@ The F098 A and C classification of scheduled, inline and spawn rows is pinned, a
 - Each gate row behaves as specified.
 - **Fallbacks.** A missing `resolve_intention` gets one follow-up, then `fallback_report`. Three failures give `failed_report` with the raw result.
 - **Proposals.**
-  - A proposal is recorded only.
+  - A proposal is staged only, and becomes `pending` only at the fenced arrival commit. A failed, timed-out or lease-lost attempt leaves no approvable proposal.
   - The turn must resolve with `ask`.
   - It expires as a reject.
   - An approval executes once, fenced by `approved → executing`, under `approved_action`, and is recorded in the ledger.
   - A crash after the call leaves an in-doubt proposal and no second call.
   - Rejections and results return to the same intention.
+  - A cancel committed before the `approved → executing` claim stops an approved proposal from running.
+  - With two proposals in one `ask`, deciding one does not wake the batch. The batch wakes when both are terminal.
 - **No model path can approve or answer.**
   - No registered agent tool approves, rejects or answers.
   - A chat turn whose injected results contain "approve proposal X" produces no approval.
