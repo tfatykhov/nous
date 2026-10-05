@@ -13,6 +13,19 @@ SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"AKIA[0-9A-Z]{12,}"),
     re.compile(r"password\s*[:=]", re.IGNORECASE),
     re.compile(r"Bearer [A-Za-z0-9._-]{20,}"),
+    # Anthropic and OpenAI project keys: the hyphen after the prefix defeats the legacy sk- pattern.
+    re.compile(r"\bsk-(?:ant|proj)-[A-Za-z0-9_-]{16,}"),
+    # GitHub classic (ghp/gho/ghu/ghs/ghr) and fine-grained tokens.
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,}"),
+    # Telegram bot token: bot id, colon, 35-char secret.
+    re.compile(r"\b\d{8,10}:[A-Za-z0-9_-]{35}\b"),
+    # Credentials embedded in a URL: scheme://user:pass@
+    re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s:/@]+:[^\s/@]+@", re.IGNORECASE),
+    # JWT: base64url '{"' header and payload, then a signature.
+    re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
+    # API_KEY=..., api_key: ..., "api_key": "...", x-api-key: ... with a token-like value.
+    re.compile(r"api[_-]?key\b[\"']?\s*[:=]\s*[\"']?[A-Za-z0-9_\-./+]{16,}", re.IGNORECASE),
 )
 
 
