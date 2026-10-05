@@ -500,3 +500,18 @@ async def test_push_surface_offers_revert_when_snapshot_and_compensator_exist() 
     built = captured.get("_last_built")
     assert built is not None, f"push failed: {result}"
     assert "review.revert" in built.allowed_actions, "Revert must be offered when snapshot and compensator both exist"
+
+
+def test_ack_status_does_not_promise_auto_close_for_agent_findings() -> None:
+    """Codex P2 on #699: agent-raised findings (check 'agent:…') are never
+    auto-resolved by the heartbeat runner, so their acknowledge text and the
+    legend must not promise auto-close for them."""
+    from nous.a2ui.builders.heartbeat_findings import LEGEND, status_after
+
+    agent_ack = status_after("acknowledge", "agent:facts:1a2b3c4d")
+    assert "auto-close" not in agent_ack
+    assert "Resolve or Dismiss" in agent_ack
+    assert "auto-close" in status_after("acknowledge", "disk_usage")
+    assert "auto-close" in status_after("acknowledge", None)
+    assert status_after("resolve", "agent:x:1") == status_after("resolve", "disk_usage")
+    assert "agent:" in LEGEND

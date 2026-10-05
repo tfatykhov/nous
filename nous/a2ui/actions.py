@@ -646,9 +646,17 @@ def _register_default_handlers(router: ActionRouter) -> None:
                 store.record_outcome(fingerprint, OutcomeSignal.POSITIVE)
             except Exception:
                 logger.debug("F092 outcome signal failed", exc_info=True)
-        from .builders.heartbeat_findings import STATUS_AFTER
+        from .builders.heartbeat_findings import status_after
 
-        status_text = STATUS_AFTER.get(verb, f"{verb}d")
+        # Agent-raised findings never auto-close (codex P2), so their
+        # acknowledge text must not promise it.
+        check_name = None
+        try:
+            tracked = store.get_tracked(fingerprint)
+            check_name = getattr(getattr(tracked, "finding", None), "check_name", None)
+        except Exception:
+            logger.debug("F092 check_name lookup failed", exc_info=True)
+        status_text = status_after(verb, check_name)
         patches: list[tuple[str, Any]] = [(f"/findings/{_escape_pointer(fingerprint)}", verb)]
         # Only cards built with a /status map get the visible status patch:
         # on an older card the parent is missing, and an all-digit

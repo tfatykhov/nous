@@ -16,7 +16,9 @@ from ..dsl import Button, Card, Column, Divider, Row, Surface, Text, event
 # Shown once at the top of the card so the three buttons are self-explaining.
 LEGEND = (
     "- **Acknowledge** — seen it, keep watching. Stays tracked in the daily "
-    "digest and auto-closes once the check stops reporting it.\n"
+    "digest and auto-closes once the check stops reporting it. Items Nous "
+    "raised itself (check `agent:…`) have no check to clear them, so they "
+    "stay until you Resolve or Dismiss.\n"
     "- **Resolve** — handled. Closes it now and tells the heartbeat this was a "
     "useful alert.\n"
     "- **Dismiss** — noise. Closes it now and counts against that check, so "
@@ -31,6 +33,19 @@ STATUS_AFTER = {
     "resolve": "✓ Resolved — closed as handled",
     "dismiss": "✓ Dismissed — closed as noise; counted against this check",
 }
+
+# Agent-raised findings (check_name "agent:…", registered by push_surface)
+# are never auto-resolved: the heartbeat runner only clears findings whose
+# check ran successfully this cycle, and no runner check owns these.
+AGENT_CHECK_PREFIX = "agent:"
+STATUS_AFTER_AGENT_ACK = "✓ Acknowledged — still tracked; Resolve or Dismiss it when done"
+
+
+def status_after(verb: str, check_name: str | None) -> str:
+    """Status line for a finding after ``verb``, honest about auto-close."""
+    if verb == "acknowledge" and (check_name or "").startswith(AGENT_CHECK_PREFIX):
+        return STATUS_AFTER_AGENT_ACK
+    return STATUS_AFTER.get(verb, f"{verb}d")
 
 
 def heartbeat_findings(params: dict[str, Any]) -> Any:
