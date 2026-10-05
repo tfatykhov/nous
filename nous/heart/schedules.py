@@ -179,9 +179,32 @@ class ScheduleManager:
                 "Advanced schedule %s (fire #%d, next: %s)",
                 schedule_id.hex[:8], schedule.fire_count, schedule.next_fire_at,
             )
+            deactivated = not schedule.active
+        if deactivated:
+            await self._close_container(schedule_id)
+
+    async def _close_container(self, schedule_id: UUID) -> None:
+        """F099: a schedule that no longer fires closes its container intention.
+
+        Its own transaction, after the deactivation committed. Closing is
+        bookkeeping, and a failure here must never leave a schedule active
+        (a one-shot schedule would fire again). A close that fails here, or
+        never runs because the process exits first, is repaired by the
+        reconciler's intentions pass (intentions.close_finished_containers).
+        A schedule created with intentions off has no container, and this
+        closes nothing.
+        """
+        try:
+            async with self._db.session() as session:
+                await intentions.close_for_source(
+                    session, self._agent_id, intentions.SOURCE_SCHEDULE, schedule_id, with_result=False
+                )
+                await session.commit()
+        except Exception:
+            logger.warning("F099: could not close the container of schedule %s", schedule_id.hex[:8], exc_info=True)
 
     async def deactivate(self, schedule_id: UUID) -> None:
-        """Deactivate a schedule."""
+        """Deactivate a schedule, and close its F099 container intention."""
         async with self._db.session() as session:
             await session.execute(
                 update(Schedule)
@@ -190,6 +213,7 @@ class ScheduleManager:
             )
             await session.commit()
             logger.info("Deactivated schedule %s", schedule_id.hex[:8])
+        await self._close_container(schedule_id)
 
     async def get(self, schedule_id: UUID) -> Schedule | None:
         """Get a schedule by ID."""

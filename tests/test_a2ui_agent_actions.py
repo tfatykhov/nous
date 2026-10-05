@@ -1285,3 +1285,37 @@ async def test_refine_restamps_actions_from_surviving_spec(
     # SURVIVING app_spec, never dropped by the recompose.
     assert composer.kwargs is not None
     assert composer.kwargs["agent_actions"] == _ACTIONS
+
+
+# ---------------------------------------------------------------------------
+# F099 Phase 1: a tap records its action as the intention
+# ---------------------------------------------------------------------------
+
+
+async def test_app_act_records_its_action_as_the_intention(flag_settings) -> None:
+    from unittest.mock import AsyncMock
+
+    from nous.brain.intentions import ORIGIN_APP_ACT, IntentionSpec
+
+    settings = flag_settings.model_copy(update={"result_inbox_enabled": True, "intentions_enabled": True})
+    inbox = SimpleNamespace(channel_of_session=AsyncMock(return_value="telegram:7"))
+    heart = SimpleNamespace(subtasks=_FakeSubtasks(), result_inbox=inbox)
+    router = _handler_router(settings, heart=heart)
+    result = await router._handlers["app.act"].fn(_ctx(router, _surface_stub(session_id="chat-7"), "rebalance"))
+    assert result.ok, result.message
+    spec = heart.subtasks.created[0].kwargs["intention"]
+    assert isinstance(spec, IntentionSpec)
+    assert (spec.intent, spec.origin_kind, spec.origin_session_id, spec.origin_channel) == (
+        "Rebalance", ORIGIN_APP_ACT, "chat-7", "telegram:7",
+    )
+    for t in router._action_watchers:
+        t.cancel()
+
+
+async def test_app_act_with_intentions_off_passes_no_intention(flag_settings) -> None:
+    heart = SimpleNamespace(subtasks=_FakeSubtasks())
+    router = _handler_router(flag_settings, heart=heart)
+    await router._handlers["app.act"].fn(_ctx(router, _surface_stub(), "rebalance"))
+    assert "intention" not in heart.subtasks.created[0].kwargs
+    for t in router._action_watchers:
+        t.cancel()

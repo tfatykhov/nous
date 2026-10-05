@@ -16,6 +16,8 @@ from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 
+from nous.brain import intentions
+from nous.brain.intentions import IntentionSpec
 from nous.cancellation import cancel_requested
 from nous.config import Settings
 from nous.heart.heart import Heart
@@ -182,6 +184,20 @@ class TaskScheduler:
                 # Create a subtask from the schedule. This is the failure
                 # point — if it raises (queue full, transient DB error),
                 # the post-success state-commit below is skipped.
+                # F099: a fire is a new root under its schedule's container
+                # (section 4.1 Schedules): remember when it notifies, else none.
+                # A schedule from before the flag has no container: no parent.
+                # A schedule stopped since get_due loaded it is refused inside
+                # create (IntentionRootClosed, a ValueError): the queue-full arm
+                # below logs it and skips the fire without advancing.
+                fire_intention = None
+                if intentions.enabled(self._settings):
+                    fire_intention = IntentionSpec(
+                        intent=schedule.task,
+                        origin_kind=intentions.ORIGIN_SCHEDULER,
+                        wake_policy=intentions.WAKE_REMEMBER if schedule.notify else intentions.WAKE_NONE,
+                        parent_source=(intentions.SOURCE_SCHEDULE, str(schedule.id)),
+                    )
                 _enqueued = False
                 try:
                     await self._heart.subtasks.create(
@@ -193,6 +209,7 @@ class TaskScheduler:
                         model=schedule.model,
                         frame_type=schedule.frame_type,
                         metadata=continuation_metadata,
+                        **intentions.intention_kwargs(fire_intention),
                     )
                     _enqueued = True
                 except ValueError:

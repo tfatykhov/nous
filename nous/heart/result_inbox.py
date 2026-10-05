@@ -262,6 +262,18 @@ class ResultInboxStore:
             await session.commit()
         return sorted(claimed, key=lambda r: r.created_at), older
 
+    async def channel_of_session(self, session_id: str) -> str | None:
+        """F099: the channel whose latest session is ``session_id``, if any."""
+        async with self._db.session() as session:
+            return (
+                await session.execute(
+                    select(ChannelSession.channel)
+                    .where(ChannelSession.agent_id == self._agent_id, ChannelSession.session_id == session_id)
+                    .order_by(ChannelSession.last_active.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+
     async def touch_channel(self, channel: str, session_id: str) -> None:
         """Record ``session_id`` as the latest session on ``channel``."""
         now = datetime.now(UTC)

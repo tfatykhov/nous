@@ -26,6 +26,8 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import select, update
 
+from nous.brain import intentions
+from nous.brain.intentions import IntentionSpec
 from nous.dag.approval import node_id_from_dedup_key, refusal_message
 from nous.storage.models import A2uiAction, A2uiSurface
 
@@ -998,6 +1000,21 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
         if rejection is not None:
             return ActionResult(ok=False, message=rejection)
 
+        # F099: the tap's intention is its action (policy none: the watcher
+        # below consumes the result). The channel comes from the surface's
+        # recorded session. Built BEFORE the pending stamp is written: the
+        # channel read is a DB round trip, and a stamp with no row and no
+        # watcher freezes the footer if this await is cancelled (review S8).
+        act_intention = None
+        if intentions.enabled(settings):
+            origin_session = getattr(ctx.surface, "session_id", None)
+            act_intention = IntentionSpec(
+                intent=str(action.get("label") or action_id),
+                origin_kind=intentions.ORIGIN_APP_ACT,
+                origin_session_id=origin_session,
+                origin_channel=await _channel_of(router, origin_session),
+            )
+
         # Stamp writes are direct, not data_patches (the dispatch reconciles
         # patch failures away by design). Ordering is the control (codex P1
         # rounds 5-7): a created subtask is runnable the moment its row
@@ -1049,6 +1066,7 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
                     "max_attempts": 1,
                 },
                 subtask_id=sub_id,
+                **intentions.intention_kwargs(act_intention),
             )
         except Exception as exc:
             # The discriminator is ROW EXISTENCE, not worker liveness (codex
@@ -1094,6 +1112,18 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
 
 _ACT_META_KEY = "meta"  # compose.py's _META_KEY; server-owned subtree.
 _ACT_TERMINAL = frozenset({"completed", "failed", "cancelled"})
+
+
+async def _channel_of(router: ActionRouter, session_id: str | None) -> str | None:
+    """F099: the channel whose latest session pushed a surface (best effort)."""
+    inbox = getattr(router._heart, "result_inbox", None) if router._heart else None
+    if not session_id or inbox is None:
+        return None
+    try:
+        return await inbox.channel_of_session(session_id)
+    except Exception:
+        logger.warning("F099: could not read the channel of session %s", session_id, exc_info=True)
+        return None
 
 
 def _pending_stamp(surface: Any) -> dict | None:

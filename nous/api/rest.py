@@ -55,7 +55,8 @@ from nous.api.companion_assets import OverlayStaticFiles
 from nous.api.execution_context import ExecutionContext
 from nous.api.models import Attachment
 from nous.api.runner import AgentRunner
-from nous.brain import Brain
+from nous.brain import Brain, intentions
+from nous.brain.intentions import IntentionSpec
 from nous.cognitive import CognitiveLayer
 from nous.cognitive.context import PROFILE_CORE_TAG, TIER1_FACT_CATEGORIES
 from nous.config import Settings
@@ -1253,6 +1254,17 @@ def create_app(
                 status_code=400,
             )
 
+        # F099 I1: a schedule created over REST is a spawn like schedule_task:
+        # it records its container in the schedule's transaction, so its fires
+        # join it. No turn wrote an intent, so it is generated from the task.
+        container = None
+        if intentions.enabled(settings):
+            container = IntentionSpec(
+                intent=intentions.generated_intent(intentions.ORIGIN_REST, task),
+                origin_kind=intentions.ORIGIN_REST,
+                container=True,
+            )
+
         try:
             from nous.handlers.time_parser import parse_every, parse_when
 
@@ -1267,6 +1279,7 @@ def create_app(
                     fire_at=fire_at,
                     notify=notify,
                     timeout=timeout,
+                    **intentions.intention_kwargs(container),
                 )
             else:
                 interval_seconds, cron_expr = parse_every(every)
@@ -1277,6 +1290,7 @@ def create_app(
                     cron_expr=cron_expr,
                     notify=notify,
                     timeout=timeout,
+                    **intentions.intention_kwargs(container),
                 )
 
             return JSONResponse({
