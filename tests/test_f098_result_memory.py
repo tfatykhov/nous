@@ -298,6 +298,35 @@ async def test_worker_terminal_path_writes_result_memory(mem_env):
     assert call["episode_id"] == ep.id
 
 
+async def test_ongoing_conversation_episode_does_not_capture_the_write(mem_env):
+    """A short conversation seed whose words all appear in the task is not reused (P1-1)."""
+    from nous.heart.schemas import EpisodeInput
+
+    env = mem_env
+    convo = await env.heart.start_episode(EpisodeInput(summary="Research ski resorts near Innsbruck", session_id="S1"))
+    st = await _finished(env)  # task: "Research ski resorts near Innsbruck"
+    assert await env.heart.result_memory.record(st) == "written"
+    [ep] = await _episodes(env, st.id)
+    assert ep.id != convo.id
+    async with env.db.session() as s:
+        live = await s.get(Episode, convo.id)
+        assert live.ended_at is None and live.outcome is None
+        assert live.summary == "Research ski resorts near Innsbruck"
+
+
+async def test_episode_dedup_still_applies_to_every_other_caller(mem_env):
+    from nous.heart.schemas import EpisodeInput
+
+    env = mem_env
+    first = await env.heart.start_episode(EpisodeInput(summary="Plan the ski trip to Innsbruck", session_id="S2"))
+    again = await env.heart.start_episode(EpisodeInput(summary="Plan the ski trip to Innsbruck", session_id="S3"))
+    assert again.id == first.id
+    fresh = await env.heart.start_episode(
+        EpisodeInput(summary="Plan the ski trip to Innsbruck", session_id="S4"), dedup=False
+    )
+    assert fresh.id != first.id
+
+
 async def test_short_result_has_no_chunks(mem_env):
     env = mem_env
     st = await _finished(env, result="R" * 400)

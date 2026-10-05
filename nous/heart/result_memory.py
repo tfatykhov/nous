@@ -384,9 +384,11 @@ class ResultMemoryWriter:
         heart = self._heart
         ep_input = build_episode_input(subtask, text, tier, self._settings)
         async with self._db.session() as session:
-            episode = await heart.start_episode(ep_input, session=session)
+            # dedup=False: a short conversation seed whose words all appear in
+            # the task would otherwise be reused as this result's episode.
+            episode = await heart.start_episode(ep_input, session=session, dedup=False)
             if episode.session_id != ep_input.session_id:
-                # EpisodeManager.start reuses a similar ONGOING episode; never close someone else's.
+                # Never close someone else's episode.
                 raise RuntimeError(f"episode start returned unrelated episode {episode.id}")
             await heart.end_episode(
                 episode.id, "success" if subtask.status == "completed" else "failure", session=session

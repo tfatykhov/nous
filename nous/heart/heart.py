@@ -179,9 +179,11 @@ class Heart:
         self,
         input: EpisodeInput,
         session: AsyncSession | None = None,
+        *,
+        dedup: bool = True,
     ) -> EpisodeDetail:
-        """Start a new episode."""
-        return await self.episodes.start(input, session)
+        """Start a new episode. ``dedup=False`` never reuses a similar ongoing one."""
+        return await self.episodes.start(input, session, dedup=dedup)
 
     async def end_episode(
         self,
