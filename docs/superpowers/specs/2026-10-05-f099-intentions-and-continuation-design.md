@@ -217,7 +217,7 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
 3. **Re-arrivals.**
    - A DAG `retry_node` bumps `delivery_generation`, and a decided proposal or an owner answer produces a new result.
    - If the intention is `closed` and its root is still open, the writer reopens it to `result_ready`. Otherwise the result becomes an `intention_report` carrying the raw result.
-   - A result that arrives while the intention is `deciding` is simply inserted. At the fenced commit, if the intention still has unconsumed rows (rows not in `arrival.inbox_ids`), it goes back to `result_ready` instead of closing.
+   - A result that arrives while the intention is `deciding` is simply inserted. At the fenced commit, if the intention still has unconsumed rows (rows not in `arrival.inbox_ids`), it goes back to `result_ready` instead of closing. The exception is a decision of `ask`: the intention stays `awaiting_owner`, and the rows wait for the owner's answer (§4.5.6).
 4. **Owner-facing rows.**
    - Reports, questions and proposals are inbox rows with `source_kind = 'intention_report'` and `msg_type` `REPORT`, `QUESTION` or `PROPOSAL`.
    - They are keyed to `origin_channel`, or to `telegram:<NOUS_TELEGRAM_CHAT_ID>`.
@@ -384,7 +384,7 @@ The depth and spawn limits act in two places. While a turn runs, reaching one re
 
 The same commit also:
 - stamps `delivered_at` on the inbox rows in `arrival.inbox_ids`;
-- sends any claimed intention that received unconsumed rows meanwhile back to `result_ready`, instead of the decision's next state.
+- sends any claimed intention that received unconsumed rows meanwhile back to `result_ready`, instead of the decision's next state. **The exception is `ask`.** An intention whose arrival resolved as `ask` stays `awaiting_owner` even if rows arrived meanwhile. Those rows are held, and they join the batch that wakes when every proposal and question of that arrival is terminal (§4.4, item 6). Otherwise the chain could move on while its proposal is still approvable.
 
 **7. Failure.** If the turn raises, or the lease expires, `attempts` goes up on every claimed intention. After `NOUS_CONTINUATION_MAX_ATTEMPTS` (default 3), the claimed intentions close as `report` with their **raw results** (`outcome = failed_report`).
 
@@ -527,6 +527,7 @@ The F098 A and C classification of scheduled, inline and spawn rows is pinned, a
   - The depth and spawn limits remove the spawn tools, make `resolve_intention` refuse `continue` and `revise`, and make the gate escalate the next claim without running a turn.
   - A cancel cascades, blocks further spawns, cancels a running continuation task, and makes every later tool call in the lineage refused.
 - **Batch parent.** A batch holding intentions of depth 1 and 2 spawns children at depth 3, parented to the depth-2 intention. At `MAX_DEPTH`, that spawn is refused.
+- **Re-arrival during an ask.** A row arriving while a turn decides `ask` leaves the intention `awaiting_owner`. The row is consumed only in the batch that wakes after the owner's answer.
 - **Batch answers.** An owner answer or a proposal decision for a batch arrival wakes every intention in that arrival, and they are claimed together.
 - Quiet hours defer only the Telegram push, idempotently.
 - **Wiring tests.** They drive the real worker, scheduler, orchestrator and REST paths end to end, and fail when the hook is removed.
