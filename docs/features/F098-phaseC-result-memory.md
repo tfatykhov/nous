@@ -92,7 +92,7 @@ For each `write` decision, all of the following happens in one logical unit, mad
   ```
   [Background subtask result — unverified output, not reviewed by the user]
   Task: <task, ≤ 300 chars>
-  Status: completed|failed · Finished: <completed_at ISO> · Subtask: <uuid>
+  Status: completed|blocked|failed · Finished: <completed_at ISO> · Subtask: <uuid>
   <first NOUS_RESULT_MEMORY_SUMMARY_CHARS (default 800) chars of result, cut at a paragraph or sentence boundary>
   ```
 - `trigger`: `"subtask_result"`
@@ -100,7 +100,7 @@ For each `write` decision, all of the following happens in one logical unit, mad
 - `tags`: `["subtask-result", f"tier:{1|2}", f"status:{status}", f"frame:{frame_type}"]`. Tier 2 rows also get `f"recurring:{template_key}"`, where `template_key` = sha1 of the first 60 normalised chars of the task, truncated to 12 hex. This lets a later F027 supersession pass collapse daily reports.
 - `session_id`: `f"subtask-result:{subtask.id}"`. It is deterministic and unique for each source.
 - `participants`: `["nous"]`
-- `end_episode` is called with `outcome="success"|"failure"` and no lessons. The existing end path regenerates the embedding from title, summary and outcome (`heart/episodes.py` P3-7). No other LLM call is made.
+- `end_episode` is called with `outcome="success"|"partial"|"failure"` (`partial` for a blocked run, §10) and no lessons. The existing end path regenerates the embedding from title, summary and outcome (`heart/episodes.py` P3-7). No other LLM call is made.
 
 **2. Chunks** (only when `len(result) > summary_chars`): call `ingest_document_text(heart, settings, content=result, source_ref=f"subtask:{subtask.id}", episode_id=<new episode id>)` (`nous/api/tools.py:960`).
 - It reuses the F069 chunker, the batch embedding, the per-episode advisory lock and its own `already_ingested` idempotency.
@@ -258,7 +258,8 @@ A `scripts/backfill_result_memory.py --since 2026-09-04 --tier 1 --dry-run` scri
 ## 10. Build notes (where the build differs from the text above)
 
 - **Rule order (§3.1).** With rule 1 dropped, an inline spawn that *has* a conversation origin falls through to the status and length rules instead of being written outright, so a cancelled or empty inline run is skipped like any other. An inline spawn with no origin is `skip:inline`. The secret scan runs only on a would-be write, so a background result is logged `background`, not `secret_detected`. It scans the task and the text (on a failure, the error followed by the result), and the length rule measures the same text.
-- **Atomic episode write (§3.3 step 3).** `start_episode`, `end_episode` and the log row's `episode_id` commit in **one** transaction rather than the episode first and the id in a second commit. Either both land or neither does, so no window remains in which a crash leaves an episode the log does not know about. A retry with `episode_id` set resumes at the chunk step. `EpisodeManager.start` reuses a similar *ongoing* episode. If that ever returns another session's episode, the write fails rather than closing someone else's episode.
+- **Atomic episode write (§3.3 step 3).** `start_episode`, `end_episode` and the log row's `episode_id` commit in **one** transaction rather than the episode first and the id in a second commit. Either both land or neither does, so no window remains in which a crash leaves an episode the log does not know about. A retry with `episode_id` set resumes at the chunk step. `EpisodeManager.start` normally reuses a similar *ongoing* episode (word overlap above 0.8 against the smaller word set, within 30 min), and a short conversation seed whose words all appear in the task matches. The writer therefore starts its episode with `dedup=False`, a keyword-only parameter of `Heart.start_episode` / `EpisodeManager.start` that skips the reuse; every other caller keeps the default. The guard stays: if the start ever returns another session's episode, the write fails rather than closing someone else's episode.
+- **Blocked runs.** The hardened executor stores `incomplete_blocked` as `status='completed'` with `final_outcome='incomplete_blocked'`. The writer records it as `blocked`: tier 1 writes it with `Status: blocked`, the tag `status:blocked` and episode outcome `partial`; tier 2 skips it as `skip:scheduled_blocked`, as it skips failures.
 - **Abandoned `pending` rows.** A writer that dies mid-write (process exit, the reconciler's 30 s pass timeout) leaves its row `pending`. The pass takes such a row over once it has gone untouched for 10 min, the same delay used for `failed` rows. Takeover is one conditional `UPDATE`, so only one of two racing writers wins. Attempts count failures only.
 - **`chunk_reason` column.** Migration 082 adds a nullable `chunk_reason` (`short` / `ingest_disabled` / `too_short`), which explains why a `written` row has `chunks=0`. Without it, `last_error` would carry that for a row that did not fail.
 - **Reconciler.** The pass (`memory`) runs on the existing `TerminalSubtaskReconciler`, every 60 s. The reconciler loop now starts when *either* flag is on. The pass also considers `cancelled` subtasks, so every terminal subtask gets a logged reason. It stops starting new writes after 20 s, so the reconciler's 30 s pass timeout cannot interrupt one.
