@@ -428,7 +428,9 @@ class ToolDispatcher:
                 # F098: the channel outlives the session, so the result can
                 # reach the conversation after the session has expired.
                 args = {**args, "_channel": ctx.channel}
-            if session_id is not None and name == "dag_create" and ctx.kind == "interactive":
+            if session_id is not None and name == "dag_create" and not ctx.is_background:
+                # Every foreground kind (interactive, MCP): an MCP turn has no
+                # channel, so its session is the DAG's only routing key.
                 args = {**args, "_session_id": session_id}
             if session_id is not None and name == "cache_retrieve":
                 args = {**args, "session_id": session_id}

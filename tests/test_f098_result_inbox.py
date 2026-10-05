@@ -436,6 +436,12 @@ async def test_dispatcher_injects_channel_and_origin_session():
     assert seen["spawn_task"]["_channel"] == CHAN and seen["spawn_task"]["_session_id"] == "S1"
     assert seen["dag_create"]["_channel"] == CHAN and seen["dag_create"]["_session_id"] == "S1"
 
+    # Codex P1: an MCP nous_chat turn is foreground too. It has no channel, so
+    # its session is the DAG's only routing key, as it already is for spawn_task.
+    mcp = ExecutionContext(kind="mcp", session_id="mcp-1")
+    await d.dispatch("dag_create", {"name": "d"}, session_id="mcp-1", context=mcp)
+    assert seen["dag_create"]["_session_id"] == "mcp-1" and "_channel" not in seen["dag_create"]
+
     # A background turn's dag_create gets no origin session; no channel, no key.
     bg = ExecutionContext(kind="subtask", session_id="subtask-1")
     await d.dispatch("dag_create", {"name": "d"}, session_id="subtask-1", context=bg)
