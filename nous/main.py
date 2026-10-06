@@ -25,7 +25,7 @@ from nous.api.builtin_tools import register_builtin_tools
 from nous.api.runner import AgentRunner
 from nous.api.tools import ToolDispatcher, register_nous_tools
 from nous.api.web_tools import register_web_tools
-from nous.brain import Brain
+from nous.brain import Brain, continuation
 from nous.brain.embeddings import EmbeddingProvider
 from nous.cancellation import cancel_requested
 from nous.cognitive import CognitiveLayer
@@ -228,6 +228,22 @@ def _warn_on_f098_flags(settings: Settings) -> None:
         )
 
 
+def _gate_continuation_flag(settings: Settings) -> None:
+    """F099 Phase 2: keep NOUS_CONTINUATION_ENABLED off until the runner ships.
+
+    With the flag on and no runner, a continue result is written keyed by its
+    intention alone and nothing claims it (G6). The gate lives here and not in
+    a Settings validator because config.py must not import nous.brain. PR-2e
+    sets CONTINUATION_RUNNER_READY in the commit that wires the runner.
+    """
+    if settings.continuation_enabled and not continuation.CONTINUATION_RUNNER_READY:
+        logger.warning(
+            "NOUS_CONTINUATION_ENABLED=true but the continuation runner is not shipped in this build; "
+            "continuation stays OFF."
+        )
+        object.__setattr__(settings, "continuation_enabled", False)
+
+
 async def create_components(settings: Settings) -> dict:
     """Initialize all components in dependency order.
 
@@ -241,6 +257,7 @@ async def create_components(settings: Settings) -> dict:
     6. AgentRunner - LLM integration
     """
     _warn_on_f098_flags(settings)
+    _gate_continuation_flag(settings)  # before any component reads the flag
     database = Database(settings, lock_timeout_seconds=settings.db_lock_timeout_seconds)
     await database.connect()  # F1: connect() not initialize()
     await run_migrations(database.engine)  # Apply pending SQL migrations
