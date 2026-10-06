@@ -7,6 +7,8 @@ from uuid import UUID
 from croniter import croniter
 from sqlalchemy import select, update
 
+from nous.brain import intentions
+from nous.brain.intentions import IntentionSpec
 from nous.storage.database import Database
 from nous.storage.models import Schedule
 
@@ -36,6 +38,7 @@ class ScheduleManager:
         frame_type: str | None = None,
         continuation_turns: int = 0,
         continuation_prompt: str | None = None,
+        intention: IntentionSpec | None = None,
     ) -> Schedule:
         """Create a new schedule."""
         # Compute next_fire_at
@@ -51,6 +54,12 @@ class ScheduleManager:
             raise ValueError("Recurring schedule needs interval_seconds or cron_expr")
 
         async with self._db.session() as session:
+            # F099 I1: a schedule's intention is its container (section 4.1 Schedules).
+            prepared = (
+                await intentions.prepare_intention(session, self._agent_id, intention)
+                if intention is not None
+                else None
+            )
             schedule = Schedule(
                 agent_id=self._agent_id,
                 task=task,
@@ -70,6 +79,11 @@ class ScheduleManager:
                 continuation_prompt=continuation_prompt,
             )
             session.add(schedule)
+            await session.flush()
+            if prepared is not None:
+                await intentions.insert_prepared(
+                    session, self._agent_id, prepared, source_kind=intentions.SOURCE_SCHEDULE, source_id=schedule.id
+                )
             await session.commit()
             await session.refresh(schedule)
             logger.info(
@@ -165,9 +179,32 @@ class ScheduleManager:
                 "Advanced schedule %s (fire #%d, next: %s)",
                 schedule_id.hex[:8], schedule.fire_count, schedule.next_fire_at,
             )
+            deactivated = not schedule.active
+        if deactivated:
+            await self._close_container(schedule_id)
+
+    async def _close_container(self, schedule_id: UUID) -> None:
+        """F099: a schedule that no longer fires closes its container intention.
+
+        Its own transaction, after the deactivation committed. Closing is
+        bookkeeping, and a failure here must never leave a schedule active
+        (a one-shot schedule would fire again). A close that fails here, or
+        never runs because the process exits first, is repaired by the
+        reconciler's intentions pass (intentions.close_finished_containers).
+        A schedule created with intentions off has no container, and this
+        closes nothing.
+        """
+        try:
+            async with self._db.session() as session:
+                await intentions.close_for_source(
+                    session, self._agent_id, intentions.SOURCE_SCHEDULE, schedule_id, with_result=False
+                )
+                await session.commit()
+        except Exception:
+            logger.warning("F099: could not close the container of schedule %s", schedule_id.hex[:8], exc_info=True)
 
     async def deactivate(self, schedule_id: UUID) -> None:
-        """Deactivate a schedule."""
+        """Deactivate a schedule, and close its F099 container intention."""
         async with self._db.session() as session:
             await session.execute(
                 update(Schedule)
@@ -176,6 +213,7 @@ class ScheduleManager:
             )
             await session.commit()
             logger.info("Deactivated schedule %s", schedule_id.hex[:8])
+        await self._close_container(schedule_id)
 
     async def get(self, schedule_id: UUID) -> Schedule | None:
         """Get a schedule by ID."""

@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from typing import Any, Literal, get_args
 from uuid import UUID
 
+from nous.brain.intentions import AUTHORITIES, AUTHORITY_INTERNAL, AUTHORITY_OWNER
+
 ContextKind = Literal[
     "interactive",         # REST /chat, /chat/stream — a person is in the loop
     "mcp",                 # MCP tool call — another agent is waiting on the answer
@@ -75,10 +77,19 @@ class ExecutionContext:
     # pre_turn sets it after this frozen context was built, so the runner
     # carries it in with dataclasses.replace once pre_turn returns.
     decision_id: str | None = None
+    # F099 I3: the intention this turn works under, read from the subtask
+    # row's lineage stamp (metadata.intention) or a DAG check's. A spawn from
+    # this turn joins that lineage. Phase 1 only carries it: nothing narrows
+    # a tool set on ``authority`` until Phase 2.
+    intention_id: UUID | None = None
+    root_intention_id: UUID | None = None
+    authority: str = AUTHORITY_OWNER
 
     def __post_init__(self) -> None:
         if self.kind not in CONTEXT_KINDS:
             raise ValueError(f"unknown execution context kind {self.kind!r}")
+        if self.authority not in AUTHORITIES:
+            raise ValueError(f"unknown authority {self.authority!r}")
 
     @property
     def is_background(self) -> bool:
@@ -94,6 +105,8 @@ class ExecutionContext:
         ``metadata.schedule_id``. A row with none of them is a plain spawn —
         ``parent_session_id`` still says which session spawned it.
         ``getattr`` defaults keep SimpleNamespace test doubles working.
+        ``metadata.intention`` (F099) is the lineage stamp: no lookup, so
+        nothing here can fail open.
         """
         meta = getattr(subtask, "metadata_", None)
         if not isinstance(meta, dict):
@@ -108,6 +121,7 @@ class ExecutionContext:
             kind = "scheduled"
         else:
             kind = "subtask"
+        intention_id, root_intention_id, authority = lineage_from_stamp(meta.get("intention"))
         return cls(
             kind=kind,
             session_id=session_id,
@@ -119,7 +133,29 @@ class ExecutionContext:
             schedule_id=meta.get("schedule_id") or None,
             surface_id=meta.get("a2ui_surface_id") or None,
             undoable=bool(meta.get("undoable")),
+            intention_id=intention_id,
+            root_intention_id=root_intention_id,
+            authority=authority,
         )
+
+
+def lineage_from_stamp(stamp: Any) -> tuple[UUID | None, UUID | None, str]:
+    """``(intention_id, root_intention_id, authority)`` from a lineage stamp.
+
+    No stamp: a row from before F099, or made with the flag off, so owner. A
+    stamp that cannot be read fails CLOSED to internal_only: a damaged
+    lineage may only lose tools, never gain them (I3).
+    """
+    if stamp is None:
+        return None, None, AUTHORITY_OWNER
+    if not isinstance(stamp, dict):
+        return None, None, AUTHORITY_INTERNAL
+    intention_id = _as_uuid(stamp.get("id"))
+    root_id = _as_uuid(stamp.get("root_id"))
+    authority = stamp.get("authority")
+    if intention_id is None or root_id is None or authority not in AUTHORITIES:
+        return intention_id, root_id, AUTHORITY_INTERNAL
+    return intention_id, root_id, authority
 
 
 def resolve_context(
@@ -141,7 +177,5 @@ def resolve_context(
             session_id=session_id,
         )
     if is_background and not context.is_background:
-        raise ValueError(
-            f"is_background=True contradicts a foreground ExecutionContext ({context.kind})"
-        )
+        raise ValueError(f"is_background=True contradicts a foreground ExecutionContext ({context.kind})")
     return context

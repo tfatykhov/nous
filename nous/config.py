@@ -1204,6 +1204,14 @@ class Settings(BaseSettings):
     # telegram:<telegram_chat_id>. Off: such DAGs keep only the F087 push.
     result_inbox_dag_scheduled: bool = False
 
+    # F099 Phase 1: every spawn records the intention behind it
+    # (brain.intentions, in the work row's transaction). Recording only:
+    # routing stays F098 Phase A's, and every intention closes as 'legacy'
+    # when its source finishes. The inbox writers are what close it, so it
+    # needs result_inbox_enabled; without it a WARNING is logged and this
+    # stays off.
+    intentions_enabled: bool = False
+
     # F098 Phase C: result memory — a finished background subtask result
     # becomes an episode (+ document chunks), so recall_deep can find it.
     # Independent of result_inbox_enabled. Off: the hooks and the reconciler
@@ -3045,6 +3053,18 @@ class Settings(BaseSettings):
     def _detect_explicit_overrides(self) -> "Settings":
         object.__setattr__(self, "_compaction_threshold_explicit", "compaction_threshold" in self.model_fields_set)
         object.__setattr__(self, "_keep_recent_explicit", "keep_recent_tokens" in self.model_fields_set)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_intentions_dependency(self) -> "Settings":
+        """F099 §5: intentions close through the F098 inbox writers and
+        reconciler. Without the inbox they would never leave 'pending', so the
+        flag is forced off, loudly."""
+        if self.intentions_enabled and not self.result_inbox_enabled:
+            logging.getLogger(__name__).warning(
+                "NOUS_INTENTIONS_ENABLED=true needs NOUS_RESULT_INBOX_ENABLED=true; intentions stay OFF."
+            )
+            object.__setattr__(self, "intentions_enabled", False)
         return self
 
     @model_validator(mode="after")

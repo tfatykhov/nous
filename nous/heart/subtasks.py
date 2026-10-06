@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import func, select, text, update
 
+from nous.brain import intentions
 from nous.storage.database import Database
 from nous.storage.models import Subtask
+
+if TYPE_CHECKING:
+    from nous.brain.intentions import IntentionSpec
 
 logger = logging.getLogger(__name__)
 
@@ -66,10 +71,17 @@ class SubtaskManager:
         worker_id: str | None = None,
         # F098: channel the spawning turn ran on (routes the result).
         parent_channel: str | None = None,
+        # F099 I1: the intention behind this spawn, written in this transaction.
+        intention: IntentionSpec | None = None,
     ) -> Subtask:
         """Create a new subtask: pending, or already running for ``worker_id``.
 
         Raises ValueError if the pending limit is reached.
+
+        With ``intention``, its ``brain.intentions`` row is written in the same
+        transaction, and the row carries the lineage stamp (``metadata.intention``)
+        that its turn's ExecutionContext reads (I3). ``IntentionRootClosed`` /
+        ``IntentionParentMissing`` propagate, and then neither row exists.
         """
         pri_val = _PRIORITY_MAP.get(priority, 100)
 
@@ -85,6 +97,11 @@ class SubtaskManager:
                 raise SubtaskQueueFull(
                     f"pending subtask limit ({_MAX_PENDING}) reached"
                 )
+
+            prepared = None
+            if intention is not None:
+                prepared = await intentions.prepare_intention(session, self._agent_id, intention)
+                metadata = {**(metadata or {}), "intention": prepared.stamp}
 
             subtask = Subtask(
                 **({"id": subtask_id} if subtask_id is not None else {}),
@@ -109,6 +126,11 @@ class SubtaskManager:
                 ),
             )
             session.add(subtask)
+            await session.flush()  # the id the intention points at
+            if prepared is not None:
+                await intentions.insert_prepared(
+                    session, self._agent_id, prepared, source_kind=intentions.SOURCE_SUBTASK, source_id=subtask.id
+                )
             await session.commit()
             await session.refresh(subtask)
             logger.info("Created subtask %s: %s", subtask.id.hex[:8], task[:80])

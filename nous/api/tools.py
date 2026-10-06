@@ -36,7 +36,9 @@ from uuid import UUID
 from nous.api.call_outcome import CallOutcome
 from nous.api.call_outcome import _current as _outcome_var  # the one setter (harness 2b)
 from nous.api.execution_context import ExecutionContext, resolve_context
+from nous.brain import intentions
 from nous.brain.brain import Brain
+from nous.brain.intentions import AUTHORITY_INTERNAL
 from nous.brain.schemas import NON_PREDICTION_OUTCOMES, ReasonInput, RecordInput
 from nous.config import PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS, Settings
 from nous.heart.exemplars import parse_label
@@ -280,6 +282,25 @@ def _required_handler_params(handler: Callable[..., Any]) -> set[str] | None:
     return None if accepts_var_kw else named
 
 
+def _origin_args(ctx: ExecutionContext) -> dict[str, Any]:
+    """F099 section 4.2: the spawning turn's origin, as a spawn tool's hidden arguments."""
+    out: dict[str, Any] = {"_origin_kind": ctx.kind}
+    if ctx.session_id is not None:
+        out["_origin_session_id"] = ctx.session_id
+    if ctx.channel:
+        out["_origin_channel"] = ctx.channel
+    if ctx.decision_id:
+        # Same value the dispatch Phase 0a block sets; that block is the flag-off path.
+        out["_decision_id"] = ctx.decision_id
+    if ctx.intention_id is not None:
+        out["_intention_id"] = str(ctx.intention_id)
+    elif ctx.authority == AUTHORITY_INTERNAL:
+        # A damaged stamp failed closed in lineage_from_stamp (no id, but
+        # internal_only): refuse the spawn rather than make it a root.
+        out["_intention_id"] = intentions.UNREADABLE_LINEAGE
+    return out
+
+
 class ToolDispatcher:
     """Registers tool handlers and dispatches tool calls from the API.
 
@@ -311,15 +332,30 @@ class ToolDispatcher:
         # Repair model-emitted input where a required arg leaked as an XML
         # <parameter> tag inside another string arg (see _salvage_leaked_args).
         self._arg_salvage_enabled = arg_salvage_enabled
+        # F099: spawn tools that record an intention, so dispatch passes them
+        # where the call came from. Opt-in per registration, set only while
+        # NOUS_INTENTIONS_ENABLED is on: with it off no handler sees a new argument.
+        self._origin_aware: set[str] = set()
 
     def is_registered(self, name: str) -> bool:
         """True when ``name`` has a handler -- the only way a call can run."""
         return name in self._handlers
 
-    def register(self, name: str, handler: Callable[..., Any], schema: dict[str, Any]) -> None:
-        """Register a tool handler with its JSON schema."""
+    def register(
+        self, name: str, handler: Callable[..., Any], schema: dict[str, Any], *, origin_aware: bool = False
+    ) -> None:
+        """Register a tool handler with its JSON schema.
+
+        ``origin_aware`` (F099 section 4.2): dispatch passes the handler the
+        spawning turn's origin (``_origin_kind`` and the rest, see
+        ``_origin_args``), for its intention row.
+        """
         self._handlers[name] = handler
         self._schemas[name] = schema
+        if origin_aware:
+            self._origin_aware.add(name)
+        else:
+            self._origin_aware.discard(name)
         self._tool_schema_cache.clear()  # F036: invalidate on registration
 
     def _repair(self, name: str, args: dict[str, Any]) -> tuple[dict[str, Any], list[str], list[str]]:
@@ -392,6 +428,12 @@ class ToolDispatcher:
                 hard_missing = (
                     list(missing) if handler_required is None else [k for k in missing if k in handler_required]
                 )
+                if name in self._origin_aware:
+                    # F099 I2: a spawn tool's handler owns the intent rule (refused
+                    # in a foreground turn, generated in any other). dag_create's
+                    # handler takes **kwargs, so without this every missing intent
+                    # would be refused here, background ones included.
+                    hard_missing = [k for k in hard_missing if k != "intent"]
                 if hard_missing:
                     provided = sorted(k for k in args if not k.startswith("_"))
                     return (
@@ -418,6 +460,15 @@ class ToolDispatcher:
                     True,
                 )
 
+            # F099 (security): an argument whose name starts with "_" is the
+            # dispatcher's to set, never the model's. Drop every one the model
+            # sent, for every tool, before anything below injects the real value.
+            # A forged _intention_id would join a foreign lineage, a forged
+            # _channel or _session_id would re-route a result (F098), and a
+            # forged _lookup_token would make spawn_sync read another row. No
+            # tool schema declares a "_" property; _schema_type_errors and the
+            # missing-argument error already treat these keys as not the model's.
+            args = {k: v for k, v in args.items() if not k.startswith("_")}
             if name in self._BACKGROUND_AWARE_TOOLS:
                 # compose_surface derives origin from it: a heartbeat or
                 # scheduled turn composes origin="agent" apps (F092.1 push
@@ -425,14 +476,16 @@ class ToolDispatcher:
                 args = {**args, "_is_background": is_background}
             if session_id is not None and name == "spawn_task":
                 args = {**args, "_session_id": session_id}
-            if name in ("spawn_task", "spawn_sync"):
+            if ctx.decision_id and name in ("spawn_task", "spawn_sync"):
                 # F099 Phase 0a: the spawning turn's Plan decision, stored on the
                 # subtask row so its reason outlives the turn. Not a routing key.
-                # A value the model sent itself is dropped first: only the
-                # dispatcher may name the turn's decision.
-                args = {k: v for k, v in args.items() if k != "_decision_id"}
-                if ctx.decision_id:
-                    args = {**args, "_decision_id": ctx.decision_id}
+                # _origin_args sets the same value when the flag is on; this block
+                # must stay because it is the flag-off path.
+                args = {**args, "_decision_id": ctx.decision_id}
+            if name in self._origin_aware:
+                # F099 section 4.2: where the spawn came from, for its intention
+                # row only. _session_id / _channel below stay the routing keys (I5).
+                args = {**args, **_origin_args(ctx)}
             if ctx.channel and name in ("spawn_task", "dag_create"):
                 # F098: the channel outlives the session, so the result can
                 # reach the conversation after the session has expired.
@@ -2913,6 +2966,22 @@ async def _close_cancelled_inline_subtask(heart: Heart, subtask_id: UUID) -> boo
         return False
 
 
+async def _close_inline_intention(heart: Any, subtask_id: UUID) -> None:
+    """F099 section 4.1 Closing: an inline run never reaches a worker writer.
+
+    Closes its intention as 'legacy' however the call ended. Never raises
+    (a second cancel can still interrupt the await; IntentionClosePass is
+    the backstop).
+    """
+    store = getattr(heart, "intentions", None)
+    if store is None:
+        return
+    try:
+        await store.close_for_source(intentions.SOURCE_SUBTASK, subtask_id)
+    except Exception:
+        logger.warning("F099: could not close the intention of inline subtask %s", subtask_id.hex[:8], exc_info=True)
+
+
 # ---------------------------------------------------------------------------
 # Subtask & Schedule tool closures (011.1)
 # ---------------------------------------------------------------------------
@@ -2970,6 +3039,10 @@ def create_subtask_tools(
         # subtask row even when dropped at execute time — operators can
         # inspect via /dashboard/subtasks.
         payload_schema: dict | None = None,
+        # F099 I2: required while NOUS_INTENTIONS_ENABLED is on (only then is
+        # it in the schema); ignored with the flag off.
+        intent: str | None = None,
+        wake_policy: str | None = None,
         # F062: internal-only lookup token written to metadata so spawn_sync
         # can find the row it just created without overriding the caller's
         # parent_session_id (Codex round-14 P2). Not exposed in the public
@@ -2978,6 +3051,11 @@ def create_subtask_tools(
         _session_id: str | None = None,
         _channel: str | None = None,  # F098: injected by ToolDispatcher
         _decision_id: str | None = None,  # F099 Phase 0a: injected by ToolDispatcher
+        # F099 section 4.2: the spawning turn's origin, for the intention row only (I5).
+        _origin_kind: str | None = None,
+        _origin_session_id: str | None = None,
+        _origin_channel: str | None = None,
+        _intention_id: str | None = None,
     ) -> dict[str, Any]:
         """Spawn a subtask, optionally waiting for its result inline.
 
@@ -2994,6 +3072,22 @@ def create_subtask_tools(
             MCP-compliant response with subtask ID or inline result
         """
         try:
+            # F099 I2: the intention behind this spawn, built first, so a
+            # refused intent creates nothing.
+            spec = None
+            if intentions.enabled(settings):
+                spec = intentions.spec_from_tool_call(
+                    intent=intent,
+                    wake_policy=wake_policy,
+                    origin_kind=_origin_kind,
+                    fallback_text=task,
+                    # As worker_id below: without a runner the row is left to a worker.
+                    inline=bool(await_result and runner is not None),
+                    origin_session_id=_origin_session_id,
+                    origin_channel=_origin_channel,
+                    decision_id=_decision_id,
+                    intention_id=_intention_id,
+                )
             # 012.2: Apply frame-default model mapping
             effective_model = model
             if not effective_model and frame_type:
@@ -3062,6 +3156,7 @@ def create_subtask_tools(
                 # Run inline below, in this turn: claimed as it is created,
                 # so an idle worker cannot take it and run it a second time.
                 worker_id=INLINE_WORKER_ID if await_result and runner is not None else None,
+                **intentions.intention_kwargs(spec),
             )
 
             if not await_result:
@@ -3258,6 +3353,11 @@ def create_subtask_tools(
                     return _tool_error(f"[Subtask {subtask.id.hex[:8]} failed: {e}]")
             finally:
                 schedule_subtask_memory(getattr(heart, "result_memory", None), subtask.id)
+                # F099: an inline run never reaches a worker writer, so its
+                # intention closes here, however the call ended. After the
+                # synchronous memory hook, which an interrupted await must not skip.
+                if intentions.enabled(settings):
+                    await _close_inline_intention(heart, subtask.id)
 
         except ValueError as e:
             return _tool_error(f"Cannot spawn subtask: {e}")
@@ -3272,6 +3372,13 @@ def create_subtask_tools(
         notify: bool = False,
         model: str | None = None,
         frame_type: str | None = None,
+        intent: str | None = None,
+        wake_policy: str | None = None,
+        _decision_id: str | None = None,
+        _origin_kind: str | None = None,
+        _origin_session_id: str | None = None,
+        _origin_channel: str | None = None,
+        _intention_id: str | None = None,
     ) -> dict[str, Any]:
         """Schedule a task for later or recurring execution.
 
@@ -3290,6 +3397,23 @@ def create_subtask_tools(
             if bool(when) == bool(every):
                 return _tool_error("Exactly one of 'when' or 'every' must be provided.")
 
+            # F099: a schedule's intention is its container (section 4.1 Schedules).
+            # wake_policy is accepted for a uniform schema but has no meaning
+            # here: each fire takes remember/none from notify (plan D3).
+            spec = None
+            if intentions.enabled(settings):
+                spec = intentions.spec_from_tool_call(
+                    intent=intent,
+                    wake_policy=None,
+                    origin_kind=_origin_kind,
+                    fallback_text=task,
+                    container=True,
+                    origin_session_id=_origin_session_id,
+                    origin_channel=_origin_channel,
+                    decision_id=_decision_id,
+                    intention_id=_intention_id,
+                )
+
             from nous.handlers.time_parser import parse_every, parse_when
 
             if when:
@@ -3302,6 +3426,7 @@ def create_subtask_tools(
                     timeout=settings.subtask_default_timeout,
                     model=model,
                     frame_type=frame_type,
+                    **intentions.intention_kwargs(spec),
                 )
             else:
                 interval_seconds, cron_expr = parse_every(every)  # type: ignore[arg-type]
@@ -3314,6 +3439,7 @@ def create_subtask_tools(
                     timeout=settings.subtask_default_timeout,
                     model=model,
                     frame_type=frame_type,
+                    **intentions.intention_kwargs(spec),
                 )
 
             next_fire = schedule.next_fire_at.isoformat() if schedule.next_fire_at else "N/A"
@@ -3425,8 +3551,14 @@ def create_subtask_tools(
         timeout_seconds: int | None = None,
         model: str | None = None,
         success_criteria: str | None = None,
+        intent: str | None = None,
+        wake_policy: str | None = None,
         _session_id: str | None = None,
         _decision_id: str | None = None,
+        _origin_kind: str | None = None,
+        _origin_session_id: str | None = None,
+        _origin_channel: str | None = None,
+        _intention_id: str | None = None,
     ) -> dict[str, Any]:
         import json as _json
         import uuid as _uuid
@@ -3458,6 +3590,12 @@ def create_subtask_tools(
             _lookup_token=sync_lookup_token,
             _session_id=_session_id,  # preserve caller's parent_session_id
             _decision_id=_decision_id,
+            intent=intent,
+            wake_policy=wake_policy,
+            _origin_kind=_origin_kind,
+            _origin_session_id=_origin_session_id,
+            _origin_channel=_origin_channel,
+            _intention_id=_intention_id,
         )
 
         # spawn_task always returns {"content": [{"type":"text","text":...}]}.
@@ -3480,7 +3618,7 @@ def create_subtask_tools(
                 raw_text=text,
                 confidence=None,
                 elapsed_seconds=0.0,
-                validator_reason="spawn_sync: no subtask row created (censor or runner unavailable)",
+                validator_reason=f"spawn_sync: no subtask row created: {text}",
             )
             return _tool_error(_json.dumps(result.to_dict(), indent=2))
 
@@ -3790,6 +3928,29 @@ def _build_spawn_task_schema(payload_schema_enabled: bool) -> dict[str, Any]:
     return schema
 
 
+def _with_intent_params(schema: dict[str, Any], enabled: bool) -> dict[str, Any]:
+    """F099 I2: ``intent`` (required) and ``wake_policy`` on a spawn tool's schema.
+
+    Only while NOUS_INTENTIONS_ENABLED is on. Off, the very same schema
+    object, so the wire bytes and the prompt-cache prefix do not change
+    (tests/fixtures/f099_spawn_tool_schemas.json).
+    """
+    if not enabled:
+        return schema
+    out = copy.deepcopy(schema)
+    out["properties"]["intent"] = {"type": "string", "description": intentions.INTENT_HELP}
+    out["properties"]["wake_policy"] = {
+        "type": "string",
+        "enum": list(intentions.MODEL_WAKE_POLICIES),
+        "description": (
+            "Optional. What happens when the result arrives: 'continue' (come back to it; the default "
+            "for a conversation), 'remember', 'report' or 'none'. Ignored for an inline or scheduled spawn."
+        ),
+    }
+    out["required"] = [*out.get("required", []), "intent"]
+    return out
+
+
 def register_subtask_tools(
     dispatcher: ToolDispatcher,
     heart: Heart,
@@ -3819,8 +3980,15 @@ def register_subtask_tools(
     spawn_task_schema = _build_spawn_task_schema(
         settings.subtask_payload_schema_enabled and settings.subtask_hardening_enabled
     )
-    dispatcher.register("spawn_task", closures["spawn_task"], spawn_task_schema)
-    dispatcher.register("schedule_task", closures["schedule_task"], _SCHEDULE_TASK_SCHEMA)
+    # F099 I2: intent/wake_policy and the origin arguments exist only while
+    # NOUS_INTENTIONS_ENABLED is on.
+    on = intentions.enabled(settings)
+    dispatcher.register(
+        "spawn_task", closures["spawn_task"], _with_intent_params(spawn_task_schema, on), origin_aware=on
+    )
+    dispatcher.register(
+        "schedule_task", closures["schedule_task"], _with_intent_params(_SCHEDULE_TASK_SCHEMA, on), origin_aware=on
+    )
     dispatcher.register("list_tasks", closures["list_tasks"], _LIST_TASKS_SCHEMA)
     dispatcher.register("cancel_task", closures["cancel_task"], _CANCEL_TASK_SCHEMA)
     # F062 requires F061's hardened executor — without subtask_hardening_enabled
@@ -3832,7 +4000,9 @@ def register_subtask_tools(
     # with a tool that creates pending subtask rows and synthesizes false
     # error results (Codex round-10 P2).
     if settings.subtask_payload_schema_enabled and settings.subtask_hardening_enabled and runner is not None:
-        dispatcher.register("spawn_sync", closures["spawn_sync"], _SPAWN_SYNC_SCHEMA)
+        dispatcher.register(
+            "spawn_sync", closures["spawn_sync"], _with_intent_params(_SPAWN_SYNC_SCHEMA, on), origin_aware=on
+        )
     elif settings.subtask_payload_schema_enabled and settings.subtask_hardening_enabled:
         logger.warning(
             "F062: both NOUS_SUBTASK_PAYLOAD_SCHEMA_ENABLED and "
@@ -5253,6 +5423,7 @@ def register_dag_tools(
     # compensation is on. Off, the key is ignored as it was before #652 — a
     # node that set it could not write at all, with nothing wired to snapshot.
     undoable_accepted = bool(getattr(cfg, "compensation_enabled", False))
+    intentions_on = intentions.enabled(cfg)
 
     async def dag_create(**kwargs: Any) -> dict:
         """Create a DAG with dependency-tracked nodes."""
@@ -5279,6 +5450,20 @@ def register_dag_tools(
                     "process — the question could never be shown."
                 )
         try:
+            # F099 I2: the DAG's intention, built first, so a refused intent creates nothing.
+            spec = None
+            if intentions_on:
+                spec = intentions.spec_from_tool_call(
+                    intent=kwargs.get("intent"),
+                    wake_policy=kwargs.get("wake_policy"),
+                    origin_kind=kwargs.get("_origin_kind"),
+                    fallback_text=(kwargs.get("description") or "").strip() or kwargs.get("name"),
+                    origin_session_id=kwargs.get("_origin_session_id"),
+                    origin_channel=kwargs.get("_origin_channel"),
+                    decision_id=kwargs.get("_decision_id"),
+                    intention_id=kwargs.get("_intention_id"),
+                )
+
             # Parse nodes
             node_specs: list[DAGNodeSpec] = []
             for n in kwargs.get("nodes", []):
@@ -5354,10 +5539,17 @@ def register_dag_tools(
                 origin_session_id=kwargs.get("_session_id"),
                 # F099 Phase 0a: why the DAG exists. Before Phase 1 the only
                 # reason text a dag_create call carries is its description.
-                original_request=(description.strip() or None) if isinstance(description, str) else None,
+                # F099: why the DAG exists. The model's own intent when it wrote
+                # one; otherwise (flag off, or a generated intent) the stripped
+                # description, as in Phase 0a (plan D1).
+                original_request=(
+                    spec.intent
+                    if spec is not None and intentions.intent_line(kwargs.get("intent"))
+                    else ((description.strip() or None) if isinstance(description, str) else None)
+                ),
             )
 
-            dag = await store.create(request)
+            dag = await store.create(request, **intentions.intention_kwargs(spec))
             await orchestrator.start_dag(dag.id)
 
             # Re-fetch to get actual status
@@ -5383,6 +5575,10 @@ def register_dag_tools(
                     "companion to answer."
                 )
             return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+        except (intentions.IntentArgumentError, intentions.IntentionRootClosed, intentions.IntentionParentMissing) as e:
+            # F099: a refused spawn is the model's to fix, not a crash; spec_from_tool_call
+            # already logged the refusal at INFO.
+            return _tool_error(f"Error creating DAG: {e}")
         except Exception as e:
             logger.exception("dag_create failed")
             return _tool_error(f"Error creating DAG: {e}")
@@ -5796,6 +5992,13 @@ def register_dag_tools(
             "required": ["name", "nodes"],
         },
     )
+
+    if intentions_on:
+        # F099 I2: the same schema plus intent / wake_policy. Off, the registration
+        # above stands untouched (tests/fixtures/f099_spawn_tool_schemas.json).
+        dispatcher.register(
+            "dag_create", dag_create, _with_intent_params(dispatcher._schemas["dag_create"], True), origin_aware=True
+        )
 
     dispatcher.register(
         "dag_manage",

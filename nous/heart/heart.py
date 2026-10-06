@@ -24,6 +24,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain.embeddings import EmbeddingProvider
+from nous.brain.intentions import IntentionStore
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart.admission import AdmissionConfig, AdmissionController
@@ -128,6 +129,7 @@ class Heart:
         self.working_memory = WorkingMemoryManager(database, settings.agent_id)
         self.subtasks = SubtaskManager(database, settings.agent_id)
         self.result_inbox = ResultInboxStore(database, settings.agent_id)  # F098
+        self.intentions = IntentionStore(database, settings.agent_id)  # F099
         self.result_memory = ResultMemoryWriter(self)  # F098 Phase C
         self.schedules = ScheduleManager(database, settings.agent_id)
 

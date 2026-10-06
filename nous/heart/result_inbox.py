@@ -26,6 +26,7 @@ from uuid import UUID
 from sqlalchemy import and_, func, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from nous.brain import intentions
 from nous.storage.database import Database
 from nous.storage.models import ChannelSession, ResultInbox, ResultInboxState, Subtask
 
@@ -154,6 +155,7 @@ class ResultInboxStore:
         correlation_id: str | None = None,
         source_generation: int = 0,
         created_at: datetime | None = None,
+        intention_id: UUID | None = None,
     ) -> bool:
         """Insert one result; True if a row was written, False if it existed.
 
@@ -175,6 +177,7 @@ class ResultInboxStore:
                 title=title[:_TITLE_MAX],
                 body=body,
                 created_at=created_at or datetime.now(UTC),
+                intention_id=intention_id,
             )
             .on_conflict_do_nothing(index_elements=["source_kind", "source_id", "source_generation"])
         )
@@ -182,6 +185,13 @@ class ResultInboxStore:
             result = await session.execute(stmt)
             await session.commit()
             return bool(result.rowcount)
+
+    async def close_source_intention(self, source_kind: str, source_id: UUID) -> UUID | None:
+        """F099 Phase 1: close a finished source's intention as 'legacy'. Its id, or None."""
+        async with self._db.session() as session:
+            found = await intentions.close_for_source(session, self._agent_id, source_kind, source_id)
+            await session.commit()
+        return found
 
     async def claim(
         self,
@@ -261,6 +271,18 @@ class ResultInboxStore:
                 older = (await session.execute(select(func.count()).select_from(overflow).add_cte(settle))).scalar_one()
             await session.commit()
         return sorted(claimed, key=lambda r: r.created_at), older
+
+    async def channel_of_session(self, session_id: str) -> str | None:
+        """F099: the channel whose latest session is ``session_id``, if any."""
+        async with self._db.session() as session:
+            return (
+                await session.execute(
+                    select(ChannelSession.channel)
+                    .where(ChannelSession.agent_id == self._agent_id, ChannelSession.session_id == session_id)
+                    .order_by(ChannelSession.last_active.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
 
     async def touch_channel(self, channel: str, session_id: str) -> None:
         """Record ``session_id`` as the latest session on ``channel``."""
@@ -345,6 +367,24 @@ def _percentile(values: list[float], q: float) -> float | None:
 # ---------------------------------------------------------------------------
 
 
+async def close_intention_quietly(
+    store: ResultInboxStore, settings: Settings, source_kind: str, source_id: UUID
+) -> UUID | None:
+    """F099 section 4.3 Phase 1: close the finished source's intention.
+
+    The writers call this BEFORE their routing-key check, so a result nobody
+    is routed (a scheduled fire, a monitor) still closes. Its own try: a
+    failure here must never cost the result its inbox row (G6).
+    """
+    if not intentions.enabled(settings):
+        return None
+    try:
+        return await store.close_source_intention(source_kind, source_id)
+    except Exception:
+        logger.warning("F099: could not close the intention of %s %s", source_kind, source_id, exc_info=True)
+        return None
+
+
 async def record_subtask_result(store: ResultInboxStore, subtask: Any, settings: Settings) -> bool:
     """Write a terminal subtask's result to the inbox. Never raises.
 
@@ -356,6 +396,7 @@ async def record_subtask_result(store: ResultInboxStore, subtask: Any, settings:
     try:
         if subtask.status not in ("completed", "failed") or is_dag_node_subtask(subtask):
             return False
+        intention_id = await close_intention_quietly(store, settings, SOURCE_SUBTASK, subtask.id)
         channel = getattr(subtask, "parent_channel", None)
         session_id = subtask.parent_session_id
         if not channel and not session_id:
@@ -372,6 +413,7 @@ async def record_subtask_result(store: ResultInboxStore, subtask: Any, settings:
             channel=channel,
             session_id=session_id,
             correlation_id=str(subtask.id),
+            intention_id=intention_id,
         )
     except Exception:
         logger.warning("F098: inbox write failed for subtask %s", getattr(subtask, "id", "?"), exc_info=True)
@@ -402,12 +444,14 @@ async def record_dag_result(
     if not settings.result_inbox_enabled:
         return False
     try:
+        dag_uuid = dag_id if isinstance(dag_id, UUID) else UUID(str(dag_id))
+        # F099: closed before the routing-key check below (section 4.1 Closing).
+        intention_id = await close_intention_quietly(store, settings, SOURCE_DAG, dag_uuid)
         channel = origin_channel
         if not channel and not origin_session_id:
             if not (settings.result_inbox_dag_scheduled and settings.telegram_chat_id):
                 return False
             channel = f"telegram:{settings.telegram_chat_id}"
-        dag_uuid = dag_id if isinstance(dag_id, UUID) else UUID(str(dag_id))
         body = _cap(
             summary or f"DAG '{name}' {status}",
             settings.result_inbox_body_max_chars,
@@ -424,6 +468,7 @@ async def record_dag_result(
             session_id=origin_session_id,
             correlation_id=str(dag_uuid),
             created_at=created_at,
+            intention_id=intention_id,
         )
     except Exception:
         logger.warning("F098: inbox write failed for DAG %s", dag_id, exc_info=True)

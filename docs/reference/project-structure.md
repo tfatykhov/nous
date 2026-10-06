@@ -21,7 +21,7 @@ nous/
 │   ├── cancellation.py         # cancel_requested(): a task's own cancellation, as opposed to one that came out of something it awaited
 │   ├── storage/                # Database layer (async SQLAlchemy)
 │   │   ├── database.py         # Connection pool, session management
-│   │   ├── models.py           # ORM models for all 47 tables
+│   │   ├── models.py           # ORM models
 │   │   └── migrator.py         # Schema migration runner
 │   ├── brain/                  # Decision intelligence organ
 │   │   ├── brain.py            # Core: record, query, review, calibrate
@@ -30,6 +30,7 @@ nous/
 │   │   ├── embeddings.py       # pgvector embedding provider
 │   │   ├── graph_linker.py     # Cross-type auto-linking (common-template embedding)
 │   │   ├── guardrails.py       # CEL expression guardrails
+│   │   ├── intentions.py       # F099: brain.intentions — spec, wake-policy defaults, lineage (a fire only under an open container), in-transaction insert, legacy close
 │   │   ├── quality.py          # Decision quality scoring
 │   │   ├── schemas.py          # Pydantic models
 │   │   └── spreading_activation.py  # Density-gated multi-hop graph traversal
@@ -44,7 +45,7 @@ nous/
 │   │   ├── search.py           # Full-text + vector search
 │   │   ├── subtasks.py         # Subtask CRUD operations
 │   │   ├── result_inbox.py     # F098: channel-keyed result inbox (store, subtask/DAG writers, pre_turn formatting)
-│   │   ├── result_reconciler.py  # F098: repairs lost inbox writes (subtask and DAG passes); Phase C adds the memory pass
+│   │   ├── result_reconciler.py  # F098: repairs lost inbox writes (the inbox passes: subtask and DAG); Phase C adds the memory pass; F099 adds the intentions pass (closes finished work and stopped schedules)
 │   │   ├── result_memory.py    # F098 Phase C: a finished subtask result becomes an episode + marked chunks (log, writer, reconciler pass)
 │   │   ├── schedules.py        # Schedule CRUD operations
 │   │   └── schemas.py          # Pydantic models

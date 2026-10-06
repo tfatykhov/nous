@@ -43,6 +43,10 @@ services:
       - NOUS_SUBTASK_MAX_TIMEOUT=${NOUS_SUBTASK_MAX_TIMEOUT:-600}
       - NOUS_DAG_NODE_DEFAULT_TIMEOUT=${NOUS_DAG_NODE_DEFAULT_TIMEOUT:-600}
       - NOUS_DAG_NODE_MAX_TIMEOUT=${NOUS_DAG_NODE_MAX_TIMEOUT:-7200}
+      # F098 Phase A: route background results to the conversation by channel.
+      - NOUS_RESULT_INBOX_ENABLED=${NOUS_RESULT_INBOX_ENABLED:-false}
+      # F099 Phase 1: record the intention behind every spawn (needs the inbox flag above).
+      - NOUS_INTENTIONS_ENABLED=${NOUS_INTENTIONS_ENABLED:-false}
       # F087: agent-authored DAG delivery summary. Off by default (costs one
       # LLM turn per finished DAG); falls back to the deterministic template
       # on timeout/failure, so delivery never depends on the LLM being up.

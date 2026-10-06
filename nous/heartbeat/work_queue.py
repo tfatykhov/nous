@@ -21,6 +21,8 @@ from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from nous.brain import intentions
+from nous.brain.intentions import IntentionSpec
 from nous.heartbeat.registry import BaseCheck
 from nous.heartbeat.schemas import CheckResult, Finding
 
@@ -214,6 +216,12 @@ class WorkQueueCheck(BaseCheck):
         self._request_factory = request_factory or self._default_request_factory
         self.interval = settings.work_queue_interval_seconds
 
+    def _intention(self, item: WorkItem) -> IntentionSpec | None:
+        """F099: a work-queue DAG records its item as its intention (remember)."""
+        if not intentions.enabled(self._settings):
+            return None
+        return IntentionSpec(intent=item.title or item.external_id, origin_kind=intentions.ORIGIN_WORK_QUEUE)
+
     async def run(self) -> CheckResult:
         """Poll the adapter and process new + terminal items.
 
@@ -320,7 +328,7 @@ class WorkQueueCheck(BaseCheck):
         dag = None
         try:
             request = self._with_reason(self._request_factory(item), item)
-            dag = await self._dag_store.create(request)
+            dag = await self._dag_store.create(request, **intentions.intention_kwargs(self._intention(item)))
             await self._items.mark_dispatched(claimed.id, dag.id)
         except Exception as e:
             logger.exception(
@@ -427,7 +435,7 @@ class WorkQueueCheck(BaseCheck):
         dag = None
         try:
             request = self._with_reason(self._request_factory(item), item)
-            dag = await self._dag_store.create(request)
+            dag = await self._dag_store.create(request, **intentions.intention_kwargs(self._intention(item)))
             await self._items.mark_dispatched(row_id, dag.id)
         except Exception as e:
             logger.exception(
