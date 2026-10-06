@@ -1259,6 +1259,18 @@ class SweepReport:
     next_due: datetime | None
 
 
+def _ttl_applies(agent_id: str, root_id: Any) -> ColumnElement[bool]:
+    """EXISTS: the lineage of ``root_id`` (a value, or a column of the sweep's query) has an open ``continue`` or
+    ``report`` intention, what the TTL is about (spec 4.6). One definition: the sweep's ``due`` reads it, and
+    ``_expire_root`` reads it again under the root's lock."""
+    return exists().where(
+        Intention.agent_id == agent_id,
+        Intention.root_id == root_id,
+        Intention.state.in_(OPEN_STATES),
+        Intention.wake_policy.in_((intentions.WAKE_CONTINUE, intentions.WAKE_REPORT)),
+    )
+
+
 async def expire_roots(
     session: AsyncSession,
     agent_id: str,
@@ -1277,12 +1289,6 @@ async def expire_roots(
     """
     now = now or datetime.now(UTC)
     root = aliased(Intention)
-    lineage_open = exists().where(
-        Intention.agent_id == agent_id,
-        Intention.root_id == root.id,
-        Intention.state.in_(OPEN_STATES),
-        Intention.wake_policy.in_((intentions.WAKE_CONTINUE, intentions.WAKE_REPORT)),
-    )
     due = (
         select(root.id)
         .where(
@@ -1291,7 +1297,7 @@ async def expire_roots(
             root.root_cancelled_at.is_(None),
             root.root_expired_at.is_(None),
             root.wake_policy != intentions.WAKE_CONTAINER,
-            lineage_open,
+            _ttl_applies(agent_id, root.id),
             or_(
                 root.deadline <= now,
                 and_(root.deadline.is_(None), root.created_at <= now - timedelta(hours=ttl_hours)),
@@ -1408,12 +1414,16 @@ async def _expire_root(
     ).scalar_one_or_none()
     if row is None or row.root_cancelled_at is not None or row.root_expired_at is not None:
         return False  # a cancel or another sweep got there first
+    # `due` was read before the sweep waited for this root, and a turn that resolved the root meanwhile (it held
+    # the root first) may have left nothing the TTL is about: a pending `remember` child outlives its parent's
+    # turn by design and never made the root due. So `due`'s own predicate again, under the lock; every resolver
+    # takes the root first, so the answer holds until this transaction ends.
+    if not (await session.execute(select(_ttl_applies(agent_id, root_id)))).scalar_one():
+        return False
     # Close the open intentions FIRST: this UPDATE takes their row locks, so a record_result that is mid-flight
     # (it holds its intention FOR UPDATE and reads the root unlocked) either committed before it, and its row is
     # visible below, or waits for us and then finds its intention expired and writes a raw REPORT. Reading the
     # unread rows before this statement would orphan a row committed in the gap. (2e's cancel_root: same order.)
-    # It is also the due check under the lock: `due` was read before the sweep waited for this root, and a turn
-    # that resolved the root meanwhile (it held the root first) left nothing open, so nothing is written for it.
     # Accepted residual: a T6 reopen (record_result on a `closed` continue intention) holds only that row and
     # reads the root unlocked; this UPDATE skips the `closed` row it sees without waiting, so a reopen committing
     # alongside ends `result_ready` under an expired root, and the next claim's gate drops it (`expired`).

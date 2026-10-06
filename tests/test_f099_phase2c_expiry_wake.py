@@ -188,12 +188,23 @@ async def test_a_commit_and_an_expiry_that_meet_on_a_low_id_child_do_not_deadloc
     assert not [r for r in caplog.records if "could not expire root" in r.getMessage()]
 
 
-async def test_an_expiry_that_waited_for_a_turn_that_resolved_the_root_writes_nothing(env_factory):  # noqa: F811
+@pytest.mark.parametrize("child_policy", [None, "remember"])
+async def test_an_expiry_that_waited_for_a_turn_that_resolved_the_root_writes_nothing(
+    env_factory,  # noqa: F811
+    caplog,
+    child_policy,
+):
     """Review Important 1. The sweep read the root as due while its turn was deciding, then waited for the root
-    while the turn committed a drop. Under the lock the lineage has nothing open: no marker, no "did not finish"
-    report for a root that finished. The holder IS the committing turn, so no lock-grant order is assumed."""
+    while the turn committed a drop. Under the lock the lineage has no open continue or report intention: no
+    marker, no "did not finish" report for a root that finished. Re-review new issue 1: a pending ``remember``
+    child (it outlives its parent's turn by design) is open but never made the root due, so it is left alone.
+    The holder IS the committing turn, so no lock-grant order is assumed."""
+    caplog.set_level(logging.WARNING, logger=continuation.__name__)
     env = await env_factory(**CONT)
     root = await make_root(env)
+    child = await make_child(env, root) if child_policy else None
+    if child is not None:
+        await set_intention(env, child.id, wake_policy=child_policy)
     await record(env, root)
     got = await claim(env, root.id)
     await _past(env, root.id)
@@ -216,7 +227,11 @@ async def test_an_expiry_that_waited_for_a_turn_that_resolved_the_root_writes_no
     assert await asyncio.wait_for(sweep, timeout=30) == []
     fresh = await intention_of(env, "subtask", root.source_id)
     assert (fresh.state, fresh.close_reason, fresh.root_expired_at) == ("closed", "resolved", None)
+    if child is not None:
+        assert (await intention_of(env, "subtask", child.source_id)).state == "pending"
     assert await _owner_rows(env) == []
+    # An expiry that raised is caught per root and would also return []: the log says it did not.
+    assert not [r for r in caplog.records if "could not expire root" in r.getMessage()]
 
 
 async def _pause_the_expiry_after_its_first_root(monkeypatch):
