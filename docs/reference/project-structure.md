@@ -123,7 +123,7 @@ nous/
 │       ├── retrieval_pipeline.py # F051: run_recall_pipeline (shared by recall_deep + eval)
 │       ├── execution_context.py # Harness 1a: who is calling (interactive, dag_node, …)
 │       ├── tool_classes.py     # Harness 2a: every tool's class, declared once
-│       ├── tool_policy.py      # Harness 2a: per-context policy at the choke point
+│       ├── tool_policy.py      # Harness 2a: per-context policy at the choke point; F099: the internal_only allowed set, denylist and per-call rules
 │       ├── idempotency.py      # Harness 2b: logical-send keys for external sends
 │       ├── companion_assets.py # Agent-hosted asset overlay behind /dashboard/v2
 │       ├── compensation.py     # Harness 2.8: snapshots of side-effecting writes so a background mutation can be reverted (NOUS_COMPENSATION_ENABLED)

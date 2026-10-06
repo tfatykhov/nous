@@ -62,6 +62,7 @@ With `NOUS_CONTINUATION_ENABLED=false` (every PR), behaviour is identical to PR-
 3. **2b: the startup rollback runs whenever `brain.intentions` exists**, even with both flags off (§4.3 item 6). On a database that never ran with the flag on, it is one SELECT that finds nothing.
 4. **2b: `main.py` forces the flag off with a WARNING** until 2e (§2). Visible only as a log line when someone sets the flag early.
 5. **2c: `end_conversation` skips reflection for `intent-` sessions** and `pre_turn` accepts `context_kind`. No caller passes either with the flag off.
+6. **2b: `pre_turn` skips the result-inbox claim for a session whose id starts with `intent-`**, and so does `_inject_result_inbox` itself (which also skips that session's `touch_channel`). This skip is not gated on either F099 flag: it applies whenever `NOUS_RESULT_INBOX_ENABLED` is on. Nothing in `nous/` produces an `intent-` session id before 2c's runner, so no turn reaches it.
 
 ---
 
@@ -233,7 +234,7 @@ Notes on the columns:
 
 ### 4.3 Settings (`nous/config.py`, all in PR-2b)
 
-Placed after `intentions_enabled` (`nous/config.py:1213`). Every one gets its row in `docs/reference/environment-variables.md` and its compose line in 2e.
+Placed after `intentions_enabled` (`nous/config.py:1213`). Every one gets its row in `docs/reference/environment-variables.md` and its compose line in 2b (Task 2b-2, lead ruling).
 
 | Field | Env | Default | Bounds |
 |---|---|---|---|
