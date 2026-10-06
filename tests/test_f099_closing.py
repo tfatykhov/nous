@@ -398,3 +398,49 @@ async def test_end_to_end_a_chat_spawn_is_recorded_then_closed(db, mock_embeddin
         runner._api_shared = True
         await runner.close()
         await heart.close()
+
+
+@pytest.mark.postgres_only  # CAST(text AS uuid) join
+async def test_a_subtask_cancelled_while_pending_closes_without_a_result_at(close_env):
+    from nous.heart.result_reconciler import build_reconciler
+
+    env = await close_env(**ON)
+    st = await _subtask(env, routed=False)
+    assert await env.heart.subtasks.cancel(st.id)
+    await build_reconciler(env.db, env.heart.result_inbox, env.settings).run_once()
+    it = await _of(env, "subtask", st.id)
+    assert (it.state, it.close_reason) == ("closed", "legacy")
+    assert it.closed_at is not None
+    assert it.result_at is None
+
+
+@pytest.mark.postgres_only  # CAST(text AS uuid) join
+async def test_a_completed_subtask_closed_by_the_pass_has_a_result_at(close_env):
+    from nous.heart.result_reconciler import build_reconciler
+
+    env = await close_env(**ON)
+    st = await _subtask(env, routed=False)
+    await env.heart.subtasks.complete(st.id, RESULT, final_outcome="completed")  # no hook ran
+    await build_reconciler(env.db, env.heart.result_inbox, env.settings).run_once()
+    it = await _of(env, "subtask", st.id)
+    assert it.state == "closed"
+    assert it.result_at is not None
+
+
+@pytest.mark.postgres_only  # CAST(text AS uuid) in the close
+async def test_a_cancelled_inline_call_closes_without_a_result_at(close_env):
+    env = await close_env(**ON)
+    env.turn.block = True
+    call = asyncio.create_task(
+        env.d.dispatch(
+            "spawn_task", {"task": "t", "await_result": True, "intent": "x"}, session_id="S1", context=INTERACTIVE
+        )
+    )
+    await asyncio.wait_for(env.turn.started.wait(), timeout=10)
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    (st,) = await env.heart.subtasks.list(limit=10)
+    it = await _of(env, "subtask", st.id)
+    assert (it.state, it.close_reason) == ("closed", "legacy")
+    assert it.result_at is None

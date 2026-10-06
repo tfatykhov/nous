@@ -282,12 +282,6 @@ def _required_handler_params(handler: Callable[..., Any]) -> set[str] | None:
     return None if accepts_var_kw else named
 
 
-# Sent as _intention_id when the turn's lineage stamp could not be read:
-# spec_from_tool_call refuses it (IntentionParentMissing) instead of letting the
-# spawn become a new owner root.
-UNREADABLE_LINEAGE = "unreadable-lineage"
-
-
 def _origin_args(ctx: ExecutionContext) -> dict[str, Any]:
     """F099 section 4.2: the spawning turn's origin, as a spawn tool's hidden arguments."""
     out: dict[str, Any] = {"_origin_kind": ctx.kind}
@@ -296,13 +290,14 @@ def _origin_args(ctx: ExecutionContext) -> dict[str, Any]:
     if ctx.channel:
         out["_origin_channel"] = ctx.channel
     if ctx.decision_id:
+        # Same value the dispatch Phase 0a block sets; that block is the flag-off path.
         out["_decision_id"] = ctx.decision_id
     if ctx.intention_id is not None:
         out["_intention_id"] = str(ctx.intention_id)
     elif ctx.authority == AUTHORITY_INTERNAL:
         # A damaged stamp failed closed in lineage_from_stamp (no id, but
         # internal_only): refuse the spawn rather than make it a root.
-        out["_intention_id"] = UNREADABLE_LINEAGE
+        out["_intention_id"] = intentions.UNREADABLE_LINEAGE
     return out
 
 
@@ -484,6 +479,8 @@ class ToolDispatcher:
             if ctx.decision_id and name in ("spawn_task", "spawn_sync"):
                 # F099 Phase 0a: the spawning turn's Plan decision, stored on the
                 # subtask row so its reason outlives the turn. Not a routing key.
+                # _origin_args sets the same value when the flag is on; this block
+                # must stay because it is the flag-off path.
                 args = {**args, "_decision_id": ctx.decision_id}
             if name in self._origin_aware:
                 # F099 section 4.2: where the spawn came from, for its intention

@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, cast, exists, or_, select, update
+from sqlalchemy import and_, case, cast, exists, or_, select, update
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -75,6 +75,12 @@ _FOREGROUND_KINDS = frozenset({"interactive", "mcp"})
 # tests/test_f099_intentions.py pins the DAG set to nous.dag.store's.
 TERMINAL_SUBTASK_STATUSES: tuple[str, ...] = ("completed", "failed", "cancelled")
 TERMINAL_DAG_STATUSES: tuple[str, ...] = ("completed", "failed", "partial", "cancelled")
+# A subtask that ended without a result (cancelled) never gets a result_at.
+RESULT_SUBTASK_STATUSES: tuple[str, ...] = ("completed", "failed")
+
+# Sent as _intention_id when the turn's lineage stamp could not be read: the
+# spawn is refused instead of becoming a new owner root.
+UNREADABLE_LINEAGE = "unreadable-lineage"
 
 INTENT_MAX_CHARS = 500
 INTENT_HELP = (
@@ -265,6 +271,11 @@ def spec_from_tool_call(
     policy = wake_policy or None
     if policy is not None and policy not in MODEL_WAKE_POLICIES:
         raise IntentArgumentError(f"wake_policy must be one of: {', '.join(MODEL_WAKE_POLICIES)}")
+    if intention_id == UNREADABLE_LINEAGE:
+        raise IntentionParentMissing(
+            "this turn's lineage could not be read, so spawning is refused in this turn; "
+            "finish the turn without spawning"
+        )
     parent_id = parse_uuid(intention_id)
     if intention_id and parent_id is None:
         raise IntentionParentMissing(f"intention {intention_id!r} is not an id")
@@ -416,8 +427,9 @@ async def close_for_source(
     """Close the pending intention of a finished source.
 
     Returns the intention's id, closed now or earlier, or None when the
-    source recorded none. A container never received a result
-    (``with_result=False``), so its result_at stays empty.
+    source recorded none. result_at is set only when a result arrived: a
+    subtask that completed or failed, or a DAG; never a container
+    (``with_result=False``) or a cancelled subtask.
     """
     found = (
         await session.execute(
@@ -433,7 +445,20 @@ async def close_for_source(
     now = datetime.now(UTC)
     values: dict[str, Any] = {"state": STATE_CLOSED, "close_reason": reason, "closed_at": now, "updated_at": now}
     if with_result:
-        values["result_at"] = now
+        if source_kind == SOURCE_SUBTASK:
+            values["result_at"] = case(
+                (
+                    exists().where(
+                        Subtask.agent_id == agent_id,
+                        Subtask.id == cast(str(source_id), PG_UUID(as_uuid=True)),
+                        Subtask.status.in_(RESULT_SUBTASK_STATUSES),
+                    ),
+                    now,
+                ),
+                else_=None,
+            )
+        else:
+            values["result_at"] = now
     await session.execute(
         update(Intention).where(Intention.id == found, Intention.state == STATE_PENDING).values(**values)
     )
@@ -463,7 +488,8 @@ async def close_finished_sources(
 
     The backstop for a writer's one-shot close (a worker cancelled at
     shutdown, a failed hook, an interrupted inline close). Containers are
-    close_finished_containers' job.
+    close_finished_containers' job. result_at is set only when a result
+    arrived: not for a cancelled subtask.
     """
     source_uuid = cast(Intention.source_id, PG_UUID(as_uuid=True))
     subtask_done = exists().where(
@@ -487,10 +513,22 @@ async def close_finished_sources(
         .limit(limit)
     )
     now = datetime.now(UTC)
+    got_result = or_(
+        Intention.source_kind == SOURCE_DAG,
+        exists().where(
+            Subtask.agent_id == agent_id, Subtask.id == source_uuid, Subtask.status.in_(RESULT_SUBTASK_STATUSES)
+        ),
+    )
     result = await session.execute(
         update(Intention)
         .where(Intention.id.in_(due), Intention.state == STATE_PENDING)
-        .values(state=STATE_CLOSED, close_reason=reason, result_at=now, closed_at=now, updated_at=now)
+        .values(
+            state=STATE_CLOSED,
+            close_reason=reason,
+            result_at=case((got_result, now), else_=None),
+            closed_at=now,
+            updated_at=now,
+        )
         .returning(Intention.id)
         .execution_options(synchronize_session=False)
     )

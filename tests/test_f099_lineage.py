@@ -196,7 +196,7 @@ async def test_a_tool_with_no_hidden_arguments_never_receives_one():
 
 
 async def test_a_damaged_stamp_sends_an_unreadable_lineage_not_a_root():
-    from nous.api.tools import UNREADABLE_LINEAGE
+    from nous.brain.intentions import UNREADABLE_LINEAGE
 
     d, seen = _recording_dispatcher({"dag_create": True})
     ctx = ExecutionContext.for_subtask(_row(intention="garbage"), "s")

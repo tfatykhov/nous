@@ -21,7 +21,7 @@ nous/
 │   ├── cancellation.py         # cancel_requested(): a task's own cancellation, as opposed to one that came out of something it awaited
 │   ├── storage/                # Database layer (async SQLAlchemy)
 │   │   ├── database.py         # Connection pool, session management
-│   │   ├── models.py           # ORM models for all 47 tables
+│   │   ├── models.py           # ORM models
 │   │   └── migrator.py         # Schema migration runner
 │   ├── brain/                  # Decision intelligence organ
 │   │   ├── brain.py            # Core: record, query, review, calibrate

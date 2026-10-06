@@ -78,7 +78,7 @@ async def test_all_tables_exist(db):
         ("brain", "calibration_snapshots"),
         # F099 Phase 1: one row per spawn (migration 083)
         ("brain", "intentions"),
-        # heart (11)
+        # heart (19)
         ("heart", "episodes"),
         # heart.episode_decisions dropped by migration 068 (no runtime writer;
         # episode <-> decision now derived from the shared session_id)

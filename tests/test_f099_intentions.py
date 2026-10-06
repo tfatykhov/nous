@@ -389,17 +389,17 @@ async def test_a_cancel_holding_the_root_row_stops_a_spawn(db):
 async def test_close_for_source_closes_once_and_always_returns_the_id(db):
     agent = _agent()
     source = uuid.uuid4()
-    row = await _record(db, agent, _spec(), source_id=source)
+    row = await _record(db, agent, _spec(), source_kind="dag", source_id=source)
     async with db.session() as s:
-        first = await intentions.close_for_source(s, agent, "subtask", source)
+        first = await intentions.close_for_source(s, agent, "dag", source)
         await s.commit()
     async with db.session() as s:
         closed = await s.get(Intention, row.id)
-        second = await intentions.close_for_source(s, agent, "subtask", source, reason="delivered")
+        second = await intentions.close_for_source(s, agent, "dag", source, reason="delivered")
         await s.commit()
     async with db.session() as s:
         again = await s.get(Intention, row.id)
-        missing = await intentions.close_for_source(s, agent, "subtask", uuid.uuid4())
+        missing = await intentions.close_for_source(s, agent, "dag", uuid.uuid4())
     assert first == second == row.id and missing is None
     assert (closed.state, closed.close_reason) == ("closed", "legacy")
     assert closed.result_at is not None and closed.closed_at is not None
@@ -601,3 +601,12 @@ def test_enabled_reads_only_a_real_true():
     assert intentions.enabled(Settings(_env_file=None, result_inbox_enabled=True, intentions_enabled=True))
     assert not intentions.enabled(Settings(_env_file=None))
     assert not intentions.enabled(MagicMock())  # a mocked Settings is not "on"
+
+
+def test_an_unreadable_lineage_is_refused_with_a_message_the_model_can_act_on():
+    with pytest.raises(intentions.IntentionParentMissing) as err:
+        intentions.spec_from_tool_call(
+            intent="x", wake_policy=None, origin_kind="subtask", intention_id=intentions.UNREADABLE_LINEAGE
+        )
+    assert "lineage could not be read" in str(err.value)
+    assert "unreadable-lineage" not in str(err.value)
