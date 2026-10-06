@@ -36,6 +36,7 @@ from nous.heartbeat.dynamic import (
     render_findings,
 )
 from nous.heartbeat.finding_store import FindingStore
+from nous.heartbeat.quiet_hours import in_quiet_hours
 from nous.heartbeat.registry import BaseCheck, CheckRegistry
 from nous.heartbeat.schemas import CheckResult, Finding, FindingAction, HeartbeatResult
 from nous.heartbeat.tuner import HeartbeatTuner
@@ -1327,16 +1328,7 @@ class HeartbeatRunner:
 
     def _in_quiet_hours(self) -> bool:
         """Check if current hour falls in quiet range."""
-        hour = datetime.now(UTC).hour
-        start = self._settings.heartbeat_quiet_start
-        end = self._settings.heartbeat_quiet_end
-
-        if start <= end:
-            # Simple range: e.g. 9-17
-            return start <= hour < end
-        else:
-            # Wraps midnight: e.g. 23-8
-            return hour >= start or hour < end
+        return in_quiet_hours(self._settings, datetime.now(UTC))
 
     def _has_budget(self) -> bool:
         """Check if daily token budget is not exhausted."""

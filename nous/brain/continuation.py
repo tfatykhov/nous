@@ -10,6 +10,8 @@ every writer.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
@@ -23,6 +25,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain import intentions
+from nous.brain.schemas import ReasonInput, RecordInput
 from nous.storage.models import (
     Decision,
     ExecutionDAG,
@@ -639,6 +642,372 @@ def gate_inputs(reason: str, claim: Claim) -> tuple[Resolution, str | None]:
     raw = raw_results_text(claim.inbox_rows)
     text_ = f"{explanation}\n\nWhat came back:\n{raw}" if raw else explanation
     return Resolution("report", explanation, False, 1.0), text_
+
+
+@dataclass(frozen=True, slots=True)
+class ArrivalCommit:
+    """What ``commit_arrival`` wrote (contract section 4.14)."""
+
+    arrival_id: UUID
+    n: int
+    next_states: dict[UUID, str]
+    decision_record_id: UUID | None
+    report_ids: tuple[UUID, ...]
+
+
+class _FenceLost(Exception):
+    """A fenced UPDATE moved fewer rows than the claim holds: the lease was released, or the root was
+    cancelled or expired, since the claim. Raised inside a SAVEPOINT so nothing the function wrote survives."""
+
+
+# The Brain record embeds the description and searches for links while the claimed rows are locked: bounded.
+# A timeout is one more logged failure that leaves decision_record_id NULL (the commit goes on).
+BRAIN_RECORD_TIMEOUT_SECONDS = 30
+
+
+def push_after_for(settings: Any, now: datetime | None = None) -> datetime:
+    """When an owner-facing row may go to Telegram: ``now``, or the end of the quiet hours (spec 4.5.8)."""
+    # Late: importing nous.heartbeat runs its package __init__, which imports modules that import this one.
+    from nous.heartbeat.quiet_hours import quiet_hours_end
+
+    return quiet_hours_end(settings, now or datetime.now(UTC))
+
+
+def _close_reason(outcome: str) -> str:
+    if outcome == OUTCOME_FALLBACK:
+        return CLOSE_FALLBACK_REPORT
+    if outcome == OUTCOME_FAILED:
+        return CLOSE_FAILED_REPORT
+    return CLOSE_RESOLVED
+
+
+def _clip(text: str, settings: Any) -> str:
+    limit = int(getattr(settings, "result_inbox_body_max_chars", 4000))
+    return text if len(text) <= limit else text[: limit - 20].rstrip() + "\n[truncated]"
+
+
+async def _lock_claimed(session: AsyncSession, agent_id: str, root_id: UUID, ids: list[UUID]) -> None:
+    """Lock the root row FIRST, then the claimed rows in id order, all FOR NO KEY UPDATE (conflict C4: the
+    FK checks of a late child INSERT and of the arrival row take FOR KEY SHARE and must not wait on this).
+
+    Root first, always: ``expire_roots`` (and 2e's ``cancel_root``) lock the root and then update the
+    lineage's open rows, so a path that held a claimed row and then asked for the root would close a
+    cycle with them (a deadlock Postgres breaks by aborting one side with an error that is not a lost
+    fence). Deliberately NOT a fence: there is no state or token predicate here, so each fenced UPDATE
+    below is independently necessary. What the locks buy is that a writer of an inbox row
+    (``record_result`` locks the intention first) either finished before we look for late rows, or waits
+    for our commit."""
+    await session.execute(
+        select(Intention.id)
+        .where(Intention.agent_id == agent_id, Intention.id == root_id)
+        .with_for_update(key_share=True)
+    )
+    await session.execute(
+        select(Intention.id)
+        .where(Intention.agent_id == agent_id, Intention.id.in_(ids))
+        .order_by(Intention.id)
+        .with_for_update(key_share=True)
+    )
+
+
+async def _fenced_move(
+    session: AsyncSession, agent_id: str, ids: list[UUID], token: UUID, values: dict[str, Any]
+) -> set[UUID]:
+    """The fenced UPDATE of claimed intentions: the ids it moved. Every statement that changes a claimed
+    intention goes through here: ``state = 'deciding' AND claim_token = :token`` is in the WHERE."""
+    if not ids:
+        return set()
+    moved = await session.execute(
+        update(Intention)
+        .where(
+            Intention.agent_id == agent_id,
+            Intention.id.in_(ids),
+            Intention.state == STATE_DECIDING,
+            Intention.claim_token == token,
+        )
+        .values(**values)
+        .returning(Intention.id)
+        .execution_options(synchronize_session=False)
+    )
+    return set(moved.scalars().all())
+
+
+async def _root_origin_channel(session: AsyncSession, agent_id: str, root_id: UUID, fallback: str | None) -> str | None:
+    """Where the conversation came from: the root's origin channel (a continuation turn has none,
+    so every descendant's is NULL), else ``fallback``."""
+    channel = (
+        await session.execute(
+            select(Intention.origin_channel).where(Intention.agent_id == agent_id, Intention.id == root_id)
+        )
+    ).scalar_one_or_none()
+    return channel or fallback
+
+
+async def _verified_progress(
+    session: AsyncSession,
+    agent_id: str,
+    ids: list[UUID],
+    *,
+    resolution: Resolution,
+    outcome: str,
+    gate_reason: str | None,
+    wrote_memory: bool,
+) -> bool | None:
+    """Spec 4.5.4: the model's claim, kept only if the arrival spawned work (a child of a claimed
+    intention), changed the plan (``revise``) or wrote memory. NULL where no model decided
+    (a gate arrival, ``failed_report``); a fallback made no decision about progress: false."""
+    if gate_reason is not None or outcome == OUTCOME_FAILED:
+        return None
+    if outcome == OUTCOME_FALLBACK or not resolution.progress_claimed:
+        return False
+    if resolution.decision == "revise" or wrote_memory:
+        return True
+    spawned = (
+        await session.execute(select(exists().where(Intention.agent_id == agent_id, Intention.parent_id.in_(ids))))
+    ).scalar_one()
+    return bool(spawned)
+
+
+async def _record_brain(
+    session: AsyncSession,
+    brain: Any,
+    *,
+    claim: Claim,
+    resolution: Resolution,
+    ids: list[UUID],
+    n: int,
+) -> UUID | None:
+    """One Brain decision per arrival (G5), category process, stakes low (spec 4.5.6). Runs in its own
+    SAVEPOINT: whatever the Brain does (it rejects a description that reads as noise, its store can be
+    down), the arrival commits. The description is fixed-shape so it is never noise; the note, which
+    may be a single word, is the reason."""
+    if brain is None:
+        return None
+    root_id = claim.root_id
+    note = (resolution.note or "").strip()
+    try:
+        async with session.begin_nested():
+            detail = await asyncio.wait_for(
+                brain.record(
+                    RecordInput(
+                        description=f"F099 arrival {n} on '{claim.deepest.intent[:120]}': {resolution.decision}",
+                        confidence=min(1.0, max(0.0, float(resolution.confidence))),
+                        category="process",
+                        stakes="low",
+                        context=json.dumps(
+                            {"root_id": str(root_id), "intention_ids": [str(i) for i in ids], "arrival_n": n}
+                        ),
+                        tags=["f099", resolution.decision],
+                        reasons=[ReasonInput(type="analysis", text=note[:2000])] if note else [],
+                        session_id=f"{INTENT_SESSION_PREFIX}{root_id}",
+                    ),
+                    session=session,
+                ),
+                timeout=BRAIN_RECORD_TIMEOUT_SECONDS,  # it embeds and searches while the claimed rows are locked
+            )
+        return detail.id
+    except Exception:
+        logger.warning("F099: could not record the Brain decision of arrival %s of root %s", n, root_id, exc_info=True)
+        return None
+
+
+async def commit_arrival(
+    session: AsyncSession,
+    agent_id: str,
+    claim: Claim,
+    *,
+    resolution: Resolution,
+    outcome: str,
+    gate_reason: str | None = None,
+    tokens: tuple[int, int] = (0, 0),
+    brain: Any = None,
+    settings: Any,
+    report_text: str | None = None,
+    wrote_memory: bool = False,
+    arrival_id: UUID | None = None,
+    now: datetime | None = None,
+) -> ArrivalCommit | None:
+    """T9, T10, T11: the one fenced commit of an arrival (spec 4.5.6, contract 4.14), in the caller's
+    transaction. None when the fence rejected it (the claim was released, or the root was cancelled
+    or expired): nothing is written then, and the caller discards the turn's result.
+
+    ``tokens`` is ``(tokens_in, tokens_out)``. ``report_text`` is the body of the REPORT of a gate
+    escalation or a fallback (the note otherwise). ``wrote_memory`` is the turn's evidence for
+    ``progress``. ``arrival_id`` is the id the turn's context carried. Does not commit and emits
+    nothing: the runner emits ``intention.arrival_decided`` after it commits.
+    """
+    if resolution.decision not in DECISIONS:
+        raise ValueError(f"decision must be one of {DECISIONS}, not {resolution.decision!r}")
+    if gate_reason is not None and gate_reason not in GATE_REASONS:
+        raise ValueError(f"unknown gate reason {gate_reason!r}")
+    try:
+        async with session.begin_nested():
+            return await _commit_arrival(
+                session,
+                agent_id,
+                claim,
+                resolution=resolution,
+                outcome=outcome,
+                gate_reason=gate_reason,
+                tokens=tokens,
+                brain=brain,
+                settings=settings,
+                report_text=report_text,
+                wrote_memory=wrote_memory,
+                arrival_id=arrival_id or uuid.uuid4(),
+                now=now or datetime.now(UTC),
+            )
+    except _FenceLost:
+        logger.warning(
+            "F099: the claim %s of root %s is no longer live; its decision is discarded",
+            claim.claim_token.hex[:8],
+            claim.root_id,
+        )
+        return None
+
+
+async def _commit_arrival(
+    session: AsyncSession,
+    agent_id: str,
+    claim: Claim,
+    *,
+    resolution: Resolution,
+    outcome: str,
+    gate_reason: str | None,
+    tokens: tuple[int, int],
+    brain: Any,
+    settings: Any,
+    report_text: str | None,
+    wrote_memory: bool,
+    arrival_id: UUID,
+    now: datetime,
+) -> ArrivalCommit:
+    ids = sorted(i.id for i in claim.intentions)
+    root_id, deepest = claim.root_id, claim.deepest
+    await _lock_claimed(session, agent_id, root_id, ids)
+
+    # Rows that arrived after the claim read them (held, because the intention was deciding): they are
+    # not consumed by this arrival, and their intention goes back to result_ready (T11), except after ask.
+    shown = [row.id for row in claim.inbox_rows]
+    late_query = select(ResultInbox.intention_id).where(
+        intention_keyed(agent_id, ids), ResultInbox.delivered_at.is_(None)
+    )
+    if shown:
+        late_query = late_query.where(ResultInbox.id.notin_(shown))
+    late = set((await session.execute(late_query.distinct())).scalars().all())
+
+    next_states: dict[UUID, str] = {}
+    groups: dict[tuple[str, str | None], list[UUID]] = {}
+    for intention_id in ids:
+        if gate_reason == "cancelled":
+            target: tuple[str, str | None] = (STATE_CANCELLED, CLOSE_CANCELLED)
+        elif gate_reason == "expired":
+            target = (STATE_EXPIRED, CLOSE_EXPIRED)
+        elif resolution.decision == "ask":
+            target = (STATE_AWAITING_OWNER, None)
+        elif intention_id in late:
+            target = (STATE_RESULT_READY, None)
+        else:
+            target = (STATE_CLOSED, _close_reason(outcome))
+        next_states[intention_id] = target[0]
+        groups.setdefault(target, []).append(intention_id)
+    for (state, reason), group in groups.items():
+        values: dict[str, Any] = {"state": state, "claim_token": None, "claimed_at": None, "updated_at": now}
+        if outcome != OUTCOME_FAILED or state != STATE_CLOSED:
+            values["attempts"] = 0  # only a failed_report that closes keeps the count that ended it
+        if state in (STATE_CLOSED, STATE_CANCELLED, STATE_EXPIRED):
+            values.update(close_reason=reason, closed_at=now)
+        if state == STATE_RESULT_READY:
+            values["result_at"] = now
+        if await _fenced_move(session, agent_id, group, claim.claim_token, values) != set(group):
+            raise _FenceLost
+
+    # Delivery is stamped here and only here (spec 4.3 item 1): after the fenced moves above, in the
+    # same SAVEPOINT, on exactly the rows the turn was shown. A lost fence rolls this back with them.
+    if shown:
+        await session.execute(
+            update(ResultInbox)
+            .where(ResultInbox.agent_id == agent_id, ResultInbox.id.in_(shown), ResultInbox.delivered_at.is_(None))
+            .values(delivered_at=now, delivered_session_id=f"{INTENT_SESSION_PREFIX}{root_id}")
+            .execution_options(synchronize_session=False)
+        )
+
+    n = (
+        1
+        + (
+            await session.execute(
+                select(func.coalesce(func.max(IntentionArrival.n), 0)).where(
+                    IntentionArrival.agent_id == agent_id, IntentionArrival.root_id == root_id
+                )
+            )
+        ).scalar_one()
+    )
+    progress = await _verified_progress(
+        session,
+        agent_id,
+        ids,
+        resolution=resolution,
+        outcome=outcome,
+        gate_reason=gate_reason,
+        wrote_memory=wrote_memory,
+    )
+    decision_record_id = await _record_brain(session, brain, claim=claim, resolution=resolution, ids=ids, n=n)
+
+    report_ids: list[UUID] = []
+    kind = {"ask": MSG_QUESTION, "report": MSG_REPORT}.get(resolution.decision)
+    if kind is not None:
+        origin = await _root_origin_channel(session, agent_id, root_id, deepest.origin_channel)
+        channel = owner_channel(settings, origin)
+        if channel is None:
+            logger.error(
+                "F099: arrival %s of root %s has a %s for the owner and no owner channel (no origin channel, no "
+                "default chat); it cannot be written",
+                n,
+                root_id,
+                kind,
+            )
+        else:
+            body = resolution.note if kind == MSG_QUESTION else (report_text or resolution.note)
+            report_ids.append(
+                await insert_report(
+                    session,
+                    agent_id,
+                    kind=kind,
+                    title=f"{'Question' if kind == MSG_QUESTION else 'Update'}: {deepest.intent}",
+                    body=_clip(body, settings),
+                    channel=channel,
+                    intention_id=deepest.id,
+                    root_id=root_id,
+                    arrival_id=arrival_id,
+                    push_after=push_after_for(settings, now),
+                )
+            )
+
+    session.add(
+        IntentionArrival(
+            id=arrival_id,
+            agent_id=agent_id,
+            root_id=root_id,
+            n=n,
+            intention_ids=ids,
+            inbox_ids=shown,
+            report_ids=report_ids,
+            claim_token=claim.claim_token,
+            decision=resolution.decision,
+            note=resolution.note,
+            progress_claimed=resolution.progress_claimed,
+            progress=progress,
+            confidence=resolution.confidence,
+            gate_reason=gate_reason,
+            tokens_in=tokens[0],
+            tokens_out=tokens[1],
+            decision_record_id=decision_record_id,
+            outcome=outcome,
+            decided_at=now,
+        )
+    )
+    await session.flush()
+    return ArrivalCommit(arrival_id, n, next_states, decision_record_id, tuple(report_ids))
 
 
 # A fixed namespace: the report of an arrival nothing can reopen has a
