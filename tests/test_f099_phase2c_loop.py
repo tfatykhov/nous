@@ -445,6 +445,59 @@ async def test_a_cancellation_from_within_an_arrival_is_a_failed_attempt_and_coo
         await cont.stop()
 
 
+async def test_a_cancellation_from_within_ending_the_session_keeps_the_decision(runner_env, caplog):  # noqa: F811
+    """Final review M1: a CancelledError nobody requested out of end_conversation comes after the model decided. The
+    decision is committed (no attempt charged, no second turn); the session is left to the idle monitor."""
+    env = await runner_env([resolve("report", "The snow is deep.")])
+    root = await _ready_root(env)
+    cont = _cont(env)
+    ended = asyncio.Event()
+
+    async def cancelled_from_within(session_id, *args, **kwargs):
+        ended.set()
+        victim = asyncio.get_running_loop().create_future()
+        victim.cancel()
+        await victim  # nobody cancelled the arrival's task
+
+    env.runner.end_conversation = cancelled_from_within
+    await cont.start()
+    try:
+        await asyncio.wait_for(ended.wait(), timeout=10)
+        await _until_arrived(env, root.id)
+        (arrival,) = await _arrivals(env, root.id)
+        assert (arrival.decision, arrival.outcome) == ("report", "resolved")
+        fresh = await intention_of(env, "subtask", root.source_id)
+        assert (fresh.state, fresh.close_reason, fresh.attempts) == ("closed", "resolved", 0)  # no attempt charged
+        assert [r.msg_type for r in await inbox_rows(env) if r.source_kind == "intention_report"] == ["REPORT"]
+        assert "could not be ended" in caplog.text and root.id not in cont._cooldown
+        assert len(env.model.calls) == 1 and not cont._task.done()  # one turn; the loop goes on
+    finally:
+        await cont.stop()
+
+
+async def test_a_stop_while_ending_the_session_still_ends_the_arrival(runner_env):  # noqa: F811  # PIN
+    """The other side of the guard: a stop is a real cancel, so it re-raises out of end_conversation, the claim is
+    released without an attempt and nothing is committed."""
+    env = await runner_env([resolve("report", "The snow is deep.")])
+    root = await _ready_root(env)
+    cont = _cont(env)
+    ending = asyncio.Event()
+
+    async def slow_end(session_id, *args, **kwargs):
+        ending.set()
+        await asyncio.sleep(30)
+
+    env.runner.end_conversation = slow_end
+    await cont.start()
+    await asyncio.wait_for(ending.wait(), timeout=10)
+    arrival = cont._running[root.id]
+    await asyncio.wait_for(cont.stop(), timeout=15)
+    assert arrival.cancelled()  # re-raised: the stop ended the arrival
+    assert await _arrivals(env, root.id) == []
+    fresh = await intention_of(env, "subtask", root.source_id)
+    assert (fresh.state, fresh.attempts, fresh.claim_token) == ("result_ready", 0, None)
+
+
 async def test_an_ended_arrival_gives_back_only_what_it_holds(runner_env):  # noqa: F811
     """The done callback unmaps its root only while the map still holds THIS task (a late callback of an older task
     cannot unmap a newer arrival, which 2e's cancel reads), and the cap is bounded: a stray release raises instead of

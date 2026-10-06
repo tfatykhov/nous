@@ -800,6 +800,28 @@ async def _verified_progress(
     return bool(spawned)
 
 
+async def has_open_work(session: AsyncSession, agent_id: str, claim: Claim) -> bool:
+    """Whether a ``continue`` or ``revise`` of this claim would leave anything running under its root (final review
+    I1). The commit closes the claimed intentions, so without one of these nothing would ever wake the root again:
+    an open intention of the root other than the claimed ones (a fan-out's sibling still running, or this turn's
+    spawn), or a child of a claimed intention created at or after the claim (spawned this turn, even if it has
+    already finished). Rows only, the same bound as ``_verified_progress``."""
+    ids = [i.id for i in claim.intentions]
+    open_elsewhere = exists().where(
+        Intention.agent_id == agent_id,
+        Intention.root_id == claim.root_id,
+        Intention.id.notin_(ids),
+        Intention.state.in_(OPEN_STATES),
+    )
+    # claim_root reloaded the claimed rows after its UPDATE: claimed_at is the claim's own now().
+    spawned = exists().where(
+        Intention.agent_id == agent_id,
+        Intention.parent_id.in_(ids),
+        Intention.created_at >= claim.intentions[0].claimed_at,
+    )
+    return bool((await session.execute(select(or_(open_elsewhere, spawned)))).scalar_one())
+
+
 async def _record_brain(
     session: AsyncSession,
     brain: Any,
@@ -1093,6 +1115,7 @@ async def fail_attempt(
     settings: Any,
     brain: Any = None,
     now: datetime | None = None,
+    arrival_id: UUID | None = None,
 ) -> str:
     """T8 and T12: one claimed attempt failed (the turn raised or timed out, or its lease expired).
 
@@ -1106,7 +1129,9 @@ async def fail_attempt(
     more failure (a successful commit resets the count). Does not commit.
 
     Each path charges the attempt in its one fenced UPDATE (the retry's move, or the arrival's moves at the
-    cap), so the claim token in that UPDATE is the fence and nothing else stands in for it.
+    cap), so the claim token in that UPDATE is the fence and nothing else stands in for it. ``arrival_id`` is the
+    id of the cap's arrival row (a new one when not given), as ``commit_arrival`` takes it: the caller can name
+    that row in ``intention.arrival_decided``.
     """
     now = now or datetime.now(UTC)
     ids = sorted(i.id for i in claim.intentions)
@@ -1154,7 +1179,7 @@ async def fail_attempt(
                 settings=settings,
                 report_text=f"{body}\n\n{raw}" if raw else body,
                 wrote_memory=False,
-                arrival_id=uuid.uuid4(),
+                arrival_id=arrival_id or uuid.uuid4(),
                 now=now,
             )
             return CLOSE_FAILED_REPORT

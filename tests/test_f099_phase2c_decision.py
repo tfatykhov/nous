@@ -24,13 +24,20 @@ BLOCKED = RootLimits(depth=3, spawns=5, turns=1, tokens=5000, stalls=0, spawn_bl
 GOOD = {"decision": "continue", "note": "The snow is deep; check the lifts next.", "progress": True, "confidence": 0.8}
 
 
-def _executor(limits: RootLimits = FREE, *, proposals=()):
+async def _open_work():
+    return True
+
+
+def _executor(limits: RootLimits = FREE, *, proposals=(), open_work: bool = True):
     state = ArrivalState(proposals=list(proposals))
 
     async def limits_of():
         return limits
 
-    return state, make_resolve_intention_executor(state, limits_of=limits_of)
+    async def open_work_of():
+        return open_work
+
+    return state, make_resolve_intention_executor(state, limits_of=limits_of, open_work_of=open_work_of)
 
 
 def test_the_schema_is_the_contracts():  # PIN
@@ -146,10 +153,48 @@ async def test_the_limits_are_read_at_call_time():
         calls.append(1)
         return BLOCKED if len(calls) > 1 else FREE  # spawns made during the turn tip it over
 
-    execute = make_resolve_intention_executor(state, limits_of=limits_of)
+    execute = make_resolve_intention_executor(state, limits_of=limits_of, open_work_of=_open_work)
     assert (await execute(**GOOD))[1] is False
     state.resolution = None
     assert (await execute(**GOOD))[1] is True and len(calls) == 2
+
+
+@pytest.mark.parametrize("decision", ["continue", "revise"])
+async def test_a_continue_or_revise_with_nothing_running_is_refused(decision):
+    """Final review I1: with nothing open under the root and nothing spawned, the commit would close the last open
+    intention and nothing would ever wake the root again. Refused like the limits: the model reads it and corrects."""
+    state, execute = _executor(open_work=False)
+    text, is_error = await execute(**{**GOOD, "decision": decision})
+    assert is_error is True and state.resolution is None
+    assert f"you chose {decision}, but nothing is running under this work" in text
+    assert "spawn_task or dag_create" in text and "report, drop or ask" in text
+
+
+@pytest.mark.parametrize("decision", ["report", "drop", "ask"])
+async def test_an_ending_decision_needs_nothing_running(decision):
+    state, execute = _executor(open_work=False)
+    assert await execute(**{**GOOD, "decision": decision}) == ("Recorded.", False)
+
+
+async def test_the_limit_refusal_comes_before_the_open_work_check():
+    state, execute = _executor(BLOCKED, open_work=False)
+    text, is_error = await execute(**GOOD)
+    assert is_error is True and "depth or spawn limit" in text and "nothing is running" not in text
+
+
+async def test_open_work_is_read_at_call_time():
+    answers = [False, True]  # the model spawns after the refusal, then continues
+    state = ArrivalState()
+
+    async def limits_of():
+        return FREE
+
+    async def open_work_of():
+        return answers.pop(0)
+
+    execute = make_resolve_intention_executor(state, limits_of=limits_of, open_work_of=open_work_of)
+    assert (await execute(**GOOD))[1] is True
+    assert await execute(**GOOD) == ("Recorded.", False) and answers == []
 
 
 async def test_an_integer_confidence_and_a_long_note_are_normalised():

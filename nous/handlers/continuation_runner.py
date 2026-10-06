@@ -94,14 +94,20 @@ class ArrivalState:
 
 
 def make_resolve_intention_executor(
-    state: ArrivalState, *, limits_of: Callable[[], Awaitable[continuation.RootLimits]]
+    state: ArrivalState,
+    *,
+    limits_of: Callable[[], Awaitable[continuation.RootLimits]],
+    open_work_of: Callable[[], Awaitable[bool]],
 ) -> Callable[..., Awaitable[tuple[str, bool]]]:
     """The executor of ``resolve_intention`` for one turn (the ``extra_tools`` shape: ``(text, is_error)``).
 
     A bad call is an error the model reads and can correct: a failing terminal tool does not end the
     loop. A good call stores the resolution and ends it. ``continue`` and ``revise`` are refused when the
-    root is at its depth or spawn limit, judged from rows at the moment of the call (spawns this turn
-    already count); a turn that staged a proposal may only ``ask``.
+    root is at its depth or spawn limit, and when nothing would be left running under the root
+    (``open_work_of``, ``continuation.has_open_work``): the commit closes the claimed intentions, so a
+    continue with nothing open and nothing spawned would end the goal with no one to wake it. Both are
+    judged from rows at the moment of the call (spawns this turn already count); a turn that staged a
+    proposal may only ``ask``.
     """
 
     async def resolve_intention(**kwargs: Any) -> tuple[str, bool]:
@@ -128,6 +134,12 @@ def make_resolve_intention_executor(
             return (
                 f"Error: this work is at its depth or spawn limit{named}, so it cannot "
                 "continue or revise: nothing more can be spawned under it. End with report, drop or ask.",
+                True,
+            )
+        if decision in ("continue", "revise") and not await open_work_of():
+            return (
+                f"Error: you chose {decision}, but nothing is running under this work: spawn the next step first "
+                f"(spawn_task or dag_create), then {decision}; or end with report, drop or ask.",
                 True,
             )
         state.resolution = Resolution(decision, note.strip()[:NOTE_MAX_CHARS], progress, float(confidence))
@@ -552,7 +564,9 @@ class ContinuationRunner:
         extra_tools = {
             "resolve_intention": (
                 RESOLVE_INTENTION_SCHEMA,
-                make_resolve_intention_executor(state, limits_of=self._limits_of(claim.root_id)),
+                make_resolve_intention_executor(
+                    state, limits_of=self._limits_of(claim.root_id), open_work_of=self._open_work_of(claim)
+                ),
             )
         }
         usage = [0, 0]
@@ -635,6 +649,8 @@ class ContinuationRunner:
         claim, the same thread, the tool asked for in words). Returns the last non-empty text."""
         text = await self._run_one(session_id, prompt, extra_tools, context, usage)
         if state.resolution is None:
+            # Also the only way out of a turn that hit max_tool_calls: _tool_loop's closing call is then made with
+            # tools=None, so resolve_intention cannot be called in it. Do not skip the follow-up for that case.
             followup = await self._run_one(session_id, CONTINUATION_FOLLOWUP_PROMPT, extra_tools, context, usage)
             text = followup if followup.strip() else text
         return text
@@ -677,6 +693,13 @@ class ContinuationRunner:
                 return await continuation.root_limits(session, self._agent_id, root_id, settings=self._settings)
 
         return limits_of
+
+    def _open_work_of(self, claim: continuation.Claim) -> Callable[[], Awaitable[bool]]:
+        async def open_work_of() -> bool:
+            async with self._db.session() as session:
+                return await continuation.has_open_work(session, self._agent_id, claim)
+
+        return open_work_of
 
     async def _lineage_context(
         self, session: Any, claim: continuation.Claim
@@ -781,6 +804,7 @@ class ContinuationRunner:
     async def _fail(self, claim: continuation.Claim) -> None:
         """A failed attempt (spec 4.5.7): one more attempt on every claimed intention; the cap closes them
         with their raw results. If even this fails, the lease recovers the claim."""
+        arrival_id = uuid.uuid4()  # the cap's arrival row, named in arrival_decided (contract 4.13)
         try:
             async with self._db.session() as session:
                 outcome = await continuation.fail_attempt(
@@ -790,6 +814,7 @@ class ContinuationRunner:
                     max_attempts=self._settings.continuation_max_attempts,
                     settings=self._settings,
                     brain=None,  # R5: a failed report is not a model decision
+                    arrival_id=arrival_id,
                 )
                 await session.commit()
         except asyncio.CancelledError:
@@ -801,7 +826,7 @@ class ContinuationRunner:
             await self._emit(
                 "intention.arrival_decided",
                 {
-                    "arrival_id": None,
+                    "arrival_id": str(arrival_id),
                     "root_id": str(claim.root_id),
                     "decision": "report",
                     "outcome": continuation.OUTCOME_FAILED,
@@ -820,11 +845,19 @@ class ContinuationRunner:
 
     async def _end_conversation(self, session_id: str) -> None:
         """No conversation state accumulates (spec 4.5.4). Bounded and swallowed: a hung close must not
-        outlive the lease."""
+        outlive the lease. A cancellation nobody requested (Fix-Z) is swallowed too: the turn is over, so the
+        decision it made is committed rather than charged as a failed attempt, and the session is left to the
+        idle monitor. A stop or a cancel of the arrival still re-raises."""
         try:
             await asyncio.wait_for(self._runner.end_conversation(session_id), END_CONVERSATION_TIMEOUT_SECONDS)
         except asyncio.CancelledError:
-            raise
+            if cancel_requested():
+                raise
+            logger.warning(
+                "F099: the session %s could not be ended (cancelled from within); the idle monitor will end it",
+                session_id,
+                exc_info=True,
+            )
         except Exception:
             logger.warning("F099: could not end the session %s", session_id, exc_info=True)
 

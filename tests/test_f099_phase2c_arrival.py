@@ -25,7 +25,7 @@ from sqlalchemy import select
 
 from nous.brain import continuation
 from nous.handlers.continuation_runner import CONTINUATION_FOLLOWUP_PROMPT, ContinuationRunner
-from nous.storage.models import Decision, IntentionArrival
+from nous.storage.models import Decision, Intention, IntentionArrival
 
 pytestmark = pytest.mark.postgres_only  # the runner runs on a real heart, with real locks
 
@@ -159,6 +159,67 @@ async def test_a_root_that_reaches_its_spawn_limit_mid_turn_must_report(runner_e
     assert (arrival.decision, arrival.outcome) == ("report", "resolved")
 
 
+async def _open_under(env, root_id) -> list:
+    async with env.db.session() as s:
+        query = select(Intention).where(
+            Intention.agent_id == env.agent,
+            Intention.root_id == root_id,
+            Intention.state.in_(continuation.OPEN_STATES),
+        )
+        return list((await s.execute(query)).scalars().all())
+
+
+async def test_a_continue_with_nothing_running_is_refused_and_the_turn_reports(runner_env):  # noqa: F811
+    """Final review I1: a continue that spawned nothing, on a root with nothing else open, would close the last open
+    intention and end the goal silently. It is refused; the model reads the refusal and reports instead."""
+    env = await runner_env(
+        [resolve("continue", "Next I check the lifts.", progress=True)],  # refused: nothing would be left running
+        [resolve("report", "The snow is deep; nothing more is running.")],
+    )
+    root = await _ready_root(env)
+    await _cont(env).run_arrival(root.id)
+    assert len(env.model.calls) == 2
+    assert "you chose continue, but nothing is running under this work" in str(env.model.calls[1]["messages"])
+    (arrival,) = await _arrivals(env, root.id)
+    assert (arrival.decision, arrival.outcome) == ("report", "resolved")
+    (report,) = await _owner_rows(env)
+    assert (report.msg_type, report.body) == ("REPORT", "The snow is deep; nothing more is running.")
+    fresh = await intention_of(env, "subtask", root.source_id)
+    assert (fresh.state, fresh.close_reason) == ("closed", "resolved") and await _open_under(env, root.id) == []
+
+
+async def _fan_out(env):
+    """A root whose earlier arrival spawned two children and closed: the shape a fan-out leaves."""
+    root = await make_root(env)
+    first, second = await make_child(env, root), await make_child(env, root)
+    await set_intention(env, root.id, state="closed", close_reason="resolved", closed_at=datetime.now(UTC))
+    await record(env, first)
+    return root, first, second
+
+
+async def test_a_fan_out_continue_with_a_sibling_still_running_is_accepted(runner_env):  # noqa: F811  # PIN
+    env = await runner_env([resolve("continue", "The lifts are open; waiting on the snow report.")])
+    root, first, second = await _fan_out(env)
+    await _cont(env).run_arrival(root.id)
+    assert len(env.model.calls) == 1  # accepted at once: no spawn needed while the sibling runs
+    (arrival,) = await _arrivals(env, root.id)
+    assert (arrival.decision, arrival.outcome, list(arrival.intention_ids)) == ("continue", "resolved", [first.id])
+    assert [i.id for i in await _open_under(env, root.id)] == [second.id]
+
+
+async def test_a_fan_out_continue_with_every_sibling_finished_is_refused(runner_env):  # noqa: F811
+    """The control for the test above: the same shape with the sibling closed leaves nothing running."""
+    env = await runner_env(
+        [resolve("continue", "The lifts are open.")], [resolve("report", "Both checks are in: go tomorrow.")]
+    )
+    root, first, second = await _fan_out(env)
+    await set_intention(env, second.id, state="closed", close_reason="delivered", closed_at=datetime.now(UTC))
+    await _cont(env).run_arrival(root.id)
+    assert "nothing is running under this work" in str(env.model.calls[1]["messages"])
+    (arrival,) = await _arrivals(env, root.id)
+    assert arrival.decision == "report"
+
+
 async def test_a_missing_resolve_intention_gets_one_followup_and_no_forced_tool_choice(runner_env):  # noqa: F811
     env = await runner_env([say("The snow is fine, nothing to do.")], [resolve("drop", "Nothing to do.")])
     root = await _ready_root(env)
@@ -205,7 +266,8 @@ async def test_three_failures_report_the_raw_result(runner_env):  # noqa: F811
     assert (fresh.state, fresh.close_reason, fresh.attempts) == ("closed", "failed_report", 3)
     assert env.cognitive.end_sessions == [f"intent-{root.id}"] * 3  # every attempt ended its session
     decided = [e for e in env.bus.events if e.type == "intention.arrival_decided"]
-    assert [(e.data["outcome"], e.data["arrival_id"]) for e in decided] == [("failed_report", None)]
+    # Final review M2 (contract 4.13): the event names the arrival row the cap wrote, so a consumer can open it.
+    assert [(e.data["outcome"], e.data["arrival_id"]) for e in decided] == [("failed_report", str(arrival.id))]
 
 
 async def test_a_turn_longer_than_the_timeout_counts_as_an_attempt(runner_env):  # noqa: F811
@@ -382,7 +444,9 @@ async def test_a_result_that_asks_for_an_email_produces_no_send(runner_env):  # 
 async def test_memory_the_turn_wrote_verifies_the_progress_claim(runner_env, monkeypatch, status, expected):  # noqa: F811
     env = await runner_env([resolve("continue", "Remembered it.", progress=True)])
     monkeypatch.setattr(env.runner, "executed_tools", lambda session_id: [("learn_fact", status)])
-    root = await _ready_root(env)
+    root = await make_root(env)
+    await make_child(env, root)  # still running, so a continue is allowed; spawned before the claim, so not progress
+    await record(env, root)
     await _cont(env).run_arrival(root.id)
     (arrival,) = await _arrivals(env, root.id)
     assert (arrival.progress_claimed, arrival.progress) == (True, expected)
@@ -455,7 +519,9 @@ async def test_a_learn_fact_the_turn_ran_verifies_progress_through_the_real_ledg
         [use("learn_fact", content="The lifts open at nine.")], [resolve("continue", "Remembered it.", progress=True)]
     )
     env.dispatcher.register("learn_fact", learn_fact, schema)
-    root = await _ready_root(env)
+    root = await make_root(env)
+    await make_child(env, root)  # still running, so a continue is allowed; spawned before the claim, so not progress
+    await record(env, root)
     await _cont(env).run_arrival(root.id)
     (arrival,) = await _arrivals(env, root.id)
     assert (arrival.progress_claimed, arrival.progress) == (True, True)  # nothing spawned: the memory write did it

@@ -150,6 +150,67 @@ async def test_continue_after_spawning_closes_resolved_and_records_the_arrival(e
     assert done.next_states == {root.id: "closed"} and done.report_ids == ()
 
 
+# ---- has_open_work: what a continue or revise needs running under the root (final review I1) ----------------
+
+
+async def _open_work(env, got) -> bool:
+    async with env.db.session() as s:
+        return await continuation.has_open_work(s, env.agent, got)
+
+
+@pytest.mark.postgres_only
+async def test_the_claimed_intentions_are_not_open_work(env_factory):  # noqa: F811
+    env = await env_factory(**CONT)
+    _root, got = await _claimed(env)  # the root alone, deciding: an open state, but the claim's own
+    assert await _open_work(env, got) is False
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [(s, True) for s in continuation.OPEN_STATES] + [(s, False) for s in ("closed", "cancelled", "expired")],
+)
+async def test_an_open_intention_of_the_root_besides_the_claimed_ones_is_open_work(env_factory, state, expected):  # noqa: F811
+    env = await env_factory(**CONT)
+    root = await make_root(env)
+    first, second = await make_child(env, root), await make_child(env, root)
+    await set_intention(env, root.id, state="closed", close_reason="resolved")  # only the sibling can count
+    await record(env, first)
+    got = await claim(env, root.id)
+    assert [i.id for i in got.intentions] == [first.id]
+    await set_intention(env, second.id, state=state)
+    assert await _open_work(env, got) is expected
+
+
+@pytest.mark.postgres_only
+async def test_a_child_spawned_since_the_claim_is_open_work_even_once_closed(env_factory):  # noqa: F811
+    env = await env_factory(**CONT)
+    _root, got = await _claimed(env)
+    child = await make_child(env, got.deepest)  # the turn spawned it
+    assert await _open_work(env, got) is True
+    await set_intention(env, child.id, state="closed", close_reason="delivered")  # it already finished
+    assert await _open_work(env, got) is True
+
+
+@pytest.mark.postgres_only
+async def test_a_child_closed_before_the_claim_is_not_open_work(env_factory):  # noqa: F811
+    env = await env_factory(**CONT)
+    root = await make_root(env)
+    earlier = await make_child(env, root)  # an earlier arrival's spawn, finished before this claim
+    await set_intention(env, earlier.id, state="closed", close_reason="delivered")
+    _root, got = await _claimed(env, root=root)
+    assert await _open_work(env, got) is False
+
+
+@pytest.mark.postgres_only
+async def test_another_roots_open_intentions_are_not_open_work(env_factory):  # noqa: F811
+    env = await env_factory(**CONT)
+    other = await make_root(env)
+    await make_child(env, other)  # another root, with open work of its own
+    _root, got = await _claimed(env)
+    assert await _open_work(env, got) is False
+
+
 @pytest.mark.postgres_only
 async def test_delivery_is_stamped_only_by_the_commit_on_the_rows_the_turn_was_shown(env_factory):  # noqa: F811
     env = await env_factory(**CONT)
