@@ -512,6 +512,8 @@ async def route_result(
     * ``continue``: intention-only routing, no routing key consulted and no default chat
       (``record_continue_result``: the row and the move to ``result_ready`` in one transaction);
     * ``report``: the F098-keyed row and the ``delivered`` close in one transaction (``insert_and_close``);
+      with no routing key the row goes to ``continuation.owner_channel``, and with no owner channel
+      either nothing is written and the intention closes as ``legacy``;
     * ``none``, ``remember``, a container, or no intention: closed (before the routing check, so a
       result nobody is routed still closes) and routed as F098 Phase A.
 
@@ -534,6 +536,19 @@ async def route_result(
         return recorded.inserted
     if not channel and not session_id:
         channel = default_channel
+    if intention is not None and policy == intentions.WAKE_REPORT and env is not None and not (channel or session_id):
+        # Spec 4.1: an owner-facing result with no routing key goes to the origin channel, else the default chat.
+        channel = continuation.owner_channel(settings, intention.origin_channel)
+        if channel is None:
+            # Nothing can be delivered, so the close is not close_reason_for's 'delivered'.
+            logger.warning(
+                "F099: the report of %s %s has no owner channel (no origin channel, no default chat); "
+                "it stays on its work row",
+                source_kind,
+                str(source_id)[:8],
+            )
+            await store.close_source_intention(source_kind, source_id, reason=intentions.CLOSE_LEGACY)
+            return False
     if env is None or not (channel or session_id):
         await close_intention_quietly(store, settings, source_kind, source_id)
         return False

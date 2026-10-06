@@ -224,7 +224,8 @@ class InboxDagPass:
             if continuation.enabled(settings):
                 # F099 Phase 2: a DAG a continuation spawned has no origin, and its row is keyed by its
                 # intention alone. Without this its lost row would never be repaired. A closed
-                # intention counts: a retried DAG (new generation) reopens it.
+                # intention counts unless it was closed 'legacy': a retried DAG (new generation)
+                # reopens it, but nothing reopens a legacy close.
                 routable = or_(
                     routable,
                     continuation.has_continue_intention(

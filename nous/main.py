@@ -255,7 +255,7 @@ def _telegram_text_push(settings: Settings) -> Callable[[str], Awaitable[bool]] 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"https://api.telegram.org/bot{token}/sendMessage",
-                    json={"chat_id": chat_id, "text": text[:3900]},
+                    json={"chat_id": chat_id, "text": text[: continuation.RAW_PUSH_CHARS]},
                     timeout=10,
                 )
             return response.status_code < 400

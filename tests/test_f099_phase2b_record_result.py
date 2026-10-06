@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from f099_support import (  # noqa: F401
@@ -144,6 +144,27 @@ async def test_a_closed_continue_intention_with_an_open_root_reopens(env_factory
     assert len(await inbox_rows(env, st.id)) == 2
 
 
+async def test_a_reopen_clears_the_previous_claim_and_attempts(env_factory):  # noqa: F811
+    """T6: the new arrival starts 2c's lease and attempt count from scratch, not from the last one's."""
+    env = await env_factory(**CONT)
+    st = await make_subtask(env)
+    await _record(env, st)
+    it = await intention_of(env, "subtask", st.id)
+    await set_intention(
+        env,
+        it.id,
+        state="closed",
+        close_reason="resolved",
+        closed_at=datetime.now(UTC),
+        claim_token=uuid.uuid4(),
+        claimed_at=datetime.now(UTC),
+        attempts=2,
+    )
+    assert (await _record(env, st, generation=1)).reopened is True
+    after = await intention_of(env, "subtask", st.id)
+    assert (after.state, after.claim_token, after.claimed_at, after.attempts) == ("result_ready", None, None, 0)
+
+
 def _split(rows):
     """(the source-keyed rows, the intention_report rows) of an environment's inbox."""
     return (
@@ -262,6 +283,24 @@ async def test_a_reported_result_settles_its_work_row_for_the_reconciler_passes(
     assert stamped.delivered_at is not None and stamped.delivered_session_id.startswith("report:")
     rows, _ = await env.heart.result_inbox.claim(channel=CHAN, session_id="S1", max_age_hours=72, max_items=10)
     assert [r.source_kind for r in rows] == ["intention_report"]  # the report only, never the settled twin
+
+
+async def test_a_report_of_an_old_result_gets_a_fresh_claim_window_and_its_twin_keeps_the_works_time(env_factory):  # noqa: F811
+    """An owner-facing row's created_at is when the owner can see it, so F098's claim window starts then.
+    The reconciler passes hand record_result the work's completed_at; here the result finished 100 h
+    ago (the passes themselves select only the last 72 h, so the call is made directly, with the
+    created_at they would pass). The settled twin is the work row's record and keeps that time."""
+    env = await env_factory(**CONT)
+    st = await make_subtask(env)
+    it = await intention_of(env, "subtask", st.id)
+    await set_intention(env, it.id, state="closed", close_reason="resolved", root_cancelled_at=datetime.now(UTC))
+    finished = datetime.now(UTC) - timedelta(hours=100)
+    before = datetime.now(UTC)
+    assert (await _record(env, st, created_at=finished)).reported is True
+    (twin,), (report,) = _split(await inbox_rows(env))
+    assert twin.created_at == finished and report.created_at >= before
+    rows, _ = await env.heart.result_inbox.claim(channel=CHAN, session_id="S9", max_age_hours=72, max_items=10)
+    assert [r.id for r in rows] == [report.id]
 
 
 async def test_a_cancelled_intention_reports_instead_of_waking(env_factory):  # noqa: F811

@@ -243,9 +243,11 @@ async def _insert_report_row(
     arrival_id: UUID | None = None,
     proposal_id: UUID | None = None,
     push_after: datetime | None = None,
-    created_at: datetime | None = None,
 ) -> UUID | None:
-    """The row of ``insert_report``; its id, or None when ``report_id`` was already written."""
+    """The row of ``insert_report``; its id, or None when ``report_id`` was already written.
+
+    Always stamped now, never with the work's age: an owner-facing row's ``created_at`` is when the
+    owner can see it, so F098's claim window (``result_inbox_max_age_hours``) starts then."""
     if not channel or not channel.strip():
         raise ValueError("an owner-facing row needs a channel (spec section 4.3 item 4)")
     row_id = await insert_inbox_row(
@@ -258,7 +260,6 @@ async def _insert_report_row(
         body=body,
         channel=channel.strip(),
         correlation_id=str(report_id),
-        created_at=created_at,
         intention_id=intention_id,
         arrival_id=arrival_id,
         proposal_id=proposal_id,
@@ -307,10 +308,11 @@ async def _set_result_ready(
     session: AsyncSession, agent_id: str, intention_id: UUID, *, from_state: str, now: datetime
 ) -> None:
     """T4 (``pending``) and T6 (``closed``, a reopen): the conditional UPDATE. The caller holds
-    the row lock, so a miss is a bug, not a race: it raises and the caller's transaction rolls back."""
+    the row lock, so a miss is a bug, not a race: it raises and the caller's transaction rolls back.
+    A reopen also clears the previous arrival's claim and attempts, so 2c's lease starts fresh."""
     values: dict[str, Any] = {"state": STATE_RESULT_READY, "result_at": now, "updated_at": now}
     if from_state == STATE_CLOSED:
-        values.update(close_reason=None, closed_at=None)
+        values.update(close_reason=None, closed_at=None, claim_token=None, claimed_at=None, attempts=0)
     moved = (
         await session.execute(
             update(Intention)
@@ -394,7 +396,8 @@ async def record_result(
         report_id = arrival_report_id(source_kind, source_id, source_generation)
         # MF-1: the work row's own inbox row, NULL-keyed and already delivered. The F098 reconciler passes
         # decide "needs repair" by this row (has_row): without it they would re-select the work row on
-        # every tick for good. NULL-keyed and delivered, no chat turn can claim it.
+        # every tick for good. NULL-keyed and delivered, no chat turn can claim it, so it keeps the work's
+        # created_at; the REPORT below, which chat claims, is stamped now.
         twin = await insert_inbox_row(
             session,
             agent_id,
@@ -438,7 +441,6 @@ async def record_result(
             intention_id=intention_id,
             root_id=root_id,
             arrival_id=arrival_id,
-            created_at=created_at,
         )
         wrote = report_row is not None
         return ResultRecorded(report_row, wrote, state, False, wrote, intention_id, root_id)
@@ -480,7 +482,7 @@ class RollbackReport:
 
 _ROLLBACK_STATES = (STATE_RESULT_READY, "deciding", "awaiting_owner")
 _SWEEP_BATCH = 200
-_RAW_PUSH_CHARS = 3900
+RAW_PUSH_CHARS = 3900
 # delivered_session_id of a row the rollback sent by Telegram instead of routing.
 ROLLBACK_SESSION_ID = "rollback"
 
@@ -492,13 +494,16 @@ async def rollback_at_startup(
 
     Open ``continue`` intentions in ``result_ready``, ``deciding`` or ``awaiting_owner`` have their
     undelivered intention-keyed inbox rows re-routed to ``owner_channel`` (so F098's chat turn shows
-    them), their ``staged`` and ``pending`` proposals expired (a later tap is refused), and are closed
+    them; a re-routed row is stamped ``created_at`` now, so the claim window starts when chat can see
+    it), their ``staged`` and ``pending`` proposals expired (a later tap is refused), and are closed
     as ``legacy`` with the claim cleared; so is every ``pending`` intention whose source is already
     terminal (work that finished while the flags were off: task-1.9 carry-over 2). It runs whenever
     ``brain.intentions`` exists, ``NOUS_INTENTIONS_ENABLED`` off included, and does nothing when the
     continuation flag is on. If the inbox is off too, a re-routed row would be invisible: each row is
     sent by ``telegram_push`` instead and stamped delivered, and an intention whose push failed stays
-    open for the next start (a result is never dropped to make the close succeed).
+    open for the next start. With the inbox off and no Telegram configured there is no channel to
+    deliver to: the intention closes with a WARNING and the result stays on its work row (the subtask
+    or DAG).
 
     One transaction applies the re-route, the expiry and the close, so a close can never outrun its
     rows. The network sends happen before it, outside any transaction, so the raw push is
@@ -551,7 +556,7 @@ async def rollback_at_startup(
         elif telegram_push is not None:
             for it in open_rows:
                 for row in stuck[it.id]:
-                    if await telegram_push(f"{row.title}\n\n{row.body}"[:_RAW_PUSH_CHARS]):
+                    if await telegram_push(f"{row.title}\n\n{row.body}"[:RAW_PUSH_CHARS]):
                         pushed_ids.append(row.id)
                     else:
                         keep_open.add(it.id)
@@ -580,10 +585,12 @@ async def rollback_at_startup(
                         it.id,
                     )
                 elif row_ids:
+                    # created_at is when chat can see the row, so F098's claim window starts now and
+                    # not at the age of the work (a result that waited past it would never be shown).
                     moved = await session.execute(
                         update(ResultInbox)
                         .where(ResultInbox.id.in_(row_ids), ResultInbox.delivered_at.is_(None))
-                        .values(channel=channel, reply_to=channel)
+                        .values(channel=channel, reply_to=channel, created_at=now)
                         .execution_options(synchronize_session=False)
                     )
                     rerouted += moved.rowcount or 0

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from f099_support import (  # noqa: F401
@@ -16,15 +16,16 @@ from f099_support import (  # noqa: F401
     finish,
     inbox_rows,
     intention_of,
+    make_dag,
     make_subtask,
     set_intention,
 )
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from nous.brain import continuation
 from nous.brain.intentions import IntentionSpec
 from nous.config import Settings
-from nous.storage.models import IntentionProposal
+from nous.storage.models import Intention, IntentionProposal, ResultInbox
 
 pytestmark = pytest.mark.postgres_only  # the sweep half uses a CAST(text AS uuid) join
 
@@ -85,6 +86,22 @@ async def test_the_rollback_reroutes_expires_and_closes_with_both_flags_off(env_
     assert (row.channel, row.reply_to, row.session_id) == (CHAN, CHAN, None)
     rows, _ = await env.heart.result_inbox.claim(channel=CHAN, session_id="S9", max_age_hours=72, max_items=10)
     assert [r.id for r in rows] == [row.id]  # the next chat turn sees the result F098 style
+
+
+async def test_a_rerouted_row_gets_a_fresh_claim_window(env_factory):  # noqa: F811
+    """A row's created_at is when chat can see it: a result that waited 100 h for a flag-off restart is
+    still claimed, not aged out of F098's 72 h window by the time it waited."""
+    env = await env_factory(**CONT)
+    st, _ = await _stuck(env)
+    (row,) = await inbox_rows(env, st.id)
+    async with env.db.session() as s:
+        old = datetime.now(UTC) - timedelta(hours=100)
+        await s.execute(update(ResultInbox).where(ResultInbox.id == row.id).values(created_at=old))
+        await s.commit()
+    report = await continuation.rollback_at_startup(env.db, _off(env, result_inbox_enabled=True), telegram_push=None)
+    assert report.rerouted_rows == 1
+    rows, _ = await env.heart.result_inbox.claim(channel=CHAN, session_id="S9", max_age_hours=72, max_items=10)
+    assert [r.id for r in rows] == [row.id]
 
 
 async def test_a_second_rollback_changes_nothing(env_factory):  # noqa: F811
@@ -207,3 +224,53 @@ async def test_with_the_inbox_off_and_no_telegram_the_intention_still_closes(env
         report = await continuation.rollback_at_startup(env.db, _off(env), telegram_push=None)
     assert (report.closed, report.pushed_raw) == (1, 0)
     assert "cannot be delivered" in caplog.text
+
+
+# ---- prod's exact flags: inbox on, intentions on, continuation off ------------------------------------------
+
+
+async def _intention_states(env) -> dict:
+    async with env.db.session() as s:
+        rows = await s.execute(
+            select(Intention.id, Intention.state, Intention.close_reason).where(Intention.agent_id == env.agent)
+        )
+        return {r.id: (r.state, r.close_reason) for r in rows}
+
+
+def _row_keys(rows) -> list:
+    return [
+        (r.id, r.channel, r.reply_to, r.session_id, r.created_at, r.delivered_at, r.delivered_session_id) for r in rows
+    ]
+
+
+async def test_the_rollback_under_prods_flags_moves_no_row_and_pushes_nothing(env_factory):  # noqa: F811  # PIN
+    """2b-8 ruling 3, on Phase 1-shaped data: delivered and waiting channel-keyed rows, pending intentions
+    whose source finished with no writer, and one whose source still runs. The rollback re-routes nothing,
+    sends nothing, and closes exactly the pending intentions of finished sources, as legacy."""
+    env = await env_factory(**ON, telegram_chat_id="4242")
+    seen = await make_subtask(env)
+    await finish(env, seen)
+    await env.pool._record_inbox(seen)
+    claimed, _ = await env.heart.result_inbox.claim(channel=CHAN, session_id="S1", max_age_hours=72, max_items=10)
+    assert len(claimed) == 1  # a delivered channel-keyed row
+    waiting = await make_subtask(env, policy="remember")
+    await finish(env, waiting)
+    await env.pool._record_inbox(waiting)  # an undelivered channel-keyed row
+    lost = await make_subtask(env)
+    await finish(env, lost)  # finished, its writer never ran: pending with a terminal source
+    running = await make_subtask(env)
+    dag, _ = await make_dag(env, origin_channel=CHAN)  # a terminal DAG with no writer
+    rows_before, states_before = _row_keys(await inbox_rows(env)), await _intention_states(env)
+    assert len(rows_before) == 2
+
+    push = _Push()
+    report = await continuation.rollback_at_startup(env.db, env.settings, telegram_push=push)
+
+    assert (report.closed, report.rerouted_rows, report.expired_proposals, report.pushed_raw) == (2, 0, 0, 0)
+    assert push.sent == []
+    assert _row_keys(await inbox_rows(env)) == rows_before
+    swept = {(await intention_of(env, "subtask", lost.id)).id, (await intention_of(env, "dag", dag.id)).id}
+    expected = {k: ("closed", "legacy") if k in swept else v for k, v in states_before.items()}
+    assert await _intention_states(env) == expected
+    assert states_before[(await intention_of(env, "subtask", running.id)).id] == ("pending", None)
+    assert all(states_before[k] == ("pending", None) for k in swept)

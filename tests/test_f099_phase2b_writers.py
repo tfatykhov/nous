@@ -121,12 +121,37 @@ async def test_a_failed_close_rolls_the_report_row_back_and_a_retry_lands_both(e
     assert (await intention_of(env, "subtask", st.id)).close_reason == "delivered"
 
 
-async def test_an_unrouted_report_still_closes_as_delivered(env_factory):  # noqa: F811
-    env = await env_factory(**CONT)
+async def test_an_unrouted_report_falls_back_to_the_default_chat(env_factory):  # noqa: F811
+    """Spec 4.1 (lead ruling): a report with no routing key goes to the default chat, closed as
+    delivered in the insert's transaction. A DAG takes it with scheduled routing off too."""
+    env = await env_factory(**CONT, telegram_chat_id="4242")
     st = await make_subtask(env, policy="report", routed=False)
     await _hook(env, st)
     it = await intention_of(env, "subtask", st.id)
-    assert (it.state, it.close_reason) == ("closed", "delivered") and await inbox_rows(env, st.id) == []
+    (row,) = await inbox_rows(env, st.id)
+    assert (row.channel, row.session_id, row.intention_id) == ("telegram:4242", None, it.id)
+    assert (it.state, it.close_reason) == ("closed", "delivered")
+    dag, _ = await make_dag(env, policy="report")
+    assert await record_dag_result(env.heart.result_inbox, env.settings, **dag_kwargs(dag)) is True
+    assert [r.channel for r in await inbox_rows(env, dag.id)] == ["telegram:4242"]
+    assert (await intention_of(env, "dag", dag.id)).close_reason == "delivered"
+
+
+async def test_an_unrouted_report_with_no_chat_writes_nothing_and_closes_as_legacy(env_factory):  # noqa: F811
+    """Lead ruling: nothing was delivered, so the close is not 'delivered'."""
+    env = await env_factory(**CONT)  # no origin channel, no default chat
+    st = await make_subtask(env, policy="report", routed=False)
+    await _hook(env, st)
+    it = await intention_of(env, "subtask", st.id)
+    assert (it.state, it.close_reason) == ("closed", "legacy") and await inbox_rows(env, st.id) == []
+
+
+async def test_with_continuation_off_an_unrouted_report_still_writes_nothing(env_factory):  # noqa: F811  # PIN (Phase 1 behaviour)
+    env = await env_factory(**ON, telegram_chat_id="4242")
+    st = await make_subtask(env, policy="report", routed=False)
+    await _hook(env, st)
+    it = await intention_of(env, "subtask", st.id)
+    assert (it.state, it.close_reason) == ("closed", "legacy") and await inbox_rows(env) == []
 
 
 # ---- none and remember -----------------------------------------------------------------------------
@@ -241,16 +266,17 @@ async def test_a_non_terminal_dag_status_writes_and_closes_nothing(env_factory, 
     assert (await intention_of(env, "dag", dag.id)).state == "pending"
 
 
-async def test_a_report_dag_closes_as_delivered_with_its_row_and_an_unrouted_one_without(env_factory):  # noqa: F811
-    env = await env_factory(**CONT)
+async def test_a_report_dag_closes_as_delivered_with_its_row_and_an_unrouted_one_as_legacy(env_factory):  # noqa: F811
+    env = await env_factory(**CONT)  # no default chat
     routed, _ = await make_dag(env, policy="report", origin_channel=CHAN)
     bare, _ = await make_dag(env, policy="report")
     store = env.heart.result_inbox
     assert await record_dag_result(store, env.settings, **dag_kwargs(routed, origin_channel=CHAN)) is True
     assert await record_dag_result(store, env.settings, **dag_kwargs(bare)) is False
     assert (await intention_of(env, "dag", routed.id)).close_reason == "delivered"
-    assert (await intention_of(env, "dag", bare.id)).close_reason == "delivered"
+    assert (await intention_of(env, "dag", bare.id)).close_reason == "legacy"  # nothing was delivered
     assert [r.channel for r in await inbox_rows(env, routed.id)] == [CHAN]
+    assert await inbox_rows(env, bare.id) == []
 
 
 # ---- the reconciler's subtask pass ------------------------------------------------------------------
