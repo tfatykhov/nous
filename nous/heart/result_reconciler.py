@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Protocol
 from sqlalchemy import exists, or_, select, update
 from sqlalchemy.orm import selectinload
 
-from nous.brain import intentions
+from nous.brain import continuation, intentions
 from nous.heart.result_inbox import (
     SOURCE_DAG,
     SOURCE_SUBTASK,
@@ -31,6 +31,7 @@ from nous.heart.result_inbox import (
     close_intention_quietly,
     is_dag_node_subtask,
     record_dag_result,
+    route_result,
     subtask_envelope,
 )
 from nous.heart.result_memory import ResultMemoryPass, ResultMemoryWriter
@@ -116,8 +117,31 @@ class InboxSubtaskPass:
 
         fixed = 0
         settle = []
+        continuation_on = continuation.enabled(self._settings)
         for st in candidates:
             env = None if is_dag_node_subtask(st) else subtask_envelope(st, self._settings.result_inbox_body_max_chars)
+            if continuation_on and not is_dag_node_subtask(st):
+                # F099 Phase 2: the same routing as the worker hook. A continue result is written
+                # by its intention (an empty one too); a non-continue one with nothing to say settles.
+                written = await route_result(
+                    self._store,
+                    self._settings,
+                    source_kind=SOURCE_SUBTASK,
+                    source_id=st.id,
+                    generation=0,
+                    env=env,
+                    channel=st.parent_channel,
+                    session_id=st.parent_session_id,
+                    correlation_id=str(st.id),
+                    created_at=st.completed_at,
+                    empty_title=st.task or "subtask",
+                )
+                if written:
+                    fixed += 1
+                    logger.info("F098: reconciler re-inserted the inbox row of subtask %s", st.id.hex[:8])
+                elif env is None:
+                    settle.append(st.id)
+                continue
             if env is None:
                 settle.append(st.id)
                 continue

@@ -268,12 +268,25 @@ class ResultInboxStore:
             await own.commit()
         return written is not None
 
-    async def close_source_intention(self, source_kind: str, source_id: UUID) -> UUID | None:
-        """F099 Phase 1: close a finished source's intention as 'legacy'. Its id, or None."""
+    async def close_source_intention(
+        self, source_kind: str, source_id: UUID, *, reason: str = intentions.CLOSE_LEGACY
+    ) -> UUID | None:
+        """F099: close a finished source's intention (Phase 1: 'legacy'; Phase 2: see
+        continuation.close_reason_for). Its id, or None."""
         async with self._db.session() as session:
-            found = await intentions.close_for_source(session, self._agent_id, source_kind, source_id)
+            found = await intentions.close_for_source(session, self._agent_id, source_kind, source_id, reason=reason)
             await session.commit()
         return found
+
+    async def insert_and_close(self, *, close_kind: str, close_id: UUID, **insert_kwargs: Any) -> bool:
+        """F099 I4: the inbox row of a ``report`` intention and the ``delivered`` close of that
+        intention in ONE transaction (T3). A fault after the INSERT rolls the row back too, so a
+        report is never both closed and unwritten; the reconciler's pass re-runs the writer."""
+        async with self._db.session() as session:
+            written = await self.insert(session=session, **insert_kwargs)
+            await continuation.close_delivered(session, self._agent_id, close_kind, close_id)
+            await session.commit()
+        return written
 
     async def claim(
         self,
@@ -461,23 +474,114 @@ async def close_intention_quietly(
     if not intentions.enabled(settings):
         return None
     try:
-        return await store.close_source_intention(source_kind, source_id)
+        return await store.close_source_intention(
+            source_kind, source_id, reason=continuation.close_reason_for(settings)
+        )
     except Exception:
         logger.warning("F099: could not close the intention of %s %s", source_kind, source_id, exc_info=True)
         return None
+
+
+_NO_OUTPUT = "The work finished and returned no output."
+
+
+def _no_output_envelope(title: str) -> Envelope:
+    """A ``continue`` intention is owed a wake even when its work said nothing (contract C12)."""
+    return Envelope("INFORM", (title or "result").strip().replace("\n", " ")[:_TITLE_MAX], _NO_OUTPUT)
+
+
+async def route_result(
+    store: ResultInboxStore,
+    settings: Settings,
+    *,
+    source_kind: str,
+    source_id: UUID,
+    generation: int,
+    env: Envelope | None,
+    channel: str | None,
+    session_id: str | None,
+    default_channel: str | None = None,
+    correlation_id: str | None = None,
+    created_at: datetime | None = None,
+    empty_title: str = "result",
+) -> bool:
+    """F099 Phase 2 (``continuation.enabled(settings)``): where one finished result goes.
+
+    The intention's wake policy decides (spec 4.3 and I4):
+
+    * ``continue``: intention-only routing, no routing key consulted and no default chat
+      (``record_continue_result``: the row and the move to ``result_ready`` in one transaction);
+    * ``report``: the F098-keyed row and the ``delivered`` close in one transaction (``insert_and_close``);
+    * ``none``, ``remember``, a container, or no intention: closed (before the routing check, so a
+      result nobody is routed still closes) and routed as F098 Phase A.
+
+    ``default_channel`` is the DAG default chat, applied only on the non-``continue`` branch. True when
+    a row was written. May raise: the writers around it swallow.
+    """
+    intention = await store.intention_of(source_kind, source_id)
+    policy = intention.wake_policy if intention is not None else None
+    if intention is not None and policy == intentions.WAKE_CONTINUE:
+        recorded = await store.record_continue_result(
+            intention_id=intention.id,
+            source_kind=source_kind,
+            source_id=source_id,
+            generation=generation,
+            envelope=env or _no_output_envelope(empty_title),
+            correlation_id=correlation_id,
+            created_at=created_at,
+            settings=settings,
+        )
+        return recorded.inserted
+    if not channel and not session_id:
+        channel = default_channel
+    if env is None or not (channel or session_id):
+        await close_intention_quietly(store, settings, source_kind, source_id)
+        return False
+    row = dict(
+        source_kind=source_kind,
+        source_id=source_id,
+        source_generation=generation,
+        msg_type=env.msg_type,
+        title=env.title,
+        body=env.body,
+        channel=channel,
+        session_id=session_id,
+        correlation_id=correlation_id,
+        created_at=created_at,
+    )
+    if intention is not None and policy == intentions.WAKE_REPORT:
+        return await store.insert_and_close(
+            close_kind=source_kind, close_id=source_id, intention_id=intention.id, **row
+        )
+    intention_id = await close_intention_quietly(store, settings, source_kind, source_id)
+    return await store.insert(intention_id=intention_id, **row)
 
 
 async def record_subtask_result(store: ResultInboxStore, subtask: Any, settings: Settings) -> bool:
     """Write a terminal subtask's result to the inbox. Never raises.
 
     Skipped when the flag is off, for DAG-node subtasks (their DAG reports),
-    for rows with no routing key, and for rows with nothing to say.
+    for rows with no routing key, and for rows with nothing to say. With
+    NOUS_CONTINUATION_ENABLED on, ``route_result`` routes it by its intention.
     """
     if not settings.result_inbox_enabled or subtask is None:
         return False
     try:
         if subtask.status not in ("completed", "failed") or is_dag_node_subtask(subtask):
             return False
+        if continuation.enabled(settings):
+            return await route_result(
+                store,
+                settings,
+                source_kind=SOURCE_SUBTASK,
+                source_id=subtask.id,
+                generation=0,
+                env=subtask_envelope(subtask, settings.result_inbox_body_max_chars),
+                channel=getattr(subtask, "parent_channel", None),
+                session_id=subtask.parent_session_id,
+                correlation_id=str(subtask.id),
+                empty_title=subtask.task or "subtask",
+            )
         intention_id = await close_intention_quietly(store, settings, SOURCE_SUBTASK, subtask.id)
         channel = getattr(subtask, "parent_channel", None)
         session_id = subtask.parent_session_id
@@ -522,11 +626,36 @@ async def record_dag_result(
     terminal status: one row per generation, so the outcome of a run that
     ``retry_node`` reactivated is delivered even after the first was.
     ``created_at`` defaults to now; the reconciler passes ``completed_at``.
+    A non-terminal ``status`` writes and closes nothing. With
+    NOUS_CONTINUATION_ENABLED on, ``route_result`` routes it by its intention.
     """
     if not settings.result_inbox_enabled:
         return False
     try:
         dag_uuid = dag_id if isinstance(dag_id, UUID) else UUID(str(dag_id))
+        if status not in intentions.TERMINAL_DAG_STATUSES:
+            return False  # an intention must not close on a non-terminal event (Phase 1 follow-up)
+        if continuation.enabled(settings):
+            body = _cap(
+                summary or f"DAG '{name}' {status}",
+                settings.result_inbox_body_max_chars,
+                f"dag_manage status {dag_uuid.hex[:8]}",
+            )
+            scheduled = settings.result_inbox_dag_scheduled and settings.telegram_chat_id
+            return await route_result(
+                store,
+                settings,
+                source_kind=SOURCE_DAG,
+                source_id=dag_uuid,
+                generation=int(generation or 0),
+                env=Envelope(dag_msg_type(status, blocked), name or "DAG", body),
+                channel=origin_channel,
+                session_id=origin_session_id,
+                default_channel=f"telegram:{settings.telegram_chat_id}" if scheduled else None,
+                correlation_id=str(dag_uuid),
+                created_at=created_at,
+                empty_title=name or "DAG",
+            )
         # F099: closed before the routing-key check below (section 4.1 Closing).
         intention_id = await close_intention_quietly(store, settings, SOURCE_DAG, dag_uuid)
         channel = origin_channel

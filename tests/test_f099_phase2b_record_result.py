@@ -18,7 +18,7 @@ from f099_support import (  # noqa: F401
     make_subtask,
     set_intention,
 )
-from sqlalchemy import text, update
+from sqlalchemy import select, text, update
 
 from nous.brain import continuation
 from nous.heart.result_inbox import Envelope
@@ -167,11 +167,59 @@ async def test_a_re_arrival_on_a_closed_root_becomes_an_intention_report(env_fac
     assert (row.source_kind, row.msg_type, row.channel, row.session_id) == ("intention_report", "REPORT", CHAN, None)
     assert row.body == "the raw result" and row.intention_id == it.id
     assert row.source_id == continuation.arrival_report_id("subtask", st.id, 1)
+    # inbox_id is the REPORT row's primary key; 2c and 2d key a report on its source_id, which differs
+    assert recorded.inbox_id == row.id and recorded.inbox_id != row.source_id
     assert (await intention_of(env, "subtask", st.id)).state == "closed"  # a closed root is never reopened
     again = await _record(env, st, generation=1, body="the raw result")  # the second writer of the same outcome
     assert (again.inserted, again.reported) == (False, False)
     assert len(await inbox_rows(env)) == 2  # the report and its work row's settled twin, once each
     assert len(stamped) == 1
+
+
+async def test_a_duplicate_delivery_after_a_root_cancel_writes_no_report(env_factory):  # noqa: F811
+    """The REPORT is written only with a newly written settled twin. Generation 0 landed on the continue
+    path and the root was cancelled before anything consumed it: a duplicate of generation 0 (the bus
+    listener and deliver both write) changes nothing. A real re-arrival reports once, however often it comes."""
+    env = await env_factory(**CONT)
+    st = await make_subtask(env)
+    assert (await _record(env, st)).inserted is True
+    it = await intention_of(env, "subtask", st.id)
+    await set_intention(env, it.id, root_cancelled_at=datetime.now(UTC))
+    again = await _record(env, st)
+    assert (again.inbox_id, again.inserted, again.reported) == (None, False, False)
+    stamped, reports = _split(await inbox_rows(env))
+    assert reports == [] and len(stamped) == 1 and stamped[0].delivered_at is None  # still the continue row
+    first, second = await _record(env, st, generation=1), await _record(env, st, generation=1)
+    assert (first.reported, second.reported) == (True, False)
+    _, reports = _split(await inbox_rows(env))
+    assert [r.msg_type for r in reports] == ["REPORT"]
+
+
+async def test_record_result_reads_the_locked_row_not_the_callers_identity_map(env_factory):  # noqa: F811
+    """record_result locks the intention by its columns, not as an ORM entity. A SELECT ... FOR UPDATE of
+    the entity returns the object the caller's session already holds without refreshing it, so it would
+    decide on that stale state: here 'pending', where the committed state is 'awaiting_owner'."""
+    env = await env_factory(**CONT)
+    st = await make_subtask(env)
+    it = await intention_of(env, "subtask", st.id)
+    async with env.db.session() as s:
+        held = await s.get(Intention, it.id)  # the caller's own view, loaded first
+        assert held.state == "pending"
+        await set_intention(env, it.id, state="awaiting_owner")  # another transaction moves it and commits
+        recorded = await continuation.record_result(
+            s,
+            env.agent,
+            intention_id=it.id,
+            source_kind="subtask",
+            source_id=st.id,
+            msg_type="INFORM",
+            title="t",
+            body="b",
+            settings=env.settings,
+        )
+        await s.commit()
+    assert (recorded.inserted, recorded.state_after) == (True, "awaiting_owner")  # held, not moved
+    assert (await intention_of(env, "subtask", st.id)).state == "awaiting_owner"
 
 
 async def test_a_reported_result_settles_its_work_row_for_the_reconciler_passes(env_factory):  # noqa: F811
@@ -311,8 +359,28 @@ async def test_a_writer_waits_for_a_concurrent_move_and_then_holds_its_row(env_f
     assert (await intention_of(env, "subtask", st.id)).state == "result_ready"
 
 
+class _CommittedStateBus:
+    """Records each event and the intention's state as a fresh session reads it at emit time."""
+
+    def __init__(self, env) -> None:
+        self.env = env
+        self.events: list = []
+        self.seen: list[str] = []
+
+    async def emit(self, event) -> None:
+        self.events.append(event)
+        async with self.env.db.session() as s:
+            intention_id = uuid.UUID(event.data["intention_id"])
+            self.seen.append(
+                (await s.execute(select(Intention.state).where(Intention.id == intention_id))).scalar_one()
+            )
+
+
 async def test_the_store_emits_result_ready_after_the_commit(env_factory):  # noqa: F811
+    """The emit follows the commit: a fresh session already reads 'result_ready' when the event goes out
+    (an emit inside the writer's transaction would see 'pending')."""
     env = await env_factory(**CONT)
+    env.bus = _CommittedStateBus(env)
     store = env.heart.result_inbox
     store.set_bus(env.bus)
     assert store.bus is env.bus
@@ -331,6 +399,7 @@ async def test_the_store_emits_result_ready_after_the_commit(env_factory):  # no
     (event,) = env.bus.events
     assert event.type == "intention.result_ready"
     assert event.data == {"intention_id": str(it.id), "root_id": str(it.root_id), "agent_id": env.agent}
+    assert env.bus.seen == ["result_ready"]
     await store.record_continue_result(generation=0, envelope=Envelope("INFORM", "t", "b"), **kwargs)  # duplicate
     assert len(env.bus.events) == 1
 

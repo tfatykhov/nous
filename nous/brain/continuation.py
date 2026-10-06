@@ -54,7 +54,12 @@ INBOX_SOURCE_KEY = ("source_kind", "source_id", "source_generation", "agent_id")
 
 @dataclass(frozen=True, slots=True)
 class ResultRecorded:
-    """What ``record_result`` did (contract section 4.7)."""
+    """What ``record_result`` did (contract section 4.7).
+
+    ``inserted`` is True when the row this call was asked for (the continue row or the REPORT) was new.
+    The settled source-keyed twin row of a report is never counted in ``inserted``, so callers decide on
+    ``reported`` / ``state_after``.
+    """
 
     inbox_id: UUID | None
     inserted: bool
@@ -342,14 +347,22 @@ async def record_result(
     ``cancelled`` or ``expired`` intention) becomes an owner-facing ``intention_report`` carrying the
     raw result, plus the work row's own inbox row, NULL-keyed and stamped delivered, so the reconciler
     passes see the source as written. The state UPDATE runs only when the row was written, so a
-    duplicate delivery is a no-op. ``arrival_id`` is the arrival an owner answer belongs to (2d).
-    Emits nothing: the caller emits ``intention.result_ready`` after it commits.
+    duplicate delivery is a no-op; the REPORT is written only with a newly written twin, so a duplicate
+    of a generation that first landed on the continue path (before a root cancel) reports nothing.
+    ``arrival_id`` is the arrival an owner answer belongs to (2d). Emits nothing: the caller emits
+    ``intention.result_ready`` after it commits.
+
+    The intention is locked and read by its columns, never as an ORM entity: a ``SELECT`` of the entity
+    returns, unrefreshed, an ``Intention`` the caller's session already holds. Such an entity is not
+    refreshed by the Core UPDATE here either: a caller that loaded one must ``session.refresh`` it.
     """
     row = (
         await session.execute(
-            select(Intention).where(Intention.agent_id == agent_id, Intention.id == intention_id).with_for_update()
+            select(Intention.state, Intention.wake_policy, Intention.root_id, Intention.origin_channel)
+            .where(Intention.agent_id == agent_id, Intention.id == intention_id)
+            .with_for_update()
         )
-    ).scalar_one_or_none()
+    ).one_or_none()
     if row is None:
         raise LookupError(f"intention {intention_id} does not exist for agent {agent_id}")
     state, policy, root_id, origin_channel = row.state, row.wake_policy, row.root_id, row.origin_channel
@@ -364,7 +377,7 @@ async def record_result(
         # MF-1: the work row's own inbox row, NULL-keyed and already delivered. The F098 reconciler passes
         # decide "needs repair" by this row (has_row): without it they would re-select the work row on
         # every tick for good. NULL-keyed and delivered, no chat turn can claim it.
-        await insert_inbox_row(
+        twin = await insert_inbox_row(
             session,
             agent_id,
             source_kind=source_kind,
@@ -382,6 +395,10 @@ async def record_result(
             delivered_at=now,
             delivered_session_id=f"report:{report_id.hex[:8]}",
         )
+        if twin is None:
+            # This generation was already written (on this path, or on the continue path before the
+            # root closed): the first delivery decided its fate, so a duplicate writes no REPORT.
+            return ResultRecorded(None, False, state, False, False, intention_id, root_id)
         channel = owner_channel(settings, origin_channel)
         if channel is None:
             logger.warning(

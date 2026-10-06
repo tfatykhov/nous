@@ -36,7 +36,7 @@ from uuid import UUID
 from nous.api.call_outcome import CallOutcome
 from nous.api.call_outcome import _current as _outcome_var  # the one setter (harness 2b)
 from nous.api.execution_context import ExecutionContext, resolve_context
-from nous.brain import intentions
+from nous.brain import continuation, intentions
 from nous.brain.brain import Brain
 from nous.brain.intentions import AUTHORITY_INTERNAL
 from nous.brain.schemas import NON_PREDICTION_OUTCOMES, ReasonInput, RecordInput
@@ -2966,10 +2966,11 @@ async def _close_cancelled_inline_subtask(heart: Heart, subtask_id: UUID) -> boo
         return False
 
 
-async def _close_inline_intention(heart: Any, subtask_id: UUID) -> None:
+async def _close_inline_intention(heart: Any, subtask_id: UUID, reason: str = intentions.CLOSE_LEGACY) -> None:
     """F099 section 4.1 Closing: an inline run never reaches a worker writer.
 
-    Closes its intention as 'legacy' however the call ended. Never raises
+    Closes its intention as ``reason`` ('legacy', or 'delivered' with
+    NOUS_CONTINUATION_ENABLED on) however the call ended. Never raises
     (a second cancel can still interrupt the await; IntentionClosePass is
     the backstop).
     """
@@ -2977,7 +2978,7 @@ async def _close_inline_intention(heart: Any, subtask_id: UUID) -> None:
     if store is None:
         return
     try:
-        await store.close_for_source(intentions.SOURCE_SUBTASK, subtask_id)
+        await store.close_for_source(intentions.SOURCE_SUBTASK, subtask_id, reason=reason)
     except Exception:
         logger.warning("F099: could not close the intention of inline subtask %s", subtask_id.hex[:8], exc_info=True)
 
@@ -3357,7 +3358,7 @@ def create_subtask_tools(
                 # intention closes here, however the call ended. After the
                 # synchronous memory hook, which an interrupted await must not skip.
                 if intentions.enabled(settings):
-                    await _close_inline_intention(heart, subtask.id)
+                    await _close_inline_intention(heart, subtask.id, continuation.close_reason_for(settings))
 
         except ValueError as e:
             return _tool_error(f"Cannot spawn subtask: {e}")
