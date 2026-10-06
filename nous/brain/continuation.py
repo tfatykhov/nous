@@ -18,12 +18,20 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Text, and_, cast, exists, or_, select, text, update
+from sqlalchemy import ColumnElement, Text, and_, cast, exists, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain import intentions
-from nous.storage.models import Intention, IntentionProposal, ResultInbox
+from nous.storage.models import (
+    Decision,
+    ExecutionDAG,
+    Intention,
+    IntentionArrival,
+    IntentionProposal,
+    ResultInbox,
+    Subtask,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +89,57 @@ class Claim:
     intentions: tuple[Intention, ...]
     deepest: Intention
     inbox_rows: tuple[ResultInbox, ...]
+
+
+GATE_REASONS = (
+    "cancelled",
+    "expired",
+    "past_deadline",
+    "budget_turns",
+    "budget_tokens",
+    "budget_stall",
+    "limit_depth",
+    "limit_spawns",
+    "plan_resolved",
+)
+# The gate reasons whose arrival drops the work (the others escalate: a report). Spec 4.5.3.
+GATE_DROP_REASONS = ("cancelled", "expired", "plan_resolved")
+PLAN_DROP_OUTCOMES = ("superseded", "noise")
+# The owner-facing sentence for each gate reason (the arrival's note, and the head of a report).
+GATE_TEXT = {
+    "cancelled": "The owner cancelled this work.",
+    "expired": "This work expired before its result could be acted on.",
+    "past_deadline": "This result arrived after its deadline, so I did not act on it.",
+    "budget_turns": "The follow-up budget for this work is used up, so I stopped here.",
+    "budget_tokens": "The token budget for this work is used up, so I stopped here.",
+    "budget_stall": "The last follow-ups made no progress, so I stopped here.",
+    "limit_depth": "This work reached its depth limit and cannot spawn more, so I stopped here.",
+    "limit_spawns": "This work reached its spawn limit and cannot spawn more, so I stopped here.",
+    "plan_resolved": "The plan this work served has been resolved or superseded.",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class RootLimits:
+    """A root's budgets, derived from rows when checked: nothing is counted, so nothing drifts."""
+
+    depth: int
+    spawns: int
+    turns: int
+    tokens: int
+    stalls: int
+    spawn_blocked: bool  # depth >= max_depth or spawns >= max_spawns
+    escalate: str | None  # 'budget_turns' | 'budget_tokens' | 'budget_stall' | 'limit_depth' | 'limit_spawns' | None
+
+
+@dataclass(frozen=True, slots=True)
+class Resolution:
+    """What a continuation decided (resolve_intention's arguments, or a gate's or a fallback's synthetic one)."""
+
+    decision: str
+    note: str
+    progress_claimed: bool
+    confidence: float
 
 
 def enabled(settings: Any) -> bool:
@@ -297,6 +356,8 @@ async def close_delivered(
 # on it. FOR UPDATE would let a sweep that holds the root and waits for a claimed row deadlock against a
 # commit that holds the claimed row and needs the root. NO KEY UPDATE still excludes every other claimer
 # and the spawn path's FOR SHARE (a spawn in flight and a claim conflict on the root row, as I1 needs).
+# The UPDATE locks the claimed rows in scan order, not id order; that is harmless, because every 2c path
+# takes the root lock first and record_result holds no second lock.
 _CLAIM_SQL = text(
     """
     UPDATE brain.intentions i
@@ -325,6 +386,7 @@ _ELIGIBLE_SQL = text(
                         WHERE d.agent_id = :agent AND d.root_id = i.root_id AND d.state = 'deciding')
      GROUP BY i.root_id
      ORDER BY due
+     LIMIT :limit
     """
 )
 
@@ -400,18 +462,174 @@ async def claim_root(
 
 
 async def eligible_roots(
-    session: AsyncSession, agent_id: str, *, debounce_s: float, max_wait_s: float
+    session: AsyncSession, agent_id: str, *, debounce_s: float, max_wait_s: float, limit: int = 50
 ) -> list[tuple[UUID, datetime]]:
     """The roots with a ``result_ready`` ``continue`` intention and no ``deciding`` one, each with the
     instant it becomes claimable (the claim's own rule: the newest result is debounce old, or the
-    oldest has waited max-wait), earliest first. The runner sleeps until the first. A root whose
-    results carry no ``result_at`` is left out (code never writes one; a hand-made row is not claimable
-    either, so listing it would spin the loop)."""
+    oldest has waited max-wait), earliest first, at most ``limit`` of them. The runner sleeps until the
+    first. A root whose results carry no ``result_at`` is left out (code never writes one; a hand-made
+    row is not claimable either, so listing it would spin the loop)."""
     result = await session.execute(
         _ELIGIBLE_SQL,
-        {"agent": agent_id, "debounce": float(debounce_s), "max_wait": float(max_wait_s)},
+        {"agent": agent_id, "debounce": float(debounce_s), "max_wait": float(max_wait_s), "limit": int(limit)},
     )
     return [(row.root_id, row.due) for row in result if row.due is not None]
+
+
+async def root_limits(session: AsyncSession, agent_id: str, root_id: UUID, *, settings: Any) -> RootLimits:
+    """Every budget of a root, read from rows (spec 4.6: "all budgets are derived from rows when checked").
+
+    Tokens are the lineage's subtask ``tokens_in/out`` (a DAG-node subtask has no intention of its own, and
+    ``dag_node_id IS NULL`` keeps it out should one ever have one: its usage is already in its DAG's
+    ``tokens_consumed``), plus its DAGs' ``tokens_consumed`` (which Task 2c1-8 feeds with check-node usage),
+    plus its arrivals' tokens.
+    """
+    depth, spawns = (
+        await session.execute(
+            select(
+                func.coalesce(func.max(Intention.depth), 0),
+                func.count(Intention.id).filter(Intention.depth > 0),
+            ).where(Intention.agent_id == agent_id, Intention.root_id == root_id)
+        )
+    ).one()
+    subtask_tokens = (
+        await session.execute(
+            select(func.coalesce(func.sum(Subtask.tokens_in + Subtask.tokens_out), 0)).where(
+                Subtask.agent_id == agent_id,
+                Subtask.dag_node_id.is_(None),
+                exists().where(
+                    Intention.agent_id == agent_id,
+                    Intention.root_id == root_id,
+                    Intention.source_kind == "subtask",
+                    Intention.source_id == cast(Subtask.id, Text),
+                ),
+            )
+        )
+    ).scalar_one()
+    dag_tokens = (
+        await session.execute(
+            select(func.coalesce(func.sum(ExecutionDAG.tokens_consumed), 0)).where(
+                ExecutionDAG.agent_id == agent_id,
+                exists().where(
+                    Intention.agent_id == agent_id,
+                    Intention.root_id == root_id,
+                    Intention.source_kind == "dag",
+                    Intention.source_id == cast(ExecutionDAG.id, Text),
+                ),
+            )
+        )
+    ).scalar_one()
+    arrival_tokens, turns = (
+        await session.execute(
+            select(
+                func.coalesce(func.sum(IntentionArrival.tokens_in + IntentionArrival.tokens_out), 0),
+                func.count(IntentionArrival.id).filter(IntentionArrival.gate_reason.is_(None)),
+            ).where(IntentionArrival.agent_id == agent_id, IntentionArrival.root_id == root_id)
+        )
+    ).one()
+    progress = (
+        (
+            await session.execute(
+                select(IntentionArrival.progress)
+                .where(
+                    IntentionArrival.agent_id == agent_id,
+                    IntentionArrival.root_id == root_id,
+                    IntentionArrival.gate_reason.is_(None),
+                    IntentionArrival.progress.is_not(None),
+                )
+                .order_by(IntentionArrival.n.desc())
+                .limit(50)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    stalls = 0
+    for verified in progress:  # the trailing run of verified no-progress arrivals, newest first
+        if verified is not False:
+            break
+        stalls += 1
+    tokens = int(subtask_tokens) + int(dag_tokens) + int(arrival_tokens)
+    depth, spawns, turns = int(depth), int(spawns), int(turns)
+    max_depth, max_spawns = settings.continuation_max_depth, settings.continuation_max_spawns_per_root
+    escalate: str | None = None
+    if turns >= settings.continuation_max_turns_per_root:
+        escalate = "budget_turns"
+    elif tokens >= settings.continuation_max_tokens_per_root:
+        escalate = "budget_tokens"
+    elif stalls >= settings.continuation_stall_limit:
+        escalate = "budget_stall"
+    elif depth >= max_depth:
+        escalate = "limit_depth"
+    elif spawns >= max_spawns:
+        escalate = "limit_spawns"
+    return RootLimits(depth, spawns, turns, tokens, stalls, depth >= max_depth or spawns >= max_spawns, escalate)
+
+
+async def decision_outcome(session: AsyncSession, agent_id: str, decision_id: UUID) -> str | None:
+    """A Brain decision's outcome (``pending``, ``success``, ``superseded``, ``noise`` ...), or None."""
+    return (
+        await session.execute(select(Decision.outcome).where(Decision.agent_id == agent_id, Decision.id == decision_id))
+    ).scalar_one_or_none()
+
+
+async def gate(
+    session: AsyncSession,
+    agent_id: str,
+    claim: Claim,
+    *,
+    settings: Any,
+    plan_outcome_of: Callable[[UUID], Awaitable[str | None]] | None = None,
+) -> str | None:
+    """Spec 4.5.3: the deterministic checks before a turn, in order. Returns the ``gate_reason`` of the
+    first that fails, or None (run the turn). No model is called.
+
+    ``plan_outcome_of`` answers "what became of this Plan decision?" (2c-2 passes ``decision_outcome``
+    bound to a session); it is asked only when the deepest claimed intention carries a decision id. A
+    NULL ``deadline`` never trips ``past_deadline``: Phase 1 wrote none (task-1.9 carry-over 3).
+    """
+    markers = (
+        await session.execute(
+            select(Intention.root_cancelled_at, Intention.root_expired_at).where(
+                Intention.agent_id == agent_id, Intention.id == claim.root_id
+            )
+        )
+    ).first()
+    if markers is not None and markers.root_cancelled_at is not None:
+        return "cancelled"
+    if markers is not None and markers.root_expired_at is not None:
+        return "expired"
+    deadline = claim.deepest.deadline
+    if deadline is not None and deadline <= datetime.now(UTC):
+        return "past_deadline"
+    limits = await root_limits(session, agent_id, claim.root_id, settings=settings)
+    if limits.escalate is not None:
+        return limits.escalate
+    decision_id = claim.deepest.origin_decision_id
+    if decision_id is not None and plan_outcome_of is not None:
+        if await plan_outcome_of(decision_id) in PLAN_DROP_OUTCOMES:
+            return "plan_resolved"
+    return None
+
+
+def raw_results_text(rows: Any) -> str:
+    """The claimed results as the owner may read them: each row's title and body, as they arrived."""
+    return "\n\n---\n\n".join(f"{row.title}\n{row.body}".strip() for row in rows)
+
+
+def gate_inputs(reason: str, claim: Claim) -> tuple[Resolution, str | None]:
+    """What a gate arrival commits: a synthetic decision and the text of its report.
+
+    A drop (cancelled, expired, plan resolved) writes no report. An escalation (past deadline, a
+    budget, a limit) reports the claimed results without acting on them: the reason, then the raw
+    results (spec 4.5.3).
+    """
+    explanation = GATE_TEXT[reason]
+    if reason in GATE_DROP_REASONS:
+        return Resolution("drop", explanation, False, 1.0), None
+    raw = raw_results_text(claim.inbox_rows)
+    text_ = f"{explanation}\n\nWhat came back:\n{raw}" if raw else explanation
+    return Resolution("report", explanation, False, 1.0), text_
 
 
 # A fixed namespace: the report of an arrival nothing can reopen has a

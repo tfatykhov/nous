@@ -197,6 +197,16 @@ async def test_eligible_roots_leave_out_a_root_that_is_deciding(env_factory):  #
     assert await eligible(env) == []
 
 
+async def test_eligible_roots_keep_the_earliest_due_under_the_limit(env_factory):  # noqa: F811
+    env = await env_factory(**CONT)
+    roots = [await make_root(env) for _ in range(3)]
+    for root, seconds in zip(roots, (10, 300, 100), strict=True):
+        await record(env, root)
+        await age(env, root.id, seconds=seconds)
+    due = await eligible(env, debounce=60, max_wait=600, limit=2)
+    assert [root for root, _ in due] == [roots[1].id, roots[2].id]  # due 240 s and 40 s ago; roots[0] in 50 s
+
+
 async def test_a_claim_without_a_due_result_is_cheap_and_leaves_no_trace(env_factory):  # noqa: F811
     env = await env_factory(**CONT)
     root = await make_root(env)  # pending: nothing arrived

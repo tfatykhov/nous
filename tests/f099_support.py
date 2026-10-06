@@ -19,7 +19,7 @@ from sqlalchemy import select, text, update
 from nous.brain import continuation
 from nous.brain.intentions import IntentionSpec
 from nous.config import Settings
-from nous.storage.models import Intention, ResultInbox
+from nous.storage.models import Intention, IntentionArrival, ResultInbox
 
 ON = {"result_inbox_enabled": True, "intentions_enabled": True}
 CONT = {**ON, "continuation_enabled": True}
@@ -91,8 +91,15 @@ async def finish(env, subtask, how: str = "complete"):
     return await env.heart.subtasks.get(subtask.id)
 
 
-async def make_dag(env, *, policy: str = "continue", origin_channel: str | None = None, status: str = "completed"):
-    """A terminal DAG with its intention. Returns ``(dag, store)``."""
+async def make_dag(
+    env,
+    *,
+    policy: str = "continue",
+    origin_channel: str | None = None,
+    status: str = "completed",
+    parent: Intention | None = None,
+):
+    """A terminal DAG with its intention (a child of ``parent`` when given). Returns ``(dag, store)``."""
     from nous.dag.schemas import DAGCreateRequest, DAGNodeSpec, DAGNodeType
     from nous.dag.store import DAGStore
 
@@ -104,7 +111,12 @@ async def make_dag(env, *, policy: str = "continue", origin_channel: str | None 
             nodes=[DAGNodeSpec(name="n", type=DAGNodeType.subtask, instructions="x")],
         ),
         intention=IntentionSpec(
-            intent="Summarise the alerts", origin_kind="interactive", wake_policy=policy, origin_channel=origin_channel
+            intent="Summarise the alerts",
+            origin_kind="continuation" if parent is not None else "interactive",
+            wake_policy=policy,
+            origin_channel=origin_channel,
+            parent_id=parent.id if parent is not None else None,
+            origin_authority="internal_only" if parent is not None else None,
         ),
     )
     await store.update_dag_status(dag.id, status, result_summary="ok")
@@ -198,9 +210,9 @@ async def claim(env, root_id, *, debounce: float = 0, max_wait: float = 0):
     return got
 
 
-async def eligible(env, *, debounce: float = 20, max_wait: float = 120):
+async def eligible(env, *, debounce: float = 20, max_wait: float = 120, limit: int = 50):
     async with env.db.session() as s:
-        return await continuation.eligible_roots(s, env.agent, debounce_s=debounce, max_wait_s=max_wait)
+        return await continuation.eligible_roots(s, env.agent, debounce_s=debounce, max_wait_s=max_wait, limit=limit)
 
 
 async def until_a_backend_waits_on_a_lock(env, *, at_least: int = 1) -> None:
@@ -220,3 +232,35 @@ async def until_a_backend_waits_on_a_lock(env, *, at_least: int = 1) -> None:
         if waiting >= at_least:
             return
         await asyncio.sleep(0.05)
+
+
+async def add_arrival(
+    env,
+    root_id,
+    n: int,
+    *,
+    progress: bool | None = False,
+    gate_reason: str | None = None,
+    tokens: tuple[int, int] = (0, 0),
+    decision: str = "continue",
+    outcome: str = "resolved",
+) -> None:
+    """An arrival row as a committed arrival leaves it (the budgets read these)."""
+    async with env.db.session() as s:
+        s.add(
+            IntentionArrival(
+                agent_id=env.agent,
+                root_id=root_id,
+                n=n,
+                intention_ids=[root_id],
+                claim_token=uuid.uuid4(),
+                decision=decision,
+                progress_claimed=bool(progress),
+                progress=progress,
+                gate_reason=gate_reason,
+                tokens_in=tokens[0],
+                tokens_out=tokens[1],
+                outcome=outcome,
+            )
+        )
+        await s.commit()
