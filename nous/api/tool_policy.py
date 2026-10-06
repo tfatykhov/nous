@@ -44,6 +44,13 @@ CONTEXT_POLICY: Mapping[str, ContextPolicy] = MappingProxyType(
         "heartbeat_check": ContextPolicy(_WORK, spawn=False),
         "heartbeat_callback": ContextPolicy(_WORK, spawn=False),
         "background": ContextPolicy(_LOCAL, spawn=False),
+        # F099: Nous's own turn on a background result. Local levels only, and the
+        # two spawn tools; _offered_tools and the strict path in
+        # _authorize_tool_call narrow it further (the policy is the floor).
+        "continuation": ContextPolicy(_LOCAL, spawn=frozenset({"spawn_task", "dag_create"})),
+        # F099: one owner-approved call, declared_tools=(tool,). Levels wide because the
+        # proposed call is by definition outward or a denylisted local tool.
+        "approved_action": ContextPolicy(_ALL, spawn=True),
     }
 )
 

@@ -22,10 +22,21 @@ def _subtask(*, metadata=None, dag_node_id=None, sid=None, parent=None):
     )
 
 
+def _valid_context(kind: str) -> ExecutionContext:
+    """A constructible context of ``kind``: F099's two kinds need their own fields."""
+    if kind == "continuation":
+        return ExecutionContext(
+            kind=kind, authority="internal_only", intention_id=uuid.uuid4(), root_intention_id=uuid.uuid4()
+        )
+    if kind == "approved_action":
+        return ExecutionContext(kind=kind, proposal_id=uuid.uuid4(), declared_tools=("send_email",))
+    return ExecutionContext(kind=kind)
+
+
 def test_foreground_kinds_are_exactly_interactive_and_mcp():
     assert FOREGROUND_KINDS == frozenset({"interactive", "mcp"})
     for kind in CONTEXT_KINDS:
-        assert ExecutionContext(kind=kind).is_background is (kind not in FOREGROUND_KINDS)
+        assert _valid_context(kind).is_background is (kind not in FOREGROUND_KINDS)
 
 
 def test_unknown_kind_is_rejected():
