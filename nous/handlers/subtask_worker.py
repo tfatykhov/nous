@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 import httpx
 
 from nous.api.execution_context import ExecutionContext
+from nous.brain import continuation, intentions
 from nous.cancellation import cancel_requested
 from nous.config import Settings
 from nous.events import Event, EventBus
@@ -523,6 +524,24 @@ class SubtaskWorkerPool:
     # Telegram notifications
     # ------------------------------------------------------------------
 
+    async def _superseded_by_continuation(self, subtask: Subtask) -> bool:
+        """F099 Phase 2: a ``continue`` result goes to Nous's own continuation, so the raw push
+        stands down (spec 4.3 item 5). One point read, only for a ``notify=True`` subtask with the
+        flag on. A failed read sends the push: a duplicate costs less than a lost notification."""
+        if not continuation.enabled(self._settings):
+            return False
+        store = getattr(self._heart, "intentions", None)
+        if store is None:
+            return False
+        try:
+            row = await store.get_for_source(intentions.SOURCE_SUBTASK, subtask.id)
+        except Exception:
+            logger.warning(
+                "F099: could not read the intention of subtask %s; sending its push", subtask.id.hex[:8], exc_info=True
+            )
+            return False
+        return row is not None and row.wake_policy == intentions.WAKE_CONTINUE
+
     async def _notify_telegram(
         self,
         subtask: Subtask,
@@ -537,6 +556,8 @@ class SubtaskWorkerPool:
         token = self._settings.telegram_bot_token
         chat_id = self._settings.telegram_chat_id
         if not token or not chat_id:
+            return
+        if await self._superseded_by_continuation(subtask):
             return
 
         if result is not None:

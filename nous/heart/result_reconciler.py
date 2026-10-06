@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Protocol
 from sqlalchemy import exists, or_, select, update
 from sqlalchemy.orm import selectinload
 
-from nous.brain import intentions
+from nous.brain import continuation, intentions
 from nous.heart.result_inbox import (
     SOURCE_DAG,
     SOURCE_SUBTASK,
@@ -31,6 +31,7 @@ from nous.heart.result_inbox import (
     close_intention_quietly,
     is_dag_node_subtask,
     record_dag_result,
+    route_result,
     subtask_envelope,
 )
 from nous.heart.result_memory import ResultMemoryPass, ResultMemoryWriter
@@ -93,6 +94,9 @@ class InboxSubtaskPass:
         enabled_at = await self._store.ensure_enabled_at()
         async with self._db.session() as session:
             has_row = exists().where(ResultInbox.source_kind == SOURCE_SUBTASK, ResultInbox.source_id == Subtask.id)
+            routable = or_(Subtask.parent_channel.is_not(None), Subtask.parent_session_id.is_not(None))
+            if continuation.enabled(self._settings):
+                routable = or_(routable, continuation.has_continue_intention(agent_id, SOURCE_SUBTASK, Subtask.id))
             candidates = (
                 (
                     await session.execute(
@@ -104,7 +108,7 @@ class InboxSubtaskPass:
                         .where(or_(Subtask.worker_id.is_(None), Subtask.worker_id != INLINE_WORKER_ID))
                         .where(Subtask.dag_node_id.is_(None))
                         .where(Subtask.delivered.is_(False))
-                        .where(or_(Subtask.parent_channel.is_not(None), Subtask.parent_session_id.is_not(None)))
+                        .where(routable)
                         .where(~has_row)
                         .order_by(Subtask.completed_at)
                         .limit(limit)
@@ -116,8 +120,31 @@ class InboxSubtaskPass:
 
         fixed = 0
         settle = []
+        continuation_on = continuation.enabled(self._settings)
         for st in candidates:
             env = None if is_dag_node_subtask(st) else subtask_envelope(st, self._settings.result_inbox_body_max_chars)
+            if continuation_on and not is_dag_node_subtask(st):
+                # F099 Phase 2: the same routing as the worker hook. A continue result is written
+                # by its intention (an empty one too); a non-continue one with nothing to say settles.
+                written = await route_result(
+                    self._store,
+                    self._settings,
+                    source_kind=SOURCE_SUBTASK,
+                    source_id=st.id,
+                    generation=0,
+                    env=env,
+                    channel=st.parent_channel,
+                    session_id=st.parent_session_id,
+                    correlation_id=str(st.id),
+                    created_at=st.completed_at,
+                    empty_title=st.task or "subtask",
+                )
+                if written:
+                    fixed += 1
+                    logger.info("F098: reconciler re-inserted the inbox row of subtask %s", st.id.hex[:8])
+                elif env is None:
+                    settle.append(st.id)
+                continue
             if env is None:
                 settle.append(st.id)
                 continue
@@ -193,9 +220,19 @@ class InboxDagPass:
             .limit(limit)
         )
         if not (settings.result_inbox_dag_scheduled and settings.telegram_chat_id):
-            query = query.where(
-                or_(ExecutionDAG.origin_channel.is_not(None), ExecutionDAG.origin_session_id.is_not(None))
-            )
+            routable = or_(ExecutionDAG.origin_channel.is_not(None), ExecutionDAG.origin_session_id.is_not(None))
+            if continuation.enabled(settings):
+                # F099 Phase 2: a DAG a continuation spawned has no origin, and its row is keyed by its
+                # intention alone. Without this its lost row would never be repaired. A closed
+                # intention counts unless it was closed 'legacy': a retried DAG (new generation)
+                # reopens it, but nothing reopens a legacy close.
+                routable = or_(
+                    routable,
+                    continuation.has_continue_intention(
+                        settings.agent_id, SOURCE_DAG, ExecutionDAG.id, include_closed=True
+                    ),
+                )
+            query = query.where(routable)
         async with self._db.session() as session:
             candidates = (await session.execute(query)).scalars().all()
 
@@ -236,7 +273,9 @@ class IntentionClosePass:
     whose schedule is inactive or gone is closed here; containers have no
     TTL, so nothing else would.
 
-    Each kind at most ``limit`` per tick, oldest first.
+    Each kind at most ``limit`` per tick, oldest first. With the continuation
+    flag on it leaves ``continue`` and ``report`` intentions to their writers
+    and the inbox passes (F099 Phase 2).
     """
 
     name = "intentions"
@@ -247,8 +286,20 @@ class IntentionClosePass:
 
     async def run(self, *, limit: int) -> int:
         agent_id = self._settings.agent_id
+        on = continuation.enabled(self._settings)
         async with self._db.session() as session:
-            closed = await intentions.close_finished_sources(session, agent_id, limit=limit)
+            closed = await intentions.close_finished_sources(
+                session,
+                agent_id,
+                limit=limit,
+                reason=continuation.close_reason_for(self._settings),
+                # Phase 2: a continue result is the writer's (the row and the move to result_ready are one
+                # transaction) and a report closes with its insert; closing either here would strand a
+                # result with no row. A lost row is the inbox passes' to repair (they select the work of a
+                # continue intention); what they cannot select (a cancelled subtask) is PR-2c's
+                # repair_missing_results.
+                exclude_policies=(intentions.WAKE_CONTINUE, intentions.WAKE_REPORT) if on else (),
+            )
             containers = await intentions.close_finished_containers(session, agent_id, limit=limit)
             await session.commit()
         if closed or containers:

@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import func
 
 from nous.brain.brain import Brain
+from nous.brain.continuation import INTENT_SESSION_PREFIX
 from nous.cognitive.context import ContextEngine
 from nous.cognitive.dedup import ConversationDeduplicator
 from nous.cognitive.deliberation import DESCRIPTION_CAPTURE_CHARS, DeliberationEngine
@@ -430,6 +431,8 @@ class CognitiveLayer:
         back with their bodies; older ones are claimed and counted. Never
         raises.
         """
+        if str(session_id or "").startswith(INTENT_SESSION_PREFIX):
+            return system_prompt
         inbox = self._heart.result_inbox
         if channel:
             try:
@@ -491,6 +494,10 @@ class CognitiveLayer:
         # F098: where the conversation lives ('telegram:<chat_id>'). Routes
         # background results across session rollover. None = session only.
         channel: str | None = None,
+        # F099 Phase 2: the turn's ContextKind when the runner passes one (only a
+        # 'continuation' turn does, from PR-2c). A continuation reads its results
+        # by intention, so it neither claims the chat inbox nor opens a Plan decision.
+        context_kind: str | None = None,
     ) -> TurnContext:
         """SENSE -> FRAME -> RECALL -> DELIBERATE — prepare for LLM turn.
 
@@ -828,9 +835,12 @@ class CognitiveLayer:
         # get_undelivered (which lost every result finishing after a
         # Telegram session rolled over). Off: the legacy path, unchanged.
         if getattr(self._settings, "result_inbox_enabled", False) is True:
-            system_prompt = await self._inject_result_inbox(
-                session_id, channel, system_prompt, sections_by_tier,
-            )
+            # F099: a continuation turn and an intent-<root> session read their rows by
+            # intention (the runner stamps delivery in its fenced commit), never by claim.
+            if context_kind != "continuation" and not str(session_id or "").startswith(INTENT_SESSION_PREFIX):
+                system_prompt = await self._inject_result_inbox(
+                    session_id, channel, system_prompt, sections_by_tier,
+                )
         else:
             try:
                 undelivered = await self._heart.subtasks.get_undelivered(session_id)
@@ -884,7 +894,7 @@ class CognitiveLayer:
         # 4. DELIBERATE — start if frame warrants it
         decision_id: str | None = None
         try:
-            if await self._deliberation.should_deliberate(frame):
+            if context_kind != "continuation" and await self._deliberation.should_deliberate(frame):
                 decision_id = await self._deliberation.start(
                     agent_id, user_input[:DESCRIPTION_CAPTURE_CHARS], frame,
                     session_id=session_id, session=session,

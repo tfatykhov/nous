@@ -31,6 +31,7 @@ nous/
 │   │   ├── graph_linker.py     # Cross-type auto-linking (common-template embedding)
 │   │   ├── guardrails.py       # CEL expression guardrails
 │   │   ├── intentions.py       # F099: brain.intentions — spec, wake-policy defaults, lineage (a fire only under an open container), in-transaction insert, legacy close
+│   │   ├── continuation.py     # F099 Phase 2: the continuation store: the inbox primitives, the same-transaction move of a continue result, owner-facing rows, the startup rollback (the runner follows in PR-2c)
 │   │   ├── quality.py          # Decision quality scoring
 │   │   ├── schemas.py          # Pydantic models
 │   │   └── spreading_activation.py  # Density-gated multi-hop graph traversal

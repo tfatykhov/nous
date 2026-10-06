@@ -1211,6 +1211,27 @@ class Settings(BaseSettings):
     # needs result_inbox_enabled; without it a WARNING is logged and this
     # stays off.
     intentions_enabled: bool = False
+    # F099 Phase 2: continue-policy results return to Nous's own continuation
+    # turn instead of the chat (spec section 4.3). Needs intentions_enabled and,
+    # until PR-2e ships the runner, main.py forces it off (CONTINUATION_RUNNER_READY).
+    continuation_enabled: bool = False
+    # Bounds per root (section 4.6). Derived from rows, never counted in memory.
+    continuation_max_depth: int = Field(default=3, ge=1)
+    continuation_max_spawns_per_root: int = Field(default=12, ge=1)
+    continuation_max_turns_per_root: int = Field(default=8, ge=1)
+    continuation_max_tokens_per_root: int = Field(default=400000, ge=1000)
+    continuation_stall_limit: int = Field(default=2, ge=1)
+    # A root's TTL; a child's deadline is min(parent deadline, created + this).
+    intention_root_ttl_hours: float = Field(default=72, gt=0)
+    continuation_max_concurrent: int = Field(default=2, ge=1)
+    # A claim waits this long after the newest result, but no longer than max_wait after the oldest.
+    continuation_debounce_seconds: int = Field(default=20, ge=0)
+    continuation_max_wait_seconds: int = Field(default=120, ge=0)
+    # A claimed arrival's lease. The turn timeout must sit at least 60 s below it.
+    continuation_lease_seconds: int = Field(default=900, ge=120)
+    continuation_turn_timeout_seconds: int = Field(default=780, ge=60)
+    continuation_max_attempts: int = Field(default=3, ge=1)
+    intention_proposal_ttl_hours: float = Field(default=24, gt=0)
 
     # F098 Phase C: result memory — a finished background subtask result
     # becomes an episode (+ document chunks), so recall_deep can find it.
@@ -3065,6 +3086,36 @@ class Settings(BaseSettings):
                 "NOUS_INTENTIONS_ENABLED=true needs NOUS_RESULT_INBOX_ENABLED=true; intentions stay OFF."
             )
             object.__setattr__(self, "intentions_enabled", False)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_continuation_dependency(self) -> "Settings":
+        """F099 §5: a continuation needs the intentions its results belong to.
+        Runs after _validate_intentions_dependency, so an intentions flag forced
+        off by a missing inbox forces this off too."""
+        if self.continuation_enabled and not self.intentions_enabled:
+            logging.getLogger(__name__).warning(
+                "NOUS_CONTINUATION_ENABLED=true needs NOUS_INTENTIONS_ENABLED=true; continuation stays OFF."
+            )
+            object.__setattr__(self, "continuation_enabled", False)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_continuation_timing(self) -> "Settings":
+        """A lease shorter than the turn would release a claim under a live
+        turn, and a max wait below the debounce could never be reached. Hard
+        errors at any flag value (like _validate_keepalive): both are cheap to
+        get right and unsafe to get wrong."""
+        if self.continuation_turn_timeout_seconds > self.continuation_lease_seconds - 60:
+            raise ValueError(
+                "NOUS_CONTINUATION_TURN_TIMEOUT_SECONDS must be at least 60 s below NOUS_CONTINUATION_LEASE_SECONDS "
+                f"({self.continuation_turn_timeout_seconds} > {self.continuation_lease_seconds} - 60)"
+            )
+        if self.continuation_max_wait_seconds < self.continuation_debounce_seconds:
+            raise ValueError(
+                "NOUS_CONTINUATION_MAX_WAIT_SECONDS must not be below NOUS_CONTINUATION_DEBOUNCE_SECONDS "
+                f"({self.continuation_max_wait_seconds} < {self.continuation_debounce_seconds})"
+            )
         return self
 
     @model_validator(mode="after")
