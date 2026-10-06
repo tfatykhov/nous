@@ -103,7 +103,7 @@ async def test_the_spawn_limit_counts_the_roots_rows(env_factory):  # noqa: F811
     root = await make_root(env)
     first = await _spawn(env, intentions.with_bounds(_child(root), env.settings))
     await _spawn(env, intentions.with_bounds(_child(first), env.settings))  # a grandchild counts too
-    with pytest.raises(IntentionLimitReached, match="spawn"):
+    with pytest.raises(IntentionLimitReached, match="spawn limit"):  # the depth refusal says "spawned" too
         over = intentions.with_bounds(_child(root), env.settings)
         await env.heart.subtasks.create(task="one too many", intention=over)
 

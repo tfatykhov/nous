@@ -7,13 +7,16 @@ tests never see each other's rows.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 
+from nous.brain import continuation
 from nous.brain.intentions import IntentionSpec
 from nous.config import Settings
 from nous.storage.models import Intention, ResultInbox
@@ -156,3 +159,64 @@ async def make_child(env, parent: Intention, *, authority: str = "internal_only"
         ),
     )
     return await intention_of(env, "subtask", st.id)
+
+
+async def record(env, intention: Intention, *, body: str = RESULT, generation: int = 0):
+    """A continue result for ``intention``'s source, written as the worker hook writes it (T4/T6)."""
+    async with env.db.session() as s:
+        recorded = await continuation.record_result(
+            s,
+            env.agent,
+            intention_id=intention.id,
+            source_kind=intention.source_kind,
+            source_id=uuid.UUID(intention.source_id),
+            msg_type="INFORM",
+            title="Snow report",
+            body=body,
+            source_generation=generation,
+            settings=env.settings,
+        )
+        await s.commit()
+    return recorded
+
+
+async def age(env, *intention_ids, seconds: float = 60) -> None:
+    """Make the results of these intentions ``seconds`` old (the debounce reads ``result_at``)."""
+    when = datetime.now(UTC) - timedelta(seconds=seconds)
+    for intention_id in intention_ids:
+        await set_intention(env, intention_id, result_at=when)
+
+
+async def claim(env, root_id, *, debounce: float = 0, max_wait: float = 0):
+    """``continuation.claim_root`` in its own session, committed when it claimed."""
+    async with env.db.session() as s:
+        got = await continuation.claim_root(
+            s, env.agent, root_id, token=uuid.uuid4(), debounce_s=debounce, max_wait_s=max_wait
+        )
+        if got is not None:
+            await s.commit()
+    return got
+
+
+async def eligible(env, *, debounce: float = 20, max_wait: float = 120):
+    async with env.db.session() as s:
+        return await continuation.eligible_roots(s, env.agent, debounce_s=debounce, max_wait_s=max_wait)
+
+
+async def until_a_backend_waits_on_a_lock(env, *, at_least: int = 1) -> None:
+    """Return once ``at_least`` backends of this database wait on a lock. Callers bound it with
+    ``asyncio.wait_for``: a lock that is never waited on fails the test, it does not hang it."""
+    while True:
+        async with env.db.session() as s:  # a fresh transaction each time: the stats view is snapshotted
+            waiting = (
+                await s.execute(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity "
+                        "WHERE datname = current_database() AND wait_event_type = 'Lock' "
+                        "AND query ILIKE '%brain.intentions%'"
+                    )
+                )
+            ).scalar_one()
+        if waiting >= at_least:
+            return
+        await asyncio.sleep(0.05)

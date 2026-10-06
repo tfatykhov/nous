@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Text, and_, cast, exists, or_, select, update
+from sqlalchemy import ColumnElement, Text, and_, cast, exists, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,6 +45,7 @@ OPEN_STATES = ("pending", "result_ready", "deciding", "awaiting_owner")
 
 STATE_PENDING, STATE_RESULT_READY, STATE_CLOSED = "pending", "result_ready", "closed"
 STATE_CANCELLED, STATE_EXPIRED = "cancelled", "expired"
+STATE_DECIDING, STATE_AWAITING_OWNER = "deciding", "awaiting_owner"
 
 # heart.result_inbox.title is VARCHAR(200); tests pin it equal to result_inbox._TITLE_MAX.
 INBOX_TITLE_MAX = 200
@@ -69,6 +70,17 @@ class ResultRecorded:
     reported: bool
     intention_id: UUID
     root_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
+class Claim:
+    """What one claim took (contract section 4.7). ``deepest`` is the parent of every child the turn spawns."""
+
+    root_id: UUID
+    claim_token: UUID
+    intentions: tuple[Intention, ...]
+    deepest: Intention
+    inbox_rows: tuple[ResultInbox, ...]
 
 
 def enabled(settings: Any) -> bool:
@@ -278,6 +290,128 @@ async def close_delivered(
     return await intentions.close_for_source(
         session, agent_id, source_kind, source_id, reason=CLOSE_DELIVERED, with_result=with_result
     )
+
+
+# Spec 4.5.2, with one change (contract conflict C4): the per-root mutex is FOR NO KEY UPDATE, so the
+# FK checks of a child intention's INSERT and an arrival's INSERT (FOR KEY SHARE on the root) do not wait
+# on it. FOR UPDATE would let a sweep that holds the root and waits for a claimed row deadlock against a
+# commit that holds the claimed row and needs the root. NO KEY UPDATE still excludes every other claimer
+# and the spawn path's FOR SHARE (a spawn in flight and a claim conflict on the root row, as I1 needs).
+_CLAIM_SQL = text(
+    """
+    UPDATE brain.intentions i
+       SET state = 'deciding', claimed_at = now(), claim_token = :token, updated_at = now()
+     WHERE i.agent_id = :agent AND i.root_id = :root AND i.state = 'result_ready' AND i.wake_policy = 'continue'
+       AND NOT EXISTS (SELECT 1 FROM brain.intentions d
+                        WHERE d.agent_id = :agent AND d.root_id = :root AND d.state = 'deciding')
+       AND (   (SELECT max(result_at) FROM brain.intentions
+                 WHERE agent_id = :agent AND root_id = :root AND state = 'result_ready')
+                 <= now() - make_interval(secs => CAST(:debounce AS double precision))
+            OR (SELECT min(result_at) FROM brain.intentions
+                 WHERE agent_id = :agent AND root_id = :root AND state = 'result_ready')
+                 <= now() - make_interval(secs => CAST(:max_wait AS double precision)))
+    RETURNING i.id
+    """
+)
+
+_ELIGIBLE_SQL = text(
+    """
+    SELECT i.root_id AS root_id,
+           LEAST(max(i.result_at) + make_interval(secs => CAST(:debounce AS double precision)),
+                 min(i.result_at) + make_interval(secs => CAST(:max_wait AS double precision))) AS due
+      FROM brain.intentions i
+     WHERE i.agent_id = :agent AND i.state = 'result_ready' AND i.wake_policy = 'continue'
+       AND NOT EXISTS (SELECT 1 FROM brain.intentions d
+                        WHERE d.agent_id = :agent AND d.root_id = i.root_id AND d.state = 'deciding')
+     GROUP BY i.root_id
+     ORDER BY due
+    """
+)
+
+
+async def claim_root(
+    session: AsyncSession,
+    agent_id: str,
+    root_id: UUID,
+    *,
+    token: UUID,
+    debounce_s: float,
+    max_wait_s: float,
+) -> Claim | None:
+    """T7: claim every ``result_ready`` ``continue`` intention of ``root_id`` for one arrival (spec 4.5.2).
+
+    One transaction, READ COMMITTED: the root row is locked first (the per-root mutex), then one UPDATE
+    does the whole claim, so two claimers on a root are serialised and the second sees the first's
+    ``deciding`` row. Returns None when nothing was claimable (the debounce has not elapsed, a claim is
+    already live, or a ``report`` intention was forced into ``result_ready``); the caller commits only
+    when a Claim comes back. The inbox rows are read here but stamped delivered only by the fenced commit.
+    """
+    locked = (
+        await session.execute(
+            select(Intention.id)
+            .where(Intention.agent_id == agent_id, Intention.id == root_id)
+            .with_for_update(key_share=True)
+        )
+    ).scalar_one_or_none()
+    if locked is None:
+        return None
+    moved = (
+        (
+            await session.execute(
+                _CLAIM_SQL,
+                {
+                    "agent": agent_id,
+                    "root": root_id,
+                    "token": token,
+                    "debounce": float(debounce_s),
+                    "max_wait": float(max_wait_s),
+                },
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not moved:
+        return None
+    rows = (
+        (
+            await session.execute(
+                select(Intention)
+                .where(Intention.agent_id == agent_id, Intention.id.in_(list(moved)))
+                .order_by(Intention.depth.desc(), Intention.created_at, Intention.id)
+                .execution_options(populate_existing=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    inbox = (
+        (
+            await session.execute(
+                select(ResultInbox)
+                .where(intention_keyed(agent_id, list(moved)), ResultInbox.delivered_at.is_(None))
+                .order_by(ResultInbox.created_at, ResultInbox.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return Claim(root_id, token, tuple(rows), rows[0], tuple(inbox))
+
+
+async def eligible_roots(
+    session: AsyncSession, agent_id: str, *, debounce_s: float, max_wait_s: float
+) -> list[tuple[UUID, datetime]]:
+    """The roots with a ``result_ready`` ``continue`` intention and no ``deciding`` one, each with the
+    instant it becomes claimable (the claim's own rule: the newest result is debounce old, or the
+    oldest has waited max-wait), earliest first. The runner sleeps until the first. A root whose
+    results carry no ``result_at`` is left out (code never writes one; a hand-made row is not claimable
+    either, so listing it would spin the loop)."""
+    result = await session.execute(
+        _ELIGIBLE_SQL,
+        {"agent": agent_id, "debounce": float(debounce_s), "max_wait": float(max_wait_s)},
+    )
+    return [(row.root_id, row.due) for row in result if row.due is not None]
 
 
 # A fixed namespace: the report of an arrival nothing can reopen has a
