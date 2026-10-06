@@ -109,16 +109,16 @@ States (migration 083, unchanged): `pending`, `result_ready`, `deciding`, `await
 | T2 | `pending` → `closed` (`legacy`) | writers via `close_intention_quietly` (`nous/heart/result_inbox.py:370`), inline `finally` (`nous/api/tools.py:2969`), `IntentionClosePass` | own transaction | 1; kept with the flag off |
 | T3 | `pending` → `closed` (`delivered`) | the same writers, flag on, for `none`, `remember`, `report`, `container`; `report` in the SAME transaction as its inbox insert (I4) | `continuation.record_result(session=…)` | 2b |
 | T4 | `pending` → `result_ready` | `continuation.record_result` for `continue`: inbox insert + transition in one transaction, `result_at = now` | `WITH … UPDATE … WHERE state IN ('pending') RETURNING` + INSERT | 2b |
-| T5 | `awaiting_owner` → `result_ready` | `continuation.wake_arrival` when every proposal and question of the arrival is terminal (§4.4 item 6); applies to every intention in `arrival.intention_ids` | one transaction, `WHERE state = 'awaiting_owner'` | 2c (questions), 2d (proposals) |
+| T5 | `awaiting_owner` → `result_ready` | `continuation.wake_arrival` when every proposal and question of the arrival is terminal (§4.4 item 6), called by `wake_terminal_arrivals` (the sweep) and 2d's `record_answer`; applies to every intention in `arrival.intention_ids` | the caller's transaction, root locked first (§4.7 Locks), `WHERE state = 'awaiting_owner'` | 2c (questions), 2d (proposals) |
 | T6 | `closed` → `result_ready` (reopen) | `record_result` on a re-arrival: policy `continue`, root open (§4.3 item 3) | same as T4, `WHERE state = 'closed' AND wake_policy = 'continue'` + root-open predicate | 2b |
-| T7 | `result_ready` → `deciding` | `continuation.claim_root` (the §4.5 claim SQL, per-root `FOR UPDATE`, debounce / max-wait) | one transaction READ COMMITTED; sets `claimed_at`, `claim_token` | 2c |
-| T8 | `deciding` → `result_ready` (lease released) | `continuation.release_stale_claims` at startup and every sweep: `claimed_at < now - lease`, `attempts + 1`, `claim_token = NULL` | own transaction | 2c |
+| T7 | `result_ready` → `deciding` | `continuation.claim_root`: the root row locked `FOR NO KEY UPDATE` (§4.7 Locks), then one UPDATE, the §4.5 claim SQL (debounce / max-wait) | the caller's transaction, READ COMMITTED; sets `claimed_at = now()`, `claim_token`; the caller commits only when a claim comes back | 2c |
+| T8 | `deciding` → `result_ready` (released) | `continuation.release_stale_claims` at startup and every sweep: each claim with `claimed_at < now - lease` goes through `fail_attempt`, which charges `attempts + 1` and releases it below `max_attempts`, and takes T12 at the cap (the cap applies at lease release too); `fail_attempt` after a failed turn, likewise; `release_claim` (a shutdown, a cancel) charges no attempt | the caller's transaction, one SAVEPOINT per claim, fenced on `claim_token`; `result_at = now`, `claim_token = NULL` | 2c |
 | T9 | `deciding` → `closed` (`resolved`) | `continuation.commit_arrival` for `continue` (after spawning), `revise`, `drop`, `report`, and both fallbacks | the fenced commit: `WHERE state = 'deciding' AND claim_token = :token` | 2c |
-| T10 | `deciding` → `awaiting_owner` | `commit_arrival` for `ask` | same fence | 2c |
+| T10 | `deciding` → `awaiting_owner` | `commit_arrival` for `ask`, which writes a QUESTION; an `ask` with no owner channel is refused (`ValueError`, nothing written) | same fence | 2c |
 | T11 | `deciding` → `result_ready` (unconsumed rows) | `commit_arrival` when the intention has undelivered inbox rows not in `arrival.inbox_ids`, for every decision except `ask` (§4.5 item 6) | same fence | 2c |
-| T12 | `deciding` → `closed` (`failed_report`) | `continuation.fail_attempt` after `attempts >= max_attempts`; raw results become a REPORT row | own transaction, fenced on `claim_token` | 2c |
-| T13 | any open → `cancelled` | `continuation.cancel_root`; also writes `root_cancelled_at` on the root row (`FOR UPDATE`) | one transaction, root first | 2e |
-| T14 | any open → `expired` | `continuation.expire_roots` (TTL sweep); writes `root_expired_at`; reports what exists; containers excluded | one transaction per root | 2c |
+| T12 | `deciding` → `closed` (`failed_report`) | `continuation.fail_attempt` when this failure brings the worst `attempts` of the claim to `max_attempts` (from a failed turn or a lease release, T8); `commit_arrival` with outcome `failed_report`: the raw results become a REPORT row, the count is kept | the caller's transaction, one SAVEPOINT, fenced on `claim_token` | 2c |
+| T13 | any open → `cancelled` | `continuation.cancel_root`; also writes `root_cancelled_at` on the root row, which it locks first, `FOR NO KEY UPDATE` (§4.7 Locks), before the lineage | one transaction, root first | 2e |
+| T14 | any open → `expired` | `continuation.expire_roots` (TTL sweep): due when the deadline is past, or, with a NULL deadline (a Phase 1 root), `created_at + ttl`; containers excluded; closes the lineage's open rows, then writes `root_expired_at`, then stamps the unread rows and writes one REPORT when there are unread rows or the root has a deadline (a NULL-deadline root with nothing unread closes with no report) | the caller's transaction, one SAVEPOINT per root, at most `EXPIRE_BATCH` roots per sweep, roots in `(created_at, id)` order | 2c |
 | T15 | open `continue` → `closed` (`legacy`) | `continuation.rollback_at_startup` with the flag off | own transaction | 2b |
 
 "Open" = `pending, result_ready, deciding, awaiting_owner`. A `report` intention never reaches `result_ready` (T3). A container never leaves `pending` except by T2/T3 (its schedule deactivated) or T13.
@@ -460,19 +460,49 @@ Continuation turns pass `force_tool_on_penultimate=None` (§4.4). The follow-up 
 
 ### 4.7 The store module: `nous/brain/continuation.py` (2b skeleton; 2c, 2d, 2e fill it)
 
-Module-level, session-taking functions (the `intentions.py` style, so one monkeypatch target per operation), plus a thin `ContinuationStore` for callers without a transaction. All take `(session, agent_id, …)` unless noted. Constants:
+Module-level, session-taking functions in the `intentions.py` style; there is no store class. Callers reach them through the module (`from nous.brain import continuation`, then `continuation.claim_root(...)`), so one monkeypatch target covers every caller of an operation. All take `(session, agent_id, …)`, run in the caller's transaction and do not commit, unless noted. This section describes the code as 2c-1 built it; the `[2d]` and `[2e]` lines are still to come.
+
+**Locks: one order, everywhere.** Every row lock that 2c-1's code (and, after it, 2d's and 2e's) takes on a root or a claimed intention is `FOR NO KEY UPDATE` (`with_for_update(key_share=True)`, conflict C4 of the 2c-1 plan). It excludes every other writer of the row and the spawn path's root `FOR SHARE` (`_hold_open_root`). It does not block the `FOR KEY SHARE` that the FK checks of a child INSERT and of the arrival INSERT take, so a sweep and a commit cannot deadlock through an FK. `FOR UPDATE` would let them.
+
+- **In one root:** the root row first, then the claimed intentions in `id` order, then inbox rows. The lockers are `claim_root`, `_lock_claimed` (used by `commit_arrival`, `fail_attempt` and `release_claim`), `_expire_root` and `wake_arrival`. 2d's `record_answer` and 2e's `cancel_root` take the same order. A path that locked a claimed intention and then asked for its root would close a cycle with the expiry, which holds the root while it closes the lineage.
+- **Across roots:** a sweep that locks several roots in one transaction (`release_stale_claims`, `expire_roots`, `wake_terminal_arrivals`) takes them in `(root.created_at, root.id)` order.
+- **Outside the order:** two writers.
+  - 2b's `record_result` locks its one intention `FOR UPDATE` and holds no second lock, so it cannot close a cycle.
+  - The reconciler's `intentions.close_finished_sources` (base code) updates rows in scan order with no root lock. Across two lineages it can deadlock with `_expire_root`'s lineage UPDATE. Postgres aborts one side and both retry at their next run: liveness only, nothing lost or duplicated.
+
+**Fenced means in the statement.** Every UPDATE of a claimed intention goes through `_fenced_move`, so `state = 'deciding' AND claim_token = :token` is in its WHERE. Each compares the rows it moved with the rows it expected. A mismatch raises the private `_FenceLost` inside a SAVEPOINT, so nothing the function wrote survives. The up-front row locks carry no predicate and are not a fence.
+
+Constants (the module's, in full):
 
 ```python
 CONTINUATION_RUNNER_READY: bool = False          # flipped to True in PR-2e (section 2)
 INTENT_SESSION_PREFIX = "intent-"                 # session id of a root's thread: f"intent-{root_id}"
-SOURCE_INTENTION_REPORT = "intention_report"      # inbox source kind
+SOURCE_INTENTION_REPORT = "intention_report"      # inbox source kind of an owner-facing row
 MSG_REPORT, MSG_QUESTION, MSG_PROPOSAL = "REPORT", "QUESTION", "PROPOSAL"
+REPORT_KINDS = (MSG_REPORT, MSG_QUESTION, MSG_PROPOSAL)
 CLOSE_DELIVERED, CLOSE_RESOLVED, CLOSE_CANCELLED, CLOSE_EXPIRED = "delivered", "resolved", "cancelled", "expired"
 CLOSE_FALLBACK_REPORT, CLOSE_FAILED_REPORT = "fallback_report", "failed_report"
 OUTCOME_RESOLVED, OUTCOME_FALLBACK, OUTCOME_FAILED = "resolved", "fallback_report", "failed_report"
+OUTCOMES = (OUTCOME_RESOLVED, OUTCOME_FALLBACK, OUTCOME_FAILED)
 DECISIONS = ("continue", "revise", "drop", "report", "ask")
 PROPOSAL_TERMINAL = frozenset({"executed", "failed", "rejected", "expired", "cancelled"})
 OPEN_STATES = ("pending", "result_ready", "deciding", "awaiting_owner")
+STATE_PENDING, STATE_RESULT_READY, STATE_CLOSED = "pending", "result_ready", "closed"
+STATE_CANCELLED, STATE_EXPIRED = "cancelled", "expired"
+STATE_DECIDING, STATE_AWAITING_OWNER = "deciding", "awaiting_owner"
+INBOX_TITLE_MAX = 200                             # heart.result_inbox.title is VARCHAR(200)
+INBOX_SOURCE_KEY = ("source_kind", "source_id", "source_generation", "agent_id")  # the inbox UNIQUE, column order
+GATE_REASONS = ("cancelled", "expired", "past_deadline", "budget_turns", "budget_tokens", "budget_stall",
+                "limit_depth", "limit_spawns", "plan_resolved")
+GATE_DROP_REASONS = ("cancelled", "expired", "plan_resolved")  # the other reasons escalate: a REPORT
+PLAN_DROP_OUTCOMES = ("superseded", "noise")      # a Plan decision with one of these outcomes: 'plan_resolved'
+GATE_TEXT: dict[str, str]                         # the owner-facing sentence of each gate reason
+BRAIN_RECORD_STATEMENT_TIMEOUT_MS = 10_000        # SET LOCAL statement_timeout inside the Brain record's SAVEPOINT
+FAIL_RETRY, FAIL_LOST = "retry", "lost"           # fail_attempt's results, with CLOSE_FAILED_REPORT
+EXPIRE_BATCH = 10                                 # roots expired per sweep
+STRANDED_BATCH = 200                              # rows held on closed intentions settled per sweep
+RAW_PUSH_CHARS = 3900                             # rollback_at_startup's raw Telegram push, per message
+ROLLBACK_SESSION_ID = "rollback"                  # delivered_session_id of a row the rollback pushed raw
 ```
 
 Dataclasses:
@@ -480,7 +510,8 @@ Dataclasses:
 ```python
 @dataclass(frozen=True, slots=True)
 class RootLimits:        # derived from rows, never counted
-    depth: int; spawns: int; turns: int; tokens: int; stalls: int
+    depth: int; spawns: int; turns: int; tokens: int
+    stalls: int          # saturates at continuation_stall_limit: whether the stall budget is spent, not a total
     spawn_blocked: bool  # depth >= max_depth or spawns >= max_spawns
     escalate: str | None # 'budget_turns' | 'budget_tokens' | 'budget_stall' | 'limit_depth' | 'limit_spawns' | None
 
@@ -509,7 +540,7 @@ class RollbackReport:                        # rollback_at_startup
     closed: int; rerouted_rows: int; expired_proposals: int; pushed_raw: int
 
 @dataclass(frozen=True, slots=True)
-class SweepReport:                           # ContinuationRunner.run_once
+class SweepReport:                           # defined here; ContinuationRunner.run_once fills it (2c-2)
     released: int; expired_roots: int; expired_proposals: int; pushed: int; launched: tuple[UUID, ...]; next_due: datetime | None
 
 @dataclass(frozen=True, slots=True)
@@ -526,73 +557,139 @@ class CancelOutcome:                         # cancel_root
     cancelled_dags: int; cancelled_proposals: int; deactivated_schedules: int; turn_stopped: bool
 ```
 
+Pure helpers (2b, no session):
+
+- `enabled(settings)`: the flag is `True` and `intentions.enabled(settings)`. A mocked Settings counts as off.
+- `close_reason_for(settings)`: `delivered` with the flag on, `legacy` otherwise.
+- `owner_channel(settings, origin_channel)`: the origin channel, else `f"telegram:{settings.telegram_chat_id}"`, else None.
+- `intention_keyed(agent_id, intention_ids)`: the rows only the continuation reads. They are keyed by an intention id, with `channel` and `session_id` NULL.
+- `has_continue_intention(agent_id, source_kind, source_id_col, *, include_closed=False)`: EXISTS for an open `continue` intention of a work row. With `include_closed`, a closed one counts too, unless it was closed `legacy`.
+- `arrival_report_id(source_kind, source_id, generation)`: a uuid5, the `source_id` of the REPORT that a re-arrival becomes.
+
 Functions (PR in brackets):
 
 ```python
+async def insert_inbox_row(session, agent_id, *, source_kind, source_id, msg_type, title, body, channel=None,
+                           session_id=None, source_generation=0, correlation_id=None, created_at=None,
+                           intention_id=None, arrival_id=None, proposal_id=None, push_after=None,
+                           delivered_at=None, delivered_session_id=None) -> UUID | None                   [2b]
+    # The one INSERT into heart.result_inbox, ON CONFLICT (INBOX_SOURCE_KEY) DO NOTHING: the new row's id, or None
+    # when the key already had a row. delivered_at writes a row already settled (record_result's twin, the repair's
+    # placeholder).
+
+async def insert_report(session, agent_id, *, kind, title, body, channel, intention_id, root_id, arrival_id=None,
+                        proposal_id=None, push_after=None, report_id=None) -> UUID                       [2b]
+    # An intention_report row (kind in REPORT_KINDS, else ValueError). Its source_id is report_id (a fresh uuid
+    # unless the caller needs the write idempotent), its generation 0, its created_at now. Returns report_id.
+    # channel is never NULL (section 4.3 item 4: ValueError); root_id is for the log only.
+
 async def record_result(session, agent_id, *, intention_id, source_kind, source_id, msg_type, title, body,
-                        source_generation=0, correlation_id=None, created_at=None, settings) -> ResultRecorded   [2b]
-    # The one Phase 2 writer for continue results. One transaction:
-    # policy=='continue' and state in (pending, closed-with-open-root): INSERT inbox row with
-    # channel=NULL, session_id=NULL, intention_id → UPDATE state='result_ready', result_at=now (T4/T6);
-    # state=='awaiting_owner' or 'deciding': INSERT only (held) (section 4.3 items 2-3);
-    # closed root or non-continue policy: INSERT an intention_report REPORT row carrying the raw
-    # result, keyed to origin_channel or the default chat; state unchanged.
-    # Returns ResultRecorded(inserted: bool, state_after: str, reopened: bool, reported: bool).
-    # Emits nothing: the caller emits intention.result_ready after commit (section 4.13).
+                        source_generation=0, correlation_id=None, created_at=None, arrival_id=None,
+                        settings) -> ResultRecorded                                                       [2b]
+    # The one Phase 2 writer for continue results. Locks the intention FOR UPDATE (its only lock), then:
+    # policy=='continue' with an open root and state pending, or closed not as legacy: INSERT a row with
+    # channel=NULL, session_id=NULL, intention_id → UPDATE state='result_ready', result_at=now (T4/T6; a T6 reopen
+    # clears the claim and keeps attempts);
+    # state result_ready, deciding or awaiting_owner: INSERT only (held) (section 4.3 items 2-3);
+    # anything nothing can reopen (another policy, a closed root, cancelled, expired, closed legacy): the work row's
+    # own row, NULL-keyed and stamped delivered (the twin), and, only when the twin is new, an intention_report
+    # REPORT with the raw result, keyed to the intention's origin_channel or the default chat (none with neither).
+    # A duplicate generation writes nothing. arrival_id is the arrival an owner's answer, or the "did not answer"
+    # row, belongs to (C9). Emits nothing: the caller emits intention.result_ready after commit (section 4.13).
 
 async def close_delivered(session, agent_id, source_kind, source_id, *, with_result=True) -> UUID | None     [2b]
     # Phase 2's T3: intentions.close_for_source(..., reason=CLOSE_DELIVERED). Used by every writer
     # for none/remember/report/container when settings.continuation_enabled; legacy otherwise.
 
-async def insert_report(session, agent_id, *, kind, title, body, channel, intention_id, root_id, arrival_id=None,
-                        proposal_id=None, push_after=None) -> UUID                                        [2b]
-    # An intention_report row (REPORT/QUESTION/PROPOSAL). Returns its id (= source_id = report_id).
-    # channel is origin_channel or f"telegram:{settings.telegram_chat_id}"; never NULL (section 4.3 item 4).
-
 async def rollback_at_startup(database, settings, *, telegram_push) -> RollbackReport                     [2b]
-    # Section 4.3 item 6, including task-1.9 carry-over 2 (pending with a terminal source).
+    # Section 4.3 item 6 and T15, including task-1.9 carry-over 2 (pending with a terminal source). Returns at once
+    # when enabled(settings). Owns its transaction.
 
-async def claim_root(session, agent_id, root_id, *, token, debounce_s, max_wait_s) -> Claim | None       [2c]
-    # The section 4.5 claim SQL, verbatim, after SELECT ... FOR UPDATE on the root row.
-async def eligible_roots(session, agent_id, *, debounce_s, max_wait_s) -> list[tuple[UUID, datetime]]    [2c]
-    # Roots with a result_ready continue intention and no deciding one, with the instant each becomes
-    # claimable (the runner sleeps until the earliest).
-async def release_stale_claims(session, agent_id, *, lease_s, max_attempts, settings, brain=None,
-                               now=None) -> list[UUID]                                                    [2c]  (T8)
-    # Every deciding row claimed more than lease_s ago, grouped by claim, each group through fail_attempt (so the
-    # cap applies at lease release too). Roots in (created_at, id) order. Returns the ids taken from their claim.
+async def claim_root(session, agent_id, root_id, *, token, debounce_s, max_wait_s) -> Claim | None       [2c]  (T7)
+    # Locks the root row FOR NO KEY UPDATE, then one UPDATE: the spec 4.5.2 claim SQL, with FOR NO KEY UPDATE its only
+    # change (C4). Reloads the claimed rows (Claim.deepest's order) and reads inbox_rows in the same transaction.
+    # None when nothing was claimable; the caller commits only when a Claim comes back.
+async def eligible_roots(session, agent_id, *, debounce_s, max_wait_s, limit=50) -> list[tuple[UUID, datetime]]  [2c]
+    # Roots with a result_ready continue intention and no deciding one, each with the instant it becomes claimable
+    # (newest result + debounce, or oldest + max-wait, whichever is first), earliest first, at most limit (LIMIT in
+    # the SQL). A root whose results carry no result_at is left out.
 async def root_limits(session, agent_id, root_id, *, settings) -> RootLimits                              [2c]
     # tokens = Σ subtasks.tokens_in+tokens_out over the root's subtask intentions with dag_node_id IS NULL
-    #        + Σ execution_dags.tokens_consumed over its dag intentions + Σ arrivals.tokens_in+out;
+    #        + Σ execution_dags.tokens_consumed over its dag intentions (check-node runs included: 2c1-8's roll-up)
+    #        + Σ arrivals.tokens_in+out;
     # turns = count(arrivals where gate_reason IS NULL); spawns = count(intentions where root_id=:root and depth>0);
-    # depth = max(depth); stalls = length of the trailing run of arrivals with progress=false.
-async def gate(session, agent_id, claim, *, settings, plan_outcome_of) -> str | None                     [2c]
+    # depth = max(depth); stalls = the trailing run of verified progress = false over the arrivals a model decided
+    # (gate arrivals and NULL progress skipped), newest first, read with LIMIT continuation_stall_limit, so it
+    # saturates at the limit. escalate = the first of budget_turns, budget_tokens, budget_stall, limit_depth,
+    # limit_spawns that trips, in that order.
+async def decision_outcome(session, agent_id, decision_id) -> str | None                                   [2c]
+    # A Brain decision's outcome (pending, success, superseded, noise ...), or None. 2c-2 binds it to a session
+    # and passes it to gate as plan_outcome_of.
+async def gate(session, agent_id, claim, *, settings, plan_outcome_of) -> str | None                      [2c]
     # Section 4.5 item 3 in order: cancelled/expired → 'cancelled'/'expired'; past deadline of the deepest
-    # claimed intention → 'past_deadline'; root_limits.escalate; the originating Plan decision (the root's
-    # origin_decision_id, else the deepest claimed intention's) resolved superseded/noise → 'plan_resolved'.
-    # Returns the gate_reason or None.
-async def commit_arrival(session, agent_id, claim, *, resolution, outcome, gate_reason=None, tokens, brain,
-                         settings, report_text=None) -> ArrivalCommit | None                            [2c]
-    # Section 4.5 item 6 and section 4.14. Every UPDATE carries WHERE state='deciding' AND claim_token=:token;
-    # None when the fence rejected (the lease was released).
+    # claimed intention → 'past_deadline' (a NULL deadline never trips it); root_limits.escalate; the originating
+    # Plan decision (the root's origin_decision_id, else the deepest claimed intention's) resolved with an outcome
+    # in PLAN_DROP_OUTCOMES → 'plan_resolved'. plan_outcome_of is required. Returns the gate_reason or None.
+def gate_inputs(reason, claim) -> tuple[Resolution, str | None]                                            [2c]
+    # A gate arrival's synthetic decision (confidence 1.0, progress not claimed) and report text. A reason in
+    # GATE_DROP_REASONS → ('drop', no report). An escalation → ('report', GATE_TEXT[reason], then the raw results).
+def raw_results_text(rows) -> str                                                                          [2c]
+    # Each row's title and body as they arrived, separated by '---'. Unbounded: the publisher caps it (2c-2).
+def push_after_for(settings, now=None) -> datetime                                                         [2c]
+    # now, or the end of the quiet hours (nous/heartbeat/quiet_hours.py: quiet_hours_end(settings, now)).
+async def commit_arrival(session, agent_id, claim, *, resolution, outcome, gate_reason=None, tokens=(0, 0),
+                         brain=None, settings, report_text=None, wrote_memory=False, arrival_id=None,
+                         now=None) -> ArrivalCommit | None                                               [2c]  (T9-T11)
+    # Section 4.5 item 6 and section 4.14, in one SAVEPOINT of the caller's transaction; emits nothing.
+    # tokens is (tokens_in, tokens_out); wrote_memory is the turn's evidence for progress (a learn_fact or
+    # ingest_document call: run_turn returns no tool results); arrival_id is the id the turn's context carried (a
+    # new one otherwise); brain=None records no decision; now fixes the clock (C5). report_text is the body of a
+    # gate escalation's or a fallback's REPORT (the note otherwise). Raises ValueError and writes nothing for an
+    # unknown decision, outcome or gate_reason, for a fallback that asks, and for an ask with no owner channel
+    # (no origin channel, no default chat). None when the fence rejected it (the lease was released, or the root
+    # was cancelled or expired). The Brain record runs in its own SAVEPOINT with SET LOCAL statement_timeout and
+    # can never abort the commit (C8).
 async def fail_attempt(session, agent_id, claim, *, max_attempts, settings, brain=None, now=None) -> str    [2c]  (T8 or T12)
-    # attempts+1 on every claimed intention, in the one fenced UPDATE of each path: 'retry' (back to result_ready,
-    # result_at=now), 'failed_report' (at the cap, one REPORT with the raw results, closed failed_report), or
-    # 'lost' (the fence rejected it; nothing written).
-async def release_claim(session, agent_id, claim) -> int                                                   [2c]
+    # attempts+1 on every claimed intention, in the one fenced UPDATE of each path: 'retry' (below the cap: back to
+    # result_ready, result_at=now, so the debounce spaces the retry), 'failed_report' (at the cap: commit_arrival with
+    # outcome failed_report, one REPORT with the raw results, closed failed_report; a late row sends its intention
+    # back with the count kept), or 'lost' (the fence rejected it; nothing written).
+async def release_claim(session, agent_id, claim) -> int                                                   [2c]  (T8)
     # A deliberate release (a shutdown, a cancel): fenced, back to result_ready, no attempt charged. Returns the
     # number of intentions released.
-async def expire_roots(session, agent_id, *, ttl_hours, settings) -> list[UUID]                            [2c]  (T14)
-async def repair_missing_results(session, agent_id, *, settings, limit) -> int                             [2c]
-    # continue/report intentions whose source is terminal (cancelled included) and that have no inbox row for
-    # the source's current generation. A continue intention is repaired through record_result (NULL keys; a
-    # cancelled subtask gets a FAILURE row "Outcome: cancelled"); a report intention through the writer's
-    # non-continue branch: today's routing keys plus close_delivered (T3). The Phase 2 counterpart of
-    # IntentionClosePass for those two policies.
-async def arrival_is_terminal(session, agent_id, arrival_id) -> bool                                       [2c, extended 2d]
-    # True when every QUESTION row of the arrival is answered (its answer row exists) or past its deadline,
-    # AND (2d) every proposal of the arrival is in PROPOSAL_TERMINAL.
-async def wake_arrival(session, agent_id, arrival_id) -> list[UUID]                                        [2c]  (T5)
+async def release_stale_claims(session, agent_id, *, lease_s, max_attempts, settings, brain=None,
+                               now=None) -> list[UUID]                                                    [2c]  (T8 or T12)
+    # Every deciding row claimed more than lease_s ago, grouped by claim, each group through fail_attempt (so the
+    # cap applies at lease release too). Roots in (created_at, id) order. Returns the ids taken from their claim.
+    # A non-fence DB error aborts the caller's transaction: run_once isolates each step (2c-2).
+async def expire_roots(session, agent_id, *, ttl_hours, settings, limit=EXPIRE_BATCH, now=None) -> list[UUID]  [2c]  (T14)
+    # Due: open (no root marker), not a container, an open continue or report intention in the lineage
+    # (_ttl_applies), and the deadline past; a NULL deadline (a Phase 1 root) is judged by created_at + ttl_hours (C10).
+    # At most limit roots, in (created_at, id) order, one SAVEPOINT each (a failure is logged and retried at the next
+    # sweep). Under the root's lock: _ttl_applies again (a root resolved meanwhile is skipped), then the lineage's
+    # open rows close expired, then root_expired_at, then the unread intention-keyed rows of the closed rows are
+    # read and stamped (lock, then read: a record_result in flight is read here, or waits and reports raw). One
+    # REPORT to owner_channel(root's origin channel) when there are unread rows or the root has a deadline: a
+    # NULL-deadline root with nothing unread closes with no report. Then it settles stranded rows: undelivered
+    # intention-keyed rows on a cancelled or expired intention (left by a gate arrival), stamped once and reported
+    # raw per root, at most STRANDED_BATCH. Returns the expired root ids; the runner emits intention.root_expired.
+
+async def arrival_is_terminal(session, agent_id, arrival_id, *, settings=None, now=None) -> bool          [2c, extended 2d]
+    # True when every QUESTION row of the arrival is answered or expired (C9). An answer is an INFORM intention_report
+    # row with the arrival's id, created at or after the question. A question expires intention_proposal_ttl_hours
+    # after its row; without settings it never expires. An arrival with no QUESTION is terminal.
+    # (2d) AND every proposal of the arrival is in PROPOSAL_TERMINAL.
+async def wake_arrival(session, agent_id, arrival_id, *, now=None) -> list[UUID]                           [2c]  (T5)
+    # Locks the root first, then every continue intention of the arrival still awaiting_owner → result_ready,
+    # result_at=now. Returns their ids. A caller that writes to the arrival's intentions before waking it must lock
+    # the root before those writes.
+async def wake_terminal_arrivals(session, agent_id, *, settings, now=None, limit=50) -> list[UUID]         [2c]  (T5)
+    # The sweep's backstop for T5: each ask arrival with an intention still awaiting_owner (roots in (created_at, id)
+    # order, one SAVEPOINT each) whose questions are terminal is woken through wake_arrival. For one that expired
+    # unanswered, it then writes one INFORM row, "The owner did not answer", per woken intention through
+    # record_result (source_id a uuid5 of arrival and intention: idempotent), so the woken claim has a row to show.
+    # It asks only about questions; 2d extends it with arrival_is_terminal's proposal half. Returns the woken ids.
+
 async def stage_proposal(session, agent_id, *, intention_id, root_id, claim_token, tool, arguments, rationale) -> UUID  [2d]
 async def publish_staged(session, agent_id, *, arrival_id, claim_token, deadline) -> list[UUID]           [2d]
     # staged → pending for the claim's proposals, inside the fenced commit; inserts their PROPOSAL rows.
@@ -611,7 +708,47 @@ async def cancel_root(session, agent_id, root_id, *, reason, actor) -> CancelOut
 async def cancelled_root_ids(session, agent_id, *, since) -> list[UUID]                                    [2e]
 ```
 
-`IntentionLimitReached(ValueError)` is added to `nous/brain/intentions.py` in 2c and raised by `prepare_intention` when `spec.parent_id` is set and the new row would exceed `max_depth` (from the parent's `depth + 1`, exact) or the root's `max_spawns` (a `count(*)` of the root's rows with `depth > 0`, run inside the spawning transaction). Two concurrent spawns under one root both hold the root `FOR SHARE`, so the count can overshoot by the concurrency width; that is accepted and documented, since the gate escalates on the next claim either way and the depth limit, which is exact, bounds the chain. `prepare_intention` receives the limits through `IntentionSpec.limits: tuple[int, int] | None` (max_depth, max_spawns), set by the four spawn handlers from settings when `continuation_enabled`; code paths leave it `None`. The same route carries the TTL: `IntentionSpec.ttl_hours: float | None`, set by all eight spawn sites via `intentions.ttl_for(settings)` (returns `settings.intention_root_ttl_hours` when `continuation_enabled`, else `None`); `prepare_intention` writes `deadline = created + ttl` for a root and `min(parent.deadline, created + ttl)` for a child, NULL when `ttl_hours` is None. (The stores have no settings: `SubtaskManager.__init__` is `(database, agent_id)`, `nous/heart/subtasks.py:42`.)
+The repair lives in `nous/heart/result_reconciler.py`, not here. It calls `route_result` and `record_dag_result`, and `nous.heart.result_inbox` imports this module, so a call from here would be an import cycle (C2):
+
+```python
+async def repair_missing_results(database, store, settings, *, limit) -> int                              [2c]
+    # Returns 0 before any query with the flag off. Owns its sessions: one read session per half (subtasks, DAGs), each at most
+    # limit sources that finished inside result_inbox_max_age_hours (a flip never backfills history), then each
+    # repair in its own session (a failure is logged and left for the next sweep). Selects continue/report intentions
+    # (REPAIR_POLICIES) that are pending, or expired with a finished source and no row; never a DAG-node subtask
+    # (it reports through its DAG); a DAG only once F087 has delivered it. Returns how many it repaired.
+    # (a) no row: written through the writers' own routing, route_result (subtasks) or record_dag_result (DAGs):
+    #     continue → record_result (NULL keys, T4); report → its routing keys, else the owner channel, else closed
+    #     legacy with no row. R1: a report with no content closes legacy, not delivered.
+    # (b) a legacy-closed continue DAG retried after the flip (delivery_generation >= 1) with no row for that
+    #     generation: reported raw (record_result never reopens a legacy close).
+    # (c) the source already has its routed or delivered row: close delivered, write nothing, never re-deliver.
+    # (d) a cancelled subtask produced no result: its intention closes with no row (C3), 'cancelled' under a cancelled
+    #     root and 'legacy' otherwise, in one UPDATE that reads the root marker. A cancelled or partial DAG has a
+    #     result (a FAILURE) and takes (a).
+    # Expired arm: an expired intention's result is written once (the expiry is never undone). One that reaches no
+    # one (no content, or no owner channel) gets a settled placeholder (NULL-keyed, stamped delivered,
+    # delivered_session_id REPAIR_SESSION_ID = "repair"), so it is not selected again.
+    # Nothing calls it in 2c-1; 2c-2's ContinuationWakePass runs it (section 4.8).
+```
+
+`IntentionLimitReached(ValueError)` (`nous/brain/intentions.py`, 2c) is raised by `prepare_intention` when `spec.parent_id` is set, `spec.limits` is not None, and the new child would exceed one of two limits:
+
+- `max_depth`: `parent.depth + 1 > max_depth`, which is exact.
+- the root's `max_spawns`: a `count(*)` of the root's rows with `depth > 0` is already at the limit. The count runs inside the spawning transaction while the root is held `FOR SHARE`.
+
+The refusal is raised in the store's transaction, before the work row is written. Its text is what the model sees. Two concurrent spawns under one root can both pass the count, so it can overshoot by the concurrency width. That is accepted: the gate escalates at the next claim (`root_limits`), and the exact depth limit bounds the chain.
+
+The bounds reach `prepare_intention` on the spec: `IntentionSpec.limits: tuple[int, int] | None` (`max_depth`, `max_spawns`) and `IntentionSpec.ttl_hours: float | None`. Both are filled by `intentions.with_bounds(spec, settings)` from `limits_for(settings)` and `ttl_for(settings)`; a schedule's container gets no TTL. With continuation off both are None and `with_bounds` returns the same object, so every site makes Phase 1's call.
+
+`with_bounds` is applied at each of the seven construction sites (C13):
+
+- three through `spec_from_tool_call`: `spawn_task` (which `spawn_sync` goes through), `schedule_task` and `dag_create`;
+- four `IntentionSpec(...)` builders: `app.act`, the work queue's one builder, `POST /schedules` and the scheduler's fire.
+
+`test_every_intention_spec_site_applies_the_bounds` (an AST test) fails when a site does not apply it, so the count is whatever the code has.
+
+`prepare_intention` writes `deadline = now + ttl` for a root. A child gets the earlier of its parent's deadline and `now + ttl`. A parent with no deadline (a Phase 1 row) counts as its `created_at + ttl` (ruling R3, `intentions._deadline`), the rule the expiry judges a root by. The deadline is NULL when `ttl_hours` is None. (The stores have no settings: `SubtaskManager.__init__` is `(database, agent_id)`, `nous/heart/subtasks.py:42`.)
 
 `IntentionClosePass` exclusion (2b): `close_finished_sources` gains `exclude_policies: tuple[str, ...] = ()`; `IntentionClosePass.run` passes `(WAKE_CONTINUE, WAKE_REPORT)` when `settings.continuation_enabled`. Without it the pass races the Phase 2 writer and closes a `continue` result as `legacy` with no inbox row (`nous/heart/result_reconciler.py:248-253`, `nous/brain/intentions.py:484-535`).
 
@@ -694,7 +831,7 @@ Writers, when `settings.continuation_enabled`:
 
 **Push and quiet hours (2d):** `OwnerPublisher` in `nous/handlers/continuation_publisher.py`: `push_due(limit) -> int` sends every `intention_report` row with `pushed_at IS NULL AND (push_after IS NULL OR push_after <= now)` to `settings.telegram_chat_id` with the bot token (as `_notify_telegram` does), inline keyboard `[[Approve, Reject]]` for PROPOSAL rows, `force_reply` for QUESTION rows; stores `push_message_id` and `pushed_at` by row id (idempotent: `UPDATE … WHERE pushed_at IS NULL RETURNING`). `insert_report` sets `push_after = next quiet-hours end` when `in_quiet_hours(settings)` (the module function extracted from `HeartbeatRunner._in_quiet_hours`, `nous/heartbeat/runner.py:1321-1332`, into `nous/heartbeat/quiet_hours.py:in_quiet_hours(settings, now=None) -> bool` and `quiet_hours_end(settings, now=None) -> datetime`); REPORT rows are pushed only when `origin_channel` is NULL or Telegram (chat sees them through the inbox either way).
 
-**Answers (2d):** `record_answer` first locks the question's root row (`FOR NO KEY UPDATE`), the one lock order of 2c (root, then intentions in `id` order, then inbox rows); a `record_result` per intention followed by `wake_arrival`, with no root lock before them, takes the intention rows before the root and deadlocks against the TTL sweep (seen in 2c1-6 for `wake_arrival`). Then it inserts, for every intention in the question's arrival, a `continue` result through `record_result` with `source_kind = "intention_report"`, `source_id = <new uuid>`, `msg_type = "INFORM"`, `title = "Owner's answer"`, `body = text`, `arrival_id = <the question's arrival>`; then `wake_arrival` if `arrival_is_terminal`. The model never routes it (§4.4 Questions).
+**Answers (2d):** `record_answer` first locks the question's root row, in the one lock order (§4.7 Locks); a `record_result` per intention followed by `wake_arrival`, with no root lock before them, takes the intention rows before the root and deadlocks against the TTL sweep (seen in 2c1-6 for `wake_arrival`). Then it inserts, for every intention in the question's arrival, a `continue` result through `record_result` with `source_kind = "intention_report"`, `source_id = <new uuid>`, `msg_type = "INFORM"`, `title = "Owner's answer"`, `body = text`, `arrival_id = <the question's arrival>`; then `wake_arrival` if `arrival_is_terminal`. The model never routes it (§4.4 Questions).
 
 ### 4.10 REST routes (`nous/api/rest.py`, routes list at line 3343; 2d and 2e)
 
@@ -747,14 +884,64 @@ The bot is a separate process that proxies REST; it never approves on its own an
 
 All are hints (the bus drops on `QueueFull`, `nous/events.py:185-189`); rows are the truth and the sweep is the backstop.
 
-### 4.14 Arrival commit contents (`commit_arrival`, one transaction, every UPDATE fenced on `state = 'deciding' AND claim_token = :token`)
+### 4.14 Arrival commit contents (`commit_arrival`, one SAVEPOINT in the caller's transaction, every UPDATE of a claimed intention fenced on `state = 'deciding' AND claim_token = :token`)
 
-1. The `intention_arrivals` row: `n = 1 + count(arrivals of root)`, `intention_ids = claim ids`, `inbox_ids = ids of the rows the turn was shown`, `claim_token`, `decision`, `note`, `progress_claimed`, `progress` (verified: the arrival spawned work (an intention with `parent_id` in `intention_ids`), changed a plan (a `revise` decision), or wrote memory (a `learn_fact`/`ingest_document` call in the turn's tool results); a `true` that fails the check is stored `false`), `confidence`, `gate_reason`, `tokens_in`, `tokens_out`, `outcome`, `decided_at = now`.
-2. One Brain decision via `brain.record(RecordInput(description=f"{decision}: {note}"[:…], confidence, category="process", stakes="low", context=json.dumps({"root_id", "intention_ids", "arrival_n"}), session_id=f"intent-{root_id}", tags=["f099", decision]), session=session)` (`nous/brain/brain.py:353-372` supports a caller-owned session); its id → `decision_record_id`. Gate arrivals (`gate_reason` set) also get one, so "every arrival decision is recorded" (G5).
-3. `delivered_at = now, delivered_session_id = f"intent-{root_id}"` on every row in `inbox_ids` (`WHERE delivered_at IS NULL`).
-4. Each claimed intention's next state: `continue`/`revise`/`drop`/`report`/fallbacks → `closed` with `close_reason = resolved | fallback_report | failed_report`, `closed_at = now`; `ask` → `awaiting_owner`; any decision but `ask` for an intention with undelivered rows not in `inbox_ids` → `result_ready` instead (T11). `claim_token = NULL`, `claimed_at = NULL`, `updated_at = now`.
-5. For `report`, and for both fallbacks: `insert_report(kind=REPORT, …)`; ids → `report_ids`. For `ask`: `insert_report(kind=QUESTION, arrival_id=…)` when the note is a question, plus (2d) `publish_staged` → PROPOSAL rows for each staged proposal of this `claim_token`, with `deadline = now + proposal_ttl`.
-6. Post-commit (outside the transaction): `intention.arrival_decided`, `intention.proposal_pending` per proposal, `publisher.push_due()` kick.
+**Refusals.** `commit_arrival` raises `ValueError` and writes nothing for:
+
+- an unknown `decision`, `outcome` or `gate_reason`;
+- a fallback whose decision is `ask` (a fallback always reports, and no question would be answered);
+- an `ask` with no owner channel, meaning no origin channel on the root (or the deepest intention) and no `telegram_chat_id`. Committed, such an `ask` would wait in `awaiting_owner` on a QUESTION that was never written; that reads as answered, so the next sweep would wake it to a claim with no rows.
+
+The first two are checked before the SAVEPOINT opens. The owner channel is resolved inside it, after the locks and before any write. The runner (2c-2) treats a refusal like any other failed commit.
+
+**Order inside the SAVEPOINT:**
+
+1. the locks (§4.7 Locks);
+2. the owner channel;
+3. the late rows: undelivered intention-keyed rows not in `inbox_ids`;
+4. the fenced moves (item 4);
+5. the delivery stamp (item 3);
+6. `n` and `progress`;
+7. the Brain record (item 2);
+8. the owner-facing row (item 5);
+9. the arrival row (item 1).
+
+A move that touches fewer rows than it expected raises `_FenceLost`: the SAVEPOINT rolls back and `commit_arrival` returns None.
+
+1. **The `intention_arrivals` row.**
+   - `id`: the `arrival_id` the turn's context carried, else a new one.
+   - `n = 1 + max(n)` over the root's arrivals. This equals `1 + count` while nothing deletes arrivals; `uq_intention_arrivals_root_n` holds either way.
+   - `intention_ids`: the claim's ids, sorted. `inbox_ids`: the rows the turn was shown (`claim.inbox_rows`). `report_ids`: item 5.
+   - `claim_token`, `decision`, `note`, `progress_claimed`, `progress`, `confidence`, `gate_reason`.
+   - `tokens_in`, `tokens_out`, from the `tokens` tuple.
+   - `decision_record_id`, `outcome`, and `decided_at = now`.
+
+   `progress` is verified (spec 4.5.4):
+   - NULL for a gate arrival and a `failed_report`, where no model decided.
+   - `false` for a `fallback_report`, or when the model claimed no progress.
+   - Otherwise `true` only if the decision is `revise`, or the turn wrote memory (`wrote_memory`, the runner's evidence of a `learn_fact`/`ingest_document` call), or a child of a claimed intention was created at or after the claim's `claimed_at`. A child that an earlier arrival or a lease-released attempt spawned does not count.
+
+   A claimed `true` that fails the check is stored `false`.
+2. **One Brain decision (G5),** in its own SAVEPOINT. `SET LOCAL statement_timeout = BRAIN_RECORD_STATEMENT_TIMEOUT_MS` runs inside it, and it is reset to `DEFAULT` afterwards. The call is `brain.record(RecordInput(description=f"F099 arrival {n} on '{deepest.intent[:120]}': {decision}", confidence (clamped to 0..1), category="process", stakes="low", context=json.dumps({"root_id", "intention_ids", "arrival_n"}), tags=["f099", decision], reasons=[ReasonInput(type="analysis", text=note[:2000])] when the note is not blank, session_id=f"intent-{root_id}"), session=session)`. `nous/brain/brain.py:353-372` supports a caller-owned session. Its id goes to `decision_record_id`.
+   - The description has a fixed shape, so the Brain's noise filter never rejects it, even for a note of one word (C8).
+   - A Brain failure, or a statement cut off by the timeout, logs a WARNING and leaves `decision_record_id` NULL. It never aborts the commit.
+   - With `brain=None`, nothing is recorded.
+   - Gate arrivals (synthetic confidence 1.0) and `failed_report` arrivals (0.0) also record one.
+3. **The delivery stamp.** `delivered_at = now, delivered_session_id = f"intent-{root_id}"` on every row in `inbox_ids` (`WHERE delivered_at IS NULL`). It runs after the fenced moves, in the same SAVEPOINT. This is the only place a row a turn was shown is stamped.
+4. **Each claimed intention's next state,** set by one fenced UPDATE per target:
+   - gate `cancelled` → `cancelled`, and gate `expired` → `expired`, each with that `close_reason`;
+   - `ask` → `awaiting_owner` (late rows stay held);
+   - otherwise, an intention with late rows → `result_ready`, `result_at = now` (T11);
+   - the rest → `closed`, with `close_reason = resolved | fallback_report | failed_report`.
+
+   Every closing move also sets `closed_at = now`. Every move sets `claim_token = NULL`, `claimed_at = NULL`, `updated_at = now` and `attempts = 0`. The exception is a `failed_report`, which charges one attempt (`attempts + 1`) and keeps the count, on a send-back too.
+5. **The owner-facing row** (one at most in 2c; 2d adds PROPOSAL rows). The channel is the root's origin channel, else the deepest intention's, else the default chat (`owner_channel`, C11). It carries `push_after = push_after_for(settings, now)` (the end of the quiet hours by night, now otherwise), and its body is clipped to `result_inbox_body_max_chars`.
+   - **A REPORT:** for `report`, with `report_text` or else the note as its body. A gate escalation's `report_text` is the reason, then the raw results. Both fallbacks also write a REPORT, unconditionally, whatever their decision.
+   - **A QUESTION:** for every `ask`, carrying `arrival_id`, with the note as the question. In 2d, `publish_staged` adds PROPOSAL rows for each staged proposal of this `claim_token`, with `deadline = now + proposal_ttl`.
+   - **No row:** `continue`, `revise`, `drop` and a gate drop write none.
+
+   A REPORT with no owner channel logs an ERROR, and the arrival commits without it. An `ask` with none was refused (above). The rows' `source_id`s go to `report_ids`.
+6. **Post-commit,** outside the transaction (the runner's, 2c-2; `commit_arrival` emits nothing): `intention.arrival_decided`, `intention.proposal_pending` per proposal, and a `publisher.push_due()` kick.
 
 Nothing in the commit spawns work: spawns happened during the turn through the normal spawn tools and are already rows with `parent_id = claim.deepest.id`.
 
@@ -783,7 +970,7 @@ Nothing in the commit spawns work: spawns happened during the turn through the n
 1. **What does `POST /intentions/{id}/answer` address?** The spec (§4.4 Questions) writes `{id}` as the intention. But the claim SQL blocks only on a `deciding` row, so one root can hold two arrivals in `awaiting_owner` (two result_ready intentions claimed at different times), each with its own question. **Recommended:** the route addresses the question row (`POST /intentions/questions/{id}/answer`, §4.10), and `/answer <id>` takes the question id; the Telegram reply path resolves by `push_message_id`. The intention-addressed form is dropped.
 2. **Close reason for `none`/`remember` with intentions on and continuation off.** §4.1 Closing says `'legacy'` in Phase 1 and `'delivered'` in Phase 2, but does not say whether "Phase 2" means the code or the flag. **Recommended:** `delivered` only when `continuation_enabled`; `legacy` otherwise. Phase 1's closing tests then keep their literals with the flag off, and the week of Phase 1 data is comparable before and after the 2b deploy.
 3. **The `owner_approved` authority.** §4.4 item 5 names it, but `AUTHORITIES` (`nous/brain/intentions.py:46`) feeds both the row CHECK and `lineage_from_stamp` (`execution_context.py:156`); adding a third value would let a stamp claim it. **Recommended:** no new authority value; `kind == "approved_action"` with `declared_tools = (tool,)` is the representation, `authority` stays `"owner"`, and the spec wording is read as the kind.
-4. **Where the TTL and the limits enter `prepare_intention`.** The spec says a root gets `created + root TTL` but the stores have no settings. **Recommended:** `IntentionSpec.ttl_hours` and `IntentionSpec.limits`, filled at the eight spawn sites via `intentions.ttl_for(settings)` / `intentions.limits_for(settings)` (both `None` with the flag off), §4.7. The alternative, a module-level configured value, is global state the tests would have to reset.
+4. **Where the TTL and the limits enter `prepare_intention`.** The spec says a root gets `created + root TTL` but the stores have no settings. **Recommended:** `IntentionSpec.ttl_hours` and `IntentionSpec.limits`, filled at the seven construction sites by `intentions.with_bounds(spec, settings)`, from `ttl_for` / `limits_for` (both `None` with the flag off), §4.7. The alternative, a module-level configured value, is global state the tests would have to reset.
 
 ---
 
@@ -810,4 +997,4 @@ Nothing in the commit spawns work: spawns happened during the turn through the n
 2. **A forged or unoffered call runs because the mode is `warn`.** The strict block sits before the `offered_mode != "off"` check and before `policy_mode == "off"` (§4.5). Mutation check: set both modes to `off` in the forged-`send_email` test and assert the refusal still happens, on both loops.
 3. **A proposal becomes approvable from a failed, timed-out or lease-lost attempt.** `staged → pending` happens only in `publish_staged` inside the fenced commit; `expire_staged` runs on every failure path and on lease release. Mutation check: kill the turn after `propose_action` and assert no `pending` row exists and the Telegram publisher sends nothing.
 4. **A result is lost silently.** Four doors: (a) the flag is on but no runner claims NULL-keyed rows (the §2 gate); (b) `IntentionClosePass` closes a `continue` intention as `legacy` (§4.7 exclusion); (c) a `continue` DAG is marked delivered with no inbox row and `InboxDagPass` does not select it (§4.9 filter); (d) a cancelled lineage subtask reaches no writer (`repair_missing_results`). Each needs a test that removes the hook and watches the count of undelivered-and-unclaimable results go above 0.
-5. **Cancel races.** Three lock orders must hold everywhere: root `FOR UPDATE` (cancel, claim) vs root `FOR SHARE` (spawn, `_hold_open_root`); container row before schedule row (cancel of a container vs a fire, `_hold_open_container`); `approved → executing` with the root-open predicate in the same statement (cancel vs approve). Plus the running-turn task cancel: the turn's spawns after the cancel are refused by I1 (root closed) even if the task cancel lands late. Tests: cancel committed between `claim_execution`'s read and write; a fire in flight while a container is cancelled; a spawn in flight while its root is cancelled.
+5. **Cancel races.** Three lock orders must hold everywhere: root `FOR NO KEY UPDATE` (cancel, claim; §4.7 Locks) vs root `FOR SHARE` (spawn, `_hold_open_root`); container row before schedule row (cancel of a container vs a fire, `_hold_open_container`); `approved → executing` with the root-open predicate in the same statement (cancel vs approve). Plus the running-turn task cancel: the turn's spawns after the cancel are refused by I1 (root closed) even if the task cancel lands late. Tests: cancel committed between `claim_execution`'s read and write; a fire in flight while a container is cancelled; a spawn in flight while its root is cancelled.
