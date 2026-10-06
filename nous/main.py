@@ -14,7 +14,7 @@ import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import uvicorn
@@ -233,8 +233,9 @@ def _gate_continuation_flag(settings: Settings) -> None:
 
     With the flag on and no runner, a continue result is written keyed by its
     intention alone and nothing claims it (G6). The gate lives here and not in
-    a Settings validator because config.py must not import nous.brain. PR-2e
-    sets CONTINUATION_RUNNER_READY in the commit that wires the runner.
+    a Settings validator because config.py must not import nous.brain. The
+    runner is already wired (``_build_continuation_runner``, inert while the
+    constant is False); PR-2e sets CONTINUATION_RUNNER_READY.
     """
     if settings.continuation_enabled and not continuation.CONTINUATION_RUNNER_READY:
         logger.warning(
@@ -283,6 +284,39 @@ async def _rollback_continuation(settings: Settings, database: Database) -> None
             report.expired_proposals,
             report.pushed_raw,
         )
+
+
+async def _build_continuation_runner(
+    settings: Settings, *, database: Database, runner: Any, heart: Any, brain: Any, bus: Any, dispatcher: Any
+) -> Any | None:
+    """F099 Phase 2c: build and wire the continuation runner (NOT started), or None.
+
+    A runner exists only when continuation is on AND this build may run it
+    (``continuation.CONTINUATION_RUNNER_READY``, flipped by PR-2e). ``_gate_continuation_flag``
+    already forces the flag off while the constant is False; this is the second guard, so a change to the
+    gate alone cannot start a runner. With either off, nothing is constructed: no loop, no sweep, no
+    push, no reconciler pass. The runner is returned unstarted: `create_components` starts it as its LAST
+    statement, once the tools it may offer (spawn, DAG) and every other component exist; a root that is already
+    due would otherwise be claimed in the first sweep and offered no `spawn_task`.
+    """
+    if not (settings.continuation_enabled and continuation.CONTINUATION_RUNNER_READY):
+        return None
+    from nous.handlers.continuation_publisher import OwnerPublisher
+    from nous.handlers.continuation_runner import ContinuationRunner
+
+    continuation_runner = ContinuationRunner(
+        database=database,
+        settings=settings,
+        runner=runner,
+        heart=heart,
+        brain=brain,
+        bus=bus,
+        dispatcher=dispatcher,
+        publisher=OwnerPublisher(database=database, settings=settings),
+    )
+    if bus is not None:
+        bus.on("intention.result_ready", continuation_runner.on_result_ready)
+    return continuation_runner
 
 
 async def create_components(settings: Settings) -> dict:
@@ -1094,6 +1128,12 @@ async def create_components(settings: Settings) -> dict:
                 _context_log_retention_loop(settings, database), name="context-log-retention"
             )
 
+    # F099 Phase 2c: the continuation runner. None while CONTINUATION_RUNNER_READY is False (until PR-2e), so
+    # the reconciler's pass below and the shutdown see none.
+    continuation_runner = await _build_continuation_runner(
+        settings, database=database, runner=runner, heart=heart, brain=brain, bus=bus, dispatcher=dispatcher
+    )
+
     # F098: repair inbox writes the subtask worker lost (codex P1 on #694),
     # and (Phase C) write results to memory that no hook wrote.
     result_reconciler_task = None
@@ -1110,7 +1150,13 @@ async def create_components(settings: Settings) -> dict:
                 await heart.result_inbox.ensure_enabled_at()
             except Exception:
                 logger.warning("F098: could not record when the result inbox was enabled", exc_info=True)
-        result_reconciler = build_reconciler(database, heart.result_inbox, settings, heart.result_memory)
+        result_reconciler = build_reconciler(
+            database,
+            heart.result_inbox,
+            settings,
+            heart.result_memory,
+            continuation_wake=continuation_runner.wake if continuation_runner is not None else None,
+        )
         result_reconciler_task = asyncio.create_task(
             _result_reconciler_loop(result_reconciler), name="result-reconciler"
         )
@@ -1541,6 +1587,10 @@ async def create_components(settings: Settings) -> dict:
         a2ui_sweep_task = asyncio.create_task(_a2ui_sweep_loop(settings, surface_service))
         logger.info("F092: A2UI companion enabled (push_surface + /a2ui routes + sweep)")
 
+    # F099 Phase 2c: started last, once every tool and component a continuation turn may use exists.
+    if continuation_runner is not None:
+        await continuation_runner.start()
+
     return {
         "database": database,
         "brain": brain,
@@ -1564,6 +1614,7 @@ async def create_components(settings: Settings) -> dict:
         "rubric_evolver": rubric_evolver if bus else None,
         "heartbeat_runner": heartbeat_runner,
         "dag_orchestrator": dag_orchestrator,
+        "continuation_runner": continuation_runner,
         "context_logger": context_logger,
         "context_log_retention_task": context_log_retention_task,
         "result_reconciler_task": result_reconciler_task,
@@ -1581,6 +1632,12 @@ async def create_components(settings: Settings) -> dict:
 async def shutdown_components(components: dict) -> None:
     """Graceful shutdown in reverse order."""
     logger.info("Shutting down Nous...")
+
+    # F099: stop the continuation runner first: its turns spawn work and write rows. Each running arrival
+    # releases its claim without an attempt.
+    continuation_runner = components.get("continuation_runner")
+    if continuation_runner is not None:
+        await continuation_runner.stop()
 
     # F034: Stop heartbeat before other components
     heartbeat_runner = components.get("heartbeat_runner")

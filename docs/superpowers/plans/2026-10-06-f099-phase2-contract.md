@@ -792,6 +792,8 @@ class ContinuationRunner:
 
 **Failure** (§4.5 item 7): a raise, a `TimeoutError` from `wait_for`, or a fence rejection → `fail_attempt` (`attempts + 1`, `claim_token = NULL`, `state = result_ready` or, at the cap, `failed_report`) and `expire_staged` (2d). A `CancelledError` from `stop()` or `cancel_root` re-raises after releasing the claim.
 
+> **Superseded by #705 (the fence-rejection case only):** `fail_attempt` is fenced on the same `claim_token` as the commit, so a commit that lost its fence writes nothing and charges nothing: the claim was released, or the root was cancelled or expired, under the turn (as built, `ContinuationRunner._commit` returns None and calls no `fail_attempt`). A raise and a timeout still go through `fail_attempt` as above.
+
 **`main.py` wiring (2e only):** after the result reconciler block (`nous/main.py:1039-1056`):
 
 ```python
