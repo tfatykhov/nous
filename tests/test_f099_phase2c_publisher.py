@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -210,3 +211,100 @@ async def test_with_continuation_off_the_publisher_touches_nothing():  # PIN
     settings = Settings(_env_file=None, result_inbox_enabled=True, intentions_enabled=True, telegram_bot_token="t")
     publisher = OwnerPublisher(database=NoDatabase(), settings=settings, http_client=http)
     assert await publisher.push_due() == 0 and http.post.await_count == 0
+
+
+def _http_by_chat(statuses: dict[str, int]):
+    """A Telegram double that answers each chat with its status (200 for any chat not listed)."""
+
+    async def post(url, *, json, timeout):
+        status = statuses.get(json["chat_id"], 200)
+        if status < 400:
+            body = {"ok": True, "result": {"message_id": 777}}
+        else:
+            body = {"ok": False, "error_code": status, "description": "Forbidden: bot was blocked by the user"}
+        return SimpleNamespace(status_code=status, json=lambda: body, text=str(body))
+
+    return MagicMock(post=AsyncMock(side_effect=post))
+
+
+def _chats(http) -> list[str]:
+    return [c.kwargs["json"]["chat_id"] for c in http.post.call_args_list]
+
+
+@pytest.mark.parametrize("status", [400, 403])
+async def test_a_refused_row_does_not_block_the_rows_behind_it(env_factory, status, caplog):  # noqa: F811
+    """A refusal (the bot is blocked, the chat is gone) is final for its row: it is stamped with no message id
+    and the sweep goes on, instead of holding every later push for the whole inbox window."""
+    env = await _env(env_factory)
+    refused = await _row(env, channel="telegram:1111", push_after=NOW - timedelta(minutes=5))  # the oldest due row
+    later = await _row(env, channel="telegram:2222")
+    http = _http_by_chat({"1111": status})
+    with caplog.at_level(logging.WARNING, logger="nous.handlers.continuation_publisher"):
+        assert await _publisher(env, http).push_due(now=NOW) == 1  # a refused row is not counted as pushed
+    assert _chats(http) == ["1111", "2222"]
+    stamped = await _stored(env, refused)
+    assert stamped.pushed_at is not None and stamped.push_message_id is None
+    assert (await _stored(env, later)).push_message_id == 777
+    assert f"HTTP {status}" in caplog.text
+    assert "test-token" not in caplog.text and "blocked" not in caplog.text  # the status only, never the body
+
+
+async def test_a_refused_row_is_not_sent_again(env_factory):  # noqa: F811
+    env = await _env(env_factory)
+    await _row(env, channel="telegram:1111")
+    http = _http_by_chat({"1111": 403})
+    publisher = _publisher(env, http)
+    assert await publisher.push_due(now=NOW) == 0
+    assert await publisher.push_due(now=NOW + timedelta(minutes=1)) == 0
+    assert http.post.await_count == 1  # the refusal was the row's one send
+
+
+@pytest.mark.parametrize("status", [401, 404, 409, 429, 500])
+async def test_a_transient_failure_still_stops_the_batch_and_stamps_nothing(env_factory, status):  # noqa: F811  # PIN
+    """401 and 404 are a wrong bot token, a fault for every row, so never one row's refusal; 429 and 5xx are an
+    outage; any other status (409 here) is not known to be final. The rows stay due for the next sweep."""
+    env = await _env(env_factory)
+    first = await _row(env, channel="telegram:1111", push_after=NOW - timedelta(minutes=5))
+    second = await _row(env, channel="telegram:2222")
+    http = _http_by_chat({"1111": status, "2222": status})
+    assert await _publisher(env, http).push_due(now=NOW) == 0
+    assert _chats(http) == ["1111"]  # the second row was not tried
+    assert (await _stored(env, first)).pushed_at is None and (await _stored(env, second)).pushed_at is None
+
+
+async def test_a_row_with_no_chat_id_is_stamped_without_a_send(env_factory):  # noqa: F811
+    env = await _env(env_factory)
+    empty = await _row(env, channel="telegram:", push_after=NOW - timedelta(minutes=5))
+    await _row(env)
+    http = _http()
+    assert await _publisher(env, http).push_due(now=NOW) == 1
+    assert _chats(http) == ["8080"]  # the row with no chat id never reached Telegram
+    row = await _stored(env, empty)
+    assert row.pushed_at is not None and row.push_message_id is None
+
+
+async def test_the_truncation_marker_survives_the_telegram_cut(env_factory):  # noqa: F811
+    """With the default body cap (4000) a 3950-character body passed the clip whole, and the 3900-character
+    Telegram cut then took its end, marker and all."""
+    env = await _env(env_factory)
+    assert env.settings.result_inbox_body_max_chars == 4000  # the default this case is about
+    await _row(env, body="x" * 3950)
+    http = _http()
+    assert await _publisher(env, http).push_due(now=NOW) == 1
+    text = http.post.call_args.kwargs["json"]["text"]
+    assert len(text) <= 3900 and text.endswith("[truncated]")
+
+
+async def test_the_stores_reports_are_still_clipped_at_the_inbox_cap(env_factory):  # noqa: F811  # PIN
+    """The Telegram room is the publisher's alone: an expiry report (one of the store's clip_body callers) is
+    still cut at the inbox cap, 4000 by default: 3980 characters, then the 12 of the marker."""
+    env = await _env(env_factory)
+    root = await make_root(env)
+    await record(env, root, body="x" * 9000)
+    await set_intention(env, root.id, deadline=datetime.now(UTC) - timedelta(hours=1))
+    async with env.db.session() as s:
+        expired = await continuation.expire_roots(s, env.agent, ttl_hours=72.0, settings=env.settings, limit=10)
+        await s.commit()
+    assert expired == [root.id]
+    (report,) = await _owner_rows(env)
+    assert len(report.body) == 3992 and report.body.endswith("x\n[truncated]")

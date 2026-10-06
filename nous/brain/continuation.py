@@ -686,10 +686,13 @@ def _close_reason(outcome: str) -> str:
     return CLOSE_RESOLVED
 
 
-def clip_body(text: str, settings: Any) -> str:
-    """``text`` cut to the inbox's body limit (``result_inbox_body_max_chars``), marked ``[truncated]`` when cut."""
-    limit = int(getattr(settings, "result_inbox_body_max_chars", 4000))
-    return text if len(text) <= limit else text[: limit - 20].rstrip() + "\n[truncated]"
+def clip_body(text: str, settings: Any, *, limit: int | None = None) -> str:
+    """``text`` cut to the inbox's body limit (``result_inbox_body_max_chars``), or to ``limit`` when that is
+    smaller, marked ``[truncated]`` when cut."""
+    cap = int(getattr(settings, "result_inbox_body_max_chars", 4000))
+    if limit is not None:
+        cap = min(cap, limit)
+    return text if len(text) <= cap else text[: cap - 20].rstrip() + "\n[truncated]"
 
 
 async def _lock_claimed(session: AsyncSession, agent_id: str, root_id: UUID, ids: list[UUID]) -> None:
