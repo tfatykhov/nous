@@ -77,8 +77,13 @@ class _Orchestrator:
         self.start_dag = AsyncMock()
 
 
+@pytest.fixture(params=[False, True], ids=["intentions-off", "intentions-on"])
+def intentions_flag(request) -> bool:
+    return request.param
+
+
 @pytest.fixture
-async def make_env(db, mock_embeddings):
+async def make_env(db, mock_embeddings, intentions_flag):
     """Build one agent's real Heart + ToolDispatcher with the spawn and DAG tools."""
     from nous.heart import Heart
 
@@ -86,7 +91,7 @@ async def make_env(db, mock_embeddings):
 
     async def build(**over):
         agent = f"f099-pin-{uuid.uuid4().hex[:8]}"
-        settings = _settings(agent, **over)
+        settings = _settings(agent, intentions_enabled=intentions_flag, **over)
         heart = Heart(db, settings, embedding_provider=mock_embeddings)
         hearts.append(heart)
         dispatcher = ToolDispatcher()
@@ -97,6 +102,11 @@ async def make_env(db, mock_embeddings):
     yield build
     for heart in hearts:
         await heart.close()
+
+
+def _intent(env) -> dict:
+    """With intentions on, every spawn tool needs one (I2); the routing must not change (I5)."""
+    return {"intent": "Pin the routing"} if env.settings.intentions_enabled else {}
 
 
 async def _dispatch(env, name: str, args: dict, ctx: ExecutionContext = INTERACTIVE) -> tuple[str, bool]:
@@ -111,7 +121,7 @@ async def _only_subtask(env) -> Subtask:
 
 
 async def _spawn(env) -> Subtask:
-    text, is_error = await _dispatch(env, "spawn_task", {"task": "Check the snow report"})
+    text, is_error = await _dispatch(env, "spawn_task", {"task": "Check the snow report", **_intent(env)})
     assert not is_error, text
     row = await _only_subtask(env)
     await env.heart.subtasks.complete(row.id, PIN_RESULT, final_outcome="completed")
@@ -119,7 +129,9 @@ async def _spawn(env) -> Subtask:
 
 
 async def _inline(env) -> Subtask:
-    text, is_error = await _dispatch(env, "spawn_task", {"task": "Check the snow report", "await_result": True})
+    text, is_error = await _dispatch(
+        env, "spawn_task", {"task": "Check the snow report", "await_result": True, **_intent(env)}
+    )
     assert not is_error, text
     return await _only_subtask(env)
 
@@ -127,13 +139,15 @@ async def _inline(env) -> Subtask:
 async def _spawn_sync(env) -> Subtask:
     # The stub never calls submit_final_report, so the hardened run may end
     # completed or failed; the routing columns are what is pinned.
-    await _dispatch(env, "spawn_sync", {"task": "Check the snow report"})
+    await _dispatch(env, "spawn_sync", {"task": "Check the snow report", **_intent(env)})
     return await _only_subtask(env)
 
 
 async def _fire(env, *, notify: bool) -> Subtask:
     text, is_error = await _dispatch(
-        env, "schedule_task", {"task": "Check the snow report", "every": "30 minutes", "notify": notify}
+        env,
+        "schedule_task",
+        {"task": "Check the snow report", "every": "30 minutes", "notify": notify, **_intent(env)},
     )
     assert not is_error, text
     async with env.db.session() as s:
@@ -214,6 +228,15 @@ async def test_phase_a_routing_of_each_spawned_row(make_env, path, routing, inbo
         await record_subtask_result(env.heart.result_inbox, row, env.settings)
     assert await _inbox_keys(env, row.id) == inbox
 
+    from nous.storage.models import Intention
+
+    async with env.db.session() as s:
+        count = len((await s.execute(select(Intention).where(Intention.agent_id == env.agent))).scalars().all())
+    # Exactly one intention per spawn (a fire is two spawns: the schedule's
+    # container and the fire itself); none at all with the flag off.
+    expected = {"spawn": 1, "inline": 1, "spawn_sync": 1, "fire_notify": 2, "fire_silent": 2}[path]
+    assert count == (expected if env.settings.intentions_enabled else 0)
+
 
 @pytest.mark.parametrize(
     ("path", "expected"),
@@ -252,6 +275,7 @@ async def test_dag_origin_written_by_dag_create(make_env, ctx, origin):
             "name": "pin-dag",
             "description": "Pin the origin",
             "nodes": [{"name": "n", "type": "subtask", "instructions": "x"}],
+            **_intent(env),
         },
         ctx,
     )
@@ -259,3 +283,9 @@ async def test_dag_origin_written_by_dag_create(make_env, ctx, origin):
     async with env.db.session() as s:
         dag = (await s.execute(select(ExecutionDAG).where(ExecutionDAG.agent_id == env.agent))).scalar_one()
     assert (dag.origin_channel, dag.origin_session_id) == origin
+
+    from nous.storage.models import Intention
+
+    async with env.db.session() as s:
+        count = len((await s.execute(select(Intention).where(Intention.agent_id == env.agent))).scalars().all())
+    assert count == (1 if env.settings.intentions_enabled else 0)

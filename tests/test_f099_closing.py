@@ -310,3 +310,91 @@ async def test_the_inbox_repair_names_and_closes_the_intention(close_env):
     it = await _of(env, "subtask", st.id)
     (row,) = await _inbox(env, st.id)
     assert row.intention_id == it.id and it.state == "closed"
+
+
+async def test_end_to_end_a_chat_spawn_is_recorded_then_closed(db, mock_embeddings):
+    """The real runner, dispatcher, spawn_task, worker and inbox writer. A
+    chat turn's spawn records a continue intention carrying the turn's Plan
+    decision; the worker finishing it closes it as legacy, and the inbox row
+    names it and is routed exactly as F098 routes it."""
+    from nous.api.runner import AgentRunner, ApiResponse
+    from nous.cognitive.schemas import Assessment, FrameSelection, TurnContext
+    from nous.handlers.subtask_worker import SubtaskWorkerPool
+    from nous.heart import Heart
+
+    plan = str(uuid.uuid4())
+
+    class _Cognitive:
+        async def pre_turn(self, *a, **k):
+            return TurnContext(
+                system_prompt="You are Nous.",
+                frame=FrameSelection(frame_id="task", frame_name="Task", confidence=0.9, match_method="default"),
+                decision_id=plan,
+                active_censors=[],
+                context_token_estimate=100,
+            )
+
+        async def post_turn(self, agent_id, session_id, turn_result, turn_context, **k):
+            return Assessment(actual=turn_result.response_text[:200])
+
+        async def end_session(self, *a, **k):
+            return None
+
+        async def list_frames(self, *a, **k):
+            return []
+
+    class _Stub:
+        async def close(self):
+            pass
+
+    agent = f"f099-e2e-{uuid.uuid4().hex[:8]}"
+    settings = Settings(_env_file=None, agent_id=agent, ANTHROPIC_API_KEY="test-key", **ON)
+    heart = Heart(db, settings, embedding_provider=mock_embeddings)
+    runner = AgentRunner(_Cognitive(), _Stub(), _Stub(), settings)
+    d = ToolDispatcher()
+    register_subtask_tools(d, heart, settings, runner=runner)
+    runner.set_dispatcher(d)
+    calls = {"n": 0}
+
+    async def fake_call_api(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            spawn = {"task": "Check the snow report", "intent": "Tell the user whether to drive up"}
+            return ApiResponse(
+                content=[{"type": "tool_use", "id": "t1", "name": "spawn_task", "input": spawn}], stop_reason="tool_use"
+            )
+        return ApiResponse(content=[{"type": "text", "text": "On it."}], stop_reason="end_turn")
+
+    runner._call_api = fake_call_api
+    try:
+        await runner.run_turn(
+            "S1", "check the snow", context=ExecutionContext(kind="interactive", session_id="S1", channel=CHAN)
+        )
+        (st,) = await heart.subtasks.list(limit=10)
+        it = await heart.intentions.get_for_source("subtask", st.id)
+        assert (it.wake_policy, it.origin_kind, it.origin_channel, str(it.origin_decision_id)) == (
+            "continue",
+            "interactive",
+            CHAN,
+            plan,
+        )
+        assert st.metadata_["plan_decision_id"] == plan
+
+        class _WorkerTurn:
+            async def run_turn(self, **kwargs):
+                return RESULT, None, {"input_tokens": 1, "output_tokens": 1}
+
+            async def end_conversation(self, *a, **k):
+                return None
+
+        pool = SubtaskWorkerPool(_WorkerTurn(), heart, settings)
+        await pool._process_subtask(await heart.subtasks.dequeue("worker-0"))
+        it = await heart.intentions.get_for_source("subtask", st.id)
+        assert (it.state, it.close_reason) == ("closed", "legacy")
+        async with db.session() as s:
+            (row,) = (await s.execute(select(ResultInbox).where(ResultInbox.source_id == st.id))).scalars().all()
+        assert row.intention_id == it.id and (row.channel, row.session_id) == (CHAN, "S1")
+    finally:
+        runner._api_shared = True
+        await runner.close()
+        await heart.close()
