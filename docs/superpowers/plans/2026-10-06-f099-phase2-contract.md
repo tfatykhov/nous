@@ -488,7 +488,9 @@ class RootLimits:        # derived from rows, never counted
 class Claim:
     root_id: UUID; claim_token: UUID; intentions: tuple[Intention, ...]
     deepest: Intention                       # section 4.4: max depth, then earliest created_at, then lowest id
-    inbox_rows: tuple[ResultInbox, ...]      # undelivered rows keyed by any claimed intention, read after the claim committed
+    inbox_rows: tuple[ResultInbox, ...]      # undelivered rows keyed by any claimed intention, read inside the claim's transaction
+                                             # (after its UPDATE); a row that lands later sends its intention back to
+                                             # result_ready at commit_arrival, so the two readings are equivalent
 
 @dataclass(frozen=True, slots=True)
 class Resolution:
@@ -555,7 +557,10 @@ async def claim_root(session, agent_id, root_id, *, token, debounce_s, max_wait_
 async def eligible_roots(session, agent_id, *, debounce_s, max_wait_s) -> list[tuple[UUID, datetime]]    [2c]
     # Roots with a result_ready continue intention and no deciding one, with the instant each becomes
     # claimable (the runner sleeps until the earliest).
-async def release_stale_claims(session, agent_id, *, lease_s) -> list[UUID]                              [2c]  (T8)
+async def release_stale_claims(session, agent_id, *, lease_s, max_attempts, settings, brain=None,
+                               now=None) -> list[UUID]                                                    [2c]  (T8)
+    # Every deciding row claimed more than lease_s ago, grouped by claim, each group through fail_attempt (so the
+    # cap applies at lease release too). Roots in (created_at, id) order. Returns the ids taken from their claim.
 async def root_limits(session, agent_id, root_id, *, settings) -> RootLimits                              [2c]
     # tokens = Σ subtasks.tokens_in+tokens_out over the root's subtask intentions with dag_node_id IS NULL
     #        + Σ execution_dags.tokens_consumed over its dag intentions + Σ arrivals.tokens_in+out;
@@ -563,14 +568,20 @@ async def root_limits(session, agent_id, root_id, *, settings) -> RootLimits    
     # depth = max(depth); stalls = length of the trailing run of arrivals with progress=false.
 async def gate(session, agent_id, claim, *, settings, plan_outcome_of) -> str | None                     [2c]
     # Section 4.5 item 3 in order: cancelled/expired → 'cancelled'/'expired'; past deadline of the deepest
-    # claimed intention → 'past_deadline'; root_limits.escalate; the Plan decision of the deepest claimed
-    # intention resolved superseded/noise → 'plan_resolved'. Returns the gate_reason or None.
+    # claimed intention → 'past_deadline'; root_limits.escalate; the originating Plan decision (the root's
+    # origin_decision_id, else the deepest claimed intention's) resolved superseded/noise → 'plan_resolved'.
+    # Returns the gate_reason or None.
 async def commit_arrival(session, agent_id, claim, *, resolution, outcome, gate_reason=None, tokens, brain,
                          settings, report_text=None) -> ArrivalCommit | None                            [2c]
     # Section 4.5 item 6 and section 4.14. Every UPDATE carries WHERE state='deciding' AND claim_token=:token;
     # None when the fence rejected (the lease was released).
-async def fail_attempt(session, agent_id, claim, *, max_attempts, settings) -> str                         [2c]  (T8 or T12)
-    # attempts+1 on every claimed intention; at the cap, REPORT rows with the raw results and close failed_report.
+async def fail_attempt(session, agent_id, claim, *, max_attempts, settings, brain=None, now=None) -> str    [2c]  (T8 or T12)
+    # attempts+1 on every claimed intention, in the one fenced UPDATE of each path: 'retry' (back to result_ready,
+    # result_at=now), 'failed_report' (at the cap, one REPORT with the raw results, closed failed_report), or
+    # 'lost' (the fence rejected it; nothing written).
+async def release_claim(session, agent_id, claim) -> int                                                   [2c]
+    # A deliberate release (a shutdown, a cancel): fenced, back to result_ready, no attempt charged. Returns the
+    # number of intentions released.
 async def expire_roots(session, agent_id, *, ttl_hours, settings) -> list[UUID]                            [2c]  (T14)
 async def repair_missing_results(session, agent_id, *, settings, limit) -> int                             [2c]
     # continue/report intentions whose source is terminal (cancelled included) and that have no inbox row for
@@ -683,7 +694,7 @@ Writers, when `settings.continuation_enabled`:
 
 **Push and quiet hours (2d):** `OwnerPublisher` in `nous/handlers/continuation_publisher.py`: `push_due(limit) -> int` sends every `intention_report` row with `pushed_at IS NULL AND (push_after IS NULL OR push_after <= now)` to `settings.telegram_chat_id` with the bot token (as `_notify_telegram` does), inline keyboard `[[Approve, Reject]]` for PROPOSAL rows, `force_reply` for QUESTION rows; stores `push_message_id` and `pushed_at` by row id (idempotent: `UPDATE … WHERE pushed_at IS NULL RETURNING`). `insert_report` sets `push_after = next quiet-hours end` when `in_quiet_hours(settings)` (the module function extracted from `HeartbeatRunner._in_quiet_hours`, `nous/heartbeat/runner.py:1321-1332`, into `nous/heartbeat/quiet_hours.py:in_quiet_hours(settings, now=None) -> bool` and `quiet_hours_end(settings, now=None) -> datetime`); REPORT rows are pushed only when `origin_channel` is NULL or Telegram (chat sees them through the inbox either way).
 
-**Answers (2d):** `record_answer` inserts, for every intention in the question's arrival, a `continue` result through `record_result` with `source_kind = "intention_report"`, `source_id = <new uuid>`, `msg_type = "INFORM"`, `title = "Owner's answer"`, `body = text`, `arrival_id = <the question's arrival>`; then `wake_arrival` if `arrival_is_terminal`. The model never routes it (§4.4 Questions).
+**Answers (2d):** `record_answer` first locks the question's root row (`FOR NO KEY UPDATE`), the one lock order of 2c (root, then intentions in `id` order, then inbox rows); a `record_result` per intention followed by `wake_arrival`, with no root lock before them, takes the intention rows before the root and deadlocks against the TTL sweep (seen in 2c1-6 for `wake_arrival`). Then it inserts, for every intention in the question's arrival, a `continue` result through `record_result` with `source_kind = "intention_report"`, `source_id = <new uuid>`, `msg_type = "INFORM"`, `title = "Owner's answer"`, `body = text`, `arrival_id = <the question's arrival>`; then `wake_arrival` if `arrival_is_terminal`. The model never routes it (§4.4 Questions).
 
 ### 4.10 REST routes (`nous/api/rest.py`, routes list at line 3343; 2d and 2e)
 
