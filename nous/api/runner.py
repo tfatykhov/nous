@@ -51,6 +51,7 @@ from nous.api.models import (  # noqa: F401 — re-exported for backward compat
 from nous.api.smart_compress import smart_compress
 from nous.api.tool_classes import refuse_denylist
 from nous.brain.brain import Brain
+from nous.brain.continuation import INTENT_SESSION_PREFIX
 from nous.brain.intentions import AUTHORITY_INTERNAL
 from nous.cognitive.action_gate import ActionGate
 from nous.cognitive.claim_verifier import ClaimVerifier, Evidence, IntentTracker
@@ -1362,6 +1363,9 @@ class AgentRunner:
                 # F098: only passed when known, so callers without a channel
                 # (and test doubles of pre_turn) see the call unchanged.
                 **({"channel": _ctx.channel} if _ctx.channel else {}),
+                # F099 (2c): only a continuation turn names its kind, so pre_turn skips the generic inbox
+                # injection and the Plan deliberation (the arrival's own decision is its record).
+                **({"context_kind": _ctx.kind} if _ctx.kind == "continuation" else {}),
                 # F091: same conversation-derived number context_log records,
                 # computed here BEFORE the user message is appended below —
                 # matching how _current_turn_number is derived after the
@@ -1651,7 +1655,8 @@ class AgentRunner:
         conversation = self._conversations.get(session_id)
 
         reflection: str | None = None
-        if conversation and len(conversation.messages) >= 6:  # 3 user + 3 assistant = 6
+        # F099: an intent-<root> session is a continuation's thread, rebuilt from rows every arrival: no reflection.
+        if conversation and len(conversation.messages) >= 6 and not session_id.startswith(INTENT_SESSION_PREFIX):
             try:
                 # Build a reflection prompt with conversation history
                 history_text = self._format_history_text(conversation)
@@ -3860,6 +3865,16 @@ Rules:
             self._ledgers[session_id] = ExecutionLedger(session_id=session_id)
             logger.info("F026: Ledger created for session %s", session_id)
         return self._ledgers[session_id]
+
+    def executed_tools(self, session_id: str) -> list[tuple[str, str]]:
+        """``(tool_name, status)`` of every call this session's execution ledger recorded, in order.
+
+        The continuation runner reads it BEFORE it ends the session (``end_conversation`` pops the
+        ledger) to verify the model's ``progress`` claim: a ``learn_fact`` or ``ingest_document`` that
+        succeeded is memory written (spec 4.5.4).
+        """
+        ledger = self._ledgers.get(session_id)
+        return [(a.tool_name, a.status) for a in ledger.actions] if ledger else []
 
     def _verify_claims(
         self,

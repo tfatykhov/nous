@@ -686,7 +686,8 @@ def _close_reason(outcome: str) -> str:
     return CLOSE_RESOLVED
 
 
-def _clip(text: str, settings: Any) -> str:
+def clip_body(text: str, settings: Any) -> str:
+    """``text`` cut to the inbox's body limit (``result_inbox_body_max_chars``), marked ``[truncated]`` when cut."""
     limit = int(getattr(settings, "result_inbox_body_max_chars", 4000))
     return text if len(text) <= limit else text[: limit - 20].rstrip() + "\n[truncated]"
 
@@ -746,6 +747,14 @@ async def _root_origin_channel(session: AsyncSession, agent_id: str, root_id: UU
         )
     ).scalar_one_or_none()
     return channel or fallback
+
+
+async def claim_owner_channel(session: AsyncSession, agent_id: str, claim: Claim, *, settings: Any) -> str | None:
+    """Where an owner-facing row of this claim goes (contract 4.14 item 5): the root's origin channel, else the
+    deepest claimed intention's, else the default chat; None when there is none. The commit and the runner ask
+    this one function, so an ask the runner lets through is never one the commit refuses."""
+    origin = await _root_origin_channel(session, agent_id, claim.root_id, claim.deepest.origin_channel)
+    return owner_channel(settings, origin)
 
 
 async def _verified_progress(
@@ -932,9 +941,7 @@ async def _commit_arrival(
         kind = {"ask": MSG_QUESTION, "report": MSG_REPORT}.get(resolution.decision)
     channel: str | None = None
     if kind is not None:
-        channel = owner_channel(
-            settings, await _root_origin_channel(session, agent_id, root_id, deepest.origin_channel)
-        )
+        channel = await claim_owner_channel(session, agent_id, claim, settings=settings)
     if kind == MSG_QUESTION and channel is None:
         raise ValueError(
             f"root {root_id} has no owner channel (no origin channel, no default chat): an ask has nowhere to ask"
@@ -1034,7 +1041,7 @@ async def _commit_arrival(
                     agent_id,
                     kind=kind,
                     title=f"{'Question' if kind == MSG_QUESTION else 'Update'}: {deepest.intent}",
-                    body=_clip(body, settings),
+                    body=clip_body(body, settings),
                     channel=channel,
                     intention_id=deepest.id,
                     root_id=root_id,
@@ -1398,7 +1405,7 @@ async def _settle_stranded_rows(session: AsyncSession, agent_id: str, *, setting
                 agent_id,
                 kind=MSG_REPORT,
                 title=f"Late results: {root.intent}",
-                body=_clip(f"{head}\n\n{raw_results_text(rows)}", settings),
+                body=clip_body(f"{head}\n\n{raw_results_text(rows)}", settings),
                 channel=channel,
                 intention_id=root_id,
                 root_id=root_id,
@@ -1504,7 +1511,7 @@ async def _expire_root(
                 agent_id,
                 kind=MSG_REPORT,
                 title=f"Closed after {ttl_hours:g} hours: {row.intent}",
-                body=_clip(f"{head}\n\nWhat I had so far:\n{raw}" if raw else head, settings),
+                body=clip_body(f"{head}\n\nWhat I had so far:\n{raw}" if raw else head, settings),
                 channel=channel,
                 intention_id=root_id,
                 root_id=root_id,
@@ -1614,34 +1621,39 @@ async def wake_terminal_arrivals(
     )
     woken: list[UUID] = []
     for arrival in arrivals:
-        async with session.begin_nested():
-            terminal, answered, questions = await _question_state(
-                session, agent_id, arrival.id, settings=settings, now=now
+        try:
+            async with session.begin_nested():
+                terminal, answered, questions = await _question_state(
+                    session, agent_id, arrival.id, settings=settings, now=now
+                )
+                if not terminal:
+                    continue
+                # Wake first: wake_arrival takes the root before any intention, and the rows below go only to the
+                # intentions it moved. One the expiry closed meanwhile gets none: on a closed intention
+                # record_result would turn the row into a report telling the owner that the owner did not answer.
+                moved = await wake_arrival(session, agent_id, arrival.id, now=now)
+                if not answered:
+                    for intention_id in moved:
+                        await record_result(
+                            session,
+                            agent_id,
+                            intention_id=intention_id,
+                            source_kind=SOURCE_INTENTION_REPORT,
+                            source_id=uuid.uuid5(_EXPIRY_NAMESPACE, f"{arrival.id}:{intention_id}"),
+                            msg_type="INFORM",
+                            title="The owner did not answer",
+                            body=(
+                                "I asked the owner a question and the owner did not answer within "
+                                f"{float(settings.intention_proposal_ttl_hours):g} hours: {questions[0].body[:500]}"
+                            ),
+                            arrival_id=arrival.id,
+                            settings=settings,
+                        )
+                woken.extend(moved)
+        except Exception:
+            logger.warning(
+                "F099: could not wake arrival %s; it is retried at the next sweep", arrival.id, exc_info=True
             )
-            if not terminal:
-                continue
-            # Wake first: wake_arrival takes the root before any intention, and the rows below go only to the
-            # intentions it moved. One the expiry closed meanwhile gets none: on a closed intention record_result
-            # would turn the row into a report telling the owner that the owner did not answer.
-            moved = await wake_arrival(session, agent_id, arrival.id, now=now)
-            if not answered:
-                for intention_id in moved:
-                    await record_result(
-                        session,
-                        agent_id,
-                        intention_id=intention_id,
-                        source_kind=SOURCE_INTENTION_REPORT,
-                        source_id=uuid.uuid5(_EXPIRY_NAMESPACE, f"{arrival.id}:{intention_id}"),
-                        msg_type="INFORM",
-                        title="The owner did not answer",
-                        body=(
-                            "I asked the owner a question and the owner did not answer within "
-                            f"{float(settings.intention_proposal_ttl_hours):g} hours: {questions[0].body[:500]}"
-                        ),
-                        arrival_id=arrival.id,
-                        settings=settings,
-                    )
-            woken.extend(moved)
     return woken
 
 

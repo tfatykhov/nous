@@ -403,7 +403,17 @@ async def _hold_open_container(session: AsyncSession, agent_id: str, container: 
         raise IntentionRootClosed(f"schedule {container.source_id} no longer fires; no new fire")
 
 
-async def _check_limits(session: AsyncSession, agent_id: str, parent: ParentView, limits: tuple[int, int]) -> None:
+def _limit_advice(origin_kind: str) -> str:
+    """What a refused spawner can do next. Only a continuation turn ends with resolve_intention; a subtask, a
+    DAG node or a heartbeat check can only stop spawning."""
+    if origin_kind == "continuation":
+        return "end the turn with resolve_intention (report, drop or ask) instead"
+    return "finish your task without spawning more work"
+
+
+async def _check_limits(
+    session: AsyncSession, agent_id: str, parent: ParentView, limits: tuple[int, int], origin_kind: str
+) -> None:
     """Spec 4.6: refuse a child that would exceed its root's depth (exact, from the parent's
     depth) or spawn limit (one indexed count, in the spawning transaction, so two concurrent
     spawns can overshoot by the concurrency width: the gate re-checks at the next claim)."""
@@ -411,7 +421,7 @@ async def _check_limits(session: AsyncSession, agent_id: str, parent: ParentView
     if parent.depth + 1 > max_depth:
         raise IntentionLimitReached(
             f"this work is already {parent.depth} step(s) deep and the depth limit is {max_depth}, so nothing more "
-            "can be spawned under it; end the turn with resolve_intention (report, drop or ask) instead"
+            f"can be spawned under it; {_limit_advice(origin_kind)}"
         )
     spawned = (
         await session.execute(
@@ -423,7 +433,7 @@ async def _check_limits(session: AsyncSession, agent_id: str, parent: ParentView
     if spawned >= max_spawns:
         raise IntentionLimitReached(
             f"this work has already spawned {spawned} piece(s) of work and the spawn limit is {max_spawns}, so "
-            "nothing more can be spawned under it; end the turn with resolve_intention (report, drop or ask) instead"
+            f"nothing more can be spawned under it; {_limit_advice(origin_kind)}"
         )
 
 
@@ -464,7 +474,7 @@ async def prepare_intention(session: AsyncSession, agent_id: str, spec: Intentio
         parent = lineage_parent = _view(row)
         await _hold_open_root(session, agent_id, parent.root_id)
         if spec.limits is not None:
-            await _check_limits(session, agent_id, parent, spec.limits)
+            await _check_limits(session, agent_id, parent, spec.limits, spec.origin_kind)
     elif spec.parent_source is not None:
         kind, source_id = spec.parent_source
         row = (

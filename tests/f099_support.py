@@ -8,6 +8,7 @@ tests never see each other's rows.
 from __future__ import annotations
 
 import asyncio
+import copy
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -16,8 +17,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from sqlalchemy import select, text, update
 
-from nous.brain import continuation
+from nous.brain import Brain, continuation
 from nous.brain.intentions import IntentionSpec
+from nous.cognitive.schemas import Assessment, FrameSelection, TurnContext
 from nous.config import Settings
 from nous.storage.models import Intention, IntentionArrival, ResultInbox
 
@@ -264,3 +266,125 @@ async def add_arrival(
             )
         )
         await s.commit()
+
+
+class StubCognitive:
+    """The cognitive layer as the runner calls it, recording what ``pre_turn`` was given."""
+
+    def __init__(self) -> None:
+        self.pre_turn_calls: list[dict] = []
+        self.end_sessions: list[str] = []
+
+    async def pre_turn(self, agent_id, session_id, user_message, **kwargs):
+        self.pre_turn_calls.append({"session_id": session_id, "user_message": user_message, **kwargs})
+        return TurnContext(
+            system_prompt="You are Nous.",
+            frame=FrameSelection(frame_id="task", frame_name="Task", confidence=0.9, match_method="default"),
+            decision_id=None,
+            active_censors=[],
+            context_token_estimate=100,
+        )
+
+    async def post_turn(self, agent_id, session_id, turn_result, turn_context, **kwargs):
+        return Assessment(actual=turn_result.response_text[:200])
+
+    async def end_session(self, agent_id, session_id, **kwargs):
+        self.end_sessions.append(session_id)
+
+    def get_active_episode_id(self, session_id):
+        return None
+
+    async def pre_compaction(self, *args, **kwargs):
+        return None
+
+    async def list_frames(self, *args, **kwargs):
+        return []
+
+
+def use(name: str, **tool_input) -> dict:
+    """A ``tool_use`` content block."""
+    return {"type": "tool_use", "id": f"toolu_{uuid.uuid4().hex[:12]}", "name": name, "input": tool_input}
+
+
+def say(text: str) -> dict:
+    """A ``text`` content block."""
+    return {"type": "text", "text": text}
+
+
+class ScriptedModel:
+    """A stand-in for ``AgentRunner._call_api``: each call plays the next scripted step.
+
+    A step is a list of content blocks (``use(...)``, ``say(...)``), an exception to raise, or an async
+    callable taking the call's keyword arguments and returning blocks (a test blocks the model on an
+    event this way). Every call's keyword arguments (``tools``, ``messages``, ``model_override`` ...) are
+    kept in ``calls`` as DEEP COPIES: the tool loop keeps appending to the very ``messages`` list it passed,
+    so a reference would show a later state, not what the request carried. A call beyond the script sets
+    ``overrun`` (``runner_env`` fails the test at teardown, because the runner under test catches the
+    AssertionError this raises and books it as a failed attempt).
+    """
+
+    def __init__(self, *steps) -> None:
+        self._steps = list(steps)
+        self.calls: list[dict] = []
+        self.overrun = False
+
+    async def __call__(self, *args, **kwargs):
+        from nous.api.models import ApiResponse
+
+        self.calls.append(copy.deepcopy(kwargs))
+        if not self._steps:
+            self.overrun = True
+            raise AssertionError("the model was called more often than the test scripted")
+        step = self._steps.pop(0)
+        if isinstance(step, BaseException):
+            raise step
+        blocks = await step(kwargs) if callable(step) else step
+        return ApiResponse(
+            content=list(blocks),
+            stop_reason="tool_use" if any(b.get("type") == "tool_use" for b in blocks) else "end_turn",
+            usage={"input_tokens": 100, "output_tokens": 10},
+        )
+
+
+def build_runner(env, model, *, brain=None):
+    """A real AgentRunner on the environment's heart (stub cognitive layer, the scripted model) with the
+    real subtask tools registered. Returns ``(runner, cognitive, dispatcher)``."""
+    from nous.api.runner import AgentRunner
+    from nous.api.tools import ToolDispatcher, register_subtask_tools
+
+    cognitive = StubCognitive()
+    runner = AgentRunner(cognitive, brain, env.heart, env.settings)
+    dispatcher = ToolDispatcher()
+    register_subtask_tools(dispatcher, env.heart, env.settings, runner=runner)
+    runner.set_dispatcher(dispatcher)
+    runner._call_api = model
+    return runner, cognitive, dispatcher
+
+
+@pytest.fixture
+async def runner_env(env_factory):
+    """``await runner_env(*steps, **settings)``: an environment (continuation on, no debounce, an API key
+    so an AgentRunner can be built) with ``.model`` (a ScriptedModel of ``steps``), ``.brain``,
+    ``.runner``, ``.cognitive`` and ``.dispatcher``."""
+    built = []
+
+    async def build(*steps, **settings):
+        values = {
+            **CONT,
+            "ANTHROPIC_API_KEY": "test-key",
+            "continuation_debounce_seconds": 0,
+            "continuation_max_wait_seconds": 0,
+            **settings,
+        }
+        env = await env_factory(**values)
+        env.model = ScriptedModel(*steps)
+        env.brain = Brain(database=env.db, settings=env.settings)
+        env.runner, env.cognitive, env.dispatcher = build_runner(env, env.model, brain=env.brain)
+        built.append((env.runner, env.model))
+        return env
+
+    yield build
+    for runner, model in built:
+        runner._api_shared = True
+        await runner.close()
+    assert not any(model.overrun for _runner, model in built), "a scripted model was called more often than scripted"
