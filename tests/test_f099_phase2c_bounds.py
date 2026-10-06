@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
-from f099_support import CONT, ON, env_factory, intention_of, make_root  # noqa: F401
+from f099_support import CONT, ON, env_factory, intention_of, make_root, set_intention  # noqa: F401
 from sqlalchemy import select
 
 from nous.api.execution_context import ExecutionContext
@@ -80,10 +80,21 @@ async def test_a_child_deadline_is_the_earlier_of_its_parent_and_its_own(env_fac
     root = await _spawn(env, intentions.with_bounds(_root_spec(), short))
     child = await _spawn(env, intentions.with_bounds(_child(root), env.settings))  # 72 h of its own
     assert child.deadline == root.deadline
-    # A parent with no deadline (a Phase 1 row): the child's own.
+    # A fresh parent with no deadline (a Phase 1 row): its created_at + TTL, about the child's own.
     old_root = await make_root(env)
     own = await _spawn(env, intentions.with_bounds(_child(old_root), env.settings))
     assert own.deadline > datetime.now(UTC) + timedelta(hours=71)
+
+
+@pytest.mark.postgres_only
+async def test_a_child_of_an_old_root_with_no_deadline_gets_what_is_left_of_its_ttl(env_factory):  # noqa: F811
+    """Ruling R3: a NULL deadline (a Phase 1 root) means created_at + TTL, the rule the expiry judges the root
+    by. A child spawned 70 hours into a 72-hour TTL gets about 2 hours, not 72."""
+    env = await env_factory(**CONT)
+    old_root = await make_root(env)  # no bounds: a NULL deadline
+    await set_intention(env, old_root.id, created_at=datetime.now(UTC) - timedelta(hours=70))
+    child = await _spawn(env, intentions.with_bounds(_child(old_root), env.settings))
+    assert abs((child.deadline - (datetime.now(UTC) + timedelta(hours=2))).total_seconds()) < 60
 
 
 @pytest.mark.postgres_only

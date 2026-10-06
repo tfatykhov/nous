@@ -19,9 +19,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Text, and_, cast, exists, func, or_, select, text, update
+from sqlalchemy import ColumnElement, Text, and_, any_, cast, exists, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from nous.brain import intentions
 from nous.brain.schemas import ReasonInput, RecordInput
@@ -1087,6 +1088,7 @@ async def fail_attempt(
     ids = sorted(i.id for i in claim.intentions)
     try:
         async with session.begin_nested():
+            # Kept for the one lock order (root first); not load-bearing: nothing is written before the fenced UPDATE.
             await _lock_claimed(session, agent_id, claim.root_id, ids)
             # A plain read, deliberately not fenced: a fenced read would raise on a stale claim before the
             # fenced UPDATE below could, and so hide that UPDATE's predicate. It only picks the path.
@@ -1232,6 +1234,367 @@ async def release_stale_claims(
         if outcome != FAIL_LOST:
             released.extend(ids)
     return released
+
+
+EXPIRE_BATCH = 10  # roots expired per sweep: a backlog is worked off over several, never in one burst
+STRANDED_BATCH = 200  # rows held on closed intentions settled per sweep
+# The `source_id` namespace of the row an unanswered question's expiry writes (idempotent per arrival and intention).
+_EXPIRY_NAMESPACE = uuid.UUID("0b3c6a52-8f0e-4d0b-9d3b-6a2f4f6a7c11")
+
+
+@dataclass(frozen=True, slots=True)
+class SweepReport:
+    """What one runner sweep did (contract section 4.7)."""
+
+    released: int
+    expired_roots: int
+    expired_proposals: int
+    pushed: int
+    launched: tuple[UUID, ...]
+    next_due: datetime | None
+
+
+async def expire_roots(
+    session: AsyncSession,
+    agent_id: str,
+    *,
+    ttl_hours: float,
+    settings: Any,
+    limit: int = EXPIRE_BATCH,
+    now: datetime | None = None,
+) -> list[UUID]:
+    """T14: expire the roots whose TTL ran out (spec 4.6), at most ``limit``, one SAVEPOINT per root.
+
+    Due: open (neither root marker set), not a container, with an open ``continue`` or ``report``
+    intention in its lineage, and ``deadline`` past (a NULL deadline: ``created_at + ttl_hours`` past).
+    Then settles the rows held on intentions a gate arrival closed (``_settle_stranded_rows``).
+    Does not commit; the runner emits ``intention.root_expired`` for the returned ids.
+    """
+    now = now or datetime.now(UTC)
+    root = aliased(Intention)
+    lineage_open = exists().where(
+        Intention.agent_id == agent_id,
+        Intention.root_id == root.id,
+        Intention.state.in_(OPEN_STATES),
+        Intention.wake_policy.in_((intentions.WAKE_CONTINUE, intentions.WAKE_REPORT)),
+    )
+    due = (
+        select(root.id)
+        .where(
+            root.agent_id == agent_id,
+            root.id == root.root_id,
+            root.root_cancelled_at.is_(None),
+            root.root_expired_at.is_(None),
+            root.wake_policy != intentions.WAKE_CONTAINER,
+            lineage_open,
+            or_(
+                root.deadline <= now,
+                and_(root.deadline.is_(None), root.created_at <= now - timedelta(hours=ttl_hours)),
+            ),
+        )
+        .order_by(root.created_at)
+        .limit(limit)
+    )
+    expired: list[UUID] = []
+    for root_id in (await session.execute(due)).scalars().all():
+        try:
+            async with session.begin_nested():
+                if await _expire_root(session, agent_id, root_id, ttl_hours=ttl_hours, settings=settings, now=now):
+                    expired.append(root_id)
+        except Exception:
+            logger.warning("F099: could not expire root %s; retried at the next sweep", root_id, exc_info=True)
+    try:
+        async with session.begin_nested():
+            await _settle_stranded_rows(session, agent_id, settings=settings, now=now)
+    except Exception:
+        logger.warning(
+            "F099: could not settle the rows held on closed intentions; retried at the next sweep", exc_info=True
+        )
+    return expired
+
+
+async def _settle_stranded_rows(session: AsyncSession, agent_id: str, *, settings: Any, now: datetime) -> int:
+    """Rows held on an intention a gate arrival closed (``cancelled`` or ``expired``): they landed after the
+    claim read its rows and before the root's marker, so the arrival did not consume them, and nothing claims
+    a closed intention. Each root's are stamped delivered and reported raw in one REPORT, as ``record_result``
+    reports a result that lands after the close. The expiry never strands one (it reads after it closes).
+    Writes no intention row, so it takes no intention lock. Returns the number of rows settled."""
+    stranded = (
+        await session.execute(
+            select(ResultInbox.id, Intention.root_id)
+            .join(Intention, and_(Intention.agent_id == agent_id, Intention.id == ResultInbox.intention_id))
+            .where(
+                ResultInbox.agent_id == agent_id,
+                ResultInbox.channel.is_(None),
+                ResultInbox.session_id.is_(None),
+                ResultInbox.delivered_at.is_(None),
+                Intention.state.in_((STATE_CANCELLED, STATE_EXPIRED)),
+            )
+            .order_by(ResultInbox.created_at, ResultInbox.id)
+            .limit(STRANDED_BATCH)
+        )
+    ).all()
+    by_root: dict[UUID, list[UUID]] = {}
+    for row_id, root_id in stranded:
+        by_root.setdefault(root_id, []).append(row_id)
+    settled = 0
+    for root_id, row_ids in by_root.items():
+        # Stamp and read in one statement: only the rows this call moved are reported, so a row is reported once.
+        rows = sorted(
+            await session.execute(
+                update(ResultInbox)
+                .where(ResultInbox.id.in_(row_ids), ResultInbox.delivered_at.is_(None))
+                .values(delivered_at=now, delivered_session_id=f"{INTENT_SESSION_PREFIX}{root_id}")
+                .returning(ResultInbox.id, ResultInbox.title, ResultInbox.body, ResultInbox.created_at)
+                .execution_options(synchronize_session=False)
+            ),
+            key=lambda r: (r.created_at, r.id),
+        )
+        if not rows:
+            continue
+        root = (
+            await session.execute(
+                select(Intention.intent, Intention.origin_channel).where(
+                    Intention.agent_id == agent_id, Intention.id == root_id
+                )
+            )
+        ).one()
+        channel = owner_channel(settings, root.origin_channel)
+        if channel is None:
+            logger.warning(
+                "F099: %d result(s) held on the closed lineage of root %s have no owner channel; they stay on their "
+                "work rows",
+                len(rows),
+                root_id,
+            )
+        else:
+            head = f"These results arrived as this work was closed, so nothing acted on them: {root.intent}"
+            await insert_report(
+                session,
+                agent_id,
+                kind=MSG_REPORT,
+                title=f"Late results: {root.intent}",
+                body=_clip(f"{head}\n\n{raw_results_text(rows)}", settings),
+                channel=channel,
+                intention_id=root_id,
+                root_id=root_id,
+                push_after=push_after_for(settings, now),
+            )
+        settled += len(rows)
+    return settled
+
+
+async def _expire_root(
+    session: AsyncSession, agent_id: str, root_id: UUID, *, ttl_hours: float, settings: Any, now: datetime
+) -> bool:
+    row = (
+        await session.execute(
+            select(Intention)
+            .where(Intention.agent_id == agent_id, Intention.id == root_id)
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if row is None or row.root_cancelled_at is not None or row.root_expired_at is not None:
+        return False  # a cancel or another sweep got there first
+    await session.execute(update(Intention).where(Intention.id == root_id).values(root_expired_at=now, updated_at=now))
+    # Close the open intentions FIRST: this UPDATE takes their row locks, so a record_result that is mid-flight
+    # (it holds its intention FOR UPDATE and reads the root unlocked) either committed before it, and its row is
+    # visible below, or waits for us and then finds its intention expired and writes a raw REPORT. Reading the
+    # unread rows before this statement would orphan a row committed in the gap. (2e's cancel_root: same order.)
+    closed_ids = (
+        (
+            await session.execute(
+                update(Intention)
+                .where(
+                    Intention.agent_id == agent_id,
+                    Intention.root_id == root_id,
+                    Intention.state.in_(OPEN_STATES),
+                )
+                .values(
+                    state=STATE_EXPIRED,
+                    close_reason=CLOSE_EXPIRED,
+                    closed_at=now,
+                    claim_token=None,
+                    claimed_at=None,
+                    updated_at=now,
+                )
+                .returning(Intention.id)
+                .execution_options(synchronize_session=False)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    unread = (
+        (
+            await session.execute(
+                select(ResultInbox)
+                .where(intention_keyed(agent_id, closed_ids), ResultInbox.delivered_at.is_(None))
+                .order_by(ResultInbox.created_at, ResultInbox.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if unread:
+        await session.execute(
+            update(ResultInbox)
+            .where(ResultInbox.id.in_([r.id for r in unread]), ResultInbox.delivered_at.is_(None))
+            .values(delivered_at=now, delivered_session_id=f"{INTENT_SESSION_PREFIX}{root_id}")
+            .execution_options(synchronize_session=False)
+        )
+    # Report iff there is something to show (rows the owner never saw) or the root has a deadline (it was
+    # written by continuation). A root with no deadline (Phase 1) and nothing unread closes without a report,
+    # so the first sweep after the flag flips cannot flood the owner. A later result reaches the owner raw.
+    if unread or row.deadline is not None:
+        channel = owner_channel(settings, row.origin_channel)
+        if channel is None:
+            logger.warning("F099: root %s expired with no owner channel; nothing was reported", root_id)
+        else:
+            head = f"I closed this because it did not finish within {ttl_hours:g} hours: {row.intent}"
+            raw = raw_results_text(unread)
+            await insert_report(
+                session,
+                agent_id,
+                kind=MSG_REPORT,
+                title=f"Closed after {ttl_hours:g} hours: {row.intent}",
+                body=_clip(f"{head}\n\nWhat I had so far:\n{raw}" if raw else head, settings),
+                channel=channel,
+                intention_id=root_id,
+                root_id=root_id,
+                push_after=push_after_for(settings, now),
+            )
+    return True
+
+
+async def _question_state(
+    session: AsyncSession, agent_id: str, arrival_id: UUID, *, settings: Any, now: datetime
+) -> tuple[bool, bool, list[ResultInbox]]:
+    """``(terminal, answered, questions)`` for an arrival (conflict C9)."""
+    base = (
+        ResultInbox.agent_id == agent_id,
+        ResultInbox.source_kind == SOURCE_INTENTION_REPORT,
+        ResultInbox.arrival_id == arrival_id,
+    )
+    questions = list(
+        (await session.execute(select(ResultInbox).where(*base, ResultInbox.msg_type == MSG_QUESTION))).scalars().all()
+    )
+    if not questions:
+        return True, True, questions
+    newest_answer = (
+        await session.execute(select(func.max(ResultInbox.created_at)).where(*base, ResultInbox.msg_type == "INFORM"))
+    ).scalar_one()
+    ttl = timedelta(hours=float(settings.intention_proposal_ttl_hours)) if settings is not None else None
+    answered = [newest_answer is not None and newest_answer >= q.created_at for q in questions]
+    expired = [ttl is not None and q.created_at <= now - ttl for q in questions]
+    terminal = all(a or e for a, e in zip(answered, expired, strict=True))
+    return terminal, all(answered), questions
+
+
+async def arrival_is_terminal(
+    session: AsyncSession, agent_id: str, arrival_id: UUID, *, settings: Any = None, now: datetime | None = None
+) -> bool:
+    """True when every QUESTION of the arrival is answered or past its deadline (spec 4.4 item 6; 2d adds
+    its proposals). Without ``settings`` a question never expires."""
+    terminal, _answered, _questions = await _question_state(
+        session, agent_id, arrival_id, settings=settings, now=now or datetime.now(UTC)
+    )
+    return terminal
+
+
+async def wake_arrival(
+    session: AsyncSession, agent_id: str, arrival_id: UUID, *, now: datetime | None = None
+) -> list[UUID]:
+    """T5: every intention of the arrival still ``awaiting_owner`` goes back to ``result_ready``, so the
+    rows held meanwhile (answers, late results) are one batch at the next claim. Returns their ids.
+
+    Takes the root first (the one lock order): a caller that writes to the arrival's intentions before
+    waking it must lock the root before those writes."""
+    now = now or datetime.now(UTC)
+    arrival = (
+        await session.execute(
+            select(IntentionArrival).where(IntentionArrival.agent_id == agent_id, IntentionArrival.id == arrival_id)
+        )
+    ).scalar_one_or_none()
+    if arrival is None:
+        return []
+    # The expiry holds the root while it closes the lineage: an UPDATE that locked an intention of the arrival
+    # and then waited for the root would close a cycle with it.
+    await session.execute(
+        select(Intention.id)
+        .where(Intention.agent_id == agent_id, Intention.id == arrival.root_id)
+        .with_for_update(key_share=True)
+    )
+    moved = await session.execute(
+        update(Intention)
+        .where(
+            Intention.agent_id == agent_id,
+            Intention.id.in_(list(arrival.intention_ids)),
+            Intention.state == STATE_AWAITING_OWNER,
+            Intention.wake_policy == intentions.WAKE_CONTINUE,
+        )
+        .values(state=STATE_RESULT_READY, result_at=now, updated_at=now)
+        .returning(Intention.id)
+        .execution_options(synchronize_session=False)
+    )
+    return list(moved.scalars().all())
+
+
+async def wake_terminal_arrivals(
+    session: AsyncSession, agent_id: str, *, settings: Any, now: datetime | None = None, limit: int = 50
+) -> list[UUID]:
+    """The sweep's backstop for T5: wake every ``ask`` arrival that is terminal and still has an
+    intention ``awaiting_owner``. An arrival that expired unanswered gets one ``INFORM`` row per
+    intention it woke saying so (``source_id`` derived from the arrival and the intention: idempotent),
+    so the woken claim has something to show. Returns the woken intention ids. Does not commit."""
+    now = now or datetime.now(UTC)
+    waiting = exists().where(
+        Intention.id == any_(IntentionArrival.intention_ids), Intention.state == STATE_AWAITING_OWNER
+    )
+    arrivals = (
+        (
+            await session.execute(
+                select(IntentionArrival)
+                .where(IntentionArrival.agent_id == agent_id, IntentionArrival.decision == "ask", waiting)
+                .order_by(IntentionArrival.decided_at)
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    woken: list[UUID] = []
+    for arrival in arrivals:
+        async with session.begin_nested():
+            terminal, answered, questions = await _question_state(
+                session, agent_id, arrival.id, settings=settings, now=now
+            )
+            if not terminal:
+                continue
+            # Wake first: wake_arrival takes the root before any intention, and the rows below go only to the
+            # intentions it moved. One the expiry closed meanwhile gets none: on a closed intention record_result
+            # would turn the row into a report telling the owner that the owner did not answer.
+            moved = await wake_arrival(session, agent_id, arrival.id, now=now)
+            if not answered:
+                for intention_id in moved:
+                    await record_result(
+                        session,
+                        agent_id,
+                        intention_id=intention_id,
+                        source_kind=SOURCE_INTENTION_REPORT,
+                        source_id=uuid.uuid5(_EXPIRY_NAMESPACE, f"{arrival.id}:{intention_id}"),
+                        msg_type="INFORM",
+                        title="The owner did not answer",
+                        body=(
+                            "I asked the owner a question and the owner did not answer within "
+                            f"{float(settings.intention_proposal_ttl_hours):g} hours: {questions[0].body[:500]}"
+                        ),
+                        arrival_id=arrival.id,
+                        settings=settings,
+                    )
+            woken.extend(moved)
+    return woken
 
 
 # A fixed namespace: the report of an arrival nothing can reopen has a

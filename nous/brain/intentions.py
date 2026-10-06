@@ -212,6 +212,7 @@ class ParentView:
     authority: str
     wake_policy: str
     deadline: datetime | None = None
+    created_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -356,6 +357,7 @@ def _view(row: Intention) -> ParentView:
         authority=row.authority,
         wake_policy=row.wake_policy,
         deadline=row.deadline,
+        created_at=row.created_at,
     )
 
 
@@ -426,12 +428,19 @@ async def _check_limits(session: AsyncSession, agent_id: str, parent: ParentView
 
 
 def _deadline(spec: IntentionSpec, parent: ParentView | None) -> datetime | None:
-    """A root gets created + TTL; a child gets the earlier of its parent's deadline and its own (spec 4.1)."""
+    """A root gets created + TTL; a child gets the earlier of its parent's deadline and its own (spec 4.1).
+    A parent with no deadline (a Phase 1 row) counts as its created_at + TTL (ruling R3), the rule the
+    expiry judges a root by, so a child of an old root does not outlive it."""
     if spec.ttl_hours is None:
         return None
-    own = datetime.now(UTC) + timedelta(hours=spec.ttl_hours)
-    if parent is not None and parent.deadline is not None:
+    ttl = timedelta(hours=spec.ttl_hours)
+    own = datetime.now(UTC) + ttl
+    if parent is None:
+        return own
+    if parent.deadline is not None:
         return min(parent.deadline, own)
+    if parent.created_at is not None:
+        return min(parent.created_at + ttl, own)
     return own
 
 
