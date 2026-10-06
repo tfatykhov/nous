@@ -12,7 +12,7 @@ This document settles (1) the sub-PR boundaries and (2) every name, signature, r
 
 ## 1. Decomposition
 
-Five sub-PRs, plus one optional. Every one lands dark behind `NOUS_CONTINUATION_ENABLED` (default `false`), with the named exceptions in §1.7.
+Five sub-PRs, plus 2f (the A2UI cards), which is part of Phase 3. Every one lands dark behind `NOUS_CONTINUATION_ENABLED` (default `false`), with the named exceptions in §1.7.
 
 | PR | Name | Scope in one line | Depends on | Tasks (est.) |
 |---|---|---|---|---|
