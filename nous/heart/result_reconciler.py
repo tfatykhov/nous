@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import UUID
@@ -637,6 +638,30 @@ async def _repair_dag_results(
     return fixed
 
 
+class ContinuationWakePass:
+    """F099 Phase 2c (spec 4.5.1): repair the continue and report results no writer wrote, then wake the
+    continuation runner. It only enqueues and wakes: it never runs a turn, because a reconciler pass has
+    a 30 s timeout. Inert with continuation off."""
+
+    name = "continuation"
+
+    def __init__(
+        self, database: Database, store: ResultInboxStore, settings: Settings, wake: Callable[[], None]
+    ) -> None:
+        self._db = database
+        self._store = store
+        self._settings = settings
+        self._wake = wake
+
+    async def run(self, *, limit: int) -> int:
+        if not continuation.enabled(self._settings):
+            return 0
+        fixed = await repair_missing_results(self._db, self._store, self._settings, limit=limit)
+        if fixed:
+            self._wake()
+        return fixed
+
+
 class TerminalSubtaskReconciler:
     """Runs the registered passes, each isolated and bounded."""
 
@@ -664,15 +689,20 @@ def build_reconciler(
     store: ResultInboxStore,
     settings: Settings,
     memory: ResultMemoryWriter | None = None,
+    continuation_wake: Callable[[], None] | None = None,
 ) -> TerminalSubtaskReconciler:
     """The reconciler with every pass its flags enable (F098 Phase A: the
-    inbox passes; F098 Phase C: the memory pass; F099: the intentions pass)."""
+    inbox passes; F098 Phase C: the memory pass; F099: the intentions pass).
+    F099 Phase 2c: the continuation pass, when a runner's wake is given and
+    continuation is on."""
     reconciler = TerminalSubtaskReconciler()
     if settings.result_inbox_enabled:
         reconciler.register(InboxSubtaskPass(database, store, settings))
         reconciler.register(InboxDagPass(database, store, settings))
         if intentions.enabled(settings):
             reconciler.register(IntentionClosePass(database, settings))
+        if continuation_wake is not None and continuation.enabled(settings):
+            reconciler.register(ContinuationWakePass(database, store, settings, continuation_wake))
     if settings.result_memory_enabled and memory is not None:
         reconciler.register(ResultMemoryPass(memory, settings))
     return reconciler

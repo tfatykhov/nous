@@ -251,7 +251,8 @@ class ContinuationRunner:
         self._publisher = publisher
         self._agent_id = settings.agent_id
         self._wake = asyncio.Event()
-        self._slots = asyncio.Semaphore(settings.continuation_max_concurrent)
+        # Bounded: a stray release raises instead of quietly widening the cap.
+        self._slots = asyncio.BoundedSemaphore(settings.continuation_max_concurrent)
         self._running: dict[UUID, asyncio.Task[Any]] = {}
         self._cooldown: dict[UUID, datetime] = {}
         self._task: asyncio.Task[None] | None = None
@@ -267,14 +268,18 @@ class ContinuationRunner:
 
     async def start(self) -> None:
         """Release claims older than the lease, then run the loop (spec 4.5.2). Does nothing, and builds no
-        task, with continuation off: main.py forces it off until PR-2e."""
+        task, with continuation off: main.py forces it off until PR-2e.
+
+        Must not overlap ``stop()``: nothing here guards a start that is still releasing claims against a stop.
+        main.py calls ``start()`` once, as the last step of ``create_components``."""
         if not continuation.enabled(self._settings) or self._task is not None:
             return
         await self._step("startup lease release", self._release_stale)
         self._task = asyncio.create_task(self._loop(), name="continuation-runner")
 
     async def stop(self) -> None:
-        """Cancel the loop and every running arrival (each releases its claim without an attempt), and wait."""
+        """Cancel the loop and every running arrival (each releases its claim without an attempt), and wait.
+        Must not overlap ``start()`` (see there)."""
         loop_task, self._task = self._task, None
         running = list(self._running.values())
         for task in ([loop_task] if loop_task is not None else []) + running:
@@ -375,30 +380,46 @@ class ContinuationRunner:
             if self._slots.locked():
                 break  # a slot frees when an arrival ends, and that wakes the loop
             await self._slots.acquire()
+            # The launch is run_once's LAST step, and nothing between this create_task and run_once's return yields
+            # (the acquire above never waits: the slot was just seen free), so the task has not started when run_once
+            # returns. The "cancelled before it started" test relies on that: keep any new await out of that stretch.
             task = asyncio.create_task(self._arrival_task(root_id), name=f"continuation-{root_id.hex[:8]}")
-            task.add_done_callback(lambda _task, root_id=root_id: self._arrival_ended(root_id))
+            task.add_done_callback(lambda task, root_id=root_id: self._arrival_ended(root_id, task))
             self._running[root_id] = task
             launched.append(root_id)
         return launched, next_due
 
     async def _arrival_task(self, root_id: UUID) -> None:
         """One root's arrival, in a task of its own: the per-root catch. Whatever it raises is logged and stays
-        with this root (a cooldown), so the other roots of the sweep, and the loop, go on."""
+        with this root (a cooldown), so the other roots of the sweep, and the loop, go on. That includes a
+        cancellation nobody requested (Fix-Z): only a stop or a cancel of this task ends it cancelled."""
         try:
             done = await self.run_arrival(root_id)
             if done is None:
                 self._cooldown[root_id] = datetime.now(UTC) + timedelta(seconds=COOLDOWN_SECONDS)
         except asyncio.CancelledError:
-            raise
+            if cancel_requested():
+                raise
+            # Came out of something the arrival awaited (the #690/#691 class); run_arrival charged the attempt.
+            logger.warning(
+                "F099: the arrival of root %s was cancelled from within; it is left for a later sweep",
+                root_id,
+                exc_info=True,
+            )
+            self._cooldown[root_id] = datetime.now(UTC) + timedelta(seconds=COOLDOWN_SECONDS)
         except Exception:
             logger.exception("F099: the arrival of root %s raised; it is left for a later sweep", root_id)
             self._cooldown[root_id] = datetime.now(UTC) + timedelta(seconds=COOLDOWN_SECONDS)
 
-    def _arrival_ended(self, root_id: UUID) -> None:
+    def _arrival_ended(self, root_id: UUID, task: asyncio.Task[Any]) -> None:
         """The arrival task's done callback, not a ``finally`` in it: a task cancelled before its first step (a
-        stop, or 2e's cancel, right after the launch) never runs its body, and its slot must come back all the same."""
-        self._running.pop(root_id, None)
+        stop, or 2e's cancel, right after the launch) never runs its body, and its slot must come back all the same.
+        The map entry goes only while it is still this task's, so a late callback cannot unmap a newer arrival."""
+        if self._running.get(root_id) is task:
+            del self._running[root_id]
         self._slots.release()
+        # The load-bearing wake: this callback runs (call_soon) after the task is done, so a sweep that _commit's or
+        # _fail's wake started before it saw this slot taken and this root running. Theirs cost one extra sweep.
         self.wake()
 
     async def _loop(self) -> None:
@@ -435,7 +456,8 @@ class ContinuationRunner:
         """Claim ``root_id``, decide, and commit (spec 4.5). The ArrivalCommit of a decided arrival; None
         when nothing was claimable, the fence rejected the commit, or the attempt failed. Anything that raises
         after the claim (the gate, the limits, the lineage read, the prompt, the owner-channel read) is a failed
-        attempt (contract 4.8), booked at once rather than left to the lease."""
+        attempt (contract 4.8), booked at once rather than left to the lease. So is a cancellation nobody requested
+        (Fix-Z), which is then re-raised; a stop or a cancel of this task releases the claim without an attempt."""
         settings = self._settings
         async with self._db.session() as session:
             claim = await continuation.claim_root(
@@ -452,8 +474,15 @@ class ContinuationRunner:
         try:
             return await self._decide(claim)
         except asyncio.CancelledError:
-            # A stop or a cancel: free the claim so the result is not stuck for a lease, without charging an attempt.
-            await asyncio.shield(self._release(claim))
+            if cancel_requested():
+                # A stop or a cancel: free the claim so the result is not stuck for a lease, without charging an
+                # attempt.
+                await asyncio.shield(self._release(claim))
+                raise
+            # Fix-Z: nobody cancelled this task; something the arrival awaited was cancelled (the #690/#691 class).
+            # That is a failure like any raise, so it is charged: a recurring one must reach failed_report, not
+            # come back at once forever with its claim released and no attempt counted.
+            await self._fail(claim)
             raise
         except Exception:
             # The turn, the commit and _fail swallow their own errors, so this cannot charge an attempt twice.

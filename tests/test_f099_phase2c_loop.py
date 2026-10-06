@@ -415,6 +415,55 @@ async def test_a_cancellation_from_within_does_not_end_the_loop(runner_env, monk
     assert task.done()  # its own cancellation does end it
 
 
+async def test_a_cancellation_from_within_an_arrival_is_a_failed_attempt_and_cools_down(runner_env, caplog):  # noqa: F811
+    """Fix-Z inside an arrival (the #690/#691 class): a CancelledError nobody requested came out of something the
+    arrival awaited. It is not a stop and not a cancel, so it is charged as a failed attempt and the root cools down:
+    a recurring one reaches failed_report instead of coming back at once, silently, for good."""
+    env = await runner_env(continuation_max_concurrent=1)
+    root = await _ready_root(env)
+    cont = _cont(env)
+    entered = asyncio.Event()
+
+    async def cancelled_from_within(*args, **kwargs):
+        entered.set()
+        victim = asyncio.get_running_loop().create_future()
+        victim.cancel()
+        await victim  # nobody cancelled the arrival's task
+
+    cont._run_turns = cancelled_from_within
+    await cont.start()
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        arrival = cont._running[root.id]
+        await asyncio.wait_for(asyncio.gather(arrival, return_exceptions=True), timeout=10)
+        fresh = await intention_of(env, "subtask", root.source_id)
+        assert (fresh.state, fresh.attempts, fresh.claim_token) == ("result_ready", 1, None)  # charged, released
+        assert root.id in cont._cooldown and "cancelled from within" in caplog.text
+        assert cont.running_roots == frozenset() and not cont._slots.locked()  # the one slot is free again
+        assert not cont._task.done()  # the loop goes on
+    finally:
+        await cont.stop()
+
+
+async def test_an_ended_arrival_gives_back_only_what_it_holds(runner_env):  # noqa: F811
+    """The done callback unmaps its root only while the map still holds THIS task (a late callback of an older task
+    cannot unmap a newer arrival, which 2e's cancel reads), and the cap is bounded: a stray release raises instead of
+    quietly widening it."""
+    env = await runner_env(continuation_max_concurrent=2)
+    cont = _cont(env)
+    root_id = uuid.uuid4()
+    older, newer = asyncio.get_running_loop().create_future(), asyncio.get_running_loop().create_future()
+    await cont._slots.acquire()  # the older arrival's slot
+    await cont._slots.acquire()  # the newer one's
+    cont._running[root_id] = newer
+    cont._arrival_ended(root_id, older)
+    assert cont._running[root_id] is newer and not cont._slots.locked()  # its slot back, not the newer's place
+    cont._arrival_ended(root_id, newer)
+    assert cont.running_roots == frozenset()
+    with pytest.raises(ValueError):
+        cont._slots.release()  # both slots are back: one more release is a bug, and it says so
+
+
 async def test_stop_releases_a_running_arrival_without_an_attempt(runner_env):  # noqa: F811
     started = asyncio.Event()
 

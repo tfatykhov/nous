@@ -1822,6 +1822,7 @@ async def record_result(
             intention_id=intention_id,
             root_id=root_id,
             arrival_id=arrival_id,
+            push_after=push_after_for(settings, now),  # F099 2c: pushed to Telegram too (R2), at the end of quiet hours
         )
         wrote = report_row is not None
         return ResultRecorded(report_row, wrote, state, False, wrote, intention_id, root_id)
