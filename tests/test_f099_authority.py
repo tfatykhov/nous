@@ -314,3 +314,175 @@ async def test_a_failed_read_adds_no_note_and_does_not_fail_the_spawn(authority_
     text, is_error = await _dispatch(env, "spawn_task", {"task": "t", "intent": "why", "wake_policy": "continue"}, bg)
     assert not is_error and "Subtask spawned." in text and "not available" not in text
     assert len(await _all(env, Subtask)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 2a.7: cancel_task only on the turn's own lineage; lineage web calls are logged
+# ---------------------------------------------------------------------------
+
+import logging  # noqa: E402
+import re  # noqa: E402
+
+from nous.storage.models import Schedule  # noqa: E402
+
+
+async def _spawn(env, ctx, task="work") -> uuid.UUID:
+    text, is_error = await _dispatch(env, "spawn_task", {"task": task, "intent": "why"}, ctx)
+    assert not is_error, text
+    return uuid.UUID(re.search(r"ID: ([0-9a-f-]{36})", text).group(1))
+
+
+async def _status(env, task_id: uuid.UUID) -> str:
+    async with env.db.session() as s:
+        return (await s.execute(select(Subtask.status).where(Subtask.id == task_id))).scalar_one()
+
+
+async def _cancel(env, task_id, ctx, **extra):
+    return await _dispatch(env, "cancel_task", {"task_id": str(task_id), **extra}, ctx)
+
+
+async def test_a_continuation_may_cancel_work_of_its_own_lineage(authority_env):
+    env = await authority_env()
+    root = await _root(env)
+    cont = _cont(root)
+    child = await _spawn(env, cont)
+    text, is_error = await _cancel(env, child, cont)
+    assert not is_error and "cancelled" in text, text
+    assert await _status(env, child) == "cancelled"
+
+
+async def test_a_continuation_may_not_cancel_foreign_work(authority_env):
+    env = await authority_env()
+    root = await _root(env)
+    cont = _cont(root)
+    chat = ExecutionContext(kind="interactive", session_id="S1", channel="telegram:1")
+    foreign = await _spawn(env, chat)  # the owner's own background task, a root of its own
+    other_root = await _root(env)
+    siblings_lineage = await _spawn(env, _cont(other_root))
+    legacy = (await env.heart.subtasks.create(task="work from before F099")).id  # no intention row
+    for target in (foreign, siblings_lineage, legacy):
+        text, is_error = await _cancel(env, target, cont)
+        assert is_error and "is not part of this lineage" in text, text
+        assert await _status(env, target) == "pending"
+
+
+async def test_a_model_cannot_forge_the_authority_or_the_root_the_handler_checks(authority_env):
+    env = await authority_env()
+    root = await _root(env)
+    foreign = await _spawn(env, ExecutionContext(kind="interactive", session_id="S1", channel="telegram:1"))
+    forged = {"_authority": "owner", "_root_intention_id": str(foreign)}
+    text, is_error = await _cancel(env, foreign, _cont(root), **forged)
+    assert is_error and "is not part of this lineage" in text
+    assert await _status(env, foreign) == "pending"
+
+
+async def test_a_lineage_with_a_damaged_stamp_cancels_nothing(authority_env):
+    """Fail closed (C8): internal_only with no root id cannot prove any target is its own."""
+    env = await authority_env()
+    root = await _root(env)
+    child = await _spawn(env, _cont(root))
+    damaged = ExecutionContext(kind="subtask", session_id="subtask-1", authority="internal_only")
+    text, is_error = await _cancel(env, child, damaged)
+    assert is_error and "is not part of this lineage" in text
+    assert await _status(env, child) == "pending"
+
+
+async def test_an_owner_turn_still_cancels_any_task(authority_env):  # PIN
+    env = await authority_env()
+    foreign = await _spawn(env, ExecutionContext(kind="interactive", session_id="S1", channel="telegram:1"))
+    text, is_error = await _cancel(env, foreign, ExecutionContext(kind="interactive", session_id="S2"))
+    assert not is_error and "cancelled" in text, text
+    assert await _status(env, foreign) == "cancelled"
+
+
+async def test_a_cancel_task_dispatch_from_an_owner_turn_injects_nothing():  # PIN
+    d, seen = _recording_dispatcher({"cancel_task": False})
+    owner = ExecutionContext(kind="interactive", session_id="S1")
+    await d.dispatch("cancel_task", {"task_id": "x"}, session_id="S1", context=owner)
+    assert not [k for k in seen["cancel_task"] if k.startswith("_")]
+
+
+async def test_a_cancel_task_dispatch_from_an_internal_only_turn_injects_the_authority_and_root():
+    d, seen = _recording_dispatcher({"cancel_task": False})
+    lineage = ExecutionContext(
+        kind="subtask", session_id="s", authority="internal_only", intention_id=IID, root_intention_id=RID
+    )
+    damaged = ExecutionContext(kind="subtask", session_id="s", authority="internal_only")
+    await d.dispatch("cancel_task", {"task_id": "x"}, session_id="s", context=lineage)
+    assert (seen["cancel_task"]["_authority"], seen["cancel_task"]["_root_intention_id"]) == ("internal_only", str(RID))
+    await d.dispatch("cancel_task", {"task_id": "x"}, session_id="s", context=damaged)
+    assert (seen["cancel_task"]["_authority"], seen["cancel_task"]["_root_intention_id"]) == ("internal_only", "")
+
+
+async def test_the_dispatcher_sets_the_cancel_authority_and_root_and_the_model_cannot():
+    """Forged values for both hidden arguments: the turn's own replace them, and an owner
+    turn passes neither on (a forged ``_authority`` cannot narrow or widen it)."""
+    d, seen = _recording_dispatcher({"cancel_task": False})
+    forged = {"task_id": "x", "_authority": "owner", "_root_intention_id": str(IID)}
+    lineage = ExecutionContext(
+        kind="subtask", session_id="s", authority="internal_only", intention_id=IID, root_intention_id=RID
+    )
+    await d.dispatch("cancel_task", dict(forged), session_id="s", context=lineage)
+    assert (seen["cancel_task"]["_authority"], seen["cancel_task"]["_root_intention_id"]) == ("internal_only", str(RID))
+    damaged = ExecutionContext(kind="subtask", session_id="s", authority="internal_only")
+    await d.dispatch("cancel_task", dict(forged), session_id="s", context=damaged)
+    assert (seen["cancel_task"]["_authority"], seen["cancel_task"]["_root_intention_id"]) == ("internal_only", "")
+    owner = ExecutionContext(kind="interactive", session_id="S1")
+    await d.dispatch("cancel_task", {**forged, "_authority": "internal_only"}, session_id="S1", context=owner)
+    assert seen["cancel_task"] == {"task_id": "x"}
+
+
+async def test_a_forged_root_naming_the_targets_own_lineage_cancels_nothing(authority_env):
+    """The forged root is the foreign target's REAL root: it would pass the handler's check
+    if the model's value reached it."""
+    env = await authority_env()
+    root = await _root(env)
+    foreign = await _spawn(env, ExecutionContext(kind="interactive", session_id="S1", channel="telegram:1"))
+    its_root = (await env.heart.intentions.get_for_source("subtask", foreign)).root_id
+    for ctx in (_cont(root), ExecutionContext(kind="subtask", session_id="subtask-1", authority="internal_only")):
+        text, is_error = await _cancel(env, foreign, ctx, _root_intention_id=str(its_root))
+        assert is_error and "is not part of this lineage" in text, text
+        assert await _status(env, foreign) == "pending"
+
+
+async def _schedule(env, ctx) -> uuid.UUID:
+    args = {"task": "t", "every": "30 minutes", "intent": "why"}
+    text, is_error = await _dispatch(env, "schedule_task", args, ctx)
+    assert not is_error, text
+    return uuid.UUID(re.search(r"ID: ([0-9a-f-]{36})", text).group(1))
+
+
+async def test_a_schedule_is_cancelled_only_from_the_lineage_that_created_it(authority_env):
+    """A schedule's container joins the lineage of the owner turn that created it (a lineage
+    cannot call schedule_task itself); one from the owner's chat is a root of its own."""
+    env = await authority_env()
+    root = await _root(env)
+    in_lineage = ExecutionContext(
+        kind="subtask", session_id="subtask-1", intention_id=root.id, root_intention_id=root.id
+    )
+    own = await _schedule(env, in_lineage)
+    foreign = await _schedule(env, ExecutionContext(kind="interactive", session_id="S1", channel="telegram:1"))
+    text, is_error = await _cancel(env, foreign, _cont(root))
+    assert is_error and "is not part of this lineage" in text, text
+    text, is_error = await _cancel(env, own, _cont(root))
+    assert not is_error and "deactivated" in text, text
+    active = {s.id: s.active for s in await _all(env, Schedule)}
+    assert active == {own: False, foreign: True}
+
+
+async def test_web_calls_from_a_lineage_are_logged_with_their_root(caplog):
+    d, _ = _recording_dispatcher({"web_fetch": False, "web_search": False, "recall_deep": False})
+    lineage = ExecutionContext(
+        kind="subtask", session_id="subtask-1", authority="internal_only", intention_id=IID, root_intention_id=RID
+    )
+    owner = ExecutionContext(kind="subtask", session_id="subtask-2")
+    with caplog.at_level(logging.INFO, logger="nous.api.tools"):
+        await d.dispatch("web_fetch", {}, session_id="subtask-1", context=lineage)
+        await d.dispatch("web_search", {}, session_id="subtask-1", context=lineage)
+        await d.dispatch("recall_deep", {}, session_id="subtask-1", context=lineage)
+        await d.dispatch("web_fetch", {}, session_id="subtask-2", context=owner)
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("F099: web_")]
+    assert lines == [
+        f"F099: web_fetch from lineage root {RID} (session subtask-1)",
+        f"F099: web_search from lineage root {RID} (session subtask-1)",
+    ]

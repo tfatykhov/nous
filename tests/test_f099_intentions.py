@@ -272,6 +272,22 @@ async def test_authority_only_narrows_down_a_lineage(db):
     assert (row.authority, row.wake_policy) == ("internal_only", "continue")
 
 
+async def test_an_internal_only_turn_with_no_parent_records_internal_only():
+    """F099 Phase 2: the turn's authority narrows a root too, not only a child.
+
+    With no parent_id and no parent_source the session is never touched, so None stands in for it."""
+    spec = _spec("subtask", origin_authority="internal_only")
+    prepared = await intentions.prepare_intention(None, _agent(), spec)
+    assert (prepared.parent_id, prepared.authority) == (None, "internal_only")
+
+
+def test_an_internal_only_turn_with_no_parent_wakes_the_continuation():
+    """C9 with no parent. origin_kind "subtask" because its own default is none, so only the
+    authority clause can make it continue."""
+    spec = _spec("subtask", origin_authority="internal_only")
+    assert intentions.resolve_wake_policy(spec, None) == "continue"
+
+
 async def _live_schedule(db, agent):
     from nous.heart.schedules import ScheduleManager
 

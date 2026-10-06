@@ -36,6 +36,7 @@ from uuid import UUID
 from nous.api.call_outcome import CallOutcome
 from nous.api.call_outcome import _current as _outcome_var  # the one setter (harness 2b)
 from nous.api.execution_context import ExecutionContext, resolve_context
+from nous.api.tool_policy import INTERNAL_ONLY_LOGGED_TOOLS
 from nous.brain import intentions
 from nous.brain.brain import Brain
 from nous.brain.intentions import AUTHORITY_INTERNAL
@@ -503,6 +504,18 @@ class ToolDispatcher:
                 # F099 section 4.2: where the spawn came from, for its intention
                 # row only. _session_id / _channel below stay the routing keys (I5).
                 args = {**args, **_origin_args(ctx)}
+            if ctx.authority == AUTHORITY_INTERNAL:
+                if name in INTERNAL_ONLY_LOGGED_TOOLS:
+                    # Spec section 9: a lineage may fetch or search the web, and its root is logged.
+                    logger.info("F099: %s from lineage root %s (session %s)", name, ctx.root_intention_id, session_id)
+                if name == "cancel_task":
+                    # The own-lineage rule needs the target's row, so the handler enforces it.
+                    # An empty root (a damaged stamp) is passed too, and refuses everything (fail closed).
+                    args = {
+                        **args,
+                        "_authority": ctx.authority,
+                        "_root_intention_id": str(ctx.root_intention_id) if ctx.root_intention_id else "",
+                    }
             if ctx.channel and name in ("spawn_task", "dag_create"):
                 # F098: the channel outlives the session, so the result can
                 # reach the conversation after the session has expired.
@@ -3528,10 +3541,35 @@ def create_subtask_tools(
             logger.exception("list_tasks tool failed")
             return _tool_error(f"Error listing tasks: {e}")
 
+    async def _in_lineage(uid: UUID, root_id: str | None) -> bool:
+        """Whether the subtask or schedule ``uid`` belongs to the lineage rooted at ``root_id``.
+
+        Looked up as a subtask, then as a schedule (the handler's order). Work with no
+        intention row (from before F099) and another lineage's work are not. A schedule is
+        in a lineage only when an owner turn of that lineage created it: its container joins
+        the creating turn's lineage, and a lineage itself cannot call schedule_task.
+        """
+        root = intentions.parse_uuid(root_id)
+        if root is None:
+            return False
+        for kind in (intentions.SOURCE_SUBTASK, intentions.SOURCE_SCHEDULE):
+            row = await heart.intentions.get_for_source(kind, uid)
+            if row is not None:
+                return row.root_id == root
+        return False
+
     async def cancel_task(
         task_id: str,
+        _authority: str | None = None,  # F099: injected by ToolDispatcher for an internal_only turn
+        _root_intention_id: str | None = None,
     ) -> dict[str, Any]:
         """Cancel a subtask or deactivate a schedule by ID.
+
+        F099: an ``internal_only`` turn (``_authority``, injected by the dispatcher) may
+        cancel only a target whose intention has ``root_id == _root_intention_id``. A
+        missing root (a damaged stamp), work from before F099 (no intention row), another
+        lineage's work, a schedule created outside this lineage and a DAG node's subtask
+        are all refused. The id is parsed first, so a non-UUID still answers "Invalid task ID".
 
         Args:
             task_id: UUID of the subtask or schedule to cancel
@@ -3543,6 +3581,13 @@ def create_subtask_tools(
             from uuid import UUID as _UUID
 
             uid = _UUID(task_id)
+
+            # F099 section 4.4: an internal_only turn may cancel only work its own lineage started.
+            if _authority == AUTHORITY_INTERNAL and not await _in_lineage(uid, _root_intention_id):
+                return _tool_error(
+                    f"Tool error: task {task_id} is not part of this lineage; "
+                    "cancel_task may only cancel work this lineage started."
+                )
 
             # Try subtask cancel first
             cancelled = await heart.subtasks.cancel(uid)

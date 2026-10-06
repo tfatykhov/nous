@@ -2,7 +2,8 @@
 
 The strict block runs before the offered-set mode check and before the policy's
 off switch, so a forged tool_use is refused whatever the modes say. Every test
-that matters runs under off/off, warn/warn and enforce/enforce.
+that matters runs under all nine pairs of tool_offered_set_enforcement_mode and
+tool_context_policy_mode.
 """
 
 from __future__ import annotations
@@ -22,7 +23,8 @@ from nous.cognitive.ledger_store import REFUSAL_CODES
 
 # Fixed ids: parametrize ids built from them must not change between collections (xdist).
 IID, RID, OTHER = (uuid.UUID(f"00000000-0000-0000-0000-00000000000{n}") for n in (1, 2, 3))
-MODES = [("off", "off"), ("warn", "warn"), ("enforce", "enforce")]
+_MODE_VALUES = ("off", "warn", "enforce")
+MODES = [(offered, policy) for offered in _MODE_VALUES for policy in _MODE_VALUES]
 OFFERED = ["recall_deep", "send_email", "run_python", "bash", "write_file", "cancel_task"]
 FORGED = [
     ("send_email", {"to": "a@example.com", "subject": "s", "body": "b"}),
@@ -170,6 +172,46 @@ def test_a_lineage_with_no_root_may_not_write_a_file(tmp_path):
     damaged = ExecutionContext(kind="subtask", session_id="s1", authority="internal_only")
     refusal = _auth(r, damaged, "write_file", OFFERED, {"path": f"intentions/{RID}/n.md", "content": "x"})
     assert refusal is not None and "(write_path)" in refusal.text
+
+
+@pytest.mark.parametrize(("offered_mode", "policy_mode"), MODES)
+def test_a_cancel_task_whose_id_is_not_a_uuid_is_refused_in_every_mode(offered_mode, policy_mode):
+    """The per-call rule's foreign_cancel, through the runner's strict block (not the unit alone)."""
+    r, _ = _runner(OFFERED, tool_offered_set_enforcement_mode=offered_mode, tool_context_policy_mode=policy_mode)
+    refusal = _auth(r, _internal(), "cancel_task", OFFERED, {"task_id": "not-a-uuid"})
+    assert refusal is not None and refusal.code == "internal_only" and "(foreign_cancel)" in refusal.text
+    # A UUID passes the strict block; the own-lineage check is the handler's (it needs the row).
+    assert _auth(r, _internal(), "cancel_task", OFFERED, {"task_id": str(OTHER)}) is None
+
+
+async def test_a_cancel_task_whose_id_is_not_a_uuid_never_reaches_the_handler():
+    for tool_input, dispatched in (({"task_id": str(OTHER)}, True), ({"task_id": "not-a-uuid"}, False)):
+        r, d = _runner(OFFERED, tool_offered_set_enforcement_mode="off", tool_context_policy_mode="off")
+        r._call_api = _tool_calls_then_done_with("cancel_task", tool_input, times=1)
+        await _run_loop(r, is_background=True, context=_internal())
+        assert bool(d.calls) is dispatched, tool_input
+
+
+def test_an_approved_action_refusal_is_recorded_under_its_own_kind():
+    r, _ = _runner(OFFERED, tool_offered_set_enforcement_mode="off", tool_context_policy_mode="off")
+    events: list[tuple[str, dict]] = []
+    r._log_f026_decision = lambda event_type, data, session_id=None: events.append((event_type, data))
+    ctx = ExecutionContext(
+        kind="approved_action", session_id="proposal-x", proposal_id=uuid.uuid4(), declared_tools=("send_email",)
+    )
+    refusal = _auth(r, ctx, "bash", ["send_email"], {"command": "ls"})
+    assert refusal is not None and refusal.code == "internal_only"
+    assert events == [
+        (
+            "harness_context_policy_violation",
+            {
+                "tool_name": "bash",
+                "context_kind": "approved_action",
+                "violation": "approved_action:not_offered",
+                "mode": "enforce",
+            },
+        )
+    ]
 
 
 @pytest.mark.parametrize(("offered_mode", "policy_mode"), MODES)
