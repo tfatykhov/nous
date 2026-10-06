@@ -363,17 +363,21 @@ class DAGOrchestrator:
     # before a node is failed rather than deferred again.
     _MAX_DEFERRALS = 30
 
-    async def _defer_node(self, node: DAGNode, dag: ExecutionDAG, reason: str) -> None:
+    async def _defer_node(
+        self, node: DAGNode, dag: ExecutionDAG, reason: str, *, backstop: str = "still saturated"
+    ) -> None:
         """Demote a node to 'pending' on transient resource saturation, with a
         backstop cap (DG-4 / review P2) so a never-draining pool surfaces as a
-        failure instead of an invisible infinite ready<->pending bounce."""
+        failure instead of an invisible infinite ready<->pending bounce.
+        ``backstop`` names what was still wrong when the cap is hit (F099: an
+        unreadable lineage is not saturation)."""
         count = self._defer_counts.get(node.id, 0) + 1
         self._defer_counts[node.id] = count
         if count >= self._MAX_DEFERRALS:
             self._defer_counts.pop(node.id, None)
             # Harness Phase 3 §3.3: conditional — a cancel_dag that landed
             # meanwhile keeps its 'cancelled'.
-            error = f"{reason} — still saturated after {count} deferrals"
+            error = f"{reason} — {backstop} after {count} deferrals"
             if await self._store.transition_node(
                 node.id, from_statuses={"ready", "pending"}, status="failed", error=error
             ):
@@ -3382,6 +3386,20 @@ class DAGOrchestrator:
             )
             return
 
+        # F099 I3: the node's subtask runs under its DAG's lineage. A lookup
+        # that fails defers the launch: a lineage node never runs unstamped.
+        try:
+            lineage = await self._store.intention_lineage(dag.id)
+        except Exception as e:
+            logger.warning(
+                "Could not read the intention of DAG %s; deferring node %s", dag.id, node.name, exc_info=True
+            )
+            # The exception type only: str(e) of a DB error carries the SQL statement.
+            await self._defer_node(
+                node, dag, f"intention lookup failed: {type(e).__name__}", backstop="lineage still unreadable"
+            )
+            return
+
         # Build augmented instructions with predecessor context
         augmented = await self._build_predecessor_context(node, dag)
 
@@ -3397,7 +3415,8 @@ class DAGOrchestrator:
                 model=node.model,
                 timeout=self._effective_timeout(node),
                 metadata={"dag_id": str(dag.id), "node_name": node.name,
-                          **({"undoable": True} if getattr(node, "undoable", False) else {})},
+                          **({"undoable": True} if getattr(node, "undoable", False) else {}),
+                          **({"intention": lineage} if isinstance(lineage, dict) else {})},
                 dag_node_id=node.id,
             )
             now = datetime.now(UTC)
@@ -3471,6 +3490,20 @@ class DAGOrchestrator:
             )
             return
 
+        # F099 I3: the node's check runs under its DAG's lineage. A lookup
+        # that fails defers the launch: a lineage node never runs unstamped.
+        try:
+            lineage = await self._store.intention_lineage(dag.id)
+        except Exception as e:
+            logger.warning(
+                "Could not read the intention of DAG %s; deferring node %s", dag.id, node.name, exc_info=True
+            )
+            # The exception type only: str(e) of a DB error carries the SQL statement.
+            await self._defer_node(
+                node, dag, f"intention lookup failed: {type(e).__name__}", backstop="lineage still unreadable"
+            )
+            return
+
         augmented = await self._build_predecessor_context(node, dag)
         check_name = f"{DAG_CHECK_NAME_PREFIX}{dag.id.hex[:8]}-{node.name}"
 
@@ -3486,7 +3519,10 @@ class DAGOrchestrator:
                 # urgent=True exempts them from quiet-hour suppression so the
                 # heartbeat worker actually runs when the node is created at night.
                 urgent=True,
-                metadata={_CHECK_OWNER_KEY: str(node.id)},
+                metadata={
+                    _CHECK_OWNER_KEY: str(node.id),
+                    **({"intention": lineage} if isinstance(lineage, dict) else {}),
+                },
             )
 
         created = False

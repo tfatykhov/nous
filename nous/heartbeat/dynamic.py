@@ -18,7 +18,7 @@ from croniter import croniter
 from sqlalchemy import cast, func, select, update
 from sqlalchemy.dialects.postgresql import JSONB
 
-from nous.api.execution_context import ExecutionContext
+from nous.api.execution_context import ExecutionContext, lineage_from_stamp
 from nous.heartbeat.registry import BaseCheck
 from nous.heartbeat.schemas import CheckResult, Finding
 
@@ -154,6 +154,7 @@ class DynamicCheck(BaseCheck):
         on_complete_prompt: str | None = None,
         on_complete_tools: list[str] | None = None,
         active_runs: dict[str, set[DynamicCheck]] | None = None,
+        intention: dict | None = None,
     ) -> None:
         super().__init__()
         self.check_id = check_id
@@ -169,6 +170,9 @@ class DynamicCheck(BaseCheck):
         self.on_complete_prompt = on_complete_prompt
         self.on_complete_tools = [t for t in on_complete_tools if t in ALLOWED_TOOLS] if on_complete_tools else []
         self._self_disabled = False
+        # F099 I3: the lineage of the DAG this check runs for (its row's
+        # metadata.intention); read into the heartbeat_check context.
+        self._intention = intention
         # In-flight run tracking (codex P1, PR #656): disabling a check must
         # stop a run that is already executing, not only prevent the next one.
         # ``active_runs`` is owned by the loader so it can reach a running
@@ -336,6 +340,7 @@ class DynamicCheck(BaseCheck):
         """Run the agent turn inside this check's own run task."""
         assert self._runner is not None
         _CURRENT_CHECK_RUN.set(asyncio.current_task())
+        intention_id, root_intention_id, authority = lineage_from_stamp(self._intention)
         return await self._runner.run_turn(
             session_id,
             instruction,
@@ -350,6 +355,9 @@ class DynamicCheck(BaseCheck):
                 session_id=session_id,
                 declared_tools=tuple(self._tools) or None,
                 check_name=self.name,
+                intention_id=intention_id,
+                root_intention_id=root_intention_id,
+                authority=authority,
             ),
         )
 
@@ -502,6 +510,7 @@ class DynamicCheckLoader:
                 on_complete_prompt=row.on_complete_prompt,
                 on_complete_tools=row.on_complete_tools or [],
                 active_runs=self._active_runs,
+                intention=_meta(row).get("intention"),
             )
             check.set_cron(row.cron_expr)
 
@@ -816,6 +825,7 @@ class DynamicCheckLoader:
             on_complete_prompt=on_complete_prompt,
             on_complete_tools=validated_on_complete_tools,
             active_runs=self._active_runs,
+            intention=(metadata or {}).get("intention"),
         )
         check.set_cron(cron_expr)
         self._registry.register(check, permanent=False)

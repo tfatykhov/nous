@@ -377,6 +377,16 @@ class DAGStore:
             )
             return dag
 
+    async def intention_lineage(self, dag_id: UUID) -> dict[str, str] | None:
+        """F099 I3: the lineage stamp of the DAG's intention, for its node launches.
+
+        None when the DAG has no intention (created with the flag off, or
+        before F099). A database error raises: the caller defers the launch
+        rather than run the node unstamped.
+        """
+        async with self._db.session() as session:
+            return await intentions.lineage_for_source(session, self._agent_id, intentions.SOURCE_DAG, dag_id)
+
     async def get_dag(self, dag_id: UUID) -> ExecutionDAG | None:
         """Fetch a DAG with eager-loaded nodes and edges."""
         async with self._db.session() as session:

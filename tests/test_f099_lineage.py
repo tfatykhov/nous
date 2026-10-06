@@ -203,3 +203,140 @@ async def test_a_damaged_stamp_sends_an_unreadable_lineage_not_a_root():
     assert (ctx.intention_id, ctx.authority) == (None, "internal_only")
     await d.dispatch("dag_create", {"name": "d"}, session_id="s", context=ctx)
     assert seen["dag_create"]["_intention_id"] == UNREADABLE_LINEAGE
+
+
+# ---------------------------------------------------------------------------
+# Task 1.7: DAG node launches and DAG checks carry the DAG's lineage
+# ---------------------------------------------------------------------------
+
+from unittest.mock import AsyncMock, MagicMock  # noqa: E402
+
+from sqlalchemy import update  # noqa: E402
+
+from nous.brain.intentions import IntentionSpec  # noqa: E402
+from nous.config import Settings  # noqa: E402
+from nous.dag.orchestrator import DAGOrchestrator  # noqa: E402
+from nous.dag.schemas import DAGCreateRequest, DAGNodeSpec, DAGNodeType  # noqa: E402
+from nous.dag.store import DAGStore  # noqa: E402
+from nous.heartbeat.dynamic import DynamicCheck, DynamicCheckLoader  # noqa: E402
+from nous.heartbeat.registry import CheckRegistry  # noqa: E402
+from nous.storage.models import Intention  # noqa: E402
+
+
+@pytest.fixture
+def dag_env(db):
+    agent = f"f099-lin-{uuid.uuid4().hex[:8]}"
+    settings = Settings(_env_file=None, agent_id=agent, dag_callback_execution_enabled=True)
+    store = DAGStore(db, agent, settings)
+    subtask_mgr = AsyncMock()
+    subtask_mgr.create.return_value = SimpleNamespace(id=uuid.uuid4(), status="pending")
+    loader = AsyncMock()
+    loader.create_check = AsyncMock(return_value={"name": "c"})
+    loader._registry = MagicMock()
+    loader._registry.get_check.return_value = None
+    orch = DAGOrchestrator(store=store, subtask_mgr=subtask_mgr, dynamic_loader=loader, settings=settings)
+    return SimpleNamespace(agent=agent, db=db, store=store, subtask_mgr=subtask_mgr, loader=loader, orch=orch)
+
+
+async def _dag(env, node_type: DAGNodeType, *, with_intention: bool = True, authority: str = "owner"):
+    request = DAGCreateRequest(name="d", nodes=[DAGNodeSpec(name="n", type=node_type, instructions="x")])
+    spec = IntentionSpec(intent="Summarise the alerts", origin_kind="interactive") if with_intention else None
+    dag = await env.store.create(request, **({"intention": spec} if spec else {}))
+    stamp = await env.store.intention_lineage(dag.id)
+    if stamp and authority != "owner":
+        async with env.db.session() as s:
+            await s.execute(update(Intention).where(Intention.id == uuid.UUID(stamp["id"])).values(authority=authority))
+            await s.commit()
+        stamp = {**stamp, "authority": authority}
+    dag = await env.store.get_dag(dag.id)
+    return dag, dag.nodes[0], stamp
+
+
+@pytest.mark.parametrize("node_type", [DAGNodeType.subtask, DAGNodeType.callback])
+async def test_a_subtask_backed_node_carries_its_dags_lineage(dag_env, node_type):
+    dag, node, stamp = await _dag(dag_env, node_type, authority="internal_only")
+    await dag_env.orch._launch_subtask_node(node, dag)
+    metadata = dag_env.subtask_mgr.create.call_args.kwargs["metadata"]
+    assert metadata["intention"] == stamp and stamp["authority"] == "internal_only"
+    assert metadata["dag_id"] == str(dag.id)
+    # The node's turn reads it like any subtask row.
+    ctx = ExecutionContext.for_subtask(_row(**metadata), "s")
+    assert (ctx.kind, ctx.authority, str(ctx.intention_id)) == ("dag_node", "internal_only", stamp["id"])
+
+
+async def test_a_check_node_carries_its_dags_lineage(dag_env):
+    dag, node, stamp = await _dag(dag_env, DAGNodeType.check)
+    await dag_env.orch._launch_check_node(node, dag)
+    assert dag_env.loader.create_check.call_args.kwargs["metadata"]["intention"] == stamp
+
+
+async def test_a_dag_without_an_intention_stamps_nothing(dag_env):
+    dag, node, _ = await _dag(dag_env, DAGNodeType.subtask, with_intention=False)
+    await dag_env.orch._launch_subtask_node(node, dag)
+    assert "intention" not in dag_env.subtask_mgr.create.call_args.kwargs["metadata"]
+
+
+@pytest.mark.parametrize("node_type", [DAGNodeType.subtask, DAGNodeType.check])
+async def test_a_failed_lookup_defers_the_launch_and_creates_nothing(dag_env, node_type):
+    dag, node, _ = await _dag(dag_env, node_type)
+    dag_env.store.intention_lineage = AsyncMock(side_effect=RuntimeError("db down"))
+    dag_env.orch._defer_node = AsyncMock()
+    if node_type == DAGNodeType.check:
+        await dag_env.orch._launch_check_node(node, dag)
+        dag_env.loader.create_check.assert_not_called()
+    else:
+        await dag_env.orch._launch_subtask_node(node, dag)
+        dag_env.subtask_mgr.create.assert_not_called()
+    dag_env.orch._defer_node.assert_awaited_once()
+    assert dag_env.orch._defer_node.await_args.args[2] == "intention lookup failed: RuntimeError"
+    assert dag_env.orch._defer_node.await_args.kwargs["backstop"] == "lineage still unreadable"
+
+
+async def test_a_lookup_that_keeps_failing_fails_the_node_naming_the_cause(dag_env):
+    """Review S7: the real _defer_node path, capped. The node fails with the
+    cause (the exception type, never SQL text) and no claim of saturation."""
+    dag, node, _ = await _dag(dag_env, DAGNodeType.subtask)
+    dag_env.store.intention_lineage = AsyncMock(side_effect=RuntimeError("SELECT secret statement text"))
+    dag_env.orch._MAX_DEFERRALS = 2
+    await dag_env.orch._launch_subtask_node(node, dag)
+    await dag_env.orch._launch_subtask_node(node, dag)
+    (row,) = (await dag_env.store.get_dag(dag.id)).nodes
+    assert row.status == "failed"
+    assert row.error == "intention lookup failed: RuntimeError — lineage still unreadable after 2 deferrals"
+    dag_env.subtask_mgr.create.assert_not_called()
+
+
+async def test_a_dag_check_runs_under_its_dags_lineage():
+    agent = MagicMock()
+    agent.run_turn = AsyncMock(return_value=('{"has_findings": false, "findings": []}', MagicMock(), {}))
+    agent.end_conversation = AsyncMock()
+    check = DynamicCheck(check_id="c", name="dag-x-chk", prompt="p", tools=[], runner=agent, intention=STAMP)
+    await check.run()
+    ctx = agent.run_turn.call_args.kwargs["context"]
+    assert (ctx.kind, ctx.intention_id, ctx.root_intention_id, ctx.authority) == (
+        "heartbeat_check",
+        IID,
+        RID,
+        "internal_only",
+    )
+
+
+async def test_a_check_with_no_stamp_runs_as_owner():
+    agent = MagicMock()
+    agent.run_turn = AsyncMock(return_value=('{"has_findings": false, "findings": []}', MagicMock(), {}))
+    agent.end_conversation = AsyncMock()
+    await DynamicCheck(check_id="c", name="plain", prompt="p", tools=[], runner=agent).run()
+    assert agent.run_turn.call_args.kwargs["context"].authority == "owner"
+
+
+async def test_the_loader_carries_the_stamp_on_create_and_after_a_restart(db):
+    agent_id = f"f099-lin-{uuid.uuid4().hex[:8]}"
+    name = f"dag-{uuid.uuid4().hex[:6]}-chk"
+    loader = DynamicCheckLoader(db, CheckRegistry(), runner=MagicMock(), agent_id=agent_id)
+    await loader.create_check(
+        name=name, description="d", prompt="p", interval_seconds=300, metadata={"intention": STAMP}
+    )
+    assert loader._registry.get_check(name)._intention == STAMP
+    restarted = DynamicCheckLoader(db, CheckRegistry(), runner=MagicMock(), agent_id=agent_id)
+    await restarted.sync()
+    assert restarted._registry.get_check(name)._intention == STAMP
