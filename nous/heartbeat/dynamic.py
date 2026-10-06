@@ -185,6 +185,12 @@ class DynamicCheck(BaseCheck):
         # The subset cancelled because a sibling run disabled the check.
         self._sibling_cancelled: set[asyncio.Task] = set()
 
+    @property
+    def intention_stamp(self) -> dict | None:
+        """The lineage stamp of the DAG this check runs for (its row's ``metadata.intention``, F099 I3),
+        or None for any check that is not a lineage's."""
+        return self._intention
+
     def cancel_run(self, *, by_sibling_run: bool = False) -> bool:
         """Cancel this check's in-flight runs, if any. Returns True if any cancelled.
 

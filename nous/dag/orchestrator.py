@@ -472,6 +472,27 @@ class DAGOrchestrator:
         )
         return f"approved — {slot}" if self._held[dag_id] else slot
 
+    async def add_check_tokens(self, metadata: dict, tokens: int) -> bool:
+        """F099 spec 4.6: add one run's tokens of a lineage check to its DAG's ``tokens_consumed``.
+
+        A DAG check node's usage was counted only in the heartbeat's daily total, so a lineage check that
+        keeps running never reached its root's token budget. ``metadata`` is the check's row metadata,
+        whose ``dag_node_id`` (``_CHECK_OWNER_KEY``) names its node. A relative increment, so never
+        retried. False when there is nothing to add or nowhere to add it.
+        """
+        if tokens <= 0:
+            return False
+        try:
+            node_id = UUID(str(metadata.get(_CHECK_OWNER_KEY)))
+        except (TypeError, ValueError):
+            return False
+        found = await self._store.get_node_with_dag_status(node_id)
+        if found is None:
+            return False
+        node, _dag_status = found
+        await self._store.update_dag_tokens(node.dag_id, tokens)
+        return True
+
     async def tick(self) -> int:
         """Advance all active DAGs. Returns number of DAGs processed.
 

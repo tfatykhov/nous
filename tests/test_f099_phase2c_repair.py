@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -22,9 +23,10 @@ from f099_support import (
     record,
     set_intention,
 )
-from sqlalchemy import select, update
+from sqlalchemy import Update, select, update
 
 from nous.brain import continuation
+from nous.brain.intentions import IntentionSpec
 from nous.config import Settings
 from nous.heart import result_reconciler
 from nous.heart.result_inbox import record_subtask_result, route_result
@@ -109,6 +111,26 @@ async def test_a_none_or_remember_intention_is_not_the_repairs_business(env_fact
     await finish(env, remembered)
     assert await _repair(env) == 0
     assert (await intention_of(env, "subtask", quiet.id)).state == "pending"  # the close pass owns these
+
+
+async def test_a_subtask_marked_as_a_dag_nodes_in_its_metadata_is_left_to_its_dag(env_factory):  # noqa: F811
+    """2c1-7 review, minor 7: the repair excludes DAG-node subtasks as the hook and InboxSubtaskPass do
+    (is_dag_node_subtask), including one whose node link is gone and whose metadata still names its DAG."""
+    env = await env_factory(**CONT)
+    st = await env.heart.subtasks.create(
+        task="Check the snow report",
+        parent_session_id="S1",
+        parent_channel=CHAN,
+        metadata={"dag_id": str(uuid.uuid4()), "node_name": "n"},
+        intention=IntentionSpec(
+            intent="Tell the user about the snow", origin_kind="interactive", wake_policy="continue"
+        ),
+    )
+    await finish(env, st)
+    assert st.dag_node_id is None  # the FK is ON DELETE SET NULL: the metadata is what is left
+    assert await _repair(env) == 0
+    assert await inbox_rows(env, st.id) == []
+    assert (await intention_of(env, "subtask", st.id)).state == "pending"
 
 
 # ---- (b) a retried DAG whose Phase 2 write was lost ------------------------------------------------------
@@ -210,6 +232,70 @@ async def test_a_cancelled_subtask_of_a_cancelled_root_closes_cancelled(env_fact
     assert await _repair(env) == 1
     fresh = await intention_of(env, "subtask", st.id)
     assert (fresh.state, fresh.close_reason) == ("cancelled", "cancelled")
+
+
+class _Spy:
+    """A session that runs ``before_update`` just before each UPDATE it is asked to execute."""
+
+    def __init__(self, real, before_update) -> None:
+        self._real, self._before_update = real, before_update
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    async def execute(self, statement, *args, **kwargs):
+        if isinstance(statement, Update):
+            await self._before_update()
+        return await self._real.execute(statement, *args, **kwargs)
+
+
+async def test_a_root_cancel_that_commits_just_before_the_close_is_honoured(env_factory):  # noqa: F811
+    """2c1-7 review, minor 4: the root's marker is decided inside the close's UPDATE. A cancel that commits
+    after a separate read of the marker, and before the UPDATE, must not close the child `legacy`."""
+    env = await env_factory(**CONT)
+    root = await make_root(env, policy="remember")
+    st = await make_subtask(env, policy="continue")
+    child = await intention_of(env, "subtask", st.id)
+    await set_intention(env, child.id, root_id=root.id, parent_id=root.id, depth=1)
+    await env.heart.subtasks.cancel(st.id)
+    fired = []
+
+    async def cancel_the_root_once():
+        if not fired:
+            fired.append(True)
+            await set_intention(env, root.id, root_cancelled_at=datetime.now(UTC))  # its own committed transaction
+
+    @asynccontextmanager
+    async def session():
+        async with env.db.session() as real:
+            yield _Spy(real, cancel_the_root_once)
+
+    assert (
+        await repair_missing_results(SimpleNamespace(session=session), env.heart.result_inbox, env.settings, limit=50)
+        == 1
+    )
+    assert fired == [True]
+    fresh = await intention_of(env, "subtask", st.id)
+    assert (fresh.state, fresh.close_reason) == ("cancelled", "cancelled")
+
+
+@pytest.mark.parametrize("status", ["cancelled", "partial"])
+async def test_a_cancelled_or_partial_dag_reaches_its_continue_intention_as_a_failure(env_factory, status):  # noqa: F811  # PIN
+    """2c1-7 review, minor 6: the DAG side of (d). Unlike a cancelled subtask, a cancelled DAG has a result
+    (carry-over fact 7): its lost row is repaired as a FAILURE keyed by the intention, which wakes. A
+    `partial` DAG is repaired the same way."""
+    env = await env_factory(**CONT, telegram_chat_id="8080")
+    dag, _ = await make_dag(env, policy="continue", status=status)
+    async with env.db.session() as s:
+        await s.execute(update(ExecutionDAG).where(ExecutionDAG.id == dag.id).values(delivered_at=datetime.now(UTC)))
+        await s.commit()
+    assert await _repair(env) == 1
+    (row,) = await inbox_rows(env, dag.id)
+    it = await intention_of(env, "dag", dag.id)
+    assert (row.msg_type, row.channel, row.session_id, row.intention_id) == ("FAILURE", None, None, it.id)
+    assert it.state == "result_ready"
+    assert await _owner_rows(env) == []  # the gate or the turn decides what the owner sees
+    assert await _repair(env) == 0
 
 
 # ---- R1 --------------------------------------------------------------------------------------------------
@@ -428,6 +514,8 @@ async def test_an_expired_report_with_nothing_to_deliver_is_settled_once(env_fac
     assert [(r.channel, r.session_id, r.delivered_at is not None) for r in await inbox_rows(env, st.id)] == [
         (None, None, True)
     ]
+    (placeholder,) = await inbox_rows(env, st.id)
+    assert placeholder.delivered_session_id == result_reconciler.REPAIR_SESSION_ID == "repair"  # 2c1-7 minor 2
     assert await _owner_rows(env) == []
     assert await _repair(env) == 0
     assert calls == [st.id]  # selected once, never again

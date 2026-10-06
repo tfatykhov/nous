@@ -585,6 +585,27 @@ class HeartbeatRunner:
         except Exception:
             logger.warning("F099: could not store the final-run findings of check '%s'", check.name, exc_info=True)
 
+    async def _roll_check_tokens_into_dag(self, check: BaseCheck, tokens: int) -> None:
+        """F099 spec 4.6: a lineage check's tokens count against its DAG (and so its root's budget).
+
+        Only with continuation on, and only a DynamicCheck that carries a lineage stamp, with a DAG
+        orchestrator and a loader wired; every other check does no read and no write. Never raises.
+        The increment is relative and is not retried (a retry could double-count).
+        """
+        if tokens <= 0 or not isinstance(check, DynamicCheck) or check.intention_stamp is None:
+            return
+        from nous.brain import continuation  # late: keep the heartbeat import graph as it was
+
+        if not continuation.enabled(self._settings):
+            return
+        if self.dag_orchestrator is None or self._dynamic_loader is None:
+            return
+        try:
+            metadata = await self._dynamic_loader.check_metadata(check.name)
+            await self.dag_orchestrator.add_check_tokens(metadata, tokens)
+        except Exception:
+            logger.warning("F099: could not add the tokens of check '%s' to its DAG", check.name, exc_info=True)
+
     async def _record_run_stats(
         self,
         check: BaseCheck,
@@ -743,6 +764,7 @@ class HeartbeatRunner:
                 # F034.5: Track token usage from dynamic checks
                 if result.tokens_used:
                     self._tokens_used_today += result.tokens_used
+                    await self._roll_check_tokens_into_dag(check, result.tokens_used)
 
                 # F034.5: Update run stats in DB for dynamic checks
                 await self._record_run_stats(check, success=True)
@@ -1508,6 +1530,7 @@ class HeartbeatRunner:
                 run_succeeded = True
             if result.tokens_used:
                 self._tokens_used_today += result.tokens_used
+                await self._roll_check_tokens_into_dag(check, result.tokens_used)
             # #273: Fire callback if check self-disabled
             if isinstance(check, DynamicCheck) and result.self_disabled and check.on_complete_prompt:
                 if self._has_budget():

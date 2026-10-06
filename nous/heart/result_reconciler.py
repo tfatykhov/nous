@@ -23,9 +23,9 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import UUID
 
-from sqlalchemy import Text, and_, cast, exists, or_, select, update
+from sqlalchemy import Text, and_, case, cast, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased, selectinload
 
 from nous.brain import continuation, intentions
 from nous.heart.result_inbox import (
@@ -318,6 +318,9 @@ class IntentionClosePass:
 
 
 REPAIR_POLICIES = (intentions.WAKE_CONTINUE, intentions.WAKE_REPORT)
+# delivered_session_id of the settled placeholder row the repair writes for an expired intention's result that
+# reached no one (_settle_undeliverable).
+REPAIR_SESSION_ID = "repair"
 
 
 def _row_kind(row: Any) -> str:
@@ -349,22 +352,14 @@ async def repair_missing_results(database: Database, store: ResultInboxStore, se
 
 async def _close_cancelled(database: Database, agent_id: str, intention: Intention) -> int:
     """(d): a cancelled source produced no result: close its intention with no report (``cancelled``
-    when its root is cancelled, ``legacy`` otherwise)."""
+    when its root is cancelled, ``legacy`` otherwise). The root's marker is read inside the UPDATE, so no
+    cancel can commit between a read of it and the close."""
+    root = aliased(Intention)
+    root_cancelled = exists().where(
+        root.agent_id == agent_id, root.id == intention.root_id, root.root_cancelled_at.is_not(None)
+    )
+    now = datetime.now(UTC)
     async with database.session() as session:
-        marker = (
-            await session.execute(
-                select(Intention.root_cancelled_at).where(
-                    Intention.agent_id == agent_id, Intention.id == intention.root_id
-                )
-            )
-        ).scalar_one_or_none()
-        root_cancelled = marker is not None
-        now = datetime.now(UTC)
-        values = (
-            {"state": continuation.STATE_CANCELLED, "close_reason": continuation.CLOSE_CANCELLED}
-            if root_cancelled
-            else {"state": continuation.STATE_CLOSED, "close_reason": intentions.CLOSE_LEGACY}
-        )
         moved = await session.execute(
             update(Intention)
             .where(
@@ -372,7 +367,12 @@ async def _close_cancelled(database: Database, agent_id: str, intention: Intenti
                 Intention.id == intention.id,
                 Intention.state == continuation.STATE_PENDING,
             )
-            .values(closed_at=now, updated_at=now, **values)
+            .values(
+                state=case((root_cancelled, continuation.STATE_CANCELLED), else_=continuation.STATE_CLOSED),
+                close_reason=case((root_cancelled, continuation.CLOSE_CANCELLED), else_=intentions.CLOSE_LEGACY),
+                closed_at=now,
+                updated_at=now,
+            )
         )
         await session.commit()
     return moved.rowcount or 0
@@ -414,7 +414,7 @@ async def _settle_undeliverable(
             created_at=created_at,
             intention_id=intention_id,
             delivered_at=datetime.now(UTC),
-            delivered_session_id="repair",
+            delivered_session_id=REPAIR_SESSION_ID,
         )
         await session.commit()
     logger.warning(
@@ -454,7 +454,10 @@ async def _repair_subtask_results(
                     Intention.wake_policy.in_(REPAIR_POLICIES),
                     Subtask.agent_id == agent_id,
                     Subtask.status.in_(intentions.TERMINAL_SUBTASK_STATUSES),
+                    # is_dag_node_subtask, in SQL (a DAG node's subtask reports through its DAG): a node link,
+                    # or a metadata dag_id left after the link was nulled (ON DELETE SET NULL).
                     Subtask.dag_node_id.is_(None),
+                    func.coalesce(Subtask.metadata_["dag_id"].astext, "") == "",
                     Subtask.completed_at.is_not(None),
                     Subtask.completed_at > since,
                 )
