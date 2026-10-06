@@ -143,7 +143,7 @@ def test_write_file_outside_the_root_dir_is_refused_in_every_mode(tmp_path, offe
 
 
 @pytest.mark.parametrize(("offered_mode", "policy_mode"), MODES)
-def test_write_file_inside_the_root_dir_is_authorized(tmp_path, offered_mode, policy_mode):
+def test_write_file_inside_the_root_dir_is_authorized(tmp_path, offered_mode, policy_mode):  # PIN
     r, _ = _runner(
         OFFERED,
         workspace_dir=str(tmp_path),
@@ -244,6 +244,36 @@ def test_an_approved_action_runs_its_one_tool_and_nothing_else(offered_mode, pol
     assert _auth(r, ctx, "send_email", ["send_email"], FORGED[0][1]) is None
     refusal = _auth(r, ctx, "bash", ["send_email"], {"command": "ls"})
     assert refusal is not None and refusal.code == "internal_only" and "(not_offered)" in refusal.text
+
+
+@pytest.mark.parametrize(("offered_mode", "policy_mode"), MODES)
+def test_an_approved_action_is_refused_an_offered_tool_it_did_not_declare_whatever_the_modes_say(
+    offered_mode, policy_mode
+):
+    """The one-tool rule is a floor of the strict block, not the context policy's: with the
+    policy off or warn, an offered but undeclared tool would otherwise run."""
+    r, _ = _runner(OFFERED, tool_offered_set_enforcement_mode=offered_mode, tool_context_policy_mode=policy_mode)
+    events: list[tuple[str, dict]] = []
+    r._log_f026_decision = lambda event_type, data, session_id=None: events.append((event_type, data))
+    ctx = ExecutionContext(
+        kind="approved_action", session_id="proposal-x", proposal_id=uuid.uuid4(), declared_tools=("send_email",)
+    )
+    offered = ["send_email", "bash"]
+    assert _auth(r, ctx, "send_email", offered, FORGED[0][1]) is None
+    assert events == []
+    refusal = _auth(r, ctx, "bash", offered, {"command": "ls"})
+    assert refusal is not None and refusal.code == "internal_only" and "(undeclared)" in refusal.text
+    assert events == [
+        (
+            "harness_context_policy_violation",
+            {
+                "tool_name": "bash",
+                "context_kind": "approved_action",
+                "violation": "approved_action:undeclared",
+                "mode": "enforce",
+            },
+        )
+    ]
 
 
 @pytest.mark.parametrize(("offered_mode", "policy_mode"), MODES)

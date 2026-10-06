@@ -475,14 +475,18 @@ class AgentRunner:
         """
         # F099 section 4.4: an internal_only turn, and an approved_action call, are
         # enforced here FIRST, whatever the two mode settings say. The modes are for
-        # tuning the ordinary rules; this is a security floor. A call to a tool that
-        # was not offered is refused, and so is a call the per-call rules reject.
+        # tuning the ordinary rules; this is a security floor. For both, a call to a
+        # tool that was not offered is refused (not_offered). An approved_action call
+        # is also refused any tool but its one declared tool (undeclared). An
+        # internal_only call is also refused when the per-call rules reject it.
         # With intentions off, Phase 1 writes no internal_only row: only a damaged
         # lineage stamp reaches this, and it loses tools, never gains one.
         if ctx.authority == AUTHORITY_INTERNAL or ctx.kind == "approved_action":
             strict: str | None = None
             if tool_name not in offered_names:
                 strict = "not_offered"
+            elif ctx.kind == "approved_action" and tool_name not in (ctx.declared_tools or ()):
+                strict = "undeclared"
             elif ctx.authority == AUTHORITY_INTERNAL:
                 strict = tool_policy.internal_only_call_violation(
                     ctx, tool_name, tool_input, workspace_dir=self._settings.workspace_dir
