@@ -45,7 +45,7 @@ nous/
 │   │   ├── search.py           # Full-text + vector search
 │   │   ├── subtasks.py         # Subtask CRUD operations
 │   │   ├── result_inbox.py     # F098: channel-keyed result inbox (store, subtask/DAG writers, pre_turn formatting)
-│   │   ├── result_reconciler.py  # F098: repairs lost inbox writes (subtask and DAG passes); Phase C adds the memory pass
+│   │   ├── result_reconciler.py  # F098: repairs lost inbox writes (the inbox passes: subtask and DAG); Phase C adds the memory pass; F099 adds the intentions pass (closes finished work and stopped schedules)
 │   │   ├── result_memory.py    # F098 Phase C: a finished subtask result becomes an episode + marked chunks (log, writer, reconciler pass)
 │   │   ├── schedules.py        # Schedule CRUD operations
 │   │   └── schemas.py          # Pydantic models

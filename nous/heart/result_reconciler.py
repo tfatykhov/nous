@@ -23,10 +23,12 @@ from typing import TYPE_CHECKING, Protocol
 from sqlalchemy import exists, or_, select, update
 from sqlalchemy.orm import selectinload
 
+from nous.brain import intentions
 from nous.heart.result_inbox import (
     SOURCE_DAG,
     SOURCE_SUBTASK,
     ResultInboxStore,
+    close_intention_quietly,
     is_dag_node_subtask,
     record_dag_result,
     subtask_envelope,
@@ -119,6 +121,7 @@ class InboxSubtaskPass:
             if env is None:
                 settle.append(st.id)
                 continue
+            intention_id = await close_intention_quietly(self._store, self._settings, SOURCE_SUBTASK, st.id)
             written = await self._store.insert(
                 source_kind=SOURCE_SUBTASK,
                 source_id=st.id,
@@ -129,6 +132,7 @@ class InboxSubtaskPass:
                 session_id=st.parent_session_id,
                 correlation_id=str(st.id),
                 created_at=st.completed_at,
+                intention_id=intention_id,
             )
             if written:
                 fixed += 1
@@ -217,6 +221,45 @@ class InboxDagPass:
         return fixed
 
 
+class IntentionClosePass:
+    """F099 Phase 1: close intentions whose work is over, whatever their routing key.
+
+    Subtasks and DAGs: the PRIMARY closer of cancelled subtasks (the writers
+    skip 'cancelled', and a subtask cancelled while pending never reaches a
+    writer), and otherwise the backstop. The inbox writers close an intention
+    before their routing-key check, but each runs once, and a worker
+    cancelled at shutdown, a failed hook, or a second cancel during an inline
+    close leaves it pending.
+
+    Containers: the repair for ScheduleManager._close_container, which runs
+    after the deactivation commits and may fail or never run. A container
+    whose schedule is inactive or gone is closed here; containers have no
+    TTL, so nothing else would.
+
+    Each kind at most ``limit`` per tick, oldest first.
+    """
+
+    name = "intentions"
+
+    def __init__(self, database: Database, settings: Settings) -> None:
+        self._db = database
+        self._settings = settings
+
+    async def run(self, *, limit: int) -> int:
+        agent_id = self._settings.agent_id
+        async with self._db.session() as session:
+            closed = await intentions.close_finished_sources(session, agent_id, limit=limit)
+            containers = await intentions.close_finished_containers(session, agent_id, limit=limit)
+            await session.commit()
+        if closed or containers:
+            logger.info(
+                "F099: reconciler closed %d intention(s) of finished work and %d container(s) of stopped schedules",
+                len(closed),
+                len(containers),
+            )
+        return len(closed) + len(containers)
+
+
 class TerminalSubtaskReconciler:
     """Runs the registered passes, each isolated and bounded."""
 
@@ -245,12 +288,14 @@ def build_reconciler(
     settings: Settings,
     memory: ResultMemoryWriter | None = None,
 ) -> TerminalSubtaskReconciler:
-    """The reconciler with every pass its flags enable: the inbox passes
-    (Phase A) and the result memory pass (Phase C)."""
+    """The reconciler with every pass its flags enable (F098 Phase A: the
+    inbox passes; F098 Phase C: the memory pass; F099: the intentions pass)."""
     reconciler = TerminalSubtaskReconciler()
     if settings.result_inbox_enabled:
         reconciler.register(InboxSubtaskPass(database, store, settings))
         reconciler.register(InboxDagPass(database, store, settings))
+        if intentions.enabled(settings):
+            reconciler.register(IntentionClosePass(database, settings))
     if settings.result_memory_enabled and memory is not None:
         reconciler.register(ResultMemoryPass(memory, settings))
     return reconciler

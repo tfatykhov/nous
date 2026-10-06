@@ -2969,6 +2969,22 @@ async def _close_cancelled_inline_subtask(heart: Heart, subtask_id: UUID) -> boo
         return False
 
 
+async def _close_inline_intention(heart: Any, subtask_id: UUID) -> None:
+    """F099 section 4.1 Closing: an inline run never reaches a worker writer.
+
+    Closes its intention as 'legacy' however the call ended. Never raises
+    (a second cancel can still interrupt the await; IntentionClosePass is
+    the backstop).
+    """
+    store = getattr(heart, "intentions", None)
+    if store is None:
+        return
+    try:
+        await store.close_for_source(intentions.SOURCE_SUBTASK, subtask_id)
+    except Exception:
+        logger.warning("F099: could not close the intention of inline subtask %s", subtask_id.hex[:8], exc_info=True)
+
+
 # ---------------------------------------------------------------------------
 # Subtask & Schedule tool closures (011.1)
 # ---------------------------------------------------------------------------
@@ -3340,6 +3356,11 @@ def create_subtask_tools(
                     return _tool_error(f"[Subtask {subtask.id.hex[:8]} failed: {e}]")
             finally:
                 schedule_subtask_memory(getattr(heart, "result_memory", None), subtask.id)
+                # F099: an inline run never reaches a worker writer, so its
+                # intention closes here, however the call ended. After the
+                # synchronous memory hook, which an interrupted await must not skip.
+                if intentions.enabled(settings):
+                    await _close_inline_intention(heart, subtask.id)
 
         except ValueError as e:
             return _tool_error(f"Cannot spawn subtask: {e}")
