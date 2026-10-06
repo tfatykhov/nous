@@ -112,6 +112,17 @@ async def test_a_limit_refusal_names_the_limit_that_was_hit(escalate, named, oth
     assert f"the {named} limit is reached" in text and f"the {other} limit is reached" not in text
 
 
+async def test_a_budget_reason_ahead_of_the_limit_names_no_limit():
+    """escalate names the first reason; a budget one says nothing about which limit made spawning blocked."""
+    blocked = RootLimits(
+        depth=3, spawns=5, turns=1, tokens=5000, stalls=0, spawn_blocked=True, escalate="budget_tokens"
+    )
+    state, execute = _executor(blocked)
+    text, is_error = await execute(**GOOD)
+    assert is_error is True and state.resolution is None
+    assert "depth or spawn limit" in text and "limit is reached" not in text
+
+
 async def test_a_second_valid_call_is_refused_and_the_first_decision_stands():
     state, execute = _executor()
     assert await execute(**GOOD) == ("Recorded.", False)

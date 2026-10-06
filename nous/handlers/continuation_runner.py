@@ -15,7 +15,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -25,6 +25,7 @@ from nous.api.execution_context import ExecutionContext
 from nous.brain import continuation
 from nous.brain.continuation import INTENT_SESSION_PREFIX, Resolution
 from nous.brain.intentions import AUTHORITY_INTERNAL
+from nous.cancellation import cancel_requested
 from nous.events import Event
 from nous.heart.result_inbox import format_inbox_messages, neutralize_delimiters
 from nous.storage.models import Intention, IntentionArrival
@@ -121,10 +122,11 @@ def make_resolve_intention_executor(
         if state.proposals and decision != "ask":
             return "Error: you staged a proposal for the owner, so this turn must end with decision='ask'.", True
         if decision in ("continue", "revise") and (limits := await limits_of()).spawn_blocked:
-            # escalate names the limit when one tripped it; a budget reason ahead of it leaves the spawn wording.
-            hit = "depth" if limits.escalate == "limit_depth" else "spawn"
+            # escalate names the limit when one tripped it; a budget reason ahead of it names none.
+            hit = {"limit_depth": "depth", "limit_spawns": "spawn"}.get(limits.escalate or "")
+            named = f" (the {hit} limit is reached)" if hit else ""
             return (
-                f"Error: this work is at its depth or spawn limit (the {hit} limit is reached), so it cannot "
+                f"Error: this work is at its depth or spawn limit{named}, so it cannot "
                 "continue or revise: nothing more can be spawned under it. End with report, drop or ask.",
                 True,
             )
@@ -216,13 +218,16 @@ def build_arrival_prompt(
 
 # The bound on closing a continuation's session (a reflection is skipped, but end_session still writes).
 END_CONVERSATION_TIMEOUT_SECONDS = 30
+SWEEP_INTERVAL_SECONDS = 60  # the longest the loop sleeps (also the reconciler pass's cadence)
+LOOP_RETRY_SECONDS = 5  # after a pass that failed or was cancelled from within
+COOLDOWN_SECONDS = 5  # a root that was due but not claimable is left alone this long
 NO_ROWS_NOTE = "A result was ready but no result row came with it; nothing to decide."
 
 
 class ContinuationRunner:
     """One loop per process: sleeps until the next root is claimable, claims under a concurrency slot, runs
     the arrival inside ``asyncio.wait_for(turn_timeout)`` and commits under the claim's fence (contract
-    section 4.8). This task has the arrival; the loop is the next."""
+    section 4.8). ``_running`` maps each root to its arrival's task (2e's cancel uses it)."""
 
     def __init__(
         self,
@@ -260,13 +265,177 @@ class ContinuationRunner:
         arrival ended and left work behind."""
         self._wake.set()
 
+    async def start(self) -> None:
+        """Release claims older than the lease, then run the loop (spec 4.5.2). Does nothing, and builds no
+        task, with continuation off: main.py forces it off until PR-2e."""
+        if not continuation.enabled(self._settings) or self._task is not None:
+            return
+        await self._step("startup lease release", self._release_stale)
+        self._task = asyncio.create_task(self._loop(), name="continuation-runner")
+
+    async def stop(self) -> None:
+        """Cancel the loop and every running arrival (each releases its claim without an attempt), and wait."""
+        loop_task, self._task = self._task, None
+        running = list(self._running.values())
+        for task in ([loop_task] if loop_task is not None else []) + running:
+            task.cancel()
+        await asyncio.gather(*([loop_task] if loop_task is not None else []), *running, return_exceptions=True)
+
+    async def on_result_ready(self, event: Event) -> None:
+        """The bus handler for ``intention.result_ready``: a hint. The sweep is the backstop. (One agent per
+        process: ``event.agent_id`` is not consulted; revisit with multi-agent.)"""
+        self.wake()
+
+    # ------------------------------------------------------------------
+    # The sweep and the loop
+    # ------------------------------------------------------------------
+
+    async def run_once(self) -> continuation.SweepReport:
+        """One sweep (see the task's Interfaces). Every step is isolated; with continuation off it does nothing."""
+        if not continuation.enabled(self._settings):
+            return continuation.SweepReport(0, 0, 0, 0, (), None)
+        released = await self._step("lease release", self._release_stale, [])
+        expired = await self._step("TTL sweep", self._expire, [])
+        await self._step("question wake", self._wake_questions)
+        pushed = await self._step("owner push", self._push, 0)
+        launched, next_due = await self._step("launch", self._launch, ([], None))
+        return continuation.SweepReport(len(released), len(expired), 0, pushed, tuple(launched), next_due)
+
+    async def _step(self, name: str, step: Callable[[], Awaitable[Any]], default: Any = None) -> Any:
+        try:
+            return await step()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("F099: the continuation %s failed; the next sweep tries again", name, exc_info=True)
+            return default
+
+    async def _release_stale(self) -> list[UUID]:
+        settings = self._settings
+        async with self._db.session() as session:
+            released = await continuation.release_stale_claims(
+                session,
+                self._agent_id,
+                lease_s=settings.continuation_lease_seconds,
+                max_attempts=settings.continuation_max_attempts,
+                settings=settings,
+                brain=None,  # R5: a lease-capped failed report is not a model decision
+            )
+            await session.commit()
+        if released:
+            logger.info("F099: released %d stale claim(s)", len(released))
+        return released
+
+    async def _expire(self) -> list[UUID]:
+        settings = self._settings
+        async with self._db.session() as session:
+            expired = await continuation.expire_roots(
+                session, self._agent_id, ttl_hours=settings.intention_root_ttl_hours, settings=settings
+            )
+            await session.commit()
+        for root_id in expired:
+            await self._emit("intention.root_expired", {"root_id": str(root_id)})
+        return expired
+
+    async def _wake_questions(self) -> None:
+        async with self._db.session() as session:
+            woken = await continuation.wake_terminal_arrivals(session, self._agent_id, settings=self._settings)
+            await session.commit()
+        if woken:  # the sweep launches next, so no wake()
+            logger.info("F099: woke answered or expired question(s): %s", woken)
+
+    async def _push(self) -> int:
+        return await self._publisher.push_due() if self._publisher is not None else 0
+
+    async def _launch(self) -> tuple[list[UUID], datetime | None]:
+        """Claim-and-run every root that is due, while a slot is free. The claim itself happens inside the
+        arrival task, so a slow claim cannot hold the sweep."""
+        settings = self._settings
+        async with self._db.session() as session:
+            eligible = await continuation.eligible_roots(
+                session,
+                self._agent_id,
+                debounce_s=settings.continuation_debounce_seconds,
+                max_wait_s=settings.continuation_max_wait_seconds,
+            )
+        now = datetime.now(UTC)
+        self._cooldown = {root: until for root, until in self._cooldown.items() if until > now}
+        launched: list[UUID] = []
+        next_due: datetime | None = None
+        for root_id, due in eligible:  # earliest first
+            if root_id in self._running:
+                continue
+            if due > now:
+                next_due = due if next_due is None else min(next_due, due)
+                break  # everything after is later still
+            cooling = self._cooldown.get(root_id)
+            if cooling is not None:
+                next_due = cooling if next_due is None else min(next_due, cooling)
+                continue
+            if self._slots.locked():
+                break  # a slot frees when an arrival ends, and that wakes the loop
+            await self._slots.acquire()
+            task = asyncio.create_task(self._arrival_task(root_id), name=f"continuation-{root_id.hex[:8]}")
+            task.add_done_callback(lambda _task, root_id=root_id: self._arrival_ended(root_id))
+            self._running[root_id] = task
+            launched.append(root_id)
+        return launched, next_due
+
+    async def _arrival_task(self, root_id: UUID) -> None:
+        """One root's arrival, in a task of its own: the per-root catch. Whatever it raises is logged and stays
+        with this root (a cooldown), so the other roots of the sweep, and the loop, go on."""
+        try:
+            done = await self.run_arrival(root_id)
+            if done is None:
+                self._cooldown[root_id] = datetime.now(UTC) + timedelta(seconds=COOLDOWN_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("F099: the arrival of root %s raised; it is left for a later sweep", root_id)
+            self._cooldown[root_id] = datetime.now(UTC) + timedelta(seconds=COOLDOWN_SECONDS)
+
+    def _arrival_ended(self, root_id: UUID) -> None:
+        """The arrival task's done callback, not a ``finally`` in it: a task cancelled before its first step (a
+        stop, or 2e's cancel, right after the launch) never runs its body, and its slot must come back all the same."""
+        self._running.pop(root_id, None)
+        self._slots.release()
+        self.wake()
+
+    async def _loop(self) -> None:
+        """Sleep until the next root is due (or a wake), sweep, repeat. The Fix-Z shape of every
+        maintenance loop: only its own cancellation ends it."""
+        while True:
+            try:
+                self._wake.clear()  # BEFORE the sweep: a wake that arrives during it is kept
+                report = await self.run_once()
+                await self._sleep(report)
+            except asyncio.CancelledError:
+                if cancel_requested():
+                    break
+                logger.exception("F099: the continuation loop was cancelled from within; the loop continues")
+                await asyncio.sleep(LOOP_RETRY_SECONDS)
+            except Exception:
+                logger.warning("F099: the continuation sweep failed", exc_info=True)
+                await asyncio.sleep(LOOP_RETRY_SECONDS)
+
+    async def _sleep(self, report: continuation.SweepReport) -> None:
+        delay = float(SWEEP_INTERVAL_SECONDS)
+        if report.next_due is not None:
+            delay = min(delay, max(0.05, (report.next_due - datetime.now(UTC)).total_seconds()))
+        try:
+            await asyncio.wait_for(self._wake.wait(), timeout=delay)
+        except TimeoutError:
+            pass
+
     # ------------------------------------------------------------------
     # One arrival
     # ------------------------------------------------------------------
 
     async def run_arrival(self, root_id: UUID) -> continuation.ArrivalCommit | None:
         """Claim ``root_id``, decide, and commit (spec 4.5). The ArrivalCommit of a decided arrival; None
-        when nothing was claimable, the fence rejected the commit, or the attempt failed."""
+        when nothing was claimable, the fence rejected the commit, or the attempt failed. Anything that raises
+        after the claim (the gate, the limits, the lineage read, the prompt, the owner-channel read) is a failed
+        attempt (contract 4.8), booked at once rather than left to the lease."""
         settings = self._settings
         async with self._db.session() as session:
             claim = await continuation.claim_root(
@@ -286,6 +455,11 @@ class ContinuationRunner:
             # A stop or a cancel: free the claim so the result is not stuck for a lease, without charging an attempt.
             await asyncio.shield(self._release(claim))
             raise
+        except Exception:
+            # The turn, the commit and _fail swallow their own errors, so this cannot charge an attempt twice.
+            logger.warning("F099: the arrival of root %s raised; a failed attempt", root_id, exc_info=True)
+            await self._fail(claim)
+            return None
 
     async def _decide(self, claim: continuation.Claim) -> continuation.ArrivalCommit | None:
         settings, agent_id = self._settings, self._agent_id
