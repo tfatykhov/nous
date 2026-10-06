@@ -12,17 +12,18 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Text, and_, cast, exists, select, update
+from sqlalchemy import ColumnElement, Text, and_, cast, exists, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain import intentions
-from nous.storage.models import Intention, ResultInbox
+from nous.storage.models import Intention, IntentionProposal, ResultInbox
 
 logger = logging.getLogger(__name__)
 
@@ -111,14 +112,21 @@ def has_continue_intention(
     """EXISTS: the work row (``source_id_col``, a uuid column of a subtask or DAG)
     has a ``continue`` intention that is still owed a result. The reconciler
     passes use it so a row keyed by the intention alone is still repaired. A
-    closed intention counts only when ``include_closed`` (a DAG's retry re-arrives)."""
-    states = OPEN_STATES + ((STATE_CLOSED,) if include_closed else ())
+    closed intention counts only when ``include_closed`` (a DAG's retry re-arrives),
+    and never one closed as ``legacy``: Phase 1 or the startup rollback closed it
+    and F098 delivered its result to chat, so nothing may reopen it."""
+    state = Intention.state.in_(OPEN_STATES)
+    if include_closed:
+        state = or_(
+            state,
+            and_(Intention.state == STATE_CLOSED, Intention.close_reason.is_distinct_from(intentions.CLOSE_LEGACY)),
+        )
     return exists().where(
         Intention.agent_id == agent_id,
         Intention.source_kind == source_kind,
         Intention.source_id == cast(source_id_col, Text),
         Intention.wake_policy == intentions.WAKE_CONTINUE,
-        Intention.state.in_(states),
+        state,
     )
 
 
@@ -344,7 +352,8 @@ async def record_result(
     or ``closed`` (T6, a reopen), moves to ``result_ready`` in the same transaction. A row arriving
     while the intention is ``result_ready``, ``deciding`` or ``awaiting_owner`` is inserted and held:
     the state is left alone. Anything nothing can reopen (another policy, a closed root, a
-    ``cancelled`` or ``expired`` intention) becomes an owner-facing ``intention_report`` carrying the
+    ``cancelled`` or ``expired`` intention, one closed as ``legacy`` by Phase 1 or the startup rollback,
+    whose result F098 already delivered) becomes an owner-facing ``intention_report`` carrying the
     raw result, plus the work row's own inbox row, NULL-keyed and stamped delivered, so the reconciler
     passes see the source as written. The state UPDATE runs only when the row was written, so a
     duplicate delivery is a no-op; the REPORT is written only with a newly written twin, so a duplicate
@@ -358,7 +367,13 @@ async def record_result(
     """
     row = (
         await session.execute(
-            select(Intention.state, Intention.wake_policy, Intention.root_id, Intention.origin_channel)
+            select(
+                Intention.state,
+                Intention.close_reason,
+                Intention.wake_policy,
+                Intention.root_id,
+                Intention.origin_channel,
+            )
             .where(Intention.agent_id == agent_id, Intention.id == intention_id)
             .with_for_update()
         )
@@ -371,6 +386,9 @@ async def record_result(
     if (
         policy != intentions.WAKE_CONTINUE
         or state in (STATE_CANCELLED, STATE_EXPIRED)
+        # A legacy close is never reopened (a DAG's retry_node re-arrival included): it reports, and its
+        # settled twin keeps InboxDagPass from re-selecting the work row (MF-1).
+        or (state == STATE_CLOSED and row.close_reason == intentions.CLOSE_LEGACY)
         or not await _root_is_open(session, agent_id, root_id)
     ):
         report_id = arrival_report_id(source_kind, source_id, source_generation)
@@ -448,3 +466,167 @@ async def record_result(
         await _set_result_ready(session, agent_id, intention_id, from_state=state, now=now)
         state = STATE_RESULT_READY
     return ResultRecorded(inbox_id, True, state, reopened, False, intention_id, root_id)
+
+
+@dataclass(frozen=True, slots=True)
+class RollbackReport:
+    """What ``rollback_at_startup`` did (contract section 4.7)."""
+
+    closed: int
+    rerouted_rows: int
+    expired_proposals: int
+    pushed_raw: int
+
+
+_ROLLBACK_STATES = (STATE_RESULT_READY, "deciding", "awaiting_owner")
+_SWEEP_BATCH = 200
+_RAW_PUSH_CHARS = 3900
+# delivered_session_id of a row the rollback sent by Telegram instead of routing.
+ROLLBACK_SESSION_ID = "rollback"
+
+
+async def rollback_at_startup(
+    database: Any, settings: Any, *, telegram_push: Callable[[str], Awaitable[bool]] | None
+) -> RollbackReport:
+    """Spec 4.3 item 6, T15: take the continuation out of the loop at startup (flag off).
+
+    Open ``continue`` intentions in ``result_ready``, ``deciding`` or ``awaiting_owner`` have their
+    undelivered intention-keyed inbox rows re-routed to ``owner_channel`` (so F098's chat turn shows
+    them), their ``staged`` and ``pending`` proposals expired (a later tap is refused), and are closed
+    as ``legacy`` with the claim cleared; so is every ``pending`` intention whose source is already
+    terminal (work that finished while the flags were off: task-1.9 carry-over 2). It runs whenever
+    ``brain.intentions`` exists, ``NOUS_INTENTIONS_ENABLED`` off included, and does nothing when the
+    continuation flag is on. If the inbox is off too, a re-routed row would be invisible: each row is
+    sent by ``telegram_push`` instead and stamped delivered, and an intention whose push failed stays
+    open for the next start (a result is never dropped to make the close succeed).
+
+    One transaction applies the re-route, the expiry and the close, so a close can never outrun its
+    rows. The network sends happen before it, outside any transaction, so the raw push is
+    at-least-once: a crash between the push and the commit re-sends on the next start (a duplicate
+    costs less than a lost result; the inbox-off state is not prod's).
+    """
+    if enabled(settings):
+        return RollbackReport(0, 0, 0, 0)
+    agent_id = settings.agent_id
+    inbox_on = getattr(settings, "result_inbox_enabled", False) is True
+
+    async with database.session() as session:
+        open_rows = list(
+            (
+                await session.execute(
+                    select(Intention)
+                    .where(
+                        Intention.agent_id == agent_id,
+                        Intention.wake_policy == intentions.WAKE_CONTINUE,
+                        Intention.state.in_(_ROLLBACK_STATES),
+                    )
+                    .order_by(Intention.created_at)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        stuck: dict[UUID, list[ResultInbox]] = {it.id: [] for it in open_rows}
+        if open_rows:
+            rows = (
+                await session.execute(
+                    select(ResultInbox)
+                    .where(intention_keyed(agent_id, list(stuck)), ResultInbox.delivered_at.is_(None))
+                    .order_by(ResultInbox.created_at)
+                )
+            ).scalars()
+            for row in rows:
+                stuck[row.intention_id].append(row)
+
+    pushed_ids: list[UUID] = []
+    keep_open: set[UUID] = set()
+    if not inbox_on:
+        waiting = sum(len(rows) for rows in stuck.values())
+        if telegram_push is None and waiting:
+            logger.warning(
+                "F099: the rollback found %d result(s) that cannot be delivered (the inbox is off and Telegram is not "
+                "configured); they stay on their work rows",
+                waiting,
+            )
+        elif telegram_push is not None:
+            for it in open_rows:
+                for row in stuck[it.id]:
+                    if await telegram_push(f"{row.title}\n\n{row.body}"[:_RAW_PUSH_CHARS]):
+                        pushed_ids.append(row.id)
+                    else:
+                        keep_open.add(it.id)
+
+    now = datetime.now(UTC)
+    closing = [it for it in open_rows if it.id not in keep_open]
+    close_ids = [it.id for it in closing]
+    rerouted = expired = closed = 0
+    async with database.session() as session:
+        if pushed_ids:
+            await session.execute(
+                update(ResultInbox)
+                .where(ResultInbox.id.in_(pushed_ids), ResultInbox.delivered_at.is_(None))
+                .values(delivered_at=now, delivered_session_id=ROLLBACK_SESSION_ID)
+                .execution_options(synchronize_session=False)
+            )
+        if inbox_on:
+            for it in closing:
+                row_ids = [r.id for r in stuck[it.id]]
+                channel = owner_channel(settings, it.origin_channel)
+                if row_ids and channel is None:
+                    logger.warning(
+                        "F099: the rollback found %d result(s) of intention %s with no owner channel (no origin "
+                        "channel, no default chat); they stay on their work row",
+                        len(row_ids),
+                        it.id,
+                    )
+                elif row_ids:
+                    moved = await session.execute(
+                        update(ResultInbox)
+                        .where(ResultInbox.id.in_(row_ids), ResultInbox.delivered_at.is_(None))
+                        .values(channel=channel, reply_to=channel)
+                        .execution_options(synchronize_session=False)
+                    )
+                    rerouted += moved.rowcount or 0
+        if close_ids:
+            gone = await session.execute(
+                update(IntentionProposal)
+                .where(
+                    IntentionProposal.agent_id == agent_id,
+                    IntentionProposal.intention_id.in_(close_ids),
+                    IntentionProposal.state.in_(("staged", "pending")),
+                )
+                .values(state="expired", updated_at=now)
+                .execution_options(synchronize_session=False)
+            )
+            expired = gone.rowcount or 0
+            closed += len(
+                (
+                    await session.execute(
+                        update(Intention)
+                        .where(
+                            Intention.agent_id == agent_id,
+                            Intention.id.in_(close_ids),
+                            Intention.state.in_(_ROLLBACK_STATES),
+                        )
+                        .values(
+                            state=STATE_CLOSED,
+                            close_reason=intentions.CLOSE_LEGACY,
+                            closed_at=now,
+                            updated_at=now,
+                            claim_token=None,
+                            claimed_at=None,
+                        )
+                        .returning(Intention.id)
+                        .execution_options(synchronize_session=False)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        while True:
+            swept = await intentions.close_finished_sources(session, agent_id, limit=_SWEEP_BATCH)
+            closed += len(swept)
+            if len(swept) < _SWEEP_BATCH:
+                break
+        await session.commit()
+    return RollbackReport(closed, rerouted, expired, len(pushed_ids))

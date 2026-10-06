@@ -89,7 +89,7 @@ async def test_the_chat_claim_still_takes_an_owner_row(make_layer):  # PIN
     assert (await inbox_rows(env))[0].delivered_at is not None
 
 
-async def test_a_continue_result_is_never_injected_into_a_chat_turn(make_layer):
+async def test_a_continue_result_is_never_injected_into_a_chat_turn(make_layer):  # PIN
     env = await make_layer(**CONT)
     st = await make_subtask(env)
     await finish(env, st)
@@ -231,6 +231,27 @@ async def test_the_dag_pass_still_skips_an_unroutable_non_continue_dag(env_facto
 
 
 @pytest.mark.postgres_only  # CAST(text AS uuid) in the pass filter
+@pytest.mark.parametrize(
+    ("reason", "selected", "after"), [("legacy", 0, ("closed", "legacy")), ("resolved", 1, ("result_ready", None))]
+)
+async def test_the_dag_pass_never_selects_a_continue_dag_closed_as_legacy(env_factory, reason, selected, after):  # noqa: F811
+    """Lead addendum (2b-7 review). F098 already delivered the result of a continue DAG that Phase 1 (or the
+    startup rollback) closed as 'legacy': with continuation on, InboxDagPass must not select it and reopen
+    it. One the continuation closed itself ('resolved') is still selected: a retried DAG reopens it."""
+    env = await env_factory(**CONT)
+    store = env.heart.result_inbox
+    await store.ensure_enabled_at()
+    dag, _ = await make_dag(env, policy="continue")  # no origin: selectable by its intention alone
+    it = await intention_of(env, "dag", dag.id)
+    await set_intention(env, it.id, state="closed", close_reason=reason, closed_at=datetime.now(UTC))
+    await _delivered_dag(env, dag.id)
+    assert await InboxDagPass(env.db, store, env.settings).run(limit=10) == selected
+    assert len(await inbox_rows(env, dag.id)) == selected  # not even a settled twin for the legacy one
+    found = await intention_of(env, "dag", dag.id)
+    assert (found.state, found.close_reason) == after
+
+
+@pytest.mark.postgres_only  # CAST(text AS uuid) in the pass filter
 async def test_with_continuation_off_the_dag_pass_skips_a_continue_dag_without_origin(env_factory):  # noqa: F811  # PIN
     env = await env_factory(**ON)
     store = env.heart.result_inbox
@@ -257,6 +278,7 @@ async def test_the_subtask_pass_selects_an_unrouted_continue_subtask_and_not_a_r
     assert (row.source_id, row.channel, row.session_id) == (cont.id, None, None)
 
 
+# No postgres_only marker: with the flag off the pass never builds the CAST(text AS uuid) condition.
 async def test_with_continuation_off_the_subtask_pass_skips_an_unrouted_continue_subtask(env_factory):  # noqa: F811  # PIN
     env = await env_factory(**ON)
     store = env.heart.result_inbox
@@ -269,7 +291,7 @@ async def test_with_continuation_off_the_subtask_pass_skips_an_unrouted_continue
 
 
 @pytest.mark.postgres_only  # CAST(text AS uuid) in the pass filter
-async def test_a_reported_continue_result_is_not_reselected_by_the_subtask_pass(env_factory):  # noqa: F811
+async def test_a_reported_continue_result_is_not_reselected_by_the_subtask_pass(env_factory):  # noqa: F811  # PIN
     """MF-1. A continue result that became a report (its root was cancelled after the work finished) must
     leave a source-keyed row behind. Otherwise the pass re-selects it on every tick and, with a small
     batch, starves the source behind it."""

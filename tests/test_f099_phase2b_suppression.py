@@ -193,3 +193,22 @@ async def test_with_intentions_off_the_delivery_reads_no_intention(env_factory, 
     await _delivery(env, runner).deliver(dag)
     runner.run_turn.assert_awaited_once()
     assert reads == []  # deliver swallows a failed read, so the raise alone would pass unseen
+
+
+async def test_with_continuation_and_the_summary_turn_off_the_delivery_reads_no_intention(env_factory, monkeypatch):  # noqa: F811
+    """Prod's flags (intentions on, continuation off, the F087 summary turn off): no leg can use the DAG's
+    intention, so a delivery reads none. The controls are the tests above: the summary turn on reads it
+    (the internal_only skip), continuation on reads it (the Telegram stand-down)."""
+    env = await env_factory(**ON, **TG, dag_delivery_telegram_enabled=True)
+    dag, _ = await make_dag(env, policy="continue")
+    reads = []
+
+    async def boom(*args, **kwargs):
+        reads.append(args)
+        raise AssertionError("an intention was read that no leg can use")
+
+    monkeypatch.setattr(env.heart.intentions, "get_for_source", boom)
+    outcome = await _delivery(env).deliver(dag)
+    assert reads == []
+    assert _leg(outcome, "telegram").ok is True and outcome.delivered is True  # Phase 1: the push goes out
+    env.http.post.assert_awaited_once()

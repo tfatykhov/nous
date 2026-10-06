@@ -12,16 +12,18 @@ from f099_support import (  # noqa: F401
     CHAN,
     CONT,
     RESULT,
+    dag_kwargs,
     env_factory,
     inbox_rows,
     intention_of,
+    make_dag,
     make_subtask,
     set_intention,
 )
 from sqlalchemy import select, text, update
 
 from nous.brain import continuation
-from nous.heart.result_inbox import Envelope
+from nous.heart.result_inbox import Envelope, record_dag_result
 from nous.storage.models import Intention
 
 
@@ -174,6 +176,28 @@ async def test_a_re_arrival_on_a_closed_root_becomes_an_intention_report(env_fac
     assert (again.inserted, again.reported) == (False, False)
     assert len(await inbox_rows(env)) == 2  # the report and its work row's settled twin, once each
     assert len(stamped) == 1
+
+
+async def test_a_new_generation_of_a_dag_closed_as_legacy_reports_and_never_reopens(env_factory):  # noqa: F811
+    """Lead addendum (2b-7 review). F098 already delivered the result of a continue intention that Phase 1
+    (or the startup rollback) closed as 'legacy'. A retry_node generation, written through F087's
+    record_dag_result, must not reopen it; nor may it write nothing (the MF-1 re-select loop): it becomes
+    exactly one REPORT plus the settled source-keyed twin, and the intention stays closed."""
+    env = await env_factory(**CONT)
+    dag, _ = await make_dag(env, policy="continue", origin_channel=CHAN)
+    it = await intention_of(env, "dag", dag.id)
+    await set_intention(env, it.id, state="closed", close_reason="legacy", closed_at=datetime.now(UTC))
+    generation = dag.delivery_generation + 1
+    kwargs = {**dag_kwargs(dag, origin_channel=CHAN), "generation": generation}
+    first = await record_dag_result(env.heart.result_inbox, env.settings, **kwargs)
+    second = await record_dag_result(env.heart.result_inbox, env.settings, **kwargs)  # the listener and deliver
+    assert (first, second) == (True, False)
+    (twin,), (report,) = _split(await inbox_rows(env))
+    assert (report.msg_type, report.channel, report.intention_id) == ("REPORT", CHAN, it.id)
+    assert (twin.source_id, twin.source_generation, twin.channel, twin.session_id) == (dag.id, generation, None, None)
+    assert twin.delivered_at is not None
+    after = await intention_of(env, "dag", dag.id)
+    assert (after.state, after.close_reason) == ("closed", "legacy")
 
 
 async def test_a_duplicate_delivery_after_a_root_cancel_writes_no_report(env_factory):  # noqa: F811

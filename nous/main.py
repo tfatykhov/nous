@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
@@ -244,6 +244,47 @@ def _gate_continuation_flag(settings: Settings) -> None:
         object.__setattr__(settings, "continuation_enabled", False)
 
 
+def _telegram_text_push(settings: Settings) -> Callable[[str], Awaitable[bool]] | None:
+    """A raw Telegram text sender for the rollback's no-inbox fallback, or None when Telegram is not configured."""
+    token, chat_id = settings.telegram_bot_token, settings.telegram_chat_id
+    if not token or not chat_id:
+        return None
+
+    async def push(text: str) -> bool:
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": chat_id, "text": text[:3900]},
+                    timeout=10,
+                )
+            return response.status_code < 400
+        except Exception:
+            logger.warning("F099: the rollback's Telegram push failed", exc_info=True)
+            return False
+
+    return push
+
+
+async def _rollback_continuation(settings: Settings, database: Database) -> None:
+    """F099 spec 4.3 item 6: runs at every start with the continuation flag off. A failure is
+    logged and retried at the next start: it never blocks startup."""
+    try:
+        report = await continuation.rollback_at_startup(database, settings, telegram_push=_telegram_text_push(settings))
+    except Exception:
+        logger.warning("F099: the continuation rollback failed; it is retried at the next start", exc_info=True)
+        return
+    if report.closed or report.rerouted_rows or report.expired_proposals or report.pushed_raw:
+        logger.info(
+            "F099: continuation rollback closed %d intention(s), re-routed %d result(s), expired %d proposal(s), "
+            "sent %d raw result(s) by Telegram",
+            report.closed,
+            report.rerouted_rows,
+            report.expired_proposals,
+            report.pushed_raw,
+        )
+
+
 async def create_components(settings: Settings) -> dict:
     """Initialize all components in dependency order.
 
@@ -261,6 +302,7 @@ async def create_components(settings: Settings) -> dict:
     database = Database(settings, lock_timeout_seconds=settings.db_lock_timeout_seconds)
     await database.connect()  # F1: connect() not initialize()
     await run_migrations(database.engine)  # Apply pending SQL migrations
+    await _rollback_continuation(settings, database)
 
     # Load runtime config overrides from DB (must be after migrations)
     from nous.runtime_config import RuntimeConfig
@@ -291,6 +333,7 @@ async def create_components(settings: Settings) -> dict:
     strategy_card_distiller = None
     if settings.event_bus_enabled:
         bus = EventBus()
+        heart.result_inbox.set_bus(bus)  # F099: intention.result_ready, from every writer
 
         # DB persistence adapter (P0-1 fix: correct signature — no agent_id/session_id kwargs)
         # 007.4: Pass event.session_id to populate ORM column
@@ -1314,6 +1357,8 @@ async def create_components(settings: Settings) -> dict:
                 runner=runner,
                 # F098: durability backstop for the inbox listener below.
                 inbox=heart.result_inbox if settings.result_inbox_enabled else None,
+                # F099: a continue DAG's push stands down; a lineage DAG gets no summary turn
+                intentions=heart.intentions,
             )
             if bus is not None and settings.result_inbox_enabled:
                 from nous.heart.result_inbox import ResultInboxDagListener

@@ -122,8 +122,9 @@ class DAGResultDelivery:
         # dag.completed/dag.failed listener, because the bus drops on
         # QueueFull; the inbox's UNIQUE(source, generation) collapses the two.
         self._inbox = inbox
-        # F099: read once per delivery. A continue DAG's push stands down, and an
-        # internal_only DAG gets no summary turn (spec I3).
+        # F099: read at most once per delivery, and only when a leg can use it. A
+        # continue DAG's push stands down, and an internal_only DAG gets no summary
+        # turn (spec I3).
         self._intentions = intentions
 
     # ------------------------------------------------------------------
@@ -461,9 +462,13 @@ class DAGResultDelivery:
         return "\n".join(parts)
 
     async def _dag_intention(self, dag: ExecutionDAG) -> tuple[Intention | None, bool]:
-        """``(the DAG's intention, lookup_failed)``. One point read, only with intentions on and a store.
-        Never raises: a failed lookup is reported so the caller can fail closed (with continuation on)."""
+        """``(the DAG's intention, lookup_failed)``. One point read, only with intentions on and a store,
+        and only when a leg can use it: the summary turn (I3) or, with continuation on, the Telegram leg.
+        With both off (prod's Phase 1 flags) a delivery reads nothing. Never raises: a failed lookup is
+        reported so the caller can fail closed (with continuation on)."""
         if self._intentions is None or not intentions_enabled(self._settings):
+            return None, False
+        if not (continuation.enabled(self._settings) or self._settings.dag_delivery_agent_summary_enabled):
             return None, False
         try:
             return await self._intentions.get_for_source(SOURCE_DAG, dag.id), False

@@ -274,7 +274,7 @@ class IntentionClosePass:
 
     Each kind at most ``limit`` per tick, oldest first. With the continuation
     flag on it leaves ``continue`` and ``report`` intentions to their writers
-    (F099 Phase 2).
+    and the inbox passes (F099 Phase 2).
     """
 
     name = "intentions"
