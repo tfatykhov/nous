@@ -85,6 +85,11 @@ class Refusal:
 # starve the pool or create a circular wait between subtask sessions.
 _SUBTASK_EXCLUDED_TOOLS = frozenset({"spawn_task", "schedule_task", "spawn_sync"})
 
+# F099: only these extra_tools end the loop on success. submit_final_report (F061) and
+# resolve_intention (a continuation's decision) mean "I am done"; every other extra tool
+# (propose_action) returns its result to the model like a registered tool.
+TERMINAL_EXTRA_TOOLS: frozenset[str] = frozenset({"submit_final_report", "resolve_intention"})
+
 
 def _close_status(is_error: bool, uncertain: bool) -> str:
     """The durable status of a dispatched call (harness Phase 2b): an error
@@ -2884,7 +2889,7 @@ class AgentRunner:
         effective_model_for_force = (model_override or self._settings.model).lower()
         thinking_off = self._settings.thinking_mode == "off" or "haiku" in effective_model_for_force
         force_enabled = bool(force_tool_on_penultimate) and thinking_off
-        terminate_after_tool_results = False  # set when submit_final_report fires
+        terminate_after_tool_results = False  # set when a terminal extra tool fires
         # F061 round 4 P2-I: cap the number of force_tool_on_penultimate
         # fires within a single run_turn. Without this cap, the >= math
         # could fire force on multiple consecutive turns when the model
@@ -3142,14 +3147,13 @@ class AgentRunner:
                         if extra_tools and tool_name in extra_tools:
                             _schema, executor = extra_tools[tool_name]
                             result_text, is_error = await executor(**tool_input)
-                            # Short-circuit: any successful extra_tools call
-                            # terminates the loop. F061's submit_final_report
-                            # is currently the only extra_tool and its
-                            # semantics are "I am done" — even when the
-                            # model voluntarily called it (force_tool was
-                            # None on this turn), we still want to exit
-                            # rather than make wasted follow-up API calls.
-                            if not is_error:
+                            # Short-circuit: a successful TERMINAL extra tool ends the
+                            # loop. F061's submit_final_report means "I am done" — even
+                            # when the model voluntarily called it (force_tool was None
+                            # on this turn), we still want to exit rather than make
+                            # wasted follow-up API calls. F099: any other extra tool
+                            # returns to the model.
+                            if not is_error and tool_name in TERMINAL_EXTRA_TOOLS:
                                 terminate_after_tool_results = True
                         else:
                             # F064.1 ping site 2 — immediately before tool
