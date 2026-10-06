@@ -482,14 +482,21 @@ async def lineage_for_source(
 
 
 async def close_finished_sources(
-    session: AsyncSession, agent_id: str, *, limit: int, reason: str = CLOSE_LEGACY
+    session: AsyncSession,
+    agent_id: str,
+    *,
+    limit: int,
+    reason: str = CLOSE_LEGACY,
+    exclude_policies: tuple[str, ...] = (),
 ) -> list[UUID]:
     """Close pending intentions whose subtask or DAG has finished, oldest first.
 
     The backstop for a writer's one-shot close (a worker cancelled at
     shutdown, a failed hook, an interrupted inline close). Containers are
     close_finished_containers' job. result_at is set only when a result
-    arrived: not for a cancelled subtask.
+    arrived: not for a cancelled subtask. ``exclude_policies``: wake policies
+    this pass leaves to their own writer: F099 Phase 2's ``continue`` and
+    ``report``.
     """
     source_uuid = cast(Intention.source_id, PG_UUID(as_uuid=True))
     subtask_done = exists().where(
@@ -500,9 +507,12 @@ async def close_finished_sources(
         ExecutionDAG.id == source_uuid,
         ExecutionDAG.status.in_(TERMINAL_DAG_STATUSES),
     )
+    conditions = [Intention.agent_id == agent_id, Intention.state == STATE_PENDING]
+    if exclude_policies:
+        conditions.append(Intention.wake_policy.notin_(exclude_policies))
     due = (
         select(Intention.id)
-        .where(Intention.agent_id == agent_id, Intention.state == STATE_PENDING)
+        .where(*conditions)
         .where(
             or_(
                 and_(Intention.source_kind == SOURCE_SUBTASK, subtask_done),

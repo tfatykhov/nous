@@ -44,14 +44,14 @@ async def test_the_raw_push_still_goes_out_with_continuation_off(env_factory):  
 
 
 @pytest.mark.parametrize("policy", ["remember", "none", "report"])
-async def test_the_raw_push_still_goes_out_for_every_other_policy(env_factory, policy):  # noqa: F811
+async def test_the_raw_push_still_goes_out_for_every_other_policy(env_factory, policy):  # noqa: F811  # PIN
     env = await env_factory(**CONT, **TG)
     st = await make_subtask(env, policy=policy, notify=True)
     await env.pool._notify_telegram(st, error="boom")
     env.http.post.assert_awaited_once()
 
 
-async def test_a_failed_intention_lookup_never_costs_the_push(env_factory, monkeypatch):  # noqa: F811
+async def test_a_failed_intention_lookup_never_costs_the_push(env_factory, monkeypatch):  # noqa: F811  # PIN
     env = await env_factory(**CONT, **TG)
     st = await make_subtask(env, notify=True)
 
