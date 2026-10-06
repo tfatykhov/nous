@@ -65,7 +65,9 @@ def test_a_continuation_carries_its_arrival_and_claim():
     ids=["owner-authority", "no-intention", "no-root"],
 )
 def test_a_continuation_can_never_be_built_wide_or_without_its_lineage(over):
-    with pytest.raises(ValueError, match="continuation"):
+    with pytest.raises(
+        ValueError, match="a continuation context is internal_only and names its intention and its root"
+    ):
         _continuation(**over)
 
 
@@ -80,7 +82,9 @@ def test_a_continuation_can_never_be_built_wide_or_without_its_lineage(over):
     ids=["no-proposal", "no-declared-tool", "empty-declared-tools", "two-declared-tools"],
 )
 def test_an_approved_action_names_its_proposal_and_exactly_one_tool(over):
-    with pytest.raises(ValueError, match="approved_action"):
+    with pytest.raises(
+        ValueError, match="an approved_action context needs a proposal_id and exactly one declared tool"
+    ):
         _approved(**over)
 
 
