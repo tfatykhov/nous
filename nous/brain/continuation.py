@@ -855,6 +855,8 @@ async def commit_arrival(
 
     ``tokens`` is ``(tokens_in, tokens_out)``. ``report_text`` is the body of the REPORT of a gate
     escalation or a fallback (the note otherwise); a fallback always writes one, whatever its decision.
+    A ``failed_report`` (``fail_attempt``'s, at the cap) charges one attempt on every claimed intention and
+    keeps the count; every other outcome resets it to 0.
     ``wrote_memory`` is the turn's evidence for ``progress``. ``arrival_id`` is the id the turn's context
     carried. Does not commit and emits nothing: the runner emits ``intention.arrival_decided`` after it
     commits.
@@ -946,9 +948,13 @@ async def _commit_arrival(
     for (state, reason), group in groups.items():
         values: dict[str, Any] = {"state": state, "claim_token": None, "claimed_at": None, "updated_at": now}
         if outcome != OUTCOME_FAILED:
-            # A failed_report keeps the count: the close keeps the count that ended it, and a late row's send-back
-            # keeps it as a retry below the cap does (2c1-5 ruling), so a chronic failer is not handed a fresh three.
             values["attempts"] = 0
+        else:
+            # A failed_report is a failed attempt: it is charged here, in the fenced move, so the claim token in
+            # that fence is all that stands between a stale claim and the count. The count is then kept: the close
+            # keeps the count that ended it, and a late row's send-back keeps it as a retry below the cap does
+            # (2c1-5 ruling), so a chronic failer is not handed a fresh three.
+            values["attempts"] = Intention.attempts + 1
         if state in (STATE_CLOSED, STATE_CANCELLED, STATE_EXPIRED):
             values.update(close_reason=reason, closed_at=now)
         if state == STATE_RESULT_READY:
@@ -1073,29 +1079,23 @@ async def fail_attempt(
     sends its intention back to ``result_ready`` with ``attempts`` kept, as a retry below the cap keeps it: the
     late row gets one more attempt, so a lineage whose turns keep failing reports its next result raw after one
     more failure (a successful commit resets the count). Does not commit.
+
+    Each path charges the attempt in its one fenced UPDATE (the retry's move, or the arrival's moves at the
+    cap), so the claim token in that UPDATE is the fence and nothing else stands in for it.
     """
     now = now or datetime.now(UTC)
     ids = sorted(i.id for i in claim.intentions)
     try:
         async with session.begin_nested():
             await _lock_claimed(session, agent_id, claim.root_id, ids)
-            bumped = (
+            # A plain read, deliberately not fenced: a fenced read would raise on a stale claim before the
+            # fenced UPDATE below could, and so hide that UPDATE's predicate. It only picks the path.
+            counts = (
                 await session.execute(
-                    update(Intention)
-                    .where(
-                        Intention.agent_id == agent_id,
-                        Intention.id.in_(ids),
-                        Intention.state == STATE_DECIDING,
-                        Intention.claim_token == claim.claim_token,
-                    )
-                    .values(attempts=Intention.attempts + 1, updated_at=now)
-                    .returning(Intention.id, Intention.attempts)
-                    .execution_options(synchronize_session=False)
+                    select(Intention.attempts).where(Intention.agent_id == agent_id, Intention.id.in_(ids))
                 )
-            ).all()
-            if len(bumped) != len(ids):
-                raise _FenceLost
-            worst = max(row.attempts for row in bumped)
+            ).scalars()
+            worst = max(counts) + 1
             if worst < max_attempts:
                 released = await _fenced_move(
                     session,
@@ -1108,13 +1108,14 @@ async def fail_attempt(
                         "claimed_at": None,
                         "result_at": now,
                         "updated_at": now,
+                        "attempts": Intention.attempts + 1,
                     },
                 )
                 if released != set(ids):
                     raise _FenceLost
                 return FAIL_RETRY
             raw = raw_results_text(claim.inbox_rows)
-            body = f"I could not process this result after {worst} attempts, so it is passed on as it arrived."
+            body = f"{worst} attempts to act on this work have failed, so this result is passed on as it arrived."
             await _commit_arrival(
                 session,
                 agent_id,
@@ -1169,10 +1170,11 @@ async def release_stale_claims(
     """T8: at startup and on every sweep, every ``deciding`` row claimed more than ``lease_s`` ago
     counts as a failed attempt (spec 4.5.2 Lease, 4.5.7). Rows are grouped by claim, so a batch fails
     together, and each group goes through ``fail_attempt``: ``attempts + 1`` and back to ``result_ready``,
-    or ``failed_report`` at the cap. Returns the ids it released; a claim that committed while the sweep
-    waited for its rows is not released. A turn should not outlive its lease (the runner's timeout is
-    60 s under it, less the claim's lock wait: see the predicate); the fenced commit is what makes a late
-    one harmless anyway. Does not commit."""
+    or ``failed_report`` at the cap. Returns the ids it took from their stale claim: released to
+    ``result_ready``, or closed ``failed_report`` at the cap (or sent back by a row that landed meanwhile);
+    a claim that committed while the sweep waited for its rows is not among them. A turn should not
+    outlive its lease (the runner's timeout is 60 s under it, less the claim's lock wait: see the
+    predicate); the fenced commit is what makes a late one harmless anyway. Does not commit."""
     now = now or datetime.now(UTC)
     stale = (
         (
@@ -1188,7 +1190,9 @@ async def release_stale_claims(
                     # between the turn timeout and the lease absorb a short wait; past that, the fence turns the
                     # turn's commit into a lost one and the attempt is charged. ``now`` is taken before this sweep
                     # waits on any lock, so the sweep errs the other way: it releases only what was stale when it
-                    # began. The one place that compares the database's clock with Python's: one host in prod.
+                    # began. It compares the database's clock (claimed_at) with Python's (now), as the debounce
+                    # in _CLAIM_SQL and _ELIGIBLE_SQL does (result_at is Python's, now() the database's): one host
+                    # in prod.
                     Intention.claimed_at < now - timedelta(seconds=lease_s),
                 )
                 .order_by(Intention.root_id, Intention.claim_token, Intention.id)
@@ -1259,10 +1263,12 @@ async def _set_result_ready(
 ) -> None:
     """T4 (``pending``) and T6 (``closed``, a reopen): the conditional UPDATE. The caller holds
     the row lock, so a miss is a bug, not a race: it raises and the caller's transaction rolls back.
-    A reopen also clears the previous arrival's claim and attempts, so 2c's lease starts fresh."""
+    A reopen also clears the previous arrival's claim, so 2c's lease starts fresh. ``attempts`` stays as
+    the last arrival left it (2c1-5 ruling): 0 after a success, the kept count after a ``failed_report``,
+    so a chronic failer's new result gets one more attempt whether it lands during the claim or after."""
     values: dict[str, Any] = {"state": STATE_RESULT_READY, "result_at": now, "updated_at": now}
     if from_state == STATE_CLOSED:
-        values.update(close_reason=None, closed_at=None, claim_token=None, claimed_at=None, attempts=0)
+        values.update(close_reason=None, closed_at=None, claim_token=None, claimed_at=None)
     moved = (
         await session.execute(
             update(Intention)

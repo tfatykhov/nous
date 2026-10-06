@@ -327,3 +327,89 @@ async def test_a_late_row_after_a_failed_report_keeps_the_count(env_factory):  #
     fresh = await intention_of(env, "subtask", root.source_id)
     assert (fresh.state, fresh.close_reason, fresh.attempts) == ("closed", "failed_report", 4)
     assert len(await _owner_rows(env)) == 2
+
+
+async def test_a_reopen_after_a_failed_report_keeps_the_count(env_factory):  # noqa: F811
+    """Lead ruling (2c1-5 fix round 1): a T6 reopen leaves ``attempts`` as the last arrival left it. After
+    a failed_report that is the count that ended it, so a new result that lands after the commit gets one
+    more attempt, as one that lands during the claim does (the test above): the timing does not matter."""
+    env = await env_factory(**CONT)
+    root = await make_root(env)
+    await record(env, root)
+    for _ in range(3):
+        await _fail(env, await claim(env, root.id))
+    closed = await intention_of(env, "subtask", root.source_id)
+    assert (closed.state, closed.close_reason, closed.attempts) == ("closed", "failed_report", 3)
+    assert (await record(env, root, generation=1, body="a later result")).reopened is True
+    reopened = await intention_of(env, "subtask", root.source_id)
+    assert (reopened.state, reopened.attempts) == ("result_ready", 3)
+    again = await claim(env, root.id)
+    assert again is not None and [r.body for r in again.inbox_rows] == ["a later result"]
+    assert await _fail(env, again) == "failed_report"  # one more failure, not three
+    fresh = await intention_of(env, "subtask", root.source_id)
+    assert (fresh.state, fresh.close_reason, fresh.attempts) == ("closed", "failed_report", 4)
+    (later,) = [r for r in await _owner_rows(env) if "a later result" in r.body]
+    assert "4 attempts to act on this work have failed" in later.body  # the count is the work's, not the row's
+
+
+async def test_a_reopen_after_a_resolved_close_starts_from_zero(env_factory):  # noqa: F811
+    """# PIN: the ruling's other clause. A successful commit resets the count, and the reopen keeps that 0,
+    so a new result after a success gets the full ``max_attempts``."""
+    env = await env_factory(**CONT)
+    root, got = await _claimed(env)
+    await set_intention(env, root.id, attempts=2)  # two failures before the success
+    async with env.db.session() as s:
+        done = await continuation.commit_arrival(
+            s,
+            env.agent,
+            got,
+            resolution=Resolution("drop", "Nothing more to do.", False, 0.9),
+            outcome="resolved",
+            settings=env.settings,
+        )
+        await s.commit()
+    assert done is not None
+    assert (await record(env, root, generation=1)).reopened is True
+    assert (await intention_of(env, "subtask", root.source_id)).attempts == 0
+    assert [await _fail(env, await claim(env, root.id)) for _ in range(2)] == ["retry", "retry"]
+
+
+async def test_a_batch_fails_together_at_its_highest_count(env_factory):  # noqa: F811
+    """# PIN (review Important 2): the cap is reached by the batch's highest count, so a fresh member
+    batched with a chronic failer closes failed_report with it, each keeping its own count."""
+    env = await env_factory(**CONT)
+    root = await make_root(env)
+    child = await make_child(env, root)
+    await record(env, root)
+    await record(env, child)
+    await set_intention(env, child.id, attempts=2)
+    got = await claim(env, root.id)
+    assert got is not None and {i.id for i in got.intentions} == {root.id, child.id}
+    assert await _fail(env, got) == "failed_report"
+    fresh_root = await intention_of(env, "subtask", root.source_id)
+    fresh_child = await intention_of(env, "subtask", child.source_id)
+    assert (fresh_root.state, fresh_root.close_reason, fresh_root.attempts) == ("closed", "failed_report", 1)
+    assert (fresh_child.state, fresh_child.close_reason, fresh_child.attempts) == ("closed", "failed_report", 3)
+    (report,) = await _owner_rows(env)
+    assert report.body.count(RESULT) == 2  # both raw results
+
+
+async def test_a_failed_report_arrival_charges_its_attempt_in_its_fenced_move(env_factory):  # noqa: F811
+    """Review Important 3 (a): at the cap the attempt is charged by the arrival's own fenced moves, so the
+    claim token in that fence is the only thing standing between a stale claim and the count."""
+    env = await env_factory(**CONT)
+    root, got = await _claimed(env)
+    async with env.db.session() as s:
+        done = await continuation.commit_arrival(
+            s,
+            env.agent,
+            got,
+            resolution=Resolution("report", "Failed.", False, 0.0),
+            outcome="failed_report",
+            settings=env.settings,
+            report_text="the raw results",
+        )
+        await s.commit()
+    assert done is not None
+    fresh = await intention_of(env, "subtask", root.source_id)
+    assert (fresh.state, fresh.close_reason, fresh.attempts) == ("closed", "failed_report", 1)
