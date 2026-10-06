@@ -308,7 +308,9 @@ class ContinuationRunner:
     # ------------------------------------------------------------------
 
     async def run_once(self) -> continuation.SweepReport:
-        """One sweep (see the task's Interfaces). Every step is isolated; with continuation off it does nothing."""
+        """One sweep, in order: release claims older than the lease, expire roots past their TTL, wake answered or
+        expired questions, push the owner rows that are due, and launch every root that is due while a slot is
+        free. Every step is isolated; with continuation off it does nothing."""
         if not continuation.enabled(self._settings):
             return continuation.SweepReport(0, 0, 0, 0, (), None)
         released = await self._step("lease release", self._release_stale, [])
