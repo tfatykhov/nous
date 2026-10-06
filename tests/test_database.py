@@ -66,7 +66,7 @@ async def test_all_tables_exist(db):
         ("nous_system", "process_run_log"),
         # Harness Phase 2.8: compensation snapshots (migration 080)
         ("nous_system", "compensation_snapshots"),
-        # brain (10)
+        # brain (12)
         ("brain", "decisions"),
         ("brain", "decision_tags"),
         ("brain", "decision_reasons"),
@@ -78,6 +78,9 @@ async def test_all_tables_exist(db):
         ("brain", "calibration_snapshots"),
         # F099 Phase 1: one row per spawn (migration 083)
         ("brain", "intentions"),
+        # F099 Phase 2b: arrivals and proposals (migration 084)
+        ("brain", "intention_arrivals"),
+        ("brain", "intention_proposals"),
         # heart (19)
         ("heart", "episodes"),
         # heart.episode_decisions dropped by migration 068 (no runtime writer;

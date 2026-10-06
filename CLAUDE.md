@@ -84,7 +84,7 @@ Annotated map of the main modules: [docs/reference/project-structure.md](docs/re
 
 ### Database
 
-- Three schemas: `brain`, `heart`, `nous_system` (53 tables total: brain 10, heart 19, nous_system 24 — ground truth is the expected set in `tests/test_database.py::test_all_tables_exist`)
+- Three schemas: `brain`, `heart`, `nous_system` (55 tables total: brain 12, heart 19, nous_system 24 — ground truth is the expected set in `tests/test_database.py::test_all_tables_exist`)
 - `nous_system.execution_ledger` (migration 074, harness Phase 1b) is the durable record of side-effecting tool calls; it assumes one Nous process per (database, agent_id)
 - All tables are agent-scoped (`agent_id` column) for multi-agent readiness
 - Use `vector(1536)` for embeddings (text-embedding-3-small)

@@ -25,6 +25,7 @@ from nous.heart.result_inbox import record_dag_result
 from nous.storage.models import ResultInbox, Subtask
 
 ON = {"result_inbox_enabled": True, "intentions_enabled": True}
+CONT = {**ON, "continuation_enabled": True}
 CHAN = "telegram:8080"
 RESULT = "Powder: 40cm overnight on the upper mountain."
 INTERACTIVE = ExecutionContext(kind="interactive", session_id="S1", channel=CHAN)
@@ -121,10 +122,11 @@ async def test_a_routed_result_closes_its_intention_and_its_row_names_it(close_e
 
 
 @pytest.mark.parametrize("policy", ["report", "continue"])
-async def test_a_report_intention_also_closes_as_legacy_in_phase_1(close_env, policy):
-    """Spec section 4.3 Phase 1: F098 still consumes every result, so every
-    policy closes as 'legacy'. I4's report close-at-write ('delivered', in the
-    insert's transaction) is Phase 2, which changes this test on purpose."""
+async def test_a_report_or_continue_intention_closes_as_legacy_with_continuation_off(close_env, policy):  # PIN
+    """PIN. Spec section 4.3 Phase 1: with NOUS_CONTINUATION_ENABLED off, F098 still
+    consumes every result, so every policy closes as 'legacy'. I4's report close-at-write
+    ('delivered', in the insert's transaction) is Phase 2 and needs the flag: that is
+    the next test, which is why this one was renamed (its assertions are Phase 1's, unchanged)."""
     env = await close_env(**ON)
     st = await env.heart.subtasks.create(
         task="Check the snow report",
@@ -138,6 +140,24 @@ async def test_a_report_intention_also_closes_as_legacy_in_phase_1(close_env, po
     assert (it.wake_policy, it.state, it.close_reason) == (policy, "closed", "legacy")
     (row,) = await _inbox(env, st.id)
     assert (row.channel, row.session_id, row.intention_id) == (CHAN, "S1", it.id)  # routed as F098 A
+
+
+async def test_a_report_intention_closes_as_delivered_with_continuation_on(close_env):
+    """F099 Phase 2 (I4): a report closes as 'delivered' in its insert's transaction and still
+    routes as F098 A (the chat consumes it); a continue one is no longer routed by F098 at all."""
+    env = await close_env(**CONT)
+    st = await env.heart.subtasks.create(
+        task="Check the snow report",
+        parent_session_id="S1",
+        parent_channel=CHAN,
+        intention=IntentionSpec(intent="Tell the user about the snow", origin_kind="interactive", wake_policy="report"),
+    )
+    await env.heart.subtasks.complete(st.id, RESULT, final_outcome="completed")
+    await env.pool._record_inbox(st)
+    it = await _of(env, "subtask", st.id)
+    assert (it.wake_policy, it.state, it.close_reason) == ("report", "closed", "delivered")
+    (row,) = await _inbox(env, st.id)
+    assert (row.channel, row.session_id, row.intention_id) == (CHAN, "S1", it.id)
 
 
 async def _dag(env, *, origin_channel=None):
@@ -196,6 +216,19 @@ async def test_an_inline_spawn_closes_its_intention_in_the_call(close_env, harde
     (st,) = await env.heart.subtasks.list(limit=10)
     it = await _of(env, "subtask", st.id)
     assert (it.wake_policy, it.state, it.close_reason) == ("none", "closed", "legacy")
+
+
+async def test_an_inline_spawn_closes_as_delivered_with_continuation_on(close_env):
+    env = await close_env(**CONT)
+    await env.d.dispatch(
+        "spawn_task",
+        {"task": "t", "await_result": True, "intent": "Tell the user about the snow"},
+        session_id="S1",
+        context=INTERACTIVE,
+    )
+    (st,) = await env.heart.subtasks.list(limit=10)
+    it = await _of(env, "subtask", st.id)
+    assert (it.wake_policy, it.state, it.close_reason) == ("none", "closed", "delivered")
 
 
 async def test_a_cancelled_inline_call_still_closes_its_intention(close_env):

@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
@@ -25,7 +25,7 @@ from nous.api.builtin_tools import register_builtin_tools
 from nous.api.runner import AgentRunner
 from nous.api.tools import ToolDispatcher, register_nous_tools
 from nous.api.web_tools import register_web_tools
-from nous.brain import Brain
+from nous.brain import Brain, continuation
 from nous.brain.embeddings import EmbeddingProvider
 from nous.cancellation import cancel_requested
 from nous.cognitive import CognitiveLayer
@@ -228,6 +228,63 @@ def _warn_on_f098_flags(settings: Settings) -> None:
         )
 
 
+def _gate_continuation_flag(settings: Settings) -> None:
+    """F099 Phase 2: keep NOUS_CONTINUATION_ENABLED off until the runner ships.
+
+    With the flag on and no runner, a continue result is written keyed by its
+    intention alone and nothing claims it (G6). The gate lives here and not in
+    a Settings validator because config.py must not import nous.brain. PR-2e
+    sets CONTINUATION_RUNNER_READY in the commit that wires the runner.
+    """
+    if settings.continuation_enabled and not continuation.CONTINUATION_RUNNER_READY:
+        logger.warning(
+            "NOUS_CONTINUATION_ENABLED=true but the continuation runner is not shipped in this build; "
+            "continuation stays OFF."
+        )
+        object.__setattr__(settings, "continuation_enabled", False)
+
+
+def _telegram_text_push(settings: Settings) -> Callable[[str], Awaitable[bool]] | None:
+    """A raw Telegram text sender for the rollback's no-inbox fallback, or None when Telegram is not configured."""
+    token, chat_id = settings.telegram_bot_token, settings.telegram_chat_id
+    if not token or not chat_id:
+        return None
+
+    async def push(text: str) -> bool:
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": chat_id, "text": text[: continuation.RAW_PUSH_CHARS]},
+                    timeout=10,
+                )
+            return response.status_code < 400
+        except Exception:
+            logger.warning("F099: the rollback's Telegram push failed", exc_info=True)
+            return False
+
+    return push
+
+
+async def _rollback_continuation(settings: Settings, database: Database) -> None:
+    """F099 spec 4.3 item 6: runs at every start with the continuation flag off. A failure is
+    logged and retried at the next start: it never blocks startup."""
+    try:
+        report = await continuation.rollback_at_startup(database, settings, telegram_push=_telegram_text_push(settings))
+    except Exception:
+        logger.warning("F099: the continuation rollback failed; it is retried at the next start", exc_info=True)
+        return
+    if report.closed or report.rerouted_rows or report.expired_proposals or report.pushed_raw:
+        logger.info(
+            "F099: continuation rollback closed %d intention(s), re-routed %d result(s), expired %d proposal(s), "
+            "sent %d raw result(s) by Telegram",
+            report.closed,
+            report.rerouted_rows,
+            report.expired_proposals,
+            report.pushed_raw,
+        )
+
+
 async def create_components(settings: Settings) -> dict:
     """Initialize all components in dependency order.
 
@@ -241,9 +298,11 @@ async def create_components(settings: Settings) -> dict:
     6. AgentRunner - LLM integration
     """
     _warn_on_f098_flags(settings)
+    _gate_continuation_flag(settings)  # before any component reads the flag
     database = Database(settings, lock_timeout_seconds=settings.db_lock_timeout_seconds)
     await database.connect()  # F1: connect() not initialize()
     await run_migrations(database.engine)  # Apply pending SQL migrations
+    await _rollback_continuation(settings, database)
 
     # Load runtime config overrides from DB (must be after migrations)
     from nous.runtime_config import RuntimeConfig
@@ -274,6 +333,7 @@ async def create_components(settings: Settings) -> dict:
     strategy_card_distiller = None
     if settings.event_bus_enabled:
         bus = EventBus()
+        heart.result_inbox.set_bus(bus)  # F099: intention.result_ready, from every writer
 
         # DB persistence adapter (P0-1 fix: correct signature — no agent_id/session_id kwargs)
         # 007.4: Pass event.session_id to populate ORM column
@@ -1297,6 +1357,8 @@ async def create_components(settings: Settings) -> dict:
                 runner=runner,
                 # F098: durability backstop for the inbox listener below.
                 inbox=heart.result_inbox if settings.result_inbox_enabled else None,
+                # F099: a continue DAG's push stands down; a lineage DAG gets no summary turn
+                intentions=heart.intentions,
             )
             if bus is not None and settings.result_inbox_enabled:
                 from nous.heart.result_inbox import ResultInboxDagListener
