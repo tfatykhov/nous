@@ -856,6 +856,8 @@ async def commit_arrival(
 
     ``tokens`` is ``(tokens_in, tokens_out)``. ``report_text`` is the body of the REPORT of a gate
     escalation or a fallback (the note otherwise); a fallback always writes one, whatever its decision.
+    An ``ask`` with no owner channel (no origin channel, no default chat) is refused with ``ValueError``
+    and writes nothing, as a fallback that asks is.
     A ``failed_report`` (``fail_attempt``'s, at the cap) charges one attempt on every claimed intention and
     keeps the count; every other outcome resets it to 0.
     ``wrote_memory`` is the turn's evidence for ``progress``. ``arrival_id`` is the id the turn's context
@@ -920,6 +922,23 @@ async def _commit_arrival(
     ids = sorted(i.id for i in claim.intentions)
     root_id, deepest = claim.root_id, claim.deepest
     await _lock_claimed(session, agent_id, root_id, ids)
+
+    # The owner-facing row and its channel, settled before anything moves. An ask with nowhere to ask is refused
+    # (raised inside the SAVEPOINT, so nothing is written): committed, it would wait in awaiting_owner on a
+    # QUESTION that was never written, which reads as answered, and the next sweep would wake it to no rows.
+    if outcome in (OUTCOME_FALLBACK, OUTCOME_FAILED):
+        kind: str | None = MSG_REPORT  # contract 4.14 item 5: a fallback reports unconditionally
+    else:
+        kind = {"ask": MSG_QUESTION, "report": MSG_REPORT}.get(resolution.decision)
+    channel: str | None = None
+    if kind is not None:
+        channel = owner_channel(
+            settings, await _root_origin_channel(session, agent_id, root_id, deepest.origin_channel)
+        )
+    if kind == MSG_QUESTION and channel is None:
+        raise ValueError(
+            f"root {root_id} has no owner channel (no origin channel, no default chat): an ask has nowhere to ask"
+        )
 
     # Rows that arrived after the claim read them (held, because the intention was deciding): they are
     # not consumed by this arrival, and their intention goes back to result_ready (T11), except after ask.
@@ -998,14 +1017,8 @@ async def _commit_arrival(
     decision_record_id = await _record_brain(session, brain, claim=claim, resolution=resolution, ids=ids, n=n)
 
     report_ids: list[UUID] = []
-    if outcome in (OUTCOME_FALLBACK, OUTCOME_FAILED):
-        kind: str | None = MSG_REPORT  # contract 4.14 item 5: a fallback reports unconditionally
-    else:
-        kind = {"ask": MSG_QUESTION, "report": MSG_REPORT}.get(resolution.decision)
     if kind is not None:
-        origin = await _root_origin_channel(session, agent_id, root_id, deepest.origin_channel)
-        channel = owner_channel(settings, origin)
-        if channel is None:
+        if channel is None:  # a REPORT (an ask with no channel was refused above)
             logger.error(
                 "F099: arrival %s of root %s has a %s for the owner and no owner channel (no origin channel, no "
                 "default chat); it cannot be written",

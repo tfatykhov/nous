@@ -764,12 +764,14 @@ class HeartbeatRunner:
                 # F034.5: Track token usage from dynamic checks
                 if result.tokens_used:
                     self._tokens_used_today += result.tokens_used
-                    await self._roll_check_tokens_into_dag(check, result.tokens_used)
 
                 # F034.5: Update run stats in DB for dynamic checks
                 await self._record_run_stats(check, success=True)
                 # F099 Phase 0b: the final run's findings, before the run can end.
                 await self._record_final_findings(check, result)
+                # F099: after the run's own record, as in trigger_check: a cancel here loses only the roll-up.
+                if result.tokens_used:
+                    await self._roll_check_tokens_into_dag(check, result.tokens_used)
 
                 # #273: Collect self-disabled checks with callbacks
                 if isinstance(check, DynamicCheck) and result.self_disabled and check.on_complete_prompt:

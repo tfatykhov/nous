@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -111,8 +112,20 @@ async def test_a_failing_roll_up_never_fails_the_run():
     check = _check("flaky")
     hb, loader = _hb(check, 50)
     hb.dag_orchestrator.add_check_tokens = AsyncMock(side_effect=RuntimeError("db down"))
-    await hb._tick()  # the run still completes: the loader's stats write was reached
-    loader.update_run_stats.assert_awaited_once()
+    await hb._tick()
+    # One stats write, and a success: a roll-up error that escaped would reach _tick's failure arm.
+    loader.update_run_stats.assert_awaited_once_with(check.check_id, success=True, error_msg=None)
+
+
+async def test_a_cancel_during_the_roll_up_still_writes_the_runs_stats():
+    """The roll-up comes after the run's own record, as in trigger_check: a cancel from elsewhere during its
+    awaits loses only the roll-up (a relative increment, never retried), not the run's success stats."""
+    check = _check("cancelled_roll_up")
+    hb, loader = _hb(check, 50)
+    loader.check_metadata = AsyncMock(side_effect=asyncio.CancelledError)
+    await hb._tick()
+    loader.check_metadata.assert_awaited_once_with(check.name)  # the roll-up ran, and the cancel landed there
+    loader.update_run_stats.assert_awaited_once_with(check.check_id, success=True, error_msg=None)
 
 
 async def _node_id(env, dag_id):

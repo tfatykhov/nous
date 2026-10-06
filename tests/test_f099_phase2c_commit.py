@@ -457,6 +457,22 @@ async def test_an_arrival_with_no_owner_channel_still_commits(env_factory, caplo
 
 
 @pytest.mark.postgres_only
+async def test_an_ask_with_nowhere_to_ask_is_refused_and_writes_nothing(env_factory):  # noqa: F811
+    """No origin channel and no default chat: committed, the ask would wait in awaiting_owner on a QUESTION that
+    was never written, which reads as answered, and the next sweep would wake it to a turn with no rows."""
+    env = await env_factory(**CONT, telegram_chat_id="")
+    root = await make_root(env, routed=False)
+    _, got = await _claimed(env, root=root)
+    with pytest.raises(ValueError, match="owner channel"):
+        await _commit(env, got, _r("ask", "Shall I book the Friday slot?"))
+    fresh = await intention_of(env, "subtask", root.source_id)
+    assert (fresh.state, fresh.claim_token) == ("deciding", got.claim_token)
+    assert await _arrivals(env, root.id) == [] and await _owner_rows(env) == []
+    shown = await inbox_rows(env, UUID(root.source_id))
+    assert [r.delivered_at for r in shown] == [None]
+
+
+@pytest.mark.postgres_only
 async def test_an_unknown_decision_is_refused_before_anything_is_written(env_factory):  # noqa: F811
     env = await env_factory(**CONT)
     root, got = await _claimed(env)
