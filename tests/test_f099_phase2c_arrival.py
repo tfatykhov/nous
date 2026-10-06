@@ -188,6 +188,30 @@ async def test_a_continue_with_nothing_running_is_refused_and_the_turn_reports(r
     assert (fresh.state, fresh.close_reason) == ("closed", "resolved") and await _open_under(env, root.id) == []
 
 
+async def test_a_continue_after_an_inline_spawn_is_refused(runner_env):  # noqa: F811
+    """Re-review N1: an inline spawn (await_result) runs and closes inside the turn, so it leaves nothing running.
+    A continue after it would close the root silently: it is refused, and the turn reports."""
+    env = await runner_env(
+        [use("spawn_task", task="Look at the lift status", intent="Know whether the lifts open", await_result=True)],
+        [say("The lifts open at nine.")],  # the inline subtask's own turn
+        [resolve("continue", "The lifts open at nine; next I check the snow.", progress=True)],  # refused
+        [resolve("report", "The lifts open at nine and the snow is deep.")],
+    )
+    root = await _ready_root(env)
+    await _cont(env).run_arrival(root.id)
+    assert len(env.model.calls) == 4
+    assert "you chose continue, but nothing is running under this work" in str(env.model.calls[3]["messages"])
+    (child_subtask,) = [s for s in await env.heart.subtasks.list(limit=10) if str(s.id) != root.source_id]
+    child = await intention_of(env, "subtask", child_subtask.id)
+    assert (child.parent_id, child.state, child.wake_policy) == (root.id, "closed", "none")  # inline: already closed
+    (arrival,) = await _arrivals(env, root.id)
+    assert (arrival.decision, arrival.outcome) == ("report", "resolved")
+    (report,) = await _owner_rows(env)
+    assert report.body == "The lifts open at nine and the snow is deep."
+    fresh = await intention_of(env, "subtask", root.source_id)
+    assert (fresh.state, fresh.close_reason) == ("closed", "resolved") and await _open_under(env, root.id) == []
+
+
 async def _fan_out(env):
     """A root whose earlier arrival spawned two children and closed: the shape a fan-out leaves."""
     root = await make_root(env)

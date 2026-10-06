@@ -183,13 +183,15 @@ async def test_an_open_intention_of_the_root_besides_the_claimed_ones_is_open_wo
 
 
 @pytest.mark.postgres_only
-async def test_a_child_spawned_since_the_claim_is_open_work_even_once_closed(env_factory):  # noqa: F811
+async def test_a_child_spawned_since_the_claim_is_open_work_only_while_open(env_factory):  # noqa: F811
+    """Re-review N1: a child the turn spawned counts while it runs; once closed (an inline spawn closes within the
+    turn) nothing is left running, whenever it was created."""
     env = await env_factory(**CONT)
     _root, got = await _claimed(env)
     child = await make_child(env, got.deepest)  # the turn spawned it
     assert await _open_work(env, got) is True
     await set_intention(env, child.id, state="closed", close_reason="delivered")  # it already finished
-    assert await _open_work(env, got) is True
+    assert await _open_work(env, got) is False
 
 
 @pytest.mark.postgres_only

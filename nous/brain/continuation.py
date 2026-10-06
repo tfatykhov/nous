@@ -802,10 +802,11 @@ async def _verified_progress(
 
 async def has_open_work(session: AsyncSession, agent_id: str, claim: Claim) -> bool:
     """Whether a ``continue`` or ``revise`` of this claim would leave anything running under its root (final review
-    I1). The commit closes the claimed intentions, so without one of these nothing would ever wake the root again:
-    an open intention of the root other than the claimed ones (a fan-out's sibling still running, or this turn's
-    spawn), or a child of a claimed intention created at or after the claim (spawned this turn, even if it has
-    already finished). Rows only, the same bound as ``_verified_progress``."""
+    I1): an open intention of the root other than the claimed ones (a fan-out's sibling still running, or this
+    turn's spawn, which a lineage makes ``continue`` and so keeps open until the next claim). The commit closes the
+    claimed intentions, so without one nothing would ever wake the root again. A child that already closed does
+    not count, whenever it was spawned: an inline spawn (``await_result``) closes within the turn and leaves
+    nothing running (re-review N1). Rows only."""
     ids = [i.id for i in claim.intentions]
     open_elsewhere = exists().where(
         Intention.agent_id == agent_id,
@@ -813,13 +814,7 @@ async def has_open_work(session: AsyncSession, agent_id: str, claim: Claim) -> b
         Intention.id.notin_(ids),
         Intention.state.in_(OPEN_STATES),
     )
-    # claim_root reloaded the claimed rows after its UPDATE: claimed_at is the claim's own now().
-    spawned = exists().where(
-        Intention.agent_id == agent_id,
-        Intention.parent_id.in_(ids),
-        Intention.created_at >= claim.intentions[0].claimed_at,
-    )
-    return bool((await session.execute(select(or_(open_elsewhere, spawned)))).scalar_one())
+    return bool((await session.execute(select(open_elsewhere))).scalar_one())
 
 
 async def _record_brain(
