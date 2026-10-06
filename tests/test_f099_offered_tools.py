@@ -18,6 +18,7 @@ from test_runner_authorization import _run_loop, _runner
 
 from nous.api.execution_context import CONTEXT_KINDS, ExecutionContext
 from nous.api.models import ApiResponse
+from nous.api.runner import FRAME_TOOLS
 from nous.api.tool_classes import TOOL_CLASSES, refuse_denylist
 from nous.api.tool_policy import INTERNAL_ONLY_SPAWN_TOOLS
 from nous.heartbeat.dynamic import ALLOWED_TOOLS as CHECK_TOOLS
@@ -25,6 +26,7 @@ from nous.heartbeat.dynamic import ALLOWED_TOOLS as CHECK_TOOLS
 IID, RID = (uuid.UUID(f"00000000-0000-0000-0000-00000000000{n}") for n in (1, 2))
 OWNER_KINDS = [k for k in CONTEXT_KINDS if k not in ("continuation", "approved_action")]
 ALL_TOOLS = list(TOOL_CLASSES)
+UNCLASSIFIED = "a_tool_nobody_classified"
 SUBMIT = {"name": "submit_final_report", "description": "d", "input_schema": {"type": "object"}}
 MODES = ("off", "warn", "enforce")
 
@@ -67,12 +69,22 @@ def _legacy_offered(dispatcher, frame_id, *, is_subtask, tool_filter, refuse_act
 
 def test_owner_contexts_are_offered_exactly_what_they_were_before_f099():  # PIN (also fails on the base: no helper)
     r, d = _runner(ALL_TOOLS)
+    # A frame-dependent catalogue, so a helper that ignored frame_id would differ;
+    # each frame also offers a tool nobody classified.
+    assert UNCLASSIFIED not in TOOL_CLASSES
+    by_frame = {"conversation": [*ALL_TOOLS, UNCLASSIFIED], "question": [*FRAME_TOOLS["question"], UNCLASSIFIED]}
+    d.available_tools = lambda frame_id: [
+        {"name": n, "description": n, "input_schema": {"type": "object"}} for n in by_frame[frame_id]
+    ]
     checked = 0
     for kind in OWNER_KINDS:
         ctx = ExecutionContext(kind=kind, session_id="s1")
-        for is_subtask, tool_filter, refuse_active, extra in itertools.product(
+        for frame_id, is_subtask, tool_filter, refuse_active, extra in itertools.product(
+            tuple(by_frame),
             (False, True),
-            (None, ["web_search", "bash", "recall_deep", "heartbeat_check_create"]),
+            # [] empties the list before the refuse step: the one input where the old
+            # `if refuse_active:` and the helper's `if refuse_active and tools:` differ.
+            (None, ["web_search", "bash", "recall_deep", "heartbeat_check_create"], []),
             (False, True),
             (None, {"submit_final_report": (SUBMIT, _noop)}),
         ):
@@ -82,10 +94,10 @@ def test_owner_contexts_are_offered_exactly_what_they_were_before_f099():  # PIN
                 "refuse_active": refuse_active,
                 "extra_tools": extra,
             }
-            got = r._offered_tools(ctx, "conversation", **kwargs)
-            assert json.dumps(got) == json.dumps(_legacy_offered(d, "conversation", **kwargs)), (kind, kwargs)
+            got = r._offered_tools(ctx, frame_id, **kwargs)
+            assert json.dumps(got) == json.dumps(_legacy_offered(d, frame_id, **kwargs)), (kind, frame_id, kwargs)
             checked += 1
-    assert checked == len(OWNER_KINDS) * 16
+    assert checked == len(OWNER_KINDS) * 48
 
 
 @pytest.mark.parametrize("kind", OWNER_KINDS)
@@ -187,6 +199,20 @@ async def test_the_model_is_sent_no_external_or_denylisted_tool_under_any_mode(
     r._call_api = _capturing_api(seen)
     await _run_loop(r, is_background=True, is_subtask=is_subtask, context=ctx)
     assert seen == [expected]
+
+
+@pytest.mark.parametrize("kind", ["subtask", "dag_node", "scheduled", "heartbeat_check"])
+async def test_the_tool_loop_offers_a_damaged_stamp_the_narrowed_set_with_no_spawn_tool(kind):
+    """A stamp lineage_from_stamp cannot read fails closed to internal_only with no
+    intention or root id. is_subtask=False, so the 012.2 exclusion is not what
+    removes spawn_task: the narrowing is."""
+    r, _ = _runner(ALL_TOOLS)
+    seen: list[set[str]] = []
+    r._call_api = _capturing_api(seen)
+    damaged = ExecutionContext(kind=kind, session_id="s1", authority="internal_only")
+    await _run_loop(r, is_background=True, is_subtask=False, context=damaged)
+    assert seen == [LINEAGE_ALLOWED]
+    assert not seen[0] & INTERNAL_ONLY_SPAWN_TOOLS
 
 
 async def test_stream_chat_offers_an_internal_only_turn_the_narrowed_set(monkeypatch, tmp_path):

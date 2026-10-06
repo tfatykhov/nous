@@ -463,10 +463,43 @@ class AgentRunner:
         """Return a refusal for a call the harness must not execute, else None.
 
         The single choke point both loops call before gating and dispatch:
-        the offered-set rule (Phase 1a), then the per-context policy (2a).
-        Both rules run for every call; each returns early only when IT
-        refuses, so a warn-mode deviation is recorded by both.
+        the strict F099 rule first, then the offered-set rule (Phase 1a), then
+        the per-context policy (2a). The last two run for every call the strict
+        rule lets through; each returns early only when IT refuses, so a
+        warn-mode deviation is recorded by both.
         """
+        # F099 section 4.4: an internal_only turn, and an approved_action call, are
+        # enforced here FIRST, whatever the two mode settings say. The modes are for
+        # tuning the ordinary rules; this is a security floor. A call to a tool that
+        # was not offered is refused, and so is a call the per-call rules reject.
+        # With intentions off, Phase 1 writes no internal_only row: only a damaged
+        # lineage stamp reaches this, and it loses tools, never gains one.
+        if ctx.authority == AUTHORITY_INTERNAL or ctx.kind == "approved_action":
+            strict: str | None = None
+            if tool_name not in offered_names:
+                strict = "not_offered"
+            elif ctx.authority == AUTHORITY_INTERNAL:
+                strict = tool_policy.internal_only_call_violation(
+                    ctx, tool_name, tool_input, workspace_dir=self._settings.workspace_dir
+                )
+            if strict is not None:
+                scope = "internal_only" if ctx.authority == AUTHORITY_INTERNAL else ctx.kind
+                logger.warning(
+                    "F099: refused %r in a %s turn (%s:%s, session=%s)", tool_name, ctx.kind, scope, strict, session_id
+                )
+                # mode "enforce": it was refused, which is what the dashboard counts under it.
+                self._log_f026_decision(
+                    "harness_context_policy_violation",
+                    {
+                        "tool_name": tool_name,
+                        "context_kind": ctx.kind,
+                        "violation": f"{scope}:{strict}",
+                        "mode": "enforce",
+                    },
+                    session_id=session_id,
+                )
+                return Refusal(f"Tool error: '{tool_name}' is not allowed in this turn ({strict}).", "internal_only")
+
         offered_mode = self._settings.tool_offered_set_enforcement_mode
         if offered_mode != "off" and tool_name not in offered_names:
             logger.warning(
@@ -1011,8 +1044,8 @@ class AgentRunner:
         idempotency_key: str | None = None,
     ) -> None:
         """A side-effecting call the harness refused. ``refused_by`` is a code
-        (``offered_set`` / ``action_gate`` / ``context_policy`` / ``duplicate``
-        -- see ``ledger_store.REFUSAL_CODES``), never the refusal's prose."""
+        (``offered_set`` / ``action_gate`` / ``context_policy`` / ``duplicate`` /
+        ``internal_only`` -- see ``ledger_store.REFUSAL_CODES``), never the refusal's prose."""
         if self._ledger_store is None or not self._dispatcher.is_registered(tool_name):
             return  # an unregistered name could not have run (see _ledger_open)
         try:
