@@ -26,25 +26,28 @@ def test_defaults_are_the_contract_values():
 
 
 @pytest.mark.parametrize(
-    "name,bad",
+    "name,bad,bound",
     [
-        ("continuation_max_depth", 0),
-        ("continuation_max_spawns_per_root", 0),
-        ("continuation_max_turns_per_root", 0),
-        ("continuation_max_tokens_per_root", 999),
-        ("continuation_stall_limit", 0),
-        ("intention_root_ttl_hours", 0),
-        ("continuation_max_concurrent", 0),
-        ("continuation_debounce_seconds", -1),
-        ("continuation_max_wait_seconds", -1),
-        ("continuation_lease_seconds", 119),
-        ("continuation_turn_timeout_seconds", 59),
-        ("continuation_max_attempts", 0),
-        ("intention_proposal_ttl_hours", 0),
+        ("continuation_max_depth", 0, None),
+        ("continuation_max_spawns_per_root", 0, None),
+        ("continuation_max_turns_per_root", 0, None),
+        ("continuation_max_tokens_per_root", 999, None),
+        ("continuation_stall_limit", 0, None),
+        ("intention_root_ttl_hours", 0, None),
+        ("continuation_max_concurrent", 0, None),
+        ("continuation_debounce_seconds", -1, None),
+        ("continuation_max_wait_seconds", -1, 0),
+        ("continuation_lease_seconds", 119, 120),
+        ("continuation_turn_timeout_seconds", 59, None),
+        ("continuation_max_attempts", 0, None),
+        ("intention_proposal_ttl_hours", 0, None),
     ],
 )
-def test_bounds_are_enforced(name, bad):
-    with pytest.raises(ValueError):
+def test_bounds_are_enforced(name, bad, bound):
+    # The timing validator rejects max_wait=-1 and lease=119 too, so for those
+    # two only the field bound's own error text shows the bound is still there.
+    match = None if bound is None else rf"{name}\s+Input should be greater than or equal to {bound}\b"
+    with pytest.raises(ValueError, match=match):
         Settings(_env_file=None, **{name: bad})
 
 

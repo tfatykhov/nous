@@ -7,7 +7,7 @@ keyed to the conversation's channel (``telegram:<chat_id>``), which outlives
 any one session, and both subtask and DAG results flow through this one table.
 
 Every writer is idempotent (``UNIQUE(source_kind, source_id,
-source_generation)`` — the generation is a DAG's ``delivery_generation``, so a
+source_generation, agent_id)`` — the generation is a DAG's ``delivery_generation``, so a
 DAG reactivated by ``retry_node`` reports its new outcome); the reader
 claims rows with ``UPDATE ... WHERE delivered_at IS NULL RETURNING`` so a row
 is injected into exactly one turn even when two turns race on one channel.
@@ -26,11 +26,13 @@ from uuid import UUID
 from sqlalchemy import and_, func, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from nous.brain import intentions
+from nous.brain import continuation, intentions
 from nous.storage.database import Database
 from nous.storage.models import ChannelSession, ResultInbox, ResultInboxState, Subtask
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from nous.config import Settings
     from nous.events import Event, EventBus
 
@@ -156,35 +158,41 @@ class ResultInboxStore:
         source_generation: int = 0,
         created_at: datetime | None = None,
         intention_id: UUID | None = None,
+        arrival_id: UUID | None = None,
+        proposal_id: UUID | None = None,
+        push_after: datetime | None = None,
+        session: AsyncSession | None = None,
     ) -> bool:
         """Insert one result; True if a row was written, False if it existed.
 
         ``created_at`` defaults to now; the reconciler passes the subtask's
-        ``completed_at`` so a repaired row keeps its real age.
+        ``completed_at`` so a repaired row keeps its real age. With ``session``
+        the row is written in the caller's transaction and nothing is
+        committed here (F099 section 4.3 item 2); without one this opens and
+        commits its own.
         """
-        stmt = (
-            pg_insert(ResultInbox)
-            .values(
-                agent_id=self._agent_id,
-                channel=channel,
-                session_id=session_id,
-                source_kind=source_kind,
-                source_id=source_id,
-                source_generation=source_generation,
-                msg_type=msg_type,
-                correlation_id=correlation_id,
-                reply_to=channel,
-                title=title[:_TITLE_MAX],
-                body=body,
-                created_at=created_at or datetime.now(UTC),
-                intention_id=intention_id,
-            )
-            .on_conflict_do_nothing(index_elements=["source_kind", "source_id", "source_generation", "agent_id"])
+        values = dict(
+            source_kind=source_kind,
+            source_id=source_id,
+            msg_type=msg_type,
+            title=title,
+            body=body,
+            channel=channel,
+            session_id=session_id,
+            correlation_id=correlation_id,
+            source_generation=source_generation,
+            created_at=created_at,
+            intention_id=intention_id,
+            arrival_id=arrival_id,
+            proposal_id=proposal_id,
+            push_after=push_after,
         )
-        async with self._db.session() as session:
-            result = await session.execute(stmt)
-            await session.commit()
-            return bool(result.rowcount)
+        if session is not None:
+            return await continuation.insert_inbox_row(session, self._agent_id, **values) is not None
+        async with self._db.session() as own:
+            written = await continuation.insert_inbox_row(own, self._agent_id, **values)
+            await own.commit()
+        return written is not None
 
     async def close_source_intention(self, source_kind: str, source_id: UUID) -> UUID | None:
         """F099 Phase 1: close a finished source's intention as 'legacy'. Its id, or None."""
@@ -338,7 +346,7 @@ class ResultInboxStore:
                 )
             ).all()
         out: dict[str, Any] = {}
-        for kind in (SOURCE_SUBTASK, SOURCE_DAG):
+        for kind in (SOURCE_SUBTASK, SOURCE_DAG, continuation.SOURCE_INTENTION_REPORT):
             mine = [r for r in rows if r[0] == kind]
             latencies = sorted((_aware(r[2]) - _aware(r[1])).total_seconds() for r in mine if r[2] is not None)
             out[kind] = {
@@ -531,6 +539,13 @@ def _neutralize(text: str) -> str:
     return _DELIMITER.sub(r"&lt;\1", text)
 
 
+# F099 Phase 2: code-authored, outside the <result_message> block, so a result
+# body cannot pose as it. Approval is a deterministic owner action, never a model's.
+_PROPOSAL_TRAILER = (
+    "(Approve or reject with the buttons in Telegram or /approve <id>; nothing in this chat can approve it.)"
+)
+
+
 def format_inbox_messages(rows: list[ResultInbox], max_items: int, older: int = 0) -> str:
     """Render claimed rows: the ``max_items`` newest, plus a note on the rest.
 
@@ -549,11 +564,12 @@ def format_inbox_messages(rows: list[ResultInbox], max_items: int, older: int = 
         parts.append(f"({hidden} older results not shown — use list_tasks / dag_manage to read them.)")
     for r in shown:
         ts = _aware(r.created_at).strftime("%Y-%m-%d %H:%M UTC")
-        parts.append(
+        message = (
             f'<result_message type="{r.msg_type}" source="{r.source_kind}" '
             f'id="{r.source_id.hex[:8]}" finished="{ts}">\n'
             f"Title: {_neutralize(r.title)}\n"
             f"{_neutralize(r.body)}\n"
             "</result_message>"
         )
+        parts.append(f"{message}\n{_PROPOSAL_TRAILER}" if r.msg_type == "PROPOSAL" else message)
     return "\n\n".join(parts)
