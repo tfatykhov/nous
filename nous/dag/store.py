@@ -387,6 +387,11 @@ class DAGStore:
         async with self._db.session() as session:
             return await intentions.lineage_for_source(session, self._agent_id, intentions.SOURCE_DAG, dag_id)
 
+    async def intention_wake_policy(self, dag_id: UUID) -> str | None:
+        """F099 D7: the wake policy recorded for the DAG's intention, for dag_create's receipt."""
+        async with self._db.session() as session:
+            return await intentions.wake_policy_for_source(session, self._agent_id, intentions.SOURCE_DAG, dag_id)
+
     async def get_dag(self, dag_id: UUID) -> ExecutionDAG | None:
         """Fetch a DAG with eager-loaded nodes and edges."""
         async with self._db.session() as session:

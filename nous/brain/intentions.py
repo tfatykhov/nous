@@ -144,6 +144,10 @@ class IntentionSpec:
     origin_session_id: str | None = None
     origin_channel: str | None = None
     origin_decision_id: UUID | None = None
+    # The spawning turn's authority (F099 Phase 2). A child is never wider than the turn
+    # that spawned it: this narrows what the parent ROW says, and never widens it. None
+    # for a code path (scheduler, work queue, app.act, REST): owner.
+    origin_authority: str | None = None
 
 
 def intention_kwargs(spec: IntentionSpec | None) -> dict[str, IntentionSpec]:
@@ -193,9 +197,9 @@ def resolve_wake_policy(spec: IntentionSpec, parent: ParentView | None) -> str:
         # (D3). schedule_task is denylisted inside an internal-only lineage,
         # so that case is unreachable, but it still resolves to container.
         return WAKE_CONTAINER
-    if parent is not None and parent.authority == AUTHORITY_INTERNAL:
-        # Inside an internal-only lineage the argument is ignored: every
-        # result goes back to the continuation (an inline one returns in-turn).
+    if (parent is not None and parent.authority == AUTHORITY_INTERNAL) or spec.origin_authority == AUTHORITY_INTERNAL:
+        # Inside an internal-only lineage, or from an internal-only turn, the argument is
+        # ignored: every result goes back to the continuation (an inline one returns in-turn).
         return WAKE_NONE if spec.inline else WAKE_CONTINUE
     if spec.inline:
         return WAKE_NONE  # the result comes back in the same turn
@@ -239,6 +243,13 @@ def intent_refused(intent: Any, origin_kind: str | None) -> bool:
     return not intent_line(intent) and (origin_kind or "background") in INTENT_REFUSING_KINDS
 
 
+def _known_authority(value: Any) -> str | None:
+    """No claim is None; an unknown value fails closed to internal_only."""
+    if value is None:
+        return None
+    return value if value in AUTHORITIES else AUTHORITY_INTERNAL
+
+
 def spec_from_tool_call(
     *,
     intent: Any,
@@ -251,6 +262,7 @@ def spec_from_tool_call(
     origin_channel: str | None = None,
     decision_id: str | None = None,
     intention_id: str | None = None,
+    origin_authority: str | None = None,
 ) -> IntentionSpec:
     """The intention a model spawn tool records (I2).
 
@@ -289,6 +301,7 @@ def spec_from_tool_call(
         origin_session_id=origin_session_id,
         origin_channel=origin_channel,
         origin_decision_id=parse_uuid(decision_id),
+        origin_authority=_known_authority(origin_authority),
     )
 
 
@@ -344,7 +357,8 @@ async def prepare_intention(session: AsyncSession, agent_id: str, spec: Intentio
     """Resolve ``spec`` inside the caller's transaction (I1).
 
     A child (``spec.parent_id``) joins its parent's lineage: the same root,
-    one level deeper, never wider authority (I3), and only while the root is
+    one level deeper, never wider authority than the parent row or the
+    spawning turn (I3, min of the two), and only while the root is
     open. A schedule fire (``spec.parent_source``) is a new root that keeps
     its container as ``parent_id``, for lineage only, and only while the
     container is open and its schedule active. Phase 1 writes no deadline
@@ -376,7 +390,9 @@ async def prepare_intention(session: AsyncSession, agent_id: str, spec: Intentio
         # A schedule from before the flag has no container: no parent, no check.
         lineage_parent = _view(row) if row is not None else None
     new_id = uuid.uuid4()
-    narrowed = lineage_parent is not None and lineage_parent.authority == AUTHORITY_INTERNAL
+    narrowed = (
+        lineage_parent is not None and lineage_parent.authority == AUTHORITY_INTERNAL
+    ) or spec.origin_authority == AUTHORITY_INTERNAL
     return PreparedIntention(
         id=new_id,
         root_id=parent.root_id if parent is not None else new_id,
@@ -479,6 +495,19 @@ async def lineage_for_source(
         )
     ).first()
     return lineage_stamp(row.id, row.root_id, row.authority) if row is not None else None
+
+
+async def wake_policy_for_source(session: AsyncSession, agent_id: str, source_kind: str, source_id: Any) -> str | None:
+    """The wake policy recorded for a source's intention, or None: what a spawn tool reports back (D7)."""
+    return (
+        await session.execute(
+            select(Intention.wake_policy).where(
+                Intention.agent_id == agent_id,
+                Intention.source_kind == source_kind,
+                Intention.source_id == str(source_id),
+            )
+        )
+    ).scalar_one_or_none()
 
 
 async def close_finished_sources(
@@ -600,6 +629,10 @@ class IntentionStore:
     async def lineage_for_source(self, source_kind: str, source_id: Any) -> dict[str, str] | None:
         async with self._db.session() as session:
             return await lineage_for_source(session, self._agent_id, source_kind, source_id)
+
+    async def wake_policy_for_source(self, source_kind: str, source_id: Any) -> str | None:
+        async with self._db.session() as session:
+            return await wake_policy_for_source(session, self._agent_id, source_kind, source_id)
 
     async def close_for_source(self, source_kind: str, source_id: Any, *, reason: str = CLOSE_LEGACY) -> UUID | None:
         async with self._db.session() as session:

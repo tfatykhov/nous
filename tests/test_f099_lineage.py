@@ -88,6 +88,7 @@ async def test_origin_arguments_reach_origin_aware_tools_only():
     await d.dispatch("list_tasks", {}, session_id="subtask-1", context=ctx)
     assert {k: v for k, v in seen["dag_create"].items() if k.startswith("_")} == {
         "_origin_kind": "subtask",
+        "_origin_authority": "owner",
         "_origin_session_id": "subtask-1",
         "_decision_id": PLAN,
         "_intention_id": str(IID),
@@ -127,7 +128,7 @@ async def test_origin_arguments_the_model_sent_are_dropped():
     hidden = {
         k: v for k, v in seen["dag_create"].items() if k.startswith("_origin") or k in ("_intention_id", "_decision_id")
     }
-    assert hidden == {"_origin_kind": "interactive", "_origin_session_id": "S1"}
+    assert hidden == {"_origin_kind": "interactive", "_origin_authority": "owner", "_origin_session_id": "S1"}
     ctx = ExecutionContext(kind="subtask", session_id="s", intention_id=IID, root_intention_id=RID)
     await d.dispatch("dag_create", dict(forged), session_id="s", context=ctx)
     assert seen["dag_create"]["_intention_id"] == str(IID)
@@ -340,3 +341,73 @@ async def test_the_loader_carries_the_stamp_on_create_and_after_a_restart(db):
     restarted = DynamicCheckLoader(db, CheckRegistry(), runner=MagicMock(), agent_id=agent_id)
     await restarted.sync()
     assert restarted._registry.get_check(name)._intention == STAMP
+
+
+# ---------------------------------------------------------------------------
+# F099 Phase 2a: a lineage that is not a stamp defers the launch (it never means "no lineage")
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("node_type", [DAGNodeType.subtask, DAGNodeType.check])
+@pytest.mark.parametrize("bad", ["garbage", ["not", "a", "stamp"], 7], ids=["str", "list", "int"])
+async def test_a_lineage_that_is_not_a_stamp_defers_the_launch_and_creates_nothing(dag_env, node_type, bad):
+    dag, node, _ = await _dag(dag_env, node_type)
+    dag_env.store.intention_lineage = AsyncMock(return_value=bad)
+    dag_env.orch._defer_node = AsyncMock()
+    if node_type == DAGNodeType.check:
+        await dag_env.orch._launch_check_node(node, dag)
+        dag_env.loader.create_check.assert_not_called()
+    else:
+        await dag_env.orch._launch_subtask_node(node, dag)
+        dag_env.subtask_mgr.create.assert_not_called()
+    dag_env.orch._defer_node.assert_awaited_once()
+    assert dag_env.orch._defer_node.await_args.args[2] == "lineage stamp unreadable"
+    assert dag_env.orch._defer_node.await_args.kwargs["backstop"] == "lineage still unreadable"
+
+
+async def test_the_callback_of_a_stamped_check_runs_under_its_lineage():
+    from test_f099_phase0b import _runner as _heartbeat_runner
+
+    from nous.heartbeat.registry import CheckRegistry as _Registry
+
+    hb, triage = _heartbeat_runner(_Registry())
+    check = DynamicCheck(
+        check_id="c-id",
+        name="dag-x-chk",
+        prompt="p",
+        tools=["web_search"],
+        interval=300,
+        on_complete_prompt="Tell the user",
+        on_complete_tools=["web_search", "bash", "heartbeat_check_create"],
+        intention=STAMP,
+    )
+    await hb._execute_callback(check)
+    ctx = triage.run_turn.call_args.kwargs["context"]
+    assert (ctx.kind, ctx.intention_id, ctx.root_intention_id, ctx.authority) == (
+        "heartbeat_callback",
+        IID,
+        RID,
+        "internal_only",
+    )
+
+
+async def test_the_callback_of_an_unstamped_check_is_owner_as_before():  # PIN
+    from test_f099_phase0b import _callback_check
+    from test_f099_phase0b import _runner as _heartbeat_runner
+
+    from nous.heartbeat.registry import CheckRegistry as _Registry
+
+    hb, triage = _heartbeat_runner(_Registry())
+    await hb._execute_callback(_callback_check())
+    ctx = triage.run_turn.call_args.kwargs["context"]
+    assert (ctx.authority, ctx.intention_id, ctx.root_intention_id) == ("owner", None, None)
+
+
+async def test_a_readable_stamp_and_no_stamp_still_launch_as_before(dag_env):  # PIN
+    dag, node, stamp = await _dag(dag_env, DAGNodeType.subtask, authority="internal_only")
+    await dag_env.orch._launch_subtask_node(node, dag)
+    assert dag_env.subtask_mgr.create.call_args.kwargs["metadata"]["intention"] == stamp
+    dag, node, _ = await _dag(dag_env, DAGNodeType.subtask, with_intention=False)
+    dag_env.subtask_mgr.create.reset_mock()
+    await dag_env.orch._launch_subtask_node(node, dag)
+    assert "intention" not in dag_env.subtask_mgr.create.call_args.kwargs["metadata"]

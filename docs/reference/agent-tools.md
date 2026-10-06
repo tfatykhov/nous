@@ -15,13 +15,13 @@ Documented tools the agent can call, and the cognitive frames each is offered in
 | `cache_retrieve` | all | Retrieve original content from SmartCompressed results |
 | `bash` | task, debug, conversation, question | Execute shell commands |
 | `read_file` | task, debug, question | Read file contents |
-| `write_file` | task, creative | Write/create files |
+| `write_file` | task, creative | Write/create files. F099: an `internal_only` lineage may write only under `<workspace>/intentions/<root>/` |
 | `spawn_task` | conversation, debug | Spawn a background subtask. F099: while `NOUS_INTENTIONS_ENABLED` is on, takes `intent` (one line: why, and what will be done with the result; refused if missing in a chat or MCP turn, generated in a background one) and `wake_policy` |
 | `spawn_sync` | conversation, debug | Spawn a subtask and wait for its typed result. F099: while `NOUS_INTENTIONS_ENABLED` is on, takes `intent` (one line: why, and what will be done with the result; refused if missing in a chat or MCP turn, generated in a background one) and `wake_policy` |
 | `schedule_task` | conversation, debug | Schedule a recurring/one-shot task. F099: while `NOUS_INTENTIONS_ENABLED` is on, takes `intent` (one line: why, and what will be done with the result; refused if missing in a chat or MCP turn, generated in a background one) and `wake_policy` |
-| `dag_create` | conversation, debug | Create a dependency-tracked DAG of subtasks and checks. F099: while `NOUS_INTENTIONS_ENABLED` is on, takes `intent` (one line: why, and what will be done with the result; refused if missing in a chat or MCP turn, generated in a background one) and `wake_policy` |
+| `dag_create` | conversation, debug | Create a dependency-tracked DAG of subtasks and checks. F099: while `NOUS_INTENTIONS_ENABLED` is on, takes `intent` (one line: why, and what will be done with the result; refused if missing in a chat or MCP turn, generated in a background one) and `wake_policy`. In an `internal_only` lineage it may not create an `approval` node, and it is offered only to a continuation turn whose root is below its limits |
 | `list_tasks` | conversation, question, decision, debug | List subtasks and schedules |
-| `cancel_task` | conversation, question, decision, debug | Cancel a subtask or schedule |
+| `cancel_task` | conversation, question, decision, debug | Cancel a subtask or schedule. F099: an `internal_only` lineage may cancel only its own lineage's work |
 | `web_search` | all | Search via multi-tier routing (Tavily/Exa/Brave) |
 | `web_fetch` | all | Fetch and extract web content |
 | `run_python` | conversation, question, debug, task | Execute Python with memory functions in scope. In-script `recall_deep()` runs the **same** `run_recall_pipeline` as the tool (since 2026-08-25 — it was `heart.search_facts`, facts-only, under a name promising the full retrieval) and returns dicts keyed `id`/`type`/`description`/`score`/`source`, with `content` kept as an alias of `description` for scripts written against the old `FactSummary` shape. Traced as F091 path `script`. Costs ~5s per call (prod p50), so budget a handful per script against the 90s deadline. |

@@ -20,7 +20,8 @@
   let q = $state('');
 
   const CONTEXTS = ['interactive', 'mcp', 'subtask', 'dag_node', 'scheduled', 'agent_action',
-    'heartbeat_triage', 'heartbeat_check', 'heartbeat_callback', 'dag_summary', 'background'];
+    'heartbeat_triage', 'heartbeat_check', 'heartbeat_callback', 'dag_summary', 'background',
+    'continuation', 'approved_action'];
   const STATUSES = ['pending', 'success', 'error', 'blocked', 'unknown'];
   const EFFECTS = ['write', 'external', 'irreversible'];
 

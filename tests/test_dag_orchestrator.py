@@ -2472,6 +2472,14 @@ class TestSubtaskNodeDeferral:
         calls = store.update_node.await_args_list + store.transition_node.await_args_list
         return [kw.get(key) for (_a, kw) in calls]
 
+    @staticmethod
+    def _store():
+        """An owner DAG's store: no intention, so no lineage stamp. A bare AsyncMock's
+        lineage is a MagicMock, which is not a stamp, and F099 defers that launch."""
+        store = AsyncMock()
+        store.intention_lineage.return_value = None
+        return store
+
     def _node(self):
         return SimpleNamespace(
             id=uuid.uuid4(), name="work", status="ready", node_type="subtask",
@@ -2483,7 +2491,7 @@ class TestSubtaskNodeDeferral:
     async def test_queue_full_defers_node_to_pending(self):
         from nous.heart.subtasks import SubtaskQueueFull
 
-        store = AsyncMock()
+        store = self._store()
         subtask_mgr = AsyncMock()
         subtask_mgr.create.side_effect = SubtaskQueueFull("pending subtask limit (5) reached")
         orch = DAGOrchestrator(
@@ -2503,7 +2511,7 @@ class TestSubtaskNodeDeferral:
 
     @pytest.mark.asyncio
     async def test_real_launch_error_still_fails_node(self):
-        store = AsyncMock()
+        store = self._store()
         subtask_mgr = AsyncMock()
         subtask_mgr.create.side_effect = RuntimeError("boom")
         orch = DAGOrchestrator(
@@ -2525,7 +2533,7 @@ class TestSubtaskNodeDeferral:
         check node, it does not permanently fail it."""
         from nous.heartbeat.dynamic import DynamicCheckLimitReached
 
-        store = AsyncMock()
+        store = self._store()
         loader = AsyncMock()
         loader.create_check.side_effect = DynamicCheckLimitReached("Maximum reached")
         orch = DAGOrchestrator(
@@ -2552,7 +2560,7 @@ class TestSubtaskNodeDeferral:
         failed (with a clear error) after the backstop cap, not bounced forever."""
         from nous.heart.subtasks import SubtaskQueueFull
 
-        store = AsyncMock()
+        store = self._store()
         subtask_mgr = AsyncMock()
         subtask_mgr.create.side_effect = SubtaskQueueFull("full")
         orch = DAGOrchestrator(

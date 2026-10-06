@@ -28,6 +28,8 @@ ContextKind = Literal[
     "heartbeat_callback",  # F034.6 on_complete callback
     "dag_summary",         # F087 agent-authored DAG summary
     "background",          # a background turn whose caller named no kind
+    "continuation",        # F099: Nous's own turn on a background result (internal_only)
+    "approved_action",     # F099: one owner-approved proposal, run with no model
 ]
 CONTEXT_KINDS: tuple[str, ...] = get_args(ContextKind)
 # A caller is waiting on the turn. Everything else runs with nobody in the loop.
@@ -84,12 +86,25 @@ class ExecutionContext:
     intention_id: UUID | None = None
     root_intention_id: UUID | None = None
     authority: str = AUTHORITY_OWNER
+    # F099 Phase 2: set only by the continuation runner (a continuation turn) and
+    # by execute_approved_proposal (an approved_action call). Defaults leave every
+    # other context unchanged.
+    proposal_id: UUID | None = None  # approved_action: the proposal being run
+    arrival_id: UUID | None = None  # continuation: the arrival this turn decides
+    claim_token: UUID | None = None  # continuation: the claim this turn runs under
+    spawn_blocked: bool = False  # continuation: the root is at its depth or spawn limit
 
     def __post_init__(self) -> None:
         if self.kind not in CONTEXT_KINDS:
             raise ValueError(f"unknown execution context kind {self.kind!r}")
         if self.authority not in AUTHORITIES:
             raise ValueError(f"unknown authority {self.authority!r}")
+        if self.kind == "approved_action" and (self.proposal_id is None or len(self.declared_tools or ()) != 1):
+            raise ValueError("an approved_action context needs a proposal_id and exactly one declared tool")
+        if self.kind == "continuation" and (
+            self.authority != AUTHORITY_INTERNAL or self.intention_id is None or self.root_intention_id is None
+        ):
+            raise ValueError("a continuation context is internal_only and names its intention and its root")
 
     @property
     def is_background(self) -> bool:

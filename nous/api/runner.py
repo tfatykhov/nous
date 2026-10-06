@@ -51,6 +51,7 @@ from nous.api.models import (  # noqa: F401 — re-exported for backward compat
 from nous.api.smart_compress import smart_compress
 from nous.api.tool_classes import refuse_denylist
 from nous.brain.brain import Brain
+from nous.brain.intentions import AUTHORITY_INTERNAL
 from nous.cognitive.action_gate import ActionGate
 from nous.cognitive.claim_verifier import ClaimVerifier, Evidence, IntentTracker
 from nous.cognitive.execution_ledger import (
@@ -76,6 +77,18 @@ class Refusal:
 
     text: str
     code: str
+
+
+# 012.2: a subtask may not delegate (no-nesting rule). F062: spawn_sync has identical
+# inline-blocking semantics to spawn_task(await_result=True) and competes for the same
+# worker pool; without exclusion a hardened subtask could call it recursively and
+# starve the pool or create a circular wait between subtask sessions.
+_SUBTASK_EXCLUDED_TOOLS = frozenset({"spawn_task", "schedule_task", "spawn_sync"})
+
+# F099: only these extra_tools end the loop on success. submit_final_report (F061) and
+# resolve_intention (a continuation's decision) mean "I am done"; every other extra tool
+# (propose_action) returns its result to the model like a registered tool.
+TERMINAL_EXTRA_TOOLS: frozenset[str] = frozenset({"submit_final_report", "resolve_intention"})
 
 
 def _close_status(is_error: bool, uncertain: bool) -> str:
@@ -404,6 +417,46 @@ class AgentRunner:
             # Persistence is best-effort — never let it break a turn.
             logger.debug("F026 persistence failed (suppressed)", exc_info=True)
 
+    def _offered_tools(
+        self,
+        ctx: ExecutionContext,
+        frame_id: str,
+        *,
+        is_subtask: bool,
+        tool_filter: list[str] | None,
+        refuse_active: bool,
+        extra_tools: dict[str, tuple[dict, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Exactly the tool definitions a turn is offered, in this order: frame tools (D5),
+        the subtask exclusion (012.2), ``tool_filter`` (F034.5), the F078 refuse denylist,
+        F099's ``internal_only`` narrowing, then the per-call ``extra_tools`` schemas (F061).
+
+        Both loops call this, so there is one definition of the offered set. The
+        narrowing keeps only tools for which ``tool_policy.internal_only_allowed``
+        is true, for every kind whose ``ctx.authority`` is ``internal_only`` (a lineage
+        check's ``tool_filter`` included: the intersection spec section 4.4 names).
+        Extra tools are the caller's and are not filtered.
+        """
+        tools = self._dispatcher.available_tools(frame_id)
+        if is_subtask:
+            tools = [t for t in tools if t["name"] not in _SUBTASK_EXCLUDED_TOOLS]
+        if tool_filter is not None:
+            tools = [t for t in tools if t["name"] in tool_filter]
+        if refuse_active and tools:
+            # F078 (R6): a `refuse`-tier censor matched. The LLM still runs, but its
+            # state-modifying tools are stripped so it can only decline gracefully
+            # (or answer read-only). A DENYLIST removal from the tool-class table
+            # (harness 2a), distinct from the whitelist tool_filter above.
+            denylist = refuse_denylist()
+            before = len(tools)
+            tools = [t for t in tools if t["name"] not in denylist]
+            logger.info("F078 refuse: stripped %d state-modifying tool(s)", before - len(tools))
+        if ctx.authority == AUTHORITY_INTERNAL:
+            tools = [t for t in tools if tool_policy.internal_only_allowed(t["name"], ctx=ctx)]
+        if extra_tools:
+            tools = [*tools, *(schema for schema, _executor in extra_tools.values())]
+        return tools
+
     def _authorize_tool_call(
         self,
         ctx: ExecutionContext,
@@ -415,10 +468,47 @@ class AgentRunner:
         """Return a refusal for a call the harness must not execute, else None.
 
         The single choke point both loops call before gating and dispatch:
-        the offered-set rule (Phase 1a), then the per-context policy (2a).
-        Both rules run for every call; each returns early only when IT
-        refuses, so a warn-mode deviation is recorded by both.
+        the strict F099 rule first, then the offered-set rule (Phase 1a), then
+        the per-context policy (2a). The last two run for every call the strict
+        rule lets through; each returns early only when IT refuses, so a
+        warn-mode deviation is recorded by both.
         """
+        # F099 section 4.4: an internal_only turn, and an approved_action call, are
+        # enforced here FIRST, whatever the two mode settings say. The modes are for
+        # tuning the ordinary rules; this is a security floor. For both, a call to a
+        # tool that was not offered is refused (not_offered). An approved_action call
+        # is also refused any tool but its one declared tool (undeclared). An
+        # internal_only call is also refused when the per-call rules reject it.
+        # With intentions off, Phase 1 writes no internal_only row: only a damaged
+        # lineage stamp reaches this, and it loses tools, never gains one.
+        if ctx.authority == AUTHORITY_INTERNAL or ctx.kind == "approved_action":
+            strict: str | None = None
+            if tool_name not in offered_names:
+                strict = "not_offered"
+            elif ctx.kind == "approved_action" and tool_name not in (ctx.declared_tools or ()):
+                strict = "undeclared"
+            elif ctx.authority == AUTHORITY_INTERNAL:
+                strict = tool_policy.internal_only_call_violation(
+                    ctx, tool_name, tool_input, workspace_dir=self._settings.workspace_dir
+                )
+            if strict is not None:
+                scope = "internal_only" if ctx.authority == AUTHORITY_INTERNAL else ctx.kind
+                logger.warning(
+                    "F099: refused %r in a %s turn (%s:%s, session=%s)", tool_name, ctx.kind, scope, strict, session_id
+                )
+                # mode "enforce": it was refused, which is what the dashboard counts under it.
+                self._log_f026_decision(
+                    "harness_context_policy_violation",
+                    {
+                        "tool_name": tool_name,
+                        "context_kind": ctx.kind,
+                        "violation": f"{scope}:{strict}",
+                        "mode": "enforce",
+                    },
+                    session_id=session_id,
+                )
+                return Refusal(f"Tool error: '{tool_name}' is not allowed in this turn ({strict}).", "internal_only")
+
         offered_mode = self._settings.tool_offered_set_enforcement_mode
         if offered_mode != "off" and tool_name not in offered_names:
             logger.warning(
@@ -963,8 +1053,8 @@ class AgentRunner:
         idempotency_key: str | None = None,
     ) -> None:
         """A side-effecting call the harness refused. ``refused_by`` is a code
-        (``offered_set`` / ``action_gate`` / ``context_policy`` / ``duplicate``
-        -- see ``ledger_store.REFUSAL_CODES``), never the refusal's prose."""
+        (``offered_set`` / ``action_gate`` / ``context_policy`` / ``duplicate`` /
+        ``internal_only`` -- see ``ledger_store.REFUSAL_CODES``), never the refusal's prose."""
         if self._ledger_store is None or not self._dispatcher.is_registered(tool_name):
             return  # an unregistered name could not have run (see _ledger_open)
         try:
@@ -2045,17 +2135,16 @@ class AgentRunner:
                     )
                 else:
                     system_prompt = system_prompt_prefix + "\n\n" + system_prompt
-            tools = self._dispatcher.available_tools(turn_context.frame.frame_id)
             # F078 (codex P1): a refuse-tier censor must strip state-modifying tools on the
-            # STREAMING path too — the non-streaming _tool_loop already does this, but the SSE
-            # path (used by Telegram) built tools directly and would otherwise leak write/
-            # external/irreversible/bash to a refused turn. refuse_active already accounts for
-            # refuse_keep_tools (set in cognitive/layer.py).
-            if getattr(turn_context, "refuse_active", False) and tools:
-                _refuse_denylist = refuse_denylist()  # harness 2a: every classified non-read tool
-                _before = len(tools)
-                tools = [t for t in tools if t["name"] not in _refuse_denylist]
-                logger.info("F078 refuse: stripped %d state-modifying tool(s) (streaming)", _before - len(tools))
+            # STREAMING path too (_offered_tools does it for both loops). refuse_active
+            # already accounts for refuse_keep_tools (set in cognitive/layer.py).
+            tools = self._offered_tools(
+                _ctx,
+                turn_context.frame.frame_id,
+                is_subtask=False,
+                tool_filter=None,
+                refuse_active=getattr(turn_context, "refuse_active", False),
+            )
             # Harness Phase 1a: exactly what the model is offered this turn.
             offered_names = frozenset(t["name"] for t in tools)
             messages = self._format_messages(conversation)
@@ -2766,36 +2855,17 @@ class AgentRunner:
         ctx = resolve_context(context, is_background=is_background, session_id=session_id)
         is_background = ctx.is_background
 
-        # Get base tools for current frame (D5)
-        base_tools = self._dispatcher.available_tools(frame_id)
-
-        # 012.2: Remove delegation tools from subtask tool set (no-nesting rule)
-        if is_subtask:
-            # F062: spawn_sync has identical inline-blocking semantics to
-            # spawn_task(await_result=True) and competes for the same worker
-            # pool. Without exclusion, a hardened subtask could call
-            # spawn_sync recursively and either hit _MAX_PENDING / worker
-            # starvation or create a circular wait between subtask sessions.
-            _SUBTASK_EXCLUDED_TOOLS = {"spawn_task", "schedule_task", "spawn_sync"}
-            base_tools = [t for t in base_tools if t["name"] not in _SUBTASK_EXCLUDED_TOOLS]
-
-        # F034.5: Dynamic check tool restriction
-        if tool_filter is not None:
-            base_tools = [t for t in base_tools if t["name"] in tool_filter]
-
-        # F078 (R6): a `refuse`-tier censor matched. The LLM still runs, but its
-        # state-modifying tools are stripped for the turn so it can only decline
-        # gracefully (or answer read-only). This is a DENYLIST removal, distinct
-        # from the whitelist `tool_filter` above. Denylist sourced from the
-        # tool-class table (harness 2a; NOT ActionGate, which is disabled in prod).
-        if refuse_active:
-            _refuse_denylist = refuse_denylist()
-            before = len(base_tools)
-            base_tools = [t for t in base_tools if t["name"] not in _refuse_denylist]
-            logger.warning(
-                "F078 refuse: stripped %d state-modifying tools for the turn",
-                before - len(base_tools),
-            )
+        # F099: one helper builds the offered set for both loops (frame tools, the 012.2
+        # subtask exclusion, F034.5 tool_filter, the F078 refuse denylist, the internal_only
+        # narrowing, then the F061 per-call extra tools). ctx is frozen, so once per turn is exact.
+        offered_tools = self._offered_tools(
+            ctx,
+            frame_id,
+            is_subtask=is_subtask,
+            tool_filter=tool_filter,
+            refuse_active=refuse_active,
+            extra_tools=extra_tools,
+        )
 
         # Build initial messages from conversation history
         # The latest user message is already in conversation.messages
@@ -2823,7 +2893,7 @@ class AgentRunner:
         effective_model_for_force = (model_override or self._settings.model).lower()
         thinking_off = self._settings.thinking_mode == "off" or "haiku" in effective_model_for_force
         force_enabled = bool(force_tool_on_penultimate) and thinking_off
-        terminate_after_tool_results = False  # set when submit_final_report fires
+        terminate_after_tool_results = False  # set when a terminal extra tool fires
         # F061 round 4 P2-I: cap the number of force_tool_on_penultimate
         # fires within a single run_turn. Without this cap, the >= math
         # could fire force on multiple consecutive turns when the model
@@ -2839,12 +2909,9 @@ class AgentRunner:
             if dag_node_id is not None:
                 self._ping_dag_node_activity(dag_node_id)
 
-            # F020: Rebuild tool list each iteration for dynamic cache_retrieve
-            tools = list(base_tools)
-            # F061: append per-call extra tool schemas (NOT registered globally).
-            if extra_tools:
-                for _name, (_schema, _exec) in extra_tools.items():
-                    tools.append(_schema)
+            # F020: copy the tool list each iteration (the F061 per-call extra tool
+            # schemas, NOT registered globally, are already in it).
+            tools = list(offered_tools)
             # Harness Phase 1a: exactly what the model was offered this iteration.
             offered_names = frozenset(t["name"] for t in tools)
 
@@ -3084,14 +3151,13 @@ class AgentRunner:
                         if extra_tools and tool_name in extra_tools:
                             _schema, executor = extra_tools[tool_name]
                             result_text, is_error = await executor(**tool_input)
-                            # Short-circuit: any successful extra_tools call
-                            # terminates the loop. F061's submit_final_report
-                            # is currently the only extra_tool and its
-                            # semantics are "I am done" — even when the
-                            # model voluntarily called it (force_tool was
-                            # None on this turn), we still want to exit
-                            # rather than make wasted follow-up API calls.
-                            if not is_error:
+                            # Short-circuit: a successful TERMINAL extra tool ends the
+                            # loop. F061's submit_final_report means "I am done" — even
+                            # when the model voluntarily called it (force_tool was None
+                            # on this turn), we still want to exit rather than make
+                            # wasted follow-up API calls. F099: any other extra tool
+                            # returns to the model.
+                            if not is_error and tool_name in TERMINAL_EXTRA_TOOLS:
                                 terminate_after_tool_results = True
                         else:
                             # F064.1 ping site 2 — immediately before tool
@@ -3315,10 +3381,10 @@ class AgentRunner:
                     )
 
                     # F061 PR-3 Codex review P2: stop dispatching remaining
-                    # tool_use blocks once a successful submit_final_report
-                    # accepted the terminal payload. Subsequent tools in
-                    # the same assistant message would otherwise run with
-                    # side effects after termination has been declared.
+                    # tool_use blocks once a successful terminal extra tool
+                    # (TERMINAL_EXTRA_TOOLS) accepted its payload. Subsequent
+                    # tools in the same assistant message would otherwise run
+                    # with side effects after termination has been declared.
                     if terminate_after_tool_results:
                         break
 
@@ -3333,10 +3399,10 @@ class AgentRunner:
             total_tool_calls += len(tool_results_for_message)
             total_usage["tool_calls"] += len(tool_results_for_message)
 
-            # F061: short-circuit on successful submit_final_report. Caller
-            # reads the validated payload from the collector — response_text
-            # is intentionally a thin marker since the contract is the tool
-            # input, not free-form prose.
+            # F061: short-circuit on a successful terminal extra tool
+            # (TERMINAL_EXTRA_TOOLS). Caller reads the validated payload from
+            # its collector — response_text is intentionally a thin marker
+            # since the contract is the tool input, not free-form prose.
             if terminate_after_tool_results:
                 return (
                     "Report submitted.",
