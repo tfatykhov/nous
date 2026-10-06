@@ -1621,17 +1621,19 @@ async def wake_terminal_arrivals(
     )
     woken: list[UUID] = []
     for arrival in arrivals:
+        # Read before the SAVEPOINT: its rollback expires a row it changed, and an async session cannot reload one.
+        arrival_id = arrival.id
         try:
             async with session.begin_nested():
                 terminal, answered, questions = await _question_state(
-                    session, agent_id, arrival.id, settings=settings, now=now
+                    session, agent_id, arrival_id, settings=settings, now=now
                 )
                 if not terminal:
                     continue
                 # Wake first: wake_arrival takes the root before any intention, and the rows below go only to the
                 # intentions it moved. One the expiry closed meanwhile gets none: on a closed intention
                 # record_result would turn the row into a report telling the owner that the owner did not answer.
-                moved = await wake_arrival(session, agent_id, arrival.id, now=now)
+                moved = await wake_arrival(session, agent_id, arrival_id, now=now)
                 if not answered:
                     for intention_id in moved:
                         await record_result(
@@ -1639,20 +1641,20 @@ async def wake_terminal_arrivals(
                             agent_id,
                             intention_id=intention_id,
                             source_kind=SOURCE_INTENTION_REPORT,
-                            source_id=uuid.uuid5(_EXPIRY_NAMESPACE, f"{arrival.id}:{intention_id}"),
+                            source_id=uuid.uuid5(_EXPIRY_NAMESPACE, f"{arrival_id}:{intention_id}"),
                             msg_type="INFORM",
                             title="The owner did not answer",
                             body=(
                                 "I asked the owner a question and the owner did not answer within "
                                 f"{float(settings.intention_proposal_ttl_hours):g} hours: {questions[0].body[:500]}"
                             ),
-                            arrival_id=arrival.id,
+                            arrival_id=arrival_id,
                             settings=settings,
                         )
                 woken.extend(moved)
         except Exception:
             logger.warning(
-                "F099: could not wake arrival %s; it is retried at the next sweep", arrival.id, exc_info=True
+                "F099: could not wake arrival %s; it is retried at the next sweep", arrival_id, exc_info=True
             )
     return woken
 
