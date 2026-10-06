@@ -19,7 +19,7 @@ from uuid import uuid4
 import httpx
 
 from nous.api.anthropic_client import AnthropicClient
-from nous.api.execution_context import ExecutionContext
+from nous.api.execution_context import ExecutionContext, lineage_from_stamp
 from nous.api.runner import AgentRunner
 from nous.brain import Brain
 from nous.cancellation import cancel_requested as _cancel_requested
@@ -1130,6 +1130,10 @@ class HeartbeatRunner:
         # Harness Phase 2b: one run id across the retry below -- the retry gets a
         # fresh session but the same idempotency scope, so it cannot re-send.
         run_id = uuid4().hex
+        # F099 I3: a callback runs under its check's lineage, as the check's own turn does
+        # (DynamicCheck._run_turn). A test double that is not a DynamicCheck carries no stamp.
+        stamp = check._intention if isinstance(check, DynamicCheck) else None
+        intention_id, root_intention_id, authority = lineage_from_stamp(stamp)
 
         for attempt in range(2):
             if not self._has_budget():
@@ -1159,6 +1163,9 @@ class HeartbeatRunner:
                         declared_tools=tuple(check.on_complete_tools or ()) or None,
                         check_name=check.name,
                         run_id=run_id,
+                        intention_id=intention_id,
+                        root_intention_id=root_intention_id,
+                        authority=authority,
                     ),
                 )
                 tokens = (usage or {}).get("input_tokens", 0) + (usage or {}).get("output_tokens", 0)

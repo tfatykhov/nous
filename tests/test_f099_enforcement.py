@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import functools
 import json
+import logging
 import uuid
 from unittest.mock import MagicMock
 
 import pytest
+from test_f099_lineage import _recording_dispatcher
 from test_runner_authorization import _run_loop, _runner, _tool_calls_then_done_with
 from test_runner_ledger import _FakeStore
 from test_runner_ledger import _runner as _ledger_runner
@@ -24,6 +26,7 @@ from nous.cognitive.ledger_store import REFUSAL_CODES
 # Fixed ids: parametrize ids built from them must not change between collections (xdist).
 IID, RID, OTHER = (uuid.UUID(f"00000000-0000-0000-0000-00000000000{n}") for n in (1, 2, 3))
 _MODE_VALUES = ("off", "warn", "enforce")
+# PIN: the six off-diagonal pairs pass on their base by design (the strict block reads neither mode).
 MODES = [(offered, policy) for offered in _MODE_VALUES for policy in _MODE_VALUES]
 OFFERED = ["recall_deep", "send_email", "run_python", "bash", "write_file", "cancel_task"]
 FORGED = [
@@ -175,7 +178,7 @@ def test_a_lineage_with_no_root_may_not_write_a_file(tmp_path):
 
 
 @pytest.mark.parametrize(("offered_mode", "policy_mode"), MODES)
-def test_a_cancel_task_whose_id_is_not_a_uuid_is_refused_in_every_mode(offered_mode, policy_mode):
+def test_a_cancel_task_whose_id_is_not_a_uuid_is_refused_in_every_mode(offered_mode, policy_mode):  # PIN
     """The per-call rule's foreign_cancel, through the runner's strict block (not the unit alone)."""
     r, _ = _runner(OFFERED, tool_offered_set_enforcement_mode=offered_mode, tool_context_policy_mode=policy_mode)
     refusal = _auth(r, _internal(), "cancel_task", OFFERED, {"task_id": "not-a-uuid"})
@@ -184,7 +187,7 @@ def test_a_cancel_task_whose_id_is_not_a_uuid_is_refused_in_every_mode(offered_m
     assert _auth(r, _internal(), "cancel_task", OFFERED, {"task_id": str(OTHER)}) is None
 
 
-async def test_a_cancel_task_whose_id_is_not_a_uuid_never_reaches_the_handler():
+async def test_a_cancel_task_whose_id_is_not_a_uuid_never_reaches_the_handler():  # PIN
     for tool_input, dispatched in (({"task_id": str(OTHER)}, True), ({"task_id": "not-a-uuid"}, False)):
         r, d = _runner(OFFERED, tool_offered_set_enforcement_mode="off", tool_context_policy_mode="off")
         r._call_api = _tool_calls_then_done_with("cancel_task", tool_input, times=1)
@@ -192,7 +195,25 @@ async def test_a_cancel_task_whose_id_is_not_a_uuid_never_reaches_the_handler():
         assert bool(d.calls) is dispatched, tool_input
 
 
-def test_an_approved_action_refusal_is_recorded_under_its_own_kind():
+@pytest.mark.parametrize(("offered_mode", "policy_mode"), MODES)
+async def test_a_lineage_web_fetch_runs_and_is_logged_with_its_root(caplog, offered_mode, policy_mode):  # PIN
+    """Spec section 9 through the runner: web_fetch is class none, so the strict block lets an
+    internal_only turn fetch a URL, and the real dispatcher logs the call with its root."""
+    r, _ = _runner(OFFERED, tool_offered_set_enforcement_mode=offered_mode, tool_context_policy_mode=policy_mode)
+    d, seen = _recording_dispatcher({"web_fetch": False})
+    r.set_dispatcher(d)
+    url = "https://example.com/page"
+    r._call_api = _tool_calls_then_done_with("web_fetch", {"url": url}, times=1)
+    with caplog.at_level(logging.INFO, logger="nous.api.tools"):
+        _text, results, _usage, _thinking = await _run_loop(r, is_background=True, context=_internal())
+    assert seen["web_fetch"] == {"url": url}
+    assert [(x.tool_name, x.error) for x in results] == [("web_fetch", None)]
+    assert [m for m in caplog.messages if m.startswith("F099: web_")] == [
+        f"F099: web_fetch from lineage root {RID} (session s1)"
+    ]
+
+
+def test_an_approved_action_refusal_is_recorded_under_its_own_kind():  # PIN
     r, _ = _runner(OFFERED, tool_offered_set_enforcement_mode="off", tool_context_policy_mode="off")
     events: list[tuple[str, dict]] = []
     r._log_f026_decision = lambda event_type, data, session_id=None: events.append((event_type, data))

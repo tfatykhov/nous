@@ -307,7 +307,7 @@ async def test_no_wake_policy_argument_means_no_read(authority_env):  # PIN
     spy.assert_not_called()
 
 
-async def test_a_failed_read_adds_no_note_and_does_not_fail_the_spawn(authority_env):
+async def test_a_failed_read_adds_no_note_and_does_not_fail_the_spawn(authority_env):  # PIN
     env = await authority_env()
     env.heart.intentions.wake_policy_for_source = AsyncMock(side_effect=RuntimeError("db down"))
     bg = ExecutionContext(kind="background", session_id="bg-4")
@@ -364,6 +364,35 @@ async def test_a_continuation_may_not_cancel_foreign_work(authority_env):
         text, is_error = await _cancel(env, target, cont)
         assert is_error and "is not part of this lineage" in text, text
         assert await _status(env, target) == "pending"
+
+
+async def test_another_agents_intention_row_never_puts_a_task_in_this_lineage(authority_env):
+    """The lineage lookup is agent-scoped. Another agent's row names this agent's subtask
+    and root R; only the agent_id filter of get_for_source keeps R's continuation from it."""
+    env = await authority_env()
+    root = await _root(env)
+    target = (await env.heart.subtasks.create(task="this agent's work, no intention row")).id
+    async with env.db.session() as s:
+        s.add(
+            Intention(
+                id=uuid.uuid4(),
+                agent_id=f"f099-auth-other-{uuid.uuid4().hex[:8]}",
+                root_id=root.id,
+                parent_id=root.id,
+                depth=1,
+                source_kind="subtask",
+                source_id=str(target),
+                intent="another agent's row",
+                origin_kind="interactive",
+                wake_policy="continue",
+                authority="internal_only",
+                state="pending",
+            )
+        )
+        await s.commit()
+    text, is_error = await _cancel(env, target, _cont(root))
+    assert is_error and "is not part of this lineage" in text, text
+    assert await _status(env, target) == "pending"
 
 
 async def test_a_model_cannot_forge_the_authority_or_the_root_the_handler_checks(authority_env):

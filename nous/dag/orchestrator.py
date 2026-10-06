@@ -3400,6 +3400,18 @@ class DAGOrchestrator:
             )
             return
 
+        if lineage is not None and not isinstance(lineage, dict):
+            # F099 I3, fail closed: a lineage that is not a stamp must not become "no
+            # lineage", which would run the node as owner.
+            logger.warning(
+                "Intention lineage of DAG %s is not a stamp (%s); deferring node %s",
+                dag.id,
+                type(lineage).__name__,
+                node.name,
+            )
+            await self._defer_node(node, dag, "lineage stamp unreadable", backstop="lineage still unreadable")
+            return
+
         # Build augmented instructions with predecessor context
         augmented = await self._build_predecessor_context(node, dag)
 
@@ -3416,7 +3428,7 @@ class DAGOrchestrator:
                 timeout=self._effective_timeout(node),
                 metadata={"dag_id": str(dag.id), "node_name": node.name,
                           **({"undoable": True} if getattr(node, "undoable", False) else {}),
-                          **({"intention": lineage} if isinstance(lineage, dict) else {})},
+                          **({"intention": lineage} if lineage is not None else {})},
                 dag_node_id=node.id,
             )
             now = datetime.now(UTC)
@@ -3504,6 +3516,18 @@ class DAGOrchestrator:
             )
             return
 
+        if lineage is not None and not isinstance(lineage, dict):
+            # F099 I3, fail closed: a lineage that is not a stamp must not become "no
+            # lineage", which would run the node as owner.
+            logger.warning(
+                "Intention lineage of DAG %s is not a stamp (%s); deferring node %s",
+                dag.id,
+                type(lineage).__name__,
+                node.name,
+            )
+            await self._defer_node(node, dag, "lineage stamp unreadable", backstop="lineage still unreadable")
+            return
+
         augmented = await self._build_predecessor_context(node, dag)
         check_name = f"{DAG_CHECK_NAME_PREFIX}{dag.id.hex[:8]}-{node.name}"
 
@@ -3521,7 +3545,7 @@ class DAGOrchestrator:
                 urgent=True,
                 metadata={
                     _CHECK_OWNER_KEY: str(node.id),
-                    **({"intention": lineage} if isinstance(lineage, dict) else {}),
+                    **({"intention": lineage} if lineage is not None else {}),
                 },
             )
 

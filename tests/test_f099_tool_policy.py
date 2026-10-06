@@ -80,7 +80,7 @@ def test_a_lineage_turn_that_is_not_a_continuation_is_offered_exactly_the_pinned
 
 def test_a_continuation_is_also_offered_the_two_spawn_tools_until_its_root_is_at_a_limit():
     cont = _internal("continuation")
-    assert _allowed(cont) == LINEAGE_ALLOWED | INTERNAL_ONLY_SPAWN_TOOLS
+    assert _allowed(cont) == LINEAGE_ALLOWED | {"spawn_task", "dag_create"}
     assert _allowed(_internal("continuation", spawn_blocked=True)) == LINEAGE_ALLOWED
 
 
@@ -119,6 +119,7 @@ def test_the_denylist_names_only_classified_tools_and_is_the_specs():
             "resolve_decisions",
         }
     )
+    assert INTERNAL_ONLY_SPAWN_TOOLS == frozenset({"spawn_task", "dag_create"})
     assert INTERNAL_ONLY_CHECKED_TOOLS == frozenset({"write_file", "cancel_task"})
     assert INTERNAL_ONLY_LOGGED_TOOLS == frozenset({"web_fetch", "web_search"})
 
@@ -186,6 +187,9 @@ def test_write_file_with_no_root_or_no_usable_path_is_refused(tmp_path):
     assert _write(tmp_path, "intentions/None/notes.md", damaged) == "write_path"  # str(None) names no root
     for tool_input in ({}, {"path": ""}, {"path": 7}, {"path": "a\x00b"}):
         assert _violation("write_file", tool_input, tmp_path) == "write_path"
+    # A NUL byte under the root dir: Windows' realpath swallows it (gh-106242), so only the
+    # explicit check refuses it there; Linux's resolve() raises.
+    assert _write(tmp_path, f"intentions/{RID}/a\x00b") == "write_path"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="needs symlinks")

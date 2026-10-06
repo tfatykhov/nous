@@ -272,7 +272,7 @@ async def test_authority_only_narrows_down_a_lineage(db):
     assert (row.authority, row.wake_policy) == ("internal_only", "continue")
 
 
-async def test_an_internal_only_turn_with_no_parent_records_internal_only():
+async def test_an_internal_only_turn_with_no_parent_records_internal_only():  # PIN
     """F099 Phase 2: the turn's authority narrows a root too, not only a child.
 
     With no parent_id and no parent_source the session is never touched, so None stands in for it."""
@@ -281,7 +281,7 @@ async def test_an_internal_only_turn_with_no_parent_records_internal_only():
     assert (prepared.parent_id, prepared.authority) == (None, "internal_only")
 
 
-def test_an_internal_only_turn_with_no_parent_wakes_the_continuation():
+def test_an_internal_only_turn_with_no_parent_wakes_the_continuation():  # PIN
     """C9 with no parent. origin_kind "subtask" because its own default is none, so only the
     authority clause can make it continue."""
     spec = _spec("subtask", origin_authority="internal_only")

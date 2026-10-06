@@ -20,7 +20,6 @@ from nous.api.execution_context import CONTEXT_KINDS, ExecutionContext
 from nous.api.models import ApiResponse
 from nous.api.runner import FRAME_TOOLS
 from nous.api.tool_classes import TOOL_CLASSES, refuse_denylist
-from nous.api.tool_policy import INTERNAL_ONLY_SPAWN_TOOLS
 from nous.heartbeat.dynamic import ALLOWED_TOOLS as CHECK_TOOLS
 
 IID, RID = (uuid.UUID(f"00000000-0000-0000-0000-00000000000{n}") for n in (1, 2))
@@ -29,6 +28,20 @@ ALL_TOOLS = list(TOOL_CLASSES)
 UNCLASSIFIED = "a_tool_nobody_classified"
 SUBMIT = {"name": "submit_final_report", "description": "d", "input_schema": {"type": "object"}}
 MODES = ("off", "warn", "enforce")
+# Literals on purpose, not the production constants: widening either constant must fail here.
+SPAWN = frozenset({"spawn_task", "dag_create"})
+CHECK_DECLARED = frozenset(
+    {
+        "web_search",
+        "web_fetch",
+        "recall_deep",
+        "recall_recent",
+        "bash",
+        "read_file",
+        "heartbeat_check_create",
+        "heartbeat_check_manage",
+    }
+)
 
 
 async def _noop(**_):
@@ -124,7 +137,7 @@ def test_a_continuation_is_offered_the_spawn_tools_until_its_root_is_at_a_limit(
             )
         )
 
-    assert offered() == LINEAGE_ALLOWED | INTERNAL_ONLY_SPAWN_TOOLS
+    assert offered() == LINEAGE_ALLOWED | SPAWN
     assert offered(spawn_blocked=True) == LINEAGE_ALLOWED
 
 
@@ -152,7 +165,7 @@ def test_a_lineage_check_loses_the_tools_it_declared_that_the_narrowing_denies()
     # PIN: the same check with no lineage is offered everything it declared.
     owner = ExecutionContext(kind="heartbeat_check", session_id="s1", declared_tools=tuple(declared))
     tools = r._offered_tools(owner, "conversation", is_subtask=True, tool_filter=declared, refuse_active=False)
-    assert _names(tools) == set(CHECK_TOOLS)
+    assert _names(tools) == CHECK_DECLARED
 
 
 def test_extra_tools_follow_the_narrowing_and_are_not_filtered():
@@ -167,7 +180,7 @@ def test_extra_tools_follow_the_narrowing_and_are_not_filtered():
         extra_tools={"resolve_intention": (schema, _noop)},
     )
     assert tools[-1] == schema
-    assert _names(tools) == LINEAGE_ALLOWED | INTERNAL_ONLY_SPAWN_TOOLS | {"resolve_intention"}
+    assert _names(tools) == LINEAGE_ALLOWED | SPAWN | {"resolve_intention"}
 
 
 def _capturing_api(seen: list[set[str]]):
@@ -185,7 +198,7 @@ def _capturing_api(seen: list[set[str]]):
 @pytest.mark.parametrize(
     ("ctx", "is_subtask", "expected"),
     [
-        (_internal("continuation"), False, LINEAGE_ALLOWED | INTERNAL_ONLY_SPAWN_TOOLS),
+        (_internal("continuation"), False, LINEAGE_ALLOWED | SPAWN),
         (_internal("subtask"), True, LINEAGE_ALLOWED),
         (_internal("dag_node"), True, LINEAGE_ALLOWED),
     ],
@@ -212,7 +225,7 @@ async def test_the_tool_loop_offers_a_damaged_stamp_the_narrowed_set_with_no_spa
     damaged = ExecutionContext(kind=kind, session_id="s1", authority="internal_only")
     await _run_loop(r, is_background=True, is_subtask=False, context=damaged)
     assert seen == [LINEAGE_ALLOWED]
-    assert not seen[0] & INTERNAL_ONLY_SPAWN_TOOLS
+    assert not seen[0] & SPAWN
 
 
 async def test_stream_chat_offers_an_internal_only_turn_the_narrowed_set(monkeypatch, tmp_path):

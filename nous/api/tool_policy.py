@@ -112,11 +112,13 @@ def _write_path_allowed(ctx: ExecutionContext, tool_input: Mapping[str, Any], wo
     path = tool_input.get("path")
     if ctx.root_intention_id is None or not isinstance(path, str) or not path.strip():
         return False
+    if "\x00" in path:  # Windows' realpath drops a NUL instead of raising (gh-106242)
+        return False
     try:
         workspace = Path(workspace_dir).resolve()
         root_dir = workspace / "intentions" / str(ctx.root_intention_id)
         target = Path(path).resolve() if Path(path).is_absolute() else (workspace / path).resolve()
-    except (OSError, ValueError):  # a NUL byte, an unresolvable name
+    except (OSError, ValueError):  # an unresolvable name
         return False
     return target.is_relative_to(root_dir)
 

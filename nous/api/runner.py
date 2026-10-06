@@ -3377,10 +3377,10 @@ class AgentRunner:
                     )
 
                     # F061 PR-3 Codex review P2: stop dispatching remaining
-                    # tool_use blocks once a successful submit_final_report
-                    # accepted the terminal payload. Subsequent tools in
-                    # the same assistant message would otherwise run with
-                    # side effects after termination has been declared.
+                    # tool_use blocks once a successful terminal extra tool
+                    # (TERMINAL_EXTRA_TOOLS) accepted its payload. Subsequent
+                    # tools in the same assistant message would otherwise run
+                    # with side effects after termination has been declared.
                     if terminate_after_tool_results:
                         break
 
@@ -3395,10 +3395,10 @@ class AgentRunner:
             total_tool_calls += len(tool_results_for_message)
             total_usage["tool_calls"] += len(tool_results_for_message)
 
-            # F061: short-circuit on successful submit_final_report. Caller
-            # reads the validated payload from the collector — response_text
-            # is intentionally a thin marker since the contract is the tool
-            # input, not free-form prose.
+            # F061: short-circuit on a successful terminal extra tool
+            # (TERMINAL_EXTRA_TOOLS). Caller reads the validated payload from
+            # its collector — response_text is intentionally a thin marker
+            # since the contract is the tool input, not free-form prose.
             if terminate_after_tool_results:
                 return (
                     "Report submitted.",
