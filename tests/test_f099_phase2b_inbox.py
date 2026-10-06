@@ -66,7 +66,7 @@ async def test_insert_with_a_session_commits_with_the_callers_transaction(db):
         assert (await s.execute(select(ResultInbox).where(ResultInbox.source_id == source_id))).scalar_one()
 
 
-async def test_insert_stays_idempotent_on_the_widened_key(db):
+async def test_insert_stays_idempotent_on_the_widened_key(db):  # PIN
     store, _ = _store(db)
     source_id = uuid.uuid4()
     assert await _insert(store, source_id=source_id) is True
@@ -74,7 +74,7 @@ async def test_insert_stays_idempotent_on_the_widened_key(db):
     assert await _insert(store, source_id=source_id, source_generation=1) is True
 
 
-async def test_two_agents_insert_the_same_source_key(db):
+async def test_two_agents_insert_the_same_source_key(db):  # PIN
     (a, _), (b, _) = _store(db), _store(db)
     source_id = uuid.uuid4()
     assert await _insert(a, source_id=source_id) is True
@@ -133,6 +133,45 @@ async def test_insert_report_takes_a_caller_report_id_and_is_idempotent_on_it(db
             assert returned == rid
         await s.commit()
     assert len(await _all(db, agent)) == 1
+
+
+async def test_insert_report_logs_only_the_row_it_wrote(db, caplog):
+    store, agent = _store(db)
+    rid = uuid.uuid4()
+    caplog.set_level("INFO", logger="nous.brain.continuation")
+    async with db.session() as s:
+        for _ in range(2):  # the second is the idempotent no-op on the caller's report_id
+            await continuation.insert_report(
+                s,
+                agent,
+                kind="REPORT",
+                title="t",
+                body="b",
+                channel=CHAN,
+                intention_id=uuid.uuid4(),
+                root_id=uuid.uuid4(),
+                report_id=rid,
+            )
+        await s.commit()
+    assert caplog.text.count(f"REPORT row {rid.hex[:8]}") == 1
+
+
+async def test_insert_report_stores_a_padded_channel_stripped(db):
+    store, agent = _store(db)
+    async with db.session() as s:
+        await continuation.insert_report(
+            s,
+            agent,
+            kind="REPORT",
+            title="t",
+            body="b",
+            channel=f"  {CHAN} ",
+            intention_id=uuid.uuid4(),
+            root_id=uuid.uuid4(),
+        )
+        await s.commit()
+    (row,) = await _all(db, agent)
+    assert (row.channel, row.reply_to) == (CHAN, CHAN)  # a padded key would never match a chat claim
 
 
 @pytest.mark.parametrize(

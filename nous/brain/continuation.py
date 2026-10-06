@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Text, and_, cast, exists
+from sqlalchemy import ColumnElement, Text, and_, cast, exists, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -49,7 +49,7 @@ STATE_CANCELLED, STATE_EXPIRED = "cancelled", "expired"
 INBOX_TITLE_MAX = 200
 # The UNIQUE key of heart.result_inbox, in column order (migration 084): the one
 # conflict target every insert uses.
-INBOX_SOURCE_KEY = ["source_kind", "source_id", "source_generation", "agent_id"]
+INBOX_SOURCE_KEY = ("source_kind", "source_id", "source_generation", "agent_id")
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,7 +243,7 @@ async def _insert_report_row(
         msg_type=kind,
         title=title,
         body=body,
-        channel=channel,
+        channel=channel.strip(),
         correlation_id=str(report_id),
         created_at=created_at,
         intention_id=intention_id,
@@ -251,7 +251,8 @@ async def _insert_report_row(
         proposal_id=proposal_id,
         push_after=push_after,
     )
-    logger.info("F099: %s row %s for intention %s (root %s)", kind, report_id.hex[:8], intention_id, root_id)
+    if row_id is not None:
+        logger.info("F099: %s row %s for intention %s (root %s)", kind, report_id.hex[:8], intention_id, root_id)
     return row_id
 
 
@@ -263,3 +264,170 @@ async def close_delivered(
     return await intentions.close_for_source(
         session, agent_id, source_kind, source_id, reason=CLOSE_DELIVERED, with_result=with_result
     )
+
+
+# A fixed namespace: the report of an arrival nothing can reopen has a
+# deterministic id, so the DAG bus listener and DAGResultDelivery.deliver, which
+# both reach the writer, collapse on the inbox's UNIQUE key (contract C2).
+_REPORT_NAMESPACE = uuid.UUID("5d0c7e1e-6a7b-4f0e-9a52-0f0990b2c3d4")
+
+
+def arrival_report_id(source_kind: str, source_id: Any, generation: int) -> UUID:
+    """The ``source_id`` of the ``intention_report`` a re-arrival becomes."""
+    return uuid.uuid5(_REPORT_NAMESPACE, f"{source_kind}:{source_id}:{int(generation)}")
+
+
+async def _root_is_open(session: AsyncSession, agent_id: str, root_id: UUID) -> bool:
+    """A root is open while neither root marker is set. A separate statement from the
+    intention's lock: under READ COMMITTED it sees a cancel that committed first."""
+    markers = (
+        await session.execute(
+            select(Intention.root_cancelled_at, Intention.root_expired_at).where(
+                Intention.agent_id == agent_id, Intention.id == root_id
+            )
+        )
+    ).first()
+    return markers is not None and markers.root_cancelled_at is None and markers.root_expired_at is None
+
+
+async def _set_result_ready(
+    session: AsyncSession, agent_id: str, intention_id: UUID, *, from_state: str, now: datetime
+) -> None:
+    """T4 (``pending``) and T6 (``closed``, a reopen): the conditional UPDATE. The caller holds
+    the row lock, so a miss is a bug, not a race: it raises and the caller's transaction rolls back."""
+    values: dict[str, Any] = {"state": STATE_RESULT_READY, "result_at": now, "updated_at": now}
+    if from_state == STATE_CLOSED:
+        values.update(close_reason=None, closed_at=None)
+    moved = (
+        await session.execute(
+            update(Intention)
+            .where(
+                Intention.agent_id == agent_id,
+                Intention.id == intention_id,
+                Intention.state == from_state,
+                Intention.wake_policy == intentions.WAKE_CONTINUE,
+            )
+            .values(**values)
+            .returning(Intention.id)
+            .execution_options(synchronize_session=False)
+        )
+    ).scalar_one_or_none()
+    if moved is None:
+        raise RuntimeError(f"intention {intention_id} left {from_state!r} while its row was locked")
+
+
+async def record_result(
+    session: AsyncSession,
+    agent_id: str,
+    *,
+    intention_id: UUID,
+    source_kind: str,
+    source_id: UUID,
+    msg_type: str,
+    title: str,
+    body: str,
+    source_generation: int = 0,
+    correlation_id: str | None = None,
+    created_at: datetime | None = None,
+    arrival_id: UUID | None = None,
+    settings: Any,
+) -> ResultRecorded:
+    """The one Phase 2 writer for a ``continue`` result, in the caller's transaction (spec 4.3).
+
+    Locks the intention ``FOR UPDATE``, then: a ``continue`` intention with an open root gets a row
+    keyed by the intention alone (``channel`` and ``session_id`` NULL) and, if it was ``pending`` (T4)
+    or ``closed`` (T6, a reopen), moves to ``result_ready`` in the same transaction. A row arriving
+    while the intention is ``result_ready``, ``deciding`` or ``awaiting_owner`` is inserted and held:
+    the state is left alone. Anything nothing can reopen (another policy, a closed root, a
+    ``cancelled`` or ``expired`` intention) becomes an owner-facing ``intention_report`` carrying the
+    raw result, plus the work row's own inbox row, NULL-keyed and stamped delivered, so the reconciler
+    passes see the source as written. The state UPDATE runs only when the row was written, so a
+    duplicate delivery is a no-op. ``arrival_id`` is the arrival an owner answer belongs to (2d).
+    Emits nothing: the caller emits ``intention.result_ready`` after it commits.
+    """
+    row = (
+        await session.execute(
+            select(Intention).where(Intention.agent_id == agent_id, Intention.id == intention_id).with_for_update()
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise LookupError(f"intention {intention_id} does not exist for agent {agent_id}")
+    state, policy, root_id, origin_channel = row.state, row.wake_policy, row.root_id, row.origin_channel
+    now = datetime.now(UTC)
+
+    if (
+        policy != intentions.WAKE_CONTINUE
+        or state in (STATE_CANCELLED, STATE_EXPIRED)
+        or not await _root_is_open(session, agent_id, root_id)
+    ):
+        report_id = arrival_report_id(source_kind, source_id, source_generation)
+        # MF-1: the work row's own inbox row, NULL-keyed and already delivered. The F098 reconciler passes
+        # decide "needs repair" by this row (has_row): without it they would re-select the work row on
+        # every tick for good. NULL-keyed and delivered, no chat turn can claim it.
+        await insert_inbox_row(
+            session,
+            agent_id,
+            source_kind=source_kind,
+            source_id=source_id,
+            msg_type=msg_type,
+            title=title,
+            body=body,
+            channel=None,
+            session_id=None,
+            source_generation=source_generation,
+            correlation_id=correlation_id,
+            created_at=created_at,
+            intention_id=intention_id,
+            arrival_id=arrival_id,
+            delivered_at=now,
+            delivered_session_id=f"report:{report_id.hex[:8]}",
+        )
+        channel = owner_channel(settings, origin_channel)
+        if channel is None:
+            logger.warning(
+                "F099: a result of %s %s has no owner channel (intention %s: no origin channel, no default chat); "
+                "it stays on its work row",
+                source_kind,
+                str(source_id)[:8],
+                intention_id,
+            )
+            return ResultRecorded(None, False, state, False, False, intention_id, root_id)
+        report_row = await _insert_report_row(
+            session,
+            agent_id,
+            report_id,
+            kind=MSG_REPORT,
+            title=title,
+            body=body,
+            channel=channel,
+            intention_id=intention_id,
+            root_id=root_id,
+            arrival_id=arrival_id,
+            created_at=created_at,
+        )
+        wrote = report_row is not None
+        return ResultRecorded(report_row, wrote, state, False, wrote, intention_id, root_id)
+
+    inbox_id = await insert_inbox_row(
+        session,
+        agent_id,
+        source_kind=source_kind,
+        source_id=source_id,
+        msg_type=msg_type,
+        title=title,
+        body=body,
+        channel=None,
+        session_id=None,
+        source_generation=source_generation,
+        correlation_id=correlation_id,
+        created_at=created_at,
+        intention_id=intention_id,
+        arrival_id=arrival_id,
+    )
+    if inbox_id is None:
+        return ResultRecorded(None, False, state, False, False, intention_id, root_id)
+    reopened = state == STATE_CLOSED
+    if state in (STATE_PENDING, STATE_CLOSED):
+        await _set_result_ready(session, agent_id, intention_id, from_state=state, now=now)
+        state = STATE_RESULT_READY
+    return ResultRecorded(inbox_id, True, state, reopened, False, intention_id, root_id)

@@ -28,7 +28,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from nous.brain import continuation, intentions
 from nous.storage.database import Database
-from nous.storage.models import ChannelSession, ResultInbox, ResultInboxState, Subtask
+from nous.storage.models import ChannelSession, Intention, ResultInbox, ResultInboxState, Subtask
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -143,6 +143,80 @@ class ResultInboxStore:
     def __init__(self, database: Database, agent_id: str) -> None:
         self._db = database
         self._agent_id = agent_id
+        self._bus: EventBus | None = None
+
+    def set_bus(self, bus: EventBus | None) -> None:
+        """F099: the bus ``intention.result_ready`` goes out on. main.py wires it once."""
+        self._bus = bus
+
+    @property
+    def bus(self) -> EventBus | None:
+        return self._bus
+
+    async def intention_of(self, source_kind: str, source_id: Any) -> Intention | None:
+        """F099: the intention of a finished source, or None (a source from before the flag)."""
+        return await intentions.IntentionStore(self._db, self._agent_id).get_for_source(source_kind, source_id)
+
+    async def record_continue_result(
+        self,
+        *,
+        intention_id: UUID,
+        source_kind: str,
+        source_id: UUID,
+        generation: int,
+        envelope: Envelope,
+        correlation_id: str | None,
+        created_at: datetime | None,
+        settings: Settings,
+        arrival_id: UUID | None = None,
+    ) -> continuation.ResultRecorded:
+        """F099 Phase 2: write a ``continue`` result through ``continuation.record_result`` in
+        one transaction, then (after the commit) tell the runner there is work."""
+        async with self._db.session() as session:
+            recorded = await continuation.record_result(
+                session,
+                self._agent_id,
+                intention_id=intention_id,
+                source_kind=source_kind,
+                source_id=source_id,
+                msg_type=envelope.msg_type,
+                title=envelope.title,
+                body=envelope.body,
+                source_generation=generation,
+                correlation_id=correlation_id,
+                created_at=created_at,
+                arrival_id=arrival_id,
+                settings=settings,
+            )
+            await session.commit()
+        await self._emit_result_ready(recorded)
+        return recorded
+
+    async def _emit_result_ready(self, recorded: continuation.ResultRecorded) -> None:
+        """A hint only (the bus drops on QueueFull; the runner's sweep is the backstop)."""
+        if (
+            self._bus is None
+            or not recorded.inserted
+            or recorded.reported
+            or recorded.state_after != continuation.STATE_RESULT_READY
+        ):
+            return
+        from nous.events import Event
+
+        try:
+            await self._bus.emit(
+                Event(
+                    type="intention.result_ready",
+                    agent_id=self._agent_id,
+                    data={
+                        "intention_id": str(recorded.intention_id),
+                        "root_id": str(recorded.root_id),
+                        "agent_id": self._agent_id,
+                    },
+                )
+            )
+        except Exception:
+            logger.warning("F099: could not emit intention.result_ready for %s", recorded.intention_id, exc_info=True)
 
     async def insert(
         self,
