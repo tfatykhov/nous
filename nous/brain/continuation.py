@@ -15,7 +15,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -945,8 +945,10 @@ async def _commit_arrival(
         groups.setdefault(target, []).append(intention_id)
     for (state, reason), group in groups.items():
         values: dict[str, Any] = {"state": state, "claim_token": None, "claimed_at": None, "updated_at": now}
-        if outcome != OUTCOME_FAILED or state != STATE_CLOSED:
-            values["attempts"] = 0  # only a failed_report that closes keeps the count that ended it
+        if outcome != OUTCOME_FAILED:
+            # A failed_report keeps the count: the close keeps the count that ended it, and a late row's send-back
+            # keeps it as a retry below the cap does (2c1-5 ruling), so a chronic failer is not handed a fresh three.
+            values["attempts"] = 0
         if state in (STATE_CLOSED, STATE_CANCELLED, STATE_EXPIRED):
             values.update(close_reason=reason, closed_at=now)
         if state == STATE_RESULT_READY:
@@ -1046,6 +1048,186 @@ async def _commit_arrival(
     )
     await session.flush()
     return ArrivalCommit(arrival_id, n, next_states, decision_record_id, tuple(report_ids))
+
+
+FAIL_RETRY, FAIL_LOST = "retry", "lost"
+
+
+async def fail_attempt(
+    session: AsyncSession,
+    agent_id: str,
+    claim: Claim,
+    *,
+    max_attempts: int,
+    settings: Any,
+    brain: Any = None,
+    now: datetime | None = None,
+) -> str:
+    """T8 and T12: one claimed attempt failed (the turn raised or timed out, or its lease expired).
+
+    ``attempts`` goes up on every claimed intention (spec 4.5.7). Below ``max_attempts`` the claim is
+    released to ``result_ready`` with ``result_at = now``, so the debounce spaces the retry and a
+    failing turn cannot spin: returns ``"retry"``. At the cap the raw results become a REPORT and the
+    intentions close ``failed_report``: returns ``"failed_report"``. Both fenced on the claim token; a
+    claim that is no longer live returns ``"lost"`` and writes nothing. A row that arrived while the claim ran
+    sends its intention back to ``result_ready`` with ``attempts`` kept, as a retry below the cap keeps it: the
+    late row gets one more attempt, so a lineage whose turns keep failing reports its next result raw after one
+    more failure (a successful commit resets the count). Does not commit.
+    """
+    now = now or datetime.now(UTC)
+    ids = sorted(i.id for i in claim.intentions)
+    try:
+        async with session.begin_nested():
+            await _lock_claimed(session, agent_id, claim.root_id, ids)
+            bumped = (
+                await session.execute(
+                    update(Intention)
+                    .where(
+                        Intention.agent_id == agent_id,
+                        Intention.id.in_(ids),
+                        Intention.state == STATE_DECIDING,
+                        Intention.claim_token == claim.claim_token,
+                    )
+                    .values(attempts=Intention.attempts + 1, updated_at=now)
+                    .returning(Intention.id, Intention.attempts)
+                    .execution_options(synchronize_session=False)
+                )
+            ).all()
+            if len(bumped) != len(ids):
+                raise _FenceLost
+            worst = max(row.attempts for row in bumped)
+            if worst < max_attempts:
+                released = await _fenced_move(
+                    session,
+                    agent_id,
+                    ids,
+                    claim.claim_token,
+                    {
+                        "state": STATE_RESULT_READY,
+                        "claim_token": None,
+                        "claimed_at": None,
+                        "result_at": now,
+                        "updated_at": now,
+                    },
+                )
+                if released != set(ids):
+                    raise _FenceLost
+                return FAIL_RETRY
+            raw = raw_results_text(claim.inbox_rows)
+            body = f"I could not process this result after {worst} attempts, so it is passed on as it arrived."
+            await _commit_arrival(
+                session,
+                agent_id,
+                claim,
+                resolution=Resolution("report", f"Failed after {worst} attempts.", False, 0.0),
+                outcome=OUTCOME_FAILED,
+                gate_reason=None,
+                tokens=(0, 0),
+                brain=brain,
+                settings=settings,
+                report_text=f"{body}\n\n{raw}" if raw else body,
+                wrote_memory=False,
+                arrival_id=uuid.uuid4(),
+                now=now,
+            )
+            return CLOSE_FAILED_REPORT
+    except _FenceLost:
+        logger.warning(
+            "F099: the failed claim %s of root %s is no longer live", claim.claim_token.hex[:8], claim.root_id
+        )
+        return FAIL_LOST
+
+
+async def release_claim(session: AsyncSession, agent_id: str, claim: Claim) -> int:
+    """Free a claim deliberately (a shutdown, a cancel) without charging an attempt: the rows go back to
+    ``result_ready`` as they were. Fenced: a claim that is no longer live releases nothing. Returns the
+    number of intentions released. Does not commit."""
+    ids = sorted(i.id for i in claim.intentions)
+    now = datetime.now(UTC)
+    async with session.begin_nested():
+        await _lock_claimed(session, agent_id, claim.root_id, ids)
+        moved = await _fenced_move(
+            session,
+            agent_id,
+            ids,
+            claim.claim_token,
+            {"state": STATE_RESULT_READY, "claim_token": None, "claimed_at": None, "updated_at": now},
+        )
+    return len(moved)
+
+
+async def release_stale_claims(
+    session: AsyncSession,
+    agent_id: str,
+    *,
+    lease_s: float,
+    max_attempts: int,
+    settings: Any,
+    brain: Any = None,
+    now: datetime | None = None,
+) -> list[UUID]:
+    """T8: at startup and on every sweep, every ``deciding`` row claimed more than ``lease_s`` ago
+    counts as a failed attempt (spec 4.5.2 Lease, 4.5.7). Rows are grouped by claim, so a batch fails
+    together, and each group goes through ``fail_attempt``: ``attempts + 1`` and back to ``result_ready``,
+    or ``failed_report`` at the cap. Returns the ids it released; a claim that committed while the sweep
+    waited for its rows is not released. A turn should not outlive its lease (the runner's timeout is
+    60 s under it, less the claim's lock wait: see the predicate); the fenced commit is what makes a late
+    one harmless anyway. Does not commit."""
+    now = now or datetime.now(UTC)
+    stale = (
+        (
+            await session.execute(
+                select(Intention)
+                .where(
+                    Intention.agent_id == agent_id,
+                    Intention.state == STATE_DECIDING,
+                    Intention.claim_token.is_not(None),
+                    # claimed_at is the database's now() at the start of the claim's transaction, before
+                    # claim_root waited for the root lock, so the lease runs from at or before the claim: it can
+                    # end early by that wait, never late (a crashed claim is never held past its lease). The 60 s
+                    # between the turn timeout and the lease absorb a short wait; past that, the fence turns the
+                    # turn's commit into a lost one and the attempt is charged. ``now`` is taken before this sweep
+                    # waits on any lock, so the sweep errs the other way: it releases only what was stale when it
+                    # began. The one place that compares the database's clock with Python's: one host in prod.
+                    Intention.claimed_at < now - timedelta(seconds=lease_s),
+                )
+                .order_by(Intention.root_id, Intention.claim_token, Intention.id)
+                .execution_options(populate_existing=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    groups: dict[tuple[UUID, UUID], list[Intention]] = {}
+    for member in stale:
+        groups.setdefault((member.root_id, member.claim_token), []).append(member)
+    released: list[UUID] = []
+    for (root_id, token), members in groups.items():
+        members.sort(key=lambda m: (-m.depth, m.created_at, m.id))
+        ids = [m.id for m in members]
+        rows = (
+            (
+                await session.execute(
+                    select(ResultInbox)
+                    .where(intention_keyed(agent_id, ids), ResultInbox.delivered_at.is_(None))
+                    .order_by(ResultInbox.created_at, ResultInbox.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        outcome = await fail_attempt(
+            session,
+            agent_id,
+            Claim(root_id, token, tuple(members), members[0], tuple(rows)),
+            max_attempts=max_attempts,
+            settings=settings,
+            brain=brain,
+            now=now,
+        )
+        if outcome != FAIL_LOST:
+            released.extend(ids)
+    return released
 
 
 # A fixed namespace: the report of an arrival nothing can reopen has a
