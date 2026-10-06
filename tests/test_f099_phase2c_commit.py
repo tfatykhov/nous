@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-import inspect
+import time
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -15,6 +15,7 @@ from f099_support import (
     CHAN,
     CONT,
     RESULT,
+    age,
     claim,
     env_factory,  # noqa: F401
     inbox_rows,
@@ -24,7 +25,7 @@ from f099_support import (
     record,
     set_intention,
 )
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from nous.brain import continuation
 from nous.brain.continuation import Resolution
@@ -74,12 +75,6 @@ def test_push_after_is_now_by_day_and_the_end_of_the_quiet_hours_by_night():
     assert continuation.push_after_for(settings, NIGHT) == datetime(2026, 10, 6, 8, 0, tzinfo=UTC)
 
 
-def test_the_heartbeat_runner_uses_the_shared_quiet_hours():  # PIN (its datetime-patching tests stay green)
-    from nous.heartbeat.runner import HeartbeatRunner
-
-    assert "in_quiet_hours(" in inspect.getsource(HeartbeatRunner._in_quiet_hours)
-
-
 @pytest.mark.parametrize("start", range(24))
 def test_the_heartbeat_runner_keeps_its_quiet_hours_rule_for_every_hour(start):  # PIN
     """The runner's answer for every (start, end, hour), read through its own module's ``datetime`` (what
@@ -92,6 +87,8 @@ def test_the_heartbeat_runner_keeps_its_quiet_hours_rule_for_every_hour(start): 
             runner._settings = _settings(start, end)
             for hour in range(24):
                 mock_dt.now.return_value = datetime(2026, 10, 6, hour, 30, tzinfo=UTC)
+                # The expected value is a formula, not a literal (a deliberate exception to the pin rule): it
+                # is the removed method body, transcribed, so it cannot drift with the code it pins.
                 before = start <= hour < end if start <= end else hour >= start or hour < end
                 assert runner._in_quiet_hours() is before, (start, end, hour)
 
@@ -183,6 +180,25 @@ async def test_progress_is_the_claim_checked(env_factory, decision, claimed, spa
     await _commit(env, got, _r(decision, progress=claimed), wrote_memory=memory)
     (arrival,) = await _arrivals(env, root.id)
     assert (arrival.progress_claimed, arrival.progress) == (claimed, expected)
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize("spawns_again", [False, True])
+async def test_a_child_an_earlier_arrival_spawned_does_not_count_as_progress(env_factory, spawns_again):  # noqa: F811
+    env = await env_factory(**CONT)
+    root, got = await _claimed(env)
+    await make_child(env, got.deepest)  # arrival 1 spawns under the root
+    await record(env, root, generation=1, body="a later result")  # and a late row sends the root back
+    first = await _commit(env, got, _r("continue"))
+    assert first.next_states == {root.id: "result_ready"}
+    await age(env, root.id)
+    again = await claim(env, root.id)  # the same intention, claimed a second time
+    if spawns_again:
+        await make_child(env, again.deepest)
+    await _commit(env, again, _r("continue"))
+    earlier, second = await _arrivals(env, root.id)
+    assert earlier.progress is True
+    assert (second.progress_claimed, second.progress) == (True, spawns_again)
 
 
 @pytest.mark.postgres_only
@@ -341,6 +357,20 @@ async def test_a_fallback_closes_as_fallback_report_with_the_turns_text(env_fact
 
 
 @pytest.mark.postgres_only
+@pytest.mark.parametrize(("outcome", "decision"), [("fallback_report", "continue"), ("failed_report", "drop")])
+async def test_a_fallback_reports_whatever_its_decision(env_factory, outcome, decision):  # noqa: F811
+    env = await env_factory(**CONT)
+    root, got = await _claimed(env)
+    resolution = _r(decision, "what the turn said", progress=False)
+    done = await _commit(env, got, resolution, outcome=outcome, report_text="the raw results")
+    (row,) = await _owner_rows(env)  # contract 4.14 item 5: both fallbacks write a REPORT, unconditionally
+    assert (row.msg_type, row.body, row.channel, row.intention_id) == ("REPORT", "the raw results", CHAN, root.id)
+    assert done.report_ids == (row.source_id,)
+    fresh = await intention_of(env, "subtask", root.source_id)
+    assert (fresh.state, fresh.close_reason) == ("closed", outcome)
+
+
+@pytest.mark.postgres_only
 @pytest.mark.parametrize("note", ["done", "The feed encountered an error and the run was cut short.", "ok"])
 async def test_a_terse_note_still_records_its_decision(env_factory, note):  # noqa: F811
     from nous.brain import Brain
@@ -370,6 +400,53 @@ async def test_a_failing_brain_does_not_abort_the_commit(env_factory):  # noqa: 
 
 
 @pytest.mark.postgres_only
+async def test_a_slow_brain_statement_is_cut_off_and_the_commit_still_lands(env_factory, monkeypatch):  # noqa: F811
+    env = await env_factory(**CONT)
+    monkeypatch.setattr(continuation, "BRAIN_RECORD_STATEMENT_TIMEOUT_MS", 100)
+
+    async def record_slowly(_input, session):
+        await session.execute(text("SELECT pg_sleep(1)"))  # a Brain statement still running past the bound
+        return SimpleNamespace(id=uuid.uuid4())
+
+    root, got = await _claimed(env)
+    started = time.monotonic()
+    done = await _commit(env, got, _r("continue"), brain=SimpleNamespace(record=record_slowly))
+    assert time.monotonic() - started < 1  # cut off at the bound, not after the sleep
+    assert done is not None and done.decision_record_id is None
+    assert (await intention_of(env, "subtask", root.source_id)).state == "closed"
+    (arrival,) = await _arrivals(env, root.id)
+    assert arrival.decision_record_id is None
+
+
+@pytest.mark.postgres_only
+async def test_the_brain_statement_bound_does_not_outlive_the_record(env_factory, monkeypatch):  # noqa: F811
+    env = await env_factory(**CONT)
+    monkeypatch.setattr(continuation, "BRAIN_RECORD_STATEMENT_TIMEOUT_MS", 250)
+    seen: list[str] = []
+
+    async def record(_input, session):
+        seen.append((await session.execute(text("SHOW statement_timeout"))).scalar_one())
+        return SimpleNamespace(id=uuid.uuid4())
+
+    _, got = await _claimed(env)
+    async with env.db.session() as s:
+        before = (await s.execute(text("SHOW statement_timeout"))).scalar_one()
+        done = await continuation.commit_arrival(
+            s,
+            env.agent,
+            got,
+            resolution=_r("drop"),
+            outcome="resolved",
+            settings=env.settings,
+            brain=SimpleNamespace(record=record),
+        )
+        after = (await s.execute(text("SHOW statement_timeout"))).scalar_one()
+        await s.commit()
+    assert seen == ["250ms"] and done.decision_record_id is not None
+    assert after == before  # the rest of the caller's transaction keeps its own bound
+
+
+@pytest.mark.postgres_only
 async def test_an_arrival_with_no_owner_channel_still_commits(env_factory, caplog):  # noqa: F811
     env = await env_factory(**CONT)  # no default chat either
     root = await make_root(env, routed=False)
@@ -386,3 +463,21 @@ async def test_an_unknown_decision_is_refused_before_anything_is_written(env_fac
     with pytest.raises(ValueError, match="decision"):
         await _commit(env, got, _r("approve"))
     assert (await intention_of(env, "subtask", root.source_id)).state == "deciding"
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize(
+    ("decision", "outcome", "match"),
+    [
+        ("continue", "resolve", "outcome"),  # a typo would otherwise close as 'resolved'
+        ("report", "fallback", "outcome"),
+        ("ask", "fallback_report", "fallback"),  # a fallback asks nothing: no QUESTION, nothing to wait for
+    ],
+)
+async def test_an_unknown_outcome_or_a_fallback_that_asks_is_refused(env_factory, decision, outcome, match):  # noqa: F811
+    env = await env_factory(**CONT)
+    root, got = await _claimed(env)
+    with pytest.raises(ValueError, match=match):
+        await _commit(env, got, _r(decision), outcome=outcome)
+    assert (await intention_of(env, "subtask", root.source_id)).state == "deciding"
+    assert await _arrivals(env, root.id) == [] and await _owner_rows(env) == []

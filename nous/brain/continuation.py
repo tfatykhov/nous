@@ -10,7 +10,6 @@ every writer.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import uuid
@@ -50,6 +49,7 @@ REPORT_KINDS = (MSG_REPORT, MSG_QUESTION, MSG_PROPOSAL)
 CLOSE_DELIVERED, CLOSE_RESOLVED, CLOSE_CANCELLED, CLOSE_EXPIRED = "delivered", "resolved", "cancelled", "expired"
 CLOSE_FALLBACK_REPORT, CLOSE_FAILED_REPORT = "fallback_report", "failed_report"
 OUTCOME_RESOLVED, OUTCOME_FALLBACK, OUTCOME_FAILED = "resolved", "fallback_report", "failed_report"
+OUTCOMES = (OUTCOME_RESOLVED, OUTCOME_FALLBACK, OUTCOME_FAILED)
 DECISIONS = ("continue", "revise", "drop", "report", "ask")
 PROPOSAL_TERMINAL = frozenset({"executed", "failed", "rejected", "expired", "cancelled"})
 OPEN_STATES = ("pending", "result_ready", "deciding", "awaiting_owner")
@@ -660,9 +660,13 @@ class _FenceLost(Exception):
     cancelled or expired, since the claim. Raised inside a SAVEPOINT so nothing the function wrote survives."""
 
 
-# The Brain record embeds the description and searches for links while the claimed rows are locked: bounded.
-# A timeout is one more logged failure that leaves decision_record_id NULL (the commit goes on).
-BRAIN_RECORD_TIMEOUT_SECONDS = 30
+# The Brain record runs while the claimed rows are locked, so each of its statements is bounded (SET LOCAL
+# statement_timeout inside its SAVEPOINT). The bound is per statement, not per call: the record's embedding
+# request has its own HTTP timeout, so the total is that plus a few short statements. Not asyncio.wait_for:
+# cancelling the coroutine with a statement in flight makes SQLAlchemy invalidate the connection, and the
+# commit's next statement would raise. A cut-off statement is one more logged failure that leaves
+# decision_record_id NULL (the commit goes on).
+BRAIN_RECORD_STATEMENT_TIMEOUT_MS = 10_000
 
 
 def push_after_for(settings: Any, now: datetime | None = None) -> datetime:
@@ -748,14 +752,22 @@ async def _verified_progress(
     agent_id: str,
     ids: list[UUID],
     *,
+    since: datetime | None,
     resolution: Resolution,
     outcome: str,
     gate_reason: str | None,
     wrote_memory: bool,
 ) -> bool | None:
     """Spec 4.5.4: the model's claim, kept only if the arrival spawned work (a child of a claimed
-    intention), changed the plan (``revise``) or wrote memory. NULL where no model decided
-    (a gate arrival, ``failed_report``); a fallback made no decision about progress: false."""
+    intention created at or after ``since``, the claim's ``claimed_at``), changed the plan (``revise``)
+    or wrote memory. NULL where no model decided (a gate arrival, ``failed_report``); a fallback made no
+    decision about progress: false.
+
+    Both stamps are the database's ``now()``, and the turn's spawns begin after the claim's transaction
+    committed, so the bound is exact. A child an earlier arrival spawned under an intention claimed again
+    (a T11 send-back, an answered question) does not count. Nor does one an earlier attempt spawned before
+    its lease was released: that spawn belongs to no arrival. Conservative: the stall budget trips sooner,
+    and the turn budget still caps the lineage."""
     if gate_reason is not None or outcome == OUTCOME_FAILED:
         return None
     if outcome == OUTCOME_FALLBACK or not resolution.progress_claimed:
@@ -763,7 +775,13 @@ async def _verified_progress(
     if resolution.decision == "revise" or wrote_memory:
         return True
     spawned = (
-        await session.execute(select(exists().where(Intention.agent_id == agent_id, Intention.parent_id.in_(ids))))
+        await session.execute(
+            select(
+                exists().where(
+                    Intention.agent_id == agent_id, Intention.parent_id.in_(ids), Intention.created_at >= since
+                )
+            )
+        )
     ).scalar_one()
     return bool(spawned)
 
@@ -785,30 +803,34 @@ async def _record_brain(
         return None
     root_id = claim.root_id
     note = (resolution.note or "").strip()
+    decision_id: UUID | None = None
     try:
         async with session.begin_nested():
-            detail = await asyncio.wait_for(
-                brain.record(
-                    RecordInput(
-                        description=f"F099 arrival {n} on '{claim.deepest.intent[:120]}': {resolution.decision}",
-                        confidence=min(1.0, max(0.0, float(resolution.confidence))),
-                        category="process",
-                        stakes="low",
-                        context=json.dumps(
-                            {"root_id": str(root_id), "intention_ids": [str(i) for i in ids], "arrival_n": n}
-                        ),
-                        tags=["f099", resolution.decision],
-                        reasons=[ReasonInput(type="analysis", text=note[:2000])] if note else [],
-                        session_id=f"{INTENT_SESSION_PREFIX}{root_id}",
+            # SET takes no bind parameters: the int constant is interpolated. ROLLBACK TO SAVEPOINT undoes it;
+            # a cut-off statement raises QueryCanceled (an ordinary Exception) and the savepoint rolls back.
+            await session.execute(text(f"SET LOCAL statement_timeout = {int(BRAIN_RECORD_STATEMENT_TIMEOUT_MS)}"))
+            detail = await brain.record(
+                RecordInput(
+                    description=f"F099 arrival {n} on '{claim.deepest.intent[:120]}': {resolution.decision}",
+                    confidence=min(1.0, max(0.0, float(resolution.confidence))),
+                    category="process",
+                    stakes="low",
+                    context=json.dumps(
+                        {"root_id": str(root_id), "intention_ids": [str(i) for i in ids], "arrival_n": n}
                     ),
-                    session=session,
+                    tags=["f099", resolution.decision],
+                    reasons=[ReasonInput(type="analysis", text=note[:2000])] if note else [],
+                    session_id=f"{INTENT_SESSION_PREFIX}{root_id}",
                 ),
-                timeout=BRAIN_RECORD_TIMEOUT_SECONDS,  # it embeds and searches while the claimed rows are locked
+                session=session,
             )
-        return detail.id
+        decision_id = detail.id
     except Exception:
         logger.warning("F099: could not record the Brain decision of arrival %s of root %s", n, root_id, exc_info=True)
-        return None
+    # RELEASE SAVEPOINT keeps a SET LOCAL for the rest of the transaction: give the commit back the bound it had.
+    # DEFAULT is the value the connection was opened with.
+    await session.execute(text("SET LOCAL statement_timeout = DEFAULT"))
+    return decision_id
 
 
 async def commit_arrival(
@@ -832,12 +854,22 @@ async def commit_arrival(
     or expired): nothing is written then, and the caller discards the turn's result.
 
     ``tokens`` is ``(tokens_in, tokens_out)``. ``report_text`` is the body of the REPORT of a gate
-    escalation or a fallback (the note otherwise). ``wrote_memory`` is the turn's evidence for
-    ``progress``. ``arrival_id`` is the id the turn's context carried. Does not commit and emits
-    nothing: the runner emits ``intention.arrival_decided`` after it commits.
+    escalation or a fallback (the note otherwise); a fallback always writes one, whatever its decision.
+    ``wrote_memory`` is the turn's evidence for ``progress``. ``arrival_id`` is the id the turn's context
+    carried. Does not commit and emits nothing: the runner emits ``intention.arrival_decided`` after it
+    commits.
+
+    Two clocks: ``now`` (Python's, unless given) stamps ``result_at``, ``closed_at``, ``delivered_at``,
+    ``decided_at`` and ``push_after``; ``claimed_at`` and ``created_at`` are the database's ``now()``. One
+    host in prod, and nothing here compares a stamp of one clock with one of the other (the progress
+    bound compares two database stamps).
     """
     if resolution.decision not in DECISIONS:
         raise ValueError(f"decision must be one of {DECISIONS}, not {resolution.decision!r}")
+    if outcome not in OUTCOMES:  # _close_reason would close a typo as 'resolved'
+        raise ValueError(f"outcome must be one of {OUTCOMES}, not {outcome!r}")
+    if outcome != OUTCOME_RESOLVED and resolution.decision == "ask":
+        raise ValueError(f"a fallback ({outcome}) cannot ask: it writes a REPORT, and no question would be answered")
     if gate_reason is not None and gate_reason not in GATE_REASONS:
         raise ValueError(f"unknown gate reason {gate_reason!r}")
     try:
@@ -946,6 +978,9 @@ async def _commit_arrival(
         session,
         agent_id,
         ids,
+        # claim_root reloaded the claimed rows after its UPDATE, so this is the claim's own now() (one value
+        # for every claimed row). Not re-read: the fenced moves above have already cleared the column.
+        since=claim.intentions[0].claimed_at,
         resolution=resolution,
         outcome=outcome,
         gate_reason=gate_reason,
@@ -954,7 +989,10 @@ async def _commit_arrival(
     decision_record_id = await _record_brain(session, brain, claim=claim, resolution=resolution, ids=ids, n=n)
 
     report_ids: list[UUID] = []
-    kind = {"ask": MSG_QUESTION, "report": MSG_REPORT}.get(resolution.decision)
+    if outcome in (OUTCOME_FALLBACK, OUTCOME_FAILED):
+        kind: str | None = MSG_REPORT  # contract 4.14 item 5: a fallback reports unconditionally
+    else:
+        kind = {"ask": MSG_QUESTION, "report": MSG_REPORT}.get(resolution.decision)
     if kind is not None:
         origin = await _root_origin_channel(session, agent_id, root_id, deepest.origin_channel)
         channel = owner_channel(settings, origin)
