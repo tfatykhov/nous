@@ -36,6 +36,7 @@ from nous.heartbeat.dynamic import (
     render_findings,
 )
 from nous.heartbeat.finding_store import FindingStore
+from nous.heartbeat.quiet_hours import in_quiet_hours
 from nous.heartbeat.registry import BaseCheck, CheckRegistry
 from nous.heartbeat.schemas import CheckResult, Finding, FindingAction, HeartbeatResult
 from nous.heartbeat.tuner import HeartbeatTuner
@@ -584,6 +585,27 @@ class HeartbeatRunner:
         except Exception:
             logger.warning("F099: could not store the final-run findings of check '%s'", check.name, exc_info=True)
 
+    async def _roll_check_tokens_into_dag(self, check: BaseCheck, tokens: int) -> None:
+        """F099 spec 4.6: a lineage check's tokens count against its DAG (and so its root's budget).
+
+        Only with continuation on, and only a DynamicCheck that carries a lineage stamp, with a DAG
+        orchestrator and a loader wired; every other check does no read and no write. Never raises.
+        The increment is relative and is not retried (a retry could double-count).
+        """
+        if tokens <= 0 or not isinstance(check, DynamicCheck) or check.intention_stamp is None:
+            return
+        from nous.brain import continuation  # late: keep the heartbeat import graph as it was
+
+        if not continuation.enabled(self._settings):
+            return
+        if self.dag_orchestrator is None or self._dynamic_loader is None:
+            return
+        try:
+            metadata = await self._dynamic_loader.check_metadata(check.name)
+            await self.dag_orchestrator.add_check_tokens(metadata, tokens)
+        except Exception:
+            logger.warning("F099: could not add the tokens of check '%s' to its DAG", check.name, exc_info=True)
+
     async def _record_run_stats(
         self,
         check: BaseCheck,
@@ -747,6 +769,9 @@ class HeartbeatRunner:
                 await self._record_run_stats(check, success=True)
                 # F099 Phase 0b: the final run's findings, before the run can end.
                 await self._record_final_findings(check, result)
+                # F099: after the run's own record, as in trigger_check: a cancel here loses only the roll-up.
+                if result.tokens_used:
+                    await self._roll_check_tokens_into_dag(check, result.tokens_used)
 
                 # #273: Collect self-disabled checks with callbacks
                 if isinstance(check, DynamicCheck) and result.self_disabled and check.on_complete_prompt:
@@ -1327,16 +1352,7 @@ class HeartbeatRunner:
 
     def _in_quiet_hours(self) -> bool:
         """Check if current hour falls in quiet range."""
-        hour = datetime.now(UTC).hour
-        start = self._settings.heartbeat_quiet_start
-        end = self._settings.heartbeat_quiet_end
-
-        if start <= end:
-            # Simple range: e.g. 9-17
-            return start <= hour < end
-        else:
-            # Wraps midnight: e.g. 23-8
-            return hour >= start or hour < end
+        return in_quiet_hours(self._settings, datetime.now(UTC))
 
     def _has_budget(self) -> bool:
         """Check if daily token budget is not exhausted."""
@@ -1516,6 +1532,7 @@ class HeartbeatRunner:
                 run_succeeded = True
             if result.tokens_used:
                 self._tokens_used_today += result.tokens_used
+                await self._roll_check_tokens_into_dag(check, result.tokens_used)
             # #273: Fire callback if check self-disabled
             if isinstance(check, DynamicCheck) and result.self_disabled and check.on_complete_prompt:
                 if self._has_budget():

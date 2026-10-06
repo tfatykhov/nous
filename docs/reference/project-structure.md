@@ -31,7 +31,7 @@ nous/
 │   │   ├── graph_linker.py     # Cross-type auto-linking (common-template embedding)
 │   │   ├── guardrails.py       # CEL expression guardrails
 │   │   ├── intentions.py       # F099: brain.intentions — spec, wake-policy defaults, lineage (a fire only under an open container), in-transaction insert, legacy close
-│   │   ├── continuation.py     # F099 Phase 2: the continuation store: the inbox primitives, the same-transaction move of a continue result, owner-facing rows, the startup rollback (the runner follows in PR-2c)
+│   │   ├── continuation.py     # F099 Phase 2: the continuation store: the inbox primitives, the same-transaction move of a continue result, owner-facing rows, the startup rollback; Phase 2c: the claim, the gate and the budgets (derived from rows), the fenced commit, failure and lease, the TTL sweep, the ask wake rule (the runner follows in PR-2c-2)
 │   │   ├── quality.py          # Decision quality scoring
 │   │   ├── schemas.py          # Pydantic models
 │   │   └── spreading_activation.py  # Density-gated multi-hop graph traversal
@@ -46,7 +46,7 @@ nous/
 │   │   ├── search.py           # Full-text + vector search
 │   │   ├── subtasks.py         # Subtask CRUD operations
 │   │   ├── result_inbox.py     # F098: channel-keyed result inbox (store, subtask/DAG writers, pre_turn formatting)
-│   │   ├── result_reconciler.py  # F098: repairs lost inbox writes (the inbox passes: subtask and DAG); Phase C adds the memory pass; F099 adds the intentions pass (closes finished work and stopped schedules)
+│   │   ├── result_reconciler.py  # F098: repairs lost inbox writes (the inbox passes: subtask and DAG); Phase C adds the memory pass; F099 adds the intentions pass (closes finished work and stopped schedules); F099 Phase 2c adds `repair_missing_results`
 │   │   ├── result_memory.py    # F098 Phase C: a finished subtask result becomes an episode + marked chunks (log, writer, reconciler pass)
 │   │   ├── schedules.py        # Schedule CRUD operations
 │   │   └── schemas.py          # Pydantic models
@@ -83,6 +83,7 @@ nous/
 │   │   ├── work_queue.py       # F064.6 WorkQueueCheck (file_jsonl adapter)
 │   │   ├── finding_store.py    # F034.1 finding lifecycle persistence
 │   │   ├── tuner.py            # F034.3 self-tuning pass
+│   │   ├── quiet_hours.py      # F099: in_quiet_hours / quiet_hours_end, shared by the heartbeat and the owner pushes
 │   │   └── schemas.py          # Finding, CheckResult, HeartbeatResult
 │   ├── identity/               # Agent identity system (F018)
 │   │   ├── manager.py          # Identity section CRUD

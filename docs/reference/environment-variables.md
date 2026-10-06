@@ -158,7 +158,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_CONTINUATION_MAX_TURNS_PER_ROOT` | `8` | F099 Phase 2. Most continuation turns for one root (`>= 1`). |
 | `NOUS_CONTINUATION_MAX_TOKENS_PER_ROOT` | `400000` | F099 Phase 2. Token budget for one root across its subtasks, DAGs and arrivals (`>= 1000`). |
 | `NOUS_CONTINUATION_STALL_LIMIT` | `2` | F099 Phase 2. Consecutive arrivals without progress before the root escalates (`>= 1`). |
-| `NOUS_INTENTION_ROOT_TTL_HOURS` | `72` | F099 Phase 2. A root's lifetime. A child's deadline is the earlier of its parent's and `created + this` (`> 0`). |
+| `NOUS_INTENTION_ROOT_TTL_HOURS` | `72` | F099 Phase 2. A root's lifetime. A child's deadline is the earlier of its parent's and `created + this` (`> 0`). A NULL deadline (a root written by Phase 1) is read as `created_at + this`, by the expiry sweep and for that root's children, which get `min(parent.created_at + this, now + this)`. A root with no deadline and nothing unread expires without a report. |
 | `NOUS_CONTINUATION_MAX_CONCURRENT` | `2` | F099 Phase 2. Roots deciding at once (`>= 1`). |
 | `NOUS_CONTINUATION_DEBOUNCE_SECONDS` | `20` | F099 Phase 2. A claim waits this long after the root's newest result (`>= 0`). |
 | `NOUS_CONTINUATION_MAX_WAIT_SECONDS` | `120` | F099 Phase 2. ...but no longer than this after its oldest (`>= 0`, and not below the debounce: a startup error otherwise). |

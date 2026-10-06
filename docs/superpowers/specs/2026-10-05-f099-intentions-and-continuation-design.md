@@ -548,7 +548,7 @@ The F098 A and C classification of scheduled, inline and spawn rows is pinned, a
 | 0b | **Carry the result**: heartbeat callbacks receive their check's findings; DAG check nodes store their findings as the node result. A check run cancelled during its success writes now ends as a failure, never a success. | none (a behaviour fix with its own tests and review) | #694 merged |
 | 1 | §4.1–4.2 and §4.3 Phase 1: intentions, capture on every path, lineage stamps, `legacy` closing. | `NOUS_INTENTIONS_ENABLED` | 0a |
 | 2 | §4.3 Phase 2 routing, §4.4–4.6. | `NOUS_CONTINUATION_ENABLED` | 1 |
-| 3 | §4.7 dashboard, metrics and calibration; an assumption re-check if the data calls for it. | – | 2 |
+| 3 | §4.7 dashboard, metrics and calibration; the A2UI companion cards (proposal Approve/Reject, question, "Active intentions" with cancel, reports), with more owner interaction moving to A2UI over time (owner, 2026-10-06); an assumption re-check if the data calls for it. | – | 2 |
 
 **Rollout.**
 1. Turn on Phase 1 and read a week of intentions: the wake-policy mix and the quality of the intent lines.

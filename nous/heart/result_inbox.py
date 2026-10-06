@@ -513,7 +513,8 @@ async def route_result(
       (``record_continue_result``: the row and the move to ``result_ready`` in one transaction);
     * ``report``: the F098-keyed row and the ``delivered`` close in one transaction (``insert_and_close``);
       with no routing key the row goes to ``continuation.owner_channel``, and with no owner channel
-      either nothing is written and the intention closes as ``legacy``;
+      either nothing is written and the intention closes as ``legacy``; a ``report`` with no content
+      closes as ``legacy`` (nothing was delivered);
     * ``none``, ``remember``, a container, or no intention: closed (before the routing check, so a
       result nobody is routed still closes) and routed as F098 Phase A.
 
@@ -534,6 +535,11 @@ async def route_result(
             settings=settings,
         )
         return recorded.inserted
+    if intention is not None and policy == intentions.WAKE_REPORT and env is None:
+        # R1: a report with nothing to say delivers nothing, so it is not 'delivered' (which means an
+        # owner-facing row was written). Closed before the routing check, like every close.
+        await store.close_source_intention(source_kind, source_id, reason=intentions.CLOSE_LEGACY)
+        return False
     if not channel and not session_id:
         channel = default_channel
     if intention is not None and policy == intentions.WAKE_REPORT and env is not None and not (channel or session_id):

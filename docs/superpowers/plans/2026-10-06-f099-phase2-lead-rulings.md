@@ -6,7 +6,7 @@ The contract in `2026-10-06-f099-phase2-contract.md` is binding. Every sub-PR pl
 
 - 2a (enforcement) and 2b (data and routing) both depend only on PR-1, so they are planned in parallel.
 - 2c (runner) follows 2a and 2b. 2d (proposals and owner actions) follows 2c. 2e (cancel and the flag gate) follows 2d.
-- 2f (A2UI cards) is deferred. Telegram and REST approval paths are enough for v1.
+- 2f (A2UI cards) is NOT deferred (owner, 2026-10-06): it moves into Phase 3, and the long-term aim is to move more of the owner's interaction to A2UI, with Telegram as the fallback channel. 2d must keep approve, reject, answer and cancel surface-neutral (deterministic routes the bot calls today and the cards call in Phase 3).
 
 ## Flag gate
 

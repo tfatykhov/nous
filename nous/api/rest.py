@@ -1259,10 +1259,13 @@ def create_app(
         # join it. No turn wrote an intent, so it is generated from the task.
         container = None
         if intentions.enabled(settings):
-            container = IntentionSpec(
-                intent=intentions.generated_intent(intentions.ORIGIN_REST, task),
-                origin_kind=intentions.ORIGIN_REST,
-                container=True,
+            container = intentions.with_bounds(
+                IntentionSpec(
+                    intent=intentions.generated_intent(intentions.ORIGIN_REST, task),
+                    origin_kind=intentions.ORIGIN_REST,
+                    container=True,
+                ),
+                settings,
             )
 
         try:

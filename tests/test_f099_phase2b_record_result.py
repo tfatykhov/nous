@@ -144,8 +144,10 @@ async def test_a_closed_continue_intention_with_an_open_root_reopens(env_factory
     assert len(await inbox_rows(env, st.id)) == 2
 
 
-async def test_a_reopen_clears_the_previous_claim_and_attempts(env_factory):  # noqa: F811
-    """T6: the new arrival starts 2c's lease and attempt count from scratch, not from the last one's."""
+async def test_a_reopen_clears_the_previous_claim_and_keeps_attempts(env_factory):  # noqa: F811
+    """T6: the new arrival starts 2c's lease from scratch; ``attempts`` stays as the last arrival left it
+    (2c1-5 ruling). A ``resolved`` close with a count is unreachable in code (a success resets it): this is a
+    unit test of the reopen, and the real-path proof is in ``test_f099_phase2c_failure.py``."""
     env = await env_factory(**CONT)
     st = await make_subtask(env)
     await _record(env, st)
@@ -162,7 +164,7 @@ async def test_a_reopen_clears_the_previous_claim_and_attempts(env_factory):  # 
     )
     assert (await _record(env, st, generation=1)).reopened is True
     after = await intention_of(env, "subtask", st.id)
-    assert (after.state, after.claim_token, after.claimed_at, after.attempts) == ("result_ready", None, None, 0)
+    assert (after.state, after.claim_token, after.claimed_at, after.attempts) == ("result_ready", None, None, 2)
 
 
 def _split(rows):
