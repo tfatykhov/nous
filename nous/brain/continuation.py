@@ -121,7 +121,11 @@ GATE_TEXT = {
 
 @dataclass(frozen=True, slots=True)
 class RootLimits:
-    """A root's budgets, derived from rows when checked: nothing is counted, so nothing drifts."""
+    """A root's budgets, derived from rows when checked: nothing is counted, so nothing drifts.
+
+    ``stalls`` saturates at ``continuation_stall_limit`` (only that many arrivals are read): it says whether
+    the stall budget is spent, not how long the run is, so a view must not show it as a total.
+    """
 
     depth: int
     spawns: int
@@ -538,7 +542,7 @@ async def root_limits(session: AsyncSession, agent_id: str, root_id: UUID, *, se
                     IntentionArrival.progress.is_not(None),
                 )
                 .order_by(IntentionArrival.n.desc())
-                .limit(50)
+                .limit(int(settings.continuation_stall_limit))
             )
         )
         .scalars()
@@ -579,22 +583,26 @@ async def gate(
     claim: Claim,
     *,
     settings: Any,
-    plan_outcome_of: Callable[[UUID], Awaitable[str | None]] | None = None,
+    plan_outcome_of: Callable[[UUID], Awaitable[str | None]],
 ) -> str | None:
     """Spec 4.5.3: the deterministic checks before a turn, in order. Returns the ``gate_reason`` of the
     first that fails, or None (run the turn). No model is called.
 
     ``plan_outcome_of`` answers "what became of this Plan decision?" (2c-2 passes ``decision_outcome``
-    bound to a session); it is asked only when the deepest claimed intention carries a decision id. A
-    NULL ``deadline`` never trips ``past_deadline``: Phase 1 wrote none (task-1.9 carry-over 3).
+    bound to a session). It is required, so the Plan row cannot be switched off by leaving it out. The
+    decision asked about is the originating one, the root's: a continuation child carries none (its turn
+    has no Plan step, spec 4.5.4). Only a root without one falls back to the deepest claimed intention's;
+    with neither, nothing is asked. A NULL ``deadline`` never trips ``past_deadline``: Phase 1 wrote none
+    (task-1.9 carry-over 3).
     """
     markers = (
         await session.execute(
-            select(Intention.root_cancelled_at, Intention.root_expired_at).where(
+            select(Intention.root_cancelled_at, Intention.root_expired_at, Intention.origin_decision_id).where(
                 Intention.agent_id == agent_id, Intention.id == claim.root_id
             )
         )
     ).first()
+    # None cannot happen for a claim (claim_root locked the root row, and nothing deletes intentions).
     if markers is not None and markers.root_cancelled_at is not None:
         return "cancelled"
     if markers is not None and markers.root_expired_at is not None:
@@ -605,10 +613,11 @@ async def gate(
     limits = await root_limits(session, agent_id, claim.root_id, settings=settings)
     if limits.escalate is not None:
         return limits.escalate
-    decision_id = claim.deepest.origin_decision_id
-    if decision_id is not None and plan_outcome_of is not None:
-        if await plan_outcome_of(decision_id) in PLAN_DROP_OUTCOMES:
-            return "plan_resolved"
+    decision_id = markers.origin_decision_id if markers is not None else None
+    if decision_id is None:
+        decision_id = claim.deepest.origin_decision_id
+    if decision_id is not None and await plan_outcome_of(decision_id) in PLAN_DROP_OUTCOMES:
+        return "plan_resolved"
     return None
 
 
