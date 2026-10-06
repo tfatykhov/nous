@@ -179,7 +179,7 @@ class ResultInboxStore:
                 created_at=created_at or datetime.now(UTC),
                 intention_id=intention_id,
             )
-            .on_conflict_do_nothing(index_elements=["source_kind", "source_id", "source_generation"])
+            .on_conflict_do_nothing(index_elements=["source_kind", "source_id", "source_generation", "agent_id"])
         )
         async with self._db.session() as session:
             result = await session.execute(stmt)

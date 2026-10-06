@@ -501,6 +501,103 @@ class Intention(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class IntentionArrival(Base):
+    """F099 Phase 2: one arrival decision of a root's continuation.
+
+    One row per claim, in order (``n``). ``intention_ids`` lists every intention
+    the claim took (one arrival consumes a batch). Written by the runner in
+    Phase 2c, in the fenced commit. ``progress_claimed`` is the model's claim,
+    ``progress`` the verified value.
+    """
+
+    __tablename__ = "intention_arrivals"
+    __table_args__ = (
+        UniqueConstraint("agent_id", "root_id", "n", name="uq_intention_arrivals_root_n"),
+        CheckConstraint(
+            "decision IS NULL OR decision IN ('continue', 'revise', 'drop', 'report', 'ask')",
+            name="chk_intention_arrivals_decision",
+        ),
+        CheckConstraint(
+            "outcome IN ('resolved', 'fallback_report', 'failed_report')", name="chk_intention_arrivals_outcome"
+        ),
+        CheckConstraint(
+            "gate_reason IS NULL OR gate_reason IN ('cancelled', 'expired', 'past_deadline', 'budget_turns', "
+            "'budget_tokens', 'budget_stall', 'limit_depth', 'limit_spawns', 'plan_resolved')",
+            name="chk_intention_arrivals_gate_reason",
+        ),
+        {"schema": "brain"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, server_default=func.gen_random_uuid()
+    )
+    agent_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    root_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("brain.intentions.id"), nullable=False)
+    n: Mapped[int] = mapped_column(Integer, nullable=False)
+    intention_ids: Mapped[list] = mapped_column(ARRAY(UUID(as_uuid=True)), nullable=False)
+    inbox_ids: Mapped[list] = mapped_column(
+        ARRAY(UUID(as_uuid=True)), nullable=False, default=list, server_default="{}"
+    )
+    report_ids: Mapped[list] = mapped_column(
+        ARRAY(UUID(as_uuid=True)), nullable=False, default=list, server_default="{}"
+    )
+    claim_token: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    decision: Mapped[str | None] = mapped_column(String(20))
+    note: Mapped[str | None] = mapped_column(Text)
+    progress_claimed: Mapped[bool | None] = mapped_column(Boolean)
+    progress: Mapped[bool | None] = mapped_column(Boolean)
+    confidence: Mapped[float | None] = mapped_column(Float)
+    gate_reason: Mapped[str | None] = mapped_column(String(40))
+    tokens_in: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    tokens_out: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    decision_record_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    outcome: Mapped[str] = mapped_column(String(20), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class IntentionProposal(Base):
+    """F099 Phase 2: an action the continuation may not take itself, staged for the owner.
+
+    ``staged`` until the arrival's fenced commit makes it ``pending`` (Phase
+    2d); the default at the deadline is a reject.
+    """
+
+    __tablename__ = "intention_proposals"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('staged', 'pending', 'approved', 'executing', 'rejected', 'expired', 'executed', "
+            "'failed', 'cancelled')",
+            name="chk_intention_proposals_state",
+        ),
+        {"schema": "brain"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, server_default=func.gen_random_uuid()
+    )
+    agent_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    intention_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("brain.intentions.id"), nullable=False
+    )
+    root_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("brain.intentions.id"), nullable=False)
+    arrival_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("brain.intention_arrivals.id"))
+    tool: Mapped[str] = mapped_column(String(100), nullable=False)
+    arguments: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(String(20), nullable=False, default="staged", server_default="staged")
+    claim_token: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ledger_key: Mapped[str | None] = mapped_column(Text)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decided_by: Mapped[str | None] = mapped_column(Text)
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    result: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 # =============================================================================
 # HEART SCHEMA
 # =============================================================================
@@ -969,16 +1066,22 @@ class ResultInbox(Base):
 
     Routed by ``channel`` (preferred) or ``session_id``; claimed exactly once
     by setting ``delivered_at``. ``UNIQUE(source_kind, source_id,
-    source_generation)`` makes every writer idempotent, so the DAG bus
+    source_generation, agent_id)`` makes every writer idempotent, so the DAG bus
     listener and the F087 delivery backstop can both insert; a retried DAG
-    (new ``delivery_generation``) gets a row of its own.
+    (new ``delivery_generation``) gets a row of its own. F099 Phase 2: a row
+    with ``channel`` and ``session_id`` both NULL is keyed by ``intention_id``
+    alone and is read only by the continuation; ``source_kind =
+    'intention_report'`` rows are owner-facing (REPORT, QUESTION, PROPOSAL).
     """
 
     __tablename__ = "result_inbox"
     __table_args__ = (
-        UniqueConstraint("source_kind", "source_id", "source_generation", name="uq_result_inbox_source"),
-        CheckConstraint("source_kind IN ('subtask', 'dag')", name="chk_result_inbox_source_kind"),
-        CheckConstraint("msg_type IN ('INFORM', 'FAILURE', 'BLOCKED')", name="chk_result_inbox_msg_type"),
+        UniqueConstraint("source_kind", "source_id", "source_generation", "agent_id", name="uq_result_inbox_source"),
+        CheckConstraint("source_kind IN ('subtask', 'dag', 'intention_report')", name="chk_result_inbox_source_kind"),
+        CheckConstraint(
+            "msg_type IN ('INFORM', 'FAILURE', 'BLOCKED', 'REPORT', 'QUESTION', 'PROPOSAL')",
+            name="chk_result_inbox_msg_type",
+        ),
         {"schema": "heart"},
     )
 
@@ -1003,6 +1106,14 @@ class ResultInbox(Base):
     # F099: the intention this result belongs to (no FK: a failed check must
     # never cost a result its row). Phase 1 records it; nothing routes on it.
     intention_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    # F099 Phase 2: the arrival a QUESTION or PROPOSAL row belongs to, and the
+    # proposal a PROPOSAL row shows (no FK, like intention_id).
+    arrival_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    proposal_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    # Owner push (Phase 2d): quiet-hours deferral, send stamp, the Telegram message id.
+    push_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    pushed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    push_message_id: Mapped[int | None] = mapped_column(BigInteger)
 
 
 class ChannelSession(Base):
