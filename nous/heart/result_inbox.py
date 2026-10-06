@@ -759,7 +759,8 @@ _HEADER = (
 _DELIMITER = re.compile(r"<(\s*/?\s*result_message)", re.IGNORECASE)
 
 
-def _neutralize(text: str) -> str:
+def neutralize_delimiters(text: str) -> str:
+    """``text`` with every ``<result_message`` / ``</result_message`` escaped, so it cannot open or close one."""
     return _DELIMITER.sub(r"&lt;\1", text)
 
 
@@ -792,8 +793,8 @@ def format_inbox_messages(rows: list[ResultInbox], max_items: int, older: int = 
         message = (
             f'<result_message type="{r.msg_type}" source="{r.source_kind}" '
             f'id="{r.source_id.hex[:8]}" finished="{ts}">\n'
-            f"Title: {_neutralize(r.title)}\n"
-            f"{_neutralize(r.body)}\n"
+            f"Title: {neutralize_delimiters(r.title)}\n"
+            f"{neutralize_delimiters(r.body)}\n"
             "</result_message>"
         )
         parts.append(f"{message}\n{_PROPOSAL_TRAILER}" if r.msg_type == "PROPOSAL" else message)
