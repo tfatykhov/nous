@@ -284,7 +284,7 @@ def _required_handler_params(handler: Callable[..., Any]) -> set[str] | None:
 
 def _origin_args(ctx: ExecutionContext) -> dict[str, Any]:
     """F099 section 4.2: the spawning turn's origin, as a spawn tool's hidden arguments."""
-    out: dict[str, Any] = {"_origin_kind": ctx.kind}
+    out: dict[str, Any] = {"_origin_kind": ctx.kind, "_origin_authority": ctx.authority}
     if ctx.session_id is not None:
         out["_origin_session_id"] = ctx.session_id
     if ctx.channel:
@@ -299,6 +299,23 @@ def _origin_args(ctx: ExecutionContext) -> dict[str, Any]:
         # internal_only): refuse the spawn rather than make it a root.
         out["_intention_id"] = intentions.UNREADABLE_LINEAGE
     return out
+
+
+async def _recorded_policy_note(spec: intentions.IntentionSpec | None, read: Callable[[], Any]) -> str:
+    """F099 D7 made visible: when the model asked for a wake_policy and the recorded one
+    differs (a background turn cannot widen to ``continue``; inside a lineage every result
+    goes to the continuation), the spawn receipt says so. One read, and only when the model
+    passed the argument. A failed read adds nothing: the spawn already succeeded."""
+    if spec is None or spec.wake_policy is None:
+        return ""
+    try:
+        recorded = await read()
+    except Exception:
+        logger.warning("F099: could not read the recorded wake policy", exc_info=True)
+        return ""
+    if recorded is None or recorded == spec.wake_policy:
+        return ""
+    return f" (wake_policy '{spec.wake_policy}' is not available from a {spec.origin_kind} turn; recorded '{recorded}')"
 
 
 class ToolDispatcher:
@@ -3056,6 +3073,7 @@ def create_subtask_tools(
         _origin_session_id: str | None = None,
         _origin_channel: str | None = None,
         _intention_id: str | None = None,
+        _origin_authority: str | None = None,
     ) -> dict[str, Any]:
         """Spawn a subtask, optionally waiting for its result inline.
 
@@ -3087,6 +3105,7 @@ def create_subtask_tools(
                     origin_channel=_origin_channel,
                     decision_id=_decision_id,
                     intention_id=_intention_id,
+                    origin_authority=_origin_authority,
                 )
             # 012.2: Apply frame-default model mapping
             effective_model = model
@@ -3160,7 +3179,10 @@ def create_subtask_tools(
             )
 
             if not await_result:
-                # Fire-and-forget (existing behavior)
+                # Fire-and-forget (existing behavior); F099 D7: say so when the wake policy was downgraded.
+                note = await _recorded_policy_note(
+                    spec, lambda: heart.intentions.wake_policy_for_source(intentions.SOURCE_SUBTASK, subtask.id)
+                )
                 return {
                     "content": [
                         {
@@ -3169,7 +3191,7 @@ def create_subtask_tools(
                                 f"Subtask spawned.\n"
                                 f"ID: {subtask.id}\n"
                                 f"Priority: {priority}\n"
-                                f"Timeout: {effective_timeout}s"
+                                f"Timeout: {effective_timeout}s{note}"
                             ),
                         }
                     ]
@@ -3379,6 +3401,7 @@ def create_subtask_tools(
         _origin_session_id: str | None = None,
         _origin_channel: str | None = None,
         _intention_id: str | None = None,
+        _origin_authority: str | None = None,
     ) -> dict[str, Any]:
         """Schedule a task for later or recurring execution.
 
@@ -3412,6 +3435,7 @@ def create_subtask_tools(
                     origin_channel=_origin_channel,
                     decision_id=_decision_id,
                     intention_id=_intention_id,
+                    origin_authority=_origin_authority,
                 )
 
             from nous.handlers.time_parser import parse_every, parse_when
@@ -3559,6 +3583,7 @@ def create_subtask_tools(
         _origin_session_id: str | None = None,
         _origin_channel: str | None = None,
         _intention_id: str | None = None,
+        _origin_authority: str | None = None,
     ) -> dict[str, Any]:
         import json as _json
         import uuid as _uuid
@@ -3596,6 +3621,7 @@ def create_subtask_tools(
             _origin_session_id=_origin_session_id,
             _origin_channel=_origin_channel,
             _intention_id=_intention_id,
+            _origin_authority=_origin_authority,
         )
 
         # spawn_task always returns {"content": [{"type":"text","text":...}]}.
@@ -5438,6 +5464,13 @@ def register_dag_tools(
                 "wave. Set NOUS_HEARTBEAT_ENABLED=true and restart."
             )
         wants_approval = any(n.get("type") == "approval" for n in kwargs.get("nodes", []))
+        if wants_approval and kwargs.get("_origin_authority") == AUTHORITY_INTERNAL:
+            # F099 section 4.4: an approval node asks the OWNER a question, which an
+            # internal-only turn may not do on its own; it asks through resolve_intention.
+            return _tool_error(
+                "Error: an internal-only turn cannot create approval nodes; "
+                "ask the owner through resolve_intention(decision='ask') instead."
+            )
         if wants_approval:
             if not getattr(cfg, "dag_approval_nodes_enabled", False):
                 return _tool_error(
@@ -5462,6 +5495,7 @@ def register_dag_tools(
                     origin_channel=kwargs.get("_origin_channel"),
                     decision_id=kwargs.get("_decision_id"),
                     intention_id=kwargs.get("_intention_id"),
+                    origin_authority=kwargs.get("_origin_authority"),
                 )
 
             # Parse nodes
@@ -5574,7 +5608,8 @@ def register_dag_tools(
                     "ping's link is not tappable — tell the person to open the "
                     "companion to answer."
                 )
-            return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+            note = await _recorded_policy_note(spec, lambda: store.intention_wake_policy(dag.id))
+            return {"content": [{"type": "text", "text": "\n".join(lines) + note}]}
         except (intentions.IntentArgumentError, intentions.IntentionRootClosed, intentions.IntentionParentMissing) as e:
             # F099: a refused spawn is the model's to fix, not a crash; spec_from_tool_call
             # already logged the refusal at INFO.

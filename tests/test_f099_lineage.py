@@ -88,6 +88,7 @@ async def test_origin_arguments_reach_origin_aware_tools_only():
     await d.dispatch("list_tasks", {}, session_id="subtask-1", context=ctx)
     assert {k: v for k, v in seen["dag_create"].items() if k.startswith("_")} == {
         "_origin_kind": "subtask",
+        "_origin_authority": "owner",
         "_origin_session_id": "subtask-1",
         "_decision_id": PLAN,
         "_intention_id": str(IID),
@@ -127,7 +128,7 @@ async def test_origin_arguments_the_model_sent_are_dropped():
     hidden = {
         k: v for k, v in seen["dag_create"].items() if k.startswith("_origin") or k in ("_intention_id", "_decision_id")
     }
-    assert hidden == {"_origin_kind": "interactive", "_origin_session_id": "S1"}
+    assert hidden == {"_origin_kind": "interactive", "_origin_authority": "owner", "_origin_session_id": "S1"}
     ctx = ExecutionContext(kind="subtask", session_id="s", intention_id=IID, root_intention_id=RID)
     await d.dispatch("dag_create", dict(forged), session_id="s", context=ctx)
     assert seen["dag_create"]["_intention_id"] == str(IID)
