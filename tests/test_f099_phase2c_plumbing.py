@@ -345,3 +345,11 @@ async def test_the_one_clip_and_the_one_channel_function_exist(env_factory):  # 
         assert await continuation.claim_owner_channel(s, env.agent, got, settings=env.settings) == "telegram:8080"
     assert continuation.clip_body("x" * 9000, env.settings).endswith("[truncated]")
     assert len(continuation.clip_body("x" * 9000, env.settings)) <= env.settings.result_inbox_body_max_chars
+
+
+def test_a_tiny_clip_limit_still_ends_with_the_marker():
+    from nous.brain import continuation
+    from nous.config import Settings
+
+    clipped = continuation.clip_body("x" * 500, Settings(_env_file=None), limit=5)
+    assert clipped.endswith("[truncated]") and len(clipped) <= 40

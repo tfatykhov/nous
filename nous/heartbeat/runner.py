@@ -1209,8 +1209,6 @@ class HeartbeatRunner:
                 )
                 tokens = (usage or {}).get("input_tokens", 0) + (usage or {}).get("output_tokens", 0)
                 self._tokens_used_today += tokens
-                # F099: a lineage check's callback counts against its DAG too (a no-op unless continuation is on).
-                await self._roll_check_tokens_into_dag(check, tokens)
                 logger.info(
                     "#273: Callback for '%s' completed (tokens=%d, attempt=%d)",
                     check.name,
@@ -1222,6 +1220,9 @@ class HeartbeatRunner:
                     await triage_runner.end_conversation(session_id)
                 except Exception:
                     pass
+                # F099: a lineage check's callback counts against its DAG too (a no-op unless continuation is on).
+                # Last, after the conversation ended: a cancel from within it cannot skip the clean-up.
+                await self._roll_check_tokens_into_dag(check, tokens)
                 return
             except Exception:
                 logger.exception(

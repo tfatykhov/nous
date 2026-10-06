@@ -6,6 +6,7 @@ import asyncio
 import logging
 from unittest.mock import MagicMock
 
+import pytest
 from f099_support import ON
 from test_f099_phase2c_check_tokens import STAMP, _check, _hb
 
@@ -76,3 +77,14 @@ async def test_a_cancel_from_within_the_roll_up_leaves_the_run_a_success(caplog)
         "Heartbeat check 'rolling': the roll-up of its tokens into its DAG was cancelled from within — the run itself "
         "succeeded; the increment may or may not have landed and is not written again"
     ]
+
+
+async def test_a_cancel_from_within_the_callback_roll_up_still_ends_its_conversation():
+    check = _callback_check("rolling_cb")
+    hb, loader = _hb(check, 0)
+    hb.dag_orchestrator.add_check_tokens = _cancelled_from_within
+    triage = hb._get_triage_runner.return_value
+    with pytest.raises(asyncio.CancelledError):  # the roll-up is not wrapped: the cancel still propagates
+        await hb._execute_callback(check, [])
+    triage.end_conversation.assert_awaited_once()  # but the conversation was ended first
+    triage.run_turn.assert_awaited_once()  # and the callback was not run again

@@ -688,10 +688,11 @@ def _close_reason(outcome: str) -> str:
 
 def clip_body(text: str, settings: Any, *, limit: int | None = None) -> str:
     """``text`` cut to the inbox's body limit (``result_inbox_body_max_chars``), or to ``limit`` when that is
-    smaller, marked ``[truncated]`` when cut."""
+    smaller (never below 40 characters), marked ``[truncated]`` when cut."""
     cap = int(getattr(settings, "result_inbox_body_max_chars", 4000))
     if limit is not None:
         cap = min(cap, limit)
+    cap = max(cap, 40)  # a tiny limit still leaves room for the marker
     return text if len(text) <= cap else text[: cap - 20].rstrip() + "\n[truncated]"
 
 
