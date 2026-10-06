@@ -173,6 +173,7 @@ def test_write_file_under_the_root_dir_is_allowed(tmp_path):
         "/etc/passwd",
         "intentions",
         f"intentions/{str(RID)[:8]}/notes.md",
+        f"intentions/{RID}-sibling/notes.md",
     ],
 )
 def test_write_file_outside_the_root_dir_is_refused(tmp_path, path):
@@ -182,6 +183,7 @@ def test_write_file_outside_the_root_dir_is_refused(tmp_path, path):
 def test_write_file_with_no_root_or_no_usable_path_is_refused(tmp_path):
     damaged = _internal(root_intention_id=None, intention_id=None)
     assert _write(tmp_path, f"intentions/{RID}/notes.md", damaged) == "write_path"
+    assert _write(tmp_path, "intentions/None/notes.md", damaged) == "write_path"  # str(None) names no root
     for tool_input in ({}, {"path": ""}, {"path": 7}, {"path": "a\x00b"}):
         assert _violation("write_file", tool_input, tmp_path) == "write_path"
 
