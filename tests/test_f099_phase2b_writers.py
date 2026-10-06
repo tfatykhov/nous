@@ -146,7 +146,7 @@ async def test_none_and_remember_close_as_delivered_and_route_as_f098(env_factor
 # ---- the three flag states --------------------------------------------------------------------------
 
 STATES = {
-    # PIN (first two): Phase 1, byte for byte.
+    # The first two rows are Phase 1, byte for byte.
     "off-off": ({}, "pending", None, (CHAN, "S1"), False),
     "on-off": (ON, "closed", "legacy", (CHAN, "S1"), True),
     "on-on": (CONT, "result_ready", None, (None, None), True),
@@ -154,7 +154,7 @@ STATES = {
 
 
 @pytest.mark.parametrize("flags", list(STATES))
-async def test_the_three_flag_states_route_a_continue_result_as_specified(env_factory, flags):  # noqa: F811
+async def test_the_three_flag_states_route_a_continue_result_as_specified(env_factory, flags):  # noqa: F811  # PIN: off-off, on-off
     over, state, reason, keys, names_it = STATES[flags]
     env = await env_factory(**{"result_inbox_enabled": True, **over})
     st = await make_subtask(env)  # as if spawned while the intentions flag was on

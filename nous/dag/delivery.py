@@ -30,6 +30,9 @@ import httpx
 
 from nous.api.execution_context import ExecutionContext
 from nous.api.idempotency import SUMMARY_SESSION_PREFIX
+from nous.brain import continuation
+from nous.brain.intentions import AUTHORITY_INTERNAL, SOURCE_DAG, WAKE_CONTINUE
+from nous.brain.intentions import enabled as intentions_enabled
 from nous.config import Settings
 from nous.dag.approval import approval_line, is_answered_approval, stopped_at_approval
 from nous.events import Event
@@ -37,7 +40,9 @@ from nous.heart.result_inbox import ResultInboxStore, record_dag_result
 from nous.storage.models import ExecutionDAG
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from nous.brain.intentions import IntentionStore
     from nous.events import EventBus
+    from nous.storage.models import Intention
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +111,7 @@ class DAGResultDelivery:
         runner: Any | None = None,
         http: httpx.AsyncClient | None = None,
         inbox: ResultInboxStore | None = None,
+        intentions: IntentionStore | None = None,
     ) -> None:
         self._settings = settings
         self._agent_id = agent_id
@@ -116,6 +122,9 @@ class DAGResultDelivery:
         # dag.completed/dag.failed listener, because the bus drops on
         # QueueFull; the inbox's UNIQUE(source, generation) collapses the two.
         self._inbox = inbox
+        # F099: read once per delivery. A continue DAG's push stands down, and an
+        # internal_only DAG gets no summary turn (spec I3).
+        self._intentions = intentions
 
     # ------------------------------------------------------------------
     # Public API
@@ -131,13 +140,27 @@ class DAGResultDelivery:
         legs: list[LegResult] = []
         summary_authored = False
 
+        intention, lookup_failed = await self._dag_intention(dag)
+        # I3: a lineage DAG never runs the summary turn with outward tools, whatever its wake
+        # policy and whatever the continuation flag says now (contract C6). A lookup that failed fails
+        # closed only with continuation on (MF-2): with it off, Phase 1's behaviour is kept.
+        lineage_closed = (lookup_failed and continuation.enabled(self._settings)) or (
+            intention is not None and intention.authority == AUTHORITY_INTERNAL
+        )
+        superseded = (
+            continuation.enabled(self._settings) and intention is not None and intention.wake_policy == WAKE_CONTINUE
+        )
+
         summary = self.build_template(dag)
         # @codex P2 on da5dc06: a summary authored on an earlier attempt is
         # reused rather than regenerated. Otherwise one transient Telegram
         # outage charges an LLM turn — and writes a duplicate episode — on
         # every one of the up-to-five sweep retries.
         cached = getattr(dag, "delivery_summary", None)
-        if cached:
+        if lineage_closed:
+            legs.append(LegResult("summary", ok=True, required=False, detail="internal_only"))
+            summary = cached or summary
+        elif cached:
             summary = cached
             legs.append(
                 LegResult("summary", ok=True, required=False, detail="cached")
@@ -167,7 +190,12 @@ class DAGResultDelivery:
             legs.append(await self._leg_bus(dag, summary))
 
         if self._settings.dag_delivery_telegram_enabled:
-            legs.append(await self._leg_telegram(dag, summary))
+            if superseded:
+                # Spec 4.3 item 5: Nous's own continuation is the consumer. No required leg is left, so
+                # the DAG is marked delivered, and InboxDagPass repairs a row this attempt failed to write.
+                legs.append(LegResult("telegram", ok=False, required=False, detail="superseded_by_continuation"))
+            else:
+                legs.append(await self._leg_telegram(dag, summary))
 
         delivered = all(leg.ok for leg in legs if leg.required)
         return DeliveryOutcome(
@@ -431,6 +459,19 @@ class DAGResultDelivery:
             for name, result in results:
                 parts.append(f"[{name}]: {result[:_SUMMARY_RESULT_CHARS]}")
         return "\n".join(parts)
+
+    async def _dag_intention(self, dag: ExecutionDAG) -> tuple[Intention | None, bool]:
+        """``(the DAG's intention, lookup_failed)``. One point read, only with intentions on and a store.
+        Never raises: a failed lookup is reported so the caller can fail closed (with continuation on)."""
+        if self._intentions is None or not intentions_enabled(self._settings):
+            return None, False
+        try:
+            return await self._intentions.get_for_source(SOURCE_DAG, dag.id), False
+        except Exception:
+            logger.warning(
+                "F099: could not read the intention of DAG %s", str(dag.id)[:8], exc_info=True,
+            )
+            return None, True
 
     @staticmethod
     def _is_blocked(dag: ExecutionDAG) -> bool:

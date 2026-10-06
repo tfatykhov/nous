@@ -195,6 +195,7 @@ async def test_a_duplicate_delivery_after_a_root_cancel_writes_no_report(env_fac
     assert [r.msg_type for r in reports] == ["REPORT"]
 
 
+@pytest.mark.postgres_only  # another transaction moves the intention and commits while this session is open
 async def test_record_result_reads_the_locked_row_not_the_callers_identity_map(env_factory):  # noqa: F811
     """record_result locks the intention by its columns, not as an ORM entity. A SELECT ... FOR UPDATE of
     the entity returns the object the caller's session already holds without refreshing it, so it would
