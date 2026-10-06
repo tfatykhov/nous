@@ -3108,18 +3108,21 @@ def create_subtask_tools(
             # refused intent creates nothing.
             spec = None
             if intentions.enabled(settings):
-                spec = intentions.spec_from_tool_call(
-                    intent=intent,
-                    wake_policy=wake_policy,
-                    origin_kind=_origin_kind,
-                    fallback_text=task,
-                    # As worker_id below: without a runner the row is left to a worker.
-                    inline=bool(await_result and runner is not None),
-                    origin_session_id=_origin_session_id,
-                    origin_channel=_origin_channel,
-                    decision_id=_decision_id,
-                    intention_id=_intention_id,
-                    origin_authority=_origin_authority,
+                spec = intentions.with_bounds(
+                    intentions.spec_from_tool_call(
+                        intent=intent,
+                        wake_policy=wake_policy,
+                        origin_kind=_origin_kind,
+                        fallback_text=task,
+                        # As worker_id below: without a runner the row is left to a worker.
+                        inline=bool(await_result and runner is not None),
+                        origin_session_id=_origin_session_id,
+                        origin_channel=_origin_channel,
+                        decision_id=_decision_id,
+                        intention_id=_intention_id,
+                        origin_authority=_origin_authority,
+                    ),
+                    settings,
                 )
             # 012.2: Apply frame-default model mapping
             effective_model = model
@@ -3439,17 +3442,20 @@ def create_subtask_tools(
             # here: each fire takes remember/none from notify (plan D3).
             spec = None
             if intentions.enabled(settings):
-                spec = intentions.spec_from_tool_call(
-                    intent=intent,
-                    wake_policy=None,
-                    origin_kind=_origin_kind,
-                    fallback_text=task,
-                    container=True,
-                    origin_session_id=_origin_session_id,
-                    origin_channel=_origin_channel,
-                    decision_id=_decision_id,
-                    intention_id=_intention_id,
-                    origin_authority=_origin_authority,
+                spec = intentions.with_bounds(
+                    intentions.spec_from_tool_call(
+                        intent=intent,
+                        wake_policy=None,
+                        origin_kind=_origin_kind,
+                        fallback_text=task,
+                        container=True,
+                        origin_session_id=_origin_session_id,
+                        origin_channel=_origin_channel,
+                        decision_id=_decision_id,
+                        intention_id=_intention_id,
+                        origin_authority=_origin_authority,
+                    ),
+                    settings,
                 )
 
             from nous.handlers.time_parser import parse_every, parse_when
@@ -5532,16 +5538,19 @@ def register_dag_tools(
             # F099 I2: the DAG's intention, built first, so a refused intent creates nothing.
             spec = None
             if intentions_on:
-                spec = intentions.spec_from_tool_call(
-                    intent=kwargs.get("intent"),
-                    wake_policy=kwargs.get("wake_policy"),
-                    origin_kind=kwargs.get("_origin_kind"),
-                    fallback_text=(kwargs.get("description") or "").strip() or kwargs.get("name"),
-                    origin_session_id=kwargs.get("_origin_session_id"),
-                    origin_channel=kwargs.get("_origin_channel"),
-                    decision_id=kwargs.get("_decision_id"),
-                    intention_id=kwargs.get("_intention_id"),
-                    origin_authority=kwargs.get("_origin_authority"),
+                spec = intentions.with_bounds(
+                    intentions.spec_from_tool_call(
+                        intent=kwargs.get("intent"),
+                        wake_policy=kwargs.get("wake_policy"),
+                        origin_kind=kwargs.get("_origin_kind"),
+                        fallback_text=(kwargs.get("description") or "").strip() or kwargs.get("name"),
+                        origin_session_id=kwargs.get("_origin_session_id"),
+                        origin_channel=kwargs.get("_origin_channel"),
+                        decision_id=kwargs.get("_decision_id"),
+                        intention_id=kwargs.get("_intention_id"),
+                        origin_authority=kwargs.get("_origin_authority"),
+                    ),
+                    cfg,
                 )
 
             # Parse nodes
@@ -5656,7 +5665,12 @@ def register_dag_tools(
                 )
             note = await _recorded_policy_note(spec, lambda: store.intention_wake_policy(dag.id))
             return {"content": [{"type": "text", "text": "\n".join(lines) + note}]}
-        except (intentions.IntentArgumentError, intentions.IntentionRootClosed, intentions.IntentionParentMissing) as e:
+        except (
+            intentions.IntentArgumentError,
+            intentions.IntentionRootClosed,
+            intentions.IntentionParentMissing,
+            intentions.IntentionLimitReached,
+        ) as e:
             # F099: a refused spawn is the model's to fix, not a crash; spec_from_tool_call
             # already logged the refusal at INFO.
             return _tool_error(f"Error creating DAG: {e}")

@@ -139,3 +139,20 @@ async def set_intention(env, intention_id, **values) -> None:
     async with env.db.session() as s:
         await s.execute(update(Intention).where(Intention.id == intention_id).values(**values))
         await s.commit()
+
+
+async def make_root(env, *, policy: str = "continue", routed: bool = True) -> Intention:
+    """The root intention of a pending subtask (``policy``, origin channel ``CHAN`` when ``routed``)."""
+    st = await make_subtask(env, policy=policy, routed=routed)
+    return await intention_of(env, "subtask", st.id)
+
+
+async def make_child(env, parent: Intention, *, authority: str = "internal_only") -> Intention:
+    """A child intention under ``parent``, as a continuation turn's spawn writes it (a pending subtask)."""
+    st = await env.heart.subtasks.create(
+        task="follow-up work",
+        intention=IntentionSpec(
+            intent="next step", origin_kind="continuation", parent_id=parent.id, origin_authority=authority
+        ),
+    )
+    return await intention_of(env, "subtask", st.id)

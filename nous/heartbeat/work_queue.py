@@ -220,7 +220,10 @@ class WorkQueueCheck(BaseCheck):
         """F099: a work-queue DAG records its item as its intention (remember)."""
         if not intentions.enabled(self._settings):
             return None
-        return IntentionSpec(intent=item.title or item.external_id, origin_kind=intentions.ORIGIN_WORK_QUEUE)
+        return intentions.with_bounds(
+            IntentionSpec(intent=item.title or item.external_id, origin_kind=intentions.ORIGIN_WORK_QUEUE),
+            self._settings,
+        )
 
     async def run(self) -> CheckResult:
         """Poll the adapter and process new + terminal items.

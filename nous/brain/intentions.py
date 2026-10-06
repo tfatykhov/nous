@@ -19,12 +19,12 @@ from __future__ import annotations
 
 import logging
 import uuid
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, case, cast, exists, or_, select, update
+from sqlalchemy import and_, case, cast, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -99,6 +99,11 @@ class IntentionRootClosed(ValueError):
     """The lineage's root was cancelled or expired: nothing new may join it (I1)."""
 
 
+class IntentionLimitReached(ValueError):
+    """The new child would exceed its root's depth or spawn limit (spec 4.6). The text is what
+    the model sees: it says what to do instead."""
+
+
 class IntentionParentMissing(ValueError):
     """The spawning turn names an intention that does not exist. Refused, never
     turned into a new root: a spawn inside a lineage is always a child (I3)."""
@@ -148,6 +153,11 @@ class IntentionSpec:
     # that spawned it: this narrows what the parent ROW says, and never widens it. None
     # for a code path (scheduler, work queue, app.act, REST): owner.
     origin_authority: str | None = None
+    # F099 Phase 2c: the lineage limits (max_depth, max_spawns) a child is checked against, and
+    # the root TTL its deadline is computed from. Filled by ``with_bounds``; None leaves the row
+    # exactly as Phase 1 wrote it.
+    limits: tuple[int, int] | None = None
+    ttl_hours: float | None = None
 
 
 def intention_kwargs(spec: IntentionSpec | None) -> dict[str, IntentionSpec]:
@@ -161,6 +171,37 @@ def enabled(settings: Any) -> bool:
     return getattr(settings, "intentions_enabled", False) is True
 
 
+def _continuation_on(settings: Any) -> bool:
+    """NOUS_CONTINUATION_ENABLED with intentions on. nous.brain.continuation imports this module,
+    so it cannot be asked here."""
+    return enabled(settings) and getattr(settings, "continuation_enabled", False) is True
+
+
+def ttl_for(settings: Any) -> float | None:
+    """The root TTL in hours a new intention's deadline is computed from; None with continuation off."""
+    return float(settings.intention_root_ttl_hours) if _continuation_on(settings) else None
+
+
+def limits_for(settings: Any) -> tuple[int, int] | None:
+    """(max_depth, max_spawns) a child is checked against; None with continuation off."""
+    if not _continuation_on(settings):
+        return None
+    return int(settings.continuation_max_depth), int(settings.continuation_max_spawns_per_root)
+
+
+def with_bounds(spec: IntentionSpec | None, settings: Any) -> IntentionSpec | None:
+    """``spec`` carrying this process's TTL and limits. A schedule's container has no TTL (spec 4.1
+    Schedules). With continuation off nothing is added and the same object comes back, so every
+    construction site is Phase 1's call, unchanged."""
+    if spec is None:
+        return None
+    ttl = None if spec.container else ttl_for(settings)
+    limits = limits_for(settings)
+    if ttl is None and limits is None:
+        return spec
+    return replace(spec, ttl_hours=ttl, limits=limits)
+
+
 @dataclass(frozen=True, slots=True)
 class ParentView:
     """What a child's resolution needs from its parent intention."""
@@ -170,6 +211,7 @@ class ParentView:
     depth: int
     authority: str
     wake_policy: str
+    deadline: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,6 +225,7 @@ class PreparedIntention:
     authority: str
     wake_policy: str
     spec: IntentionSpec
+    deadline: datetime | None = None
 
     @property
     def stamp(self) -> dict[str, str]:
@@ -307,7 +350,12 @@ def spec_from_tool_call(
 
 def _view(row: Intention) -> ParentView:
     return ParentView(
-        id=row.id, root_id=row.root_id, depth=row.depth, authority=row.authority, wake_policy=row.wake_policy
+        id=row.id,
+        root_id=row.root_id,
+        depth=row.depth,
+        authority=row.authority,
+        wake_policy=row.wake_policy,
+        deadline=row.deadline,
     )
 
 
@@ -353,6 +401,40 @@ async def _hold_open_container(session: AsyncSession, agent_id: str, container: 
         raise IntentionRootClosed(f"schedule {container.source_id} no longer fires; no new fire")
 
 
+async def _check_limits(session: AsyncSession, agent_id: str, parent: ParentView, limits: tuple[int, int]) -> None:
+    """Spec 4.6: refuse a child that would exceed its root's depth (exact, from the parent's
+    depth) or spawn limit (one indexed count, in the spawning transaction, so two concurrent
+    spawns can overshoot by the concurrency width: the gate re-checks at the next claim)."""
+    max_depth, max_spawns = limits
+    if parent.depth + 1 > max_depth:
+        raise IntentionLimitReached(
+            f"this work is already {parent.depth} step(s) deep and the depth limit is {max_depth}, so nothing more "
+            "can be spawned under it; end the turn with resolve_intention (report, drop or ask) instead"
+        )
+    spawned = (
+        await session.execute(
+            select(func.count(Intention.id)).where(
+                Intention.agent_id == agent_id, Intention.root_id == parent.root_id, Intention.depth > 0
+            )
+        )
+    ).scalar_one()
+    if spawned >= max_spawns:
+        raise IntentionLimitReached(
+            f"this work has already spawned {spawned} piece(s) of work and the spawn limit is {max_spawns}, so "
+            "nothing more can be spawned under it; end the turn with resolve_intention (report, drop or ask) instead"
+        )
+
+
+def _deadline(spec: IntentionSpec, parent: ParentView | None) -> datetime | None:
+    """A root gets created + TTL; a child gets the earlier of its parent's deadline and its own (spec 4.1)."""
+    if spec.ttl_hours is None:
+        return None
+    own = datetime.now(UTC) + timedelta(hours=spec.ttl_hours)
+    if parent is not None and parent.deadline is not None:
+        return min(parent.deadline, own)
+    return own
+
+
 async def prepare_intention(session: AsyncSession, agent_id: str, spec: IntentionSpec) -> PreparedIntention:
     """Resolve ``spec`` inside the caller's transaction (I1).
 
@@ -361,8 +443,8 @@ async def prepare_intention(session: AsyncSession, agent_id: str, spec: Intentio
     spawning turn (I3, min of the two), and only while the root is
     open. A schedule fire (``spec.parent_source``) is a new root that keeps
     its container as ``parent_id``, for lineage only, and only while the
-    container is open and its schedule active. Phase 1 writes no deadline
-    (the root TTL is a Phase 2 setting).
+    container is open and its schedule active. A deadline is written only
+    when the spec carries ``ttl_hours`` (Phase 2c).
     """
     parent: ParentView | None = None
     lineage_parent: ParentView | None = None
@@ -372,6 +454,8 @@ async def prepare_intention(session: AsyncSession, agent_id: str, spec: Intentio
             raise IntentionParentMissing(f"intention {spec.parent_id} does not exist")
         parent = lineage_parent = _view(row)
         await _hold_open_root(session, agent_id, parent.root_id)
+        if spec.limits is not None:
+            await _check_limits(session, agent_id, parent, spec.limits)
     elif spec.parent_source is not None:
         kind, source_id = spec.parent_source
         row = (
@@ -401,6 +485,7 @@ async def prepare_intention(session: AsyncSession, agent_id: str, spec: Intentio
         authority=AUTHORITY_INTERNAL if narrowed else AUTHORITY_OWNER,
         wake_policy=resolve_wake_policy(spec, parent),
         spec=spec,
+        deadline=_deadline(spec, parent),
     )
 
 
@@ -426,6 +511,7 @@ async def insert_prepared(
             wake_policy=prepared.wake_policy,
             authority=prepared.authority,
             state=STATE_PENDING,
+            deadline=prepared.deadline,
         )
     )
     await session.flush()

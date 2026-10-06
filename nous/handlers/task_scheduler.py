@@ -192,11 +192,14 @@ class TaskScheduler:
                 # below logs it and skips the fire without advancing.
                 fire_intention = None
                 if intentions.enabled(self._settings):
-                    fire_intention = IntentionSpec(
-                        intent=schedule.task,
-                        origin_kind=intentions.ORIGIN_SCHEDULER,
-                        wake_policy=intentions.WAKE_REMEMBER if schedule.notify else intentions.WAKE_NONE,
-                        parent_source=(intentions.SOURCE_SCHEDULE, str(schedule.id)),
+                    fire_intention = intentions.with_bounds(
+                        IntentionSpec(
+                            intent=schedule.task,
+                            origin_kind=intentions.ORIGIN_SCHEDULER,
+                            wake_policy=intentions.WAKE_REMEMBER if schedule.notify else intentions.WAKE_NONE,
+                            parent_source=(intentions.SOURCE_SCHEDULE, str(schedule.id)),
+                        ),
+                        self._settings,
                     )
                 _enqueued = False
                 try:

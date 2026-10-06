@@ -1008,11 +1008,14 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
         act_intention = None
         if intentions.enabled(settings):
             origin_session = getattr(ctx.surface, "session_id", None)
-            act_intention = IntentionSpec(
-                intent=str(action.get("label") or action_id),
-                origin_kind=intentions.ORIGIN_APP_ACT,
-                origin_session_id=origin_session,
-                origin_channel=await _channel_of(router, origin_session),
+            act_intention = intentions.with_bounds(
+                IntentionSpec(
+                    intent=str(action.get("label") or action_id),
+                    origin_kind=intentions.ORIGIN_APP_ACT,
+                    origin_session_id=origin_session,
+                    origin_channel=await _channel_of(router, origin_session),
+                ),
+                settings,
             )
 
         # Stamp writes are direct, not data_patches (the dispatch reconciles
