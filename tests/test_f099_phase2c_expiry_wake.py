@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -138,10 +139,12 @@ async def test_a_result_committed_while_the_expiry_closes_the_lineage_is_not_orp
     assert "did not finish" in report.body and "late but committed" in report.body
 
 
-async def test_a_commit_and_an_expiry_that_meet_on_a_low_id_child_do_not_deadlock(env_factory, monkeypatch):  # noqa: F811
+async def test_a_commit_and_an_expiry_that_meet_on_a_low_id_child_do_not_deadlock(env_factory, monkeypatch, caplog):  # noqa: F811
     """The lock order (root first, everywhere). The root's id sorts AFTER its child's, so a commit that locked
     its claimed rows in id order and then the root would hold the child while the expiry holds the root and
-    wants the child: a deadlock. Both must finish, the commit with a lost fence."""
+    wants the child: a deadlock. Both must finish, whichever is granted the root first: the expiry wins and the
+    commit's fence is lost, or the commit wins and the expiry finds the root resolved and leaves it alone."""
+    caplog.set_level(logging.WARNING, logger=continuation.__name__)
     _high_then_low_ids(monkeypatch)
     env = await env_factory(**CONT)
     root = await make_root(env)  # the high id
@@ -177,8 +180,101 @@ async def test_a_commit_and_an_expiry_that_meet_on_a_low_id_child_do_not_deadloc
             await asyncio.wait_for(until_a_backend_waits_on_a_lock(env, at_least=2), timeout=10)
         finally:
             await holder.commit()
-    assert await asyncio.wait_for(sweep, timeout=30) == [root.id]
-    assert await asyncio.wait_for(late, timeout=30) is None  # the fence, not a deadlock error
+    expired = await asyncio.wait_for(sweep, timeout=30)
+    done = await asyncio.wait_for(late, timeout=30)  # a deadlock error on the commit's side raises here
+    # The order the two waiters are granted the root in is Postgres's, not the test's: either outcome, never both.
+    assert (expired, done is None) in (([root.id], True), ([], False))
+    # On the expiry's side a deadlock is caught per root and would read as "the commit won": the log says which.
+    assert not [r for r in caplog.records if "could not expire root" in r.getMessage()]
+
+
+async def test_an_expiry_that_waited_for_a_turn_that_resolved_the_root_writes_nothing(env_factory):  # noqa: F811
+    """Review Important 1. The sweep read the root as due while its turn was deciding, then waited for the root
+    while the turn committed a drop. Under the lock the lineage has nothing open: no marker, no "did not finish"
+    report for a root that finished. The holder IS the committing turn, so no lock-grant order is assumed."""
+    env = await env_factory(**CONT)
+    root = await make_root(env)
+    await record(env, root)
+    got = await claim(env, root.id)
+    await _past(env, root.id)
+    async with env.db.session() as holder:
+        await holder.execute(select(Intention.id).where(Intention.id == root.id).with_for_update(key_share=True))
+        sweep = asyncio.create_task(_expire(env))
+        try:
+            await asyncio.wait_for(until_a_backend_waits_on_a_lock(env), timeout=10)  # it read the root as due
+            done = await continuation.commit_arrival(
+                holder,
+                env.agent,
+                got,
+                resolution=Resolution("drop", "Done.", False, 0.9),
+                outcome="resolved",
+                settings=env.settings,
+            )
+        finally:
+            await holder.commit()
+    assert done is not None
+    assert await asyncio.wait_for(sweep, timeout=30) == []
+    fresh = await intention_of(env, "subtask", root.source_id)
+    assert (fresh.state, fresh.close_reason, fresh.root_expired_at) == ("closed", "resolved", None)
+    assert await _owner_rows(env) == []
+
+
+async def _pause_the_expiry_after_its_first_root(monkeypatch):
+    """The expiry expires its first root and stops before the second, holding the first root's lock (its
+    transaction is open). Returns ``(paused, resume)``."""
+    real, paused, resume = continuation._expire_root, asyncio.Event(), asyncio.Event()
+    seen: list = []
+
+    async def expire_one(session, agent_id, root_id, **kwargs):
+        if seen:
+            paused.set()
+            await resume.wait()
+        seen.append(root_id)
+        return await real(session, agent_id, root_id, **kwargs)
+
+    monkeypatch.setattr(continuation, "_expire_root", expire_one)
+    return paused, resume
+
+
+async def _release_sweep(env):
+    async with env.db.session() as s:
+        released = await continuation.release_stale_claims(
+            s, env.agent, lease_s=900, max_attempts=3, settings=env.settings
+        )
+        await s.commit()
+    return released
+
+
+@pytest.mark.parametrize("other", ["wake", "release"])
+async def test_two_sweeps_take_two_roots_in_one_order(env_factory, monkeypatch, other):  # noqa: F811
+    """Review Important 2: one cross-root order, (root.created_at, root.id), in every multi-root sweep. Root A
+    is older but has the higher id, and B's question was asked first, so ordering by root id (the lease sweep's
+    old order) or by when the arrival was decided (the wake's old order) puts B first. The expiry holds A and
+    pauses; the other sweep then takes A first and waits, instead of holding B while the expiry wants it."""
+    _high_then_low_ids(monkeypatch)
+    env = await env_factory(**CONT)
+    a = await make_root(env)  # older, the high id
+    b = await make_root(env)  # younger, the low id
+    assert a.id > b.id
+    for root in (b, a):  # B's arrival first
+        await record(env, root)
+        got = await claim(env, root.id)
+        if other == "wake":
+            done = await _commit(env, got, Resolution("ask", "Shall I book it?", True, 0.8))
+            await _age_question(env, done.arrival_id)
+        else:
+            await set_intention(env, root.id, claimed_at=datetime.now(UTC) - timedelta(seconds=1000))
+        await _past(env, root.id)
+    paused, resume = await _pause_the_expiry_after_its_first_root(monkeypatch)
+    sweep = asyncio.create_task(_expire(env))
+    await asyncio.wait_for(paused.wait(), timeout=10)  # A is expired and locked; B is not asked for yet
+    rival = asyncio.create_task(_wake(env) if other == "wake" else _release_sweep(env))
+    try:
+        await asyncio.wait_for(until_a_backend_waits_on_a_lock(env), timeout=10)  # the rival waits for a root
+    finally:
+        resume.set()
+    assert await asyncio.wait_for(sweep, timeout=30) == [a.id, b.id]
+    assert await asyncio.wait_for(rival, timeout=30) == []  # both lineages were expired before it got them
 
 
 async def test_expire_roots_takes_at_most_limit_roots(env_factory):  # noqa: F811
@@ -259,10 +355,11 @@ async def test_an_expiry_leaves_a_row_chat_will_deliver_alone(env_factory):  # n
 
 
 @pytest.mark.parametrize("reason", ["cancelled", "expired"])
-async def test_a_row_held_on_an_intention_a_gate_arrival_closed_is_reported_by_the_sweep(env_factory, reason):  # noqa: F811
+async def test_a_row_held_on_an_intention_a_gate_arrival_closed_is_reported_by_the_sweep(env_factory, reason, caplog):  # noqa: F811
     """Lead note (2c1-4). A row that lands after the claim read its rows, and before the root's marker, is held.
     The gate arrival then closes its intention, so nothing can claim the row any more. The sweep reports it
-    raw, as record_result reports a result that lands after the close, and stamps it, once."""
+    raw, as record_result reports a result that lands after the close, and stamps it, once, with a WARNING
+    (review Minor 2: the settle is a backstop, so its firing is worth seeing in the log)."""
     env = await env_factory(**CONT)
     root = await make_root(env)
     await record(env, root)
@@ -289,13 +386,25 @@ async def test_a_row_held_on_an_intention_a_gate_arrival_closed_is_reported_by_t
 
     (row,) = await held()
     assert row.delivered_at is None  # stranded on a closed intention
-    assert await _expire(env) == []  # the root is closed: nothing expires, but the stranded row is settled
-    (row,) = await held()
-    assert row.delivered_at is not None and row.delivered_session_id == f"intent-{root.id}"
-    (report,) = await _owner_rows(env)
-    assert (report.msg_type, report.channel, report.intention_id) == ("REPORT", CHAN, root.id)
-    assert "landed while the gate ran" in report.body
-    assert await _expire(env) == [] and len(await _owner_rows(env)) == 1  # settled once
+
+    def settle_warnings():
+        return [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING and r.name == continuation.__name__ and "held on closed" in r.getMessage()
+        ]
+
+    with caplog.at_level(logging.WARNING, logger=continuation.__name__):
+        assert await _expire(env) == []  # the root is closed: nothing expires, but the stranded row is settled
+        (warning,) = settle_warnings()
+        assert "settled 1 result(s)" in warning.getMessage()
+        (row,) = await held()
+        assert row.delivered_at is not None and row.delivered_session_id == f"intent-{root.id}"
+        (report,) = await _owner_rows(env)
+        assert (report.msg_type, report.channel, report.intention_id) == ("REPORT", CHAN, root.id)
+        assert "landed while the gate ran" in report.body
+        assert await _expire(env) == [] and len(await _owner_rows(env)) == 1  # settled once
+        assert len(settle_warnings()) == 1  # and a sweep that settles nothing says nothing
 
 
 # ---- the wake rule -----------------------------------------------------------------------------------------
@@ -462,8 +571,9 @@ async def test_one_root_can_hold_two_awaiting_arrivals_and_each_wakes_alone(env_
 async def test_an_expiry_and_a_wake_that_meet_on_an_expired_question_do_not_deadlock(env_factory, monkeypatch):  # noqa: F811
     """Root first in the wake too. The arrival lists the low-id child before the high-id root, so a wake that
     locked the arrival's intentions in that order would hold the child while the expiry holds the root and
-    wants the child. The expiry takes the root first; the wake then finds nothing awaiting and writes nothing,
-    so no "did not answer" row lands on an expired lineage (where it would become a report to the owner)."""
+    wants the child. Whichever is granted the root first, both finish: the expiry first, and the wake finds
+    nothing awaiting and writes nothing; the wake first, and its "did not answer" rows are in the expiry's
+    report. Never one on an expired lineage, where record_result would make it a raw report to the owner."""
     _high_then_low_ids(monkeypatch)
     env = await env_factory(**CONT)
     root = await make_root(env)  # the high id
@@ -483,6 +593,9 @@ async def test_an_expiry_and_a_wake_that_meet_on_an_expired_question_do_not_dead
             await asyncio.wait_for(until_a_backend_waits_on_a_lock(env, at_least=2), timeout=10)
         finally:
             await holder.commit()
-    assert await asyncio.wait_for(sweep, timeout=30) == [root.id]
-    assert await asyncio.wait_for(wake, timeout=30) == []  # the expiry closed the lineage first
-    assert [r for r in await inbox_rows(env) if r.msg_type == "INFORM" and r.arrival_id == done.arrival_id] == []
+    assert await asyncio.wait_for(sweep, timeout=30) == [root.id]  # the lineage expires either way
+    woken = await asyncio.wait_for(wake, timeout=30)
+    assert set(woken) in (set(), {root.id, child.id})  # the order of the grant is Postgres's, not the test's
+    informs = [r for r in await inbox_rows(env) if r.msg_type == "INFORM" and r.arrival_id == done.arrival_id]
+    assert len(informs) == (2 if woken else 0) and all(r.delivered_at is not None for r in informs)
+    assert not any(r.title == "The owner did not answer" for r in await _owner_rows(env))

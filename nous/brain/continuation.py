@@ -1178,10 +1178,12 @@ async def release_stale_claims(
     outlive its lease (the runner's timeout is 60 s under it, less the claim's lock wait: see the
     predicate); the fenced commit is what makes a late one harmless anyway. Does not commit."""
     now = now or datetime.now(UTC)
+    root = aliased(Intention)
     stale = (
         (
             await session.execute(
                 select(Intention)
+                .join(root, and_(root.agent_id == agent_id, root.id == Intention.root_id))
                 .where(
                     Intention.agent_id == agent_id,
                     Intention.state == STATE_DECIDING,
@@ -1197,7 +1199,10 @@ async def release_stale_claims(
                     # in prod.
                     Intention.claimed_at < now - timedelta(seconds=lease_s),
                 )
-                .order_by(Intention.root_id, Intention.claim_token, Intention.id)
+                # The one cross-root lock order, (root.created_at, root.id), in every sweep that locks several
+                # roots in one transaction (this one, expire_roots, wake_terminal_arrivals): a released SAVEPOINT
+                # keeps its locks, so two sweeps that took two roots in opposite orders could deadlock.
+                .order_by(root.created_at, root.id, Intention.claim_token, Intention.id)
                 .execution_options(populate_existing=True)
             )
         )
@@ -1292,7 +1297,7 @@ async def expire_roots(
                 and_(root.deadline.is_(None), root.created_at <= now - timedelta(hours=ttl_hours)),
             ),
         )
-        .order_by(root.created_at)
+        .order_by(root.created_at, root.id)  # the one cross-root lock order (see release_stale_claims)
         .limit(limit)
     )
     expired: list[UUID] = []
@@ -1381,6 +1386,12 @@ async def _settle_stranded_rows(session: AsyncSession, agent_id: str, *, setting
                 push_after=push_after_for(settings, now),
             )
         settled += len(rows)
+    if settled:
+        # A backstop: today only a gate arrival's late rows land here, so a count is how a path that writes a root
+        # marker without closing its lineage (2e's cancel_root, say) shows up in the log.
+        logger.warning(
+            "F099: settled %d result(s) held on closed intentions (left by a gate arrival or a cancel)", settled
+        )
     return settled
 
 
@@ -1397,11 +1408,15 @@ async def _expire_root(
     ).scalar_one_or_none()
     if row is None or row.root_cancelled_at is not None or row.root_expired_at is not None:
         return False  # a cancel or another sweep got there first
-    await session.execute(update(Intention).where(Intention.id == root_id).values(root_expired_at=now, updated_at=now))
     # Close the open intentions FIRST: this UPDATE takes their row locks, so a record_result that is mid-flight
     # (it holds its intention FOR UPDATE and reads the root unlocked) either committed before it, and its row is
     # visible below, or waits for us and then finds its intention expired and writes a raw REPORT. Reading the
     # unread rows before this statement would orphan a row committed in the gap. (2e's cancel_root: same order.)
+    # It is also the due check under the lock: `due` was read before the sweep waited for this root, and a turn
+    # that resolved the root meanwhile (it held the root first) left nothing open, so nothing is written for it.
+    # Accepted residual: a T6 reopen (record_result on a `closed` continue intention) holds only that row and
+    # reads the root unlocked; this UPDATE skips the `closed` row it sees without waiting, so a reopen committing
+    # alongside ends `result_ready` under an expired root, and the next claim's gate drops it (`expired`).
     closed_ids = (
         (
             await session.execute(
@@ -1425,6 +1440,13 @@ async def _expire_root(
         )
         .scalars()
         .all()
+    )
+    if not closed_ids:
+        return False
+    await session.execute(
+        update(Intention)
+        .where(Intention.agent_id == agent_id, Intention.id == root_id)
+        .values(root_expired_at=now, updated_at=now)
     )
     unread = (
         (
@@ -1549,6 +1571,7 @@ async def wake_terminal_arrivals(
     intention it woke saying so (``source_id`` derived from the arrival and the intention: idempotent),
     so the woken claim has something to show. Returns the woken intention ids. Does not commit."""
     now = now or datetime.now(UTC)
+    root = aliased(Intention)
     waiting = exists().where(
         Intention.id == any_(IntentionArrival.intention_ids), Intention.state == STATE_AWAITING_OWNER
     )
@@ -1556,8 +1579,10 @@ async def wake_terminal_arrivals(
         (
             await session.execute(
                 select(IntentionArrival)
+                .join(root, and_(root.agent_id == agent_id, root.id == IntentionArrival.root_id))
                 .where(IntentionArrival.agent_id == agent_id, IntentionArrival.decision == "ask", waiting)
-                .order_by(IntentionArrival.decided_at)
+                # The one cross-root lock order (see release_stale_claims); a root's arrivals in decision order.
+                .order_by(root.created_at, root.id, IntentionArrival.decided_at, IntentionArrival.id)
                 .limit(limit)
             )
         )
