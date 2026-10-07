@@ -44,6 +44,7 @@ Base: `main` at `129d0776` (2d merged as #707). The store (`nous/brain/continuat
 
 - Add `NOUS_TELEGRAM_CHAT_ID` to the prod telegram service's compose environment, by hand. Without it the bot has no owner chat, so buttons and commands do nothing.
 - Add `NOUS_CONTINUATION_ENABLED=${NOUS_CONTINUATION_ENABLED:-false}` to the prod compose, by hand. Turn it on only when the owner says so.
+- **(2e-8 review I2) The chat id turns on Configuration B at once.** Adding `NOUS_TELEGRAM_CHAT_ID` to the prod telegram service at the 2e deploy (by hand, or by deploying a compose from 2d on, which passes it) gives the bot its owner chat on that restart, while continuation is still off. From then on 2d's owner commands (`/approve`, `/reject`, `/answer`, a reply to a bot message) and 2e's `/intentions` and `/cancel_intention` each make one REST lookup first. Under continuation off every one of them falls through to chat, except `/cancel_intention <the id of a real root>`, which answers "Nous is not running its follow-up work." (the route's 503). Nothing is written.
 
 ## Owner instructions in force
 

@@ -212,7 +212,11 @@ def build_intention_routes(*, database: Any, settings: Any, continuation_runner:
         view belongs to the continuation, and with it off nothing can be cancelled (the cancel answers 503), so a
         deployment on prod's flags sees no change and pays nothing. With it on, every open root is listed, the
         open Phase 1 roots (a schedule's container included) among them, and they can be cancelled. The budgets of
-        each root are read per root (several queries): a card should ask for ``limit=10``."""
+        each root are read per root (several queries): a card should ask for ``limit=10``.
+
+        The list carries model-authored text raw: ``intent``, ``progress``, ``gate_reason``, and the arguments,
+        rationale and result of each proposal. Any surface that renders it (the Phase 3 cards included) must escape
+        it; the bot shows only the intent, escaped inside ``<pre>``."""
         state = request.query_params.get("state", "open")
         raw_limit = request.query_params.get("limit", "20")
         if not (raw_limit.isascii() and raw_limit.isdigit()) or not 1 <= int(raw_limit) <= LIST_LIMIT_MAX:
