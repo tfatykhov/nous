@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -2043,3 +2044,169 @@ async def rollback_at_startup(
                 break
         await session.commit()
     return RollbackReport(closed, rerouted, expired, len(pushed_ids))
+
+
+# ---------------------------------------------------------------------------
+# F099 Phase 2d: proposals (spec 4.4)
+# ---------------------------------------------------------------------------
+
+PROPOSAL_STAGED, PROPOSAL_PENDING, PROPOSAL_APPROVED = "staged", "pending", "approved"
+PROPOSAL_EXECUTING, PROPOSAL_REJECTED, PROPOSAL_EXPIRED = "executing", "rejected", "expired"
+PROPOSAL_EXECUTED, PROPOSAL_FAILED, PROPOSAL_CANCELLED = "executed", "failed", "cancelled"
+MAX_PROPOSALS_PER_ARRIVAL = 5
+# What the owner is shown must fit one Telegram message whole (4096 characters): a call that does not is refused at
+# staging, never clipped, because a clipped call is one the owner approved without reading.
+PROPOSAL_ARGS_MAX_CHARS = 2000
+PROPOSAL_RATIONALE_MAX_CHARS = 1000
+PROPOSAL_NOTE_MAX_CHARS = 600  # the arrival's note, as the PROPOSAL push quotes it
+PROPOSAL_RESULT_MAX_CHARS = 2000  # the stored result of an executed call
+
+# Control characters, the C1 range, soft hyphen, zero-width and bidi marks, and the byte-order mark: shown as
+# \uXXXX so that a call cannot disguise what it does (a right-to-left override reorders what the owner reads).
+_UNSAFE_CHARS = re.compile(
+    "[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb]"
+)
+
+
+class ProposalRefused(ValueError):
+    """A proposal the store will not stage. The text is what the model reads, so it says what to change."""
+
+
+def short_id(value: UUID) -> str:
+    """The first eight hex characters of an id: what the owner sees and types."""
+    return value.hex[:8]
+
+
+def render_arguments(arguments: Mapping[str, Any]) -> str:
+    """A call's arguments as the owner reads them, and the only rendering anything shows: two-space-indented JSON
+    in the mapping's own key order (callers pass the STORED arguments, whose jsonb key order is Postgres's), with
+    every control, bidi and zero-width character as ``\\uXXXX``. Raises ``TypeError`` or ``ValueError`` for a
+    value that is not plain JSON."""
+    shown = json.dumps(arguments, ensure_ascii=False, indent=2)
+    return _UNSAFE_CHARS.sub(lambda match: f"\\u{ord(match.group()):04x}", shown)
+
+
+def _contains_nul(value: Any) -> bool:
+    """A NUL character anywhere in a JSON value, keys included. PostgreSQL's ``jsonb`` and ``text`` refuse it, and
+    ``render_arguments`` shows it as an escape, so it has to be looked for in the value itself."""
+    if isinstance(value, str):
+        return "\x00" in value
+    if isinstance(value, Mapping):
+        return any(_contains_nul(key) or _contains_nul(item) for key, item in value.items())
+    if isinstance(value, list | tuple):
+        return any(_contains_nul(item) for item in value)
+    return False
+
+
+async def stage_proposal(
+    session: AsyncSession,
+    agent_id: str,
+    *,
+    intention_id: UUID,
+    root_id: UUID,
+    claim_token: UUID,
+    tool: str,
+    arguments: Mapping[str, Any],
+    rationale: str,
+) -> UUID:
+    """Stage one proposal under a live claim: a ``staged`` row carrying ``claim_token``, in the caller's
+    transaction. Staging only records the call. It becomes ``pending``, and reaches the owner, in the arrival's
+    fenced commit (``publish_staged``) and nowhere else; a failed, timed-out or released attempt expires it
+    (``expire_staged``). Raises ``ProposalRefused`` for a claim that is no longer live (the intention is not
+    ``deciding`` under this token), a blank or oversize rationale, arguments the owner could not read in one
+    message, and a sixth proposal under one claim. The same call twice under one claim is one row.
+
+    The liveness read takes no lock (a lock that conflicts with the commit's would only add a wait), so a stage
+    that races a lease release can leave a ``staged`` row behind: it can never be approved, and
+    ``expire_proposals`` removes it after two leases."""
+    live = (
+        await session.execute(
+            select(
+                exists().where(
+                    Intention.agent_id == agent_id,
+                    Intention.id == intention_id,
+                    Intention.root_id == root_id,
+                    Intention.state == STATE_DECIDING,
+                    Intention.claim_token == claim_token,
+                )
+            )
+        )
+    ).scalar_one()
+    if not live:
+        raise ProposalRefused(
+            "this turn is no longer live (its claim was released, or its work ended): nothing staged."
+        )
+    why = (rationale or "").strip()
+    if not why:
+        raise ProposalRefused("rationale is required: say why the owner should approve this call.")
+    if len(why) > PROPOSAL_RATIONALE_MAX_CHARS:
+        raise ProposalRefused(
+            f"rationale is too long ({len(why)} characters; at most {PROPOSAL_RATIONALE_MAX_CHARS}): shorten it."
+        )
+    # A refusal the model reads, not a database error that would fail the whole turn (an injected result can make
+    # a model echo a NUL character into a call).
+    if "\x00" in why:
+        raise ProposalRefused("rationale may not contain a NUL character.")
+    if _contains_nul(arguments):
+        raise ProposalRefused("arguments may not contain a NUL character.")
+    try:
+        shown = render_arguments(arguments)
+    except (TypeError, ValueError):
+        raise ProposalRefused("arguments must be plain JSON values.") from None
+    if len(shown) > PROPOSAL_ARGS_MAX_CHARS:
+        raise ProposalRefused(
+            f"the call is too long ({len(shown)} characters; at most {PROPOSAL_ARGS_MAX_CHARS}): the owner reads the "
+            "whole call before approving it, so shorten it or split it into several proposals."
+        )
+    staged = list(
+        (
+            await session.execute(
+                select(IntentionProposal)
+                .where(
+                    IntentionProposal.agent_id == agent_id,
+                    IntentionProposal.claim_token == claim_token,
+                    IntentionProposal.state == PROPOSAL_STAGED,
+                )
+                .order_by(IntentionProposal.created_at, IntentionProposal.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for row in staged:
+        if row.tool == tool and row.arguments == dict(arguments):
+            return row.id
+    if len(staged) >= MAX_PROPOSALS_PER_ARRIVAL:
+        raise ProposalRefused(
+            f"at most {MAX_PROPOSALS_PER_ARRIVAL} proposals per turn: ask the owner about these first."
+        )
+    row = IntentionProposal(
+        agent_id=agent_id,
+        intention_id=intention_id,
+        root_id=root_id,
+        tool=tool,
+        arguments=dict(arguments),
+        rationale=why,
+        state=PROPOSAL_STAGED,
+        claim_token=claim_token,
+    )
+    session.add(row)
+    await session.flush()
+    return row.id
+
+
+async def expire_staged(session: AsyncSession, agent_id: str, *, claim_token: UUID) -> int:
+    """The failure path of staging: this claim's ``staged`` rows become ``expired``, so a failed, timed-out or
+    released attempt leaves nothing that could be approved. Returns how many. Does not commit."""
+    moved = await session.execute(
+        update(IntentionProposal)
+        .where(
+            IntentionProposal.agent_id == agent_id,
+            IntentionProposal.claim_token == claim_token,
+            IntentionProposal.state == PROPOSAL_STAGED,
+        )
+        .values(state=PROPOSAL_EXPIRED, updated_at=datetime.now(UTC))
+        .returning(IntentionProposal.id)
+        .execution_options(synchronize_session=False)
+    )
+    return len(moved.scalars().all())

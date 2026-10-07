@@ -398,6 +398,25 @@ class ToolDispatcher:
             return args
         return self._repair(name, args)[0]
 
+    def validate_call(self, name: str, args: Any) -> list[str]:
+        """What is wrong with a call a model PROPOSES (F099 2d), judged against the tool's schema without
+        running it; empty when it is well-formed. Stricter than ``dispatch`` on one point: an argument named with
+        a leading underscore is the dispatcher's own and ``dispatch`` drops it silently, so the owner would
+        approve a call that runs differently from the one shown. It is refused here instead."""
+        if not isinstance(args, dict):
+            return ["arguments must be a JSON object"]
+        schema = self._schemas.get(name)
+        if schema is None:
+            return [f"{name} is not a registered tool"]
+        problems = [
+            f"argument '{key}' is reserved: names starting with an underscore are set by the harness, not sent"
+            for key in args
+            if str(key).startswith("_")
+        ]
+        problems += [f"missing required argument '{key}'" for key in schema.get("required") or [] if key not in args]
+        problems += _schema_type_errors(args, schema)
+        return problems
+
     async def dispatch(
         self,
         name: str,

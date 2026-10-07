@@ -11,6 +11,7 @@ the arrival (claim, gate, turn, follow-up, commit), and the loop. Nothing here s
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
@@ -21,6 +22,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 
+from nous.api import tool_policy
 from nous.api.execution_context import ExecutionContext
 from nous.brain import continuation
 from nous.brain.continuation import INTENT_SESSION_PREFIX, Resolution
@@ -62,6 +64,29 @@ RESOLVE_INTENTION_SCHEMA: dict[str, Any] = {
     },
 }
 
+# The proposal tool (contract section 4.6). A per-turn extra tool: never registered with the dispatcher, never terminal.
+PROPOSE_ACTION_SCHEMA: dict[str, Any] = {
+    "name": "propose_action",
+    "description": (
+        "Stage an action you may not take yourself (an outward send, a schedule, a shell command) for the owner "
+        "to approve. Nothing runs now: the owner sees this exact call, and it runs only if they approve it. Then "
+        "end the turn with resolve_intention(decision='ask'). The tool must be a registered tool you are not "
+        "already offered. The whole call must be short enough to read in one message."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "tool": {"type": "string"},
+            "arguments": {"type": "object"},
+            "rationale": {
+                "type": "string",
+                "description": "Why the owner should approve this call (at most 1000 characters).",
+            },
+        },
+        "required": ["tool", "arguments", "rationale"],
+    },
+}
+
 # The second request of an arrival whose turn ended without the call (spec 4.5.5, the #692 pattern): the
 # tool is asked for in words, with no forced tool_choice (5.5-generation models reject one with a 400).
 CONTINUATION_FOLLOWUP_PROMPT = (
@@ -89,7 +114,7 @@ class ArrivalState:
     """What a turn recorded through its extra tools. The decision is read from here, never from the text."""
 
     resolution: Resolution | None = None
-    # 2d: the proposals the turn staged with propose_action. Always empty in 2c (the tool is not offered).
+    # The proposals the turn staged with propose_action (2d); resolve_intention may then only ask.
     proposals: list[UUID] = field(default_factory=list)
 
 
@@ -146,6 +171,62 @@ def make_resolve_intention_executor(
         return "Recorded.", False
 
     return resolve_intention
+
+
+def make_propose_action_executor(
+    state: ArrivalState,
+    *,
+    ctx: ExecutionContext,
+    dispatcher: Any,
+    stage: Callable[[str, dict, str], Awaitable[UUID]],
+) -> Callable[..., Awaitable[tuple[str, bool]]]:
+    """The executor of ``propose_action`` for one turn (the ``extra_tools`` shape: ``(text, is_error)``).
+
+    It validates and stages; it never runs anything (no ledger row and no activity ping: staging is a row write,
+    not a side effect, R9). ``tool`` must be registered and must NOT be one this lineage may already call
+    (``internal_only_allowed``, judged as if the root were below its limits: a spawn tool removed at the limit
+    is still not a proposal, because approving one would route around the limit). The call must satisfy the
+    tool's schema, and no argument may start with an underscore. A refusal is an error text the model can act
+    on; a non-terminal success returns to the model, which then ends the turn with ``ask``."""
+    probe = dataclasses.replace(ctx, spawn_blocked=False)
+
+    async def propose_action(**kwargs: Any) -> tuple[str, bool]:
+        tool = kwargs.get("tool")
+        arguments = kwargs.get("arguments")
+        rationale = kwargs.get("rationale")
+        if not isinstance(tool, str) or not tool.strip():
+            return "Error: tool is required: the name of the tool to run if the owner approves.", True
+        tool = tool.strip()
+        if not isinstance(arguments, dict):
+            return "Error: arguments must be a JSON object: the exact arguments the tool will receive.", True
+        if not isinstance(rationale, str) or not rationale.strip():
+            return "Error: rationale is required: say why the owner should approve this call.", True
+        if not dispatcher.is_registered(tool):
+            return f"Error: {tool} is not a registered tool, so there is nothing to propose.", True
+        if tool in tool_policy.INTERNAL_ONLY_SPAWN_TOOLS:
+            return (
+                f"Error: {tool} spawns work and cannot be proposed: spawn it yourself while the work is below "
+                "its depth and spawn limits, and otherwise end with report, drop or ask.",
+                True,
+            )
+        if tool_policy.internal_only_allowed(tool, ctx=probe):
+            return f"Error: {tool} is a tool you may call yourself, so call it yourself; it is not a proposal.", True
+        problems = dispatcher.validate_call(tool, arguments)
+        if problems:
+            return "Error: this call is not well-formed: " + "; ".join(problems) + ".", True
+        try:
+            proposal_id = await stage(tool, arguments, rationale)
+        except continuation.ProposalRefused as refused:
+            return f"Error: {refused}", True
+        if proposal_id not in state.proposals:
+            state.proposals.append(proposal_id)
+        return (
+            f"Staged proposal {continuation.short_id(proposal_id)} ({tool}). It reaches the owner only when you "
+            "end this turn with resolve_intention(decision='ask'), and it runs only if the owner approves it.",
+            False,
+        )
+
+    return propose_action
 
 
 def build_arrival_prompt(
@@ -563,7 +644,7 @@ class ContinuationRunner:
             # R4: the children this turn spawns inherit the root's Plan decision (the turn makes none of its own).
             decision_id=str(root_decision) if root_decision is not None else None,
         )
-        extra_tools = {
+        extra_tools: dict[str, tuple[dict, Any]] = {
             "resolve_intention": (
                 RESOLVE_INTENTION_SCHEMA,
                 make_resolve_intention_executor(
@@ -571,6 +652,13 @@ class ContinuationRunner:
                 ),
             )
         }
+        if self._dispatcher is not None:  # a proposal is validated against the dispatcher's tools and schemas
+            extra_tools["propose_action"] = (
+                PROPOSE_ACTION_SCHEMA,
+                make_propose_action_executor(
+                    state, ctx=context, dispatcher=self._dispatcher, stage=self._stager(claim)
+                ),
+            )
         usage = [0, 0]
         try:
             try:
@@ -695,6 +783,26 @@ class ContinuationRunner:
                 return await continuation.root_limits(session, self._agent_id, root_id, settings=self._settings)
 
         return limits_of
+
+    def _stager(self, claim: continuation.Claim) -> Callable[[str, dict, str], Awaitable[UUID]]:
+        """``stage`` for ``propose_action``: one proposal under this claim, in a session of its own."""
+
+        async def stage(tool: str, arguments: dict, rationale: str) -> UUID:
+            async with self._db.session() as session:
+                proposal_id = await continuation.stage_proposal(
+                    session,
+                    self._agent_id,
+                    intention_id=claim.deepest.id,
+                    root_id=claim.root_id,
+                    claim_token=claim.claim_token,
+                    tool=tool,
+                    arguments=arguments,
+                    rationale=rationale,
+                )
+                await session.commit()
+            return proposal_id
+
+        return stage
 
     def _open_work_of(self, claim: continuation.Claim) -> Callable[[], Awaitable[bool]]:
         async def open_work_of() -> bool:

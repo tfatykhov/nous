@@ -137,7 +137,7 @@ def test_the_extra_tool_names_collide_with_no_registered_tool_and_are_not_in_the
     from nous.api import tool_policy
     from nous.api.tool_classes import TOOL_CLASSES
 
-    extra_names = {"resolve_intention"}
+    extra_names = {"resolve_intention", "propose_action"}
     assert not extra_names & _registered_names()
     subtask_ctx = ExecutionContext(
         kind="subtask",
@@ -151,6 +151,7 @@ def test_the_extra_tool_names_collide_with_no_registered_tool_and_are_not_in_the
         assert not extra_names & allowed
     assert tool_policy.internal_only_allowed("resolve_intention", ctx=subtask_ctx) is False
     assert tool_policy.internal_only_allowed("resolve_intention", ctx=_continuation_ctx()) is False
+    assert tool_policy.internal_only_allowed("propose_action", ctx=_continuation_ctx()) is False
 
 
 @pytest.mark.postgres_only
