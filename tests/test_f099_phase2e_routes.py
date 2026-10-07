@@ -24,7 +24,7 @@ from f099_support import (
     runner_env,  # noqa: F401
     set_intention,
 )
-from sqlalchemy import select
+from sqlalchemy import select, update
 from starlette.applications import Starlette
 from test_f099_phase2c_parity import PROD
 
@@ -204,6 +204,7 @@ async def test_cancelling_over_rest_cancels_the_lineage_and_answers_with_the_cou
         "cancelled_proposals": 0,
         "deactivated_schedules": 0,
         "turn_stopped": False,
+        "truncated": False,
     }
     assert (await _row(env, root.id)).root_cancelled_at is not None
     again = await _call(app, "POST", f"/intentions/{root.id}/cancel")  # no body at all: allowed
@@ -237,6 +238,21 @@ async def test_a_cancel_answers_404_for_a_child_or_an_unknown_id_and_400_for_a_b
         assert (await _call(app, "POST", f"/intentions/{bad}/cancel", json={})).status_code == 400
     assert (await _call(app, "POST", f"/intentions/{root.id}/cancel", content=b"[1, 2]")).status_code == 400
     assert (await _row(env, root.id)).root_cancelled_at is None
+
+
+async def test_an_ambiguous_root_prefix_is_400_with_its_own_refusal_code(runner_env):  # noqa: F811
+    """2e-8 review m3: the bot says why, so the 400 names the case with a fixed code the bot can look up."""
+    env = await runner_env()
+    roots = [await make_root(env), await make_root(env)]
+    async with env.db.session() as s:  # two roots that share their first 8 characters (fresh tails)
+        for root in roots:
+            shared = uuid.UUID("abcdef01" + uuid.uuid4().hex[8:])
+            await s.execute(update(Intention).where(Intention.id == root.id).values(id=shared, root_id=shared))
+        await s.commit()
+    for runner in (_runner(env), None):  # looked up before the runner is needed: the same answer without one
+        response = await _call(_app(env, runner), "POST", "/intentions/abcdef01/cancel", json={})
+        assert response.status_code == 400 and response.json()["refusal"] == "ambiguous"
+        assert "more than one" in response.json()["error"]
 
 
 async def test_with_no_runner_a_known_root_is_503_and_an_unknown_one_404_and_nothing_is_cancelled(runner_env):  # noqa: F811

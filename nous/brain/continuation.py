@@ -3505,6 +3505,8 @@ class CancelOutcome:
     dag_ids: tuple[UUID, ...] = ()
     proposal_ids: tuple[UUID, ...] = ()
     root_ids: tuple[UUID, ...] = ()
+    # The cascade stopped at CANCEL_ROOTS_MAX roots: some fires are still open, and a repeat of the cancel takes them.
+    truncated: bool = False
 
 
 @dataclass(slots=True)
@@ -3761,12 +3763,14 @@ async def cancel_root(
         # level by level would take a younger fire before an older one inside a sibling's lineage, 2e-1 review I1).
         queue: list[tuple[datetime, UUID]] = [(root.created_at, root_id)]
         visited: set[UUID] = set()
+        truncated = False
         while queue:
             _created, next_root = heapq.heappop(queue)
             if next_root in visited:
                 continue
             if len(visited) >= CANCEL_ROOTS_MAX:
                 logger.warning("F099: a cancel of root %s stopped at %d roots", root_id, CANCEL_ROOTS_MAX)
+                truncated = True
                 break
             visited.add(next_root)
             found = await _cancel_lineage(session, agent_id, next_root, now=now, tally=tally, fire=next_root != root_id)
@@ -3796,6 +3800,7 @@ async def cancel_root(
         dag_ids=tuple(tally.dag_ids),
         proposal_ids=tuple(tally.proposal_ids),
         root_ids=tuple(tally.root_ids),
+        truncated=truncated,
     )
 
 

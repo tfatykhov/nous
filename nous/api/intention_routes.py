@@ -237,8 +237,9 @@ def build_intention_routes(*, database: Any, settings: Any, continuation_runner:
         Looked up before the runner is needed: an id that names no root is a 404 whatever is wired, and a root with
         no runner is a 503, so a deployment with continuation off answers 503 for a root of Phase 1 and 404 for the
         rest, and cancels nothing (a store-only cancel would cancel a real Phase 1 lineage without the runner that
-        stops its turn and its DAGs). 409 when nothing was running. Deterministic: no model takes part and no agent
-        tool reaches it.
+        stops its turn and its DAGs). 409 when nothing was running. ``truncated`` says the cascade stopped at its
+        bound (``CANCEL_ROOTS_MAX`` roots): a repeat of the cancel takes the rest. Deterministic: no model takes part
+        and no agent tool reaches it.
 
         What a cancel cannot take back: a call the owner approved that is already ``executing`` is left alone. It is
         refused if it has not passed the tool authorisation yet; a send already in flight completes (its outcome is
@@ -257,7 +258,8 @@ def build_intention_routes(*, database: Any, settings: Any, continuation_runner:
             async with database.session() as session:
                 root_id = await continuation.find_root_id(session, agent_id, shape)
         except continuation.AmbiguousId:
-            return _error(400, "that id matches more than one intention: use more characters")
+            # A fixed code, so a surface can say why (the bot does) without reading the error text.
+            return _error(400, "that id matches more than one intention: use more characters", refusal="ambiguous")
         if root_id is None:
             return _error(404, "no such intention")
         if not continuation_runner:
@@ -287,6 +289,7 @@ def build_intention_routes(*, database: Any, settings: Any, continuation_runner:
                 "cancelled_proposals": outcome.cancelled_proposals,
                 "deactivated_schedules": outcome.deactivated_schedules,
                 "turn_stopped": outcome.turn_stopped,
+                "truncated": outcome.truncated,
             }
         )
 

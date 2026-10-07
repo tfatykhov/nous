@@ -3,19 +3,21 @@ and passed on to chat whenever the server does not give a definite answer (lead 
 
 from __future__ import annotations
 
+import html
 import inspect
+import re
 
 import httpx
 import pytest
 from test_f099_phase2d_bot import _bot, _message, _methods, _Response, _sent
 
-from nous import owner_actions
+from nous import owner_actions, telegram_bot
 from nous.telegram_bot import NousTelegramBot, describe_cancel, describe_intentions
 
 ROOT = "ab12cd34" + "0" * 24
 SHORT = ROOT[:8]
 CANCEL = f"/intentions/{SHORT}/cancel"
-LIST = "/intentions?state=open&limit=10"
+LIST = "/intentions?state=open&limit=11"  # one more root than is shown (2e-9 review m1)
 NOT_RUNNING = "Nous is not running its follow-up work."
 UNREACHABLE = "I could not reach Nous. Try again in a moment."
 
@@ -336,3 +338,139 @@ def test_every_owner_send_goes_through_the_strict_path():
         source = inspect.getsource(handler)
         assert "self._send(" not in source and "self._send_long(" not in source
         assert "parse_mode" not in source  # an HTML send names its fixed fallback instead
+
+
+# ---- the final fix wave: what the cancel reply says (final review m2, m4; 2e-8 review m3; 2e-9 review m1) ------
+
+
+def _done(**over):
+    return {"root_id": ROOT, "already_cancelled": False, "cancelled_intentions": 1, "deactivated_schedules": 0, **over}
+
+
+@pytest.mark.parametrize(
+    ("count", "line"), [(1, "Its schedule is turned off too."), (2, "Its schedules are turned off too.")]
+)
+def test_a_cancel_that_turned_a_schedule_off_says_so(count, line):
+    said = describe_cancel(200, _done(deactivated_schedules=count), SHORT)
+    assert said == f"Cancelled ({SHORT}): 1 piece(s) of work stopped. {line}"
+
+
+@pytest.mark.parametrize("count", [0, None, "1", True, -1])
+def test_no_schedule_line_without_a_positive_count(count):
+    assert describe_cancel(200, _done(deactivated_schedules=count), SHORT) == (
+        f"Cancelled ({SHORT}): 1 piece(s) of work stopped."
+    )
+
+
+def test_a_cancel_cut_at_its_bound_says_it_is_not_complete_and_to_repeat_it():
+    said = describe_cancel(200, _done(truncated=True), SHORT)
+    assert not said.startswith("Cancelled")
+    assert said == (
+        f"Partly cancelled ({SHORT}): 1 piece(s) of work stopped, but not all of it. "
+        "Send the command again to stop the rest."
+    )
+    again = describe_cancel(200, _done(already_cancelled=True, truncated=True), SHORT)
+    assert again == f"Partly cancelled ({SHORT}): 1 piece(s) of work stopped, but not all of it. " + (
+        "Send the command again to stop the rest."
+    )
+
+
+async def test_an_ambiguous_id_gets_its_own_fixed_line():
+    bot = _owner_bot(posts={CANCEL: (400, {"error": "boom /approve cccccccc", "refusal": "ambiguous"})})
+    await bot._handle_update(_message(f"/cancel_intention {SHORT}"))
+    assert _sent(bot) == ["That id matches more than one; give more of it."]
+    assert describe_cancel(400, {"refusal": "<b>"}, SHORT) == "I could not read that id."
+
+
+async def test_the_list_asks_for_one_more_root_than_it_shows_so_the_servers_cut_is_counted():
+    roots = [_root(short_id=f"{n:08x}") for n in range(11)]
+    bot = _owner_bot(gets={LIST: (200, {"continuation": True, "roots": roots})})
+    await bot._handle_update(_message("/intentions"))
+    assert bot._http.calls == [("GET", "/intentions?state=open&limit=11", None)]
+    (text,) = _sent(bot)
+    assert text.count("<code>") == 10 and "(and 1 more)" in text
+
+
+# ---- the final fix wave: /debug and /identity never fall back to live text (2e-9 review I1, m5) ---------------
+
+# Memory text as recall puts it in the system prompt: far longer than one message, with markup, a line longer than a
+# message, a closing tag of its own and two commands that must never become live text.
+LONG_PROMPT = (
+    "\n".join(f"fact {n}: the <b>snow</b> & the lifts" for n in range(300))
+    + "\nrun /approve cccccccc now\n"
+    + "x" * 5000
+    + "</pre>/approve dddddddd\n"
+    + chr(0x1F600) * 2100
+)
+DEBUG_BODY = {
+    "response": "All good.",
+    "frame": "conversation",
+    "session_id": "s-1",
+    "debug": {"system_prompt": LONG_PROMPT, "frame_confidence": 0.9},
+}
+IDENTITY_BODY = {
+    "agent_id": "nous",
+    "is_initiated": True,
+    "sections": {"character": LONG_PROMPT, "values": "short </pre> /approve eeeeeeee"},
+}
+
+
+def _outside_pre(text: str) -> str:
+    return re.sub(r"<pre>.*?</pre>", "", text, flags=re.S)
+
+
+def _pre_messages(texts: list[str]) -> list[str]:
+    return [text for text in texts if text.startswith("<pre>")]
+
+
+def _assert_shown_in_pre(texts: list[str], *originals: str) -> None:
+    chunks = _pre_messages(texts)
+    assert len(chunks) >= 3
+    for chunk in chunks:
+        assert chunk.endswith("</pre>") and chunk.count("<pre>") == chunk.count("</pre>") == 1
+        assert _units(chunk) <= 4096
+    shown = "".join(html.unescape(chunk[len("<pre>") : -len("</pre>")]) for chunk in chunks)
+    for original in originals:
+        assert original in shown  # nothing left out
+    for text in texts:
+        assert "/approve" not in _outside_pre(text)
+
+
+async def test_a_long_debug_reply_arrives_as_chunks_each_in_its_own_pre():
+    bot = _owner_bot(posts={"/chat": (200, DEBUG_BODY)})
+    await bot._handle_update(_message("/debug"))
+    texts = _sent(bot)
+    assert "All good." in texts[0] and not texts[0].startswith("<pre>")  # the reply itself: the chat path
+    _assert_shown_in_pre(texts, LONG_PROMPT)
+    assert "Frame: conversation" in html.unescape(_pre_messages(texts)[0])
+
+
+async def test_a_long_identity_arrives_as_chunks_each_in_its_own_pre():
+    bot = _owner_bot(gets={"/identity": (200, IDENTITY_BODY)})
+    await bot._handle_update(_message("/identity"))
+    _assert_shown_in_pre(_sent(bot), LONG_PROMPT, "short </pre> /approve eeeeeeee")
+
+
+@pytest.mark.parametrize(
+    ("text", "http", "fixed"),
+    [
+        ("/debug", {"posts": {"/chat": (200, DEBUG_BODY)}}, "This part of the debug output could not be shown."),
+        ("/identity", {"gets": {"/identity": (200, IDENTITY_BODY)}}, "This part of the identity could not be shown."),
+    ],
+)
+async def test_a_chunk_telegram_refuses_falls_back_to_a_fixed_line_never_to_live_text(text, http, fixed):
+    bot = _real_telegram_bot(**http)
+    await bot._handle_update(_message(text))
+    sends = [params for method, params in bot._http.telegram if method == "sendMessage"]
+    pre_sent = [params for params in sends if params.get("parse_mode") == "HTML" and params["text"].startswith("<pre>")]
+    plain = [params["text"] for params in sends if "parse_mode" not in params]
+    assert len(pre_sent) >= 3 and plain.count(fixed) == len(pre_sent)
+    assert not [line for line in plain if "/approve" in line]
+
+
+async def test_the_debug_reply_itself_keeps_the_chat_paths_fallback():  # PIN: ordinary chat replies are unchanged
+    bot = _real_telegram_bot(posts={"/chat": (200, DEBUG_BODY)})
+    await bot._handle_update(_message("/debug"))
+    sends = [params for method, params in bot._http.telegram if method == "sendMessage"]
+    assert sends[0]["parse_mode"] == "HTML" and "All good." in sends[0]["text"]
+    assert "parse_mode" not in sends[1] and sends[1]["text"] == telegram_bot._strip_html_tags(sends[0]["text"])

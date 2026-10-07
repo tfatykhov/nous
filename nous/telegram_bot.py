@@ -129,10 +129,13 @@ def describe_answer(status: int, body: dict) -> str:
     return _UNREACHABLE
 
 
-INTENTIONS_SHOWN = 10  # the roots /intentions lists (the route is asked for no more)
+INTENTIONS_SHOWN = 10  # the roots /intentions lists (the route is asked for one more, so its own cut is counted)
 INTENT_SHOWN_CHARS = 160  # one root's intent, as /intentions shows it
 TELEGRAM_TEXT_LIMIT = 3900  # UTF-16 units of the escaped text: a message stays under Telegram's 4096
 INTENTIONS_NOT_SHOWN = "This list could not be shown."  # what a list Telegram refuses falls back to
+# What a /debug or /identity chunk Telegram refuses falls back to: a fixed line, never the stripped text.
+DEBUG_NOT_SHOWN = "This part of the debug output could not be shown."
+IDENTITY_NOT_SHOWN = "This part of the identity could not be shown."
 # Fixed vocabulary for a root's state: the state names of the server are looked up, never echoed.
 ROOT_STATE_WORDS = {
     "pending": "running",
@@ -152,6 +155,29 @@ def _shown(text: object, limit: int) -> str:
 def _utf16_units(text: str) -> int:
     """The length Telegram counts: UTF-16 code units (an emoji is two)."""
     return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def _escaped_units(text: str) -> int:
+    return _utf16_units(html_module.escape(text, quote=False))
+
+
+def pre_chunks(text: str, limit: int = TELEGRAM_TEXT_LIMIT) -> list[str]:
+    """Plain text that carries model or memory text, as messages that each hold one ``<pre>`` block (where Telegram
+    links no command), HTML-escaped and at most ``limit`` UTF-16 units of escaped text long. Split between lines
+    where a line fits, inside a line where it does not; escaped chunk by chunk, so no entity is cut in two."""
+    room = limit - _utf16_units("<pre></pre>")
+    chunks: list[str] = []
+    current, used = "", 0
+    for line in text.splitlines(keepends=True):
+        for piece in [line] if _escaped_units(line) <= room else line:
+            cost = _escaped_units(piece)
+            if current and used + cost > room:
+                chunks.append(current)
+                current, used = "", 0
+            current += piece
+            used += cost
+    chunks.append(current)
+    return [f"<pre>{html_module.escape(chunk, quote=False)}</pre>" for chunk in chunks if chunk.strip()]
 
 
 def describe_intentions(body: dict) -> str:
@@ -200,14 +226,26 @@ def describe_cancel(status: int, body: dict, short_id: str) -> str:
     if status == 200:
         counts = [body.get(k) for k in ("cancelled_intentions", "cancelled_subtasks", "cancelled_dags")]
         stopped = sum(c for c in counts if isinstance(c, int) and not isinstance(c, bool))
+        schedules = body.get("deactivated_schedules")
+        turned_off = ""
+        if isinstance(schedules, int) and not isinstance(schedules, bool) and schedules > 0:
+            # A cancelled schedule never fires again: the owner is told, not left to find out.
+            turned_off = " Its schedule is turned off too." if schedules == 1 else " Its schedules are turned off too."
+        if body.get("truncated") is True:  # the cascade stopped at its bound: a repeat takes the rest
+            return (
+                f"Partly cancelled ({short_id}): {stopped} piece(s) of work stopped, but not all of it.{turned_off} "
+                "Send the command again to stop the rest."
+            )
         if body.get("already_cancelled") is True:
             return f"Already cancelled ({short_id})."
-        return f"Cancelled ({short_id}): {stopped} piece(s) of work stopped."
+        return f"Cancelled ({short_id}): {stopped} piece(s) of work stopped.{turned_off}"
     if status == 409:
         refusal = body.get("refusal")
         text = CANCEL_REFUSALS.get(refusal) if isinstance(refusal, str) else None
         return text or "That work cannot be cancelled."
     if status == 400:
+        if body.get("refusal") == "ambiguous":
+            return "That id matches more than one; give more of it."
         return "I could not read that id."
     if status == 503:
         return _NOT_RUNNING
@@ -952,7 +990,7 @@ class NousTelegramBot:
             await self._send_owner(chat_id, describe_answer(status, body))
             return True
         if command == "/intentions" and not rest.strip():
-            status, body = await self._owner_get(f"/intentions?state=open&limit={INTENTIONS_SHOWN}")
+            status, body = await self._owner_get(f"/intentions?state=open&limit={INTENTIONS_SHOWN + 1}")
             if status != 200 or body.get("continuation") is not True:
                 # Anything but a definite answer from a server that runs the continuation (an older server, an
                 # outage, continuation off) is not ours: the message goes on to chat as it always did.
@@ -1009,11 +1047,13 @@ class NousTelegramBot:
                 await self._send(chat_id, "🧠 No identity configured yet. Start a conversation to begin initiation.")
                 return
 
-            parts = [f"🧠 <b>Agent Identity</b> ({escape(str(data.get('agent_id', 'unknown')))})"]
-            parts.append(f"Initiated: {'✅' if data.get('is_initiated') else '❌'}\n")
+            initiated = "\u2705" if data.get("is_initiated") else "\u274c"
+            parts = [f"\U0001f9e0 Agent Identity ({data.get('agent_id', 'unknown')})\nInitiated: {initiated}"]
             for section, content in data.get("sections", {}).items():
-                parts.append(f"<b>{escape(section.title())}</b>\n{escape(content)}")
-            await self._send(chat_id, "\n\n".join(parts), parse_mode="HTML")
+                parts.append(f"{section.title()}\n{content}")
+            # Agent-authored text: each chunk in its own <pre>, and a chunk Telegram refuses becomes a fixed
+            # line, never live text.
+            await self._send_pre(chat_id, "\n\n".join(parts), fallback=IDENTITY_NOT_SHOWN)
         except Exception as e:
             await self._send(chat_id, f"❌ Error: {e}")
 
@@ -1068,21 +1108,20 @@ class NousTelegramBot:
             }
             frame_tag = f"{frame_emoji.get(frame, '🧠')} [{frame}]"
 
-            # Add debug info if requested
+            # Debug info if requested: sent after the reply, as plain text in <pre> chunks (see below)
+            debug_info = None
             if debug and "debug" in data:
                 d = data["debug"]
-                prompt = html_module.escape(d.get("system_prompt", "(empty)"), quote=False)
-                debug_text = (
-                    f"\n\n---\n🔍 Debug Info:\n"
+                debug_info = (
+                    f"\U0001f50d Debug Info:\n"
                     f"Frame: {frame} (confidence: {d.get('frame_confidence', '?')})\n"
                     f"Censors: {d.get('active_censors', 0)}\n"
                     f"Decisions: {d.get('related_decisions', 0)}\n"
                     f"Facts: {d.get('related_facts', 0)}\n"
                     f"Episodes: {d.get('related_episodes', 0)}\n"
                     f"Context tokens: {d.get('context_tokens', 0)}\n"
-                    f"\n📋 SYSTEM PROMPT:\n<pre>{prompt}</pre>"
+                    f"\n\U0001f4cb SYSTEM PROMPT:\n{d.get('system_prompt', '(empty)')}"
                 )
-                reply += debug_text
 
             # Add usage footer if available
             usage = data.get("usage")
@@ -1092,6 +1131,11 @@ class NousTelegramBot:
             # Split long messages
             full_reply = f"{frame_tag}\n\n{reply}"
             await self._send_long(chat_id, full_reply, parse_mode="HTML")
+
+            # The system prompt carries memory text: each chunk in its own <pre>, and a chunk Telegram refuses
+            # becomes a fixed line, never live text (a /approve in it would be tappable).
+            if debug_info is not None:
+                await self._send_pre(chat_id, debug_info, fallback=DEBUG_NOT_SHOWN)
 
             # If decision was recorded, add a subtle indicator
             if data.get("decision_id"):
@@ -1232,14 +1276,24 @@ class NousTelegramBot:
         return await self._tg("sendMessage", params=params)
 
     async def _send_owner(self, chat_id: int, text: str, *, html_fallback: str | None = None) -> dict:
-        """An owner action's message (F099). ``_tg``'s fallback for a send Telegram refuses strips the tags and
-        unescapes, which would turn model text escaped inside ``<pre>`` into live text (a tappable ``/approve``).
-        With ``html_fallback`` the text is HTML, and a refused send falls back to that fixed line instead. Without
-        it the text is plain fixed words, which ``_tg`` never rewrites."""
+        """An owner action's message (F099), and each chunk of ``_send_pre``. ``_tg``'s fallback for a send Telegram
+        refuses strips the tags and unescapes, which would turn model text escaped inside ``<pre>`` into live text
+        (a tappable ``/approve``). With ``html_fallback`` the text is HTML, and a refused send falls back to that
+        fixed line instead. Without it the text is plain fixed words, which ``_tg`` never rewrites."""
         if html_fallback is None:
             return await self._send(chat_id, text)
         params: dict[str, Any] = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
         return await self._tg("sendMessage", params=params, fallback_text=html_fallback)
+
+    async def _send_pre(self, chat_id: int, text: str, *, fallback: str) -> None:
+        """Plain text that carries model or memory text (``/debug``'s system prompt, ``/identity``), in ``<pre>``
+        chunks that each fit one message (``pre_chunks``), each sent through the strict path: a chunk Telegram
+        refuses becomes ``fallback``, a fixed line. ``_send_long`` would split inside the ``<pre>``, and the
+        stripped fallback of the chat path would show a command in it as a live one."""
+        for n, chunk in enumerate(pre_chunks(text)):
+            if n:
+                await asyncio.sleep(0.3)  # Rate limit, as _send_long
+            await self._send_owner(chat_id, chunk, html_fallback=fallback)
 
     async def _send_long(
         self, chat_id: int, text: str, parse_mode: str | None = None

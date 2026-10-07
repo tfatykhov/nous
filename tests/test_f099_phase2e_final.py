@@ -17,7 +17,7 @@ from f099_support import (
     record,
     set_intention,
 )
-from test_f099_phase2e_cancel import _cancel
+from test_f099_phase2e_cancel import _cancel, _fire, _row, _schedule_container
 
 from nous.brain import continuation
 from nous.brain.continuation import RootLimits
@@ -144,3 +144,27 @@ async def test_with_continuation_off_the_push_reads_no_intention_and_goes_out(en
     monkeypatch.setattr(env.heart.intentions, "get_for_source", boom)
     await env.pool._notify_telegram(st, result="done")
     env.http.post.assert_awaited_once()
+
+
+# ---- final review m4: a cancel cut at its bound says so -------------------------------------------------------
+
+
+async def test_a_cancel_that_stops_at_its_root_bound_says_it_is_cut_and_a_repeat_finishes_it(env_factory, monkeypatch):  # noqa: F811
+    env = await env_factory(**CONT)
+    schedule, container = await _schedule_container(env)
+    _st, fire = await _fire(env, schedule)
+    monkeypatch.setattr(continuation, "CANCEL_ROOTS_MAX", 1)  # the container alone: its fire is left for later
+    first = await _cancel(env, container.id)
+    assert first.truncated is True and first.root_ids == (container.id,)
+    assert (await _row(env, fire.id)).root_cancelled_at is None
+    monkeypatch.setattr(continuation, "CANCEL_ROOTS_MAX", 2)
+    again = await _cancel(env, container.id)
+    assert (again.already_cancelled, again.truncated) == (True, False)
+    assert (await _row(env, fire.id)).root_cancelled_at is not None
+
+
+async def test_a_cancel_inside_its_bound_is_not_cut(env_factory):  # noqa: F811  # PIN
+    env = await env_factory(**CONT)
+    schedule, container = await _schedule_container(env)
+    await _fire(env, schedule)
+    assert (await _cancel(env, container.id)).truncated is False
