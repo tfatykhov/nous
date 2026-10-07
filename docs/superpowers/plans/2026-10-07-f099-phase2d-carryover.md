@@ -79,3 +79,19 @@ Base: `main` at `9a3121e8` (2c-2 merged as #706). The runner (`nous/handlers/con
 - **C13: accepted.** A timeout or an exception finishes the proposal `failed`, with the in-doubt text, immediately. An outward action is at-most-once and is never re-run. Only a process stop leaves `executing`, and the sweep then fails it the same way.
 - **C18: changed.** Prod parity is strict, so there must be **no** visible prod difference. A `/approve`, `/reject` or `/answer` whose id the route answers 404 for **falls through to chat unchanged**, exactly as a reply-to does. The bot answers "no longer available" only when the route returns 409 (a known proposal that is decided, expired or ended). Under prod's flags every id is 404, so the bot behaves as it does today. Pin it.
 - **Residual accepted (open question 4):** REPORT rows stay plain text. A model-authored report may contain a tappable `/command`, but acting on it needs another proposal's id, and the owner-chat gate still applies.
+
+## Plan review 2d (prev-2d, Fable): Ready after MUST-FIX (2 MUST, 6 SHOULD, 9 NIT)
+
+35 citations were spot-checked and there is no phantom API. C1–C11 and C13–C17 were verified against the code. C7 is a true line-for-line move.
+
+- **M1, C12's premise is false.** A root intention is `owner`, so an approved spawn under it got an `owner` child.
+  **Ruling:** `_origin_args` stamps `internal_only` for `approved_action` contexts, with an end-to-end test and a unit pin.
+- **M2, C18 was not applied.** **Ruling:** a 404 or a malformed id falls through to chat, so prod is strictly unchanged. A tap keeps "no longer available", and a pin shows no tap can occur in prod.
+- **SHOULD-FIX, all folded:**
+  - S1: shield the inline execution from a REST client disconnect.
+  - S2: orphan-staged UPDATE before the root locks.
+  - S3: a NUL in an argument is a staging refusal.
+  - S4: the 2d-4 report shows the line-for-line move.
+  - S5: tap pin.
+  - S6: `_expire_root` covers staged rows.
+- **NITs:** folded where cheap.

@@ -24,7 +24,7 @@
 |---|---|---|---|
 | C1 | R10 and the brief: the REST decide/answer routes "use the same owner authentication as the existing owner routes". | `nous/api/rest.py` has no authentication of any kind: no middleware, no header check, no token. Every existing owner route (`DELETE /subtasks/{id}`, `POST /schedules`, `POST /decisions/{id}/review`, `PUT /identity/{section}`) is the spec §9 posture: no in-app auth, the network and the front door are the gate. | **No new auth mechanism in 2d** (spec §9 says a shared token is "a separate change"). The gates 2d adds are: the bot accepts an owner action only from the owner chat (`telegram_chat_id`) and, when `NOUS_ALLOWED_USERS` is set, only from an allowed user; the REST routes are inert without rows (404) and without a runner (503); no agent tool reaches them. **Open question 1** to the lead: add an optional shared secret for these four routes in 2d? (Cheap: one setting, one header, one compose line. Not planned unless ruled.) |
 | C2 | Contract §4.10: the routes answer 503 when `continuation_runner` is `None`. R11: "the REST routes answer 404 for every id" in prod. | In prod the runner is `None` (continuation off), and no proposal row exists. | The route resolves the id first (a read-only lookup, 404 when no row), and answers 503 only when a row exists and the runner is `None`. Under prod's flags every id is 404 and the list is `{"proposals": []}`. Pinned (2d-7, 2d-9). |
-| C3 | Contract §4.10: `409 {"state": current}` when the proposal is not `pending`; contract §4.7: `decide_proposal` raises `ProposalNotPending`. Carry-over item 5: "a second approve of an approved proposal returns its current state, not an error that makes the bot retry". | The two disagree on a repeat. | The same decision again (approve on `approved`, `executing`, `executed`, `failed`; reject on `rejected`) is **200 with the current state and `changed: false`**, and runs nothing. A contradictory one (approve on `rejected`) or a late one (`expired`, work `ended`) is **409** with a fixed message, never raised. `decide_proposal` returns a `ProposalExecution` (below) instead of a state string and raises only `ProposalNotFound`. |
+| C3 | Contract §4.10: `409 {"state": current}` when the proposal is not `pending`; contract §4.7: `decide_proposal` raises `ProposalNotPending`. Carry-over item 5: "a second approve of an approved proposal returns its current state, not an error that makes the bot retry". | The two disagree on a repeat. | The same decision again (approve on `approved`, `executing`, `executed`, `failed`; reject on `rejected`) is **200 with the current state and `changed: false`**, and runs nothing. A contradictory one (approve on `rejected`) or a late one (`expired`, work `ended`) is **409** with a fixed message, never raised. What the owner reads: a repeated approve on a call still running is "Already running", on a finished one its state again. `decide_proposal` returns a `ProposalExecution` (below) instead of a state string and raises only `ProposalNotFound`. |
 | C4 | Contract §4.14 item 5: `commit_arrival` writes a QUESTION for every `ask`, and `publish_staged` "adds" PROPOSAL rows. | An `ask` that staged proposals would then hold a QUESTION the owner must answer as well, and the batch would wait for both. | When the claim has staged proposals, the `ask` writes **no QUESTION**: the owner decides each proposal, and the model's note is the "Nous says" context of every PROPOSAL push. The arrival is terminal when its proposals are. |
 | C5 | Carry-over item 3: `_fail` and `_release` call `expire_staged`; `_commit` calls `publish_staged`. | `_turn` has two paths that commit a **fallback report** while proposals are staged (no `resolve_intention` after the follow-up; an `ask` with no owner channel), and a lease released by the sweep goes through the store, not the runner. | `expire_staged` runs **inside the store's SAVEPOINTs**: `commit_arrival` (every outcome that is not a resolved `ask`), `fail_attempt` (both arms) and `release_claim`, so the lease release is covered too. A resolved non-`ask` decision with staged proposals is refused (`ValueError`, nothing written). The runner adds nothing. |
 | C6 | Contract §4.7: `publish_staged(session, agent_id, *, arrival_id, claim_token, deadline) -> list[UUID]`; `decide_proposal(...) -> str`; `expire_proposals(session, agent_id) -> list[UUID]`; `finish_execution(..., ok, result)`; `ProposalExecution(proposal_id, state, result, error, woke_arrival)`. | The signatures leave out what the functions need: the PROPOSAL row needs a channel, a push time and the note; a decision needs `settings` and a clock; a sweep must report each proposal's new state (`expired` or, for an in-doubt call, `failed`). | `publish_staged(..., deadline, channel, push_after, note) -> list[tuple[UUID, str]]` (id, tool); `decide_proposal(session, agent_id, proposal_id, *, approve, actor, settings, now=None) -> ProposalExecution`; `expire_proposals(session, agent_id, *, settings, now=None, limit=50) -> list[tuple[UUID, str]]`; `finish_execution(session, agent_id, proposal_id, *, ok, result, error, ledger_key, settings, now=None)`; `ProposalExecution` gains `changed: bool = False` and `refusal: str | None = None`. |
@@ -33,13 +33,13 @@
 | C9 | Contract §4.9: the publisher sends the owner a message with buttons. Spec §4.4 and the brief: show the arguments "verbatim and safely, escaped for Telegram". | Telegram turns `/command` text in a plain message into a tappable command, and a proposal's arguments and rationale are model output that an injected result may have shaped: a rationale that says `/approve <id of another proposal>` would be one tap away. Entities are not parsed inside `pre`. | PROPOSAL and QUESTION rows are sent with `parse_mode: "HTML"`; **every model-authored string is `html.escape`d and wrapped in `<pre>`**; only fixed text, the short id and the tool name (a registered name) sit outside it. REPORT rows keep their 2c plain-text form (residual: a model-authored report can contain a tappable `/command`; it needs another proposal's id, which a model that did not stage it cannot know). |
 | C10 | Brief and spec: "the owner sees the exact call". | The Telegram limit is 4096 characters; a clipped call would let the owner approve what they did not read. | `stage_proposal` **refuses** a call whose rendered arguments exceed `PROPOSAL_ARGS_MAX_CHARS` (2000) or whose rationale exceeds 1000, so a PROPOSAL message is always complete and below the limit, and the publisher never truncates one. It also refuses a model-sent argument whose name starts with `_` (dispatch drops those silently at run time, so the owner would approve a call that runs differently), and any spawn tool (`spawn_task`, `dag_create`: a proposal must not bypass the depth and spawn limits that blocked them). Control, bidi and zero-width characters are shown as `\uXXXX`. |
 | C11 | Contract §4.12: `ledger_key` is "stored after `_open_for_call`". | `is_keyed_tool` is true only for `send_email` and `send_file`; for `bash`, `schedule_task` and every other tool the `proposal:{id}` scope keys nothing. | Stated plainly: for a keyed send the ledger key is the second fence behind `claim_execution`; for every other tool `claim_execution` (`approved → executing`, one statement) is the only at-most-once fence, as spec §4.4 item 5 says. The key is stored when the call returns (`finish_execution(ledger_key=...)`); a crash leaves it NULL and the ledger row (`context_kind = approved_action`, session `proposal-<id>`) is the trace. |
-| C12 | Contract §4.12: the `approved_action` context carries `root_intention_id` and `intention_id`. | `dispatch` stamps `_origin_args` from them, so an approved `schedule_task` or `spawn_sync` joins the lineage (the parent row is `internal_only`, so the child is `internal_only` and its results go back to the continuation, `resolve_wake_policy`). | Kept as the contract has it: **approving one call does not widen what that call starts**. A schedule the owner approves therefore creates a lineage-narrowed container; if the owner wants a wide one, that is a later decision. **Open question 2** to the lead. |
+| C12 | Contract §4.12: the `approved_action` context carries `root_intention_id` and `intention_id`. | `dispatch` stamps `_origin_args` from them, and `_origin_args` stamps `_origin_authority = ctx.authority`, which is `owner` for the approved context. `prepare_intention` narrows a child only when the parent ROW is `internal_only` or the stamp says so (`nous/brain/intentions.py`, `narrowed = ...`). The proposing intention is usually a ROOT, whose own authority is `owner`: so an approved `schedule_task` or `spawn_sync` under a root-level proposal would create an `owner` child, and approving one call would widen what that call starts. | **Ruled (lead, after the plan review):** approving one call does not widen what it starts. `_origin_args` stamps `_origin_authority = internal_only` when `ctx.kind == "approved_action"` (2d-4), every other kind unchanged; the child of an approved spawn is `internal_only` whatever the proposing intention's own authority, and its results go back to the continuation. The only other reader of the stamp is `dag_create`'s approval-node refusal (`kwargs.get("_origin_authority") == AUTHORITY_INTERNAL`); `dag_create` cannot be proposed (it is a spawn tool, refused at staging), so that rule is unaffected. Pinned by a unit test on `_origin_args` (2d-4) and an end-to-end test of an approved `schedule_task` under an owner root (2d-5). |
 | C13 | Spec §4.4 item 5: a crash while `executing` leaves a visible in-doubt proposal. | A proposal stuck in `executing` is never terminal, so the batch would wait until the root TTL. A **timeout** is not a crash: the ledger row is already closed `unknown`. | A timeout (and any exception) finishes the proposal `failed` at once with the in-doubt text ("outcome not recorded; NOT run again") and tells the continuation. Only a process stop mid-call leaves `executing`; `expire_proposals` marks one `failed` after `max(lease, 2 × tool_timeout)` with the same text. Nothing ever re-runs it. |
 | C14 | Contract §4.9, "Answers": a `record_result` per intention of the arrival. Spec §4.4 item 6: "all of them become the next result of every intention in the arrival". | A decision is one fact, not N. | Same shape as the answer: **one INFORM per decision per awaiting intention** (`source_id = uuid5(proposal, intention)`, idempotent), written through `record_result`, only to intentions still `awaiting_owner` under the root lock (R8: a closed root gets nothing, never a raw REPORT). |
 | C15 | Nothing says what happens to a `pending` proposal whose root ended. | `_expire_root` (2c-1) closes the lineage and does not touch proposals. | `expire_proposals` (a sweep step) also expires or cancels `pending` proposals of an ended root, expires `staged` rows older than twice the lease (an orphan from a turn whose lease was released), and fails in-doubt `executing` ones (C13). `decide_proposal` and `claim_execution` re-check the root themselves, so the sweep is hygiene, not the fence. |
 | C16 | Contract §4.8: `propose_action` is an extra tool of the turn. | A proposal can only be validated with the dispatcher (is the tool registered, what is its schema). `ContinuationRunner` already takes `dispatcher`, but 2c-2's tests construct it without one. | `propose_action` is offered only when the runner has a dispatcher (production always does). New public `ToolDispatcher.validate_call(name, args) -> list[str]`. |
 | C17 | Contract §4.7: `parse_callback` lives in the bot. | The server builds the callback data and the bot parses it; two copies drift. | `nous/owner_actions.py` (stdlib only) holds `callback_data` and `parse_callback`; the bot re-exports `parse_callback`. |
-| C18 | Contract §4.11: reply-to answers a question; commands are parsed "before anything reaches `/chat`". | In prod the bot would intercept `/approve`, `/reject`, `/answer` and every reply to a bot message. | Only in the owner chat and only for those commands and for replies to a **bot** message. A 404 from the reply route falls through to chat unchanged. A command with an unknown id answers "no longer available" instead of reaching the agent: the one visible prod difference, and the only one (pinned in 2d-8 and 2d-9). |
+| C18 | Contract §4.11: reply-to answers a question; commands are parsed "before anything reaches `/chat`". | In prod the bot would intercept `/approve`, `/reject`, `/answer` and every reply to a bot message. | **Ruled (lead): prod parity is strict, so there is no visible prod difference.** The bot handles those commands only in the owner chat, and replies to a **bot** message. A `/approve`, `/reject` or `/answer` whose id the route answers **404** for, a malformed or missing id (it never reaches a route), and a reply the route does not know all fall through to chat unchanged, exactly as before 2d. "No longer available" is said only when the route answers **409** (a known proposal that is decided, expired or ended) and, for a button tap, on a 404 (a tap has no chat to fall through to, and none can occur in prod: no PROPOSAL message has ever been sent). Pinned in 2d-8 and 2d-9. |
 
 **Migration: none needed.** `sql/migrations/084_intention_arrivals_proposals.sql` already creates everything 2d writes: `brain.intention_proposals` with `agent_id`, `state` (and its CHECK for all nine states), `claim_token`, `deadline`, `ledger_key`, `decided_at`, `decided_by`, `executed_at`, `result`, `error`, the partial index `idx_intention_proposals_open` (covers every `expire_proposals` predicate) and `idx_intention_proposals_arrival`; `heart.result_inbox` with `proposal_id`, `arrival_id`, `push_after`, `pushed_at`, `push_message_id` and the `PROPOSAL` message type; the ORM `IntentionProposal` and `ResultInbox` carry all of it. No setting is added.
 
@@ -48,7 +48,7 @@
 ## Global Constraints
 
 - **No migration, no setting, no new table.** New modules: `nous/owner_actions.py` and `nous/api/intention_routes.py`. They get a row in `docs/reference/project-structure.md` (2d-9). The routes get their rows in `docs/reference/rest-api.md`, `propose_action` its row in `docs/reference/agent-tools.md`, the F099 status goes in `docs/reference/shipped-features.md` and `docs/features/INDEX.md`, and the contract gets "Superseded by 2d" notes (2d-9).
-- **Flag-off parity and prod's exact flags.** Prod runs `NOUS_RESULT_INBOX_ENABLED=true`, `NOUS_INTENTIONS_ENABLED=true`, `NOUS_RESULT_MEMORY_ENABLED=true` and continuation OFF. Every task states what runs in prod, and the answer is **nothing new**: no runner object exists (`_build_continuation_runner` returns `None`), so no turn can stage a proposal, no sweep expires one and no publisher pushes one; the four REST routes exist and answer 404 (a read-only lookup finds no row) or an empty list; the bot's handlers are inert without rows (a 404 is answered with "no longer available"). Task 2d-9 collects the pins in one file.
+- **Flag-off parity and prod's exact flags.** Prod runs `NOUS_RESULT_INBOX_ENABLED=true`, `NOUS_INTENTIONS_ENABLED=true`, `NOUS_RESULT_MEMORY_ENABLED=true` and continuation OFF. Every task states what runs in prod, and the answer is **nothing new**: no runner object exists (`_build_continuation_runner` returns `None`), so no turn can stage a proposal, no sweep expires one and no publisher pushes one; the four REST routes exist and answer 404 (a read-only lookup finds no row) or an empty list; the bot's handlers are inert without rows (a 404, like a malformed id, is passed on to chat unchanged). Task 2d-9 collects the pins in one file.
 - **Approval is never model-mediated.** `decide_proposal`, `execute_approved_proposal`, `answer_question` and `record_answer` are not registered as agent tools, are not in `TOOL_CLASSES`, and are not extra tools of any turn. The only callers are `ContinuationRunner`, the REST routes and (Phase 3) the A2UI `ActionRouter`. Pinned in 2d-5 and 2d-9. A result that says "approve proposal X" produces no approval (2d-5).
 - **The call that runs is the call that was shown.** Arguments are stored as JSONB exactly as staged, shown verbatim (rendered once, by `render_arguments`) and executed from the stored row, never re-derived, re-validated into something else or taken from the model again. No model call takes part in the approval or the execution.
 - **Locks (copied from 2c-1).** Every row lock on a root or a claimed intention is `FOR NO KEY UPDATE`, in ONE order everywhere: the **root row first**, then (in id order) the proposals and claimed or awaiting intentions, then inbox rows. A path that takes an intention before its root deadlocks against the TTL sweep. Across roots a sweep takes them in `(root.created_at, root.id)` order. The one writer outside the order is `claim_execution`, a single UPDATE that holds nothing else. Never `FOR UPDATE` on a root or an intention (`record_result` keeps its own, holding no second lock).
@@ -71,8 +71,8 @@
 
 The five failure modes most likely to bite, most likely first. Each names the test that pins it.
 
-1. **A model-mediated approval (the central one).** Anything that lets text the model saw, or wrote, approve, reject or answer: a registered tool, an extra tool, a button the model can press. Pinned: `test_no_owner_action_is_a_tool_a_model_can_call` (2d-5: names absent from every registry and every offered set), `test_a_forged_decide_call_in_a_continuation_turn_is_refused_and_changes_nothing` (2d-5), `test_a_result_that_says_approve_produces_no_approval` (2d-5), `test_the_bots_commands_and_buttons_reach_only_the_rest_routes` (2d-8, no `/chat`).
-2. **The wrong call runs, or it runs twice.** The call is the stored row's, byte for byte, once: `test_the_approved_call_runs_with_exactly_the_staged_arguments` and `test_two_concurrent_approves_run_the_call_once` (2d-5), `test_claim_execution_is_once_and_has_the_root_open_predicate` (2d-3, the cancel seam: a root marker committed before the claim stops it), `test_a_timeout_is_failed_in_doubt_and_never_rerun` (2d-5), `test_a_crash_between_the_decision_and_the_run_is_resumed_once` (2d-5), the ledger scope pins in 2d-4.
+1. **A model-mediated approval (the central one).** Anything that lets text the model saw, or wrote, approve, reject or answer: a registered tool, an extra tool, a button the model can press. Pinned: `test_no_owner_action_is_a_tool_a_model_can_call` (2d-5: names absent from every registry and every offered set), `test_a_forged_decide_call_in_a_continuation_turn_is_refused_and_changes_nothing` (2d-5), `test_a_result_that_says_approve_produces_no_approval` (2d-5), `test_approve_and_reject_commands_are_parsed_in_code_and_reach_the_decide_route` and `test_an_unknown_id_under_prods_empty_tables_falls_through_to_chat_unchanged` (2d-8: an owner action reaches a REST route and no model, and what the bot does not consume goes where it always went).
+2. **The wrong call runs, or it runs twice.** The call is the stored row's, byte for byte, once: `test_the_approved_call_runs_with_exactly_the_staged_arguments` and `test_two_concurrent_approves_run_the_call_once` (2d-5), `test_claim_execution_is_once_and_has_the_root_open_predicate` (2d-3, the cancel seam: a root marker committed before the claim stops it), `test_a_timeout_is_failed_in_doubt_and_never_rerun` (2d-5), `test_a_crash_between_the_decision_and_the_run_is_resumed_once` and `test_a_client_that_goes_away_mid_request_does_not_cancel_the_approved_call` (2d-5), the ledger scope pins in 2d-4. What the approved call starts is no wider than the lineage that proposed it: `test_an_approved_action_stamps_internal_only_so_what_it_starts_cannot_widen` (2d-4) and `test_an_approved_spawn_stays_internal_only_under_an_owner_root` (2d-5).
 3. **An approvable proposal from an attempt that did not commit.** `staged` becomes `pending` only in the fenced commit: `test_a_commit_that_loses_its_fence_publishes_nothing` and `test_a_turn_that_staged_and_then_failed_leaves_nothing_approvable` (2d-2, which also asserts the publisher sends nothing), `test_a_resolved_decision_other_than_ask_with_staged_proposals_is_refused` (2d-2), the lease-release and failed-report cases of `test_every_path_that_does_not_commit_an_ask_expires_the_staged_rows` (2d-2).
 4. **The owner approves something other than what runs, or an injected string turns into a tap.** `test_a_call_the_owner_cannot_read_in_full_is_not_staged`, `test_a_model_sent_underscore_argument_is_refused_at_staging`, `test_spawn_tools_cannot_be_proposed` (2d-1); `test_model_text_is_escaped_inside_pre_and_never_outside_it`, `test_a_proposal_message_is_never_truncated` (2d-6); the bot's id validation `test_an_id_argument_cannot_steer_the_request_path` (2d-8).
 5. **A lost or premature wake, and the races.** The batch wakes when, and only when, every proposal and question of the arrival is terminal: `test_a_batch_wakes_only_when_every_proposal_is_terminal` and `test_an_expired_proposal_is_terminal_and_wakes` (2d-3); approve racing expiry in both orders, double approve, approve racing a cancel marker, an answer racing the commit that publishes its question, and the lock-order tests of `record_answer` against `_expire_root` and `commit_arrival` (2d-3); an answer to an ended root is refused, never turned into a raw REPORT (2d-3).
@@ -301,7 +301,7 @@ def _propose(*, spawn_blocked: bool = False, stage_error: Exception | None = Non
         staged.append((tool, arguments, rationale))
         return proposal_id or uuid.uuid4()
 
-    dispatcher = _dispatcher("send_email", "bash", "schedule_task", "write_file", "spawn_task", "dag_create")
+    dispatcher = _dispatcher("send_email", "bash", "schedule_task", "write_file", "web_fetch", "spawn_task", "dag_create")
     state = ArrivalState()
     executor = make_propose_action_executor(
         state, ctx=_ctx(spawn_blocked=spawn_blocked), dispatcher=dispatcher, stage=fake_stage
@@ -383,6 +383,7 @@ async def test_a_denylisted_local_tool_may_be_proposed(tool):
     [
         ({"tool": "no_such_tool", "arguments": {}, "rationale": "r"}, "not a registered tool"),
         ({"tool": "write_file", "arguments": {"path": "a"}, "rationale": "r"}, "call it yourself"),
+        ({"tool": "web_fetch", "arguments": {"url": "https://example.com"}, "rationale": "r"}, "call it yourself"),
         ({"tool": "send_email", "arguments": "x", "rationale": "r"}, "arguments must be"),
         ({"tool": "send_email", "arguments": dict(SEND_EMAIL_ARGS), "rationale": "  "}, "rationale is required"),
         ({"tool": "", "arguments": {}, "rationale": "r"}, "tool is required"),
@@ -471,10 +472,15 @@ async def test_a_staged_proposal_carries_the_claim_token_and_nothing_else(env_fa
         ({**SEND_EMAIL_ARGS, "body": "x" * 3000}, "r", "the owner reads"),
         (SEND_EMAIL_ARGS, "y" * 1001, "rationale is too long"),
         (SEND_EMAIL_ARGS, "   ", "rationale is required"),
+        ({**SEND_EMAIL_ARGS, "body": "a\x00b"}, "r", "arguments may not contain a NUL"),
+        ({**SEND_EMAIL_ARGS, "cc\x00": "x"}, "r", "arguments may not contain a NUL"),
+        ({**SEND_EMAIL_ARGS, "nested": ["ok", {"k": "a\x00b"}]}, "r", "arguments may not contain a NUL"),
+        (SEND_EMAIL_ARGS, "why\x00", "rationale may not contain a NUL"),
     ],
 )
 async def test_a_call_the_owner_cannot_read_in_full_is_not_staged(env_factory, arguments, rationale, needle):  # noqa: F811
-    """What the owner approves must fit one message whole: an oversize call is refused, never clipped."""
+    """What the owner approves must fit one message whole: an oversize call is refused, never clipped. A NUL
+    character (which jsonb and text refuse) is a refusal the model reads, not a database error that fails the turn."""
     env = await env_factory(**CONT)
     _root, got = await claimed(env)
     with pytest.raises(continuation.ProposalRefused, match=needle):
@@ -667,6 +673,18 @@ def render_arguments(arguments: Mapping[str, Any]) -> str:
     return _UNSAFE_CHARS.sub(lambda match: f"\\u{ord(match.group()):04x}", shown)
 
 
+def _contains_nul(value: Any) -> bool:
+    """A NUL character anywhere in a JSON value, keys included. PostgreSQL's ``jsonb`` and ``text`` refuse it, and
+    ``render_arguments`` shows it as an escape, so it has to be looked for in the value itself."""
+    if isinstance(value, str):
+        return "\x00" in value
+    if isinstance(value, Mapping):
+        return any(_contains_nul(key) or _contains_nul(item) for key, item in value.items())
+    if isinstance(value, list | tuple):
+        return any(_contains_nul(item) for item in value)
+    return False
+
+
 async def stage_proposal(
     session: AsyncSession,
     agent_id: str,
@@ -710,6 +728,12 @@ async def stage_proposal(
         raise ProposalRefused(
             f"rationale is too long ({len(why)} characters; at most {PROPOSAL_RATIONALE_MAX_CHARS}): shorten it."
         )
+    # A refusal the model reads, not a database error that would fail the whole turn (an injected result can make
+    # a model echo a NUL character into a call).
+    if "\x00" in why:
+        raise ProposalRefused("rationale may not contain a NUL character.")
+    if _contains_nul(arguments):
+        raise ProposalRefused("arguments may not contain a NUL character.")
     try:
         shown = render_arguments(arguments)
     except (TypeError, ValueError):
@@ -943,7 +967,7 @@ git commit -F "$MSG"
 **Prod runs:** nothing new. `commit_arrival`, `fail_attempt` and `release_claim` are called only by a runner that prod does not construct; with no `staged` row the new branches are one indexed read (`state = 'staged'` on a claim token) and do nothing. The `ArrivalCommit` field is defaulted.
 
 **Files:**
-- Modify: `nous/brain/continuation.py`: `ArrivalCommit.proposals`; `_commit_arrival` (publish, no QUESTION for an ask with proposals, expire on every other outcome, refuse a non-ask resolved decision); `fail_attempt` and `release_claim` (expire inside their SAVEPOINTs); `proposal_text`, `publish_staged`
+- Modify: `nous/brain/continuation.py`: `ArrivalCommit.proposals`; `_commit_arrival` (publish, no QUESTION for an ask with proposals, expire on every other outcome, refuse a non-ask resolved decision); `fail_attempt` and `release_claim` (expire inside their SAVEPOINTs); `_expire_root` (expires the root's staged rows); `proposal_text`, `publish_staged`
 - Modify: `nous/handlers/continuation_runner.py`: `_commit` emits `intention.proposal_pending`
 - Modify: `tests/f099_support.py`: `commit_ask`, `ask_with_proposals`
 - Create: `tests/test_f099_phase2d_publish.py`
@@ -954,7 +978,7 @@ git commit -F "$MSG"
   - `continuation.proposal_text(proposal: IntentionProposal, note: str | None) -> str`: the plain-text body of a PROPOSAL row (what a chat turn would show the model: `Proposal <id>: <tool>`, `Why: …`, `Call, exactly as it will run:`, the rendered arguments, and `Nous says: <note clipped to 600 characters>`).
   - `async continuation.publish_staged(session, agent_id, *, arrival_id: UUID, claim_token: UUID, deadline: datetime, channel: str, push_after: datetime, note: str | None) -> list[tuple[UUID, str]]`: the claim's `staged` rows become `pending` with `arrival_id` and `deadline`, and one PROPOSAL row is inserted per proposal (`source_id = proposal_id = the proposal's id`, `arrival_id`, the owner channel, `push_after`). Returns `(proposal_id, tool)` pairs in creation order. Does not commit; called only from `_commit_arrival`, after the arrival row exists.
   - `ArrivalCommit.proposals: tuple[tuple[UUID, str], ...] = ()`.
-  - `commit_arrival` behaviour: a **resolved `ask` with staged proposals** publishes them and writes **no QUESTION** (the owner decides the proposals; the arrival's `report_ids` are the proposal ids); an `ask` with proposals and no owner channel is refused (`ValueError`, nothing written); a **resolved decision other than `ask`** with staged proposals is refused (`ValueError`, nothing written); **every other outcome** (a fallback, a failed report, a gate arrival) expires them in the same SAVEPOINT. `fail_attempt` (retry and cap arms) and `release_claim` expire them in their SAVEPOINTs, so the lease release (`release_stale_claims` goes through `fail_attempt`) is covered.
+  - `commit_arrival` behaviour: a **resolved `ask` with staged proposals** publishes them and writes **no QUESTION** (the owner decides the proposals; the arrival's `report_ids` are the proposal ids); an `ask` with proposals and no owner channel is refused (`ValueError`, nothing written); a **resolved decision other than `ask`** with staged proposals is refused (`ValueError`, nothing written); **every other outcome** (a fallback, a failed report, a gate arrival) expires them in the same SAVEPOINT. `fail_attempt` (retry and cap arms) and `release_claim` expire them in their SAVEPOINTs, so the lease release (`release_stale_claims` goes through `fail_attempt`) is covered, and `_expire_root` (the TTL sweep, which ends a claim by clearing its token) expires the staged rows of the root it closes. Those are all the paths that end a claim; a stage that races one of them is left to `expire_proposals` (2d-3).
   - Bus event `intention.proposal_pending` `{proposal_id, root_id, arrival_id, tool}`, emitted by the runner after the commit.
 
 - [ ] **Step 0: The base is what the plan says.** Run `python -c "from nous.brain import continuation as c; [getattr(c, n) for n in ('stage_proposal','expire_staged','render_arguments','short_id','ProposalRefused')]; import dataclasses; assert 'proposals' not in {f.name for f in dataclasses.fields(c.ArrivalCommit)}"`. It must print nothing.
@@ -1187,7 +1211,17 @@ async def _lease(env, root, got):
     assert released == [root.id]
 
 
-@pytest.mark.parametrize("path", [_fallback, _retry, _cap, _release, _lease], ids=lambda f: f.__name__.strip("_"))
+async def _ttl(env, root, got):
+    """The TTL sweep ends the claim by clearing its token; the late commit would lose its fence (S6)."""
+    await set_intention(env, root.id, deadline=datetime.now(UTC) - timedelta(hours=1))
+    async with env.db.session() as s:
+        assert await continuation.expire_roots(s, env.agent, ttl_hours=72.0, settings=env.settings) == [root.id]
+        await s.commit()
+
+
+@pytest.mark.parametrize(
+    "path", [_fallback, _retry, _cap, _release, _lease, _ttl], ids=lambda f: f.__name__.strip("_")
+)
 async def test_every_path_that_does_not_commit_an_ask_expires_the_staged_rows(env_factory, path):  # noqa: F811
     env = await env_factory(**CONT)
     root, got = await claimed(env)
@@ -1391,7 +1425,7 @@ with
     return ArrivalCommit(arrival_id, n, next_states, decision_record_id, tuple(report_ids), tuple(published))
 ```
 
-- [ ] **Step 5: The other two paths.** In `fail_attempt`, replace
+- [ ] **Step 5: The other paths.** In `fail_attempt`, replace
 
 ```python
             # Kept for the one lock order (root first); not load-bearing: nothing is written before the fenced UPDATE.
@@ -1432,6 +1466,33 @@ with
             {"state": STATE_RESULT_READY, "claim_token": None, "claimed_at": None, "updated_at": now},
         )
     return len(moved)
+```
+In `_expire_root`, immediately after the statement that writes `root_expired_at`
+
+```python
+    await session.execute(
+        update(Intention)
+        .where(Intention.agent_id == agent_id, Intention.id == root_id)
+        .values(root_expired_at=now, updated_at=now)
+    )
+```
+add
+
+```python
+    # F099 2d: this closed the root's claim (the token is cleared), so a late commit loses its fence and the
+    # staged proposals of the turn can never be published: expire them with it. Staged rows only: the owner never
+    # saw them. A pending proposal of an ended root is the proposals sweep's (expire_proposals), which also tells
+    # the bus.
+    await session.execute(
+        update(IntentionProposal)
+        .where(
+            IntentionProposal.agent_id == agent_id,
+            IntentionProposal.root_id == root_id,
+            IntentionProposal.state == PROPOSAL_STAGED,
+        )
+        .values(state=PROPOSAL_EXPIRED, updated_at=now)
+        .execution_options(synchronize_session=False)
+    )
 ```
 Append to the end of the module (after `expire_staged`):
 
@@ -1555,7 +1616,7 @@ with
 
 - [ ] **Step 7: Run the tests and watch them pass.** `"$BIN/nous-test-linux.sh" "$WT" runner pg "$DB" tests/test_f099_phase2d_publish.py tests/test_f099_phase2d_propose.py tests/test_f099_phase2c_commit.py tests/test_f099_phase2c_failure.py tests/test_f099_phase2c_arrival.py tests/test_f099_phase2c_expiry_wake.py -q`. Expected: all pass (the 2c store and runner suites are the regression net: nothing changes for a claim with no staged row).
 
-- [ ] **Step 8: Mutation checks.** (a) Remove `IntentionProposal.claim_token == claim_token` from `publish_staged`'s UPDATE: `test_the_proposals_of_another_claim_are_not_published` fails. (b) Delete the `expire_staged` call in `release_claim`: the `release` and `lease` cases of `test_every_path_that_does_not_commit_an_ask_expires_the_staged_rows` fail. (c) Delete the `elif staged:` arm: the `fallback` case and `test_a_turn_that_staged_and_never_resolved_falls_back_and_expires` fail. Restore each.
+- [ ] **Step 8: Mutation checks.** (a) Remove `IntentionProposal.claim_token == claim_token` from `publish_staged`'s UPDATE: `test_the_proposals_of_another_claim_are_not_published` fails. (b) Delete the `expire_staged` call in `release_claim`: the `release` and `lease` cases of `test_every_path_that_does_not_commit_an_ask_expires_the_staged_rows` fail. (c) Delete the `elif staged:` arm: the `fallback` case and `test_a_turn_that_staged_and_never_resolved_falls_back_and_expires` fail. (d) Delete the statement added to `_expire_root`: the `ttl` case fails. Restore each.
 
 - [ ] **Step 9: Lint and commit.**
 
@@ -2842,8 +2903,9 @@ async def expire_proposals(
 
     ``pending`` past its deadline, or on a root that ended, becomes ``expired`` (``cancelled`` for a cancelled
     root) and its outcome reaches the arrival, which wakes when terminal. ``staged`` older than two leases is an
-    orphan of a turn whose lease was released: ``expired``. ``executing`` for longer than
-    ``max(lease, 2 x tool_timeout)`` is a call whose process stopped: ``failed`` with ``IN_DOUBT_TEXT``, never
+    orphan of a turn whose lease was released: ``expired`` (done first, before any root is locked). ``executing``
+    for longer than ``max(lease, 2 x tool_timeout)`` is a call whose process stopped: ``failed`` with
+    ``IN_DOUBT_TEXT``, never
     re-run. Each proposal in a SAVEPOINT, roots in ``(created_at, id)`` order (the one cross-root order); a
     failure is logged and retried at the next sweep. Returns ``(proposal_id, new_state)``."""
     now = now or datetime.now(UTC)
@@ -2851,6 +2913,22 @@ async def expire_proposals(
     root = aliased(Intention)
     lease = float(settings.continuation_lease_seconds)
     doubt = max(lease, 2.0 * float(settings.tool_timeout))
+
+    # First, before any root is locked: it needs no root, and run after the loops below it would lock proposal rows
+    # while this transaction already holds roots (a released SAVEPOINT keeps its locks), against a commit that
+    # holds its root and then updates its own staged rows.
+    stale = await session.execute(
+        update(IntentionProposal)
+        .where(
+            IntentionProposal.agent_id == agent_id,
+            IntentionProposal.state == PROPOSAL_STAGED,
+            IntentionProposal.created_at < now - timedelta(seconds=2 * lease),
+        )
+        .values(state=PROPOSAL_EXPIRED, updated_at=now)
+        .returning(IntentionProposal.id)
+        .execution_options(synchronize_session=False)
+    )
+    done.extend((proposal_id, PROPOSAL_EXPIRED) for proposal_id in stale.scalars().all())
 
     async def due(*predicates: ColumnElement[bool]) -> list[tuple[UUID, UUID]]:
         rows = await session.execute(
@@ -2893,19 +2971,6 @@ async def expire_proposals(
             logger.warning(
                 "F099: could not expire proposal %s; it is retried at the next sweep", proposal_id, exc_info=True
             )
-
-    stale = await session.execute(
-        update(IntentionProposal)
-        .where(
-            IntentionProposal.agent_id == agent_id,
-            IntentionProposal.state == PROPOSAL_STAGED,
-            IntentionProposal.created_at < now - timedelta(seconds=2 * lease),
-        )
-        .values(state=PROPOSAL_EXPIRED, updated_at=now)
-        .returning(IntentionProposal.id)
-        .execution_options(synchronize_session=False)
-    )
-    done.extend((proposal_id, PROPOSAL_EXPIRED) for proposal_id in stale.scalars().all())
 
     stuck = await due(
         IntentionProposal.state == PROPOSAL_EXECUTING,
@@ -3196,11 +3261,12 @@ git commit -F "$MSG"
 ---
 ## Task 2d-4: One approved call through the ledger bracket (`execute_single_call`) and the `proposal:{id}` scope
 
-**Prod runs:** the extracted bracket runs on every tool call of every turn in prod, so this is the one task in the PR that touches a hot path. It is a **move**: the `else` branch of `_tool_loop` that opens the ledger row, takes the path lock, captures the snapshot, dispatches, closes the row and hands off the review card becomes a method, byte for byte except for its indentation and the names of its inputs. `execute_single_call` and the new scope are reachable only from `execute_approved_proposal` (2d-5), which prod does not construct; `_scope`'s new first line is false for every context kind prod has.
+**Prod runs:** the extracted bracket runs on every tool call of every turn in prod, so this is the one task in the PR that touches a hot path. It is a **move**: the `else` branch of `_tool_loop` that opens the ledger row, takes the path lock, captures the snapshot, dispatches, closes the row and hands off the review card becomes a method, byte for byte except for its indentation and the names of its inputs. `execute_single_call` and the new scope are reachable only from `execute_approved_proposal` (2d-5), which prod does not construct; `_scope`'s new first line is false for every context kind prod has, and so is the new branch of `_origin_args` (`ctx.kind == "approved_action"`), which every other kind takes the old way.
 
 **Files:**
 - Modify: `nous/api/runner.py`: `Dispatched`, `SingleCall`, `AgentRunner._dispatch_with_ledger` (moved), `AgentRunner.execute_single_call`; `_tool_loop` calls the helper
 - Modify: `nous/api/idempotency.py`: the `proposal:{id}` scope
+- Modify: `nous/api/tools.py`: `_origin_args` stamps `internal_only` for an `approved_action` context (C12)
 - Create: `tests/test_f099_phase2d_execute.py`
 
 **Interfaces:**
@@ -3211,8 +3277,9 @@ git commit -F "$MSG"
   - `async AgentRunner._dispatch_with_ledger(self, ctx, tool_name, tool_input, *, session_id, ledger, keys_this_turn, dag_node_id, turn_number, is_background) -> Dispatched`: everything between "this call may run" and "its text": the F064.1 ping and heartbeat, the durable ledger row (a keyed send claimed first, or suppressed), the write-path lock and compensation snapshot, the dispatch (a cancellation closes the row `unknown`, any other exception closes it and re-raises), the close, and the review-card hand-off. Raises what dispatch raises.
   - `async AgentRunner.execute_single_call(self, ctx: ExecutionContext, tool_name: str, tool_input: dict) -> SingleCall`: runs ONE call the owner approved, with no model: `ctx.kind` must be `approved_action` (`ValueError` otherwise); `_authorize_tool_call(ctx, tool_name, frozenset({tool_name}), ...)` first (a refusal is returned as an error text, and recorded as a blocked ledger row); then `_dispatch_with_ledger` with no F026 ledger, no ActionGate, no compression and no per-turn key set. Raises what the dispatch raises (a cancellation included, after closing the ledger row).
   - `idempotency._scope(ctx)` returns `f"proposal:{ctx.proposal_id}"` for an `approved_action` context with a proposal id, before every other rule.
+  - `tools._origin_args(ctx)` stamps `"_origin_authority": "internal_only"` when `ctx.kind == "approved_action"` (every other kind its own authority, unchanged). A root intention's own authority is `owner`, so without it `prepare_intention` would not narrow what an approved `schedule_task` or `spawn_sync` starts and approving one call would widen what that call starts; with it the child is `internal_only` whatever the proposing intention's authority (lead ruling on C12). `_origin_authority` has one other reader, `dag_create`'s approval-node refusal, which is unaffected: `dag_create` is a spawn tool and cannot be proposed.
 
-**The regression net** (run before the change and after it; the results must be identical): `tests/test_runner_ledger.py`, `tests/test_runner_authorization.py`, `tests/test_idempotency.py`, `tests/test_ledger_store.py`, `tests/test_fix_a_write_lock.py`, `tests/test_fix_a_capture_gate.py`, `tests/test_compensation.py`, `tests/test_dag_stall_detection.py`, `tests/test_f061_runner_subtask_hooks.py`, `tests/test_runner_background.py`, `tests/test_f099_enforcement.py`, `tests/test_f099_terminal_tools.py`, `tests/test_f099_offered_tools.py`. `stream_chat` keeps its own copy of the bracket and is not touched.
+**The regression net** (run before the change and after it; the results must be identical): `tests/test_runner_ledger.py`, `tests/test_runner_authorization.py`, `tests/test_idempotency.py`, `tests/test_ledger_store.py`, `tests/test_fix_a_write_lock.py`, `tests/test_fix_a_capture_gate.py`, `tests/test_compensation.py`, `tests/test_dag_stall_detection.py`, `tests/test_f061_runner_subtask_hooks.py`, `tests/test_runner_background.py`, `tests/test_f099_enforcement.py`, `tests/test_f099_terminal_tools.py`, `tests/test_f099_offered_tools.py`, `tests/test_f099_authority.py` (the `_origin_args` readers). `stream_chat` keeps its own copy of the bracket and is not touched.
 
 - [ ] **Step 0: Baseline.** On the unmodified base run the regression net: `"$BIN/nous-test-linux.sh" "$WT" runner pg "$DB" tests/test_runner_ledger.py tests/test_runner_authorization.py tests/test_idempotency.py tests/test_ledger_store.py tests/test_fix_a_write_lock.py tests/test_fix_a_capture_gate.py tests/test_compensation.py tests/test_dag_stall_detection.py tests/test_f061_runner_subtask_hooks.py tests/test_runner_background.py tests/test_f099_enforcement.py tests/test_f099_terminal_tools.py tests/test_f099_offered_tools.py -q`. Note the pass and fail counts; any failure that is already there is not yours.
 
@@ -3234,6 +3301,7 @@ from test_runner_ledger import _FakeStore, _held, _runner
 from nous.api.execution_context import ExecutionContext
 from nous.api.idempotency import idempotency_key
 from nous.api.runner import AgentRunner, Dispatched, SingleCall
+from nous.api.tools import _origin_args
 
 SEND = {"to": "friend@example.com", "subject": "Snow", "body": "40 cm overnight."}
 
@@ -3354,6 +3422,27 @@ async def test_a_cancelled_dispatch_closes_the_row_unknown_and_re_raises():
     assert store.closes[-1][0] == "unknown"
 
 
+# ---- the origin stamp (C12) ----------------------------------------------------------------------------------
+
+
+def test_an_approved_action_stamps_internal_only_so_what_it_starts_cannot_widen():
+    """A root intention's own authority is owner, so the stamp is what narrows the child of an approved spawn."""
+    ctx = _ctx()
+    stamp = _origin_args(ctx)
+    assert (stamp["_origin_kind"], stamp["_origin_authority"]) == ("approved_action", "internal_only")
+    assert stamp["_intention_id"] == str(ctx.intention_id)  # it still joins the lineage it was proposed in
+
+
+def test_every_other_kind_stamps_its_own_authority():  # PIN
+    internal = {"authority": "internal_only", "intention_id": uuid.uuid4(), "root_intention_id": uuid.uuid4()}
+    continuation_ctx = ExecutionContext(kind="continuation", session_id="intent-x", **internal)
+    subtask_ctx = ExecutionContext(kind="subtask", session_id="s", **internal)
+    assert _origin_args(continuation_ctx)["_origin_authority"] == "internal_only"
+    assert _origin_args(subtask_ctx)["_origin_authority"] == "internal_only"
+    for kind in ("interactive", "subtask", "scheduled"):
+        assert _origin_args(ExecutionContext(kind=kind, session_id="s"))["_origin_authority"] == "owner"
+
+
 # ---- the move ------------------------------------------------------------------------------------------------
 
 
@@ -3368,13 +3457,28 @@ def test_the_loop_reaches_the_bracket_only_through_the_shared_helper():
 
 - [ ] **Step 2: Run the tests and watch them fail.** `"$BIN/nous-test-linux.sh" "$WT" runner pg "$DB" tests/test_f099_phase2d_execute.py -q`. Expected: import error for `Dispatched`, `SingleCall`.
 
-- [ ] **Step 3: The scope.** In `nous/api/idempotency.py`, in `_scope`, add as the first statement of the function body (before the `dag_node` rule):
+- [ ] **Step 3: The scope and the origin stamp.** In `nous/api/idempotency.py`, in `_scope`, add as the first statement of the function body (before the `dag_node` rule):
 
 ```python
     if ctx.kind == "approved_action" and ctx.proposal_id is not None:
         return f"proposal:{ctx.proposal_id}"  # F099 2d: one approved proposal is one logical send
 ```
 and change the first line of its docstring from `"""The unit of work a send belongs to, or None (unkeyed: an operator` to `"""The unit of work a send belongs to (an approved proposal included), or None (unkeyed: an operator`.
+
+In `nous/api/tools.py`, in `_origin_args`, replace
+
+```python
+    out: dict[str, Any] = {"_origin_kind": ctx.kind, "_origin_authority": ctx.authority}
+```
+with
+```python
+    # F099 2d (C12): approving one call does not widen what that call starts. A root intention's own authority is
+    # owner, so the stamp of an approved action must say internal_only: what the call spawns is a descendant of the
+    # lineage that proposed it and is narrowed like one. Every other kind stamps its own authority.
+    authority = AUTHORITY_INTERNAL if ctx.kind == "approved_action" else ctx.authority
+    out: dict[str, Any] = {"_origin_kind": ctx.kind, "_origin_authority": authority}
+```
+(`AUTHORITY_INTERNAL` is already imported there.)
 
 - [ ] **Step 4: The two result types.** In `nous/api/runner.py`, right after the `Suppressed` dataclass, add:
 
@@ -3624,7 +3728,36 @@ Then, in `_tool_loop`, replace the `else:` branch of the `if extra_tools and too
 ```
 The lines before the `if extra_tools` statement (`start_time = time.monotonic()`, `suppressed: Suppressed | None = None`) and after the `else` (`duration_ms = ...`, the F026 `ledger.record(...)` that reads `suppressed`) stay exactly as they are.
 
-- [ ] **Step 6: Verify the move is a move.** `git diff -w --color-moved=dimmed-zebra --color-moved-ws=allow-indentation-change nous/api/runner.py` must show the body of `_dispatch_with_ledger` as moved text (dimmed), with only the first lines (the signature, the docstring, the `return`) and the replaced `else:` branch in the loop as changes. Any statement of the body that is not dimmed is a transcription error: fix it against the original.
+- [ ] **Step 6: Verify the move is a move.** `git diff -w --color-moved=dimmed-zebra --color-moved-ws=allow-indentation-change nous/api/runner.py` must show the body of `_dispatch_with_ledger` as moved text (dimmed), with only the first lines (the signature, the docstring, the `return`) and the replaced `else:` branch in the loop as changes. Any statement of the body that is not dimmed is a transcription error: fix it against the original. Then run this one-off check from the repository root (do not commit it): it compares the helper's body with the branch it replaced, statement for statement, whatever the comments and the wrapping say.
+
+```python
+import ast
+import subprocess
+import textwrap
+from pathlib import Path
+
+old = subprocess.run(
+    ["git", "show", "9a3121e8:nous/api/runner.py"], capture_output=True, text=True, check=True
+).stdout
+start = old.index("                        else:\n                            # F064.1 ping site 2")
+end_marker = "release_write_path_lock_after(_write_lock2, outcome.write_worker)\n"
+end = old.index(end_marker, start) + len(end_marker)
+old_body = textwrap.dedent(old[start:end].split("\n", 1)[1])  # the branch, without its `else:` line
+
+new = Path("nous/api/runner.py").read_text(encoding="utf-8")
+new_body = textwrap.dedent(
+    new[new.index("        # F064.1 ping site 2") : new.index("        return Dispatched(result_text")]
+)
+
+
+def dump(code: str) -> str:
+    return ast.dump(ast.parse("async def f():\n" + textwrap.indent(code, "    ")))
+
+
+assert dump(old_body) == dump(new_body), "the helper's body is not the loop's old branch"
+print("the moved body is AST-identical to the original branch")
+```
+**The 2d-4 task report must paste** that script's output, the output of `git diff -w --color-moved=dimmed-zebra --color-moved-ws=allow-indentation-change --stat nous/api/runner.py`, and the number of non-dimmed body lines (zero); the reviewer of 2d-4 re-runs both.
 
 - [ ] **Step 7: Run the tests and watch them pass.** `"$BIN/nous-test-linux.sh" "$WT" runner pg "$DB" tests/test_f099_phase2d_execute.py -q` (expect pass), then the whole regression net from Step 0 and compare the counts with the baseline: identical.
 
@@ -3637,16 +3770,17 @@ set -o pipefail
 "$BIN/lint-delta.sh" "$WT"
 MSG=$(mktemp)
 cat > "$MSG" <<'EOF'
-feat(F099): 2d-4 execute_single_call and the proposal:{id} idempotency scope (lands dark)
+feat(F099): 2d-4 execute_single_call, the proposal:{id} scope and the approved-action stamp (lands dark)
 
 The ledger-bracketed dispatch of _tool_loop moves unchanged into _dispatch_with_ledger; execute_single_call runs
 one owner-approved call through it under an approved_action context, after the strict authorization rule. The
-idempotency scope of an approved send is its proposal.
+idempotency scope of an approved send is its proposal, and what an approved call spawns is stamped
+internal_only, so approving one call never widens what it starts.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_015q4W1nke7JzGaZkC21Whng
 EOF
-git add nous/api/runner.py nous/api/idempotency.py tests/test_f099_phase2d_execute.py
+git add nous/api/runner.py nous/api/idempotency.py nous/api/tools.py tests/test_f099_phase2d_execute.py
 git commit -F "$MSG"
 ```
 
@@ -3663,7 +3797,7 @@ git commit -F "$MSG"
 **Interfaces:**
 - Consumes: `continuation.decide_proposal`, `claim_execution`, `finish_execution`, `end_unrunnable`, `expire_proposals`, `record_answer` (2d-3); `AgentRunner.execute_single_call` (2d-4); `ExecutionContext(kind="approved_action", ...)`; `ContinuationRunner._db`, `_runner`, `_settings`, `_agent_id`, `_emit`, `wake`.
 - Produces (the surface-neutral functions every owner surface calls; the REST routes in 2d-7 and, in Phase 3, the A2UI `ActionRouter` call these and nothing else):
-  - `async ContinuationRunner.decide_proposal(self, proposal_id: UUID, *, approve: bool, actor: str) -> continuation.ProposalExecution`: records the owner's decision (2d-3's `decide_proposal`, one transaction), emits `intention.proposal_decided` when it changed the proposal, and, for an approve of a proposal that is `approved` (just now, or by an earlier call that never got to run it), runs `execute_approved_proposal` and returns its result. Never raises for a refusal; raises `continuation.ProposalNotFound`.
+  - `async ContinuationRunner.decide_proposal(self, proposal_id: UUID, *, approve: bool, actor: str) -> continuation.ProposalExecution`: records the owner's decision (2d-3's `decide_proposal`, one transaction), emits `intention.proposal_decided` when it changed the proposal, and, for an approve of a proposal that is `approved` (just now, or by an earlier call that never got to run it), runs `execute_approved_proposal` (shielded: a caller that is cancelled, a REST client that disconnects, does not cancel the call) and returns its result. Never raises for a refusal; raises `continuation.ProposalNotFound`.
   - `async ContinuationRunner.execute_approved_proposal(self, proposal_id: UUID) -> continuation.ProposalExecution`: `claim_execution` (approved to executing, the at-most-once fence); with no claim, `end_unrunnable` (the work ended: `cancelled` or `expired`, nothing runs) or the proposal's current state (someone else has it); with a claim, builds `ExecutionContext(kind="approved_action", session_id=f"proposal-{id}", proposal_id=id, declared_tools=(tool,), root_intention_id=root, intention_id=intention)` (owner authority: the default), runs the STORED `(tool, arguments)` through `AgentRunner.execute_single_call` under `asyncio.wait_for(tool_timeout + EXECUTION_GRACE_SECONDS)`, and finishes the proposal: `executed` (result), or `failed` (the tool's error text; a timeout or an exception with `TIMEOUT_TEXT` / `RAISED_TEXT`, never re-run). A `CancelledError` (a shutdown) re-raises and leaves the proposal `executing`; `expire_proposals` marks it failed in doubt after the bound. No model call takes part.
   - `async ContinuationRunner.answer_question(self, question_id: UUID, *, text: str, actor: str) -> continuation.AnswerRecorded`: `record_answer` in one transaction, then `wake()` when the arrival woke. Raises `QuestionNotFound` or `AnswerRefused`.
   - `run_once` gains the step `("proposal expiry", self._expire_proposals)` after the TTL sweep and before the question wake; `SweepReport.expired_proposals` is its count; each moved proposal emits `intention.proposal_decided` with `actor = "system"`.
@@ -3701,6 +3835,7 @@ from f099_support import (
     register_send_email,
     runner_env,  # noqa: F401
     set_intention,
+    stage,
     use,
 )
 from sqlalchemy import select, update
@@ -3713,7 +3848,7 @@ from nous.brain import continuation
 from nous.handlers import continuation_runner
 from nous.handlers.continuation_runner import ContinuationRunner
 from nous.heart.result_inbox import format_inbox_messages
-from nous.storage.models import ExecutionLedgerEntry, IntentionProposal, ResultInbox
+from nous.storage.models import ExecutionLedgerEntry, Intention, IntentionProposal, ResultInbox
 
 pytestmark = pytest.mark.postgres_only
 
@@ -3786,7 +3921,9 @@ async def test_the_approved_call_runs_with_exactly_the_staged_arguments(runner_e
 
 
 async def test_two_concurrent_approves_run_the_call_once(runner_env):  # noqa: F811
-    """Review Focus 2: the fence is the one UPDATE of claim_execution, whoever gets there."""
+    """Review Focus 2: the fence is the one UPDATE of claim_execution, whoever gets there. The two coroutines are
+    gathered on purpose and no winner is asserted, only that the call ran once, which holds in every interleaving;
+    the hold-and-release shape of the store's race tests would not test the runner's fence any better."""
     env = await runner_env()
     sent = register_send_email(env)
     (pid,) = (await ask_with_proposals(env)).ids
@@ -3951,6 +4088,56 @@ async def test_the_call_is_recorded_in_the_ledger_under_its_proposal_and_a_rerun
     )
     again = await env.runner.execute_single_call(ctx, "send_email", dict(STAGED_ARGS))
     assert "Already sent" in again.text and len(sent) == 1
+
+
+async def _until_state(env, proposal_id, state):
+    while (await proposal_row(env, proposal_id)).state != state:
+        await asyncio.sleep(0.05)
+
+
+async def test_a_client_that_goes_away_mid_request_does_not_cancel_the_approved_call(runner_env):  # noqa: F811
+    """S1: the REST handler runs the approved call inline, and a disconnect cancels the request task. The call
+    must finish and be recorded, not be closed `unknown` and left `executing` for the in-doubt sweep."""
+    env = await runner_env()
+    started, release, calls = asyncio.Event(), asyncio.Event(), []
+
+    async def send_email(**kwargs):
+        calls.append(kwargs)
+        started.set()
+        await release.wait()
+        return {"content": [{"type": "text", "text": "sent"}]}
+
+    env.dispatcher.register("send_email", send_email, SEND_EMAIL_SCHEMA)
+    (pid,) = (await ask_with_proposals(env)).ids
+    request = asyncio.create_task(_cont(env).decide_proposal(pid, approve=True, actor="t"))
+    await asyncio.wait_for(started.wait(), timeout=10)
+    request.cancel()  # the client went away
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(request, timeout=10)
+    release.set()
+    await asyncio.wait_for(_until_state(env, pid, "executed"), timeout=10)
+    assert calls == [STAGED_ARGS] and (await proposal_row(env, pid)).result == "sent"
+
+
+async def test_an_approved_spawn_stays_internal_only_under_an_owner_root(runner_env):  # noqa: F811
+    """C12 (lead ruling): a root intention's authority is owner, and the call the owner approves must not start
+    anything with more authority than the lineage that proposed it."""
+    env = await runner_env()
+    root, got = await claimed(env)
+    assert root.authority == "owner"  # the stamp has to narrow: there is no internal_only parent to inherit from
+    args = {"task": "Check the lift status", "when": "in 2 hours", "intent": "Know whether the lifts open"}
+    pid = await stage(env, got, tool="schedule_task", arguments=args)
+    await commit_ask(env, got)
+    out = await _cont(env).decide_proposal(pid, approve=True, actor="t")
+    assert out.state == "executed", out.error
+    async with env.db.session() as s:
+        rows = list(
+            (await s.execute(select(Intention).where(Intention.agent_id == env.agent, Intention.source_kind == "schedule")))
+            .scalars()
+            .all()
+        )
+    (container,) = rows
+    assert (container.authority, container.root_id) == ("internal_only", root.id)  # in the lineage, and narrowed
 
 
 # ---- reject, expire, answer ----------------------------------------------------------------------------------
@@ -4154,7 +4341,8 @@ and replace the three lines of its docstring with `"""One sweep, in order: relea
         """The owner's decision on a proposal. An approve of a proposal that is ``approved`` (decided just now, or
         by an earlier call that never got as far as running it) runs the call and returns its result; every other
         outcome is the store's. A refusal is a result (``refusal``), never an exception; raises
-        ``continuation.ProposalNotFound`` for an unknown id."""
+        ``continuation.ProposalNotFound`` for an unknown id. The inline execution is shielded from the caller's
+        cancellation (see below)."""
         async with self._db.session() as session:
             decision = await continuation.decide_proposal(
                 session, self._agent_id, proposal_id, approve=approve, actor=actor, settings=self._settings
@@ -4165,7 +4353,10 @@ and replace the three lines of its docstring with `"""One sweep, in order: relea
         if decision.woke_arrival:
             self.wake()
         if approve and decision.refusal is None and decision.state == continuation.PROPOSAL_APPROVED:
-            return await self.execute_approved_proposal(proposal_id)
+            # Shielded: a REST client that goes away cancels its request task, and that must not cancel a call the
+            # owner approved half way (it would sit `executing` until the in-doubt sweep). A process stop still
+            # ends it: the loop's tasks go with the process, and the proposal is failed in doubt as C13 says.
+            return await asyncio.shield(self.execute_approved_proposal(proposal_id))
         return decision
 
     async def execute_approved_proposal(self, proposal_id: UUID) -> continuation.ProposalExecution:
@@ -4861,7 +5052,9 @@ class OwnerPublisher:
             }
         # The body gets the room the title leaves, so its [truncated] marker survives the Telegram cut.
         if row.msg_type == continuation.MSG_QUESTION:
-            room = max(100, TELEGRAM_TEXT_MAX - len(row.title) - 60)  # 60: the fixed words around the quoted text
+            # 60 covers the 48 fixed characters of render_question_html (its header and its closing line), counted
+            # after parsing.
+            room = max(100, TELEGRAM_TEXT_MAX - len(row.title) - 60)
             body = continuation.clip_body(row.body, self._settings, limit=room)
             return {
                 "chat_id": chat_id,
@@ -5285,7 +5478,7 @@ async def test_without_a_runner_a_row_answers_503_and_an_unknown_id_still_404(en
 def test_the_routes_touch_only_the_runners_owner_actions():
     """Surface neutrality: the cards of Phase 3 call the same two functions; the module reaches the runner through
     nothing else, and no model-facing object."""
-    source = Path("nous/api/intention_routes.py").read_text(encoding="utf-8")
+    source = (Path(__file__).resolve().parents[1] / "nous" / "api" / "intention_routes.py").read_text(encoding="utf-8")
     assert set(re.findall(r"continuation_runner\.(\w+)", source)) == {"decide_proposal", "answer_question"}
     assert "dispatcher" not in source and "AgentRunner" not in source
 ```
@@ -5332,6 +5525,8 @@ DECISION_REFUSALS = {
     continuation.REFUSE_ENDED: "This work has already ended, so the proposal did not run.",
     continuation.REFUSE_STATE: "This proposal was already decided the other way.",
 }
+# `ended` also covers a question whose arrival has already moved on (its intentions were woken or closed):
+# nothing is waiting for the answer.
 ANSWER_REFUSALS = {
     continuation.REFUSE_ANSWERED: "This question was already answered.",
     continuation.REFUSE_EXPIRED: "This question expired before it was answered.",
@@ -5537,7 +5732,7 @@ git commit -F "$MSG"
 ---
 ## Task 2d-8: The Telegram bot's owner actions
 
-**Prod runs:** the bot is a separate process that exists in prod, so this is the one task where prod code changes behaviour, in exactly two narrow ways and no other. (1) A button tap whose data is `f099:p:...` and a message that starts with `/approve`, `/reject` or `/answer`, or replies to one of the bot's own messages, in the **owner chat**, is now handled in code instead of reaching `/chat`. In prod no proposal or question row exists, so every such request is answered by the REST routes with 404, and the bot says "no longer available" (a command) or falls through to chat unchanged (a reply, because a 404 means "a reply to something else"). (2) Nothing else changes: every other update, in every other chat, takes the path it took before. Pinned in this task and in 2d-9.
+**Prod runs:** the bot is a separate process that exists in prod, so this is the one task where prod code runs differently, and it is built so that nothing the owner or the agent can see differs (lead ruling on C18: strict parity). A button tap whose data is `f099:p:...`, and a message that starts with `/approve`, `/reject` or `/answer` or replies to one of the bot's own messages, in the **owner chat**, is now sent to the REST routes first. In prod no proposal or question row exists, so every route answers 404, and **the bot then passes the message on to chat unchanged, exactly as before 2d**: a typed command, an `/answer`, a reply and (because it never reaches a route) a malformed or missing id alike. A tap is the one exception, and it cannot occur in prod: no PROPOSAL message has ever been sent, so no inline keyboard of this bot exists to be tapped; a tap whose proposal the server does not know is told it is gone, because it has no chat message to fall through to. Every other update, in every other chat, takes the path it took before. Pinned in this task and in 2d-9 (the parity test taps and types against the real routes and asserts that the chat path was taken).
 
 **Files:**
 - Modify: `nous/telegram_bot.py`: `parse_callback` re-export, `describe_decision`, `describe_answer`, `parse_chat_id`, `NousTelegramBot(owner_chat_id=)`, `_is_owner`, `_owner_post`, `_handle_callback`, `_handle_owner_text`, `_try_answer_reply`, `_answer_callback`, the two hooks in `_handle_update`, `main()`
@@ -5547,11 +5742,11 @@ git commit -F "$MSG"
 - Consumes: `owner_actions.parse_callback`; the REST routes of 2d-7 (`POST /intentions/proposals/{id}/decide`, `POST /intentions/questions/{id}/answer`, `POST /intentions/questions/answer`); the Telegram Bot API methods `answerCallbackQuery`, `editMessageReplyMarkup`, `sendMessage` through the bot's existing `_tg`.
 - Produces:
   - `telegram_bot.parse_callback` (re-exported from `owner_actions`); `describe_decision(status: int, body: dict, approve: bool, short_id: str) -> tuple[str, bool]` and `describe_answer(status: int, body: dict) -> str`: the **fixed vocabulary** the owner reads back (a result, an error and every other server-supplied string is never echoed: the model's text and the tool's output stay out of Telegram); `parse_chat_id(value) -> int | None`.
-  - `NousTelegramBot(..., owner_chat_id: int | None = None)`. `_is_owner(chat_id, user_id)` is true only when `owner_chat_id` is set, the update is from that chat, and the user is in `allowed_users` when that is set (otherwise the user id must equal the owner chat id, which is what a private chat is: a group needs an allowlist). Everything below requires it; a non-owner update is answered "Not authorized." (a button) or **not consumed** (a message: it takes the path it always took).
+  - `NousTelegramBot(..., owner_chat_id: int | None = None)` (from `telegram_chat_id` in `main()`; **a group chat as the owner chat needs `NOUS_ALLOWED_USERS`**, or every owner action is refused: a private chat's id is the user's id, which is how an owner with no allowlist is recognised). `_is_owner(chat_id, user_id)` is true only when `owner_chat_id` is set, the update is from that chat, and the user is in `allowed_users` when that is set (otherwise the user id must equal the owner chat id, which is what a private chat is: a group needs an allowlist). Everything below requires it; a non-owner update is answered "Not authorized." (a button) or **not consumed** (a message: it takes the path it always took).
   - A **button** (`callback_query`): `answerCallbackQuery("Approving…" | "Rejecting…")`, then `POST /intentions/proposals/<32 hex>/decide {"decision", "actor": "telegram:<user id>"}`, then (for a final answer) `editMessageReplyMarkup` to remove the buttons, then one follow-up message from `describe_decision`. A transient failure (400, 503, unreachable) leaves the buttons in place.
-  - **Commands**, parsed in code: `/approve <id>`, `/reject <id>` (`/approve@botname` too) call the decide route; `/answer <id> <text…>` calls `POST /intentions/questions/{id}/answer`; each reply is `describe_*` text. `<id>` must be 8 to 36 hex characters and dashes: anything else gets the usage line and **no request** (so an argument can never steer the request path).
+  - **Commands**, parsed in code: `/approve <id>`, `/reject <id>` (`/approve@botname` too) call the decide route; `/answer <id> <text…>` calls `POST /intentions/questions/{id}/answer`; each reply is `describe_*` text. `<id>` must be 8 to 36 hex characters and dashes: anything else, and a missing id or answer text, is **not consumed** (no request, and the message goes to chat unchanged, so an argument can never steer the request path). A route answer of **404** is not consumed either (the message goes to chat unchanged); 409, 400, 503 and an unreachable server are answered with fixed text.
   - A **reply** to a message the bot sent (`reply_to_message.from.is_bot`) calls `POST /intentions/questions/answer {chat_id, message_id, text, actor}`; a 404 returns the message to the ordinary chat path unchanged.
-  - Nothing here calls `/chat`, a model, or any agent tool.
+  - No owner action calls a model or an agent tool. What the bot does not consume takes the path it always took, which is `/chat`.
 
 - [ ] **Step 0: The base is what the plan says.** Run `python -c "import inspect; from nous.telegram_bot import NousTelegramBot as B; assert 'owner_chat_id' not in inspect.signature(B.__init__).parameters; from nous.owner_actions import parse_callback"`. It must print nothing.
 
@@ -5769,15 +5964,17 @@ async def test_an_id_argument_cannot_steer_the_request_path(arg):
     """Review Focus 4: the argument becomes part of a URL, so only hex and dashes ever get that far."""
     bot = _bot()
     await bot._handle_update(_message(f"/approve {arg}"))
-    assert bot._http.calls == []
-    assert _sent(bot) == ["Usage: /approve <proposal id>"]
-    bot._chat_streaming.assert_not_called()
+    assert bot._http.calls == [] and _sent(bot) == []  # nothing of it reached a URL, or the owner
+    bot._chat_streaming.assert_awaited_once()  # it went where it always went
+    assert bot._chat_streaming.await_args.args[1] == f"/approve {arg}"
 
 
-async def test_a_command_with_no_id_gets_its_usage_line():
+async def test_a_command_with_no_id_falls_through_to_chat_unchanged():
     bot = _bot()
     await bot._handle_update(_message("/reject"))
-    assert bot._http.calls == [] and _sent(bot) == ["Usage: /reject <proposal id>"]
+    assert bot._http.calls == [] and _sent(bot) == []
+    bot._chat_streaming.assert_awaited_once()
+    assert bot._chat_streaming.await_args.args[1] == "/reject"
 
 
 async def test_answer_command_posts_the_text_to_the_question_route():
@@ -5789,16 +5986,17 @@ async def test_answer_command_posts_the_text_to_the_question_route():
 
 
 @pytest.mark.parametrize("text", ["/answer", f"/answer {SHORT}", f"/answer {SHORT}   ", "/answer zzzzzzzz yes"])
-async def test_a_malformed_answer_command_gets_its_usage_line(text):
+async def test_a_malformed_answer_command_falls_through_to_chat_unchanged(text):
     bot = _bot()
     await bot._handle_update(_message(text))
-    assert bot._http.calls == [] and _sent(bot) == ["Usage: /answer <question id> <your answer>"]
+    assert bot._http.calls == [] and _sent(bot) == []
+    bot._chat_streaming.assert_awaited_once()
+    assert bot._chat_streaming.await_args.args[1] == text.strip()
 
 
 @pytest.mark.parametrize(
     ("status", "body", "text"),
     [
-        (404, {}, "That question is no longer available."),
         (409, {"reason": "answered"}, "That question was already answered."),
         (409, {"reason": "expired"}, "That question expired before it was answered."),
         (409, {"reason": "ended"}, "That work has already ended, so your answer was not recorded."),
@@ -5812,10 +6010,14 @@ async def test_every_answer_of_the_answer_route_has_a_fixed_text(status, body, t
     assert _sent(bot) == [text]
 
 
-async def test_an_unknown_id_under_prods_empty_tables_is_told_it_is_gone():
+@pytest.mark.parametrize("text", [f"/approve {SHORT}", f"/reject {SHORT}", f"/answer {SHORT} Yes"])
+async def test_an_unknown_id_under_prods_empty_tables_falls_through_to_chat_unchanged(text):
+    """C18, strict parity: under prod's flags every id is a 404, and the bot behaves as it did before 2d."""
     bot = _bot()  # no route knows anything: every id is a 404, as in prod
-    await bot._handle_update(_message(f"/approve {SHORT}"))
-    assert _sent(bot) == [GONE]
+    await bot._handle_update(_message(text))
+    assert len(bot._http.calls) == 1 and _sent(bot) == []  # asked the route, said nothing
+    bot._chat_streaming.assert_awaited_once()
+    assert bot._chat_streaming.await_args.args[1] == text
 
 
 # ---- replies -------------------------------------------------------------------------------------------------
@@ -5913,7 +6115,8 @@ def test_the_descriptions_never_echo_a_server_supplied_string():
 
 ```python
 # ---- F099 Phase 2d: the owner's actions ------------------------------------------------------------------------
-# Deterministic: parsed in code, sent to the REST routes, never to /chat or any model. Every line the owner reads
+# Deterministic: parsed in code, sent to the REST routes, never to a model (what the bot does not consume goes on to
+# /chat unchanged, as before 2d). Every line the owner reads
 # back is fixed vocabulary here: a result, an error and every other string the server returns stays out of
 # Telegram (a tool's output or a model's text could contain a tappable /command).
 _ID_ARG_RE = re.compile(r"[0-9a-fA-F-]{8,36}")
@@ -5974,11 +6177,11 @@ def describe_decision(status: int, body: dict, approve: bool, short_id: str) -> 
 
 
 def describe_answer(status: int, body: dict) -> str:
-    """The text for the answer of an answer route (fixed vocabulary, like ``describe_decision``)."""
+    """The text for the answer of an answer route (fixed vocabulary, like ``describe_decision``). Not called for a
+    404."""
     if status == 200:
         return "Answer recorded."
-    if status == 404:
-        return "That question is no longer available."
+    # No 404 arm: a 404 is passed on to chat by both callers before this is called (C18, strict parity).
     if status == 409:
         reason = body.get("reason")
         text = _ANSWER_REFUSALS.get(reason) if isinstance(reason, str) else None
@@ -6057,12 +6260,13 @@ Add these methods to `NousTelegramBot` (before `_show_identity`):
         if query_id is not None:
             await self._tg("answerCallbackQuery", params={"callback_query_id": query_id, "text": text})
 
-    async def _decide(self, hex_id: str, approve: bool, user_id: Any) -> tuple[str, bool]:
+    async def _decide(self, hex_id: str, approve: bool, user_id: Any) -> tuple[int, str, bool]:
+        """``(status, text, final)``: the route's status, and what ``describe_decision`` says of it."""
         status, body = await self._owner_post(
             f"/intentions/proposals/{hex_id}/decide",
             {"decision": "approve" if approve else "reject", "actor": f"telegram:{user_id}"},
         )
-        return describe_decision(status, body, approve, hex_id[:8])
+        return (status, *describe_decision(status, body, approve, hex_id[:8]))
 
     async def _handle_callback(self, query: dict[str, Any]) -> None:
         """A tap on a proposal's Approve or Reject button."""
@@ -6080,7 +6284,7 @@ Add these methods to `NousTelegramBot` (before `_show_identity`):
         _kind, hex_id, action = parsed
         approve = action == "a"
         await self._answer_callback(query_id, "Approving…" if approve else "Rejecting…")
-        text, final = await self._decide(hex_id, approve, user_id)
+        _status, text, final = await self._decide(hex_id, approve, user_id)  # a tap has no chat to fall through to
         if final and message.get("message_id") is not None:
             await self._tg(
                 "editMessageReplyMarkup",
@@ -6094,8 +6298,9 @@ Add these methods to `NousTelegramBot` (before `_show_identity`):
 
     async def _handle_owner_text(self, message: dict[str, Any], chat_id: Any, user_id: Any, text: str) -> bool:
         """``/approve``, ``/reject``, ``/answer`` and a reply to one of our messages, in the owner chat. True when
-        the message was consumed; anything else (another chat, another command, a reply to something else) is left
-        for the ordinary path, unchanged."""
+        the message was consumed; anything else (another chat, another command, a malformed or missing id, an id
+        the server answers 404 for, a reply to something else) is left for the ordinary path, unchanged: under
+        prod's flags nothing exists to approve, so the bot behaves as it did before 2d."""
         if not self._is_owner(chat_id, user_id):
             return False
         command, _, rest = text.strip().partition(" ")
@@ -6104,20 +6309,22 @@ Add these methods to `NousTelegramBot` (before `_show_identity`):
             args = rest.split()
             hex_id = _hex_id(args[0]) if len(args) == 1 else None
             if hex_id is None:
-                await self._send(chat_id, f"Usage: {command} <proposal id>")
-                return True
-            reply, _final = await self._decide(hex_id, command == "/approve", user_id)
+                return False  # not a proposal id: it was never ours (and no argument reaches a URL)
+            status, reply, _final = await self._decide(hex_id, command == "/approve", user_id)
+            if status == 404:
+                return False  # no such proposal: ordinary chat, as before 2d
             await self._send(chat_id, reply)
             return True
         if command == "/answer":
             parts = rest.strip().split(None, 1)
             hex_id = _hex_id(parts[0]) if len(parts) == 2 else None
             if hex_id is None:
-                await self._send(chat_id, "Usage: /answer <question id> <your answer>")
-                return True
+                return False
             status, body = await self._owner_post(
                 f"/intentions/questions/{hex_id}/answer", {"text": parts[1].strip(), "actor": f"telegram:{user_id}"}
             )
+            if status == 404:
+                return False  # no such question: ordinary chat, as before 2d
             await self._send(chat_id, describe_answer(status, body))
             return True
         reply_to = message.get("reply_to_message")
@@ -6146,7 +6353,7 @@ In `main()`, change the bot construction to add `owner_chat_id=parse_chat_id(_se
 
 - [ ] **Step 5: Run the tests and watch them pass.** `"$BIN/nous-test-linux.sh" "$WT" runner pg "$DB" tests/test_f099_phase2d_bot.py tests/test_telegram_attachments.py tests/test_telegram_formatting.py tests/test_telegram_tools.py -q`. Expected: all pass (the three existing bot test files are the regression net for the untouched paths).
 
-- [ ] **Step 6: Mutation checks.** (a) Make `_is_owner` return `True` when `owner_chat_id` is `None`: `test_a_button_from_anyone_but_the_owner_reaches_no_route` fails. (b) Replace `_hex_id`'s result with the raw argument: `test_an_id_argument_cannot_steer_the_request_path` fails. (c) Echo `body.get("error")` in `describe_decision`: `test_the_descriptions_never_echo_a_server_supplied_string` fails. Restore each.
+- [ ] **Step 6: Mutation checks.** (a) Make `_is_owner` return `True` when `owner_chat_id` is `None`: `test_a_button_from_anyone_but_the_owner_reaches_no_route` fails. (b) Replace `_hex_id`'s result with the raw argument: `test_an_id_argument_cannot_steer_the_request_path` fails. (c) Echo `body.get("error")` in `describe_decision`: `test_the_descriptions_never_echo_a_server_supplied_string` fails. (d) Make `_handle_owner_text` consume a 404 (send the gone text instead of returning `False`): `test_an_unknown_id_under_prods_empty_tables_falls_through_to_chat_unchanged` fails. Restore each.
 
 - [ ] **Step 7: Lint and commit.**
 
@@ -6157,10 +6364,10 @@ MSG=$(mktemp)
 cat > "$MSG" <<'EOF'
 feat(F099): 2d-8 the Telegram bot's owner actions (buttons, /approve, /reject, /answer, replies)
 
-Parsed in code and sent to the REST routes, never to /chat. Accepted only from the owner chat (and an allowed
-user). An id argument is hex only before it reaches a URL. Every line read back to the owner is fixed
-vocabulary: a tool's result or a model's text is never echoed to Telegram. A reply the server does not know is
-passed on to the ordinary chat unchanged.
+Parsed in code and sent to the REST routes; no owner action reaches a model. Accepted only from the owner chat
+(and an allowed user). An id argument is hex only before it reaches a URL. Every line read back to the owner is
+fixed vocabulary: a tool's result or a model's text is never echoed to Telegram. A command or reply the server
+does not know (a 404), and a malformed id, are passed on to the ordinary chat unchanged, so prod behaves as before.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_015q4W1nke7JzGaZkC21Whng
@@ -6172,7 +6379,7 @@ git commit -F "$MSG"
 ---
 ## Task 2d-9: Wiring, the prod-parity pins, and the docs
 
-**Prod runs:** the wiring passes the runner (which is `None` in prod, through a lazy proxy that is falsy until the component exists) to `create_app`; nothing else. This task adds the pins that say so, end to end: the real bot against the real routes against a real database under prod's exact flags.
+**Prod runs:** the wiring passes the runner (which is `None` in prod, through a lazy proxy that is falsy until the component exists) to `create_app`; nothing else. This task adds the pins that say so, end to end: the real bot against the real routes against a real database under prod's exact flags, where a typed command, a reply and a malformed id all reach the chat path unchanged and a tap (which cannot occur in prod) is told the proposal is gone.
 
 **Files:**
 - Modify: `nous/main.py`: `build_app` passes `continuation_runner=_lazy_component(components, "continuation_runner")` to `create_app`
@@ -6213,6 +6420,7 @@ from nous.storage.models import IntentionProposal, ResultInbox
 from nous.telegram_bot import NousTelegramBot
 
 HEX = "a" * 32
+GONE = "That proposal is no longer available."
 
 
 def _prod_routes(env, runner=None) -> Starlette:
@@ -6286,8 +6494,9 @@ async def test_the_routes_answer_404_or_empty_for_everything_under_prods_flags(e
 
 @pytest.mark.postgres_only
 async def test_the_real_bot_against_the_real_routes_is_inert_under_prods_flags(env_factory):  # noqa: F811
-    """A stale or forged tap, a typed /approve and a reply, from the owner chat, end to end: every one is told it is
-    gone or falls through to chat, and no row is written."""
+    """A stale or forged tap, a typed /approve and /answer, a reply and a malformed id, from the owner chat, end to
+    end (C18, strict parity): the tap, which cannot occur in prod, is told the proposal is gone; every message falls
+    through to chat unchanged; no row is written."""
     env = await env_factory(**PROD, telegram_bot_token="test-token", telegram_chat_id="8080")
     before = await _counts(env)
     bot = NousTelegramBot("test-token", "http://nous.test", allowed_users={42}, owner_chat_id=42)
@@ -6315,12 +6524,18 @@ async def test_the_real_bot_against_the_real_routes_is_inert_under_prods_flags(e
             "reply_to_message": {"message_id": 9, "from": {"id": 1, "is_bot": True}},
         }
     }
-    for update in (tap, typed):
-        await bot._handle_update(update)
-    assert sent == ["That proposal is no longer available."] * 2
+    answered = {"message": {"message_id": 4, "from": user, "chat": {"id": 42}, "text": f"/answer {HEX[:8]} yes"}}
+    malformed = {"message": {"message_id": 5, "from": user, "chat": {"id": 42}, "text": "/approve xyz"}}
+    await bot._handle_update(tap)
+    assert sent == [GONE]  # a tap has no chat to fall through to, and none can occur in prod
     bot._chat_streaming.assert_not_called()
-    await bot._handle_update(reply)  # a reply to something else: the ordinary chat path, as before 2d
-    bot._chat_streaming.assert_awaited_once()
+    messages = (typed, answered, reply, malformed)
+    for count, update in enumerate(messages, start=1):
+        await bot._handle_update(update)
+        assert bot._chat_streaming.await_count == count  # the ordinary chat path, as before 2d
+    assert sent == [GONE]  # the owner was told nothing else
+    texts = [call.args[1] for call in bot._chat_streaming.await_args_list]
+    assert texts == [f"/approve {HEX[:8]}", f"/answer {HEX[:8]} yes", "Thanks!", "/approve xyz"]
     assert await _counts(env) == before
     await bot._http.aclose()
 
@@ -6329,7 +6544,8 @@ async def test_the_real_bot_against_the_real_routes_is_inert_under_prods_flags(e
 
 
 def test_2d_added_no_migration_and_no_setting():  # PIN: changes when a later PR adds one on purpose
-    assert sorted(Path("sql/migrations").glob("*.sql"))[-1].name.startswith("084_")
+    migrations = Path(__file__).resolve().parents[1] / "sql" / "migrations"
+    assert sorted(migrations.glob("*.sql"))[-1].name.startswith("084_")
     named = {name for name in Settings.model_fields if "proposal" in name or "owner_action" in name}
     assert named == {"intention_proposal_ttl_hours"}
 
@@ -6368,16 +6584,16 @@ async def test_the_owner_actions_of_the_runner_are_inert_with_the_flag_off_and_t
   - `docs/reference/agent-tools.md`: add the row:
 
 ```
-| `propose_action` | continuation turns only (a per-turn extra tool, never registered with a dispatcher) | F099 Phase 2d: stage a call the lineage may not make itself (an outward send, a schedule, a shell command) for the owner to approve. `tool` must be registered and not one the lineage may call itself; spawn tools cannot be proposed; the arguments are checked against the tool's schema, may not start a name with `_`, and must render in at most 2000 characters (the owner reads the whole call). It never runs anything and is not terminal: the turn then ends with `resolve_intention(decision='ask')`, which publishes the proposal to the owner, who approves it in Telegram or through the REST route. A model has no tool that approves, rejects or answers |
+| `propose_action` | continuation turns only (a per-turn extra tool, never registered with a dispatcher) | F099 Phase 2d: stage a call the lineage may not make itself (an outward send, a schedule, a shell command) for the owner to approve. `tool` must be registered and not one the lineage may call itself; spawn tools cannot be proposed; the arguments are checked against the tool's schema, may not start a name with `_`, and must render in at most 2000 characters (the owner reads the whole call). It never runs anything and is not terminal: the turn then ends with `resolve_intention(decision='ask')`, which publishes the proposal to the owner, who approves it in Telegram or through the REST route. A model has no tool that approves, rejects or answers. What an approved `schedule_task` starts is `internal_only`, like the lineage that proposed it |
 ```
   - `docs/reference/shipped-features.md`: after the F099 Phase 2c-2 row add:
 
 ```
-| F099 Phase 2d | [Proposals and owner actions](../superpowers/specs/2026-10-05-f099-intentions-and-continuation-design.md) (`propose_action`, a per-turn internal-only extra tool that stages a call (`brain.intention_proposals`, state `staged`, carrying the turn's claim token) and runs nothing; the arrival's fenced commit makes the staged rows `pending` and writes their PROPOSAL rows (an `ask` with proposals writes no QUESTION), and every other outcome, a failed or released attempt included, expires them. The owner decides through `ContinuationRunner.decide_proposal` / `answer_question`, called by four REST routes (`/intentions/...`), the Telegram bot (inline Approve/Reject buttons, `/approve`, `/reject`, `/answer`, reply-to; accepted only from the owner chat) and, in Phase 3, the A2UI cards: nothing a model can call. `execute_approved_proposal` runs exactly the stored `(tool, arguments)` once, behind `claim_execution` (`approved` to `executing` in one statement that also requires the root open: the cancel seam), through the execution ledger under the `proposal:{id}` scope and an `approved_action` context with owner authority; a timeout is failed in doubt and never re-run. The batch wakes when every proposal and question of the arrival is terminal; a proposal expires as a rejection at its deadline. Telegram shows model-authored text escaped inside `<pre>` and never truncated (a call too long to read in one message is refused at staging). Lands dark: `CONTINUATION_RUNNER_READY` is still False, so nothing runs in prod) | #<PR number> |
+| F099 Phase 2d | [Proposals and owner actions](../superpowers/specs/2026-10-05-f099-intentions-and-continuation-design.md) (`propose_action`, a per-turn internal-only extra tool that stages a call (`brain.intention_proposals`, state `staged`, carrying the turn's claim token) and runs nothing; the arrival's fenced commit makes the staged rows `pending` and writes their PROPOSAL rows (an `ask` with proposals writes no QUESTION), and every other outcome, a failed or released attempt included, expires them. The owner decides through `ContinuationRunner.decide_proposal` / `answer_question`, called by four REST routes (`/intentions/...`), the Telegram bot (inline Approve/Reject buttons, `/approve`, `/reject`, `/answer`, reply-to; accepted only from the owner chat, which needs `NOUS_ALLOWED_USERS` when it is a group; an id the server does not know is passed on to chat unchanged) and, in Phase 3, the A2UI cards: nothing a model can call. `execute_approved_proposal` runs exactly the stored `(tool, arguments)` once, behind `claim_execution` (`approved` to `executing` in one statement that also requires the root open: the cancel seam), through the execution ledger under the `proposal:{id}` scope and an `approved_action` context with owner authority; a timeout is failed in doubt and never re-run. The batch wakes when every proposal and question of the arrival is terminal; a proposal expires as a rejection at its deadline. Telegram shows model-authored text escaped inside `<pre>` and never truncated (a call too long to read in one message is refused at staging). Lands dark: `CONTINUATION_RUNNER_READY` is still False, so nothing runs in prod) | #<PR number> |
 ```
   Put the real PR number in the row's last cell when the PR is opened (amend the last commit); do not leave `<PR number>`.
   - `docs/features/INDEX.md`: in the F099 row, change `Phases 2c-1 (store) and 2c-2 (runner) merged dark;` to `Phases 2c-1 (store), 2c-2 (runner) and 2d (proposals and owner actions) merged dark;`.
-  - `docs/reference/project-structure.md`: in the `telegram_bot.py` line add `; F099 2d: owner actions (buttons, /approve, /reject, /answer, reply-to)`; add under `api/` after the `rest.py` line: `│       ├── intention_routes.py # F099 Phase 2d: the four owner-action routes (decide, answer, list), thin over ContinuationRunner`; add after the `idempotency.py` line nothing (its description is unchanged: the new scope is one rule); in the line for `brain/continuation.py` append `; Phase 2d: staging, publish and expiry of proposals, the owner's decisions and answers`; in the `continuation_publisher.py` line append `; Phase 2d: PROPOSAL rows with buttons, QUESTION rows with force_reply, escaped HTML`; add a line for `nous/owner_actions.py`: `├── owner_actions.py            # F099 Phase 2d: callback-data codec shared by the publisher and the Telegram bot (stdlib only)` next to the other top-level `nous/` modules (after `telegram_bot.py`). Also update the `rest.py` endpoint count if the file states one: the four routes make it 56 where it says 52.
+  - `docs/reference/project-structure.md`: in the `telegram_bot.py` line add `; F099 2d: owner actions (buttons, /approve, /reject, /answer, reply-to)`; add under `api/` after the `rest.py` line: `│       ├── intention_routes.py # F099 Phase 2d: the four owner-action routes (decide, answer, list), thin over ContinuationRunner`; add after the `idempotency.py` line nothing (its description is unchanged: the new scope is one rule); in the line for `brain/continuation.py` append `; Phase 2d: staging, publish and expiry of proposals, the owner's decisions and answers`; in the `continuation_publisher.py` line append `; Phase 2d: PROPOSAL rows with buttons, QUESTION rows with force_reply, escaped HTML`; add a line for `nous/owner_actions.py`: `├── owner_actions.py            # F099 Phase 2d: callback-data codec shared by the publisher and the Telegram bot (stdlib only)` next to the other top-level `nous/` modules (after `telegram_bot.py`). Also update the `rest.py` endpoint count the file states: count the `Route(` entries of `create_app` before and after your change rather than trust the number written there (it says 52, `CLAUDE.md` says 42), and add four.
 
 - [ ] **Step 6: The contract.** In `docs/superpowers/plans/2026-10-06-f099-phase2-contract.md`, immediately before the heading `## 5. Open questions (with the recommended answer)`, add:
 
@@ -6387,7 +6603,7 @@ async def test_the_owner_actions_of_the_runner_are_inert_with_the_flag_off_and_t
 > - §4.7: `publish_staged(..., deadline, channel, push_after, note) -> list[tuple[UUID, str]]`; `decide_proposal(session, agent_id, proposal_id, *, approve, actor, settings, now=None) -> ProposalExecution` returns, and raises only `ProposalNotFound` (a repeat is `changed=False`, a late or contradictory decision is a `refusal`, never `ProposalNotPending`); `finish_execution(..., ok, result, error, ledger_key, settings)`; `expire_proposals(session, agent_id, *, settings, now=None, limit=50) -> list[tuple[UUID, str]]` (it also expires orphan `staged` rows after two leases, closes pending proposals of ended roots, and fails an in-doubt `executing` one after `max(lease, 2 x tool_timeout)`); `ProposalExecution` gains `changed` and `refusal`; new `end_unrunnable`, `find_proposal_id`, `find_question_id`, `find_question_id_by_message`, `normalize_id`, `proposal_view`, `list_proposals`. `expire_staged` runs inside `commit_arrival`, `fail_attempt` and `release_claim`, not in the runner.
 > - §4.9 "Answers": `record_answer` refuses an answer (answered, expired, ended) before writing anything; a proposal's end is written as one INFORM per awaiting intention (`source_id` a uuid5 of proposal and intention), only to intentions still `awaiting_owner`.
 > - §4.10: the 2d routes answer 404 for an id that names nothing before they need the runner (503 only when a row exists and no runner does), 200 with `changed: false` for a repeated decision, 409 `{"error", "state", "refusal"}` for a late or contradictory one; the contract's `RootView` and the intention routes are 2e's.
-> - §4.11: a button tap removes the buttons (`editMessageReplyMarkup`) and sends one follow-up built from fixed vocabulary; it does not edit the message text and never echoes a result. Owner actions are accepted only from the owner chat. `parse_callback` lives in `nous/owner_actions.py`.
+> - §4.11: a button tap removes the buttons (`editMessageReplyMarkup`) and sends one follow-up built from fixed vocabulary; it does not edit the message text and never echoes a result. Owner actions are accepted only from the owner chat. A command whose id the server answers 404 for, a malformed id and a reply the server does not know all go on to chat unchanged (lead ruling C18: strict prod parity). `parse_callback` lives in `nous/owner_actions.py`.
 > - §4.12: `execute_single_call` is a second caller of `_dispatch_with_ledger`, the `else` branch of `_tool_loop` moved unchanged, and returns `SingleCall(text, is_error, send_key)`; the proposal's `ledger_key` is stored when the call returns. Only `send_email` and `send_file` have a `proposal:{id}` key; `claim_execution` is the at-most-once fence for every tool.
 > - §4.13: `intention.proposal_decided` carries `actor` (the owner's actor, or `system` for the sweep).
 > - §4.14 item 5: an `ask` that staged proposals writes no QUESTION; each PROPOSAL row's `source_id` is its proposal's id and `arrival.report_ids` lists them.
@@ -6446,11 +6662,11 @@ git commit -F "$MSG"
 
 **4. Review Focus coverage.** (1) 2d-5 and 2d-8 and 2d-9; (2) 2d-3, 2d-4, 2d-5; (3) 2d-2; (4) 2d-1, 2d-6, 2d-8; (5) 2d-3.
 
-**5. Dry run (done by the plan's author).** Every code block of this plan was applied, in task order, to a scratch copy of the base (`9a3121e8`), formatted with `ruff format` as the implementer notes say, and run against a scratch PostgreSQL from the template and migrations the notes name. The anchors of every "replace this with that" matched exactly once; the moved body of `_dispatch_with_ledger` is AST-identical to the `else` branch it replaces; `ruff check` was clean after formatting; the new tests and the regression nets named in each task (the F099 suites, the Telegram and A2UI REST suites, the runner ledger, authorization, idempotency and write-lock suites) passed together (1869 passed, 6 skipped). The one failure outside that set is the existing Windows symlink group in `tests/test_compensation.py` (four tests), which fails identically on the unmodified base. Eight of the named mutation checks were run (the claim-token predicate of `publish_staged` and the missing `expire_staged` of `release_claim` in 2d-2; the root-open predicate of `claim_execution`, the ended-root guard of `_settle_proposal`, the proposal half of the wake rule and the lock order of `record_answer` in 2d-3; the skipped fence of `execute_approved_proposal` in 2d-5; the missing `<pre>` in 2d-6): each failed the test the plan says it fails. The dry run found and fixed three defects in earlier drafts of this plan (a test that reused fixed ids across runs, the jsonb key order of stored arguments, and invisible characters in test strings); a further run on your side may find mechanical ones, and the notes say how to treat them.
+**5. Dry run (done by the plan's author, twice: before and after the plan review).** Every code block of this plan was applied, in task order, to a scratch copy of the base (`9a3121e8`), formatted with `ruff format` as the implementer notes say, and run against a scratch PostgreSQL from the template and migrations the notes name. The anchors of every "replace this with that" matched exactly once; the moved body of `_dispatch_with_ledger` is AST-identical to the `else` branch it replaces (the one-off script of 2d-4 Step 6 was run too); `ruff check` was clean after formatting; the new tests and the regression nets named in each task (the F099 suites, the Telegram and A2UI REST suites, the runner ledger, authorization, idempotency and write-lock suites) passed together (1880 passed, 6 skipped). The one failure outside that set is the existing Windows symlink group in `tests/test_compensation.py` (four tests), which fails identically on the unmodified base. Fourteen mutation checks were run and each failed the test the plan says it fails: the claim-token predicate of `publish_staged`, the missing `expire_staged` of `release_claim`, the root-open predicate of `claim_execution`, the ended-root guard of `_settle_proposal`, the proposal half of the wake rule, the lock order of `record_answer`, the skipped fence of `execute_approved_proposal`, the missing `<pre>` (2d-6), the context's own authority in `_origin_args` (M1), the missing shield (S1), the missing NUL refusal (S3), the `_expire_root` statement (S6), a consumed 404 and a consumed malformed id in the bot (C18). The dry run found and fixed four defects in earlier drafts of this plan (a test that reused fixed ids across runs, the jsonb key order of stored arguments, invisible characters in test strings, and a docstring line over the limit); a further run on your side may find mechanical ones, and the notes say how to treat them.
 
 **Residuals, accepted and named.**
 1. A REPORT row (2c) is still plain text: a model-authored report can contain a tappable `/command`. It needs another proposal's id, which a model that did not stage it cannot know; PROPOSAL and QUESTION rows, which can, are escaped.
 2. `stage_proposal` reads liveness without a lock, so a stage racing a lease release can leave a `staged` row: it can never be approved and `expire_proposals` removes it after two leases.
 3. A process stop mid-call leaves the proposal `executing` for up to `max(lease, 2 x tool_timeout)` before the sweep marks it failed in doubt; nothing ever re-runs it, so the owner (and the continuation, through the INFORM) learns "check whether it happened".
-4. An approved `schedule_task` or `spawn_sync` joins the lineage (conflict C12): its children are `internal_only`. If the owner wants a wide schedule it is a later decision.
+4. An approved `schedule_task` or `spawn_sync` joins the lineage and is stamped `internal_only` by `_origin_args` (conflict C12), so what the owner approves cannot start anything with more authority than the lineage that proposed it. If the owner wants a wide schedule it is a later decision.
 5. The REST routes have no in-app authentication (conflict C1, spec section 9). The bot's owner-chat check protects the bot path only.
