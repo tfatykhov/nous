@@ -80,6 +80,12 @@ class Refusal:
     code: str
 
 
+def _no_cancelled_roots(_root_id: UUID) -> bool:
+    """The default view of cancelled roots: none. Installed until ``set_cancelled_roots`` (F099 2e) replaces it,
+    so a deployment with continuation off pays one attribute read and one call per lineage tool call."""
+    return False
+
+
 # 012.2: a subtask may not delegate (no-nesting rule). F062: spawn_sync has identical
 # inline-blocking semantics to spawn_task(await_result=True) and competes for the same
 # worker pool; without exclusion a hardened subtask could call it recursively and
@@ -396,6 +402,9 @@ class AgentRunner:
         # to tasks - the F091 _pending_tasks lesson).
         self._ledger_store: LedgerStore | None = None
         self._ledger_pending_tasks: set[asyncio.Task] = set()
+        # F099 2e: the owner's cancel, as an in-process view (``set_cancelled_roots``); nothing is cancelled until
+        # the continuation runner installs one.
+        self._root_cancelled: Callable[[UUID], bool] = _no_cancelled_roots
         # Phase 2.8: compensation snapshot store (wired when compensation_enabled).
         self._snap_store: Any | None = None
         self._workspace_dir: str = settings.workspace_dir
@@ -492,7 +501,31 @@ class AgentRunner:
         the per-context policy (2a). The last two run for every call the strict
         rule lets through; each returns early only when IT refuses, so a
         warn-mode deviation is recorded by both.
+
+        F099 2e: before all of them, a call on behalf of a CANCELLED root is refused, whatever the authority, the
+        kind of turn and the two mode settings say: the owner stopped this work, and a subtask that was already
+        running, a DAG node or a lineage check must not do one more thing. The view is a set lookup, read only
+        when the context names a root (a chat turn names none).
         """
+        if ctx.root_intention_id is not None and self._root_cancelled(ctx.root_intention_id):
+            logger.warning(
+                "F099: refused %r in a %s turn (the root %s was cancelled, session=%s)",
+                tool_name,
+                ctx.kind,
+                ctx.root_intention_id,
+                session_id,
+            )
+            self._log_f026_decision(
+                "harness_context_policy_violation",
+                {
+                    "tool_name": tool_name,
+                    "context_kind": ctx.kind,
+                    "violation": "root_cancelled",
+                    "mode": "enforce",
+                },
+                session_id=session_id,
+            )
+            return Refusal("Tool error: this work was cancelled by the owner; stop.", "root_cancelled")
         # F099 section 4.4: an internal_only turn, and an approved_action call, are
         # enforced here FIRST, whatever the two mode settings say. The modes are for
         # tuning the ordinary rules; this is a security floor. For both, a call to a
@@ -594,6 +627,11 @@ class AgentRunner:
     def set_ledger_store(self, store: LedgerStore | None) -> None:
         """Harness Phase 1b: durable ledger for side-effecting tool calls."""
         self._ledger_store = store
+
+    def set_cancelled_roots(self, view: Callable[[UUID], bool]) -> None:
+        """F099 2e: install the in-process view of cancelled roots (``ContinuationRunner.root_is_cancelled``).
+        ``_authorize_tool_call`` refuses every call whose context names a root the view says is cancelled."""
+        self._root_cancelled = view
 
     def set_snapshot_store(self, store: Any, workspace_dir: str) -> None:
         """Phase 2.8: compensation snapshots for compensable calls in background contexts."""
@@ -1646,6 +1684,22 @@ class AgentRunner:
                 raise _caught_exc
 
             return response_text, turn_context, usage
+
+    def discard_conversation(self, session_id: str) -> None:
+        """Forget everything this runner keeps in memory for ``session_id``: its messages, its execution ledger,
+        its pending corrections and its compaction lock. No database and no await (F099 2e, carry-over 3).
+
+        A continuation turn calls it first. ``end_conversation`` can time out, raise, or be cancelled from outside
+        (a cancel of the root, a stop), and then the thread of the root would carry the previous arrival's messages
+        and its ``executed_tools`` (a ``learn_fact`` of the last arrival would verify this one's ``progress``).
+
+        A ``heart.conversation_state`` row (written only after a compaction) survives this on purpose, and it is
+        harmless because ``_restore_conversation`` never reads one for an ``intent-`` thread: do not "fix" the discard
+        by adding a database write to the top of every turn."""
+        self._conversations.pop(session_id, None)
+        self._compaction_locks.pop(session_id, None)
+        self._ledgers.pop(session_id, None)
+        self._pending_corrections.pop(session_id, None)
 
     async def end_conversation(
         self,
@@ -4276,6 +4330,8 @@ Rules:
 
     async def _restore_conversation(self, session_id: str) -> Conversation | None:
         """Restore conversation from Heart persistence if available."""
+        if session_id.startswith(INTENT_SESSION_PREFIX):
+            return None  # F099 2e: a continuation thread is rebuilt from rows every arrival, never restored
         try:
             state = await self._heart.load_conversation_state(
                 agent_id=self._settings.agent_id,

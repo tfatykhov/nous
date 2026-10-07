@@ -683,6 +683,9 @@ class ContinuationRunner:
         settings = self._settings
         session_id = f"{INTENT_SESSION_PREFIX}{claim.root_id}"
         arrival_id = uuid.uuid4()
+        # Carry-over 3: the thread of this root starts empty. A previous arrival whose end_conversation timed out,
+        # raised or was cancelled from outside left its messages and its ledger behind, and this one would run on top.
+        self._runner.discard_conversation(session_id)
         async with self._db.session() as session:
             earlier, spawned, root_intent, root_decision = await self._lineage_context(session, claim)
         prompt = build_arrival_prompt(claim, earlier, spawned, limits, settings, root_intent=root_intent)
