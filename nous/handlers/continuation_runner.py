@@ -338,6 +338,7 @@ RAISED_TEXT = (
     "The call raised {name} before it finished, so its outcome may be unknown. It was NOT run again: check "
     "whether it happened before asking for it again."
 )
+NO_DISPATCHER_TEXT = "no tool dispatcher is configured; it was NOT run"
 
 
 class ContinuationRunner:
@@ -1105,8 +1106,10 @@ class ContinuationRunner:
         try:
             # Inside the try: whatever the check raises fails the proposal like any other exception (never left
             # `executing`), and nothing is dispatched.
-            problems = self._dispatcher.validate_call(proposal.tool, proposal.arguments)
-            if problems:
+            if self._dispatcher is None:  # never dispatched, so not in doubt
+                logger.warning("F099: no tool dispatcher to run proposal %s", proposal.id.hex[:8])
+                error = NO_DISPATCHER_TEXT
+            elif problems := self._dispatcher.validate_call(proposal.tool, proposal.arguments):
                 logger.warning("F099: the stored call of proposal %s no longer validates", proposal.id.hex[:8])
                 error = f"the stored call no longer validates: {'; '.join(problems)}; it was NOT run"
             else:

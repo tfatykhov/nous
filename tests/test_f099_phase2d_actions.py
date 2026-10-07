@@ -269,6 +269,27 @@ async def test_a_stored_call_that_no_longer_validates_is_failed_and_never_dispat
     assert _decided(env) == [("approved", "t"), ("failed", "t")]
 
 
+async def test_a_runner_with_no_dispatcher_fails_the_call_as_not_run(runner_env):  # noqa: F811
+    """2d-5 review m5(c): a runner built without a dispatcher knows the call was never dispatched, so it says so,
+    rather than failing on an ``AttributeError`` that reads as an outcome that may be unknown."""
+    env = await runner_env()
+    sent = register_send_email(env)
+    asked = await ask_with_proposals(env)  # staged through a runner that has the dispatcher
+    (pid,) = asked.ids
+    cont = ContinuationRunner(
+        database=env.db, settings=env.settings, runner=env.runner, heart=env.heart, brain=env.brain, bus=env.bus
+    )
+    out = await cont.decide_proposal(pid, approve=True, actor="t")
+    expected = "no tool dispatcher is configured; it was NOT run"
+    assert (out.state, out.error, out.woke_arrival) == ("failed", expected, True)
+    assert sent == []
+    row = await proposal_row(env, pid)
+    assert (row.state, row.error, row.ledger_key) == ("failed", expected, None)
+    (inform,) = await _informs(env, asked.done.arrival_id)
+    assert "it was NOT run" in inform.body and "may be unknown" not in inform.body
+    assert _decided(env) == [("approved", "t"), ("failed", "t")]
+
+
 async def test_a_shutdown_mid_call_leaves_it_executing_and_the_sweep_marks_it_in_doubt(runner_env):  # noqa: F811
     env = await runner_env()
     started = asyncio.Event()

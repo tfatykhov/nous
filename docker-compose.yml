@@ -153,6 +153,7 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       NOUS_API_URL: http://nous:8000
       NOUS_ALLOWED_USERS: ${NOUS_ALLOWED_USERS:-}
+      NOUS_TELEGRAM_CHAT_ID: ${NOUS_TELEGRAM_CHAT_ID:-}
     depends_on:
       - nous
     restart: unless-stopped
