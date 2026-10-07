@@ -65,3 +65,13 @@ Base: `main` at `129d0776` (2d merged as #707). The store (`nous/brain/continuat
 - **Open question 6 (E16):** cancelling a root that is already finished is a no-op refusal, 409 with the current state, matching C3. The marker is written only on an open root.
 - **E1–E15: accepted as the plan proposes.** The plan reviewer verifies each one against the code.
 - **Deploy:** two restarts, as the plan recommends. First deploy with the flag off so the rollback and close sweeps run, then turn the flag on when the owner says so.
+
+## Plan review 2e (prev-2e, Fable): Ready after MUST-FIX (2 MUST, 6 SHOULD, 7 NIT)
+
+E1–E16 all hold. The 13 changed pins change for their stated rule. No phantom API was found in 40 citations. **The flip is safe on prod's real data:** deploy 1's close sweep closes finished sources, the TTL sweep closes NULL-deadline roots silently, and the push backlog is empty.
+
+- **M1, owner rows of a cancelled lineage are still pushed or claimed.** Ruling: cancel stamps the lineage's undelivered intention_report rows as closed by cancel. Tests cover push_due and the chat claim.
+- **M2, metrics count the item-9 stamp as delivered.** Ruling: a separate bucket, outside delivery_rate. The WARNING names the row ids.
+- **S1–S6 and NITs: all folded.** S6: the flag-off rollback also ends approved proposals.
+- **OQ3, corrected:** with the flag ON, open Phase 1 roots are listed and can be cancelled. With it off, the list is empty.
+- **"After the flip" names two owner-visible changes:** an expired Phase 1 root's late result becomes a pushed REPORT, and the first turns run on spawns made before the flip.

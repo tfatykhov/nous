@@ -27,7 +27,7 @@
 | E4 | Contract §4.7: `CancelOutcome(root_id, already_cancelled, cancelled_intentions, cancelled_subtasks, cancelled_dags, cancelled_proposals, deactivated_schedules, turn_stopped)`. | The store cannot cancel a DAG (the orchestrator does, in its own transactions) or a task. | The store fills what it can and reports `dag_ids`, `proposal_ids` (the ones the owner had been shown) and `root_ids` (the root and the fires of its containers); `ContinuationRunner.cancel_root` fills `cancelled_dags` and `turn_stopped` with `dataclasses.replace`. Every field has a default. `cancel_root(session, agent_id, root_id, *, reason, actor)` keeps the contract's signature plus an optional `now`. |
 | E5 | Contract §4.7: `cancelled_root_ids(session, agent_id, *, since)`; §6 risk 1: `start()` "loads roots with `root_cancelled_at IS NOT NULL` that still have open work". | After a cancel nothing is open (every row is `cancelled`), so "still have open work" would load nothing, yet a lineage check or a DAG node of a cancelled root can run in a new process. | `since` is optional (None reads every cancelled root, at most 10,000, newest first). `start()` and `main.py` load them all; every sweep re-reads the roots cancelled since the last sweep less two minutes. The view is a set of UUIDs: a thousand cancels cost nothing. One process per (database, agent_id) holds, as for the ledger. |
 | E6 | Contract §4.10: `GET /intentions?state=open\|all&limit=20` and `GET /intentions/{root_id}` (RootView with lineage, arrivals, open proposals and open questions). | The carry-over scopes 2e to `GET /intentions` and the cancel; nothing calls a detail route. | `GET /intentions` returns the contract's RootView, compact: the root's columns, `root_limits` (none for a container), up to 50 lineage rows (`lineage_truncated` says so), the newest 5 arrivals and the open proposals. `open_questions` and `GET /intentions/{root_id}` are not built; Phase 3's card can add either. **Open question 2.** |
-| E7 | Brief: the new routes "answer 404 or an empty result" in prod. | Prod has intentions ON, so Phase 1 roots exist and would be listed. A cancel needs the runner (it stops the turn and the DAGs), which prod does not build. | `GET /intentions` answers `200 {"roots": [], "continuation": false}` with continuation off and **reads no row**; `POST .../cancel` looks the root up first (404 for no root) and answers 503 for a root when there is no runner, **never** cancelling through the store alone (that would cancel a real Phase 1 lineage without the turn and DAG stop). Pinned with prod's flags (2e-7, 2e-8). **Open question 3** (a lead who wants the list to show Phase 1 roots drops one `if`). |
+| E7 | Brief: the new routes "answer 404 or an empty result" in prod. | Prod has intentions ON, so Phase 1 roots exist and would be listed. A cancel needs the runner (it stops the turn and the DAGs), which prod does not build. | `GET /intentions` answers `200 {"roots": [], "continuation": false}` with continuation off and **reads no row**; `POST .../cancel` looks the root up first (404 for no root) and answers 503 for a root when there is no runner, **never** cancelling through the store alone (that would cancel a real Phase 1 lineage without the turn and DAG stop). With the flag ON the list shows every open root, the open Phase 1 roots (a schedule's container included) among them, and each can be cancelled; the empty list is the flag-off case only. Pinned with prod's flags (2e-7, 2e-8). **Open question 3** (a lead who wants the list to show Phase 1 roots drops one `if`). |
 | E8 | Contract §4.11: `/intentions` and `/cancel_intention <root_id>`. Carry-over and brief: Telegram `/intentions`. | A list with no way to act on it is half a feature; the contract names the command. | Both commands (2e-8). `/intentions` falls through to chat unless the server answers 200 with `continuation: true`; `/cancel_intention` falls through on a 404 and on a malformed id (C18, strict parity). **Open question 1:** drop `/cancel_intention` if the lead wants only the list: one handler and its tests. |
 | E9 | Carry-over: "deactivates a container's schedule, and cancels the open roots of that container's fires". | A container is also a CHILD row inside a lineage that scheduled something (`schedule_task` from a lineage, `prepare_intention` with `parent_id`), and each fire is a new root whose `parent_id` is the container. | `_cancel_lineage` scans the whole lineage for `wake_policy = container` rows, not only the root; it locks them, then their schedules, in the one order container then schedule, before it writes, and then cancels the fires that still have something open, recursively and bounded (`CANCEL_ROOTS_MAX = 50`). A fire that finished is not marked: a marker on a finished root would only silence a later result. |
 | E10 | Spec §4.5.3 and contract `GATE_DROP_REASONS`: a cancelled **or expired** root is dropped silently. | Carry-over item 5 (binding): an expired root reports the late result raw everywhere. | `GATE_DROP_REASONS` loses `expired`: an expired claim is an escalation that reports the raw rows. Four existing tests encode the old rule and change on purpose (2e-2, listed). |
@@ -38,12 +38,14 @@
 | E15 | Contract §4.7 and the 2d plan: `claim_execution` "wins" against a committed marker only. | A marker that is **not yet committed** is invisible to the claim's `EXISTS`, so a claim could pass while a cancel was in flight (2d-3 review m1). | Carry-over item 1: `cancel_root` and `_expire_root` move `staged`, `pending` and `approved` proposals in their own transaction under the root lock. The claim's UPDATE then waits on the proposal row and fails its `state = 'approved'` re-check. Tested with the lock held, not with two racing coroutines (2e-1). |
 | E16 | Spec §4.6: a cancel "always writes `root_cancelled_at` on the root row". | A cancel of a root with nothing running (every row closed, no subtask or DAG alive, no schedule active) would only put a marker on finished work, and the marker silences any later result of that root (a DAG retry, say). | `cancel_root` refuses it (`CancelRefused("finished")`, 409 over REST, nothing written) and a repeat of a cancel that did something is allowed (`already_cancelled`). A deviation from the spec's "always", on purpose: ruling 8. **Open question 6.** |
 
+**Plan review folded in (Fable 5.1, 2026-10-07; every item applied).** **M1:** a cancel closes the lineage's unsent owner-facing rows, so a deferred PROPOSAL is never pushed and F098's chat claim never reads it (2e-1). **M2:** the inbox metrics count the item-9 stamp and the cancel's stamp apart from `delivered`, and the inbox-off WARNING names the rows (2e-6). **S1:** a real claim-then-cancel race test, deterministic through Postgres' lock queue (2e-5). **S2:** the retap test waits on events, not sleeps (2e-6). **S3:** `_expire_root` writes `decided_at` and `decided_by` on the proposals it ends and the runner announces them (2e-1, 2e-5). **S4:** "After the flip" names the two changes the owner meets first. **S5:** the cancel's docstring and the route's rest-api row say what a cancel cannot take back (2e-1, 2e-7, 2e-9). **S6:** the flag-off rollback ends `approved` proposals too (2e-6). **N1, N2, N3, N5, N6, N7** applied (2e-5, 2e-5, 2e-2, 2e-3, deploy notes, 2e-7). **N4 skipped:** `cancel_root` reads the root `FOR NO KEY UPDATE` and `_cancel_lineage` locks it again; the second lock on a row already held is a no-op, and removing it would need a flag through `_cancel_lineage` for the first root, which is more code than the line it saves.
+
 **Migration: one is needed, 085** (`sql/migrations/085_intention_failed_tokens_and_cancel_index.sql`). Migration 084 already has every state and column the cancel needs (`root_cancelled_at` on `brain.intentions`, the `cancelled` intention and proposal states, `decided_by`). It has nothing that keeps the tokens of a failed attempt (item 2: a retried attempt writes no arrival row), so 085 adds `brain.intentions.failed_tokens INTEGER NOT NULL DEFAULT 0` (a constant default: metadata only on PG 11 and later). It also adds the partial index `idx_intentions_cancelled (agent_id, root_cancelled_at) WHERE root_cancelled_at IS NOT NULL` that the view's load and refresh read. No new table, so `agent_id` scoping is inherited from `brain.intentions`; the comments hold no semicolon (the migrator splits on one), and both statements are idempotent.
 
 ## Rulings on the open choices (reasons)
 
 1. **Item 2, the row design: a column, not an arrival row.** An arrival row per failed attempt needs a new `outcome` value (a widened CHECK), a `root_limits` turn count that excludes it, a prompt that skips it (`_lineage_context`, `build_arrival_prompt`), and every other reader of `intention_arrivals` (`wake_terminal_arrivals`, the views, the dashboard) to learn that a row with no decision is not a decision. Each failed attempt would also consume an `n`, which the owner reads as "arrival 4". A column on `brain.intentions` is read by exactly one query (`root_limits`, which already scans the lineage) and written by exactly one statement, in `fail_attempt`'s own fence. It is charged to the claim's **deepest** intention only, so the root's budget is a plain sum that counts a claim of several intentions once. At the cap the cost goes where it always went, the `failed_report` arrival row. A lease release knows no usage and charges nothing; a call that raised before it returned is the one cost the runner cannot see (the usage of the calls that finished is counted).
-2. **Item 9, the rollback with nowhere to deliver: close and stamp.** Close as today, and mark the undeliverable rows `delivered_at = now, delivered_session_id = 'rollback-undeliverable'`, with the WARNING that was already logged. The rows would otherwise be NULL-keyed, undelivered and read by nobody for ever: the backlog of "undelivered and unclaimable" results would never reach zero, and that is the signal Review Focus 4 of the contract watches for. The result is not lost: it stays on its work row, as `record_result`'s own "no owner channel" branch says. Keeping the intention open instead is not safe: with the flag off nothing claims it, and a later flip would wake a turn on a result that is days old. A failed push (a transient error) is a different case and still keeps everything open. In prod the branch is unreachable twice over: no flag-on row exists, and the prod process has a default chat.
+2. **Item 9, the rollback with nowhere to deliver: close and stamp.** Close as today, and mark the undeliverable rows `delivered_at = now, delivered_session_id = 'rollback-undeliverable'`, with the WARNING that was already logged. The rows would otherwise be NULL-keyed, undelivered and read by nobody for ever: the backlog of "undelivered and unclaimable" results would never reach zero, and that is the signal Review Focus 4 of the contract watches for. The result is not lost: it stays on its work row, as `record_result`'s own "no owner channel" branch says. Keeping the intention open instead is not safe: with the flag off nothing claims it, and a later flip would wake a turn on a result that is days old. A failed push (a transient error) is a different case and still keeps everything open. No owner-facing surface may report the stamp as delivered (the lead's requirement): `ResultInboxStore.metrics` counts the rollback's and the cancel's stamps in buckets of their own (`undeliverable`, `closed_by_cancel`), outside `delivered` and `delivery_rate`, and the WARNING names the rows (2e-6). In prod the branch is unreachable twice over: no flag-on row exists, and the prod process has a default chat.
 3. **Item 11, an approved proposal after a crash: the sweep resumes it.** `_proposals_terminal` counts `approved` as unfinished, so an approved proposal nobody starts holds its arrival in `awaiting_owner` until the root's TTL (72 h): "document and wait for a re-tap" strands the lineage. The sweep starts, in a tracked task like the one a decision starts, every `approved` proposal of an open root that was decided more than `max(tool_timeout + 5 s, 60 s)` ago (an inline run is not stolen) and less than `intention_proposal_ttl_hours` ago (an approval is not honoured days later: that one ends with its root). `claim_execution` is the fence, so at most once holds, and one in flight is never started twice. The owner's re-tap resumed it already (`decide_proposal`'s `approved` branch); that stays as the second path.
 4. **Item 12, the push bound: its own task, held on the runner.** The sweep starts the push (never two at once), waits `PUSH_WAIT_SECONDS` (5 s) for it and goes on; the next sweep sees it finished. The push is **not** cancelled when the wait ends (a send cancelled between the request and the stamp would be sent again), and `stop()` lets it finish (bounded) before ending it. A per-sweep cap alone still blocks the launch for as long as a send takes. `SweepReport.pushed` keeps its meaning for a push that finished inside the wait, so the 2c-2 pin `report.pushed == 2` does not change.
 5. **Item 7, the repair and cancelled intentions: no arm** (E12).
@@ -80,8 +82,8 @@ The five failure modes most likely to bite, most likely first. Each names the te
 
 1. **A cancelled lineage still acts.** A subtask that was running when the owner cancelled, a DAG node, a lineage check or an approved call must not do one more thing, in any mode. Pinned: `test_a_call_on_behalf_of_a_cancelled_root_is_refused_whatever_the_modes_say` (seven kinds and authorities, both modes off), `test_a_cancelled_roots_tool_call_does_not_run_through_a_real_turn` (the handler never runs, the ledger takes the new code) and `test_the_refusal_is_checked_before_the_strict_rule_and_a_cancelled_root_is_not_offered_anything` (2e-3); `test_after_a_cancel_the_lineage_can_dispatch_nothing`, `test_a_restart_remembers_the_cancel_and_a_sweep_takes_in_one_made_elsewhere` and `test_start_loads_the_view_before_the_loop_runs` (2e-5, the view survives a restart and a cancel made elsewhere); `test_a_cancel_is_not_a_tool` (2e-8). Mutation: remove the check, and ten of the sixteen 2e-3 tests fail.
 2. **An approved call starts after the cancel (the hard requirement of 2d-3 review m1).** Pinned: `test_a_cancel_not_yet_committed_stops_an_approved_call_from_starting` and `test_an_expiry_not_yet_committed_stops_an_approved_call_from_starting` (2e-1: the marker is not committed, the lock is held, the claim waits on the proposal row and returns None), `test_a_cancel_cancels_every_proposal_that_could_still_start`, `test_a_decision_after_a_cancel_is_refused_as_ended`. Mutation: drop the proposal UPDATE from `_cancel_lineage` and three tests fail; revert `_expire_root` to `staged` only and the expiry race fails.
-3. **A cancel races something and loses a row or leaks a slot.** A spawn in flight (`test_a_spawn_in_flight_makes_the_cancel_wait_and_is_cancelled_with_the_lineage` and `test_a_cancel_in_flight_refuses_a_spawn`), a fire in flight (`test_a_fire_in_flight_is_part_of_the_cancel`, `test_a_cancel_in_flight_refuses_a_fire`), a claim (`test_a_cancel_clears_a_live_claim_so_the_turns_commit_loses_its_fence`, `test_a_claim_after_a_cancel_finds_nothing_to_claim`), a turn past its model call (`test_a_turn_that_finished_but_has_not_committed_loses_its_fence_to_the_cancel`), a running turn (`test_a_cancel_stops_the_running_turn_releases_its_slot_and_commits_nothing`: the task is cancelled, its claim release finds 0 rows, the slot is back, no arrival or report was written), the close of a cancelled subtask (`test_a_root_cancel_in_flight_is_honoured_by_the_close`). Mutation: not cancelling the task leaves the turn blocked and the slot taken.
-4. **A cancelled root reports, or an expired one goes quiet.** The unified late-result rule in three places: `test_an_expired_roots_arrival_reports_what_came_back_and_a_cancelled_ones_does_not`, `test_a_late_result_of_a_cancelled_root_is_stamped_and_never_reported`, `test_a_late_result_of_an_expired_root_is_reported_raw`, `test_the_sweep_stamps_the_rows_stranded_on_a_cancelled_intention_without_a_report` and its expired twin, `test_a_cancelled_roots_unread_results_are_not_reported_by_the_next_sweep`, plus `test_a_cancelled_marker_wins_over_an_expired_one`. A lineage left hanging is closed and reported once (`test_the_last_child_of_a_lineage_waiting_on_it_is_cancelled_and_the_root_is_closed_and_reported`, four negative cases).
+3. **A cancel races something and loses a row or leaks a slot.** A spawn in flight (`test_a_spawn_in_flight_makes_the_cancel_wait_and_is_cancelled_with_the_lineage` and `test_a_cancel_in_flight_refuses_a_spawn`), a fire in flight (`test_a_fire_in_flight_is_part_of_the_cancel`, `test_a_cancel_in_flight_refuses_a_fire`), a claim (`test_a_cancel_clears_a_live_claim_so_the_turns_commit_loses_its_fence`, `test_a_claim_after_a_cancel_finds_nothing_to_claim`, and the real race `test_a_cancel_that_queues_behind_a_claim_stops_the_turn_that_claim_started`), a turn past its model call (`test_a_turn_that_finished_but_has_not_committed_loses_its_fence_to_the_cancel`), a running turn (`test_a_cancel_stops_the_running_turn_releases_its_slot_and_commits_nothing`: the task is cancelled, its claim release finds 0 rows, the slot is back, no arrival or report was written), the close of a cancelled subtask (`test_a_root_cancel_in_flight_is_honoured_by_the_close`). Mutation: not cancelling the task leaves the turn blocked and the slot taken.
+4. **A cancelled root reports, or an expired one goes quiet.** The unified late-result rule in three places: `test_an_expired_roots_arrival_reports_what_came_back_and_a_cancelled_ones_does_not`, `test_a_late_result_of_a_cancelled_root_is_stamped_and_never_reported`, `test_a_late_result_of_an_expired_root_is_reported_raw`, `test_the_sweep_stamps_the_rows_stranded_on_a_cancelled_intention_without_a_report` and its expired twin, `test_a_cancelled_roots_unread_results_are_not_reported_by_the_next_sweep`, plus `test_a_cancelled_marker_wins_over_an_expired_one` and `test_the_sweep_judges_a_stranded_row_by_the_roots_marker_as_well_as_the_intentions_state`. A cancelled root's owner rows are not pushed or claimed either: `test_a_cancel_closes_the_lineages_unsent_owner_rows_so_nothing_is_pushed_or_claimed` (2e-1: a deferred question is never pushed, no chat claim reads it), and no metric counts a stamped row as delivered: `test_the_inbox_metrics_count_a_row_nobody_read_apart_from_the_delivered_ones` (2e-6). A lineage left hanging is closed and reported once (`test_the_last_child_of_a_lineage_waiting_on_it_is_cancelled_and_the_root_is_closed_and_reported`, four negative cases).
 5. **The flip, or anything before it, changes prod.** `test_prods_writers_and_passes_never_reach_a_2e_store_path` (every changed store function replaced by a raiser while a subtask finishes, the reconciler ticks and the repair runs), `test_prods_rollback_finds_nothing_new`, `test_the_cancel_view_is_a_set_lookup_and_the_default_reads_nothing`, `test_a_context_that_names_no_root_never_asks_the_view`, `test_prods_flags_install_no_view_and_build_no_runner` (the constant flipped, prod's flags: still no runner), `test_the_new_routes_on_prods_flags_answer_empty_503_and_404_and_change_nothing`, `test_with_no_owner_chat_set_intentions_and_cancel_make_no_request_and_go_to_chat`, `test_without_a_definite_answer_intentions_goes_on_to_chat_unchanged`. The flip commit touches the files listed in 2e-9 and nothing else.
 
 
@@ -91,6 +93,7 @@ The five failure modes most likely to bite, most likely first. Each names the te
 |---|---|---|
 | `nous/brain/continuation.py` | `cancel_root`, `cancelled_root_ids`, `find_root_id`, `stray_dag_ids`, `list_roots`; the proposal fix in `_expire_root`; the late-result rule (gate, `record_result`, stranded settle); `close_cancelled_source` and `end_hanging_root`; the failed-attempt charge; `question_window_start`; `stalled_approved_ids`; the rollback's undeliverable stamp; the flag constant | 2e-1, 2e-2, 2e-4, 2e-5, 2e-6, 2e-7, 2e-9 |
 | `nous/heart/result_reconciler.py` | `_close_cancelled` delegates to the store | 2e-2 |
+| `nous/heart/result_inbox.py` | `metrics()` counts the rollback's and the cancel's stamps apart from `delivered` | 2e-6 |
 | `nous/api/runner.py` | the view of cancelled roots, its check in `_authorize_tool_call`, `discard_conversation`, no restore of an `intent-` thread | 2e-3 |
 | `nous/cognitive/ledger_store.py` | `root_cancelled` joins `REFUSAL_CODES` | 2e-3 |
 | `nous/storage/models.py`, `sql/migrations/085_…sql` | `Intention.failed_tokens`; the index of cancelled roots | 2e-4 |
@@ -143,10 +146,10 @@ RUFF="$MAIN_VENV/Scripts/ruff.exe"
 
 ## Task 2e-1: `cancel_root` in the store, and the proposals that move under the root lock
 
-**Prod runs:** nothing new. `cancel_root`, `cancelled_root_ids` and `find_root_id` are called by nothing yet, and the one edit to existing code, `_expire_root`'s proposal UPDATE, is reached only through `expire_roots`, which only the continuation runner calls (prod builds none).
+**Prod runs:** nothing new. `cancel_root`, `cancelled_root_ids` and `find_root_id` are called by nothing yet, and the one edit to existing code, `_expire_root`'s proposal UPDATEs (with `expire_roots`' new optional `proposals_out`), is reached only through `expire_roots`, which only the continuation runner calls (prod builds none).
 
 **Files:**
-- Modify: `nous/brain/continuation.py` (the `Schedule` import and `dataclasses.field`; `_STARTABLE_PROPOSAL_STATES`; the proposal UPDATE in `_expire_root`; a new section at the end of the module)
+- Modify: `nous/brain/continuation.py` (the `Schedule` import and `dataclasses.field`; `_SHOWN_PROPOSAL_STATES` and `_STARTABLE_PROPOSAL_STATES`; the proposal UPDATEs of `_expire_root` and the `proposals_out` of `expire_roots`; a new section at the end of the module)
 - Create: `tests/test_f099_phase2e_cancel.py`
 
 **Interfaces:**
@@ -174,7 +177,12 @@ class CancelOutcome:
 async def cancel_root(session, agent_id, root_id, *, reason: str, actor: str, now: datetime | None = None) -> CancelOutcome
 async def cancelled_root_ids(session, agent_id, *, since: datetime | None = None, limit: int = CANCELLED_VIEW_MAX) -> list[UUID]
 async def find_root_id(session, agent_id, prefix: str) -> UUID | None   # a ROOT only; AmbiguousId for two
+SILENT_SESSION_ID = "cancelled"   # delivered_session_id of a row a cancel closed (and, in 2e-2, of the twin of a dropped late result): "closed by the cancel", never "delivered"
+async def expire_roots(session, agent_id, *, ttl_hours, settings, limit=EXPIRE_BATCH, now=None, proposals_out: list[tuple[UUID, str]] | None = None) -> list[UUID]
+    # proposals_out receives (proposal_id, "expired") for each proposal the owner had been shown that an expiry ended
 ```
+
+**Three rules this task also carries** (from the plan review): the cancel closes the lineage's **unsent owner-facing rows** (a REPORT, QUESTION or PROPOSAL, which are channel-keyed, so the intention-keyed stamp does not reach them), stamping `delivered_at`, `delivered_session_id = SILENT_SESSION_ID` and `pushed_at`, so a push that quiet hours deferred or that waits for a retry never goes out for cancelled work and F098's chat claim never injects the row (a row already pushed keeps its `pushed_at`; `push_message_id` stays NULL, so a reply to a message that was never sent resolves to nothing); `_expire_root`'s proposal move keeps its one transaction but writes `decided_at` and `decided_by = 'system'` on the shown ones (the proposals sweep used to) and reports them through `proposals_out` (the runner tells the bus in 2e-5); and the docstring says what a cancel cannot take back: an `executing` call is left alone, a send in flight completes and its outcome is written to nobody.
 
 - [ ] **Step 1: Write the tests**
 
@@ -213,7 +221,7 @@ from sqlalchemy import select, update
 from nous.brain import continuation, intentions
 from nous.brain.continuation import Resolution
 from nous.brain.intentions import IntentionSpec
-from nous.storage.models import Intention, IntentionArrival, IntentionProposal
+from nous.storage.models import Intention, IntentionArrival, IntentionProposal, ResultInbox
 
 pytestmark = pytest.mark.postgres_only  # FOR NO KEY UPDATE, savepoints, = ANY(array)
 
@@ -441,6 +449,64 @@ async def test_the_view_of_cancelled_roots_and_the_root_lookup(env_factory):  # 
     assert (found, missing_child, nonsense) == (one.id, None, None)
 
 
+async def test_a_cancel_closes_the_lineages_unsent_owner_rows_so_nothing_is_pushed_or_claimed(env_factory):  # noqa: F811
+    """M1 of the plan review. An owner-facing row (REPORT, QUESTION, PROPOSAL) is keyed to a channel, so the stamp of
+    the intention-keyed rows does not reach it: a push that quiet hours deferred would go out for cancelled work, and
+    F098's chat claim would read it into the next chat turn."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from f099_support import CHAN, commit_ask
+
+    from nous.handlers.continuation_publisher import OwnerPublisher
+
+    env = await env_factory(**CONT, telegram_bot_token="test-token")
+    root, got = await claimed(env)
+    await commit_ask(env, got)
+    (question,) = [r for r in await inbox_rows(env) if r.msg_type == "QUESTION"]
+    later = datetime.now(UTC) + timedelta(hours=1)
+    async with env.db.session() as s:
+        await s.execute(update(ResultInbox).where(ResultInbox.id == question.id).values(push_after=later))
+        report_id = await continuation.insert_report(
+            s,
+            env.agent,
+            kind="REPORT",
+            title="Update",
+            body="already on Telegram",
+            channel=CHAN,
+            intention_id=root.id,
+            root_id=root.id,
+            push_after=datetime.now(UTC) - timedelta(minutes=5),
+        )
+        await s.execute(
+            update(ResultInbox)
+            .where(ResultInbox.source_id == report_id)
+            .values(pushed_at=datetime.now(UTC), push_message_id=7)
+        )
+        await s.commit()
+
+    pushed_before = await _stored_pushed_at(env, report_id)
+    await _cancel(env, root.id)
+
+    rows = {r.msg_type: r for r in await inbox_rows(env) if r.source_kind == "intention_report"}
+    assert rows["QUESTION"].delivered_session_id == continuation.SILENT_SESSION_ID and rows["QUESTION"].pushed_at
+    assert rows["QUESTION"].push_message_id is None  # a reply to a message that was never sent resolves to nothing
+    assert rows["REPORT"].delivered_session_id == continuation.SILENT_SESSION_ID
+    assert rows["REPORT"].pushed_at == pushed_before  # a push that happened keeps its time
+    http = MagicMock()
+    http.post = AsyncMock(return_value=SimpleNamespace(status_code=200, json=lambda: {"result": {"message_id": 9}}))
+    publisher = OwnerPublisher(database=env.db, settings=env.settings, http_client=http)
+    assert await publisher.push_due(now=later + timedelta(seconds=1)) == 0
+    http.post.assert_not_called()  # the deferred question is never pushed
+    claimed_rows, _ = await env.heart.result_inbox.claim(channel=CHAN, session_id="S9", max_age_hours=72, max_items=10)
+    assert claimed_rows == []  # and no chat turn reads it either
+
+
+async def _stored_pushed_at(env, source_id):
+    async with env.db.session() as s:
+        return (await s.execute(select(ResultInbox.pushed_at).where(ResultInbox.source_id == source_id))).scalar_one()
+
+
 # ---- containers and fires ------------------------------------------------------------------------------------
 
 
@@ -558,6 +624,29 @@ async def test_an_expiry_not_yet_committed_stops_an_approved_call_from_starting(
             await holder.commit()
     assert await asyncio.wait_for(claim, timeout=30) is None
     assert [(await proposal_row(env, p)).state for p in (approved, pending)] == ["expired", "expired"]
+    for proposal_id in (approved, pending):  # S3: the proposals sweep used to write these; the expiry does now
+        row = await proposal_row(env, proposal_id)
+        assert (row.decided_by, row.decided_at is not None) == ("system", True)
+
+
+async def test_the_expiry_names_the_proposals_it_ended_for_the_bus_and_not_the_ones_never_shown(env_factory):  # noqa: F811
+    env = await env_factory(**CONT)
+    asked = await ask_with_proposals(env, count=2)
+    shown, never_shown = asked.ids
+    await _set_proposal(env, never_shown, state="staged")
+    ended: list = []
+    async with env.db.session() as s:
+        await continuation.expire_roots(
+            s,
+            env.agent,
+            ttl_hours=env.settings.intention_root_ttl_hours,
+            settings=env.settings,
+            now=datetime.now(UTC) + timedelta(hours=100),
+            proposals_out=ended,
+        )
+        await s.commit()
+    assert ended == [(shown, "expired")]
+    assert (await proposal_row(env, never_shown)).state == "expired"  # ended, but the owner never saw it
 
 
 async def test_a_spawn_in_flight_makes_the_cancel_wait_and_is_cancelled_with_the_lineage(env_factory):  # noqa: F811
@@ -655,7 +744,7 @@ The order inside `_cancel_lineage` is the point: root lock, lineage read, contai
 
 ```diff
 diff --git a/nous/brain/continuation.py b/nous/brain/continuation.py
-index fbb589dc..3654e1a7 100644
+index fbb589dc..27fb6ba5 100644
 --- a/nous/brain/continuation.py
 +++ b/nous/brain/continuation.py
 @@ -16,7 +16,7 @@ import re
@@ -675,7 +764,56 @@ index fbb589dc..3654e1a7 100644
      Subtask,
  )
  
-@@ -1553,16 +1554,18 @@ async def _expire_root(
+@@ -1374,13 +1375,16 @@ async def expire_roots(
+     settings: Any,
+     limit: int = EXPIRE_BATCH,
+     now: datetime | None = None,
++    proposals_out: list[tuple[UUID, str]] | None = None,
+ ) -> list[UUID]:
+     """T14: expire the roots whose TTL ran out (spec 4.6), at most ``limit``, one SAVEPOINT per root.
+ 
+     Due: open (neither root marker set), not a container, with an open ``continue`` or ``report``
+     intention in its lineage, and ``deadline`` past (a NULL deadline: ``created_at + ttl_hours`` past).
+     Then settles the rows held on intentions a gate arrival closed (``_settle_stranded_rows``).
+-    Does not commit; the runner emits ``intention.root_expired`` for the returned ids.
++    Does not commit; the runner emits ``intention.root_expired`` for the returned ids. ``proposals_out``, when given,
++    receives ``(proposal_id, "expired")`` for each proposal the owner had been shown that an expiry ended (its decision
++    columns are written, as the proposals sweep wrote them before 2e), for the runner to tell the bus.
+     """
+     now = now or datetime.now(UTC)
+     root = aliased(Intention)
+@@ -1405,8 +1409,13 @@ async def expire_roots(
+     for root_id in (await session.execute(due)).scalars().all():
+         try:
+             async with session.begin_nested():
+-                if await _expire_root(session, agent_id, root_id, ttl_hours=ttl_hours, settings=settings, now=now):
++                ended: list[tuple[UUID, str]] = []
++                if await _expire_root(
++                    session, agent_id, root_id, ttl_hours=ttl_hours, settings=settings, now=now, shown=ended
++                ):
+                     expired.append(root_id)
++                    if proposals_out is not None:
++                        proposals_out.extend(ended)
+         except Exception:
+             logger.warning("F099: could not expire root %s; retried at the next sweep", root_id, exc_info=True)
+     try:
+@@ -1497,7 +1506,14 @@ async def _settle_stranded_rows(session: AsyncSession, agent_id: str, *, setting
+ 
+ 
+ async def _expire_root(
+-    session: AsyncSession, agent_id: str, root_id: UUID, *, ttl_hours: float, settings: Any, now: datetime
++    session: AsyncSession,
++    agent_id: str,
++    root_id: UUID,
++    *,
++    ttl_hours: float,
++    settings: Any,
++    now: datetime,
++    shown: list[tuple[UUID, str]],
+ ) -> bool:
+     row = (
+         await session.execute(
+@@ -1553,10 +1569,24 @@ async def _expire_root(
          .where(Intention.agent_id == agent_id, Intention.id == root_id)
          .values(root_expired_at=now, updated_at=now)
      )
@@ -689,26 +827,33 @@ index fbb589dc..3654e1a7 100644
 +    # predicate sees only a marker that has COMMITTED, so a proposal left `approved` here could be claimed by a
 +    # call that read the marker before this commit. Its UPDATE of the claim waits on this row instead and then
 +    # fails its `state = 'approved'` re-check. `executing` is left alone (the call has started).
++    ended = await session.execute(
++        update(IntentionProposal)
++        .where(
++            IntentionProposal.agent_id == agent_id,
++            IntentionProposal.root_id == root_id,
++            IntentionProposal.state.in_(_SHOWN_PROPOSAL_STATES),
++        )
++        .values(state=PROPOSAL_EXPIRED, decided_at=now, decided_by="system", updated_at=now)
++        .returning(IntentionProposal.id)
++        .execution_options(synchronize_session=False)
++    )
++    shown.extend((proposal_id, PROPOSAL_EXPIRED) for proposal_id in ended.scalars().all())
      await session.execute(
          update(IntentionProposal)
          .where(
-             IntentionProposal.agent_id == agent_id,
-             IntentionProposal.root_id == root_id,
--            IntentionProposal.state == PROPOSAL_STAGED,
-+            IntentionProposal.state.in_(_STARTABLE_PROPOSAL_STATES),
-         )
-         .values(state=PROPOSAL_EXPIRED, updated_at=now)
-         .execution_options(synchronize_session=False)
-@@ -2145,6 +2148,8 @@ async def rollback_at_startup(
+@@ -2145,6 +2175,10 @@ async def rollback_at_startup(
  PROPOSAL_STAGED, PROPOSAL_PENDING, PROPOSAL_APPROVED = "staged", "pending", "approved"
  PROPOSAL_EXECUTING, PROPOSAL_REJECTED, PROPOSAL_EXPIRED = "executing", "rejected", "expired"
  PROPOSAL_EXECUTED, PROPOSAL_FAILED, PROPOSAL_CANCELLED = "executed", "failed", "cancelled"
-+# The states from which a call can still START: an ended root takes all three with its marker, under the root lock.
-+_STARTABLE_PROPOSAL_STATES = (PROPOSAL_STAGED, PROPOSAL_PENDING, PROPOSAL_APPROVED)
++# The proposals the owner has been shown and may still decide or run, and (with the one that was never shown) the states
++# from which a call can still START: an ended root takes all three with its marker, under the root lock.
++_SHOWN_PROPOSAL_STATES = (PROPOSAL_PENDING, PROPOSAL_APPROVED)
++_STARTABLE_PROPOSAL_STATES = (PROPOSAL_STAGED, *_SHOWN_PROPOSAL_STATES)
  MAX_PROPOSALS_PER_ARRIVAL = 5
  # What the owner is shown must fit one Telegram message whole (4096 UTF-16 units, which is what the caps count: a
  # character above U+FFFF is two): a call that does not is refused at staging, never clipped, because a clipped call
-@@ -3231,3 +3236,322 @@ async def list_proposals(session: AsyncSession, agent_id: str, *, state: str, li
+@@ -3231,3 +3265,351 @@ async def list_proposals(session: AsyncSession, agent_id: str, *, state: str, li
          .all()
      )
      return [proposal_view(row) for row in rows]
@@ -719,6 +864,9 @@ index fbb589dc..3654e1a7 100644
 +# ---------------------------------------------------------------------------
 +
 +REFUSE_FINISHED = "finished"  # cancel_root's one refusal: nothing under the root was running
++# delivered_session_id of a row a cancel closed, and of the twin of a late result a cancelled root dropped. It says
++# "closed by the cancel", never "delivered": the owner never saw it (``ResultInboxStore.metrics`` counts it apart).
++SILENT_SESSION_ID = "cancelled"
 +CANCEL_ROOTS_MAX = 50  # roots one cancel may cascade over: the root, the fires of its containers, and theirs
 +CANCELLED_VIEW_MAX = 10_000  # the most cancelled roots one load of the in-process view reads
 +
@@ -879,7 +1027,7 @@ index fbb589dc..3654e1a7 100644
 +        .where(
 +            IntentionProposal.agent_id == agent_id,
 +            IntentionProposal.root_id == root_id,
-+            IntentionProposal.state.in_((PROPOSAL_PENDING, PROPOSAL_APPROVED)),
++            IntentionProposal.state.in_(_SHOWN_PROPOSAL_STATES),
 +        )
 +        .values(state=PROPOSAL_CANCELLED, decided_at=now, decided_by="system", updated_at=now)
 +        .returning(IntentionProposal.id)
@@ -906,6 +1054,26 @@ index fbb589dc..3654e1a7 100644
 +        update(ResultInbox)
 +        .where(intention_keyed(agent_id, ids), ResultInbox.delivered_at.is_(None))
 +        .values(delivered_at=now, delivered_session_id=f"{INTENT_SESSION_PREFIX}{root_id}")
++        .execution_options(synchronize_session=False)
++    )
++    # M1 (plan review): the owner-facing rows of the lineage that nobody has seen (a REPORT, QUESTION or PROPOSAL, keyed
++    # to a channel, so the statement above does not reach them) are closed too. A push that quiet hours deferred, or
++    # that waits for a retry, would otherwise go out for work the owner cancelled (a PROPOSAL with its buttons), and
++    # F098's chat claim would inject the row into the next chat turn. ``push_message_id`` stays NULL, so a reply to a
++    # message that was never sent resolves to nothing; a row already pushed keeps its ``pushed_at``.
++    await session.execute(
++        update(ResultInbox)
++        .where(
++            ResultInbox.agent_id == agent_id,
++            ResultInbox.source_kind == SOURCE_INTENTION_REPORT,
++            ResultInbox.intention_id.in_(ids),
++            ResultInbox.delivered_at.is_(None),
++        )
++        .values(
++            delivered_at=now,
++            delivered_session_id=SILENT_SESSION_ID,
++            pushed_at=func.coalesce(ResultInbox.pushed_at, now),
++        )
 +        .execution_options(synchronize_session=False)
 +    )
 +    if not containers:
@@ -939,13 +1107,19 @@ index fbb589dc..3654e1a7 100644
 +    open intention of the lineage to ``cancelled``, which also clears a live claim, so a turn that is deciding loses
 +    its fence. It cancels the lineage's pending and running subtasks, moves its ``staged``, ``pending`` and
 +    ``approved`` proposals to ``cancelled`` (so no call can start), stamps its unread intention-keyed results
-+    delivered without reporting them, and, for every container in the lineage, deactivates its schedule and then
++    delivered without reporting them, closes its unsent owner-facing rows (a REPORT, QUESTION or PROPOSAL that was
++    deferred or waits for a retry is never pushed, and no chat turn claims it: ``SILENT_SESSION_ID``, "closed by the
++    cancel", not "delivered"), and, for every container in the lineage, deactivates its schedule and then
 +    cancels the open roots of the container's fires. The lineage's running DAGs are reported in ``dag_ids``: the
 +    orchestrator cancels them (the runner calls it after this commits).
 +
 +    Repeating a cancel is allowed: it cancels whatever is still running and says ``already_cancelled``. A root with
 +    nothing running that was not cancelled before is refused (``CancelRefused``, nothing written): a marker on a
-+    finished root would only silence a later result. Raises ``RootNotFound`` for an id that is not a root."""
++    finished root would only silence a later result. Raises ``RootNotFound`` for an id that is not a root.
++
++    What a cancel cannot take back: a call the owner approved that has already ``executing`` state is left alone (the
++    call has started). It is refused if it has not passed ``_authorize_tool_call`` yet; a send already in flight
++    completes, and its outcome is written to nobody (``_settle_proposal`` writes nothing for an ended root)."""
 +    now = now or datetime.now(UTC)
 +    root = (
 +        await session.execute(
@@ -1035,12 +1209,13 @@ index fbb589dc..3654e1a7 100644
 
 - [ ] **Step 4: Run the tests and the neighbours**
 
-`tests/test_f099_phase2e_cancel.py tests/test_f099_phase2c_expiry_wake.py tests/test_f099_phase2d_decisions.py -q`: all pass (22 new).
+`tests/test_f099_phase2e_cancel.py tests/test_f099_phase2c_expiry_wake.py tests/test_f099_phase2d_decisions.py -q`: all pass (24 new).
 
 - [ ] **Step 5: Mutation checks** (each must fail the named tests; restore the file after each)
   1. In `_cancel_lineage`, change `IntentionProposal.state.in_((PROPOSAL_PENDING, PROPOSAL_APPROVED))` to `in_(("nothing",))`: `test_a_cancel_cancels_every_proposal_that_could_still_start`, `test_a_cancel_not_yet_committed_stops_an_approved_call_from_starting` and `test_a_decision_after_a_cancel_is_refused_as_ended` fail.
   2. In `_expire_root`, change `IntentionProposal.state.in_(_STARTABLE_PROPOSAL_STATES)` to `IntentionProposal.state == PROPOSAL_STAGED`: `test_an_expiry_not_yet_committed_stops_an_approved_call_from_starting` fails (the claim does not wait).
   3. Remove the `still_open` condition of the fires query: `test_a_cancelled_container_deactivates_its_schedule_and_cancels_its_fires` fails (a finished fire is marked).
+  4. In the owner-rows UPDATE of `_cancel_lineage`, change `ResultInbox.source_kind == SOURCE_INTENTION_REPORT` to `== 'nothing'`: `test_a_cancel_closes_the_lineages_unsent_owner_rows_so_nothing_is_pushed_or_claimed` fails (the deferred question is pushed, and the chat claim reads it).
 
 - [ ] **Step 6: Lint and commit**
 
@@ -1060,12 +1235,12 @@ index fbb589dc..3654e1a7 100644
 **Interfaces:**
 - Produces:
 ```python
-SILENT_SESSION_ID = "cancelled"   # delivered_session_id of the twin of a late result a cancelled root dropped
+# SILENT_SESSION_ID = "cancelled" is defined in 2e-1 (the cancel's stamp); `record_result` writes it on the twin of a dropped late result
 GATE_DROP_REASONS = ("cancelled", "plan_resolved")   # "expired" leaves: an expired claim escalates, with the raw rows
 async def close_cancelled_source(session, agent_id, intention, *, settings, now=None) -> int   # 0 or 1; root locked FIRST
 async def end_hanging_root(session, agent_id, root_id, *, settings, now=None) -> bool          # caller holds the root
 ```
-- Changes: `record_result` writes the work row's settled twin for any result nothing can reopen and, unless the root is cancelled (marker) or the intention is `cancelled`, also the raw REPORT; `_settle_stranded_rows` stamps a `cancelled` intention's rows and reports an `expired` one's; `result_reconciler._close_cancelled(database, settings, intention)` delegates to `close_cancelled_source`.
+- Changes: `record_result` writes the work row's settled twin for any result nothing can reopen and, unless the root is cancelled (marker) or the intention is `cancelled`, also the raw REPORT; `_settle_stranded_rows` stamps the rows of a `cancelled` intention, or of an intention under a root with `root_cancelled_at` (the rule is by marker in all three places), and reports an `expired` one's; `result_reconciler._close_cancelled(database, settings, intention)` delegates to `close_cancelled_source`.
 
 **Thirteen tests of earlier PRs change on purpose** (the rule itself changes what they assert; a test that wanted a REPORT from a CANCELLED root now uses an EXPIRED one, which still reports): in `test_f099_phase2b_routing.py`, `test_a_reported_continue_result_is_not_reselected_by_the_subtask_pass`; in `test_f099_phase2b_writers.py`, `test_a_retried_dag_on_a_cancelled_root_reports_the_raw_result` (renamed `…expired_root…`); in `test_f099_phase2c_publisher.py`, `test_a_reported_late_result_reaches_telegram_too`; in `test_f099_phase2b_record_result.py`, `test_a_re_arrival_on_a_closed_root_becomes_an_intention_report`, `test_a_duplicate_delivery_after_a_root_cancel_writes_no_report` (renamed `…root_expiry…`), `test_a_reported_result_settles_its_work_row_for_the_reconciler_passes`, `test_a_report_of_an_old_result_gets_a_fresh_claim_window_and_its_twin_keeps_the_works_time`, `test_a_cancelled_intention_reports_instead_of_waking` (renamed `test_an_expired_intention_…`) and `test_a_result_with_no_owner_channel_writes_only_the_settled_work_row` move from a cancelled marker to an expired one, which still reports; in `test_f099_phase2c_gate.py`, `test_a_gate_drop_commits_a_drop_and_a_gate_escalation_a_report` moves `expired` to the escalations; in `test_f099_phase2c_expiry_wake.py`, `test_a_row_held_on_an_intention_a_gate_arrival_closed_is_reported_by_the_sweep` expects silence for `cancelled` and an extra report for `expired` (the gate's own); in `test_f099_phase2c_repair.py`, `test_the_repair_leaves_a_row_held_on_a_gate_closed_intention_to_the_sweep` says the same, and `test_a_root_cancel_that_commits_just_before_the_close_is_honoured` is replaced by its lock-ordered form (E14: with the root locked first the old interleaving cannot happen, and in its shape it would deadlock). Each edit is in the diffs below.
 
@@ -1253,6 +1428,19 @@ async def test_the_sweep_stamps_the_rows_stranded_on_a_cancelled_intention_witho
     assert row.delivered_at is not None and row.delivered_session_id == f"intent-{root.id}"
     await _sweep(env)  # and it stays quiet
     assert await _reports(env) == []
+
+
+async def test_the_sweep_judges_a_stranded_row_by_the_roots_marker_as_well_as_the_intentions_state(env_factory):  # noqa: F811
+    """One rule in three places: by marker. An intention that expired before the owner cancelled its root is still
+    under a cancelled root, so its stranded row is stamped and nothing is said."""
+    env = await env_factory(**CONT)
+    root = await make_root(env)
+    await _strand(env, root, state="expired")
+    await set_intention(env, root.id, root_cancelled_at=NOW)
+    await _sweep(env)
+    assert await _reports(env) == []
+    (row,) = await inbox_rows(env, uuid.UUID(root.source_id))
+    assert row.delivered_at is not None
 
 
 async def test_the_sweep_reports_the_rows_stranded_on_an_expired_intention_once(env_factory):  # noqa: F811
@@ -1738,7 +1926,7 @@ index ecdf3d11..0be9f87e 100644
 
 ```diff
 diff --git a/nous/brain/continuation.py b/nous/brain/continuation.py
-index 3654e1a7..9a04bb35 100644
+index 27fb6ba5..f72b8b69 100644
 --- a/nous/brain/continuation.py
 +++ b/nous/brain/continuation.py
 @@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta
@@ -1750,17 +1938,7 @@ index 3654e1a7..9a04bb35 100644
  from sqlalchemy.dialects.postgresql import JSONB
  from sqlalchemy.dialects.postgresql import insert as pg_insert
  from sqlalchemy.ext.asyncio import AsyncSession
-@@ -63,6 +63,9 @@ STATE_PENDING, STATE_RESULT_READY, STATE_CLOSED = "pending", "result_ready", "cl
- STATE_CANCELLED, STATE_EXPIRED = "cancelled", "expired"
- STATE_DECIDING, STATE_AWAITING_OWNER = "deciding", "awaiting_owner"
- 
-+# delivered_session_id of the row of a late result that a cancelled root dropped without a report (2e).
-+SILENT_SESSION_ID = "cancelled"
-+
- # heart.result_inbox.title is VARCHAR(200); tests pin it equal to result_inbox._TITLE_MAX.
- INBOX_TITLE_MAX = 200
- # The UNIQUE key of heart.result_inbox, in column order (migration 084): the one
-@@ -110,13 +113,15 @@ GATE_REASONS = (
+@@ -110,13 +110,15 @@ GATE_REASONS = (
      "limit_spawns",
      "plan_resolved",
  )
@@ -1779,7 +1957,7 @@ index 3654e1a7..9a04bb35 100644
      "past_deadline": "This result arrived after its deadline, so I did not act on it.",
      "budget_turns": "The follow-up budget for this work is used up, so I stopped here.",
      "budget_tokens": "The token budget for this work is used up, so I stopped here.",
-@@ -637,9 +642,10 @@ def raw_results_text(rows: Any) -> str:
+@@ -637,9 +639,10 @@ def raw_results_text(rows: Any) -> str:
  def gate_inputs(reason: str, claim: Claim) -> tuple[Resolution, str | None]:
      """What a gate arrival commits: a synthetic decision and the text of its report.
  
@@ -1792,7 +1970,7 @@ index 3654e1a7..9a04bb35 100644
      """
      explanation = GATE_TEXT[reason]
      if reason in GATE_DROP_REASONS:
-@@ -1423,12 +1429,14 @@ async def expire_roots(
+@@ -1431,13 +1434,17 @@ async def expire_roots(
  async def _settle_stranded_rows(session: AsyncSession, agent_id: str, *, settings: Any, now: datetime) -> int:
      """Rows held on an intention a gate arrival closed (``cancelled`` or ``expired``): they landed after the
      claim read its rows and before the root's marker, so the arrival did not consume them, and nothing claims
@@ -1803,14 +1981,17 @@ index 3654e1a7..9a04bb35 100644
 +    of a ``cancelled`` one are stamped and nothing is said (the owner cancelled that work). The expiry never strands
 +    one (it reads after it closes), and ``cancel_root`` stamps its own.
      Writes no intention row, so it takes no intention lock. Returns the number of rows settled."""
++    root = aliased(Intention)
      stranded = (
          await session.execute(
 -            select(ResultInbox.id, Intention.root_id)
-+            select(ResultInbox.id, Intention.root_id, Intention.state)
++            select(ResultInbox.id, Intention.root_id, Intention.state, root.root_cancelled_at)
              .join(Intention, and_(Intention.agent_id == agent_id, Intention.id == ResultInbox.intention_id))
++            .join(root, and_(root.agent_id == agent_id, root.id == Intention.root_id))
              .where(
                  ResultInbox.agent_id == agent_id,
-@@ -1441,11 +1449,13 @@ async def _settle_stranded_rows(session: AsyncSession, agent_id: str, *, setting
+                 ResultInbox.channel.is_(None),
+@@ -1449,11 +1456,14 @@ async def _settle_stranded_rows(session: AsyncSession, agent_id: str, *, setting
              .limit(STRANDED_BATCH)
          )
      ).all()
@@ -1820,15 +2001,16 @@ index 3654e1a7..9a04bb35 100644
 +    # Keyed by (root, silent): a cancelled intention's rows are stamped and never reported (the unified late-result
 +    # rule), an expired one's are reported raw.
 +    by_root: dict[tuple[UUID, bool], list[UUID]] = {}
-+    for row_id, root_id, state in stranded:
-+        by_root.setdefault((root_id, state == STATE_CANCELLED), []).append(row_id)
++    for row_id, root_id, state, cancelled_at in stranded:
++        # By marker, as record_result judges (N3 of the plan review): the intention's state or the root's marker.
++        by_root.setdefault((root_id, state == STATE_CANCELLED or cancelled_at is not None), []).append(row_id)
      settled = 0
 -    for root_id, row_ids in by_root.items():
 +    for (root_id, silent), row_ids in by_root.items():
          # Stamp and read in one statement: only the rows this call moved are reported, so a row is reported once.
          rows = sorted(
              await session.execute(
-@@ -1459,6 +1469,9 @@ async def _settle_stranded_rows(session: AsyncSession, agent_id: str, *, setting
+@@ -1467,6 +1477,9 @@ async def _settle_stranded_rows(session: AsyncSession, agent_id: str, *, setting
          )
          if not rows:
              continue
@@ -1838,7 +2020,7 @@ index 3654e1a7..9a04bb35 100644
          root = (
              await session.execute(
                  select(Intention.intent, Intention.origin_channel).where(
-@@ -1491,9 +1504,7 @@ async def _settle_stranded_rows(session: AsyncSession, agent_id: str, *, setting
+@@ -1499,9 +1512,7 @@ async def _settle_stranded_rows(session: AsyncSession, agent_id: str, *, setting
      if settled:
          # A backstop: today only a gate arrival's late rows land here, so a count is how a path that writes a root
          # marker without closing its lineage (2e's cancel_root, say) shows up in the log.
@@ -1849,7 +2031,7 @@ index 3654e1a7..9a04bb35 100644
      return settled
  
  
-@@ -1886,15 +1897,20 @@ async def record_result(
+@@ -1913,15 +1924,20 @@ async def record_result(
      state, policy, root_id, origin_channel = row.state, row.wake_policy, row.root_id, row.origin_channel
      now = datetime.now(UTC)
  
@@ -1871,7 +2053,7 @@ index 3654e1a7..9a04bb35 100644
          # MF-1: the work row's own inbox row, NULL-keyed and already delivered. The F098 reconciler passes
          # decide "needs repair" by this row (has_row): without it they would re-select the work row on
          # every tick for good. NULL-keyed and delivered, no chat turn can claim it, so it keeps the work's
-@@ -1915,12 +1931,20 @@ async def record_result(
+@@ -1942,12 +1958,20 @@ async def record_result(
              intention_id=intention_id,
              arrival_id=arrival_id,
              delivered_at=now,
@@ -1893,7 +2075,7 @@ index 3654e1a7..9a04bb35 100644
          channel = owner_channel(settings, origin_channel)
          if channel is None:
              logger.warning(
-@@ -3555,3 +3579,122 @@ async def find_root_id(session: AsyncSession, agent_id: str, prefix: str) -> UUI
+@@ -3613,3 +3637,122 @@ async def find_root_id(session: AsyncSession, agent_id: str, prefix: str) -> UUI
          .all()
      )
      return _unique(list(ids), prefix)
@@ -2108,7 +2290,7 @@ index 7a24b74e..efd3c8c6 100644
 
 **Interfaces:**
 - Produces: `AgentRunner.set_cancelled_roots(view: Callable[[UUID], bool]) -> None` (the view is `ContinuationRunner.root_is_cancelled`); `AgentRunner.discard_conversation(session_id: str) -> None` (no DB, no await); the module function `_no_cancelled_roots(_root_id) -> bool`; `"root_cancelled"` in `ledger_store.REFUSAL_CODES`. `_authorize_tool_call` returns `Refusal("Tool error: this work was cancelled by the owner; stop.", "root_cancelled")` first, for any context whose `root_intention_id` the view calls cancelled.
-- A residual to state, not fix: `heart.conversation_state` rows are written only after a compaction; a no-DB discard leaves one, and the restore guard makes sure it is never read for an `intent-` thread.
+- A residual to state, not fix: `heart.conversation_state` rows are written only after a compaction; a no-DB discard leaves one, and the restore guard makes sure it is never read for an `intent-` thread. The guard is what makes the surviving row harmless, so a later reader must not "fix" the discard by adding a database write to the top of every turn (the docstring says so).
 
 - [ ] **Step 1: Write the tests**
 
@@ -2341,7 +2523,7 @@ async def test_a_leftover_session_does_not_reach_the_next_arrival(runner_env):  
 
 ```diff
 diff --git a/nous/api/runner.py b/nous/api/runner.py
-index c2aa6b98..a45d78fe 100644
+index c2aa6b98..97ea394f 100644
 --- a/nous/api/runner.py
 +++ b/nous/api/runner.py
 @@ -80,6 +80,12 @@ class Refusal:
@@ -2411,7 +2593,7 @@ index c2aa6b98..a45d78fe 100644
      def set_snapshot_store(self, store: Any, workspace_dir: str) -> None:
          """Phase 2.8: compensation snapshots for compensable calls in background contexts."""
          self._snap_store = store
-@@ -1647,6 +1685,18 @@ class AgentRunner:
+@@ -1647,6 +1685,22 @@ class AgentRunner:
  
              return response_text, turn_context, usage
  
@@ -2421,7 +2603,11 @@ index c2aa6b98..a45d78fe 100644
 +
 +        A continuation turn calls it first. ``end_conversation`` can time out, raise, or be cancelled from outside
 +        (a cancel of the root, a stop), and then the thread of the root would carry the previous arrival's messages
-+        and its ``executed_tools`` (a ``learn_fact`` of the last arrival would verify this one's ``progress``)."""
++        and its ``executed_tools`` (a ``learn_fact`` of the last arrival would verify this one's ``progress``).
++
++        A ``heart.conversation_state`` row (written only after a compaction) survives this on purpose, and it is
++        harmless because ``_restore_conversation`` never reads one for an ``intent-`` thread: do not "fix" the discard
++        by adding a database write to the top of every turn."""
 +        self._conversations.pop(session_id, None)
 +        self._compaction_locks.pop(session_id, None)
 +        self._ledgers.pop(session_id, None)
@@ -2430,7 +2616,7 @@ index c2aa6b98..a45d78fe 100644
      async def end_conversation(
          self,
          session_id: str,
-@@ -4276,6 +4326,8 @@ Rules:
+@@ -4276,6 +4330,8 @@ Rules:
  
      async def _restore_conversation(self, session_id: str) -> Conversation | None:
          """Restore conversation from Heart persistence if available."""
@@ -2792,10 +2978,10 @@ index fe0e5ee7..0c9beb29 100644
 
 ```diff
 diff --git a/nous/brain/continuation.py b/nous/brain/continuation.py
-index 9a04bb35..fbeea0a9 100644
+index f72b8b69..8e4c6cbb 100644
 --- a/nous/brain/continuation.py
 +++ b/nous/brain/continuation.py
-@@ -499,13 +499,15 @@ async def root_limits(session: AsyncSession, agent_id: str, root_id: UUID, *, se
+@@ -496,13 +496,15 @@ async def root_limits(session: AsyncSession, agent_id: str, root_id: UUID, *, se
      Tokens are the lineage's subtask ``tokens_in/out`` (a DAG-node subtask has no intention of its own, and
      ``dag_node_id IS NULL`` keeps it out should one ever have one: its usage is already in its DAG's
      ``tokens_consumed``), plus its DAGs' ``tokens_consumed`` (which Task 2c1-8 feeds with check-node usage),
@@ -2813,7 +2999,7 @@ index 9a04bb35..fbeea0a9 100644
              ).where(Intention.agent_id == agent_id, Intention.root_id == root_id)
          )
      ).one()
-@@ -566,7 +568,7 @@ async def root_limits(session: AsyncSession, agent_id: str, root_id: UUID, *, se
+@@ -563,7 +565,7 @@ async def root_limits(session: AsyncSession, agent_id: str, root_id: UUID, *, se
          if verified is not False:
              break
          stalls += 1
@@ -2822,7 +3008,7 @@ index 9a04bb35..fbeea0a9 100644
      depth, spawns, turns = int(depth), int(spawns), int(turns)
      max_depth, max_spawns = settings.continuation_max_depth, settings.continuation_max_spawns_per_root
      escalate: str | None = None
-@@ -1165,6 +1167,7 @@ async def fail_attempt(
+@@ -1162,6 +1164,7 @@ async def fail_attempt(
      brain: Any = None,
      now: datetime | None = None,
      arrival_id: UUID | None = None,
@@ -2830,7 +3016,7 @@ index 9a04bb35..fbeea0a9 100644
  ) -> str:
      """T8 and T12: one claimed attempt failed (the turn raised or timed out, or its lease expired).
  
-@@ -1181,6 +1184,11 @@ async def fail_attempt(
+@@ -1178,6 +1181,11 @@ async def fail_attempt(
      cap), so the claim token in that UPDATE is the fence and nothing else stands in for it. ``arrival_id`` is the
      id of the cap's arrival row (a new one when not given), as ``commit_arrival`` takes it: the caller can name
      that row in ``intention.arrival_decided``.
@@ -2842,7 +3028,7 @@ index 9a04bb35..fbeea0a9 100644
      """
      now = now or datetime.now(UTC)
      ids = sorted(i.id for i in claim.intentions)
-@@ -1199,7 +1207,20 @@ async def fail_attempt(
+@@ -1196,7 +1204,20 @@ async def fail_attempt(
                  )
              ).scalars()
              worst = max(counts) + 1
@@ -2863,7 +3049,7 @@ index 9a04bb35..fbeea0a9 100644
                  released = await _fenced_move(
                      session,
                      agent_id,
-@@ -1226,7 +1247,7 @@ async def fail_attempt(
+@@ -1223,7 +1244,7 @@ async def fail_attempt(
                  resolution=Resolution("report", f"Failed after {worst} attempts.", False, 0.0),
                  outcome=OUTCOME_FAILED,
                  gate_reason=None,
@@ -2964,6 +3150,7 @@ CANCEL_WAIT_SECONDS = 5.0; CANCEL_VIEW_MARGIN_SECONDS = 120; STRAY_DAG_BATCH = 1
 ```
 - `cancel_root` order: the store's transaction commits; the view takes `outcome.root_ids`; `cancel_dag(dag_id, "cancelled by the owner")` per DAG (one that raises is logged and left to the sweep); each running turn task of those roots is cancelled and awaited (bounded); `intention.root_cancelled` per root and `intention.proposal_decided` (`cancelled`, actor `system`) per shown proposal; `wake()`.
 - The running turn: `task.cancel()` reaches `run_arrival`'s `cancel_requested()` branch, which releases the claim (fenced: the cancel already moved the rows, so it finds none), and the arrival task's done callback frees the slot. A turn that is past its model call loses its fence in `commit_arrival` and returns None.
+- **S3, the bus:** `_expire` passes `proposals_out` and emits `intention.proposal_decided` (`expired`, actor `system`) for each proposal an expiry ended: the proposals sweep no longer finds them. **N1:** `_stop_turns` logs a WARNING with the count of cancelled turns still unwinding after `CANCEL_WAIT_SECONDS` (the route still says `turn_stopped`: the turn was told to). **N2:** `_build_continuation_runner` wraps `load_cancelled_roots()` in a try/except WARNING (`start()` loads again): a transient error there must not fail `create_components`.
 - `run_once` gains a first step, `"cancel sweep"`: refresh the view since the last sweep (less 120 s), then cancel the DAGs still running under a cancelled root. `start()` loads the view before the loop. `SweepReport` is unchanged.
 - `main.py`: `_build_continuation_runner` calls `runner.set_cancelled_roots(continuation_runner.root_is_cancelled)` and `await continuation_runner.load_cancelled_roots()` before returning (so the view is loaded before any loop or worker runs); the DAG block calls `continuation_runner.set_cancel_dag(dag_orchestrator.cancel_dag)` after the orchestrator is built.
 
@@ -2978,6 +3165,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from f099_support import (
@@ -2995,6 +3183,7 @@ from f099_support import (
 )
 from sqlalchemy import select
 
+import nous.handlers.continuation_runner as runner_module
 from nous.api.execution_context import ExecutionContext
 from nous.brain import continuation
 from nous.handlers.continuation_runner import ContinuationRunner
@@ -3158,26 +3347,74 @@ async def test_a_turn_that_finished_but_has_not_committed_loses_its_fence_to_the
     assert (fresh.state, fresh.attempts) == ("cancelled", 0)  # not charged as a failed attempt
 
 
-async def test_a_cancel_that_waits_for_the_claim_then_stops_the_turn_it_started(runner_env):  # noqa: F811
-    """The claim and the cancel serialise on the root row: whichever is second sees the first."""
-    started, never = asyncio.Event(), asyncio.Event()
-
-    async def blocked(_kwargs):
-        started.set()
-        await never.wait()
-
-    env = await runner_env(blocked)
+async def test_a_cancel_that_queues_behind_a_claim_stops_the_turn_that_claim_started(runner_env, monkeypatch):  # noqa: F811
+    """The claim and the cancel serialise on the root row, and Postgres grants a row lock in the order it was asked
+    for: the claim is first in the queue, so it wins (the spy sees a claim), moves the root to `deciding` and
+    commits; the cancel then takes the lock, moves that `deciding` row and cancels the arrival's task. Deterministic:
+    the lock is held while both queue."""
+    env = await runner_env()
     root = await _ready_root(env)
     cont = _cont(env)
+    claims = []
+    real = continuation.claim_root
+
+    async def spy(*args, **kwargs):
+        got = await real(*args, **kwargs)
+        claims.append(got is not None)
+        return got
+
+    monkeypatch.setattr(continuation, "claim_root", spy)
     async with env.db.session() as holder:
         await holder.execute(select(Intention.id).where(Intention.id == root.id).with_for_update(key_share=True))
-        cancel = asyncio.create_task(cont.cancel_root(root.id, reason="t", actor="t"))
+        assert (await cont.run_once()).launched == (root.id,)  # the arrival task is made; its claim queues on the root
         try:
-            await asyncio.wait_for(until_a_backend_waits_on_a_lock(env), timeout=10)
+            await asyncio.wait_for(until_a_backend_waits_on_a_lock(env, at_least=1), timeout=10)
+            cancel = asyncio.create_task(cont.cancel_root(root.id, reason="t", actor="t"))
+            await asyncio.wait_for(until_a_backend_waits_on_a_lock(env, at_least=2), timeout=10)
         finally:
             await holder.commit()
     out = await asyncio.wait_for(cancel, timeout=30)
-    assert out.cancelled_intentions == 1 and out.turn_stopped is False
+    assert claims == [True]  # the claim was first in the queue and won
+    assert out.turn_stopped is True and out.cancelled_intentions == 1  # the cancel found its `deciding` row
+    assert cont.running_roots == frozenset() and cont._slots._value == env.settings.continuation_max_concurrent
+    assert await _arrivals(env, root.id) == [] and await _owner_rows(env) == []
+    assert (await intention_of(env, "subtask", root.source_id)).state == "cancelled"
+
+
+async def test_a_turn_that_is_slow_to_unwind_is_told_so_in_the_log(runner_env, monkeypatch, caplog):  # noqa: F811
+    """N1 of the plan review: the route still says the turn was stopped (it was told to), and the log says it is not
+    gone yet."""
+    monkeypatch.setattr(runner_module, "CANCEL_WAIT_SECONDS", 0.1)
+    env = await runner_env()
+    cont = _cont(env)
+    root_id = uuid.uuid4()
+
+    async def stubborn():
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.5)  # a blocking call that has to finish first
+
+    task = asyncio.create_task(stubborn())
+    cont._running[root_id] = task
+    await asyncio.sleep(0)
+    assert await cont._stop_turns([root_id]) is True
+    assert "still unwinding" in caplog.text
+    await asyncio.wait_for(task, timeout=10)
+
+
+async def test_the_proposals_an_expiry_ended_are_announced_on_the_bus(runner_env):  # noqa: F811
+    """S3 of the plan review: the proposals sweep no longer finds the proposals of an expired root, so the expiry's
+    own sweep step tells the bus, and the rows say who ended them."""
+    env = await runner_env()
+    asked = await ask_with_proposals(env)
+    (pid,) = asked.ids
+    await set_intention(env, asked.root.id, created_at=datetime.now(UTC) - timedelta(hours=100))
+    cont = _cont(env)
+    await cont.run_once()
+    events = [e.data for e in env.bus.events if e.type == "intention.proposal_decided"]
+    assert events == [{"proposal_id": str(pid), "state": "expired", "actor": "system"}]
+    assert [e.data["root_id"] for e in env.bus.events if e.type == "intention.root_expired"] == [str(asked.root.id)]
 
 
 # ---- the view: security, restart, refresh ---------------------------------------------------------------------------
@@ -3251,10 +3488,10 @@ async def test_a_cancelled_root_is_never_launched_again(runner_env):  # noqa: F8
 
 ```diff
 diff --git a/nous/brain/continuation.py b/nous/brain/continuation.py
-index fbeea0a9..46ca8fa1 100644
+index 8e4c6cbb..7fb4244a 100644
 --- a/nous/brain/continuation.py
 +++ b/nous/brain/continuation.py
-@@ -3579,6 +3579,34 @@ async def cancelled_root_ids(
+@@ -3637,6 +3637,34 @@ async def cancelled_root_ids(
      return list(rows.scalars().all())
  
  
@@ -3295,7 +3532,7 @@ index fbeea0a9..46ca8fa1 100644
 
 ```diff
 diff --git a/nous/handlers/continuation_runner.py b/nous/handlers/continuation_runner.py
-index 767e9e92..306a5265 100644
+index 767e9e92..d4e403a3 100644
 --- a/nous/handlers/continuation_runner.py
 +++ b/nous/handlers/continuation_runner.py
 @@ -328,6 +328,11 @@ NO_ROWS_NOTE = "A result was ready but no result row came with it; nothing to de
@@ -3414,7 +3651,34 @@ index 767e9e92..306a5265 100644
      async def _release_stale(self) -> list[UUID]:
          settings = self._settings
          async with self._db.session() as session:
-@@ -1194,6 +1263,52 @@ class ContinuationRunner:
+@@ -469,13 +538,25 @@ class ContinuationRunner:
+ 
+     async def _expire(self) -> list[UUID]:
+         settings = self._settings
++        ended: list[tuple[UUID, str]] = []
+         async with self._db.session() as session:
+             expired = await continuation.expire_roots(
+-                session, self._agent_id, ttl_hours=settings.intention_root_ttl_hours, settings=settings
++                session,
++                self._agent_id,
++                ttl_hours=settings.intention_root_ttl_hours,
++                settings=settings,
++                proposals_out=ended,
+             )
+             await session.commit()
+         for root_id in expired:
+             await self._emit("intention.root_expired", {"root_id": str(root_id)})
++        for (
++            proposal_id,
++            state,
++        ) in ended:  # an expiry ends the proposals of its root with it (the proposals sweep no longer finds them)
++            await self._emit(
++                "intention.proposal_decided", {"proposal_id": str(proposal_id), "state": state, "actor": "system"}
++            )
+         return expired
+ 
+     async def _expire_proposals(self) -> list[tuple[UUID, str]]:
+@@ -1194,6 +1275,56 @@ class ContinuationRunner:
              self.wake()
          return recorded
  
@@ -3461,7 +3725,11 @@ index 767e9e92..306a5265 100644
 +        for task in tasks:
 +            task.cancel()
 +        if tasks:
-+            await asyncio.wait(tasks, timeout=CANCEL_WAIT_SECONDS)
++            _done, pending = await asyncio.wait(tasks, timeout=CANCEL_WAIT_SECONDS)
++            if pending:  # a turn in a long blocking call: it was told to stop and is still unwinding
++                logger.warning(
++                    "F099: %d cancelled turn(s) are still unwinding after %ss", len(pending), CANCEL_WAIT_SECONDS
++                )
 +        return bool(tasks)
 +
      async def _emit_decided(self, outcome: continuation.ProposalExecution, actor: str) -> None:
@@ -3473,21 +3741,26 @@ index 767e9e92..306a5265 100644
 
 ```diff
 diff --git a/nous/main.py b/nous/main.py
-index 45b60794..49ee5dbc 100644
+index 45b60794..b55e9b47 100644
 --- a/nous/main.py
 +++ b/nous/main.py
-@@ -316,6 +316,10 @@ async def _build_continuation_runner(
+@@ -316,6 +316,15 @@ async def _build_continuation_runner(
      )
      if bus is not None:
          bus.on("intention.result_ready", continuation_runner.on_result_ready)
 +    # 2e: the owner's cancel reaches every tool call. The view is loaded BEFORE any loop or worker runs, so a restart
 +    # forgets no cancel; the DAG cancel is bound later, where the orchestrator is built (this runs before it).
 +    runner.set_cancelled_roots(continuation_runner.root_is_cancelled)
-+    await continuation_runner.load_cancelled_roots()
++    try:
++        await continuation_runner.load_cancelled_roots()
++    except Exception:
++        # The migrations just ran on this database, so this is improbable; the build must not fail for it: start()
++        # loads the view again, and every sweep refreshes it.
++        logger.warning("F099: could not load the cancelled roots; start() loads them again", exc_info=True)
      return continuation_runner
  
  
-@@ -1428,6 +1432,10 @@ async def create_components(settings: Settings) -> dict:
+@@ -1428,6 +1437,10 @@ async def create_components(settings: Settings) -> dict:
                  surface_service=surface_service,
              )
  
@@ -3500,12 +3773,13 @@ index 45b60794..49ee5dbc 100644
                  # F087: the heartbeat loop is the orchestrator's only clock.
 ```
 
-- [ ] **Step 4: Run** `tests/test_f099_phase2e_runner_cancel.py tests/test_f099_phase2c_loop.py tests/test_f099_phase2c_plumbing.py tests/test_f099_phase2c_failure.py tests/test_f099_phase2c_parity.py tests/test_f099_phase2d_execute.py tests/test_f099_phase2d_actions.py -q`: all pass (11 new). The one-sweep tests of 2c-2 still pass unchanged: the new step is isolated by `_step` and does nothing with no cancelled root.
+- [ ] **Step 4: Run** `tests/test_f099_phase2e_runner_cancel.py tests/test_f099_phase2c_loop.py tests/test_f099_phase2c_plumbing.py tests/test_f099_phase2c_failure.py tests/test_f099_phase2c_parity.py tests/test_f099_phase2d_execute.py tests/test_f099_phase2d_actions.py -q`: all pass (13 new). The claim-versus-cancel race is real: the root lock is held, the arrival's claim and the cancel queue on it in that order (Postgres grants a row lock in the order asked), and a spy on `claim_root` proves the claim won before the cancel stopped its turn. The one-sweep tests of 2c-2 still pass unchanged: the new step is isolated by `_step` and does nothing with no cancelled root.
 
 - [ ] **Step 5: Mutation checks**
   1. Remove the `task.cancel()` loop from `_stop_turns`: `test_a_cancel_stops_the_running_turn_releases_its_slot_and_commits_nothing` fails.
   2. Remove `self._cancelled.update(outcome.root_ids)`: three tests fail, the security pin among them.
   3. Remove the refresh from `_cancel_sweep`: `test_a_restart_remembers_the_cancel_and_a_sweep_takes_in_one_made_elsewhere` fails.
+  4. Drop the `ended` emit loop from `_expire`: `test_the_proposals_an_expiry_ended_are_announced_on_the_bus` fails.
 
 - [ ] **Step 6: Lint and commit** (`feat(F099): 2e-5 ContinuationRunner.cancel_root, the view, the cancel sweep and the wiring (inert)`).
 
@@ -3516,7 +3790,7 @@ index 45b60794..49ee5dbc 100644
 **Prod runs:** the startup rollback runs in prod at every start. Its new branch is reached only for an open flag-on `continue` row with no owner channel, and prod has neither (no flag-on row exists, and the prod process has a default chat). `RollbackReport` gains a defaulted field. Everything else is called only by the runner. Pinned: `test_prods_flags_roll_back_nothing_new`, `test_a_deliverable_result_is_still_rerouted_and_counts_nothing_as_undeliverable`, `test_prods_rollback_finds_nothing_new` (2e-8).
 
 **Files:**
-- Modify: `nous/brain/continuation.py`, `nous/handlers/continuation_runner.py`, `nous/main.py` (the rollback's log line)
+- Modify: `nous/brain/continuation.py`, `nous/handlers/continuation_runner.py`, `nous/main.py` (the rollback's log line), `nous/heart/result_inbox.py` (`metrics`)
 - Create: `tests/test_f099_phase2e_residuals.py`
 - Modify (changed pins): the tests that age a question by hand set `created_at` back 25 h and, since a question's window now starts at its push, must clear `push_after` too: `tests/test_f099_phase2c_expiry_wake.py` (`_age_question` and two direct updates), `tests/test_f099_phase2c_plumbing.py` (one update), `tests/test_f099_phase2d_answers.py` (`_age_question`), `tests/test_f099_phase2d_routes.py` (one update)
 
@@ -3533,6 +3807,9 @@ ContinuationRunner._push() -> int                                   # the push i
 RESUME_BATCH = 5
 ```
 - Rules: see the rulings above (9, 11, 12, 10).
+- **M2 (plan review): no owner-facing surface reports a stamped row as delivered.** `ResultInboxStore.metrics(days)` (served by the dashboard's `result_inbox` block, the one consumer) leaves the rollback's `ROLLBACK_UNDELIVERABLE_ID` rows and the cancel's `SILENT_SESSION_ID` rows out of `delivered`, of the latencies and of the denominator of `delivery_rate` (they were never deliverable), and reports them in their own buckets, `undeliverable` and `closed_by_cancel`, per source kind. The inbox-off WARNING names the rows (`(row id, intention id)`, the first 20). (The `report:` twins of 2b count as delivered as before: a 2b decision.)
+- **S6 (plan review): the flag-off rollback ends every proposal that could still run**, `approved` ones included (`_SHOWN_PROPOSAL_STATES`, with `decided_at` and `decided_by = 'system'`; `staged` ones as before). A later flag-on restart inside the proposal window therefore never resumes a call whose intention the rollback closed: its outcome would reach nobody.
+- **S2 (plan review): the resume and the owner's re-tap test uses no sleep**: the fake send sets an event, the test waits for it, the re-tap returns at once (it sees `executing`), then the call is released.
 
 - [ ] **Step 1: Write the tests**
 
@@ -3546,6 +3823,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -3653,6 +3931,64 @@ async def test_prods_flags_roll_back_nothing_new(env_factory):  # noqa: F811  # 
     env = await env_factory(**ON, telegram_chat_id="4242")
     report = await continuation.rollback_at_startup(env.db, env.settings, telegram_push=None)
     assert report == continuation.RollbackReport(0, 0, 0, 0, 0)
+
+
+async def test_the_flag_off_rollback_ends_an_approved_proposal_so_a_later_flag_on_never_resumes_it(env_factory):  # noqa: F811
+    """S6 of the plan review. The owner approved, the process died before the call started, and the operator turned
+    the flag off (the rollback closes the intention) and on again inside the proposal window: without this the sweep
+    would run a call whose intention was closed, and its outcome would reach nobody."""
+    env = await env_factory(**CONT)
+    asked = await ask_with_proposals(env, count=2)
+    approved, pending = asked.ids
+    async with env.db.session() as s:
+        await continuation.decide_proposal(
+            s, env.agent, approved, approve=True, actor="telegram:42", settings=env.settings
+        )
+        await s.commit()
+    report = await continuation.rollback_at_startup(env.db, _off(env, result_inbox_enabled=True), telegram_push=None)
+    assert report.expired_proposals == 2
+    for proposal_id in (approved, pending):
+        row = await proposal_row(env, proposal_id)
+        assert (row.state, row.decided_by) == ("expired", "system")
+    async with env.db.session() as s:
+        resumable = await continuation.stalled_approved_ids(
+            s, env.agent, settings=env.settings, now=datetime.now(UTC) + timedelta(hours=1)
+        )
+    assert resumable == []  # the flag is back on, and there is nothing for the sweep to resume
+
+
+async def test_the_inbox_metrics_count_a_row_nobody_read_apart_from_the_delivered_ones(env_factory):  # noqa: F811
+    """M2 of the plan review: the owner-facing rule of item 9 is that nothing reports the stamp as "delivered"."""
+    env = await env_factory(**CONT)
+    now = datetime.now(UTC)
+    async with env.db.session() as s:
+        for session_id in ("S1", continuation.ROLLBACK_UNDELIVERABLE_ID, continuation.SILENT_SESSION_ID, None):
+            await continuation.insert_inbox_row(
+                s,
+                env.agent,
+                source_kind="subtask",
+                source_id=uuid.uuid4(),
+                msg_type="INFORM",
+                title="r",
+                body="b",
+                delivered_at=now if session_id is not None else None,
+                delivered_session_id=session_id,
+            )
+        await s.commit()
+    bucket = (await env.heart.result_inbox.metrics(1))["subtask"]
+    assert (bucket["created"], bucket["delivered"]) == (4, 1)  # only the row a chat turn read
+    assert (bucket["undeliverable"], bucket["closed_by_cancel"]) == (1, 1)
+    assert bucket["delivery_rate"] == 0.5  # 1 of the 2 rows that could have been delivered
+    assert bucket["latency_p50_s"] is not None
+
+
+async def test_the_inbox_off_warning_names_the_rows_it_marked(env_factory, caplog):  # noqa: F811
+    env = await env_factory(**CONT)
+    st = await _stuck(env)
+    (row,) = await inbox_rows(env, st.id)
+    with caplog.at_level(logging.WARNING, logger="nous.brain.continuation"):
+        await continuation.rollback_at_startup(env.db, _off(env), telegram_push=None)
+    assert str(row.id) in caplog.text and str(row.intention_id) in caplog.text
 
 
 # ---- carry-over 10: a question's answer window starts at its push --------------------------------------------------
@@ -3812,12 +4148,13 @@ async def test_an_approval_on_work_that_ended_is_ended_not_resumed(runner_env, m
 
 
 async def test_a_resume_and_an_owners_retap_run_the_call_once(runner_env):  # noqa: F811
-    release = asyncio.Event()
+    started, release = asyncio.Event(), asyncio.Event()
     env = await runner_env()
     calls = []
 
     async def send_email(**kwargs):
         calls.append(kwargs)
+        started.set()
         await release.wait()
         return {"content": [{"type": "text", "text": "sent"}]}
 
@@ -3825,13 +4162,12 @@ async def test_a_resume_and_an_owners_retap_run_the_call_once(runner_env):  # no
     _asked, pid = await _approved_and_stalled(env)
     cont = _cont(env)
     await cont.run_once()  # the sweep starts it
-    await asyncio.sleep(0.2)
+    await asyncio.wait_for(started.wait(), timeout=10)  # the call is running: its claim is `executing`
     assert len(calls) == 1 and (await proposal_row(env, pid)).state == "executing"
-    retap = asyncio.create_task(cont.decide_proposal(pid, approve=True, actor="telegram:42"))
-    await asyncio.sleep(0.2)
+    # The owner's re-tap sees a call in flight and returns at once: it starts no other (so it runs before the release).
+    out = await asyncio.wait_for(cont.decide_proposal(pid, approve=True, actor="telegram:42"), timeout=30)
+    assert out.state == "executing" and len(calls) == 1
     release.set()
-    out = await asyncio.wait_for(retap, timeout=30)
-    assert len(calls) == 1 and out.state == "executing"  # the re-tap saw a call in flight: it started no other
     await _settle(cont)
     assert (await proposal_row(env, pid)).state == "executed" and cont._executing_ids == {}
 
@@ -4019,10 +4355,10 @@ index 3062857a..5a5d9924 100644
 
 ```diff
 diff --git a/nous/brain/continuation.py b/nous/brain/continuation.py
-index 46ca8fa1..d62ae190 100644
+index 7fb4244a..58ea4b88 100644
 --- a/nous/brain/continuation.py
 +++ b/nous/brain/continuation.py
-@@ -1644,6 +1644,16 @@ async def _expire_root(
+@@ -1671,6 +1671,16 @@ async def _expire_root(
      return True
  
  
@@ -4039,7 +4375,7 @@ index 46ca8fa1..d62ae190 100644
  async def _proposals_terminal(session: AsyncSession, agent_id: str, arrival_id: UUID) -> bool:
      """Every proposal of the arrival is in ``PROPOSAL_TERMINAL`` (2d). A ``staged`` row has no arrival yet, so it
      never holds an arrival back: it is not approvable."""
-@@ -1691,7 +1701,7 @@ async def _question_state(
+@@ -1718,7 +1728,7 @@ async def _question_state(
      ).scalar_one()
      ttl = timedelta(hours=float(settings.intention_proposal_ttl_hours)) if settings is not None else None
      answered = [newest_answer is not None and newest_answer >= q.created_at for q in questions]
@@ -4048,7 +4384,7 @@ index 46ca8fa1..d62ae190 100644
      terminal = proposals_done and all(a or e for a, e in zip(answered, expired, strict=True))
      return terminal, all(answered), questions
  
-@@ -2025,6 +2035,7 @@ class RollbackReport:
+@@ -2052,6 +2062,7 @@ class RollbackReport:
      rerouted_rows: int
      expired_proposals: int
      pushed_raw: int
@@ -4056,7 +4392,7 @@ index 46ca8fa1..d62ae190 100644
  
  
  _ROLLBACK_STATES = (STATE_RESULT_READY, "deciding", "awaiting_owner")
-@@ -2032,6 +2043,10 @@ _SWEEP_BATCH = 200
+@@ -2059,6 +2070,10 @@ _SWEEP_BATCH = 200
  RAW_PUSH_CHARS = 3900
  # delivered_session_id of a row the rollback sent by Telegram instead of routing.
  ROLLBACK_SESSION_ID = "rollback"
@@ -4067,7 +4403,7 @@ index 46ca8fa1..d62ae190 100644
  
  
  async def rollback_at_startup(
-@@ -2091,15 +2106,17 @@ async def rollback_at_startup(
+@@ -2118,14 +2133,18 @@ async def rollback_at_startup(
                  stuck[row.intention_id].append(row)
  
      pushed_ids: list[UUID] = []
@@ -4076,17 +4412,18 @@ index 46ca8fa1..d62ae190 100644
      if not inbox_on:
          waiting = sum(len(rows) for rows in stuck.values())
          if telegram_push is None and waiting:
++            undeliverable_ids = [row.id for rows in stuck.values() for row in rows]
              logger.warning(
                  "F099: the rollback found %d result(s) that cannot be delivered (the inbox is off and Telegram is not "
 -                "configured); they stay on their work rows",
-+                "configured); they stay on their work rows and are marked delivered",
++                "configured); they stay on their work rows and are marked delivered, not read by anyone "
++                "(row, intention; the first 20): %s",
                  waiting,
++                [(str(row.id), str(row.intention_id)) for rows in stuck.values() for row in rows][:20],
              )
-+            undeliverable_ids = [row.id for rows in stuck.values() for row in rows]
          elif telegram_push is not None:
              for it in open_rows:
-                 for row in stuck[it.id]:
-@@ -2127,10 +2144,11 @@ async def rollback_at_startup(
+@@ -2154,10 +2173,11 @@ async def rollback_at_startup(
                  if row_ids and channel is None:
                      logger.warning(
                          "F099: the rollback found %d result(s) of intention %s with no owner channel (no origin "
@@ -4099,7 +4436,7 @@ index 46ca8fa1..d62ae190 100644
                  elif row_ids:
                      # created_at is when chat can see the row, so F098's claim window starts now and
                      # not at the age of the work (a result that waited past it would never be shown).
-@@ -2141,6 +2159,15 @@ async def rollback_at_startup(
+@@ -2168,18 +2188,40 @@ async def rollback_at_startup(
                          .execution_options(synchronize_session=False)
                      )
                      rerouted += moved.rowcount or 0
@@ -4113,9 +4450,38 @@ index 46ca8fa1..d62ae190 100644
 +                .execution_options(synchronize_session=False)
 +            )
          if close_ids:
-             gone = await session.execute(
+-            gone = await session.execute(
++            # S6 of the plan review: every proposal that could still run, the `approved` ones too. The intention
++            # closes below, so a call approved and not yet started would otherwise be resumed by a later flag-on
++            # sweep and its outcome would reach nobody. A later tap is refused, as before.
++            shown = await session.execute(
++                update(IntentionProposal)
++                .where(
++                    IntentionProposal.agent_id == agent_id,
++                    IntentionProposal.intention_id.in_(close_ids),
++                    IntentionProposal.state.in_(_SHOWN_PROPOSAL_STATES),
++                )
++                .values(state=PROPOSAL_EXPIRED, decided_at=now, decided_by="system", updated_at=now)
++                .execution_options(synchronize_session=False)
++            )
++            unshown = await session.execute(
                  update(IntentionProposal)
-@@ -2183,7 +2210,7 @@ async def rollback_at_startup(
+                 .where(
+                     IntentionProposal.agent_id == agent_id,
+                     IntentionProposal.intention_id.in_(close_ids),
+-                    IntentionProposal.state.in_(("staged", "pending")),
++                    IntentionProposal.state == PROPOSAL_STAGED,
+                 )
+-                .values(state="expired", updated_at=now)
++                .values(state=PROPOSAL_EXPIRED, updated_at=now)
+                 .execution_options(synchronize_session=False)
+             )
+-            expired = gone.rowcount or 0
++            expired = (shown.rowcount or 0) + (unshown.rowcount or 0)
+             closed += len(
+                 (
+                     await session.execute(
+@@ -2210,7 +2252,7 @@ async def rollback_at_startup(
              if len(swept) < _SWEEP_BATCH:
                  break
          await session.commit()
@@ -4124,7 +4490,7 @@ index 46ca8fa1..d62ae190 100644
  
  
  # ---------------------------------------------------------------------------
-@@ -2885,6 +2912,38 @@ async def finish_execution(
+@@ -2914,6 +2956,38 @@ async def finish_execution(
      return ProposalExecution(proposal_id, final, proposal.result, proposal.error, woke, True, None)
  
  
@@ -4163,7 +4529,7 @@ index 46ca8fa1..d62ae190 100644
  async def end_unrunnable(
      session: AsyncSession, agent_id: str, proposal_id: UUID, *, settings: Any, now: datetime | None = None
  ) -> ProposalExecution:
-@@ -3107,7 +3166,7 @@ async def record_answer(
+@@ -3136,7 +3210,7 @@ async def record_answer(
      if owner_answered:
          raise AnswerRefused(REFUSE_ANSWERED)
      ttl = timedelta(hours=float(settings.intention_proposal_ttl_hours))
@@ -4178,7 +4544,7 @@ index 46ca8fa1..d62ae190 100644
 
 ```diff
 diff --git a/nous/handlers/continuation_runner.py b/nous/handlers/continuation_runner.py
-index 306a5265..12c3d13e 100644
+index d4e403a3..589f18c0 100644
 --- a/nous/handlers/continuation_runner.py
 +++ b/nous/handlers/continuation_runner.py
 @@ -333,6 +333,9 @@ CANCEL_WAIT_SECONDS = 5.0
@@ -4221,7 +4587,7 @@ index 306a5265..12c3d13e 100644
          pushed = await self._step("owner push", self._push, 0)
          launched, next_due = await self._step("launch", self._launch, ([], None))
          return continuation.SweepReport(
-@@ -568,8 +580,42 @@ class ContinuationRunner:
+@@ -580,8 +592,42 @@ class ContinuationRunner:
          if woken:  # the sweep launches next, so no wake()
              logger.info("F099: woke answered or expired question(s): %s", woken)
  
@@ -4265,7 +4631,7 @@ index 306a5265..12c3d13e 100644
  
      async def _launch(self) -> tuple[list[UUID], datetime | None]:
          """Claim-and-run every root that is due, while a slot is free. The claim itself happens inside the
-@@ -1139,12 +1185,26 @@ class ContinuationRunner:
+@@ -1151,12 +1197,26 @@ class ContinuationRunner:
              # owner approved half way (it would sit `executing` until the in-doubt sweep). Tracked, so a graceful
              # stop() waits for it (bounded); a process stop still ends it, and the proposal is failed in doubt as
              # C13 says.
@@ -4302,7 +4668,7 @@ index 306a5265..12c3d13e 100644
 
 ```diff
 diff --git a/nous/main.py b/nous/main.py
-index 49ee5dbc..52d32723 100644
+index b55e9b47..f357136a 100644
 --- a/nous/main.py
 +++ b/nous/main.py
 @@ -275,14 +275,15 @@ async def _rollback_continuation(settings: Settings, database: Database) -> None
@@ -4325,13 +4691,74 @@ index 49ee5dbc..52d32723 100644
  
 ```
 
-- [ ] **Step 4: Run** `tests/test_f099_phase2e_residuals.py tests/test_f099_phase2b_rollback.py tests/test_f099_phase2c_loop.py tests/test_f099_phase2c_expiry_wake.py tests/test_f099_phase2c_plumbing.py tests/test_f099_phase2d_actions.py tests/test_f099_phase2d_answers.py tests/test_f099_phase2d_routes.py -q`: all pass (18 new). `report.pushed == 2` of 2c-2 is unchanged: a push that finishes inside the wait still reports its count.
+**Apply to `nous/heart/result_inbox.py`:**
+
+```diff
+diff --git a/nous/heart/result_inbox.py b/nous/heart/result_inbox.py
+index 54c28eea..1a8ca7ab 100644
+--- a/nous/heart/result_inbox.py
++++ b/nous/heart/result_inbox.py
+@@ -422,12 +422,23 @@ class ResultInboxStore:
+             return await session.get(ChannelSession, (self._agent_id, channel))
+ 
+     async def metrics(self, days: int) -> dict[str, Any]:
+-        """Delivery rate and latency per source kind over the last ``days``."""
++        """Delivery rate and latency per source kind over the last ``days``.
++
++        A row a person or a runner read is ``delivered``. A row F099 closed without anyone reading it is not: the
++        rollback's ``undeliverable`` (a result with nowhere to go) and the cancel's ``closed_by_cancel`` (work the
++        owner stopped) carry ``delivered_at`` as a stamp, and counting them as delivered would improve the rate by
++        exactly the rows nobody read. They are reported in their own buckets and left out of the rate's
++        denominator (they were never deliverable) and of the latencies."""
+         since = datetime.now(UTC) - timedelta(days=days)
+         async with self._db.session() as session:
+             rows = (
+                 await session.execute(
+-                    select(ResultInbox.source_kind, ResultInbox.created_at, ResultInbox.delivered_at)
++                    select(
++                        ResultInbox.source_kind,
++                        ResultInbox.created_at,
++                        ResultInbox.delivered_at,
++                        ResultInbox.delivered_session_id,
++                    )
+                     .where(ResultInbox.agent_id == self._agent_id)
+                     .where(ResultInbox.created_at > since)
+                 )
+@@ -435,11 +446,21 @@ class ResultInboxStore:
+         out: dict[str, Any] = {}
+         for kind in (SOURCE_SUBTASK, SOURCE_DAG, continuation.SOURCE_INTENTION_REPORT):
+             mine = [r for r in rows if r[0] == kind]
+-            latencies = sorted((_aware(r[2]) - _aware(r[1])).total_seconds() for r in mine if r[2] is not None)
++            undeliverable = [r for r in mine if r[2] is not None and r[3] == continuation.ROLLBACK_UNDELIVERABLE_ID]
++            closed = [r for r in mine if r[2] is not None and r[3] == continuation.SILENT_SESSION_ID]
++            latencies = sorted(
++                (_aware(r[2]) - _aware(r[1])).total_seconds()
++                for r in mine
++                if r[2] is not None
++                and r[3] not in (continuation.ROLLBACK_UNDELIVERABLE_ID, continuation.SILENT_SESSION_ID)
++            )
++            deliverable = len(mine) - len(undeliverable) - len(closed)
+             out[kind] = {
+                 "created": len(mine),
+                 "delivered": len(latencies),
+-                "delivery_rate": round(len(latencies) / len(mine), 4) if mine else None,
++                "undeliverable": len(undeliverable),
++                "closed_by_cancel": len(closed),
++                "delivery_rate": round(len(latencies) / deliverable, 4) if deliverable else None,
+                 "latency_p50_s": _percentile(latencies, 0.50),
+                 "latency_p95_s": _percentile(latencies, 0.95),
+             }
+```
+
+- [ ] **Step 4: Run** `tests/test_f099_phase2e_residuals.py tests/test_f099_phase2b_rollback.py tests/test_f099_phase2c_loop.py tests/test_f099_phase2c_expiry_wake.py tests/test_f099_phase2c_plumbing.py tests/test_f099_phase2d_actions.py tests/test_f099_phase2d_answers.py tests/test_f099_phase2d_routes.py -q`: all pass (21 new). `report.pushed == 2` of 2c-2 is unchanged: a push that finishes inside the wait still reports its count.
 
 - [ ] **Step 5: Mutation checks**
   1. Disable the undeliverable stamp: two tests fail.
   2. Make `question_window_start` return `created_at`: two tests fail.
   3. Remove the `"approved resume"` step: two tests fail.
   4. Wait for the push without the timeout (`asyncio.wait({task})`): the slow-publisher test times out (the sweep is held).
+  5. In `metrics`, drop the sentinel exclusion from the latencies: `test_the_inbox_metrics_count_a_row_nobody_read_apart_from_the_delivered_ones` fails.
+  6. In the rollback, restrict the shown-proposal UPDATE to `pending`: `test_the_flag_off_rollback_ends_an_approved_proposal_so_a_later_flag_on_never_resumes_it` fails.
 
 - [ ] **Step 6: Lint and commit** (`feat(F099): 2e-6 residuals: rollback stamp, question window, approved resume, push task`).
 
@@ -4354,7 +4781,7 @@ async def list_roots(session, agent_id, *, state: str, limit: int, settings) -> 
 CANCEL_REFUSALS = {"finished": "That work has already finished, so there was nothing to cancel."}   # nous/owner_actions.py
 ```
 - `GET /intentions?state=open|all&limit=1..100` (default `open`, 20): `200 {"roots": [RootView], "continuation": bool}`; 400 for a bad limit or state. `RootView` is the contract's, compact: `id, short_id, intent, state, wake_policy, authority, origin_kind, origin_channel, created_at, deadline, root_cancelled_at, root_expired_at, open_rows, limits (null for a container), lineage (≤ 50), lineage_truncated, arrivals (newest 5, oldest first), open_proposals`. `open` means no marker and an open intention in the lineage.
-- `POST /intentions/{root_id}/cancel` with an optional `{"reason"?, "actor"?}` (no body is allowed): `200 {"root_id","short_id","already_cancelled","cancelled_intentions","cancelled_subtasks","cancelled_dags","cancelled_proposals","deactivated_schedules","turn_stopped"}`; 400 malformed or ambiguous id or a non-object body; 404 no such root (a child's id is no root); 409 `{"error", "refusal": "finished"}`; 503 no runner (`continuation is not running`). No authentication, as every owner route (R12).
+- `POST /intentions/{root_id}/cancel` with an optional `{"reason"?, "actor"?}` (no body is allowed): `200 {"root_id","short_id","already_cancelled","cancelled_intentions","cancelled_subtasks","cancelled_dags","cancelled_proposals","deactivated_schedules","turn_stopped"}`; 400 malformed or ambiguous id or a non-object body; 404 no such root (a child's id is no root); 409 `{"error", "refusal": "finished"}`; 503 no runner (`continuation is not running`). No authentication, as every owner route (R12). The route and list docstrings say what a cancel cannot take back (an approved call already `executing`: a send in flight completes) and that, with the flag on, the open Phase 1 roots (containers included) are listed and can be cancelled, with the budgets read per root (a card asks for `limit=10`).
 
 - [ ] **Step 1: Write the tests**
 
@@ -4642,7 +5069,7 @@ def test_the_cancel_refusal_vocabulary_is_keyed_by_the_stores_codes():  # PIN
 
 ```diff
 diff --git a/nous/brain/continuation.py b/nous/brain/continuation.py
-index d62ae190..b7c9ca38 100644
+index 58ea4b88..fc4dc085 100644
 --- a/nous/brain/continuation.py
 +++ b/nous/brain/continuation.py
 @@ -16,7 +16,7 @@ import re
@@ -4654,7 +5081,7 @@ index d62ae190..b7c9ca38 100644
  from datetime import UTC, datetime, timedelta
  from typing import Any
  from uuid import UUID
-@@ -3806,3 +3806,135 @@ async def end_hanging_root(
+@@ -3879,3 +3879,135 @@ async def end_hanging_root(
      )
      logger.info("F099: root %s was left with nothing running; it was closed and reported", root_id)
      return True
@@ -4817,7 +5244,7 @@ index 4ebeb35c..e5bb547c 100644
 
 ```diff
 diff --git a/nous/api/intention_routes.py b/nous/api/intention_routes.py
-index 9ae8850d..fd7e595c 100644
+index 9ae8850d..0b2c5f3f 100644
 --- a/nous/api/intention_routes.py
 +++ b/nous/api/intention_routes.py
 @@ -21,11 +21,16 @@ from starlette.responses import JSONResponse
@@ -4857,7 +5284,7 @@ index 9ae8850d..fd7e595c 100644
      agent_id = settings.agent_id
  
      async def list_proposals(request: Request) -> JSONResponse:
-@@ -193,10 +205,87 @@ def build_intention_routes(*, database: Any, settings: Any, continuation_runner:
+@@ -193,10 +205,93 @@ def build_intention_routes(*, database: Any, settings: Any, continuation_runner:
              return _error(404, "no question was sent as that message")
          return await _record(question_id, text, _actor(body))
  
@@ -4867,7 +5294,9 @@ index 9ae8850d..fd7e595c 100644
 +
 +        With continuation off the answer is an empty list marked ``"continuation": false`` and no row is read: the
 +        view belongs to the continuation, and with it off nothing can be cancelled (the cancel answers 503), so a
-+        deployment on prod's flags sees no change and pays nothing."""
++        deployment on prod's flags sees no change and pays nothing. With it on, every open root is listed, the
++        open Phase 1 roots (a schedule's container included) among them, and they can be cancelled. The budgets of
++        each root are read per root (several queries): a card should ask for ``limit=10``."""
 +        state = request.query_params.get("state", "open")
 +        raw_limit = request.query_params.get("limit", "20")
 +        if not (raw_limit.isascii() and raw_limit.isdigit()) or not 1 <= int(raw_limit) <= LIST_LIMIT_MAX:
@@ -4889,7 +5318,11 @@ index 9ae8850d..fd7e595c 100644
 +        no runner is a 503, so a deployment with continuation off answers 503 for a root of Phase 1 and 404 for the
 +        rest, and cancels nothing (a store-only cancel would cancel a real Phase 1 lineage without the runner that
 +        stops its turn and its DAGs). 409 when nothing was running. Deterministic: no model takes part and no agent
-+        tool reaches it."""
++        tool reaches it.
++
++        What a cancel cannot take back: a call the owner approved that is already ``executing`` is left alone. It is
++        refused if it has not passed the tool authorisation yet; a send already in flight completes (its outcome is
++        written to nobody: the work has ended)."""
 +        raw = await request.body()
 +        body: dict[str, Any] = {}
 +        if raw.strip():
@@ -4982,7 +5415,7 @@ index 5a5d9924..8994acaf 100644
 
 ## Task 2e-8: the bot's `/intentions` and `/cancel_intention`, and the prod parity pins
 
-**Prod runs:** the bot is a separate process that exists in prod, so this is the one task where prod code runs differently, and it is built so that nothing the owner or the agent can see differs. Prod's telegram service has no `NOUS_TELEGRAM_CHAT_ID` today, so `owner_chat_id` is None: `_is_owner` is False and both commands are chat, with no request made. Once the owner adds the chat id (a deploy note), `/intentions` asks the server, which answers `continuation: false` while the flag is off, and the bot then passes the message on to chat unchanged (so the flag-off behaviour is the same as today's); `/cancel_intention` with a root id of Phase 1 gets the server's 503 and says "not running its follow-up work", and with any other id a 404 and goes to chat. The parity file is the collected proof for the whole PR.
+**Prod runs:** the bot is a separate process that exists in prod, so this is the one task where prod code runs differently, and it is built so that nothing the owner or the agent can see differs. Prod's telegram service has no `NOUS_TELEGRAM_CHAT_ID` today, so `owner_chat_id` is None: `_is_owner` is False and both commands are chat, with no request made. Once the owner adds the chat id (a deploy note), `/intentions` asks the server, which answers `continuation: false` while the flag is off, and the bot then passes the message on to chat unchanged (so the flag-off behaviour is the same as today's); `/cancel_intention` with a root id of Phase 1 gets the server's 503 and says "not running its follow-up work", and with any other id a 404 and goes to chat. The parity file is the collected proof for the whole PR; it also pins N2 of the plan review (`test_a_view_that_cannot_be_loaded_does_not_fail_the_build`).
 
 **Files:**
 - Modify: `nous/telegram_bot.py` (not format-clean on the base: edit, do not reformat)
@@ -5372,6 +5805,31 @@ async def test_a_built_runner_installs_its_view_and_loads_it_before_anything_run
     )
     assert [kind for kind, _ in order] == ["view", "load"]
     assert order[0][1] == built.root_is_cancelled and built._task is None  # wired, loaded, not started
+
+
+async def test_a_view_that_cannot_be_loaded_does_not_fail_the_build(runner_env, monkeypatch, caplog):  # noqa: F811
+    """N2 of the plan review: `start()` loads the view again and every sweep refreshes it, so a transient error in
+    the first load is a warning, never a failed `create_components`."""
+    monkeypatch.setattr(continuation, "CONTINUATION_RUNNER_READY", True)
+    env = await runner_env()
+    agent_runner = MagicMock()
+
+    async def failing(self):
+        raise RuntimeError("the database blinked")
+
+    monkeypatch.setattr(ContinuationRunner, "load_cancelled_roots", failing)
+    built = await main._build_continuation_runner(
+        env.settings,
+        database=env.db,
+        runner=agent_runner,
+        heart=env.heart,
+        brain=env.brain,
+        bus=None,
+        dispatcher=env.dispatcher,
+    )
+    assert isinstance(built, ContinuationRunner)
+    agent_runner.set_cancelled_roots.assert_called_once_with(built.root_is_cancelled)
+    assert "could not load the cancelled roots" in caplog.text
 
 
 def test_main_binds_the_orchestrators_cancel_where_the_orchestrator_exists():  # PIN
@@ -5809,7 +6267,7 @@ index 49795a42..01de9408 100644
 
 ```diff
 diff --git a/nous/brain/continuation.py b/nous/brain/continuation.py
-index b7c9ca38..6ca48b88 100644
+index fc4dc085..4c345efa 100644
 --- a/nous/brain/continuation.py
 +++ b/nous/brain/continuation.py
 @@ -42,10 +42,10 @@ from nous.storage.models import (
@@ -5833,7 +6291,7 @@ index b7c9ca38..6ca48b88 100644
 
 ```diff
 diff --git a/nous/main.py b/nous/main.py
-index 52d32723..449ff68b 100644
+index f357136a..ca717467 100644
 --- a/nous/main.py
 +++ b/nous/main.py
 @@ -229,13 +229,13 @@ def _warn_on_f098_flags(settings: Settings) -> None:
@@ -5863,7 +6321,7 @@ index 52d32723..449ff68b 100644
      already forces the flag off while the constant is False; this is the second guard, so a change to the
      gate alone cannot start a runner. With either off, nothing is constructed: no loop, no sweep, no
      push, no reconciler pass. The runner is returned unstarted: `create_components` starts it as its LAST
-@@ -1133,8 +1133,8 @@ async def create_components(settings: Settings) -> dict:
+@@ -1138,8 +1138,8 @@ async def create_components(settings: Settings) -> dict:
                  _context_log_retention_loop(settings, database), name="context-log-retention"
              )
  
@@ -5880,7 +6338,7 @@ index 52d32723..449ff68b 100644
 
 ```diff
 diff --git a/nous/handlers/continuation_runner.py b/nous/handlers/continuation_runner.py
-index 12c3d13e..207be1b3 100644
+index 589f18c0..12489e62 100644
 --- a/nous/handlers/continuation_runner.py
 +++ b/nous/handlers/continuation_runner.py
 @@ -5,7 +5,7 @@ thread of its own (``intent-<root>``), that ends with one decision: ``resolve_in
@@ -5947,15 +6405,15 @@ index 9199a7b7..7e3c4663 100644
 
 ```diff
 diff --git a/docs/reference/rest-api.md b/docs/reference/rest-api.md
-index 52edcd93..0191c5f4 100644
+index 52edcd93..79cec9a5 100644
 --- a/docs/reference/rest-api.md
 +++ b/docs/reference/rest-api.md
 @@ -38,6 +38,8 @@ Documented routes served by `nous/api/rest.py`, which is the full list. Part of
  | POST | `/intentions/proposals/{id}/decide` | F099 Phase 2d: the owner's decision, `{"decision": "approve" \| "reject", "actor"?}`. `{id}` is a UUID or a hex prefix of 8 to 32 characters. An approve runs the staged call once and answers with its state (`executed`, `failed`) and the call's raw `result` and `error`, which a surface that renders them must escape; a repeat is 200 with `changed: false`; a late (expired, work ended) or contradictory decision is 409 with a fixed message; 404 for an id that names nothing (all that a deployment with continuation off ever answers); 503 when a row exists and the runner is not running. Deterministic: no model takes part, and no agent tool can reach it. No in-app authentication (the existing LAN posture) |
  | POST | `/intentions/questions/{id}/answer` | F099 Phase 2d: the owner's answer to a question, `{"text", "actor"?}`, recorded as the next result of every intention of the asking arrival. 409 when already answered, expired or the work ended (nothing is written) |
  | POST | `/intentions/questions/answer` | F099 Phase 2d: the same, addressed by the Telegram message the question was pushed as: `{"chat_id", "message_id", "text", "actor"?}`. 404 when no question was sent as that message (the bot then treats the reply as ordinary chat) |
-+| GET | `/intentions` | F099 Phase 2e: the roots the owner can act on, newest first (`state` `open`, the default, is a root with no cancel or expiry marker and an intention of its lineage still open, `all` adds the rest; `limit` 1 to 100, default 20). Each carries its columns, its budgets (`limits`, none for a schedule's container), up to 50 lineage rows, its newest 5 arrivals and its open proposals. `200 {"roots": [], "continuation": false}` with `NOUS_CONTINUATION_ENABLED` off, and no row is read (Phase 1 roots exist but cannot be cancelled without the runner). No in-app authentication (the existing LAN posture) |
-+| POST | `/intentions/{root_id}/cancel` | F099 Phase 2e: the owner's cancel of a root (spec 4.6), `{"reason"?, "actor"?}` (no body is allowed). `{root_id}` is a UUID or a hex prefix of 8 to 32 characters of a ROOT. One transaction marks the root and cancels its lineage, subtasks, proposals, schedules and the open fires of its containers; then the lineage's DAGs, and the running turn, are cancelled, and every later tool call of the lineage is refused. `200` with the counts (`already_cancelled`, `cancelled_intentions`, `cancelled_subtasks`, `cancelled_dags`, `cancelled_proposals`, `deactivated_schedules`, `turn_stopped`); a repeat is 200 with `already_cancelled: true`; 409 `{"refusal": "finished"}` when nothing was running; 404 for an id that is no root; 400 for a malformed or ambiguous id; 503 when there is no continuation runner (a root exists, and nothing is cancelled). Deterministic: no model takes part and no agent tool can reach it |
++| GET | `/intentions` | F099 Phase 2e: the roots the owner can act on, newest first (`state` `open`, the default, is a root with no cancel or expiry marker and an intention of its lineage still open, `all` adds the rest; `limit` 1 to 100, default 20). Each carries its columns, its budgets (`limits`, none for a schedule's container), up to 50 lineage rows, its newest 5 arrivals and its open proposals. With `NOUS_CONTINUATION_ENABLED` **on**, every open root is listed, the open Phase 1 roots (a schedule's container included) among them, and each can be cancelled; with it **off** the answer is `200 {"roots": [], "continuation": false}` and no row is read (Phase 1 roots exist but cannot be cancelled without the runner). The budgets are read per root: ask for `limit=10` from a card. No in-app authentication (the existing LAN posture) |
++| POST | `/intentions/{root_id}/cancel` | F099 Phase 2e: the owner's cancel of a root (spec 4.6), `{"reason"?, "actor"?}` (no body is allowed). `{root_id}` is a UUID or a hex prefix of 8 to 32 characters of a ROOT. One transaction marks the root and cancels its lineage, subtasks, proposals, schedules and the open fires of its containers; then the lineage's DAGs, and the running turn, are cancelled, and every later tool call of the lineage is refused; the lineage's unsent owner rows (a REPORT, QUESTION or PROPOSAL that was deferred or waits for a retry) are closed, so nothing is pushed or shown for it afterwards. A call the owner already approved and that is `executing` is not taken back: a send in flight completes, and its outcome is written to nobody. `200` with the counts (`already_cancelled`, `cancelled_intentions`, `cancelled_subtasks`, `cancelled_dags`, `cancelled_proposals`, `deactivated_schedules`, `turn_stopped`); a repeat is 200 with `already_cancelled: true`; 409 `{"refusal": "finished"}` when nothing was running; 404 for an id that is no root; 400 for a malformed or ambiguous id; 503 when there is no continuation runner (a root exists, and nothing is cancelled). Deterministic: no model takes part and no agent tool can reach it |
  | GET | `/admin/search-weights` | Get search weights |
  | POST | `/admin/search-weights` | Set search weights |
  | GET | `/rubric` | Current rubric |
@@ -5965,14 +6423,14 @@ index 52edcd93..0191c5f4 100644
 
 ```diff
 diff --git a/docs/reference/shipped-features.md b/docs/reference/shipped-features.md
-index 786f5a1d..1ff95b80 100644
+index 786f5a1d..71ffc24b 100644
 --- a/docs/reference/shipped-features.md
 +++ b/docs/reference/shipped-features.md
 @@ -72,3 +72,4 @@ The [Feature Index](../features/INDEX.md) is the complete list of features and t
  | F099 Phase 2c-1 | [Continuation store](../superpowers/specs/2026-10-05-f099-intentions-and-continuation-design.md) (`nous/brain/continuation.py`: the per-root claim (`FOR NO KEY UPDATE`, debounce, max-wait, batch with its deepest member as parent), the deterministic gate, every budget derived from rows, one fenced commit per arrival (arrival row, state moves, one Brain decision that cannot abort it, delivery stamped only there, owner-facing REPORT or QUESTION with a quiet-hours-aware push time), failed attempts and the lease (the cap applies at lease release too), the TTL sweep (a root with no deadline and nothing unread closes without a report), the single wake rule of an `ask`, `repair_missing_results` in the reconciler module, the root TTL and depth/spawn limits written at spawn through `intentions.with_bounds`, and lineage-check tokens counted in their DAG, with the flag on only. A report with no content closes `legacy` (R1). Nothing calls the store yet; the flag is still forced off) | #705 |
  | F099 Phase 2c-2 | [Continuation runner](../superpowers/specs/2026-10-05-f099-intentions-and-continuation-design.md) (`nous/handlers/continuation_runner.py`: one loop that sleeps until a root is due, claims it under a concurrency slot, runs the deterministic gate, runs a `continuation` turn in its own `intent-<root>` thread whose only way out is `resolve_intention` (the decision is read from the tool call, never the text), asks once more if the model forgot with no forced `tool_choice`, falls back to a report, and commits under the claim's fence; a `continue` or `revise` with nothing left running under the root is refused, so the model must spawn the next step first or end with report, drop or ask; a raise or a timeout counts an attempt, a released lease makes a late commit a no-op; `OwnerPublisher` (`nous/handlers/continuation_publisher.py`) pushes REPORT and QUESTION rows to Telegram once each, quiet hours deferring only the push: a row Telegram refuses (HTTP 400 or 403, or an empty chat id) is stamped and skipped, while an outage, or a 401, 404, 429 or 5xx, pauses the queue and is retried at the next sweep; the reconciler's `ContinuationWakePass` repairs and wakes and never runs a turn; `main.py` builds the runner only when the flag is on and `CONTINUATION_RUNNER_READY`, which stays False until 2e, so nothing runs in prod) | #706 |
  | F099 Phase 2d | [Proposals and owner actions](../superpowers/specs/2026-10-05-f099-intentions-and-continuation-design.md) (`propose_action`, a per-turn internal-only extra tool that stages a call (`brain.intention_proposals`, state `staged`, carrying the turn's claim token) and runs nothing; the arrival's fenced commit makes the staged rows `pending` and writes their PROPOSAL rows (an `ask` with proposals writes no QUESTION), and every other outcome, a failed or released attempt included, expires them. The owner decides through `ContinuationRunner.decide_proposal` / `answer_question`, called by four REST routes (`/intentions/...`), the Telegram bot (inline Approve/Reject buttons, `/approve`, `/reject`, `/answer`, reply-to; accepted only from the owner chat, which needs `NOUS_ALLOWED_USERS` when it is a group; an id the server does not know is passed on to chat unchanged, and so is a reply the route does not confirm with a 200 or a 409) and, in Phase 3, the A2UI cards: nothing a model can call. The refusal sentences are one map in `nous/owner_actions.py`, and the decide route's 200 body carries the call's raw `result` and `error`, which any surface that renders them (the Phase 3 cards) must escape. `execute_approved_proposal` runs exactly the stored `(tool, arguments)` once, behind `claim_execution` (`approved` to `executing` in one statement that also requires the root open: the cancel seam), through the execution ledger under the `proposal:{id}` scope and an `approved_action` context with owner authority; a timeout is failed in doubt and never re-run. The batch wakes when every proposal and question of the arrival is terminal; a proposal expires as a rejection at its deadline, which counts from its push (after any quiet hours). Telegram shows model-authored text (a proposal, a question, a report) escaped inside `<pre>`, and a proposal is never truncated (a call too long to read in one message is refused at staging). The `telegram` compose service now receives `NOUS_TELEGRAM_CHAT_ID` (empty default): where it is set, that chat is the bot's owner chat, and an owner command with a well-formed id or a reply to a bot message makes one REST lookup first, which under continuation off answers 404 and the message goes on to chat unchanged. Lands dark: `CONTINUATION_RUNNER_READY` is still False, so nothing runs in prod, and no existing behaviour changes there. The one new answer prod gives is `GET /intentions/proposals`: `200 {"proposals": []}` where Starlette answered 404 before) | #707 |
-+| F099 Phase 2e | [Cancel and the flip](../superpowers/specs/2026-10-05-f099-intentions-and-continuation-design.md) (`continuation.cancel_root`: one transaction, the root locked first, then the lineage's containers and their schedules, writes the marker, cancels the open intentions (a live claim is cleared, so a deciding turn loses its fence), the lineage's subtasks, its `staged`, `pending` and `approved` proposals (so a claim that read the marker before the commit finds its row already moved: `_expire_root` got the same fix), stamps its unread results without reporting them, and cancels the open fires of every container of the lineage; `ContinuationRunner.cancel_root` then takes the roots into an in-process view, cancels the lineage's DAGs through the orchestrator and the running turn tasks, and a sweep step keeps the view and the DAGs right. `AgentRunner._authorize_tool_call` refuses first, whatever the authority or the modes, every call whose context names a cancelled root. The unified late-result rule: an expired root reports a late result raw (the gate included), a cancelled root stamps it silently, in the gate, `record_result` and the stranded-row settle; a lineage whose last waiting child was cancelled closes and reports once. Migration 085: the tokens of a failed attempt are kept on the claim's deepest intention and count against the root's token budget. Residuals: the rollback marks a result it cannot deliver as delivered, a question's window starts at its push, the sweep resumes an approved proposal nobody started, the owner push runs in its own task. `GET /intentions` and `POST /intentions/{root}/cancel`; Telegram `/intentions` and `/cancel_intention` (owner chat only; model-authored text escaped inside `<pre>`; passed on to chat unless the server gives a definite answer). `CONTINUATION_RUNNER_READY` is True: the owner turns `NOUS_CONTINUATION_ENABLED` on, and until then prod runs exactly as before) | this PR |
++| F099 Phase 2e | [Cancel and the flip](../superpowers/specs/2026-10-05-f099-intentions-and-continuation-design.md) (`continuation.cancel_root`: one transaction, the root locked first, then the lineage's containers and their schedules, writes the marker, cancels the open intentions (a live claim is cleared, so a deciding turn loses its fence), the lineage's subtasks, its `staged`, `pending` and `approved` proposals (so a claim that read the marker before the commit finds its row already moved: `_expire_root` got the same fix), stamps its unread results and closes its unsent owner rows (a deferred push never goes out for cancelled work) without reporting them, and cancels the open fires of every container of the lineage; `ContinuationRunner.cancel_root` then takes the roots into an in-process view, cancels the lineage's DAGs through the orchestrator and the running turn tasks, and a sweep step keeps the view and the DAGs right. `AgentRunner._authorize_tool_call` refuses first, whatever the authority or the modes, every call whose context names a cancelled root. The unified late-result rule: an expired root reports a late result raw (the gate included), a cancelled root stamps it silently, in the gate, `record_result` and the stranded-row settle; a lineage whose last waiting child was cancelled closes and reports once. Migration 085: the tokens of a failed attempt are kept on the claim's deepest intention and count against the root's token budget. Residuals: the rollback marks a result it cannot deliver as delivered (the inbox metrics count that stamp, and a cancel's, in their own buckets, never as delivered) and ends approved proposals, a question's window starts at its push, the sweep resumes an approved proposal nobody started, the owner push runs in its own task. `GET /intentions` and `POST /intentions/{root}/cancel`; Telegram `/intentions` and `/cancel_intention` (owner chat only; model-authored text escaped inside `<pre>`; passed on to chat unless the server gives a definite answer). `CONTINUATION_RUNNER_READY` is True: the owner turns `NOUS_CONTINUATION_ENABLED` on, and until then prod runs exactly as before) | this PR |
 ```
 
 **Apply to `docs/features/INDEX.md`:**
@@ -5997,7 +6455,7 @@ index befefdac..668a027c 100644
 
 ```diff
 diff --git a/docs/superpowers/plans/2026-10-06-f099-phase2-contract.md b/docs/superpowers/plans/2026-10-06-f099-phase2-contract.md
-index 3d117004..1439d9ac 100644
+index 3d117004..242920ba 100644
 --- a/docs/superpowers/plans/2026-10-06-f099-phase2-contract.md
 +++ b/docs/superpowers/plans/2026-10-06-f099-phase2-contract.md
 @@ -962,6 +962,15 @@ Nothing in the commit spawns work: spawns happened during the turn through the n
@@ -6006,7 +6464,7 @@ index 3d117004..1439d9ac 100644
  
 +> **Superseded by 2e (as built, `docs/superpowers/plans/2026-10-07-f099-phase2e-cancel-and-flip.md`):**
 +> - §4.5 and §6 risk 1: there was no `_root_cancelled` seam; 2e adds it. `AgentRunner.set_cancelled_roots(view)` and the check, which is the FIRST statement of `_authorize_tool_call` (before the strict block), for every context that names a root; the view is `ContinuationRunner.root_is_cancelled`, a set lookup. The refusal code `root_cancelled` joined `ledger_store.REFUSAL_CODES` (the ledger rejects an unknown code).
-+> - §4.7: `CancelOutcome` has defaults for every field and three more, `dag_ids`, `proposal_ids` and `root_ids`; the store fills what it can and `ContinuationRunner.cancel_root` fills `cancelled_dags` and `turn_stopped`. `cancel_root` marks the root and cancels its lineage, subtasks, `staged`/`pending`/`approved` proposals (in its own transaction under the root lock: `claim_execution`'s root-open predicate sees only a committed marker) and the open fires of every container of the lineage, a container being a row of the lineage as well as a root; `_expire_root` moves the same proposals. `cancelled_root_ids(since=None)` reads every cancelled root; `find_root_id` finds a ROOT by prefix; `stray_dag_ids`, `list_roots`, `close_cancelled_source`, `end_hanging_root`, `question_window_start` and `stalled_approved_ids` are new; `fail_attempt(..., tokens=(0, 0))`; `RollbackReport.undeliverable`; `root_limits` adds `Intention.failed_tokens` (migration 085).
++> - §4.7: `CancelOutcome` has defaults for every field and three more, `dag_ids`, `proposal_ids` and `root_ids`; the store fills what it can and `ContinuationRunner.cancel_root` fills `cancelled_dags` and `turn_stopped`. `cancel_root` marks the root and cancels its lineage, subtasks, `staged`/`pending`/`approved` proposals (in its own transaction under the root lock: `claim_execution`'s root-open predicate sees only a committed marker) and the open fires of every container of the lineage, a container being a row of the lineage as well as a root; `_expire_root` moves the same proposals (the shown ones with `decided_by = system`, and the runner tells the bus), and the cancel closes the lineage's unsent owner rows. `cancelled_root_ids(since=None)` reads every cancelled root; `find_root_id` finds a ROOT by prefix; `stray_dag_ids`, `list_roots`, `close_cancelled_source`, `end_hanging_root`, `question_window_start` and `stalled_approved_ids` are new; `fail_attempt(..., tokens=(0, 0))`; `RollbackReport.undeliverable`; `root_limits` adds `Intention.failed_tokens` (migration 085).
 +> - §4.8: `ContinuationRunner.set_cancel_dag` binds the orchestrator's cancel in `main.py` (the runner is built before the orchestrator); `load_cancelled_roots` runs when the runner is built and again at `start`; `run_once` gains a first step (the cancel sweep: refresh the view, cancel stray DAGs) and an approved-resume step, and the owner push runs in its own task (the sweep waits `PUSH_WAIT_SECONDS`, never starts two).
 +> - §4.10: `GET /intentions` returns the contract's RootView, compact (lineage capped at 50, the newest 5 arrivals, the open proposals; no `open_questions`), and answers `{"roots": [], "continuation": false}` without reading a row when continuation is off; `GET /intentions/{root_id}` is not built; the cancel answers 409 `{"refusal": "finished"}` for a root with nothing running, 503 for a root with no runner (it never cancels through the store alone).
 +> - §4.11: `/intentions` (consumed only on a 200 with `continuation: true`, else chat) and `/cancel_intention <root_id>` (a 404 or a malformed id goes on to chat); model-authored intents are shown escaped inside `<pre>`.
@@ -6020,7 +6478,7 @@ index 3d117004..1439d9ac 100644
 
 Replace "this PR" in the new shipped-features row by the PR number when it is known.
 
-- [ ] **Step 5: Run the whole F099 suite and its neighbours** (the plan's validation ran `tests/test_f099_*.py tests/test_runner_ledger.py tests/test_runner_authorization.py tests/test_idempotency.py tests/test_database.py tests/test_tool_classes.py tests/test_telegram_bot.py tests/test_config.py`: 1,856 passed), then the full gate.
+- [ ] **Step 5: Run the whole F099 suite and its neighbours** (the plan's validation ran `tests/test_f099_*.py tests/test_runner_ledger.py tests/test_runner_authorization.py tests/test_idempotency.py tests/test_database.py tests/test_tool_classes.py tests/test_telegram_bot.py tests/test_config.py tests/test_result_inbox*.py tests/test_f098*.py`: 1,980 passed), then the full gate.
 
 - [ ] **Step 6: Check the commit is only the flip.** `git show --stat HEAD` lists exactly the twelve files above. Mutation: set the constant back to `False` and `test_the_runner_is_ready_and_the_constant_is_set_in_one_place` and `test_with_the_flag_on_the_runner_is_built_wired_and_started` fail.
 
@@ -6034,12 +6492,15 @@ Written for the deploy. Nothing below happens until `NOUS_CONTINUATION_ENABLED=t
 
 1. **Deploy the image with the flag OFF (and `NOUS_TELEGRAM_CHAT_ID` added to the telegram service).** Startup: migrations run (085: a metadata-only column and an empty partial index); `_gate_continuation_flag` is a no-op; `_rollback_continuation` runs as at every start: it finds no open `continue` row in `result_ready`, `deciding` or `awaiting_owner` (none was ever written), and its `close_finished_sources` sweep closes the pending intentions whose source already finished as `legacy` (Phase 1 leftovers; a legacy close is never reopened, so the flip cannot re-deliver them). No runner, no view, no new loop. The bot answers `/intentions` as chat (the server says `continuation: false`).
 2. **Set the flag and restart.** Startup sequence: the gate lets the flag through; `_rollback_continuation` returns at once (`enabled`); the runner is built (`ContinuationRunner` with an `OwnerPublisher`), subscribed to `intention.result_ready`, the AgentRunner gets the cancelled-roots view and `load_cancelled_roots` fills it (no cancelled root exists yet: an empty set); the reconciler registers `ContinuationWakePass`; the orchestrator's cancel is bound once the DAG block exists; the runner is started last (`start`: `release_stale_claims`, none; the view loaded again; the loop).
-3. **The first sweep** (the loop runs one immediately, then at least every 60 s): the cancel sweep (the view is current, no stray DAG); the lease release finds no claim; the TTL sweep `expire_roots` takes **at most `EXPIRE_BATCH = 10` roots per sweep**, oldest first, those with an open `continue` or `report` intention and a deadline past (a Phase 1 root has none, so `created_at + 72 h`): an old Phase 1 root with nothing unread closes **silently** (no deadline and nothing unread means no report), one with unread rows reports them once; a backlog of N such roots takes N/10 sweeps. Then the proposal expiry (none), the question wake (none), the approved resume (none), the owner push, and the launch (no root is `result_ready` yet).
+3. **The first sweep** (the loop runs one immediately, then at least every 60 s): the cancel sweep (the view is current, no stray DAG); the lease release finds no claim; the TTL sweep `expire_roots` takes **at most `EXPIRE_BATCH = 10` roots per sweep**, oldest first, those with an open `continue` or `report` intention and a deadline past (a Phase 1 root has none, so `created_at + 72 h`). **A root older than the TTL at flip time is the only kind a sweep expires**: if intentions have been on for less than the TTL (check the oldest pending root's `created_at`), the first sweeps expire nothing; once roots pass it, only those whose work is still not terminal remain (the finished ones were closed by the flag-off restart): stuck or orphaned subtasks. Each closes **silently** (no deadline and nothing unread means no report), one with unread rows reports them once; a backlog of N such roots takes N/10 sweeps. `_expire_root` does not cancel the subtask, so nothing live is killed. Then the proposal expiry (none), the question wake (none), the approved resume (none), the owner push, and the launch (no root is `result_ready` yet).
+   **Check before the flip, after the flag-off restart:** `SELECT count(*) FROM brain.intentions WHERE wake_policy IN ('continue','report') AND state = 'pending' AND created_at < now() - interval '72 hours'` is what the first sweeps will expire, and `SELECT count(*) FROM brain.intentions i JOIN heart.subtasks s ON s.id::text = i.source_id WHERE i.source_kind = 'subtask' AND i.state = 'pending' AND s.status IN ('completed','failed','cancelled')` (pending intentions whose subtask is terminal) should be 0 once the flag-off start's `close_finished_sources` sweep has run.
 4. **The publisher backlog is empty.** Flag-off writers never set `push_after`, and `push_due` reads only `intention_report` rows with `push_after` set and `pushed_at` null, so the first push has nothing to send.
-5. **What the owner sees.** The WARNING "continuation stays OFF" is gone from the log. A `continue` result no longer goes to chat raw: the next result of a spawn from chat becomes a continuation arrival, and the owner hears only what Nous decides to say (a report, a question, a proposal with Approve and Reject buttons), pushed to Telegram once each (quiet hours defer the push, not the row). `/intentions` lists the open roots (schedule containers included, newest first, the intent shown escaped); `/cancel_intention <id>` or `POST /intentions/{root}/cancel` stops one. A spawn that was already running at the flip finishes into the continuation. Budgets apply from the first arrival (8 turns, 400,000 tokens, depth 3, 12 spawns per root).
+5. **What the owner sees.** The WARNING "continuation stays OFF" is gone from the log. A `continue` result no longer goes to chat raw: the next result of a spawn from chat becomes a continuation arrival, and the owner hears only what Nous decides to say (a report, a question, a proposal with Approve and Reject buttons), pushed to Telegram once each (quiet hours defer the push, not the row). `/intentions` lists the open roots (schedule containers included, newest first, the intent shown escaped); `/cancel_intention <id>` or `POST /intentions/{root}/cancel` stops one. Budgets apply from the first arrival (8 turns, 400,000 tokens, depth 3, 12 spawns per root).
+   **The two changes the owner meets first, both from work that began before the flip:** (a) a Phase 1 root older than the TTL whose subtask is still running when a sweep runs is expired silently; when that subtask finishes, `record_result` reports its late result raw as a REPORT **and pushes it to Telegram once** (today that result goes to chat through F098 routing): one message per such result, never a flood; (b) a Phase 1 root younger than the TTL with running work finishes **into a continuation turn**, under an `owner`-authority root with no deadline (its children get `created_at + TTL` as theirs): these are the first continuation turns the owner sees, on work spawned before the flip.
+   **`/intentions` and the flag.** With the flag ON the list shows every open root, the open Phase 1 roots (a schedule's container included) among them, and each can be cancelled; with it OFF the answer is empty (and the bot passes the message on to chat). The lead's ruling "Phase 1 roots are never listed" is the flag-off case only.
 6. **Turning it off again** (restart with the flag off): the startup rollback re-routes the results nothing claimed to chat, expires the open proposals and closes the open `continue` intentions as `legacy`; a result it cannot deliver is marked delivered (carry-over 9). A cancel is permanent: a cancelled root stays cancelled.
 
-**Deploy notes (for the lead, not code):** add `NOUS_TELEGRAM_CHAT_ID` to the prod telegram service's compose environment by hand (without it the bot has no owner chat, so the buttons and commands do nothing); add `NOUS_CONTINUATION_ENABLED=${NOUS_CONTINUATION_ENABLED:-false}` to the prod compose by hand and turn it on only when the owner says so. The prod nous process already has a default chat, which the owner rows and the rollback use.
+**Deploy notes (for the lead, not code):** add `NOUS_TELEGRAM_CHAT_ID` to the prod telegram service's compose environment by hand (without it the bot has no owner chat, so the buttons and commands do nothing); add `NOUS_CONTINUATION_ENABLED=${NOUS_CONTINUATION_ENABLED:-false}` to the prod compose by hand and turn it on only when the owner says so. The prod nous process already has a default chat, which the owner rows and the rollback use. Once the telegram service has its chat id (the first deploy), `/cancel_intention <the id of a Phase 1 root>` answers "Nous is not running its follow-up work." (the route's 503) while the flag is off: a new visible answer before the flip, and harmless; every other id, and `/intentions`, goes on to chat as before.
 
 ---
 
@@ -6051,13 +6512,8 @@ Written for the deploy. Nothing below happens until `NOUS_CONTINUATION_ENABLED=t
 
 **Types and names.** `CancelOutcome` is defined in 2e-1 and consumed in 2e-5 (`dataclasses.replace`) and 2e-7 (the route reads its fields); `root_is_cancelled` (2e-5) is what `main.py` installs with `set_cancelled_roots` (2e-3); `stray_dag_ids` (2e-5) is called by the cancel sweep; `question_window_start` and `stalled_approved_ids` (2e-6) are used by the wake, `record_answer` and the resume; `ROLLBACK_UNDELIVERABLE_ID` and `RollbackReport.undeliverable` (2e-6) by `main.py`'s log; `list_roots` and `ROOT_STATES` (2e-7) by the route; `describe_intentions` and `describe_cancel` (2e-8) by `_handle_owner_text`. The CANCEL vocabulary key `finished` equals `continuation.REFUSE_FINISHED` (pinned).
 
-**Review Focus coverage.** Every line of Review Focus names its tests, and each task lists the mutation that makes them fail.
+**Review Focus coverage.** Every line of Review Focus names its tests, and each task lists the mutation that makes them fail. The plan review's M1, M2 and S6 tests fail without their fixes (mutations 2e-1 #4 and 2e-6 #5 and #6, run on the scratch copy).
 
-## Open questions for the lead
+## Lead rulings on the open questions (applied)
 
-1. **`/cancel_intention` in the bot** (E8). Included because the contract names it and a list with no way to act is half a feature; it is one handler and its tests, removable.
-2. **`GET /intentions/{root_id}` and `open_questions`** (E6) are not built; the list carries lineage, arrivals and proposals. Say if Phase 3's card wants either in 2e.
-3. **`GET /intentions` with continuation off** answers an empty list marked `"continuation": false` and reads nothing (E7). If you prefer it to list the Phase 1 roots that prod really has (read-only), drop the one `if` and its pin; the cancel still answers 503.
-4. **Item 8 closes a hanging root by writing `root_expired_at`** (E13), so a late result of that root is reported raw, never silently reopened (T6). Confirm that consequence.
-5. **The approved resume window** (ruling 3) is `intention_proposal_ttl_hours` from the decision. Say if an approval should be honoured longer or never resumed.
-6. **A cancel of a finished root is refused** (E16), where the spec says a cancel always writes the marker. If you want the marker written regardless (a cancel of finished work then silences its late results), remove the `CancelRefused` raise and the 409 test.
+The lead's rulings (recorded in the carry-over, "Lead rulings on the 2e plan") are applied as the plan proposed them: `/cancel_intention` stays, with the C18 rules; no `GET /intentions/{id}` and no `open_questions` in 2e; `GET /intentions` is empty with continuation off (and, with it on, lists the open Phase 1 roots, which can be cancelled); a closed hanging root counts as expired, so a late result is reported raw and never reopens it; the approved-resume window equals the proposal TTL; a cancel of a finished root is a 409 no-op and the marker is written only on an open root. Deploy: two restarts. Nothing is open.
