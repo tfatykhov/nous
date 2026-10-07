@@ -29,6 +29,7 @@ import httpx
 from nous.api.attachments import classify_attachment, sanitize_filename
 from nous.api.models import Attachment
 from nous.log_redaction import configure_logging
+from nous.owner_actions import parse_callback
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,84 @@ _BOLD_RE = re.compile(r"\*\*(.+?)\*\*")  # **bold**
 _INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")  # `inline code`
 _LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")  # [text](url)
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+# ---- F099 Phase 2d: the owner's actions ------------------------------------------------------------------------
+# Deterministic: parsed in code, sent to the REST routes, never to a model (what the bot does not consume goes on to
+# /chat unchanged, as before 2d). Every line the owner reads
+# back is fixed vocabulary here: a result, an error and every other string the server returns stays out of
+# Telegram (a tool's output or a model's text could contain a tappable /command).
+_ID_ARG_RE = re.compile(r"[0-9a-fA-F-]{8,36}")
+_HEX_ID_RE = re.compile(r"[0-9a-f]{8,32}")
+_DECISION_REFUSALS = {
+    "expired": "That proposal expired before it was decided, so it did not run.",
+    "ended": "That work has already ended, so nothing ran.",
+    "not_pending": "That proposal was already decided the other way.",
+}
+_ANSWER_REFUSALS = {
+    "answered": "That question was already answered.",
+    "expired": "That question expired before it was answered.",
+    "ended": "That work has already ended, so your answer was not recorded.",
+}
+_UNREACHABLE = "I could not reach Nous. Try again in a moment."
+_NOT_RUNNING = "Nous is not running its follow-up work."
+OWNER_REQUEST_TIMEOUT = 300  # an approve runs the call inline, bounded by the server's tool timeout
+
+
+def parse_chat_id(value: object) -> int | None:
+    """The owner chat from ``telegram_chat_id`` (a string such as ``8080`` or ``-1001234``), else None."""
+    text = str(value).strip() if value is not None else ""
+    return int(text) if re.fullmatch(r"-?\d+", text) else None
+
+
+def _hex_id(arg: str) -> str | None:
+    """An id or a prefix as hex only (dashes dropped), or None: the one shape allowed into a URL."""
+    if not _ID_ARG_RE.fullmatch(arg):
+        return None
+    cleaned = arg.replace("-", "").lower()
+    return cleaned if _HEX_ID_RE.fullmatch(cleaned) else None
+
+
+def describe_decision(status: int, body: dict, approve: bool, short_id: str) -> tuple[str, bool]:
+    """``(text, final)`` for the answer of the decide route. ``final`` says the buttons come off: the proposal can
+    no longer be decided. Fixed vocabulary only (the state and refusal are looked up, never echoed)."""
+    if status == 200:
+        state = body.get("state")
+        known = {
+            "executed": f"Approved and executed ({short_id}).",
+            "failed": f"Approved, but the call failed ({short_id}). Nothing was retried.",
+            "rejected": f"Rejected ({short_id}).",
+            "approved": f"Approved ({short_id}).",
+            "executing": f"Already running ({short_id}).",
+        }
+        return (known.get(state, f"Done ({short_id}).") if isinstance(state, str) else f"Done ({short_id})."), True
+    if status == 404:
+        return "That proposal is no longer available.", True
+    if status == 409:
+        refusal = body.get("refusal")
+        text = _DECISION_REFUSALS.get(refusal) if isinstance(refusal, str) else None
+        return text or "That proposal can no longer be decided.", True
+    if status == 400:
+        return "I could not read that id.", False
+    if status == 503:
+        return _NOT_RUNNING, False
+    return _UNREACHABLE, False
+
+
+def describe_answer(status: int, body: dict) -> str:
+    """The text for the answer of an answer route (fixed vocabulary, like ``describe_decision``). Not called for a
+    404."""
+    if status == 200:
+        return "Answer recorded."
+    # No 404 arm: a 404 is passed on to chat by both callers before this is called (C18, strict parity).
+    if status == 409:
+        reason = body.get("reason")
+        text = _ANSWER_REFUSALS.get(reason) if isinstance(reason, str) else None
+        return text or "That question can no longer be answered."
+    if status == 400:
+        return "I could not read that."
+    if status == 503:
+        return _NOT_RUNNING
+    return _UNREACHABLE
 
 
 def sanitize_telegram(text: str) -> str:
@@ -480,12 +559,14 @@ class NousTelegramBot:
         allowed_users: set[int] | None = None,
         attachments_enabled: bool = False,
         attachments_default_prompt: str = "What can you tell me about this?",
+        owner_chat_id: int | None = None,
     ):
         self.bot_token = bot_token
         self.nous_url = nous_url.rstrip("/")
         self.allowed_users = allowed_users
         self.attachments_enabled = attachments_enabled
         self.attachments_default_prompt = attachments_default_prompt
+        self.owner_chat_id = owner_chat_id
         self._offset = 0
         # Map telegram chat_id -> nous session_id for continuity
         self._sessions: dict[int, str] = {}
@@ -536,6 +617,10 @@ class NousTelegramBot:
 
     async def _handle_update(self, update: dict[str, Any]) -> None:
         """Handle a single Telegram update."""
+        callback_query = update.get("callback_query")
+        if callback_query:
+            await self._handle_callback(callback_query)  # F099 2d: a tap on a proposal's button
+            return
         message = update.get("message")
         if not message:
             return
@@ -578,6 +663,10 @@ class NousTelegramBot:
         # Handle /identity - show current agent identity
         if text == "/identity":
             await self._show_identity(chat_id)
+            return
+
+        # F099 2d: /approve, /reject, /answer and a reply to one of our messages, from the owner chat only.
+        if await self._handle_owner_text(message, chat_id, user_id, text):
             return
 
         # Download inbound attachments (photos/documents/stickers).
@@ -657,6 +746,126 @@ class NousTelegramBot:
         await self._chat_streaming(
             chat_id, text, user_id=str(user_id) if user_id else None,
             user_display_name=user_display_name, attachments=attachments or None)
+
+    # ------------------------------------------------------------------
+    # F099 Phase 2d: the owner's actions
+    # ------------------------------------------------------------------
+
+    def _is_owner(self, chat_id: Any, user_id: Any) -> bool:
+        """An owner action is accepted only from the owner chat (``telegram_chat_id``) and, when
+        ``NOUS_ALLOWED_USERS`` is set, only from an allowed user. Without an allowlist the user must BE the owner
+        chat (a private chat's id is the user's id); a group chat therefore needs an allowlist. Fails closed."""
+        if self.owner_chat_id is None or chat_id != self.owner_chat_id or user_id is None:
+            return False
+        if self.allowed_users:
+            return user_id in self.allowed_users
+        return user_id == self.owner_chat_id
+
+    async def _owner_post(self, path: str, payload: dict[str, Any]) -> tuple[int, dict]:
+        """POST to a REST owner route: ``(status, body)``; status 0 when the server could not be reached."""
+        try:
+            response = await self._http.post(f"{self.nous_url}{path}", json=payload, timeout=OWNER_REQUEST_TIMEOUT)
+        except Exception as exc:
+            logger.warning("owner action request failed (%s)", type(exc).__name__)
+            return 0, {}
+        try:
+            body = response.json()
+        except Exception:
+            body = {}
+        return response.status_code, body if isinstance(body, dict) else {}
+
+    async def _answer_callback(self, query_id: Any, text: str) -> None:
+        if query_id is not None:
+            await self._tg("answerCallbackQuery", params={"callback_query_id": query_id, "text": text})
+
+    async def _decide(self, hex_id: str, approve: bool, user_id: Any) -> tuple[int, str, bool]:
+        """``(status, text, final)``: the route's status, and what ``describe_decision`` says of it."""
+        status, body = await self._owner_post(
+            f"/intentions/proposals/{hex_id}/decide",
+            {"decision": "approve" if approve else "reject", "actor": f"telegram:{user_id}"},
+        )
+        return (status, *describe_decision(status, body, approve, hex_id[:8]))
+
+    async def _handle_callback(self, query: dict[str, Any]) -> None:
+        """A tap on a proposal's Approve or Reject button."""
+        query_id = query.get("id")
+        message = query.get("message") or {}
+        chat_id = (message.get("chat") or {}).get("id")
+        user_id = (query.get("from") or {}).get("id")
+        if not self._is_owner(chat_id, user_id):
+            await self._answer_callback(query_id, "Not authorized.")
+            return
+        parsed = parse_callback(query.get("data"))
+        if parsed is None:
+            await self._answer_callback(query_id, "Unknown button.")
+            return
+        _kind, hex_id, action = parsed
+        approve = action == "a"
+        await self._answer_callback(query_id, "Approving\u2026" if approve else "Rejecting\u2026")
+        _status, text, final = await self._decide(hex_id, approve, user_id)  # a tap has no chat to fall through to
+        if final and message.get("message_id") is not None:
+            await self._tg(
+                "editMessageReplyMarkup",
+                params={
+                    "chat_id": chat_id,
+                    "message_id": message["message_id"],
+                    "reply_markup": json.dumps({"inline_keyboard": []}),
+                },
+            )
+        await self._send(chat_id, text)
+
+    async def _handle_owner_text(self, message: dict[str, Any], chat_id: Any, user_id: Any, text: str) -> bool:
+        """``/approve``, ``/reject``, ``/answer`` and a reply to one of our messages, in the owner chat. True when
+        the message was consumed; anything else (another chat, another command, a malformed or missing id, an id
+        the server answers 404 for, a reply to something else) is left for the ordinary path, unchanged: under
+        prod's flags nothing exists to approve, so the bot behaves as it did before 2d."""
+        if not self._is_owner(chat_id, user_id):
+            return False
+        command, _, rest = text.strip().partition(" ")
+        command = command.split("@", 1)[0].lower()
+        if command in ("/approve", "/reject"):
+            args = rest.split()
+            hex_id = _hex_id(args[0]) if len(args) == 1 else None
+            if hex_id is None:
+                return False  # not a proposal id: it was never ours (and no argument reaches a URL)
+            status, reply, _final = await self._decide(hex_id, command == "/approve", user_id)
+            if status == 404:
+                return False  # no such proposal: ordinary chat, as before 2d
+            await self._send(chat_id, reply)
+            return True
+        if command == "/answer":
+            parts = rest.strip().split(None, 1)
+            hex_id = _hex_id(parts[0]) if len(parts) == 2 else None
+            if hex_id is None:
+                return False
+            status, body = await self._owner_post(
+                f"/intentions/questions/{hex_id}/answer", {"text": parts[1].strip(), "actor": f"telegram:{user_id}"}
+            )
+            if status == 404:
+                return False  # no such question: ordinary chat, as before 2d
+            await self._send(chat_id, describe_answer(status, body))
+            return True
+        reply_to = message.get("reply_to_message")
+        if (
+            isinstance(reply_to, dict)
+            and (reply_to.get("from") or {}).get("is_bot")
+            and reply_to.get("message_id") is not None
+            and text.strip()
+        ):
+            return await self._try_answer_reply(chat_id, user_id, reply_to["message_id"], text.strip())
+        return False
+
+    async def _try_answer_reply(self, chat_id: Any, user_id: Any, message_id: Any, text: str) -> bool:
+        """A reply to a bot message: the answer to the question that was sent as it. A 404 means it was a reply to
+        something else, so the message goes on to the ordinary chat path."""
+        status, body = await self._owner_post(
+            "/intentions/questions/answer",
+            {"chat_id": chat_id, "message_id": message_id, "text": text, "actor": f"telegram:{user_id}"},
+        )
+        if status == 404:
+            return False
+        await self._send(chat_id, describe_answer(status, body))
+        return True
 
     async def _show_identity(self, chat_id: int) -> None:
         """Show current agent identity via REST API."""
@@ -978,6 +1187,7 @@ async def main() -> None:
         bot_token, nous_url, allowed_users,
         attachments_enabled=_settings.attachments_enabled,
         attachments_default_prompt=_settings.attachments_default_prompt,
+        owner_chat_id=parse_chat_id(_settings.telegram_chat_id),
     )
     try:
         await bot.start()
