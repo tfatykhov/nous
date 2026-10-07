@@ -368,7 +368,11 @@ def test_the_routes_touch_only_the_runners_owner_actions():
     """Surface neutrality: the cards of Phase 3 call the same two functions; the module reaches the runner through
     nothing else, and no model-facing object."""
     source = (Path(__file__).resolve().parents[1] / "nous" / "api" / "intention_routes.py").read_text(encoding="utf-8")
-    assert set(re.findall(r"continuation_runner\.(\w+)", source)) == {"decide_proposal", "answer_question"}
+    assert set(re.findall(r"continuation_runner\.(\w+)", source)) == {
+        "decide_proposal",
+        "answer_question",
+        "cancel_root",
+    }
     assert "dispatcher" not in source and "AgentRunner" not in source
 
 

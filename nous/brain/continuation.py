@@ -17,7 +17,7 @@ import re
 import unicodedata
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -3959,3 +3959,135 @@ async def end_hanging_root(
     )
     logger.info("F099: root %s was left with nothing running; it was closed and reported", root_id)
     return True
+
+
+# ---------------------------------------------------------------------------
+# F099 Phase 2e: the owner's view of the roots (contract RootView, spec 4.6 "GET /intentions")
+# ---------------------------------------------------------------------------
+
+LINEAGE_VIEW_MAX = 50  # the lineage rows one root's view lists (a root's spawn limit is 12 with continuation on)
+ARRIVALS_VIEW_MAX = 5  # the newest arrivals one root's view lists
+ROOT_STATES = ("open", "all")
+
+
+def _lineage_row(row: Intention) -> dict[str, Any]:
+    return {
+        "id": str(row.id),
+        "parent_id": str(row.parent_id) if row.parent_id is not None else None,
+        "depth": row.depth,
+        "source_kind": row.source_kind,
+        "source_id": row.source_id,
+        "state": row.state,
+        "wake_policy": row.wake_policy,
+        "intent": row.intent,
+    }
+
+
+def _limits_view(limits: RootLimits) -> dict[str, Any]:
+    """``RootLimits`` as JSON. ``stalls`` saturates at the stall limit (it says whether the budget is spent, not how
+    long the run is): shown as it is, and a surface must not present it as a total."""
+    return asdict(limits)
+
+
+async def list_roots(
+    session: AsyncSession, agent_id: str, *, state: str, limit: int, settings: Any
+) -> list[dict[str, Any]]:
+    """The roots the owner can act on, newest first, each as a JSON-ready view (contract ``RootView``), in the
+    caller's transaction. ``state`` is ``open`` (no root marker, and an intention of the lineage still open: a
+    finished lineage, and one that was cancelled or expired, are not listed) or ``all``. A view carries the root's
+    own columns, its budgets (``root_limits``, none for a container), up to ``LINEAGE_VIEW_MAX`` lineage rows, its
+    newest ``ARRIVALS_VIEW_MAX`` arrivals and its open proposals. Raises ``ValueError`` for another ``state``.
+    Read-only; four queries for the page plus the budget reads of each root."""
+    if state not in ROOT_STATES:
+        raise ValueError(f"state must be one of {ROOT_STATES}, not {state!r}")
+    query = select(Intention).where(Intention.agent_id == agent_id, Intention.id == Intention.root_id)
+    if state == "open":
+        lineage_row = aliased(Intention)
+        query = query.where(
+            Intention.root_cancelled_at.is_(None),
+            Intention.root_expired_at.is_(None),
+            exists().where(
+                lineage_row.agent_id == agent_id,
+                lineage_row.root_id == Intention.id,
+                lineage_row.state.in_(OPEN_STATES),
+            ),
+        )
+    roots = list(
+        (await session.execute(query.order_by(Intention.created_at.desc(), Intention.id).limit(limit))).scalars()
+    )
+    if not roots:
+        return []
+    ids = [root.id for root in roots]
+    lineage: dict[UUID, list[Intention]] = {root_id: [] for root_id in ids}
+    for row in (
+        await session.execute(
+            select(Intention)
+            .where(Intention.agent_id == agent_id, Intention.root_id.in_(ids))
+            .order_by(Intention.depth, Intention.created_at, Intention.id)
+        )
+    ).scalars():
+        lineage[row.root_id].append(row)
+    arrivals: dict[UUID, list[IntentionArrival]] = {root_id: [] for root_id in ids}
+    for arrival in (
+        await session.execute(
+            select(IntentionArrival)
+            .where(IntentionArrival.agent_id == agent_id, IntentionArrival.root_id.in_(ids))
+            .order_by(IntentionArrival.root_id, IntentionArrival.n.desc())
+        )
+    ).scalars():
+        if len(arrivals[arrival.root_id]) < ARRIVALS_VIEW_MAX:
+            arrivals[arrival.root_id].append(arrival)
+    proposals: dict[UUID, list[dict[str, Any]]] = {root_id: [] for root_id in ids}
+    for proposal in (
+        await session.execute(
+            select(IntentionProposal)
+            .where(
+                IntentionProposal.agent_id == agent_id,
+                IntentionProposal.root_id.in_(ids),
+                IntentionProposal.state.in_(_OPEN_PROPOSAL_STATES),
+            )
+            .order_by(IntentionProposal.created_at, IntentionProposal.id)
+        )
+    ).scalars():
+        proposals[proposal.root_id].append(proposal_view(proposal))
+    views: list[dict[str, Any]] = []
+    for root in roots:
+        rows = lineage[root.id]
+        limits = (
+            None
+            if root.wake_policy == intentions.WAKE_CONTAINER
+            else _limits_view(await root_limits(session, agent_id, root.id, settings=settings))
+        )
+        views.append(
+            {
+                "id": str(root.id),
+                "short_id": short_id(root.id),
+                "intent": root.intent,
+                "state": root.state,
+                "wake_policy": root.wake_policy,
+                "authority": root.authority,
+                "origin_kind": root.origin_kind,
+                "origin_channel": root.origin_channel,
+                "created_at": _iso(root.created_at),
+                "deadline": _iso(root.deadline),
+                "root_cancelled_at": _iso(root.root_cancelled_at),
+                "root_expired_at": _iso(root.root_expired_at),
+                "open_rows": sum(1 for row in rows if row.state in OPEN_STATES),
+                "limits": limits,
+                "lineage": [_lineage_row(row) for row in rows[:LINEAGE_VIEW_MAX]],
+                "lineage_truncated": len(rows) > LINEAGE_VIEW_MAX,
+                "arrivals": [
+                    {
+                        "n": a.n,
+                        "decision": a.decision,
+                        "progress": a.progress,
+                        "outcome": a.outcome,
+                        "gate_reason": a.gate_reason,
+                        "decided_at": _iso(a.decided_at),
+                    }
+                    for a in reversed(arrivals[root.id])
+                ],
+                "open_proposals": proposals[root.id],
+            }
+        )
+    return views
