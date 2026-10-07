@@ -2811,7 +2811,10 @@ async def end_unrunnable(
     if proposal is None:
         raise ProposalNotFound(str(proposal_id))
     if proposal.state != PROPOSAL_APPROVED or ended is None:
-        return ProposalExecution(proposal_id, proposal.state, proposal.result, proposal.error, False, False, None)
+        # decide_proposal's state-to-refusal map, with no default: a row another caller is running or ran is a
+        # repeat (no refusal), and a row the sweep ended in the meantime is refused the way a decision would be.
+        refusal = {PROPOSAL_EXPIRED: REFUSE_EXPIRED, PROPOSAL_CANCELLED: REFUSE_ENDED}.get(proposal.state)
+        return ProposalExecution(proposal_id, proposal.state, proposal.result, proposal.error, False, False, refusal)
     final = PROPOSAL_CANCELLED if ended == STATE_CANCELLED else PROPOSAL_EXPIRED
     moved = await _set_proposal_state(
         session, agent_id, proposal_id, from_state=PROPOSAL_APPROVED, to_state=final, now=now
@@ -2828,12 +2831,11 @@ async def expire_proposals(
     ``pending`` past its deadline, or on a root that ended, becomes ``expired`` (``cancelled`` for a cancelled
     root) and its outcome reaches the arrival, which wakes when terminal. ``approved`` on a root that ended is a call
     nobody will claim any more (the process stopped between the approve and the claim): ``end_unrunnable`` ends it
-    (2d-3 review m2). ``staged`` older than two leases is an
-    orphan of a turn whose lease was released: ``expired`` (done first, before any root is locked). ``executing``
-    for longer than ``max(lease, 2 x tool_timeout)`` is a call whose process stopped: ``failed`` with
-    ``IN_DOUBT_TEXT``, never
-    re-run. Each proposal in a SAVEPOINT, roots in ``(created_at, id)`` order (the one cross-root order); a
-    failure is logged and retried at the next sweep. Returns ``(proposal_id, new_state)``."""
+    (2d-3 review m2). ``staged`` older than two leases is an orphan of a turn whose lease was released: ``expired``
+    (done first, before any root is locked). ``executing`` for longer than ``max(lease, 2 x tool_timeout)`` is a
+    call whose process stopped: ``failed`` with ``IN_DOUBT_TEXT``, never re-run. Each proposal in a SAVEPOINT,
+    roots in ``(created_at, id)`` order (the one cross-root order); a failure is logged and retried at the next
+    sweep. Returns ``(proposal_id, new_state)``."""
     now = now or datetime.now(UTC)
     done: list[tuple[UUID, str]] = []
     root = aliased(Intention)

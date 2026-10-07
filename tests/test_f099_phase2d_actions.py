@@ -108,6 +108,7 @@ async def test_the_approved_call_runs_with_exactly_the_staged_arguments(runner_e
     assert "it ran" in inform.body and "Message sent." in inform.body
     assert _decided(env) == [("approved", "telegram:42"), ("executed", "telegram:42")]
     assert env.model.calls == []  # no model took part in the approval or the execution
+    assert env.cont._wake.is_set()  # the loop is told: an arrival is result_ready
 
 
 async def test_two_concurrent_approves_run_the_call_once(runner_env):  # noqa: F811
@@ -181,6 +182,21 @@ async def test_a_cancel_committed_before_the_claim_stops_an_approved_call(runner
     out = await _cont(env).execute_approved_proposal(pid)
     assert sent == [] and (out.state, out.refusal) == ("cancelled", "ended")
     assert (await proposal_row(env, pid)).state == "cancelled"
+    assert not env.cont._wake.is_set()  # nothing wakes a closed root (R8)
+
+
+@pytest.mark.parametrize(("ended", "refusal"), [("expired", "expired"), ("cancelled", "ended")])
+async def test_an_approved_call_the_sweep_ended_before_the_claim_is_refused_like_a_decision(runner_env, ended, refusal):  # noqa: F811
+    """2d-5 review m3: the sweep ended the approved row between the owner's approve and the claim. The runner
+    answers with the same refusal the store's decide_proposal gives that state, so a route can answer 409."""
+    env = await runner_env()
+    sent = register_send_email(env)
+    (pid,) = (await ask_with_proposals(env)).ids
+    await _approve_in_the_store(env, pid)
+    await _set_proposal(env, pid, state=ended)
+    out = await _cont(env).execute_approved_proposal(pid)
+    assert (out.state, out.changed, out.refusal) == (ended, False, refusal) and sent == []
+    assert _decided(env) == []
 
 
 async def test_a_call_that_fails_is_failed_and_never_rerun(runner_env):  # noqa: F811
@@ -367,6 +383,56 @@ async def test_a_client_that_goes_away_mid_request_does_not_cancel_the_approved_
     assert calls == [STAGED_ARGS] and (await proposal_row(env, pid)).result == "sent"
 
 
+async def test_stop_waits_for_an_approved_call_in_flight(runner_env):  # noqa: F811
+    """2d-5 review m4: the shielded execution is tracked, and a graceful stop waits for it (bounded) instead of
+    leaving an outward call running unowned (C13: it must finish or end in doubt, never be cut)."""
+    env = await runner_env()
+    started, release, calls = asyncio.Event(), asyncio.Event(), []
+
+    async def send_email(**kwargs):
+        calls.append(kwargs)
+        started.set()
+        await release.wait()
+        return {"content": [{"type": "text", "text": "sent"}]}
+
+    env.dispatcher.register("send_email", send_email, SEND_EMAIL_SCHEMA)
+    (pid,) = (await ask_with_proposals(env)).ids
+    cont = _cont(env)
+    request = asyncio.create_task(cont.decide_proposal(pid, approve=True, actor="t"))
+    await asyncio.wait_for(started.wait(), timeout=10)
+    stopping = asyncio.create_task(cont.stop())
+    done, _ = await asyncio.wait({stopping}, timeout=0.5)
+    assert not done  # stop is waiting for the call
+    release.set()
+    await asyncio.wait_for(stopping, timeout=10)
+    assert (await proposal_row(env, pid)).state == "executed" and calls == [STAGED_ARGS]
+    assert (await asyncio.wait_for(request, timeout=10)).state == "executed"
+    assert cont._executing == set()  # the done callback forgot it
+
+
+async def test_stop_does_not_wait_past_its_bound_and_never_cancels_the_call(runner_env, monkeypatch, caplog):  # noqa: F811
+    env = await runner_env()
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def send_email(**kwargs):
+        started.set()
+        await release.wait()
+        return {"content": [{"type": "text", "text": "sent"}]}
+
+    env.dispatcher.register("send_email", send_email, SEND_EMAIL_SCHEMA)
+    (pid,) = (await ask_with_proposals(env)).ids
+    cont = _cont(env)
+    request = asyncio.create_task(cont.decide_proposal(pid, approve=True, actor="t"))
+    await asyncio.wait_for(started.wait(), timeout=10)
+    monkeypatch.setattr(continuation_runner, "EXECUTION_GRACE_SECONDS", 0.1)  # after the call's own bound was set
+    await asyncio.wait_for(cont.stop(), timeout=10)
+    assert not request.done() and len(cont._executing) == 1  # not cancelled: still running
+    assert (await proposal_row(env, pid)).state == "executing"
+    assert "still running" in caplog.text
+    release.set()
+    assert (await asyncio.wait_for(request, timeout=10)).state == "executed"
+
+
 async def test_an_approved_spawn_stays_internal_only_under_an_owner_root(runner_env):  # noqa: F811
     """C12 (lead ruling): a root intention's authority is owner, and the call the owner approves must not start
     anything with more authority than the lineage that proposed it."""
@@ -404,6 +470,7 @@ async def test_a_rejected_proposal_never_runs_and_goes_back_to_the_intention(run
     assert (out.state, out.changed, out.woke_arrival) == ("rejected", True, True) and sent == []
     (inform,) = await _informs(env, asked.done.arrival_id)
     assert "rejected" in inform.body and _decided(env) == [("rejected", "telegram:42")]
+    assert env.cont._wake.is_set()  # the loop is told: an arrival is result_ready
 
 
 async def test_an_approve_after_the_deadline_is_refused_and_runs_nothing(runner_env):  # noqa: F811
@@ -413,6 +480,7 @@ async def test_an_approve_after_the_deadline_is_refused_and_runs_nothing(runner_
     await _set_proposal(env, pid, deadline=datetime.now(UTC) - timedelta(minutes=1))
     out = await _cont(env).decide_proposal(pid, approve=True, actor="t")
     assert (out.state, out.refusal, out.changed) == ("expired", "expired", True) and sent == []
+    assert _decided(env) == [("expired", "system")]  # the expiry is the system's, as the row says, not the owner's
 
 
 async def test_an_unknown_proposal_is_not_found(runner_env):  # noqa: F811

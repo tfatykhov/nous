@@ -325,7 +325,8 @@ SWEEP_INTERVAL_SECONDS = 60  # the longest the loop sleeps (also the reconciler 
 LOOP_RETRY_SECONDS = 5  # after a pass that failed or was cancelled from within
 COOLDOWN_SECONDS = 5  # a root that was due but not claimable is left alone this long
 NO_ROWS_NOTE = "A result was ready but no result row came with it; nothing to decide."
-# An approved call is bounded by the tool timeout plus this (the dispatcher's own bound is the inner one).
+# An approved call is bounded by the tool timeout plus this. The runner's wait_for is the only bound: the dispatch
+# path (_dispatch_with_ledger) applies no tool timeout of its own. stop() also waits this long for a call in flight.
 EXECUTION_GRACE_SECONDS = 5.0
 # What the model and the owner are told of a call whose outcome is not known. Never the exception's message: it
 # can echo the call's arguments.
@@ -369,6 +370,8 @@ class ContinuationRunner:
         # Bounded: a stray release raises instead of quietly widening the cap.
         self._slots = asyncio.BoundedSemaphore(settings.continuation_max_concurrent)
         self._running: dict[UUID, asyncio.Task[Any]] = {}
+        # The shielded approved calls (decide_proposal): held here so that stop() can wait for them.
+        self._executing: set[asyncio.Task[Any]] = set()
         self._cooldown: dict[UUID, datetime] = {}
         self._task: asyncio.Task[None] | None = None
 
@@ -394,12 +397,20 @@ class ContinuationRunner:
 
     async def stop(self) -> None:
         """Cancel the loop and every running arrival (each releases its claim without an attempt), and wait.
-        Must not overlap ``start()`` (see there)."""
+        Then wait, up to ``EXECUTION_GRACE_SECONDS``, for the approved calls still running, and never cancel one:
+        an outward call finishes or ends in doubt (C13). Must not overlap ``start()`` (see there)."""
         loop_task, self._task = self._task, None
         running = list(self._running.values())
         for task in ([loop_task] if loop_task is not None else []) + running:
             task.cancel()
         await asyncio.gather(*([loop_task] if loop_task is not None else []), *running, return_exceptions=True)
+        if self._executing:
+            _done, pending = await asyncio.wait(set(self._executing), timeout=EXECUTION_GRACE_SECONDS)
+            if pending:
+                logger.warning(
+                    "F099: %d approved call(s) still running at stop; the in-doubt sweep ends any that never finish",
+                    len(pending),
+                )
 
     async def on_result_ready(self, event: Event) -> None:
         """The bus handler for ``intention.result_ready``: a hint. The sweep is the backstop. (One agent per
@@ -1040,14 +1051,20 @@ class ContinuationRunner:
             )
             await session.commit()
         if decision.changed:
-            await self._emit_decided(decision, actor)
+            # A changed decision with a refusal is the store ending the proposal at its deadline or with its work:
+            # the system's transition (the row says decided_by "system"), not the owner's.
+            await self._emit_decided(decision, "system" if decision.refusal is not None else actor)
         if decision.woke_arrival:
             self.wake()
         if approve and decision.refusal is None and decision.state == continuation.PROPOSAL_APPROVED:
             # Shielded: a REST client that goes away cancels its request task, and that must not cancel a call the
-            # owner approved half way (it would sit `executing` until the in-doubt sweep). A process stop still
-            # ends it: the loop's tasks go with the process, and the proposal is failed in doubt as C13 says.
-            return await asyncio.shield(self.execute_approved_proposal(proposal_id))
+            # owner approved half way (it would sit `executing` until the in-doubt sweep). Tracked, so a graceful
+            # stop() waits for it (bounded); a process stop still ends it, and the proposal is failed in doubt as
+            # C13 says.
+            task = asyncio.create_task(self.execute_approved_proposal(proposal_id))
+            self._executing.add(task)
+            task.add_done_callback(self._executing.discard)
+            return await asyncio.shield(task)
         return decision
 
     async def execute_approved_proposal(self, proposal_id: UUID) -> continuation.ProposalExecution:
