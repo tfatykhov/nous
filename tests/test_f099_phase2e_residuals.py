@@ -665,7 +665,7 @@ async def test_the_proposal_sweep_locks_the_roots_of_every_arm_in_one_order_so_a
 # ---- 2e-6 review: three unpinned guards (I1, m1, m2), and a system close keeps who approved (m3) -----------------
 
 
-async def test_two_resumes_of_one_approved_proposal_start_one_execution(runner_env):  # noqa: F811
+async def test_two_resumes_of_one_approved_proposal_start_one_execution(runner_env):  # noqa: F811  # PIN
     """I1: while the first start's claim has not committed, the proposal still reads `approved`, so a second resume
     (or a re-tap) that reads it then gets the task already running instead of starting another. The claim would fence
     a second task's call, so the call count alone cannot tell: the number of tasks does."""
@@ -758,7 +758,7 @@ async def _end_by_expiry(env, asked):
 
 async def _end_by_rollback(env, asked):
     report = await continuation.rollback_at_startup(env.db, _off(env, result_inbox_enabled=True), telegram_push=None)
-    assert report.expired_proposals == 2
+    assert report.expired_proposals == 3  # the staged one too
 
 
 @pytest.mark.parametrize(
@@ -766,16 +766,22 @@ async def _end_by_rollback(env, asked):
 )
 async def test_a_system_close_keeps_who_approved_and_names_the_system_on_the_rest(env_factory, end):  # noqa: F811
     """m3: `decided_by` keeps the owner who approved when the system later ends the proposal (a cancel, the TTL or
-    the flag-off rollback), so the row still says the owner approved; a pending one the system ended says `system`."""
+    the flag-off rollback), so the row still says the owner approved; a pending one the system ended says `system`.
+    `decided_at` follows the same rule (2e-7 review): the approved row keeps when the owner decided, the pending one
+    gets the close's time, and a staged one, never shown, keeps no decision at all."""
     env = await env_factory(**CONT)
-    asked = await ask_with_proposals(env, count=2)
-    approved, pending = asked.ids
+    asked = await ask_with_proposals(env, count=3)
+    approved, pending, staged = asked.ids
+    await _set_proposal(env, staged, state="staged")
     async with env.db.session() as s:
         await continuation.decide_proposal(
             s, env.agent, approved, approve=True, actor="telegram:42", settings=env.settings
         )
         await s.commit()
+    approved_at = (await proposal_row(env, approved)).decided_at
+    assert approved_at is not None
     await end(env, asked)
-    rows = [await proposal_row(env, p) for p in (approved, pending)]
+    rows = [await proposal_row(env, p) for p in (approved, pending, staged)]
     assert all(row.state in ("cancelled", "expired") for row in rows)
-    assert [row.decided_by for row in rows] == ["telegram:42", "system"]
+    assert [row.decided_by for row in rows] == ["telegram:42", "system", None]
+    assert rows[0].decided_at == approved_at and rows[1].decided_at is not None and rows[2].decided_at is None

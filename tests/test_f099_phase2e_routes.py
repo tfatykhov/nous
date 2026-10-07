@@ -13,6 +13,7 @@ import pytest
 from f099_support import (
     CONT,
     ON,
+    add_arrival,
     ask_with_proposals,
     claim,
     env_factory,  # noqa: F401
@@ -139,6 +140,38 @@ async def test_a_container_is_listed_without_budgets(runner_env):  # noqa: F811
     assert (view["wake_policy"], view["limits"]) == ("container", None)
 
 
+async def test_a_root_with_the_expiry_marker_is_not_open_even_with_an_open_row(runner_env):  # noqa: F811  # PIN
+    """Review m2: the marker half of the open filter on its own. The root and its child are still pending (an
+    expiry and its close commit together, so this is defense in depth), and only the marker leaves the root out."""
+    env = await runner_env()
+    marked = await make_root(env)
+    await make_child(env, marked)
+    await set_intention(env, marked.id, root_expired_at=datetime.now(UTC))
+    other = await make_root(env)
+    app = _app(env, _runner(env))
+    assert [r["id"] for r in (await _call(app, "GET", "/intentions")).json()["roots"]] == [str(other.id)]
+    assert (await _row(env, marked.id)).state == "pending"
+
+
+async def test_the_view_lists_the_newest_arrivals_oldest_first_and_says_when_the_lineage_is_cut(  # PIN
+    runner_env,  # noqa: F811
+    monkeypatch,
+):
+    """Review m3: the caps reached. The newest ``ARRIVALS_VIEW_MAX`` arrivals, in the order they came; a lineage
+    longer than ``LINEAGE_VIEW_MAX`` is cut and says so (the cap is lowered here: a real lineage of 51 rows would
+    first meet the spawn limit)."""
+    env = await runner_env()
+    root = await make_root(env)
+    await make_child(env, root)
+    for n in range(1, continuation.ARRIVALS_VIEW_MAX + 3):
+        await add_arrival(env, root.id, n)
+    monkeypatch.setattr(continuation, "LINEAGE_VIEW_MAX", 1)
+    (view,) = (await _call(_app(env, _runner(env)), "GET", "/intentions")).json()["roots"]
+    newest = list(range(3, continuation.ARRIVALS_VIEW_MAX + 3))
+    assert [a["n"] for a in view["arrivals"]] == newest
+    assert [row["id"] for row in view["lineage"]] == [str(root.id)] and view["lineage_truncated"] is True
+
+
 async def test_a_bad_limit_or_state_is_400(runner_env):  # noqa: F811
     env = await runner_env()
     app = _app(env, _runner(env))
@@ -184,7 +217,12 @@ async def test_a_cancel_of_work_that_is_finished_is_409_and_writes_nothing(runne
     await set_intention(env, root.id, state="closed", close_reason="legacy")
     response = await _call(_app(env, _runner(env)), "POST", f"/intentions/{root.id}/cancel", json={})
     assert response.status_code == 409
-    assert response.json() == {"error": owner_actions.CANCEL_REFUSALS["finished"], "refusal": "finished"}
+    # The root's current state rides along, as on 2d's decide 409 (OQ6, 2e-7 review m4).
+    assert response.json() == {
+        "error": owner_actions.CANCEL_REFUSALS["finished"],
+        "state": "closed",
+        "refusal": "finished",
+    }
     assert (await _row(env, root.id)).root_cancelled_at is None
 
 
@@ -206,9 +244,12 @@ async def test_with_no_runner_a_known_root_is_503_and_an_unknown_one_404_and_not
     runner that stops its turn and its DAGs, so the route does not cancel without one."""
     env = await runner_env()
     root = await make_root(env)
+    child = await make_child(env, root)
     app = _app(env, None)
     assert (await _call(app, "POST", f"/intentions/{root.id}/cancel", json={})).status_code == 503
     assert (await _call(app, "POST", f"/intentions/{uuid.uuid4()}/cancel", json={})).status_code == 404
+    # A child's id names no root (find_root_id's root-only filter), so it is 404 here too, never 503 (review m1).
+    assert (await _call(app, "POST", f"/intentions/{child.id}/cancel", json={})).status_code == 404
     fresh = await _row(env, root.id)
     assert (fresh.state, fresh.root_cancelled_at) == ("pending", None)
 
@@ -262,7 +303,7 @@ async def test_the_new_routes_are_mounted_by_create_app_and_never_shadow_the_2d_
     assert (await _call(app, "GET", "/intentions/proposals")).json() == {"proposals": []}  # not read as a root id
 
 
-def test_no_new_route_has_a_model_path():
+def test_no_new_route_has_a_model_path():  # PIN
     """Cancel is an owner action: the module that holds it registers no tool and imports no dispatcher."""
     source = inspect.getsource(intention_routes)
     assert "dispatcher" not in source and "register(" not in source

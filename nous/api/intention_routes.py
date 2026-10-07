@@ -266,6 +266,7 @@ def build_intention_routes(*, database: Any, settings: Any, continuation_runner:
             return _error(
                 409,
                 CANCEL_REFUSALS.get(refused.reason, "That work cannot be cancelled."),
+                state=refused.state,
                 refusal=refused.reason,
             )
         except Exception:

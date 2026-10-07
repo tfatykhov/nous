@@ -1625,7 +1625,12 @@ async def _expire_root(
             IntentionProposal.root_id == root_id,
             IntentionProposal.state.in_(_SHOWN_PROPOSAL_STATES),
         )
-        .values(state=PROPOSAL_EXPIRED, decided_at=now, decided_by=_SYSTEM_UNLESS_DECIDED, updated_at=now)
+        .values(
+            state=PROPOSAL_EXPIRED,
+            decided_at=func.coalesce(IntentionProposal.decided_at, now),
+            decided_by=_SYSTEM_UNLESS_DECIDED,
+            updated_at=now,
+        )
         .returning(IntentionProposal.id)
         .execution_options(synchronize_session=False)
     )
@@ -2226,7 +2231,9 @@ async def rollback_at_startup(
                 )
                 .values(
                     state=PROPOSAL_EXPIRED,
-                    decided_at=case((unshown, IntentionProposal.decided_at), else_=now),
+                    decided_at=case(
+                        (unshown, IntentionProposal.decided_at), else_=func.coalesce(IntentionProposal.decided_at, now)
+                    ),
                     decided_by=case((unshown, IntentionProposal.decided_by), else_=_SYSTEM_UNLESS_DECIDED),
                     updated_at=now,
                 )
@@ -2278,7 +2285,9 @@ PROPOSAL_EXECUTED, PROPOSAL_FAILED, PROPOSAL_CANCELLED = "executed", "failed", "
 _SHOWN_PROPOSAL_STATES = (PROPOSAL_PENDING, PROPOSAL_APPROVED)
 _STARTABLE_PROPOSAL_STATES = (PROPOSAL_STAGED, *_SHOWN_PROPOSAL_STATES)
 # `decided_by` when the system ends a shown proposal (a cancel, the TTL, the flag-off rollback): an `approved` row
-# keeps the owner who approved it, so the record still says so; a `pending` one has none and says `system`.
+# keeps the owner who approved it, so the record still says so; a `pending` one has none and says `system`. Its
+# `decided_at` follows the same rule (`coalesce(decided_at, now)` at each site): when the owner decided is kept, and
+# `updated_at` says when the row was closed.
 _SYSTEM_UNLESS_DECIDED = func.coalesce(IntentionProposal.decided_by, "system")
 MAX_PROPOSALS_PER_ARRIVAL = 5
 # What the owner is shown must fit one Telegram message whole (4096 UTF-16 units, which is what the caps count: a
@@ -3462,11 +3471,13 @@ class RootNotFound(LookupError):
 
 
 class CancelRefused(Exception):
-    """A cancel the store did not make: ``reason`` is ``REFUSE_FINISHED``; nothing was written."""
+    """A cancel the store did not make: ``reason`` is ``REFUSE_FINISHED``; nothing was written. ``state`` is the
+    root's state as the refusing cancel read it under the root lock."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, state: str | None = None) -> None:
         super().__init__(reason)
         self.reason = reason
+        self.state = state
 
 
 @dataclass(frozen=True, slots=True)
@@ -3627,7 +3638,12 @@ async def _cancel_lineage(
             IntentionProposal.root_id == root_id,
             IntentionProposal.state.in_(_SHOWN_PROPOSAL_STATES),
         )
-        .values(state=PROPOSAL_CANCELLED, decided_at=now, decided_by=_SYSTEM_UNLESS_DECIDED, updated_at=now)
+        .values(
+            state=PROPOSAL_CANCELLED,
+            decided_at=func.coalesce(IntentionProposal.decided_at, now),
+            decided_by=_SYSTEM_UNLESS_DECIDED,
+            updated_at=now,
+        )
         .returning(IntentionProposal.id)
         .execution_options(synchronize_session=False)
     )
@@ -3753,7 +3769,7 @@ async def cancel_root(
             for entry in found:
                 heapq.heappush(queue, entry)
         if not already and tally.nothing_was_running():
-            raise CancelRefused(REFUSE_FINISHED)
+            raise CancelRefused(REFUSE_FINISHED, state=root.state)
     logger.info(
         "F099: root %s cancelled by %s (%s): %d intention(s), %d subtask(s), %d DAG(s) to stop, %d proposal(s), "
         "%d schedule(s)",
