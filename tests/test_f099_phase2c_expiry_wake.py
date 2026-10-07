@@ -486,7 +486,7 @@ async def _age_question(env, arrival_id, hours=25):
         await s.execute(
             update(ResultInbox)
             .where(ResultInbox.arrival_id == arrival_id, ResultInbox.msg_type == "QUESTION")
-            .values(created_at=datetime.now(UTC) - timedelta(hours=hours))
+            .values(created_at=datetime.now(UTC) - timedelta(hours=hours), push_after=None)
         )
         await s.commit()
 
@@ -509,7 +509,7 @@ async def test_an_expired_question_is_terminal_only_with_the_ttl_to_judge_it_by(
         await s.execute(
             update(ResultInbox)
             .where(ResultInbox.arrival_id == done.arrival_id, ResultInbox.msg_type == "QUESTION")
-            .values(created_at=datetime.now(UTC) - timedelta(hours=25))
+            .values(created_at=datetime.now(UTC) - timedelta(hours=25), push_after=None)
         )
         await s.commit()
     assert await _terminal(env, done.arrival_id, with_settings=False) is False
@@ -565,7 +565,7 @@ async def test_an_expired_question_wakes_with_a_row_saying_nobody_answered(env_f
         await s.execute(
             update(ResultInbox)
             .where(ResultInbox.arrival_id == done.arrival_id, ResultInbox.msg_type == "QUESTION")
-            .values(created_at=datetime.now(UTC) - timedelta(hours=25))
+            .values(created_at=datetime.now(UTC) - timedelta(hours=25), push_after=None)
         )
         await s.commit()
     assert await _wake(env) == [root.id]

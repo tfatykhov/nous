@@ -313,7 +313,7 @@ async def test_a_failure_after_the_wake_rolls_that_arrival_back_and_the_next_sti
             await s.execute(
                 update(ResultInbox)
                 .where(ResultInbox.arrival_id == done.arrival_id, ResultInbox.msg_type == "QUESTION")
-                .values(created_at=datetime.now(UTC) - timedelta(hours=48))
+                .values(created_at=datetime.now(UTC) - timedelta(hours=48), push_after=None)
             )
             await s.commit()
         asked.append((root, done))

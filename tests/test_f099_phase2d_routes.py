@@ -281,7 +281,8 @@ async def test_an_answer_to_an_unknown_question_or_a_proposal_is_404(runner_env)
 async def test_an_answer_after_the_question_expired_is_409_expired(runner_env):  # noqa: F811
     env = await runner_env()
     qid = await _question(env)
-    await _set(env, ResultInbox, await _row_id(env, qid), created_at=datetime.now(UTC) - timedelta(hours=25))
+    aged = datetime.now(UTC) - timedelta(hours=25)
+    await _set(env, ResultInbox, await _row_id(env, qid), created_at=aged, push_after=None)
     path = f"/intentions/questions/{qid.hex[:8]}/answer"
     response = await _call(_app(env, _runner(env)), "POST", path, json={"text": "Yes"})
     assert response.status_code == 409 and response.json()["reason"] == "expired"

@@ -341,6 +341,9 @@ CANCEL_WAIT_SECONDS = 5.0
 # A sweep re-reads the roots cancelled since the last one, less this margin (a second process would lag by a sweep).
 CANCEL_VIEW_MARGIN_SECONDS = 120
 STRAY_DAG_BATCH = 10  # the DAGs under cancelled roots one sweep cancels
+# The sweep waits this long for the owner push, then goes on: a slow Telegram must not delay a launch (12).
+PUSH_WAIT_SECONDS = 5.0
+RESUME_BATCH = 5  # the approved calls one sweep starts again
 # What the model and the owner are told of a call whose outcome is not known. Never the exception's message: it
 # can echo the call's arguments.
 TIMEOUT_TEXT = (
@@ -387,6 +390,8 @@ class ContinuationRunner:
         self._running: dict[UUID, asyncio.Task[Any]] = {}
         # The shielded approved calls (decide_proposal): held here so that stop() can wait for them.
         self._executing: set[asyncio.Task[Any]] = set()
+        self._executing_ids: dict[UUID, asyncio.Task[Any]] = {}  # by proposal: a resume never starts one twice
+        self._push_task: asyncio.Task[int] | None = None  # the owner push in flight (2e, item 12)
         self._cooldown: dict[UUID, datetime] = {}
         self._task: asyncio.Task[None] | None = None
         # 2e: the owner's cancel. ``_cancelled`` is the in-process view AgentRunner._authorize_tool_call asks (loaded at
@@ -435,6 +440,12 @@ class ContinuationRunner:
         for task in ([loop_task] if loop_task is not None else []) + running:
             task.cancel()
         await asyncio.gather(*([loop_task] if loop_task is not None else []), *running, return_exceptions=True)
+        push, self._push_task = self._push_task, None
+        if push is not None and not push.done():
+            # A push in flight finishes its send: cancelling between the send and the stamp would send the row twice.
+            await asyncio.wait({push}, timeout=EXECUTION_GRACE_SECONDS)
+            push.cancel()
+            await asyncio.gather(push, return_exceptions=True)
         if self._executing:
             # An execution's exception is retrieved by its done callback (_execution_done), whenever it ends.
             _done, pending = await asyncio.wait(set(self._executing), timeout=EXECUTION_GRACE_SECONDS)
@@ -467,6 +478,7 @@ class ContinuationRunner:
         # release_stale_claims has already expired the staged rows of every stale claim (2d-3 review m3).
         expired_proposals = await self._step("proposal expiry", self._expire_proposals, [])
         await self._step("question wake", self._wake_questions)
+        await self._step("approved resume", self._resume_approved)
         pushed = await self._step("owner push", self._push, 0)
         launched, next_due = await self._step("launch", self._launch, ([], None))
         return continuation.SweepReport(
@@ -586,8 +598,42 @@ class ContinuationRunner:
         if woken:  # the sweep launches next, so no wake()
             logger.info("F099: woke answered or expired question(s): %s", woken)
 
+    async def _resume_approved(self) -> int:
+        """Start again the approved calls nothing started (a crash between the decision and the claim, carry-over 11).
+        Each runs in its own tracked task, like the one a decision starts, so the sweep is not held for a call;
+        ``claim_execution`` stays the fence (at most once), and a proposal already running is not started twice."""
+        async with self._db.session() as session:
+            stalled = await continuation.stalled_approved_ids(
+                session, self._agent_id, settings=self._settings, limit=RESUME_BATCH
+            )
+        for proposal_id in stalled:
+            logger.warning("F099: resuming the approved proposal %s that nothing started", proposal_id.hex[:8])
+            self._start_execution(proposal_id)
+        return len(stalled)
+
     async def _push(self) -> int:
-        return await self._publisher.push_due() if self._publisher is not None else 0
+        """The owner push, in a task of its own (2e, item 12). The publisher sends up to a batch of rows, each with
+        its own timeout, so a slow Telegram could hold this sweep (about 200 s at worst) and with it every launch.
+        The sweep starts the push (never two at once), waits ``PUSH_WAIT_SECONDS`` for it and goes on; the push
+        finishes in the background and the next sweep sees it done. Not cancelled when the wait ends: a send that
+        is cancelled between the request and the stamp would be sent again."""
+        if self._publisher is None:
+            return 0
+        task = self._push_task
+        if task is None or task.done():
+            task = self._push_task = asyncio.create_task(self._publisher.push_due(), name="continuation-push")
+            task.add_done_callback(self._push_ended)
+        done, _pending = await asyncio.wait({task}, timeout=PUSH_WAIT_SECONDS)
+        if task not in done or task.cancelled() or task.exception() is not None:
+            return 0
+        return task.result()
+
+    def _push_ended(self, task: asyncio.Task[int]) -> None:
+        """Retrieve the push's exception whenever it ends (the sweep may have stopped waiting for it)."""
+        if not task.cancelled() and task.exception() is not None:
+            logger.warning(
+                "F099: the continuation owner push failed; the next sweep tries again", exc_info=task.exception()
+            )
 
     async def _launch(self) -> tuple[list[UUID], datetime | None]:
         """Claim-and-run every root that is due, while a slot is free. The claim itself happens inside the
@@ -1162,11 +1208,25 @@ class ContinuationRunner:
             # owner approved half way (it would sit `executing` until the in-doubt sweep). Tracked, so a graceful
             # stop() waits for it (bounded); a process stop still ends it, and the proposal is failed in doubt as
             # C13 says.
-            task = asyncio.create_task(self.execute_approved_proposal(proposal_id))
-            self._executing.add(task)
-            task.add_done_callback(self._execution_done)
-            return await asyncio.shield(task)
+            return await asyncio.shield(self._start_execution(proposal_id))
         return decision
+
+    def _start_execution(self, proposal_id: UUID) -> asyncio.Task[Any]:
+        """The tracked task that runs an approved proposal (``decide_proposal`` and the sweep's resume share it). One
+        at a time per proposal: a proposal that is already running returns its task."""
+        running = self._executing_ids.get(proposal_id)
+        if running is not None and not running.done():
+            return running
+        task = asyncio.create_task(self.execute_approved_proposal(proposal_id))
+        self._executing.add(task)
+        self._executing_ids[proposal_id] = task
+        task.add_done_callback(self._execution_done)
+        task.add_done_callback(lambda done, pid=proposal_id: self._forget_execution(pid, done))
+        return task
+
+    def _forget_execution(self, proposal_id: UUID, task: asyncio.Task[Any]) -> None:
+        if self._executing_ids.get(proposal_id) is task:
+            del self._executing_ids[proposal_id]
 
     def _execution_done(self, task: asyncio.Task[Any]) -> None:
         """Forget a finished execution and retrieve its exception. A store error in the claim or the finish ends the

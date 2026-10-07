@@ -1672,6 +1672,16 @@ async def _expire_root(
     return True
 
 
+def question_window_start(question: ResultInbox) -> datetime:
+    """When the answer window of a QUESTION row opens: the later of when it was written and when it may be pushed.
+    Quiet hours defer the push, not the row, so a question written at night is not answerable for a shorter time
+    than one written by day: the same rule as a proposal's deadline (``max(now, push_after) + ttl``, 2d review m2).
+    A row written outside the quiet hours has ``push_after`` at its own creation, so the two agree."""
+    if question.push_after is None:
+        return question.created_at
+    return max(question.created_at, question.push_after)
+
+
 async def _proposals_terminal(session: AsyncSession, agent_id: str, arrival_id: UUID) -> bool:
     """Every proposal of the arrival is in ``PROPOSAL_TERMINAL`` (2d). A ``staged`` row has no arrival yet, so it
     never holds an arrival back: it is not approvable."""
@@ -1719,7 +1729,7 @@ async def _question_state(
     ).scalar_one()
     ttl = timedelta(hours=float(settings.intention_proposal_ttl_hours)) if settings is not None else None
     answered = [newest_answer is not None and newest_answer >= q.created_at for q in questions]
-    expired = [ttl is not None and q.created_at <= now - ttl for q in questions]
+    expired = [ttl is not None and question_window_start(q) <= now - ttl for q in questions]
     terminal = proposals_done and all(a or e for a, e in zip(answered, expired, strict=True))
     return terminal, all(answered), questions
 
@@ -2053,6 +2063,7 @@ class RollbackReport:
     rerouted_rows: int
     expired_proposals: int
     pushed_raw: int
+    undeliverable: int = 0  # rows stamped delivered because there was nowhere to send them (2e, carry-over 9)
 
 
 _ROLLBACK_STATES = (STATE_RESULT_READY, "deciding", "awaiting_owner")
@@ -2060,6 +2071,10 @@ _SWEEP_BATCH = 200
 RAW_PUSH_CHARS = 3900
 # delivered_session_id of a row the rollback sent by Telegram instead of routing.
 ROLLBACK_SESSION_ID = "rollback"
+# delivered_session_id of a row the rollback could not deliver at all (no owner channel, or the inbox off and no
+# Telegram): the intention closes, so the row would never be read by anyone. It is stamped, so nothing counts it as
+# an undelivered result; the result itself stays on its work row (the subtask or the DAG).
+ROLLBACK_UNDELIVERABLE_ID = "rollback-undeliverable"
 
 
 async def rollback_at_startup(
@@ -2070,15 +2085,18 @@ async def rollback_at_startup(
     Open ``continue`` intentions in ``result_ready``, ``deciding`` or ``awaiting_owner`` have their
     undelivered intention-keyed inbox rows re-routed to ``owner_channel`` (so F098's chat turn shows
     them; a re-routed row is stamped ``created_at`` now, so the claim window starts when chat can see
-    it), their ``staged`` and ``pending`` proposals expired (a later tap is refused), and are closed
+    it), their ``staged``, ``pending`` and ``approved`` proposals expired (a later tap is refused, and a
+    later flag-on sweep resumes nothing: 2e, S6), and are closed
     as ``legacy`` with the claim cleared; so is every ``pending`` intention whose source is already
     terminal (work that finished while the flags were off: task-1.9 carry-over 2). It runs whenever
     ``brain.intentions`` exists, ``NOUS_INTENTIONS_ENABLED`` off included, and does nothing when the
     continuation flag is on. If the inbox is off too, a re-routed row would be invisible: each row is
     sent by ``telegram_push`` instead and stamped delivered, and an intention whose push failed stays
     open for the next start. With the inbox off and no Telegram configured there is no channel to
-    deliver to: the intention closes with a WARNING and the result stays on its work row (the subtask
-    or DAG).
+    deliver to: the intention closes with a WARNING naming the rows and the result stays on its work row
+    (the subtask or DAG); so does one with the inbox on and no owner channel. Those rows are stamped
+    ``ROLLBACK_UNDELIVERABLE_ID``, so none stays undelivered for good, and the metrics count them apart
+    from the delivered ones (2e, carry-over 9).
 
     One transaction applies the re-route, the expiry and the close, so a close can never outrun its
     rows. The network sends happen before it, outside any transaction, so the raw push is
@@ -2119,14 +2137,18 @@ async def rollback_at_startup(
                 stuck[row.intention_id].append(row)
 
     pushed_ids: list[UUID] = []
+    undeliverable_ids: list[UUID] = []
     keep_open: set[UUID] = set()
     if not inbox_on:
         waiting = sum(len(rows) for rows in stuck.values())
         if telegram_push is None and waiting:
+            undeliverable_ids = [row.id for rows in stuck.values() for row in rows]
             logger.warning(
                 "F099: the rollback found %d result(s) that cannot be delivered (the inbox is off and Telegram is not "
-                "configured); they stay on their work rows",
+                "configured); they stay on their work rows and are marked delivered, not read by anyone "
+                "(row, intention; the first 20): %s",
                 waiting,
+                [(str(row.id), str(row.intention_id)) for rows in stuck.values() for row in rows][:20],
             )
         elif telegram_push is not None:
             for it in open_rows:
@@ -2155,10 +2177,11 @@ async def rollback_at_startup(
                 if row_ids and channel is None:
                     logger.warning(
                         "F099: the rollback found %d result(s) of intention %s with no owner channel (no origin "
-                        "channel, no default chat); they stay on their work row",
+                        "channel, no default chat); they stay on their work row and are marked delivered",
                         len(row_ids),
                         it.id,
                     )
+                    undeliverable_ids.extend(row_ids)
                 elif row_ids:
                     # created_at is when chat can see the row, so F098's claim window starts now and
                     # not at the age of the work (a result that waited past it would never be shown).
@@ -2169,15 +2192,34 @@ async def rollback_at_startup(
                         .execution_options(synchronize_session=False)
                     )
                     rerouted += moved.rowcount or 0
+        if undeliverable_ids:
+            # The intention closes below and nothing reads these rows again: a row left undelivered would sit in the
+            # backlog for good (carry-over 9). Stamped, not deleted: the row stays as the record.
+            await session.execute(
+                update(ResultInbox)
+                .where(ResultInbox.id.in_(undeliverable_ids), ResultInbox.delivered_at.is_(None))
+                .values(delivered_at=now, delivered_session_id=ROLLBACK_UNDELIVERABLE_ID)
+                .execution_options(synchronize_session=False)
+            )
         if close_ids:
+            # S6 of the plan review: every proposal that could still run, the `approved` ones too. The intention
+            # closes below, so a call approved and not yet started would otherwise be resumed by a later flag-on
+            # sweep and its outcome would reach nobody. A later tap is refused, as before. Only a row the owner was
+            # shown (pending, approved) gets the decision columns; a staged one was never offered.
+            unshown = IntentionProposal.state == PROPOSAL_STAGED
             gone = await session.execute(
                 update(IntentionProposal)
                 .where(
                     IntentionProposal.agent_id == agent_id,
                     IntentionProposal.intention_id.in_(close_ids),
-                    IntentionProposal.state.in_(("staged", "pending")),
+                    IntentionProposal.state.in_(_STARTABLE_PROPOSAL_STATES),
                 )
-                .values(state="expired", updated_at=now)
+                .values(
+                    state=PROPOSAL_EXPIRED,
+                    decided_at=case((unshown, IntentionProposal.decided_at), else_=now),
+                    decided_by=case((unshown, IntentionProposal.decided_by), else_="system"),
+                    updated_at=now,
+                )
                 .execution_options(synchronize_session=False)
             )
             expired = gone.rowcount or 0
@@ -2211,7 +2253,7 @@ async def rollback_at_startup(
             if len(swept) < _SWEEP_BATCH:
                 break
         await session.commit()
-    return RollbackReport(closed, rerouted, expired, len(pushed_ids))
+    return RollbackReport(closed, rerouted, expired, len(pushed_ids), len(undeliverable_ids))
 
 
 # ---------------------------------------------------------------------------
@@ -2915,6 +2957,38 @@ async def finish_execution(
     return ProposalExecution(proposal_id, final, proposal.result, proposal.error, woke, True, None)
 
 
+async def stalled_approved_ids(
+    session: AsyncSession, agent_id: str, *, settings: Any, now: datetime | None = None, limit: int = 10
+) -> list[UUID]:
+    """The ``approved`` proposals of an open root that nothing started (carry-over 11): the process stopped between
+    the owner's decision and ``claim_execution``, or the request that was to run the call went away. Oldest first.
+
+    Only a proposal decided at least ``max(tool_timeout + 5 s, 60 s)`` ago (an inline run, started by the
+    decision itself, is not stolen: and ``claim_execution`` is the fence in any case), and at most
+    ``intention_proposal_ttl_hours`` ago (an approval is not honoured days later: that one ends with its root).
+    ``approved`` is not terminal, so without a resume the arrival would wait in ``awaiting_owner`` until the
+    root's TTL."""
+    now = now or datetime.now(UTC)
+    grace = timedelta(seconds=max(float(settings.tool_timeout) + 5.0, 60.0))
+    window = timedelta(hours=float(settings.intention_proposal_ttl_hours))
+    root = aliased(Intention)
+    rows = await session.execute(
+        select(IntentionProposal.id)
+        .join(root, and_(root.agent_id == agent_id, root.id == IntentionProposal.root_id))
+        .where(
+            IntentionProposal.agent_id == agent_id,
+            IntentionProposal.state == PROPOSAL_APPROVED,
+            IntentionProposal.updated_at < now - grace,
+            IntentionProposal.decided_at > now - window,
+            root.root_cancelled_at.is_(None),
+            root.root_expired_at.is_(None),
+        )
+        .order_by(IntentionProposal.updated_at, IntentionProposal.id)
+        .limit(limit)
+    )
+    return list(rows.scalars().all())
+
+
 async def end_unrunnable(
     session: AsyncSession, agent_id: str, proposal_id: UUID, *, settings: Any, now: datetime | None = None
 ) -> ProposalExecution:
@@ -3143,7 +3217,7 @@ async def record_answer(
     if owner_answered:
         raise AnswerRefused(REFUSE_ANSWERED)
     ttl = timedelta(hours=float(settings.intention_proposal_ttl_hours))
-    if question.created_at <= now - ttl:
+    if question_window_start(question) <= now - ttl:
         raise AnswerRefused(REFUSE_EXPIRED)
     waiting = list(
         (

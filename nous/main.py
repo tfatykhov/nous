@@ -275,14 +275,15 @@ async def _rollback_continuation(settings: Settings, database: Database) -> None
     except Exception:
         logger.warning("F099: the continuation rollback failed; it is retried at the next start", exc_info=True)
         return
-    if report.closed or report.rerouted_rows or report.expired_proposals or report.pushed_raw:
+    if report.closed or report.rerouted_rows or report.expired_proposals or report.pushed_raw or report.undeliverable:
         logger.info(
             "F099: continuation rollback closed %d intention(s), re-routed %d result(s), expired %d proposal(s), "
-            "sent %d raw result(s) by Telegram",
+            "sent %d raw result(s) by Telegram, marked %d result(s) delivered that had nowhere to go",
             report.closed,
             report.rerouted_rows,
             report.expired_proposals,
             report.pushed_raw,
+            report.undeliverable,
         )
 
 

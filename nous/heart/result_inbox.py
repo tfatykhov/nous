@@ -422,12 +422,23 @@ class ResultInboxStore:
             return await session.get(ChannelSession, (self._agent_id, channel))
 
     async def metrics(self, days: int) -> dict[str, Any]:
-        """Delivery rate and latency per source kind over the last ``days``."""
+        """Delivery rate and latency per source kind over the last ``days``.
+
+        A row a person or a runner read is ``delivered``. A row F099 closed without anyone reading it is not: the
+        rollback's ``undeliverable`` (a result with nowhere to go) and the cancel's ``closed_by_cancel`` (work the
+        owner stopped) carry ``delivered_at`` as a stamp, and counting them as delivered would improve the rate by
+        exactly the rows nobody read. They are reported in their own buckets and left out of the rate's
+        denominator (they were never deliverable) and of the latencies."""
         since = datetime.now(UTC) - timedelta(days=days)
         async with self._db.session() as session:
             rows = (
                 await session.execute(
-                    select(ResultInbox.source_kind, ResultInbox.created_at, ResultInbox.delivered_at)
+                    select(
+                        ResultInbox.source_kind,
+                        ResultInbox.created_at,
+                        ResultInbox.delivered_at,
+                        ResultInbox.delivered_session_id,
+                    )
                     .where(ResultInbox.agent_id == self._agent_id)
                     .where(ResultInbox.created_at > since)
                 )
@@ -435,11 +446,21 @@ class ResultInboxStore:
         out: dict[str, Any] = {}
         for kind in (SOURCE_SUBTASK, SOURCE_DAG, continuation.SOURCE_INTENTION_REPORT):
             mine = [r for r in rows if r[0] == kind]
-            latencies = sorted((_aware(r[2]) - _aware(r[1])).total_seconds() for r in mine if r[2] is not None)
+            undeliverable = [r for r in mine if r[2] is not None and r[3] == continuation.ROLLBACK_UNDELIVERABLE_ID]
+            closed = [r for r in mine if r[2] is not None and r[3] == continuation.SILENT_SESSION_ID]
+            latencies = sorted(
+                (_aware(r[2]) - _aware(r[1])).total_seconds()
+                for r in mine
+                if r[2] is not None
+                and r[3] not in (continuation.ROLLBACK_UNDELIVERABLE_ID, continuation.SILENT_SESSION_ID)
+            )
+            deliverable = len(mine) - len(undeliverable) - len(closed)
             out[kind] = {
                 "created": len(mine),
                 "delivered": len(latencies),
-                "delivery_rate": round(len(latencies) / len(mine), 4) if mine else None,
+                "undeliverable": len(undeliverable),
+                "closed_by_cancel": len(closed),
+                "delivery_rate": round(len(latencies) / deliverable, 4) if deliverable else None,
                 "latency_p50_s": _percentile(latencies, 0.50),
                 "latency_p95_s": _percentile(latencies, 0.95),
             }
