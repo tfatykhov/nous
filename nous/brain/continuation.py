@@ -814,10 +814,13 @@ async def _verified_progress(
 
 async def has_open_work(session: AsyncSession, agent_id: str, claim: Claim) -> bool:
     """Whether a ``continue`` or ``revise`` of this claim would leave anything running under its root (final review
-    I1): an open intention of the root other than the claimed ones (a fan-out's sibling still running, or this
-    turn's spawn, which a lineage makes ``continue`` and so keeps open until the next claim). The commit closes the
-    claimed intentions, so without one nothing would ever wake the root again. A child that already closed does
-    not count, whenever it was spawned: an inline spawn (``await_result``) closes within the turn and leaves
+    I1): an open ``continue`` intention of the root other than the claimed ones (a fan-out's sibling still running,
+    or this turn's spawn, which a lineage makes ``continue`` and so keeps open until the next claim). The commit
+    closes the claimed intentions, so without one nothing would ever wake the root again. Open work is work that
+    will come back: a ``remember``, ``report``, ``none`` or ``container`` child never wakes the root, and the paths
+    that close one never end it, so it does not count (2e final review I1). ``end_hanging_root`` keeps counting
+    every open row on purpose: it must not end a root while such a child still runs. A child that already closed
+    does not count, whenever it was spawned: an inline spawn (``await_result``) closes within the turn and leaves
     nothing running (re-review N1). Rows only."""
     ids = [i.id for i in claim.intentions]
     open_elsewhere = exists().where(
@@ -825,6 +828,7 @@ async def has_open_work(session: AsyncSession, agent_id: str, claim: Claim) -> b
         Intention.root_id == claim.root_id,
         Intention.id.notin_(ids),
         Intention.state.in_(OPEN_STATES),
+        Intention.wake_policy == intentions.WAKE_CONTINUE,
     )
     return bool((await session.execute(select(open_elsewhere))).scalar_one())
 
