@@ -730,7 +730,9 @@ class ContinuationRunner:
                 logger.warning(
                     "F099: the continuation of root %s failed (%s)", claim.root_id, type(exc).__name__, exc_info=True
                 )
-                await self._fail(claim)
+                # What the calls that finished before the failure cost (2e, carry-over 2): a call that raised
+                # returned no usage, so it is the one cost this cannot see.
+                await self._fail(claim, tokens=(usage[0], usage[1]))
                 return None
             # Read BEFORE the session ends: end_conversation pops the ledger.
             wrote_memory = any(
@@ -950,11 +952,11 @@ class ContinuationRunner:
             raise
         except ValueError as exc:  # commit_arrival refused the arrival: an ask with nowhere to ask, a bad outcome
             logger.warning("F099: the commit of root %s was refused (%s)", claim.root_id, exc)
-            await self._fail(claim)
+            await self._fail(claim, tokens=tokens)
             return None
         except Exception:
             logger.warning("F099: the commit of root %s failed", claim.root_id, exc_info=True)
-            await self._fail(claim)
+            await self._fail(claim, tokens=tokens)
             return None
         await self._emit(
             "intention.arrival_decided",
@@ -979,9 +981,10 @@ class ContinuationRunner:
         self.wake()
         return done
 
-    async def _fail(self, claim: continuation.Claim) -> None:
+    async def _fail(self, claim: continuation.Claim, *, tokens: tuple[int, int] = (0, 0)) -> None:
         """A failed attempt (spec 4.5.7): one more attempt on every claimed intention; the cap closes them
-        with their raw results. If even this fails, the lease recovers the claim."""
+        with their raw results. ``tokens`` is what the attempt spent, which counts against the root's budget (2e).
+        If even this fails, the lease recovers the claim."""
         arrival_id = uuid.uuid4()  # the cap's arrival row, named in arrival_decided (contract 4.13)
         try:
             async with self._db.session() as session:
@@ -993,6 +996,7 @@ class ContinuationRunner:
                     settings=self._settings,
                     brain=None,  # R5: a failed report is not a model decision
                     arrival_id=arrival_id,
+                    tokens=tokens,
                 )
                 await session.commit()
         except asyncio.CancelledError:

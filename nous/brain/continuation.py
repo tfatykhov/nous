@@ -497,13 +497,15 @@ async def root_limits(session: AsyncSession, agent_id: str, root_id: UUID, *, se
     Tokens are the lineage's subtask ``tokens_in/out`` (a DAG-node subtask has no intention of its own, and
     ``dag_node_id IS NULL`` keeps it out should one ever have one: its usage is already in its DAG's
     ``tokens_consumed``), plus its DAGs' ``tokens_consumed`` (which Task 2c1-8 feeds with check-node usage),
-    plus its arrivals' tokens.
+    plus its arrivals' tokens, plus what its failed attempts spent (``failed_tokens``, 2e: a retried attempt
+    writes no arrival row).
     """
-    depth, spawns = (
+    depth, spawns, failed_tokens = (
         await session.execute(
             select(
                 func.coalesce(func.max(Intention.depth), 0),
                 func.count(Intention.id).filter(Intention.depth > 0),
+                func.coalesce(func.sum(Intention.failed_tokens), 0),
             ).where(Intention.agent_id == agent_id, Intention.root_id == root_id)
         )
     ).one()
@@ -564,7 +566,7 @@ async def root_limits(session: AsyncSession, agent_id: str, root_id: UUID, *, se
         if verified is not False:
             break
         stalls += 1
-    tokens = int(subtask_tokens) + int(dag_tokens) + int(arrival_tokens)
+    tokens = int(subtask_tokens) + int(dag_tokens) + int(arrival_tokens) + int(failed_tokens)
     depth, spawns, turns = int(depth), int(spawns), int(turns)
     max_depth, max_spawns = settings.continuation_max_depth, settings.continuation_max_spawns_per_root
     escalate: str | None = None
@@ -1163,6 +1165,7 @@ async def fail_attempt(
     brain: Any = None,
     now: datetime | None = None,
     arrival_id: UUID | None = None,
+    tokens: tuple[int, int] = (0, 0),
 ) -> str:
     """T8 and T12: one claimed attempt failed (the turn raised or timed out, or its lease expired).
 
@@ -1179,6 +1182,11 @@ async def fail_attempt(
     cap), so the claim token in that UPDATE is the fence and nothing else stands in for it. ``arrival_id`` is the
     id of the cap's arrival row (a new one when not given), as ``commit_arrival`` takes it: the caller can name
     that row in ``intention.arrival_decided``.
+
+    ``tokens`` is ``(tokens_in, tokens_out)`` the failed attempt spent (2e, carry-over 2): a retry keeps it on the
+    claim's deepest intention (``failed_tokens``, in the same fence as the retry), the cap books it on the arrival
+    row of the ``failed_report``. Either way ``root_limits`` counts it, so a lineage whose turns keep failing reaches
+    its token budget. A lease release knows no usage and passes none.
     """
     now = now or datetime.now(UTC)
     ids = sorted(i.id for i in claim.intentions)
@@ -1197,7 +1205,20 @@ async def fail_attempt(
                 )
             ).scalars()
             worst = max(counts) + 1
+            spent = int(tokens[0]) + int(tokens[1])
             if worst < max_attempts:
+                if spent > 0:
+                    # Through the fence like every write to a claimed intention: it is checked before the release
+                    # below, so a stale claim charges nothing. One row only (the deepest), so it is summed once.
+                    charged = await _fenced_move(
+                        session,
+                        agent_id,
+                        [claim.deepest.id],
+                        claim.claim_token,
+                        {"failed_tokens": Intention.failed_tokens + spent, "updated_at": now},
+                    )
+                    if charged != {claim.deepest.id}:
+                        raise _FenceLost
                 released = await _fenced_move(
                     session,
                     agent_id,
@@ -1224,7 +1245,7 @@ async def fail_attempt(
                 resolution=Resolution("report", f"Failed after {worst} attempts.", False, 0.0),
                 outcome=OUTCOME_FAILED,
                 gate_reason=None,
-                tokens=(0, 0),
+                tokens=(int(tokens[0]), int(tokens[1])),
                 brain=brain,
                 settings=settings,
                 report_text=f"{body}\n\n{raw}" if raw else body,
