@@ -1855,6 +1855,7 @@ def build_app(settings: Settings) -> Starlette:
         push_service=_lazy_component(components, "push_service"),
         action_router=_lazy_component(components, "action_router"),
         dag_orchestrator=_lazy_component(components, "dag_orchestrator"),
+        continuation_runner=_lazy_component(components, "continuation_runner"),
     )
 
     if settings.mcp_enabled:

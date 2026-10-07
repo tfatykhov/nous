@@ -18,10 +18,11 @@ import pytest
 from sqlalchemy import select, text, update
 
 from nous.brain import Brain, continuation
+from nous.brain.continuation import Resolution
 from nous.brain.intentions import IntentionSpec
 from nous.cognitive.schemas import Assessment, FrameSelection, TurnContext
 from nous.config import Settings
-from nous.storage.models import Intention, IntentionArrival, ResultInbox
+from nous.storage.models import Intention, IntentionArrival, IntentionProposal, ResultInbox
 
 ON = {"result_inbox_enabled": True, "intentions_enabled": True}
 CONT = {**ON, "continuation_enabled": True}
@@ -388,3 +389,86 @@ async def runner_env(env_factory):
         runner._api_shared = True
         await runner.close()
     assert not any(model.overrun for _runner, model in built), "a scripted model was called more often than scripted"
+
+
+# ---- Phase 2d ------------------------------------------------------------------------------------------------
+
+SEND_EMAIL_SCHEMA = {
+    "type": "object",
+    "description": "Send an email.",
+    "properties": {
+        "to": {"type": "string"},
+        "subject": {"type": "string"},
+        "body": {"type": "string"},
+    },
+    "required": ["to", "subject", "body"],
+}
+SEND_EMAIL_ARGS = {"to": "friend@example.com", "subject": "Snow", "body": "40 cm overnight."}
+
+
+def register_send_email(env, *, text: str = "sent") -> list[dict]:
+    """A recording ``send_email`` on the environment's dispatcher (the real one lives in the server's tool set).
+    Returns the list of keyword arguments each call received: a test asserts on it, so nothing is ever sent."""
+    calls: list[dict] = []
+
+    async def send_email(**kwargs):
+        calls.append(kwargs)
+        return {"content": [{"type": "text", "text": text}]}
+
+    env.dispatcher.register("send_email", send_email, SEND_EMAIL_SCHEMA)
+    return calls
+
+
+async def claimed(env, *, routed: bool = True):
+    """A root with one recorded result, claimed (its intention is ``deciding``): ``(root, claim)``."""
+    root = await make_root(env, routed=routed)
+    await record(env, root)
+    return root, await claim(env, root.id)
+
+
+async def stage(
+    env, got, *, tool="send_email", arguments=None, rationale="The owner asked me to share the snow report."
+):
+    """Stage one proposal under ``got``'s claim, as ``propose_action`` does. Returns its id."""
+    async with env.db.session() as s:
+        proposal_id = await continuation.stage_proposal(
+            s,
+            env.agent,
+            intention_id=got.deepest.id,
+            root_id=got.root_id,
+            claim_token=got.claim_token,
+            tool=tool,
+            arguments=dict(SEND_EMAIL_ARGS if arguments is None else arguments),
+            rationale=rationale,
+        )
+        await s.commit()
+    return proposal_id
+
+
+async def proposal_row(env, proposal_id) -> IntentionProposal:
+    async with env.db.session() as s:
+        return await s.get(IntentionProposal, proposal_id)
+
+
+async def commit_ask(env, got, note: str = "Shall I go ahead?"):
+    """``commit_arrival`` of an ``ask`` under ``got``'s claim, committed. None when the fence rejected it."""
+    async with env.db.session() as s:
+        done = await continuation.commit_arrival(
+            s,
+            env.agent,
+            got,
+            resolution=Resolution("ask", note, True, 0.8),
+            outcome="resolved",
+            settings=env.settings,
+        )
+        await s.commit()
+    return done
+
+
+async def ask_with_proposals(env, *, count: int = 1, note: str = "May I email this?", routed: bool = True):
+    """A root whose turn staged ``count`` distinct proposals and then asked: ``SimpleNamespace(root, got, done,
+    ids)`` (``ids`` in creation order, every proposal ``pending``)."""
+    root, got = await claimed(env, routed=routed)
+    ids = [await stage(env, got, arguments={**SEND_EMAIL_ARGS, "subject": f"Snow {n}"}) for n in range(count)]
+    done = await commit_ask(env, got, note)
+    return SimpleNamespace(root=root, got=got, done=done, ids=ids)

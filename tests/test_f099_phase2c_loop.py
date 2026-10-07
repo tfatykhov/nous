@@ -208,6 +208,7 @@ async def test_a_sweep_wakes_an_answered_question_and_decides_the_answer(runner_
             source_id=uuid.uuid4(),
             msg_type="INFORM",
             title="Owner's answer",
+            correlation_id=f"{continuation.ANSWER_CORRELATION_PREFIX}telegram:42",  # as record_answer writes it
             body="Yes, book it.",
             arrival_id=asked.arrival_id,
             settings=env.settings,
@@ -241,6 +242,7 @@ async def test_the_sweep_runs_the_publisher_and_counts_what_it_pushed(runner_env
     [
         ("release_stale_claims", "lease release"),
         ("expire_roots", "TTL sweep"),
+        ("expire_proposals", "proposal expiry"),
         ("wake_terminal_arrivals", "question wake"),
     ],
 )

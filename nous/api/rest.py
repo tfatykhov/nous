@@ -53,6 +53,7 @@ from starlette.types import Scope
 
 from nous.api.companion_assets import OverlayStaticFiles
 from nous.api.execution_context import ExecutionContext
+from nous.api.intention_routes import build_intention_routes
 from nous.api.models import Attachment
 from nous.api.runner import AgentRunner
 from nous.brain import Brain, intentions
@@ -95,6 +96,7 @@ def create_app(
     action_router: Any | None = None,
     push_service: Any | None = None,
     dag_orchestrator: Any | None = None,
+    continuation_runner: Any | None = None,
 ) -> Starlette:
     """Create the Starlette ASGI app with all routes."""
 
@@ -3517,6 +3519,12 @@ def create_app(
             if _mime is not None:
                 response.headers["Content-Type"] = _mime
             return response
+
+    # F099 Phase 2d: the owner's deterministic actions on proposals and questions. Literal paths: any later
+    # /intentions/{root_id} route (2e) goes after them.
+    routes.extend(
+        build_intention_routes(database=database, settings=settings, continuation_runner=continuation_runner)
+    )
 
     # Dashboard v2 (Svelte) — appended after the exact-match Route entries above.
     dashboard_v2_dir = os.path.join(

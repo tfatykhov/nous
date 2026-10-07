@@ -30,8 +30,10 @@ def is_keyed_tool(name: str) -> bool:
 
 
 def _scope(ctx: ExecutionContext) -> str | None:
-    """The unit of work a send belongs to, or None (unkeyed: an operator
+    """The unit of work a send belongs to (an approved proposal included), or None (unkeyed: an operator
     re-send from chat, a check tick, triage and generic background turns)."""
+    if ctx.kind == "approved_action" and ctx.proposal_id is not None:
+        return f"proposal:{ctx.proposal_id}"  # F099 2d: one approved proposal is one logical send
     if ctx.kind == "dag_node" and ctx.dag_id is not None and ctx.dag_node_name:
         return f"dag:{ctx.dag_id}:{ctx.dag_node_name}"
     if ctx.kind == "dag_summary" and ctx.session_id:

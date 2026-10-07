@@ -11,6 +11,7 @@ the arrival (claim, gate, turn, follow-up, commit), and the loop. Nothing here s
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
@@ -21,7 +22,9 @@ from uuid import UUID
 
 from sqlalchemy import select
 
+from nous.api import tool_policy
 from nous.api.execution_context import ExecutionContext
+from nous.api.tool_classes import tool_class
 from nous.brain import continuation
 from nous.brain.continuation import INTENT_SESSION_PREFIX, Resolution
 from nous.brain.intentions import AUTHORITY_INTERNAL
@@ -62,6 +65,29 @@ RESOLVE_INTENTION_SCHEMA: dict[str, Any] = {
     },
 }
 
+# The proposal tool (contract section 4.6). A per-turn extra tool: never registered with the dispatcher, never terminal.
+PROPOSE_ACTION_SCHEMA: dict[str, Any] = {
+    "name": "propose_action",
+    "description": (
+        "Stage an action you may not take yourself (an outward send, a schedule, a shell command) for the owner "
+        "to approve. Nothing runs now: the owner sees this exact call, and it runs only if they approve it. Then "
+        "end the turn with resolve_intention(decision='ask'). The tool must be a registered tool you are not "
+        "already offered. The whole call must be short enough to read in one message."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "tool": {"type": "string"},
+            "arguments": {"type": "object"},
+            "rationale": {
+                "type": "string",
+                "description": "Why the owner should approve this call (at most 1000 characters).",
+            },
+        },
+        "required": ["tool", "arguments", "rationale"],
+    },
+}
+
 # The second request of an arrival whose turn ended without the call (spec 4.5.5, the #692 pattern): the
 # tool is asked for in words, with no forced tool_choice (5.5-generation models reject one with a 400).
 CONTINUATION_FOLLOWUP_PROMPT = (
@@ -89,7 +115,7 @@ class ArrivalState:
     """What a turn recorded through its extra tools. The decision is read from here, never from the text."""
 
     resolution: Resolution | None = None
-    # 2d: the proposals the turn staged with propose_action. Always empty in 2c (the tool is not offered).
+    # The proposals the turn staged with propose_action (2d); resolve_intention may then only ask.
     proposals: list[UUID] = field(default_factory=list)
 
 
@@ -146,6 +172,71 @@ def make_resolve_intention_executor(
         return "Recorded.", False
 
     return resolve_intention
+
+
+# The one spawn-class tool a turn may propose (spec 4.4 item 1 names it). It is origin-aware, so the approved call's
+# context stamps what it schedules internal_only (2d-4). Every other spawn is refused: spawn_task and dag_create would
+# route around the depth and spawn limits, spawn_sync is an inline model run under the approving request, and
+# heartbeat_check_create is not origin-aware, so an approved check would not be internal_only.
+PROPOSABLE_SPAWN_TOOLS: frozenset[str] = frozenset({"schedule_task"})
+
+
+def make_propose_action_executor(
+    state: ArrivalState,
+    *,
+    ctx: ExecutionContext,
+    dispatcher: Any,
+    stage: Callable[[str, dict, str], Awaitable[UUID]],
+) -> Callable[..., Awaitable[tuple[str, bool]]]:
+    """The executor of ``propose_action`` for one turn (the ``extra_tools`` shape: ``(text, is_error)``).
+
+    It validates and stages; it never runs anything (no ledger row and no activity ping: staging is a row write,
+    not a side effect, R9). ``tool`` must be registered, must not spawn work (``schedule_task`` aside:
+    ``PROPOSABLE_SPAWN_TOOLS``) and must NOT be one this lineage may already call (``internal_only_allowed``, judged
+    as if the root were below its limits: a spawn tool removed at the limit is still not a proposal, because
+    approving one would route around the limit). The call must satisfy the
+    tool's schema, and no argument may start with an underscore. A refusal is an error text the model can act
+    on; a non-terminal success returns to the model, which then ends the turn with ``ask``."""
+    probe = dataclasses.replace(ctx, spawn_blocked=False)
+
+    async def propose_action(**kwargs: Any) -> tuple[str, bool]:
+        tool = kwargs.get("tool")
+        arguments = kwargs.get("arguments")
+        rationale = kwargs.get("rationale")
+        if not isinstance(tool, str) or not tool.strip():
+            return "Error: tool is required: the name of the tool to run if the owner approves.", True
+        tool = tool.strip()
+        if not isinstance(arguments, dict):
+            return "Error: arguments must be a JSON object: the exact arguments the tool will receive.", True
+        if not isinstance(rationale, str) or not rationale.strip():
+            return "Error: rationale is required: say why the owner should approve this call.", True
+        if not dispatcher.is_registered(tool):
+            return f"Error: {tool} is not a registered tool, so there is nothing to propose.", True
+        cls = tool_class(tool)
+        if cls is not None and cls.spawns and tool not in PROPOSABLE_SPAWN_TOOLS:
+            return (
+                f"Error: {tool} spawns work and cannot be proposed: spawn it yourself with spawn_task or dag_create "
+                "while the work is below its depth and spawn limits, and otherwise end with report, drop or ask.",
+                True,
+            )
+        if tool_policy.internal_only_allowed(tool, ctx=probe):
+            return f"Error: {tool} is a tool you may call yourself, so call it yourself; it is not a proposal.", True
+        problems = dispatcher.validate_call(tool, arguments)
+        if problems:
+            return "Error: this call is not well-formed: " + "; ".join(problems) + ".", True
+        try:
+            proposal_id = await stage(tool, arguments, rationale)
+        except continuation.ProposalRefused as refused:
+            return f"Error: {refused}", True
+        if proposal_id not in state.proposals:
+            state.proposals.append(proposal_id)
+        return (
+            f"Staged proposal {continuation.short_id(proposal_id)} ({tool}). It reaches the owner only when you "
+            "end this turn with resolve_intention(decision='ask'), and it runs only if the owner approves it.",
+            False,
+        )
+
+    return propose_action
 
 
 def build_arrival_prompt(
@@ -234,6 +325,20 @@ SWEEP_INTERVAL_SECONDS = 60  # the longest the loop sleeps (also the reconciler 
 LOOP_RETRY_SECONDS = 5  # after a pass that failed or was cancelled from within
 COOLDOWN_SECONDS = 5  # a root that was due but not claimable is left alone this long
 NO_ROWS_NOTE = "A result was ready but no result row came with it; nothing to decide."
+# An approved call is bounded by the tool timeout plus this. The runner's wait_for is the only bound: the dispatch
+# path (_dispatch_with_ledger) applies no tool timeout of its own. stop() also waits this long for a call in flight.
+EXECUTION_GRACE_SECONDS = 5.0
+# What the model and the owner are told of a call whose outcome is not known. Never the exception's message: it
+# can echo the call's arguments.
+TIMEOUT_TEXT = (
+    "The call did not finish within its time limit, so its outcome is unknown. It was NOT run again: check "
+    "whether it happened before asking for it again."
+)
+RAISED_TEXT = (
+    "The call raised {name} before it finished, so its outcome may be unknown. It was NOT run again: check "
+    "whether it happened before asking for it again."
+)
+NO_DISPATCHER_TEXT = "no tool dispatcher is configured; it was NOT run"
 
 
 class ContinuationRunner:
@@ -266,6 +371,8 @@ class ContinuationRunner:
         # Bounded: a stray release raises instead of quietly widening the cap.
         self._slots = asyncio.BoundedSemaphore(settings.continuation_max_concurrent)
         self._running: dict[UUID, asyncio.Task[Any]] = {}
+        # The shielded approved calls (decide_proposal): held here so that stop() can wait for them.
+        self._executing: set[asyncio.Task[Any]] = set()
         self._cooldown: dict[UUID, datetime] = {}
         self._task: asyncio.Task[None] | None = None
 
@@ -291,12 +398,21 @@ class ContinuationRunner:
 
     async def stop(self) -> None:
         """Cancel the loop and every running arrival (each releases its claim without an attempt), and wait.
-        Must not overlap ``start()`` (see there)."""
+        Then wait, up to ``EXECUTION_GRACE_SECONDS``, for the approved calls still running, and never cancel one:
+        an outward call finishes or ends in doubt (C13). Must not overlap ``start()`` (see there)."""
         loop_task, self._task = self._task, None
         running = list(self._running.values())
         for task in ([loop_task] if loop_task is not None else []) + running:
             task.cancel()
         await asyncio.gather(*([loop_task] if loop_task is not None else []), *running, return_exceptions=True)
+        if self._executing:
+            # An execution's exception is retrieved by its done callback (_execution_done), whenever it ends.
+            _done, pending = await asyncio.wait(set(self._executing), timeout=EXECUTION_GRACE_SECONDS)
+            if pending:
+                logger.warning(
+                    "F099: %d approved call(s) still running at stop; the in-doubt sweep ends any that never finish",
+                    len(pending),
+                )
 
     async def on_result_ready(self, event: Event) -> None:
         """The bus handler for ``intention.result_ready``: a hint. The sweep is the backstop. (One agent per
@@ -308,17 +424,23 @@ class ContinuationRunner:
     # ------------------------------------------------------------------
 
     async def run_once(self) -> continuation.SweepReport:
-        """One sweep, in order: release claims older than the lease, expire roots past their TTL, wake answered or
-        expired questions, push the owner rows that are due, and launch every root that is due while a slot is
-        free. Every step is isolated; with continuation off it does nothing."""
+        """One sweep, in order: release claims older than the lease, expire roots past their TTL, expire proposals,
+        wake answered or expired questions, push the owner rows that are due, and launch every root that is due
+        while a slot is free. Every step is isolated; with continuation off it does nothing."""
         if not continuation.enabled(self._settings):
             return continuation.SweepReport(0, 0, 0, 0, (), None)
         released = await self._step("lease release", self._release_stale, [])
         expired = await self._step("TTL sweep", self._expire, [])
+        # The proposal expiry runs in its own session and AFTER the lease release, and the order matters: its
+        # orphan-staged UPDATE holds staged rows while its later loops take roots, which is safe only because
+        # release_stale_claims has already expired the staged rows of every stale claim (2d-3 review m3).
+        expired_proposals = await self._step("proposal expiry", self._expire_proposals, [])
         await self._step("question wake", self._wake_questions)
         pushed = await self._step("owner push", self._push, 0)
         launched, next_due = await self._step("launch", self._launch, ([], None))
-        return continuation.SweepReport(len(released), len(expired), 0, pushed, tuple(launched), next_due)
+        return continuation.SweepReport(
+            len(released), len(expired), len(expired_proposals), pushed, tuple(launched), next_due
+        )
 
     async def _step(self, name: str, step: Callable[[], Awaitable[Any]], default: Any = None) -> Any:
         try:
@@ -355,6 +477,20 @@ class ContinuationRunner:
         for root_id in expired:
             await self._emit("intention.root_expired", {"root_id": str(root_id)})
         return expired
+
+    async def _expire_proposals(self) -> list[tuple[UUID, str]]:
+        """Pending proposals past their deadline (or on ended work), approved ones whose work ended before they
+        could run, orphan staged rows, calls left in doubt (2d)."""
+        async with self._db.session() as session:
+            moved = await continuation.expire_proposals(session, self._agent_id, settings=self._settings)
+            await session.commit()
+        for proposal_id, state in moved:
+            await self._emit(
+                "intention.proposal_decided", {"proposal_id": str(proposal_id), "state": state, "actor": "system"}
+            )
+        if moved:  # an arrival may have become terminal: the loop looks again
+            self.wake()
+        return moved
 
     async def _wake_questions(self) -> None:
         async with self._db.session() as session:
@@ -563,7 +699,7 @@ class ContinuationRunner:
             # R4: the children this turn spawns inherit the root's Plan decision (the turn makes none of its own).
             decision_id=str(root_decision) if root_decision is not None else None,
         )
-        extra_tools = {
+        extra_tools: dict[str, tuple[dict, Any]] = {
             "resolve_intention": (
                 RESOLVE_INTENTION_SCHEMA,
                 make_resolve_intention_executor(
@@ -571,6 +707,13 @@ class ContinuationRunner:
                 ),
             )
         }
+        if self._dispatcher is not None:  # a proposal is validated against the dispatcher's tools and schemas
+            extra_tools["propose_action"] = (
+                PROPOSE_ACTION_SCHEMA,
+                make_propose_action_executor(
+                    state, ctx=context, dispatcher=self._dispatcher, stage=self._stager(claim)
+                ),
+            )
         usage = [0, 0]
         try:
             try:
@@ -696,6 +839,26 @@ class ContinuationRunner:
 
         return limits_of
 
+    def _stager(self, claim: continuation.Claim) -> Callable[[str, dict, str], Awaitable[UUID]]:
+        """``stage`` for ``propose_action``: one proposal under this claim, in a session of its own."""
+
+        async def stage(tool: str, arguments: dict, rationale: str) -> UUID:
+            async with self._db.session() as session:
+                proposal_id = await continuation.stage_proposal(
+                    session,
+                    self._agent_id,
+                    intention_id=claim.deepest.id,
+                    root_id=claim.root_id,
+                    claim_token=claim.claim_token,
+                    tool=tool,
+                    arguments=arguments,
+                    rationale=rationale,
+                )
+                await session.commit()
+            return proposal_id
+
+        return stage
+
     def _open_work_of(self, claim: continuation.Claim) -> Callable[[], Awaitable[bool]]:
         async def open_work_of() -> bool:
             async with self._db.session() as session:
@@ -800,6 +963,16 @@ class ContinuationRunner:
                 "gate_reason": gate_reason,
             },
         )
+        for proposal_id, tool in done.proposals:  # the owner can see these now (the rows are committed)
+            await self._emit(
+                "intention.proposal_pending",
+                {
+                    "proposal_id": str(proposal_id),
+                    "root_id": str(claim.root_id),
+                    "arrival_id": str(done.arrival_id),
+                    "tool": tool,
+                },
+            )
         self.wake()
         return done
 
@@ -862,6 +1035,163 @@ class ContinuationRunner:
             )
         except Exception:
             logger.warning("F099: could not end the session %s", session_id, exc_info=True)
+
+    # ------------------------------------------------------------------
+    # The owner's actions (spec 4.4 items 3 to 6): deterministic, never model-mediated. The REST routes call
+    # these, and so will the A2UI ActionRouter (Phase 3). They are not tools.
+    # ------------------------------------------------------------------
+
+    async def decide_proposal(self, proposal_id: UUID, *, approve: bool, actor: str) -> continuation.ProposalExecution:
+        """The owner's decision on a proposal. An approve of a proposal that is ``approved`` (decided just now, or
+        by an earlier call that never got as far as running it) runs the call and returns its result; every other
+        outcome is the store's. A refusal is a result (``refusal``), never an exception; raises
+        ``continuation.ProposalNotFound`` for an unknown id. The inline execution is shielded from the caller's
+        cancellation (see below)."""
+        async with self._db.session() as session:
+            decision = await continuation.decide_proposal(
+                session, self._agent_id, proposal_id, approve=approve, actor=actor, settings=self._settings
+            )
+            await session.commit()
+        if decision.changed:
+            # A changed decision with a refusal is the store ending the proposal at its deadline or with its work:
+            # the system's transition (the row says decided_by "system"), not the owner's.
+            await self._emit_decided(decision, "system" if decision.refusal is not None else actor)
+        if decision.woke_arrival:
+            self.wake()
+        if approve and decision.refusal is None and decision.state == continuation.PROPOSAL_APPROVED:
+            # Shielded: a REST client that goes away cancels its request task, and that must not cancel a call the
+            # owner approved half way (it would sit `executing` until the in-doubt sweep). Tracked, so a graceful
+            # stop() waits for it (bounded); a process stop still ends it, and the proposal is failed in doubt as
+            # C13 says.
+            task = asyncio.create_task(self.execute_approved_proposal(proposal_id))
+            self._executing.add(task)
+            task.add_done_callback(self._execution_done)
+            return await asyncio.shield(task)
+        return decision
+
+    def _execution_done(self, task: asyncio.Task[Any]) -> None:
+        """Forget a finished execution and retrieve its exception. A store error in the claim or the finish ends the
+        task with one, and its caller may be gone (the shield case) or stop() may have stopped waiting: retrieved
+        here, whenever it ends, or asyncio warns at GC that it was never retrieved."""
+        self._executing.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.warning("F099: an approved call's execution failed", exc_info=task.exception())
+
+    async def execute_approved_proposal(self, proposal_id: UUID) -> continuation.ProposalExecution:
+        """Run exactly the stored ``(tool, arguments)`` of an approved proposal, once, with no model.
+
+        ``claim_execution`` is the fence (``approved`` to ``executing``, with the root-open predicate in the same
+        statement); without its claim nothing runs, and a proposal whose work ended is ended here
+        (``end_unrunnable``). With the claim, the stored call is checked against the tool as it is registered now
+        (``validate_call``): a call that no longer validates is failed and NOT dispatched. Otherwise it goes
+        through ``AgentRunner.execute_single_call``: the strict ``approved_action`` rule, the execution ledger
+        under the ``proposal:{id}`` scope, owner authority. Whatever happens is recorded on the proposal and
+        returned to the intentions that asked: the result, the tool's error, or an in-doubt text for a timeout or
+        an exception. A call is never re-run. A cancellation (a shutdown) re-raises and leaves the proposal
+        ``executing``: ``expire_proposals`` marks it failed in doubt after the bound."""
+        async with self._db.session() as session:
+            proposal = await continuation.claim_execution(session, self._agent_id, proposal_id)
+            root_decision = None
+            if proposal is not None:
+                root_decision = (
+                    await session.execute(
+                        select(Intention.origin_decision_id).where(
+                            Intention.agent_id == self._agent_id, Intention.id == proposal.root_id
+                        )
+                    )
+                ).scalar_one_or_none()
+            await session.commit()
+        if proposal is None:
+            return await self._not_runnable(proposal_id)
+        context = ExecutionContext(
+            kind="approved_action",
+            session_id=f"proposal-{proposal.id}",
+            proposal_id=proposal.id,
+            declared_tools=(proposal.tool,),
+            root_intention_id=proposal.root_id,
+            intention_id=proposal.intention_id,
+            # R4: what the approved call starts inherits the root's Plan decision, as a continuation turn's do.
+            decision_id=str(root_decision) if root_decision is not None else None,
+        )  # authority stays the default, owner: the owner approved this one call
+        ok, result, error, send_key = False, None, None, None
+        try:
+            # Inside the try: whatever the check raises fails the proposal like any other exception (never left
+            # `executing`), and nothing is dispatched.
+            if self._dispatcher is None:  # never dispatched, so not in doubt
+                logger.warning("F099: no tool dispatcher to run proposal %s", proposal.id.hex[:8])
+                error = NO_DISPATCHER_TEXT
+            elif problems := self._dispatcher.validate_call(proposal.tool, proposal.arguments):
+                logger.warning("F099: the stored call of proposal %s no longer validates", proposal.id.hex[:8])
+                error = f"the stored call no longer validates: {'; '.join(problems)}; it was NOT run"
+            else:
+                call = await asyncio.wait_for(
+                    self._runner.execute_single_call(context, proposal.tool, dict(proposal.arguments)),
+                    timeout=float(self._settings.tool_timeout) + EXECUTION_GRACE_SECONDS,
+                )
+                ok, send_key = not call.is_error, call.send_key
+                result, error = (call.text, None) if ok else (None, call.text)
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError:
+            logger.warning("F099: the approved call of proposal %s timed out; outcome unknown", proposal.id.hex[:8])
+            error = TIMEOUT_TEXT
+        except Exception as exc:
+            logger.warning(
+                "F099: the approved call of proposal %s raised %s",
+                proposal.id.hex[:8],
+                type(exc).__name__,
+                exc_info=True,
+            )
+            error = RAISED_TEXT.format(name=type(exc).__name__)
+        async with self._db.session() as session:
+            finished = await continuation.finish_execution(
+                session,
+                self._agent_id,
+                proposal_id,
+                ok=ok,
+                result=result,
+                error=error,
+                ledger_key=send_key,
+                settings=self._settings,
+            )
+            await session.commit()
+        if finished.changed:
+            await self._emit_decided(finished, proposal.decided_by or "owner")
+        if finished.woke_arrival:
+            self.wake()
+        return finished
+
+    async def _not_runnable(self, proposal_id: UUID) -> continuation.ProposalExecution:
+        """``claim_execution`` gave no claim: the work ended before the call could start (it ends here as
+        ``cancelled`` or ``expired``, and nothing runs), or the proposal is not ``approved`` any more (another
+        caller has it, or it is done): its current state."""
+        async with self._db.session() as session:
+            outcome = await continuation.end_unrunnable(session, self._agent_id, proposal_id, settings=self._settings)
+            await session.commit()
+        if outcome.changed:
+            await self._emit_decided(outcome, "system")
+        if outcome.woke_arrival:
+            self.wake()
+        return outcome
+
+    async def answer_question(self, question_id: UUID, *, text: str, actor: str) -> continuation.AnswerRecorded:
+        """The owner's answer to a question, recorded as the next result of every intention of the asking arrival.
+        Raises ``continuation.QuestionNotFound`` or ``continuation.AnswerRefused`` (answered, expired or ended:
+        nothing written)."""
+        async with self._db.session() as session:
+            recorded = await continuation.record_answer(
+                session, self._agent_id, question_id, text=text, actor=actor, settings=self._settings
+            )
+            await session.commit()
+        if recorded.woke_arrival:
+            self.wake()
+        return recorded
+
+    async def _emit_decided(self, outcome: continuation.ProposalExecution, actor: str) -> None:
+        await self._emit(
+            "intention.proposal_decided",
+            {"proposal_id": str(outcome.proposal_id), "state": outcome.state, "actor": actor},
+        )
 
     async def _emit(self, event_type: str, data: dict[str, Any]) -> None:
         """A hint on the bus (it drops on QueueFull); the rows are the truth. Never raises."""

@@ -43,9 +43,10 @@ TOOL_CLASSES: Mapping[str, ToolClass] = MappingProxyType({
     "cancel_task": _WRITE, "heartbeat_check_manage": _WRITE_C, "ingest_document": _WRITE,
     "resolve_decision": _WRITE_C, "resolve_decisions": _WRITE, "push_surface": _WRITE,
     "compose_surface": _WRITE, "dag_manage": _WRITE,
-    # F099: a continuation's decision, injected per turn via extra_tools (never registered); classified so the
-    # ledger and the internal_only rules read one table. propose_action joins it in 2d.
+    # F099: a continuation's decision and its staged proposals, injected per turn via extra_tools (never
+    # registered); classified so the ledger and the internal_only rules read one table.
     "resolve_intention": _WRITE,
+    "propose_action": _WRITE,
     "run_python": _WRITE,  # the floor; code that reaches the network is external
     "bash": _WRITE,        # the floor; classify_side_effect reads the command itself
     # start other agent work — NOT compensable: cancelling a schedule or check

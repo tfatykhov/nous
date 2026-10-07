@@ -494,7 +494,8 @@ async def test_an_ask_writes_a_question_and_waits_for_the_owner(runner_env):  # 
     root = await _ready_root(env)
     cont = _cont(env)
     done = await cont.run_arrival(root.id)
-    assert "propose_action" not in {t["name"] for t in env.model.calls[0]["tools"]}  # C4: not offered in 2c
+    # no dispatcher on this runner: propose_action is not offered (2d, C16)
+    assert "propose_action" not in {t["name"] for t in env.model.calls[0]["tools"]}
     (question,) = await _owner_rows(env)
     assert (question.msg_type, question.channel, question.arrival_id) == ("QUESTION", CHAN, done.arrival_id)
     assert question.push_after is not None and "Friday slot" in question.body
