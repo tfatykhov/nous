@@ -64,7 +64,8 @@ def _actor(body: dict[str, Any]) -> str:
 
 
 def _is_int(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool)
+    """A JSON integer that fits a signed int64: a larger one would fail asyncpg's BIGINT bind (a 500, not a 400)."""
+    return isinstance(value, int) and not isinstance(value, bool) and -(1 << 63) <= value < 1 << 63
 
 
 def build_intention_routes(*, database: Any, settings: Any, continuation_runner: Any) -> list[Route]:
@@ -76,7 +77,8 @@ def build_intention_routes(*, database: Any, settings: Any, continuation_runner:
         """GET /intentions/proposals?state=pending&limit=20"""
         state = request.query_params.get("state", "pending")
         raw_limit = request.query_params.get("limit", "20")
-        if not raw_limit.isdigit() or not 1 <= int(raw_limit) <= LIST_LIMIT_MAX:
+        # isascii: str.isdigit() also accepts Unicode digits such as a superscript two, which int() rejects.
+        if not (raw_limit.isascii() and raw_limit.isdigit()) or not 1 <= int(raw_limit) <= LIST_LIMIT_MAX:
             return _error(400, f"limit must be a whole number from 1 to {LIST_LIMIT_MAX}")
         try:
             async with database.session() as session:
@@ -158,6 +160,9 @@ def build_intention_routes(*, database: Any, settings: Any, continuation_runner:
     def _text_of(body: dict[str, Any]) -> str | None:
         text = body.get("text")
         if not isinstance(text, str) or not text.strip() or len(text) > ANSWER_MAX_CHARS:
+            return None
+        # Postgres refuses a NUL and the UTF-8 encode a lone surrogate: refused here, not a 500 from the store.
+        if continuation._has_nul(text) or continuation._has_surrogate(text):
             return None
         return text
 

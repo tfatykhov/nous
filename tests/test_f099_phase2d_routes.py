@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -224,7 +225,8 @@ async def test_the_list_filters_by_state_validates_its_limit_and_never_shows_a_s
     assert {p["id"] for p in everything} == {str(pending), str(rejected)}
     one = (await _call(app, "GET", "/intentions/proposals", params={"state": "all", "limit": 1})).json()["proposals"]
     assert len(one) == 1
-    for params in ({"state": "staged"}, {"state": "bogus"}, {"limit": "0"}, {"limit": "x"}, {"limit": "101"}):
+    bad_limits = ({"limit": "0"}, {"limit": "x"}, {"limit": "101"}, {"limit": chr(0xB2)})  # a superscript two
+    for params in ({"state": "staged"}, {"state": "bogus"}, *bad_limits):
         assert (await _call(app, "GET", "/intentions/proposals", params=params)).status_code == 400
 
 
@@ -251,6 +253,20 @@ async def test_a_blank_or_oversize_answer_is_400(runner_env, payload):  # noqa: 
     qid = await _question(env)
     path = f"/intentions/questions/{qid.hex[:8]}/answer"
     assert (await _call(_app(env, _runner(env)), "POST", path, json=payload)).status_code == 400
+
+
+@pytest.mark.parametrize("text", ["a" + chr(0) + "b", chr(0xD800) + " yes"])
+async def test_a_nul_or_a_lone_surrogate_in_an_answer_is_400_and_records_nothing(runner_env, text):  # noqa: F811
+    """2d-7 review m1: Postgres refuses a NUL and the UTF-8 encode a lone surrogate, so either would reach the store
+    and 500. The raw JSON escapes it (``ensure_ascii``): httpx's own encoder would refuse the surrogate client-side."""
+    env = await runner_env()
+    qid = await _question(env)
+    app = _app(env, _runner(env))
+    path = f"/intentions/questions/{qid.hex[:8]}/answer"
+    headers = {"content-type": "application/json"}
+    response = await _call(app, "POST", path, content=json.dumps({"text": text}), headers=headers)
+    assert response.status_code == 400
+    assert (await _call(app, "POST", path, json={"text": "Yes"})).status_code == 200  # still unanswered
 
 
 async def test_an_answer_to_an_unknown_question_or_a_proposal_is_404(runner_env):  # noqa: F811
@@ -289,6 +305,8 @@ async def test_a_telegram_reply_is_resolved_by_the_message_it_replies_to(runner_
         {"chat_id": "8080", "message_id": 777, "text": "Yes"},
         {"chat_id": True, "message_id": 777, "text": "Yes"},
         {"chat_id": 8080, "message_id": 777, "text": " "},
+        {"chat_id": 8080, "message_id": 2**63, "text": "Yes"},  # past BIGINT: asyncpg would refuse the bind
+        {"chat_id": -(2**63) - 1, "message_id": 777, "text": "Yes"},
     ]
     for bad in malformed:
         assert (await _call(app, "POST", path, json=bad)).status_code == 400
@@ -313,6 +331,33 @@ async def test_without_a_runner_a_row_answers_503_and_an_unknown_id_still_404(en
     listed = (await _call(app, "GET", "/intentions/proposals")).json()["proposals"]
     assert [p["id"] for p in listed] == [str(pid)]  # reads need no runner
     assert (await proposal_row(env, pid)).state == "pending"  # nothing was touched
+
+
+class _RaisingRunner:
+    """A runner whose owner actions fail the way a store error would."""
+
+    async def decide_proposal(self, *args, **kwargs):
+        raise RuntimeError("secret internal detail")
+
+    async def answer_question(self, *args, **kwargs):
+        raise RuntimeError("secret internal detail")
+
+
+async def test_a_runner_that_raises_is_a_fixed_500_that_leaks_nothing(runner_env):  # noqa: F811  # PIN
+    """2d-7 review m4: the bot branches on these codes. The exception's text stays in the log."""
+    env = await runner_env()
+    (pid,) = (await ask_with_proposals(env)).ids
+    qid = await _question(env)
+    app = _app(env, _RaisingRunner())
+    decided = await _call(app, "POST", f"/intentions/proposals/{pid.hex[:8]}/decide", json={"decision": "approve"})
+    assert (decided.status_code, decided.json()) == (500, {"error": "the decision could not be processed"})
+    answer_path = f"/intentions/questions/{qid.hex[:8]}/answer"
+    answered = await _call(app, "POST", answer_path, json={"text": "Yes"})
+    assert (answered.status_code, answered.json()) == (500, {"error": "the answer could not be processed"})
+    assert "secret" not in decided.text and "secret" not in answered.text
+    assert (await proposal_row(env, pid)).state == "pending"
+    real = _app(env, _runner(env))
+    assert (await _call(real, "POST", answer_path, json={"text": "Yes"})).status_code == 200  # was not answered
 
 
 # ---- the shape of the module ---------------------------------------------------------------------------------
@@ -438,3 +483,17 @@ async def test_under_prods_flags_the_mounted_routes_find_nothing(env_factory):  
     ]
     for path, payload in requests:
         assert (await _call(app, "POST", path, json=payload)).status_code == 404, path
+
+
+async def test_under_prods_flags_malformed_input_is_400_never_500(env_factory):  # noqa: F811
+    """2d-7 review I1: the routes are mounted in prod, so malformed input there must be refused, not crash. A
+    Unicode digit passes ``str.isdigit`` and fails ``int()``; an id past int64 fails asyncpg's BIGINT bind."""
+    env = await env_factory(**ON, result_memory_enabled=True)
+    assert env.settings.continuation_enabled is False
+    app = create_app(MagicMock(), MagicMock(), env.heart, MagicMock(), env.db, env.settings)
+    for limit in (chr(0xB2), chr(0x663)):  # a superscript two; an Arabic-Indic three
+        listed = await _call(app, "GET", "/intentions/proposals", params={"limit": limit})
+        assert listed.status_code == 400, limit
+    for ids in ({"chat_id": 8080, "message_id": 2**63}, {"chat_id": 10**30, "message_id": 10**30}):
+        answered = await _call(app, "POST", "/intentions/questions/answer", json={**ids, "text": "Yes"})
+        assert answered.status_code == 400, ids

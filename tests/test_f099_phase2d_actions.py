@@ -445,9 +445,48 @@ async def test_stop_retrieves_and_logs_the_exception_of_a_tracked_execution(runn
 
     task = asyncio.create_task(failing_execution())
     cont._executing.add(task)  # tracked as decide_proposal tracks it; its caller was cancelled
+    task.add_done_callback(cont._execution_done)
     await asyncio.wait_for(cont.stop(), timeout=10)
     assert "the claim could not be written" in caplog.text
+    # CPython-specific: ``_log_traceback`` is the flag of both the C and the Python Task (since 3.4) that
+    # ``exception()`` clears and that makes asyncio warn "never retrieved" at GC. The caplog line is the portable half.
     assert task._log_traceback is False  # retrieved: asyncio has nothing to warn about at GC
+    assert cont._executing == set()
+
+
+async def test_an_execution_that_fails_after_stop_stopped_waiting_is_still_retrieved(
+    runner_env,  # noqa: F811
+    monkeypatch,
+    caplog,
+):
+    """2d-7 review m3: stop() waits only ``EXECUTION_GRACE_SECONDS``; a tracked execution that ends with an exception
+    after that is retrieved and logged by its done callback, not left for asyncio's warning at GC."""
+    env = await runner_env()
+    register_send_email(env)
+    (pid,) = (await ask_with_proposals(env)).ids
+    cont = _cont(env)
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def late_failing_execution(proposal_id):
+        started.set()
+        await release.wait()
+        raise RuntimeError("the finish could not be written")
+
+    monkeypatch.setattr(cont, "execute_approved_proposal", late_failing_execution)
+    request = asyncio.create_task(cont.decide_proposal(pid, approve=True, actor="t"))
+    await asyncio.wait_for(started.wait(), timeout=10)
+    (task,) = cont._executing  # tracked by decide_proposal itself
+    request.cancel()  # the REST caller went away: nobody awaits the shielded task now
+    await asyncio.wait({request}, timeout=10)
+    monkeypatch.setattr(continuation_runner, "EXECUTION_GRACE_SECONDS", 0.05)
+    await asyncio.wait_for(cont.stop(), timeout=10)
+    assert not task.done() and "still running" in caplog.text
+    release.set()
+    await asyncio.wait_for(asyncio.wait({task}), timeout=10)  # not `await task`: that would retrieve it here
+    await asyncio.sleep(0)  # the done callbacks run on the next loop iteration
+    assert "the finish could not be written" in caplog.text
+    assert task._log_traceback is False  # CPython-specific, as above
+    assert cont._executing == set()
 
 
 async def test_an_approved_spawn_stays_internal_only_under_an_owner_root(runner_env):  # noqa: F811
