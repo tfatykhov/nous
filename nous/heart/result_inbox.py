@@ -278,6 +278,13 @@ class ResultInboxStore:
             await session.commit()
         return found
 
+    async def end_hanging_roots_after_close(self, intention_ids: list[UUID], *, settings: Settings) -> int:
+        """F099 2e re-review N1: ``continuation.end_hanging_roots_after_close`` on this store's database, after a
+        quiet close committed. Never raises."""
+        return await continuation.end_hanging_roots_after_close(
+            self._db, self._agent_id, intention_ids, settings=settings
+        )
+
     async def insert_and_close(self, *, close_kind: str, close_id: UUID, **insert_kwargs: Any) -> bool:
         """F099 I4: the inbox row of a ``report`` intention and the ``delivered`` close of that
         intention in ONE transaction (T3). A fault after the INSERT rolls the row back too, so a
@@ -495,12 +502,22 @@ async def close_intention_quietly(
     if not intentions.enabled(settings):
         return None
     try:
-        return await store.close_source_intention(
+        found = await store.close_source_intention(
             source_kind, source_id, reason=continuation.close_reason_for(settings)
         )
     except Exception:
         logger.warning("F099: could not close the intention of %s %s", source_kind, source_id, exc_info=True)
         return None
+    await _after_quiet_close(store, settings, found)
+    return found
+
+
+async def _after_quiet_close(store: ResultInboxStore, settings: Settings, intention_id: UUID | None) -> None:
+    """F099 2e re-review N1: a quiet close may have closed the last open row of a root that was waiting on a
+    cancelled ``continue`` child; end that root (``continuation.end_hanging_roots_after_close``, after the close's
+    commit). With continuation off nothing is read: no root is ever left waiting."""
+    if intention_id is not None and continuation.enabled(settings):
+        await store.end_hanging_roots_after_close([intention_id], settings=settings)
 
 
 _NO_OUTPUT = "The work finished and returned no output."
@@ -559,7 +576,8 @@ async def route_result(
     if intention is not None and policy == intentions.WAKE_REPORT and env is None:
         # R1: a report with nothing to say delivers nothing, so it is not 'delivered' (which means an
         # owner-facing row was written). Closed before the routing check, like every close.
-        await store.close_source_intention(source_kind, source_id, reason=intentions.CLOSE_LEGACY)
+        closed = await store.close_source_intention(source_kind, source_id, reason=intentions.CLOSE_LEGACY)
+        await _after_quiet_close(store, settings, closed)
         return False
     if not channel and not session_id:
         channel = default_channel
@@ -574,7 +592,8 @@ async def route_result(
                 source_kind,
                 str(source_id)[:8],
             )
-            await store.close_source_intention(source_kind, source_id, reason=intentions.CLOSE_LEGACY)
+            closed = await store.close_source_intention(source_kind, source_id, reason=intentions.CLOSE_LEGACY)
+            await _after_quiet_close(store, settings, closed)
             return False
     if env is None or not (channel or session_id):
         await close_intention_quietly(store, settings, source_kind, source_id)
@@ -592,9 +611,11 @@ async def route_result(
         created_at=created_at,
     )
     if intention is not None and policy == intentions.WAKE_REPORT:
-        return await store.insert_and_close(
+        written = await store.insert_and_close(
             close_kind=source_kind, close_id=source_id, intention_id=intention.id, **row
         )
+        await _after_quiet_close(store, settings, intention.id)
+        return written
     intention_id = await close_intention_quietly(store, settings, source_kind, source_id)
     return await store.insert(intention_id=intention_id, **row)
 

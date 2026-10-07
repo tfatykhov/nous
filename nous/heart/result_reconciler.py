@@ -315,6 +315,11 @@ class IntentionClosePass:
                 len(closed),
                 len(containers),
             )
+        if on and (closed or containers):
+            # 2e re-review N1: after the commit, a root these closes left waiting on nothing is ended and reported.
+            await continuation.end_hanging_roots_after_close(
+                self._db, agent_id, [*closed, *containers], settings=self._settings
+            )
         return len(closed) + len(containers)
 
 

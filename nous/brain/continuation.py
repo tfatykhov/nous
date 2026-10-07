@@ -16,7 +16,7 @@ import logging
 import re
 import unicodedata
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -3984,6 +3984,51 @@ async def end_hanging_root(
     )
     logger.info("F099: root %s was left with nothing running; it was closed and reported", root_id)
     return True
+
+
+async def end_hanging_roots_after_close(
+    database: Any, agent_id: str, intention_ids: Iterable[UUID], *, settings: Any
+) -> int:
+    """After a quiet close has COMMITTED (a ``remember``, ``report``, ``none`` or container child closed by its
+    writer or by the close pass), ``end_hanging_root`` for the roots of the closed children (2e final re-review N1).
+
+    A root whose only ``continue`` child was cancelled while such a sibling was open was left waiting by that close
+    (the sibling was open); once the sibling closes, nothing is left that will ever wake, expire or list the root,
+    and the quiet closers do not reach ``end_hanging_root`` on their own. A ``continue`` child that finishes wakes
+    its root instead, so a lineage gets here only through a cancel, which is what the REPORT says. Each root in its
+    own transaction, after the close: ``end_hanging_root`` takes the root lock first, and doing that inside the
+    closer's transaction, which holds the child row, would break the one lock order (child before root deadlocks
+    against a cancel). Idempotent (the marker, the REPORT's ``uuid5`` id). The callers call it only with continuation
+    on. Never raises: a failure here must never cost the close. Returns the number of roots closed."""
+    ids = list(intention_ids)
+    if not ids:
+        return 0
+    try:
+        async with database.session() as session:
+            root_ids = (
+                (
+                    await session.execute(
+                        select(Intention.root_id)
+                        .where(Intention.agent_id == agent_id, Intention.id.in_(ids), Intention.root_id != Intention.id)
+                        .distinct()
+                    )
+                )
+                .scalars()
+                .all()
+            )
+    except Exception:
+        logger.warning("F099: could not read the roots of %d closed intention(s)", len(ids), exc_info=True)
+        return 0
+    ended = 0
+    for root_id in sorted(root_ids):
+        try:
+            async with database.session() as session:
+                if await end_hanging_root(session, agent_id, root_id, settings=settings):
+                    ended += 1
+                await session.commit()
+        except Exception:
+            logger.warning("F099: could not check root %s for a hanging lineage", root_id, exc_info=True)
+    return ended
 
 
 # ---------------------------------------------------------------------------

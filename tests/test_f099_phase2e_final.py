@@ -1,7 +1,10 @@
-"""F099 Phase 2e, the final fix wave: open work is work that will come back (final review I1), and a cancelled
-lineage sends no legacy push (final review m1)."""
+"""F099 Phase 2e, the final fix wave: open work is work that will come back (final review I1), a cancelled lineage
+sends no legacy push (final review m1), a cancel cut at its bound says so (final review m4), and a quiet close that
+leaves a root waiting on nothing ends it (re-review N1)."""
 
 from __future__ import annotations
+
+import uuid
 
 import pytest
 from f099_support import (
@@ -10,6 +13,8 @@ from f099_support import (
     RESULT,
     claim,
     env_factory,  # noqa: F401
+    finish,
+    inbox_rows,
     intention_of,
     make_child,
     make_root,
@@ -24,6 +29,8 @@ from nous.brain.continuation import RootLimits
 from nous.brain.intentions import IntentionSpec
 from nous.handlers.continuation_runner import ArrivalState, make_resolve_intention_executor
 from nous.handlers.subtask_worker import SubtaskWorkerPool
+from nous.heart.result_inbox import record_subtask_result
+from nous.heart.result_reconciler import IntentionClosePass, repair_missing_results
 
 pytestmark = pytest.mark.postgres_only
 
@@ -168,3 +175,79 @@ async def test_a_cancel_inside_its_bound_is_not_cut(env_factory):  # noqa: F811 
     schedule, container = await _schedule_container(env)
     await _fire(env, schedule)
     assert (await _cancel(env, container.id)).truncated is False
+
+
+# ---- re-review N1: a quiet close that leaves a root waiting on nothing ends it ----------------------------------
+
+
+async def _waiting_on_a_cancelled_child_and_a_remember_one(env):
+    """The re-review's sequence: the root's turn spawned a `continue` child C and a `remember` child M and resolved
+    `continue` (accepted: C counts). C is cancelled; its close (the repair) sees M open and ends nothing."""
+    root = await make_root(env)
+    await record(env, root)
+    child = await make_child(env, root)
+    remember = await env.heart.subtasks.create(
+        task="note the snow",
+        intention=IntentionSpec(intent="note it", origin_kind="interactive", wake_policy="remember", parent_id=root.id),
+    )
+    got = await claim(env, root.id)
+    async with env.db.session() as s:
+        assert await continuation.has_open_work(s, env.agent, got)
+        resolution = continuation.Resolution("continue", "waiting on the follow-up", True, 0.6)
+        assert await continuation.commit_arrival(
+            s, env.agent, got, resolution=resolution, outcome="resolved", settings=env.settings
+        )
+        await s.commit()
+    await env.heart.subtasks.cancel(uuid.UUID(child.source_id))
+    await repair_missing_results(env.db, env.heart.result_inbox, env.settings, limit=50)
+    assert (await intention_of(env, "subtask", child.source_id)).close_reason == "legacy"
+    assert (await _row(env, root.id)).root_expired_at is None  # M is still open
+    return root, remember
+
+
+async def _hanging_reports(env, root):
+    return [r for r in await inbox_rows(env) if r.source_kind == "intention_report" and r.intention_id == root.id]
+
+
+async def _close_by_writer(env, subtask):
+    await record_subtask_result(env.heart.result_inbox, await env.heart.subtasks.get(subtask.id), env.settings)
+
+
+async def _close_by_pass(env, _subtask):
+    await IntentionClosePass(env.db, env.settings).run(limit=50)  # the writer never ran: the backstop closes it
+
+
+@pytest.mark.parametrize("close", [_close_by_writer, _close_by_pass], ids=["writer", "close-pass"])
+async def test_the_quiet_close_of_the_last_open_child_ends_a_root_left_waiting_on_nothing(env_factory, close):  # noqa: F811
+    env = await env_factory(**CONT)
+    root, remember = await _waiting_on_a_cancelled_child_and_a_remember_one(env)
+    await finish(env, remember)
+    await close(env, remember)
+    assert (await intention_of(env, "subtask", remember.id)).state == "closed"
+    fresh = await _row(env, root.id)
+    assert fresh.root_expired_at is not None  # ended, so it is reported, not left hanging
+    (report,) = await _hanging_reports(env, root)
+    assert report.msg_type == "REPORT" and report.source_id == uuid.uuid5(continuation._HANGING_NAMESPACE, str(root.id))
+    await close(env, remember)  # a second close, or the next tick, reports nothing more
+    assert len(await _hanging_reports(env, root)) == 1
+
+
+async def test_a_quiet_close_with_a_continue_child_still_open_ends_nothing(env_factory):  # noqa: F811  # PIN
+    env = await env_factory(**CONT)
+    root = await make_root(env)
+    await record(env, root)
+    await make_child(env, root)  # still running: it will come back
+    remember = await env.heart.subtasks.create(
+        task="note the snow",
+        intention=IntentionSpec(intent="note it", origin_kind="interactive", wake_policy="remember", parent_id=root.id),
+    )
+    got = await claim(env, root.id)
+    async with env.db.session() as s:
+        resolution = continuation.Resolution("continue", "waiting on the follow-up", True, 0.6)
+        await continuation.commit_arrival(
+            s, env.agent, got, resolution=resolution, outcome="resolved", settings=env.settings
+        )
+        await s.commit()
+    await finish(env, remember)
+    await _close_by_writer(env, remember)
+    assert (await _row(env, root.id)).root_expired_at is None and await _hanging_reports(env, root) == []
