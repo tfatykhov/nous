@@ -196,8 +196,11 @@ def describe_intentions(body: dict) -> str:
         return "Nothing is running that I could cancel."
     heading, footer = "<b>Open work</b>", "To stop one: /cancel_intention &lt;id&gt;"
     lines = [heading]
-    # Room is kept for the "(and N more)" line whether or not it is needed, so the footer always fits.
-    used = _utf16_units(heading) + 1 + _utf16_units(footer) + _utf16_units(f"(and {len(listed)} more)") + 1
+    # Room is kept for the "(and N more)" line whether or not it is needed, so the footer always fits. More roots
+    # than are shown means the server's own cut was reached (it is asked for one more): the true count is unknown.
+    beyond = len(listed) > INTENTIONS_SHOWN
+    more = "(and at least {} more)" if beyond else "(and {} more)"
+    used = _utf16_units(heading) + 1 + _utf16_units(footer) + _utf16_units(more.format(len(listed))) + 1
     for root in listed[:INTENTIONS_SHOWN]:
         steps = root.get("open_rows")
         steps = steps if isinstance(steps, int) and not isinstance(steps, bool) and steps >= 0 else 0
@@ -215,7 +218,7 @@ def describe_intentions(body: dict) -> str:
         used += cost
     shown = len(lines) - 1
     if shown < len(listed):
-        lines.append(f"(and {len(listed) - shown} more)")
+        lines.append(more.format(len(listed) - shown))
     lines.append(footer)
     return "\n".join(lines)
 

@@ -137,11 +137,11 @@ def make_resolve_intention_executor(
 
     A bad call is an error the model reads and can correct: a failing terminal tool does not end the
     loop. A good call stores the resolution and ends it. ``continue`` and ``revise`` are refused when the
-    root is at its depth or spawn limit, and when nothing would be left running under the root
-    (``open_work_of``, ``continuation.has_open_work``): the commit closes the claimed intentions, so a
-    continue with nothing open and nothing spawned would end the goal with no one to wake it. Both are
-    judged from rows at the moment of the call (spawns this turn already count); a turn that staged a
-    proposal may only ``ask``.
+    root is at its depth or spawn limit, and when nothing that will come back (an open ``continue``
+    intention) would be left running under the root (``open_work_of``, ``continuation.has_open_work``): the
+    commit closes the claimed intentions, so a continue with nothing open and nothing spawned would end the goal
+    with no one to wake it. Both are judged from rows at the moment of the call (spawns this turn already count);
+    a turn that staged a proposal may only ``ask``.
     """
 
     async def resolve_intention(**kwargs: Any) -> tuple[str, bool]:
@@ -172,8 +172,10 @@ def make_resolve_intention_executor(
             )
         if decision in ("continue", "revise") and not await open_work_of():
             return (
-                f"Error: you chose {decision}, but nothing is running under this work: spawn the next step first "
-                f"(spawn_task or dag_create), then {decision}; or end with report, drop or ask.",
+                # Open work is work that will come back (has_open_work): a `remember` child may be running.
+                f"Error: you chose {decision}, but nothing that will report back to you is running under this "
+                f"work: spawn the next step first (spawn_task or dag_create), then {decision}; or end with "
+                "report, drop or ask.",
                 True,
             )
         state.resolution = Resolution(decision, note.strip()[:NOTE_MAX_CHARS], progress, float(confidence))

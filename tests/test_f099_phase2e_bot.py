@@ -261,13 +261,14 @@ def test_the_list_is_measured_in_telegrams_units_and_says_how_many_it_left_out()
     assert _units(text) <= 3900  # Telegram counts UTF-16 units, not Python characters
     assert 0 < shown < 10 and text.count("<pre>") == text.count("</pre>") == shown
     assert f"(and {10 - shown} more)" in text  # m2: a cut is said
+    assert "at least" not in text  # ten roots or fewer, cut by size: the count is exact
     assert text.endswith("To stop one: /cancel_intention &lt;id&gt;")  # the footer survives the cut
 
 
 def test_more_roots_than_are_shown_are_counted_too():
     roots = [_root(short_id=f"{n:08x}") for n in range(12)]
     text = describe_intentions({"roots": roots})
-    assert text.count("<code>") == 10 and "(and 2 more)" in text
+    assert text.count("<code>") == 10 and "(and at least 2 more)" in text  # the server cut: unknown count
 
 
 def test_a_list_that_fits_says_nothing_more():
@@ -356,7 +357,7 @@ def test_a_cancel_that_turned_a_schedule_off_says_so(count, line):
 
 
 @pytest.mark.parametrize("count", [0, None, "1", True, -1])
-def test_no_schedule_line_without_a_positive_count(count):
+def test_no_schedule_line_without_a_positive_count(count):  # PIN
     assert describe_cancel(200, _done(deactivated_schedules=count), SHORT) == (
         f"Cancelled ({SHORT}): 1 piece(s) of work stopped."
     )
@@ -388,7 +389,7 @@ async def test_the_list_asks_for_one_more_root_than_it_shows_so_the_servers_cut_
     await bot._handle_update(_message("/intentions"))
     assert bot._http.calls == [("GET", "/intentions?state=open&limit=11", None)]
     (text,) = _sent(bot)
-    assert text.count("<code>") == 10 and "(and 1 more)" in text
+    assert text.count("<code>") == 10 and "(and at least 1 more)" in text
 
 
 # ---- the final fix wave: /debug and /identity never fall back to live text (2e-9 review I1, m5) ---------------

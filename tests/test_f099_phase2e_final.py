@@ -80,7 +80,7 @@ async def test_a_continue_whose_only_open_sibling_cannot_wake_the_root_is_refuse
     state, execute = _executor(env, got)
     text, is_error = await execute(**CONTINUE)
     assert is_error is True and state.resolution is None
-    assert "you chose continue, but nothing is running under this work" in text
+    assert "you chose continue, but nothing that will report back to you is running under this work" in text
 
 
 async def test_a_continue_whose_open_sibling_is_a_continue_child_is_accepted(env_factory):  # noqa: F811  # PIN

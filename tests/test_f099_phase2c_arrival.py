@@ -179,7 +179,8 @@ async def test_a_continue_with_nothing_running_is_refused_and_the_turn_reports(r
     root = await _ready_root(env)
     await _cont(env).run_arrival(root.id)
     assert len(env.model.calls) == 2
-    assert "you chose continue, but nothing is running under this work" in str(env.model.calls[1]["messages"])
+    sent = str(env.model.calls[1]["messages"])
+    assert "you chose continue, but nothing that will report back to you is running under this work" in sent
     (arrival,) = await _arrivals(env, root.id)
     assert (arrival.decision, arrival.outcome) == ("report", "resolved")
     (report,) = await _owner_rows(env)
@@ -200,7 +201,8 @@ async def test_a_continue_after_an_inline_spawn_is_refused(runner_env):  # noqa:
     root = await _ready_root(env)
     await _cont(env).run_arrival(root.id)
     assert len(env.model.calls) == 4
-    assert "you chose continue, but nothing is running under this work" in str(env.model.calls[3]["messages"])
+    sent = str(env.model.calls[3]["messages"])
+    assert "you chose continue, but nothing that will report back to you is running under this work" in sent
     (child_subtask,) = [s for s in await env.heart.subtasks.list(limit=10) if str(s.id) != root.source_id]
     child = await intention_of(env, "subtask", child_subtask.id)
     assert (child.parent_id, child.state, child.wake_policy) == (root.id, "closed", "none")  # inline: already closed
@@ -239,7 +241,7 @@ async def test_a_fan_out_continue_with_every_sibling_finished_is_refused(runner_
     root, first, second = await _fan_out(env)
     await set_intention(env, second.id, state="closed", close_reason="delivered", closed_at=datetime.now(UTC))
     await _cont(env).run_arrival(root.id)
-    assert "nothing is running under this work" in str(env.model.calls[1]["messages"])
+    assert "nothing that will report back to you is running under this work" in str(env.model.calls[1]["messages"])
     (arrival,) = await _arrivals(env, root.id)
     assert arrival.decision == "report"
 
