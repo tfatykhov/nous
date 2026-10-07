@@ -29,7 +29,7 @@ import httpx
 from nous.api.attachments import classify_attachment, sanitize_filename
 from nous.api.models import Attachment
 from nous.log_redaction import configure_logging
-from nous.owner_actions import ANSWER_REFUSALS, DECISION_REFUSALS, parse_callback
+from nous.owner_actions import ANSWER_REFUSALS, CANCEL_REFUSALS, DECISION_REFUSALS, parse_callback
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +124,71 @@ def describe_answer(status: int, body: dict) -> str:
         return text or "That question can no longer be answered."
     if status == 400:
         return "I could not read that."
+    if status == 503:
+        return _NOT_RUNNING
+    return _UNREACHABLE
+
+
+INTENTIONS_SHOWN = 10  # the roots /intentions lists (the route is asked for no more)
+INTENT_SHOWN_CHARS = 160  # one root's intent, as /intentions shows it
+TELEGRAM_TEXT_LIMIT = 3900  # a message stays under Telegram's 4096
+# Fixed vocabulary for a root's state: the state names of the server are looked up, never echoed.
+ROOT_STATE_WORDS = {
+    "pending": "running",
+    "result_ready": "result ready",
+    "deciding": "thinking",
+    "awaiting_owner": "waiting for you",
+}
+_SHORT_ID_RE = re.compile(r"[0-9a-f]{8}")
+
+
+def _shown(text: object, limit: int) -> str:
+    """Model-authored text as one printable line, clipped: control characters and runs of white space become a space."""
+    cleaned = " ".join("".join(ch if ch.isprintable() else " " for ch in str(text or "")).split())
+    return cleaned if len(cleaned) <= limit else cleaned[: limit - 1].rstrip() + "\u2026"
+
+
+def describe_intentions(body: dict) -> str:
+    """The HTML text of ``/intentions`` for the body of ``GET /intentions``. The roots' intents are model-authored
+    (a spawning turn wrote them from whatever it read), so each sits inside ``<pre>``, HTML-escaped, where Telegram
+    parses no command, link or mention; everything outside ``<pre>`` is fixed words, a short id the server minted
+    (checked to be 8 hex characters) and a looked-up state word."""
+    roots = body.get("roots")
+    shown = [r for r in roots if isinstance(r, dict)][:INTENTIONS_SHOWN] if isinstance(roots, list) else []
+    if not shown:
+        return "Nothing is running that I could cancel."
+    lines = ["<b>Running</b>"]
+    for root in shown:
+        short = root.get("short_id")
+        if not isinstance(short, str) or not _SHORT_ID_RE.fullmatch(short):
+            continue
+        steps = root.get("open_rows")
+        steps = steps if isinstance(steps, int) and not isinstance(steps, bool) and steps >= 0 else 0
+        state = ROOT_STATE_WORDS.get(str(root.get("state")), "open")
+        if root.get("wake_policy") == "container":
+            state = "scheduled"
+        lines.append(f"<code>{short}</code> \u00b7 {state} \u00b7 {steps} open step(s)")
+        lines.append(f"<pre>{html_module.escape(_shown(root.get('intent'), INTENT_SHOWN_CHARS))}</pre>")
+    lines.append("To stop one: /cancel_intention &lt;id&gt;")
+    text = "\n".join(lines)
+    return text if len(text) <= TELEGRAM_TEXT_LIMIT else text[:TELEGRAM_TEXT_LIMIT].rsplit("\n", 1)[0]
+
+
+def describe_cancel(status: int, body: dict, short_id: str) -> str:
+    """The text for the answer of the cancel route (fixed vocabulary, like ``describe_decision``). Not called for a
+    404: a command whose id the server does not know goes on to chat (C18)."""
+    if status == 200:
+        counts = [body.get(k) for k in ("cancelled_intentions", "cancelled_subtasks", "cancelled_dags")]
+        stopped = sum(c for c in counts if isinstance(c, int) and not isinstance(c, bool))
+        if body.get("already_cancelled") is True:
+            return f"Already cancelled ({short_id})."
+        return f"Cancelled ({short_id}): {stopped} piece(s) of work stopped."
+    if status == 409:
+        refusal = body.get("refusal")
+        text = CANCEL_REFUSALS.get(refusal) if isinstance(refusal, str) else None
+        return text or "That work cannot be cancelled."
+    if status == 400:
+        return "I could not read that id."
     if status == 503:
         return _NOT_RUNNING
     return _UNREACHABLE
@@ -769,6 +834,22 @@ class NousTelegramBot:
             body = {}
         return response.status_code, body if isinstance(body, dict) else {}
 
+    async def _owner_get(self, path: str) -> tuple[int, dict]:
+        """GET a REST owner route: ``(status, body)``; status 0 when the server could not be reached. The connect is
+        bounded like ``_owner_post``'s; a read takes no call, so 30 s is plenty."""
+        try:
+            response = await self._http.get(
+                f"{self.nous_url}{path}", timeout=httpx.Timeout(connect=10, read=30, write=10, pool=10)
+            )
+        except Exception as exc:
+            logger.warning("owner request failed (%s)", type(exc).__name__)
+            return 0, {}
+        try:
+            body = response.json()
+        except Exception:
+            body = {}
+        return response.status_code, body if isinstance(body, dict) else {}
+
     async def _answer_callback(self, query_id: Any, text: str) -> None:
         if query_id is not None:
             await self._tg("answerCallbackQuery", params={"callback_query_id": query_id, "text": text})
@@ -818,7 +899,8 @@ class NousTelegramBot:
             logger.warning("could not send the follow-up of an owner action (%s)", type(exc).__name__)
 
     async def _handle_owner_text(self, message: dict[str, Any], chat_id: Any, user_id: Any, text: str) -> bool:
-        """``/approve``, ``/reject``, ``/answer`` and a reply to one of our messages, in the owner chat. True when
+        """``/approve``, ``/reject``, ``/answer``, ``/intentions``, ``/cancel_intention`` and a reply to one of our
+        messages, in the owner chat. True when
         the message was consumed; anything else (another chat, another command, a malformed or missing id, an id
         the server answers 404 for, a reply the answer route does not confirm with a 200 or a 409) is left for the
         ordinary path, unchanged: under
@@ -848,6 +930,26 @@ class NousTelegramBot:
             if status == 404:
                 return False  # no such question: ordinary chat, as before 2d
             await self._send(chat_id, describe_answer(status, body))
+            return True
+        if command == "/intentions" and not rest.strip():
+            status, body = await self._owner_get(f"/intentions?state=open&limit={INTENTIONS_SHOWN}")
+            if status != 200 or body.get("continuation") is not True:
+                # Anything but a definite answer from a server that runs the continuation (an older server, an
+                # outage, continuation off) is not ours: the message goes on to chat as it always did.
+                return False
+            await self._send(chat_id, describe_intentions(body), parse_mode="HTML")
+            return True
+        if command == "/cancel_intention":
+            args = rest.split()
+            hex_id = _hex_id(args[0]) if len(args) == 1 else None
+            if hex_id is None:
+                return False  # no id, or not one: it was never ours (and no argument reaches a URL)
+            status, body = await self._owner_post(
+                f"/intentions/{hex_id}/cancel", {"actor": f"telegram:{user_id}", "reason": "cancelled from Telegram"}
+            )
+            if status == 404:
+                return False  # no such root: ordinary chat, as before 2e
+            await self._send(chat_id, describe_cancel(status, body, hex_id[:8]))
             return True
         reply_to = message.get("reply_to_message")
         if (
