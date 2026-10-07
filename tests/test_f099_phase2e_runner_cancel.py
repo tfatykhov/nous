@@ -79,10 +79,16 @@ async def test_cancel_root_cancels_the_lineage_the_dags_and_tells_the_bus(runner
     asked = await ask_with_proposals(env)
     (pid,) = asked.ids
     running, _ = await make_dag(env, status="running", parent=asked.root)
-    dags = DagRecorder()
-    cont = _cont(env, cancel_dag=dags)
+    dags, view_held = DagRecorder(), []
+
+    async def cancel_dag(dag_id, reason="cancelled"):  # the view holds the root before the orchestrator is asked
+        view_held.append(cont.root_is_cancelled(asked.root.id))
+        await dags(dag_id, reason)
+
+    cont = _cont(env, cancel_dag=cancel_dag)
 
     out = await cont.cancel_root(asked.root.id, reason="no longer wanted", actor="owner-test")
+    assert view_held == [True]
 
     assert (out.already_cancelled, out.cancelled_dags, out.cancelled_proposals, out.turn_stopped) == (
         False,
@@ -113,6 +119,20 @@ async def test_a_dag_the_orchestrator_cannot_cancel_is_left_to_the_sweep(runner_
     dags.fail_for.clear()
     await cont.run_once()  # the sweep finds the DAG still running under a cancelled root
     assert [call[0] for call in dags.calls] == [running.id, running.id]
+
+
+async def test_the_sweep_leaves_a_running_dag_of_a_live_root_alone(runner_env):  # noqa: F811
+    """2e-5 review I1: the sweep acts on rows no owner named, so only the DAGs under a cancelled root are its."""
+    env = await runner_env()
+    doomed, alive = await make_root(env), await make_root(env)
+    stray, _ = await make_dag(env, status="running", parent=doomed)
+    live, _ = await make_dag(env, status="running", parent=alive)
+    dags = DagRecorder(fail_for={stray.id})
+    cont = _cont(env, cancel_dag=dags)
+    await cont.cancel_root(doomed.id, reason="t", actor="t")
+    dags.fail_for.clear()
+    await cont.run_once()
+    assert [call[0] for call in dags.calls] == [stray.id, stray.id]  # never live.id
 
 
 async def test_with_no_orchestrator_bound_the_dags_are_reported_and_the_cancel_stands(runner_env, caplog):  # noqa: F811
