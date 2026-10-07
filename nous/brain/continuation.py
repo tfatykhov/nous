@@ -2163,15 +2163,25 @@ def render_arguments(arguments: Mapping[str, Any]) -> str:
     return "".join(_escaped(ch) if _unsafe(ch) else ch for ch in shown)
 
 
-def _contains_nul(value: Any) -> bool:
-    """A NUL character anywhere in a JSON value, keys included. PostgreSQL's ``jsonb`` and ``text`` refuse it, and
-    ``render_arguments`` shows it as an escape, so it has to be looked for in the value itself."""
+def _has_nul(text: str) -> bool:
+    return "\x00" in text
+
+
+def _has_surrogate(text: str) -> bool:
+    """A lone UTF-16 half (category ``Cs``): the UTF-8 wire and ``jsonb`` refuse it."""
+    return any(unicodedata.category(ch) == "Cs" for ch in text)
+
+
+def _contains(value: Any, test: Callable[[str], bool]) -> bool:
+    """``test`` holds for a string anywhere in a JSON value, keys included. PostgreSQL's ``jsonb`` and ``text``
+    refuse a NUL and a lone surrogate, and ``render_arguments`` shows both as escapes, so they have to be looked for
+    in the value itself."""
     if isinstance(value, str):
-        return "\x00" in value
+        return test(value)
     if isinstance(value, Mapping):
-        return any(_contains_nul(key) or _contains_nul(item) for key, item in value.items())
+        return any(_contains(key, test) or _contains(item, test) for key, item in value.items())
     if isinstance(value, list | tuple):
-        return any(_contains_nul(item) for item in value)
+        return any(_contains(item, test) for item in value)
     return False
 
 
@@ -2223,10 +2233,14 @@ async def stage_proposal(
         )
     # A refusal the model reads, not a database error that would fail the whole turn (an injected result can make
     # a model echo a NUL character into a call).
-    if "\x00" in why:
+    if _has_nul(why):
         raise ProposalRefused("rationale may not contain a NUL character.")
-    if _contains_nul(arguments):
+    if _has_surrogate(why):
+        raise ProposalRefused("rationale may not contain a lone surrogate (half of a UTF-16 pair).")
+    if _contains(arguments, _has_nul):
         raise ProposalRefused("arguments may not contain a NUL character.")
+    if _contains(arguments, _has_surrogate):
+        raise ProposalRefused("arguments may not contain a lone surrogate (half of a UTF-16 pair).")
     try:
         shown = render_arguments(arguments)
     except (TypeError, ValueError):

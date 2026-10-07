@@ -287,6 +287,36 @@ async def test_a_call_the_owner_cannot_read_in_full_is_not_staged(env_factory, a
 
 
 @pytest.mark.postgres_only
+@pytest.mark.parametrize(
+    ("arguments", "rationale", "needle"),
+    [
+        pytest.param(
+            {**SEND_EMAIL_ARGS, "body": "a\ud800b"}, "r", "arguments may not contain a lone surrogate", id="value"
+        ),
+        pytest.param({**SEND_EMAIL_ARGS, "cc\udc00": "x"}, "r", "arguments may not contain a lone surrogate", id="key"),
+        pytest.param(
+            {**SEND_EMAIL_ARGS, "nested": ["ok", {"k": "\udfff"}]},
+            "r",
+            "arguments may not contain a lone surrogate",
+            id="nested",
+        ),
+        pytest.param(SEND_EMAIL_ARGS, "why\ud83d", "rationale may not contain a lone surrogate", id="rationale"),
+    ],
+)
+async def test_a_lone_surrogate_is_a_refusal_the_model_reads(env_factory, arguments, rationale, needle):  # noqa: F811
+    """Addendum (2d-2): an unpaired UTF-16 half (category Cs) cannot be stored (jsonb and the UTF-8 wire refuse it), so
+    it is refused at staging the way a NUL is, instead of failing the whole turn with a database error."""
+    env = await env_factory(**CONT)
+    _root, got = await claimed(env)
+    with pytest.raises(continuation.ProposalRefused, match=needle):
+        await stage(env, got, arguments=arguments, rationale=rationale)
+    async with env.db.session() as s:
+        assert (
+            await s.execute(select(IntentionProposal).where(IntentionProposal.agent_id == env.agent))
+        ).first() is None
+
+
+@pytest.mark.postgres_only
 async def test_staging_on_a_claim_that_is_no_longer_live_is_refused(env_factory):  # noqa: F811
     env = await env_factory(**CONT)
     _root, got = await claimed(env)
