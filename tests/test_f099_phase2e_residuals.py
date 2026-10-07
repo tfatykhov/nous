@@ -152,9 +152,9 @@ async def test_the_flag_off_rollback_ends_an_approved_proposal_so_a_later_flag_o
         await s.commit()
     report = await continuation.rollback_at_startup(env.db, _off(env, result_inbox_enabled=True), telegram_push=None)
     assert report.expired_proposals == 2
-    for proposal_id in (approved, pending):
+    for proposal_id, decided_by in ((approved, "telegram:42"), (pending, "system")):  # who approved is kept
         row = await proposal_row(env, proposal_id)
-        assert (row.state, row.decided_by) == ("expired", "system")
+        assert (row.state, row.decided_by) == ("expired", decided_by)
     async with env.db.session() as s:
         resumable = await continuation.stalled_approved_ids(
             s, env.agent, settings=env.settings, now=datetime.now(UTC) + timedelta(hours=1)
@@ -660,3 +660,122 @@ async def test_the_proposal_sweep_locks_the_roots_of_every_arm_in_one_order_so_a
     moved = await asyncio.wait_for(task, timeout=30)
     assert sorted(moved) == sorted([(due, "expired"), (stale, "expired")])
     assert "deadlock" not in caplog.text
+
+
+# ---- 2e-6 review: three unpinned guards (I1, m1, m2), and a system close keeps who approved (m3) -----------------
+
+
+async def test_two_resumes_of_one_approved_proposal_start_one_execution(runner_env):  # noqa: F811
+    """I1: while the first start's claim has not committed, the proposal still reads `approved`, so a second resume
+    (or a re-tap) that reads it then gets the task already running instead of starting another. The claim would fence
+    a second task's call, so the call count alone cannot tell: the number of tasks does."""
+    started, release = asyncio.Event(), asyncio.Event()
+    env = await runner_env()
+    calls = []
+
+    async def send_email(**kwargs):
+        calls.append(kwargs)
+        started.set()
+        await release.wait()
+        return {"content": [{"type": "text", "text": "sent"}]}
+
+    env.dispatcher.register("send_email", send_email, SEND_EMAIL_SCHEMA)
+    _asked, pid = await _approved_and_stalled(env)
+    cont = _cont(env)
+    async with env.db.session() as holder:
+        await holder.execute(select(IntentionProposal.id).where(IntentionProposal.id == pid).with_for_update())
+        try:
+            assert await cont._resume_approved() == 1
+            await asyncio.wait_for(until_a_backend_waits_on_a_lock(env), timeout=10)  # its claim queues on the row
+            assert await cont._resume_approved() == 1  # the second resume reads the same `approved` proposal
+            assert len(cont._executing) == 1 and set(cont._executing_ids) == {pid}
+        finally:
+            await holder.commit()
+    await asyncio.wait_for(started.wait(), timeout=10)
+    release.set()
+    await _settle(cont)
+    assert len(calls) == 1 and (await proposal_row(env, pid)).state == "executed"
+
+
+@pytest.mark.parametrize("marker", ["root_cancelled_at", "root_expired_at"])
+async def test_the_resume_never_reads_an_approved_proposal_under_a_marked_root(env_factory, marker):  # noqa: F811  # PIN
+    """m1: the resume's own predicates. Through a sweep the proposals' `unrunnable` arm ends the row first, so this
+    reads `stalled_approved_ids` directly, with the row still `approved`."""
+    env = await env_factory(**CONT)
+    asked, pid = await _approved_and_stalled(env)
+    async with env.db.session() as s:
+        assert await continuation.stalled_approved_ids(s, env.agent, settings=env.settings) == [pid]
+    await set_intention(env, asked.root.id, **{marker: datetime.now(UTC)})
+    async with env.db.session() as s:
+        assert await continuation.stalled_approved_ids(s, env.agent, settings=env.settings) == []
+    assert (await proposal_row(env, pid)).state == "approved"  # nothing else moved it: the predicate alone
+
+
+async def test_stop_waits_for_a_push_in_flight_to_finish_its_send(runner_env, monkeypatch):  # noqa: F811  # PIN
+    """m2: `stop()` lets a push in flight finish (bounded by the grace) before it ends it."""
+    monkeypatch.setattr(runner_module, "PUSH_WAIT_SECONDS", 0.1)
+    monkeypatch.setattr(runner_module, "EXECUTION_GRACE_SECONDS", 10.0)
+    env = await runner_env()
+    publisher = SlowPublisher()
+    cont = ContinuationRunner(
+        database=env.db,
+        settings=env.settings,
+        runner=env.runner,
+        heart=env.heart,
+        brain=env.brain,
+        bus=env.bus,
+        publisher=publisher,
+    )
+    await cont.run_once()
+    push = cont._push_task
+    assert push is not None and not push.done()
+
+    async def release_soon():
+        await asyncio.sleep(0.2)
+        publisher.release.set()
+
+    releaser = asyncio.create_task(release_soon())
+    await asyncio.wait_for(cont.stop(), timeout=30)
+    await asyncio.wait_for(releaser, timeout=10)
+    assert not push.cancelled() and push.result() == 3
+
+
+async def _end_by_cancel(env, asked):
+    async with env.db.session() as s:
+        await continuation.cancel_root(s, env.agent, asked.root.id, reason="t", actor="owner-test")
+        await s.commit()
+
+
+async def _end_by_expiry(env, asked):
+    later = datetime.now(UTC) + timedelta(hours=100)
+    async with env.db.session() as s:
+        expired = await continuation.expire_roots(
+            s, env.agent, ttl_hours=env.settings.intention_root_ttl_hours, settings=env.settings, now=later
+        )
+        await s.commit()
+    assert expired == [asked.root.id]
+
+
+async def _end_by_rollback(env, asked):
+    report = await continuation.rollback_at_startup(env.db, _off(env, result_inbox_enabled=True), telegram_push=None)
+    assert report.expired_proposals == 2
+
+
+@pytest.mark.parametrize(
+    "end", [_end_by_cancel, _end_by_expiry, _end_by_rollback], ids=["cancel", "expiry", "rollback"]
+)
+async def test_a_system_close_keeps_who_approved_and_names_the_system_on_the_rest(env_factory, end):  # noqa: F811
+    """m3: `decided_by` keeps the owner who approved when the system later ends the proposal (a cancel, the TTL or
+    the flag-off rollback), so the row still says the owner approved; a pending one the system ended says `system`."""
+    env = await env_factory(**CONT)
+    asked = await ask_with_proposals(env, count=2)
+    approved, pending = asked.ids
+    async with env.db.session() as s:
+        await continuation.decide_proposal(
+            s, env.agent, approved, approve=True, actor="telegram:42", settings=env.settings
+        )
+        await s.commit()
+    await end(env, asked)
+    rows = [await proposal_row(env, p) for p in (approved, pending)]
+    assert all(row.state in ("cancelled", "expired") for row in rows)
+    assert [row.decided_by for row in rows] == ["telegram:42", "system"]

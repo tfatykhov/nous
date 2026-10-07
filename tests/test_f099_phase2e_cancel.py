@@ -201,7 +201,7 @@ async def test_a_cancel_cancels_every_proposal_that_could_still_start(env_factor
         "cancelled",
         "executing",  # the call has started: a cancel cannot take it back
     ]
-    assert (await proposal_row(env, approved)).decided_by == "system"
+    assert (await proposal_row(env, approved)).decided_by == "owner-test"  # who approved is kept (2e-6 review m3)
 
 
 async def test_a_cancel_reports_the_running_dags_and_not_the_finished_ones(env_factory):  # noqa: F811
@@ -552,9 +552,10 @@ async def test_an_expiry_not_yet_committed_stops_an_approved_call_from_starting(
             await holder.commit()
     assert await asyncio.wait_for(claim, timeout=30) is None
     assert [(await proposal_row(env, p)).state for p in (approved, pending)] == ["expired", "expired"]
-    for proposal_id in (approved, pending):  # S3: the proposals sweep used to write these; the expiry does now
+    # S3: the proposals sweep used to write these; the expiry does now. Who approved is kept (2e-6 review m3).
+    for proposal_id, decided_by in ((approved, "owner-test"), (pending, "system")):
         row = await proposal_row(env, proposal_id)
-        assert (row.decided_by, row.decided_at is not None) == ("system", True)
+        assert (row.decided_by, row.decided_at is not None) == (decided_by, True)
 
 
 async def test_the_expiry_names_the_proposals_it_ended_for_the_bus_and_not_the_ones_never_shown(env_factory):  # noqa: F811

@@ -1625,7 +1625,7 @@ async def _expire_root(
             IntentionProposal.root_id == root_id,
             IntentionProposal.state.in_(_SHOWN_PROPOSAL_STATES),
         )
-        .values(state=PROPOSAL_EXPIRED, decided_at=now, decided_by="system", updated_at=now)
+        .values(state=PROPOSAL_EXPIRED, decided_at=now, decided_by=_SYSTEM_UNLESS_DECIDED, updated_at=now)
         .returning(IntentionProposal.id)
         .execution_options(synchronize_session=False)
     )
@@ -2227,7 +2227,7 @@ async def rollback_at_startup(
                 .values(
                     state=PROPOSAL_EXPIRED,
                     decided_at=case((unshown, IntentionProposal.decided_at), else_=now),
-                    decided_by=case((unshown, IntentionProposal.decided_by), else_="system"),
+                    decided_by=case((unshown, IntentionProposal.decided_by), else_=_SYSTEM_UNLESS_DECIDED),
                     updated_at=now,
                 )
                 .execution_options(synchronize_session=False)
@@ -2277,6 +2277,9 @@ PROPOSAL_EXECUTED, PROPOSAL_FAILED, PROPOSAL_CANCELLED = "executed", "failed", "
 # from which a call can still START: an ended root takes all three with its marker, under the root lock.
 _SHOWN_PROPOSAL_STATES = (PROPOSAL_PENDING, PROPOSAL_APPROVED)
 _STARTABLE_PROPOSAL_STATES = (PROPOSAL_STAGED, *_SHOWN_PROPOSAL_STATES)
+# `decided_by` when the system ends a shown proposal (a cancel, the TTL, the flag-off rollback): an `approved` row
+# keeps the owner who approved it, so the record still says so; a `pending` one has none and says `system`.
+_SYSTEM_UNLESS_DECIDED = func.coalesce(IntentionProposal.decided_by, "system")
 MAX_PROPOSALS_PER_ARRIVAL = 5
 # What the owner is shown must fit one Telegram message whole (4096 UTF-16 units, which is what the caps count: a
 # character above U+FFFF is two): a call that does not is refused at staging, never clipped, because a clipped call
@@ -3624,7 +3627,7 @@ async def _cancel_lineage(
             IntentionProposal.root_id == root_id,
             IntentionProposal.state.in_(_SHOWN_PROPOSAL_STATES),
         )
-        .values(state=PROPOSAL_CANCELLED, decided_at=now, decided_by="system", updated_at=now)
+        .values(state=PROPOSAL_CANCELLED, decided_at=now, decided_by=_SYSTEM_UNLESS_DECIDED, updated_at=now)
         .returning(IntentionProposal.id)
         .execution_options(synchronize_session=False)
     )
