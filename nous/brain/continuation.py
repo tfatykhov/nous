@@ -2651,7 +2651,8 @@ async def decide_proposal(
     outcome and wakes the arrival when it is terminal; an approve wakes nothing, the call has not run). A
     proposal past its deadline, or on work that ended, is ended here instead (the default at the deadline is a
     reject) and the decision is refused. The same decision again is not an error (``changed=False``, no
-    refusal); a contradictory one is a refusal. Raises only ``ProposalNotFound``."""
+    refusal); a contradictory one is a refusal. Raises only ``ProposalNotFound`` (and ``RuntimeError`` when its
+    held ``pending`` row updates nothing, a broken invariant)."""
     now = now or datetime.now(UTC)
     root_id = (
         await session.execute(
@@ -2677,7 +2678,7 @@ async def decide_proposal(
                 session, agent_id, proposal, PROPOSAL_EXPIRED, REFUSE_EXPIRED, settings=settings, now=now
             )
         target = PROPOSAL_APPROVED if approve else PROPOSAL_REJECTED
-        await _set_proposal_state(
+        moved = await _set_proposal_state(
             session,
             agent_id,
             proposal_id,
@@ -2687,6 +2688,10 @@ async def decide_proposal(
             decided_at=now,
             decided_by=actor,
         )
+        if not moved:
+            # Held and read pending under the lock, so this cannot miss. Judged by its row count like every other
+            # transition, so a broken invariant is loud.
+            raise RuntimeError(f"proposal {proposal_id}: the pending -> {target} transition updated no row")
         woke = (
             False
             if approve
@@ -2942,7 +2947,10 @@ async def record_answer(
     (``expired``), or whose work ended or moved on (``ended``, R8). A refused answer is never written, so it
     cannot come back through ``record_result``'s closed-root branch as a raw REPORT. Otherwise one INFORM
     (``source_id`` = uuid5 of question and intention, so a retry collapses) per intention of the arrival that is
-    still waiting, and the arrival wakes when it is terminal. Raises ``QuestionNotFound`` or ``AnswerRefused``."""
+    still waiting, and the arrival wakes when it is terminal. Raises ``QuestionNotFound`` or ``AnswerRefused``, and
+    ``ValueError`` for a blank answer (refused here, before any read or write: every owner surface calls this)."""
+    if not text.strip():
+        raise ValueError("an answer must not be blank")
     now = now or datetime.now(UTC)
     question = (
         await session.execute(

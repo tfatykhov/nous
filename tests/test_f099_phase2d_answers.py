@@ -320,3 +320,15 @@ async def test_an_answer_and_a_commit_on_the_same_root_do_not_deadlock(env_facto
             await holder.commit()
     assert await asyncio.wait_for(committed, timeout=30) is not None
     assert (await asyncio.wait_for(answered, timeout=30)).woke_arrival is True
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+async def test_a_blank_answer_is_refused_before_anything_is_written(env_factory, blank):  # noqa: F811
+    """The store is the one layer every owner surface uses, so it refuses an empty answer itself."""
+    env = await env_factory(**CONT)
+    root, qid, done = await _ask(env)
+    before = len(await inbox_rows(env))
+    with pytest.raises(ValueError, match="blank"):
+        await _answer(env, qid, blank)
+    assert len(await inbox_rows(env)) == before and await _informs(env, done.arrival_id) == []
+    assert (await intention_of(env, "subtask", root.source_id)).state == "awaiting_owner"

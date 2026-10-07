@@ -505,3 +505,32 @@ async def test_two_concurrent_approves_change_the_proposal_once(env_factory):  #
     outs = [await asyncio.wait_for(task, timeout=30) for task in (one, two)]
     assert sorted(out.changed for out in outs) == [False, True]
     assert {out.state for out in outs} == {"approved"} and all(out.refusal is None for out in outs)
+
+
+async def test_a_pending_proposal_of_another_lineage_does_not_hold_this_arrival(env_factory):  # noqa: F811  # PIN
+    """The wake rule is scoped to the arrival: an undecided proposal elsewhere holds nothing here."""
+    env = await env_factory(**CONT)
+    other = await ask_with_proposals(env)  # stays pending for the whole test
+    mine = await ask_with_proposals(env)
+    (pid,) = mine.ids
+    out = await _decide(env, pid, approve=False)
+    assert out.woke_arrival is True and await _state(env, mine.root) == "result_ready"
+    assert await _state(env, other.root) == "awaiting_owner"
+
+
+async def test_a_decision_whose_transition_matches_no_row_raises(env_factory, monkeypatch):  # noqa: F811
+    """Every proposal transition is judged by its row count: a pending -> approved/rejected UPDATE that moved
+    nothing is a broken invariant (the row is held and was read pending), never a silent success."""
+    env = await env_factory(**CONT)
+    asked = await ask_with_proposals(env)
+    (pid,) = asked.ids
+
+    async def matches_nothing(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr(continuation, "_set_proposal_state", matches_nothing)
+    for approve in (True, False):
+        with pytest.raises(RuntimeError, match="pending"):
+            await _decide(env, pid, approve=approve)
+    monkeypatch.undo()
+    assert (await proposal_row(env, pid)).state == "pending" and await _results(env, asked.root.id) == []
