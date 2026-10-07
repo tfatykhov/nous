@@ -285,7 +285,11 @@ def _required_handler_params(handler: Callable[..., Any]) -> set[str] | None:
 
 def _origin_args(ctx: ExecutionContext) -> dict[str, Any]:
     """F099 section 4.2: the spawning turn's origin, as a spawn tool's hidden arguments."""
-    out: dict[str, Any] = {"_origin_kind": ctx.kind, "_origin_authority": ctx.authority}
+    # F099 2d (C12): approving one call does not widen what that call starts. A root intention's own authority is
+    # owner, so the stamp of an approved action must say internal_only: what the call spawns is a descendant of the
+    # lineage that proposed it and is narrowed like one. Every other kind stamps its own authority.
+    authority = AUTHORITY_INTERNAL if ctx.kind == "approved_action" else ctx.authority
+    out: dict[str, Any] = {"_origin_kind": ctx.kind, "_origin_authority": authority}
     if ctx.session_id is not None:
         out["_origin_session_id"] = ctx.session_id
     if ctx.channel:
@@ -399,10 +403,11 @@ class ToolDispatcher:
         return self._repair(name, args)[0]
 
     def validate_call(self, name: str, args: Any) -> list[str]:
-        """What is wrong with a call a model PROPOSES (F099 2d), judged against the tool's schema without
-        running it; empty when it is well-formed. Stricter than ``dispatch`` on one point: an argument named with
-        a leading underscore is the dispatcher's own and ``dispatch`` drops it silently, so the owner would
-        approve a call that runs differently from the one shown. It is refused here instead."""
+        """What is wrong with a call a model PROPOSES (F099 2d), judged against the tool's schema and its
+        handler's required parameters without running it; empty when it is well-formed. Stricter than
+        ``dispatch`` on one point: an argument named with a leading underscore is the dispatcher's own and
+        ``dispatch`` drops it silently, so the owner would approve a call that runs differently from the one
+        shown. It is refused here instead."""
         if not isinstance(args, dict):
             return ["arguments must be a JSON object"]
         schema = self._schemas.get(name)
@@ -413,7 +418,17 @@ class ToolDispatcher:
             for key in args
             if str(key).startswith("_")
         ]
-        problems += [f"missing required argument '{key}'" for key in schema.get("required") or [] if key not in args]
+        schema_required = list(schema.get("required") or [])
+        problems += [f"missing required argument '{key}'" for key in schema_required if key not in args]
+        # F099 2d (2d-1 review m5): the handler's signature can require more than the schema says, and a call
+        # missing such a parameter fails inside dispatch, so the owner would approve a call that cannot run. A
+        # parameter named with an underscore is the dispatcher's to inject, never the model's to send.
+        handler_required = _required_handler_params(self._handlers[name]) or set()
+        problems += [
+            f"missing required argument '{key}'"
+            for key in sorted(handler_required)
+            if key not in args and key not in schema_required and not key.startswith("_")
+        ]
         problems += _schema_type_errors(args, schema)
         return problems
 
