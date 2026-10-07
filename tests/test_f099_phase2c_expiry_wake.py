@@ -372,9 +372,10 @@ async def test_an_expiry_leaves_a_row_chat_will_deliver_alone(env_factory):  # n
 @pytest.mark.parametrize("reason", ["cancelled", "expired"])
 async def test_a_row_held_on_an_intention_a_gate_arrival_closed_is_reported_by_the_sweep(env_factory, reason, caplog):  # noqa: F811
     """Lead note (2c1-4). A row that lands after the claim read its rows, and before the root's marker, is held.
-    The gate arrival then closes its intention, so nothing can claim the row any more. The sweep reports it
-    raw, as record_result reports a result that lands after the close, and stamps it, once, with a WARNING
-    (review Minor 2: the settle is a backstop, so its firing is worth seeing in the log)."""
+    The gate arrival then closes its intention, so nothing can claim the row any more. The sweep stamps it, once,
+    with a WARNING (review Minor 2: the settle is a backstop, so its firing is worth seeing in the log), and, by
+    the unified late-result rule (2e), reports it raw when the root EXPIRED and says nothing when it was
+    CANCELLED. An expired root's gate arrival escalates too, so its own rows are reported as well."""
     env = await env_factory(**CONT)
     root = await make_root(env)
     await record(env, root)
@@ -415,10 +416,14 @@ async def test_a_row_held_on_an_intention_a_gate_arrival_closed_is_reported_by_t
         assert "settled 1 result(s)" in warning.getMessage()
         (row,) = await held()
         assert row.delivered_at is not None and row.delivered_session_id == f"intent-{root.id}"
-        (report,) = await _owner_rows(env)
-        assert (report.msg_type, report.channel, report.intention_id) == ("REPORT", CHAN, root.id)
-        assert "landed while the gate ran" in report.body
-        assert await _expire(env) == [] and len(await _owner_rows(env)) == 1  # settled once
+        reported = [r for r in await _owner_rows(env) if "landed while the gate ran" in r.body]
+        if reason == "cancelled":
+            assert reported == [] and await _owner_rows(env) == []
+        else:
+            (report,) = reported
+            assert (report.msg_type, report.channel, report.intention_id) == ("REPORT", CHAN, root.id)
+        owner_rows = len(await _owner_rows(env))
+        assert await _expire(env) == [] and len(await _owner_rows(env)) == owner_rows  # settled once
         assert len(settle_warnings()) == 1  # and a sweep that settles nothing says nothing
 
 

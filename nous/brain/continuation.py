@@ -22,7 +22,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Text, and_, any_, cast, exists, func, literal, or_, select, text, update
+from sqlalchemy import ColumnElement, Text, and_, any_, case, cast, exists, func, literal, or_, select, text, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -111,13 +111,15 @@ GATE_REASONS = (
     "limit_spawns",
     "plan_resolved",
 )
-# The gate reasons whose arrival drops the work (the others escalate: a report). Spec 4.5.3.
-GATE_DROP_REASONS = ("cancelled", "expired", "plan_resolved")
+# The gate reasons whose arrival drops the work silently (the others escalate: a report). Spec 4.5.3, and the
+# unified late-result rule (2e): a CANCELLED root says nothing it has not said, an EXPIRED one reports the late
+# result raw, here and in record_result and in the stranded-row settle.
+GATE_DROP_REASONS = ("cancelled", "plan_resolved")
 PLAN_DROP_OUTCOMES = ("superseded", "noise")
 # The owner-facing sentence for each gate reason (the arrival's note, and the head of a report).
 GATE_TEXT = {
     "cancelled": "The owner cancelled this work.",
-    "expired": "This work expired before its result could be acted on.",
+    "expired": "This work expired before its result could be acted on, so I did not act on it.",
     "past_deadline": "This result arrived after its deadline, so I did not act on it.",
     "budget_turns": "The follow-up budget for this work is used up, so I stopped here.",
     "budget_tokens": "The token budget for this work is used up, so I stopped here.",
@@ -638,9 +640,10 @@ def raw_results_text(rows: Any) -> str:
 def gate_inputs(reason: str, claim: Claim) -> tuple[Resolution, str | None]:
     """What a gate arrival commits: a synthetic decision and the text of its report.
 
-    A drop (cancelled, expired, plan resolved) writes no report. An escalation (past deadline, a
+    A drop (cancelled, plan resolved) writes no report. An escalation (expired, past deadline, a
     budget, a limit) reports the claimed results without acting on them: the reason, then the raw
-    results (spec 4.5.3).
+    results (spec 4.5.3; an expired root reports what came back, a cancelled one is silent: the unified
+    late-result rule of 2e).
     """
     explanation = GATE_TEXT[reason]
     if reason in GATE_DROP_REASONS:
@@ -1432,13 +1435,17 @@ async def expire_roots(
 async def _settle_stranded_rows(session: AsyncSession, agent_id: str, *, settings: Any, now: datetime) -> int:
     """Rows held on an intention a gate arrival closed (``cancelled`` or ``expired``): they landed after the
     claim read its rows and before the root's marker, so the arrival did not consume them, and nothing claims
-    a closed intention. Each root's are stamped delivered and reported raw in one REPORT, as ``record_result``
-    reports a result that lands after the close. The expiry never strands one (it reads after it closes).
+    a closed intention. The unified late-result rule: the rows of an ``expired`` intention are stamped delivered and
+    reported raw in one REPORT per root, as ``record_result`` reports a result that lands after the close; the rows
+    of a ``cancelled`` one are stamped and nothing is said (the owner cancelled that work). The expiry never strands
+    one (it reads after it closes), and ``cancel_root`` stamps its own.
     Writes no intention row, so it takes no intention lock. Returns the number of rows settled."""
+    root = aliased(Intention)
     stranded = (
         await session.execute(
-            select(ResultInbox.id, Intention.root_id)
+            select(ResultInbox.id, Intention.root_id, Intention.state, root.root_cancelled_at)
             .join(Intention, and_(Intention.agent_id == agent_id, Intention.id == ResultInbox.intention_id))
+            .join(root, and_(root.agent_id == agent_id, root.id == Intention.root_id))
             .where(
                 ResultInbox.agent_id == agent_id,
                 ResultInbox.channel.is_(None),
@@ -1450,11 +1457,14 @@ async def _settle_stranded_rows(session: AsyncSession, agent_id: str, *, setting
             .limit(STRANDED_BATCH)
         )
     ).all()
-    by_root: dict[UUID, list[UUID]] = {}
-    for row_id, root_id in stranded:
-        by_root.setdefault(root_id, []).append(row_id)
+    # Keyed by (root, silent): a cancelled intention's rows are stamped and never reported (the unified late-result
+    # rule), an expired one's are reported raw.
+    by_root: dict[tuple[UUID, bool], list[UUID]] = {}
+    for row_id, root_id, state, cancelled_at in stranded:
+        # By marker, as record_result judges (N3 of the plan review): the intention's state or the root's marker.
+        by_root.setdefault((root_id, state == STATE_CANCELLED or cancelled_at is not None), []).append(row_id)
     settled = 0
-    for root_id, row_ids in by_root.items():
+    for (root_id, silent), row_ids in by_root.items():
         # Stamp and read in one statement: only the rows this call moved are reported, so a row is reported once.
         rows = sorted(
             await session.execute(
@@ -1467,6 +1477,9 @@ async def _settle_stranded_rows(session: AsyncSession, agent_id: str, *, setting
             key=lambda r: (r.created_at, r.id),
         )
         if not rows:
+            continue
+        if silent:
+            settled += len(rows)
             continue
         root = (
             await session.execute(
@@ -1500,9 +1513,7 @@ async def _settle_stranded_rows(session: AsyncSession, agent_id: str, *, setting
     if settled:
         # A backstop: today only a gate arrival's late rows land here, so a count is how a path that writes a root
         # marker without closing its lineage (2e's cancel_root, say) shows up in the log.
-        logger.warning(
-            "F099: settled %d result(s) held on closed intentions (left by a gate arrival or a cancel)", settled
-        )
+        logger.warning("F099: settled %d result(s) held on closed intentions (left by a gate arrival)", settled)
     return settled
 
 
@@ -1914,15 +1925,20 @@ async def record_result(
     state, policy, root_id, origin_channel = row.state, row.wake_policy, row.root_id, row.origin_channel
     now = datetime.now(UTC)
 
+    ended = await _root_end_state(session, agent_id, root_id)
     if (
         policy != intentions.WAKE_CONTINUE
         or state in (STATE_CANCELLED, STATE_EXPIRED)
         # A legacy close is never reopened (a DAG's retry_node re-arrival included): it reports, and its
         # settled twin keeps InboxDagPass from re-selecting the work row (MF-1).
         or (state == STATE_CLOSED and row.close_reason == intentions.CLOSE_LEGACY)
-        or not await _root_is_open(session, agent_id, root_id)
+        or ended is not None
     ):
         report_id = arrival_report_id(source_kind, source_id, source_generation)
+        # The unified late-result rule (2e, by marker): a CANCELLED root reports nothing, and an EXPIRED one
+        # reports the late result raw. The twin below is written either way, so the reconciler passes see the
+        # source as written.
+        silent = state == STATE_CANCELLED or ended == STATE_CANCELLED
         # MF-1: the work row's own inbox row, NULL-keyed and already delivered. The F098 reconciler passes
         # decide "needs repair" by this row (has_row): without it they would re-select the work row on
         # every tick for good. NULL-keyed and delivered, no chat turn can claim it, so it keeps the work's
@@ -1943,11 +1959,19 @@ async def record_result(
             intention_id=intention_id,
             arrival_id=arrival_id,
             delivered_at=now,
-            delivered_session_id=f"report:{report_id.hex[:8]}",
+            delivered_session_id=SILENT_SESSION_ID if silent else f"report:{report_id.hex[:8]}",
         )
         if twin is None:
             # This generation was already written (on this path, or on the continue path before the
             # root closed): the first delivery decided its fate, so a duplicate writes no REPORT.
+            return ResultRecorded(None, False, state, False, False, intention_id, root_id)
+        if silent:
+            logger.info(
+                "F099: a late result of %s %s on cancelled root %s was dropped without a report",
+                source_kind,
+                str(source_id)[:8],
+                root_id,
+            )
             return ResultRecorded(None, False, state, False, False, intention_id, root_id)
         channel = owner_channel(settings, origin_channel)
         if channel is None:
@@ -3641,3 +3665,122 @@ async def find_root_id(session: AsyncSession, agent_id: str, prefix: str) -> UUI
         .all()
     )
     return _unique(list(ids), prefix)
+
+
+# ---------------------------------------------------------------------------
+# F099 Phase 2e: a lineage whose last open work was cancelled (carry-over 8)
+# ---------------------------------------------------------------------------
+
+# The source_id of the REPORT that ends a hanging root: one per root, so a retried close writes it once.
+_HANGING_NAMESPACE = uuid.UUID("c2f1a8d4-6b7e-4c39-8a15-9d0e3f4b5a67")
+
+
+async def close_cancelled_source(
+    session: AsyncSession, agent_id: str, intention: Intention, *, settings: Any, now: datetime | None = None
+) -> int:
+    """(d) of ``repair_missing_results``: a cancelled subtask produced no result, so its pending intention closes
+    with no row: ``cancelled`` when its root is cancelled, ``legacy`` otherwise. The root is locked FIRST (the one
+    lock order), and the root marker is read inside the UPDATE, so no cancel can commit between a read of it and the
+    close. Returns the number of intentions closed (0 or 1). Then ``end_hanging_root``. Does not commit."""
+    now = now or datetime.now(UTC)
+    await _lock_root(session, agent_id, intention.root_id)
+    root = aliased(Intention)
+    root_cancelled = exists().where(
+        root.agent_id == agent_id, root.id == intention.root_id, root.root_cancelled_at.is_not(None)
+    )
+    moved = await session.execute(
+        update(Intention)
+        .where(Intention.agent_id == agent_id, Intention.id == intention.id, Intention.state == STATE_PENDING)
+        .values(
+            state=case((root_cancelled, STATE_CANCELLED), else_=STATE_CLOSED),
+            close_reason=case((root_cancelled, CLOSE_CANCELLED), else_=intentions.CLOSE_LEGACY),
+            closed_at=now,
+            updated_at=now,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    closed = moved.rowcount or 0
+    if closed:
+        await end_hanging_root(session, agent_id, intention.root_id, settings=settings, now=now)
+    return closed
+
+
+async def end_hanging_root(
+    session: AsyncSession, agent_id: str, root_id: UUID, *, settings: Any, now: datetime | None = None
+) -> bool:
+    """Carry-over 8: close a root that nothing will ever wake or expire, and tell the owner. The caller holds the
+    root (``FOR NO KEY UPDATE``).
+
+    A continuation that ended ``continue`` or ``revise`` is waiting for the work it spawned. If that work is
+    cancelled (``cancel_task`` by the owner or the model, a DAG node, a worker) and closes as ``legacy`` with no
+    result, the lineage has no open row left: ``_ttl_applies`` is false, so the TTL sweep never reaches it, no
+    result will come, and the goal would end without a word. This writes ``root_expired_at`` (a later result is then
+    reported raw, never silently reopened: the consequence of closing it) and one REPORT to the owner channel.
+    Nothing happens while any intention of the lineage is open, for a root that carries a marker, for a container,
+    or when the newest arrival did not leave the lineage waiting (a ``drop``, ``report`` or ``ask``, or no arrival
+    at all: a Phase 1 root has nothing to report). Returns whether the root was closed."""
+    now = now or datetime.now(UTC)
+    root = (
+        await session.execute(
+            select(Intention)
+            .where(Intention.agent_id == agent_id, Intention.id == root_id)
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if (
+        root is None
+        or root.root_cancelled_at is not None
+        or root.root_expired_at is not None
+        or root.wake_policy == intentions.WAKE_CONTAINER
+    ):
+        return False
+    open_left = (
+        await session.execute(
+            select(
+                exists().where(
+                    Intention.agent_id == agent_id, Intention.root_id == root_id, Intention.state.in_(OPEN_STATES)
+                )
+            )
+        )
+    ).scalar_one()
+    if open_left:
+        return False
+    newest = (
+        await session.execute(
+            select(IntentionArrival.decision)
+            .where(IntentionArrival.agent_id == agent_id, IntentionArrival.root_id == root_id)
+            .order_by(IntentionArrival.n.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if newest not in ("continue", "revise"):
+        return False
+    await session.execute(
+        update(Intention)
+        .where(Intention.agent_id == agent_id, Intention.id == root_id)
+        .values(root_expired_at=now, updated_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    channel = owner_channel(settings, root.origin_channel)
+    if channel is None:
+        logger.warning(
+            "F099: root %s was left with nothing running and has no owner channel; nothing was reported", root_id
+        )
+        return True
+    await insert_report(
+        session,
+        agent_id,
+        kind=MSG_REPORT,
+        title=f"Stopped: {root.intent}",
+        body=clip_body(
+            f"The work I was waiting on was cancelled, so nothing is left running for this: {root.intent}", settings
+        ),
+        channel=channel,
+        intention_id=root_id,
+        root_id=root_id,
+        push_after=push_after_for(settings, now),
+        report_id=uuid.uuid5(_HANGING_NAMESPACE, str(root_id)),
+    )
+    logger.info("F099: root %s was left with nothing running; it was closed and reported", root_id)
+    return True

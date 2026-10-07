@@ -381,11 +381,20 @@ def test_the_plan_question_is_a_required_argument_of_the_gate():
 def test_a_gate_drop_commits_a_drop_and_a_gate_escalation_a_report():
     rows = (SimpleNamespace(title="Snow", body="40 cm"), SimpleNamespace(title="Wind", body="gusty"))
     got = SimpleNamespace(inbox_rows=rows)
-    for reason in ("cancelled", "expired", "plan_resolved"):
+    # 2e, the unified late-result rule: a cancelled root says nothing, an expired one reports what came back.
+    for reason in ("cancelled", "plan_resolved"):
         resolution, report = continuation.gate_inputs(reason, got)
         assert (resolution.decision, report) == ("drop", None)
         assert resolution.note == continuation.GATE_TEXT[reason] and resolution.progress_claimed is False
-    for reason in ("past_deadline", "budget_turns", "budget_tokens", "budget_stall", "limit_depth", "limit_spawns"):
+    for reason in (
+        "expired",
+        "past_deadline",
+        "budget_turns",
+        "budget_tokens",
+        "budget_stall",
+        "limit_depth",
+        "limit_spawns",
+    ):
         resolution, report = continuation.gate_inputs(reason, got)
         assert resolution.decision == "report" and resolution.note == continuation.GATE_TEXT[reason]
         assert continuation.GATE_TEXT[reason] in report and "40 cm" in report and "gusty" in report
