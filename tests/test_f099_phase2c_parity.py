@@ -30,11 +30,12 @@ class Untouchable:
 UNTOUCHED = {name: Untouchable() for name in ("database", "runner", "heart", "brain", "bus", "dispatcher")}
 
 
-def test_the_runner_is_not_ready_in_this_pr():  # PIN: 2e flips this assertion, and nothing else flips the constant
-    assert continuation.CONTINUATION_RUNNER_READY is False
+def test_the_runner_is_ready_in_this_build():  # PIN: 2e flipped this assertion, and nothing else flips the constant
+    assert continuation.CONTINUATION_RUNNER_READY is True
 
 
-async def test_a_requested_flag_is_forced_off_and_no_runner_is_built():  # PIN (from 2c-2 on)
+async def test_a_requested_flag_is_forced_off_and_no_runner_is_built_without_the_runner(monkeypatch):  # PIN
+    monkeypatch.setattr(continuation, "CONTINUATION_RUNNER_READY", False)  # a build that has not got the runner
     settings = Settings(_env_file=None, **CONT)
     assert settings.continuation_enabled is True  # as an operator set it
     main._gate_continuation_flag(settings)
@@ -42,7 +43,8 @@ async def test_a_requested_flag_is_forced_off_and_no_runner_is_built():  # PIN (
     assert await main._build_continuation_runner(settings, **UNTOUCHED) is None
 
 
-async def test_the_second_guard_holds_even_if_the_gate_were_bypassed():  # PIN (from 2c-2 on)
+async def test_the_second_guard_holds_even_if_the_gate_were_bypassed(monkeypatch):  # PIN (from 2c-2 on)
+    monkeypatch.setattr(continuation, "CONTINUATION_RUNNER_READY", False)  # a build that has not got the runner
     settings = Settings(_env_file=None, **CONT)  # the flag on, the gate never run
     assert await main._build_continuation_runner(settings, **UNTOUCHED) is None
 

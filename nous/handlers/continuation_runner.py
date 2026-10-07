@@ -5,7 +5,7 @@ thread of its own (``intent-<root>``), that ends with one decision: ``resolve_in
 that decide whether, when and how the turn's outcome is committed are rows-level and live in
 ``nous.brain.continuation``; this module is the part that runs: the decision tool, the turn's input,
 the arrival (claim, gate, turn, follow-up, commit), and the loop. Nothing here starts unless
-``NOUS_CONTINUATION_ENABLED`` is on, which ``main.py`` forces off until PR-2e.
+``NOUS_CONTINUATION_ENABLED`` is on (default off: the owner turns it on).
 """
 
 from __future__ import annotations
@@ -421,7 +421,7 @@ class ContinuationRunner:
 
     async def start(self) -> None:
         """Release claims older than the lease, then run the loop (spec 4.5.2). Does nothing, and builds no
-        task, with continuation off: main.py forces it off until PR-2e.
+        task, with continuation off.
 
         Must not overlap ``stop()``: nothing here guards a start that is still releasing claims against a stop.
         main.py calls ``start()`` once, as the last step of ``create_components``."""

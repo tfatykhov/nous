@@ -229,13 +229,13 @@ def _warn_on_f098_flags(settings: Settings) -> None:
 
 
 def _gate_continuation_flag(settings: Settings) -> None:
-    """F099 Phase 2: keep NOUS_CONTINUATION_ENABLED off until the runner ships.
+    """F099 Phase 2: keep NOUS_CONTINUATION_ENABLED off in a build that has no runner.
 
     With the flag on and no runner, a continue result is written keyed by its
     intention alone and nothing claims it (G6). The gate lives here and not in
-    a Settings validator because config.py must not import nous.brain. The
-    runner is already wired (``_build_continuation_runner``, inert while the
-    constant is False); PR-2e sets CONTINUATION_RUNNER_READY.
+    a Settings validator because config.py must not import nous.brain. PR-2e
+    set CONTINUATION_RUNNER_READY, so the gate lets the flag through; it stays
+    as the guard of any build that clears the constant.
     """
     if settings.continuation_enabled and not continuation.CONTINUATION_RUNNER_READY:
         logger.warning(
@@ -293,7 +293,7 @@ async def _build_continuation_runner(
     """F099 Phase 2c: build and wire the continuation runner (NOT started), or None.
 
     A runner exists only when continuation is on AND this build may run it
-    (``continuation.CONTINUATION_RUNNER_READY``, flipped by PR-2e). ``_gate_continuation_flag``
+    (``continuation.CONTINUATION_RUNNER_READY``, True since PR-2e). ``_gate_continuation_flag``
     already forces the flag off while the constant is False; this is the second guard, so a change to the
     gate alone cannot start a runner. With either off, nothing is constructed: no loop, no sweep, no
     push, no reconciler pass. The runner is returned unstarted: `create_components` starts it as its LAST
@@ -1138,8 +1138,8 @@ async def create_components(settings: Settings) -> dict:
                 _context_log_retention_loop(settings, database), name="context-log-retention"
             )
 
-    # F099 Phase 2c: the continuation runner. None while CONTINUATION_RUNNER_READY is False (until PR-2e), so
-    # the reconciler's pass below and the shutdown see none.
+    # F099 Phase 2c: the continuation runner. None unless NOUS_CONTINUATION_ENABLED is on (and
+    # CONTINUATION_RUNNER_READY, True since PR-2e), so the reconciler's pass below and the shutdown see none.
     continuation_runner = await _build_continuation_runner(
         settings, database=database, runner=runner, heart=heart, brain=brain, bus=bus, dispatcher=dispatcher
     )

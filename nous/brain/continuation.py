@@ -43,10 +43,10 @@ from nous.storage.models import (
 
 logger = logging.getLogger(__name__)
 
-# Flipped to True by PR-2e, in the commit that wires the runner into main.py.
-# While it is False, main.py forces NOUS_CONTINUATION_ENABLED off: with the flag
-# on and no runner, a continue result is written NULL-keyed and nothing claims it.
-CONTINUATION_RUNNER_READY: bool = False
+# True since PR-2e: the runner, its bounds, the proposals and the owner's cancel all ship. A build that
+# has not got them sets it False, and main.py then forces NOUS_CONTINUATION_ENABLED off: with the flag on
+# and no runner, a continue result is written NULL-keyed and nothing claims it.
+CONTINUATION_RUNNER_READY: bool = True
 
 INTENT_SESSION_PREFIX = "intent-"  # session id of a root's thread: f"intent-{root_id}"
 SOURCE_INTENTION_REPORT = "intention_report"  # inbox source kind of an owner-facing row
