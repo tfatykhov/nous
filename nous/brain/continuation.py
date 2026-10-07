@@ -1149,6 +1149,12 @@ async def _commit_arrival(
         )
     elif staged:
         await expire_staged(session, agent_id, claim_token=claim.claim_token)
+    if resolution.decision in ("continue", "revise") and outcome == OUTCOME_RESOLVED and gate_reason is None:
+        # 2e-2 review m4: the executor refuses a continue with nothing open, but at call time. The last open child
+        # can close between that check and this commit (the model's own cancel_task, then the repair), and its
+        # close saw this claim's root still open and ended nothing. Under the root lock, with the arrival row
+        # flushed, this is the last chance: a lineage left with nothing running is closed and reported once.
+        await end_hanging_root(session, agent_id, root_id, settings=settings, now=now)
     return ArrivalCommit(arrival_id, n, next_states, decision_record_id, tuple(report_ids), tuple(published))
 
 

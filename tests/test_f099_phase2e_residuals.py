@@ -15,12 +15,14 @@ from f099_support import (
     SEND_EMAIL_ARGS,
     SEND_EMAIL_SCHEMA,
     ask_with_proposals,
+    claim,
     claimed,
     commit_ask,
     env_factory,  # noqa: F401
     finish,
     inbox_rows,
     intention_of,
+    make_child,
     make_root,
     make_subtask,
     proposal_row,
@@ -28,14 +30,16 @@ from f099_support import (
     register_send_email,
     runner_env,  # noqa: F401
     set_intention,
+    until_a_backend_waits_on_a_lock,
 )
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 import nous.handlers.continuation_runner as runner_module
 from nous.brain import continuation
 from nous.config import Settings
 from nous.handlers.continuation_runner import ContinuationRunner
-from nous.storage.models import IntentionProposal, ResultInbox
+from nous.heart.result_reconciler import repair_missing_results
+from nous.storage.models import Intention, IntentionProposal, ResultInbox
 
 pytestmark = pytest.mark.postgres_only
 
@@ -479,3 +483,82 @@ async def test_a_failing_push_is_logged_and_the_sweep_goes_on(runner_env, caplog
     report = await cont.run_once()
     assert report.pushed == 0 and "owner push failed" in caplog.text
     assert (await cont.run_once()).pushed == 0  # and the next sweep tries again
+
+
+# ---- 2e-2 review m4: a `continue` commit that leaves nothing open --------------------------------------------
+
+
+async def _waiting_on_a_child(env):
+    """A root with a result to decide and one running child: the executor's `has_open_work` check passes."""
+    root = await make_root(env)
+    await record(env, root)
+    child = await make_child(env, root)
+    got = await claim(env, root.id)
+    async with env.db.session() as s:
+        assert await continuation.has_open_work(s, env.agent, got)
+    return root, child, got
+
+
+async def _close_child(env, child):
+    """The model's own `cancel_task` mid-turn, then the repair's tick: the child closes `legacy`, no result."""
+    await env.heart.subtasks.cancel(uuid.UUID(child.source_id))
+    return await repair_missing_results(env.db, env.heart.result_inbox, env.settings, limit=50)
+
+
+async def _commit_continue(s, env, got):
+    return await continuation.commit_arrival(
+        s,
+        env.agent,
+        got,
+        resolution=continuation.Resolution("continue", "waiting on the follow-up", False, 0.6),
+        outcome="resolved",
+        settings=env.settings,
+    )
+
+
+async def _root_and_reports(env, root):
+    async with env.db.session() as s:
+        fresh = (await s.execute(select(Intention).where(Intention.id == root.id))).scalar_one()
+    return fresh, [r for r in await inbox_rows(env) if r.source_kind == "intention_report"]
+
+
+async def test_a_continue_committed_after_its_last_child_closed_ends_the_root_with_one_report(env_factory):  # noqa: F811
+    """The child closes between the executor's check and the commit. Its close saw the claimed root still open, so
+    it ended nothing; the commit is the last chance, and it closes the root and says so, in its own transaction."""
+    env = await env_factory(**CONT, telegram_chat_id="8080")
+    root, child, got = await _waiting_on_a_child(env)
+    await _close_child(env, child)
+    assert (await intention_of(env, "subtask", child.source_id)).close_reason == "legacy"
+    assert (await _root_and_reports(env, root))[1] == []  # the close found the claimed root open
+    async with env.db.session() as s:
+        assert await _commit_continue(s, env, got) is not None
+        await s.commit()
+    fresh, reports = await _root_and_reports(env, root)
+    assert fresh.root_expired_at is not None and fresh.state == "closed"
+    (report,) = reports
+    assert report.msg_type == "REPORT" and root.intent in report.body
+
+
+async def test_a_close_that_queues_behind_the_commit_ends_the_root_and_the_commit_does_not_report_too(env_factory):  # noqa: F811
+    """The other order: the commit holds the root, the child's close waits on it, then sees the `continue`
+    arrival with nothing open. One REPORT, from the close."""
+    env = await env_factory(**CONT, telegram_chat_id="8080")
+    root, child, got = await _waiting_on_a_child(env)
+    async with env.db.session() as s:
+        assert await _commit_continue(s, env, got) is not None  # holds the root until the commit
+        closing = asyncio.create_task(_close_child(env, child))
+        await asyncio.wait_for(until_a_backend_waits_on_a_lock(env), timeout=10)
+        await s.commit()
+    await asyncio.wait_for(closing, timeout=30)
+    fresh, reports = await _root_and_reports(env, root)
+    assert fresh.root_expired_at is not None and len(reports) == 1
+
+
+async def test_a_continue_with_a_child_still_running_leaves_the_root_open(env_factory):  # noqa: F811  # PIN
+    env = await env_factory(**CONT, telegram_chat_id="8080")
+    root, _child, got = await _waiting_on_a_child(env)
+    async with env.db.session() as s:
+        assert await _commit_continue(s, env, got) is not None
+        await s.commit()
+    fresh, reports = await _root_and_reports(env, root)
+    assert fresh.root_expired_at is None and reports == []
