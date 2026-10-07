@@ -14,7 +14,7 @@ nous/
 │   ├── config.py               # Settings via pydantic-settings
 │   ├── main.py                 # Entry point, component wiring, lifecycle
 │   ├── telegram_bot.py         # Telegram interface (streaming + usage); F099 2d: owner actions (buttons, /approve, /reject, /answer, reply-to)
-│   ├── owner_actions.py        # F099 Phase 2d: callback-data codec shared by the publisher and the Telegram bot (stdlib only)
+│   ├── owner_actions.py        # F099 Phase 2d: callback-data codec and refusal vocabulary shared by the publisher, the REST routes and the Telegram bot (stdlib only)
 │   ├── events.py               # Event bus (async pub/sub)
 │   ├── utils.py                # Shared utilities
 │   ├── loop_watchdog.py        # Event-loop stall watchdog (stack dump + exit)
@@ -121,7 +121,7 @@ nous/
 │   ├── security/
 │   │   └── secrets.py          # scan_secrets: shared by send_email (refuse) and the F098 result memory writer (skip)
 │   └── api/                    # External interfaces
-│       ├── rest.py             # Starlette REST API (109 endpoints)
+│       ├── rest.py             # Starlette REST API (the route list in `create_app`; see `docs/reference/rest-api.md`)
 │       ├── intention_routes.py # F099 Phase 2d: the four owner-action routes (decide, answer, list), thin over ContinuationRunner
 │       ├── mcp.py              # MCP server (nous_chat, nous_decide, etc.)
 │       ├── runner.py           # Agent runner (tool loop, streaming)

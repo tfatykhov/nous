@@ -17,7 +17,7 @@ Cognitive Layer (hooks into LLM calls)
 
 Runtime: Direct Anthropic API + tool dispatch loop
 Storage: PostgreSQL + pgvector (one DB, three schemas: brain/heart/system)
-API: REST (42 endpoints) + MCP server + Telegram bot (streaming)
+API: REST (see docs/reference/rest-api.md) + MCP server + Telegram bot (streaming)
 ```
 
 ## Project Structure

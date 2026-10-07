@@ -75,7 +75,11 @@ def build_intention_routes(*, database: Any, settings: Any, continuation_runner:
         return JSONResponse({"proposals": views})
 
     async def decide(request: Request) -> JSONResponse:
-        """POST /intentions/proposals/{id}/decide"""
+        """POST /intentions/proposals/{id}/decide
+
+        The 200 body carries the call's raw ``result`` and ``error``: a tool's output, which a model or an injected
+        result may have shaped. Any surface that renders them (the Phase 3 A2UI cards) must escape them; the bot
+        never renders them."""
         body = await _object_body(request)
         if body is None:
             return _error(400, "the body must be a JSON object")
