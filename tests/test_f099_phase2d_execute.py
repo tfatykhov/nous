@@ -7,13 +7,15 @@ import inspect
 import uuid
 
 import pytest
-from test_runner_authorization import _RecordingDispatcher
-from test_runner_ledger import _FakeStore, _held, _runner
+from test_runner_authorization import _MockBrain, _MockCognitive, _MockHeart, _RecordingDispatcher, _settings
+from test_runner_ledger import _FakeSnapStore, _FakeStore, _held, _runner
 
+from nous.api import compensation
 from nous.api.execution_context import ExecutionContext
 from nous.api.idempotency import idempotency_key
 from nous.api.runner import AgentRunner, Dispatched, SingleCall
 from nous.api.tools import ToolDispatcher, _origin_args
+from nous.brain import intentions
 
 SEND = {"to": "friend@example.com", "subject": "Snow", "body": "40 cm overnight."}
 
@@ -193,3 +195,51 @@ async def test_validate_call_refuses_a_call_missing_a_parameter_only_the_handler
     # What validate_call now refuses is exactly what dispatch cannot run.
     text, is_error = await dispatcher.dispatch("touch", {})
     assert is_error and "path" in text
+
+
+# ---- lead addendum (2d-4 review m1 to m3) ---------------------------------------------------------------------
+
+
+def test_an_approved_context_without_an_intention_fails_closed_instead_of_making_a_root():
+    """2d-4 review m1: the unreadable-lineage fallback keys on the STAMPED authority. An approved_action context
+    stamps internal_only, so without an intention id its spawn is refused like a damaged stamp, never made an
+    internal_only root with no continuation to return to."""
+    stamp = _origin_args(_ctx(intention_id=None, root_intention_id=None))
+    assert stamp["_origin_authority"] == "internal_only"
+    assert stamp["_intention_id"] == intentions.UNREADABLE_LINEAGE
+
+
+def test_the_unreadable_lineage_fallback_is_unchanged_for_every_other_kind():  # PIN
+    for kind in ("subtask", "dag_node"):
+        ctx = ExecutionContext(kind=kind, session_id="s", authority="internal_only")
+        assert _origin_args(ctx)["_intention_id"] == intentions.UNREADABLE_LINEAGE
+    for kind in ("interactive", "subtask", "scheduled"):
+        assert "_intention_id" not in _origin_args(ExecutionContext(kind=kind, session_id="s"))
+
+
+async def test_a_single_call_without_a_dispatcher_fails_like_the_loops():
+    """2d-4 review m2: the same guard and the same text as _tool_loop and stream_chat."""
+    runner = AgentRunner(_MockCognitive(), _MockBrain(), _MockHeart(), _settings())
+    with pytest.raises(RuntimeError, match="No tool dispatcher set"):
+        await runner.execute_single_call(_ctx(), "send_email", dict(SEND))
+
+
+async def test_a_dispatch_that_raises_still_releases_the_write_lock(tmp_path):  # PIN
+    """2d-4 review m3: the path lock a write takes is released on the error path too, not only after a success."""
+    store = _FakeStore()
+    runner, _ = _runner(store, offered=("write_file",), compensation_enabled=True)
+    runner.set_snapshot_store(_FakeSnapStore(), str(tmp_path))
+    key = compensation.write_path_key("plain.txt", str(tmp_path))
+    held_at_raise: list[bool] = []
+
+    class _RaisingWrite(_RecordingDispatcher):
+        async def dispatch(self, name, inp, **kwargs):
+            lock = compensation._write_path_locks.get(key)
+            held_at_raise.append(lock is not None and lock.locked())
+            raise RuntimeError("disk is full")
+
+    runner.set_dispatcher(_RaisingWrite(["write_file"], store))
+    with pytest.raises(RuntimeError, match="disk is full"):
+        await runner.execute_single_call(_ctx(tool="write_file"), "write_file", {"path": "plain.txt", "content": "x"})
+    assert held_at_raise == [True]  # the call held the lock when it raised
+    assert key not in compensation._write_path_locks  # and the error path released it

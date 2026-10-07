@@ -3020,6 +3020,8 @@ class AgentRunner:
         dispatch raises; the caller (``ContinuationRunner.execute_approved_proposal``) owns the proposal's state."""
         if ctx.kind != "approved_action":
             raise ValueError(f"execute_single_call runs an approved_action context, not {ctx.kind!r}")
+        if not self._dispatcher:
+            raise RuntimeError("No tool dispatcher set -- call set_dispatcher() first")
         refusal = self._authorize_tool_call(ctx, tool_name, frozenset({tool_name}), ctx.session_id, tool_input)
         if refusal is not None:
             await self._ledger_blocked(ctx, tool_name, tool_input, None, refusal.code)

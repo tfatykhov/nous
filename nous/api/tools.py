@@ -299,9 +299,10 @@ def _origin_args(ctx: ExecutionContext) -> dict[str, Any]:
         out["_decision_id"] = ctx.decision_id
     if ctx.intention_id is not None:
         out["_intention_id"] = str(ctx.intention_id)
-    elif ctx.authority == AUTHORITY_INTERNAL:
+    elif authority == AUTHORITY_INTERNAL:
         # A damaged stamp failed closed in lineage_from_stamp (no id, but
-        # internal_only): refuse the spawn rather than make it a root.
+        # internal_only): refuse the spawn rather than make it a root. Keyed on
+        # the stamp, so an approved action with no intention id fails closed too.
         out["_intention_id"] = intentions.UNREADABLE_LINEAGE
     return out
 
