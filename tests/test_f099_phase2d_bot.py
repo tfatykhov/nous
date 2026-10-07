@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from nous import owner_actions
+from nous import owner_actions, telegram_bot
 from nous.telegram_bot import (
     OWNER_REQUEST_TIMEOUT,
     NousTelegramBot,
@@ -422,6 +422,26 @@ async def test_a_user_who_is_not_allowed_is_still_refused_before_anything_else()
 
 
 # ---- the pure parts ------------------------------------------------------------------------------------------
+
+
+def test_the_bot_and_the_routes_share_one_refusal_vocabulary():
+    """Final review m6: one definition per invariant. The bot, the routes and (Phase 3) the cards say the same
+    sentence for the same refusal, because they hold the same object, keyed by the store's refusal codes."""
+    from nous.api import intention_routes
+    from nous.brain import continuation
+
+    assert telegram_bot.DECISION_REFUSALS is intention_routes.DECISION_REFUSALS is owner_actions.DECISION_REFUSALS
+    assert telegram_bot.ANSWER_REFUSALS is intention_routes.ANSWER_REFUSALS is owner_actions.ANSWER_REFUSALS
+    assert set(owner_actions.DECISION_REFUSALS) == {
+        continuation.REFUSE_EXPIRED,
+        continuation.REFUSE_ENDED,
+        continuation.REFUSE_STATE,
+    }
+    assert set(owner_actions.ANSWER_REFUSALS) == {
+        continuation.REFUSE_ANSWERED,
+        continuation.REFUSE_EXPIRED,
+        continuation.REFUSE_ENDED,
+    }
 
 
 def test_the_bot_parses_the_servers_buttons_with_the_shared_codec():

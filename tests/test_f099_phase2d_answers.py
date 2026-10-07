@@ -157,6 +157,31 @@ async def test_an_answer_after_the_sweep_woke_an_expired_question_is_refused(env
     assert refused.value.reason == "expired"
 
 
+async def test_only_an_owner_answer_answers_a_question(env_factory):  # noqa: F811
+    """Final review m8: a proposal's outcome is an INFORM of the arrival too. C4 keeps a QUESTION and proposals out
+    of one arrival, but the wake rule must not depend on it: built directly here, such an INFORM answers nothing."""
+    env = await env_factory(**CONT)
+    root, _qid, done = await _ask(env)
+    async with env.db.session() as s:
+        await continuation.record_result(  # the shape of a proposal's outcome row: no owner-answer correlation
+            s,
+            env.agent,
+            intention_id=root.id,
+            source_kind=continuation.SOURCE_INTENTION_REPORT,
+            source_id=uuid.uuid4(),
+            msg_type="INFORM",
+            title="Proposal rejected",
+            body="The owner rejected the proposal.",
+            arrival_id=done.arrival_id,
+            settings=env.settings,
+        )
+        await s.commit()
+    assert len(await _informs(env, done.arrival_id)) == 1  # it is there, and held for the arrival
+    async with env.db.session() as s:
+        assert await continuation.arrival_is_terminal(s, env.agent, done.arrival_id, settings=env.settings) is False
+    assert (await intention_of(env, "subtask", root.source_id)).state == "awaiting_owner"
+
+
 async def test_an_unknown_id_and_a_proposal_id_are_not_questions(env_factory):  # noqa: F811
     env = await env_factory(**CONT)
     with pytest.raises(continuation.QuestionNotFound):

@@ -453,6 +453,7 @@ async def _answer(env, arrival_id, intention, text="Yes, book it."):
             source_id=uuid.uuid4(),
             msg_type="INFORM",
             title="Owner's answer",
+            correlation_id=f"{continuation.ANSWER_CORRELATION_PREFIX}telegram:42",  # as record_answer writes it
             body=text,
             arrival_id=arrival_id,
             settings=env.settings,

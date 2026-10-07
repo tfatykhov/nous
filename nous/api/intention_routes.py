@@ -21,6 +21,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from nous.brain import continuation
+from nous.owner_actions import ANSWER_REFUSALS, DECISION_REFUSALS  # the one refusal vocabulary (fixed sentences)
 
 logger = logging.getLogger(__name__)
 
@@ -28,20 +29,6 @@ ACTOR_MAX_CHARS = 100
 ANSWER_MAX_CHARS = 8000  # the owner's text; record_answer clips it again to the inbox body cap
 LIST_LIMIT_MAX = 100
 NOT_RUNNING = "continuation is not running"
-
-# Fixed, server-authored vocabulary: what the bot and the cards show the owner. Never a model's text.
-DECISION_REFUSALS = {
-    continuation.REFUSE_EXPIRED: "This proposal expired before it was decided, so it did not run.",
-    continuation.REFUSE_ENDED: "This work has already ended, so the proposal did not run.",
-    continuation.REFUSE_STATE: "This proposal was already decided the other way.",
-}
-# `ended` also covers a question whose arrival has already moved on (its intentions were woken or closed):
-# nothing is waiting for the answer.
-ANSWER_REFUSALS = {
-    continuation.REFUSE_ANSWERED: "This question was already answered.",
-    continuation.REFUSE_EXPIRED: "This question expired before it was answered.",
-    continuation.REFUSE_ENDED: "This work has already ended, so the answer was not recorded.",
-}
 
 
 def _error(status: int, message: str, **extra: Any) -> JSONResponse:

@@ -208,6 +208,7 @@ async def test_a_sweep_wakes_an_answered_question_and_decides_the_answer(runner_
             source_id=uuid.uuid4(),
             msg_type="INFORM",
             title="Owner's answer",
+            correlation_id=f"{continuation.ANSWER_CORRELATION_PREFIX}telegram:42",  # as record_answer writes it
             body="Yes, book it.",
             arrival_id=asked.arrival_id,
             settings=env.settings,

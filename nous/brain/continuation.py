@@ -1127,14 +1127,17 @@ async def _commit_arrival(
     await session.flush()  # the arrival row exists before the proposals reference it
     published: list[tuple[UUID, str]] = []
     if publishing:
+        # The approval window starts when the owner can see the proposal: a push deferred to the end of the quiet
+        # hours moves the deadline with it, and the push's "Expires" line shows this same deadline.
+        push_after = push_after_for(settings, now)
         published = await publish_staged(
             session,
             agent_id,
             arrival_id=arrival_id,
             claim_token=claim.claim_token,
-            deadline=now + timedelta(hours=float(settings.intention_proposal_ttl_hours)),
+            deadline=max(now, push_after) + timedelta(hours=float(settings.intention_proposal_ttl_hours)),
             channel=channel,
-            push_after=push_after_for(settings, now),
+            push_after=push_after,
             note=resolution.note,
         )
     elif staged:
@@ -1640,8 +1643,16 @@ async def _question_state(
     )
     if not questions:
         return proposals_done, True, questions
+    # An answer is the owner's answer INFORM (record_answer's predicate), not any INFORM of the arrival: a
+    # proposal's outcome is an INFORM too, and the rule must not lean on C4 keeping the two apart.
     newest_answer = (
-        await session.execute(select(func.max(ResultInbox.created_at)).where(*base, ResultInbox.msg_type == "INFORM"))
+        await session.execute(
+            select(func.max(ResultInbox.created_at)).where(
+                *base,
+                ResultInbox.msg_type == "INFORM",
+                ResultInbox.correlation_id.like(f"{ANSWER_CORRELATION_PREFIX}%"),
+            )
+        )
     ).scalar_one()
     ttl = timedelta(hours=float(settings.intention_proposal_ttl_hours)) if settings is not None else None
     answered = [newest_answer is not None and newest_answer >= q.created_at for q in questions]

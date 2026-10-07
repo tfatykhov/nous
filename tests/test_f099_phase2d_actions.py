@@ -111,6 +111,29 @@ async def test_the_approved_call_runs_with_exactly_the_staged_arguments(runner_e
     assert env.cont._wake.is_set()  # the loop is told: an arrival is result_ready
 
 
+async def test_an_approved_call_carries_the_roots_plan_decision(runner_env, monkeypatch):  # noqa: F811
+    """Final review m3 (R4): what an approved call starts inherits the root's Plan decision, as the children of a
+    continuation turn do."""
+    env = await runner_env()
+    register_send_email(env)
+    asked = await ask_with_proposals(env)
+    (pid,) = asked.ids
+    plan = uuid.uuid4()
+    await set_intention(env, asked.root.id, origin_decision_id=plan)
+    contexts: list[ExecutionContext] = []
+    run_one = env.runner.execute_single_call
+
+    async def spy(ctx, tool_name, tool_input):
+        contexts.append(ctx)
+        return await run_one(ctx, tool_name, tool_input)
+
+    monkeypatch.setattr(env.runner, "execute_single_call", spy)
+    out = await _cont(env).decide_proposal(pid, approve=True, actor="t")
+    assert out.state == "executed", out.error
+    (ctx,) = contexts
+    assert (ctx.kind, ctx.root_intention_id, ctx.decision_id) == ("approved_action", asked.root.id, str(plan))
+
+
 async def test_two_concurrent_approves_run_the_call_once(runner_env):  # noqa: F811
     """Review Focus 2: the fence is the one UPDATE of claim_execution, whoever gets there. The two coroutines are
     gathered on purpose and no winner is asserted, only that the call ran once, which holds in every interleaving;

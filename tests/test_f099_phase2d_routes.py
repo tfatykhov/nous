@@ -128,7 +128,7 @@ async def test_a_repeated_approve_is_200_and_a_contradictory_one_is_409(runner_e
     flipped = await _call(app, "POST", path, json={"decision": "reject"})
     assert flipped.status_code == 409
     assert flipped.json() == {
-        "error": "This proposal was already decided the other way.",
+        "error": "That proposal was already decided the other way.",
         "state": "executed",
         "refusal": "not_pending",
     }
@@ -244,7 +244,7 @@ async def test_an_answer_over_rest_is_recorded_and_wakes_the_arrival(runner_env)
     assert body["question_id"] == str(qid) and body["woke"] is True and uuid.UUID(body["arrival_id"])
     again = await _call(app, "POST", path, json={"text": "No."})
     assert again.status_code == 409 and again.json()["reason"] == "answered"
-    assert again.json()["error"] == "This question was already answered."
+    assert again.json()["error"] == "That question was already answered."
 
 
 @pytest.mark.parametrize("payload", [{"text": "   "}, {"text": 5}, {}, {"text": "x" * 8001}, ["Yes"]])
@@ -373,8 +373,9 @@ def test_the_routes_touch_only_the_runners_owner_actions():
 
 # ---- lead addendum 1: a refusal of any kind is a 409, whichever caller comes first -----------------------------
 
-ENDED_TEXT = "This work has already ended, so the proposal did not run."
-EXPIRED_TEXT = "This proposal expired before it was decided, so it did not run."
+# The bot's sentences: since the final review's m6 the routes and the bot share one map (nous/owner_actions.py).
+ENDED_TEXT = "That work has already ended, so nothing ran."
+EXPIRED_TEXT = "That proposal expired before it was decided, so it did not run."
 # The root marker, the state the proposal ends in, and what a later caller is refused with (decide_proposal's map).
 ENDED_ROOTS = [("root_expired_at", "expired", "expired"), ("root_cancelled_at", "cancelled", "ended")]
 

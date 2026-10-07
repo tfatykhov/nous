@@ -31,7 +31,7 @@ from sqlalchemy import select, update
 
 from nous.brain import continuation
 from nous.brain.continuation import Resolution
-from nous.handlers.continuation_publisher import OwnerPublisher
+from nous.handlers.continuation_publisher import OwnerPublisher, render_proposal_html
 from nous.handlers.continuation_runner import ContinuationRunner
 from nous.storage.models import IntentionArrival, IntentionProposal
 
@@ -58,7 +58,7 @@ async def _arrivals(env):
 
 
 async def test_an_ask_publishes_its_staged_proposals_in_the_fenced_commit(env_factory):  # noqa: F811
-    env = await env_factory(**CONT)
+    env = await env_factory(**CONT, heartbeat_quiet_start=0, heartbeat_quiet_end=0)  # never quiet: the push is now
     asked = await ask_with_proposals(env, count=2)
     done = asked.done
     assert [pid for pid, _tool in done.proposals] == asked.ids
@@ -80,6 +80,20 @@ async def test_an_ask_publishes_its_staged_proposals_in_the_fenced_commit(env_fa
     assert (await intention_of(env, "subtask", asked.root.source_id)).state == "awaiting_owner"
     (arrival,) = await _arrivals(env)
     assert arrival.decision == "ask" and set(arrival.report_ids) == set(asked.ids)
+
+
+async def test_a_proposal_staged_in_quiet_hours_gets_its_window_from_the_push(env_factory):  # noqa: F811
+    """Final review m2: the approval window starts when the owner can see the proposal. A proposal committed in the
+    quiet hours is pushed at their end, so its deadline is ``push_after + ttl``, and the push says that deadline."""
+    hour = datetime.now(UTC).hour
+    env = await env_factory(**CONT, heartbeat_quiet_start=hour, heartbeat_quiet_end=(hour + 3) % 24)
+    asked = await ask_with_proposals(env)
+    (pid,) = asked.ids
+    (pushed,) = await _proposal_rows(env)
+    assert pushed.push_after > datetime.now(UTC) + timedelta(hours=1)  # deferred to the end of the quiet hours
+    row = await proposal_row(env, pid)
+    assert row.deadline == pushed.push_after + timedelta(hours=24)  # the 24 h TTL, from the push
+    assert f"Expires {row.deadline.astimezone(UTC):%Y-%m-%d %H:%M} UTC." in render_proposal_html(row, None)
 
 
 async def test_an_ask_with_no_proposals_still_writes_its_question(env_factory):  # noqa: F811  # PIN (2c behaviour)

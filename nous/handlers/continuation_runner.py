@@ -1091,6 +1091,15 @@ class ContinuationRunner:
         ``executing``: ``expire_proposals`` marks it failed in doubt after the bound."""
         async with self._db.session() as session:
             proposal = await continuation.claim_execution(session, self._agent_id, proposal_id)
+            root_decision = None
+            if proposal is not None:
+                root_decision = (
+                    await session.execute(
+                        select(Intention.origin_decision_id).where(
+                            Intention.agent_id == self._agent_id, Intention.id == proposal.root_id
+                        )
+                    )
+                ).scalar_one_or_none()
             await session.commit()
         if proposal is None:
             return await self._not_runnable(proposal_id)
@@ -1101,6 +1110,8 @@ class ContinuationRunner:
             declared_tools=(proposal.tool,),
             root_intention_id=proposal.root_id,
             intention_id=proposal.intention_id,
+            # R4: what the approved call starts inherits the root's Plan decision, as a continuation turn's do.
+            decision_id=str(root_decision) if root_decision is not None else None,
         )  # authority stays the default, owner: the owner approved this one call
         ok, result, error, send_key = False, None, None, None
         try:

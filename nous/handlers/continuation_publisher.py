@@ -10,7 +10,8 @@ proposal's arguments and rationale, and a question, are model output that an inj
 Telegram turns ``/command`` text in a plain message into a tappable command and parses links and mentions, but
 parses no entity inside ``pre``. Before the HTML escape, the characters ``continuation.render_arguments`` shows
 as escapes (bidi, zero-width, control) are shown as escapes in the rationale, the note and the question too
-(``continuation.render_text``). A REPORT keeps its plain-text form.
+(``continuation.render_text``). A REPORT is sent the same way (2d final review m4): the model learns its own
+proposal's short id in the turn, so a report it shapes could otherwise carry a tappable ``/approve <id>``.
 """
 
 from __future__ import annotations
@@ -93,6 +94,12 @@ def render_question_html(title: str, body: str) -> str:
     shown with ``render_text``'s escapes and HTML-escaped inside ``<pre>``."""
     quoted = continuation.render_text(f"{title}\n\n{body}")
     return f"<b>Question</b>\n{_pre(quoted)}\nReply to this message to answer it."
+
+
+def render_report_html(title: str, body: str) -> str:
+    """The Telegram text of a REPORT, in HTML: the title (it names the intent) and the body are model-authored, so
+    both are shown with ``render_text``'s escapes and HTML-escaped inside ``<pre>``, and nothing sits outside it."""
+    return _pre(continuation.render_text(f"{title}\n\n{body}"))
 
 
 class OwnerPublisher:
@@ -209,9 +216,12 @@ class OwnerPublisher:
                 "parse_mode": "HTML",
                 "reply_markup": QUESTION_MARKUP,
             }
-        room = max(100, TELEGRAM_TEXT_MAX - len(row.title) - 2)
+        # A REPORT, counted as the QUESTION is: 2 covers the blank line between the title and the body.
+        title = continuation.render_text(row.title)
+        room = max(100, TELEGRAM_TEXT_MAX - continuation.utf16_units(title) - 2)
         body = continuation.clip_body(row.body, self._settings, limit=room)  # carry-over 7, C20: the store's one clip
-        return {"chat_id": chat_id, "text": f"{row.title}\n\n{body}"[:TELEGRAM_TEXT_MAX]}
+        body = continuation.clip_shown(body, room, marker="\n[truncated]")
+        return {"chat_id": chat_id, "text": render_report_html(title, body), "parse_mode": "HTML"}
 
     async def _send(
         self, token: str, row: ResultInbox, proposal: Any = None, note: str | None = None

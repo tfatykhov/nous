@@ -29,7 +29,7 @@ import httpx
 from nous.api.attachments import classify_attachment, sanitize_filename
 from nous.api.models import Attachment
 from nous.log_redaction import configure_logging
-from nous.owner_actions import parse_callback
+from nous.owner_actions import ANSWER_REFUSALS, DECISION_REFUSALS, parse_callback
 
 logger = logging.getLogger(__name__)
 
@@ -66,16 +66,6 @@ _HTML_TAG_RE = re.compile(r"<[^>]+>")
 # Telegram (a tool's output or a model's text could contain a tappable /command).
 _ID_ARG_RE = re.compile(r"[0-9a-fA-F-]{8,36}")
 _HEX_ID_RE = re.compile(r"[0-9a-f]{8,32}")
-_DECISION_REFUSALS = {
-    "expired": "That proposal expired before it was decided, so it did not run.",
-    "ended": "That work has already ended, so nothing ran.",
-    "not_pending": "That proposal was already decided the other way.",
-}
-_ANSWER_REFUSALS = {
-    "answered": "That question was already answered.",
-    "expired": "That question expired before it was answered.",
-    "ended": "That work has already ended, so your answer was not recorded.",
-}
 _UNREACHABLE = "I could not reach Nous. Try again in a moment."
 _NOT_RUNNING = "Nous is not running its follow-up work."
 OWNER_REQUEST_TIMEOUT = 300  # an approve runs the call inline, bounded by the server's tool timeout
@@ -112,7 +102,7 @@ def describe_decision(status: int, body: dict, approve: bool, short_id: str) -> 
         return "That proposal is no longer available.", True
     if status == 409:
         refusal = body.get("refusal")
-        text = _DECISION_REFUSALS.get(refusal) if isinstance(refusal, str) else None
+        text = DECISION_REFUSALS.get(refusal) if isinstance(refusal, str) else None
         return text or "That proposal can no longer be decided.", True
     if status == 400:
         return "I could not read that id.", False
@@ -130,7 +120,7 @@ def describe_answer(status: int, body: dict) -> str:
     # passes on every status but 200 and 409 too (final review I1); only /answer reaches the arms below.
     if status == 409:
         reason = body.get("reason")
-        text = _ANSWER_REFUSALS.get(reason) if isinstance(reason, str) else None
+        text = ANSWER_REFUSALS.get(reason) if isinstance(reason, str) else None
         return text or "That question can no longer be answered."
     if status == 400:
         return "I could not read that."

@@ -33,6 +33,9 @@ from nous.brain import continuation
 from nous.storage.models import Intention, IntentionProposal
 
 pytestmark = pytest.mark.postgres_only  # FOR NO KEY UPDATE, savepoints, = ANY(array)
+# A deadline starts at the push (final review m2), and a push in the quiet hours waits for their end: a test that
+# sweeps at "now + 25 h" needs the push to be now, whatever hour the suite runs at.
+NEVER_QUIET = {"heartbeat_quiet_start": 0, "heartbeat_quiet_end": 0}
 
 
 async def _decide(env, proposal_id, *, approve, actor="owner-test", now=None):
@@ -463,7 +466,7 @@ async def _hold_root(session, root_id):
 async def test_an_approve_that_waited_for_the_expiry_sweep_finds_the_proposal_expired(env_factory):  # noqa: F811
     """Approve racing expiry, the sweep first: both lock the root first, so the approve waits and then reads the
     sweep's result instead of approving a proposal whose outcome was already written."""
-    env = await env_factory(**CONT)
+    env = await env_factory(**CONT, **NEVER_QUIET)
     asked = await ask_with_proposals(env)
     (pid,) = asked.ids
     async with env.db.session() as holder:
@@ -482,7 +485,7 @@ async def test_an_approve_that_waited_for_the_expiry_sweep_finds_the_proposal_ex
 
 
 async def test_an_expiry_sweep_after_an_approve_leaves_the_approved_proposal_alone(env_factory):  # noqa: F811
-    env = await env_factory(**CONT)
+    env = await env_factory(**CONT, **NEVER_QUIET)
     asked = await ask_with_proposals(env)
     (pid,) = asked.ids
     await _decide(env, pid, approve=True)

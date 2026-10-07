@@ -255,6 +255,7 @@ async def test_one_failing_arrival_does_not_stop_the_others_waking(env_factory, 
                 source_id=uuid.uuid4(),
                 msg_type="INFORM",
                 title="Owner's answer",
+                correlation_id=f"{continuation.ANSWER_CORRELATION_PREFIX}telegram:42",  # as record_answer writes it
                 body="Yes.",
                 arrival_id=done.arrival_id,
                 settings=env.settings,

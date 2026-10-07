@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import html
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -57,6 +59,11 @@ async def _stored(env, report_id) -> ResultInbox:
         return (await s.execute(select(ResultInbox).where(ResultInbox.source_id == report_id))).scalar_one()
 
 
+def _shown_length(text: str) -> int:
+    """What Telegram counts: UTF-16 units of the text after its HTML entities are parsed."""
+    return len(html.unescape(re.sub(r"<[^>]+>", "", text)).encode("utf-16-le")) // 2
+
+
 def _publisher(env, http) -> OwnerPublisher:
     return OwnerPublisher(database=env.db, settings=env.settings, http_client=http)
 
@@ -69,7 +76,8 @@ async def test_a_due_row_is_pushed_once_with_its_message_id(env_factory):  # noq
     assert await publisher.push_due(now=NOW) == 1
     ((url,), kwargs) = http.post.call_args
     assert url == "https://api.telegram.org/bottest-token/sendMessage"
-    assert kwargs["json"] == {"chat_id": "8080", "text": "Update: snow\n\nDeep."}
+    # 2d final review m4: a REPORT is model-authored too, so it is escaped inside <pre>, like a QUESTION.
+    assert kwargs["json"] == {"chat_id": "8080", "text": "<pre>Update: snow\n\nDeep.</pre>", "parse_mode": "HTML"}
     row = await _stored(env, report_id)
     assert row.pushed_at is not None and row.push_message_id == 777
     assert await publisher.push_due(now=NOW) == 0  # idempotent: the stamp keys it
@@ -91,8 +99,27 @@ async def test_a_long_body_is_capped_at_the_inbox_body_cap(env_factory):  # noqa
     http = _http()
     assert await _publisher(env, http).push_due(now=NOW) == 1
     text = http.post.call_args.kwargs["json"]["text"]
-    assert text.endswith("[truncated]") and len(text) < 260
+    assert text.endswith("[truncated]</pre>") and _shown_length(text) < 250
     assert "[truncated]" in continuation.clip_body("x" * 9000, env.settings)  # one marker, one source
+
+
+async def test_a_reports_model_text_is_shown_only_inside_pre_escaped(env_factory):  # noqa: F811
+    """2d final review m4: the model learns its own proposal's short id in the turn, so a REPORT it shapes could
+    carry a tappable ``/approve <id>`` while the proposal is pending. Telegram parses no entity inside ``pre``: the
+    title and the body (the intent and the report are model-authored) go there, escaped, and nothing else does."""
+    bidi = chr(0x202E)
+    env = await _env(env_factory)
+    await _row(env, title="Update: <i>snow</i> /approve abcdef12", body=f"Tap /approve abcdef12 <b>now</b> & {bidi}go")
+    http = _http()
+    assert await _publisher(env, http).push_due(now=NOW) == 1
+    payload = http.post.call_args.kwargs["json"]
+    assert payload["parse_mode"] == "HTML"
+    text = payload["text"]
+    assert re.sub(r"<pre>.*?</pre>", "", text, flags=re.S) == ""  # no text outside the one block
+    assert text.count("<pre>") == text.count("</pre>") == 1
+    assert "<b>" not in text and "<i>" not in text and bidi not in text
+    assert "Update: &lt;i&gt;snow&lt;/i&gt; /approve abcdef12" in text
+    assert "Tap /approve abcdef12 &lt;b&gt;now&lt;/b&gt; &amp; \\u202ego" in text
 
 
 async def test_a_proposal_row_with_no_proposal_is_stamped_and_never_sent(env_factory):  # noqa: F811
@@ -296,7 +323,7 @@ async def test_the_truncation_marker_survives_the_telegram_cut(env_factory):  # 
     http = _http()
     assert await _publisher(env, http).push_due(now=NOW) == 1
     text = http.post.call_args.kwargs["json"]["text"]
-    assert len(text) <= 3900 and text.endswith("[truncated]")
+    assert _shown_length(text) <= 3900 and text.endswith("[truncated]</pre>")
 
 
 async def test_the_stores_reports_are_still_clipped_at_the_inbox_cap(env_factory):  # noqa: F811  # PIN
