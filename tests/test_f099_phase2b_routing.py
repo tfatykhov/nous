@@ -292,7 +292,7 @@ async def test_with_continuation_off_the_subtask_pass_skips_an_unrouted_continue
 
 @pytest.mark.postgres_only  # CAST(text AS uuid) in the pass filter
 async def test_a_reported_continue_result_is_not_reselected_by_the_subtask_pass(env_factory):  # noqa: F811  # PIN
-    """MF-1. A continue result that became a report (its root was cancelled after the work finished) must
+    """MF-1. A continue result that became a report (its root expired after the work finished) must
     leave a source-keyed row behind. Otherwise the pass re-selects it on every tick and, with a small
     batch, starves the source behind it."""
     env = await env_factory(**CONT)
@@ -301,7 +301,7 @@ async def test_a_reported_continue_result_is_not_reselected_by_the_subtask_pass(
     stuck = await make_subtask(env)
     await finish(env, stuck)
     it = await intention_of(env, "subtask", stuck.id)
-    await set_intention(env, it.id, state="closed", close_reason="resolved", root_cancelled_at=datetime.now(UTC))
+    await set_intention(env, it.id, state="closed", close_reason="resolved", root_expired_at=datetime.now(UTC))
     healthy = await make_subtask(env)
     await finish(env, healthy)  # its hook's write was lost
     pass_ = InboxSubtaskPass(env.db, store, env.settings)

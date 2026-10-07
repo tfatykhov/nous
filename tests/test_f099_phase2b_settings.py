@@ -127,12 +127,13 @@ def test_compose_passes_every_phase2_setting_with_the_settings_default():
     assert str(int(s.intention_proposal_ttl_hours)) == PHASE2_ENV["NOUS_INTENTION_PROPOSAL_TTL_HOURS"]
 
 
-def test_the_runner_is_not_ready_in_this_build():
-    """2e flips this assertion together with the gate test below."""
-    assert continuation.CONTINUATION_RUNNER_READY is False
+def test_the_runner_is_ready_in_this_build():
+    """2e flipped this assertion together with the gate tests below."""
+    assert continuation.CONTINUATION_RUNNER_READY is True
 
 
-def test_the_gate_forces_a_requested_flag_off(caplog):
+def test_the_gate_forces_a_requested_flag_off_in_a_build_without_the_runner(caplog, monkeypatch):
+    monkeypatch.setattr(continuation, "CONTINUATION_RUNNER_READY", False)  # a build that has not got the runner
     settings = Settings(_env_file=None, continuation_enabled=True, **BASE)
     assert settings.continuation_enabled is True  # the validators alone do not gate it
     with caplog.at_level(logging.WARNING, logger="nous.main"):
@@ -149,8 +150,7 @@ def test_the_gate_is_silent_when_the_flag_is_off(caplog):
     assert "continuation runner" not in caplog.text
 
 
-def test_the_gate_lets_a_ready_runner_through(monkeypatch):
-    monkeypatch.setattr(continuation, "CONTINUATION_RUNNER_READY", True)
+def test_the_gate_lets_a_ready_runner_through():
     settings = Settings(_env_file=None, continuation_enabled=True, **BASE)
     main._gate_continuation_flag(settings)
     assert settings.continuation_enabled is True
@@ -159,7 +159,8 @@ def test_the_gate_lets_a_ready_runner_through(monkeypatch):
 async def test_create_components_gates_the_flag_before_anything_reads_it(monkeypatch):
     """create_components must gate before it builds a single component. The
     first thing it builds is the Database, so a stand-in that stops there sees
-    the flag already off."""
+    the flag already off (in a build without the runner: the constant is cleared here)."""
+    monkeypatch.setattr(continuation, "CONTINUATION_RUNNER_READY", False)
     settings = Settings(_env_file=None, continuation_enabled=True, **BASE)
     seen: dict[str, bool] = {}
 

@@ -281,7 +281,8 @@ async def test_an_answer_to_an_unknown_question_or_a_proposal_is_404(runner_env)
 async def test_an_answer_after_the_question_expired_is_409_expired(runner_env):  # noqa: F811
     env = await runner_env()
     qid = await _question(env)
-    await _set(env, ResultInbox, await _row_id(env, qid), created_at=datetime.now(UTC) - timedelta(hours=25))
+    aged = datetime.now(UTC) - timedelta(hours=25)
+    await _set(env, ResultInbox, await _row_id(env, qid), created_at=aged, push_after=None)
     path = f"/intentions/questions/{qid.hex[:8]}/answer"
     response = await _call(_app(env, _runner(env)), "POST", path, json={"text": "Yes"})
     assert response.status_code == 409 and response.json()["reason"] == "expired"
@@ -367,7 +368,11 @@ def test_the_routes_touch_only_the_runners_owner_actions():
     """Surface neutrality: the cards of Phase 3 call the same two functions; the module reaches the runner through
     nothing else, and no model-facing object."""
     source = (Path(__file__).resolve().parents[1] / "nous" / "api" / "intention_routes.py").read_text(encoding="utf-8")
-    assert set(re.findall(r"continuation_runner\.(\w+)", source)) == {"decide_proposal", "answer_question"}
+    assert set(re.findall(r"continuation_runner\.(\w+)", source)) == {
+        "decide_proposal",
+        "answer_question",
+        "cancel_root",
+    }
     assert "dispatcher" not in source and "AgentRunner" not in source
 
 

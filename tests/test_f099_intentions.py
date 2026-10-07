@@ -15,7 +15,7 @@ INTENTION_COLUMNS = {
     "origin_kind", "origin_session_id", "origin_channel", "origin_decision_id", "wake_policy",
     "authority", "expected_result", "assumptions", "deadline", "state", "close_reason",
     "root_cancelled_at", "root_expired_at", "claimed_at", "claim_token", "attempts",
-    "created_at", "result_at", "closed_at", "updated_at",
+    "created_at", "result_at", "closed_at", "updated_at", "failed_tokens",
 }  # fmt: skip
 
 

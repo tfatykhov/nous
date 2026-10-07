@@ -89,7 +89,7 @@ async def _age_question(env, arrival_id, hours=25):
         await s.execute(
             update(ResultInbox)
             .where(ResultInbox.arrival_id == arrival_id, ResultInbox.msg_type == "QUESTION")
-            .values(created_at=datetime.now(UTC) - timedelta(hours=hours))
+            .values(created_at=datetime.now(UTC) - timedelta(hours=hours), push_after=None)
         )
         await s.commit()
 

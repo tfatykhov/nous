@@ -51,7 +51,7 @@ def _bot(routes=None, *, allowed=frozenset({42}), owner=42) -> NousTelegramBot:
     bot = NousTelegramBot("test-token", "http://nous.test", allowed_users=set(allowed) or None, owner_chat_id=owner)
     bot.tg = []  # (method, params) of every Telegram call
 
-    async def fake_tg(method, params=None):
+    async def fake_tg(method, params=None, **_fallback):  # an owner's HTML send names its fallback line (2e-8 I1)
         bot.tg.append((method, params))
         return {}
 

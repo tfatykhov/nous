@@ -166,7 +166,7 @@ async def test_a_continue_or_revise_with_nothing_running_is_refused(decision):
     state, execute = _executor(open_work=False)
     text, is_error = await execute(**{**GOOD, "decision": decision})
     assert is_error is True and state.resolution is None
-    assert f"you chose {decision}, but nothing is running under this work" in text
+    assert f"you chose {decision}, but nothing that will report back to you is running under this work" in text
     assert "spawn_task or dag_create" in text and "report, drop or ask" in text
 
 
@@ -179,7 +179,7 @@ async def test_an_ending_decision_needs_nothing_running(decision):
 async def test_the_limit_refusal_comes_before_the_open_work_check():
     state, execute = _executor(BLOCKED, open_work=False)
     text, is_error = await execute(**GOOD)
-    assert is_error is True and "depth or spawn limit" in text and "nothing is running" not in text
+    assert is_error is True and "depth or spawn limit" in text and "nothing that will report back" not in text
 
 
 async def test_open_work_is_read_at_call_time():

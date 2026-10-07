@@ -175,7 +175,8 @@ def _split(rows):
     )
 
 
-@pytest.mark.parametrize("marker", ["root_cancelled_at", "root_expired_at"])
+# 2e: the report is the EXPIRED half of the unified late-result rule; a cancelled root is silent (2e tests).
+@pytest.mark.parametrize("marker", ["root_expired_at"])
 async def test_a_re_arrival_on_a_closed_root_becomes_an_intention_report(env_factory, marker):  # noqa: F811
     env = await env_factory(**CONT)
     st = await make_subtask(env)
@@ -223,15 +224,15 @@ async def test_a_new_generation_of_a_dag_closed_as_legacy_reports_and_never_reop
     assert (after.state, after.close_reason) == ("closed", "legacy")
 
 
-async def test_a_duplicate_delivery_after_a_root_cancel_writes_no_report(env_factory):  # noqa: F811
+async def test_a_duplicate_delivery_after_a_root_expiry_writes_no_report(env_factory):  # noqa: F811
     """The REPORT is written only with a newly written settled twin. Generation 0 landed on the continue
-    path and the root was cancelled before anything consumed it: a duplicate of generation 0 (the bus
+    path and the root expired before anything consumed it: a duplicate of generation 0 (the bus
     listener and deliver both write) changes nothing. A real re-arrival reports once, however often it comes."""
     env = await env_factory(**CONT)
     st = await make_subtask(env)
     assert (await _record(env, st)).inserted is True
     it = await intention_of(env, "subtask", st.id)
-    await set_intention(env, it.id, root_cancelled_at=datetime.now(UTC))
+    await set_intention(env, it.id, root_expired_at=datetime.now(UTC))
     again = await _record(env, st)
     assert (again.inbox_id, again.inserted, again.reported) == (None, False, False)
     stamped, reports = _split(await inbox_rows(env))
@@ -277,7 +278,7 @@ async def test_a_reported_result_settles_its_work_row_for_the_reconciler_passes(
     env = await env_factory(**CONT)
     st = await make_subtask(env)
     it = await intention_of(env, "subtask", st.id)
-    await set_intention(env, it.id, state="closed", close_reason="resolved", root_cancelled_at=datetime.now(UTC))
+    await set_intention(env, it.id, state="closed", close_reason="resolved", root_expired_at=datetime.now(UTC))
     await _record(env, st, generation=0)
     (stamped,), _ = _split(await inbox_rows(env))
     assert (stamped.source_kind, stamped.source_id, stamped.source_generation) == ("subtask", st.id, 0)
@@ -295,7 +296,7 @@ async def test_a_report_of_an_old_result_gets_a_fresh_claim_window_and_its_twin_
     env = await env_factory(**CONT)
     st = await make_subtask(env)
     it = await intention_of(env, "subtask", st.id)
-    await set_intention(env, it.id, state="closed", close_reason="resolved", root_cancelled_at=datetime.now(UTC))
+    await set_intention(env, it.id, state="closed", close_reason="resolved", root_expired_at=datetime.now(UTC))
     finished = datetime.now(UTC) - timedelta(hours=100)
     before = datetime.now(UTC)
     assert (await _record(env, st, created_at=finished)).reported is True
@@ -305,20 +306,20 @@ async def test_a_report_of_an_old_result_gets_a_fresh_claim_window_and_its_twin_
     assert [r.id for r in rows] == [report.id]
 
 
-async def test_a_cancelled_intention_reports_instead_of_waking(env_factory):  # noqa: F811
+async def test_an_expired_intention_reports_instead_of_waking(env_factory):  # noqa: F811
     env = await env_factory(**CONT)
     st = await make_subtask(env)
     it = await intention_of(env, "subtask", st.id)
-    await set_intention(env, it.id, state="cancelled")
+    await set_intention(env, it.id, state="expired")
     recorded = await _record(env, st)
-    assert (recorded.reported, recorded.state_after) == (True, "cancelled")
+    assert (recorded.reported, recorded.state_after) == (True, "expired")
 
 
 async def test_a_result_with_no_owner_channel_writes_only_the_settled_work_row(env_factory, caplog):  # noqa: F811
     env = await env_factory(**CONT)  # no default chat configured
     st = await make_subtask(env, routed=False)  # and no origin channel
     it = await intention_of(env, "subtask", st.id)
-    await set_intention(env, it.id, root_cancelled_at=datetime.now(UTC))
+    await set_intention(env, it.id, root_expired_at=datetime.now(UTC))
     recorded = await _record(env, st)
     assert (recorded.inserted, recorded.reported) == (False, False)
     stamped, reports = _split(await inbox_rows(env))

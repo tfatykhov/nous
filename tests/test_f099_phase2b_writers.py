@@ -243,13 +243,13 @@ async def test_a_retried_dag_reopens_its_closed_continue_intention(env_factory):
     assert [r.source_generation for r in await inbox_rows(env, dag.id)] == [0, 1]
 
 
-async def test_a_retried_dag_on_a_cancelled_root_reports_the_raw_result(env_factory):  # noqa: F811
+async def test_a_retried_dag_on_an_expired_root_reports_the_raw_result(env_factory):  # noqa: F811
     env = await env_factory(**CONT)
     dag, _ = await make_dag(env, origin_channel=CHAN)
     store = env.heart.result_inbox
     await record_dag_result(store, env.settings, **dag_kwargs(dag, origin_channel=CHAN))
     it = await intention_of(env, "dag", dag.id)
-    await set_intention(env, it.id, state="closed", close_reason="resolved", root_cancelled_at=datetime.now(UTC))
+    await set_intention(env, it.id, state="closed", close_reason="resolved", root_expired_at=datetime.now(UTC))
     await record_dag_result(store, env.settings, **{**dag_kwargs(dag, origin_channel=CHAN), "generation": 1})
     rows = await inbox_rows(env)
     reports = [r for r in rows if r.source_kind == "intention_report"]

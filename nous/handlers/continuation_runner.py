@@ -5,7 +5,7 @@ thread of its own (``intent-<root>``), that ends with one decision: ``resolve_in
 that decide whether, when and how the turn's outcome is committed are rows-level and live in
 ``nous.brain.continuation``; this module is the part that runs: the decision tool, the turn's input,
 the arrival (claim, gate, turn, follow-up, commit), and the loop. Nothing here starts unless
-``NOUS_CONTINUATION_ENABLED`` is on, which ``main.py`` forces off until PR-2e.
+``NOUS_CONTINUATION_ENABLED`` is on (default off: the owner turns it on).
 """
 
 from __future__ import annotations
@@ -112,11 +112,19 @@ MEMORY_WRITE_TOOLS = frozenset({"learn_fact", "ingest_document"})
 
 @dataclass
 class ArrivalState:
-    """What a turn recorded through its extra tools. The decision is read from here, never from the text."""
+    """What one arrival recorded: through its extra tools, the decision (read from here, never from the text) and
+    the proposals; and what its model calls cost."""
 
     resolution: Resolution | None = None
     # The proposals the turn staged with propose_action (2d); resolve_intention may then only ask.
     proposals: list[UUID] = field(default_factory=list)
+    # What the arrival's model calls cost so far, added as each returns: every failure path charges it (2e).
+    tokens_in: int = 0
+    tokens_out: int = 0
+
+    @property
+    def tokens(self) -> tuple[int, int]:
+        return self.tokens_in, self.tokens_out
 
 
 def make_resolve_intention_executor(
@@ -129,11 +137,11 @@ def make_resolve_intention_executor(
 
     A bad call is an error the model reads and can correct: a failing terminal tool does not end the
     loop. A good call stores the resolution and ends it. ``continue`` and ``revise`` are refused when the
-    root is at its depth or spawn limit, and when nothing would be left running under the root
-    (``open_work_of``, ``continuation.has_open_work``): the commit closes the claimed intentions, so a
-    continue with nothing open and nothing spawned would end the goal with no one to wake it. Both are
-    judged from rows at the moment of the call (spawns this turn already count); a turn that staged a
-    proposal may only ``ask``.
+    root is at its depth or spawn limit, and when nothing that will come back (an open ``continue``
+    intention) would be left running under the root (``open_work_of``, ``continuation.has_open_work``): the
+    commit closes the claimed intentions, so a continue with nothing open and nothing spawned would end the goal
+    with no one to wake it. Both are judged from rows at the moment of the call (spawns this turn already count);
+    a turn that staged a proposal may only ``ask``.
     """
 
     async def resolve_intention(**kwargs: Any) -> tuple[str, bool]:
@@ -164,8 +172,10 @@ def make_resolve_intention_executor(
             )
         if decision in ("continue", "revise") and not await open_work_of():
             return (
-                f"Error: you chose {decision}, but nothing is running under this work: spawn the next step first "
-                f"(spawn_task or dag_create), then {decision}; or end with report, drop or ask.",
+                # Open work is work that will come back (has_open_work): a `remember` child may be running.
+                f"Error: you chose {decision}, but nothing that will report back to you is running under this "
+                f"work: spawn the next step first (spawn_task or dag_create), then {decision}; or end with "
+                "report, drop or ask.",
                 True,
             )
         state.resolution = Resolution(decision, note.strip()[:NOTE_MAX_CHARS], progress, float(confidence))
@@ -328,6 +338,14 @@ NO_ROWS_NOTE = "A result was ready but no result row came with it; nothing to de
 # An approved call is bounded by the tool timeout plus this. The runner's wait_for is the only bound: the dispatch
 # path (_dispatch_with_ledger) applies no tool timeout of its own. stop() also waits this long for a call in flight.
 EXECUTION_GRACE_SECONDS = 5.0
+# cancel_root waits this long for the turns it cancelled to unwind (a turn in a blocking call finishes it, then ends).
+CANCEL_WAIT_SECONDS = 5.0
+# A sweep re-reads the roots cancelled since the last one, less this margin (a second process would lag by a sweep).
+CANCEL_VIEW_MARGIN_SECONDS = 120
+STRAY_DAG_BATCH = 10  # the DAGs under cancelled roots one sweep cancels
+# The sweep waits this long for the owner push, then goes on: a slow Telegram must not delay a launch (12).
+PUSH_WAIT_SECONDS = 5.0
+RESUME_BATCH = 5  # the approved calls one sweep starts again
 # What the model and the owner are told of a call whose outcome is not known. Never the exception's message: it
 # can echo the call's arguments.
 TIMEOUT_TEXT = (
@@ -357,6 +375,7 @@ class ContinuationRunner:
         bus: Any = None,
         dispatcher: Any = None,
         publisher: Any = None,
+        cancel_dag: Callable[[UUID, str], Awaitable[None]] | None = None,
     ) -> None:
         self._db = database
         self._settings = settings
@@ -373,12 +392,29 @@ class ContinuationRunner:
         self._running: dict[UUID, asyncio.Task[Any]] = {}
         # The shielded approved calls (decide_proposal): held here so that stop() can wait for them.
         self._executing: set[asyncio.Task[Any]] = set()
+        self._executing_ids: dict[UUID, asyncio.Task[Any]] = {}  # by proposal: a resume never starts one twice
+        self._push_task: asyncio.Task[int] | None = None  # the owner push in flight (2e, item 12)
         self._cooldown: dict[UUID, datetime] = {}
         self._task: asyncio.Task[None] | None = None
+        # 2e: the owner's cancel. ``_cancelled`` is the in-process view AgentRunner._authorize_tool_call asks (loaded at
+        # startup, grown by cancel_root, refreshed by every sweep); ``_cancel_dag`` is the orchestrator's cancel, bound
+        # after the DAG block of main.py exists (the runner is built before it).
+        self._cancelled: set[UUID] = set()
+        self._cancel_dag = cancel_dag
+        self._view_checked_at: datetime | None = None
 
     @property
     def running_roots(self) -> frozenset[UUID]:
         return frozenset(self._running)
+
+    def set_cancel_dag(self, cancel_dag: Callable[[UUID, str], Awaitable[None]] | None) -> None:
+        """Bind ``DAGOrchestrator.cancel_dag`` (main.py, once the orchestrator exists)."""
+        self._cancel_dag = cancel_dag
+
+    def root_is_cancelled(self, root_id: UUID) -> bool:
+        """The in-process view of cancelled roots, for ``AgentRunner.set_cancelled_roots``. A set lookup: no
+        database, no await. A root the owner cancelled is in it from the moment ``cancel_root`` committed."""
+        return root_id in self._cancelled
 
     def wake(self) -> None:
         """Tell the loop to look again: a result is ready (the bus hint, the reconciler pass), or an
@@ -387,13 +423,14 @@ class ContinuationRunner:
 
     async def start(self) -> None:
         """Release claims older than the lease, then run the loop (spec 4.5.2). Does nothing, and builds no
-        task, with continuation off: main.py forces it off until PR-2e.
+        task, with continuation off.
 
         Must not overlap ``stop()``: nothing here guards a start that is still releasing claims against a stop.
         main.py calls ``start()`` once, as the last step of ``create_components``."""
         if not continuation.enabled(self._settings) or self._task is not None:
             return
         await self._step("startup lease release", self._release_stale)
+        await self._step("cancelled roots load", self.load_cancelled_roots)
         self._task = asyncio.create_task(self._loop(), name="continuation-runner")
 
     async def stop(self) -> None:
@@ -405,6 +442,12 @@ class ContinuationRunner:
         for task in ([loop_task] if loop_task is not None else []) + running:
             task.cancel()
         await asyncio.gather(*([loop_task] if loop_task is not None else []), *running, return_exceptions=True)
+        push, self._push_task = self._push_task, None
+        if push is not None and not push.done():
+            # A push in flight finishes its send: cancelling between the send and the stamp would send the row twice.
+            await asyncio.wait({push}, timeout=EXECUTION_GRACE_SECONDS)
+            push.cancel()
+            await asyncio.gather(push, return_exceptions=True)
         if self._executing:
             # An execution's exception is retrieved by its done callback (_execution_done), whenever it ends.
             _done, pending = await asyncio.wait(set(self._executing), timeout=EXECUTION_GRACE_SECONDS)
@@ -424,18 +467,22 @@ class ContinuationRunner:
     # ------------------------------------------------------------------
 
     async def run_once(self) -> continuation.SweepReport:
-        """One sweep, in order: release claims older than the lease, expire roots past their TTL, expire proposals,
-        wake answered or expired questions, push the owner rows that are due, and launch every root that is due
-        while a slot is free. Every step is isolated; with continuation off it does nothing."""
+        """One sweep, in order: release claims older than the lease, expire roots past their TTL, end the
+        roots left waiting on nothing, expire proposals, wake answered or expired questions, push the owner rows
+        that are due, and launch every root that is due while a slot is free. Every step is isolated; with
+        continuation off it does nothing."""
         if not continuation.enabled(self._settings):
             return continuation.SweepReport(0, 0, 0, 0, (), None)
+        await self._step("cancel sweep", self._cancel_sweep)
         released = await self._step("lease release", self._release_stale, [])
         expired = await self._step("TTL sweep", self._expire, [])
+        await self._step("hanging-root sweep", self._end_hanging)
         # The proposal expiry runs in its own session and AFTER the lease release, and the order matters: its
         # orphan-staged UPDATE holds staged rows while its later loops take roots, which is safe only because
         # release_stale_claims has already expired the staged rows of every stale claim (2d-3 review m3).
         expired_proposals = await self._step("proposal expiry", self._expire_proposals, [])
         await self._step("question wake", self._wake_questions)
+        await self._step("approved resume", self._resume_approved)
         pushed = await self._step("owner push", self._push, 0)
         launched, next_due = await self._step("launch", self._launch, ([], None))
         return continuation.SweepReport(
@@ -450,6 +497,52 @@ class ContinuationRunner:
         except Exception:
             logger.warning("F099: the continuation %s failed; the next sweep tries again", name, exc_info=True)
             return default
+
+    async def load_cancelled_roots(self) -> int:
+        """Load every cancelled root into the view (2e). main.py calls it when it builds the runner, before any loop
+        or worker runs, and ``start`` calls it again: a restart must not forget a cancel. Returns how many roots
+        the view holds."""
+        await self._refresh_cancelled(since=None)
+        return len(self._cancelled)
+
+    async def _refresh_cancelled(self, *, since: datetime | None) -> None:
+        checked = datetime.now(UTC)
+        async with self._db.session() as session:
+            ids = await continuation.cancelled_root_ids(session, self._agent_id, since=since)
+        self._cancelled.update(ids)
+        self._view_checked_at = checked
+
+    async def _cancel_sweep(self) -> int:
+        """Every sweep: take in the roots cancelled since the last one (a cancel through another surface, or by a
+        second process), then cancel the DAGs that are still running under a cancelled root (a cancel whose
+        orchestrator call failed, or whose process stopped after the commit). Returns the DAGs it cancelled."""
+        since = (
+            self._view_checked_at - timedelta(seconds=CANCEL_VIEW_MARGIN_SECONDS)
+            if self._view_checked_at is not None
+            else None
+        )
+        await self._refresh_cancelled(since=since)
+        if self._cancel_dag is None:
+            return 0
+        async with self._db.session() as session:
+            strays = await continuation.stray_dag_ids(session, self._agent_id, limit=STRAY_DAG_BATCH)
+        return await self._cancel_dags(strays)
+
+    async def _cancel_dags(self, dag_ids: Sequence[UUID]) -> int:
+        """The orchestrator's cancel for each DAG; one that raises is logged and left for the sweep."""
+        done = 0
+        for dag_id in dag_ids:
+            if self._cancel_dag is None:
+                logger.warning("F099: DAG %s is running under a cancelled root and no orchestrator is bound", dag_id)
+                continue
+            try:
+                await self._cancel_dag(dag_id, "cancelled by the owner")
+                done += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("F099: could not cancel DAG %s; the sweep tries again", dag_id, exc_info=True)
+        return done
 
     async def _release_stale(self) -> list[UUID]:
         settings = self._settings
@@ -469,14 +562,32 @@ class ContinuationRunner:
 
     async def _expire(self) -> list[UUID]:
         settings = self._settings
+        ended: list[tuple[UUID, str]] = []
         async with self._db.session() as session:
             expired = await continuation.expire_roots(
-                session, self._agent_id, ttl_hours=settings.intention_root_ttl_hours, settings=settings
+                session,
+                self._agent_id,
+                ttl_hours=settings.intention_root_ttl_hours,
+                settings=settings,
+                proposals_out=ended,
             )
             await session.commit()
         for root_id in expired:
             await self._emit("intention.root_expired", {"root_id": str(root_id)})
+        # An expiry ends the proposals of its root with it (the proposals sweep no longer finds them).
+        for proposal_id, state in ended:
+            await self._emit(
+                "intention.proposal_decided", {"proposal_id": str(proposal_id), "state": state, "actor": "system"}
+            )
         return expired
+
+    async def _end_hanging(self) -> list[UUID]:
+        """The roots left waiting on nothing, whatever closed their last open row (``end_hanging_roots``): each is
+        ended and its REPORT pushed by this sweep's owner push."""
+        async with self._db.session() as session:
+            ended = await continuation.end_hanging_roots(session, self._agent_id, settings=self._settings)
+            await session.commit()
+        return ended
 
     async def _expire_proposals(self) -> list[tuple[UUID, str]]:
         """Pending proposals past their deadline (or on ended work), approved ones whose work ended before they
@@ -499,8 +610,42 @@ class ContinuationRunner:
         if woken:  # the sweep launches next, so no wake()
             logger.info("F099: woke answered or expired question(s): %s", woken)
 
+    async def _resume_approved(self) -> int:
+        """Start again the approved calls nothing started (a crash between the decision and the claim, carry-over 11).
+        Each runs in its own tracked task, like the one a decision starts, so the sweep is not held for a call;
+        ``claim_execution`` stays the fence (at most once), and a proposal already running is not started twice."""
+        async with self._db.session() as session:
+            stalled = await continuation.stalled_approved_ids(
+                session, self._agent_id, settings=self._settings, limit=RESUME_BATCH
+            )
+        for proposal_id in stalled:
+            logger.warning("F099: resuming the approved proposal %s that nothing started", proposal_id.hex[:8])
+            self._start_execution(proposal_id)
+        return len(stalled)
+
     async def _push(self) -> int:
-        return await self._publisher.push_due() if self._publisher is not None else 0
+        """The owner push, in a task of its own (2e, item 12). The publisher sends up to a batch of rows, each with
+        its own timeout, so a slow Telegram could hold this sweep (about 200 s at worst) and with it every launch.
+        The sweep starts the push (never two at once), waits ``PUSH_WAIT_SECONDS`` for it and goes on; the push
+        finishes in the background and the next sweep sees it done. Not cancelled when the wait ends: a send that
+        is cancelled between the request and the stamp would be sent again."""
+        if self._publisher is None:
+            return 0
+        task = self._push_task
+        if task is None or task.done():
+            task = self._push_task = asyncio.create_task(self._publisher.push_due(), name="continuation-push")
+            task.add_done_callback(self._push_ended)
+        done, _pending = await asyncio.wait({task}, timeout=PUSH_WAIT_SECONDS)
+        if task not in done or task.cancelled() or task.exception() is not None:
+            return 0
+        return task.result()
+
+    def _push_ended(self, task: asyncio.Task[int]) -> None:
+        """Retrieve the push's exception whenever it ends (the sweep may have stopped waiting for it)."""
+        if not task.cancelled() and task.exception() is not None:
+            logger.warning(
+                "F099: the continuation owner push failed; the next sweep tries again", exc_info=task.exception()
+            )
 
     async def _launch(self) -> tuple[list[UUID], datetime | None]:
         """Claim-and-run every root that is due, while a slot is free. The claim itself happens inside the
@@ -621,8 +766,10 @@ class ContinuationRunner:
             if claim is None:
                 return None
             await session.commit()
+        # The arrival's state lives here, not in _turn, so that every failure below charges what the turn spent.
+        state = ArrivalState()
         try:
-            return await self._decide(claim)
+            return await self._decide(claim, state)
         except asyncio.CancelledError:
             if cancel_requested():
                 # A stop or a cancel: free the claim so the result is not stuck for a lease, without charging an
@@ -632,15 +779,15 @@ class ContinuationRunner:
             # Fix-Z: nobody cancelled this task; something the arrival awaited was cancelled (the #690/#691 class).
             # That is a failure like any raise, so it is charged: a recurring one must reach failed_report, not
             # come back at once forever with its claim released and no attempt counted.
-            await self._fail(claim)
+            await self._fail(claim, tokens=state.tokens)
             raise
         except Exception:
             # The turn, the commit and _fail swallow their own errors, so this cannot charge an attempt twice.
             logger.warning("F099: the arrival of root %s raised; a failed attempt", root_id, exc_info=True)
-            await self._fail(claim)
+            await self._fail(claim, tokens=state.tokens)
             return None
 
-    async def _decide(self, claim: continuation.Claim) -> continuation.ArrivalCommit | None:
+    async def _decide(self, claim: continuation.Claim, state: ArrivalState) -> continuation.ArrivalCommit | None:
         settings, agent_id = self._settings, self._agent_id
         async with self._db.session() as session:
 
@@ -675,18 +822,20 @@ class ContinuationRunner:
                 resolution=Resolution("drop", NO_ROWS_NOTE, False, 1.0),
                 outcome=continuation.OUTCOME_RESOLVED,
             )
-        return await self._turn(claim, limits)
+        return await self._turn(claim, limits, state)
 
     async def _turn(
-        self, claim: continuation.Claim, limits: continuation.RootLimits
+        self, claim: continuation.Claim, limits: continuation.RootLimits, state: ArrivalState
     ) -> continuation.ArrivalCommit | None:
         settings = self._settings
         session_id = f"{INTENT_SESSION_PREFIX}{claim.root_id}"
         arrival_id = uuid.uuid4()
+        # Carry-over 3: the thread of this root starts empty. A previous arrival whose end_conversation timed out,
+        # raised or was cancelled from outside left its messages and its ledger behind, and this one would run on top.
+        self._runner.discard_conversation(session_id)
         async with self._db.session() as session:
             earlier, spawned, root_intent, root_decision = await self._lineage_context(session, claim)
         prompt = build_arrival_prompt(claim, earlier, spawned, limits, settings, root_intent=root_intent)
-        state = ArrivalState()
         context = ExecutionContext(
             kind="continuation",
             session_id=session_id,
@@ -714,11 +863,10 @@ class ContinuationRunner:
                     state, ctx=context, dispatcher=self._dispatcher, stage=self._stager(claim)
                 ),
             )
-        usage = [0, 0]
         try:
             try:
                 text = await asyncio.wait_for(
-                    self._run_turns(session_id, prompt, extra_tools, context, state, usage),
+                    self._run_turns(session_id, prompt, extra_tools, context, state),
                     timeout=settings.continuation_turn_timeout_seconds,
                 )
             except asyncio.CancelledError:
@@ -727,7 +875,9 @@ class ContinuationRunner:
                 logger.warning(
                     "F099: the continuation of root %s failed (%s)", claim.root_id, type(exc).__name__, exc_info=True
                 )
-                await self._fail(claim)
+                # What the model calls that returned before the failure cost (2e, carry-over 2): a call that raised
+                # or was cut off returned no usage, so it is the one cost this cannot see.
+                await self._fail(claim, tokens=state.tokens)
                 return None
             # Read BEFORE the session ends: end_conversation pops the ledger.
             wrote_memory = any(
@@ -736,7 +886,7 @@ class ContinuationRunner:
             )
         finally:
             await self._end_conversation(session_id)
-        tokens = (usage[0], usage[1])
+        tokens = state.tokens
         if (
             state.resolution is not None
             and state.resolution.decision == "ask"
@@ -788,15 +938,14 @@ class ContinuationRunner:
         extra_tools: dict[str, tuple[dict, Any]],
         context: ExecutionContext,
         state: ArrivalState,
-        usage: list[int],
     ) -> str:
         """The turn, then, if the model did not end it with resolve_intention, the one follow-up (the same
         claim, the same thread, the tool asked for in words). Returns the last non-empty text."""
-        text = await self._run_one(session_id, prompt, extra_tools, context, usage)
+        text = await self._run_one(session_id, prompt, extra_tools, context, state)
         if state.resolution is None:
             # Also the only way out of a turn that hit max_tool_calls: _tool_loop's closing call is then made with
             # tools=None, so resolve_intention cannot be called in it. Do not skip the follow-up for that case.
-            followup = await self._run_one(session_id, CONTINUATION_FOLLOWUP_PROMPT, extra_tools, context, usage)
+            followup = await self._run_one(session_id, CONTINUATION_FOLLOWUP_PROMPT, extra_tools, context, state)
             text = followup if followup.strip() else text
         return text
 
@@ -806,24 +955,30 @@ class ContinuationRunner:
         message: str,
         extra_tools: dict[str, tuple[dict, Any]],
         context: ExecutionContext,
-        usage: list[int],
+        state: ArrivalState,
     ) -> str:
         settings = self._settings
-        text, _turn_context, used = await self._runner.run_turn(
-            session_id,
-            message,
-            skip_episode=True,
-            # False: the 012.2 subtask rule would strip spawn_task before the internal_only step decides.
-            is_subtask=False,
-            is_background=True,
-            max_tool_calls=settings.subtask_tool_call_limit,
-            model_override=settings.background_model,
-            extra_tools=extra_tools,
-            force_tool_on_penultimate=None,  # 5.5-generation models reject a forced tool_choice (spec 4.4)
-            context=context,
-        )
-        usage[0] += (used or {}).get("input_tokens", 0)
-        usage[1] += (used or {}).get("output_tokens", 0)
+        # The tool loop adds each model call's usage here as it returns, so a turn that raises, times out or is
+        # cancelled half-way still says what it spent (2e-4 review m3).
+        spent = {"input_tokens": 0, "output_tokens": 0, "tool_calls": 0}
+        try:
+            text, _turn_context, _used = await self._runner.run_turn(
+                session_id,
+                message,
+                skip_episode=True,
+                # False: the 012.2 subtask rule would strip spawn_task before the internal_only step decides.
+                is_subtask=False,
+                is_background=True,
+                max_tool_calls=settings.subtask_tool_call_limit,
+                model_override=settings.background_model,
+                extra_tools=extra_tools,
+                force_tool_on_penultimate=None,  # 5.5-generation models reject a forced tool_choice (spec 4.4)
+                context=context,
+                usage_out=spent,
+            )
+        finally:
+            state.tokens_in += spent["input_tokens"]
+            state.tokens_out += spent["output_tokens"]
         return text or ""
 
     async def _owner_channel(self, claim: continuation.Claim) -> str | None:
@@ -947,11 +1102,11 @@ class ContinuationRunner:
             raise
         except ValueError as exc:  # commit_arrival refused the arrival: an ask with nowhere to ask, a bad outcome
             logger.warning("F099: the commit of root %s was refused (%s)", claim.root_id, exc)
-            await self._fail(claim)
+            await self._fail(claim, tokens=tokens)
             return None
         except Exception:
             logger.warning("F099: the commit of root %s failed", claim.root_id, exc_info=True)
-            await self._fail(claim)
+            await self._fail(claim, tokens=tokens)
             return None
         await self._emit(
             "intention.arrival_decided",
@@ -976,9 +1131,10 @@ class ContinuationRunner:
         self.wake()
         return done
 
-    async def _fail(self, claim: continuation.Claim) -> None:
+    async def _fail(self, claim: continuation.Claim, *, tokens: tuple[int, int] = (0, 0)) -> None:
         """A failed attempt (spec 4.5.7): one more attempt on every claimed intention; the cap closes them
-        with their raw results. If even this fails, the lease recovers the claim."""
+        with their raw results. ``tokens`` is what the attempt spent, which counts against the root's budget (2e).
+        If even this fails, the lease recovers the claim."""
         arrival_id = uuid.uuid4()  # the cap's arrival row, named in arrival_decided (contract 4.13)
         try:
             async with self._db.session() as session:
@@ -990,6 +1146,7 @@ class ContinuationRunner:
                     settings=self._settings,
                     brain=None,  # R5: a failed report is not a model decision
                     arrival_id=arrival_id,
+                    tokens=tokens,
                 )
                 await session.commit()
         except asyncio.CancelledError:
@@ -1063,11 +1220,25 @@ class ContinuationRunner:
             # owner approved half way (it would sit `executing` until the in-doubt sweep). Tracked, so a graceful
             # stop() waits for it (bounded); a process stop still ends it, and the proposal is failed in doubt as
             # C13 says.
-            task = asyncio.create_task(self.execute_approved_proposal(proposal_id))
-            self._executing.add(task)
-            task.add_done_callback(self._execution_done)
-            return await asyncio.shield(task)
+            return await asyncio.shield(self._start_execution(proposal_id))
         return decision
+
+    def _start_execution(self, proposal_id: UUID) -> asyncio.Task[Any]:
+        """The tracked task that runs an approved proposal (``decide_proposal`` and the sweep's resume share it). One
+        at a time per proposal: a proposal that is already running returns its task."""
+        running = self._executing_ids.get(proposal_id)
+        if running is not None and not running.done():
+            return running
+        task = asyncio.create_task(self.execute_approved_proposal(proposal_id))
+        self._executing.add(task)
+        self._executing_ids[proposal_id] = task
+        task.add_done_callback(self._execution_done)
+        task.add_done_callback(lambda done, pid=proposal_id: self._forget_execution(pid, done))
+        return task
+
+    def _forget_execution(self, proposal_id: UUID, task: asyncio.Task[Any]) -> None:
+        if self._executing_ids.get(proposal_id) is task:
+            del self._executing_ids[proposal_id]
 
     def _execution_done(self, task: asyncio.Task[Any]) -> None:
         """Forget a finished execution and retrieve its exception. A store error in the claim or the finish ends the
@@ -1186,6 +1357,56 @@ class ContinuationRunner:
         if recorded.woke_arrival:
             self.wake()
         return recorded
+
+    # ------------------------------------------------------------------
+    # The owner's cancel (spec 4.6). An owner action like the three above: the REST route, the bot and (Phase 3)
+    # the A2UI card call this one function. Not a tool: no model can cancel (it can only stop its own children).
+    # ------------------------------------------------------------------
+
+    async def cancel_root(self, root_id: UUID, *, reason: str, actor: str) -> continuation.CancelOutcome:
+        """Cancel a root and everything under it (T13). In this order:
+
+        1. The store's one transaction (``continuation.cancel_root``): the marker, the lineage, its subtasks, its
+           proposals, its containers and their fires. It commits.
+        2. The in-process view takes every cancelled root, so the next tool call of the lineage is refused
+           (``AgentRunner._authorize_tool_call``). A call already past that check when the marker committed
+           runs; the one after it does not, and a spawn is refused by the database (I1) from the commit on.
+        3. The lineage's running DAGs, by the orchestrator (the store cannot): one that fails is left to the sweep.
+        4. The running turn of each cancelled root: its task is cancelled, which releases its claim (fenced: the
+           cancel already moved the rows, so it finds none), ends its session and frees its slot. A turn that is
+           past its model call and about to commit loses its fence instead.
+        5. The bus.
+
+        Raises ``continuation.RootNotFound`` and ``continuation.CancelRefused`` (nothing written)."""
+        async with self._db.session() as session:
+            outcome = await continuation.cancel_root(session, self._agent_id, root_id, reason=reason, actor=actor)
+            await session.commit()
+        self._cancelled.update(outcome.root_ids)
+        cancelled_dags = await self._cancel_dags(outcome.dag_ids)
+        stopped = await self._stop_turns(outcome.root_ids)
+        for cancelled in outcome.root_ids:
+            await self._emit("intention.root_cancelled", {"root_id": str(cancelled), "reason": reason, "actor": actor})
+        for proposal_id in outcome.proposal_ids:
+            await self._emit(
+                "intention.proposal_decided",
+                {"proposal_id": str(proposal_id), "state": continuation.PROPOSAL_CANCELLED, "actor": "system"},
+            )
+        self.wake()
+        return dataclasses.replace(outcome, cancelled_dags=cancelled_dags, turn_stopped=stopped)
+
+    async def _stop_turns(self, root_ids: Sequence[UUID]) -> bool:
+        """Cancel the arrival task of each root that has one and wait (bounded) for it to unwind. Whether any was
+        running."""
+        tasks = [task for root in root_ids if (task := self._running.get(root)) is not None]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            _done, pending = await asyncio.wait(tasks, timeout=CANCEL_WAIT_SECONDS)
+            if pending:  # a turn in a long blocking call: it was told to stop and is still unwinding
+                logger.warning(
+                    "F099: %d cancelled turn(s) are still unwinding after %ss", len(pending), CANCEL_WAIT_SECONDS
+                )
+        return bool(tasks)
 
     async def _emit_decided(self, outcome: continuation.ProposalExecution, actor: str) -> None:
         await self._emit(

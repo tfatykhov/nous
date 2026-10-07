@@ -24,9 +24,9 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import UUID
 
-from sqlalchemy import Text, and_, case, cast, exists, func, or_, select, update
+from sqlalchemy import Text, and_, cast, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
-from sqlalchemy.orm import aliased, selectinload
+from sqlalchemy.orm import selectinload
 
 from nous.brain import continuation, intentions
 from nous.heart.result_inbox import (
@@ -315,6 +315,11 @@ class IntentionClosePass:
                 len(closed),
                 len(containers),
             )
+        if on and (closed or containers):
+            # 2e re-review N1: after the commit, a root these closes left waiting on nothing is ended and reported.
+            await continuation.end_hanging_roots_after_close(
+                self._db, agent_id, [*closed, *containers], settings=self._settings
+            )
         return len(closed) + len(containers)
 
 
@@ -351,32 +356,14 @@ async def repair_missing_results(database: Database, store: ResultInboxStore, se
     return fixed
 
 
-async def _close_cancelled(database: Database, agent_id: str, intention: Intention) -> int:
+async def _close_cancelled(database: Database, settings: Settings, intention: Intention) -> int:
     """(d): a cancelled source produced no result: close its intention with no report (``cancelled``
-    when its root is cancelled, ``legacy`` otherwise). The root's marker is read inside the UPDATE, so no
-    cancel can commit between a read of it and the close."""
-    root = aliased(Intention)
-    root_cancelled = exists().where(
-        root.agent_id == agent_id, root.id == intention.root_id, root.root_cancelled_at.is_not(None)
-    )
-    now = datetime.now(UTC)
+    when its root is cancelled, ``legacy`` otherwise), and, when that leaves a lineage that was waiting on it with
+    nothing running, close the root and tell the owner (``continuation.end_hanging_root``, carry-over 8)."""
     async with database.session() as session:
-        moved = await session.execute(
-            update(Intention)
-            .where(
-                Intention.agent_id == agent_id,
-                Intention.id == intention.id,
-                Intention.state == continuation.STATE_PENDING,
-            )
-            .values(
-                state=case((root_cancelled, continuation.STATE_CANCELLED), else_=continuation.STATE_CLOSED),
-                close_reason=case((root_cancelled, continuation.CLOSE_CANCELLED), else_=intentions.CLOSE_LEGACY),
-                closed_at=now,
-                updated_at=now,
-            )
-        )
+        closed = await continuation.close_cancelled_source(session, settings.agent_id, intention, settings=settings)
         await session.commit()
-    return moved.rowcount or 0
+    return closed
 
 
 async def _close_settled(database: Database, agent_id: str, source_kind: str, source_id: Any) -> int:
@@ -485,7 +472,7 @@ async def _repair_subtask_results(
     for intention, st in pairs:
         try:
             if st.status == "cancelled":
-                fixed += await _close_cancelled(database, agent_id, intention)  # (d)
+                fixed += await _close_cancelled(database, settings, intention)  # (d)
             elif st.id in kinds:
                 if kinds[st.id] == "keyed":
                     fixed += await _close_settled(database, agent_id, SOURCE_SUBTASK, st.id)  # (c)

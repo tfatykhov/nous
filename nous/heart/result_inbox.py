@@ -278,6 +278,13 @@ class ResultInboxStore:
             await session.commit()
         return found
 
+    async def end_hanging_roots_after_close(self, intention_ids: list[UUID], *, settings: Settings) -> int:
+        """F099 2e re-review N1: ``continuation.end_hanging_roots_after_close`` on this store's database, after a
+        quiet close committed. Never raises."""
+        return await continuation.end_hanging_roots_after_close(
+            self._db, self._agent_id, intention_ids, settings=settings
+        )
+
     async def insert_and_close(self, *, close_kind: str, close_id: UUID, **insert_kwargs: Any) -> bool:
         """F099 I4: the inbox row of a ``report`` intention and the ``delivered`` close of that
         intention in ONE transaction (T3). A fault after the INSERT rolls the row back too, so a
@@ -422,12 +429,23 @@ class ResultInboxStore:
             return await session.get(ChannelSession, (self._agent_id, channel))
 
     async def metrics(self, days: int) -> dict[str, Any]:
-        """Delivery rate and latency per source kind over the last ``days``."""
+        """Delivery rate and latency per source kind over the last ``days``.
+
+        A row a person or a runner read is ``delivered``. A row F099 closed without anyone reading it is not: the
+        rollback's ``undeliverable`` (a result with nowhere to go) and the cancel's ``closed_by_cancel`` (work the
+        owner stopped) carry ``delivered_at`` as a stamp, and counting them as delivered would improve the rate by
+        exactly the rows nobody read. They are reported in their own buckets and left out of the rate's
+        denominator (they were never deliverable) and of the latencies."""
         since = datetime.now(UTC) - timedelta(days=days)
         async with self._db.session() as session:
             rows = (
                 await session.execute(
-                    select(ResultInbox.source_kind, ResultInbox.created_at, ResultInbox.delivered_at)
+                    select(
+                        ResultInbox.source_kind,
+                        ResultInbox.created_at,
+                        ResultInbox.delivered_at,
+                        ResultInbox.delivered_session_id,
+                    )
                     .where(ResultInbox.agent_id == self._agent_id)
                     .where(ResultInbox.created_at > since)
                 )
@@ -435,11 +453,21 @@ class ResultInboxStore:
         out: dict[str, Any] = {}
         for kind in (SOURCE_SUBTASK, SOURCE_DAG, continuation.SOURCE_INTENTION_REPORT):
             mine = [r for r in rows if r[0] == kind]
-            latencies = sorted((_aware(r[2]) - _aware(r[1])).total_seconds() for r in mine if r[2] is not None)
+            undeliverable = [r for r in mine if r[2] is not None and r[3] == continuation.ROLLBACK_UNDELIVERABLE_ID]
+            closed = [r for r in mine if r[2] is not None and r[3] == continuation.SILENT_SESSION_ID]
+            latencies = sorted(
+                (_aware(r[2]) - _aware(r[1])).total_seconds()
+                for r in mine
+                if r[2] is not None
+                and r[3] not in (continuation.ROLLBACK_UNDELIVERABLE_ID, continuation.SILENT_SESSION_ID)
+            )
+            deliverable = len(mine) - len(undeliverable) - len(closed)
             out[kind] = {
                 "created": len(mine),
                 "delivered": len(latencies),
-                "delivery_rate": round(len(latencies) / len(mine), 4) if mine else None,
+                "undeliverable": len(undeliverable),
+                "closed_by_cancel": len(closed),
+                "delivery_rate": round(len(latencies) / deliverable, 4) if deliverable else None,
                 "latency_p50_s": _percentile(latencies, 0.50),
                 "latency_p95_s": _percentile(latencies, 0.95),
             }
@@ -474,12 +502,22 @@ async def close_intention_quietly(
     if not intentions.enabled(settings):
         return None
     try:
-        return await store.close_source_intention(
+        found = await store.close_source_intention(
             source_kind, source_id, reason=continuation.close_reason_for(settings)
         )
     except Exception:
         logger.warning("F099: could not close the intention of %s %s", source_kind, source_id, exc_info=True)
         return None
+    await _after_quiet_close(store, settings, found)
+    return found
+
+
+async def _after_quiet_close(store: ResultInboxStore, settings: Settings, intention_id: UUID | None) -> None:
+    """F099 2e re-review N1: a quiet close may have closed the last open row of a root that was waiting on a
+    cancelled ``continue`` child; end that root (``continuation.end_hanging_roots_after_close``, after the close's
+    commit). With continuation off nothing is read: no root is ever left waiting."""
+    if intention_id is not None and continuation.enabled(settings):
+        await store.end_hanging_roots_after_close([intention_id], settings=settings)
 
 
 _NO_OUTPUT = "The work finished and returned no output."
@@ -538,7 +576,8 @@ async def route_result(
     if intention is not None and policy == intentions.WAKE_REPORT and env is None:
         # R1: a report with nothing to say delivers nothing, so it is not 'delivered' (which means an
         # owner-facing row was written). Closed before the routing check, like every close.
-        await store.close_source_intention(source_kind, source_id, reason=intentions.CLOSE_LEGACY)
+        closed = await store.close_source_intention(source_kind, source_id, reason=intentions.CLOSE_LEGACY)
+        await _after_quiet_close(store, settings, closed)
         return False
     if not channel and not session_id:
         channel = default_channel
@@ -553,7 +592,8 @@ async def route_result(
                 source_kind,
                 str(source_id)[:8],
             )
-            await store.close_source_intention(source_kind, source_id, reason=intentions.CLOSE_LEGACY)
+            closed = await store.close_source_intention(source_kind, source_id, reason=intentions.CLOSE_LEGACY)
+            await _after_quiet_close(store, settings, closed)
             return False
     if env is None or not (channel or session_id):
         await close_intention_quietly(store, settings, source_kind, source_id)
@@ -571,9 +611,11 @@ async def route_result(
         created_at=created_at,
     )
     if intention is not None and policy == intentions.WAKE_REPORT:
-        return await store.insert_and_close(
+        written = await store.insert_and_close(
             close_kind=source_kind, close_id=source_id, intention_id=intention.id, **row
         )
+        await _after_quiet_close(store, settings, intention.id)
+        return written
     intention_id = await close_intention_quietly(store, settings, source_kind, source_id)
     return await store.insert(intention_id=intention_id, **row)
 

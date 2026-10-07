@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -22,8 +22,9 @@ from f099_support import (
     make_subtask,
     record,
     set_intention,
+    until_a_backend_waits_on_a_lock,
 )
-from sqlalchemy import Update, select, update
+from sqlalchemy import select, update
 
 from nous.brain import continuation
 from nous.brain.intentions import IntentionSpec
@@ -234,47 +235,28 @@ async def test_a_cancelled_subtask_of_a_cancelled_root_closes_cancelled(env_fact
     assert (fresh.state, fresh.close_reason) == ("cancelled", "cancelled")
 
 
-class _Spy:
-    """A session that runs ``before_update`` just before each UPDATE it is asked to execute."""
-
-    def __init__(self, real, before_update) -> None:
-        self._real, self._before_update = real, before_update
-
-    def __getattr__(self, name):
-        return getattr(self._real, name)
-
-    async def execute(self, statement, *args, **kwargs):
-        if isinstance(statement, Update):
-            await self._before_update()
-        return await self._real.execute(statement, *args, **kwargs)
-
-
-async def test_a_root_cancel_that_commits_just_before_the_close_is_honoured(env_factory):  # noqa: F811
-    """2c1-7 review, minor 4: the root's marker is decided inside the close's UPDATE. A cancel that commits
-    after a separate read of the marker, and before the UPDATE, must not close the child `legacy`."""
+async def test_a_root_cancel_in_flight_is_honoured_by_the_close(env_factory):  # noqa: F811
+    """2c1-7 review, minor 4, as 2e keeps it: the close takes the root lock first (the one lock order), so a cancel
+    that holds the root makes it wait, and the close then decides the marker inside its UPDATE: the child is
+    `cancelled`, never `legacy`. (2c let a cancel commit between the close's read and its UPDATE; the lock closes
+    that window instead of tolerating it.)"""
     env = await env_factory(**CONT)
     root = await make_root(env, policy="remember")
     st = await make_subtask(env, policy="continue")
     child = await intention_of(env, "subtask", st.id)
     await set_intention(env, child.id, root_id=root.id, parent_id=root.id, depth=1)
     await env.heart.subtasks.cancel(st.id)
-    fired = []
-
-    async def cancel_the_root_once():
-        if not fired:
-            fired.append(True)
-            await set_intention(env, root.id, root_cancelled_at=datetime.now(UTC))  # its own committed transaction
-
-    @asynccontextmanager
-    async def session():
-        async with env.db.session() as real:
-            yield _Spy(real, cancel_the_root_once)
-
-    assert (
-        await repair_missing_results(SimpleNamespace(session=session), env.heart.result_inbox, env.settings, limit=50)
-        == 1
-    )
-    assert fired == [True]
+    async with env.db.session() as canceller:
+        await canceller.execute(select(Intention.id).where(Intention.id == root.id).with_for_update(key_share=True))
+        await canceller.execute(
+            update(Intention).where(Intention.id == root.id).values(root_cancelled_at=datetime.now(UTC))
+        )
+        repair = asyncio.create_task(_repair(env))
+        try:
+            await asyncio.wait_for(until_a_backend_waits_on_a_lock(env), timeout=10)
+        finally:
+            await canceller.commit()
+    assert await asyncio.wait_for(repair, timeout=30) == 1
     fresh = await intention_of(env, "subtask", st.id)
     assert (fresh.state, fresh.close_reason) == ("cancelled", "cancelled")
 
@@ -550,6 +532,9 @@ async def test_the_repair_leaves_a_row_held_on_a_gate_closed_intention_to_the_sw
     await env.heart.subtasks.complete(uuid.UUID(root.source_id), "done", final_outcome="completed")
     assert await _repair(env) == 0
     assert await _expire(env) == []
-    assert len(await _owner_rows(env)) == 1  # the sweep's report of the held row
+    # The unified late-result rule (2e): a cancelled root says nothing (the held row is stamped), an expired one
+    # reports twice, once for the arrival's own rows (the gate escalates) and once for the row the sweep settles.
+    reports = 0 if reason == "cancelled" else 2
+    assert len(await _owner_rows(env)) == reports
     assert await _repair(env) == 0
-    assert len(await _owner_rows(env)) == 1
+    assert len(await _owner_rows(env)) == reports

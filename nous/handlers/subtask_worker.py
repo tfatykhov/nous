@@ -526,8 +526,11 @@ class SubtaskWorkerPool:
 
     async def _superseded_by_continuation(self, subtask: Subtask) -> bool:
         """F099 Phase 2: a ``continue`` result goes to Nous's own continuation, so the raw push
-        stands down (spec 4.3 item 5). One point read, only for a ``notify=True`` subtask with the
-        flag on. A failed read sends the push: a duplicate costs less than a lost notification."""
+        stands down (spec 4.3 item 5). So does the push of a subtask whose root the owner cancelled
+        (2e final review m1): the cancel moves every open intention of the lineage to ``cancelled``,
+        and the worker's own ``complete()`` was then a no-op. One point read, only for a
+        ``notify=True`` subtask with the flag on (with it off no root is ever cancelled). A failed
+        read sends the push: a duplicate costs less than a lost notification."""
         if not continuation.enabled(self._settings):
             return False
         store = getattr(self._heart, "intentions", None)
@@ -540,7 +543,9 @@ class SubtaskWorkerPool:
                 "F099: could not read the intention of subtask %s; sending its push", subtask.id.hex[:8], exc_info=True
             )
             return False
-        return row is not None and row.wake_policy == intentions.WAKE_CONTINUE
+        return row is not None and (
+            row.wake_policy == intentions.WAKE_CONTINUE or row.state == continuation.STATE_CANCELLED
+        )
 
     async def _notify_telegram(
         self,

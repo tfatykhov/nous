@@ -10,18 +10,19 @@ every writer.
 
 from __future__ import annotations
 
+import heapq
 import json
 import logging
 import re
 import unicodedata
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Iterable, Mapping
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Text, and_, any_, cast, exists, func, literal, or_, select, text, update
+from sqlalchemy import ColumnElement, Text, and_, any_, case, cast, exists, func, literal, or_, select, text, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,15 +37,16 @@ from nous.storage.models import (
     IntentionArrival,
     IntentionProposal,
     ResultInbox,
+    Schedule,
     Subtask,
 )
 
 logger = logging.getLogger(__name__)
 
-# Flipped to True by PR-2e, in the commit that wires the runner into main.py.
-# While it is False, main.py forces NOUS_CONTINUATION_ENABLED off: with the flag
-# on and no runner, a continue result is written NULL-keyed and nothing claims it.
-CONTINUATION_RUNNER_READY: bool = False
+# True since PR-2e: the runner, its bounds, the proposals and the owner's cancel all ship. A build that
+# has not got them sets it False, and main.py then forces NOUS_CONTINUATION_ENABLED off: with the flag on
+# and no runner, a continue result is written NULL-keyed and nothing claims it.
+CONTINUATION_RUNNER_READY: bool = True
 
 INTENT_SESSION_PREFIX = "intent-"  # session id of a root's thread: f"intent-{root_id}"
 SOURCE_INTENTION_REPORT = "intention_report"  # inbox source kind of an owner-facing row
@@ -109,13 +111,15 @@ GATE_REASONS = (
     "limit_spawns",
     "plan_resolved",
 )
-# The gate reasons whose arrival drops the work (the others escalate: a report). Spec 4.5.3.
-GATE_DROP_REASONS = ("cancelled", "expired", "plan_resolved")
+# The gate reasons whose arrival drops the work silently (the others escalate: a report). Spec 4.5.3, and the
+# unified late-result rule (2e): a CANCELLED root says nothing it has not said, an EXPIRED one reports the late
+# result raw, here and in record_result and in the stranded-row settle.
+GATE_DROP_REASONS = ("cancelled", "plan_resolved")
 PLAN_DROP_OUTCOMES = ("superseded", "noise")
 # The owner-facing sentence for each gate reason (the arrival's note, and the head of a report).
 GATE_TEXT = {
     "cancelled": "The owner cancelled this work.",
-    "expired": "This work expired before its result could be acted on.",
+    "expired": "This work expired before its result could be acted on, so I did not act on it.",
     "past_deadline": "This result arrived after its deadline, so I did not act on it.",
     "budget_turns": "The follow-up budget for this work is used up, so I stopped here.",
     "budget_tokens": "The token budget for this work is used up, so I stopped here.",
@@ -493,13 +497,15 @@ async def root_limits(session: AsyncSession, agent_id: str, root_id: UUID, *, se
     Tokens are the lineage's subtask ``tokens_in/out`` (a DAG-node subtask has no intention of its own, and
     ``dag_node_id IS NULL`` keeps it out should one ever have one: its usage is already in its DAG's
     ``tokens_consumed``), plus its DAGs' ``tokens_consumed`` (which Task 2c1-8 feeds with check-node usage),
-    plus its arrivals' tokens.
+    plus its arrivals' tokens, plus what its failed attempts spent (``failed_tokens``, 2e: a retried attempt
+    writes no arrival row).
     """
-    depth, spawns = (
+    depth, spawns, failed_tokens = (
         await session.execute(
             select(
                 func.coalesce(func.max(Intention.depth), 0),
                 func.count(Intention.id).filter(Intention.depth > 0),
+                func.coalesce(func.sum(Intention.failed_tokens), 0),
             ).where(Intention.agent_id == agent_id, Intention.root_id == root_id)
         )
     ).one()
@@ -560,7 +566,7 @@ async def root_limits(session: AsyncSession, agent_id: str, root_id: UUID, *, se
         if verified is not False:
             break
         stalls += 1
-    tokens = int(subtask_tokens) + int(dag_tokens) + int(arrival_tokens)
+    tokens = int(subtask_tokens) + int(dag_tokens) + int(arrival_tokens) + int(failed_tokens)
     depth, spawns, turns = int(depth), int(spawns), int(turns)
     max_depth, max_spawns = settings.continuation_max_depth, settings.continuation_max_spawns_per_root
     escalate: str | None = None
@@ -636,9 +642,10 @@ def raw_results_text(rows: Any) -> str:
 def gate_inputs(reason: str, claim: Claim) -> tuple[Resolution, str | None]:
     """What a gate arrival commits: a synthetic decision and the text of its report.
 
-    A drop (cancelled, expired, plan resolved) writes no report. An escalation (past deadline, a
+    A drop (cancelled, plan resolved) writes no report. An escalation (expired, past deadline, a
     budget, a limit) reports the claimed results without acting on them: the reason, then the raw
-    results (spec 4.5.3).
+    results (spec 4.5.3; an expired root reports what came back, a cancelled one is silent: the unified
+    late-result rule of 2e).
     """
     explanation = GATE_TEXT[reason]
     if reason in GATE_DROP_REASONS:
@@ -807,10 +814,13 @@ async def _verified_progress(
 
 async def has_open_work(session: AsyncSession, agent_id: str, claim: Claim) -> bool:
     """Whether a ``continue`` or ``revise`` of this claim would leave anything running under its root (final review
-    I1): an open intention of the root other than the claimed ones (a fan-out's sibling still running, or this
-    turn's spawn, which a lineage makes ``continue`` and so keeps open until the next claim). The commit closes the
-    claimed intentions, so without one nothing would ever wake the root again. A child that already closed does
-    not count, whenever it was spawned: an inline spawn (``await_result``) closes within the turn and leaves
+    I1): an open ``continue`` intention of the root other than the claimed ones (a fan-out's sibling still running,
+    or this turn's spawn, which a lineage makes ``continue`` and so keeps open until the next claim). The commit
+    closes the claimed intentions, so without one nothing would ever wake the root again. Open work is work that
+    will come back: a ``remember``, ``report``, ``none`` or ``container`` child never wakes the root, and the paths
+    that close one never end it, so it does not count (2e final review I1). ``end_hanging_root`` keeps counting
+    every open row on purpose: it must not end a root while such a child still runs. A child that already closed
+    does not count, whenever it was spawned: an inline spawn (``await_result``) closes within the turn and leaves
     nothing running (re-review N1). Rows only."""
     ids = [i.id for i in claim.intentions]
     open_elsewhere = exists().where(
@@ -818,6 +828,7 @@ async def has_open_work(session: AsyncSession, agent_id: str, claim: Claim) -> b
         Intention.root_id == claim.root_id,
         Intention.id.notin_(ids),
         Intention.state.in_(OPEN_STATES),
+        Intention.wake_policy == intentions.WAKE_CONTINUE,
     )
     return bool((await session.execute(select(open_elsewhere))).scalar_one())
 
@@ -1039,12 +1050,14 @@ async def _commit_arrival(
             raise _FenceLost
 
     # Delivery is stamped here and only here (spec 4.3 item 1): after the fenced moves above, in the
-    # same SAVEPOINT, on exactly the rows the turn was shown. A lost fence rolls this back with them.
+    # same SAVEPOINT, on exactly the rows the turn was shown. A lost fence rolls this back with them. A gate that
+    # dropped a cancelled root's arrival showed them to nobody: they are closed by the cancel, not delivered.
     if shown:
+        stamp = SILENT_SESSION_ID if gate_reason == "cancelled" else f"{INTENT_SESSION_PREFIX}{root_id}"
         await session.execute(
             update(ResultInbox)
             .where(ResultInbox.agent_id == agent_id, ResultInbox.id.in_(shown), ResultInbox.delivered_at.is_(None))
-            .values(delivered_at=now, delivered_session_id=f"{INTENT_SESSION_PREFIX}{root_id}")
+            .values(delivered_at=now, delivered_session_id=stamp)
             .execution_options(synchronize_session=False)
         )
 
@@ -1142,6 +1155,12 @@ async def _commit_arrival(
         )
     elif staged:
         await expire_staged(session, agent_id, claim_token=claim.claim_token)
+    if resolution.decision in ("continue", "revise") and outcome == OUTCOME_RESOLVED and gate_reason is None:
+        # 2e-2 review m4: the executor refuses a continue with nothing open, but at call time. The last open child
+        # can close between that check and this commit (the model's own cancel_task, then the repair), and its
+        # close saw this claim's root still open and ended nothing. Under the root lock, with the arrival row
+        # flushed, this is the last chance: a lineage left with nothing running is closed and reported once.
+        await end_hanging_root(session, agent_id, root_id, settings=settings, now=now)
     return ArrivalCommit(arrival_id, n, next_states, decision_record_id, tuple(report_ids), tuple(published))
 
 
@@ -1158,6 +1177,7 @@ async def fail_attempt(
     brain: Any = None,
     now: datetime | None = None,
     arrival_id: UUID | None = None,
+    tokens: tuple[int, int] = (0, 0),
 ) -> str:
     """T8 and T12: one claimed attempt failed (the turn raised or timed out, or its lease expired).
 
@@ -1174,6 +1194,11 @@ async def fail_attempt(
     cap), so the claim token in that UPDATE is the fence and nothing else stands in for it. ``arrival_id`` is the
     id of the cap's arrival row (a new one when not given), as ``commit_arrival`` takes it: the caller can name
     that row in ``intention.arrival_decided``.
+
+    ``tokens`` is ``(tokens_in, tokens_out)`` the failed attempt spent (2e, carry-over 2): a retry keeps it on the
+    claim's deepest intention (``failed_tokens``, in the same fence as the retry), the cap books it on the arrival
+    row of the ``failed_report``. Either way ``root_limits`` counts it, so a lineage whose turns keep failing reaches
+    its token budget. A lease release knows no usage and passes none.
     """
     now = now or datetime.now(UTC)
     ids = sorted(i.id for i in claim.intentions)
@@ -1192,7 +1217,20 @@ async def fail_attempt(
                 )
             ).scalars()
             worst = max(counts) + 1
+            spent = int(tokens[0]) + int(tokens[1])
             if worst < max_attempts:
+                if spent > 0:
+                    # Through the fence like every write to a claimed intention: it is checked before the release
+                    # below, so a stale claim charges nothing. One row only (the deepest), so it is summed once.
+                    charged = await _fenced_move(
+                        session,
+                        agent_id,
+                        [claim.deepest.id],
+                        claim.claim_token,
+                        {"failed_tokens": Intention.failed_tokens + spent, "updated_at": now},
+                    )
+                    if charged != {claim.deepest.id}:
+                        raise _FenceLost
                 released = await _fenced_move(
                     session,
                     agent_id,
@@ -1219,7 +1257,7 @@ async def fail_attempt(
                 resolution=Resolution("report", f"Failed after {worst} attempts.", False, 0.0),
                 outcome=OUTCOME_FAILED,
                 gate_reason=None,
-                tokens=(0, 0),
+                tokens=(int(tokens[0]), int(tokens[1])),
                 brain=brain,
                 settings=settings,
                 report_text=f"{body}\n\n{raw}" if raw else body,
@@ -1374,13 +1412,16 @@ async def expire_roots(
     settings: Any,
     limit: int = EXPIRE_BATCH,
     now: datetime | None = None,
+    proposals_out: list[tuple[UUID, str]] | None = None,
 ) -> list[UUID]:
     """T14: expire the roots whose TTL ran out (spec 4.6), at most ``limit``, one SAVEPOINT per root.
 
     Due: open (neither root marker set), not a container, with an open ``continue`` or ``report``
     intention in its lineage, and ``deadline`` past (a NULL deadline: ``created_at + ttl_hours`` past).
     Then settles the rows held on intentions a gate arrival closed (``_settle_stranded_rows``).
-    Does not commit; the runner emits ``intention.root_expired`` for the returned ids.
+    Does not commit; the runner emits ``intention.root_expired`` for the returned ids. ``proposals_out``, when given,
+    receives ``(proposal_id, "expired")`` for each proposal the owner had been shown that an expiry ended (its decision
+    columns are written, as the proposals sweep wrote them before 2e), for the runner to tell the bus.
     """
     now = now or datetime.now(UTC)
     root = aliased(Intention)
@@ -1405,8 +1446,13 @@ async def expire_roots(
     for root_id in (await session.execute(due)).scalars().all():
         try:
             async with session.begin_nested():
-                if await _expire_root(session, agent_id, root_id, ttl_hours=ttl_hours, settings=settings, now=now):
+                ended: list[tuple[UUID, str]] = []
+                if await _expire_root(
+                    session, agent_id, root_id, ttl_hours=ttl_hours, settings=settings, now=now, shown=ended
+                ):
                     expired.append(root_id)
+                    if proposals_out is not None:
+                        proposals_out.extend(ended)
         except Exception:
             logger.warning("F099: could not expire root %s; retried at the next sweep", root_id, exc_info=True)
     try:
@@ -1422,13 +1468,17 @@ async def expire_roots(
 async def _settle_stranded_rows(session: AsyncSession, agent_id: str, *, settings: Any, now: datetime) -> int:
     """Rows held on an intention a gate arrival closed (``cancelled`` or ``expired``): they landed after the
     claim read its rows and before the root's marker, so the arrival did not consume them, and nothing claims
-    a closed intention. Each root's are stamped delivered and reported raw in one REPORT, as ``record_result``
-    reports a result that lands after the close. The expiry never strands one (it reads after it closes).
+    a closed intention. The unified late-result rule: the rows of an ``expired`` intention are stamped delivered and
+    reported raw in one REPORT per root, as ``record_result`` reports a result that lands after the close; the rows
+    of a ``cancelled`` one are stamped and nothing is said (the owner cancelled that work). The expiry never strands
+    one (it reads after it closes), and ``cancel_root`` stamps its own.
     Writes no intention row, so it takes no intention lock. Returns the number of rows settled."""
+    root = aliased(Intention)
     stranded = (
         await session.execute(
-            select(ResultInbox.id, Intention.root_id)
+            select(ResultInbox.id, Intention.root_id, Intention.state, root.root_cancelled_at)
             .join(Intention, and_(Intention.agent_id == agent_id, Intention.id == ResultInbox.intention_id))
+            .join(root, and_(root.agent_id == agent_id, root.id == Intention.root_id))
             .where(
                 ResultInbox.agent_id == agent_id,
                 ResultInbox.channel.is_(None),
@@ -1440,23 +1490,31 @@ async def _settle_stranded_rows(session: AsyncSession, agent_id: str, *, setting
             .limit(STRANDED_BATCH)
         )
     ).all()
-    by_root: dict[UUID, list[UUID]] = {}
-    for row_id, root_id in stranded:
-        by_root.setdefault(root_id, []).append(row_id)
+    # Keyed by (root, silent): a cancelled intention's rows are stamped and never reported (the unified late-result
+    # rule), an expired one's are reported raw.
+    by_root: dict[tuple[UUID, bool], list[UUID]] = {}
+    for row_id, root_id, state, cancelled_at in stranded:
+        # By marker, as record_result judges (N3 of the plan review): the intention's state or the root's marker.
+        by_root.setdefault((root_id, state == STATE_CANCELLED or cancelled_at is not None), []).append(row_id)
     settled = 0
-    for root_id, row_ids in by_root.items():
+    for (root_id, silent), row_ids in by_root.items():
         # Stamp and read in one statement: only the rows this call moved are reported, so a row is reported once.
+        # A silent group was read by nobody: closed by the cancel, not delivered (the metrics count it apart).
+        stamp = SILENT_SESSION_ID if silent else f"{INTENT_SESSION_PREFIX}{root_id}"
         rows = sorted(
             await session.execute(
                 update(ResultInbox)
                 .where(ResultInbox.id.in_(row_ids), ResultInbox.delivered_at.is_(None))
-                .values(delivered_at=now, delivered_session_id=f"{INTENT_SESSION_PREFIX}{root_id}")
+                .values(delivered_at=now, delivered_session_id=stamp)
                 .returning(ResultInbox.id, ResultInbox.title, ResultInbox.body, ResultInbox.created_at)
                 .execution_options(synchronize_session=False)
             ),
             key=lambda r: (r.created_at, r.id),
         )
         if not rows:
+            continue
+        if silent:
+            settled += len(rows)
             continue
         root = (
             await session.execute(
@@ -1490,14 +1548,19 @@ async def _settle_stranded_rows(session: AsyncSession, agent_id: str, *, setting
     if settled:
         # A backstop: today only a gate arrival's late rows land here, so a count is how a path that writes a root
         # marker without closing its lineage (2e's cancel_root, say) shows up in the log.
-        logger.warning(
-            "F099: settled %d result(s) held on closed intentions (left by a gate arrival or a cancel)", settled
-        )
+        logger.warning("F099: settled %d result(s) held on closed intentions (left by a gate arrival)", settled)
     return settled
 
 
 async def _expire_root(
-    session: AsyncSession, agent_id: str, root_id: UUID, *, ttl_hours: float, settings: Any, now: datetime
+    session: AsyncSession,
+    agent_id: str,
+    root_id: UUID,
+    *,
+    ttl_hours: float,
+    settings: Any,
+    now: datetime,
+    shown: list[tuple[UUID, str]],
 ) -> bool:
     row = (
         await session.execute(
@@ -1553,10 +1616,29 @@ async def _expire_root(
         .where(Intention.agent_id == agent_id, Intention.id == root_id)
         .values(root_expired_at=now, updated_at=now)
     )
-    # F099 2d: this closed the root's claim (the token is cleared), so a late commit loses its fence and the
-    # staged proposals of the turn can never be published: expire them with it. Staged rows only: the owner never
-    # saw them. A pending proposal of an ended root is the proposals sweep's (expire_proposals), which also tells
-    # the bus.
+    # F099 2d, 2e: this closed the root's claim (the token is cleared), so a late commit loses its fence and the
+    # staged proposals of the turn can never be published. Every proposal that could still start moves with the
+    # root marker, in THIS transaction and under the root lock (2d-3 review m1): claim_execution's root-open
+    # predicate sees only a marker that has COMMITTED, so a proposal left `approved` here could be claimed by a
+    # call that read the marker before this commit. Its UPDATE of the claim waits on this row instead and then
+    # fails its `state = 'approved'` re-check. `executing` is left alone (the call has started).
+    ended = await session.execute(
+        update(IntentionProposal)
+        .where(
+            IntentionProposal.agent_id == agent_id,
+            IntentionProposal.root_id == root_id,
+            IntentionProposal.state.in_(_SHOWN_PROPOSAL_STATES),
+        )
+        .values(
+            state=PROPOSAL_EXPIRED,
+            decided_at=func.coalesce(IntentionProposal.decided_at, now),
+            decided_by=_SYSTEM_UNLESS_DECIDED,
+            updated_at=now,
+        )
+        .returning(IntentionProposal.id)
+        .execution_options(synchronize_session=False)
+    )
+    shown.extend((proposal_id, PROPOSAL_EXPIRED) for proposal_id in ended.scalars().all())
     await session.execute(
         update(IntentionProposal)
         .where(
@@ -1609,6 +1691,16 @@ async def _expire_root(
     return True
 
 
+def question_window_start(question: ResultInbox) -> datetime:
+    """When the answer window of a QUESTION row opens: the later of when it was written and when it may be pushed.
+    Quiet hours defer the push, not the row, so a question written at night is not answerable for a shorter time
+    than one written by day: the same rule as a proposal's deadline (``max(now, push_after) + ttl``, 2d review m2).
+    A row written outside the quiet hours has ``push_after`` at its own creation, so the two agree."""
+    if question.push_after is None:
+        return question.created_at
+    return max(question.created_at, question.push_after)
+
+
 async def _proposals_terminal(session: AsyncSession, agent_id: str, arrival_id: UUID) -> bool:
     """Every proposal of the arrival is in ``PROPOSAL_TERMINAL`` (2d). A ``staged`` row has no arrival yet, so it
     never holds an arrival back: it is not approvable."""
@@ -1656,7 +1748,7 @@ async def _question_state(
     ).scalar_one()
     ttl = timedelta(hours=float(settings.intention_proposal_ttl_hours)) if settings is not None else None
     answered = [newest_answer is not None and newest_answer >= q.created_at for q in questions]
-    expired = [ttl is not None and q.created_at <= now - ttl for q in questions]
+    expired = [ttl is not None and question_window_start(q) <= now - ttl for q in questions]
     terminal = proposals_done and all(a or e for a, e in zip(answered, expired, strict=True))
     return terminal, all(answered), questions
 
@@ -1883,15 +1975,20 @@ async def record_result(
     state, policy, root_id, origin_channel = row.state, row.wake_policy, row.root_id, row.origin_channel
     now = datetime.now(UTC)
 
+    ended = await _root_end_state(session, agent_id, root_id)
     if (
         policy != intentions.WAKE_CONTINUE
         or state in (STATE_CANCELLED, STATE_EXPIRED)
         # A legacy close is never reopened (a DAG's retry_node re-arrival included): it reports, and its
         # settled twin keeps InboxDagPass from re-selecting the work row (MF-1).
         or (state == STATE_CLOSED and row.close_reason == intentions.CLOSE_LEGACY)
-        or not await _root_is_open(session, agent_id, root_id)
+        or ended is not None
     ):
         report_id = arrival_report_id(source_kind, source_id, source_generation)
+        # The unified late-result rule (2e, by marker): a CANCELLED root reports nothing, and an EXPIRED one
+        # reports the late result raw. The twin below is written either way, so the reconciler passes see the
+        # source as written.
+        silent = state == STATE_CANCELLED or ended == STATE_CANCELLED
         # MF-1: the work row's own inbox row, NULL-keyed and already delivered. The F098 reconciler passes
         # decide "needs repair" by this row (has_row): without it they would re-select the work row on
         # every tick for good. NULL-keyed and delivered, no chat turn can claim it, so it keeps the work's
@@ -1912,11 +2009,19 @@ async def record_result(
             intention_id=intention_id,
             arrival_id=arrival_id,
             delivered_at=now,
-            delivered_session_id=f"report:{report_id.hex[:8]}",
+            delivered_session_id=SILENT_SESSION_ID if silent else f"report:{report_id.hex[:8]}",
         )
         if twin is None:
             # This generation was already written (on this path, or on the continue path before the
             # root closed): the first delivery decided its fate, so a duplicate writes no REPORT.
+            return ResultRecorded(None, False, state, False, False, intention_id, root_id)
+        if silent:
+            logger.info(
+                "F099: a late result of %s %s on cancelled root %s was dropped without a report",
+                source_kind,
+                str(source_id)[:8],
+                root_id,
+            )
             return ResultRecorded(None, False, state, False, False, intention_id, root_id)
         channel = owner_channel(settings, origin_channel)
         if channel is None:
@@ -1977,6 +2082,7 @@ class RollbackReport:
     rerouted_rows: int
     expired_proposals: int
     pushed_raw: int
+    undeliverable: int = 0  # rows stamped delivered because there was nowhere to send them (2e, carry-over 9)
 
 
 _ROLLBACK_STATES = (STATE_RESULT_READY, "deciding", "awaiting_owner")
@@ -1984,6 +2090,10 @@ _SWEEP_BATCH = 200
 RAW_PUSH_CHARS = 3900
 # delivered_session_id of a row the rollback sent by Telegram instead of routing.
 ROLLBACK_SESSION_ID = "rollback"
+# delivered_session_id of a row the rollback could not deliver at all (no owner channel, or the inbox off and no
+# Telegram): the intention closes, so the row would never be read by anyone. It is stamped, so nothing counts it as
+# an undelivered result; the result itself stays on its work row (the subtask or the DAG).
+ROLLBACK_UNDELIVERABLE_ID = "rollback-undeliverable"
 
 
 async def rollback_at_startup(
@@ -1994,15 +2104,18 @@ async def rollback_at_startup(
     Open ``continue`` intentions in ``result_ready``, ``deciding`` or ``awaiting_owner`` have their
     undelivered intention-keyed inbox rows re-routed to ``owner_channel`` (so F098's chat turn shows
     them; a re-routed row is stamped ``created_at`` now, so the claim window starts when chat can see
-    it), their ``staged`` and ``pending`` proposals expired (a later tap is refused), and are closed
+    it), their ``staged``, ``pending`` and ``approved`` proposals expired (a later tap is refused, and a
+    later flag-on sweep resumes nothing: 2e, S6), and are closed
     as ``legacy`` with the claim cleared; so is every ``pending`` intention whose source is already
     terminal (work that finished while the flags were off: task-1.9 carry-over 2). It runs whenever
     ``brain.intentions`` exists, ``NOUS_INTENTIONS_ENABLED`` off included, and does nothing when the
     continuation flag is on. If the inbox is off too, a re-routed row would be invisible: each row is
     sent by ``telegram_push`` instead and stamped delivered, and an intention whose push failed stays
     open for the next start. With the inbox off and no Telegram configured there is no channel to
-    deliver to: the intention closes with a WARNING and the result stays on its work row (the subtask
-    or DAG).
+    deliver to: the intention closes with a WARNING naming the rows and the result stays on its work row
+    (the subtask or DAG); so does one with the inbox on and no owner channel. Those rows are stamped
+    ``ROLLBACK_UNDELIVERABLE_ID``, so none stays undelivered for good, and the metrics count them apart
+    from the delivered ones (2e, carry-over 9).
 
     One transaction applies the re-route, the expiry and the close, so a close can never outrun its
     rows. The network sends happen before it, outside any transaction, so the raw push is
@@ -2043,14 +2156,18 @@ async def rollback_at_startup(
                 stuck[row.intention_id].append(row)
 
     pushed_ids: list[UUID] = []
+    undeliverable_ids: list[UUID] = []
     keep_open: set[UUID] = set()
     if not inbox_on:
         waiting = sum(len(rows) for rows in stuck.values())
         if telegram_push is None and waiting:
+            undeliverable_ids = [row.id for rows in stuck.values() for row in rows]
             logger.warning(
                 "F099: the rollback found %d result(s) that cannot be delivered (the inbox is off and Telegram is not "
-                "configured); they stay on their work rows",
+                "configured); they stay on their work rows and are marked delivered, not read by anyone "
+                "(row, intention; the first 20): %s",
                 waiting,
+                [(str(row.id), str(row.intention_id)) for rows in stuck.values() for row in rows][:20],
             )
         elif telegram_push is not None:
             for it in open_rows:
@@ -2079,10 +2196,11 @@ async def rollback_at_startup(
                 if row_ids and channel is None:
                     logger.warning(
                         "F099: the rollback found %d result(s) of intention %s with no owner channel (no origin "
-                        "channel, no default chat); they stay on their work row",
+                        "channel, no default chat); they stay on their work row and are marked delivered",
                         len(row_ids),
                         it.id,
                     )
+                    undeliverable_ids.extend(row_ids)
                 elif row_ids:
                     # created_at is when chat can see the row, so F098's claim window starts now and
                     # not at the age of the work (a result that waited past it would never be shown).
@@ -2093,15 +2211,36 @@ async def rollback_at_startup(
                         .execution_options(synchronize_session=False)
                     )
                     rerouted += moved.rowcount or 0
+        if undeliverable_ids:
+            # The intention closes below and nothing reads these rows again: a row left undelivered would sit in the
+            # backlog for good (carry-over 9). Stamped, not deleted: the row stays as the record.
+            await session.execute(
+                update(ResultInbox)
+                .where(ResultInbox.id.in_(undeliverable_ids), ResultInbox.delivered_at.is_(None))
+                .values(delivered_at=now, delivered_session_id=ROLLBACK_UNDELIVERABLE_ID)
+                .execution_options(synchronize_session=False)
+            )
         if close_ids:
+            # S6 of the plan review: every proposal that could still run, the `approved` ones too. The intention
+            # closes below, so a call approved and not yet started would otherwise be resumed by a later flag-on
+            # sweep and its outcome would reach nobody. A later tap is refused, as before. Only a row the owner was
+            # shown (pending, approved) gets the decision columns; a staged one was never offered.
+            unshown = IntentionProposal.state == PROPOSAL_STAGED
             gone = await session.execute(
                 update(IntentionProposal)
                 .where(
                     IntentionProposal.agent_id == agent_id,
                     IntentionProposal.intention_id.in_(close_ids),
-                    IntentionProposal.state.in_(("staged", "pending")),
+                    IntentionProposal.state.in_(_STARTABLE_PROPOSAL_STATES),
                 )
-                .values(state="expired", updated_at=now)
+                .values(
+                    state=PROPOSAL_EXPIRED,
+                    decided_at=case(
+                        (unshown, IntentionProposal.decided_at), else_=func.coalesce(IntentionProposal.decided_at, now)
+                    ),
+                    decided_by=case((unshown, IntentionProposal.decided_by), else_=_SYSTEM_UNLESS_DECIDED),
+                    updated_at=now,
+                )
                 .execution_options(synchronize_session=False)
             )
             expired = gone.rowcount or 0
@@ -2135,7 +2274,7 @@ async def rollback_at_startup(
             if len(swept) < _SWEEP_BATCH:
                 break
         await session.commit()
-    return RollbackReport(closed, rerouted, expired, len(pushed_ids))
+    return RollbackReport(closed, rerouted, expired, len(pushed_ids), len(undeliverable_ids))
 
 
 # ---------------------------------------------------------------------------
@@ -2145,6 +2284,15 @@ async def rollback_at_startup(
 PROPOSAL_STAGED, PROPOSAL_PENDING, PROPOSAL_APPROVED = "staged", "pending", "approved"
 PROPOSAL_EXECUTING, PROPOSAL_REJECTED, PROPOSAL_EXPIRED = "executing", "rejected", "expired"
 PROPOSAL_EXECUTED, PROPOSAL_FAILED, PROPOSAL_CANCELLED = "executed", "failed", "cancelled"
+# The proposals the owner has been shown and may still decide or run, and (with the one that was never shown) the states
+# from which a call can still START: an ended root takes all three with its marker, under the root lock.
+_SHOWN_PROPOSAL_STATES = (PROPOSAL_PENDING, PROPOSAL_APPROVED)
+_STARTABLE_PROPOSAL_STATES = (PROPOSAL_STAGED, *_SHOWN_PROPOSAL_STATES)
+# `decided_by` when the system ends a shown proposal (a cancel, the TTL, the flag-off rollback): an `approved` row
+# keeps the owner who approved it, so the record still says so; a `pending` one has none and says `system`. Its
+# `decided_at` follows the same rule (`coalesce(decided_at, now)` at each site): when the owner decided is kept, and
+# `updated_at` says when the row was closed.
+_SYSTEM_UNLESS_DECIDED = func.coalesce(IntentionProposal.decided_by, "system")
 MAX_PROPOSALS_PER_ARRIVAL = 5
 # What the owner is shown must fit one Telegram message whole (4096 UTF-16 units, which is what the caps count: a
 # character above U+FFFF is two): a call that does not is refused at staging, never clipped, because a clipped call
@@ -2835,6 +2983,38 @@ async def finish_execution(
     return ProposalExecution(proposal_id, final, proposal.result, proposal.error, woke, True, None)
 
 
+async def stalled_approved_ids(
+    session: AsyncSession, agent_id: str, *, settings: Any, now: datetime | None = None, limit: int = 10
+) -> list[UUID]:
+    """The ``approved`` proposals of an open root that nothing started (carry-over 11): the process stopped between
+    the owner's decision and ``claim_execution``, or the request that was to run the call went away. Oldest first.
+
+    Only a proposal decided at least ``max(tool_timeout + 5 s, 60 s)`` ago (an inline run, started by the
+    decision itself, is not stolen: and ``claim_execution`` is the fence in any case), and at most
+    ``intention_proposal_ttl_hours`` ago (an approval is not honoured days later: that one ends with its root).
+    ``approved`` is not terminal, so without a resume the arrival would wait in ``awaiting_owner`` until the
+    root's TTL."""
+    now = now or datetime.now(UTC)
+    grace = timedelta(seconds=max(float(settings.tool_timeout) + 5.0, 60.0))
+    window = timedelta(hours=float(settings.intention_proposal_ttl_hours))
+    root = aliased(Intention)
+    rows = await session.execute(
+        select(IntentionProposal.id)
+        .join(root, and_(root.agent_id == agent_id, root.id == IntentionProposal.root_id))
+        .where(
+            IntentionProposal.agent_id == agent_id,
+            IntentionProposal.state == PROPOSAL_APPROVED,
+            IntentionProposal.updated_at < now - grace,
+            IntentionProposal.decided_at > now - window,
+            root.root_cancelled_at.is_(None),
+            root.root_expired_at.is_(None),
+        )
+        .order_by(IntentionProposal.updated_at, IntentionProposal.id)
+        .limit(limit)
+    )
+    return list(rows.scalars().all())
+
+
 async def end_unrunnable(
     session: AsyncSession, agent_id: str, proposal_id: UUID, *, settings: Any, now: datetime | None = None
 ) -> ProposalExecution:
@@ -2868,6 +3048,34 @@ async def end_unrunnable(
     return ProposalExecution(proposal_id, final, None, None, woke, moved, REFUSE_ENDED)
 
 
+async def _lock_roots_in_order(session: AsyncSession, agent_id: str, root_ids: set[UUID]) -> set[UUID]:
+    """Lock ``root_ids`` ``FOR NO KEY UPDATE`` one by one in ``(created_at, id)`` order, each in a SAVEPOINT (a
+    released one keeps its lock). Returns the roots locked: a root whose lock failed is logged and left out, so the
+    caller never takes it later, out of order."""
+    if not root_ids:
+        return set()
+    ordered = (
+        await session.execute(
+            select(Intention.id)
+            .where(Intention.agent_id == agent_id, Intention.id.in_(root_ids))
+            .order_by(Intention.created_at, Intention.id)
+        )
+    ).scalars()
+    locked: set[UUID] = set()
+    for root_id in list(ordered):
+        try:
+            async with session.begin_nested():
+                await _lock_root(session, agent_id, root_id)
+            locked.add(root_id)
+        except Exception:
+            logger.warning(
+                "F099: could not lock root %s for the proposal sweep; its proposals are retried at the next sweep",
+                root_id,
+                exc_info=True,
+            )
+    return locked
+
+
 async def expire_proposals(
     session: AsyncSession, agent_id: str, *, settings: Any, now: datetime | None = None, limit: int = 50
 ) -> list[tuple[UUID, str]]:
@@ -2877,31 +3085,17 @@ async def expire_proposals(
     root) and its outcome reaches the arrival, which wakes when terminal. ``approved`` on a root that ended is a call
     nobody will claim any more (the process stopped between the approve and the claim): ``end_unrunnable`` ends it
     (2d-3 review m2). ``staged`` older than two leases is an orphan of a turn whose lease was released: ``expired``
-    (done first, before any root is locked). ``executing`` for longer than ``max(lease, 2 x tool_timeout)`` is a
-    call whose process stopped: ``failed`` with ``IN_DOUBT_TEXT``, never re-run. Each proposal in a SAVEPOINT,
-    roots in ``(created_at, id)`` order (the one cross-root order); a failure is logged and retried at the next
-    sweep. Returns ``(proposal_id, new_state)``."""
+    (its root locked first, as in every arm). ``executing`` for longer than ``max(lease, 2 x tool_timeout)`` is a
+    call whose process stopped: ``failed`` with ``IN_DOUBT_TEXT``, never re-run. Every root any arm will touch is
+    locked first, once, in ``(created_at, id)`` order (the one cross-root order: an arm that sorted only its own
+    roots would take one older than a root an earlier arm holds, 2e-2 review); then each proposal in a SAVEPOINT,
+    re-checked under its root. A failure is logged and retried at the next sweep. Returns
+    ``(proposal_id, new_state)``."""
     now = now or datetime.now(UTC)
     done: list[tuple[UUID, str]] = []
     root = aliased(Intention)
     lease = float(settings.continuation_lease_seconds)
     doubt = max(lease, 2.0 * float(settings.tool_timeout))
-
-    # First, before any root is locked: it needs no root, and run after the loops below it would lock proposal rows
-    # while this transaction already holds roots (a released SAVEPOINT keeps its locks), against a commit that
-    # holds its root and then updates its own staged rows.
-    stale = await session.execute(
-        update(IntentionProposal)
-        .where(
-            IntentionProposal.agent_id == agent_id,
-            IntentionProposal.state == PROPOSAL_STAGED,
-            IntentionProposal.created_at < now - timedelta(seconds=2 * lease),
-        )
-        .values(state=PROPOSAL_EXPIRED, updated_at=now)
-        .returning(IntentionProposal.id)
-        .execution_options(synchronize_session=False)
-    )
-    done.extend((proposal_id, PROPOSAL_EXPIRED) for proposal_id in stale.scalars().all())
 
     async def due(*predicates: ColumnElement[bool]) -> list[tuple[UUID, UUID]]:
         rows = await session.execute(
@@ -2913,10 +3107,48 @@ async def expire_proposals(
         )
         return [(row.id, row.root_id) for row in rows]
 
+    # The root first, as everywhere (2e-1 review m5): a stale row moved holding no root would be held while this
+    # transaction waits for a root below, against a cancel or an expiry that holds that root and then moves its
+    # lineage's staged rows.
+    stale = await due(
+        IntentionProposal.state == PROPOSAL_STAGED,
+        IntentionProposal.created_at < now - timedelta(seconds=2 * lease),
+    )
     pending = await due(
         IntentionProposal.state == PROPOSAL_PENDING,
         or_(IntentionProposal.deadline <= now, root.root_cancelled_at.is_not(None), root.root_expired_at.is_not(None)),
     )
+    unrunnable = await due(
+        IntentionProposal.state == PROPOSAL_APPROVED,
+        or_(root.root_cancelled_at.is_not(None), root.root_expired_at.is_not(None)),
+    )
+    stuck = await due(
+        IntentionProposal.state == PROPOSAL_EXECUTING,
+        IntentionProposal.updated_at < now - timedelta(seconds=doubt),
+    )
+    locked = await _lock_roots_in_order(
+        session, agent_id, {root_id for _id, root_id in (*stale, *pending, *unrunnable, *stuck)}
+    )
+    stale, pending, unrunnable, stuck = (
+        [(proposal_id, root_id) for proposal_id, root_id in arm if root_id in locked]
+        for arm in (stale, pending, unrunnable, stuck)
+    )
+
+    for proposal_id, root_id in stale:
+        try:
+            async with session.begin_nested():
+                await _lock_root(session, agent_id, root_id)
+                if await _set_proposal_state(
+                    session, agent_id, proposal_id, from_state=PROPOSAL_STAGED, to_state=PROPOSAL_EXPIRED, now=now
+                ):
+                    done.append((proposal_id, PROPOSAL_EXPIRED))
+        except Exception:
+            logger.warning(
+                "F099: could not expire the orphan proposal %s; it is retried at the next sweep",
+                proposal_id,
+                exc_info=True,
+            )
+
     for proposal_id, root_id in pending:
         try:
             async with session.begin_nested():
@@ -2945,10 +3177,6 @@ async def expire_proposals(
                 "F099: could not expire proposal %s; it is retried at the next sweep", proposal_id, exc_info=True
             )
 
-    unrunnable = await due(
-        IntentionProposal.state == PROPOSAL_APPROVED,
-        or_(root.root_cancelled_at.is_not(None), root.root_expired_at.is_not(None)),
-    )
     for proposal_id, _root_id in unrunnable:
         try:
             async with session.begin_nested():
@@ -2962,10 +3190,6 @@ async def expire_proposals(
                 exc_info=True,
             )
 
-    stuck = await due(
-        IntentionProposal.state == PROPOSAL_EXECUTING,
-        IntentionProposal.updated_at < now - timedelta(seconds=doubt),
-    )
     for proposal_id, root_id in stuck:
         try:
             async with session.begin_nested():
@@ -3057,7 +3281,7 @@ async def record_answer(
     if owner_answered:
         raise AnswerRefused(REFUSE_ANSWERED)
     ttl = timedelta(hours=float(settings.intention_proposal_ttl_hours))
-    if question.created_at <= now - ttl:
+    if question_window_start(question) <= now - ttl:
         raise AnswerRefused(REFUSE_EXPIRED)
     waiting = list(
         (
@@ -3231,3 +3455,763 @@ async def list_proposals(session: AsyncSession, agent_id: str, *, state: str, li
         .all()
     )
     return [proposal_view(row) for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# F099 Phase 2e: cancel (spec 4.6)
+# ---------------------------------------------------------------------------
+
+REFUSE_FINISHED = "finished"  # cancel_root's one refusal: nothing under the root was running
+# delivered_session_id of every row a cancelled root closed unread (the cancel itself, the stranded-row settle, a gate
+# that dropped the arrival), and of the twin of a late result a cancelled root dropped. It says "closed by the
+# cancel", never "delivered": the owner never saw it (``ResultInboxStore.metrics`` counts it apart).
+SILENT_SESSION_ID = "cancelled"
+CANCEL_ROOTS_MAX = 50  # roots one cancel may cascade over: the root, the fires of its containers, and theirs
+CANCELLED_VIEW_MAX = 10_000  # the most cancelled roots one load of the in-process view reads
+
+
+class RootNotFound(LookupError):
+    """No root intention with this id for the agent (a child's id is not a root's)."""
+
+
+class CancelRefused(Exception):
+    """A cancel the store did not make: ``reason`` is ``REFUSE_FINISHED``; nothing was written. ``state`` is the
+    root's state as the refusing cancel read it under the root lock."""
+
+    def __init__(self, reason: str, state: str | None = None) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.state = state
+
+
+@dataclass(frozen=True, slots=True)
+class CancelOutcome:
+    """What ``cancel_root`` did (contract section 4.7), plus what the runner needs to finish the cancel.
+
+    The store cancels rows. A DAG is cancelled by the orchestrator, and a running turn by its task, so the store
+    reports ``dag_ids`` (the lineage's DAGs that were still running) and the runner fills ``cancelled_dags`` and
+    ``turn_stopped`` after it acted. ``root_ids`` is every root this call marked (the root, and the fires of its
+    containers): the runner's in-process view takes all of them. ``proposal_ids`` are the proposals the owner had
+    been shown (pending or approved), for the bus."""
+
+    root_id: UUID
+    already_cancelled: bool = False
+    cancelled_intentions: int = 0
+    cancelled_subtasks: int = 0
+    cancelled_dags: int = 0
+    cancelled_proposals: int = 0
+    deactivated_schedules: int = 0
+    turn_stopped: bool = False
+    dag_ids: tuple[UUID, ...] = ()
+    proposal_ids: tuple[UUID, ...] = ()
+    root_ids: tuple[UUID, ...] = ()
+    # The cascade stopped at CANCEL_ROOTS_MAX roots: some fires are still open, and a repeat of the cancel takes them.
+    truncated: bool = False
+
+
+@dataclass(slots=True)
+class _CancelTally:
+    intentions: int = 0
+    subtasks: int = 0
+    proposals: int = 0
+    schedules: int = 0
+    dag_ids: list[UUID] = field(default_factory=list)
+    proposal_ids: list[UUID] = field(default_factory=list)
+    root_ids: list[UUID] = field(default_factory=list)
+
+    def nothing_was_running(self) -> bool:
+        return not (self.intentions or self.subtasks or self.proposals or self.schedules or self.dag_ids)
+
+
+def _uuid_or_none(value: Any) -> UUID | None:
+    try:
+        return UUID(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+async def _cancel_lineage(
+    session: AsyncSession, agent_id: str, root_id: UUID, *, now: datetime, tally: _CancelTally, fire: bool = False
+) -> list[tuple[datetime, UUID]]:
+    """Cancel one root's lineage in the caller's transaction (T13) and return the open roots of its containers'
+    fires as ``(created_at, id)``, which the caller cancels next, in that order. ``fire`` is true for a root the
+    cascade reached through a container: one that ended before this took its lock gets no marker.
+
+    One order everywhere (contract 4.7 Locks): the root first, then every container of the lineage, then their
+    schedules, and only then the writes. A fire that is in flight holds its container and its schedule FOR SHARE
+    (``_hold_open_container``), so this waits for it and finds its root below; one that starts later is refused.
+    The lineage is read AFTER the root lock: a spawn in flight holds the root FOR SHARE, and its rows are visible
+    once this has the lock. Then, as ``_expire_root`` does: the open rows close first (a ``record_result`` in
+    flight either committed before and is stamped below, or waits and finds its intention cancelled), then the
+    marker, then the proposals, then the unread rows."""
+    await _lock_root(session, agent_id, root_id)
+    lineage = (
+        await session.execute(
+            select(Intention.id, Intention.source_kind, Intention.source_id, Intention.wake_policy)
+            .where(Intention.agent_id == agent_id, Intention.root_id == root_id)
+            .order_by(Intention.id)
+        )
+    ).all()
+    ids = [row.id for row in lineage]
+    containers = [row for row in lineage if row.wake_policy == intentions.WAKE_CONTAINER]
+    if containers:
+        await session.execute(
+            select(Intention.id)
+            .where(Intention.agent_id == agent_id, Intention.id.in_([c.id for c in containers]))
+            .order_by(Intention.id)
+            .with_for_update(key_share=True)
+        )
+        schedule_ids = [sid for sid in (_uuid_or_none(c.source_id) for c in containers) if sid is not None]
+        if schedule_ids:
+            deactivated = await session.execute(
+                update(Schedule)
+                .where(Schedule.agent_id == agent_id, Schedule.id.in_(schedule_ids), Schedule.active.is_(True))
+                .values(active=False)
+                .returning(Schedule.id)
+                .execution_options(synchronize_session=False)
+            )
+            tally.schedules += len(deactivated.scalars().all())
+    closed = await session.execute(
+        update(Intention)
+        .where(Intention.agent_id == agent_id, Intention.root_id == root_id, Intention.state.in_(OPEN_STATES))
+        .values(
+            state=STATE_CANCELLED,
+            close_reason=CLOSE_CANCELLED,
+            closed_at=now,
+            claim_token=None,
+            claimed_at=None,
+            updated_at=now,
+        )
+        .returning(Intention.id)
+        .execution_options(synchronize_session=False)
+    )
+    moved = len(closed.scalars().all())
+    tally.intentions += moved
+    subtask_ids = [
+        sid
+        for sid in (_uuid_or_none(r.source_id) for r in lineage if r.source_kind == intentions.SOURCE_SUBTASK)
+        if sid is not None
+    ]
+    if subtask_ids:
+        stopped = await session.execute(
+            update(Subtask)
+            .where(
+                Subtask.agent_id == agent_id, Subtask.id.in_(subtask_ids), Subtask.status.in_(("pending", "running"))
+            )
+            .values(status="cancelled", final_outcome="cancelled", completed_at=now)
+            .returning(Subtask.id)
+            .execution_options(synchronize_session=False)
+        )
+        stopped_count = len(stopped.scalars().all())
+        tally.subtasks += stopped_count
+        moved += stopped_count
+    dag_source_ids = [
+        did
+        for did in (_uuid_or_none(r.source_id) for r in lineage if r.source_kind == intentions.SOURCE_DAG)
+        if did is not None
+    ]
+    if dag_source_ids:
+        running = await session.execute(
+            select(ExecutionDAG.id).where(
+                ExecutionDAG.agent_id == agent_id,
+                ExecutionDAG.id.in_(dag_source_ids),
+                ExecutionDAG.status.notin_(intentions.TERMINAL_DAG_STATUSES),
+            )
+        )
+        running_ids = running.scalars().all()
+        tally.dag_ids.extend(running_ids)
+        moved += len(running_ids)
+    if fire and not moved:
+        # A fire is read open before its lock is taken: one the TTL sweep ended in between is left as it is, like a
+        # fire that was already done (2e-1 review m1). A marker would only silence its later result, which an
+        # expired root reports raw (E16), and its rows and reports are the expiry's. Its containers' open fires are
+        # still the cancel's.
+        return await _open_fires(session, agent_id, [c.id for c in containers])
+    await session.execute(
+        update(Intention)
+        .where(Intention.agent_id == agent_id, Intention.id == root_id, Intention.root_cancelled_at.is_(None))
+        .values(root_cancelled_at=now, updated_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    tally.root_ids.append(root_id)
+    # Everything that could still START: the owner sees pending and approved ones (the bus is told), a staged one
+    # was never shown. Under the root lock and in this transaction, so claim_execution cannot win a race on a
+    # marker it cannot see yet (2d-3 review m1).
+    seen = await session.execute(
+        update(IntentionProposal)
+        .where(
+            IntentionProposal.agent_id == agent_id,
+            IntentionProposal.root_id == root_id,
+            IntentionProposal.state.in_(_SHOWN_PROPOSAL_STATES),
+        )
+        .values(
+            state=PROPOSAL_CANCELLED,
+            decided_at=func.coalesce(IntentionProposal.decided_at, now),
+            decided_by=_SYSTEM_UNLESS_DECIDED,
+            updated_at=now,
+        )
+        .returning(IntentionProposal.id)
+        .execution_options(synchronize_session=False)
+    )
+    shown = seen.scalars().all()
+    tally.proposals += len(shown)
+    tally.proposal_ids.extend(shown)
+    unshown = await session.execute(
+        update(IntentionProposal)
+        .where(
+            IntentionProposal.agent_id == agent_id,
+            IntentionProposal.root_id == root_id,
+            IntentionProposal.state == PROPOSAL_STAGED,
+        )
+        .values(state=PROPOSAL_CANCELLED, updated_at=now)
+        .returning(IntentionProposal.id)
+        .execution_options(synchronize_session=False)
+    )
+    tally.proposals += len(unshown.scalars().all())
+    # A cancelled root reports nothing it has not said (the unified late-result rule): its unread results are
+    # stamped closed by the cancel, never shown, never reported.
+    await session.execute(
+        update(ResultInbox)
+        .where(intention_keyed(agent_id, ids), ResultInbox.delivered_at.is_(None))
+        .values(delivered_at=now, delivered_session_id=SILENT_SESSION_ID)
+        .execution_options(synchronize_session=False)
+    )
+    # M1 (plan review): the owner-facing rows of the lineage that nobody has seen (a REPORT, QUESTION or PROPOSAL, keyed
+    # to a channel, so the statement above does not reach them) are closed too. A push that quiet hours deferred, or
+    # that waits for a retry, would otherwise go out for work the owner cancelled (a PROPOSAL with its buttons), and
+    # F098's chat claim would inject the row into the next chat turn. ``push_message_id`` stays NULL, so a reply to a
+    # message that was never sent resolves to nothing; a row already pushed keeps its ``pushed_at``.
+    await session.execute(
+        update(ResultInbox)
+        .where(
+            ResultInbox.agent_id == agent_id,
+            ResultInbox.source_kind == SOURCE_INTENTION_REPORT,
+            ResultInbox.intention_id.in_(ids),
+            ResultInbox.delivered_at.is_(None),
+        )
+        .values(
+            delivered_at=now,
+            delivered_session_id=SILENT_SESSION_ID,
+            pushed_at=func.coalesce(ResultInbox.pushed_at, now),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    return await _open_fires(session, agent_id, [c.id for c in containers])
+
+
+async def _open_fires(session: AsyncSession, agent_id: str, container_ids: list[UUID]) -> list[tuple[datetime, UUID]]:
+    """The fires of these containers that still have something open, as ``(created_at, id)``. A fire that finished
+    is not marked (a marker on a finished root would only silence a later result). A fire that starts after the
+    cancel is refused by its container check."""
+    if not container_ids:
+        return []
+    lineage_row = aliased(Intention)
+    still_open = exists().where(
+        lineage_row.agent_id == agent_id, lineage_row.root_id == Intention.id, lineage_row.state.in_(OPEN_STATES)
+    )
+    fires = await session.execute(
+        select(Intention.created_at, Intention.id).where(
+            Intention.agent_id == agent_id,
+            Intention.parent_id.in_(container_ids),
+            Intention.id == Intention.root_id,
+            Intention.root_cancelled_at.is_(None),
+            still_open,
+        )
+    )
+    return [(row.created_at, row.id) for row in fires]
+
+
+async def cancel_root(
+    session: AsyncSession, agent_id: str, root_id: UUID, *, reason: str, actor: str, now: datetime | None = None
+) -> CancelOutcome:
+    """T13: cancel a root and everything under it, in the caller's transaction (spec 4.6). Does not commit.
+
+    One transaction, the root locked first (``FOR NO KEY UPDATE``). It writes ``root_cancelled_at`` and moves every
+    open intention of the lineage to ``cancelled``, which also clears a live claim, so a turn that is deciding loses
+    its fence. It cancels the lineage's pending and running subtasks, moves its ``staged``, ``pending`` and
+    ``approved`` proposals to ``cancelled`` (so no call can start), stamps its unread intention-keyed results
+    delivered without reporting them, closes its unsent owner-facing rows (a REPORT, QUESTION or PROPOSAL that was
+    deferred or waits for a retry is never pushed, and no chat turn claims it: ``SILENT_SESSION_ID``, "closed by the
+    cancel", not "delivered"), and, for every container in the lineage, deactivates its schedule and then
+    cancels the open roots of the container's fires. The lineage's running DAGs are reported in ``dag_ids``: the
+    orchestrator cancels them (the runner calls it after this commits).
+
+    Repeating a cancel is allowed: it cancels whatever is still running and says ``already_cancelled``. A root with
+    nothing running that was not cancelled before is refused (``CancelRefused``, nothing written): a marker on a
+    finished root would only silence a later result. Raises ``RootNotFound`` for an id that is not a root.
+
+    What a cancel cannot take back: a call the owner approved that has already ``executing`` state is left alone (the
+    call has started). It is refused if it has not passed ``_authorize_tool_call`` yet; a send already in flight
+    completes, and its outcome is written to nobody (``_settle_proposal`` writes nothing for an ended root)."""
+    now = now or datetime.now(UTC)
+    root = (
+        await session.execute(
+            select(Intention)
+            # A child's id matches nothing, so it takes no lock (a child's lock without its root's breaks the order).
+            .where(Intention.agent_id == agent_id, Intention.id == root_id, Intention.id == Intention.root_id)
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if root is None:
+        raise RootNotFound(str(root_id))
+    already = root.root_cancelled_at is not None
+    tally = _CancelTally()
+    async with session.begin_nested():  # a refusal rolls the cascade back to here
+        # A heap on (created_at, id), the one cross-root lock order: a fire is always younger than the root whose
+        # container it fires, so the roots come out in that order however deep the containers are nested (a walk
+        # level by level would take a younger fire before an older one inside a sibling's lineage, 2e-1 review I1).
+        queue: list[tuple[datetime, UUID]] = [(root.created_at, root_id)]
+        visited: set[UUID] = set()
+        truncated = False
+        while queue:
+            _created, next_root = heapq.heappop(queue)
+            if next_root in visited:
+                continue
+            if len(visited) >= CANCEL_ROOTS_MAX:
+                logger.warning("F099: a cancel of root %s stopped at %d roots", root_id, CANCEL_ROOTS_MAX)
+                truncated = True
+                break
+            visited.add(next_root)
+            found = await _cancel_lineage(session, agent_id, next_root, now=now, tally=tally, fire=next_root != root_id)
+            for entry in found:
+                heapq.heappush(queue, entry)
+        if not already and tally.nothing_was_running():
+            raise CancelRefused(REFUSE_FINISHED, state=root.state)
+    logger.info(
+        "F099: root %s cancelled by %s (%s): %d intention(s), %d subtask(s), %d DAG(s) to stop, %d proposal(s), "
+        "%d schedule(s)",
+        root_id,
+        actor,
+        (reason or "no reason")[:200],
+        tally.intentions,
+        tally.subtasks,
+        len(tally.dag_ids),
+        tally.proposals,
+        tally.schedules,
+    )
+    return CancelOutcome(
+        root_id=root_id,
+        already_cancelled=already,
+        cancelled_intentions=tally.intentions,
+        cancelled_subtasks=tally.subtasks,
+        cancelled_proposals=tally.proposals,
+        deactivated_schedules=tally.schedules,
+        dag_ids=tuple(tally.dag_ids),
+        proposal_ids=tuple(tally.proposal_ids),
+        root_ids=tuple(tally.root_ids),
+        truncated=truncated,
+    )
+
+
+async def cancelled_root_ids(
+    session: AsyncSession, agent_id: str, *, since: datetime | None = None, limit: int = CANCELLED_VIEW_MAX
+) -> list[UUID]:
+    """The roots that carry ``root_cancelled_at`` (since ``since`` when given), newest first: what the runner's
+    in-process view of cancelled roots is loaded and refreshed from."""
+    query = select(Intention.id).where(Intention.agent_id == agent_id, Intention.root_cancelled_at.is_not(None))
+    if since is not None:
+        query = query.where(Intention.root_cancelled_at >= since)
+    rows = await session.execute(query.order_by(Intention.root_cancelled_at.desc()).limit(limit))
+    return list(rows.scalars().all())
+
+
+async def stray_dag_ids(session: AsyncSession, agent_id: str, *, limit: int = 10) -> list[UUID]:
+    """The DAGs that are still running under a cancelled root, oldest first. ``cancel_root`` reports its lineage's
+    DAGs and the runner cancels them after the commit, so a process that stopped in between, or an orchestrator that
+    raised, leaves one running: the runner's sweep cancels it from here. A stray DAG cannot act (the root is
+    cancelled, so every tool call of its nodes is refused), it can only keep its nodes busy."""
+    root = aliased(Intention)
+    rows = await session.execute(
+        select(ExecutionDAG.id)
+        .join(
+            Intention,
+            and_(
+                Intention.agent_id == agent_id,
+                Intention.source_kind == intentions.SOURCE_DAG,
+                Intention.source_id == cast(ExecutionDAG.id, Text),
+            ),
+        )
+        .join(root, and_(root.agent_id == agent_id, root.id == Intention.root_id))
+        .where(
+            ExecutionDAG.agent_id == agent_id,
+            ExecutionDAG.status.notin_(intentions.TERMINAL_DAG_STATUSES),
+            root.root_cancelled_at.is_not(None),
+        )
+        .order_by(ExecutionDAG.created_at, ExecutionDAG.id)
+        .limit(limit)
+    )
+    return list(rows.scalars().all())
+
+
+async def find_root_id(session: AsyncSession, agent_id: str, prefix: str) -> UUID | None:
+    """The one ROOT intention whose id starts with ``prefix`` (a child is never matched: the owner cancels roots)."""
+    cleaned = normalize_id(prefix)
+    if cleaned is None:
+        return None
+    ids = (
+        (
+            await session.execute(
+                select(Intention.id)
+                .where(
+                    Intention.agent_id == agent_id,
+                    Intention.id == Intention.root_id,
+                    func.replace(cast(Intention.id, Text), "-", "").like(f"{cleaned}%"),
+                )
+                .limit(2)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return _unique(list(ids), prefix)
+
+
+# ---------------------------------------------------------------------------
+# F099 Phase 2e: a lineage whose last open work was cancelled (carry-over 8)
+# ---------------------------------------------------------------------------
+
+# The source_id of the REPORT that ends a hanging root: one per root, so a retried close writes it once.
+_HANGING_NAMESPACE = uuid.UUID("c2f1a8d4-6b7e-4c39-8a15-9d0e3f4b5a67")
+
+
+async def close_cancelled_source(
+    session: AsyncSession, agent_id: str, intention: Intention, *, settings: Any, now: datetime | None = None
+) -> int:
+    """(d) of ``repair_missing_results``: a cancelled subtask produced no result, so its pending intention closes
+    with no row: ``cancelled`` when its root is cancelled, ``legacy`` otherwise. The root is locked FIRST (the one
+    lock order), and the root marker is read inside the UPDATE, so no cancel can commit between a read of it and the
+    close. Returns the number of intentions closed (0 or 1). Then ``end_hanging_root``. Does not commit."""
+    now = now or datetime.now(UTC)
+    await _lock_root(session, agent_id, intention.root_id)
+    root = aliased(Intention)
+    root_cancelled = exists().where(
+        root.agent_id == agent_id, root.id == intention.root_id, root.root_cancelled_at.is_not(None)
+    )
+    moved = await session.execute(
+        update(Intention)
+        .where(Intention.agent_id == agent_id, Intention.id == intention.id, Intention.state == STATE_PENDING)
+        .values(
+            state=case((root_cancelled, STATE_CANCELLED), else_=STATE_CLOSED),
+            close_reason=case((root_cancelled, CLOSE_CANCELLED), else_=intentions.CLOSE_LEGACY),
+            closed_at=now,
+            updated_at=now,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    closed = moved.rowcount or 0
+    if closed:
+        await end_hanging_root(session, agent_id, intention.root_id, settings=settings, now=now)
+    return closed
+
+
+async def end_hanging_root(
+    session: AsyncSession, agent_id: str, root_id: UUID, *, settings: Any, now: datetime | None = None
+) -> bool:
+    """Carry-over 8: close a root that nothing will ever wake or expire, and tell the owner. The caller holds the
+    root (``FOR NO KEY UPDATE``).
+
+    A continuation that ended ``continue`` or ``revise`` is waiting for the work it spawned. If that work is
+    cancelled (``cancel_task`` by the owner or the model, a DAG node, a worker) and closes as ``legacy`` with no
+    result, the lineage has no open row left: ``_ttl_applies`` is false, so the TTL sweep never reaches it, no
+    result will come, and the goal would end without a word. This writes ``root_expired_at`` (a later result is then
+    reported raw, never silently reopened: the consequence of closing it) and one REPORT to the owner channel.
+    Nothing happens while any intention of the lineage is open, for a root that carries a marker, for a container,
+    or when the newest arrival did not leave the lineage waiting (a ``drop``, ``report`` or ``ask``, or no arrival
+    at all: a Phase 1 root has nothing to report). Returns whether the root was closed."""
+    now = now or datetime.now(UTC)
+    root = (
+        await session.execute(
+            select(Intention)
+            .where(Intention.agent_id == agent_id, Intention.id == root_id)
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if (
+        root is None
+        or root.root_cancelled_at is not None
+        or root.root_expired_at is not None
+        or root.wake_policy == intentions.WAKE_CONTAINER
+    ):
+        return False
+    open_left = (
+        await session.execute(
+            select(
+                exists().where(
+                    Intention.agent_id == agent_id, Intention.root_id == root_id, Intention.state.in_(OPEN_STATES)
+                )
+            )
+        )
+    ).scalar_one()
+    if open_left:
+        return False
+    newest = (
+        await session.execute(
+            select(IntentionArrival.decision)
+            .where(IntentionArrival.agent_id == agent_id, IntentionArrival.root_id == root_id)
+            .order_by(IntentionArrival.n.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if newest not in ("continue", "revise"):
+        return False
+    await session.execute(
+        update(Intention)
+        .where(Intention.agent_id == agent_id, Intention.id == root_id)
+        .values(root_expired_at=now, updated_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    channel = owner_channel(settings, root.origin_channel)
+    if channel is None:
+        logger.warning(
+            "F099: root %s was left with nothing running and has no owner channel; nothing was reported", root_id
+        )
+        return True
+    await insert_report(
+        session,
+        agent_id,
+        kind=MSG_REPORT,
+        title=f"Stopped: {root.intent}",
+        body=clip_body(
+            f"The work I was waiting on was cancelled, so nothing is left running for this: {root.intent}", settings
+        ),
+        channel=channel,
+        intention_id=root_id,
+        root_id=root_id,
+        push_after=push_after_for(settings, now),
+        report_id=uuid.uuid5(_HANGING_NAMESPACE, str(root_id)),
+    )
+    logger.info("F099: root %s was left with nothing running; it was closed and reported", root_id)
+    return True
+
+
+async def end_hanging_roots_after_close(
+    database: Any, agent_id: str, intention_ids: Iterable[UUID], *, settings: Any
+) -> int:
+    """After a quiet close has COMMITTED (a ``remember``, ``report``, ``none`` or container child closed by its
+    writer or by the close pass), ``end_hanging_root`` for the roots of the closed children (2e final re-review N1).
+
+    A root whose only ``continue`` child was cancelled while such a sibling was open was left waiting by that close
+    (the sibling was open); once the sibling closes, nothing is left that will ever wake, expire or list the root,
+    and the quiet closers do not reach ``end_hanging_root`` on their own. A ``continue`` child that finishes wakes
+    its root instead, so a lineage gets here only through a cancel, which is what the REPORT says. Each root in its
+    own transaction, after the close: ``end_hanging_root`` takes the root lock first, and doing that inside the
+    closer's transaction, which holds the child row, would break the one lock order (child before root deadlocks
+    against a cancel). Idempotent (the marker, the REPORT's ``uuid5`` id). The callers call it only with continuation
+    on. Never raises: a failure here must never cost the close. Returns the number of roots closed."""
+    ids = list(intention_ids)
+    if not ids:
+        return 0
+    try:
+        async with database.session() as session:
+            root_ids = (
+                (
+                    await session.execute(
+                        select(Intention.root_id)
+                        .where(Intention.agent_id == agent_id, Intention.id.in_(ids), Intention.root_id != Intention.id)
+                        .distinct()
+                    )
+                )
+                .scalars()
+                .all()
+            )
+    except Exception:
+        logger.warning("F099: could not read the roots of %d closed intention(s)", len(ids), exc_info=True)
+        return 0
+    ended = 0
+    for root_id in sorted(root_ids):
+        try:
+            async with database.session() as session:
+                if await end_hanging_root(session, agent_id, root_id, settings=settings):
+                    ended += 1
+                await session.commit()
+        except Exception:
+            logger.warning("F099: could not check root %s for a hanging lineage", root_id, exc_info=True)
+    return ended
+
+
+HANGING_BATCH = 10  # hanging roots ended per sweep
+
+
+async def end_hanging_roots(
+    session: AsyncSession, agent_id: str, *, settings: Any, limit: int = HANGING_BATCH, now: datetime | None = None
+) -> list[UUID]:
+    """The sweep's backstop for ``end_hanging_root`` (2e final fix wave, round 3): every root left waiting on nothing,
+    however its last open row closed (a closer that checks no root, such as ``ScheduleManager._close_container``,
+    or a process that stopped between a close's commit and its check). At most ``limit``, oldest first (the one
+    cross-root lock order), one SAVEPOINT per root. Does not commit.
+
+    Due: a root with neither marker, not a container, with NO open intention in its lineage (any policy: the same
+    predicate as ``end_hanging_root``'s, so a root with a ``remember`` child still running is never ended), whose
+    newest arrival decided ``continue`` or ``revise``. That is exactly the hanging shape and nothing else: a root
+    that ended by its own decision has a ``drop``, ``report`` or ``ask`` arrival newest (and every gate, fallback and
+    failed arrival is written as ``drop`` or ``report``), a Phase 1 root has no arrival, and a ``continue`` whose
+    work came back has a newer arrival, because the result woke the root. ``end_hanging_root`` checks it all again
+    under the root lock, writes the marker and one REPORT, and is idempotent. Returns the roots it ended."""
+    now = now or datetime.now(UTC)
+    root = aliased(Intention)
+    lineage = aliased(Intention)
+    newest = (
+        select(IntentionArrival.decision)
+        .where(IntentionArrival.agent_id == agent_id, IntentionArrival.root_id == root.id)
+        .order_by(IntentionArrival.n.desc())
+        .limit(1)
+        .correlate(root)
+        .scalar_subquery()
+    )
+    due = (
+        select(root.id)
+        .where(
+            root.agent_id == agent_id,
+            root.id == root.root_id,
+            root.root_cancelled_at.is_(None),
+            root.root_expired_at.is_(None),
+            root.wake_policy != intentions.WAKE_CONTAINER,
+            ~exists().where(lineage.agent_id == agent_id, lineage.root_id == root.id, lineage.state.in_(OPEN_STATES)),
+            newest.in_(("continue", "revise")),
+        )
+        .order_by(root.created_at, root.id)
+        .limit(limit)
+    )
+    ended: list[UUID] = []
+    for root_id in (await session.execute(due)).scalars().all():
+        try:
+            async with session.begin_nested():
+                if await end_hanging_root(session, agent_id, root_id, settings=settings, now=now):
+                    ended.append(root_id)
+        except Exception:
+            logger.warning("F099: could not end hanging root %s; retried at the next sweep", root_id, exc_info=True)
+    return ended
+
+
+# ---------------------------------------------------------------------------
+# F099 Phase 2e: the owner's view of the roots (contract RootView, spec 4.6 "GET /intentions")
+# ---------------------------------------------------------------------------
+
+LINEAGE_VIEW_MAX = 50  # the lineage rows one root's view lists (a root's spawn limit is 12 with continuation on)
+ARRIVALS_VIEW_MAX = 5  # the newest arrivals one root's view lists
+ROOT_STATES = ("open", "all")
+
+
+def _lineage_row(row: Intention) -> dict[str, Any]:
+    return {
+        "id": str(row.id),
+        "parent_id": str(row.parent_id) if row.parent_id is not None else None,
+        "depth": row.depth,
+        "source_kind": row.source_kind,
+        "source_id": row.source_id,
+        "state": row.state,
+        "wake_policy": row.wake_policy,
+        "intent": row.intent,
+    }
+
+
+def _limits_view(limits: RootLimits) -> dict[str, Any]:
+    """``RootLimits`` as JSON. ``stalls`` saturates at the stall limit (it says whether the budget is spent, not how
+    long the run is): shown as it is, and a surface must not present it as a total."""
+    return asdict(limits)
+
+
+async def list_roots(
+    session: AsyncSession, agent_id: str, *, state: str, limit: int, settings: Any
+) -> list[dict[str, Any]]:
+    """The roots the owner can act on, newest first, each as a JSON-ready view (contract ``RootView``), in the
+    caller's transaction. ``state`` is ``open`` (no root marker, and an intention of the lineage still open: a
+    finished lineage, and one that was cancelled or expired, are not listed) or ``all``. A view carries the root's
+    own columns, its budgets (``root_limits``, none for a container), up to ``LINEAGE_VIEW_MAX`` lineage rows, its
+    newest ``ARRIVALS_VIEW_MAX`` arrivals and its open proposals. Raises ``ValueError`` for another ``state``.
+    Read-only; four queries for the page plus the budget reads of each root."""
+    if state not in ROOT_STATES:
+        raise ValueError(f"state must be one of {ROOT_STATES}, not {state!r}")
+    query = select(Intention).where(Intention.agent_id == agent_id, Intention.id == Intention.root_id)
+    if state == "open":
+        lineage_row = aliased(Intention)
+        query = query.where(
+            Intention.root_cancelled_at.is_(None),
+            Intention.root_expired_at.is_(None),
+            exists().where(
+                lineage_row.agent_id == agent_id,
+                lineage_row.root_id == Intention.id,
+                lineage_row.state.in_(OPEN_STATES),
+            ),
+        )
+    roots = list(
+        (await session.execute(query.order_by(Intention.created_at.desc(), Intention.id).limit(limit))).scalars()
+    )
+    if not roots:
+        return []
+    ids = [root.id for root in roots]
+    lineage: dict[UUID, list[Intention]] = {root_id: [] for root_id in ids}
+    for row in (
+        await session.execute(
+            select(Intention)
+            .where(Intention.agent_id == agent_id, Intention.root_id.in_(ids))
+            .order_by(Intention.depth, Intention.created_at, Intention.id)
+        )
+    ).scalars():
+        lineage[row.root_id].append(row)
+    arrivals: dict[UUID, list[IntentionArrival]] = {root_id: [] for root_id in ids}
+    for arrival in (
+        await session.execute(
+            select(IntentionArrival)
+            .where(IntentionArrival.agent_id == agent_id, IntentionArrival.root_id.in_(ids))
+            .order_by(IntentionArrival.root_id, IntentionArrival.n.desc())
+        )
+    ).scalars():
+        if len(arrivals[arrival.root_id]) < ARRIVALS_VIEW_MAX:
+            arrivals[arrival.root_id].append(arrival)
+    proposals: dict[UUID, list[dict[str, Any]]] = {root_id: [] for root_id in ids}
+    for proposal in (
+        await session.execute(
+            select(IntentionProposal)
+            .where(
+                IntentionProposal.agent_id == agent_id,
+                IntentionProposal.root_id.in_(ids),
+                IntentionProposal.state.in_(_OPEN_PROPOSAL_STATES),
+            )
+            .order_by(IntentionProposal.created_at, IntentionProposal.id)
+        )
+    ).scalars():
+        proposals[proposal.root_id].append(proposal_view(proposal))
+    views: list[dict[str, Any]] = []
+    for root in roots:
+        rows = lineage[root.id]
+        limits = (
+            None
+            if root.wake_policy == intentions.WAKE_CONTAINER
+            else _limits_view(await root_limits(session, agent_id, root.id, settings=settings))
+        )
+        views.append(
+            {
+                "id": str(root.id),
+                "short_id": short_id(root.id),
+                "intent": root.intent,
+                "state": root.state,
+                "wake_policy": root.wake_policy,
+                "authority": root.authority,
+                "origin_kind": root.origin_kind,
+                "origin_channel": root.origin_channel,
+                "created_at": _iso(root.created_at),
+                "deadline": _iso(root.deadline),
+                "root_cancelled_at": _iso(root.root_cancelled_at),
+                "root_expired_at": _iso(root.root_expired_at),
+                "open_rows": sum(1 for row in rows if row.state in OPEN_STATES),
+                "limits": limits,
+                "lineage": [_lineage_row(row) for row in rows[:LINEAGE_VIEW_MAX]],
+                "lineage_truncated": len(rows) > LINEAGE_VIEW_MAX,
+                "arrivals": [
+                    {
+                        "n": a.n,
+                        "decision": a.decision,
+                        "progress": a.progress,
+                        "outcome": a.outcome,
+                        "gate_reason": a.gate_reason,
+                        "decided_at": _iso(a.decided_at),
+                    }
+                    for a in reversed(arrivals[root.id])
+                ],
+                "open_proposals": proposals[root.id],
+            }
+        )
+    return views

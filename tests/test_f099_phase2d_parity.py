@@ -183,7 +183,7 @@ async def test_the_real_bot_against_the_real_routes_is_inert_under_prods_flags(e
 
 def test_2d_added_no_migration_and_no_setting():  # PIN: changes when a later PR adds one on purpose
     migrations = Path(__file__).resolve().parents[1] / "sql" / "migrations"
-    assert sorted(migrations.glob("*.sql"))[-1].name.startswith("084_")
+    assert sorted(migrations.glob("*.sql"))[-1].name.startswith("085_")  # 2e adds 085; 2d added none
     named = {name for name in Settings.model_fields if "proposal" in name or "owner_action" in name}
     assert named == {"intention_proposal_ttl_hours"}
 

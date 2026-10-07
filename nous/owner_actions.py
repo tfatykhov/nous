@@ -29,6 +29,11 @@ DECISION_REFUSALS = {
     "ended": "That work has already ended, so nothing ran.",
     "not_pending": "That proposal was already decided the other way.",
 }
+# 2e: the one refusal of a cancel. A root with nothing running is not marked: a marker would only silence a
+# later result.
+CANCEL_REFUSALS = {
+    "finished": "That work has already finished, so there was nothing to cancel.",
+}
 ANSWER_REFUSALS = {
     "answered": "That question was already answered.",
     "expired": "That question expired before it was answered.",

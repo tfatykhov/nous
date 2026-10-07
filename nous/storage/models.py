@@ -495,6 +495,9 @@ class Intention(Base):
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     claim_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # F099 2e (migration 085): tokens (in + out) that failed attempts of a claim spent, on the claim's deepest
+    # intention. A retried attempt writes no arrival row, so this is where its cost is kept.
+    failed_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     result_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

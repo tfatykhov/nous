@@ -211,7 +211,7 @@ async def test_a_reported_late_result_reaches_telegram_too(env_factory):  # noqa
     no push time, so it never left chat."""
     env = await _env(env_factory)
     root = await make_root(env)
-    await set_intention(env, root.id, root_cancelled_at=datetime.now(UTC))  # the root is closed
+    await set_intention(env, root.id, root_expired_at=datetime.now(UTC))  # the root is closed
     recorded = await record(env, root, body="it finished after the cancel")
     assert recorded.reported is True
     (report,) = [r for r in await _owner_rows(env)]

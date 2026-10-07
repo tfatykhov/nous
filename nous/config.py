@@ -1212,8 +1212,8 @@ class Settings(BaseSettings):
     # stays off.
     intentions_enabled: bool = False
     # F099 Phase 2: continue-policy results return to Nous's own continuation
-    # turn instead of the chat (spec section 4.3). Needs intentions_enabled and,
-    # until PR-2e ships the runner, main.py forces it off (CONTINUATION_RUNNER_READY).
+    # turn instead of the chat (spec section 4.3). Needs intentions_enabled. Default off:
+    # the owner turns it on (PR-2e shipped the runner and the owner's cancel).
     continuation_enabled: bool = False
     # Bounds per root (section 4.6). Derived from rows, never counted in memory.
     continuation_max_depth: int = Field(default=3, ge=1)
