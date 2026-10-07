@@ -792,23 +792,9 @@ class ContinuationRunner:
 
 **Failure** (§4.5 item 7): a raise, a `TimeoutError` from `wait_for`, or a fence rejection → `fail_attempt` (`attempts + 1`, `claim_token = NULL`, `state = result_ready` or, at the cap, `failed_report`) and `expire_staged` (2d). A `CancelledError` from `stop()` or `cancel_root` re-raises after releasing the claim.
 
-**`main.py` wiring (2e only):** after the result reconciler block (`nous/main.py:1039-1056`):
+> **Superseded by #705 (the fence-rejection case only):** `fail_attempt` is fenced on the same `claim_token` as the commit, so a commit that lost its fence writes nothing and charges nothing: the claim was released, or the root was cancelled or expired, under the turn (as built, `ContinuationRunner._commit` returns None and calls no `fail_attempt`). A raise and a timeout still go through `fail_attempt` as above.
 
-```python
-    continuation_runner = None
-    if settings.continuation_enabled:
-        from nous.handlers.continuation_runner import ContinuationRunner
-        continuation_runner = ContinuationRunner(database=database, settings=settings, runner=runner, heart=heart,
-                                                 brain=brain, bus=bus, dispatcher=dispatcher, publisher=publisher,
-                                                 cancel_dag=(dag_orchestrator.cancel_dag if dag_orchestrator else None))
-        runner.set_cancelled_roots(continuation_runner.root_is_cancelled)
-        if bus is not None:
-            bus.on("intention.result_ready", continuation_runner.on_result_ready)
-        await continuation_runner.start()
-    components["continuation_runner"] = continuation_runner
-```
-
-It must be constructed after `dag_orchestrator` (line 1307) and the A2UI block (1445-1477), so it sits at the end of component construction; `shutdown_components` (line 1519) stops it before the heartbeat runner. `build_reconciler` (`nous/heart/result_reconciler.py:285`) takes `continuation: ContinuationRunner | None = None` and registers `ContinuationWakePass(database, settings, wake=continuation.wake)` (name `"continuation"`) when the flag is on: it runs `repair_missing_results` then calls `wake()`; it never runs a turn (the pass timeout is 30 s, line 51). `AgentRunner.set_cancelled_roots(view: Callable[[UUID], bool])` stores `self._root_cancelled`.
+**`main.py` wiring (built in 2c-2, inert until 2e):** `_build_continuation_runner` constructs the runner (with its `OwnerPublisher`, subscribed to `intention.result_ready`) only when `continuation_enabled` and `CONTINUATION_RUNNER_READY` are both true, so it is `None` until 2e (2c-2 plan C1). It is built before the reconciler block, so `build_reconciler(..., continuation_wake=runner.wake)` can register `ContinuationWakePass` (name `"continuation"`, flag on only: `repair_missing_results`, then `wake()`, never a turn); it is started as the last statement of `create_components`, once the spawn and DAG tools exist; `shutdown_components` stops it first, before the heartbeat runner (2c-2 plan C2). 2e flips the constant and adds `runner.set_cancelled_roots(continuation_runner.root_is_cancelled)` (`AgentRunner.set_cancelled_roots(view: Callable[[UUID], bool])` stores `self._root_cancelled`) and the orchestrator's `cancel_dag`.
 
 The runner's loop body uses the Fix-Z shape of `_result_reconciler_loop` (`nous/main.py:205-217`): `except asyncio.CancelledError: if cancel_requested(): break; logger.exception(...)`.
 

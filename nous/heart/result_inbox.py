@@ -759,7 +759,8 @@ _HEADER = (
 _DELIMITER = re.compile(r"<(\s*/?\s*result_message)", re.IGNORECASE)
 
 
-def _neutralize(text: str) -> str:
+def neutralize_delimiters(text: str) -> str:
+    """``text`` with every ``<result_message`` / ``</result_message`` escaped, so it cannot open or close one."""
     return _DELIMITER.sub(r"&lt;\1", text)
 
 
@@ -770,18 +771,19 @@ _PROPOSAL_TRAILER = (
 )
 
 
-def format_inbox_messages(rows: list[ResultInbox], max_items: int, older: int = 0) -> str:
+def format_inbox_messages(rows: list[ResultInbox], max_items: int, older: int = 0, header: str | None = None) -> str:
     """Render claimed rows: the ``max_items`` newest, plus a note on the rest.
 
     ``older`` counts rows claimed together with ``rows`` but never loaded
-    (see ``ResultInboxStore.claim``); the note includes them.
+    (see ``ResultInboxStore.claim``); the note includes them. ``header`` replaces the chat's
+    (F099: a continuation turn is told its results are data, not that it should tell the user).
     """
     if not rows:
         return ""
     ordered = sorted(rows, key=lambda r: r.created_at)
     shown = ordered[-max_items:]
     hidden = len(ordered) - len(shown) + older
-    parts = [_HEADER]
+    parts = [_HEADER if header is None else header]
     if hidden:
         # The count only: listing every hidden id would let a backlog grow
         # the prompt past what max_items is meant to bound.
@@ -791,8 +793,8 @@ def format_inbox_messages(rows: list[ResultInbox], max_items: int, older: int = 
         message = (
             f'<result_message type="{r.msg_type}" source="{r.source_kind}" '
             f'id="{r.source_id.hex[:8]}" finished="{ts}">\n'
-            f"Title: {_neutralize(r.title)}\n"
-            f"{_neutralize(r.body)}\n"
+            f"Title: {neutralize_delimiters(r.title)}\n"
+            f"{neutralize_delimiters(r.body)}\n"
             "</result_message>"
         )
         parts.append(f"{message}\n{_PROPOSAL_TRAILER}" if r.msg_type == "PROPOSAL" else message)

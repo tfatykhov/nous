@@ -686,9 +686,14 @@ def _close_reason(outcome: str) -> str:
     return CLOSE_RESOLVED
 
 
-def _clip(text: str, settings: Any) -> str:
-    limit = int(getattr(settings, "result_inbox_body_max_chars", 4000))
-    return text if len(text) <= limit else text[: limit - 20].rstrip() + "\n[truncated]"
+def clip_body(text: str, settings: Any, *, limit: int | None = None) -> str:
+    """``text`` cut to the inbox's body limit (``result_inbox_body_max_chars``), or to ``limit`` when that is
+    smaller (never below 40 characters), marked ``[truncated]`` when cut."""
+    cap = int(getattr(settings, "result_inbox_body_max_chars", 4000))
+    if limit is not None:
+        cap = min(cap, limit)
+    cap = max(cap, 40)  # a tiny limit still leaves room for the marker
+    return text if len(text) <= cap else text[: cap - 20].rstrip() + "\n[truncated]"
 
 
 async def _lock_claimed(session: AsyncSession, agent_id: str, root_id: UUID, ids: list[UUID]) -> None:
@@ -748,6 +753,14 @@ async def _root_origin_channel(session: AsyncSession, agent_id: str, root_id: UU
     return channel or fallback
 
 
+async def claim_owner_channel(session: AsyncSession, agent_id: str, claim: Claim, *, settings: Any) -> str | None:
+    """Where an owner-facing row of this claim goes (contract 4.14 item 5): the root's origin channel, else the
+    deepest claimed intention's, else the default chat; None when there is none. The commit and the runner ask
+    this one function, so an ask the runner lets through is never one the commit refuses."""
+    origin = await _root_origin_channel(session, agent_id, claim.root_id, claim.deepest.origin_channel)
+    return owner_channel(settings, origin)
+
+
 async def _verified_progress(
     session: AsyncSession,
     agent_id: str,
@@ -785,6 +798,23 @@ async def _verified_progress(
         )
     ).scalar_one()
     return bool(spawned)
+
+
+async def has_open_work(session: AsyncSession, agent_id: str, claim: Claim) -> bool:
+    """Whether a ``continue`` or ``revise`` of this claim would leave anything running under its root (final review
+    I1): an open intention of the root other than the claimed ones (a fan-out's sibling still running, or this
+    turn's spawn, which a lineage makes ``continue`` and so keeps open until the next claim). The commit closes the
+    claimed intentions, so without one nothing would ever wake the root again. A child that already closed does
+    not count, whenever it was spawned: an inline spawn (``await_result``) closes within the turn and leaves
+    nothing running (re-review N1). Rows only."""
+    ids = [i.id for i in claim.intentions]
+    open_elsewhere = exists().where(
+        Intention.agent_id == agent_id,
+        Intention.root_id == claim.root_id,
+        Intention.id.notin_(ids),
+        Intention.state.in_(OPEN_STATES),
+    )
+    return bool((await session.execute(select(open_elsewhere))).scalar_one())
 
 
 async def _record_brain(
@@ -932,9 +962,7 @@ async def _commit_arrival(
         kind = {"ask": MSG_QUESTION, "report": MSG_REPORT}.get(resolution.decision)
     channel: str | None = None
     if kind is not None:
-        channel = owner_channel(
-            settings, await _root_origin_channel(session, agent_id, root_id, deepest.origin_channel)
-        )
+        channel = await claim_owner_channel(session, agent_id, claim, settings=settings)
     if kind == MSG_QUESTION and channel is None:
         raise ValueError(
             f"root {root_id} has no owner channel (no origin channel, no default chat): an ask has nowhere to ask"
@@ -1034,7 +1062,7 @@ async def _commit_arrival(
                     agent_id,
                     kind=kind,
                     title=f"{'Question' if kind == MSG_QUESTION else 'Update'}: {deepest.intent}",
-                    body=_clip(body, settings),
+                    body=clip_body(body, settings),
                     channel=channel,
                     intention_id=deepest.id,
                     root_id=root_id,
@@ -1082,6 +1110,7 @@ async def fail_attempt(
     settings: Any,
     brain: Any = None,
     now: datetime | None = None,
+    arrival_id: UUID | None = None,
 ) -> str:
     """T8 and T12: one claimed attempt failed (the turn raised or timed out, or its lease expired).
 
@@ -1095,7 +1124,9 @@ async def fail_attempt(
     more failure (a successful commit resets the count). Does not commit.
 
     Each path charges the attempt in its one fenced UPDATE (the retry's move, or the arrival's moves at the
-    cap), so the claim token in that UPDATE is the fence and nothing else stands in for it.
+    cap), so the claim token in that UPDATE is the fence and nothing else stands in for it. ``arrival_id`` is the
+    id of the cap's arrival row (a new one when not given), as ``commit_arrival`` takes it: the caller can name
+    that row in ``intention.arrival_decided``.
     """
     now = now or datetime.now(UTC)
     ids = sorted(i.id for i in claim.intentions)
@@ -1143,7 +1174,7 @@ async def fail_attempt(
                 settings=settings,
                 report_text=f"{body}\n\n{raw}" if raw else body,
                 wrote_memory=False,
-                arrival_id=uuid.uuid4(),
+                arrival_id=arrival_id or uuid.uuid4(),
                 now=now,
             )
             return CLOSE_FAILED_REPORT
@@ -1398,7 +1429,7 @@ async def _settle_stranded_rows(session: AsyncSession, agent_id: str, *, setting
                 agent_id,
                 kind=MSG_REPORT,
                 title=f"Late results: {root.intent}",
-                body=_clip(f"{head}\n\n{raw_results_text(rows)}", settings),
+                body=clip_body(f"{head}\n\n{raw_results_text(rows)}", settings),
                 channel=channel,
                 intention_id=root_id,
                 root_id=root_id,
@@ -1504,7 +1535,7 @@ async def _expire_root(
                 agent_id,
                 kind=MSG_REPORT,
                 title=f"Closed after {ttl_hours:g} hours: {row.intent}",
-                body=_clip(f"{head}\n\nWhat I had so far:\n{raw}" if raw else head, settings),
+                body=clip_body(f"{head}\n\nWhat I had so far:\n{raw}" if raw else head, settings),
                 channel=channel,
                 intention_id=root_id,
                 root_id=root_id,
@@ -1614,34 +1645,41 @@ async def wake_terminal_arrivals(
     )
     woken: list[UUID] = []
     for arrival in arrivals:
-        async with session.begin_nested():
-            terminal, answered, questions = await _question_state(
-                session, agent_id, arrival.id, settings=settings, now=now
+        # Read before the SAVEPOINT: its rollback expires a row it changed, and an async session cannot reload one.
+        arrival_id = arrival.id
+        try:
+            async with session.begin_nested():
+                terminal, answered, questions = await _question_state(
+                    session, agent_id, arrival_id, settings=settings, now=now
+                )
+                if not terminal:
+                    continue
+                # Wake first: wake_arrival takes the root before any intention, and the rows below go only to the
+                # intentions it moved. One the expiry closed meanwhile gets none: on a closed intention
+                # record_result would turn the row into a report telling the owner that the owner did not answer.
+                moved = await wake_arrival(session, agent_id, arrival_id, now=now)
+                if not answered:
+                    for intention_id in moved:
+                        await record_result(
+                            session,
+                            agent_id,
+                            intention_id=intention_id,
+                            source_kind=SOURCE_INTENTION_REPORT,
+                            source_id=uuid.uuid5(_EXPIRY_NAMESPACE, f"{arrival_id}:{intention_id}"),
+                            msg_type="INFORM",
+                            title="The owner did not answer",
+                            body=(
+                                "I asked the owner a question and the owner did not answer within "
+                                f"{float(settings.intention_proposal_ttl_hours):g} hours: {questions[0].body[:500]}"
+                            ),
+                            arrival_id=arrival_id,
+                            settings=settings,
+                        )
+                woken.extend(moved)
+        except Exception:
+            logger.warning(
+                "F099: could not wake arrival %s; it is retried at the next sweep", arrival_id, exc_info=True
             )
-            if not terminal:
-                continue
-            # Wake first: wake_arrival takes the root before any intention, and the rows below go only to the
-            # intentions it moved. One the expiry closed meanwhile gets none: on a closed intention record_result
-            # would turn the row into a report telling the owner that the owner did not answer.
-            moved = await wake_arrival(session, agent_id, arrival.id, now=now)
-            if not answered:
-                for intention_id in moved:
-                    await record_result(
-                        session,
-                        agent_id,
-                        intention_id=intention_id,
-                        source_kind=SOURCE_INTENTION_REPORT,
-                        source_id=uuid.uuid5(_EXPIRY_NAMESPACE, f"{arrival.id}:{intention_id}"),
-                        msg_type="INFORM",
-                        title="The owner did not answer",
-                        body=(
-                            "I asked the owner a question and the owner did not answer within "
-                            f"{float(settings.intention_proposal_ttl_hours):g} hours: {questions[0].body[:500]}"
-                        ),
-                        arrival_id=arrival.id,
-                        settings=settings,
-                    )
-            woken.extend(moved)
     return woken
 
 
@@ -1808,6 +1846,7 @@ async def record_result(
             intention_id=intention_id,
             root_id=root_id,
             arrival_id=arrival_id,
+            push_after=push_after_for(settings, now),  # F099 2c: pushed to Telegram too (R2), at the end of quiet hours
         )
         wrote = report_row is not None
         return ResultRecorded(report_row, wrote, state, False, wrote, intention_id, root_id)

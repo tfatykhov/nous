@@ -80,6 +80,9 @@ INTERNAL_ONLY_DENYLIST: frozenset[str] = frozenset(
 )
 # Offered to continuation turns only; removed when ctx.spawn_blocked.
 INTERNAL_ONLY_SPAWN_TOOLS: frozenset[str] = frozenset({"spawn_task", "dag_create"})
+# A continuation's per-turn extra tools: offered only as extra_tools, appended after the narrowing.
+# Classified for the ledger, never in the allowed set (2d adds propose_action).
+INTERNAL_ONLY_EXTRA_TOOLS: frozenset[str] = frozenset({"resolve_intention"})
 # Per-call rules (path and lineage), evaluated at dispatch.
 INTERNAL_ONLY_CHECKED_TOOLS: frozenset[str] = frozenset({"write_file", "cancel_task"})
 # Logged with their root when called from a lineage (spec section 9).
@@ -95,7 +98,7 @@ def internal_only_allowed(name: str, *, ctx: ExecutionContext) -> bool:
     cls = tool_class(name)
     if cls is None or cls.side_effect not in ("none", "write"):
         return False
-    if name in INTERNAL_ONLY_DENYLIST:
+    if name in INTERNAL_ONLY_DENYLIST or name in INTERNAL_ONLY_EXTRA_TOOLS:
         return False
     if name in INTERNAL_ONLY_SPAWN_TOOLS:
         return ctx.kind == "continuation" and not ctx.spawn_blocked

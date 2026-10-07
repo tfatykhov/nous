@@ -738,6 +738,7 @@ class HeartbeatRunner:
             # only a recorded success or an explicit skip overrides it.
             self._registry.begin_run(check.name)
             run_succeeded: bool | None = False
+            rolling_up = False  # F099: the roll-up is the last await of the success branch
             sibling_cancelled = False
             outcome: dict[str, bool] = {}
             outcome_token = RUN_OUTCOME.set(outcome)
@@ -769,9 +770,6 @@ class HeartbeatRunner:
                 await self._record_run_stats(check, success=True)
                 # F099 Phase 0b: the final run's findings, before the run can end.
                 await self._record_final_findings(check, result)
-                # F099: after the run's own record, as in trigger_check: a cancel here loses only the roll-up.
-                if result.tokens_used:
-                    await self._roll_check_tokens_into_dag(check, result.tokens_used)
 
                 # #273: Collect self-disabled checks with callbacks
                 if isinstance(check, DynamicCheck) and result.self_disabled and check.on_complete_prompt:
@@ -783,6 +781,13 @@ class HeartbeatRunner:
                     all_findings.extend(result.findings)
                     for f in result.findings:
                         current_fingerprints.setdefault(check.name, set()).add(f.fingerprint())
+
+                # F099: last, after the run's own record, the callback candidate and the findings: a cancel from
+                # within the roll-up loses only the increment, and the run is a success (see the arm below).
+                if result.tokens_used:
+                    rolling_up = True
+                    await self._roll_check_tokens_into_dag(check, result.tokens_used)
+                    rolling_up = False
 
             except TimeoutError:
                 check.mark_failure()
@@ -798,25 +803,34 @@ class HeartbeatRunner:
                     # committed.
                     run_succeeded = False
                     raise
-                # Something awaited for this check was cancelled elsewhere.
-                # Nobody asked this loop to stop: a failed run of this check.
-                check.mark_failure()
-                # The arm also covers the stats write and the final-run findings write
-                # that follow a successful run.
-                successful_checks.discard(check.name)
-                if run_succeeded:
-                    # It was that write. Whether its record landed is unknown,
-                    # and the write is a relative increment: one run gets no
-                    # second write (see NO RETRY in _record_run_stats).
+                if rolling_up:
+                    # Cancelled from within the roll-up, which runs after the run's stats and findings were
+                    # written: the run succeeded, only the increment (a relative write, not retried) is in doubt.
                     logger.error(
-                        "Heartbeat check '%s': the write of its success stats or final-run findings was "
-                        "cancelled from within — the record may or may not have landed and is not written again",
+                        "Heartbeat check '%s': the roll-up of its tokens into its DAG was cancelled from within — "
+                        "the run itself succeeded; the increment may or may not have landed and is not written again",
                         check.name,
                     )
                 else:
-                    logger.error("Heartbeat check '%s' was cancelled from within — a failed run", check.name)
-                    await self._record_run_stats(check, success=False, error_msg="cancelled")
-                run_succeeded = False
+                    # Something awaited for this check was cancelled elsewhere.
+                    # Nobody asked this loop to stop: a failed run of this check.
+                    check.mark_failure()
+                    # The arm also covers the stats write and the final-run findings write
+                    # that follow a successful run; the roll-up is handled apart (above).
+                    successful_checks.discard(check.name)
+                    if run_succeeded:
+                        # It was that write. Whether its record landed is unknown,
+                        # and the write is a relative increment: one run gets no
+                        # second write (see NO RETRY in _record_run_stats).
+                        logger.error(
+                            "Heartbeat check '%s': the write of its success stats or final-run findings was "
+                            "cancelled from within — the record may or may not have landed and is not written again",
+                            check.name,
+                        )
+                    else:
+                        logger.error("Heartbeat check '%s' was cancelled from within — a failed run", check.name)
+                        await self._record_run_stats(check, success=False, error_msg="cancelled")
+                    run_succeeded = False
             except Exception as exc:
                 check.mark_failure()
                 logger.exception("Heartbeat check '%s' failed", check.name)
@@ -1206,6 +1220,9 @@ class HeartbeatRunner:
                     await triage_runner.end_conversation(session_id)
                 except Exception:
                     pass
+                # F099: a lineage check's callback counts against its DAG too (a no-op unless continuation is on).
+                # Last, after the conversation ended: a cancel from within it cannot skip the clean-up.
+                await self._roll_check_tokens_into_dag(check, tokens)
                 return
             except Exception:
                 logger.exception(
