@@ -764,7 +764,11 @@ class NousTelegramBot:
     async def _owner_post(self, path: str, payload: dict[str, Any]) -> tuple[int, dict]:
         """POST to a REST owner route: ``(status, body)``; status 0 when the server could not be reached."""
         try:
-            response = await self._http.post(f"{self.nous_url}{path}", json=payload, timeout=OWNER_REQUEST_TIMEOUT)
+            response = await self._http.post(
+                f"{self.nous_url}{path}",
+                json=payload,
+                timeout=httpx.Timeout(connect=10, read=OWNER_REQUEST_TIMEOUT, write=10, pool=10),
+            )
         except Exception as exc:
             logger.warning("owner action request failed (%s)", type(exc).__name__)
             return 0, {}
@@ -803,16 +807,24 @@ class NousTelegramBot:
         approve = action == "a"
         await self._answer_callback(query_id, "Approving\u2026" if approve else "Rejecting\u2026")
         _status, text, final = await self._decide(hex_id, approve, user_id)  # a tap has no chat to fall through to
+        # The call may have run by now: a raised Telegram call (transport error, an HTML error page) is logged, and
+        # one never skips the other, so the owner is still told.
         if final and message.get("message_id") is not None:
-            await self._tg(
-                "editMessageReplyMarkup",
-                params={
-                    "chat_id": chat_id,
-                    "message_id": message["message_id"],
-                    "reply_markup": json.dumps({"inline_keyboard": []}),
-                },
-            )
-        await self._send(chat_id, text)
+            try:
+                await self._tg(
+                    "editMessageReplyMarkup",
+                    params={
+                        "chat_id": chat_id,
+                        "message_id": message["message_id"],
+                        "reply_markup": json.dumps({"inline_keyboard": []}),
+                    },
+                )
+            except Exception as exc:
+                logger.warning("could not remove the buttons of a proposal (%s)", type(exc).__name__)
+        try:
+            await self._send(chat_id, text)
+        except Exception as exc:
+            logger.warning("could not send the follow-up of an owner action (%s)", type(exc).__name__)
 
     async def _handle_owner_text(self, message: dict[str, Any], chat_id: Any, user_id: Any, text: str) -> bool:
         """``/approve``, ``/reject``, ``/answer`` and a reply to one of our messages, in the owner chat. True when

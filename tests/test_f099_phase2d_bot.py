@@ -6,10 +6,18 @@ import json
 import uuid
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from nous import owner_actions
-from nous.telegram_bot import NousTelegramBot, describe_answer, describe_decision, parse_callback, parse_chat_id
+from nous.telegram_bot import (
+    OWNER_REQUEST_TIMEOUT,
+    NousTelegramBot,
+    describe_answer,
+    describe_decision,
+    parse_callback,
+    parse_chat_id,
+)
 
 HEX = "a" * 32
 SHORT = HEX[:8]
@@ -141,6 +149,55 @@ async def test_an_unreachable_server_keeps_the_buttons():
     bot._http = Down()
     await bot._handle_update(_callback(f"f099:p:{HEX}:a"))
     assert _sent(bot) == [UNREACHABLE] and "editMessageReplyMarkup" not in _methods(bot)
+
+
+def _telegram_raises_on(bot, failing: str) -> None:
+    """Telegram raises (a transport error, or its HTML 502 page) on ``failing``; every call is still recorded."""
+
+    async def fake_tg(method, params=None):
+        bot.tg.append((method, params))
+        if method == failing:
+            raise httpx.ConnectError("telegram is unreachable")
+        return {}
+
+    bot._tg = fake_tg
+
+
+async def test_a_tap_whose_button_removal_raises_still_tells_the_owner():
+    """2d-8 review I1: the route answered 200 (the call ran), so a raised ``editMessageReplyMarkup`` must not skip
+    the one line that tells the owner it did."""
+    bot = _bot({DECIDE: EXECUTED})
+    _telegram_raises_on(bot, "editMessageReplyMarkup")
+    await bot._handle_update(_callback(f"f099:p:{HEX}:a"))
+    assert bot._http.calls == [(DECIDE, {"decision": "approve", "actor": "telegram:42"})]
+    assert _methods(bot) == ["answerCallbackQuery", "editMessageReplyMarkup", "sendMessage"]
+    assert _sent(bot) == [f"Approved and executed ({SHORT})."]
+
+
+async def test_a_tap_whose_follow_up_raises_still_returns_normally():
+    """2d-8 review I1: a raised ``sendMessage`` is logged, not raised into the poll loop."""
+    bot = _bot({DECIDE: EXECUTED})
+    _telegram_raises_on(bot, "sendMessage")
+    await bot._handle_update(_callback(f"f099:p:{HEX}:a"))
+    assert len(bot._http.calls) == 1
+    assert _methods(bot) == ["answerCallbackQuery", "editMessageReplyMarkup", "sendMessage"]
+
+
+async def test_the_owner_route_bounds_its_connect_like_the_chat_call():
+    """2d-8 review m1: only the read may take as long as an approved call; a dropped connection fails in 10 s."""
+    seen = []
+
+    class Recording(_FakeHttp):
+        async def post(self, url, json=None, timeout=None):  # noqa: A002 - httpx's keyword
+            seen.append(timeout)
+            return await super().post(url, json=json, timeout=timeout)
+
+    bot = _bot()
+    bot._http = Recording({DECIDE: EXECUTED})
+    await bot._handle_update(_callback(f"f099:p:{HEX}:a"))
+    (timeout,) = seen
+    assert isinstance(timeout, httpx.Timeout)
+    assert (timeout.connect, timeout.read, timeout.write, timeout.pool) == (10, OWNER_REQUEST_TIMEOUT, 10, 10)
 
 
 @pytest.mark.parametrize(
@@ -312,11 +369,12 @@ async def test_a_refused_reply_is_told_why_and_not_forwarded():
 # ---- everything else is untouched ----------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("command", ["/approve", "/reject", "/answer"])
-async def test_a_command_outside_the_owner_chat_is_not_consumed_and_takes_the_old_path(command):
-    """Parity for every other chat: it goes to the agent as it always did."""
+@pytest.mark.parametrize("text", [f"/approve {SHORT}", f"/reject {SHORT}", f"/answer {SHORT} yes"])
+async def test_a_command_outside_the_owner_chat_is_not_consumed_and_takes_the_old_path(text):
+    """Parity for every other chat: it goes to the agent as it always did. Each command is well formed (2d-8 review
+    m2), so the owner-chat gate alone keeps it from the route."""
     bot = _bot(allowed=frozenset({42, 7}))
-    await bot._handle_update(_message(f"{command} {SHORT} yes", user=7, chat=7))
+    await bot._handle_update(_message(text, user=7, chat=7))
     assert bot._http.calls == []
     bot._chat_streaming.assert_awaited_once()
 
