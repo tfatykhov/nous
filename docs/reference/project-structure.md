@@ -13,7 +13,8 @@ nous/
 ├── nous/                       # Python package (~30,000 lines)
 │   ├── config.py               # Settings via pydantic-settings
 │   ├── main.py                 # Entry point, component wiring, lifecycle
-│   ├── telegram_bot.py         # Telegram interface (streaming + usage)
+│   ├── telegram_bot.py         # Telegram interface (streaming + usage); F099 2d: owner actions (buttons, /approve, /reject, /answer, reply-to)
+│   ├── owner_actions.py        # F099 Phase 2d: callback-data codec shared by the publisher and the Telegram bot (stdlib only)
 │   ├── events.py               # Event bus (async pub/sub)
 │   ├── utils.py                # Shared utilities
 │   ├── loop_watchdog.py        # Event-loop stall watchdog (stack dump + exit)
@@ -31,7 +32,7 @@ nous/
 │   │   ├── graph_linker.py     # Cross-type auto-linking (common-template embedding)
 │   │   ├── guardrails.py       # CEL expression guardrails
 │   │   ├── intentions.py       # F099: brain.intentions — spec, wake-policy defaults, lineage (a fire only under an open container), in-transaction insert, legacy close
-│   │   ├── continuation.py     # F099 Phase 2: the continuation store: the inbox primitives, the same-transaction move of a continue result, owner-facing rows, the startup rollback; Phase 2c: the claim, the gate and the budgets (derived from rows), the fenced commit, failure and lease, the TTL sweep, the ask wake rule (the runner that calls it: `handlers/continuation_runner.py`)
+│   │   ├── continuation.py     # F099 Phase 2: the continuation store: the inbox primitives, the same-transaction move of a continue result, owner-facing rows, the startup rollback; Phase 2c: the claim, the gate and the budgets (derived from rows), the fenced commit, failure and lease, the TTL sweep, the ask wake rule (the runner that calls it: `handlers/continuation_runner.py`); Phase 2d: staging, publish and expiry of proposals, the owner's decisions and answers
 │   │   ├── quality.py          # Decision quality scoring
 │   │   ├── schemas.py          # Pydantic models
 │   │   └── spreading_activation.py  # Density-gated multi-hop graph traversal
@@ -70,7 +71,7 @@ nous/
 │   │   ├── sleep_handler.py       # Sleep/reflection handler
 │   │   ├── subtask_worker.py      # Async subtask execution
 │   │   ├── continuation_runner.py # F099 Phase 2c: ContinuationRunner (the loop, the turn, resolve_intention, the follow-up and fallbacks), build_arrival_prompt
-│   │   ├── continuation_publisher.py # F099 Phase 2c: OwnerPublisher, the owner push to Telegram (quiet-hours aware, once per row)
+│   │   ├── continuation_publisher.py # F099 Phase 2c: OwnerPublisher, the owner push to Telegram (quiet-hours aware, once per row); Phase 2d: PROPOSAL rows with buttons, QUESTION rows with force_reply, escaped HTML
 │   │   ├── task_scheduler.py      # Cron/one-shot scheduling
 │   │   └── time_parser.py         # Natural language time parsing
 │   ├── skills/                 # Skill discovery system (F011)
@@ -120,7 +121,8 @@ nous/
 │   ├── security/
 │   │   └── secrets.py          # scan_secrets: shared by send_email (refuse) and the F098 result memory writer (skip)
 │   └── api/                    # External interfaces
-│       ├── rest.py             # Starlette REST API (52 endpoints)
+│       ├── rest.py             # Starlette REST API (109 endpoints)
+│       ├── intention_routes.py # F099 Phase 2d: the four owner-action routes (decide, answer, list), thin over ContinuationRunner
 │       ├── mcp.py              # MCP server (nous_chat, nous_decide, etc.)
 │       ├── runner.py           # Agent runner (tool loop, streaming)
 │       ├── tools.py            # Tool dispatcher + registration

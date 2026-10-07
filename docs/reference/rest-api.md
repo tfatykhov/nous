@@ -34,6 +34,10 @@ Documented routes served by `nous/api/rest.py`, which is the full list. Part of 
 | GET | `/schedules` | List schedules |
 | POST | `/schedules` | Create a schedule |
 | DELETE | `/schedules/{id}` | Deactivate a schedule |
+| GET | `/intentions/proposals` | F099 Phase 2d: the proposals the owner can see, newest first (`state` is a proposal state, `open` or `all`, default `pending`; `limit` 1 to 100). A `staged` proposal, which the owner has not been shown, is never listed. Empty unless `NOUS_CONTINUATION_ENABLED` has produced rows |
+| POST | `/intentions/proposals/{id}/decide` | F099 Phase 2d: the owner's decision, `{"decision": "approve" \| "reject", "actor"?}`. `{id}` is a UUID or a hex prefix of 8 to 32 characters. An approve runs the staged call once and answers with its state (`executed`, `failed`); a repeat is 200 with `changed: false`; a late (expired, work ended) or contradictory decision is 409 with a fixed message; 404 for an id that names nothing (all that a deployment with continuation off ever answers); 503 when a row exists and the runner is not running. Deterministic: no model takes part, and no agent tool can reach it. No in-app authentication (the existing LAN posture) |
+| POST | `/intentions/questions/{id}/answer` | F099 Phase 2d: the owner's answer to a question, `{"text", "actor"?}`, recorded as the next result of every intention of the asking arrival. 409 when already answered, expired or the work ended (nothing is written) |
+| POST | `/intentions/questions/answer` | F099 Phase 2d: the same, addressed by the Telegram message the question was pushed as: `{"chat_id", "message_id", "text", "actor"?}`. 404 when no question was sent as that message (the bot then treats the reply as ordinary chat) |
 | GET | `/admin/search-weights` | Get search weights |
 | POST | `/admin/search-weights` | Set search weights |
 | GET | `/rubric` | Current rubric |
