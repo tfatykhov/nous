@@ -112,11 +112,19 @@ MEMORY_WRITE_TOOLS = frozenset({"learn_fact", "ingest_document"})
 
 @dataclass
 class ArrivalState:
-    """What a turn recorded through its extra tools. The decision is read from here, never from the text."""
+    """What one arrival recorded: through its extra tools, the decision (read from here, never from the text) and
+    the proposals; and what its model calls cost."""
 
     resolution: Resolution | None = None
     # The proposals the turn staged with propose_action (2d); resolve_intention may then only ask.
     proposals: list[UUID] = field(default_factory=list)
+    # What the arrival's model calls cost so far, added as each returns: every failure path charges it (2e).
+    tokens_in: int = 0
+    tokens_out: int = 0
+
+    @property
+    def tokens(self) -> tuple[int, int]:
+        return self.tokens_in, self.tokens_out
 
 
 def make_resolve_intention_executor(
@@ -700,8 +708,10 @@ class ContinuationRunner:
             if claim is None:
                 return None
             await session.commit()
+        # The arrival's state lives here, not in _turn, so that every failure below charges what the turn spent.
+        state = ArrivalState()
         try:
-            return await self._decide(claim)
+            return await self._decide(claim, state)
         except asyncio.CancelledError:
             if cancel_requested():
                 # A stop or a cancel: free the claim so the result is not stuck for a lease, without charging an
@@ -711,15 +721,15 @@ class ContinuationRunner:
             # Fix-Z: nobody cancelled this task; something the arrival awaited was cancelled (the #690/#691 class).
             # That is a failure like any raise, so it is charged: a recurring one must reach failed_report, not
             # come back at once forever with its claim released and no attempt counted.
-            await self._fail(claim)
+            await self._fail(claim, tokens=state.tokens)
             raise
         except Exception:
             # The turn, the commit and _fail swallow their own errors, so this cannot charge an attempt twice.
             logger.warning("F099: the arrival of root %s raised; a failed attempt", root_id, exc_info=True)
-            await self._fail(claim)
+            await self._fail(claim, tokens=state.tokens)
             return None
 
-    async def _decide(self, claim: continuation.Claim) -> continuation.ArrivalCommit | None:
+    async def _decide(self, claim: continuation.Claim, state: ArrivalState) -> continuation.ArrivalCommit | None:
         settings, agent_id = self._settings, self._agent_id
         async with self._db.session() as session:
 
@@ -754,10 +764,10 @@ class ContinuationRunner:
                 resolution=Resolution("drop", NO_ROWS_NOTE, False, 1.0),
                 outcome=continuation.OUTCOME_RESOLVED,
             )
-        return await self._turn(claim, limits)
+        return await self._turn(claim, limits, state)
 
     async def _turn(
-        self, claim: continuation.Claim, limits: continuation.RootLimits
+        self, claim: continuation.Claim, limits: continuation.RootLimits, state: ArrivalState
     ) -> continuation.ArrivalCommit | None:
         settings = self._settings
         session_id = f"{INTENT_SESSION_PREFIX}{claim.root_id}"
@@ -768,7 +778,6 @@ class ContinuationRunner:
         async with self._db.session() as session:
             earlier, spawned, root_intent, root_decision = await self._lineage_context(session, claim)
         prompt = build_arrival_prompt(claim, earlier, spawned, limits, settings, root_intent=root_intent)
-        state = ArrivalState()
         context = ExecutionContext(
             kind="continuation",
             session_id=session_id,
@@ -796,11 +805,10 @@ class ContinuationRunner:
                     state, ctx=context, dispatcher=self._dispatcher, stage=self._stager(claim)
                 ),
             )
-        usage = [0, 0]
         try:
             try:
                 text = await asyncio.wait_for(
-                    self._run_turns(session_id, prompt, extra_tools, context, state, usage),
+                    self._run_turns(session_id, prompt, extra_tools, context, state),
                     timeout=settings.continuation_turn_timeout_seconds,
                 )
             except asyncio.CancelledError:
@@ -809,9 +817,9 @@ class ContinuationRunner:
                 logger.warning(
                     "F099: the continuation of root %s failed (%s)", claim.root_id, type(exc).__name__, exc_info=True
                 )
-                # What the calls that finished before the failure cost (2e, carry-over 2): a call that raised
-                # returned no usage, so it is the one cost this cannot see.
-                await self._fail(claim, tokens=(usage[0], usage[1]))
+                # What the model calls that returned before the failure cost (2e, carry-over 2): a call that raised
+                # or was cut off returned no usage, so it is the one cost this cannot see.
+                await self._fail(claim, tokens=state.tokens)
                 return None
             # Read BEFORE the session ends: end_conversation pops the ledger.
             wrote_memory = any(
@@ -820,7 +828,7 @@ class ContinuationRunner:
             )
         finally:
             await self._end_conversation(session_id)
-        tokens = (usage[0], usage[1])
+        tokens = state.tokens
         if (
             state.resolution is not None
             and state.resolution.decision == "ask"
@@ -872,15 +880,14 @@ class ContinuationRunner:
         extra_tools: dict[str, tuple[dict, Any]],
         context: ExecutionContext,
         state: ArrivalState,
-        usage: list[int],
     ) -> str:
         """The turn, then, if the model did not end it with resolve_intention, the one follow-up (the same
         claim, the same thread, the tool asked for in words). Returns the last non-empty text."""
-        text = await self._run_one(session_id, prompt, extra_tools, context, usage)
+        text = await self._run_one(session_id, prompt, extra_tools, context, state)
         if state.resolution is None:
             # Also the only way out of a turn that hit max_tool_calls: _tool_loop's closing call is then made with
             # tools=None, so resolve_intention cannot be called in it. Do not skip the follow-up for that case.
-            followup = await self._run_one(session_id, CONTINUATION_FOLLOWUP_PROMPT, extra_tools, context, usage)
+            followup = await self._run_one(session_id, CONTINUATION_FOLLOWUP_PROMPT, extra_tools, context, state)
             text = followup if followup.strip() else text
         return text
 
@@ -890,24 +897,30 @@ class ContinuationRunner:
         message: str,
         extra_tools: dict[str, tuple[dict, Any]],
         context: ExecutionContext,
-        usage: list[int],
+        state: ArrivalState,
     ) -> str:
         settings = self._settings
-        text, _turn_context, used = await self._runner.run_turn(
-            session_id,
-            message,
-            skip_episode=True,
-            # False: the 012.2 subtask rule would strip spawn_task before the internal_only step decides.
-            is_subtask=False,
-            is_background=True,
-            max_tool_calls=settings.subtask_tool_call_limit,
-            model_override=settings.background_model,
-            extra_tools=extra_tools,
-            force_tool_on_penultimate=None,  # 5.5-generation models reject a forced tool_choice (spec 4.4)
-            context=context,
-        )
-        usage[0] += (used or {}).get("input_tokens", 0)
-        usage[1] += (used or {}).get("output_tokens", 0)
+        # The tool loop adds each model call's usage here as it returns, so a turn that raises, times out or is
+        # cancelled half-way still says what it spent (2e-4 review m3).
+        spent = {"input_tokens": 0, "output_tokens": 0, "tool_calls": 0}
+        try:
+            text, _turn_context, _used = await self._runner.run_turn(
+                session_id,
+                message,
+                skip_episode=True,
+                # False: the 012.2 subtask rule would strip spawn_task before the internal_only step decides.
+                is_subtask=False,
+                is_background=True,
+                max_tool_calls=settings.subtask_tool_call_limit,
+                model_override=settings.background_model,
+                extra_tools=extra_tools,
+                force_tool_on_penultimate=None,  # 5.5-generation models reject a forced tool_choice (spec 4.4)
+                context=context,
+                usage_out=spent,
+            )
+        finally:
+            state.tokens_in += spent["input_tokens"]
+            state.tokens_out += spent["output_tokens"]
         return text or ""
 
     async def _owner_channel(self, claim: continuation.Claim) -> str | None:

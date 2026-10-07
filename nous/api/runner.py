@@ -1355,6 +1355,10 @@ class AgentRunner:
         # Harness Phase 1a: which harness path runs this turn. Callers that
         # start a background turn name it; chat/MCP pass interactive/mcp.
         context: ExecutionContext | None = None,
+        # F099 2e: when given, the dict the tool loop accumulates its usage into, call by call, so the caller
+        # can read what the calls that returned cost when the turn raises, times out or is cancelled. Callers
+        # pass {"input_tokens": 0, "output_tokens": 0, "tool_calls": 0}. Only the continuation runner does.
+        usage_out: dict[str, int] | None = None,
     ) -> tuple[str, TurnContext, dict[str, int]]:
         """Execute a single conversational turn.
 
@@ -1627,6 +1631,7 @@ class AgentRunner:
                             dag_node_id=dag_node_id,
                             refuse_active=getattr(turn_context, "refuse_active", False),  # F078 R6
                             context=_ctx,  # harness Phase 1a
+                            usage_out=usage_out,
                         )
                     finally:
                         CURRENT_TURN_EXCLUDE_IDS.reset(_f071_token)
@@ -3123,6 +3128,7 @@ class AgentRunner:
         # at different turns, which is worse than a NULL.
         turn_number: int | None = None,
         context: ExecutionContext | None = None,  # harness Phase 1a
+        usage_out: dict[str, int] | None = None,  # F099 2e: see run_turn
     ) -> tuple[str, list[ToolResult], dict[str, int], list[str]]:
         """Run the tool use loop until completion or max_turns.
 
@@ -3162,11 +3168,15 @@ class AgentRunner:
         all_thinking_blocks: list[str] = []  # Accumulated across iterations
         # F061: include tool_calls counter so the hardened executor's per-attempt
         # accumulator can populate heart.subtasks.tool_calls_made (was missing).
-        total_usage: dict[str, int] = {
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "tool_calls": 0,
-        }
+        total_usage: dict[str, int] = (
+            {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "tool_calls": 0,
+            }
+            if usage_out is None
+            else usage_out
+        )
         turns = 0
         total_tool_calls = 0
         max_turns = self._settings.max_turns

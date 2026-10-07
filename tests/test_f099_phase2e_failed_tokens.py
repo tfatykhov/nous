@@ -3,6 +3,7 @@ migration 085."""
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -10,12 +11,14 @@ from f099_support import (
     CONT,
     claim,
     env_factory,  # noqa: F401
+    intention_of,
     make_child,
     make_root,
     record,
     runner_env,  # noqa: F401
     say,
     set_intention,
+    use,
 )
 from sqlalchemy import select, text
 
@@ -189,3 +192,103 @@ async def test_a_lineage_whose_turns_keep_failing_reaches_its_token_budget(runne
     async with env.db.session() as s:
         (arrival,) = (await s.execute(select(IntentionArrival).where(IntentionArrival.root_id == root.id))).scalars()
     assert (arrival.gate_reason, arrival.decision) == ("budget_tokens", "report")
+
+
+# ---- every way an attempt fails after it spent tokens (2e-5, the lead's addendum) ------------------------------
+# Each turn spends 110 tokens (one model call) before it fails, and the root (the deepest claimed row) carries them.
+
+
+def _cont(env) -> ContinuationRunner:
+    return ContinuationRunner(
+        database=env.db, settings=env.settings, runner=env.runner, heart=env.heart, brain=env.brain, bus=env.bus
+    )
+
+
+def _resolve(decision="report", note="The snow is deep."):
+    return [use("resolve_intention", decision=decision, note=note, progress=False, confidence=0.7)]
+
+
+def _refused_resolve():
+    """A call the executor refuses (no such decision): the tool loop goes on to a second model call."""
+    return [use("resolve_intention", decision="maybe", note="x", progress=False, confidence=0.5)]
+
+
+async def _ready_root(env):
+    root = await make_root(env)
+    await record(env, root)
+    return root
+
+
+async def _charged(env, root):
+    fresh = await intention_of(env, "subtask", root.source_id)
+    return fresh.failed_tokens, fresh.attempts
+
+
+async def test_a_turn_cancelled_from_within_mid_tool_loop_charges_what_it_spent(runner_env):  # noqa: F811
+    """Fix-Z: the second model call of the tool loop is cancelled by something nobody asked to cancel. The first
+    call (inside the same tool loop, which never returns) is charged."""
+
+    async def cancelled_from_within(_kwargs):
+        victim = asyncio.get_running_loop().create_future()
+        victim.cancel()
+        await victim
+
+    env = await runner_env(_refused_resolve(), cancelled_from_within)
+    root = await _ready_root(env)
+    with pytest.raises(asyncio.CancelledError):
+        await _cont(env).run_arrival(root.id)
+    assert await _charged(env, root) == (110, 1)
+
+
+async def test_a_raise_after_the_turn_reaches_the_generic_arm_and_charges_the_turn(runner_env, monkeypatch):  # noqa: F811
+    env = await runner_env(_resolve())
+    root = await _ready_root(env)
+
+    def broken(_session_id):
+        raise RuntimeError("the ledger is gone")
+
+    monkeypatch.setattr(env.runner, "executed_tools", broken)
+    assert await _cont(env).run_arrival(root.id) is None
+    assert await _charged(env, root) == (110, 1)
+
+
+@pytest.mark.parametrize("error", [ValueError("refused"), RuntimeError("the database went away")])
+async def test_a_commit_that_raises_charges_the_turn(runner_env, monkeypatch, error):  # noqa: F811
+    """# PIN (2e-4 review m1): both of _commit's failure arms pass the turn's tokens."""
+    env = await runner_env(_resolve())
+    root = await _ready_root(env)
+
+    async def refused(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(continuation, "commit_arrival", refused)
+    assert await _cont(env).run_arrival(root.id) is None
+    assert await _charged(env, root) == (110, 1)
+
+
+async def test_a_tool_loop_that_times_out_charges_the_calls_that_returned(runner_env):  # noqa: F811
+    """2e-4 review m3: the first model call returned, the second never does, and the turn's timeout ends the tool
+    loop. Before, the loop's usage was read only when run_turn returned, so this charged nothing."""
+    never = asyncio.Event()
+
+    async def hangs(_kwargs):
+        await never.wait()
+
+    env = await runner_env(_refused_resolve(), hangs)
+    object.__setattr__(env.settings, "continuation_turn_timeout_seconds", 1)
+    root = await _ready_root(env)
+    assert await _cont(env).run_arrival(root.id) is None
+    assert await _charged(env, root) == (110, 1)
+
+
+async def test_an_owner_channel_read_that_raises_after_an_ask_charges_the_turn(runner_env):  # noqa: F811
+    env = await runner_env(_resolve("ask", "Shall I email the report?"))
+    root = await _ready_root(env)
+    cont = _cont(env)
+
+    async def broken(_claim):
+        raise RuntimeError("the owner channel could not be read")
+
+    cont._owner_channel = broken
+    assert await cont.run_arrival(root.id) is None
+    assert await _charged(env, root) == (110, 1)
