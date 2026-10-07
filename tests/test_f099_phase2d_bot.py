@@ -366,6 +366,36 @@ async def test_a_refused_reply_is_told_why_and_not_forwarded():
     bot._chat_streaming.assert_not_called()
 
 
+@pytest.mark.parametrize("status", [500, 503, 400])
+async def test_a_reply_whose_route_fails_reaches_chat_with_its_original_text(status):
+    """Final review I1: only a 200 or a 409 proves the reply was addressed to a question. Any other answer of the
+    route (a bug, an outage, no runner) must not swallow an ordinary reply to an earlier bot message."""
+    bot = _bot({"/intentions/questions/answer": (status, {"error": "boom"})})
+    await bot._handle_update(_message("Thanks, that helps.", reply_to=5))
+    assert len(bot._http.calls) == 1 and _sent(bot) == []
+    bot._chat_streaming.assert_awaited_once()
+    assert bot._chat_streaming.await_args.args[1] == "Thanks, that helps."
+
+
+@pytest.mark.parametrize("error", [httpx.ConnectError("refused"), httpx.ReadTimeout("slow")])
+async def test_a_reply_whose_route_cannot_be_reached_reaches_chat_with_its_original_text(error):
+    bot = _bot()
+    bot._http.post = AsyncMock(side_effect=error)
+    await bot._handle_update(_message("Thanks, that helps.", reply_to=5))
+    bot._http.post.assert_awaited_once()
+    assert _sent(bot) == []
+    bot._chat_streaming.assert_awaited_once()
+    assert bot._chat_streaming.await_args.args[1] == "Thanks, that helps."
+
+
+async def test_a_typed_approve_whose_route_fails_is_still_answered_and_not_forwarded():  # PIN
+    """The owner typed an action verb: "could not reach Nous" is the right answer, and the model never sees it."""
+    bot = _bot({f"/intentions/proposals/{SHORT}/decide": (500, {})})
+    await bot._handle_update(_message(f"/approve {SHORT}"))
+    assert len(bot._http.calls) == 1 and _sent(bot) == [UNREACHABLE]
+    bot._chat_streaming.assert_not_called()
+
+
 # ---- everything else is untouched ----------------------------------------------------------------------------
 
 

@@ -123,10 +123,11 @@ def describe_decision(status: int, body: dict, approve: bool, short_id: str) -> 
 
 def describe_answer(status: int, body: dict) -> str:
     """The text for the answer of an answer route (fixed vocabulary, like ``describe_decision``). Not called for a
-    404."""
+    404, and for a reply only on a 200 or a 409."""
     if status == 200:
         return "Answer recorded."
-    # No 404 arm: a 404 is passed on to chat by both callers before this is called (C18, strict parity).
+    # No 404 arm: a 404 is passed on to chat by both callers before this is called (C18, strict parity). A reply
+    # passes on every status but 200 and 409 too (final review I1); only /answer reaches the arms below.
     if status == 409:
         reason = body.get("reason")
         text = _ANSWER_REFUSALS.get(reason) if isinstance(reason, str) else None
@@ -829,7 +830,8 @@ class NousTelegramBot:
     async def _handle_owner_text(self, message: dict[str, Any], chat_id: Any, user_id: Any, text: str) -> bool:
         """``/approve``, ``/reject``, ``/answer`` and a reply to one of our messages, in the owner chat. True when
         the message was consumed; anything else (another chat, another command, a malformed or missing id, an id
-        the server answers 404 for, a reply to something else) is left for the ordinary path, unchanged: under
+        the server answers 404 for, a reply the answer route does not confirm with a 200 or a 409) is left for the
+        ordinary path, unchanged: under
         prod's flags nothing exists to approve, so the bot behaves as it did before 2d."""
         if not self._is_owner(chat_id, user_id):
             return False
@@ -868,13 +870,15 @@ class NousTelegramBot:
         return False
 
     async def _try_answer_reply(self, chat_id: Any, user_id: Any, message_id: Any, text: str) -> bool:
-        """A reply to a bot message: the answer to the question that was sent as it. A 404 means it was a reply to
-        something else, so the message goes on to the ordinary chat path."""
+        """A reply to a bot message: the answer to the question that was sent as it. Only a 200 (recorded) or a 409
+        (a known question that can no longer be answered) proves the reply was addressed to a question; anything
+        else (a 404, an error status, no answer at all) goes on to the ordinary chat path with the original text,
+        so a route failure never swallows an ordinary reply."""
         status, body = await self._owner_post(
             "/intentions/questions/answer",
             {"chat_id": chat_id, "message_id": message_id, "text": text, "actor": f"telegram:{user_id}"},
         )
-        if status == 404:
+        if status not in (200, 409):
             return False
         await self._send(chat_id, describe_answer(status, body))
         return True
