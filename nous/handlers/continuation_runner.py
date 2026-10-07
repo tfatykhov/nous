@@ -405,7 +405,12 @@ class ContinuationRunner:
             task.cancel()
         await asyncio.gather(*([loop_task] if loop_task is not None else []), *running, return_exceptions=True)
         if self._executing:
-            _done, pending = await asyncio.wait(set(self._executing), timeout=EXECUTION_GRACE_SECONDS)
+            done, pending = await asyncio.wait(set(self._executing), timeout=EXECUTION_GRACE_SECONDS)
+            # A store error in the claim or the finish ends the task with an exception, and its caller may be gone
+            # (the shield case): retrieve it here, or asyncio warns that it was never retrieved.
+            for task in done:
+                if not task.cancelled() and task.exception() is not None:
+                    logger.warning("F099: an approved call's execution failed", exc_info=task.exception())
             if pending:
                 logger.warning(
                     "F099: %d approved call(s) still running at stop; the in-doubt sweep ends any that never finish",

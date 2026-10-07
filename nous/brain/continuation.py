@@ -21,7 +21,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Text, and_, any_, cast, exists, func, or_, select, text, update
+from sqlalchemy import ColumnElement, Text, and_, any_, cast, exists, func, literal, or_, select, text, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -2292,9 +2293,13 @@ async def stage_proposal(
     if _contains(arguments, _has_surrogate):
         raise ProposalRefused("arguments may not contain a lone surrogate (half of a UTF-16 pair).")
     try:
-        shown = render_arguments(arguments)
+        payload = json.dumps(arguments, allow_nan=False)
     except (TypeError, ValueError):
         raise ProposalRefused("arguments must be plain JSON values.") from None
+    # Measured, compared and stored as jsonb holds them, which is what the push renders and the call runs from:
+    # jsonb normalises numbers (``1e300`` becomes 301 digits), so the mapping the model sent is not what is shown.
+    stored = (await session.execute(select(cast(literal(payload, Text), JSONB)))).scalar_one()
+    shown = render_arguments(stored)
     if utf16_units(shown) > PROPOSAL_ARGS_MAX_CHARS:
         raise ProposalRefused(
             f"the call is too long ({utf16_units(shown)} characters; at most {PROPOSAL_ARGS_MAX_CHARS}): the owner "
@@ -2316,7 +2321,7 @@ async def stage_proposal(
         .all()
     )
     for row in staged:
-        if row.tool == tool and row.arguments == dict(arguments):
+        if row.tool == tool and row.arguments == stored:
             return row.id
     if len(staged) >= MAX_PROPOSALS_PER_ARRIVAL:
         raise ProposalRefused(
@@ -2327,7 +2332,7 @@ async def stage_proposal(
         intention_id=intention_id,
         root_id=root_id,
         tool=tool,
-        arguments=dict(arguments),
+        arguments=stored,
         rationale=why,
         state=PROPOSAL_STAGED,
         claim_token=claim_token,

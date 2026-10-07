@@ -297,6 +297,20 @@ def test_the_renderer_puts_every_model_authored_field_in_a_pre_block():
     assert not {"<x>", "<y>", "<z>"} & set(re.findall(r"<[a-z]>", text))
 
 
+def test_the_tool_name_is_escaped_too():
+    """2d-6 review m1: the tool name sits outside <pre>. It is a registered name on the prod path, but the store
+    does not check that, so the renderer escapes it (a name with markup in it is shown, never parsed)."""
+    proposal = SimpleNamespace(
+        id=uuid.uuid4(),
+        tool="send<b>mail",
+        rationale="why",
+        arguments={"k": "v"},
+        deadline=datetime(2026, 10, 8, 9, 30, tzinfo=UTC),
+    )
+    text = render_proposal_html(proposal, None)
+    assert "Tool: <code>send&lt;b&gt;mail</code>" in text and "<b>mail" not in text
+
+
 # ---- lead addendum 1 (2d-1 and 2d-2 reviews): the rationale and the note, escaped and measured in UTF-16 -------
 
 

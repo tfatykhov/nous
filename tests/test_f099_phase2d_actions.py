@@ -433,6 +433,23 @@ async def test_stop_does_not_wait_past_its_bound_and_never_cancels_the_call(runn
     assert (await asyncio.wait_for(request, timeout=10)).state == "executed"
 
 
+async def test_stop_retrieves_and_logs_the_exception_of_a_tracked_execution(runner_env, caplog):  # noqa: F811
+    """2d-6 review m2: a database error in claim_execution or finish_execution ends the tracked task with an
+    exception; when its REST caller already went away nobody awaits it, so stop() retrieves and logs it (else
+    asyncio warns "Task exception was never retrieved" at garbage collection)."""
+    env = await runner_env()
+    cont = _cont(env)
+
+    async def failing_execution():
+        raise RuntimeError("the claim could not be written")
+
+    task = asyncio.create_task(failing_execution())
+    cont._executing.add(task)  # tracked as decide_proposal tracks it; its caller was cancelled
+    await asyncio.wait_for(cont.stop(), timeout=10)
+    assert "the claim could not be written" in caplog.text
+    assert task._log_traceback is False  # retrieved: asyncio has nothing to warn about at GC
+
+
 async def test_an_approved_spawn_stays_internal_only_under_an_owner_root(runner_env):  # noqa: F811
     """C12 (lead ruling): a root intention's authority is owner, and the call the owner approves must not start
     anything with more authority than the lineage that proposed it."""

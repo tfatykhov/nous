@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 
 import pytest
@@ -19,7 +20,7 @@ from f099_support import (
     stage,
     use,
 )
-from sqlalchemy import select
+from sqlalchemy import select, text
 from test_tool_classes import _registered_names
 
 from nous.api import tool_policy
@@ -337,6 +338,52 @@ async def test_the_same_call_twice_is_one_row_and_a_sixth_is_refused(env_factory
         await stage(env, got, arguments={**SEND_EMAIL_ARGS, "subject": f"Snow {n}"})
     with pytest.raises(continuation.ProposalRefused, match="at most"):
         await stage(env, got, arguments={**SEND_EMAIL_ARGS, "subject": "one too many"})
+
+
+# ---- lead addendum 2 (2d-6 review I1): the cap measures the call as jsonb stores it -----------------------------
+
+
+@pytest.mark.postgres_only
+async def test_the_call_cap_measures_the_arguments_as_jsonb_stores_them(env_factory):  # noqa: F811
+    """jsonb writes ``1e300`` as 301 digits, and the push renders the stored mapping: 90 such values fit the cap
+    as Python renders them and would reach the owner as a 28k message Telegram refuses, so the proposal would
+    expire unseen. The cap measures the stored form, so the call is refused at staging, where the model reads it."""
+    env = await env_factory(**CONT)
+    _root, got = await claimed(env)
+    arguments = {**SEND_EMAIL_ARGS, **{f"k{n}": 1e300 for n in range(90)}}
+    assert continuation.utf16_units(continuation.render_arguments(arguments)) <= continuation.PROPOSAL_ARGS_MAX_CHARS
+    with pytest.raises(continuation.ProposalRefused, match="the owner reads"):
+        await stage(env, got, arguments=arguments)
+    async with env.db.session() as s:
+        assert (
+            await s.execute(select(IntentionProposal).where(IntentionProposal.agent_id == env.agent))
+        ).first() is None
+
+
+@pytest.mark.postgres_only
+async def test_a_staged_call_is_stored_as_its_jsonb_round_trip_and_dedupes_on_it(env_factory):  # noqa: F811
+    """What is measured is what is stored and what runs: the stored arguments render exactly as jsonb renders
+    them, and the model retrying the same call is still one row (the dedupe compares the stored form)."""
+    env = await env_factory(**CONT)
+    _root, got = await claimed(env)
+    arguments = {**SEND_EMAIL_ARGS, "big": 1e300, "small": 2.5, "whole": 1.5e3}
+    first = await stage(env, got, arguments=arguments)
+    async with env.db.session() as s:
+        trip = (
+            await s.execute(text("SELECT CAST(CAST(:j AS jsonb) AS text)"), {"j": json.dumps(arguments)})
+        ).scalar_one()
+    stored = (await proposal_row(env, first)).arguments
+    assert continuation.render_arguments(stored) == continuation.render_arguments(json.loads(trip))
+    assert await stage(env, got, arguments=arguments) == first
+
+
+@pytest.mark.postgres_only
+async def test_a_non_finite_number_is_a_refusal_the_model_reads(env_factory):  # noqa: F811
+    """jsonb has no NaN or Infinity: refused as not plain JSON, never a database error that fails the turn."""
+    env = await env_factory(**CONT)
+    _root, got = await claimed(env)
+    with pytest.raises(continuation.ProposalRefused, match="plain JSON"):
+        await stage(env, got, arguments={**SEND_EMAIL_ARGS, "n": float("nan")})
 
 
 @pytest.mark.postgres_only
