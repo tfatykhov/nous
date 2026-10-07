@@ -415,7 +415,8 @@ async def test_a_row_held_on_an_intention_a_gate_arrival_closed_is_settled_by_th
         (warning,) = settle_warnings()
         assert "settled 1 result(s)" in warning.getMessage()
         (row,) = await held()
-        assert row.delivered_at is not None and row.delivered_session_id == f"intent-{root.id}"
+        silent = continuation.SILENT_SESSION_ID if reason == "cancelled" else f"intent-{root.id}"
+        assert row.delivered_at is not None and row.delivered_session_id == silent
         reported = [r for r in await _owner_rows(env) if "landed while the gate ran" in r.body]
         if reason == "cancelled":
             assert reported == [] and await _owner_rows(env) == []

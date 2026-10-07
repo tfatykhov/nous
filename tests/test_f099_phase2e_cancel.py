@@ -180,7 +180,7 @@ async def test_a_cancel_stamps_the_unread_results_and_reports_nothing(env_factor
 
     rows = await inbox_rows(env)
     (stamped,) = [r for r in rows if r.intention_id == root.id]
-    assert stamped.delivered_at is not None and stamped.delivered_session_id == f"intent-{root.id}"
+    assert stamped.delivered_at is not None and stamped.delivered_session_id == continuation.SILENT_SESSION_ID
     assert [r for r in rows if r.source_kind == "intention_report"] == []
 
 

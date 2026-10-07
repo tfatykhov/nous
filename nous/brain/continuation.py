@@ -1046,12 +1046,14 @@ async def _commit_arrival(
             raise _FenceLost
 
     # Delivery is stamped here and only here (spec 4.3 item 1): after the fenced moves above, in the
-    # same SAVEPOINT, on exactly the rows the turn was shown. A lost fence rolls this back with them.
+    # same SAVEPOINT, on exactly the rows the turn was shown. A lost fence rolls this back with them. A gate that
+    # dropped a cancelled root's arrival showed them to nobody: they are closed by the cancel, not delivered.
     if shown:
+        stamp = SILENT_SESSION_ID if gate_reason == "cancelled" else f"{INTENT_SESSION_PREFIX}{root_id}"
         await session.execute(
             update(ResultInbox)
             .where(ResultInbox.agent_id == agent_id, ResultInbox.id.in_(shown), ResultInbox.delivered_at.is_(None))
-            .values(delivered_at=now, delivered_session_id=f"{INTENT_SESSION_PREFIX}{root_id}")
+            .values(delivered_at=now, delivered_session_id=stamp)
             .execution_options(synchronize_session=False)
         )
 
@@ -1493,11 +1495,13 @@ async def _settle_stranded_rows(session: AsyncSession, agent_id: str, *, setting
     settled = 0
     for (root_id, silent), row_ids in by_root.items():
         # Stamp and read in one statement: only the rows this call moved are reported, so a row is reported once.
+        # A silent group was read by nobody: closed by the cancel, not delivered (the metrics count it apart).
+        stamp = SILENT_SESSION_ID if silent else f"{INTENT_SESSION_PREFIX}{root_id}"
         rows = sorted(
             await session.execute(
                 update(ResultInbox)
                 .where(ResultInbox.id.in_(row_ids), ResultInbox.delivered_at.is_(None))
-                .values(delivered_at=now, delivered_session_id=f"{INTENT_SESSION_PREFIX}{root_id}")
+                .values(delivered_at=now, delivered_session_id=stamp)
                 .returning(ResultInbox.id, ResultInbox.title, ResultInbox.body, ResultInbox.created_at)
                 .execution_options(synchronize_session=False)
             ),
@@ -3404,8 +3408,9 @@ async def list_proposals(session: AsyncSession, agent_id: str, *, state: str, li
 # ---------------------------------------------------------------------------
 
 REFUSE_FINISHED = "finished"  # cancel_root's one refusal: nothing under the root was running
-# delivered_session_id of a row a cancel closed, and of the twin of a late result a cancelled root dropped. It says
-# "closed by the cancel", never "delivered": the owner never saw it (``ResultInboxStore.metrics`` counts it apart).
+# delivered_session_id of every row a cancelled root closed unread (the cancel itself, the stranded-row settle, a gate
+# that dropped the arrival), and of the twin of a late result a cancelled root dropped. It says "closed by the
+# cancel", never "delivered": the owner never saw it (``ResultInboxStore.metrics`` counts it apart).
 SILENT_SESSION_ID = "cancelled"
 CANCEL_ROOTS_MAX = 50  # roots one cancel may cascade over: the root, the fires of its containers, and theirs
 CANCELLED_VIEW_MAX = 10_000  # the most cancelled roots one load of the in-process view reads
@@ -3601,11 +3606,11 @@ async def _cancel_lineage(
     )
     tally.proposals += len(unshown.scalars().all())
     # A cancelled root reports nothing it has not said (the unified late-result rule): its unread results are
-    # stamped delivered, never shown, never reported.
+    # stamped closed by the cancel, never shown, never reported.
     await session.execute(
         update(ResultInbox)
         .where(intention_keyed(agent_id, ids), ResultInbox.delivered_at.is_(None))
-        .values(delivered_at=now, delivered_session_id=f"{INTENT_SESSION_PREFIX}{root_id}")
+        .values(delivered_at=now, delivered_session_id=SILENT_SESSION_ID)
         .execution_options(synchronize_session=False)
     )
     # M1 (plan review): the owner-facing rows of the lineage that nobody has seen (a REPORT, QUESTION or PROPOSAL, keyed

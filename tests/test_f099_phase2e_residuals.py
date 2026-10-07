@@ -562,3 +562,51 @@ async def test_a_continue_with_a_child_still_running_leaves_the_root_open(env_fa
         await s.commit()
     fresh, reports = await _root_and_reports(env, root)
     assert fresh.root_expired_at is None and reports == []
+
+
+# ---- 2e-1 review m7 and 2e-2 review m1: every silent stamp of a cancel says so ----------------------------------
+
+
+async def test_a_cancelled_roots_unread_results_count_as_closed_by_cancel_not_delivered(env_factory):  # noqa: F811
+    """The cancel stamps the lineage's unread rows `SILENT_SESSION_ID`, not the `intent-<root>` a turn's delivery
+    writes, so the metrics' `closed_by_cancel` bucket counts them and `delivered` does not."""
+    env = await env_factory(**CONT)
+    root = await make_root(env)
+    await record(env, root)
+    async with env.db.session() as s:
+        await continuation.cancel_root(s, env.agent, root.id, reason="t", actor="owner-test")
+        await s.commit()
+    (row,) = await inbox_rows(env, uuid.UUID(root.source_id))
+    assert row.delivered_session_id == continuation.SILENT_SESSION_ID
+    bucket = (await env.heart.result_inbox.metrics(1))["subtask"]
+    assert (bucket["created"], bucket["delivered"], bucket["closed_by_cancel"]) == (1, 0, 1)
+    assert bucket["delivery_rate"] is None  # nothing was deliverable
+
+
+async def test_a_gate_that_drops_a_cancelled_roots_arrival_stamps_its_rows_closed_by_cancel(env_factory):  # noqa: F811
+    """The third silent stamp: a claim taken before the marker, dropped by the gate. Nobody saw its rows; an
+    expired root's rows are reported, so they keep the turn's id."""
+    env = await env_factory(**CONT)
+    stamps = {}
+    for marker, reason in (("root_cancelled_at", "cancelled"), ("root_expired_at", "expired")):
+        root = await make_root(env)
+        await record(env, root)
+        got = await claim(env, root.id)
+        await set_intention(env, root.id, **{marker: datetime.now(UTC)})
+        resolution, report_text = continuation.gate_inputs(reason, got)
+        async with env.db.session() as s:
+            await continuation.commit_arrival(
+                s,
+                env.agent,
+                got,
+                resolution=resolution,
+                outcome="resolved",
+                gate_reason=reason,
+                settings=env.settings,
+                report_text=report_text,
+            )
+            await s.commit()
+        (row,) = await inbox_rows(env, uuid.UUID(root.source_id))
+        stamps[reason] = (row.delivered_session_id, root.id)
+    assert stamps["cancelled"][0] == continuation.SILENT_SESSION_ID
+    assert stamps["expired"][0] == f"intent-{stamps['expired'][1]}"

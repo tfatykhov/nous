@@ -174,7 +174,7 @@ async def test_the_sweep_stamps_the_rows_stranded_on_a_cancelled_intention_witho
     await _sweep(env)
     assert await _reports(env) == []
     (row,) = await inbox_rows(env, uuid.UUID(root.source_id))
-    assert row.delivered_at is not None and row.delivered_session_id == f"intent-{root.id}"
+    assert row.delivered_at is not None and row.delivered_session_id == continuation.SILENT_SESSION_ID
     await _sweep(env)  # and it stays quiet
     assert await _reports(env) == []
 
