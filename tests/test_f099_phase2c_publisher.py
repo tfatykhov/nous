@@ -95,11 +95,15 @@ async def test_a_long_body_is_capped_at_the_inbox_body_cap(env_factory):  # noqa
     assert "[truncated]" in continuation.clip_body("x" * 9000, env.settings)  # one marker, one source
 
 
-async def test_a_proposal_is_not_pushed_until_2d(env_factory):  # noqa: F811
+async def test_a_proposal_row_with_no_proposal_is_stamped_and_never_sent(env_factory):  # noqa: F811
+    """2d: PROPOSAL rows are pushed (with buttons), but a row whose proposal does not exist or is not pending has
+    nothing to approve: it is stamped unsent, so it cannot hold the rows behind it."""
     env = await _env(env_factory)
-    await _row(env, kind=continuation.MSG_PROPOSAL)
+    report_id = await _row(env, kind=continuation.MSG_PROPOSAL)
     http = _http()
     assert await _publisher(env, http).push_due(now=NOW) == 0 and http.post.await_count == 0
+    stored = await _stored(env, report_id)
+    assert stored.pushed_at is not None and stored.push_message_id is None
 
 
 async def test_a_row_deferred_by_quiet_hours_is_pushed_when_they_end(env_factory):  # noqa: F811

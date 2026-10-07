@@ -2161,7 +2161,7 @@ def _escaped(ch: str) -> str:
     return f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}"
 
 
-def _utf16_units(text: str) -> int:
+def utf16_units(text: str) -> int:
     """The length Telegram counts: UTF-16 code units (a lone surrogate counts one, and is not an error)."""
     return len(text.encode("utf-16-le", "surrogatepass")) // 2
 
@@ -2180,8 +2180,36 @@ def render_arguments(arguments: Mapping[str, Any]) -> str:
     in the mapping's own key order (callers pass the STORED arguments, whose jsonb key order is Postgres's), with
     every control, format, bidi and zero-width character as ``\\uXXXX`` (``\\UXXXXXXXX`` above U+FFFF). Raises
     ``TypeError`` or ``ValueError`` for a value that is not plain JSON."""
-    shown = json.dumps(arguments, ensure_ascii=False, indent=2)
-    return "".join(_escaped(ch) if _unsafe(ch) else ch for ch in shown)
+    return render_text(json.dumps(arguments, ensure_ascii=False, indent=2))
+
+
+def render_text(text: str) -> str:
+    """Model-authored text (a rationale, a note, a question) as the owner reads it: the characters
+    ``render_arguments`` shows as escapes are shown as escapes here too. An escape is plain ASCII, so applying
+    it twice changes nothing."""
+    return "".join(_escaped(ch) if _unsafe(ch) else ch for ch in text)
+
+
+def clip_shown(text: str, limit: int, *, marker: str = "") -> str:
+    """``render_text(text)`` cut to at most ``limit`` UTF-16 units (what Telegram counts), at a character
+    boundary, so never inside an escape. When it is cut, ``marker`` is appended inside the limit."""
+    shown = render_text(text)
+    if utf16_units(shown) <= limit:
+        return shown
+    room, out, used = limit - utf16_units(marker), [], 0
+    for ch in text:
+        piece = _escaped(ch) if _unsafe(ch) else ch
+        used += utf16_units(piece)
+        if used > room:
+            break
+        out.append(piece)
+    return "".join(out).rstrip() + marker
+
+
+def proposal_note(note: str | None) -> str:
+    """The arrival's note as a proposal quotes it ("Nous says"): one line, escaped, at most
+    ``PROPOSAL_NOTE_MAX_CHARS`` UTF-16 units."""
+    return clip_shown(" ".join((note or "").split()), PROPOSAL_NOTE_MAX_CHARS)
 
 
 def _has_nul(text: str) -> bool:
@@ -2247,10 +2275,11 @@ async def stage_proposal(
     why = (rationale or "").strip()
     if not why:
         raise ProposalRefused("rationale is required: say why the owner should approve this call.")
-    if _utf16_units(why) > PROPOSAL_RATIONALE_MAX_CHARS:
+    # Measured as the owner is shown it (escapes included), like the call below: the push never truncates.
+    shown_why = utf16_units(render_text(why))
+    if shown_why > PROPOSAL_RATIONALE_MAX_CHARS:
         raise ProposalRefused(
-            f"rationale is too long ({_utf16_units(why)} characters; at most {PROPOSAL_RATIONALE_MAX_CHARS}): "
-            "shorten it."
+            f"rationale is too long ({shown_why} characters; at most {PROPOSAL_RATIONALE_MAX_CHARS}): shorten it."
         )
     # A refusal the model reads, not a database error that would fail the whole turn (an injected result can make
     # a model echo a NUL character into a call).
@@ -2266,9 +2295,9 @@ async def stage_proposal(
         shown = render_arguments(arguments)
     except (TypeError, ValueError):
         raise ProposalRefused("arguments must be plain JSON values.") from None
-    if _utf16_units(shown) > PROPOSAL_ARGS_MAX_CHARS:
+    if utf16_units(shown) > PROPOSAL_ARGS_MAX_CHARS:
         raise ProposalRefused(
-            f"the call is too long ({_utf16_units(shown)} characters; at most {PROPOSAL_ARGS_MAX_CHARS}): the owner "
+            f"the call is too long ({utf16_units(shown)} characters; at most {PROPOSAL_ARGS_MAX_CHARS}): the owner "
             "reads the whole call before approving it, so shorten it or split it into several proposals."
         )
     staged = list(
@@ -2328,14 +2357,14 @@ async def expire_staged(session: AsyncSession, agent_id: str, *, claim_token: UU
 def proposal_text(proposal: IntentionProposal, note: str | None) -> str:
     """The plain-text body of a PROPOSAL row: what a chat turn is shown (the owner's Telegram message is
     rendered separately, escaped, by the publisher). The arguments are ``render_arguments``' text and nothing
-    else, so every surface shows one rendering."""
+    else, so every surface shows one rendering; the rationale and the note are ``render_text``'s."""
     parts = [
         f"Proposal {short_id(proposal.id)}: {proposal.tool}",
-        f"Why: {proposal.rationale}",
+        f"Why: {render_text(proposal.rationale)}",
         "Call, exactly as it will run:",
         render_arguments(proposal.arguments),
     ]
-    context = " ".join((note or "").split())[:PROPOSAL_NOTE_MAX_CHARS]
+    context = proposal_note(note)
     if context:
         parts.append(f"Nous says: {context}")
     return "\n".join(parts)
