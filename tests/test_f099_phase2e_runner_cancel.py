@@ -191,7 +191,12 @@ async def test_a_cancel_that_queues_behind_a_claim_stops_the_turn_that_claim_sta
     for: the claim is first in the queue, so it wins (the spy sees a claim), moves the root to `deciding` and
     commits; the cancel then takes the lock, moves that `deciding` row and cancels the arrival's task. Deterministic:
     the lock is held while both queue."""
-    env = await runner_env()
+    never = asyncio.Event()
+
+    async def blocked(_kwargs):
+        await never.wait()  # a turn that reaches its model call waits there: the cancel stops it wherever it is
+
+    env = await runner_env(blocked)
     root = await _ready_root(env)
     cont = _cont(env)
     claims = []
