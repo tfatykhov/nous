@@ -1020,7 +1020,7 @@ class Settings(BaseSettings):
     smart_compress_max_k: int = Field(default=50, description="Max items to keep per compressed result")
     smart_compress_elbow_threshold: float = Field(default=0.3, description="Score cliff threshold for adaptive K")
     smart_compress_exempt_tools: list[str] = Field(
-        default=["recall_deep", "recall_recent"],
+        default=["recall_deep", "recall_recent", "read_file"],
         description=(
             "Tools whose output SmartCompress must pass through untouched. "
             "SmartCompress ranks by ORIGINAL POSITION (30% head + 15% tail) and "
@@ -1040,6 +1040,10 @@ class Settings(BaseSettings):
             "whose allotment is flat at NOUS_EPISODE_CHUNK_RECALL_LIMIT). Size "
             "control for these tools belongs in the pipeline, where scores are "
             "known — not in a downstream text cutter. "
+            "read_file is exempt because sampling non-contiguous lines of a file "
+            "the model asked to read silently drops the middle (a 303-line report "
+            "kept 63 lines, 2026-10-07); read_file_tool pages instead, returning "
+            "a contiguous window plus a trailer naming the next offset. "
             "Set to `[]` to restore compression for every tool (kill switch)."
         ),
     )

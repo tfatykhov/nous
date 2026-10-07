@@ -32,6 +32,12 @@ logger = logging.getLogger(__name__)
 _MAX_BASH_TIMEOUT = 300  # seconds
 _MAX_OUTPUT_CHARS = 100 * 1024  # 100KB
 _MAX_FILE_SIZE = 1 * 1024 * 1024  # 1MB
+# read_file page cap. A larger result is cut to a CONTIGUOUS leading window
+# plus a trailer naming the next offset, never sampled: read_file is exempt
+# from SmartCompress (smart_compress_exempt_tools), whose head/tail/outlier
+# sampling silently dropped the middle of a 303-line report (2026-10-07).
+_READ_FILE_MAX_LINES = 400
+_READ_FILE_MAX_CHARS = 48_000
 
 
 def _mcp_response(text: str) -> dict[str, Any]:
@@ -146,7 +152,9 @@ async def read_file_tool(
     Args:
         path: File path (relative to workspace or absolute within workspace)
         offset: Line offset to start reading from (0-indexed)
-        limit: Number of lines to read (0 = all)
+        limit: Number of lines to read (0 = all). Capped at
+            _READ_FILE_MAX_LINES lines / _READ_FILE_MAX_CHARS chars per call;
+            a capped page ends with a trailer naming the next offset.
         _workspace_dir: Internal param set by registration closure
 
     Returns:
@@ -172,16 +180,40 @@ async def read_file_tool(
         # Read file in thread
         content = await asyncio.to_thread(target.read_text, encoding="utf-8", errors="replace")
 
-        # Apply offset/limit
-        if offset > 0 or limit > 0:
-            lines = content.splitlines(keepends=True)
-            if offset > 0:
-                lines = lines[offset:]
-            if limit > 0:
-                lines = lines[:limit]
-            content = "".join(lines)
+        if not content:
+            return _mcp_response("(empty file)")
 
-        return _mcp_response(content if content else "(empty file)")
+        lines = content.splitlines(keepends=True)
+        total = len(lines)
+        if offset >= total:
+            return _mcp_response(f"[read_file: offset {offset} is past the end of the file ({total} lines).]")
+
+        # The requested window, then the page cap: at most
+        # _READ_FILE_MAX_LINES lines and _READ_FILE_MAX_CHARS chars, but
+        # always at least one whole line. Lines are never sampled or cut.
+        requested_end = min(offset + limit, total) if limit > 0 else total
+        end = offset
+        chars = 0
+        while end < requested_end and end - offset < _READ_FILE_MAX_LINES:
+            chars += len(lines[end])
+            if chars > _READ_FILE_MAX_CHARS and end > offset:
+                break
+            end += 1
+        page = "".join(lines[offset:end])
+
+        if end < requested_end:
+            # The suggested call must itself be trailed if it is capped: an
+            # explicit limit is never trailed when honoured exactly, so an
+            # unbounded read is continued unbounded, and an explicit one
+            # with the rest of its range.
+            next_call = f"offset={end}, limit={requested_end - end}" if limit > 0 else f"offset={end}"
+            if not page.endswith("\n"):
+                page += "\n"
+            page += (
+                f"[read_file: showing lines {offset + 1}–{end} of {total}. "
+                f"Call read_file(path, {next_call}) for the next part.]"
+            )
+        return _mcp_response(page)
 
     except ValueError as e:
         return _tool_error(str(e))
@@ -741,7 +773,10 @@ _READ_FILE_SCHEMA: dict[str, Any] = {
         },
         "limit": {
             "type": "integer",
-            "description": "Number of lines to read (0 = all)",
+            "description": (
+                f"Number of lines to read (0 = all). A page is capped at {_READ_FILE_MAX_LINES} lines / "
+                f"{_READ_FILE_MAX_CHARS:,} chars; a capped page ends with a trailer naming the next offset."
+            ),
             "default": 0,
             "minimum": 0,
         },

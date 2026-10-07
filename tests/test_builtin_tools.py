@@ -7,6 +7,7 @@ commands use python -c for cross-platform compatibility.
 
 import contextlib
 import hashlib
+import re
 import sys
 
 import pytest
@@ -14,6 +15,8 @@ import pytest
 from nous.api import call_outcome
 from nous.api.builtin_tools import (
     _MAX_FILE_SIZE,
+    _READ_FILE_MAX_CHARS,
+    _READ_FILE_MAX_LINES,
     bash_tool,
     read_file_tool,
     write_file_tool,
@@ -260,6 +263,134 @@ class TestReadFileTool:
         )
         text = _extract_text(result)
         assert "empty file" in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# read_file pagination: a contiguous window plus a trailer, never a sample
+# ---------------------------------------------------------------------------
+
+_TRAILER = re.compile(
+    r"\n\[read_file: showing lines (\d+)–(\d+) of (\d+)\. "
+    r"Call read_file\(path, offset=(\d+)(?:, limit=(\d+))?\) for the next part\.\]$"
+)
+
+
+def _prose_report(n_lines: int = 300, width: int = 200) -> str:
+    """Prose markdown shaped like the 2026-10-07 incident report: it contains
+    "failed"/"error", which made SmartCompress sample it."""
+    lines = []
+    for i in range(n_lines):
+        word = "failed" if i % 7 == 0 else "error" if i % 11 == 0 else "passed"
+        line = f"Line {i}: the harness comparison {word} on criterion {i % 13}. "
+        lines.append((line * (width // len(line) + 1))[:width])
+    return "\n".join(lines) + "\n"
+
+
+class TestReadFilePagination:
+    """A file the model asked to read must arrive as contiguous lines; an
+    oversize one is cut at a page boundary the trailer names exactly."""
+
+    @pytest.mark.asyncio
+    async def test_oversize_prose_is_a_contiguous_window_with_trailer(self, tmp_path):
+        content = _prose_report()  # 300 lines, ~60 KB: over the char cap
+        assert len(content) > _READ_FILE_MAX_CHARS
+        (tmp_path / "report.md").write_text(content, encoding="utf-8")
+
+        text = _extract_text(await read_file_tool(path="report.md", _workspace_dir=str(tmp_path)))
+
+        m = _TRAILER.search(text)
+        assert m, text[-300:]
+        first, last, total, next_offset = map(int, m.groups()[:4])
+        assert (first, total, next_offset, m.group(5)) == (1, 300, last, None)
+        page = text[: m.start() + 1]
+        assert page == "".join(content.splitlines(keepends=True)[:last]), "not a contiguous prefix"
+        assert len(page) <= _READ_FILE_MAX_CHARS
+
+    @pytest.mark.asyncio
+    async def test_paging_by_trailer_reaches_the_end_byte_identical(self, tmp_path):
+        content = _prose_report(n_lines=1000, width=60)  # over the line cap
+        (tmp_path / "big.md").write_text(content, encoding="utf-8")
+
+        assert await self._page_through(tmp_path, "big.md", offset=0, limit=0) == (content, 3)  # 400+400+200
+
+    @pytest.mark.asyncio
+    async def test_paging_an_explicit_range_by_trailer_stops_at_its_end(self, tmp_path):
+        content = _prose_report(n_lines=1000, width=60)
+        (tmp_path / "big.md").write_text(content, encoding="utf-8")
+
+        text, calls = await self._page_through(tmp_path, "big.md", offset=100, limit=850)
+
+        assert text == "".join(content.splitlines(keepends=True)[100:950])
+        assert calls == 3  # 400 + 400 + 50
+
+    @staticmethod
+    async def _page_through(tmp_path, path: str, offset: int, limit: int) -> tuple[str, int]:
+        """Follow trailers exactly as the model would; return (text, calls)."""
+        pieces, calls = [], 0
+        while True:
+            calls += 1
+            text = _extract_text(
+                await read_file_tool(path=path, offset=offset, limit=limit, _workspace_dir=str(tmp_path))
+            )
+            m = _TRAILER.search(text)
+            if not m:
+                pieces.append(text)
+                return "".join(pieces), calls
+            assert int(m.group(1)) == offset + 1
+            pieces.append(text[: m.start() + 1])
+            offset, limit = int(m.group(4)), int(m.group(5) or 0)
+
+    @pytest.mark.asyncio
+    async def test_explicit_offset_limit_is_exact_and_untrailed(self, tmp_path):
+        content = _prose_report(n_lines=1000, width=60)
+        (tmp_path / "big.md").write_text(content, encoding="utf-8")
+        lines = content.splitlines(keepends=True)
+
+        text = _extract_text(await read_file_tool(path="big.md", offset=950, limit=10, _workspace_dir=str(tmp_path)))
+        assert text == "".join(lines[950:960])
+
+        # A limit past EOF returns the rest, with no spurious trailer.
+        text = _extract_text(await read_file_tool(path="big.md", offset=990, limit=500, _workspace_dir=str(tmp_path)))
+        assert text == "".join(lines[990:])
+
+    @pytest.mark.asyncio
+    async def test_explicit_limit_over_cap_is_capped_with_trailer(self, tmp_path):
+        content = _prose_report(n_lines=1000, width=60)
+        (tmp_path / "big.md").write_text(content, encoding="utf-8")
+
+        text = _extract_text(await read_file_tool(path="big.md", offset=100, limit=900, _workspace_dir=str(tmp_path)))
+
+        m = _TRAILER.search(text)
+        assert m
+        assert m.groups() == ("101", "500", "1000", "500", "500")
+        assert text[: m.start() + 1] == "".join(content.splitlines(keepends=True)[100:500])
+
+    @pytest.mark.asyncio
+    async def test_file_at_the_caps_is_unchanged(self, tmp_path):
+        content = "".join(f"row {i}\n" for i in range(_READ_FILE_MAX_LINES))
+        (tmp_path / "exact.txt").write_text(content, encoding="utf-8")
+
+        text = _extract_text(await read_file_tool(path="exact.txt", _workspace_dir=str(tmp_path)))
+        assert text == content
+
+    @pytest.mark.asyncio
+    async def test_single_line_over_char_cap_is_whole_then_trailed(self, tmp_path):
+        content = "x" * (_READ_FILE_MAX_CHARS + 10) + "\nsecond\n"
+        (tmp_path / "wide.txt").write_text(content, encoding="utf-8")
+
+        text = _extract_text(await read_file_tool(path="wide.txt", _workspace_dir=str(tmp_path)))
+
+        m = _TRAILER.search(text)
+        assert m
+        assert m.groups() == ("1", "1", "2", "1", None)
+        assert text[: m.start() + 1] == "x" * (_READ_FILE_MAX_CHARS + 10) + "\n"
+
+    @pytest.mark.asyncio
+    async def test_offset_past_end_is_reported(self, tmp_path):
+        (tmp_path / "short.txt").write_text("a\nb\n", encoding="utf-8")
+
+        text = _extract_text(await read_file_tool(path="short.txt", offset=5, _workspace_dir=str(tmp_path)))
+        assert text == "[read_file: offset 5 is past the end of the file (2 lines).]"
 
 
 # ---------------------------------------------------------------------------

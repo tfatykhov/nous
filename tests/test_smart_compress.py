@@ -428,3 +428,43 @@ class TestExemptTools:
 
         assert (await smart_compress("recall_deep", {}, text, settings)).text == text
         assert (await smart_compress("recall_recent", {}, text, settings)).text != text
+
+
+class TestReadFileExempt:
+    """2026-10-07: a 303-line report read with read_file was classified
+    STRING_ARRAY (it contains "failed") and cut to ~63 non-contiguous lines;
+    read_file is re-fetchable, so no original was cached. read_file now pages
+    contiguously itself and SmartCompress must pass it through."""
+
+    @staticmethod
+    def _prose_report() -> str:
+        lines = [
+            f"Section {i // 20}, line {i}: the run {'failed' if i % 7 == 0 else 'passed'} "
+            f"on criterion {i % 13}; the effort rating for this item is under review."
+            for i in range(300)
+        ]
+        return "\n".join(lines) + "\n"
+
+    def test_default_exempts_read_file(self):
+        assert "read_file" in Settings(_env_file=None).smart_compress_exempt_tools
+
+    @pytest.mark.asyncio
+    async def test_read_file_prose_passes_through(self):
+        settings = Settings(_env_file=None, smart_compress_enabled=True)
+        text = self._prose_report()
+        assert is_crushable(text, min_chars=settings.smart_compress_min_chars)
+
+        result = await smart_compress("read_file", {"path": "report.md"}, text, settings)
+
+        assert result.was_compressed is False
+        assert result.text == text
+
+    @pytest.mark.asyncio
+    async def test_same_text_still_compressed_for_bash(self):
+        """Compression for other tools is unchanged."""
+        settings = Settings(_env_file=None, smart_compress_enabled=True)
+        text = self._prose_report()
+
+        result = await smart_compress("bash", {}, text, settings)
+
+        assert result.was_compressed is True
