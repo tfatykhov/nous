@@ -918,6 +918,16 @@ class ContinuationRunner:
                 "gate_reason": gate_reason,
             },
         )
+        for proposal_id, tool in done.proposals:  # the owner can see these now (the rows are committed)
+            await self._emit(
+                "intention.proposal_pending",
+                {
+                    "proposal_id": str(proposal_id),
+                    "root_id": str(claim.root_id),
+                    "arrival_id": str(done.arrival_id),
+                    "tool": tool,
+                },
+            )
         self.wake()
         return done
 

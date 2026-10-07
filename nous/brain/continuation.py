@@ -655,6 +655,8 @@ class ArrivalCommit:
     next_states: dict[UUID, str]
     decision_record_id: UUID | None
     report_ids: tuple[UUID, ...]
+    # F099 2d: (proposal id, tool) of each staged proposal this commit made pending, in creation order.
+    proposals: tuple[tuple[UUID, str], ...] = ()
 
 
 class _FenceLost(Exception):
@@ -957,14 +959,37 @@ async def _commit_arrival(
     # The owner-facing row and its channel, settled before anything moves. An ask with nowhere to ask is refused
     # (raised inside the SAVEPOINT, so nothing is written): committed, it would wait in awaiting_owner on a
     # QUESTION that was never written, which reads as answered, and the next sweep would wake it to no rows.
+    # F099 2d: the proposals this claim's turn staged. They are published only by a resolved ask (the owner then
+    # decides them: no QUESTION is written, conflict C4), refused for any other resolved decision (nobody would
+    # be told), and expired by every other outcome, in this SAVEPOINT.
+    staged = list(
+        (
+            await session.execute(
+                select(IntentionProposal)
+                .where(
+                    IntentionProposal.agent_id == agent_id,
+                    IntentionProposal.claim_token == claim.claim_token,
+                    IntentionProposal.state == PROPOSAL_STAGED,
+                )
+                .order_by(IntentionProposal.created_at, IntentionProposal.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    publishing = bool(staged) and resolution.decision == "ask" and outcome == OUTCOME_RESOLVED
+    if staged and not publishing and outcome == OUTCOME_RESOLVED and gate_reason is None:
+        raise ValueError("a turn that staged a proposal must end with ask: nothing was written")
     if outcome in (OUTCOME_FALLBACK, OUTCOME_FAILED):
         kind: str | None = MSG_REPORT  # contract 4.14 item 5: a fallback reports unconditionally
     else:
         kind = {"ask": MSG_QUESTION, "report": MSG_REPORT}.get(resolution.decision)
+        if publishing:
+            kind = None
     channel: str | None = None
-    if kind is not None:
+    if kind is not None or publishing:
         channel = await claim_owner_channel(session, agent_id, claim, settings=settings)
-    if kind == MSG_QUESTION and channel is None:
+    if (kind == MSG_QUESTION or publishing) and channel is None:
         raise ValueError(
             f"root {root_id} has no owner channel (no origin channel, no default chat): an ask has nowhere to ask"
         )
@@ -1072,6 +1097,8 @@ async def _commit_arrival(
                 )
             )
 
+    if publishing:
+        report_ids.extend(proposal.id for proposal in staged)  # the owner-facing rows this arrival wrote
     session.add(
         IntentionArrival(
             id=arrival_id,
@@ -1095,8 +1122,22 @@ async def _commit_arrival(
             decided_at=now,
         )
     )
-    await session.flush()
-    return ArrivalCommit(arrival_id, n, next_states, decision_record_id, tuple(report_ids))
+    await session.flush()  # the arrival row exists before the proposals reference it
+    published: list[tuple[UUID, str]] = []
+    if publishing:
+        published = await publish_staged(
+            session,
+            agent_id,
+            arrival_id=arrival_id,
+            claim_token=claim.claim_token,
+            deadline=now + timedelta(hours=float(settings.intention_proposal_ttl_hours)),
+            channel=channel,
+            push_after=push_after_for(settings, now),
+            note=resolution.note,
+        )
+    elif staged:
+        await expire_staged(session, agent_id, claim_token=claim.claim_token)
+    return ArrivalCommit(arrival_id, n, next_states, decision_record_id, tuple(report_ids), tuple(published))
 
 
 FAIL_RETRY, FAIL_LOST = "retry", "lost"
@@ -1135,6 +1176,9 @@ async def fail_attempt(
         async with session.begin_nested():
             # Kept for the one lock order (root first); not load-bearing: nothing is written before the fenced UPDATE.
             await _lock_claimed(session, agent_id, claim.root_id, ids)
+            # A failed or released attempt leaves no approvable proposal (2d). Inside this SAVEPOINT: a lost fence
+            # rolls it back with the rest, and the sweep removes a row that is left (expire_proposals).
+            await expire_staged(session, agent_id, claim_token=claim.claim_token)
             # A plain read, deliberately not fenced: a fenced read would raise on a stale claim before the
             # fenced UPDATE below could, and so hide that UPDATE's predicate. It only picks the path.
             counts = (
@@ -1194,6 +1238,7 @@ async def release_claim(session: AsyncSession, agent_id: str, claim: Claim) -> i
     now = datetime.now(UTC)
     async with session.begin_nested():
         await _lock_claimed(session, agent_id, claim.root_id, ids)
+        await expire_staged(session, agent_id, claim_token=claim.claim_token)  # 2d: nothing approvable survives
         moved = await _fenced_move(
             session,
             agent_id,
@@ -1502,6 +1547,20 @@ async def _expire_root(
         update(Intention)
         .where(Intention.agent_id == agent_id, Intention.id == root_id)
         .values(root_expired_at=now, updated_at=now)
+    )
+    # F099 2d: this closed the root's claim (the token is cleared), so a late commit loses its fence and the
+    # staged proposals of the turn can never be published: expire them with it. Staged rows only: the owner never
+    # saw them. A pending proposal of an ended root is the proposals sweep's (expire_proposals), which also tells
+    # the bus.
+    await session.execute(
+        update(IntentionProposal)
+        .where(
+            IntentionProposal.agent_id == agent_id,
+            IntentionProposal.root_id == root_id,
+            IntentionProposal.state == PROPOSAL_STAGED,
+        )
+        .values(state=PROPOSAL_EXPIRED, updated_at=now)
+        .execution_options(synchronize_session=False)
     )
     unread = (
         (
@@ -2229,3 +2288,92 @@ async def expire_staged(session: AsyncSession, agent_id: str, *, claim_token: UU
         .execution_options(synchronize_session=False)
     )
     return len(moved.scalars().all())
+
+
+def proposal_text(proposal: IntentionProposal, note: str | None) -> str:
+    """The plain-text body of a PROPOSAL row: what a chat turn is shown (the owner's Telegram message is
+    rendered separately, escaped, by the publisher). The arguments are ``render_arguments``' text and nothing
+    else, so every surface shows one rendering."""
+    parts = [
+        f"Proposal {short_id(proposal.id)}: {proposal.tool}",
+        f"Why: {proposal.rationale}",
+        "Call, exactly as it will run:",
+        render_arguments(proposal.arguments),
+    ]
+    context = " ".join((note or "").split())[:PROPOSAL_NOTE_MAX_CHARS]
+    if context:
+        parts.append(f"Nous says: {context}")
+    return "\n".join(parts)
+
+
+async def publish_staged(
+    session: AsyncSession,
+    agent_id: str,
+    *,
+    arrival_id: UUID,
+    claim_token: UUID,
+    deadline: datetime,
+    channel: str,
+    push_after: datetime,
+    note: str | None,
+) -> list[tuple[UUID, str]]:
+    """``staged`` to ``pending`` for the proposals of ``claim_token``, and one PROPOSAL row each, in the caller's
+    transaction. Called only by ``_commit_arrival`` and only after the arrival row exists (``arrival_id`` is a
+    foreign key), inside the commit's SAVEPOINT: the claim token fences it (rows of another claim are not
+    touched) and a lost fence rolls it back. The PROPOSAL row's ``source_id`` is the proposal's id, so the
+    short id on the button, in ``/approve`` and in the row are one thing. Returns ``(proposal_id, tool)`` in
+    creation order."""
+    moved = (
+        (
+            await session.execute(
+                update(IntentionProposal)
+                .where(
+                    IntentionProposal.agent_id == agent_id,
+                    IntentionProposal.claim_token == claim_token,
+                    IntentionProposal.state == PROPOSAL_STAGED,
+                )
+                .values(
+                    state=PROPOSAL_PENDING,
+                    arrival_id=arrival_id,
+                    deadline=deadline,
+                    updated_at=datetime.now(UTC),
+                )
+                .returning(IntentionProposal.id)
+                .execution_options(synchronize_session=False)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not moved:
+        return []
+    rows = (
+        (
+            await session.execute(
+                select(IntentionProposal)
+                .where(IntentionProposal.agent_id == agent_id, IntentionProposal.id.in_(list(moved)))
+                .order_by(IntentionProposal.created_at, IntentionProposal.id)
+                .execution_options(populate_existing=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    published: list[tuple[UUID, str]] = []
+    for proposal in rows:
+        await insert_report(
+            session,
+            agent_id,
+            kind=MSG_PROPOSAL,
+            title=f"Proposal {short_id(proposal.id)}: {proposal.tool}",
+            body=proposal_text(proposal, note),
+            channel=channel,
+            intention_id=proposal.intention_id,
+            root_id=proposal.root_id,
+            arrival_id=arrival_id,
+            proposal_id=proposal.id,
+            push_after=push_after,
+            report_id=proposal.id,
+        )
+        published.append((proposal.id, proposal.tool))
+    return published
