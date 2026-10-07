@@ -441,6 +441,10 @@ async def test_a_cancel_takes_the_roots_of_nested_fires_in_the_one_order_so_a_sw
     )
     _stg, g = await _fire(env, inner)
     _st2, f2 = await _fire(env, schedule)
+    # The order is the test's, not the clock's: three commits in a row may share a created_at.
+    for n, fire in enumerate((f1, g, f2), start=1):
+        await set_intention(env, fire.id, created_at=container.created_at + timedelta(seconds=n))
+    f1, g, f2 = [await _row(env, fire.id) for fire in (f1, g, f2)]
     assert (f1.created_at, f1.id) < (g.created_at, g.id) < (f2.created_at, f2.id)
     outcomes: dict[str, str] = {}
 

@@ -370,7 +370,7 @@ async def test_an_expiry_leaves_a_row_chat_will_deliver_alone(env_factory):  # n
 
 
 @pytest.mark.parametrize("reason", ["cancelled", "expired"])
-async def test_a_row_held_on_an_intention_a_gate_arrival_closed_is_reported_by_the_sweep(env_factory, reason, caplog):  # noqa: F811
+async def test_a_row_held_on_an_intention_a_gate_arrival_closed_is_settled_by_the_sweep(env_factory, reason, caplog):  # noqa: F811
     """Lead note (2c1-4). A row that lands after the claim read its rows, and before the root's marker, is held.
     The gate arrival then closes its intention, so nothing can claim the row any more. The sweep stamps it, once,
     with a WARNING (review Minor 2: the settle is a backstop, so its firing is worth seeing in the log), and, by
