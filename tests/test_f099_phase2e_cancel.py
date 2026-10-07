@@ -30,7 +30,7 @@ from sqlalchemy import select, update
 from nous.brain import continuation, intentions
 from nous.brain.continuation import Resolution
 from nous.brain.intentions import IntentionSpec
-from nous.storage.models import Intention, IntentionArrival, IntentionProposal, ResultInbox
+from nous.storage.models import Intention, IntentionArrival, IntentionProposal, ResultInbox, Subtask
 
 pytestmark = pytest.mark.postgres_only  # FOR NO KEY UPDATE, savepoints, = ANY(array)
 
@@ -108,6 +108,9 @@ async def test_a_cancel_moves_the_whole_lineage_and_stops_its_work(env_factory):
     root = await make_root(env)
     child = await make_child(env, root)
     other = await make_root(env)  # another lineage: untouched
+    async with env.db.session() as s:  # the usual case for an owner cancel: the work is running (2e-1 review m3)
+        await s.execute(update(Subtask).where(Subtask.id == uuid.UUID(child.source_id)).values(status="running"))
+        await s.commit()
 
     out = await _cancel(env, root.id)
 
@@ -141,11 +144,13 @@ async def test_a_cancel_clears_a_live_claim_so_the_turns_commit_loses_its_fence(
     env = await env_factory(**CONT)
     root, got = await claimed(env)
     pid = await stage(env, got)
-    assert (await intention_of(env, "subtask", root.source_id)).state == "deciding"
+    live = await intention_of(env, "subtask", root.source_id)
+    assert live.state == "deciding" and live.claim_token is not None
 
     out = await _cancel(env, root.id)
 
     assert out.cancelled_intentions == 1 and out.cancelled_proposals == 1
+    assert (await _row(env, root.id)).claim_token is None  # the token is cleared (2e-1 review m4)
     assert (await proposal_row(env, pid)).state == "cancelled"
     async with env.db.session() as s:
         done = await continuation.commit_arrival(
@@ -240,6 +245,24 @@ async def test_only_a_root_can_be_cancelled(env_factory):  # noqa: F811
         with pytest.raises(continuation.RootNotFound):
             await _cancel(env, bad)
     assert (await _row(env, child.id)).state == "pending"
+
+
+async def test_a_child_id_is_refused_before_any_lock_is_taken(env_factory):  # noqa: F811
+    """2e-1 review m2: a child's lock without its root's is the order the one lock order forbids, so the refusal
+    takes none (the caller's transaction is still open here, and another session can lock the child at once)."""
+    env = await env_factory(**CONT)
+    root = await make_root(env)
+    child = await make_child(env, root)
+    async with env.db.session() as caller:
+        with pytest.raises(continuation.RootNotFound):
+            await continuation.cancel_root(caller, env.agent, child.id, reason="t", actor="t")
+        async with env.db.session() as other:
+            locked = await other.execute(
+                select(Intention.id).where(Intention.id == child.id).with_for_update(key_share=True, nowait=True)
+            )
+            assert locked.scalar_one() == child.id
+            await other.rollback()
+        await caller.rollback()
 
 
 async def test_the_view_of_cancelled_roots_and_the_root_lookup(env_factory):  # noqa: F811
@@ -393,6 +416,98 @@ async def test_a_container_inside_a_lineage_is_cancelled_with_it(env_factory):  
     assert (await env.heart.schedules.get(schedule.id)).active is False
 
 
+async def _lock_intention(session, intention_id):
+    await session.execute(select(Intention.id).where(Intention.id == intention_id).with_for_update(key_share=True))
+
+
+async def test_a_cancel_takes_the_roots_of_nested_fires_in_the_one_order_so_a_sweep_cannot_deadlock_it(env_factory):  # noqa: F811
+    """2e-1 review I1. Container C has fires F1 and F2; F1's lineage scheduled an inner container whose fire is G,
+    made between them. The one cross-root order is (created_at, id): F1, G, F2. A sweep holds G and then wants F2;
+    a cancel that took F2 before G (level by level) would hold F2 and wait on G, and Postgres would abort one side."""
+    env = await env_factory(**CONT)
+    schedule, container = await _schedule_container(env)
+    _st1, f1 = await _fire(env, schedule)
+    inner = await env.heart.schedules.create(
+        task="inner",
+        schedule_type="recurring",
+        interval_seconds=1800,
+        intention=IntentionSpec(
+            intent="Inner schedule",
+            origin_kind="continuation",
+            container=True,
+            parent_id=f1.id,
+            origin_authority="internal_only",
+        ),
+    )
+    _stg, g = await _fire(env, inner)
+    _st2, f2 = await _fire(env, schedule)
+    assert (f1.created_at, f1.id) < (g.created_at, g.id) < (f2.created_at, f2.id)
+    outcomes: dict[str, str] = {}
+
+    async def cancel():
+        try:
+            await _cancel(env, container.id)
+            outcomes["cancel"] = "ok"
+        except Exception as exc:  # the probe records what Postgres did to each side
+            outcomes["cancel"] = str(exc)
+
+    async with env.db.session() as sweep:
+        await _lock_intention(sweep, g.id)
+        task = asyncio.create_task(cancel())
+        try:
+            await asyncio.wait_for(until_a_backend_waits_on_a_lock(env), timeout=10)  # the cancel queues on G
+            try:
+                await asyncio.wait_for(_lock_intention(sweep, f2.id), timeout=30)
+                outcomes["sweep"] = "ok"
+            except Exception as exc:
+                outcomes["sweep"] = str(exc)
+        finally:
+            await sweep.rollback()
+    await asyncio.wait_for(task, timeout=30)
+    assert outcomes == {"sweep": "ok", "cancel": "ok"}
+    for fire in (f1, g, f2):
+        assert (await _row(env, fire.id)).root_cancelled_at is not None
+
+
+async def test_a_fire_that_ended_while_the_cancel_waited_for_it_gets_no_marker(env_factory):  # noqa: F811
+    """2e-1 review m1 (E16). The cancel reads the open fires before it locks them. A fire the TTL sweep expired in
+    between has nothing left to cancel, so it gets no marker: a marker would turn its later result silent, and an
+    expired root's late result is reported raw."""
+    env = await env_factory(**CONT)
+    schedule, container = await _schedule_container(env)
+    st, fire = await _fire(env, schedule)
+    await env.heart.subtasks.complete(st.id, "done", final_outcome="completed")  # nothing of it runs any more
+    now = datetime.now(UTC)
+    async with env.db.session() as sweep:  # the expiry, not yet committed: the cancel still reads the fire as open
+        await sweep.execute(
+            update(Intention)
+            .where(Intention.id == fire.id)
+            .values(state="expired", close_reason="expired", closed_at=now, root_expired_at=now)
+        )
+        expiry_report = await continuation.insert_report(  # what the expiry tells the owner
+            sweep,
+            env.agent,
+            kind="REPORT",
+            title="Expired",
+            body="the snow check expired",
+            channel="telegram:8080",
+            intention_id=fire.id,
+            root_id=fire.id,
+            push_after=now,
+        )
+        task = asyncio.create_task(_cancel(env, container.id))
+        try:
+            await asyncio.wait_for(until_a_backend_waits_on_a_lock(env), timeout=10)
+        finally:
+            await sweep.commit()
+    out = await asyncio.wait_for(task, timeout=30)
+    assert out.root_ids == (container.id,)
+    fresh = await _row(env, fire.id)
+    assert (fresh.state, fresh.root_cancelled_at) == ("expired", None)
+    (report,) = await inbox_rows(env, expiry_report)
+    assert report.delivered_at is None  # the cancel does not silence what the expiry says
+
+
 # ---- the races ------------------------------------------------------------------------------------------------
 
 
@@ -456,6 +571,38 @@ async def test_the_expiry_names_the_proposals_it_ended_for_the_bus_and_not_the_o
         await s.commit()
     assert ended == [(shown, "expired")]
     assert (await proposal_row(env, never_shown)).state == "expired"  # ended, but the owner never saw it
+
+
+async def test_a_cancel_holding_the_root_does_not_deadlock_the_stale_staged_sweep(env_factory, caplog):  # noqa: F811
+    """2e-1 review m5. The cancel (and ``_expire_root``) hold the root and then move the lineage's ``staged`` rows. The
+    proposals sweep's stale-staged step used to move ``staged`` rows holding no root and then lock roots for its
+    ``pending`` arm: hold-staged-want-root against hold-root-want-staged. It now takes each stale row's root first, so
+    it waits for the cancel and finds the row already cancelled."""
+    env = await env_factory(**CONT)
+    asked = await ask_with_proposals(env, count=2)
+    stale, due = asked.ids
+    await _set_proposal(env, stale, state="staged", created_at=datetime.now(UTC) - timedelta(hours=1))
+    await _set_proposal(env, due, deadline=datetime.now(UTC) - timedelta(minutes=1))  # the pending arm wants the root
+
+    async def sweep():
+        async with env.db.session() as s:
+            moved = await continuation.expire_proposals(s, env.agent, settings=env.settings)
+            await s.commit()
+        return moved
+
+    async with env.db.session() as canceller:
+        await _lock_intention(canceller, asked.root.id)  # the cancel's first statement
+        task = asyncio.create_task(sweep())
+        try:
+            await asyncio.wait_for(until_a_backend_waits_on_a_lock(env), timeout=10)  # the sweep queues on the root
+            await asyncio.wait_for(
+                continuation.cancel_root(canceller, env.agent, asked.root.id, reason="t", actor="t"), timeout=30
+            )
+        finally:
+            await canceller.commit()
+    assert await asyncio.wait_for(task, timeout=30) == []  # the cancel ended both, the sweep found nothing left
+    assert [(await proposal_row(env, p)).state for p in (stale, due)] == ["cancelled", "cancelled"]
+    assert "deadlock" not in caplog.text
 
 
 async def test_a_spawn_in_flight_makes_the_cancel_wait_and_is_cancelled_with_the_lineage(env_factory):  # noqa: F811

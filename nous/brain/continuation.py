@@ -10,6 +10,7 @@ every writer.
 
 from __future__ import annotations
 
+import heapq
 import json
 import logging
 import re
@@ -2911,7 +2912,7 @@ async def expire_proposals(
     root) and its outcome reaches the arrival, which wakes when terminal. ``approved`` on a root that ended is a call
     nobody will claim any more (the process stopped between the approve and the claim): ``end_unrunnable`` ends it
     (2d-3 review m2). ``staged`` older than two leases is an orphan of a turn whose lease was released: ``expired``
-    (done first, before any root is locked). ``executing`` for longer than ``max(lease, 2 x tool_timeout)`` is a
+    (its root locked first, as in every arm). ``executing`` for longer than ``max(lease, 2 x tool_timeout)`` is a
     call whose process stopped: ``failed`` with ``IN_DOUBT_TEXT``, never re-run. Each proposal in a SAVEPOINT,
     roots in ``(created_at, id)`` order (the one cross-root order); a failure is logged and retried at the next
     sweep. Returns ``(proposal_id, new_state)``."""
@@ -2920,22 +2921,6 @@ async def expire_proposals(
     root = aliased(Intention)
     lease = float(settings.continuation_lease_seconds)
     doubt = max(lease, 2.0 * float(settings.tool_timeout))
-
-    # First, before any root is locked: it needs no root, and run after the loops below it would lock proposal rows
-    # while this transaction already holds roots (a released SAVEPOINT keeps its locks), against a commit that
-    # holds its root and then updates its own staged rows.
-    stale = await session.execute(
-        update(IntentionProposal)
-        .where(
-            IntentionProposal.agent_id == agent_id,
-            IntentionProposal.state == PROPOSAL_STAGED,
-            IntentionProposal.created_at < now - timedelta(seconds=2 * lease),
-        )
-        .values(state=PROPOSAL_EXPIRED, updated_at=now)
-        .returning(IntentionProposal.id)
-        .execution_options(synchronize_session=False)
-    )
-    done.extend((proposal_id, PROPOSAL_EXPIRED) for proposal_id in stale.scalars().all())
 
     async def due(*predicates: ColumnElement[bool]) -> list[tuple[UUID, UUID]]:
         rows = await session.execute(
@@ -2946,6 +2931,28 @@ async def expire_proposals(
             .limit(limit)
         )
         return [(row.id, row.root_id) for row in rows]
+
+    # The root first, as everywhere (2e-1 review m5): a stale row moved holding no root would be held while this
+    # transaction waits for a root below, against a cancel or an expiry that holds that root and then moves its
+    # lineage's staged rows.
+    stale = await due(
+        IntentionProposal.state == PROPOSAL_STAGED,
+        IntentionProposal.created_at < now - timedelta(seconds=2 * lease),
+    )
+    for proposal_id, root_id in stale:
+        try:
+            async with session.begin_nested():
+                await _lock_root(session, agent_id, root_id)
+                if await _set_proposal_state(
+                    session, agent_id, proposal_id, from_state=PROPOSAL_STAGED, to_state=PROPOSAL_EXPIRED, now=now
+                ):
+                    done.append((proposal_id, PROPOSAL_EXPIRED))
+        except Exception:
+            logger.warning(
+                "F099: could not expire the orphan proposal %s; it is retried at the next sweep",
+                proposal_id,
+                exc_info=True,
+            )
 
     pending = await due(
         IntentionProposal.state == PROPOSAL_PENDING,
@@ -3336,10 +3343,11 @@ def _uuid_or_none(value: Any) -> UUID | None:
 
 
 async def _cancel_lineage(
-    session: AsyncSession, agent_id: str, root_id: UUID, *, now: datetime, tally: _CancelTally
-) -> list[UUID]:
+    session: AsyncSession, agent_id: str, root_id: UUID, *, now: datetime, tally: _CancelTally, fire: bool = False
+) -> list[tuple[datetime, UUID]]:
     """Cancel one root's lineage in the caller's transaction (T13) and return the open roots of its containers'
-    fires, which the caller cancels next.
+    fires as ``(created_at, id)``, which the caller cancels next, in that order. ``fire`` is true for a root the
+    cascade reached through a container: one that ended before this took its lock gets no marker.
 
     One order everywhere (contract 4.7 Locks): the root first, then every container of the lineage, then their
     schedules, and only then the writes. A fire that is in flight holds its container and its schedule FOR SHARE
@@ -3389,7 +3397,8 @@ async def _cancel_lineage(
         .returning(Intention.id)
         .execution_options(synchronize_session=False)
     )
-    tally.intentions += len(closed.scalars().all())
+    moved = len(closed.scalars().all())
+    tally.intentions += moved
     subtask_ids = [
         sid
         for sid in (_uuid_or_none(r.source_id) for r in lineage if r.source_kind == intentions.SOURCE_SUBTASK)
@@ -3405,7 +3414,9 @@ async def _cancel_lineage(
             .returning(Subtask.id)
             .execution_options(synchronize_session=False)
         )
-        tally.subtasks += len(stopped.scalars().all())
+        stopped_count = len(stopped.scalars().all())
+        tally.subtasks += stopped_count
+        moved += stopped_count
     dag_source_ids = [
         did
         for did in (_uuid_or_none(r.source_id) for r in lineage if r.source_kind == intentions.SOURCE_DAG)
@@ -3419,7 +3430,15 @@ async def _cancel_lineage(
                 ExecutionDAG.status.notin_(intentions.TERMINAL_DAG_STATUSES),
             )
         )
-        tally.dag_ids.extend(running.scalars().all())
+        running_ids = running.scalars().all()
+        tally.dag_ids.extend(running_ids)
+        moved += len(running_ids)
+    if fire and not moved:
+        # A fire is read open before its lock is taken: one the TTL sweep ended in between is left as it is, like a
+        # fire that was already done (2e-1 review m1). A marker would only silence its later result, which an
+        # expired root reports raw (E16), and its rows and reports are the expiry's. Its containers' open fires are
+        # still the cancel's.
+        return await _open_fires(session, agent_id, [c.id for c in containers])
     await session.execute(
         update(Intention)
         .where(Intention.agent_id == agent_id, Intention.id == root_id, Intention.root_cancelled_at.is_(None))
@@ -3484,26 +3503,29 @@ async def _cancel_lineage(
         )
         .execution_options(synchronize_session=False)
     )
-    if not containers:
+    return await _open_fires(session, agent_id, [c.id for c in containers])
+
+
+async def _open_fires(session: AsyncSession, agent_id: str, container_ids: list[UUID]) -> list[tuple[datetime, UUID]]:
+    """The fires of these containers that still have something open, as ``(created_at, id)``. A fire that finished
+    is not marked (a marker on a finished root would only silence a later result). A fire that starts after the
+    cancel is refused by its container check."""
+    if not container_ids:
         return []
-    # Only a fire with something open: a fire that finished is not marked (a marker on a finished root would only
-    # silence a later result). A fire that starts after this is refused by its container check.
     lineage_row = aliased(Intention)
     still_open = exists().where(
         lineage_row.agent_id == agent_id, lineage_row.root_id == Intention.id, lineage_row.state.in_(OPEN_STATES)
     )
     fires = await session.execute(
-        select(Intention.id)
-        .where(
+        select(Intention.created_at, Intention.id).where(
             Intention.agent_id == agent_id,
-            Intention.parent_id.in_([c.id for c in containers]),
+            Intention.parent_id.in_(container_ids),
             Intention.id == Intention.root_id,
             Intention.root_cancelled_at.is_(None),
             still_open,
         )
-        .order_by(Intention.created_at, Intention.id)  # the one cross-root lock order
     )
-    return list(fires.scalars().all())
+    return [(row.created_at, row.id) for row in fires]
 
 
 async def cancel_root(
@@ -3532,27 +3554,33 @@ async def cancel_root(
     root = (
         await session.execute(
             select(Intention)
-            .where(Intention.agent_id == agent_id, Intention.id == root_id)
+            # A child's id matches nothing, so it takes no lock (a child's lock without its root's breaks the order).
+            .where(Intention.agent_id == agent_id, Intention.id == root_id, Intention.id == Intention.root_id)
             .with_for_update(key_share=True)
             .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
-    if root is None or root.root_id != root.id:
+    if root is None:
         raise RootNotFound(str(root_id))
     already = root.root_cancelled_at is not None
     tally = _CancelTally()
     async with session.begin_nested():  # a refusal rolls the cascade back to here
-        queue: list[UUID] = [root_id]
+        # A heap on (created_at, id), the one cross-root lock order: a fire is always younger than the root whose
+        # container it fires, so the roots come out in that order however deep the containers are nested (a walk
+        # level by level would take a younger fire before an older one inside a sibling's lineage, 2e-1 review I1).
+        queue: list[tuple[datetime, UUID]] = [(root.created_at, root_id)]
         visited: set[UUID] = set()
         while queue:
-            next_root = queue.pop(0)
+            _created, next_root = heapq.heappop(queue)
             if next_root in visited:
                 continue
             if len(visited) >= CANCEL_ROOTS_MAX:
                 logger.warning("F099: a cancel of root %s stopped at %d roots", root_id, CANCEL_ROOTS_MAX)
                 break
             visited.add(next_root)
-            queue.extend(await _cancel_lineage(session, agent_id, next_root, now=now, tally=tally))
+            found = await _cancel_lineage(session, agent_id, next_root, now=now, tally=tally, fire=next_root != root_id)
+            for entry in found:
+                heapq.heappush(queue, entry)
         if not already and tally.nothing_was_running():
             raise CancelRefused(REFUSE_FINISHED)
     logger.info(
