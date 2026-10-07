@@ -3032,6 +3032,34 @@ async def end_unrunnable(
     return ProposalExecution(proposal_id, final, None, None, woke, moved, REFUSE_ENDED)
 
 
+async def _lock_roots_in_order(session: AsyncSession, agent_id: str, root_ids: set[UUID]) -> set[UUID]:
+    """Lock ``root_ids`` ``FOR NO KEY UPDATE`` one by one in ``(created_at, id)`` order, each in a SAVEPOINT (a
+    released one keeps its lock). Returns the roots locked: a root whose lock failed is logged and left out, so the
+    caller never takes it later, out of order."""
+    if not root_ids:
+        return set()
+    ordered = (
+        await session.execute(
+            select(Intention.id)
+            .where(Intention.agent_id == agent_id, Intention.id.in_(root_ids))
+            .order_by(Intention.created_at, Intention.id)
+        )
+    ).scalars()
+    locked: set[UUID] = set()
+    for root_id in list(ordered):
+        try:
+            async with session.begin_nested():
+                await _lock_root(session, agent_id, root_id)
+            locked.add(root_id)
+        except Exception:
+            logger.warning(
+                "F099: could not lock root %s for the proposal sweep; its proposals are retried at the next sweep",
+                root_id,
+                exc_info=True,
+            )
+    return locked
+
+
 async def expire_proposals(
     session: AsyncSession, agent_id: str, *, settings: Any, now: datetime | None = None, limit: int = 50
 ) -> list[tuple[UUID, str]]:
@@ -3042,9 +3070,11 @@ async def expire_proposals(
     nobody will claim any more (the process stopped between the approve and the claim): ``end_unrunnable`` ends it
     (2d-3 review m2). ``staged`` older than two leases is an orphan of a turn whose lease was released: ``expired``
     (its root locked first, as in every arm). ``executing`` for longer than ``max(lease, 2 x tool_timeout)`` is a
-    call whose process stopped: ``failed`` with ``IN_DOUBT_TEXT``, never re-run. Each proposal in a SAVEPOINT,
-    roots in ``(created_at, id)`` order (the one cross-root order); a failure is logged and retried at the next
-    sweep. Returns ``(proposal_id, new_state)``."""
+    call whose process stopped: ``failed`` with ``IN_DOUBT_TEXT``, never re-run. Every root any arm will touch is
+    locked first, once, in ``(created_at, id)`` order (the one cross-root order: an arm that sorted only its own
+    roots would take one older than a root an earlier arm holds, 2e-2 review); then each proposal in a SAVEPOINT,
+    re-checked under its root. A failure is logged and retried at the next sweep. Returns
+    ``(proposal_id, new_state)``."""
     now = now or datetime.now(UTC)
     done: list[tuple[UUID, str]] = []
     root = aliased(Intention)
@@ -3068,6 +3098,26 @@ async def expire_proposals(
         IntentionProposal.state == PROPOSAL_STAGED,
         IntentionProposal.created_at < now - timedelta(seconds=2 * lease),
     )
+    pending = await due(
+        IntentionProposal.state == PROPOSAL_PENDING,
+        or_(IntentionProposal.deadline <= now, root.root_cancelled_at.is_not(None), root.root_expired_at.is_not(None)),
+    )
+    unrunnable = await due(
+        IntentionProposal.state == PROPOSAL_APPROVED,
+        or_(root.root_cancelled_at.is_not(None), root.root_expired_at.is_not(None)),
+    )
+    stuck = await due(
+        IntentionProposal.state == PROPOSAL_EXECUTING,
+        IntentionProposal.updated_at < now - timedelta(seconds=doubt),
+    )
+    locked = await _lock_roots_in_order(
+        session, agent_id, {root_id for _id, root_id in (*stale, *pending, *unrunnable, *stuck)}
+    )
+    stale, pending, unrunnable, stuck = (
+        [(proposal_id, root_id) for proposal_id, root_id in arm if root_id in locked]
+        for arm in (stale, pending, unrunnable, stuck)
+    )
+
     for proposal_id, root_id in stale:
         try:
             async with session.begin_nested():
@@ -3083,10 +3133,6 @@ async def expire_proposals(
                 exc_info=True,
             )
 
-    pending = await due(
-        IntentionProposal.state == PROPOSAL_PENDING,
-        or_(IntentionProposal.deadline <= now, root.root_cancelled_at.is_not(None), root.root_expired_at.is_not(None)),
-    )
     for proposal_id, root_id in pending:
         try:
             async with session.begin_nested():
@@ -3115,10 +3161,6 @@ async def expire_proposals(
                 "F099: could not expire proposal %s; it is retried at the next sweep", proposal_id, exc_info=True
             )
 
-    unrunnable = await due(
-        IntentionProposal.state == PROPOSAL_APPROVED,
-        or_(root.root_cancelled_at.is_not(None), root.root_expired_at.is_not(None)),
-    )
     for proposal_id, _root_id in unrunnable:
         try:
             async with session.begin_nested():
@@ -3132,10 +3174,6 @@ async def expire_proposals(
                 exc_info=True,
             )
 
-    stuck = await due(
-        IntentionProposal.state == PROPOSAL_EXECUTING,
-        IntentionProposal.updated_at < now - timedelta(seconds=doubt),
-    )
     for proposal_id, root_id in stuck:
         try:
             async with session.begin_nested():

@@ -610,3 +610,53 @@ async def test_a_gate_that_drops_a_cancelled_roots_arrival_stamps_its_rows_close
         stamps[reason] = (row.delivered_session_id, root.id)
     assert stamps["cancelled"][0] == continuation.SILENT_SESSION_ID
     assert stamps["expired"][0] == f"intent-{stamps['expired'][1]}"
+
+
+# ---- 2e-2 review: the proposal sweep takes the roots of all its arms in the one order ----------------------------
+
+
+async def _set_proposal(env, proposal_id, **values):
+    async with env.db.session() as s:
+        await s.execute(update(IntentionProposal).where(IntentionProposal.id == proposal_id).values(**values))
+        await s.commit()
+
+
+async def _lock_root(s, root_id):
+    await s.execute(select(Intention.id).where(Intention.id == root_id).with_for_update(key_share=True))
+
+
+async def test_the_proposal_sweep_locks_the_roots_of_every_arm_in_one_order_so_a_holder_cannot_deadlock_it(
+    env_factory,  # noqa: F811
+    caplog,
+):
+    """Each arm sorted only its own roots, inside one transaction, and a released SAVEPOINT keeps its locks: the stale
+    arm took the YOUNGER root, and the pending arm then waited on the OLDER one. Against another holder taking roots
+    in the one order (a nested-fire cancel, the expiry), that is a cycle. The sweep now locks every root any arm will
+    touch first, in `(created_at, id)` order, so it waits on the older root holding nothing."""
+    env = await env_factory(**CONT)
+    older, younger = await ask_with_proposals(env), await ask_with_proposals(env)
+    now = datetime.now(UTC)
+    # The order is the test's, not the clock's.
+    await set_intention(env, older.root.id, created_at=now - timedelta(hours=2))
+    await set_intention(env, younger.root.id, created_at=now - timedelta(hours=1))
+    (due,), (stale,) = older.ids, younger.ids
+    await _set_proposal(env, due, deadline=now - timedelta(minutes=1))  # the pending arm: the older root
+    await _set_proposal(env, stale, state="staged", created_at=now - timedelta(hours=1))  # the stale arm runs first
+
+    async def sweep():
+        async with env.db.session() as s:
+            moved = await continuation.expire_proposals(s, env.agent, settings=env.settings)
+            await s.commit()
+        return moved
+
+    async with env.db.session() as holder:
+        await _lock_root(holder, older.root.id)  # a holder in the one order: the older root, then the younger
+        task = asyncio.create_task(sweep())
+        try:
+            await asyncio.wait_for(until_a_backend_waits_on_a_lock(env), timeout=10)  # the sweep waits on the older
+            await asyncio.wait_for(_lock_root(holder, younger.root.id), timeout=30)  # the sweep must not hold it
+        finally:
+            await holder.commit()
+    moved = await asyncio.wait_for(task, timeout=30)
+    assert sorted(moved) == sorted([(due, "expired"), (stale, "expired")])
+    assert "deadlock" not in caplog.text
