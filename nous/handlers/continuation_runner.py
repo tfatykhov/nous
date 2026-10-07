@@ -325,6 +325,18 @@ SWEEP_INTERVAL_SECONDS = 60  # the longest the loop sleeps (also the reconciler 
 LOOP_RETRY_SECONDS = 5  # after a pass that failed or was cancelled from within
 COOLDOWN_SECONDS = 5  # a root that was due but not claimable is left alone this long
 NO_ROWS_NOTE = "A result was ready but no result row came with it; nothing to decide."
+# An approved call is bounded by the tool timeout plus this (the dispatcher's own bound is the inner one).
+EXECUTION_GRACE_SECONDS = 5.0
+# What the model and the owner are told of a call whose outcome is not known. Never the exception's message: it
+# can echo the call's arguments.
+TIMEOUT_TEXT = (
+    "The call did not finish within its time limit, so its outcome is unknown. It was NOT run again: check "
+    "whether it happened before asking for it again."
+)
+RAISED_TEXT = (
+    "The call raised {name} before it finished, so its outcome may be unknown. It was NOT run again: check "
+    "whether it happened before asking for it again."
+)
 
 
 class ContinuationRunner:
@@ -399,17 +411,23 @@ class ContinuationRunner:
     # ------------------------------------------------------------------
 
     async def run_once(self) -> continuation.SweepReport:
-        """One sweep, in order: release claims older than the lease, expire roots past their TTL, wake answered or
-        expired questions, push the owner rows that are due, and launch every root that is due while a slot is
-        free. Every step is isolated; with continuation off it does nothing."""
+        """One sweep, in order: release claims older than the lease, expire roots past their TTL, expire proposals,
+        wake answered or expired questions, push the owner rows that are due, and launch every root that is due
+        while a slot is free. Every step is isolated; with continuation off it does nothing."""
         if not continuation.enabled(self._settings):
             return continuation.SweepReport(0, 0, 0, 0, (), None)
         released = await self._step("lease release", self._release_stale, [])
         expired = await self._step("TTL sweep", self._expire, [])
+        # The proposal expiry runs in its own session and AFTER the lease release, and the order matters: its
+        # orphan-staged UPDATE holds staged rows while its later loops take roots, which is safe only because
+        # release_stale_claims has already expired the staged rows of every stale claim (2d-3 review m3).
+        expired_proposals = await self._step("proposal expiry", self._expire_proposals, [])
         await self._step("question wake", self._wake_questions)
         pushed = await self._step("owner push", self._push, 0)
         launched, next_due = await self._step("launch", self._launch, ([], None))
-        return continuation.SweepReport(len(released), len(expired), 0, pushed, tuple(launched), next_due)
+        return continuation.SweepReport(
+            len(released), len(expired), len(expired_proposals), pushed, tuple(launched), next_due
+        )
 
     async def _step(self, name: str, step: Callable[[], Awaitable[Any]], default: Any = None) -> Any:
         try:
@@ -446,6 +464,20 @@ class ContinuationRunner:
         for root_id in expired:
             await self._emit("intention.root_expired", {"root_id": str(root_id)})
         return expired
+
+    async def _expire_proposals(self) -> list[tuple[UUID, str]]:
+        """Pending proposals past their deadline (or on ended work), approved ones whose work ended before they
+        could run, orphan staged rows, calls left in doubt (2d)."""
+        async with self._db.session() as session:
+            moved = await continuation.expire_proposals(session, self._agent_id, settings=self._settings)
+            await session.commit()
+        for proposal_id, state in moved:
+            await self._emit(
+                "intention.proposal_decided", {"proposal_id": str(proposal_id), "state": state, "actor": "system"}
+            )
+        if moved:  # an arrival may have become terminal: the loop looks again
+            self.wake()
+        return moved
 
     async def _wake_questions(self) -> None:
         async with self._db.session() as session:
@@ -990,6 +1022,136 @@ class ContinuationRunner:
             )
         except Exception:
             logger.warning("F099: could not end the session %s", session_id, exc_info=True)
+
+    # ------------------------------------------------------------------
+    # The owner's actions (spec 4.4 items 3 to 6): deterministic, never model-mediated. The REST routes call
+    # these, and so will the A2UI ActionRouter (Phase 3). They are not tools.
+    # ------------------------------------------------------------------
+
+    async def decide_proposal(self, proposal_id: UUID, *, approve: bool, actor: str) -> continuation.ProposalExecution:
+        """The owner's decision on a proposal. An approve of a proposal that is ``approved`` (decided just now, or
+        by an earlier call that never got as far as running it) runs the call and returns its result; every other
+        outcome is the store's. A refusal is a result (``refusal``), never an exception; raises
+        ``continuation.ProposalNotFound`` for an unknown id. The inline execution is shielded from the caller's
+        cancellation (see below)."""
+        async with self._db.session() as session:
+            decision = await continuation.decide_proposal(
+                session, self._agent_id, proposal_id, approve=approve, actor=actor, settings=self._settings
+            )
+            await session.commit()
+        if decision.changed:
+            await self._emit_decided(decision, actor)
+        if decision.woke_arrival:
+            self.wake()
+        if approve and decision.refusal is None and decision.state == continuation.PROPOSAL_APPROVED:
+            # Shielded: a REST client that goes away cancels its request task, and that must not cancel a call the
+            # owner approved half way (it would sit `executing` until the in-doubt sweep). A process stop still
+            # ends it: the loop's tasks go with the process, and the proposal is failed in doubt as C13 says.
+            return await asyncio.shield(self.execute_approved_proposal(proposal_id))
+        return decision
+
+    async def execute_approved_proposal(self, proposal_id: UUID) -> continuation.ProposalExecution:
+        """Run exactly the stored ``(tool, arguments)`` of an approved proposal, once, with no model.
+
+        ``claim_execution`` is the fence (``approved`` to ``executing``, with the root-open predicate in the same
+        statement); without its claim nothing runs, and a proposal whose work ended is ended here
+        (``end_unrunnable``). With the claim, the stored call is checked against the tool as it is registered now
+        (``validate_call``): a call that no longer validates is failed and NOT dispatched. Otherwise it goes
+        through ``AgentRunner.execute_single_call``: the strict ``approved_action`` rule, the execution ledger
+        under the ``proposal:{id}`` scope, owner authority. Whatever happens is recorded on the proposal and
+        returned to the intentions that asked: the result, the tool's error, or an in-doubt text for a timeout or
+        an exception. A call is never re-run. A cancellation (a shutdown) re-raises and leaves the proposal
+        ``executing``: ``expire_proposals`` marks it failed in doubt after the bound."""
+        async with self._db.session() as session:
+            proposal = await continuation.claim_execution(session, self._agent_id, proposal_id)
+            await session.commit()
+        if proposal is None:
+            return await self._not_runnable(proposal_id)
+        context = ExecutionContext(
+            kind="approved_action",
+            session_id=f"proposal-{proposal.id}",
+            proposal_id=proposal.id,
+            declared_tools=(proposal.tool,),
+            root_intention_id=proposal.root_id,
+            intention_id=proposal.intention_id,
+        )  # authority stays the default, owner: the owner approved this one call
+        ok, result, error, send_key = False, None, None, None
+        try:
+            # Inside the try: whatever the check raises fails the proposal like any other exception (never left
+            # `executing`), and nothing is dispatched.
+            problems = self._dispatcher.validate_call(proposal.tool, proposal.arguments)
+            if problems:
+                logger.warning("F099: the stored call of proposal %s no longer validates", proposal.id.hex[:8])
+                error = f"the stored call no longer validates: {'; '.join(problems)}; it was NOT run"
+            else:
+                call = await asyncio.wait_for(
+                    self._runner.execute_single_call(context, proposal.tool, dict(proposal.arguments)),
+                    timeout=float(self._settings.tool_timeout) + EXECUTION_GRACE_SECONDS,
+                )
+                ok, send_key = not call.is_error, call.send_key
+                result, error = (call.text, None) if ok else (None, call.text)
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError:
+            logger.warning("F099: the approved call of proposal %s timed out; outcome unknown", proposal.id.hex[:8])
+            error = TIMEOUT_TEXT
+        except Exception as exc:
+            logger.warning(
+                "F099: the approved call of proposal %s raised %s",
+                proposal.id.hex[:8],
+                type(exc).__name__,
+                exc_info=True,
+            )
+            error = RAISED_TEXT.format(name=type(exc).__name__)
+        async with self._db.session() as session:
+            finished = await continuation.finish_execution(
+                session,
+                self._agent_id,
+                proposal_id,
+                ok=ok,
+                result=result,
+                error=error,
+                ledger_key=send_key,
+                settings=self._settings,
+            )
+            await session.commit()
+        if finished.changed:
+            await self._emit_decided(finished, proposal.decided_by or "owner")
+        if finished.woke_arrival:
+            self.wake()
+        return finished
+
+    async def _not_runnable(self, proposal_id: UUID) -> continuation.ProposalExecution:
+        """``claim_execution`` gave no claim: the work ended before the call could start (it ends here as
+        ``cancelled`` or ``expired``, and nothing runs), or the proposal is not ``approved`` any more (another
+        caller has it, or it is done): its current state."""
+        async with self._db.session() as session:
+            outcome = await continuation.end_unrunnable(session, self._agent_id, proposal_id, settings=self._settings)
+            await session.commit()
+        if outcome.changed:
+            await self._emit_decided(outcome, "system")
+        if outcome.woke_arrival:
+            self.wake()
+        return outcome
+
+    async def answer_question(self, question_id: UUID, *, text: str, actor: str) -> continuation.AnswerRecorded:
+        """The owner's answer to a question, recorded as the next result of every intention of the asking arrival.
+        Raises ``continuation.QuestionNotFound`` or ``continuation.AnswerRefused`` (answered, expired or ended:
+        nothing written)."""
+        async with self._db.session() as session:
+            recorded = await continuation.record_answer(
+                session, self._agent_id, question_id, text=text, actor=actor, settings=self._settings
+            )
+            await session.commit()
+        if recorded.woke_arrival:
+            self.wake()
+        return recorded
+
+    async def _emit_decided(self, outcome: continuation.ProposalExecution, actor: str) -> None:
+        await self._emit(
+            "intention.proposal_decided",
+            {"proposal_id": str(outcome.proposal_id), "state": outcome.state, "actor": actor},
+        )
 
     async def _emit(self, event_type: str, data: dict[str, Any]) -> None:
         """A hint on the bus (it drops on QueueFull); the rows are the truth. Never raises."""

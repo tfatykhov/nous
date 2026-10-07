@@ -2826,7 +2826,9 @@ async def expire_proposals(
     """The sweep's hygiene for proposals (carry-over 9, conflicts C13 and C15), in the caller's transaction.
 
     ``pending`` past its deadline, or on a root that ended, becomes ``expired`` (``cancelled`` for a cancelled
-    root) and its outcome reaches the arrival, which wakes when terminal. ``staged`` older than two leases is an
+    root) and its outcome reaches the arrival, which wakes when terminal. ``approved`` on a root that ended is a call
+    nobody will claim any more (the process stopped between the approve and the claim): ``end_unrunnable`` ends it
+    (2d-3 review m2). ``staged`` older than two leases is an
     orphan of a turn whose lease was released: ``expired`` (done first, before any root is locked). ``executing``
     for longer than ``max(lease, 2 x tool_timeout)`` is a call whose process stopped: ``failed`` with
     ``IN_DOUBT_TEXT``, never
@@ -2894,6 +2896,23 @@ async def expire_proposals(
         except Exception:
             logger.warning(
                 "F099: could not expire proposal %s; it is retried at the next sweep", proposal_id, exc_info=True
+            )
+
+    unrunnable = await due(
+        IntentionProposal.state == PROPOSAL_APPROVED,
+        or_(root.root_cancelled_at.is_not(None), root.root_expired_at.is_not(None)),
+    )
+    for proposal_id, _root_id in unrunnable:
+        try:
+            async with session.begin_nested():
+                outcome = await end_unrunnable(session, agent_id, proposal_id, settings=settings, now=now)
+                if outcome.changed:
+                    done.append((proposal_id, outcome.state))
+        except Exception:
+            logger.warning(
+                "F099: could not end the unrunnable proposal %s; it is retried at the next sweep",
+                proposal_id,
+                exc_info=True,
             )
 
     stuck = await due(

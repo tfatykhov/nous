@@ -241,6 +241,7 @@ async def test_the_sweep_runs_the_publisher_and_counts_what_it_pushed(runner_env
     [
         ("release_stale_claims", "lease release"),
         ("expire_roots", "TTL sweep"),
+        ("expire_proposals", "proposal expiry"),
         ("wake_terminal_arrivals", "question wake"),
     ],
 )
