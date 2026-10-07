@@ -630,8 +630,11 @@ class AgentRunner:
 
     def set_cancelled_roots(self, view: Callable[[UUID], bool]) -> None:
         """F099 2e: install the in-process view of cancelled roots (``ContinuationRunner.root_is_cancelled``).
-        ``_authorize_tool_call`` refuses every call whose context names a root the view says is cancelled."""
+        ``_authorize_tool_call`` refuses every call whose context names a root the view says is cancelled. Propagated
+        to the forks, as the snapshot store is: the heartbeat's checks run on one."""
         self._root_cancelled = view
+        for fork in self._forks:
+            fork.set_cancelled_roots(view)
 
     def set_snapshot_store(self, store: Any, workspace_dir: str) -> None:
         """Phase 2.8: compensation snapshots for compensable calls in background contexts."""
@@ -1308,6 +1311,7 @@ class AgentRunner:
         forked._snap_store = self._snap_store
         forked._workspace_dir = self._workspace_dir
         forked._action_review_pusher = self._action_review_pusher
+        forked._root_cancelled = self._root_cancelled  # F099 2e: and set_cancelled_roots propagates a later view
         self._forks.add(forked)
         # F035.4: Context logger NOT propagated to forks — heartbeat triage
         # uses a dedicated API client on a separate connection pool, and the

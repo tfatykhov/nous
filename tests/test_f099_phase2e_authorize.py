@@ -100,6 +100,38 @@ async def test_a_root_that_is_not_cancelled_is_untouched_by_the_view(env_factory
     assert view.asked == [ROOT]
 
 
+async def test_a_fork_made_before_the_view_is_installed_refuses_a_cancelled_roots_call(env_factory):  # noqa: F811
+    """The heartbeat's dedicated runner is a fork made at its start, and every lineage check and callback runs on it:
+    a view installed later must reach it, as the snapshot store does."""
+    env, runner = await _runner(env_factory, **MODES_OFF)
+    forked = runner.fork(AsyncMock())
+    runner.set_cancelled_roots(CountingView({ROOT}))
+    refusal = forked._authorize_tool_call(
+        _ctx("heartbeat_check"), "web_search", frozenset({"web_search"}), "s", {"query": "snow"}
+    )
+    assert refusal is not None and refusal.code == "root_cancelled"
+
+
+async def test_a_fork_made_after_the_view_is_installed_refuses_a_cancelled_roots_call(env_factory):  # noqa: F811
+    env, runner = await _runner(env_factory, **MODES_OFF)
+    runner.set_cancelled_roots(CountingView({ROOT}))
+    forked = runner.fork(AsyncMock())
+    refusal = forked._authorize_tool_call(
+        _ctx("heartbeat_check"), "web_search", frozenset({"web_search"}), "s", {"query": "snow"}
+    )
+    assert refusal is not None and refusal.code == "root_cancelled"
+
+
+async def test_a_fork_of_a_runner_with_no_view_has_no_view(env_factory):  # noqa: F811  # PIN
+    """Prod parity (continuation off): nothing installs a view, so a fork copies the default, which reads nothing."""
+    env, runner = await _runner(env_factory)
+    forked = runner.fork(AsyncMock())
+    assert forked._root_cancelled is runner_module._no_cancelled_roots
+    assert (
+        forked._authorize_tool_call(_ctx("heartbeat_check"), "web_search", frozenset({"web_search"}), "s", {}) is None
+    )
+
+
 async def test_a_context_that_names_no_root_never_asks_the_view(env_factory):  # noqa: F811  # PIN
     """Prod parity: a chat turn, a heartbeat triage and every pre-F099 background context name no root, so for them
     the check is one `is not None` and the view is never called."""
@@ -169,6 +201,8 @@ async def test_a_cancelled_roots_tool_call_does_not_run_through_a_real_turn(runn
 
     class Ledger:
         async def record_blocked(self, **kwargs):
+            if kwargs["refused_by"] not in REFUSAL_CODES:  # as the real store does
+                raise ValueError(f"unknown refusal code {kwargs['refused_by']!r}")
             blocked.append(kwargs["refused_by"])
 
     env.runner.set_ledger_store(Ledger())
