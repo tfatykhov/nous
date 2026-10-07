@@ -4,6 +4,7 @@ leaves a root waiting on nothing ends it (re-review N1)."""
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 import pytest
@@ -20,6 +21,7 @@ from f099_support import (
     make_root,
     make_subtask,
     record,
+    runner_env,  # noqa: F401
     set_intention,
 )
 from test_f099_phase2e_cancel import _cancel, _fire, _row, _schedule_container
@@ -27,7 +29,7 @@ from test_f099_phase2e_cancel import _cancel, _fire, _row, _schedule_container
 from nous.brain import continuation
 from nous.brain.continuation import RootLimits
 from nous.brain.intentions import IntentionSpec
-from nous.handlers.continuation_runner import ArrivalState, make_resolve_intention_executor
+from nous.handlers.continuation_runner import ArrivalState, ContinuationRunner, make_resolve_intention_executor
 from nous.handlers.subtask_worker import SubtaskWorkerPool
 from nous.heart.result_inbox import record_subtask_result
 from nous.heart.result_reconciler import IntentionClosePass, repair_missing_results
@@ -206,7 +208,10 @@ async def _waiting_on_a_cancelled_child_and_a_remember_one(env):
 
 
 async def _hanging_reports(env, root):
-    return [r for r in await inbox_rows(env) if r.source_kind == "intention_report" and r.intention_id == root.id]
+    """The REPORTs that say the root was left with nothing running (keyed by `uuid5`, so a resolved root's own
+    REPORT is not one)."""
+    hanging = uuid.uuid5(continuation._HANGING_NAMESPACE, str(root.id))
+    return [r for r in await inbox_rows(env) if r.source_kind == "intention_report" and r.source_id == hanging]
 
 
 async def _close_by_writer(env, subtask):
@@ -251,3 +256,150 @@ async def test_a_quiet_close_with_a_continue_child_still_open_ends_nothing(env_f
     await finish(env, remember)
     await _close_by_writer(env, remember)
     assert (await _row(env, root.id)).root_expired_at is None and await _hanging_reports(env, root) == []
+
+
+# ---- round 3: the hanging-root sweep (every closer, and the gap between a close and its check) -------------------
+
+
+async def _sweep(env):
+    async with env.db.session() as s:
+        ended = await continuation.end_hanging_roots(s, env.agent, settings=env.settings, limit=10)
+        await s.commit()
+    return ended
+
+
+async def _commit(env, root, decision):
+    got = await claim(env, root.id)
+    async with env.db.session() as s:
+        resolution = continuation.Resolution(decision, "the arrival's note", True, 0.6)
+        assert await continuation.commit_arrival(
+            s, env.agent, got, resolution=resolution, outcome="resolved", settings=env.settings
+        )
+        await s.commit()
+
+
+async def test_a_container_closed_by_the_scheduler_is_followed_by_the_sweep(env_factory):  # noqa: F811
+    """`ScheduleManager._close_container` closes in its own transaction and checks no root: the sweep does."""
+    env = await env_factory(**CONT)
+    root = await make_root(env)
+    await record(env, root)
+    child = await make_child(env, root)
+    schedule = await env.heart.schedules.create(
+        task="watch the snow",
+        schedule_type="recurring",
+        interval_seconds=1800,
+        intention=IntentionSpec(intent="Watch it", origin_kind="interactive", container=True, parent_id=root.id),
+    )
+    await _commit(env, root, "continue")
+    await env.heart.subtasks.cancel(uuid.UUID(child.source_id))
+    await repair_missing_results(env.db, env.heart.result_inbox, env.settings, limit=50)  # the container is open
+    await env.heart.schedules.deactivate(schedule.id)
+    assert (await intention_of(env, "schedule", schedule.id)).state == "closed"
+    assert (await _row(env, root.id)).root_expired_at is None  # the scheduler's close ended nothing
+    assert await _sweep(env) == [root.id]
+    assert (await _row(env, root.id)).root_expired_at is not None
+    assert len(await _hanging_reports(env, root)) == 1
+    assert await _sweep(env) == [] and len(await _hanging_reports(env, root)) == 1  # a second sweep: nothing
+
+
+async def test_a_close_whose_hang_check_never_ran_is_followed_by_the_sweep(env_factory):  # noqa: F811
+    """The crash gap: the quiet close committed and the process stopped before its check."""
+    env = await env_factory(**CONT)
+    root, remember = await _waiting_on_a_cancelled_child_and_a_remember_one(env)
+    m = await intention_of(env, "subtask", remember.id)
+    await set_intention(env, m.id, state="closed", close_reason="delivered")  # the close, without its check
+    assert (await _row(env, root.id)).root_expired_at is None
+    assert await _sweep(env) == [root.id]
+    (report,) = await _hanging_reports(env, root)
+    assert report.source_id == uuid.uuid5(continuation._HANGING_NAMESPACE, str(root.id))
+    assert await _sweep(env) == [] and len(await _hanging_reports(env, root)) == 1
+
+
+async def test_the_sweep_leaves_a_root_with_any_child_still_open(env_factory):  # noqa: F811
+    """A `remember` child still running: the lineage is not empty, whatever it will or will not wake."""
+    env = await env_factory(**CONT)
+    root, _remember = await _waiting_on_a_cancelled_child_and_a_remember_one(env)
+    assert await _sweep(env) == []
+    assert (await _row(env, root.id)).root_expired_at is None and await _hanging_reports(env, root) == []
+
+
+@pytest.mark.parametrize("decision", ["report", "drop"])
+async def test_the_sweep_never_touches_a_root_that_was_resolved(env_factory, decision):  # noqa: F811  # PIN
+    env = await env_factory(**CONT)
+    root = await make_root(env)
+    await record(env, root)
+    await _commit(env, root, decision)
+    before = await _row(env, root.id)
+    assert before.state == "closed"
+    assert await _sweep(env) == []
+    after = await _row(env, root.id)
+    assert (after.root_expired_at, after.state, after.updated_at) == (None, "closed", before.updated_at)
+    assert await _hanging_reports(env, root) == []
+
+
+async def test_the_sweep_never_touches_a_phase_1_root_or_a_container(env_factory):  # noqa: F811  # PIN
+    """No arrival (a Phase 1 root, closed `legacy` by its writer), or a container: nothing was waiting."""
+    env = await env_factory(**CONT)
+    st = await make_subtask(env, policy="remember")
+    await finish(env, st)
+    await record_subtask_result(env.heart.result_inbox, await env.heart.subtasks.get(st.id), env.settings)
+    phase_1 = await intention_of(env, "subtask", st.id)
+    assert phase_1.state == "closed"
+    schedule, container = await _schedule_container(env)
+    await env.heart.schedules.deactivate(schedule.id)
+    assert await _sweep(env) == []
+    for row in (phase_1, container):
+        assert (await _row(env, row.id)).root_expired_at is None
+
+
+async def test_the_sweep_is_bounded_and_takes_the_oldest_first(env_factory):  # noqa: F811
+    env = await env_factory(**CONT)
+    roots = []
+    for _ in range(3):
+        root, remember = await _waiting_on_a_cancelled_child_and_a_remember_one(env)
+        await set_intention(env, (await intention_of(env, "subtask", remember.id)).id, state="closed")
+        for st_id in (remember.id, uuid.UUID(root.source_id)):  # the pending queue holds five
+            await env.heart.subtasks.cancel(st_id)
+        roots.append(root)
+    async with env.db.session() as s:
+        first = await continuation.end_hanging_roots(s, env.agent, settings=env.settings, limit=2)
+        await s.commit()
+    assert first == [roots[0].id, roots[1].id]
+    assert await _sweep(env) == [roots[2].id]
+
+
+async def test_the_runners_sweep_ends_a_hanging_root(runner_env):  # noqa: F811
+    env = await runner_env()
+    root, remember = await _waiting_on_a_cancelled_child_and_a_remember_one(env)
+    await set_intention(env, (await intention_of(env, "subtask", remember.id)).id, state="closed")
+    cont = ContinuationRunner(
+        database=env.db,
+        settings=env.settings,
+        runner=env.runner,
+        heart=env.heart,
+        brain=env.brain,
+        bus=env.bus,
+        dispatcher=env.dispatcher,
+    )
+    await asyncio.wait_for(cont.run_once(), timeout=30)
+    assert (await _row(env, root.id)).root_expired_at is not None and len(await _hanging_reports(env, root)) == 1
+
+
+async def test_a_failing_hanging_root_step_does_not_stop_the_sweep(runner_env, monkeypatch):  # noqa: F811
+    env = await runner_env()
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("hanging sweep down")
+
+    monkeypatch.setattr(continuation, "end_hanging_roots", boom)
+    cont = ContinuationRunner(
+        database=env.db,
+        settings=env.settings,
+        runner=env.runner,
+        heart=env.heart,
+        brain=env.brain,
+        bus=env.bus,
+        dispatcher=env.dispatcher,
+    )
+    report = await asyncio.wait_for(cont.run_once(), timeout=30)
+    assert report.launched == ()  # the later steps still ran

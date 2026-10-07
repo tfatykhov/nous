@@ -467,14 +467,16 @@ class ContinuationRunner:
     # ------------------------------------------------------------------
 
     async def run_once(self) -> continuation.SweepReport:
-        """One sweep, in order: release claims older than the lease, expire roots past their TTL, expire proposals,
-        wake answered or expired questions, push the owner rows that are due, and launch every root that is due
-        while a slot is free. Every step is isolated; with continuation off it does nothing."""
+        """One sweep, in order: release claims older than the lease, expire roots past their TTL, end the
+        roots left waiting on nothing, expire proposals, wake answered or expired questions, push the owner rows
+        that are due, and launch every root that is due while a slot is free. Every step is isolated; with
+        continuation off it does nothing."""
         if not continuation.enabled(self._settings):
             return continuation.SweepReport(0, 0, 0, 0, (), None)
         await self._step("cancel sweep", self._cancel_sweep)
         released = await self._step("lease release", self._release_stale, [])
         expired = await self._step("TTL sweep", self._expire, [])
+        await self._step("hanging-root sweep", self._end_hanging)
         # The proposal expiry runs in its own session and AFTER the lease release, and the order matters: its
         # orphan-staged UPDATE holds staged rows while its later loops take roots, which is safe only because
         # release_stale_claims has already expired the staged rows of every stale claim (2d-3 review m3).
@@ -578,6 +580,14 @@ class ContinuationRunner:
                 "intention.proposal_decided", {"proposal_id": str(proposal_id), "state": state, "actor": "system"}
             )
         return expired
+
+    async def _end_hanging(self) -> list[UUID]:
+        """The roots left waiting on nothing, whatever closed their last open row (``end_hanging_roots``): each is
+        ended and its REPORT pushed by this sweep's owner push."""
+        async with self._db.session() as session:
+            ended = await continuation.end_hanging_roots(session, self._agent_id, settings=self._settings)
+            await session.commit()
+        return ended
 
     async def _expire_proposals(self) -> list[tuple[UUID, str]]:
         """Pending proposals past their deadline (or on ended work), approved ones whose work ended before they

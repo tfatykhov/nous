@@ -4031,6 +4031,60 @@ async def end_hanging_roots_after_close(
     return ended
 
 
+HANGING_BATCH = 10  # hanging roots ended per sweep
+
+
+async def end_hanging_roots(
+    session: AsyncSession, agent_id: str, *, settings: Any, limit: int = HANGING_BATCH, now: datetime | None = None
+) -> list[UUID]:
+    """The sweep's backstop for ``end_hanging_root`` (2e final fix wave, round 3): every root left waiting on nothing,
+    however its last open row closed (a closer that checks no root, such as ``ScheduleManager._close_container``,
+    or a process that stopped between a close's commit and its check). At most ``limit``, oldest first (the one
+    cross-root lock order), one SAVEPOINT per root. Does not commit.
+
+    Due: a root with neither marker, not a container, with NO open intention in its lineage (any policy: the same
+    predicate as ``end_hanging_root``'s, so a root with a ``remember`` child still running is never ended), whose
+    newest arrival decided ``continue`` or ``revise``. That is exactly the hanging shape and nothing else: a root
+    that ended by its own decision has a ``drop``, ``report`` or ``ask`` arrival newest (and every gate, fallback and
+    failed arrival is written as ``drop`` or ``report``), a Phase 1 root has no arrival, and a ``continue`` whose
+    work came back has a newer arrival, because the result woke the root. ``end_hanging_root`` checks it all again
+    under the root lock, writes the marker and one REPORT, and is idempotent. Returns the roots it ended."""
+    now = now or datetime.now(UTC)
+    root = aliased(Intention)
+    lineage = aliased(Intention)
+    newest = (
+        select(IntentionArrival.decision)
+        .where(IntentionArrival.agent_id == agent_id, IntentionArrival.root_id == root.id)
+        .order_by(IntentionArrival.n.desc())
+        .limit(1)
+        .correlate(root)
+        .scalar_subquery()
+    )
+    due = (
+        select(root.id)
+        .where(
+            root.agent_id == agent_id,
+            root.id == root.root_id,
+            root.root_cancelled_at.is_(None),
+            root.root_expired_at.is_(None),
+            root.wake_policy != intentions.WAKE_CONTAINER,
+            ~exists().where(lineage.agent_id == agent_id, lineage.root_id == root.id, lineage.state.in_(OPEN_STATES)),
+            newest.in_(("continue", "revise")),
+        )
+        .order_by(root.created_at, root.id)
+        .limit(limit)
+    )
+    ended: list[UUID] = []
+    for root_id in (await session.execute(due)).scalars().all():
+        try:
+            async with session.begin_nested():
+                if await end_hanging_root(session, agent_id, root_id, settings=settings, now=now):
+                    ended.append(root_id)
+        except Exception:
+            logger.warning("F099: could not end hanging root %s; retried at the next sweep", root_id, exc_info=True)
+    return ended
+
+
 # ---------------------------------------------------------------------------
 # F099 Phase 2e: the owner's view of the roots (contract RootView, spec 4.6 "GET /intentions")
 # ---------------------------------------------------------------------------
