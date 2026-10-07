@@ -3665,6 +3665,34 @@ async def cancelled_root_ids(
     return list(rows.scalars().all())
 
 
+async def stray_dag_ids(session: AsyncSession, agent_id: str, *, limit: int = 10) -> list[UUID]:
+    """The DAGs that are still running under a cancelled root, oldest first. ``cancel_root`` reports its lineage's
+    DAGs and the runner cancels them after the commit, so a process that stopped in between, or an orchestrator that
+    raised, leaves one running: the runner's sweep cancels it from here. A stray DAG cannot act (the root is
+    cancelled, so every tool call of its nodes is refused), it can only keep its nodes busy."""
+    root = aliased(Intention)
+    rows = await session.execute(
+        select(ExecutionDAG.id)
+        .join(
+            Intention,
+            and_(
+                Intention.agent_id == agent_id,
+                Intention.source_kind == intentions.SOURCE_DAG,
+                Intention.source_id == cast(ExecutionDAG.id, Text),
+            ),
+        )
+        .join(root, and_(root.agent_id == agent_id, root.id == Intention.root_id))
+        .where(
+            ExecutionDAG.agent_id == agent_id,
+            ExecutionDAG.status.notin_(intentions.TERMINAL_DAG_STATUSES),
+            root.root_cancelled_at.is_not(None),
+        )
+        .order_by(ExecutionDAG.created_at, ExecutionDAG.id)
+        .limit(limit)
+    )
+    return list(rows.scalars().all())
+
+
 async def find_root_id(session: AsyncSession, agent_id: str, prefix: str) -> UUID | None:
     """The one ROOT intention whose id starts with ``prefix`` (a child is never matched: the owner cancels roots)."""
     cleaned = normalize_id(prefix)

@@ -316,6 +316,15 @@ async def _build_continuation_runner(
     )
     if bus is not None:
         bus.on("intention.result_ready", continuation_runner.on_result_ready)
+    # 2e: the owner's cancel reaches every tool call. The view is loaded BEFORE any loop or worker runs, so a restart
+    # forgets no cancel; the DAG cancel is bound later, where the orchestrator is built (this runs before it).
+    runner.set_cancelled_roots(continuation_runner.root_is_cancelled)
+    try:
+        await continuation_runner.load_cancelled_roots()
+    except Exception:
+        # The migrations just ran on this database, so this is improbable; the build must not fail for it: start()
+        # loads the view again, and every sweep refreshes it.
+        logger.warning("F099: could not load the cancelled roots; start() loads them again", exc_info=True)
     return continuation_runner
 
 
@@ -1427,6 +1436,10 @@ async def create_components(settings: Settings) -> dict:
                 # Harness Phase 3: pushes and closes approval cards.
                 surface_service=surface_service,
             )
+
+            if continuation_runner is not None:
+                # F099 2e: an owner's cancel stops the DAGs of its lineage through the orchestrator.
+                continuation_runner.set_cancel_dag(dag_orchestrator.cancel_dag)
 
             if heartbeat_runner is not None:
                 heartbeat_runner.dag_orchestrator = dag_orchestrator

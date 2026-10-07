@@ -328,6 +328,11 @@ NO_ROWS_NOTE = "A result was ready but no result row came with it; nothing to de
 # An approved call is bounded by the tool timeout plus this. The runner's wait_for is the only bound: the dispatch
 # path (_dispatch_with_ledger) applies no tool timeout of its own. stop() also waits this long for a call in flight.
 EXECUTION_GRACE_SECONDS = 5.0
+# cancel_root waits this long for the turns it cancelled to unwind (a turn in a blocking call finishes it, then ends).
+CANCEL_WAIT_SECONDS = 5.0
+# A sweep re-reads the roots cancelled since the last one, less this margin (a second process would lag by a sweep).
+CANCEL_VIEW_MARGIN_SECONDS = 120
+STRAY_DAG_BATCH = 10  # the DAGs under cancelled roots one sweep cancels
 # What the model and the owner are told of a call whose outcome is not known. Never the exception's message: it
 # can echo the call's arguments.
 TIMEOUT_TEXT = (
@@ -357,6 +362,7 @@ class ContinuationRunner:
         bus: Any = None,
         dispatcher: Any = None,
         publisher: Any = None,
+        cancel_dag: Callable[[UUID, str], Awaitable[None]] | None = None,
     ) -> None:
         self._db = database
         self._settings = settings
@@ -375,10 +381,25 @@ class ContinuationRunner:
         self._executing: set[asyncio.Task[Any]] = set()
         self._cooldown: dict[UUID, datetime] = {}
         self._task: asyncio.Task[None] | None = None
+        # 2e: the owner's cancel. ``_cancelled`` is the in-process view AgentRunner._authorize_tool_call asks (loaded at
+        # startup, grown by cancel_root, refreshed by every sweep); ``_cancel_dag`` is the orchestrator's cancel, bound
+        # after the DAG block of main.py exists (the runner is built before it).
+        self._cancelled: set[UUID] = set()
+        self._cancel_dag = cancel_dag
+        self._view_checked_at: datetime | None = None
 
     @property
     def running_roots(self) -> frozenset[UUID]:
         return frozenset(self._running)
+
+    def set_cancel_dag(self, cancel_dag: Callable[[UUID, str], Awaitable[None]] | None) -> None:
+        """Bind ``DAGOrchestrator.cancel_dag`` (main.py, once the orchestrator exists)."""
+        self._cancel_dag = cancel_dag
+
+    def root_is_cancelled(self, root_id: UUID) -> bool:
+        """The in-process view of cancelled roots, for ``AgentRunner.set_cancelled_roots``. A set lookup: no
+        database, no await. A root the owner cancelled is in it from the moment ``cancel_root`` committed."""
+        return root_id in self._cancelled
 
     def wake(self) -> None:
         """Tell the loop to look again: a result is ready (the bus hint, the reconciler pass), or an
@@ -394,6 +415,7 @@ class ContinuationRunner:
         if not continuation.enabled(self._settings) or self._task is not None:
             return
         await self._step("startup lease release", self._release_stale)
+        await self._step("cancelled roots load", self.load_cancelled_roots)
         self._task = asyncio.create_task(self._loop(), name="continuation-runner")
 
     async def stop(self) -> None:
@@ -429,6 +451,7 @@ class ContinuationRunner:
         while a slot is free. Every step is isolated; with continuation off it does nothing."""
         if not continuation.enabled(self._settings):
             return continuation.SweepReport(0, 0, 0, 0, (), None)
+        await self._step("cancel sweep", self._cancel_sweep)
         released = await self._step("lease release", self._release_stale, [])
         expired = await self._step("TTL sweep", self._expire, [])
         # The proposal expiry runs in its own session and AFTER the lease release, and the order matters: its
@@ -451,6 +474,52 @@ class ContinuationRunner:
             logger.warning("F099: the continuation %s failed; the next sweep tries again", name, exc_info=True)
             return default
 
+    async def load_cancelled_roots(self) -> int:
+        """Load every cancelled root into the view (2e). main.py calls it when it builds the runner, before any loop
+        or worker runs, and ``start`` calls it again: a restart must not forget a cancel. Returns how many roots
+        the view holds."""
+        await self._refresh_cancelled(since=None)
+        return len(self._cancelled)
+
+    async def _refresh_cancelled(self, *, since: datetime | None) -> None:
+        checked = datetime.now(UTC)
+        async with self._db.session() as session:
+            ids = await continuation.cancelled_root_ids(session, self._agent_id, since=since)
+        self._cancelled.update(ids)
+        self._view_checked_at = checked
+
+    async def _cancel_sweep(self) -> int:
+        """Every sweep: take in the roots cancelled since the last one (a cancel through another surface, or by a
+        second process), then cancel the DAGs that are still running under a cancelled root (a cancel whose
+        orchestrator call failed, or whose process stopped after the commit). Returns the DAGs it cancelled."""
+        since = (
+            self._view_checked_at - timedelta(seconds=CANCEL_VIEW_MARGIN_SECONDS)
+            if self._view_checked_at is not None
+            else None
+        )
+        await self._refresh_cancelled(since=since)
+        if self._cancel_dag is None:
+            return 0
+        async with self._db.session() as session:
+            strays = await continuation.stray_dag_ids(session, self._agent_id, limit=STRAY_DAG_BATCH)
+        return await self._cancel_dags(strays)
+
+    async def _cancel_dags(self, dag_ids: Sequence[UUID]) -> int:
+        """The orchestrator's cancel for each DAG; one that raises is logged and left for the sweep."""
+        done = 0
+        for dag_id in dag_ids:
+            if self._cancel_dag is None:
+                logger.warning("F099: DAG %s is running under a cancelled root and no orchestrator is bound", dag_id)
+                continue
+            try:
+                await self._cancel_dag(dag_id, "cancelled by the owner")
+                done += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("F099: could not cancel DAG %s; the sweep tries again", dag_id, exc_info=True)
+        return done
+
     async def _release_stale(self) -> list[UUID]:
         settings = self._settings
         async with self._db.session() as session:
@@ -469,13 +538,23 @@ class ContinuationRunner:
 
     async def _expire(self) -> list[UUID]:
         settings = self._settings
+        ended: list[tuple[UUID, str]] = []
         async with self._db.session() as session:
             expired = await continuation.expire_roots(
-                session, self._agent_id, ttl_hours=settings.intention_root_ttl_hours, settings=settings
+                session,
+                self._agent_id,
+                ttl_hours=settings.intention_root_ttl_hours,
+                settings=settings,
+                proposals_out=ended,
             )
             await session.commit()
         for root_id in expired:
             await self._emit("intention.root_expired", {"root_id": str(root_id)})
+        # An expiry ends the proposals of its root with it (the proposals sweep no longer finds them).
+        for proposal_id, state in ended:
+            await self._emit(
+                "intention.proposal_decided", {"proposal_id": str(proposal_id), "state": state, "actor": "system"}
+            )
         return expired
 
     async def _expire_proposals(self) -> list[tuple[UUID, str]]:
@@ -1193,6 +1272,56 @@ class ContinuationRunner:
         if recorded.woke_arrival:
             self.wake()
         return recorded
+
+    # ------------------------------------------------------------------
+    # The owner's cancel (spec 4.6). An owner action like the three above: the REST route, the bot and (Phase 3)
+    # the A2UI card call this one function. Not a tool: no model can cancel (it can only stop its own children).
+    # ------------------------------------------------------------------
+
+    async def cancel_root(self, root_id: UUID, *, reason: str, actor: str) -> continuation.CancelOutcome:
+        """Cancel a root and everything under it (T13). In this order:
+
+        1. The store's one transaction (``continuation.cancel_root``): the marker, the lineage, its subtasks, its
+           proposals, its containers and their fires. It commits.
+        2. The in-process view takes every cancelled root, so the next tool call of the lineage is refused
+           (``AgentRunner._authorize_tool_call``). A call already past that check when the marker committed
+           runs; the one after it does not, and a spawn is refused by the database (I1) from the commit on.
+        3. The lineage's running DAGs, by the orchestrator (the store cannot): one that fails is left to the sweep.
+        4. The running turn of each cancelled root: its task is cancelled, which releases its claim (fenced: the
+           cancel already moved the rows, so it finds none), ends its session and frees its slot. A turn that is
+           past its model call and about to commit loses its fence instead.
+        5. The bus.
+
+        Raises ``continuation.RootNotFound`` and ``continuation.CancelRefused`` (nothing written)."""
+        async with self._db.session() as session:
+            outcome = await continuation.cancel_root(session, self._agent_id, root_id, reason=reason, actor=actor)
+            await session.commit()
+        self._cancelled.update(outcome.root_ids)
+        cancelled_dags = await self._cancel_dags(outcome.dag_ids)
+        stopped = await self._stop_turns(outcome.root_ids)
+        for cancelled in outcome.root_ids:
+            await self._emit("intention.root_cancelled", {"root_id": str(cancelled), "reason": reason, "actor": actor})
+        for proposal_id in outcome.proposal_ids:
+            await self._emit(
+                "intention.proposal_decided",
+                {"proposal_id": str(proposal_id), "state": continuation.PROPOSAL_CANCELLED, "actor": "system"},
+            )
+        self.wake()
+        return dataclasses.replace(outcome, cancelled_dags=cancelled_dags, turn_stopped=stopped)
+
+    async def _stop_turns(self, root_ids: Sequence[UUID]) -> bool:
+        """Cancel the arrival task of each root that has one and wait (bounded) for it to unwind. Whether any was
+        running."""
+        tasks = [task for root in root_ids if (task := self._running.get(root)) is not None]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            _done, pending = await asyncio.wait(tasks, timeout=CANCEL_WAIT_SECONDS)
+            if pending:  # a turn in a long blocking call: it was told to stop and is still unwinding
+                logger.warning(
+                    "F099: %d cancelled turn(s) are still unwinding after %ss", len(pending), CANCEL_WAIT_SECONDS
+                )
+        return bool(tasks)
 
     async def _emit_decided(self, outcome: continuation.ProposalExecution, actor: str) -> None:
         await self._emit(
