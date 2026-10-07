@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import unicodedata
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
@@ -1604,10 +1605,30 @@ async def _expire_root(
     return True
 
 
+async def _proposals_terminal(session: AsyncSession, agent_id: str, arrival_id: UUID) -> bool:
+    """Every proposal of the arrival is in ``PROPOSAL_TERMINAL`` (2d). A ``staged`` row has no arrival yet, so it
+    never holds an arrival back: it is not approvable."""
+    unfinished = (
+        await session.execute(
+            select(
+                exists().where(
+                    IntentionProposal.agent_id == agent_id,
+                    IntentionProposal.arrival_id == arrival_id,
+                    IntentionProposal.state.notin_(sorted(PROPOSAL_TERMINAL)),
+                )
+            )
+        )
+    ).scalar_one()
+    return not unfinished
+
+
 async def _question_state(
     session: AsyncSession, agent_id: str, arrival_id: UUID, *, settings: Any, now: datetime
 ) -> tuple[bool, bool, list[ResultInbox]]:
-    """``(terminal, answered, questions)`` for an arrival (conflict C9)."""
+    """``(terminal, answered, questions)`` for an arrival (conflict C9). ``terminal`` is the single wake rule of an
+    ``ask`` (spec 4.4 item 6): every QUESTION answered or past its deadline AND, since 2d, every proposal of the
+    arrival terminal. ``answered`` is about the questions alone (True when there are none)."""
+    proposals_done = await _proposals_terminal(session, agent_id, arrival_id)
     base = (
         ResultInbox.agent_id == agent_id,
         ResultInbox.source_kind == SOURCE_INTENTION_REPORT,
@@ -1617,22 +1638,22 @@ async def _question_state(
         (await session.execute(select(ResultInbox).where(*base, ResultInbox.msg_type == MSG_QUESTION))).scalars().all()
     )
     if not questions:
-        return True, True, questions
+        return proposals_done, True, questions
     newest_answer = (
         await session.execute(select(func.max(ResultInbox.created_at)).where(*base, ResultInbox.msg_type == "INFORM"))
     ).scalar_one()
     ttl = timedelta(hours=float(settings.intention_proposal_ttl_hours)) if settings is not None else None
     answered = [newest_answer is not None and newest_answer >= q.created_at for q in questions]
     expired = [ttl is not None and q.created_at <= now - ttl for q in questions]
-    terminal = all(a or e for a, e in zip(answered, expired, strict=True))
+    terminal = proposals_done and all(a or e for a, e in zip(answered, expired, strict=True))
     return terminal, all(answered), questions
 
 
 async def arrival_is_terminal(
     session: AsyncSession, agent_id: str, arrival_id: UUID, *, settings: Any = None, now: datetime | None = None
 ) -> bool:
-    """True when every QUESTION of the arrival is answered or past its deadline (spec 4.4 item 6; 2d adds
-    its proposals). Without ``settings`` a question never expires."""
+    """True when every QUESTION of the arrival is answered or past its deadline and every proposal of it is
+    terminal (spec 4.4 item 6). Without ``settings`` a question never expires."""
     terminal, _answered, _questions = await _question_state(
         session, agent_id, arrival_id, settings=settings, now=now or datetime.now(UTC)
     )
@@ -2391,3 +2412,748 @@ async def publish_staged(
         )
         published.append((proposal.id, proposal.tool))
     return published
+
+
+# ---------------------------------------------------------------------------
+# F099 Phase 2d: the owner's decisions (spec 4.4 items 3 to 6), deterministic and never model-mediated
+# ---------------------------------------------------------------------------
+
+REFUSE_EXPIRED, REFUSE_ENDED, REFUSE_STATE, REFUSE_ANSWERED = "expired", "ended", "not_pending", "answered"
+IN_DOUBT_TEXT = (
+    "The call was started, but its outcome was never recorded (the process stopped, or the call outlived its time "
+    "limit). It was NOT run again: check whether it happened before asking for it again."
+)
+ANSWER_CORRELATION_PREFIX = "owner-answer:"
+# Fixed namespaces: the outcome row of a decision, and the answer row of a question, have deterministic ids per
+# intention, so a retried write collapses on the inbox's UNIQUE key.
+_PROPOSAL_NAMESPACE = uuid.UUID("3f4b8a2e-5c1d-4e7a-9b63-2d8f1a0c7e55")
+_ANSWER_NAMESPACE = uuid.UUID("a1d7c3e9-2b4f-4c68-8e51-7f3b9d0a6c24")
+_HEX_ID = re.compile(r"[0-9a-f]{8,32}")
+
+
+class ProposalNotFound(LookupError):
+    """No proposal with this id for the agent."""
+
+
+class QuestionNotFound(LookupError):
+    """No QUESTION row with this id for the agent."""
+
+
+class AmbiguousId(ValueError):
+    """An id prefix that more than one row matches."""
+
+
+class AnswerRefused(Exception):
+    """An answer the store did not record. ``reason`` is ``answered``, ``expired`` or ``ended``; nothing was written."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+@dataclass(frozen=True, slots=True)
+class ProposalExecution:
+    """What a decision, an execution or a settlement did to a proposal (contract section 4.7, extended by 2d)."""
+
+    proposal_id: UUID
+    state: str
+    result: str | None
+    error: str | None
+    woke_arrival: bool
+    changed: bool = False  # this call moved the proposal (a repeat of a decision does not)
+    refusal: str | None = None  # None, REFUSE_EXPIRED, REFUSE_ENDED or REFUSE_STATE
+
+
+@dataclass(frozen=True, slots=True)
+class AnswerRecorded:
+    """What ``record_answer`` wrote (contract section 4.7)."""
+
+    question_id: UUID
+    arrival_id: UUID
+    intention_ids: tuple[UUID, ...]
+    woke_arrival: bool
+
+
+async def _lock_root(session: AsyncSession, agent_id: str, root_id: UUID) -> None:
+    """The root row, ``FOR NO KEY UPDATE``: the first lock of every owner action (the one lock order)."""
+    await session.execute(
+        select(Intention.id)
+        .where(Intention.agent_id == agent_id, Intention.id == root_id)
+        .with_for_update(key_share=True)
+    )
+
+
+async def _load_proposal(
+    session: AsyncSession, agent_id: str, proposal_id: UUID, *, lock: bool
+) -> IntentionProposal | None:
+    query = (
+        select(IntentionProposal)
+        .where(IntentionProposal.agent_id == agent_id, IntentionProposal.id == proposal_id)
+        .execution_options(populate_existing=True)
+    )
+    if lock:
+        query = query.with_for_update(key_share=True)
+    return (await session.execute(query)).scalar_one_or_none()
+
+
+async def _root_end_state(session: AsyncSession, agent_id: str, root_id: UUID) -> str | None:
+    """``cancelled`` or ``expired`` when the root carries a marker (or is gone), else None: the work is open."""
+    markers = (
+        await session.execute(
+            select(Intention.root_cancelled_at, Intention.root_expired_at).where(
+                Intention.agent_id == agent_id, Intention.id == root_id
+            )
+        )
+    ).first()
+    if markers is not None and markers.root_cancelled_at is not None:
+        return STATE_CANCELLED
+    if markers is None or markers.root_expired_at is not None:
+        return STATE_EXPIRED
+    return None
+
+
+async def _set_proposal_state(
+    session: AsyncSession,
+    agent_id: str,
+    proposal_id: UUID,
+    *,
+    from_state: str,
+    to_state: str,
+    now: datetime,
+    **values: Any,
+) -> bool:
+    """One conditional transition: ``UPDATE ... WHERE state = from_state``. Whether this call made it."""
+    moved = await session.execute(
+        update(IntentionProposal)
+        .where(
+            IntentionProposal.agent_id == agent_id,
+            IntentionProposal.id == proposal_id,
+            IntentionProposal.state == from_state,
+        )
+        .values(state=to_state, updated_at=now, **values)
+        .returning(IntentionProposal.id)
+        .execution_options(synchronize_session=False)
+    )
+    return moved.scalar_one_or_none() is not None
+
+
+def _proposal_outcome(proposal: IntentionProposal, state: str, settings: Any) -> tuple[str, str]:
+    """The title and body of the result a proposal's end becomes for the intention that asked (the model reads it)."""
+    sid, tool = short_id(proposal.id), proposal.tool
+    if state == PROPOSAL_EXECUTED:
+        shown = proposal.result or "(no output)"
+        body = f"The owner approved your proposal {sid} ({tool}) and it ran. Its result:\n{shown}"
+    elif state == PROPOSAL_FAILED:
+        body = f"The owner approved your proposal {sid} ({tool}), but it failed: {proposal.error or 'no detail'}"
+    elif state == PROPOSAL_REJECTED:
+        body = f"The owner rejected your proposal {sid} ({tool}). It did not run: do not propose it again unchanged."
+    elif state == PROPOSAL_CANCELLED:
+        body = f"Your proposal {sid} ({tool}) was cancelled together with the work it belonged to. It did not run."
+    else:
+        body = f"Your proposal {sid} ({tool}) was not decided in time, so it expired as a rejection. It did not run."
+    return f"Proposal {sid}: {state}", clip_body(body, settings)
+
+
+async def _settle_proposal(
+    session: AsyncSession, agent_id: str, proposal: IntentionProposal, state: str, *, settings: Any, now: datetime
+) -> bool:
+    """A proposal reached ``state``: tell every intention of its arrival that is still waiting, then wake the
+    arrival if it is terminal now. The caller holds the root (root first) and made the transition. Returns whether
+    the arrival woke.
+
+    One INFORM per awaiting intention (``source_id`` = uuid5 of proposal and intention: idempotent), written
+    through ``record_result``, so the rows are held (the intention is ``awaiting_owner``) and join the batch that
+    wakes. Nothing is written for an ended root (R8): ``record_result`` would turn the row into a raw REPORT."""
+    arrival_id = proposal.arrival_id
+    if arrival_id is None or await _root_end_state(session, agent_id, proposal.root_id) is not None:
+        return False
+    arrival = (
+        await session.execute(
+            select(IntentionArrival).where(IntentionArrival.agent_id == agent_id, IntentionArrival.id == arrival_id)
+        )
+    ).scalar_one_or_none()
+    if arrival is None:
+        return False
+    waiting = list(
+        (
+            await session.execute(
+                select(Intention.id)
+                .where(
+                    Intention.agent_id == agent_id,
+                    Intention.id.in_(list(arrival.intention_ids)),
+                    Intention.state == STATE_AWAITING_OWNER,
+                    Intention.wake_policy == intentions.WAKE_CONTINUE,
+                )
+                .order_by(Intention.id)
+                .with_for_update(key_share=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    title, body = _proposal_outcome(proposal, state, settings)
+    for intention_id in waiting:
+        await record_result(
+            session,
+            agent_id,
+            intention_id=intention_id,
+            source_kind=SOURCE_INTENTION_REPORT,
+            source_id=uuid.uuid5(_PROPOSAL_NAMESPACE, f"{proposal.id}:{intention_id}"),
+            msg_type="INFORM",
+            title=title,
+            body=body,
+            arrival_id=arrival_id,
+            settings=settings,
+        )
+    terminal, _answered, _questions = await _question_state(session, agent_id, arrival_id, settings=settings, now=now)
+    return bool(terminal and await wake_arrival(session, agent_id, arrival_id, now=now))
+
+
+async def _end_pending(
+    session: AsyncSession,
+    agent_id: str,
+    proposal: IntentionProposal,
+    state: str,
+    refusal: str,
+    *,
+    settings: Any,
+    now: datetime,
+) -> ProposalExecution:
+    """A decision that found a ``pending`` proposal too late: it ends as ``state`` (expired or cancelled), with
+    its outcome, and the owner's decision is refused."""
+    moved = await _set_proposal_state(
+        session,
+        agent_id,
+        proposal.id,
+        from_state=PROPOSAL_PENDING,
+        to_state=state,
+        now=now,
+        decided_at=now,
+        decided_by="system",
+    )
+    woke = moved and await _settle_proposal(session, agent_id, proposal, state, settings=settings, now=now)
+    return ProposalExecution(proposal.id, state, None, None, woke, moved, refusal)
+
+
+async def decide_proposal(
+    session: AsyncSession,
+    agent_id: str,
+    proposal_id: UUID,
+    *,
+    approve: bool,
+    actor: str,
+    settings: Any,
+    now: datetime | None = None,
+) -> ProposalExecution:
+    """The owner's decision on a proposal, in the caller's transaction (spec 4.4 item 3).
+
+    The root first, then the proposal. ``pending`` becomes ``approved`` or ``rejected`` (a reject writes the
+    outcome and wakes the arrival when it is terminal; an approve wakes nothing, the call has not run). A
+    proposal past its deadline, or on work that ended, is ended here instead (the default at the deadline is a
+    reject) and the decision is refused. The same decision again is not an error (``changed=False``, no
+    refusal); a contradictory one is a refusal. Raises only ``ProposalNotFound``."""
+    now = now or datetime.now(UTC)
+    root_id = (
+        await session.execute(
+            select(IntentionProposal.root_id).where(
+                IntentionProposal.agent_id == agent_id, IntentionProposal.id == proposal_id
+            )
+        )
+    ).scalar_one_or_none()
+    if root_id is None:
+        raise ProposalNotFound(str(proposal_id))
+    await _lock_root(session, agent_id, root_id)
+    proposal = await _load_proposal(session, agent_id, proposal_id, lock=True)
+    if proposal is None:
+        raise ProposalNotFound(str(proposal_id))
+    state = proposal.state
+    if state == PROPOSAL_PENDING:
+        ended = await _root_end_state(session, agent_id, root_id)
+        if ended is not None:
+            final = PROPOSAL_CANCELLED if ended == STATE_CANCELLED else PROPOSAL_EXPIRED
+            return await _end_pending(session, agent_id, proposal, final, REFUSE_ENDED, settings=settings, now=now)
+        if proposal.deadline is not None and proposal.deadline <= now:
+            return await _end_pending(
+                session, agent_id, proposal, PROPOSAL_EXPIRED, REFUSE_EXPIRED, settings=settings, now=now
+            )
+        target = PROPOSAL_APPROVED if approve else PROPOSAL_REJECTED
+        await _set_proposal_state(
+            session,
+            agent_id,
+            proposal_id,
+            from_state=PROPOSAL_PENDING,
+            to_state=target,
+            now=now,
+            decided_at=now,
+            decided_by=actor,
+        )
+        woke = (
+            False
+            if approve
+            else await _settle_proposal(session, agent_id, proposal, target, settings=settings, now=now)
+        )
+        return ProposalExecution(proposal_id, target, None, None, woke, True, None)
+    repeat = (approve and state in (PROPOSAL_APPROVED, PROPOSAL_EXECUTING, PROPOSAL_EXECUTED, PROPOSAL_FAILED)) or (
+        not approve and state == PROPOSAL_REJECTED
+    )
+    if repeat:
+        return ProposalExecution(proposal_id, state, proposal.result, proposal.error, False, False, None)
+    refusal = {PROPOSAL_EXPIRED: REFUSE_EXPIRED, PROPOSAL_CANCELLED: REFUSE_ENDED}.get(state, REFUSE_STATE)
+    return ProposalExecution(proposal_id, state, proposal.result, proposal.error, False, False, refusal)
+
+
+async def claim_execution(
+    session: AsyncSession, agent_id: str, proposal_id: UUID, *, now: datetime | None = None
+) -> IntentionProposal | None:
+    """The at-most-once fence of an approved call: ``approved`` to ``executing`` in ONE statement whose WHERE also
+    requires the root to have neither marker (spec 4.4 item 5), so a cancel (2e) or an expiry that committed
+    first wins. Takes no lock of its own beyond the proposal row, so it cannot join a lock cycle. The row, or
+    None when it is not claimable (not approved, already claimed, or the work ended)."""
+    ended = (
+        exists()
+        .where(
+            Intention.agent_id == agent_id,
+            Intention.id == IntentionProposal.root_id,
+            or_(Intention.root_cancelled_at.is_not(None), Intention.root_expired_at.is_not(None)),
+        )
+        .correlate(IntentionProposal)
+    )
+    moved = (
+        await session.execute(
+            update(IntentionProposal)
+            .where(
+                IntentionProposal.agent_id == agent_id,
+                IntentionProposal.id == proposal_id,
+                IntentionProposal.state == PROPOSAL_APPROVED,
+                ~ended,
+            )
+            .values(state=PROPOSAL_EXECUTING, updated_at=now or datetime.now(UTC))
+            .returning(IntentionProposal.id)
+            .execution_options(synchronize_session=False)
+        )
+    ).scalar_one_or_none()
+    if moved is None:
+        return None
+    return await _load_proposal(session, agent_id, proposal_id, lock=False)
+
+
+async def finish_execution(
+    session: AsyncSession,
+    agent_id: str,
+    proposal_id: UUID,
+    *,
+    ok: bool,
+    result: str | None = None,
+    error: str | None = None,
+    ledger_key: str | None = None,
+    settings: Any,
+    now: datetime | None = None,
+) -> ProposalExecution:
+    """``executing`` to ``executed`` or ``failed``, with the result, and the outcome to the intentions of the
+    arrival (the root first). A proposal that is not ``executing`` (the in-doubt sweep got there first) is
+    returned unchanged. Raises ``ProposalNotFound``."""
+    now = now or datetime.now(UTC)
+    root_id = (
+        await session.execute(
+            select(IntentionProposal.root_id).where(
+                IntentionProposal.agent_id == agent_id, IntentionProposal.id == proposal_id
+            )
+        )
+    ).scalar_one_or_none()
+    if root_id is None:
+        raise ProposalNotFound(str(proposal_id))
+    await _lock_root(session, agent_id, root_id)
+    final = PROPOSAL_EXECUTED if ok else PROPOSAL_FAILED
+    moved = await _set_proposal_state(
+        session,
+        agent_id,
+        proposal_id,
+        from_state=PROPOSAL_EXECUTING,
+        to_state=final,
+        now=now,
+        executed_at=now,
+        result=clip_body(result, settings, limit=PROPOSAL_RESULT_MAX_CHARS) if result is not None else None,
+        error=clip_body(error, settings, limit=PROPOSAL_RESULT_MAX_CHARS) if error is not None else None,
+        ledger_key=ledger_key,
+    )
+    proposal = await _load_proposal(session, agent_id, proposal_id, lock=True)
+    if proposal is None:
+        raise ProposalNotFound(str(proposal_id))
+    if not moved:
+        return ProposalExecution(proposal_id, proposal.state, proposal.result, proposal.error, False, False, None)
+    woke = await _settle_proposal(session, agent_id, proposal, final, settings=settings, now=now)
+    return ProposalExecution(proposal_id, final, proposal.result, proposal.error, woke, True, None)
+
+
+async def end_unrunnable(
+    session: AsyncSession, agent_id: str, proposal_id: UUID, *, settings: Any, now: datetime | None = None
+) -> ProposalExecution:
+    """An ``approved`` proposal whose root ended before ``claim_execution`` could start it: it becomes ``cancelled``
+    (or ``expired``) and does not run. A proposal in any other state, or on open work, is returned unchanged."""
+    now = now or datetime.now(UTC)
+    root_id = (
+        await session.execute(
+            select(IntentionProposal.root_id).where(
+                IntentionProposal.agent_id == agent_id, IntentionProposal.id == proposal_id
+            )
+        )
+    ).scalar_one_or_none()
+    if root_id is None:
+        raise ProposalNotFound(str(proposal_id))
+    await _lock_root(session, agent_id, root_id)
+    proposal = await _load_proposal(session, agent_id, proposal_id, lock=True)
+    ended = await _root_end_state(session, agent_id, root_id)
+    if proposal is None:
+        raise ProposalNotFound(str(proposal_id))
+    if proposal.state != PROPOSAL_APPROVED or ended is None:
+        return ProposalExecution(proposal_id, proposal.state, proposal.result, proposal.error, False, False, None)
+    final = PROPOSAL_CANCELLED if ended == STATE_CANCELLED else PROPOSAL_EXPIRED
+    moved = await _set_proposal_state(
+        session, agent_id, proposal_id, from_state=PROPOSAL_APPROVED, to_state=final, now=now
+    )
+    woke = moved and await _settle_proposal(session, agent_id, proposal, final, settings=settings, now=now)
+    return ProposalExecution(proposal_id, final, None, None, woke, moved, REFUSE_ENDED)
+
+
+async def expire_proposals(
+    session: AsyncSession, agent_id: str, *, settings: Any, now: datetime | None = None, limit: int = 50
+) -> list[tuple[UUID, str]]:
+    """The sweep's hygiene for proposals (carry-over 9, conflicts C13 and C15), in the caller's transaction.
+
+    ``pending`` past its deadline, or on a root that ended, becomes ``expired`` (``cancelled`` for a cancelled
+    root) and its outcome reaches the arrival, which wakes when terminal. ``staged`` older than two leases is an
+    orphan of a turn whose lease was released: ``expired`` (done first, before any root is locked). ``executing``
+    for longer than ``max(lease, 2 x tool_timeout)`` is a call whose process stopped: ``failed`` with
+    ``IN_DOUBT_TEXT``, never
+    re-run. Each proposal in a SAVEPOINT, roots in ``(created_at, id)`` order (the one cross-root order); a
+    failure is logged and retried at the next sweep. Returns ``(proposal_id, new_state)``."""
+    now = now or datetime.now(UTC)
+    done: list[tuple[UUID, str]] = []
+    root = aliased(Intention)
+    lease = float(settings.continuation_lease_seconds)
+    doubt = max(lease, 2.0 * float(settings.tool_timeout))
+
+    # First, before any root is locked: it needs no root, and run after the loops below it would lock proposal rows
+    # while this transaction already holds roots (a released SAVEPOINT keeps its locks), against a commit that
+    # holds its root and then updates its own staged rows.
+    stale = await session.execute(
+        update(IntentionProposal)
+        .where(
+            IntentionProposal.agent_id == agent_id,
+            IntentionProposal.state == PROPOSAL_STAGED,
+            IntentionProposal.created_at < now - timedelta(seconds=2 * lease),
+        )
+        .values(state=PROPOSAL_EXPIRED, updated_at=now)
+        .returning(IntentionProposal.id)
+        .execution_options(synchronize_session=False)
+    )
+    done.extend((proposal_id, PROPOSAL_EXPIRED) for proposal_id in stale.scalars().all())
+
+    async def due(*predicates: ColumnElement[bool]) -> list[tuple[UUID, UUID]]:
+        rows = await session.execute(
+            select(IntentionProposal.id, IntentionProposal.root_id)
+            .join(root, and_(root.agent_id == agent_id, root.id == IntentionProposal.root_id))
+            .where(IntentionProposal.agent_id == agent_id, *predicates)
+            .order_by(root.created_at, root.id, IntentionProposal.id)
+            .limit(limit)
+        )
+        return [(row.id, row.root_id) for row in rows]
+
+    pending = await due(
+        IntentionProposal.state == PROPOSAL_PENDING,
+        or_(IntentionProposal.deadline <= now, root.root_cancelled_at.is_not(None), root.root_expired_at.is_not(None)),
+    )
+    for proposal_id, root_id in pending:
+        try:
+            async with session.begin_nested():
+                await _lock_root(session, agent_id, root_id)
+                proposal = await _load_proposal(session, agent_id, proposal_id, lock=True)
+                if proposal is None or proposal.state != PROPOSAL_PENDING:
+                    continue
+                ended = await _root_end_state(session, agent_id, root_id)
+                if ended is None and not (proposal.deadline is not None and proposal.deadline <= now):
+                    continue  # decided or moved while this sweep waited for the root
+                final = PROPOSAL_CANCELLED if ended == STATE_CANCELLED else PROPOSAL_EXPIRED
+                if await _set_proposal_state(
+                    session,
+                    agent_id,
+                    proposal_id,
+                    from_state=PROPOSAL_PENDING,
+                    to_state=final,
+                    now=now,
+                    decided_at=now,
+                    decided_by="system",
+                ):
+                    await _settle_proposal(session, agent_id, proposal, final, settings=settings, now=now)
+                    done.append((proposal_id, final))
+        except Exception:
+            logger.warning(
+                "F099: could not expire proposal %s; it is retried at the next sweep", proposal_id, exc_info=True
+            )
+
+    stuck = await due(
+        IntentionProposal.state == PROPOSAL_EXECUTING,
+        IntentionProposal.updated_at < now - timedelta(seconds=doubt),
+    )
+    for proposal_id, root_id in stuck:
+        try:
+            async with session.begin_nested():
+                await _lock_root(session, agent_id, root_id)
+                proposal = await _load_proposal(session, agent_id, proposal_id, lock=True)
+                if proposal is None or proposal.state != PROPOSAL_EXECUTING:
+                    continue
+                if await _set_proposal_state(
+                    session,
+                    agent_id,
+                    proposal_id,
+                    from_state=PROPOSAL_EXECUTING,
+                    to_state=PROPOSAL_FAILED,
+                    now=now,
+                    executed_at=now,
+                    error=IN_DOUBT_TEXT,
+                ):
+                    proposal = await _load_proposal(session, agent_id, proposal_id, lock=False)  # now carries the error
+                    await _settle_proposal(session, agent_id, proposal, PROPOSAL_FAILED, settings=settings, now=now)
+                    done.append((proposal_id, PROPOSAL_FAILED))
+        except Exception:
+            logger.warning(
+                "F099: could not settle the in-doubt proposal %s; it is retried at the next sweep",
+                proposal_id,
+                exc_info=True,
+            )
+    return done
+
+
+async def record_answer(
+    session: AsyncSession,
+    agent_id: str,
+    question_id: UUID,
+    *,
+    text: str,
+    actor: str,
+    settings: Any,
+    now: datetime | None = None,
+) -> AnswerRecorded:
+    """The owner's answer to a QUESTION, in the caller's transaction (spec 4.4 Questions, contract section 4.9).
+
+    The root is locked FIRST (the one lock order): an answer that locked the arrival's intentions before the root
+    would deadlock against the TTL sweep, which holds the root and closes them. The refusals are decided under
+    that lock and BEFORE any write: a question already answered by the owner (``answered``), past its deadline
+    (``expired``), or whose work ended or moved on (``ended``, R8). A refused answer is never written, so it
+    cannot come back through ``record_result``'s closed-root branch as a raw REPORT. Otherwise one INFORM
+    (``source_id`` = uuid5 of question and intention, so a retry collapses) per intention of the arrival that is
+    still waiting, and the arrival wakes when it is terminal. Raises ``QuestionNotFound`` or ``AnswerRefused``."""
+    now = now or datetime.now(UTC)
+    question = (
+        await session.execute(
+            select(ResultInbox).where(
+                ResultInbox.agent_id == agent_id,
+                ResultInbox.source_kind == SOURCE_INTENTION_REPORT,
+                ResultInbox.source_id == question_id,
+                ResultInbox.msg_type == MSG_QUESTION,
+            )
+        )
+    ).scalar_one_or_none()
+    if question is None or question.arrival_id is None:
+        raise QuestionNotFound(str(question_id))
+    arrival = (
+        await session.execute(
+            select(IntentionArrival).where(
+                IntentionArrival.agent_id == agent_id, IntentionArrival.id == question.arrival_id
+            )
+        )
+    ).scalar_one_or_none()
+    if arrival is None:
+        raise QuestionNotFound(str(question_id))
+    arrival_id, root_id, ids = arrival.id, arrival.root_id, list(arrival.intention_ids)
+    await _lock_root(session, agent_id, root_id)
+    owner_answered = (
+        await session.execute(
+            select(
+                exists().where(
+                    ResultInbox.agent_id == agent_id,
+                    ResultInbox.source_kind == SOURCE_INTENTION_REPORT,
+                    ResultInbox.arrival_id == arrival_id,
+                    ResultInbox.msg_type == "INFORM",
+                    ResultInbox.correlation_id.like(f"{ANSWER_CORRELATION_PREFIX}%"),
+                )
+            )
+        )
+    ).scalar_one()
+    if owner_answered:
+        raise AnswerRefused(REFUSE_ANSWERED)
+    ttl = timedelta(hours=float(settings.intention_proposal_ttl_hours))
+    if question.created_at <= now - ttl:
+        raise AnswerRefused(REFUSE_EXPIRED)
+    waiting = list(
+        (
+            await session.execute(
+                select(Intention.id)
+                .where(
+                    Intention.agent_id == agent_id,
+                    Intention.id.in_(ids),
+                    Intention.state == STATE_AWAITING_OWNER,
+                    Intention.wake_policy == intentions.WAKE_CONTINUE,
+                )
+                .order_by(Intention.id)
+                .with_for_update(key_share=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not waiting or not await _root_is_open(session, agent_id, root_id):
+        raise AnswerRefused(REFUSE_ENDED)
+    body = clip_body(text.strip(), settings)
+    for intention_id in waiting:
+        await record_result(
+            session,
+            agent_id,
+            intention_id=intention_id,
+            source_kind=SOURCE_INTENTION_REPORT,
+            source_id=uuid.uuid5(_ANSWER_NAMESPACE, f"{question_id}:{intention_id}"),
+            msg_type="INFORM",
+            title="Owner's answer",
+            body=body,
+            correlation_id=f"{ANSWER_CORRELATION_PREFIX}{actor[:100]}",
+            arrival_id=arrival_id,
+            settings=settings,
+        )
+    terminal, _answered, _questions = await _question_state(session, agent_id, arrival_id, settings=settings, now=now)
+    woke = bool(terminal and await wake_arrival(session, agent_id, arrival_id, now=now))
+    return AnswerRecorded(question_id, arrival_id, tuple(waiting), woke)
+
+
+def normalize_id(value: Any) -> str | None:
+    """An id or an id prefix as 8 to 32 lower-case hex characters (dashes dropped), else None. The only shape a
+    route or the bot lets near a query or a URL."""
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip().lower().replace("-", "")
+    return cleaned if _HEX_ID.fullmatch(cleaned) else None
+
+
+def _unique(ids: list[UUID], prefix: str) -> UUID | None:
+    if len(ids) > 1:
+        raise AmbiguousId(prefix)
+    return ids[0] if ids else None
+
+
+async def find_proposal_id(session: AsyncSession, agent_id: str, prefix: str) -> UUID | None:
+    """The one proposal whose id starts with ``prefix`` (a ``staged`` one is never found: it was never shown)."""
+    cleaned = normalize_id(prefix)
+    if cleaned is None:
+        return None
+    ids = (
+        (
+            await session.execute(
+                select(IntentionProposal.id)
+                .where(
+                    IntentionProposal.agent_id == agent_id,
+                    IntentionProposal.state != PROPOSAL_STAGED,
+                    func.replace(cast(IntentionProposal.id, Text), "-", "").like(f"{cleaned}%"),
+                )
+                .limit(2)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return _unique(list(ids), prefix)
+
+
+async def find_question_id(session: AsyncSession, agent_id: str, prefix: str) -> UUID | None:
+    """The one QUESTION row whose ``source_id`` starts with ``prefix``: the id the owner sees and types."""
+    cleaned = normalize_id(prefix)
+    if cleaned is None:
+        return None
+    ids = (
+        (
+            await session.execute(
+                select(ResultInbox.source_id)
+                .where(
+                    ResultInbox.agent_id == agent_id,
+                    ResultInbox.source_kind == SOURCE_INTENTION_REPORT,
+                    ResultInbox.msg_type == MSG_QUESTION,
+                    func.replace(cast(ResultInbox.source_id, Text), "-", "").like(f"{cleaned}%"),
+                )
+                .limit(2)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return _unique(list(ids), prefix)
+
+
+async def find_question_id_by_message(
+    session: AsyncSession, agent_id: str, *, chat_id: int, message_id: int
+) -> UUID | None:
+    """The QUESTION the publisher sent as Telegram message ``message_id`` to ``chat_id`` (a reply's target)."""
+    return (
+        await session.execute(
+            select(ResultInbox.source_id)
+            .where(
+                ResultInbox.agent_id == agent_id,
+                ResultInbox.source_kind == SOURCE_INTENTION_REPORT,
+                ResultInbox.msg_type == MSG_QUESTION,
+                ResultInbox.channel == f"telegram:{chat_id}",
+                ResultInbox.push_message_id == message_id,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def proposal_view(proposal: IntentionProposal) -> dict[str, Any]:
+    """A proposal as the REST routes and the owner surfaces show it (contract ``ProposalView``): JSON-ready, with
+    the arguments exactly as stored."""
+    return {
+        "id": str(proposal.id),
+        "short_id": short_id(proposal.id),
+        "root_id": str(proposal.root_id),
+        "intention_id": str(proposal.intention_id),
+        "arrival_id": str(proposal.arrival_id) if proposal.arrival_id is not None else None,
+        "tool": proposal.tool,
+        "arguments": proposal.arguments,
+        "rationale": proposal.rationale,
+        "state": proposal.state,
+        "deadline": _iso(proposal.deadline),
+        "decided_at": _iso(proposal.decided_at),
+        "decided_by": proposal.decided_by,
+        "result": proposal.result,
+    }
+
+
+_OPEN_PROPOSAL_STATES = (PROPOSAL_PENDING, PROPOSAL_APPROVED, PROPOSAL_EXECUTING)
+_VISIBLE_PROPOSAL_STATES = (*_OPEN_PROPOSAL_STATES, *sorted(PROPOSAL_TERMINAL))
+
+
+async def list_proposals(session: AsyncSession, agent_id: str, *, state: str, limit: int) -> list[dict[str, Any]]:
+    """Proposals as ``proposal_view``s, newest first, never a ``staged`` one. ``state`` is one proposal state,
+    ``"open"`` (pending, approved, executing) or ``"all"``."""
+    if state == "open":
+        states: tuple[str, ...] = _OPEN_PROPOSAL_STATES
+    elif state == "all":
+        states = _VISIBLE_PROPOSAL_STATES
+    elif state in _VISIBLE_PROPOSAL_STATES:
+        states = (state,)
+    else:
+        raise ValueError(f"unknown proposal state {state!r}")
+    rows = (
+        (
+            await session.execute(
+                select(IntentionProposal)
+                .where(IntentionProposal.agent_id == agent_id, IntentionProposal.state.in_(states))
+                .order_by(IntentionProposal.created_at.desc(), IntentionProposal.id)
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [proposal_view(row) for row in rows]

@@ -27,7 +27,7 @@ from f099_support import (
     stage,
     use,
 )
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from nous.brain import continuation
 from nous.brain.continuation import Resolution
@@ -102,6 +102,23 @@ async def test_the_proposals_of_another_claim_are_not_published(env_factory):  #
     assert (await proposal_row(env, mine_id)).state == "pending"
     assert (await proposal_row(env, theirs_id)).state == "staged"  # its own claim has not committed
     assert [r.source_id for r in await _proposal_rows(env)] == [mine_id]
+
+
+async def test_a_row_of_the_claim_that_is_not_staged_is_not_published(env_factory):  # noqa: F811  # PIN (2d-2 review m2)
+    """``publish_staged`` is fenced on ``state = 'staged'`` as well as on the claim token: a row of the same claim
+    that something already ended stays ended, with no arrival and no PROPOSAL row."""
+    env = await env_factory(**CONT)
+    _root, got = await claimed(env)
+    live = await stage(env, got)
+    ended = await stage(env, got, arguments={**SEND_EMAIL_ARGS, "subject": "ended"})
+    async with env.db.session() as s:
+        await s.execute(update(IntentionProposal).where(IntentionProposal.id == ended).values(state="expired"))
+        await s.commit()
+    done = await commit_ask(env, got)
+    assert [pid for pid, _t in done.proposals] == [live]
+    row = await proposal_row(env, ended)
+    assert (row.state, row.arrival_id, row.deadline) == ("expired", None, None)
+    assert [r.source_id for r in await _proposal_rows(env)] == [live]
 
 
 async def test_a_commit_that_loses_its_fence_publishes_nothing(env_factory):  # noqa: F811
