@@ -72,7 +72,15 @@ def _propose(*, spawn_blocked: bool = False, stage_error: Exception | None = Non
         return proposal_id or uuid.uuid4()
 
     dispatcher = _dispatcher(
-        "send_email", "bash", "schedule_task", "write_file", "web_fetch", "spawn_task", "dag_create"
+        "send_email",
+        "bash",
+        "schedule_task",
+        "write_file",
+        "web_fetch",
+        "spawn_task",
+        "dag_create",
+        "spawn_sync",
+        "heartbeat_check_create",
     )
     state = ArrivalState()
     executor = make_propose_action_executor(
@@ -132,6 +140,17 @@ def test_render_arguments_shows_bidi_and_zero_width_characters_as_escapes():
     assert "\\u202e" in shown and "\\u200b" in shown and "\\u0085" in shown
 
 
+def test_render_arguments_escapes_every_invisible_or_format_character():
+    """A category predicate, not a list: the Arabic letter mark (a bidi control), the tag block (invisible text
+    a downstream reader still sees), a variation selector. Above U+FFFF the escape has eight hex digits."""
+    shown = continuation.render_arguments({"cmd": "rm a\u061cb", "tag": "x\U000e0041y", "vs": "z\ufe0f"})
+    assert "\u061c" not in shown and "\U000e0041" not in shown and "\ufe0f" not in shown
+    assert "\\u061c" in shown and "\\U000e0041" in shown and "\\ufe0f" in shown
+    assert (
+        continuation.render_arguments({"t": "caf\u00e9 \U0001f600"}) == '{\n  "t": "caf\u00e9 \U0001f600"\n}'
+    )  # visible text stays
+
+
 # ---- the executor --------------------------------------------------------------------------------------------
 
 
@@ -179,12 +198,14 @@ async def test_a_model_sent_underscore_argument_is_refused_at_staging():
 
 
 @pytest.mark.parametrize("spawn_blocked", [False, True])
-@pytest.mark.parametrize("tool", ["spawn_task", "dag_create"])
+@pytest.mark.parametrize("tool", ["spawn_task", "dag_create", "spawn_sync", "heartbeat_check_create"])
 async def test_spawn_tools_cannot_be_proposed(tool, spawn_blocked):
-    """A turn at its depth or spawn limit has them removed; proposing one would route around the limit."""
+    """A turn at its depth or spawn limit has them removed; proposing one would route around the limit.
+    spawn_sync is an inline model run under the approving request, and an approved heartbeat check is not
+    origin-aware, so nothing would make it internal_only. schedule_task stays proposable (see above)."""
     executor, _state, staged = _propose(spawn_blocked=spawn_blocked)
     text, is_error = await executor(tool=tool, arguments={}, rationale="r")
-    assert is_error is True and "spawn" in text and staged == []
+    assert is_error is True and "cannot be proposed" in text and staged == []
 
 
 async def test_a_refusal_from_the_store_is_returned_as_an_error():
@@ -242,6 +263,8 @@ async def test_a_staged_proposal_carries_the_claim_token_and_nothing_else(env_fa
     ("arguments", "rationale", "needle"),
     [
         ({**SEND_EMAIL_ARGS, "body": "x" * 3000}, "r", "the owner reads"),
+        pytest.param({**SEND_EMAIL_ARGS, "body": "\U0001f600" * 1500}, "r", "the owner reads", id="astral-call"),
+        pytest.param(SEND_EMAIL_ARGS, "\U0001f600" * 600, "rationale is too long", id="astral-rationale"),
         (SEND_EMAIL_ARGS, "y" * 1001, "rationale is too long"),
         (SEND_EMAIL_ARGS, "   ", "rationale is required"),
         ({**SEND_EMAIL_ARGS, "body": "a\x00b"}, "r", "arguments may not contain a NUL"),

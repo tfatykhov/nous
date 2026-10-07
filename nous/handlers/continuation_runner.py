@@ -24,6 +24,7 @@ from sqlalchemy import select
 
 from nous.api import tool_policy
 from nous.api.execution_context import ExecutionContext
+from nous.api.tool_classes import tool_class
 from nous.brain import continuation
 from nous.brain.continuation import INTENT_SESSION_PREFIX, Resolution
 from nous.brain.intentions import AUTHORITY_INTERNAL
@@ -173,6 +174,13 @@ def make_resolve_intention_executor(
     return resolve_intention
 
 
+# The one spawn-class tool a turn may propose (spec 4.4 item 1 names it). It is origin-aware, so the approved call's
+# context stamps what it schedules internal_only (2d-4). Every other spawn is refused: spawn_task and dag_create would
+# route around the depth and spawn limits, spawn_sync is an inline model run under the approving request, and
+# heartbeat_check_create is not origin-aware, so an approved check would not be internal_only.
+PROPOSABLE_SPAWN_TOOLS: frozenset[str] = frozenset({"schedule_task"})
+
+
 def make_propose_action_executor(
     state: ArrivalState,
     *,
@@ -183,9 +191,10 @@ def make_propose_action_executor(
     """The executor of ``propose_action`` for one turn (the ``extra_tools`` shape: ``(text, is_error)``).
 
     It validates and stages; it never runs anything (no ledger row and no activity ping: staging is a row write,
-    not a side effect, R9). ``tool`` must be registered and must NOT be one this lineage may already call
-    (``internal_only_allowed``, judged as if the root were below its limits: a spawn tool removed at the limit
-    is still not a proposal, because approving one would route around the limit). The call must satisfy the
+    not a side effect, R9). ``tool`` must be registered, must not spawn work (``schedule_task`` aside:
+    ``PROPOSABLE_SPAWN_TOOLS``) and must NOT be one this lineage may already call (``internal_only_allowed``, judged
+    as if the root were below its limits: a spawn tool removed at the limit is still not a proposal, because
+    approving one would route around the limit). The call must satisfy the
     tool's schema, and no argument may start with an underscore. A refusal is an error text the model can act
     on; a non-terminal success returns to the model, which then ends the turn with ``ask``."""
     probe = dataclasses.replace(ctx, spawn_blocked=False)
@@ -203,10 +212,11 @@ def make_propose_action_executor(
             return "Error: rationale is required: say why the owner should approve this call.", True
         if not dispatcher.is_registered(tool):
             return f"Error: {tool} is not a registered tool, so there is nothing to propose.", True
-        if tool in tool_policy.INTERNAL_ONLY_SPAWN_TOOLS:
+        cls = tool_class(tool)
+        if cls is not None and cls.spawns and tool not in PROPOSABLE_SPAWN_TOOLS:
             return (
-                f"Error: {tool} spawns work and cannot be proposed: spawn it yourself while the work is below "
-                "its depth and spawn limits, and otherwise end with report, drop or ask.",
+                f"Error: {tool} spawns work and cannot be proposed: spawn it yourself with spawn_task or dag_create "
+                "while the work is below its depth and spawn limits, and otherwise end with report, drop or ask.",
                 True,
             )
         if tool_policy.internal_only_allowed(tool, ctx=probe):

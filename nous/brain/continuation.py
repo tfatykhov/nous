@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
-import re
+import unicodedata
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -2054,18 +2054,36 @@ PROPOSAL_STAGED, PROPOSAL_PENDING, PROPOSAL_APPROVED = "staged", "pending", "app
 PROPOSAL_EXECUTING, PROPOSAL_REJECTED, PROPOSAL_EXPIRED = "executing", "rejected", "expired"
 PROPOSAL_EXECUTED, PROPOSAL_FAILED, PROPOSAL_CANCELLED = "executed", "failed", "cancelled"
 MAX_PROPOSALS_PER_ARRIVAL = 5
-# What the owner is shown must fit one Telegram message whole (4096 characters): a call that does not is refused at
-# staging, never clipped, because a clipped call is one the owner approved without reading.
+# What the owner is shown must fit one Telegram message whole (4096 UTF-16 units, which is what the caps count: a
+# character above U+FFFF is two): a call that does not is refused at staging, never clipped, because a clipped call
+# is one the owner approved without reading.
 PROPOSAL_ARGS_MAX_CHARS = 2000
 PROPOSAL_RATIONALE_MAX_CHARS = 1000
 PROPOSAL_NOTE_MAX_CHARS = 600  # the arrival's note, as the PROPOSAL push quotes it
 PROPOSAL_RESULT_MAX_CHARS = 2000  # the stored result of an executed call
 
-# Control characters, the C1 range, soft hyphen, zero-width and bidi marks, and the byte-order mark: shown as
-# \uXXXX so that a call cannot disguise what it does (a right-to-left override reorders what the owner reads).
-_UNSAFE_CHARS = re.compile(
-    "[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb]"
-)
+# Characters shown as an escape so that a call cannot disguise what it does (a right-to-left override reorders what
+# the owner reads; the tag block carries text the owner cannot see and a downstream reader can): by category, control
+# and format characters (bidi marks, zero-width characters, the byte-order mark, the tag block), line and paragraph
+# separators, surrogates, private-use and unassigned code points; and the variation selectors.
+_UNSAFE_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Cs", "Co", "Cn"})
+
+
+def _unsafe(ch: str) -> bool:
+    code = ord(ch)
+    return ch not in "\t\n\r" and (  # json.dumps escapes these itself, and indent=2 writes real newlines
+        unicodedata.category(ch) in _UNSAFE_CATEGORIES or 0xFE00 <= code <= 0xFE0F or 0xE0100 <= code <= 0xE01EF
+    )
+
+
+def _escaped(ch: str) -> str:
+    code = ord(ch)
+    return f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}"
+
+
+def _utf16_units(text: str) -> int:
+    """The length Telegram counts: UTF-16 code units (a lone surrogate counts one, and is not an error)."""
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
 
 
 class ProposalRefused(ValueError):
@@ -2080,10 +2098,10 @@ def short_id(value: UUID) -> str:
 def render_arguments(arguments: Mapping[str, Any]) -> str:
     """A call's arguments as the owner reads them, and the only rendering anything shows: two-space-indented JSON
     in the mapping's own key order (callers pass the STORED arguments, whose jsonb key order is Postgres's), with
-    every control, bidi and zero-width character as ``\\uXXXX``. Raises ``TypeError`` or ``ValueError`` for a
-    value that is not plain JSON."""
+    every control, format, bidi and zero-width character as ``\\uXXXX`` (``\\UXXXXXXXX`` above U+FFFF). Raises
+    ``TypeError`` or ``ValueError`` for a value that is not plain JSON."""
     shown = json.dumps(arguments, ensure_ascii=False, indent=2)
-    return _UNSAFE_CHARS.sub(lambda match: f"\\u{ord(match.group()):04x}", shown)
+    return "".join(_escaped(ch) if _unsafe(ch) else ch for ch in shown)
 
 
 def _contains_nul(value: Any) -> bool:
@@ -2139,9 +2157,10 @@ async def stage_proposal(
     why = (rationale or "").strip()
     if not why:
         raise ProposalRefused("rationale is required: say why the owner should approve this call.")
-    if len(why) > PROPOSAL_RATIONALE_MAX_CHARS:
+    if _utf16_units(why) > PROPOSAL_RATIONALE_MAX_CHARS:
         raise ProposalRefused(
-            f"rationale is too long ({len(why)} characters; at most {PROPOSAL_RATIONALE_MAX_CHARS}): shorten it."
+            f"rationale is too long ({_utf16_units(why)} characters; at most {PROPOSAL_RATIONALE_MAX_CHARS}): "
+            "shorten it."
         )
     # A refusal the model reads, not a database error that would fail the whole turn (an injected result can make
     # a model echo a NUL character into a call).
@@ -2153,10 +2172,10 @@ async def stage_proposal(
         shown = render_arguments(arguments)
     except (TypeError, ValueError):
         raise ProposalRefused("arguments must be plain JSON values.") from None
-    if len(shown) > PROPOSAL_ARGS_MAX_CHARS:
+    if _utf16_units(shown) > PROPOSAL_ARGS_MAX_CHARS:
         raise ProposalRefused(
-            f"the call is too long ({len(shown)} characters; at most {PROPOSAL_ARGS_MAX_CHARS}): the owner reads the "
-            "whole call before approving it, so shorten it or split it into several proposals."
+            f"the call is too long ({_utf16_units(shown)} characters; at most {PROPOSAL_ARGS_MAX_CHARS}): the owner "
+            "reads the whole call before approving it, so shorten it or split it into several proposals."
         )
     staged = list(
         (
