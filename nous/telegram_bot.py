@@ -131,7 +131,8 @@ def describe_answer(status: int, body: dict) -> str:
 
 INTENTIONS_SHOWN = 10  # the roots /intentions lists (the route is asked for no more)
 INTENT_SHOWN_CHARS = 160  # one root's intent, as /intentions shows it
-TELEGRAM_TEXT_LIMIT = 3900  # a message stays under Telegram's 4096
+TELEGRAM_TEXT_LIMIT = 3900  # UTF-16 units of the escaped text: a message stays under Telegram's 4096
+INTENTIONS_NOT_SHOWN = "This list could not be shown."  # what a list Telegram refuses falls back to
 # Fixed vocabulary for a root's state: the state names of the server are looked up, never echoed.
 ROOT_STATE_WORDS = {
     "pending": "running",
@@ -148,30 +149,49 @@ def _shown(text: object, limit: int) -> str:
     return cleaned if len(cleaned) <= limit else cleaned[: limit - 1].rstrip() + "\u2026"
 
 
+def _utf16_units(text: str) -> int:
+    """The length Telegram counts: UTF-16 code units (an emoji is two)."""
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
 def describe_intentions(body: dict) -> str:
     """The HTML text of ``/intentions`` for the body of ``GET /intentions``. The roots' intents are model-authored
     (a spawning turn wrote them from whatever it read), so each sits inside ``<pre>``, HTML-escaped, where Telegram
     parses no command, link or mention; everything outside ``<pre>`` is fixed words, a short id the server minted
-    (checked to be 8 hex characters) and a looked-up state word."""
+    (checked to be 8 hex characters) and a looked-up state word. Built root by root and measured as Telegram
+    measures (UTF-16 units of the escaped text), so it never outgrows one message; what is left out is counted."""
     roots = body.get("roots")
-    shown = [r for r in roots if isinstance(r, dict)][:INTENTIONS_SHOWN] if isinstance(roots, list) else []
-    if not shown:
+    listed = [
+        r
+        for r in (roots if isinstance(roots, list) else [])
+        if isinstance(r, dict) and isinstance(r.get("short_id"), str) and _SHORT_ID_RE.fullmatch(r["short_id"])
+    ]
+    if not listed:
         return "Nothing is running that I could cancel."
-    lines = ["<b>Running</b>"]
-    for root in shown:
-        short = root.get("short_id")
-        if not isinstance(short, str) or not _SHORT_ID_RE.fullmatch(short):
-            continue
+    heading, footer = "<b>Open work</b>", "To stop one: /cancel_intention &lt;id&gt;"
+    lines = [heading]
+    # Room is kept for the "(and N more)" line whether or not it is needed, so the footer always fits.
+    used = _utf16_units(heading) + 1 + _utf16_units(footer) + _utf16_units(f"(and {len(listed)} more)") + 1
+    for root in listed[:INTENTIONS_SHOWN]:
         steps = root.get("open_rows")
         steps = steps if isinstance(steps, int) and not isinstance(steps, bool) and steps >= 0 else 0
         state = ROOT_STATE_WORDS.get(str(root.get("state")), "open")
         if root.get("wake_policy") == "container":
             state = "scheduled"
-        lines.append(f"<code>{short}</code> \u00b7 {state} \u00b7 {steps} open step(s)")
-        lines.append(f"<pre>{html_module.escape(_shown(root.get('intent'), INTENT_SHOWN_CHARS))}</pre>")
-    lines.append("To stop one: /cancel_intention &lt;id&gt;")
-    text = "\n".join(lines)
-    return text if len(text) <= TELEGRAM_TEXT_LIMIT else text[:TELEGRAM_TEXT_LIMIT].rsplit("\n", 1)[0]
+        intent = _shown(root.get("intent"), INTENT_SHOWN_CHARS)
+        block = f"<code>{root['short_id']}</code> \u00b7 {state} \u00b7 {steps} open step(s)\n" + (
+            f"<pre>{html_module.escape(intent)}</pre>" if intent else "<i>(no intent)</i>"
+        )
+        cost = _utf16_units(block) + 1
+        if used + cost > TELEGRAM_TEXT_LIMIT:
+            break
+        lines.append(block)
+        used += cost
+    shown = len(lines) - 1
+    if shown < len(listed):
+        lines.append(f"(and {len(listed) - shown} more)")
+    lines.append(footer)
+    return "\n".join(lines)
 
 
 def describe_cancel(status: int, body: dict, short_id: str) -> str:
@@ -894,7 +914,7 @@ class NousTelegramBot:
             except Exception as exc:
                 logger.warning("could not remove the buttons of a proposal (%s)", type(exc).__name__)
         try:
-            await self._send(chat_id, text)
+            await self._send_owner(chat_id, text)
         except Exception as exc:
             logger.warning("could not send the follow-up of an owner action (%s)", type(exc).__name__)
 
@@ -917,7 +937,7 @@ class NousTelegramBot:
             status, reply, _final = await self._decide(hex_id, command == "/approve", user_id)
             if status == 404:
                 return False  # no such proposal: ordinary chat, as before 2d
-            await self._send(chat_id, reply)
+            await self._send_owner(chat_id, reply)
             return True
         if command == "/answer":
             parts = rest.strip().split(None, 1)
@@ -929,7 +949,7 @@ class NousTelegramBot:
             )
             if status == 404:
                 return False  # no such question: ordinary chat, as before 2d
-            await self._send(chat_id, describe_answer(status, body))
+            await self._send_owner(chat_id, describe_answer(status, body))
             return True
         if command == "/intentions" and not rest.strip():
             status, body = await self._owner_get(f"/intentions?state=open&limit={INTENTIONS_SHOWN}")
@@ -937,7 +957,7 @@ class NousTelegramBot:
                 # Anything but a definite answer from a server that runs the continuation (an older server, an
                 # outage, continuation off) is not ours: the message goes on to chat as it always did.
                 return False
-            await self._send(chat_id, describe_intentions(body), parse_mode="HTML")
+            await self._send_owner(chat_id, describe_intentions(body), html_fallback=INTENTIONS_NOT_SHOWN)
             return True
         if command == "/cancel_intention":
             args = rest.split()
@@ -949,7 +969,7 @@ class NousTelegramBot:
             )
             if status == 404:
                 return False  # no such root: ordinary chat, as before 2e
-            await self._send(chat_id, describe_cancel(status, body, hex_id[:8]))
+            await self._send_owner(chat_id, describe_cancel(status, body, hex_id[:8]))
             return True
         reply_to = message.get("reply_to_message")
         if (
@@ -972,7 +992,7 @@ class NousTelegramBot:
         )
         if status not in (200, 409):
             return False
-        await self._send(chat_id, describe_answer(status, body))
+        await self._send_owner(chat_id, describe_answer(status, body))
         return True
 
     async def _show_identity(self, chat_id: int) -> None:
@@ -1211,6 +1231,16 @@ class NousTelegramBot:
             params["parse_mode"] = parse_mode
         return await self._tg("sendMessage", params=params)
 
+    async def _send_owner(self, chat_id: int, text: str, *, html_fallback: str | None = None) -> dict:
+        """An owner action's message (F099). ``_tg``'s fallback for a send Telegram refuses strips the tags and
+        unescapes, which would turn model text escaped inside ``<pre>`` into live text (a tappable ``/approve``).
+        With ``html_fallback`` the text is HTML, and a refused send falls back to that fixed line instead. Without
+        it the text is plain fixed words, which ``_tg`` never rewrites."""
+        if html_fallback is None:
+            return await self._send(chat_id, text)
+        params: dict[str, Any] = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+        return await self._tg("sendMessage", params=params, fallback_text=html_fallback)
+
     async def _send_long(
         self, chat_id: int, text: str, parse_mode: str | None = None
     ) -> None:
@@ -1240,11 +1270,14 @@ class NousTelegramBot:
         """Best-effort: return None if we can't track it."""
         return None  # TODO: track sent message IDs
 
-    async def _tg(self, method: str, params: dict[str, Any] | None = None) -> Any:
+    async def _tg(
+        self, method: str, params: dict[str, Any] | None = None, *, fallback_text: str | None = None
+    ) -> Any:
         """Call Telegram Bot API with parse_mode fallback.
 
         If a request with parse_mode fails (e.g. malformed HTML from LLM output),
-        retries without parse_mode using plain text as a fallback.
+        retries without parse_mode using plain text as a fallback: the text with its
+        tags stripped, or ``fallback_text`` when given (an owner message, ``_send_owner``).
         """
         url = TG_API.format(token=self.bot_token, method=method)
         response = await self._http.get(url, params=params)
@@ -1259,7 +1292,9 @@ class NousTelegramBot:
                 )
                 fallback_params = {k: v for k, v in params.items() if k != "parse_mode"}
                 if "text" in fallback_params:
-                    fallback_params["text"] = _strip_html_tags(fallback_params["text"])
+                    fallback_params["text"] = (
+                        _strip_html_tags(fallback_params["text"]) if fallback_text is None else fallback_text
+                    )
                 response = await self._http.get(url, params=fallback_params)
                 data = response.json()
                 if data.get("ok"):

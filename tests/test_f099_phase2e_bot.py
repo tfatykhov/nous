@@ -3,12 +3,14 @@ and passed on to chat whenever the server does not give a definite answer (lead 
 
 from __future__ import annotations
 
+import inspect
+
 import httpx
 import pytest
 from test_f099_phase2d_bot import _bot, _message, _methods, _Response, _sent
 
 from nous import owner_actions
-from nous.telegram_bot import describe_cancel, describe_intentions
+from nous.telegram_bot import NousTelegramBot, describe_cancel, describe_intentions
 
 ROOT = "ab12cd34" + "0" * 24
 SHORT = ROOT[:8]
@@ -233,3 +235,104 @@ async def test_the_list_request_bounds_its_connect_like_the_owner_post():
     (timeout,) = seen
     assert isinstance(timeout, httpx.Timeout)
     assert (timeout.connect, timeout.read, timeout.write, timeout.pool) == (10, 30, 10, 10)
+
+
+# ---- 2e-8 review I1, m2, m4, m5: the cap in Telegram's units, and no fallback to live text --------------------
+
+
+def _units(text: str) -> int:
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
+# The reviewer's probe 2: 160 characters (kept whole by the clip), each emoji two UTF-16 units, each `<` four
+# characters once escaped, and a command that must never become live text.
+PROBE_INTENT = chr(0x1F600) * 120 + "<" * 22 + " /approve cccccccc"
+
+
+def _probe_roots(count: int = 10) -> list[dict]:
+    return [_root(short_id=f"{n:08x}", intent=PROBE_INTENT) for n in range(count)]
+
+
+def test_the_list_is_measured_in_telegrams_units_and_says_how_many_it_left_out():
+    text = describe_intentions({"roots": _probe_roots()})
+    shown = text.count("<code>")
+    assert _units(text) <= 3900  # Telegram counts UTF-16 units, not Python characters
+    assert 0 < shown < 10 and text.count("<pre>") == text.count("</pre>") == shown
+    assert f"(and {10 - shown} more)" in text  # m2: a cut is said
+    assert text.endswith("To stop one: /cancel_intention &lt;id&gt;")  # the footer survives the cut
+
+
+def test_more_roots_than_are_shown_are_counted_too():
+    roots = [_root(short_id=f"{n:08x}") for n in range(12)]
+    text = describe_intentions({"roots": roots})
+    assert text.count("<code>") == 10 and "(and 2 more)" in text
+
+
+def test_a_list_that_fits_says_nothing_more():
+    text = describe_intentions({"roots": [_root()]})
+    assert "more)" not in text
+
+
+@pytest.mark.parametrize("intent", [None, "", "   ", "\x00\n"])
+def test_a_root_with_no_intent_shows_a_fixed_placeholder(intent):  # m4
+    text = describe_intentions({"roots": [_root(intent=intent)]})
+    assert "<pre></pre>" not in text and "<pre>" not in text and "<i>(no intent)</i>" in text
+
+
+def test_the_heading_says_open_work():  # m5: the list holds waiting and scheduled roots too
+    assert describe_intentions({"roots": [_root()]}).startswith("<b>Open work</b>\n")
+
+
+class _TelegramAndRest(_Http):
+    """The REST API and Telegram behind one client, as the real ``_tg`` reaches it: a send WITH a parse mode is
+    refused (as Telegram refuses a message too long, or HTML it cannot parse), a plain one is accepted."""
+
+    def __init__(self, **http):
+        super().__init__(**http)
+        self.telegram: list[tuple[str, dict]] = []
+
+    async def get(self, url, params=None, timeout=None):
+        if not url.startswith("https://api.telegram.org/"):
+            return await super().get(url, timeout=timeout)
+        self.telegram.append((url.rsplit("/", 1)[1], dict(params or {})))
+        if "parse_mode" in (params or {}):
+            return _Response(200, {"ok": False, "description": "Bad Request: message is too long"})
+        return _Response(200, {"ok": True, "result": {"message_id": 1}})
+
+
+def _real_telegram_bot(**http):
+    bot = _bot()
+    del bot._tg  # the real `_tg`, with its fallback
+    bot._http = _TelegramAndRest(**http)
+    return bot
+
+
+async def test_a_list_telegram_refuses_falls_back_to_a_fixed_line_never_to_live_text():
+    """I1: `_tg`'s fallback strips the tags and unescapes, which would put the model's `/approve` outside `<pre>`."""
+    bot = _real_telegram_bot(gets={LIST: (200, {"continuation": True, "roots": _probe_roots()})})
+    await bot._handle_update(_message("/intentions"))
+    (first, second) = bot._http.telegram
+    assert first[0] == "sendMessage" and first[1]["parse_mode"] == "HTML" and "<pre>" in first[1]["text"]
+    assert second == ("sendMessage", {"chat_id": 42, "text": "This list could not be shown."})
+    plain = [params["text"] for _method, params in bot._http.telegram if "parse_mode" not in params]
+    assert not [text for text in plain if "/approve" in text or "<" in text]
+    bot._chat_streaming.assert_not_awaited()
+
+
+async def test_the_chat_paths_fallback_is_unchanged():  # PIN: prod's chat behaviour
+    bot = _real_telegram_bot()
+    await bot._send(42, "<b>bold</b> &lt;tag&gt;", parse_mode="HTML")
+    assert bot._http.telegram[1] == ("sendMessage", {"chat_id": 42, "text": "bold <tag>"})
+
+
+def test_every_owner_send_goes_through_the_strict_path():
+    """The audit, pinned: the owner's handlers send only through `_send_owner`, whose one HTML send (the list) has
+    a fixed fallback; the follow-ups are plain fixed words, which `_tg` never rewrites."""
+    for handler in (
+        NousTelegramBot._handle_callback,
+        NousTelegramBot._handle_owner_text,
+        NousTelegramBot._try_answer_reply,
+    ):
+        source = inspect.getsource(handler)
+        assert "self._send(" not in source and "self._send_long(" not in source
+        assert "parse_mode" not in source  # an HTML send names its fixed fallback instead
