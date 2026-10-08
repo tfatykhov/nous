@@ -79,6 +79,9 @@ class UndoJournal:
         # two writers near a bound each prune protecting only their own file
         # and can delete each other's snapshot.
         self._lock = threading.Lock()
+        # Ids discarded before their write landed (guarded by _lock): a
+        # cancelled record() can still finish its write in the worker thread.
+        self._discarded: set[str] = set()
 
     @property
     def root(self) -> Path:
@@ -102,10 +105,13 @@ class UndoJournal:
         note: str | None = None,
         source: str = SOURCE_MUTATION,
         restores: str | None = None,
+        snapshot_id: str | None = None,
     ) -> str:
         """Persist one snapshot and return its id. Raises on failure: callers
-        that must never block use ``record_safe``."""
-        snapshot_id = uuid4().hex
+        that must never block use ``record_safe``. A caller that may have to
+        ``discard`` the snapshot passes its own ``snapshot_id``: cancelled
+        mid-write, it never sees the return value, but the write still lands."""
+        snapshot_id = snapshot_id or uuid4().hex
         entry = {
             "id": snapshot_id,
             "kind": kind,
@@ -132,6 +138,9 @@ class UndoJournal:
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
         name = f"{stamp}-{entry['id']}{_SUFFIX}"
         with self._lock:
+            if entry["id"] in self._discarded:
+                self._discarded.discard(entry["id"])
+                return
             self._write_file(name, entry, data)
             self._prune(keep=name)
 
@@ -215,6 +224,17 @@ class UndoJournal:
 
         await asyncio.to_thread(_mark)
 
+    def discard(self, snapshot_id: str) -> None:
+        """Delete a snapshot whose mutation did not commit. Synchronous, so a
+        caller can run it while handling a cancellation. A snapshot not
+        written yet is tombstoned, so a write still in flight is dropped."""
+        with self._lock:
+            path = self._find(snapshot_id)
+            if path is not None:
+                path.unlink(missing_ok=True)
+            else:
+                self._discarded.add(snapshot_id)
+
 
 def _dump(entry: dict[str, Any]) -> bytes:
     return json.dumps(entry, separators=(",", ":")).encode("utf-8")
@@ -260,7 +280,9 @@ async def record_safe(kind: str, action: str, target: str, before: Any, **kwargs
         return None
 
 
-async def record_model_safe(kind: str, action: str, model: Any, *, label: str | None = None) -> str | None:
+async def record_model_safe(
+    kind: str, action: str, model: Any, *, label: str | None = None, snapshot_id: str | None = None
+) -> str | None:
     """``record_safe`` for an ORM row as it is now; never raises."""
     if _journal is None:
         return None
@@ -269,7 +291,7 @@ async def record_model_safe(kind: str, action: str, model: Any, *, label: str | 
     except Exception:
         logger.warning("Undo journal: %s snapshot could not be encoded; the %s proceeds", kind, action, exc_info=True)
         return None
-    return await record_safe(kind, action, target, before, label=label)
+    return await record_safe(kind, action, target, before, label=label, snapshot_id=snapshot_id)
 
 
 async def record_file_write(path: str, workspace_dir: str) -> str | None:
@@ -357,6 +379,18 @@ class RestoreResult:
     success: bool
     message: str
     pre_restore_id: str | None = None
+
+
+def discard_safe(snapshot_id: str | None) -> None:
+    """Delete a snapshot recorded for a mutation that did not commit, so no
+    restore can apply it; never raises. A no-op for None (nothing recorded)."""
+    journal = _journal
+    if journal is None or snapshot_id is None:
+        return
+    try:
+        journal.discard(snapshot_id)
+    except Exception:
+        logger.warning("Undo journal: could not discard snapshot %s", snapshot_id, exc_info=True)
 
 
 @dataclass
