@@ -34,10 +34,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import json
 import logging
 import os
+import threading
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -72,6 +74,11 @@ class UndoJournal:
         self._root = Path(root)
         self._max_entries = max_entries
         self._max_bytes = max_bytes
+        # Held around every write and its prune (and mark_restored's rewrite).
+        # A threading lock: writes run in asyncio.to_thread workers. Unlocked,
+        # two writers near a bound each prune protecting only their own file
+        # and can delete each other's snapshot.
+        self._lock = threading.Lock()
 
     @property
     def root(self) -> Path:
@@ -124,8 +131,9 @@ class UndoJournal:
         self._root.mkdir(mode=0o700, parents=True, exist_ok=True)
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
         name = f"{stamp}-{entry['id']}{_SUFFIX}"
-        self._write_file(name, entry, data)
-        self._prune(keep=name)
+        with self._lock:
+            self._write_file(name, entry, data)
+            self._prune(keep=name)
 
     def _write_file(self, name: str, entry: dict[str, Any], data: bytes | None = None) -> None:
         data = _dump(entry) if data is None else data
@@ -194,13 +202,16 @@ class UndoJournal:
         """Stamp a snapshot with the restore that used it."""
 
         def _mark() -> None:
-            path = self._find(snapshot_id)
-            if path is None:
-                return
-            entry = json.loads(path.read_bytes())
-            entry["restored_at"] = datetime.now(UTC).isoformat()
-            entry["restore_result"] = message
-            self._write_file(path.name, entry)
+            # Locked: a concurrent prune must not delete the file between the
+            # read and the rewrite (the rewrite would bring it back).
+            with self._lock:
+                path = self._find(snapshot_id)
+                if path is None:
+                    return
+                entry = json.loads(path.read_bytes())
+                entry["restored_at"] = datetime.now(UTC).isoformat()
+                entry["restore_result"] = message
+                self._write_file(path.name, entry)
 
         await asyncio.to_thread(_mark)
 
@@ -357,6 +368,7 @@ class RestoreDeps:
     check_loader: Any = None  # DynamicCheckLoader
     read_config: Callable[[list[str]], dict[str, Any]] | None = None
     apply_config: Callable[[dict[str, Any]], list[str]] | None = None
+    config_lock: asyncio.Lock | None = None  # the lock config writers hold around read + record + apply
 
 
 async def restore(snapshot_id: str, deps: RestoreDeps, journal: UndoJournal | None = None) -> RestoreResult:
@@ -441,8 +453,9 @@ async def _restore_config(
 ) -> RestoreResult:
     if deps.read_config is None or deps.apply_config is None:
         return RestoreResult(False, "runtime config is not available")
-    await record_current(deps.read_config(list(before)))
-    applied = deps.apply_config(before)
+    async with deps.config_lock or contextlib.nullcontext():
+        await record_current(deps.read_config(list(before)))
+        applied = deps.apply_config(before)
     return RestoreResult(True, f"restored config fields: {', '.join(sorted(applied)) or 'none'}")
 
 

@@ -264,6 +264,44 @@ def test_file_is_reloaded_on_change_and_bad_edit_keeps_last_good(tmp_path) -> No
     assert store.ingest(_finding("third SNN integration deferral")) == FindingAction.AUTO_CLOSE
 
 
+def test_unreadable_file_is_retried_once_readable(tmp_path, monkeypatch, caplog: pytest.LogCaptureFixture) -> None:
+    # Codex P2 on #711 (#714): the mtime was cached before open(), so a file
+    # that could not be read was never retried after a chmod (which leaves
+    # the mtime unchanged).
+    import builtins
+
+    from nous.heartbeat import known_fp
+
+    path = tmp_path / "fp.json"
+    _write(path, {"rules": [SNN_RULE]})
+    readable = [False]
+
+    def _open(file, *args, **kwargs):
+        if str(file) == str(path) and not readable[0]:
+            raise PermissionError(13, "Permission denied", str(file))
+        return builtins.open(file, *args, **kwargs)
+
+    monkeypatch.setattr(known_fp, "open", _open, raising=False)
+    store = _store(KnownFalsePositiveRules(str(path), today=lambda: TODAY))
+    with caplog.at_level(logging.WARNING, logger="nous.heartbeat.known_fp"):
+        assert store.ingest(_finding("first SNN integration deferral")) == FindingAction.TRIAGE
+        assert store.ingest(_finding("second SNN integration deferral")) == FindingAction.TRIAGE
+    assert sum("invalid" in r.getMessage() for r in caplog.records) == 1  # warned once, not per tick
+
+    readable[0] = True  # chmod: same mtime
+    assert store.ingest(_finding("third SNN integration deferral")) == FindingAction.AUTO_CLOSE
+
+
+def test_malformed_file_with_unchanged_mtime_keeps_last_good(tmp_path) -> None:
+    path = tmp_path / "fp.json"
+    _write(path, {"rules": [SNN_RULE]})
+    rules = KnownFalsePositiveRules(str(path), today=lambda: TODAY)
+    assert [r.id for r in rules.rules] == ["snn-integration-deferral"]
+    _write(path, '{"rules": [')
+    assert [r.id for r in rules.rules] == ["snn-integration-deferral"]
+    assert [r.id for r in rules.rules] == ["snn-integration-deferral"]
+
+
 def test_matching_errors_are_contained() -> None:
     class _Broken(KnownFalsePositiveRules):
         def _maybe_reload(self) -> None:

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import threading
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -106,6 +107,37 @@ class TestJournalStore:
             await j.record("config", "x", "t", {"blob": "a" * 20_000})
         assert [e["id"] for e in await j.list(10)] == list(reversed(ids))
         assert await undo_journal.record_safe("config", "x", "t", {"blob": "a" * 20_000}) is None
+
+    async def test_concurrent_writes_at_the_bound_never_prune_each_other(self, tmp_path, monkeypatch):
+        # Codex P2 on #712 (7c7c4d2): two writers at max_entries each pruned
+        # protecting only their own file, so each could delete the other's.
+        # Here the first pruner waits for the second write; unlocked, the
+        # second prunes the first and the first then prunes the second.
+        j = UndoJournal(str(tmp_path / "j"), max_entries=1)
+        first_pruning = threading.Event()
+        second_written = threading.Event()
+        write_file, prune = j._write_file, j._prune
+
+        def _write_file(name, entry, data=None):
+            write_file(name, entry, data)
+            if first_pruning.is_set():
+                second_written.set()
+
+        def _prune(*, keep):
+            if not first_pruning.is_set():
+                first_pruning.set()
+                second_written.wait(timeout=0.5)
+            prune(keep=keep)
+
+        monkeypatch.setattr(j, "_write_file", _write_file)
+        monkeypatch.setattr(j, "_prune", _prune)
+
+        async def _second():
+            await asyncio.to_thread(first_pruning.wait, 5)
+            return await j.record("config", "x", "t", {"n": 2})
+
+        await asyncio.gather(j.record("config", "x", "t", {"n": 1}), _second())
+        assert len(await j.list(10)) == 1
 
     async def test_list_omits_payload_and_get_returns_it(self, tmp_path):
         j = UndoJournal(str(tmp_path / "j"))
@@ -442,6 +474,42 @@ class TestCheckKind:
         assert (await undo_journal.restore(entry["id"], RestoreDeps(check_loader=loader), journal)).success
         assert (await _row(db, DynamicCheckModel, check_id))["tools"] == ["web_search"]
 
+    @pytest.mark.parametrize(
+        "updates",
+        [
+            {"interval_seconds": 60},
+            {"on_complete_tools": ["web_search"]},
+            {"timeout_seconds": "slow"},
+            {"cron_expr": None, "prompt": "p2"},
+        ],
+    )
+    async def test_rejected_update_records_nothing(self, db, loader, journal, updates):
+        # Codex P2 on #712 (7c7c4d2): an update that fails validation was
+        # snapshotted before the error, leaving a journal entry for a change
+        # that never happened.
+        created = await loader.create_check(
+            name=f"watch-{uuid.uuid4().hex[:6]}", description="d", prompt="look", interval_seconds=600, tools=[]
+        )
+        if "cron_expr" in updates:  # an interval below the minimum, set behind validation's back
+            async with db.session() as s:
+                row = await s.get(DynamicCheckModel, uuid.UUID(created["id"]))
+                row.interval_seconds = 60
+                await s.commit()
+        before = await _row(db, DynamicCheckModel, uuid.UUID(created["id"]))
+        with pytest.raises(ValueError):
+            await loader.manage_check("update", created["name"], updates)
+        assert [e["action"] for e in await journal.list(500)] == ["create"]
+        assert await _row(db, DynamicCheckModel, uuid.UUID(created["id"])) == before
+
+    async def test_refused_disable_records_nothing(self, db, loader, journal, monkeypatch):
+        check_id = await _make_check(loader)
+        name = (await _row(db, DynamicCheckModel, check_id))["name"]
+        monkeypatch.setattr(loader, "_has_cancellable_run", lambda _name: True)
+        with pytest.raises(ValueError, match="active run"):
+            await loader.manage_check("disable", name, capture={"refuse_if_running": True})
+        assert [e["action"] for e in await journal.list(500)] == ["create"]
+        assert (await _row(db, DynamicCheckModel, check_id))["enabled"] is True
+
     async def test_snapshot_failure_does_not_block(self, db, loader, failing_journal, caplog):
         with caplog.at_level(logging.WARNING, logger="nous.undo_journal"):
             check_id = await _make_check(loader)
@@ -479,6 +547,62 @@ class TestConfigKind:
         deps = RestoreDeps(read_config=lambda fields: dict(live), apply_config=lambda body: live.update(body) or [])
         result = await undo_journal.restore(sid, deps, journal)
         assert not result.success and live == {"tick_interval": 99}
+
+
+    async def test_restore_waits_for_the_config_lock(self, journal):
+        # Codex P2 on #712 (#713 item 1): a restore takes the same lock as
+        # PUT /heartbeat/config around read + record + apply.
+        live = {"tick_interval": 99}
+        sid = await journal.record("config", "heartbeat_config", "heartbeat_config", {"tick_interval": 30})
+        lock = asyncio.Lock()
+        deps = RestoreDeps(
+            read_config=lambda fields: {f: live[f] for f in fields},
+            apply_config=lambda body: [k for k in body if live.__setitem__(k, body[k]) is None],
+            config_lock=lock,
+        )
+        async with lock:
+            task = asyncio.create_task(undo_journal.restore(sid, deps, journal))
+            await asyncio.sleep(0.05)
+            assert not task.done() and live == {"tick_interval": 99}
+            live["tick_interval"] = 55  # a writer holding the lock changes it
+        result = await task
+        assert result.success and live == {"tick_interval": 30}
+        assert (await journal.get(result.pre_restore_id))["before"] == {"tick_interval": 55}
+
+    async def test_concurrent_config_puts_snapshot_each_prior_value(self, journal, workspace, monkeypatch):
+        # Codex P2 on #712 (#713 item 1): two concurrent PUTs both read the
+        # same prior value while the journal write yielded, so the later
+        # snapshot skipped the state just before it.
+        from nous.api.rest import create_app
+        from nous.config import Settings
+
+        settings = Settings(workspace_dir=str(workspace))
+        heartbeat_runner = SimpleNamespace(registry=CheckRegistry())
+        app = create_app(
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            settings,
+            heartbeat_runner=heartbeat_runner,
+        )
+        record = journal.record
+
+        async def _slow_record(*args, **kwargs):
+            await asyncio.sleep(0.05)
+            return await record(*args, **kwargs)
+
+        monkeypatch.setattr(journal, "record", _slow_record)
+        original = settings.heartbeat_tick_interval
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            first = asyncio.create_task(client.put("/heartbeat/config", json={"tick_interval": original + 1}))
+            await asyncio.sleep(0.01)
+            second = asyncio.create_task(client.put("/heartbeat/config", json={"tick_interval": original + 2}))
+            assert (await first).status_code == 200 and (await second).status_code == 200
+        befores = [(await journal.get(e["id"]))["before"]["tick_interval"] for e in reversed(await journal.list(10))]
+        assert befores == [original, original + 1]
+        assert settings.heartbeat_tick_interval == original + 2
 
 
 # ---------------------------------------------------------------------------
