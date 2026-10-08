@@ -215,6 +215,14 @@ class UndoJournal:
 
         await asyncio.to_thread(_mark)
 
+    def discard(self, snapshot_id: str) -> None:
+        """Delete a snapshot whose mutation did not commit. Synchronous, so a
+        caller can run it while handling a cancellation."""
+        with self._lock:
+            path = self._find(snapshot_id)
+            if path is not None:
+                path.unlink(missing_ok=True)
+
 
 def _dump(entry: dict[str, Any]) -> bytes:
     return json.dumps(entry, separators=(",", ":")).encode("utf-8")
@@ -357,6 +365,18 @@ class RestoreResult:
     success: bool
     message: str
     pre_restore_id: str | None = None
+
+
+def discard_safe(snapshot_id: str | None) -> None:
+    """Delete a snapshot recorded for a mutation that did not commit, so no
+    restore can apply it; never raises. A no-op for None (nothing recorded)."""
+    journal = _journal
+    if journal is None or snapshot_id is None:
+        return
+    try:
+        journal.discard(snapshot_id)
+    except Exception:
+        logger.warning("Undo journal: could not discard snapshot %s", snapshot_id, exc_info=True)
 
 
 @dataclass

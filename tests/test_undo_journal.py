@@ -510,6 +510,57 @@ class TestCheckKind:
         assert [e["action"] for e in await journal.list(500)] == ["create"]
         assert (await _row(db, DynamicCheckModel, check_id))["enabled"] is True
 
+    async def test_run_starting_during_the_disable_snapshot_leaves_no_orphan(self, db, loader, journal, monkeypatch):
+        # Codex P2 on #715: a run starting while the disable's snapshot was
+        # being written got the disable refused after the snapshot existed;
+        # a later undo could apply it over newer settings.
+        check_id = await _make_check(loader)
+        name = (await _row(db, DynamicCheckModel, check_id))["name"]
+        check = loader._registry.get_check(name)
+        check._runner = object()
+        check._active_runs = loader._active_runs
+        turn_started = asyncio.Event()
+
+        async def _turn(session_id, instruction):
+            turn_started.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(check, "_run_turn", _turn)
+        record = journal.record
+        runs = []
+
+        async def _record_while_a_run_starts(*args, **kwargs):
+            runs.append(asyncio.create_task(check.run()))
+            await asyncio.sleep(0)
+            return await record(*args, **kwargs)
+
+        monkeypatch.setattr(journal, "record", _record_while_a_run_starts)
+        capture = {"refuse_if_running": True}
+        try:
+            result = await loader.manage_check("disable", name, capture=capture)
+        finally:
+            for task in runs:
+                task.cancel()
+        # The disable proceeds: its gate kept the run from starting.
+        assert result["status"] == "disabled"
+        assert (await runs[0]).skipped and not turn_started.is_set()
+        assert (await _row(db, DynamicCheckModel, check_id))["enabled"] is False
+        entry = await _only(journal, "heartbeat_check", "disable")
+        assert (await journal.get(entry["id"]))["before"]["enabled"] is True
+
+    async def test_disable_that_does_not_commit_discards_its_snapshot(self, db, loader, journal):
+        check_id = await _make_check(loader)
+        name = (await _row(db, DynamicCheckModel, check_id))["name"]
+
+        async def _persist(session, capture):
+            raise RuntimeError("compensation write failed")
+
+        with pytest.raises(RuntimeError):
+            await loader.manage_check("disable", name, capture={"refuse_if_running": True, "persist": _persist})
+        assert [e["action"] for e in await journal.list(500)] == ["create"]
+        assert (await _row(db, DynamicCheckModel, check_id))["enabled"] is True
+        assert not loader._registry.get_check(name)._self_disabled
+
     async def test_snapshot_failure_does_not_block(self, db, loader, failing_journal, caplog):
         with caplog.at_level(logging.WARNING, logger="nous.undo_journal"):
             check_id = await _make_check(loader)

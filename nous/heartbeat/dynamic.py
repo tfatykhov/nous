@@ -934,10 +934,6 @@ class DynamicCheckLoader:
                 # run cannot be undone -- re-enabling restores the schedule,
                 # not the interrupted run. Decided from the registry
                 # _cancel_active_runs reads, before anything is written.
-                refusing = capture is not None and capture.get("refuse_if_running") and self._has_cancellable_run(name)
-                if not refusing:
-                    # Undo journal (never blocks); a refused disable is not recorded.
-                    await undo_journal.record_model_safe(undo_journal.KIND_CHECK, action, model, label=name)
                 cancels_run = capture is not None and self._has_cancellable_run(name)
                 if cancels_run and capture.get("refuse_if_running"):
                     raise ValueError(
@@ -955,7 +951,16 @@ class DynamicCheckLoader:
                     gate = None
                 if gate is not None:
                     gate._self_disabled = True
+                snapshot_id = None
                 try:
+                    # Undo journal (never blocks), recorded only once the
+                    # disable will proceed: the refusal above is decided and
+                    # gated before this await (codex P2, PR #715), so a run
+                    # starting mid-write cannot turn it into a refusal that
+                    # leaves the snapshot behind.
+                    snapshot_id = await undo_journal.record_model_safe(
+                        undo_journal.KIND_CHECK, action, model, label=name
+                    )
                     prior_enabled = model.enabled
                     token = uuid4().hex
                     model.enabled = False
@@ -980,6 +985,11 @@ class DynamicCheckLoader:
                 except BaseException:
                     if gate is not None:
                         gate._self_disabled = False
+                    # A disable that did not land must leave no snapshot an
+                    # undo could apply over newer settings. A cancel during
+                    # the commit itself may drop a landed disable's snapshot:
+                    # that loses its undo, never applies a wrong one.
+                    undo_journal.discard_safe(snapshot_id)
                     raise
                 # codex P2 (PR #656): flag the in-memory check only once the
                 # disable is durable. Flagging before the commit left a failed
