@@ -93,6 +93,17 @@ class MockEmbeddingProvider:
         pass
 
 
+@pytest.fixture(autouse=True)
+def _no_undo_journal():
+    """The undo journal is process-wide: a test that runs create_components
+    installs one under the real workspace_dir. Start and end every test without it."""
+    from nous import undo_journal
+
+    undo_journal.set_journal(None)
+    yield
+    undo_journal.set_journal(None)
+
+
 # ---------------------------------------------------------------------------
 # Database fixtures
 # ---------------------------------------------------------------------------

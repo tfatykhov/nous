@@ -1962,6 +1962,20 @@ class Settings(BaseSettings):
     # settings it was built with, so turning it off takes effect at restart.
     dag_approval_proceed_default_enabled: bool = False
 
+    # Undo journal (nous/undo_journal.py): PASSIVE before-state snapshots of
+    # workspace files written by write_file, schedules, dynamic heartbeat
+    # checks and runtime heartbeat config, restorable only by the owner over
+    # REST. Separate from the compensation layer above: it gates nothing and
+    # nothing acts on it unasked. A snapshot failure is logged, never blocks.
+    undo_journal_enabled: bool = True
+    undo_journal_dir: str = ""  # empty => <workspace_dir>/.nous-undo
+    undo_journal_max_entries: int = Field(500, ge=1, description="Undo journal: snapshots kept; oldest pruned first.")
+    undo_journal_max_bytes: int = Field(
+        50 * 1024 * 1024,
+        ge=1024 * 1024,
+        description="Undo journal: total bytes kept on disk; oldest pruned first.",
+    )
+
     # F087: act on tokens_consumed, which only becomes non-zero once the
     # accounting wiring lands. Dark by default because the budget branch has
     # never executed in prod — flipping it silently would start cancelling

@@ -1,0 +1,409 @@
+"""Tests for the passive undo journal (nous/undo_journal.py).
+
+Per kind -- workspace file, schedule, dynamic heartbeat check, runtime
+heartbeat config -- a mutation records its before-state, a restore round-trips
+it (snapshotting the current state first), and a failed snapshot never blocks
+the mutation. One end-to-end test drives every kind through the REST surface
+and checks the restored artifacts are byte/row identical.
+"""
+
+from __future__ import annotations
+
+import base64
+import logging
+import uuid
+from types import SimpleNamespace
+
+import pytest
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
+
+from nous import undo_journal
+from nous.api.builtin_tools import write_file_tool
+from nous.brain.intentions import IntentionSpec
+from nous.heart.schedules import ScheduleManager
+from nous.heartbeat.dynamic import DynamicCheckLoader
+from nous.heartbeat.registry import CheckRegistry
+from nous.storage.models import DynamicCheckModel, Schedule
+from nous.undo_journal import RestoreDeps, UndoJournal
+
+# ---------------------------------------------------------------------------
+# Fixtures and helpers
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def workspace(tmp_path):
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    return ws
+
+
+@pytest.fixture
+def journal(workspace):
+    j = UndoJournal(str(workspace / ".nous-undo"))
+    undo_journal.set_journal(j)
+    yield j
+    undo_journal.set_journal(None)
+
+
+@pytest.fixture
+def failing_journal(journal, monkeypatch):
+    async def _boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(journal, "record", _boom)
+    return journal
+
+
+async def _only(journal: UndoJournal, kind: str, action: str | None = None) -> dict:
+    entries = [
+        e
+        for e in await journal.list(500)
+        if e["kind"] == kind and (action is None or e["action"] == action) and e["source"] == "mutation"
+    ]
+    assert len(entries) == 1, entries
+    return entries[0]
+
+
+async def _row(db, model, row_id) -> dict | None:
+    table = model.__table__
+    async with db.session() as s:
+        row = (await s.execute(select(table).where(table.c.id == row_id))).mappings().first()
+    return dict(row) if row is not None else None
+
+
+def _agent() -> str:
+    return f"test-undo-{uuid.uuid4().hex[:8]}"
+
+
+# ---------------------------------------------------------------------------
+# Journal store: retention
+# ---------------------------------------------------------------------------
+
+
+class TestJournalStore:
+    async def test_prunes_oldest_beyond_max_entries(self, tmp_path):
+        j = UndoJournal(str(tmp_path / "j"), max_entries=3)
+        ids = [await j.record("config", "x", "t", {"n": i}) for i in range(5)]
+        kept = [e["id"] for e in await j.list(10)]
+        assert kept == list(reversed(ids[2:]))
+
+    async def test_prunes_oldest_beyond_max_bytes(self, tmp_path):
+        j = UndoJournal(str(tmp_path / "j"), max_bytes=10_000)
+        ids = [await j.record("config", "x", "t", {"blob": "a" * 4_000}) for _ in range(4)]
+        kept = [e["id"] for e in await j.list(10)]
+        assert kept == list(reversed(ids[-2:]))
+
+    async def test_list_omits_payload_and_get_returns_it(self, tmp_path):
+        j = UndoJournal(str(tmp_path / "j"))
+        sid = await j.record("config", "x", "t", {"secret": 1})
+        assert "before" not in (await j.list())[0]
+        assert (await j.get(sid))["before"] == {"secret": 1}
+        assert await j.get("../../etc/passwd") is None
+
+    async def test_row_codec_round_trips(self):
+        from datetime import UTC, datetime
+        from decimal import Decimal
+
+        row = {
+            "id": uuid.uuid4(),
+            "at": datetime.now(UTC),
+            "n": Decimal("1.50"),
+            "tools": ["a"],
+            "metadata": {"k": [1, None]},
+            "none": None,
+        }
+        assert undo_journal.decode_row(undo_journal.encode_row(row)) == row
+
+    def test_configure_respects_flag(self, tmp_path):
+        s = SimpleNamespace(
+            undo_journal_enabled=False,
+            undo_journal_dir="",
+            workspace_dir=str(tmp_path),
+            undo_journal_max_entries=5,
+            undo_journal_max_bytes=2**20,
+        )
+        assert undo_journal.configure(s) is None
+        s.undo_journal_enabled = True
+        try:
+            j = undo_journal.configure(s)
+            assert j is not None and j.root == tmp_path / ".nous-undo"
+        finally:
+            undo_journal.set_journal(None)
+
+
+# ---------------------------------------------------------------------------
+# Kind: workspace file (write_file)
+# ---------------------------------------------------------------------------
+
+
+class TestFileKind:
+    async def test_write_file_records_prior_bytes(self, workspace, journal):
+        (workspace / "notes.txt").write_bytes(b"old\xff bytes")
+        out = await write_file_tool("notes.txt", "new", _workspace_dir=str(workspace))
+        assert "is_error" not in out
+        entry = await journal.get((await _only(journal, "file"))["id"])
+        assert entry["restorable"] is True
+        assert base64.b64decode(entry["before"]["prior_b64"]) == b"old\xff bytes"
+
+    async def test_restore_round_trips_and_snapshots_current_first(self, workspace, journal):
+        target = workspace / "notes.txt"
+        target.write_bytes(b"old\xff bytes")
+        await write_file_tool("notes.txt", "new", _workspace_dir=str(workspace))
+        sid = (await _only(journal, "file"))["id"]
+
+        result = await undo_journal.restore(sid, RestoreDeps(), journal)
+        assert result.success, result.message
+        assert target.read_bytes() == b"old\xff bytes"
+        # The state the restore replaced is itself restorable.
+        pre = await journal.get(result.pre_restore_id)
+        assert pre["source"] == "pre_restore" and pre["restores"] == sid
+        again = await undo_journal.restore(result.pre_restore_id, RestoreDeps(), journal)
+        assert again.success and target.read_bytes() == b"new"
+
+    async def test_restore_of_created_file_removes_it(self, workspace, journal):
+        await write_file_tool("fresh.txt", "made", _workspace_dir=str(workspace))
+        sid = (await _only(journal, "file"))["id"]
+        assert (await undo_journal.restore(sid, RestoreDeps(), journal)).success
+        assert not (workspace / "fresh.txt").exists()
+
+    async def test_oversized_prior_is_recorded_not_restorable(self, workspace, journal):
+        (workspace / "big.bin").write_bytes(b"x" * (undo_journal.FILE_SNAPSHOT_MAX_BYTES + 1))
+        await write_file_tool("big.bin", "small", _workspace_dir=str(workspace))
+        entry = await _only(journal, "file")
+        assert entry["restorable"] is False
+        result = await undo_journal.restore(entry["id"], RestoreDeps(), journal)
+        assert not result.success and (workspace / "big.bin").read_bytes() == b"small"
+
+    async def test_tampered_snapshot_is_refused(self, workspace, journal):
+        (workspace / "a.txt").write_bytes(b"before")
+        await write_file_tool("a.txt", "after", _workspace_dir=str(workspace))
+        entry = await journal.get((await _only(journal, "file"))["id"])
+        entry["before"]["prior_b64"] = base64.b64encode(b"evil").decode()
+        journal._write_file(journal._find(entry["id"]).name, entry)
+        result = await undo_journal.restore(entry["id"], RestoreDeps(), journal)
+        assert not result.success and (workspace / "a.txt").read_bytes() == b"after"
+
+    async def test_snapshot_failure_does_not_block_write(self, workspace, failing_journal, caplog):
+        with caplog.at_level(logging.WARNING, logger="nous.undo_journal"):
+            out = await write_file_tool("notes.txt", "written", _workspace_dir=str(workspace))
+        assert "is_error" not in out
+        assert (workspace / "notes.txt").read_text() == "written"
+        assert "file snapshot" in caplog.text
+
+    async def test_write_into_journal_is_refused(self, workspace, journal):
+        out = await write_file_tool(".nous-undo/x.json", "{}", _workspace_dir=str(workspace))
+        assert out.get("is_error") is True
+        assert not (workspace / ".nous-undo" / "x.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# Kind: schedule
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def schedules(db):
+    return ScheduleManager(db, _agent())
+
+
+@pytest.mark.postgres_only
+class TestScheduleKind:
+    async def test_deactivate_records_and_restore_round_trips(self, db, schedules, journal):
+        sched = await schedules.create(task="Water plants", schedule_type="recurring", interval_seconds=3600)
+        original = await _row(db, Schedule, sched.id)
+        await schedules.deactivate(sched.id)
+        entry = await _only(journal, "schedule", "deactivate")
+        assert entry["target"] == str(sched.id)
+
+        result = await undo_journal.restore(entry["id"], RestoreDeps(schedules=schedules), journal)
+        assert result.success, result.message
+        assert await _row(db, Schedule, sched.id) == original
+        pre = await journal.get(result.pre_restore_id)
+        assert undo_journal.decode_row(pre["before"])["active"] is False
+
+    async def test_restore_of_create_deactivates_never_deletes(self, db, schedules, journal):
+        sched = await schedules.create(task="t", schedule_type="recurring", interval_seconds=3600)
+        entry = await _only(journal, "schedule", "create")
+        result = await undo_journal.restore(entry["id"], RestoreDeps(schedules=schedules), journal)
+        assert result.success, result.message
+        row = await _row(db, Schedule, sched.id)
+        assert row is not None and row["active"] is False
+
+    async def test_closed_container_restores_inactive(self, db, schedules, journal):
+        spec = IntentionSpec(intent="Check daily", origin_kind="interactive", container=True)
+        sched = await schedules.create(task="Check", schedule_type="recurring", interval_seconds=1800, intention=spec)
+        await schedules.deactivate(sched.id)  # closes the container
+        entry = await _only(journal, "schedule", "deactivate")
+        result = await undo_journal.restore(entry["id"], RestoreDeps(schedules=schedules), journal)
+        assert result.success and "inactive" in result.message
+        assert (await _row(db, Schedule, sched.id))["active"] is False
+
+    async def test_snapshot_failure_does_not_block(self, db, schedules, failing_journal, caplog):
+        with caplog.at_level(logging.WARNING, logger="nous.undo_journal"):
+            sched = await schedules.create(task="t", schedule_type="recurring", interval_seconds=3600)
+            await schedules.deactivate(sched.id)
+        assert (await _row(db, Schedule, sched.id))["active"] is False
+        assert "schedule snapshot" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Kind: dynamic heartbeat check
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def loader(db):
+    return DynamicCheckLoader(db=db, registry=CheckRegistry(), agent_id=_agent())
+
+
+async def _make_check(loader: DynamicCheckLoader) -> uuid.UUID:
+    created = await loader.create_check(
+        name=f"watch-{uuid.uuid4().hex[:6]}", description="d", prompt="look", interval_seconds=600
+    )
+    return uuid.UUID(created["id"])
+
+
+@pytest.mark.postgres_only
+class TestCheckKind:
+    @pytest.mark.parametrize(
+        ("action", "updates"),
+        [("update", {"interval_seconds": 7200, "prompt": "changed"}), ("disable", None), ("delete", None)],
+    )
+    async def test_action_records_and_restore_round_trips(self, db, loader, journal, action, updates):
+        check_id = await _make_check(loader)
+        original = await _row(db, DynamicCheckModel, check_id)
+        await loader.manage_check(action, original["name"], updates)
+        entry = await _only(journal, "heartbeat_check", action)
+
+        result = await undo_journal.restore(entry["id"], RestoreDeps(check_loader=loader), journal)
+        assert result.success, result.message
+        assert await _row(db, DynamicCheckModel, check_id) == original
+        live = loader._registry.get_check(original["name"])
+        assert live is not None and live.interval == 600 and live._prompt == "look"
+
+    async def test_restore_of_create_disables_never_deletes(self, db, loader, journal):
+        check_id = await _make_check(loader)
+        entry = await _only(journal, "heartbeat_check", "create")
+        result = await undo_journal.restore(entry["id"], RestoreDeps(check_loader=loader), journal)
+        assert result.success, result.message
+        row = await _row(db, DynamicCheckModel, check_id)
+        assert row is not None and row["enabled"] is False
+        assert loader._registry.get_check(row["name"]) is None
+
+    async def test_name_clash_refuses(self, db, loader, journal):
+        check_id = await _make_check(loader)
+        name = (await _row(db, DynamicCheckModel, check_id))["name"]
+        await loader.manage_check("delete", name)
+        await loader.create_check(name=name, description="d", prompt="other", interval_seconds=600)
+        entry = await _only(journal, "heartbeat_check", "delete")
+        result = await undo_journal.restore(entry["id"], RestoreDeps(check_loader=loader), journal)
+        assert not result.success and "nothing changed" in result.message
+
+    async def test_dag_check_restore_is_refused(self, db, loader, journal):
+        created = await loader.create_check(name=f"dag-{uuid.uuid4().hex[:6]}", description="d", prompt="p")
+        await loader.manage_check("disable", created["name"])
+        entry = await _only(journal, "heartbeat_check", "disable")
+        result = await undo_journal.restore(entry["id"], RestoreDeps(check_loader=loader), journal)
+        assert not result.success and "DAG node" in result.message
+        assert (await _row(db, DynamicCheckModel, uuid.UUID(created["id"])))["enabled"] is False
+
+    async def test_snapshot_failure_does_not_block(self, db, loader, failing_journal, caplog):
+        with caplog.at_level(logging.WARNING, logger="nous.undo_journal"):
+            check_id = await _make_check(loader)
+            name = (await _row(db, DynamicCheckModel, check_id))["name"]
+            await loader.manage_check("update", name, {"prompt": "p2"})
+        assert (await _row(db, DynamicCheckModel, check_id))["prompt"] == "p2"
+        assert "heartbeat_check snapshot" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Kind: runtime config (restore logic; the REST hook is covered end to end)
+# ---------------------------------------------------------------------------
+
+
+class TestConfigKind:
+    async def test_restore_applies_before_and_snapshots_current(self, journal):
+        live = {"tick_interval": 99}
+        sid = await journal.record("config", "heartbeat_config", "heartbeat_config", {"tick_interval": 30})
+        deps = RestoreDeps(
+            read_config=lambda fields: {f: live[f] for f in fields},
+            apply_config=lambda body: [k for k in body if live.__setitem__(k, body[k]) is None],
+        )
+        result = await undo_journal.restore(sid, deps, journal)
+        assert result.success and live == {"tick_interval": 30}
+        assert (await journal.get(result.pre_restore_id))["before"] == {"tick_interval": 99}
+
+    async def test_failed_pre_restore_snapshot_changes_nothing(self, journal, monkeypatch):
+        live = {"tick_interval": 99}
+        sid = await journal.record("config", "heartbeat_config", "heartbeat_config", {"tick_interval": 30})
+
+        async def _boom(*args, **kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(journal, "record", _boom)
+        deps = RestoreDeps(read_config=lambda fields: dict(live), apply_config=lambda body: live.update(body) or [])
+        result = await undo_journal.restore(sid, deps, journal)
+        assert not result.success and live == {"tick_interval": 99}
+
+
+# ---------------------------------------------------------------------------
+# End to end: every kind mutated through Nous, restored over REST
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+async def test_end_to_end_restore_every_kind_identically(db, heart, workspace, journal):
+    from nous.api.rest import create_app
+    from nous.config import Settings
+
+    settings = Settings()
+    loader = DynamicCheckLoader(db=db, registry=CheckRegistry(), agent_id=settings.agent_id)
+    heartbeat_runner = SimpleNamespace(registry=loader._registry, dynamic_loader=loader)
+    app = create_app(
+        SimpleNamespace(), SimpleNamespace(), heart, SimpleNamespace(), db, settings, heartbeat_runner=heartbeat_runner
+    )
+
+    async def restore(client: AsyncClient, kind: str, action: str) -> None:
+        sid = (await _only(journal, kind, action))["id"]
+        resp = await client.post(f"/undo/snapshots/{sid}/restore")
+        assert resp.status_code == 200, resp.json()
+        assert resp.json()["pre_restore_id"]
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        # file
+        target = workspace / "report.md"
+        target.write_bytes(b"# v1\n\x00\xfe binary tail")
+        await write_file_tool("report.md", "# v2", _workspace_dir=str(workspace))
+        assert target.read_bytes() == b"# v2"
+        await restore(client, "file", "write_file")
+        assert target.read_bytes() == b"# v1\n\x00\xfe binary tail"
+
+        # schedule (cancelled over REST)
+        sched = await heart.schedules.create(task="e2e", schedule_type="recurring", interval_seconds=3600)
+        sched_row = await _row(db, Schedule, sched.id)
+        assert (await client.delete(f"/schedules/{sched.id}")).status_code == 200
+        await restore(client, "schedule", "deactivate")
+        assert await _row(db, Schedule, sched.id) == sched_row
+
+        # heartbeat check (updated over REST)
+        name = f"e2e-{uuid.uuid4().hex[:6]}"
+        created = await loader.create_check(name=name, description="d", prompt="p", interval_seconds=900)
+        check_row = await _row(db, DynamicCheckModel, uuid.UUID(created["id"]))
+        resp = await client.patch(f"/heartbeat/checks/dynamic/{name}", json={"interval_seconds": 4000})
+        assert resp.status_code == 200
+        await restore(client, "heartbeat_check", "update")
+        assert await _row(db, DynamicCheckModel, uuid.UUID(created["id"])) == check_row
+
+        # runtime config
+        before = settings.heartbeat_tick_interval
+        resp = await client.put("/heartbeat/config", json={"tick_interval": before + 17})
+        assert resp.json()["fields"] == ["tick_interval"] and settings.heartbeat_tick_interval == before + 17
+        await restore(client, "config", "heartbeat_config")
+        assert settings.heartbeat_tick_interval == before
+
+        listed = (await client.get("/undo/snapshots")).json()["snapshots"]
+        assert {e["kind"] for e in listed} == {"file", "schedule", "heartbeat_check", "config"}
+        assert all("before" not in e for e in listed)

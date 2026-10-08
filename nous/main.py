@@ -343,6 +343,12 @@ async def create_components(settings: Settings) -> dict:
     """
     _warn_on_f098_flags(settings)
     _gate_continuation_flag(settings)  # before any component reads the flag
+    # Passive undo journal: installed before anything can mutate a file,
+    # schedule, check or runtime setting (nous/undo_journal.py).
+    from nous import undo_journal
+
+    if undo_journal.configure(settings) is not None:
+        logger.info("Undo journal: recording before-state snapshots under %s", undo_journal.get_journal().root)
     database = Database(settings, lock_timeout_seconds=settings.db_lock_timeout_seconds)
     await database.connect()  # F1: connect() not initialize()
     await run_migrations(database.engine)  # Apply pending SQL migrations

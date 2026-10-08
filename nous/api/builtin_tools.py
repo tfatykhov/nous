@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from nous import undo_journal
 from nous.api.call_outcome import current_outcome
 from nous.api.tools import ToolDispatcher, _tool_error
 from nous.config import Settings
@@ -654,6 +655,11 @@ async def write_file_tool(
     """
     try:
         target = _validate_path(path, _workspace_dir)
+        journal = undo_journal.get_journal()
+        if journal is not None and journal.contains(target):
+            return _tool_error(f"Refused to write '{path}': it is inside the undo journal; nothing was written.")
+        # Passive before-state snapshot (never blocks: a failure is logged).
+        await undo_journal.record_file_write(path, _workspace_dir)
         outcome = current_outcome()
         if outcome is None or outcome.write_target is None:
             # No snapshot is bound to this call (compensation off, or a call
