@@ -1122,6 +1122,10 @@ class DynamicCheckLoader:
                         await session.execute(insert(table).values(**values))
                     else:
                         values.pop("id")
+                        # Runs may have completed after the snapshot: their
+                        # history (status, self-tuning) is never rewound.
+                        for column in ("run_count", "error_count", "last_run_at", "last_error"):
+                            values[column] = current[column]
                         await session.execute(update(table).where(table.c.id == check_id).values(**values))
                     await session.commit()
             if before is None:

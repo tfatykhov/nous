@@ -387,6 +387,25 @@ class TestCheckKind:
         live = loader._registry.get_check(original["name"])
         assert live is not None and live.interval == 600 and live._prompt == "look"
 
+    async def test_restore_keeps_runs_completed_after_the_snapshot(self, db, loader, journal):
+        # Codex P1 on #712: a restore never rewinds run_count, error_count,
+        # last_run_at or last_error, which status and self-tuning read.
+        check_id = await _make_check(loader)
+        name = (await _row(db, DynamicCheckModel, check_id))["name"]
+        await loader.manage_check("update", name, {"prompt": "p2"})
+        entry = await _only(journal, "heartbeat_check", "update")
+        await loader.update_run_stats(str(check_id), success=True)  # runs that completed after the snapshot
+        await loader.update_run_stats(str(check_id), success=False, error_msg="boom")
+        ran = await _row(db, DynamicCheckModel, check_id)
+        assert ran["last_run_at"] is not None
+
+        result = await undo_journal.restore(entry["id"], RestoreDeps(check_loader=loader), journal)
+        assert result.success, result.message
+        row = await _row(db, DynamicCheckModel, check_id)
+        assert row["prompt"] == "look"
+        assert (row["run_count"], row["error_count"], row["last_error"]) == (2, 1, "boom")
+        assert row["last_run_at"] == ran["last_run_at"]
+
     async def test_restore_of_create_disables_never_deletes(self, db, loader, journal):
         check_id = await _make_check(loader)
         entry = await _only(journal, "heartbeat_check", "create")
