@@ -137,6 +137,7 @@ class KnownFalsePositiveRules:
         self._rules: list[KnownFalsePositiveRule] = list(rules)
         self._today = today
         self._loaded_mtime: int | None = None
+        self._failed_mtime: int | None = None  # warn once per bad file version, not every tick
         self._missing_logged = False
         self._expired_warned: set[KnownFalsePositiveRule] = set()
 
@@ -184,6 +185,7 @@ class KnownFalsePositiveRules:
                 logger.warning("Known-FP rule file %s not found; no heartbeat findings will be auto-closed", self._path)
             self._rules = []
             self._loaded_mtime = None
+            self._failed_mtime = None
             return
         except OSError:
             logger.warning("Known-FP rule file %s unreadable; keeping the last good rules", self._path, exc_info=True)
@@ -191,8 +193,9 @@ class KnownFalsePositiveRules:
         self._missing_logged = False
         if mtime == self._loaded_mtime:
             return
-        # Recorded before parsing so a bad file warns once, not every tick.
-        self._loaded_mtime = mtime
+        # The mtime is cached only once the file has been read and parsed: a
+        # chmod does not change it, so a file that failed to open must be
+        # retried. A bad file is re-read each tick but warns once per mtime.
         try:
             with open(self._path, encoding="utf-8") as fh:
                 data = json.load(fh)
@@ -200,13 +203,17 @@ class KnownFalsePositiveRules:
             if not isinstance(raw_rules, list):
                 raise ValueError('top level must be an object with a "rules" list')
         except Exception as exc:
-            logger.warning(
-                "Known-FP rule file %s is invalid (%s); keeping the last good rules (%d)",
-                self._path,
-                exc,
-                len(self._rules),
-            )
+            if mtime != self._failed_mtime:
+                self._failed_mtime = mtime
+                logger.warning(
+                    "Known-FP rule file %s is invalid (%s); keeping the last good rules (%d)",
+                    self._path,
+                    exc,
+                    len(self._rules),
+                )
             return
+        self._loaded_mtime = mtime
+        self._failed_mtime = None
         rules: list[KnownFalsePositiveRule] = []
         seen_ids: set[str] = set()
         for index, raw in enumerate(raw_rules):
