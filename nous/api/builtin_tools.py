@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 _MAX_BASH_TIMEOUT = 300  # seconds
 _MAX_OUTPUT_CHARS = 100 * 1024  # 100KB
 _MAX_FILE_SIZE = 1 * 1024 * 1024  # 1MB
+_UNDO_WRITE_LOCK_WAIT_SECONDS = 5.0  # write_file's wait for its path lock when the undo journal takes it
 # read_file page cap. A larger result is cut to a CONTIGUOUS leading window
 # plus a trailer naming the next offset, never sampled: read_file is exempt
 # from SmartCompress (smart_compress_exempt_tools), whose head/tail/outlier
@@ -653,14 +654,31 @@ async def write_file_tool(
     Returns:
         MCP-format response confirming write
     """
+    own_lock: asyncio.Lock | None = None
+    worker: asyncio.Future | None = None
     try:
         target = _validate_path(path, _workspace_dir)
         journal = undo_journal.get_journal()
-        if journal is not None and journal.contains(target):
-            return _tool_error(f"Refused to write '{path}': it is inside the undo journal; nothing was written.")
-        # Passive before-state snapshot (never blocks: a failure is logged).
-        await undo_journal.record_file_write(path, _workspace_dir)
         outcome = current_outcome()
+        if journal is not None:
+            if journal.contains(target):
+                return _tool_error(f"Refused to write '{path}': it is inside the undo journal; nothing was written.")
+            if outcome is None or outcome.write_lock is None:
+                # The journal's snapshot and this write share the path's lock
+                # (the runner holds it already when compensation is wired):
+                # two writes must not both snapshot the same prior content.
+                from nous.api.compensation import write_path_lock
+
+                lock = write_path_lock(path, _workspace_dir)
+                try:
+                    await asyncio.wait_for(lock.acquire(), timeout=_UNDO_WRITE_LOCK_WAIT_SECONDS)
+                except TimeoutError:
+                    return _tool_error(
+                        f"Refused to write '{path}': another write to it is still in flight; nothing was written."
+                    )
+                own_lock = lock
+            # Passive before-state snapshot (never blocks: a failure is logged).
+            await undo_journal.record_file_write(path, _workspace_dir)
         if outcome is None or outcome.write_target is None:
             # No snapshot is bound to this call (compensation off, or a call
             # nothing can revert): the file itself is written, as before
@@ -682,6 +700,10 @@ async def write_file_tool(
                 # thread ends (compensation.release_write_path_lock_after).
                 outcome.write_worker = asyncio.ensure_future(write)
                 await asyncio.shield(outcome.write_worker)
+            elif own_lock is not None:
+                # Held until the thread ends, as the runner's lock is.
+                worker = asyncio.ensure_future(write)
+                await asyncio.shield(worker)
             else:
                 await write
             return _mcp_response(f"File written successfully: {target}\nSize: {len(content):,} bytes")
@@ -744,6 +766,11 @@ async def write_file_tool(
     except Exception as e:
         logger.exception("write_file_tool error")
         return _tool_error(f"Error writing file: {e}")
+    finally:
+        if own_lock is not None:
+            from nous.api.compensation import release_write_path_lock_after
+
+            release_write_path_lock_after(own_lock, worker)
 
 
 # ---------------------------------------------------------------------------

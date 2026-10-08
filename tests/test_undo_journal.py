@@ -9,6 +9,7 @@ and checks the restored artifacts are byte/row identical.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import uuid
@@ -176,6 +177,24 @@ class TestFileKind:
         assert entry["restorable"] is False
         result = await undo_journal.restore(entry["id"], RestoreDeps(workspace_dir=str(workspace)), journal)
         assert not result.success and (workspace / "big.bin").read_bytes() == b"small"
+
+    async def test_concurrent_writes_snapshot_in_turn(self, workspace, journal):
+        # Codex P1 on #712: with compensation off, two writes to one path
+        # must not both snapshot the same prior content.
+        target = workspace / "notes.txt"
+        target.write_text("A")
+        outs = await asyncio.gather(
+            write_file_tool("notes.txt", "B", _workspace_dir=str(workspace)),
+            write_file_tool("notes.txt", "C", _workspace_dir=str(workspace)),
+        )
+        assert all("is_error" not in out for out in outs)
+        final = target.read_text()
+        first = "C" if final == "B" else "B"
+        newest, older = [e for e in await journal.list(10) if e["source"] == "mutation"]
+        assert base64.b64decode((await journal.get(older["id"]))["before"]["prior_b64"]) == b"A"
+        result = await undo_journal.restore(newest["id"], RestoreDeps(workspace_dir=str(workspace)), journal)
+        assert result.success, result.message
+        assert target.read_text() == first  # the state just before the second write, not A
 
     async def test_tampered_snapshot_is_refused(self, workspace, journal):
         (workspace / "a.txt").write_bytes(b"before")
