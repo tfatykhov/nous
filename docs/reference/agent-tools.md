@@ -14,7 +14,7 @@ Documented tools the agent can call, and the cognitive frames each is offered in
 | `create_censor` | all | Create a guardrail censor |
 | `cache_retrieve` | all | Retrieve original content from SmartCompressed results |
 | `bash` | task, debug, conversation, question | Execute shell commands |
-| `read_file` | task, debug, question | Read file contents |
+| `read_file` | task, debug, question | Read file contents. Pages at 400 lines / 48,000 chars: a capped result is a contiguous window plus a trailer naming the next `offset`; never sampled by SmartCompress |
 | `write_file` | task, creative | Write/create files. F099: an `internal_only` lineage may write only under `<workspace>/intentions/<root>/` |
 | `spawn_task` | conversation, debug | Spawn a background subtask. F099: while `NOUS_INTENTIONS_ENABLED` is on, takes `intent` (one line: why, and what will be done with the result; refused if missing in a chat or MCP turn, generated in a background one) and `wake_policy` |
 | `spawn_sync` | conversation, debug | Spawn a subtask and wait for its typed result. F099: while `NOUS_INTENTIONS_ENABLED` is on, takes `intent` (one line: why, and what will be done with the result; refused if missing in a chat or MCP turn, generated in a background one) and `wake_policy` |
