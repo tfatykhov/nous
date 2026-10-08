@@ -561,6 +561,37 @@ class TestCheckKind:
         assert (await _row(db, DynamicCheckModel, check_id))["enabled"] is True
         assert not loader._registry.get_check(name)._self_disabled
 
+    async def test_disable_cancelled_mid_snapshot_write_leaves_no_orphan(self, db, loader, journal, monkeypatch):
+        # Codex P2 on #717: cancelled while record()'s thread write was in
+        # flight, the disable never learned the snapshot id, so the write that
+        # landed afterwards survived as a snapshot of a disable that never
+        # committed.
+        check_id = await _make_check(loader)
+        name = (await _row(db, DynamicCheckModel, check_id))["name"]
+        write = journal._write
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+        def _slow_write(entry):
+            entered.set()
+            release.wait(5)
+            try:
+                write(entry)
+            finally:
+                finished.set()
+
+        monkeypatch.setattr(journal, "_write", _slow_write)
+        task = asyncio.create_task(loader.manage_check("disable", name, capture={"refuse_if_running": True}))
+        assert await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 5)
+        # No disable snapshot: undo has nothing to apply.
+        assert [e["action"] for e in await journal.list(500)] == ["create"]
+        assert not journal._discarded
+        assert (await _row(db, DynamicCheckModel, check_id))["enabled"] is True
+
     async def test_snapshot_failure_does_not_block(self, db, loader, failing_journal, caplog):
         with caplog.at_level(logging.WARNING, logger="nous.undo_journal"):
             check_id = await _make_check(loader)

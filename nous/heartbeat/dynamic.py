@@ -951,15 +951,17 @@ class DynamicCheckLoader:
                     gate = None
                 if gate is not None:
                     gate._self_disabled = True
-                snapshot_id = None
+                # Chosen before the write (codex P2, PR #717): a cancel
+                # during the write must still know which snapshot to discard.
+                snapshot_id = uuid4().hex
                 try:
                     # Undo journal (never blocks), recorded only once the
                     # disable will proceed: the refusal above is decided and
                     # gated before this await (codex P2, PR #715), so a run
                     # starting mid-write cannot turn it into a refusal that
                     # leaves the snapshot behind.
-                    snapshot_id = await undo_journal.record_model_safe(
-                        undo_journal.KIND_CHECK, action, model, label=name
+                    await undo_journal.record_model_safe(
+                        undo_journal.KIND_CHECK, action, model, label=name, snapshot_id=snapshot_id
                     )
                     prior_enabled = model.enabled
                     token = uuid4().hex
