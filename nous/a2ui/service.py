@@ -38,6 +38,7 @@ from nous.dag.approval import DEDUP_PREFIX as _DAG_APPROVAL_PREFIX
 from nous.storage.database import Database
 from nous.storage.models import A2uiAction, A2uiOutbox, A2uiSurface
 
+from .actions import EXPIRED_UNANSWERED
 from .dsl import BuiltSurface, SurfaceValidationError
 from .grammar import lint_micro_app
 
@@ -134,7 +135,7 @@ class SurfaceService:
         # Per-surface serialization shared by the ActionRouter AND the expiry
         # sweep (codex P1): an action could pass its live check and still be
         # mid-handler when the sweep claimed the surface, recording both a
-        # completed action and contradictory no_objection evidence. One lock
+        # completed action and a contradictory expired-unanswered row. One lock
         # registry means expiry waits for in-flight actions and vice versa.
         self._surface_locks: dict[str, _LockEntry] = {}
         # F092.2: session_id -> monotonic deadline. app.close on a surface
@@ -1111,7 +1112,10 @@ class SurfaceService:
         """Expire overdue surfaces + prune old rows. Returns surfaces expired.
 
         Spec 6.2 "silence counts": before a surface expires unactioned, a
-        durable ``no_objection`` record is written to a2ui_actions. (Linking
+        durable ``expired_unanswered`` record is written to a2ui_actions. It
+        records that nobody answered; it is never consent. Rows written
+        before 2026-10 carry the legacy ``no_objection`` label for the same
+        event (see ``EXPIRED_UNANSWERED_ACTIONS``). (Linking
         that evidence into brain.decisions rides with the escalation
         integration, not this PR — a2ui_actions is the durable audit tier.)
         """
@@ -1137,7 +1141,7 @@ class SurfaceService:
         for surface_id in overdue_ids:
             # Per-surface lock + atomic claim (codex P1, two layers): the
             # lock serializes with an in-flight action's whole dispatch, so
-            # expiry cannot record no_objection while a handler is mid-run;
+            # expiry cannot record an unanswered expiry while a handler is mid-run;
             # the UPDATE..WHERE live claim keeps the evidence write in the
             # same transaction as the flip, so a completed action and the
             # silence claim can never both land.
@@ -1147,7 +1151,7 @@ class SurfaceService:
                     # dedup refresh that ran while we waited for the lock
                     # moves expires_at into the future — claiming on
                     # liveness alone would delete the fresh card and record
-                    # false no_objection evidence.
+                    # a false expired-unanswered row.
                     claim_now = datetime.now(UTC)
                     claimed = (
                         (
@@ -1179,13 +1183,13 @@ class SurfaceService:
                     # Harness Phase 3 §3.7: a DAG approval card's node is the
                     # record of what happened; after an outage longer than
                     # wait + grace this startup expiry would otherwise write
-                    # "no objection" for a card that was answered.
+                    # "expired, unanswered" for a card that was answered.
                     if not (claimed[0][1] or "").startswith(_DAG_APPROVAL_PREFIX):
                         session.add(
                             A2uiAction(
                                 agent_id=agent_id,
                                 surface_id=surface_id,
-                                action_name="no_objection",
+                                action_name=EXPIRED_UNANSWERED,
                                 actor="system:expiry",
                                 context={"expired_at": now.isoformat()},
                                 status="completed",
@@ -1241,7 +1245,7 @@ class SurfaceService:
         durable heartbeat surface references is gone, so each of its buttons
         would return "finding not found" for up to 72h. The surfaces are
         provably dead — expire them with an ``invalidated`` audit row (NOT
-        ``no_objection``: this is process loss, not user silence).
+        ``expired_unanswered``: this is process loss, not user silence).
         """
         now = datetime.now(UTC)
         agent_id = self._settings.agent_id

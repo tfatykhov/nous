@@ -259,7 +259,7 @@
 
         <!-- State pills -->
         <div class="state-pills">
-          {#each ['new', 'acknowledged', 'resolved', 'suppressed'] as st}
+          {#each ['new', 'acknowledged', 'resolved', 'suppressed', 'auto_closed_known_fp'] as st}
             <span class="hb-pill" style="border-color: {STATE_COLOR[st] ?? '#6b7280'}">
               {st}: {byState[st] ?? 0}
             </span>
@@ -287,6 +287,7 @@
                 <div><span class="dl">Escalated</span><span>{row.escalated ? 'yes' : 'no'}</span></div>
                 {#if row.outcome}<div><span class="dl">Outcome</span><span>{row.outcome}</span></div>{/if}
                 {#if row.reopen_count > 0}<div><span class="dl">Reopens</span><span>{row.reopen_count}</span></div>{/if}
+                {#if row.auto_closed_rule}<div><span class="dl">Known-FP rule</span><span>{row.auto_closed_rule}</span></div>{/if}
               </div>
             {/snippet}
           </DataTable>

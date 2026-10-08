@@ -28,6 +28,7 @@ import pytest_asyncio
 from sqlalchemy import delete, select, text
 
 from nous.a2ui import service as service_module
+from nous.a2ui.actions import EXPIRED_UNANSWERED_ACTIONS, is_expired_unanswered
 from nous.a2ui.builders import approval_gate, heartbeat_findings
 from nous.a2ui.dsl import BuiltSurface
 from nous.a2ui.service import SurfaceService, _pointer_set
@@ -36,6 +37,24 @@ from nous.storage.models import A2uiAction, A2uiOutbox, A2uiSurface
 # ---------------------------------------------------------------------------
 # _pointer_set — pure, runs on every backend
 # ---------------------------------------------------------------------------
+
+
+def test_expiry_label_is_expired_unanswered_and_legacy_label_is_recognised() -> None:
+    """Silence is never consent: both the new label and the legacy
+    ``no_objection`` rows (not rewritten) read as "expired, unanswered"."""
+    assert service_module.EXPIRED_UNANSWERED == "expired_unanswered"
+    assert EXPIRED_UNANSWERED_ACTIONS == {"expired_unanswered", "no_objection"}
+    assert is_expired_unanswered("expired_unanswered")
+    assert is_expired_unanswered("no_objection")
+    for answered in ("approval.choose", "review.acknowledge", "invalidated", "", None):
+        assert not is_expired_unanswered(answered)
+
+
+def test_no_surface_offers_an_expiry_label_as_a_clickable_action() -> None:
+    """Nothing can turn an expiry label into an approval: no approval card
+    lists either label among the actions a client may POST."""
+    built = approval_gate(APPROVAL_PARAMS)
+    assert not set(built.allowed_actions) & EXPIRED_UNANSWERED_ACTIONS
 
 
 def test_pointer_set_writes_a_nested_value() -> None:
@@ -503,14 +522,15 @@ class TestMutations:
 
 @pytest.mark.postgres_only
 class TestExpirySweep:
-    async def test_sweep_records_no_objection_before_expiring(
+    async def test_sweep_records_expired_unanswered_before_expiring(
         self, service: SurfaceService, db, a2ui_agent_id: str
     ) -> None:
         """Spec 6.2 "silence counts": the evidence is written BEFORE the flip.
 
         If the order were reversed, a crash between the two writes would
-        expire an escalation with no record that nobody objected — the
+        expire an escalation with no record that nobody answered — the
         surface would be gone and the reason it was gone unrecoverable.
+        The label is ``expired_unanswered``: silence is never consent.
         """
         surface_id = await service.push_built(approval_gate(APPROVAL_PARAMS))
         async with db.session() as session:
@@ -531,7 +551,8 @@ class TestExpirySweep:
 
         actions = await _actions(db, a2ui_agent_id)
         assert len(actions) == 1
-        assert actions[0].action_name == "no_objection"
+        assert actions[0].action_name == "expired_unanswered"
+        assert is_expired_unanswered(actions[0].action_name)
         assert actions[0].status == "completed"
         assert actions[0].actor == "system:expiry", "a sweep is not a human consenting"
         assert actions[0].completed_at <= surface.resolved_at
@@ -889,7 +910,7 @@ async def test_expire_sweep_claims_atomically_never_after_an_action(
 ) -> None:
     """A surface resolved by a user action before the sweep runs must NOT
 
-    get a no_objection row: the sweep's UPDATE-claim only flips still-live
+    get an expired-unanswered row: the sweep's UPDATE-claim only flips still-live
     rows, and evidence is written in the same transaction (codex P1).
     """
     from datetime import timedelta as _td
@@ -907,7 +928,7 @@ async def test_expire_sweep_claims_atomically_never_after_an_action(
             await session.execute(
                 select(A2uiAction).where(
                     A2uiAction.agent_id == a2ui_agent_id,
-                    A2uiAction.action_name == "no_objection",
+                    A2uiAction.action_name.in_(EXPIRED_UNANSWERED_ACTIONS),
                 )
             )
         ).scalars().all()
@@ -970,7 +991,7 @@ async def test_startup_invalidation_expires_only_heartbeat_surfaces(
     """After a restart the in-memory finding store is empty, so every live
 
     heartbeat surface is provably dead — expired with an `invalidated`
-    audit row (NOT no_objection: process loss is not user silence). Other
+    audit row (NOT expired_unanswered: process loss is not user silence). Other
     origins stay live (codex P2).
     """
     hb_id = await service.push_built(heartbeat_findings(FINDINGS_LOW))
@@ -1092,7 +1113,7 @@ async def test_close_helpers_and_liveness_queries(service, db, a2ui_agent_id: st
 
 
 @pytest.mark.postgres_only
-async def test_expire_sweep_writes_no_objection_only_for_non_dag_cards(
+async def test_expire_sweep_writes_expired_unanswered_only_for_non_dag_cards(
     service, db, a2ui_agent_id: str
 ) -> None:
     dag_card = await service.push_built(
@@ -1110,7 +1131,7 @@ async def test_expire_sweep_writes_no_objection_only_for_non_dag_cards(
         await session.commit()
 
     assert await service.expire_sweep() == 2
-    evidence = {a.surface_id for a in await _actions(db, a2ui_agent_id) if a.action_name == "no_objection"}
+    evidence = {a.surface_id for a in await _actions(db, a2ui_agent_id) if is_expired_unanswered(a.action_name)}
     assert evidence == {agent_card}
     assert dag_card not in evidence
 

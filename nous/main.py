@@ -167,9 +167,9 @@ async def _context_log_retention_loop(settings: Settings, database: Database) ->
 async def _a2ui_sweep_loop(settings: Settings, surface_service: SurfaceService) -> None:
     """Expire companion surfaces: once at startup, then every sweep interval."""
     # Sweep once at startup, then periodically. The sweep must run
-    # unobserved: expiry writes no_objection evidence ("silence
-    # counts", spec 6.2) even if no client ever connects, so it
-    # cannot be piggybacked on client activity.
+    # unobserved: expiry records "expired, unanswered" (spec 6.2:
+    # silence counts, and is never consent) even if no client ever
+    # connects, so it cannot be piggybacked on client activity.
     first = True
     while True:
         try:
@@ -1240,7 +1240,12 @@ async def create_components(settings: Settings) -> dict:
                 high_realert_hours=settings.heartbeat_escalation_high_realert_hours,
                 accumulation_threshold=settings.heartbeat_escalation_accumulation_threshold,
             )
-            finding_store = FindingStore(escalation_config=escalation_config)
+            from nous.heartbeat.known_fp import KnownFalsePositiveRules
+
+            finding_store = FindingStore(
+                escalation_config=escalation_config,
+                known_fp_rules=KnownFalsePositiveRules(settings.heartbeat_known_fp_path or None),
+            )
 
             registry = CheckRegistry()
             registry.register(HealthCheck(heart, brain, settings), permanent=True)

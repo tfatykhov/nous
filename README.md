@@ -310,6 +310,22 @@ Key environment variables. See the [Quickstart Guide](docs/quickstart.md) and th
 
 For the full set — heartbeat tuning, DAG timeouts, sleep cycle, eval harness — see the [environment variable reference](docs/reference/environment-variables.md).
 
+### Known heartbeat false positives
+
+Findings already diagnosed as recurring false positives can be closed at ingest instead of being triaged again. Put rules in the JSON file at `NOUS_HEARTBEAT_KNOWN_FP_PATH` (default `/tmp/nous-workspace/heartbeat/known_false_positives.json`); edits are picked up on the next tick, no restart needed. Start from [`docs/examples/known_false_positives.example.json`](docs/examples/known_false_positives.example.json). Each rule has:
+
+| Field | Required | Meaning |
+|-------|----------|---------|
+| `id` | yes | Stable rule id, recorded on every finding it closes |
+| `match.check` | one of the three | Exact check name (also matches agent-raised `agent:<check>:…` items) |
+| `match.contains` | one of the three | Case-insensitive substring of the finding summary |
+| `match.regex` | one of the three | Case-insensitive regex searched in the summary |
+| `reason` | yes | Why this is a false positive |
+| `added_by` | yes | Who added the rule |
+| `review_by` | yes | `YYYY-MM-DD`. After this date the rule stops matching and logs one warning |
+
+All `match` criteria given must hold. Nothing is hidden: auto-closed findings keep state `auto_closed_known_fp` and their rule id in `GET /heartbeat/findings`, and `stats.auto_closed_by_rule` counts them per rule. High-urgency or escalated findings are never auto-closed. A missing file means no rules. A malformed file keeps the last good rules and never stops the heartbeat.
+
 ## Status
 
 🚀 **v1.0.0 — released 2026-09-05** (see [CHANGELOG.md](CHANGELOG.md)).

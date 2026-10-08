@@ -1,7 +1,8 @@
 """Finding lifecycle store — dedup, escalation, digest, outcomes (F034.1).
 
 In-memory store that tracks findings through their lifecycle:
-NEW -> ACKNOWLEDGED -> RESOLVED, with SUPPRESSED for dedup.
+NEW -> ACKNOWLEDGED -> RESOLVED, with SUPPRESSED for dedup and
+AUTO_CLOSED_KNOWN_FP for findings a known-false-positive rule closes at ingest.
 
 Provides outcome signals for the self-tuner (F034.3) and
 accumulation escalation for noisy checks.
@@ -14,6 +15,7 @@ import logging
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 
+from nous.heartbeat.known_fp import KnownFalsePositiveRule, KnownFalsePositiveRules
 from nous.heartbeat.schemas import (
     EscalationConfig,
     Finding,
@@ -29,8 +31,14 @@ logger = logging.getLogger(__name__)
 class FindingStore:
     """Tracks finding lifecycle — dedup, escalation, digest, outcomes (F034.1)."""
 
-    def __init__(self, escalation_config: EscalationConfig | None = None) -> None:
+    def __init__(
+        self,
+        escalation_config: EscalationConfig | None = None,
+        known_fp_rules: KnownFalsePositiveRules | None = None,
+    ) -> None:
         self._findings: dict[str, TrackedFinding] = {}  # fingerprint -> tracked
+        self._known_fp = known_fp_rules
+        self._auto_closed_by_rule: dict[str, int] = {}  # rule id -> findings auto-closed
         self._escalation = escalation_config or EscalationConfig()
         self._accumulation_escalated: dict[str, datetime | None] = {}  # check_name -> last escalation time
         self._startup_time: datetime = datetime.now(UTC)
@@ -47,8 +55,20 @@ class FindingStore:
         - TRIAGE: new finding, process normally
         - SUPPRESS: duplicate or startup suppression, skip
         - ESCALATE: overdue finding, upgrade urgency
+        - AUTO_CLOSE: matched a known-false-positive rule, skip (still tracked)
         """
         fp = finding.fingerprint()
+
+        # Known false positives close before anything else, so the startup
+        # window cannot park one as SUPPRESSED.
+        rule = self._known_fp_match(finding, self._findings.get(fp))
+        if rule is not None:
+            return self._auto_close(finding, fp, rule)
+        existing_closed = self._findings.get(fp)
+        if existing_closed is not None and existing_closed.state == FindingState.AUTO_CLOSED_KNOWN_FP:
+            # Its rule expired or was removed, or the finding turned urgent:
+            # it flows normally from here, exactly like a new finding.
+            del self._findings[fp]
 
         # Startup suppression: treat all findings as suppress for 5 min after restart
         if self._in_startup_suppression():
@@ -100,6 +120,58 @@ class FindingStore:
             last_seen=now,
         )
         return FindingAction.TRIAGE
+
+    def _known_fp_match(self, finding: Finding, existing: TrackedFinding | None) -> KnownFalsePositiveRule | None:
+        """The rule that auto-closes ``finding``, or None.
+
+        Never closes a high-urgency or escalated finding, whatever the rules
+        say. Only a finding nobody has triaged yet is eligible (new to the
+        store, already auto-closed, a resolved one reopening, or one parked by
+        the startup window); a NEW or ACKNOWLEDGED one is already in front of
+        the owner and keeps its normal lifecycle.
+        """
+        if self._known_fp is None or finding.urgency == "high":
+            return None
+        if existing is not None:
+            if existing.escalated or existing.state in (FindingState.NEW, FindingState.ACKNOWLEDGED):
+                return None
+        return self._known_fp.match(finding)
+
+    def _auto_close(self, finding: Finding, fp: str, rule: KnownFalsePositiveRule) -> FindingAction:
+        """Record ``finding`` as auto-closed by ``rule``.
+
+        The per-rule counter moves only on the transition INTO the state, so a
+        finding that recurs every tick counts once. That also makes a repeat
+        ingest idempotent, which push_surface relies on.
+        """
+        now = datetime.now(UTC)
+        existing = self._findings.get(fp)
+        if existing is None:
+            existing = TrackedFinding(
+                finding=finding,
+                fingerprint=fp,
+                state=FindingState.AUTO_CLOSED_KNOWN_FP,
+                first_seen=now,
+                last_seen=now,
+            )
+            self._findings[fp] = existing
+        else:
+            existing.last_seen = now
+            existing.absent_ticks = 0
+            existing.seen_count += 1
+            if existing.state == FindingState.AUTO_CLOSED_KNOWN_FP and existing.auto_closed_rule == rule.id:
+                return FindingAction.AUTO_CLOSE
+            existing.state = FindingState.AUTO_CLOSED_KNOWN_FP
+        existing.auto_closed_rule = rule.id
+        existing.resolved_at = now
+        self._auto_closed_by_rule[rule.id] = self._auto_closed_by_rule.get(rule.id, 0) + 1
+        logger.info(
+            "Auto-closed heartbeat finding %s as known false positive %r: %s",
+            fp,
+            rule.id,
+            finding.summary[:80],
+        )
+        return FindingAction.AUTO_CLOSE
 
     def acknowledge(self, fingerprint: str) -> bool:
         """Mark a finding as acknowledged (triaged)."""
@@ -291,12 +363,13 @@ class FindingStore:
         return count
 
     def prune(self, resolved_ttl_days: int = 7) -> int:
-        """Remove resolved findings older than TTL."""
+        """Remove resolved findings, and auto-closed ones no longer recurring, older than TTL."""
         cutoff = datetime.now(UTC) - timedelta(days=resolved_ttl_days)
         to_remove = [
             fp
             for fp, t in self._findings.items()
-            if t.state == FindingState.RESOLVED and t.resolved_at is not None and t.resolved_at < cutoff
+            if (t.state == FindingState.RESOLVED and t.resolved_at is not None and t.resolved_at < cutoff)
+            or (t.state == FindingState.AUTO_CLOSED_KNOWN_FP and t.last_seen is not None and t.last_seen < cutoff)
         ]
         for fp in to_remove:
             del self._findings[fp]
@@ -324,6 +397,7 @@ class FindingStore:
                     "escalated": t.escalated,
                     "outcome": t.outcome.value if t.outcome else None,
                     "reopen_count": t.reopen_count,
+                    "auto_closed_rule": t.auto_closed_rule,
                 }
             )
         return result
@@ -335,7 +409,14 @@ class FindingStore:
         for t in self._findings.values():
             by_state[t.state.value] = by_state.get(t.state.value, 0) + 1
             by_check[t.finding.check_name] = by_check.get(t.finding.check_name, 0) + 1
-        return {"total": len(self._findings), "by_state": by_state, "by_check": by_check}
+        return {
+            "total": len(self._findings),
+            "by_state": by_state,
+            "by_check": by_check,
+            # Findings auto-closed per known-FP rule since process start
+            # (transitions, not ticks), including ones since pruned.
+            "auto_closed_by_rule": dict(self._auto_closed_by_rule),
+        }
 
     # ------------------------------------------------------------------
     # Internal

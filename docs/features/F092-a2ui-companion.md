@@ -277,13 +277,13 @@ The spec requires global uniqueness for the renderer's lifetime and warns that o
 
 | Tier | What | Where | Retention |
 |---|---|---|---|
-| **Evidence** | The act itself: `trace_id`, what was executed, verb chosen (`acknowledged` / `course_corrected` / `reverted` / `promoted_to_rule` / `no_objection`), actor, timestamps, resolution note | `brain.decisions` + execution ledger | **Permanent** |
+| **Evidence** | The act itself: `trace_id`, what was executed, verb chosen (`acknowledged` / `course_corrected` / `reverted` / `promoted_to_rule` / `expired_unanswered`), actor, timestamps, resolution note | `brain.decisions` + execution ledger | **Permanent** |
 | **Presentation** | A2UI surface envelope: component tree, data model, catalog refs, outbox frames | `heart.a2ui_surfaces`, `heart.a2ui_outbox` | live until `expires_at`; **30 days** after `resolved`/`expired`, then deleted |
 
 Rules that make the split safe:
 
 - The evidence row is written **at resolution time, before** the surface transitions to `resolved` — never derived from the surface afterwards. Surface deletion can therefore never lose a record.
-- Silence counts. When a surface expires unactioned it writes `no_objection` evidence *then* expires; "nobody looked" is itself an audit fact under advisory review.
+- Silence counts, but never as consent. When a surface expires unactioned it writes `expired_unanswered` evidence *then* expires; "nobody looked" is itself an audit fact under advisory review. (Rows written before 2026-10 carry the legacy label `no_objection` for the same event; readers treat both as unanswered via `EXPIRED_UNANSWERED_ACTIONS` in `nous/a2ui/actions.py`.)
 - `surface_id` is stored on the evidence row as a **weak reference**. Post-sweep it dangles by design; the UI renders the evidence row with a "surface expired" note rather than a 404.
 - Read-only surfaces with no verb (memory browser, DAG monitor, timeline) produce no evidence row and follow the plain 30-day path.
 - Unchanged sweeps: `live` with `expires_at < now()` → `expired` (existing heartbeat); outbox rows for non-`live` surfaces deleted after 24h.
@@ -483,7 +483,7 @@ async def _(ctx: ActionContext) -> ActionResult: ...
 
 - **The verbs change.** Approve/Reject presuppose a pending action. After the fact the vocabulary is **Acknowledge / Course-correct / Revert / Make-it-a-rule.**
 - **Revertibility is declared, never assumed.** Every reviewable handler supplies `compensation: {revertible: bool, handler: str | None, window_s: int}`. If nothing can undo it, the card says so plainly and renders no Revert button. A Revert button that silently fails is worse than no button.
-- **Silence is consent.** Records auto-archive after `a2ui_review_archive_days` with outcome `no_objection`. There is no expiry-that-abandons, because nothing is pending.
+- **Silence is recorded, not read as consent.** Records auto-archive after `a2ui_review_archive_days` with outcome `expired_unanswered`. There is no expiry-that-abandons, because nothing is pending — but nobody looking is never counted as an endorsement.
 - **Disagreement is calibration data.** Course-correct writes `resolve_decision(outcome=…)` against the originating `trace_id`. Repeated correction of the same pattern surfaces *Make-it-a-rule*, which drafts a standing rule or censor.
 
 **What "advisory" does NOT mean.** It does not repeal the standing autonomy directive. Genuinely irreversible or destructive actions, real spend, credential/security-posture changes, values calls, and repeated-failure patterns still escalate *before* execution, exactly as they do today — they simply render as a surface instead of prose (Appendix A). Advisory describes the *surface*, not the escalation policy. Conflating the two would silently weaken an existing safety boundary.
@@ -677,11 +677,11 @@ This reversed my recommendation, and the design absorbed it rather than merely c
 **Residual risk still being watched:** "not a Telegram replacement" is now a discipline rather than a structural fact. The tripwire is any request for notification reliability, offline queueing, or lock-screen delivery in the companion — §15 says refuse it, and I will.
 
 **Q5. Do approval gates *block* autonomous execution, or are they advisory?** — ✅ **DECIDED (Tim, rev 2): advisory.**
-Rewritten into §10.4 and surface #1. Material consequences: verbs became **Acknowledge / Course-correct / Revert / Make-it-a-rule**; `compensation` metadata is mandatory on every reviewable handler; silence archives as `no_objection`; disagreement writes back as calibration against the originating `trace_id`.
+Rewritten into §10.4 and surface #1. Material consequences: verbs became **Acknowledge / Course-correct / Revert / Make-it-a-rule**; `compensation` metadata is mandatory on every reviewable handler; silence archives as `expired_unanswered` (never as consent); disagreement writes back as calibration against the originating `trace_id`.
 **Boundary restated, because this one is easy to over-read:** advisory describes the *surface*, not the escalation policy. Irreversible/destructive actions, real spend, credential changes and values calls still escalate **before** execution under the standing directive — they just render as a surface now instead of prose.
 
 **Q6. Retention.** — ✅ **RESOLVED: split evidence from presentation.** Fully specified in §6.2.
-The 30-day guess was wrong in one direction only: under Q5-advisory, action-review records *are* the audit trail of unsupervised execution, so they persist **permanently** in `brain.decisions` + the ledger, written at resolution time before the surface resolves. The A2UI envelope stays disposable at 30 days. `surface_id` is a weak reference that is allowed to dangle. Silence writes `no_objection` evidence before expiring — "nobody looked" is an audit fact too.
+The 30-day guess was wrong in one direction only: under Q5-advisory, action-review records *are* the audit trail of unsupervised execution, so they persist **permanently** in `brain.decisions` + the ledger, written at resolution time before the surface resolves. The A2UI envelope stays disposable at 30 days. `surface_id` is a weak reference that is allowed to dangle. Silence writes `expired_unanswered` evidence before expiring — "nobody looked" is an audit fact too.
 
 ### 16.1 Revisit triggers
 
@@ -735,7 +735,7 @@ The common case (Q5). Nous has **already acted**; the card is a reviewable recor
 
 No Revert button is rendered, because `compensation.revertible` is `false` and the note says why. Tapping **Wrong call** expands a `TextField` (`longText`) bound to `/correction`, and submitting it writes `resolve_decision(outcome="failure", resolution_note=…)` against `traceId` — so a disagreement becomes calibration data rather than a lost complaint in a chat log.
 
-If nothing is tapped, the record archives as `no_objection` after `a2ui_review_archive_days`.
+If nothing is tapped, the record archives as `expired_unanswered` after `a2ui_review_archive_days`.
 
 ---
 

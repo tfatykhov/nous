@@ -1,0 +1,32 @@
+{
+  "rules": [
+    {
+      "id": "snn-integration-deferral",
+      "match": {"contains": "SNN integration deferral"},
+      "reason": "The SNN integration is deliberately deferred; the reminder recurs every tick and has been triaged as noise.",
+      "added_by": "nous",
+      "review_by": "2026-12-31"
+    },
+    {
+      "id": "pass-loop-thursday-friday",
+      "match": {"regex": "pass loop should be done on thursday or friday"},
+      "reason": "Scheduling note, not a fault; it is already on the weekly plan.",
+      "added_by": "nous",
+      "review_by": "2026-12-31"
+    },
+    {
+      "id": "f066-2-ai-briefing-auto-fix",
+      "match": {"regex": "F066\\.2.*Option 2.*AI Briefing auto-fix"},
+      "reason": "Known open option; the auto-fix decision is parked, the reminder adds nothing.",
+      "added_by": "nous",
+      "review_by": "2026-12-31"
+    },
+    {
+      "id": "cognition-engines-action-not-deployed",
+      "match": {"contains": "Action not deployed", "regex": "cognition[- ]engines"},
+      "reason": "The cognition-engines site has no deploy action by design; this check misreads that as a failed deploy.",
+      "added_by": "tim",
+      "review_by": "2026-12-31"
+    }
+  ]
+}
