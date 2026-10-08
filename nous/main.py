@@ -1234,7 +1234,12 @@ async def create_components(settings: Settings) -> dict:
                 high_realert_hours=settings.heartbeat_escalation_high_realert_hours,
                 accumulation_threshold=settings.heartbeat_escalation_accumulation_threshold,
             )
-            finding_store = FindingStore(escalation_config=escalation_config)
+            from nous.heartbeat.known_fp import KnownFalsePositiveRules
+
+            finding_store = FindingStore(
+                escalation_config=escalation_config,
+                known_fp_rules=KnownFalsePositiveRules(settings.heartbeat_known_fp_path or None),
+            )
 
             registry = CheckRegistry()
             registry.register(HealthCheck(heart, brain, settings), permanent=True)

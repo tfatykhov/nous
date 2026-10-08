@@ -71,6 +71,9 @@ class FindingState(str, Enum):
     SUPPRESSED = "suppressed"
     ACKNOWLEDGED = "acknowledged"
     RESOLVED = "resolved"
+    # Closed at ingest by a known-false-positive rule (known_fp.py): never
+    # triaged or carded, but still tracked, listed and counted per rule.
+    AUTO_CLOSED_KNOWN_FP = "auto_closed_known_fp"
 
 
 class FindingAction(str, Enum):
@@ -79,6 +82,7 @@ class FindingAction(str, Enum):
     TRIAGE = "triage"
     SUPPRESS = "suppress"
     ESCALATE = "escalate"
+    AUTO_CLOSE = "auto_close"  # matched a known-false-positive rule
 
 
 class OutcomeSignal(str, Enum):
@@ -137,6 +141,7 @@ class TrackedFinding:
     reopen_count: int = 0  # flapping detection
     last_escalated_at: datetime | None = None  # for periodic re-alert throttling
     absent_ticks: int = 0  # consecutive ticks where check ran but didn't report this finding
+    auto_closed_rule: str | None = None  # known-FP rule id while AUTO_CLOSED_KNOWN_FP
 
 
 @dataclass

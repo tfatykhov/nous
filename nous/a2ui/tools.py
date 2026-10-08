@@ -599,16 +599,32 @@ def register_a2ui_tools(
             # nothing persists from it: a startup-window item is NOT left as
             # a SUPPRESSED record (which never transitions to NEW), so a retry
             # after the window registers it normally.
+            # One exception: a known false positive is terminal and never on
+            # the card, so recording it does not ride the push transaction.
+            # Its probe ingest is kept, so it is listed and counted per rule
+            # exactly like the runner's (the per-rule counter is not part of
+            # the snapshot, so restoring and re-ingesting would count twice).
             snapshot = store.snapshot(within_push_fps)
             verdicts: dict[str, Any] = {}
+            probed = False
             try:
                 for _row, finding in candidates:
                     store.ingest(finding)
                     fp_ = finding.fingerprint()
                     tracked_ = store.get_tracked(fp_)
                     verdicts[fp_] = tracked_.state if tracked_ is not None else None
+                probed = True
             finally:
-                store.restore(snapshot)
+                if probed:
+                    store.restore(
+                        {
+                            fp_: prior
+                            for fp_, prior in snapshot.items()
+                            if verdicts.get(fp_) != _FindingState.AUTO_CLOSED_KNOWN_FP
+                        }
+                    )
+                else:
+                    store.restore(snapshot)
 
             normalized: list[dict] = []
             for row, finding in candidates:
@@ -644,8 +660,9 @@ def register_a2ui_tools(
                                         "No surface pushed: every finding is "
                                         "suppressed by the finding lifecycle "
                                         "(5-minute startup window after a restart, "
-                                        "already acknowledged, or flapping). Nothing "
-                                        "was registered; retry after the startup "
+                                        "already acknowledged, flapping, or "
+                                        "auto-closed as a known false positive). "
+                                        "Nothing else was registered; retry after the startup "
                                         "window, or triage the acknowledged ones via "
                                         "GET /heartbeat/findings."
                                     ),

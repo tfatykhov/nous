@@ -328,6 +328,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_HEARTBEAT_ESCALATION_ACCUMULATION_THRESHOLD` | `5` | Acknowledged findings count to trigger collection escalation |
 | `NOUS_HEARTBEAT_DIGEST_HOUR_UTC` | `9` | UTC hour for daily digest Telegram message |
 | `NOUS_HEARTBEAT_SUPPRESSION_TTL_HOURS` | `24` | TTL for suppressed finding state |
+| `NOUS_HEARTBEAT_KNOWN_FP_PATH` | `/tmp/nous-workspace/heartbeat/known_false_positives.json` | JSON file of known-false-positive rules. A matching heartbeat finding is auto-closed at ingest (state `auto_closed_known_fp`, rule id recorded, counted per rule in `stats()["auto_closed_by_rule"]`, still listed at `GET /heartbeat/findings`) instead of going to triage or a companion card. Re-read when its mtime changes. Missing file = no rules; an invalid file keeps the last good rules and logs a warning. Rules stop matching after their `review_by` date; high-urgency and escalated findings are never auto-closed. Empty string disables. Schema: `docs/examples/known_false_positives.example.json`. |
 | `NOUS_HEARTBEAT_TUNING_ENABLED` | `false` | Enable heartbeat self-tuning (F034.3) |
 | `NOUS_HEARTBEAT_TUNING_INTERVAL_HOURS` | `168` | Hours between tuning passes (weekly) |
 | `NOUS_HEARTBEAT_TUNING_MIN_SAMPLES` | `10` | Minimum outcome signals before adjusting params |

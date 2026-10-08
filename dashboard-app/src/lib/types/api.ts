@@ -126,6 +126,8 @@ export interface HeartbeatTrackedFinding {
   escalated: boolean;
   outcome: string | null;
   reopen_count: number;
+  /** Known-FP rule id when state is auto_closed_known_fp. */
+  auto_closed_rule?: string | null;
 }
 
 export interface HeartbeatFindingLifecycle {
@@ -133,6 +135,8 @@ export interface HeartbeatFindingLifecycle {
     total: number;
     by_state: Record<string, number>;
     by_check: Record<string, number>;
+    /** Findings auto-closed per known-FP rule since process start. */
+    auto_closed_by_rule?: Record<string, number>;
   };
   findings: HeartbeatTrackedFinding[];
   escalation_policy: {

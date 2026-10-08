@@ -1707,6 +1707,10 @@ class Settings(BaseSettings):
     heartbeat_escalation_accumulation_threshold: int = 5
     heartbeat_digest_hour_utc: int = 9
     heartbeat_suppression_ttl_hours: int = 24
+    # Known-false-positive rules (JSON, editable without a code change):
+    # matching findings are auto-closed at ingest instead of triaged.
+    # Missing/invalid file => no rules. Empty string disables.
+    heartbeat_known_fp_path: str = "/tmp/nous-workspace/heartbeat/known_false_positives.json"
 
     # F034.3: Self-tuning
     heartbeat_tuning_enabled: bool = False  # off by default until stable

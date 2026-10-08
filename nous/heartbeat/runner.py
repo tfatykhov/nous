@@ -965,6 +965,10 @@ class HeartbeatRunner:
                 if action == FindingAction.SUPPRESS:
                     logger.debug("F034.1: Suppressed finding %s: %s", fp, f.summary[:60])
                     continue
+                if action == FindingAction.AUTO_CLOSE:
+                    # Known false positive: tracked and counted by the store,
+                    # never triaged, never acknowledged.
+                    continue
                 elif action == FindingAction.ESCALATE:
                     # Audit HB-9 (2026-06-09): bump ONE ladder step
                     # (low->normal->high), not straight to "high". _should_escalate
