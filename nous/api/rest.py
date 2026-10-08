@@ -51,6 +51,7 @@ from starlette.responses import JSONResponse, RedirectResponse, Response, Stream
 from starlette.routing import Mount, Route
 from starlette.types import Scope
 
+from nous import undo_journal
 from nous.api.companion_assets import OverlayStaticFiles
 from nous.api.execution_context import ExecutionContext
 from nous.api.intention_routes import build_intention_routes
@@ -2480,6 +2481,32 @@ def create_app(
         except Exception:
             return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+        changing = [
+            short for short in _HEARTBEAT_CONFIG_FIELDS
+            if isinstance(body.get(short), int) and body[short] >= 0
+        ]
+        if changing:
+            # Undo journal: the values before this change (never blocks).
+            await undo_journal.record_safe(
+                undo_journal.KIND_CONFIG, "heartbeat_config", "heartbeat_config", _read_heartbeat_config(changing)
+            )
+        updated = _apply_heartbeat_config(body)
+        return JSONResponse({"status": "updated", "fields": updated})
+
+    # PUT /heartbeat/config fields (short name, without the heartbeat_ prefix).
+    _HEARTBEAT_CONFIG_FIELDS = (
+        "tick_interval", "quiet_start", "quiet_end", "daily_token_budget",
+        "health_interval", "self_initiated_interval",
+    )
+
+    def _read_heartbeat_config(fields: list[str]) -> dict[str, Any]:
+        return {short: getattr(settings, f"heartbeat_{short}") for short in fields if short in _HEARTBEAT_CONFIG_FIELDS}
+
+    def _apply_heartbeat_config(body: dict[str, Any]) -> list[str]:
+        """Set heartbeat settings at runtime; PUT /heartbeat/config and an
+        undo-journal restore both go through here."""
         updated = []
         # Map of config field -> check name (for propagating interval changes)
         interval_to_check = {
@@ -2487,10 +2514,8 @@ def create_app(
             "heartbeat_self_initiated_interval": "self_initiated",
         }
 
-        for field_name in ("heartbeat_tick_interval", "heartbeat_quiet_start",
-                           "heartbeat_quiet_end", "heartbeat_daily_token_budget",
-                           "heartbeat_health_interval", "heartbeat_self_initiated_interval"):
-            short = field_name.replace("heartbeat_", "")
+        for short in _HEARTBEAT_CONFIG_FIELDS:
+            field_name = f"heartbeat_{short}"
             if short in body:
                 val = body[short]
                 if isinstance(val, int) and val >= 0:
@@ -2502,8 +2527,41 @@ def create_app(
                         check = heartbeat_runner.registry.get_check(check_name)
                         if check:
                             check.interval = val
+        return updated
 
-        return JSONResponse({"status": "updated", "fields": updated})
+    async def undo_snapshots_list(request: Request) -> JSONResponse:
+        """GET /undo/snapshots — newest undo-journal snapshots (no payloads)."""
+        journal = undo_journal.get_journal()
+        if journal is None:
+            return JSONResponse({"error": "Undo journal not enabled"}, status_code=503)
+        try:
+            limit = max(1, min(int(request.query_params.get("limit", "50")), 500))
+        except ValueError:
+            return JSONResponse({"error": "limit must be an integer"}, status_code=400)
+        return JSONResponse({"snapshots": await journal.list(limit)})
+
+    async def undo_snapshot_restore(request: Request) -> JSONResponse:
+        """POST /undo/snapshots/{id}/restore — owner-run restore of one snapshot."""
+        journal = undo_journal.get_journal()
+        if journal is None:
+            return JSONResponse({"error": "Undo journal not enabled"}, status_code=503)
+        try:
+            _ = heartbeat_runner.registry
+            heartbeat_on = True
+        except (RuntimeError, AttributeError):
+            heartbeat_on = False
+        deps = undo_journal.RestoreDeps(
+            workspace_dir=settings.workspace_dir,
+            schedules=heart.schedules,
+            check_loader=getattr(heartbeat_runner, "dynamic_loader", None) if heartbeat_on else None,
+            read_config=_read_heartbeat_config if heartbeat_on else None,
+            apply_config=_apply_heartbeat_config if heartbeat_on else None,
+        )
+        result = await undo_journal.restore(request.path_params["id"], deps, journal)
+        return JSONResponse(
+            {"success": result.success, "message": result.message, "pre_restore_id": result.pre_restore_id},
+            status_code=200 if result.success else 409,
+        )
 
     async def heartbeat_check_trigger(request: Request) -> JSONResponse:
         """POST /heartbeat/check/{name}/trigger — force specific check."""
@@ -3405,6 +3463,8 @@ def create_app(
         Route("/heartbeat/status", heartbeat_status),
         Route("/heartbeat/trigger", heartbeat_trigger, methods=["POST"]),
         Route("/heartbeat/config", heartbeat_config, methods=["PUT"]),
+        Route("/undo/snapshots", undo_snapshots_list),
+        Route("/undo/snapshots/{id}/restore", undo_snapshot_restore, methods=["POST"]),
         # F034.1: Finding lifecycle endpoints
         Route("/heartbeat/findings/{fingerprint}/acknowledge", heartbeat_findings_acknowledge, methods=["POST"]),
         Route("/heartbeat/findings/{fingerprint}/resolve", heartbeat_findings_resolve, methods=["POST"]),

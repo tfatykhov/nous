@@ -440,13 +440,15 @@ class SnapshotStore:
 async def snapshot_for_write_file(
     path: str,
     workspace_dir: str,
+    *,
+    max_bytes: int = _FILE_SNAPSHOT_MAX_BYTES,
 ) -> dict[str, Any]:
     """Capture the prior state of a file before write_file overwrites it.
 
     I/O is offloaded to a worker thread so the event loop is never stalled.
     The prior content is recorded as bytes (``prior_b64``, with its
     ``prior_sha256``). Files larger than ``_FILE_SNAPSHOT_MAX_BYTES`` are
-    flagged ``oversized=True`` and an existing file whose content cannot be
+    flagged ``oversized=True`` (``max_bytes`` overrides the cap) and an existing file whose content cannot be
     read carries ``capture_error``; neither has ``prior_b64`` captured, and callers in undoable contexts
     should raise ``SnapshotBlocksDispatch`` rather than proceed without a snapshot.
 
@@ -495,13 +497,13 @@ async def snapshot_for_write_file(
             st = os.fstat(f.fileno())
             if not stat.S_ISREG(st.st_mode):
                 raise ValueError(f"{path!r} is not a regular file")
-            if st.st_size > _FILE_SNAPSHOT_MAX_BYTES:
+            if st.st_size > max_bytes:
                 return True, None, True
-            data = f.read(_FILE_SNAPSHOT_MAX_BYTES + 1)
+            data = f.read(max_bytes + 1)
             recheck = os.stat(_validate_path(path, workspace_dir))
             if (recheck.st_dev, recheck.st_ino) != (st.st_dev, st.st_ino):
                 raise ValueError(f"{path!r} changed while it was being snapshotted")
-        if len(data) > _FILE_SNAPSHOT_MAX_BYTES:
+        if len(data) > max_bytes:
             return True, None, True
         return True, data, False
 

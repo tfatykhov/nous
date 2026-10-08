@@ -10,14 +10,16 @@ import contextvars
 import json
 import logging
 import re
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from croniter import croniter
-from sqlalchemy import cast, func, select, update
+from sqlalchemy import cast, func, insert, select, update
 from sqlalchemy.dialects.postgresql import JSONB
 
+from nous import undo_journal
 from nous.api.execution_context import ExecutionContext, lineage_from_stamp
 from nous.heartbeat.registry import BaseCheck
 from nous.heartbeat.schemas import CheckResult, Finding
@@ -816,6 +818,8 @@ class DynamicCheckLoader:
             await session.refresh(model)
 
             check_id = str(model.id)
+        # Undo journal: before a create there was no row.
+        await undo_journal.record_safe(undo_journal.KIND_CHECK, "create", check_id, None, label=name)
 
         # Immediately register in registry (don't wait for next sync)
         check = DynamicCheck(
@@ -911,6 +915,10 @@ class DynamicCheckLoader:
             model = result.scalar_one_or_none()
             if model is None:
                 raise ValueError(f"Dynamic check '{name}' not found")
+
+            if action in ("enable", "disable", "delete", "update"):
+                # Undo journal: the row before this action (never blocks).
+                await undo_journal.record_model_safe(undo_journal.KIND_CHECK, action, model, label=name)
 
             if action == "enable":
                 model.enabled = True
@@ -1049,6 +1057,82 @@ class DynamicCheckLoader:
 
             else:
                 raise ValueError(f"Unknown action: {action}")
+
+    async def restore_row(
+        self,
+        check_id: UUID,
+        before: dict[str, Any] | None,
+        *,
+        on_current: Callable[[Mapping[str, Any] | None], Awaitable[None]],
+    ) -> tuple[bool, str]:
+        """Undo journal: put check ``check_id`` back to ``before`` (its column
+        values) and resync the registry, under ``_mutation_lock``. When
+        ``before`` is None (the snapshot was taken at its create) the check is
+        disabled, never deleted. ``on_current`` gets the row as it is now
+        before anything changes; if it raises, nothing changes. A DAG node's
+        check is refused: the DAG loop reads its enabled state as the node's
+        progress, which a restore must not move."""
+        from nous.dag.store import DAG_CHECK_NAME_PREFIX, dag_check_nodes
+        from nous.storage.models import DAGNode, DynamicCheckModel
+
+        table = DynamicCheckModel.__table__
+        async with self._mutation_lock:
+            async with self._db.session() as session:
+                current = (
+                    await session.execute(
+                        select(table)
+                        .where(table.c.id == check_id)
+                        .where(table.c.agent_id == self._agent_id)
+                        .with_for_update()
+                    )
+                ).mappings().first()
+                names = {row["name"] for row in (current, before) if row is not None}
+                for name in names:
+                    dag_owned = name.startswith(DAG_CHECK_NAME_PREFIX) or (
+                        await session.execute(
+                            dag_check_nodes(self._agent_id).where(DAGNode.check_name == name).limit(1)
+                        )
+                    ).first() is not None
+                    if dag_owned:
+                        return False, f"check {name!r} belongs to a DAG node; restore refused, nothing changed"
+                await on_current(dict(current) if current is not None else None)
+                if before is None:
+                    if current is None or not current["enabled"]:
+                        return True, f"check {check_id} is already absent or disabled"
+                    name = current["name"]
+                else:
+                    if before.get("agent_id") != self._agent_id or before.get("id") != check_id:
+                        return False, "snapshot belongs to another check or agent; nothing changed"
+                    clash = (
+                        await session.execute(
+                            select(table.c.id)
+                            .where(table.c.agent_id == self._agent_id)
+                            .where(table.c.name == before["name"])
+                            .where(table.c.id != check_id)
+                        )
+                    ).first()
+                    if clash is not None:
+                        return False, f"another check is now named {before['name']!r}; nothing changed"
+                    values = dict(before)
+                    # The journal lives in the workspace: a row read from it
+                    # gets the same tool filter as create_check.
+                    for key in ("tools", "on_complete_tools"):
+                        values[key] = [t for t in (values.get(key) or []) if t in ALLOWED_TOOLS]
+                    if current is None:
+                        await session.execute(insert(table).values(**values))
+                    else:
+                        values.pop("id")
+                        # Runs may have completed after the snapshot: their
+                        # history (status, self-tuning) is never rewound.
+                        for column in ("run_count", "error_count", "last_run_at", "last_error"):
+                            values[column] = current[column]
+                        await session.execute(update(table).where(table.c.id == check_id).values(**values))
+                    await session.commit()
+            if before is None:
+                await self._manage_check_locked("disable", name, None)
+                return True, f"disabled check {name!r} (undoing its create; rows are never deleted)"
+            await self._sync_locked()
+            return True, f"restored check {before['name']!r}"
 
     async def is_enabled(self, name: str, check_id: str) -> bool:
         """Whether check ``name`` is still the row ``check_id`` and enabled."""

@@ -13,6 +13,7 @@ nous/
 ├── nous/                       # Python package (~30,000 lines)
 │   ├── config.py               # Settings via pydantic-settings
 │   ├── main.py                 # Entry point, component wiring, lifecycle
+│   ├── undo_journal.py         # Passive before-state snapshots (files, schedules, heartbeat checks, heartbeat config) + owner-run restore (NOUS_UNDO_JOURNAL_ENABLED)
 │   ├── telegram_bot.py         # Telegram interface (streaming + usage); F099 2d: owner actions (buttons, /approve, /reject, /answer, reply-to)
 │   ├── owner_actions.py        # F099 Phase 2d: callback-data codec and refusal vocabulary shared by the publisher, the REST routes and the Telegram bot (stdlib only)
 │   ├── events.py               # Event bus (async pub/sub)

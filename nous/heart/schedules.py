@@ -1,18 +1,24 @@
 """Schedule manager -- CRUD and due-task operations for recurring/timed tasks."""
 
 import logging
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 from croniter import croniter
-from sqlalchemy import select, update
+from sqlalchemy import insert, select, update
 
+from nous import undo_journal
 from nous.brain import intentions
 from nous.brain.intentions import IntentionSpec
 from nous.storage.database import Database
 from nous.storage.models import Schedule
 
 logger = logging.getLogger(__name__)
+
+# Intention states in which a schedule's container no longer accepts fires.
+_CLOSED_INTENTION_STATES = ("closed", "cancelled", "expired")
 
 
 class ScheduleManager:
@@ -86,6 +92,10 @@ class ScheduleManager:
                 )
             await session.commit()
             await session.refresh(schedule)
+            # Undo journal: before a create there was no row.
+            await undo_journal.record_safe(
+                undo_journal.KIND_SCHEDULE, "create", str(schedule.id), None, label=task[:80]
+            )
             logger.info(
                 "Created %s schedule %s: %s (next: %s)",
                 schedule_type, schedule.id.hex[:8], task[:80], next_fire,
@@ -206,6 +216,8 @@ class ScheduleManager:
     async def deactivate(self, schedule_id: UUID) -> None:
         """Deactivate a schedule, and close its F099 container intention."""
         async with self._db.session() as session:
+            if undo_journal.get_journal() is not None:
+                await self._record_before_deactivate(session, schedule_id)
             await session.execute(
                 update(Schedule)
                 .where(Schedule.id == schedule_id)
@@ -214,6 +226,106 @@ class ScheduleManager:
             await session.commit()
             logger.info("Deactivated schedule %s", schedule_id.hex[:8])
         await self._close_container(schedule_id)
+
+    async def restore_row(
+        self,
+        schedule_id: UUID,
+        before: dict[str, Any] | None,
+        *,
+        on_current: Callable[[Mapping[str, Any] | None], Awaitable[None]],
+    ) -> tuple[bool, str]:
+        """Undo journal: put schedule ``schedule_id`` back to ``before`` (its
+        column values), or, when ``before`` is None (the snapshot was taken
+        at its create), deactivate it -- never a delete. ``on_current`` gets
+        the row as it is now, under the row lock, before anything changes;
+        if it raises, nothing changes. A row restored active whose F099
+        container intention is no longer open is restored inactive instead:
+        a restore never re-arms work against a closed intention."""
+        table = Schedule.__table__
+        async with self._db.session() as session:
+            current = (
+                await session.execute(
+                    select(table)
+                    .where(table.c.id == schedule_id)
+                    .where(table.c.agent_id == self._agent_id)
+                    .with_for_update()
+                )
+            ).mappings().first()
+            await on_current(dict(current) if current is not None else None)
+            if before is None:
+                if current is None or not current["active"]:
+                    return True, f"schedule {schedule_id} is already absent or inactive"
+                await session.execute(update(table).where(table.c.id == schedule_id).values(active=False))
+                await session.commit()
+                deactivated = True
+            else:
+                if before.get("agent_id") != self._agent_id or before.get("id") != schedule_id:
+                    return False, "snapshot belongs to another schedule or agent; nothing changed"
+                values = dict(before)
+                note = ""
+                if values.get("active"):
+                    state = await self._container_state(session, schedule_id)
+                    if state in _CLOSED_INTENTION_STATES:
+                        values["active"] = False
+                        note = f"; restored inactive because its container intention is {state}"
+                if current is None:
+                    await session.execute(insert(table).values(**values))
+                else:
+                    values.pop("id")
+                    # A fire may have committed after the snapshot: its
+                    # progress is never rewound, or the same run fires twice.
+                    for column in ("fire_count", "last_fired_at", "next_fire_at"):
+                        values[column] = current[column]
+                    await session.execute(update(table).where(table.c.id == schedule_id).values(**values))
+                await session.commit()
+                return True, f"restored schedule {schedule_id}{note}"
+        if deactivated:
+            await self._close_container(schedule_id)
+        return True, f"deactivated schedule {schedule_id} (undoing its create; rows are never deleted)"
+
+    async def _record_before_deactivate(self, session: Any, schedule_id: UUID) -> None:
+        """Undo journal: the row before a deactivate, read under its row lock
+        in the deactivate's own transaction, so a fire cannot commit between
+        the snapshot and the deactivate (never raises: the reads run in a
+        savepoint, and a failed one leaves the deactivate's transaction
+        intact). A schedule with an F099 container intention is recorded but
+        not restorable: the deactivate closes the container, and restore
+        never re-arms work against a closed intention."""
+        try:
+            table = Schedule.__table__
+            async with session.begin_nested():
+                prior = (
+                    await session.execute(select(table).where(table.c.id == schedule_id).with_for_update())
+                ).mappings().first()
+                if prior is None:
+                    return
+                container = await self._container_state(session, schedule_id)
+        except Exception:
+            logger.warning("Undo journal: could not read schedule %s before deactivate", schedule_id, exc_info=True)
+            return
+        await undo_journal.record_safe(
+            undo_journal.KIND_SCHEDULE,
+            "deactivate",
+            str(schedule_id),
+            undo_journal.encode_row(prior),
+            label=prior["task"][:80],
+            restorable=container is None,
+            note="its F099 container intention is closed by this deactivate" if container else None,
+        )
+
+    async def _container_state(self, session: Any, schedule_id: UUID) -> str | None:
+        """The state of schedule ``schedule_id``'s F099 container intention, or None without one."""
+        from nous.storage.models import Intention
+
+        return (
+            await session.execute(
+                select(Intention.state).where(
+                    Intention.agent_id == self._agent_id,
+                    Intention.source_kind == intentions.SOURCE_SCHEDULE,
+                    Intention.source_id == str(schedule_id),
+                )
+            )
+        ).scalar_one_or_none()
 
     async def get(self, schedule_id: UUID) -> Schedule | None:
         """Get a schedule by ID."""

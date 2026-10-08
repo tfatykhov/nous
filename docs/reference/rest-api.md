@@ -70,7 +70,9 @@ Documented routes served by `nous/api/rest.py`, which is the full list. Part of 
 | GET | `/dashboard/attention` | Harness dashboard: questions waiting + sends in doubt (same predicates as the DAG and Ledger tabs) for the nav badges and the Overview strip |
 | GET | `/heartbeat/status` | Heartbeat status, checks, budget, and DAG tick liveness: `last_dag_tick` (last tick that succeeded) and `dag_tick_pending_since` (start of the tick in flight, null when none) |
 | POST | `/heartbeat/trigger` | Force immediate heartbeat tick |
-| PUT | `/heartbeat/config` | Update heartbeat intervals/budget at runtime |
+| PUT | `/heartbeat/config` | Update heartbeat intervals/budget at runtime (the prior values are recorded in the undo journal) |
+| GET | `/undo/snapshots` | Undo journal: newest snapshots, newest first, without their payloads (`limit`, default 50, max 500) |
+| POST | `/undo/snapshots/{id}/restore` | Undo journal: owner-run restore of one snapshot; snapshots the current state first (`pre_restore_id`). 409 with a message when it refuses |
 | POST | `/heartbeat/check/{name}/trigger` | Force a specific check to run |
 | POST | `/heartbeat/check/{name}/reset` | Reset circuit breaker for a failed check |
 | GET | `/heartbeat/findings` | All tracked findings with state/age |
