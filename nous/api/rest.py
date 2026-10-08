@@ -2551,6 +2551,7 @@ def create_app(
         except (RuntimeError, AttributeError):
             heartbeat_on = False
         deps = undo_journal.RestoreDeps(
+            workspace_dir=settings.workspace_dir,
             schedules=heart.schedules,
             check_loader=getattr(heartbeat_runner, "dynamic_loader", None) if heartbeat_on else None,
             read_config=_read_heartbeat_config if heartbeat_on else None,

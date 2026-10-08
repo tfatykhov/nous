@@ -154,19 +154,19 @@ class TestFileKind:
         await write_file_tool("notes.txt", "new", _workspace_dir=str(workspace))
         sid = (await _only(journal, "file"))["id"]
 
-        result = await undo_journal.restore(sid, RestoreDeps(), journal)
+        result = await undo_journal.restore(sid, RestoreDeps(workspace_dir=str(workspace)), journal)
         assert result.success, result.message
         assert target.read_bytes() == b"old\xff bytes"
         # The state the restore replaced is itself restorable.
         pre = await journal.get(result.pre_restore_id)
         assert pre["source"] == "pre_restore" and pre["restores"] == sid
-        again = await undo_journal.restore(result.pre_restore_id, RestoreDeps(), journal)
+        again = await undo_journal.restore(result.pre_restore_id, RestoreDeps(workspace_dir=str(workspace)), journal)
         assert again.success and target.read_bytes() == b"new"
 
     async def test_restore_of_created_file_removes_it(self, workspace, journal):
         await write_file_tool("fresh.txt", "made", _workspace_dir=str(workspace))
         sid = (await _only(journal, "file"))["id"]
-        assert (await undo_journal.restore(sid, RestoreDeps(), journal)).success
+        assert (await undo_journal.restore(sid, RestoreDeps(workspace_dir=str(workspace)), journal)).success
         assert not (workspace / "fresh.txt").exists()
 
     async def test_oversized_prior_is_recorded_not_restorable(self, workspace, journal):
@@ -174,7 +174,7 @@ class TestFileKind:
         await write_file_tool("big.bin", "small", _workspace_dir=str(workspace))
         entry = await _only(journal, "file")
         assert entry["restorable"] is False
-        result = await undo_journal.restore(entry["id"], RestoreDeps(), journal)
+        result = await undo_journal.restore(entry["id"], RestoreDeps(workspace_dir=str(workspace)), journal)
         assert not result.success and (workspace / "big.bin").read_bytes() == b"small"
 
     async def test_tampered_snapshot_is_refused(self, workspace, journal):
@@ -183,8 +183,19 @@ class TestFileKind:
         entry = await journal.get((await _only(journal, "file"))["id"])
         entry["before"]["prior_b64"] = base64.b64encode(b"evil").decode()
         journal._write_file(journal._find(entry["id"]).name, entry)
-        result = await undo_journal.restore(entry["id"], RestoreDeps(), journal)
+        result = await undo_journal.restore(entry["id"], RestoreDeps(workspace_dir=str(workspace)), journal)
         assert not result.success and (workspace / "a.txt").read_bytes() == b"after"
+
+    async def test_restore_outside_configured_workspace_is_refused(self, workspace, journal, tmp_path):
+        outside = tmp_path / "outside.txt"
+        outside.write_bytes(b"keep")
+        await write_file_tool("a.txt", "x", _workspace_dir=str(workspace))
+        entry = await journal.get((await _only(journal, "file"))["id"])
+        # A forged entry pointing outside the workspace, its root rewritten to match.
+        entry["before"].update(full_path=str(outside), workspace_root=str(tmp_path))
+        journal._write_file(journal._find(entry["id"]).name, entry)
+        result = await undo_journal.restore(entry["id"], RestoreDeps(workspace_dir=str(workspace)), journal)
+        assert not result.success and outside.read_bytes() == b"keep"
 
     async def test_snapshot_failure_does_not_block_write(self, workspace, failing_journal, caplog):
         with caplog.at_level(logging.WARNING, logger="nous.undo_journal"):
@@ -232,12 +243,24 @@ class TestScheduleKind:
         row = await _row(db, Schedule, sched.id)
         assert row is not None and row["active"] is False
 
-    async def test_closed_container_restores_inactive(self, db, schedules, journal):
+    async def test_container_backed_deactivate_is_not_restorable(self, db, schedules, journal):
         spec = IntentionSpec(intent="Check daily", origin_kind="interactive", container=True)
         sched = await schedules.create(task="Check", schedule_type="recurring", interval_seconds=1800, intention=spec)
         await schedules.deactivate(sched.id)  # closes the container
         entry = await _only(journal, "schedule", "deactivate")
+        assert entry["restorable"] is False and "container" in entry["note"]
         result = await undo_journal.restore(entry["id"], RestoreDeps(schedules=schedules), journal)
+        assert not result.success
+        assert (await _row(db, Schedule, sched.id))["active"] is False
+
+    async def test_restore_never_rearms_against_a_closed_container(self, db, schedules, journal):
+        spec = IntentionSpec(intent="Check daily", origin_kind="interactive", container=True)
+        sched = await schedules.create(task="Check", schedule_type="recurring", interval_seconds=1800, intention=spec)
+        active_row = undo_journal.encode_row(await _row(db, Schedule, sched.id))
+        await schedules.deactivate(sched.id)
+        # e.g. a snapshot taken before intentions were on, restored after
+        sid = await journal.record("schedule", "deactivate", str(sched.id), active_row)
+        result = await undo_journal.restore(sid, RestoreDeps(schedules=schedules), journal)
         assert result.success and "inactive" in result.message
         assert (await _row(db, Schedule, sched.id))["active"] is False
 
@@ -310,6 +333,16 @@ class TestCheckKind:
         assert not result.success and "DAG node" in result.message
         assert (await _row(db, DynamicCheckModel, uuid.UUID(created["id"])))["enabled"] is False
 
+    async def test_restored_row_gets_the_tool_filter(self, db, loader, journal):
+        check_id = await _make_check(loader)
+        name = (await _row(db, DynamicCheckModel, check_id))["name"]
+        await loader.manage_check("update", name, {"prompt": "p2"})
+        entry = await journal.get((await _only(journal, "heartbeat_check", "update"))["id"])
+        entry["before"]["tools"] = ["web_search", "send_email"]  # forged
+        journal._write_file(journal._find(entry["id"]).name, entry)
+        assert (await undo_journal.restore(entry["id"], RestoreDeps(check_loader=loader), journal)).success
+        assert (await _row(db, DynamicCheckModel, check_id))["tools"] == ["web_search"]
+
     async def test_snapshot_failure_does_not_block(self, db, loader, failing_journal, caplog):
         with caplog.at_level(logging.WARNING, logger="nous.undo_journal"):
             check_id = await _make_check(loader)
@@ -359,7 +392,7 @@ async def test_end_to_end_restore_every_kind_identically(db, heart, workspace, j
     from nous.api.rest import create_app
     from nous.config import Settings
 
-    settings = Settings()
+    settings = Settings(workspace_dir=str(workspace))
     loader = DynamicCheckLoader(db=db, registry=CheckRegistry(), agent_id=settings.agent_id)
     heartbeat_runner = SimpleNamespace(registry=loader._registry, dynamic_loader=loader)
     app = create_app(

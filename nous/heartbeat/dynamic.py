@@ -918,9 +918,7 @@ class DynamicCheckLoader:
 
             if action in ("enable", "disable", "delete", "update"):
                 # Undo journal: the row before this action (never blocks).
-                await undo_journal.record_safe(
-                    undo_journal.KIND_CHECK, action, str(model.id), undo_journal.encode_model(model), label=name
-                )
+                await undo_journal.record_model_safe(undo_journal.KIND_CHECK, action, model, label=name)
 
             if action == "enable":
                 model.enabled = True
@@ -1116,6 +1114,10 @@ class DynamicCheckLoader:
                     if clash is not None:
                         return False, f"another check is now named {before['name']!r}; nothing changed"
                     values = dict(before)
+                    # The journal lives in the workspace: a row read from it
+                    # gets the same tool filter as create_check.
+                    for key in ("tools", "on_complete_tools"):
+                        values[key] = [t for t in (values.get(key) or []) if t in ALLOWED_TOOLS]
                     if current is None:
                         await session.execute(insert(table).values(**values))
                     else:

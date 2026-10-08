@@ -244,6 +244,18 @@ async def record_safe(kind: str, action: str, target: str, before: Any, **kwargs
         return None
 
 
+async def record_model_safe(kind: str, action: str, model: Any, *, label: str | None = None) -> str | None:
+    """``record_safe`` for an ORM row as it is now; never raises."""
+    if _journal is None:
+        return None
+    try:
+        target, before = str(model.id), encode_model(model)
+    except Exception:
+        logger.warning("Undo journal: %s snapshot could not be encoded; the %s proceeds", kind, action, exc_info=True)
+        return None
+    return await record_safe(kind, action, target, before, label=label)
+
+
 async def record_file_write(path: str, workspace_dir: str) -> str | None:
     """Snapshot a file ``write_file`` is about to overwrite; never raises."""
     journal = _journal
@@ -335,6 +347,7 @@ class RestoreResult:
 class RestoreDeps:
     """What a restore of each kind needs; a missing one fails that kind."""
 
+    workspace_dir: str | None = None  # file restores must land inside it
     schedules: Any = None  # heart.schedules (ScheduleManager)
     check_loader: Any = None  # DynamicCheckLoader
     read_config: Callable[[list[str]], dict[str, Any]] | None = None
@@ -376,7 +389,7 @@ async def restore(snapshot_id: str, deps: RestoreDeps, journal: UndoJournal | No
     kind = entry["kind"]
     try:
         if kind == KIND_FILE:
-            result = await _restore_file(entry["before"], record_current, journal.max_bytes)
+            result = await _restore_file(entry["before"], deps.workspace_dir, record_current, journal.max_bytes)
         elif kind == KIND_SCHEDULE:
             result = await _restore_row(deps.schedules, "schedules", entry, record_current)
         elif kind == KIND_CHECK:
@@ -430,16 +443,21 @@ async def _restore_config(
 
 async def _restore_file(
     before: dict[str, Any],
+    workspace_dir: str | None,
     record_current: Callable[[Any], Awaitable[None]],
     max_bytes: int,
 ) -> RestoreResult:
     """Write the prior bytes back (or remove a file the write created), only
-    while the file still holds what the pre-restore snapshot captured."""
+    while the file still holds what the pre-restore snapshot captured. The
+    target must lie inside the CONFIGURED workspace: the journal lives in
+    the workspace, so the root a snapshot records is not trusted."""
     from nous.api.builtin_tools import ABSENT, PreconditionFailed, atomic_replace_bytes, remove_if_matches
     from nous.api.compensation import release_write_path_lock, snapshot_for_write_file, write_path_lock
 
+    if not workspace_dir:
+        return RestoreResult(False, "the workspace is not available")
     full_path = before["full_path"]
-    root = before["workspace_root"]
+    root = str(Path(workspace_dir).resolve())
     prior: bytes | None = None
     if before["existed"]:
         prior = base64.b64decode(before["prior_b64"])
