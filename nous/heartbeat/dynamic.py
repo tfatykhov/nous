@@ -916,8 +916,9 @@ class DynamicCheckLoader:
             if model is None:
                 raise ValueError(f"Dynamic check '{name}' not found")
 
-            if action in ("enable", "disable", "delete", "update"):
+            if action in ("enable", "delete"):
                 # Undo journal: the row before this action (never blocks).
+                # disable and update record only once they will proceed.
                 await undo_journal.record_model_safe(undo_journal.KIND_CHECK, action, model, label=name)
 
             if action == "enable":
@@ -933,6 +934,10 @@ class DynamicCheckLoader:
                 # run cannot be undone -- re-enabling restores the schedule,
                 # not the interrupted run. Decided from the registry
                 # _cancel_active_runs reads, before anything is written.
+                refusing = capture is not None and capture.get("refuse_if_running") and self._has_cancellable_run(name)
+                if not refusing:
+                    # Undo journal (never blocks); a refused disable is not recorded.
+                    await undo_journal.record_model_safe(undo_journal.KIND_CHECK, action, model, label=name)
                 cancels_run = capture is not None and self._has_cancellable_run(name)
                 if cancels_run and capture.get("refuse_if_running"):
                     raise ValueError(
@@ -1019,6 +1024,9 @@ class DynamicCheckLoader:
                     "on_complete_prompt",
                     "on_complete_tools",
                 }
+                # Validated in full before anything is set or recorded: a
+                # rejected update must not leave an undo-journal snapshot.
+                changes: dict[str, Any] = {}
                 for key, value in updates.items():
                     if key not in allowed_fields:
                         continue
@@ -1037,19 +1045,27 @@ class DynamicCheckLoader:
                         value = [t for t in value if t in ALLOWED_TOOLS]
                     if key == "interval_seconds" and value < MIN_INTERVAL_SECONDS:
                         raise ValueError(f"Minimum interval is {MIN_INTERVAL_SECONDS} seconds")
-                    setattr(model, key, value)
+                    changes[key] = value
+
+                def _after(key: str) -> Any:
+                    return changes[key] if key in changes else getattr(model, key)
+
                 # If cron_expr was removed, validate interval is still >= minimum
-                if updates.get("cron_expr") is None and model.cron_expr is None:
-                    if model.interval_seconds < MIN_INTERVAL_SECONDS:
+                if updates.get("cron_expr") is None and _after("cron_expr") is None:
+                    if _after("interval_seconds") < MIN_INTERVAL_SECONDS:
                         raise ValueError(
                             f"Minimum interval is {MIN_INTERVAL_SECONDS} seconds "
-                            f"(current: {model.interval_seconds}s) — set a valid interval or cron expression"
+                            f"(current: {_after('interval_seconds')}s) — set a valid interval or cron expression"
                         )
                 # Re-validate on_complete_tools subset after all updates
-                current_tools = set(model.tools or [])
-                current_on_complete = set(model.on_complete_tools or [])
+                current_tools = set(_after("tools") or [])
+                current_on_complete = set(_after("on_complete_tools") or [])
                 if current_on_complete and not current_on_complete.issubset(current_tools):
                     raise ValueError("on_complete_tools must be a subset of check tools")
+                # Undo journal: the row before this update (never blocks).
+                await undo_journal.record_model_safe(undo_journal.KIND_CHECK, action, model, label=name)
+                for key, value in changes.items():
+                    setattr(model, key, value)
                 model.updated_at = datetime.now(UTC)
                 await session.commit()
                 await self._sync_locked()

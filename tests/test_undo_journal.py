@@ -474,6 +474,42 @@ class TestCheckKind:
         assert (await undo_journal.restore(entry["id"], RestoreDeps(check_loader=loader), journal)).success
         assert (await _row(db, DynamicCheckModel, check_id))["tools"] == ["web_search"]
 
+    @pytest.mark.parametrize(
+        "updates",
+        [
+            {"interval_seconds": 60},
+            {"on_complete_tools": ["web_search"]},
+            {"timeout_seconds": "slow"},
+            {"cron_expr": None, "prompt": "p2"},
+        ],
+    )
+    async def test_rejected_update_records_nothing(self, db, loader, journal, updates):
+        # Codex P2 on #712 (7c7c4d2): an update that fails validation was
+        # snapshotted before the error, leaving a journal entry for a change
+        # that never happened.
+        created = await loader.create_check(
+            name=f"watch-{uuid.uuid4().hex[:6]}", description="d", prompt="look", interval_seconds=600, tools=[]
+        )
+        if "cron_expr" in updates:  # an interval below the minimum, set behind validation's back
+            async with db.session() as s:
+                row = await s.get(DynamicCheckModel, uuid.UUID(created["id"]))
+                row.interval_seconds = 60
+                await s.commit()
+        before = await _row(db, DynamicCheckModel, uuid.UUID(created["id"]))
+        with pytest.raises(ValueError):
+            await loader.manage_check("update", created["name"], updates)
+        assert [e["action"] for e in await journal.list(500)] == ["create"]
+        assert await _row(db, DynamicCheckModel, uuid.UUID(created["id"])) == before
+
+    async def test_refused_disable_records_nothing(self, db, loader, journal, monkeypatch):
+        check_id = await _make_check(loader)
+        name = (await _row(db, DynamicCheckModel, check_id))["name"]
+        monkeypatch.setattr(loader, "_has_cancellable_run", lambda _name: True)
+        with pytest.raises(ValueError, match="active run"):
+            await loader.manage_check("disable", name, capture={"refuse_if_running": True})
+        assert [e["action"] for e in await journal.list(500)] == ["create"]
+        assert (await _row(db, DynamicCheckModel, check_id))["enabled"] is True
+
     async def test_snapshot_failure_does_not_block(self, db, loader, failing_journal, caplog):
         with caplog.at_level(logging.WARNING, logger="nous.undo_journal"):
             check_id = await _make_check(loader)
