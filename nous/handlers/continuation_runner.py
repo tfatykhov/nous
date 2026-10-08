@@ -29,6 +29,7 @@ from nous.brain import continuation
 from nous.brain.continuation import INTENT_SESSION_PREFIX, Resolution
 from nous.brain.intentions import AUTHORITY_INTERNAL
 from nous.cancellation import cancel_requested
+from nous.cognitive.execution_ledger import bash_exit_code
 from nous.events import Event
 from nous.heart.result_inbox import format_inbox_messages, neutralize_delimiters
 from nous.storage.models import ExecutionDAG, Intention, IntentionArrival, IntentionProposal, Subtask
@@ -1505,7 +1506,10 @@ class ContinuationRunner:
                     self._runner.execute_single_call(context, proposal.tool, dict(proposal.arguments)),
                     timeout=float(self._settings.tool_timeout) + EXECUTION_GRACE_SECONDS,
                 )
-                ok, send_key = not call.is_error, call.send_key
+                # bash reports a non-zero exit in its text ("Exit code: N"), not as an error: the call failed all the
+                # same, so it is recorded failed and the intention is told so (the 50c7aa53 incident).
+                failed_exit = proposal.tool == "bash" and bash_exit_code(call.text) not in (None, 0)
+                ok, send_key = not call.is_error and not failed_exit, call.send_key
                 result, error = (call.text, None) if ok else (None, call.text)
         except asyncio.CancelledError:
             raise

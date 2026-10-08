@@ -242,6 +242,42 @@ async def test_a_call_that_fails_is_failed_and_never_rerun(runner_env):  # noqa:
     assert "failed" in inform.body and "smtp is down" in inform.body
 
 
+BASH_SCHEMA = {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}
+
+
+@pytest.mark.parametrize(
+    ("output", "state"),
+    [
+        ("fatal: not a git repository (or any of the parent directories): .git\nExit code: 1", "failed"),
+        ("PR #715 merged\nExit code: 0", "executed"),
+        ("the log says Exit code: 1\nExit code: 0", "executed"),  # only the trailer is the wrapper's status
+    ],
+)
+async def test_an_approved_bash_call_is_failed_when_it_exits_non_zero(runner_env, output, state):  # noqa: F811
+    """Proposal 50c7aa53 (2026-10-08): bash returns is_error=False for a non-zero exit and says so only in its
+    "Exit code: N" trailer, so a failed `gh pr merge` was recorded executed and the agent never learned it failed."""
+    env = await runner_env()
+    calls = []
+
+    async def bash(**kwargs):
+        calls.append(kwargs)
+        return {"content": [{"type": "text", "text": output}]}
+
+    env.dispatcher.register("bash", bash, BASH_SCHEMA)
+    _root, got = await claimed(env)
+    pid = await stage(env, got, tool="bash", arguments={"command": "gh pr merge 715 --squash"})
+    done = await commit_ask(env, got)
+    out = await _cont(env).decide_proposal(pid, approve=True, actor="t")
+    assert len(calls) == 1 and out.state == state
+    row = await proposal_row(env, pid)
+    assert row.state == state
+    (inform,) = await _informs(env, done.arrival_id)
+    if state == "failed":
+        assert (row.result, row.error) == (None, output) and "but it failed" in inform.body
+    else:
+        assert (row.result, row.error) == (output, None) and "it ran" in inform.body
+
+
 async def test_a_timeout_is_failed_in_doubt_and_never_rerun(runner_env, monkeypatch):  # noqa: F811
     env = await runner_env()
     started = []
