@@ -31,7 +31,7 @@ from nous.brain.intentions import AUTHORITY_INTERNAL
 from nous.cancellation import cancel_requested
 from nous.events import Event
 from nous.heart.result_inbox import format_inbox_messages, neutralize_delimiters
-from nous.storage.models import Intention, IntentionArrival
+from nous.storage.models import ExecutionDAG, Intention, IntentionArrival, IntentionProposal, Subtask
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +108,9 @@ ARRIVAL_NOTE_CHARS = 300  # an earlier arrival's note, as the prompt quotes it
 ARRIVALS_SHOWN = 8  # the newest earlier arrivals the prompt lists
 # Tools whose success is "memory written" for the progress check (spec 4.5.4).
 MEMORY_WRITE_TOOLS = frozenset({"learn_fact", "ingest_document"})
+OBSERVED_WORK_SHOWN = 20  # the intentions the observed-state block lists (root, claimed, then spawned)
+OBSERVED_PROPOSALS_SHOWN = 10  # the newest proposals of the root the block lists
+OBSERVED_TOOL_CHARS = 60  # a proposal's tool name, as the block quotes it
 
 
 @dataclass
@@ -249,6 +252,113 @@ def make_propose_action_executor(
     return propose_action
 
 
+@dataclass(frozen=True)
+class ObservedWork:
+    """One intention as the harness read it, with the subtask or DAG row behind it. ``found`` is False when
+    that row was not there (a schedule's work is not looked up: ``kind`` stays None)."""
+
+    role: str  # "root", "claimed" or "spawned"
+    intention: Any
+    kind: str | None = None  # "subtask" or "dag"
+    found: bool = False
+    status: str | None = None
+    outcome: str | None = None  # a subtask's final_outcome
+    finished_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class ObservedState:
+    """What the harness read from the rows before the turn, for the prompt's ground-truth block. ``more_work``
+    and ``more_proposals`` say that rows were left out by the caps, so a missing row is never read as absent."""
+
+    observed_at: datetime
+    root: Any | None
+    work: tuple[ObservedWork, ...] = ()
+    more_work: int = 0
+    proposals: tuple[Any, ...] = ()
+    more_proposals: bool = False
+
+
+def _when(moment: datetime | None) -> str:
+    return moment.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC") if moment is not None else "unknown time"
+
+
+def _short(value: Any) -> str:
+    return neutralize_delimiters(str(value)[:8])
+
+
+def _observed_lines(observed: ObservedState | None) -> list[str]:
+    """The ground-truth block: code-generated from rows, never from the model or a result body. Only states,
+    ids and times are shown (no error or result text: the results block carries those once, as data)."""
+    lines = ["", "## What the harness observed (ground truth)"]
+    if observed is None:
+        lines.append(
+            "The harness could not read the state of this work: treat whether anything was cancelled, failed, "
+            "delivered, sent or done as unknown / not observed."
+        )
+        return lines
+    lines.append(
+        f"Read from the database at {_when(observed.observed_at)}, before this turn started; it is not updated "
+        "during the turn."
+    )
+    root = observed.root
+    if root is None:
+        lines.append("Root: no row found.")
+    else:
+        head = f"Root {_short(root.id)}: state {root.state}"
+        if root.close_reason:
+            head += f" (close reason {root.close_reason})"
+        if root.root_cancelled_at is not None:
+            lines.append(
+                f"{head}. CANCELLED at {_when(root.root_cancelled_at)} (who asked for the cancel is not recorded)."
+            )
+        else:
+            lines.append(f"{head}. No cancel has been requested for this work (the root is not cancelled).")
+        if root.root_expired_at is not None:
+            lines.append(f"The root EXPIRED at {_when(root.root_expired_at)}.")
+        elif root.root_cancelled_at is None:
+            lines.append("The root has not expired: it is open.")
+    if observed.work:
+        lines.append("Intentions under this root, and the work behind each:")
+    for item in observed.work:
+        intention = item.intention
+        line = f"- {item.role} intention {_short(intention.id)}: state {intention.state}"
+        if getattr(intention, "close_reason", None):
+            line += f" (close reason {intention.close_reason})"
+        source = f"{intention.source_kind} {_short(intention.source_id)}"
+        if item.kind is None:
+            line += f"; {source}"
+        elif not item.found:
+            line += f"; {source}: no row found"
+        else:
+            line += f"; {source}: status {item.status}"
+            if item.kind == "subtask":
+                line += f", outcome {item.outcome}" if item.outcome else ", no final outcome recorded"
+            if item.finished_at is not None:
+                line += f", finished {_when(item.finished_at)}"
+            if item.status == "cancelled":
+                line += " (this child's own work was stopped; that is not a cancel of the root)"
+        lines.append(line)
+    if observed.more_work:
+        lines.append(f"- ({observed.more_work} more intention(s) not shown)")
+    if observed.proposals:
+        lines.append("Proposals on this root (newest first):")
+        for proposal in observed.proposals:
+            tool = neutralize_delimiters(" ".join((proposal.tool or "").split())[:OBSERVED_TOOL_CHARS])
+            line = f"- proposal {_short(proposal.id)}: tool {tool}, state {proposal.state}"
+            if proposal.executed_at is not None:
+                line += f", executed {_when(proposal.executed_at)}"
+            if proposal.state in ("executed", "failed") or proposal.result or proposal.error:
+                recorded = [name for name in ("result", "error") if getattr(proposal, name)]
+                line += f", {' and '.join(recorded)} recorded" if recorded else ", no result or error recorded"
+            lines.append(line)
+        if observed.more_proposals:
+            lines.append("- (older proposals not shown)")
+    else:
+        lines.append("Proposals on this root: none.")
+    return lines
+
+
 def build_arrival_prompt(
     claim: continuation.Claim,
     lineage_arrivals: Sequence[Any],
@@ -257,6 +367,7 @@ def build_arrival_prompt(
     settings: Any,
     *,
     root_intent: str | None = None,
+    observed: ObservedState | None = None,
 ) -> str:
     """The turn's input, from rows only (spec 4.5.4): the idle monitor deletes conversation state, so
     nothing here can come from it. ``children_of_failed_attempt`` is read as the children the claimed
@@ -266,7 +377,9 @@ def build_arrival_prompt(
     results (the intents and the earlier notes, which a lineage turn may have copied from an untrusted result) is
     neutralized too, so it cannot open or close a ``<result_message>``. Spec 4.5.4 also lists the allowed tools
     (they are in the request's tool list) and the typed summary of ``expected_result`` (the row body already is
-    2b's envelope): neither is repeated here."""
+    2b's envelope): neither is repeated here. ``observed`` is the harness's read of the root, the intentions and
+    their work, and the proposals: the turn is told that it may claim an outcome only if a row shows it (a turn
+    that had no ground truth once reported a cancel that nobody had asked for as failed)."""
     lines = [
         "This is a continuation turn: you are acting on your own, on work you started earlier. Nobody is "
         "waiting for this reply, and you cannot send anything outward from here. If something needs the "
@@ -295,6 +408,8 @@ def build_arrival_prompt(
         heading = "## Work already spawned under this work (by an earlier attempt or arrival: do not repeat it)"
         lines += ["", heading]
         lines += [f"- {neutralize_delimiters(child.intent)} ({child.state})" for child in children_of_failed_attempt]
+
+    lines += _observed_lines(observed)
 
     rows = list(claim.inbox_rows)
     lines += ["", "## Results to decide on"]
@@ -325,6 +440,9 @@ def build_arrival_prompt(
         "- report: tell the owner, in your voice, what came of it (the note is what they read).",
         "- ask: put a question to the owner (the note is the question); nothing proceeds until they answer.",
         "progress is true only if this arrival spawned work, changed the plan, or wrote memory.",
+        "Say that something was cancelled, failed, delivered, sent or done only if the harness's observed state "
+        "above, a result row, or a tool result in this turn shows it. Otherwise say it is unknown / not observed: "
+        "never infer an outcome from the intent text or from what was expected to happen.",
     ]
     return "\n".join(lines)
 
@@ -835,7 +953,10 @@ class ContinuationRunner:
         self._runner.discard_conversation(session_id)
         async with self._db.session() as session:
             earlier, spawned, root_intent, root_decision = await self._lineage_context(session, claim)
-        prompt = build_arrival_prompt(claim, earlier, spawned, limits, settings, root_intent=root_intent)
+            observed = await self._observed_state(session, claim, spawned)
+        prompt = build_arrival_prompt(
+            claim, earlier, spawned, limits, settings, root_intent=root_intent, observed=observed
+        )
         context = ExecutionContext(
             kind="continuation",
             session_id=session_id,
@@ -1060,6 +1181,91 @@ class ContinuationRunner:
         root_intent = root.intent if root is not None else None
         root_decision = root.origin_decision_id if root is not None else None
         return list(reversed(earlier)), list(spawned), root_intent, root_decision
+
+    async def _observed_state(
+        self, session: Any, claim: continuation.Claim, spawned: Sequence[Intention]
+    ) -> ObservedState:
+        """The rows of the prompt's ground-truth block, read without locks: the root's markers, the subtask or
+        DAG row behind each intention shown (the root, the claimed, the already spawned) and the root's newest
+        proposals. At most four queries, each a separate read (READ COMMITTED), so a row that changed between
+        them can disagree with another; the block says when it was read."""
+        observed_at = datetime.now(UTC)
+        root = (
+            await session.execute(
+                select(Intention).where(Intention.agent_id == self._agent_id, Intention.id == claim.root_id)
+            )
+        ).scalar_one_or_none()
+        claimed_ids = {i.id for i in claim.intentions}
+        entries: list[tuple[str, Any]] = []
+        if root is not None and root.id not in claimed_ids:
+            entries.append(("root", root))
+        entries += [("claimed", i) for i in claim.intentions]
+        entries += [("spawned", i) for i in spawned if i.id not in claimed_ids]
+        shown, more_work = entries[:OBSERVED_WORK_SHOWN], max(len(entries) - OBSERVED_WORK_SHOWN, 0)
+
+        def ids_of(kind: str) -> set[UUID]:
+            found: set[UUID] = set()
+            for _role, intention in shown:
+                if intention.source_kind == kind:
+                    try:
+                        found.add(UUID(str(intention.source_id)))
+                    except ValueError:
+                        continue
+            return found
+
+        subtasks: dict[str, tuple[str, str | None, datetime | None]] = {}
+        if subtask_ids := ids_of("subtask"):
+            rows = await session.execute(
+                select(Subtask.id, Subtask.status, Subtask.final_outcome, Subtask.completed_at).where(
+                    Subtask.agent_id == self._agent_id, Subtask.id.in_(subtask_ids)
+                )
+            )
+            subtasks = {str(r.id): (r.status, r.final_outcome, r.completed_at) for r in rows}
+        dags: dict[str, tuple[str, str | None, datetime | None]] = {}
+        if dag_ids := ids_of("dag"):
+            rows = await session.execute(
+                select(ExecutionDAG.id, ExecutionDAG.status, ExecutionDAG.completed_at).where(
+                    ExecutionDAG.agent_id == self._agent_id, ExecutionDAG.id.in_(dag_ids)
+                )
+            )
+            dags = {str(r.id): (r.status, None, r.completed_at) for r in rows}
+
+        work: list[ObservedWork] = []
+        for role, intention in shown:
+            table = {"subtask": subtasks, "dag": dags}.get(intention.source_kind)
+            if table is None:
+                work.append(ObservedWork(role, intention))
+                continue
+            try:
+                key = str(UUID(str(intention.source_id)))
+            except ValueError:
+                key = ""
+            row = table.get(key)
+            status, outcome, finished_at = row if row is not None else (None, None, None)
+            work.append(
+                ObservedWork(role, intention, intention.source_kind, row is not None, status, outcome, finished_at)
+            )
+
+        proposals = list(
+            (
+                await session.execute(
+                    select(IntentionProposal)
+                    .where(IntentionProposal.agent_id == self._agent_id, IntentionProposal.root_id == claim.root_id)
+                    .order_by(IntentionProposal.created_at.desc())
+                    .limit(OBSERVED_PROPOSALS_SHOWN + 1)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return ObservedState(
+            observed_at=observed_at,
+            root=root,
+            work=tuple(work),
+            more_work=more_work,
+            proposals=tuple(proposals[:OBSERVED_PROPOSALS_SHOWN]),
+            more_proposals=len(proposals) > OBSERVED_PROPOSALS_SHOWN,
+        )
 
     async def _commit(
         self,
