@@ -2832,10 +2832,11 @@ class Settings(BaseSettings):
         default=900,
         ge=60,
         description=(
-            "F092: seconds between surface expiry sweeps (writes no_objection "
-            "evidence, expires overdue surfaces, prunes old rows). The sweep "
-            "must run unobserved — 'silence counts' is an audit fact even when "
-            "no client ever connects."
+            "F092: seconds between surface expiry sweeps (records an "
+            "'expired_unanswered' row, expires overdue surfaces, prunes old "
+            "rows). The sweep must run unobserved — 'nobody answered' is an "
+            "audit fact even when no client ever connects, and it is never "
+            "recorded as consent."
         ),
     )
     a2ui_public_base_url: str = Field(

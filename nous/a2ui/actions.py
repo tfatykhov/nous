@@ -33,6 +33,23 @@ from nous.storage.models import A2uiAction, A2uiSurface
 
 logger = logging.getLogger(__name__)
 
+# The audit label the expiry sweep writes when a surface lapses with nobody
+# answering. Silence is never consent: expiry records that nobody answered,
+# not that anybody agreed.
+EXPIRED_UNANSWERED = "expired_unanswered"
+# Every a2ui_actions.action_name that means "expired, unanswered". Rows written
+# before 2026-10 carry the legacy "no_objection" label for the same event;
+# they are not rewritten, so readers must treat both as unanswered.
+EXPIRED_UNANSWERED_ACTIONS = frozenset({EXPIRED_UNANSWERED, "no_objection"})
+
+
+def is_expired_unanswered(action_name: str | None) -> bool:
+    """True if an a2ui_actions row records an expiry nobody answered.
+
+    Such a row is never consent, approval or acknowledgement.
+    """
+    return action_name in EXPIRED_UNANSWERED_ACTIONS
+
 
 @dataclass
 class ActionContext:
@@ -270,7 +287,7 @@ class ActionRouter:
 
         # Per-surface serialization via the SERVICE's shared lock registry
         # (codex P1): the expiry sweep takes the same lock, so expiry cannot
-        # record no_objection while an action handler is mid-dispatch, and
+        # record an unanswered expiry while an action handler is mid-dispatch, and
         # two overlapping terminal actions still dispatch exactly once (the
         # status re-read inside the lock turns the loser into a 404).
         async with self._service.surface_lock(surface_id):
@@ -556,7 +573,7 @@ def _register_default_handlers(router: ActionRouter) -> None:
         # Defer must NOT resolve (codex P2): nothing reschedules a resolved
         # card, so "Ask me later" would permanently destroy the approval.
         # The card stays live until the user decides or it expires — and
-        # expiry then writes the honest `no_objection` evidence.
+        # expiry then records it as `expired_unanswered` (never as consent).
         return ActionResult(
             message="deferred — the card stays until you decide or it expires",
             data_patches=[("/summary", "Deferred. This stays here until you decide or it expires.")],

@@ -167,9 +167,9 @@ async def _context_log_retention_loop(settings: Settings, database: Database) ->
 async def _a2ui_sweep_loop(settings: Settings, surface_service: SurfaceService) -> None:
     """Expire companion surfaces: once at startup, then every sweep interval."""
     # Sweep once at startup, then periodically. The sweep must run
-    # unobserved: expiry writes no_objection evidence ("silence
-    # counts", spec 6.2) even if no client ever connects, so it
-    # cannot be piggybacked on client activity.
+    # unobserved: expiry records "expired, unanswered" (spec 6.2:
+    # silence counts, and is never consent) even if no client ever
+    # connects, so it cannot be piggybacked on client activity.
     first = True
     while True:
         try:

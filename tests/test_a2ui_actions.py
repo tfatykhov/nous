@@ -691,7 +691,7 @@ async def test_defer_keeps_the_surface_live(
     """'Ask me later' must not destroy the approval (codex P2): nothing
 
     reschedules a resolved card, so defer leaves it live until the user
-    decides or expiry writes the honest no_objection evidence.
+    decides or expiry records it as expired_unanswered (never consent).
     """
     surface_id = await service.push_built(approval_gate(APPROVAL_PARAMS))
     nonce = (await _surface_row(db, surface_id)).nonce
