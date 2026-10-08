@@ -13,6 +13,7 @@ import asyncio
 import base64
 import logging
 import uuid
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -253,6 +254,43 @@ class TestScheduleKind:
         assert await _row(db, Schedule, sched.id) == original
         pre = await journal.get(result.pre_restore_id)
         assert undo_journal.decode_row(pre["before"])["active"] is False
+
+    async def test_restore_keeps_fires_committed_after_the_snapshot(self, db, schedules, journal):
+        # Codex P1 on #712: a restore never rewinds fire_count, last_fired_at
+        # or next_fire_at, so the same run cannot fire twice.
+        sched = await schedules.create(task="Water plants", schedule_type="recurring", interval_seconds=3600)
+        await schedules.deactivate(sched.id)
+        entry = await _only(journal, "schedule", "deactivate")
+        fired_at = datetime.now(UTC)
+        await schedules.advance(sched.id, fired_at)  # a fire that committed after the snapshot
+        fired = await _row(db, Schedule, sched.id)
+
+        result = await undo_journal.restore(entry["id"], RestoreDeps(schedules=schedules), journal)
+        assert result.success, result.message
+        row = await _row(db, Schedule, sched.id)
+        assert row["active"] is True
+        assert row["fire_count"] == 1 and row["last_fired_at"] == fired_at
+        assert row["next_fire_at"] == fired["next_fire_at"] == fired_at + timedelta(seconds=3600)
+
+    async def test_deactivate_snapshot_holds_the_row_lock(self, db, schedules, journal, monkeypatch):
+        # Codex P1 on #712: a fire cannot commit between the snapshot and the
+        # deactivate -- the snapshot is read under the deactivate's row lock.
+        sched = await schedules.create(task="t", schedule_type="recurring", interval_seconds=3600)
+        record_safe = undo_journal.record_safe
+        fire: list[asyncio.Task] = []
+
+        async def _record_during_fire(*args, **kwargs):
+            fire.append(asyncio.create_task(schedules.advance(sched.id, datetime.now(UTC))))
+            await asyncio.sleep(0.5)
+            assert not fire[0].done()  # blocked on the row lock
+            return await record_safe(*args, **kwargs)
+
+        monkeypatch.setattr(undo_journal, "record_safe", _record_during_fire)
+        await schedules.deactivate(sched.id)
+        await fire[0]
+        entry = await journal.get((await _only(journal, "schedule", "deactivate"))["id"])
+        assert undo_journal.decode_row(entry["before"])["fire_count"] == 0
+        assert (await _row(db, Schedule, sched.id))["fire_count"] == 1
 
     async def test_restore_of_create_deactivates_never_deletes(self, db, schedules, journal):
         sched = await schedules.create(task="t", schedule_type="recurring", interval_seconds=3600)

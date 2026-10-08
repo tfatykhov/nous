@@ -215,9 +215,9 @@ class ScheduleManager:
 
     async def deactivate(self, schedule_id: UUID) -> None:
         """Deactivate a schedule, and close its F099 container intention."""
-        if undo_journal.get_journal() is not None:
-            await self._record_before_deactivate(schedule_id)
         async with self._db.session() as session:
+            if undo_journal.get_journal() is not None:
+                await self._record_before_deactivate(session, schedule_id)
             await session.execute(
                 update(Schedule)
                 .where(Schedule.id == schedule_id)
@@ -272,6 +272,10 @@ class ScheduleManager:
                     await session.execute(insert(table).values(**values))
                 else:
                     values.pop("id")
+                    # A fire may have committed after the snapshot: its
+                    # progress is never rewound, or the same run fires twice.
+                    for column in ("fire_count", "last_fired_at", "next_fire_at"):
+                        values[column] = current[column]
                     await session.execute(update(table).where(table.c.id == schedule_id).values(**values))
                 await session.commit()
                 return True, f"restored schedule {schedule_id}{note}"
@@ -279,15 +283,20 @@ class ScheduleManager:
             await self._close_container(schedule_id)
         return True, f"deactivated schedule {schedule_id} (undoing its create; rows are never deleted)"
 
-    async def _record_before_deactivate(self, schedule_id: UUID) -> None:
-        """Undo journal: the row before a deactivate (never raises). A
-        schedule with an F099 container intention is recorded but not
-        restorable: the deactivate closes the container, and restore never
-        re-arms work against a closed intention."""
+    async def _record_before_deactivate(self, session: Any, schedule_id: UUID) -> None:
+        """Undo journal: the row before a deactivate, read under its row lock
+        in the deactivate's own transaction, so a fire cannot commit between
+        the snapshot and the deactivate (never raises: the reads run in a
+        savepoint, and a failed one leaves the deactivate's transaction
+        intact). A schedule with an F099 container intention is recorded but
+        not restorable: the deactivate closes the container, and restore
+        never re-arms work against a closed intention."""
         try:
             table = Schedule.__table__
-            async with self._db.session() as session:  # its own: a failed read must not abort the deactivate
-                prior = (await session.execute(select(table).where(table.c.id == schedule_id))).mappings().first()
+            async with session.begin_nested():
+                prior = (
+                    await session.execute(select(table).where(table.c.id == schedule_id).with_for_update())
+                ).mappings().first()
                 if prior is None:
                     return
                 container = await self._container_state(session, schedule_id)
