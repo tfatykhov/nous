@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import json
 import logging
@@ -367,6 +368,7 @@ class RestoreDeps:
     check_loader: Any = None  # DynamicCheckLoader
     read_config: Callable[[list[str]], dict[str, Any]] | None = None
     apply_config: Callable[[dict[str, Any]], list[str]] | None = None
+    config_lock: asyncio.Lock | None = None  # the lock config writers hold around read + record + apply
 
 
 async def restore(snapshot_id: str, deps: RestoreDeps, journal: UndoJournal | None = None) -> RestoreResult:
@@ -451,8 +453,9 @@ async def _restore_config(
 ) -> RestoreResult:
     if deps.read_config is None or deps.apply_config is None:
         return RestoreResult(False, "runtime config is not available")
-    await record_current(deps.read_config(list(before)))
-    applied = deps.apply_config(before)
+    async with deps.config_lock or contextlib.nullcontext():
+        await record_current(deps.read_config(list(before)))
+        applied = deps.apply_config(before)
     return RestoreResult(True, f"restored config fields: {', '.join(sorted(applied)) or 'none'}")
 
 

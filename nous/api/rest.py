@@ -2487,13 +2487,19 @@ def create_app(
             short for short in _HEARTBEAT_CONFIG_FIELDS
             if isinstance(body.get(short), int) and body[short] >= 0
         ]
-        if changing:
-            # Undo journal: the values before this change (never blocks).
-            await undo_journal.record_safe(
-                undo_journal.KIND_CONFIG, "heartbeat_config", "heartbeat_config", _read_heartbeat_config(changing)
-            )
-        updated = _apply_heartbeat_config(body)
+        async with _heartbeat_config_lock:
+            if changing:
+                # Undo journal: the values before this change (never blocks).
+                await undo_journal.record_safe(
+                    undo_journal.KIND_CONFIG, "heartbeat_config", "heartbeat_config", _read_heartbeat_config(changing)
+                )
+            updated = _apply_heartbeat_config(body)
         return JSONResponse({"status": "updated", "fields": updated})
+
+    # Held around read + journal write + apply, by PUT /heartbeat/config and
+    # a config restore: unlocked, two concurrent changes could both snapshot
+    # the same prior value while the journal write yields.
+    _heartbeat_config_lock = asyncio.Lock()
 
     # PUT /heartbeat/config fields (short name, without the heartbeat_ prefix).
     _HEARTBEAT_CONFIG_FIELDS = (
@@ -2556,6 +2562,7 @@ def create_app(
             check_loader=getattr(heartbeat_runner, "dynamic_loader", None) if heartbeat_on else None,
             read_config=_read_heartbeat_config if heartbeat_on else None,
             apply_config=_apply_heartbeat_config if heartbeat_on else None,
+            config_lock=_heartbeat_config_lock,
         )
         result = await undo_journal.restore(request.path_params["id"], deps, journal)
         return JSONResponse(

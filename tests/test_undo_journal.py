@@ -549,6 +549,62 @@ class TestConfigKind:
         assert not result.success and live == {"tick_interval": 99}
 
 
+    async def test_restore_waits_for_the_config_lock(self, journal):
+        # Codex P2 on #712 (#713 item 1): a restore takes the same lock as
+        # PUT /heartbeat/config around read + record + apply.
+        live = {"tick_interval": 99}
+        sid = await journal.record("config", "heartbeat_config", "heartbeat_config", {"tick_interval": 30})
+        lock = asyncio.Lock()
+        deps = RestoreDeps(
+            read_config=lambda fields: {f: live[f] for f in fields},
+            apply_config=lambda body: [k for k in body if live.__setitem__(k, body[k]) is None],
+            config_lock=lock,
+        )
+        async with lock:
+            task = asyncio.create_task(undo_journal.restore(sid, deps, journal))
+            await asyncio.sleep(0.05)
+            assert not task.done() and live == {"tick_interval": 99}
+            live["tick_interval"] = 55  # a writer holding the lock changes it
+        result = await task
+        assert result.success and live == {"tick_interval": 30}
+        assert (await journal.get(result.pre_restore_id))["before"] == {"tick_interval": 55}
+
+    async def test_concurrent_config_puts_snapshot_each_prior_value(self, journal, workspace, monkeypatch):
+        # Codex P2 on #712 (#713 item 1): two concurrent PUTs both read the
+        # same prior value while the journal write yielded, so the later
+        # snapshot skipped the state just before it.
+        from nous.api.rest import create_app
+        from nous.config import Settings
+
+        settings = Settings(workspace_dir=str(workspace))
+        heartbeat_runner = SimpleNamespace(registry=CheckRegistry())
+        app = create_app(
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            settings,
+            heartbeat_runner=heartbeat_runner,
+        )
+        record = journal.record
+
+        async def _slow_record(*args, **kwargs):
+            await asyncio.sleep(0.05)
+            return await record(*args, **kwargs)
+
+        monkeypatch.setattr(journal, "record", _slow_record)
+        original = settings.heartbeat_tick_interval
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            first = asyncio.create_task(client.put("/heartbeat/config", json={"tick_interval": original + 1}))
+            await asyncio.sleep(0.01)
+            second = asyncio.create_task(client.put("/heartbeat/config", json={"tick_interval": original + 2}))
+            assert (await first).status_code == 200 and (await second).status_code == 200
+        befores = [(await journal.get(e["id"]))["before"]["tick_interval"] for e in reversed(await journal.list(10))]
+        assert befores == [original, original + 1]
+        assert settings.heartbeat_tick_interval == original + 2
+
+
 # ---------------------------------------------------------------------------
 # End to end: every kind mutated through Nous, restored over REST
 # ---------------------------------------------------------------------------
