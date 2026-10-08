@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import threading
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -106,6 +107,37 @@ class TestJournalStore:
             await j.record("config", "x", "t", {"blob": "a" * 20_000})
         assert [e["id"] for e in await j.list(10)] == list(reversed(ids))
         assert await undo_journal.record_safe("config", "x", "t", {"blob": "a" * 20_000}) is None
+
+    async def test_concurrent_writes_at_the_bound_never_prune_each_other(self, tmp_path, monkeypatch):
+        # Codex P2 on #712 (7c7c4d2): two writers at max_entries each pruned
+        # protecting only their own file, so each could delete the other's.
+        # Here the first pruner waits for the second write; unlocked, the
+        # second prunes the first and the first then prunes the second.
+        j = UndoJournal(str(tmp_path / "j"), max_entries=1)
+        first_pruning = threading.Event()
+        second_written = threading.Event()
+        write_file, prune = j._write_file, j._prune
+
+        def _write_file(name, entry, data=None):
+            write_file(name, entry, data)
+            if first_pruning.is_set():
+                second_written.set()
+
+        def _prune(*, keep):
+            if not first_pruning.is_set():
+                first_pruning.set()
+                second_written.wait(timeout=0.5)
+            prune(keep=keep)
+
+        monkeypatch.setattr(j, "_write_file", _write_file)
+        monkeypatch.setattr(j, "_prune", _prune)
+
+        async def _second():
+            await asyncio.to_thread(first_pruning.wait, 5)
+            return await j.record("config", "x", "t", {"n": 2})
+
+        await asyncio.gather(j.record("config", "x", "t", {"n": 1}), _second())
+        assert len(await j.list(10)) == 1
 
     async def test_list_omits_payload_and_get_returns_it(self, tmp_path):
         j = UndoJournal(str(tmp_path / "j"))
