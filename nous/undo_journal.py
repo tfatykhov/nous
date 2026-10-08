@@ -77,10 +77,6 @@ class UndoJournal:
     def root(self) -> Path:
         return self._root
 
-    @property
-    def max_bytes(self) -> int:
-        return self._max_bytes
-
     def contains(self, path: str | os.PathLike[str]) -> bool:
         """Whether ``path`` resolves inside the journal directory."""
         root = os.path.realpath(self._root)
@@ -120,14 +116,19 @@ class UndoJournal:
         return snapshot_id
 
     def _write(self, entry: dict[str, Any]) -> None:
+        data = _dump(entry)
+        if len(data) > self._max_bytes:
+            # Pruning could not make room: it would delete every older
+            # snapshot and still leave the journal over its bound.
+            raise ValueError(f"snapshot of {len(data)} bytes exceeds the journal's {self._max_bytes}-byte bound")
         self._root.mkdir(mode=0o700, parents=True, exist_ok=True)
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
         name = f"{stamp}-{entry['id']}{_SUFFIX}"
-        self._write_file(name, entry)
+        self._write_file(name, entry, data)
         self._prune(keep=name)
 
-    def _write_file(self, name: str, entry: dict[str, Any]) -> None:
-        data = json.dumps(entry, separators=(",", ":")).encode("utf-8")
+    def _write_file(self, name: str, entry: dict[str, Any], data: bytes | None = None) -> None:
+        data = _dump(entry) if data is None else data
         tmp = self._root / f".{name}.tmp"
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
@@ -202,6 +203,10 @@ class UndoJournal:
             self._write_file(path.name, entry)
 
         await asyncio.to_thread(_mark)
+
+
+def _dump(entry: dict[str, Any]) -> bytes:
+    return json.dumps(entry, separators=(",", ":")).encode("utf-8")
 
 
 _journal: UndoJournal | None = None
@@ -389,7 +394,7 @@ async def restore(snapshot_id: str, deps: RestoreDeps, journal: UndoJournal | No
     kind = entry["kind"]
     try:
         if kind == KIND_FILE:
-            result = await _restore_file(entry["before"], deps.workspace_dir, record_current, journal.max_bytes)
+            result = await _restore_file(entry["before"], deps.workspace_dir, record_current)
         elif kind == KIND_SCHEDULE:
             result = await _restore_row(deps.schedules, "schedules", entry, record_current)
         elif kind == KIND_CHECK:
@@ -445,7 +450,6 @@ async def _restore_file(
     before: dict[str, Any],
     workspace_dir: str | None,
     record_current: Callable[[Any], Awaitable[None]],
-    max_bytes: int,
 ) -> RestoreResult:
     """Write the prior bytes back (or remove a file the write created), only
     while the file still holds what the pre-restore snapshot captured. The
@@ -470,7 +474,9 @@ async def _restore_file(
     except TimeoutError:
         return RestoreResult(False, f"a write to {full_path!r} is in flight; nothing was changed, retry")
     try:
-        current = await snapshot_for_write_file(full_path, root, max_bytes=max_bytes)
+        # The same per-file cap as write_file's snapshots: a larger current
+        # file cannot be saved first, so the restore does not run.
+        current = await snapshot_for_write_file(full_path, root, max_bytes=FILE_SNAPSHOT_MAX_BYTES)
         if current.get("invalid_path") or current.get("capture_error") or current.get("oversized"):
             reason = current.get("invalid_path") or current.get("capture_error") or "it is too large to snapshot"
             return RestoreResult(

@@ -98,6 +98,15 @@ class TestJournalStore:
         kept = [e["id"] for e in await j.list(10)]
         assert kept == list(reversed(ids[-2:]))
 
+    async def test_entry_over_max_bytes_is_refused_and_evicts_nothing(self, tmp_path):
+        # Codex P2 on #712: one oversized entry must not prune every older snapshot.
+        j = UndoJournal(str(tmp_path / "j"), max_bytes=10_000)
+        ids = [await j.record("config", "x", "t", {"n": i}) for i in range(3)]
+        with pytest.raises(ValueError, match="exceeds"):
+            await j.record("config", "x", "t", {"blob": "a" * 20_000})
+        assert [e["id"] for e in await j.list(10)] == list(reversed(ids))
+        assert await undo_journal.record_safe("config", "x", "t", {"blob": "a" * 20_000}) is None
+
     async def test_list_omits_payload_and_get_returns_it(self, tmp_path):
         j = UndoJournal(str(tmp_path / "j"))
         sid = await j.record("config", "x", "t", {"secret": 1})
@@ -196,6 +205,20 @@ class TestFileKind:
         result = await undo_journal.restore(newest["id"], RestoreDeps(workspace_dir=str(workspace)), journal)
         assert result.success, result.message
         assert target.read_text() == first  # the state just before the second write, not A
+
+    async def test_pre_restore_snapshot_uses_the_per_file_cap(self, workspace, journal):
+        # Codex P2 on #712: a current file over 1 MiB cannot be saved first,
+        # so the restore refuses rather than journal it whole.
+        target = workspace / "notes.txt"
+        target.write_bytes(b"small")
+        await write_file_tool("notes.txt", "next", _workspace_dir=str(workspace))
+        sid = (await _only(journal, "file"))["id"]
+        big = b"x" * (undo_journal.FILE_SNAPSHOT_MAX_BYTES + 1)
+        target.write_bytes(big)
+        result = await undo_journal.restore(sid, RestoreDeps(workspace_dir=str(workspace)), journal)
+        assert not result.success and "too large" in result.message
+        assert target.read_bytes() == big
+        assert [e["id"] for e in await journal.list(10)] == [sid]
 
     async def test_tampered_snapshot_is_refused(self, workspace, journal):
         (workspace / "a.txt").write_bytes(b"before")
