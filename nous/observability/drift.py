@@ -65,7 +65,19 @@ class DriftDetector:
         # quiet (zero-prune) snapshots has no variance, the zero-variance
         # branch has no scale to judge against, and the prune is silent on
         # both metrics at once.
-        "facts_pruned":            {"k": 2.0, "min_samples": 10, "min_abs_deviation": 50.0},
+        #
+        # Floor raised from 50 → 100 (fix/facts-pruned-drift-fp): a normal
+        # sleep cycle running stale_scan + cluster_consolidation legitimately
+        # prunes 70–100 ephemeral micro-artifact facts (Garmin sync states,
+        # fitness snapshots, bare issue# fragments). Observed: Oct 2=78,
+        # Oct 8=91, Oct 9=83 — all false positives at k=2/floor=50.
+        # Raising the floor to 100 suppresses routine sleep-cycle cleanup
+        # while still catching genuinely anomalous mass pruning (RL sweep
+        # gone wrong, etc.) which would manifest at 150+.
+        # Long-term fix: residualize facts_pruned against a sleep_prune_count
+        # metric in the snapshot (analogous to inactive_fact_delta for
+        # fact_count_delta). Tracked in GitHub issue.
+        "facts_pruned":            {"k": 2.0, "min_samples": 10, "min_abs_deviation": 100.0},
         "findings_created":        {"k": 2.0, "min_samples": 10},
         "episodes_compacted":      {"k": 2.0, "min_samples": 10},
         "contradictions_resolved": {"k": 2.0, "min_samples": 10},
