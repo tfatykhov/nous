@@ -2366,6 +2366,38 @@ def clip_shown(text: str, limit: int, *, marker: str = "") -> str:
     return "".join(out).rstrip() + marker
 
 
+def clip_text(text: str, limit: int, *, marker: str = "\u2026") -> str:
+    """``text`` cut to at most ``limit`` UTF-16 units (what Telegram counts), with ``marker`` appended inside the limit
+    when it is cut, so a reader can tell the text is incomplete. The cut falls on the last line break, else the last
+    space, when that keeps at least 70% of the room; otherwise at a character boundary. ``{dropped}`` in ``marker``
+    becomes the number of characters left out. A limit too small for the marker gives the marker alone, clipped."""
+    if utf16_units(text) <= limit:
+        return text
+    room = limit - utf16_units(marker.replace("{dropped}", str(len(text))))
+    if room <= 0:
+        return _fitting(marker.replace("{dropped}", str(len(text))), limit)
+    end = len(_fitting(text, room))
+    cut = end
+    if not text[end].isspace():
+        for sep in ("\n", " "):
+            at = text.rfind(sep, 0, end)
+            if at >= 0.7 * end:
+                cut = at
+                break
+    kept = text[:cut].rstrip()
+    return kept + marker.replace("{dropped}", str(len(text) - len(kept)))
+
+
+def _fitting(text: str, limit: int) -> str:
+    """The longest prefix of ``text`` that is at most ``limit`` UTF-16 units."""
+    used = 0
+    for i, ch in enumerate(text):
+        used += utf16_units(ch)
+        if used > limit:
+            return text[:i]
+    return text
+
+
 def proposal_note(note: str | None) -> str:
     """The arrival's note as a proposal quotes it ("Nous says"): one line, escaped, at most
     ``PROPOSAL_NOTE_MAX_CHARS`` UTF-16 units."""
