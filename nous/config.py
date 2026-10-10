@@ -1236,6 +1236,10 @@ class Settings(BaseSettings):
     continuation_turn_timeout_seconds: int = Field(default=780, ge=60)
     continuation_max_attempts: int = Field(default=3, ge=1)
     intention_proposal_ttl_hours: float = Field(default=24, gt=0)
+    # F099 lineage shell: offer bash to internal_only turns (continuations and the subtasks and
+    # DAG nodes of a lineage), each call held to tool_policy.lineage_bash_allowed (runner.sh,
+    # read-only gh and plain reads). Off: bash stays on the internal_only denylist (as before).
+    f099_lineage_shell: bool = True
 
     # F098 Phase C: result memory — a finished background subtask result
     # becomes an episode (+ document chunks), so recall_deep can find it.

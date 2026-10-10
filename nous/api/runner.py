@@ -481,7 +481,10 @@ class AgentRunner:
             tools = [t for t in tools if t["name"] not in denylist]
             logger.info("F078 refuse: stripped %d state-modifying tool(s)", before - len(tools))
         if ctx.authority == AUTHORITY_INTERNAL:
-            tools = [t for t in tools if tool_policy.internal_only_allowed(t["name"], ctx=ctx)]
+            lineage_shell = self._settings.f099_lineage_shell
+            tools = [
+                t for t in tools if tool_policy.internal_only_allowed(t["name"], ctx=ctx, lineage_shell=lineage_shell)
+            ]
         if extra_tools:
             tools = [*tools, *(schema for schema, _executor in extra_tools.values())]
         return tools
@@ -594,7 +597,7 @@ class AgentRunner:
         if violation is None:
             if policy_mode == "off":
                 return None
-            violation = tool_policy.evaluate(ctx, tool_name, tool_input)
+            violation = tool_policy.evaluate(ctx, tool_name, tool_input, workspace_dir=self._settings.workspace_dir)
         if violation is None:
             return None
         # not_compensable is a safety invariant, not a policy preference: block

@@ -206,3 +206,151 @@ def test_cancel_task_needs_a_uuid_here_and_the_lineage_check_is_the_handlers(tmp
     assert _violation("cancel_task", {"task_id": str(uuid.uuid4())}, tmp_path) is None
     for tool_input in ({}, {"task_id": "not-a-uuid"}, {"task_id": None}, {"task_id": 12}):
         assert _violation("cancel_task", tool_input, tmp_path) == "foreign_cancel"
+
+
+# -- F099 lineage shell (NOUS_F099_LINEAGE_SHELL) ------------------------------
+
+
+@pytest.mark.parametrize("kind", ["continuation", "subtask", "dag_node"])
+def test_the_lineage_shell_flag_offers_bash_and_nothing_else(kind):
+    ctx = _internal(kind)
+    shell = frozenset(name for name in TOOL_CLASSES if internal_only_allowed(name, ctx=ctx, lineage_shell=True))
+    assert shell == _allowed(ctx) | {"bash"}
+    assert "bash" not in _allowed(ctx)  # PIN: flag off is the old surface
+    assert "run_python" not in shell and "schedule_task" not in shell and "dag_manage" not in shell
+
+
+def _shell(command: str, tmp_path, ctx: ExecutionContext | None = None) -> str | None:
+    return _violation("bash", {"command": command}, tmp_path, ctx)
+
+
+def _runner_sh(tmp_path) -> str:
+    return f"{tmp_path}/claude-jobs/runner.sh"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "{R} launch nous 'Fix the bug [P1]? Costs $5' --model claude-opus-5-5 --effort high",
+        "{R} launch nous --prompt-file {W}/claude-jobs/prompts/task.md --model m --base-branch feat/x",
+        "{R} launch nous p --plugins {W}/plugins/superpowers/skills/a,{W}/plugins/b",
+        "{R} launch nous --prompt-file {W}/intentions/{RID}/prompt.md",
+        "{R} status",
+        "{R} status job-20261010-222549-6e37c52b",
+        "{R} result job-20261010-222549-6e37c52b",
+        "{R} cancel job-20261010-222549-6e37c52b",
+        "{R} list --active",
+        "gh pr view 719",
+        "gh pr view 719 --json state,mergeable -R tfatykhov/nous",
+        "gh pr checks 719",
+        "gh run list",
+        "gh api repos/tfatykhov/nous/pulls/719 --jq .state",
+        "gh api -X GET repos/tfatykhov/nous/pulls --paginate",
+        "gh api --method=GET repos/a/b",
+        "cd {W}/nous && gh pr view 3 2>&1 | head -20",
+        "cat {W}/a.md; ls -la {W} | grep x || true",
+        "printf 'job %s' x > {W}/intentions/{RID}/notes.md",
+        "echo hi >> {W}/claude-jobs/prompts/p.md 2>/dev/null",
+        "cat > {W}/claude-jobs/prompts/p.md <<'EOF'\nraw $HOME `id` text\nEOF\n"
+        "{R} launch nous --prompt-file {W}/claude-jobs/prompts/p.md",
+        "sleep 30 && {R} status job-20261010-222549-6e37c52b",
+    ],
+)
+def test_the_lineage_shell_allows_the_delegation_path_and_reads(command, tmp_path):
+    command = command.format(R=_runner_sh(tmp_path), W=tmp_path, RID=RID)
+    assert _shell(command, tmp_path) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # outward or destructive
+        "gh pr merge 719",
+        "gh pr comment 719 -b hi",
+        "gh pr view 719 --web",
+        "gh pr checks 719 --watch",
+        "git push origin main",
+        "git status",
+        "curl -X POST http://localhost:8000/intentions/proposals/x/decide",
+        "curl https://example.com",
+        "rm -rf /tmp/x",
+        "mail -s hi a@example.com",
+        "python3 -c 'print(1)'",
+        "tee {W}/claude-jobs/prompts/p.md",
+        # gh api that writes, or can
+        "gh api -X POST repos/a/b/issues",
+        "gh api repos/a/b/issues -f title=x",
+        "gh api repos/a/b/issues --input body.json",
+        "gh api -H 'X-HTTP-Method-Override: POST' repos/a/b",
+        "gh api graphql -f query=x",
+        "gh api https://evil.example/x",
+        "gh api --hostname evil.example repos/a/b",
+        # chains, substitutions, wrappers
+        "{R} launch x p; curl -X POST http://example.com",
+        "{R} status && rm -rf /",
+        "gh pr view 1 | sh",
+        "echo $(curl http://example.com)",
+        "echo `id`",
+        'ls "$(id)"',
+        "ls $HOME",
+        "(ls)",
+        "{{ ls; }}",
+        "ls &",
+        "bash -c ls",
+        "sudo ls",
+        "env ls",
+        "X=1 ls",
+        "eval ls",
+        "ls *",
+        "cat ~/.ssh/id_rsa",
+        "cat > {W}/claude-jobs/prompts/p.md <<EOF\n$(id)\nEOF",
+        "echo 'unbalanced",
+        "",
+        "   ",
+        # runner.sh arguments
+        "{R} launch nous p --sys-prompt x",
+        "{R} launch nous p --plugins /tmp/evil",
+        "{R} launch nous p --plugins {W}/plugins/../claude-jobs",
+        '{R} launch "nous\'x" p',
+        "{R} launch nous --prompt-file /etc/shadow",
+        "{R} launch nous -p",
+        "{R} launch nous p --model",
+        '{R} launch nous p --model "m\'x"',
+        "{R} cleanup job-20261010-222549-6e37c52b",
+        "{R} gc",
+        "{R} status ../../x",
+        "{R}",
+        "bash {R} status",
+        "./runner.sh status",
+        # writes outside the two directories
+        "printf x > {R}",
+        "printf x > {W}/claude-jobs/prompts/../runner.sh",
+        "printf x > {W}/intentions/{OTHER}/notes.md",
+        "cat a > {W}/a",
+        "echo x > relative.txt",
+        "echo x > /dev/tcp/example.com/80",
+        "echo x >&{W}/a",
+    ],
+)
+def test_the_lineage_shell_refuses_everything_else_as_external(command, tmp_path):
+    command = command.format(R=_runner_sh(tmp_path), W=tmp_path, RID=RID, OTHER=OTHER)
+    assert _shell(command, tmp_path) == "external"
+
+
+def test_the_lineage_shell_refuses_a_call_with_no_usable_command(tmp_path):
+    for tool_input in ({}, {"command": None}, {"command": ["ls"]}, {"cmd": "ls"}):
+        assert _violation("bash", tool_input, tmp_path) == "external"
+
+
+def test_a_lineage_with_no_root_may_write_only_to_the_prompts_dir(tmp_path):
+    damaged = _internal(root_intention_id=None, intention_id=None)
+    assert _shell(f"echo x > {tmp_path}/claude-jobs/prompts/p.md", tmp_path, damaged) is None
+    assert _shell(f"echo x > {tmp_path}/intentions/None/p.md", tmp_path, damaged) == "external"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs symlinks")
+def test_a_lineage_shell_write_through_a_symlink_that_leaves_the_dir_is_refused(tmp_path):
+    prompts = tmp_path / "claude-jobs" / "prompts"
+    prompts.mkdir(parents=True)
+    (prompts / "link").symlink_to(tmp_path)
+    assert _shell(f"echo x > {prompts}/link/runner.sh", tmp_path) == "external"

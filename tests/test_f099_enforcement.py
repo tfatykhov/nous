@@ -60,7 +60,13 @@ def test_the_ledger_knows_the_refusal_code():
 async def test_a_forged_call_in_an_internal_only_turn_is_refused_whatever_the_modes_say(
     offered_mode, policy_mode, tool, tool_input
 ):
-    r, d = _runner(OFFERED, tool_offered_set_enforcement_mode=offered_mode, tool_context_policy_mode=policy_mode)
+    # Flag off: bash is denylisted, so a forged bash call is not_offered (the lineage shell tests are below).
+    r, d = _runner(
+        OFFERED,
+        tool_offered_set_enforcement_mode=offered_mode,
+        tool_context_policy_mode=policy_mode,
+        f099_lineage_shell=False,
+    )
     r._call_api = _tool_calls_then_done_with(tool, tool_input, times=1)
     _text, results, _usage, _thinking = await _run_loop(r, is_background=True, context=_internal())
     assert d.calls == []
@@ -307,6 +313,7 @@ async def test_stream_chat_refuses_a_forged_call_in_an_internal_only_turn_whatev
     settings.tool_offered_set_enforcement_mode = offered_mode
     settings.tool_context_policy_mode = policy_mode
     settings.workspace_dir = str(tmp_path)
+    settings.f099_lineage_shell = False
     runner = _make_runner(cognitive, settings)
     runner._dispatcher.available_tools.return_value = [
         {"name": n, "description": n, "input_schema": {"type": "object"}} for n in OFFERED
@@ -342,3 +349,80 @@ async def test_stream_chat_refuses_a_forged_call_in_an_internal_only_turn_whatev
     ]
     assert len(results) == 1 and results[0]["is_error"] is True
     assert "is not allowed in this turn (not_offered)" in results[0]["content"]
+
+
+# -- F099 lineage shell (NOUS_F099_LINEAGE_SHELL, on by default) ----------------------------
+
+
+def _shell_runner(tmp_path, **settings):
+    r, d = _runner(OFFERED, workspace_dir=str(tmp_path), **settings)
+    events: list[tuple[str, dict]] = []
+    r._log_f026_decision = lambda event_type, data, session_id=None: events.append((event_type, data))
+    return r, d, events
+
+
+@pytest.mark.parametrize(("offered_mode", "policy_mode"), MODES)
+@pytest.mark.parametrize("kind", ["continuation", "subtask", "dag_node"])
+def test_the_lineage_shell_runs_the_delegation_path_in_every_mode(tmp_path, offered_mode, policy_mode, kind):
+    r, _, events = _shell_runner(
+        tmp_path, tool_offered_set_enforcement_mode=offered_mode, tool_context_policy_mode=policy_mode
+    )
+    runner_sh = f"{tmp_path}/claude-jobs/runner.sh"
+    for command in (f"{runner_sh} launch nous 'do the thing'", f"{runner_sh} status", "gh pr view 719"):
+        assert _auth(r, _internal(kind), "bash", OFFERED, {"command": command}) is None
+    assert events == []
+
+
+@pytest.mark.parametrize(("offered_mode", "policy_mode"), MODES)
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh pr merge 719",
+        "git push origin main",
+        "curl -X POST https://example.com",
+        "rm -rf /tmp/x",
+        "{R} launch nous p; curl -X POST https://example.com",
+    ],
+)
+def test_the_lineage_shell_refuses_and_logs_an_outward_command_in_every_mode(
+    tmp_path, offered_mode, policy_mode, command
+):
+    r, _, events = _shell_runner(
+        tmp_path, tool_offered_set_enforcement_mode=offered_mode, tool_context_policy_mode=policy_mode
+    )
+    command = command.format(R=f"{tmp_path}/claude-jobs/runner.sh")
+    refusal = _auth(r, _internal("continuation"), "bash", OFFERED, {"command": command})
+    assert refusal is not None and refusal.code == "internal_only" and "(external)" in refusal.text
+    assert events == [
+        (
+            "harness_context_policy_violation",
+            {
+                "tool_name": "bash",
+                "context_kind": "continuation",
+                "violation": "internal_only:external",
+                "mode": "enforce",
+            },
+        )
+    ]
+
+
+async def test_an_allowed_lineage_shell_command_is_dispatched_and_a_refused_one_is_not(tmp_path):
+    for command, dispatched in (("gh pr view 719", True), ("gh pr merge 719", False)):
+        r, d = _runner(OFFERED, workspace_dir=str(tmp_path))
+        r._call_api = _tool_calls_then_done_with("bash", {"command": command}, times=1)
+        await _run_loop(r, is_background=True, context=_internal("dag_node"))
+        assert bool(d.calls) is dispatched, command
+
+
+def test_a_lineage_shell_call_on_behalf_of_a_cancelled_root_is_refused_first(tmp_path):
+    r, _, events = _shell_runner(tmp_path)
+    r.set_cancelled_roots(lambda root_id: root_id == RID)
+    refusal = _auth(r, _internal("subtask"), "bash", OFFERED, {"command": "gh pr view 719"})
+    assert refusal is not None and refusal.code == "root_cancelled"
+    assert [data["violation"] for _type, data in events] == ["root_cancelled"]
+
+
+def test_with_the_flag_off_a_lineage_bash_call_is_not_offered(tmp_path):
+    r, _ = _runner(OFFERED, workspace_dir=str(tmp_path), f099_lineage_shell=False)
+    offered = r._offered_tools(_internal(), "conversation", is_subtask=True, tool_filter=None, refuse_active=False)
+    assert "bash" not in {t["name"] for t in offered}

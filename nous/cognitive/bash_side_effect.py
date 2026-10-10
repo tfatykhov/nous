@@ -206,6 +206,76 @@ def command_runs(command: str, exit_code: int | None) -> list[tuple[str, list[st
         return None
 
 
+_HEREDOC_OPEN = re.compile(r"(?<!<)<<(?!<)")
+# Outside single quotes these expand to something this reader cannot see. In
+# a double-quoted word only `$` and a backtick do.
+_BARE_EXPANSION = re.compile(r"[$`*?\[{~]")
+_DQ_EXPANSION = re.compile(r"[$`]")
+
+
+def simple_commands(command: str) -> list[tuple[list[str], list[str], str]] | None:
+    """Every simple command in ``command`` as ``(words, output targets, the
+    operator after it)``, or None when it cannot be read exactly.
+
+    For the F099 lineage shell allowlist (``tool_policy``), which must see
+    exactly what runs. None: over the size cap, an unbalanced quote, a
+    redirect with no target, or a word that expands -- ``$`` or a backtick
+    outside single quotes, an unquoted glob, brace or tilde, or ``$`` or a
+    backtick in the body of a heredoc whose delimiter is unquoted. Words are
+    de-quoted; input redirections and heredoc bodies are dropped; an fd
+    duplication (``2>&1``) is not an output target; the operator after the
+    last command is ``""``. Total: anything unexpected is None.
+    """
+    if len(command) > _MAX_COMMAND_CHARS:
+        return None
+    try:
+        kept, bodies = _split_heredocs(command)
+        if any("$" in b or "`" in b for b in bodies):
+            for m in _HEREDOC_OPEN.finditer(kept):
+                delim = _HEREDOC_DELIM.match(kept, m.end())
+                if delim is None or delim.group(4) is not None:
+                    return None
+        for m in _LEX.finditer(kept):
+            kind = m.lastgroup
+            if (kind == "bare" and _BARE_EXPANSION.search(m.group(kind))) or (
+                kind == "dq" and _DQ_EXPANSION.search(m.group(kind))
+            ):
+                return None
+        tokens = _lex(kept)
+        if tokens is None:
+            return None
+        commands: list[tuple[list[str], list[str], str]] = []
+        words: list[str] = []
+        targets: list[str] = []
+        expect: str | None = None
+        for tok, is_operator in tokens:
+            if not is_operator:
+                if expect == "out" or (expect == "dup" and not (tok.isdigit() or tok == "-")):
+                    targets.append(tok)
+                elif expect is None:
+                    words.append(tok)
+                expect = None
+                continue
+            for op in _OPERATOR.findall(tok):
+                if expect is not None:
+                    return None
+                if op in _OUTPUT_REDIRECTS:
+                    expect = "out"
+                elif op == ">&":
+                    expect = "dup"
+                elif op in _INPUT_REDIRECTS:
+                    expect = "in"
+                else:
+                    commands.append((words, targets, op))
+                    words, targets = [], []
+        if expect is not None:
+            return None
+        commands.append((words, targets, ""))
+        return commands
+    except Exception:
+        return None
+
+
 _MAX_STRING_DEPTH = 3
 _CONSTANT_COMMANDS = {"true": True, ":": True, "false": False}
 _GLOB = re.compile(r"[*?\[]")  # a case pattern that is not a literal word

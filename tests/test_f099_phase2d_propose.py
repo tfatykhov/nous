@@ -62,7 +62,14 @@ def _dispatcher(*names: str) -> ToolDispatcher:
     return dispatcher
 
 
-def _propose(*, spawn_blocked: bool = False, stage_error: Exception | None = None, proposal_id=None):
+def _propose(
+    *,
+    spawn_blocked: bool = False,
+    stage_error: Exception | None = None,
+    proposal_id=None,
+    lineage_shell: bool = False,
+    workspace_dir: str = "/tmp/nous-workspace",
+):
     """The executor over a fake store: ``(executor, state, staged calls)``."""
     staged: list[tuple[str, dict, str]] = []
 
@@ -85,7 +92,12 @@ def _propose(*, spawn_blocked: bool = False, stage_error: Exception | None = Non
     )
     state = ArrivalState()
     executor = make_propose_action_executor(
-        state, ctx=_ctx(spawn_blocked=spawn_blocked), dispatcher=dispatcher, stage=fake_stage
+        state,
+        ctx=_ctx(spawn_blocked=spawn_blocked),
+        dispatcher=dispatcher,
+        stage=fake_stage,
+        lineage_shell=lineage_shell,
+        workspace_dir=workspace_dir,
     )
     return executor, state, staged
 
@@ -168,6 +180,32 @@ async def test_a_denylisted_local_tool_may_be_proposed(tool):
     executor, state, staged = _propose()
     _text, is_error = await executor(tool=tool, arguments={"command": "ls"}, rationale="They asked.")
     assert is_error is False and staged and state.proposals
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git push origin main",
+        "gh pr merge 719",
+        "curl -X POST https://example.com",
+        "rm -rf /tmp/x",
+        "{R} launch nous p; curl -X POST https://example.com",
+    ],
+)
+async def test_with_the_lineage_shell_a_bash_command_the_allowlist_refuses_may_still_be_proposed(command, tmp_path):
+    executor, state, staged = _propose(lineage_shell=True, workspace_dir=str(tmp_path))
+    command = command.format(R=f"{tmp_path}/claude-jobs/runner.sh")
+    _text, is_error = await executor(tool="bash", arguments={"command": command}, rationale="They asked.")
+    assert is_error is False and staged and state.proposals
+
+
+@pytest.mark.parametrize("command", ["ls", "gh pr view 719", "{R} status"])
+async def test_with_the_lineage_shell_an_allowed_bash_command_is_not_a_proposal(command, tmp_path):
+    executor, state, staged = _propose(lineage_shell=True, workspace_dir=str(tmp_path))
+    command = command.format(R=f"{tmp_path}/claude-jobs/runner.sh")
+    text, is_error = await executor(tool="bash", arguments={"command": command}, rationale="r")
+    assert is_error is True and "call it yourself" in text
+    assert staged == [] and state.proposals == []
 
 
 @pytest.mark.parametrize(

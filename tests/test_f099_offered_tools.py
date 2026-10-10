@@ -44,6 +44,14 @@ CHECK_DECLARED = frozenset(
 )
 
 
+# NOUS_F099_LINEAGE_SHELL: on, bash is offered too (its calls are held to the lineage allowlist).
+SHELL_FLAG = pytest.mark.parametrize("lineage_shell", [True, False], ids=["shell", "no_shell"])
+
+
+def _shell(lineage_shell: bool) -> frozenset[str]:
+    return frozenset({"bash"}) if lineage_shell else frozenset()
+
+
 async def _noop(**_):
     return "ok", False
 
@@ -113,18 +121,30 @@ def test_owner_contexts_are_offered_exactly_what_they_were_before_f099():  # PIN
     assert checked == len(OWNER_KINDS) * 48
 
 
+@SHELL_FLAG
 @pytest.mark.parametrize("kind", OWNER_KINDS)
 @pytest.mark.parametrize("is_subtask", [False, True])
-def test_a_lineage_turn_that_is_not_a_continuation_is_offered_no_spawn_external_or_denylisted_tool(kind, is_subtask):
-    r, _ = _runner(ALL_TOOLS)
+def test_a_lineage_turn_that_is_not_a_continuation_is_offered_no_spawn_external_or_denylisted_tool(
+    kind, is_subtask, lineage_shell
+):
+    r, _ = _runner(ALL_TOOLS, f099_lineage_shell=lineage_shell)
     tools = r._offered_tools(
         _internal(kind), "conversation", is_subtask=is_subtask, tool_filter=None, refuse_active=False
     )
-    assert _names(tools) == LINEAGE_ALLOWED
+    assert _names(tools) == LINEAGE_ALLOWED | _shell(lineage_shell)
 
 
-def test_a_continuation_is_offered_the_spawn_tools_until_its_root_is_at_a_limit():
+def test_the_lineage_shell_is_on_by_default():
     r, _ = _runner(ALL_TOOLS)
+    assert r._settings.f099_lineage_shell is True
+    assert "bash" in _names(
+        r._offered_tools(_internal(), "conversation", is_subtask=True, tool_filter=None, refuse_active=False)
+    )
+
+
+@SHELL_FLAG
+def test_a_continuation_is_offered_the_spawn_tools_until_its_root_is_at_a_limit(lineage_shell):
+    r, _ = _runner(ALL_TOOLS, f099_lineage_shell=lineage_shell)
 
     def offered(**over):
         return _names(
@@ -137,8 +157,8 @@ def test_a_continuation_is_offered_the_spawn_tools_until_its_root_is_at_a_limit(
             )
         )
 
-    assert offered() == LINEAGE_ALLOWED | SPAWN
-    assert offered(spawn_blocked=True) == LINEAGE_ALLOWED
+    assert offered() == LINEAGE_ALLOWED | SPAWN | _shell(lineage_shell)
+    assert offered(spawn_blocked=True) == LINEAGE_ALLOWED | _shell(lineage_shell)
 
 
 def test_the_narrowing_composes_with_refuse_and_the_subtask_exclusion():
@@ -154,14 +174,16 @@ def test_the_narrowing_composes_with_refuse_and_the_subtask_exclusion():
     assert "spawn_task" not in _names(tools)
 
 
-def test_a_lineage_check_loses_the_tools_it_declared_that_the_narrowing_denies():
-    """Phase 1 carry-over: a stamped check cannot be offered heartbeat_check_create (or bash)."""
-    r, _ = _runner(ALL_TOOLS)
+@SHELL_FLAG
+def test_a_lineage_check_loses_the_tools_it_declared_that_the_narrowing_denies(lineage_shell):
+    """Phase 1 carry-over: a stamped check cannot be offered heartbeat_check_create (nor bash without the flag)."""
+    r, _ = _runner(ALL_TOOLS, f099_lineage_shell=lineage_shell)
     declared = sorted(CHECK_TOOLS)
     ctx = _internal("heartbeat_check", declared_tools=tuple(declared))
     tools = r._offered_tools(ctx, "conversation", is_subtask=True, tool_filter=declared, refuse_active=False)
-    assert _names(tools) == {"web_search", "web_fetch", "recall_deep", "recall_recent", "read_file"}
-    assert not _names(tools) & {"bash", "heartbeat_check_create", "heartbeat_check_manage"}
+    expected = {"web_search", "web_fetch", "recall_deep", "recall_recent", "read_file"} | _shell(lineage_shell)
+    assert _names(tools) == expected
+    assert not _names(tools) & {"heartbeat_check_create", "heartbeat_check_manage"}
     # PIN: the same check with no lineage is offered everything it declared.
     owner = ExecutionContext(kind="heartbeat_check", session_id="s1", declared_tools=tuple(declared))
     tools = r._offered_tools(owner, "conversation", is_subtask=True, tool_filter=declared, refuse_active=False)
@@ -169,7 +191,7 @@ def test_a_lineage_check_loses_the_tools_it_declared_that_the_narrowing_denies()
 
 
 def test_extra_tools_follow_the_narrowing_and_are_not_filtered():
-    r, _ = _runner(ALL_TOOLS)
+    r, _ = _runner(ALL_TOOLS, f099_lineage_shell=False)
     schema = {"name": "resolve_intention", "description": "d", "input_schema": {"type": "object"}}
     tools = r._offered_tools(
         _internal("continuation"),
@@ -193,6 +215,7 @@ def _capturing_api(seen: list[set[str]]):
     return fake_call_api
 
 
+@SHELL_FLAG
 @pytest.mark.parametrize("offered_mode", MODES)
 @pytest.mark.parametrize("policy_mode", MODES)
 @pytest.mark.parametrize(
@@ -205,13 +228,18 @@ def _capturing_api(seen: list[set[str]]):
     ids=["continuation", "subtask", "dag_node"],
 )
 async def test_the_model_is_sent_no_external_or_denylisted_tool_under_any_mode(
-    offered_mode, policy_mode, ctx, is_subtask, expected
+    offered_mode, policy_mode, ctx, is_subtask, expected, lineage_shell
 ):
-    r, _ = _runner(ALL_TOOLS, tool_offered_set_enforcement_mode=offered_mode, tool_context_policy_mode=policy_mode)
+    r, _ = _runner(
+        ALL_TOOLS,
+        tool_offered_set_enforcement_mode=offered_mode,
+        tool_context_policy_mode=policy_mode,
+        f099_lineage_shell=lineage_shell,
+    )
     seen: list[set[str]] = []
     r._call_api = _capturing_api(seen)
     await _run_loop(r, is_background=True, is_subtask=is_subtask, context=ctx)
-    assert seen == [expected]
+    assert seen == [expected | _shell(lineage_shell)]
 
 
 @pytest.mark.parametrize("kind", ["subtask", "dag_node", "scheduled", "heartbeat_check"])
@@ -219,7 +247,7 @@ async def test_the_tool_loop_offers_a_damaged_stamp_the_narrowed_set_with_no_spa
     """A stamp lineage_from_stamp cannot read fails closed to internal_only with no
     intention or root id. is_subtask=False, so the 012.2 exclusion is not what
     removes spawn_task: the narrowing is."""
-    r, _ = _runner(ALL_TOOLS)
+    r, _ = _runner(ALL_TOOLS, f099_lineage_shell=False)
     seen: list[set[str]] = []
     r._call_api = _capturing_api(seen)
     damaged = ExecutionContext(kind=kind, session_id="s1", authority="internal_only")
@@ -228,7 +256,8 @@ async def test_the_tool_loop_offers_a_damaged_stamp_the_narrowed_set_with_no_spa
     assert not seen[0] & SPAWN
 
 
-async def test_stream_chat_offers_an_internal_only_turn_the_narrowed_set(monkeypatch, tmp_path):
+@SHELL_FLAG
+async def test_stream_chat_offers_an_internal_only_turn_the_narrowed_set(monkeypatch, tmp_path, lineage_shell):
     """stream_chat shares the helper, so it shares the narrowing.
 
     In production stream_chat's context is always interactive and owner, so no
@@ -247,6 +276,7 @@ async def test_stream_chat_offers_an_internal_only_turn_the_narrowed_set(monkeyp
     turn_context.refuse_active = False
     settings = _make_mock_settings()
     settings.workspace_dir = str(tmp_path)
+    settings.f099_lineage_shell = lineage_shell
     runner = _make_runner(cognitive, settings)
     runner._dispatcher.available_tools.return_value = [
         {"name": n, "description": n, "input_schema": {"type": "object"}}
@@ -267,4 +297,4 @@ async def test_stream_chat_offers_an_internal_only_turn_the_narrowed_set(monkeyp
 
     runner._call_api_stream = MagicMock(side_effect=fake_stream)
     [e async for e in runner.stream_chat("s1", "hi")]
-    assert offered == [{"recall_deep", "write_file", "web_fetch"}]
+    assert offered == [{"recall_deep", "write_file", "web_fetch"} | _shell(lineage_shell)]
