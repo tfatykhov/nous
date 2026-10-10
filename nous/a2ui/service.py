@@ -39,6 +39,7 @@ from nous.storage.database import Database
 from nous.storage.models import A2uiAction, A2uiOutbox, A2uiSurface
 
 from .actions import EXPIRED_UNANSWERED
+from .builders.heartbeat_findings import fully_triaged
 from .dsl import BuiltSurface, SurfaceValidationError
 from .grammar import lint_micro_app
 
@@ -75,6 +76,11 @@ class FallbackOverwriteRefused(Exception):
 # section, body, footer). A live app with more than this carries real
 # authored content, so replacing it with a fallback is a net loss.
 _FALLBACK_COMPONENT_COUNT = 5
+
+
+def _card_triaged(data_model: Any) -> bool:
+    """``fully_triaged`` on a stored data model, tolerating a non-dict row."""
+    return isinstance(data_model, dict) and fully_triaged(data_model.get("findings"))
 
 
 def _overwrite_refusal(existing: A2uiSurface, dedup_key: str | None) -> str | None:
@@ -1119,6 +1125,19 @@ class SurfaceService:
         that evidence into brain.decisions rides with the escalation
         integration, not this PR — a2ui_actions is the durable audit tier.)
         """
+        # Fully triaged findings cards close BEFORE the expiry claims (codex
+        # P1): an overdue card whose final resolve failed to deliver was
+        # answered, so it must end resolved, never expired_unanswered.
+        # Never lets a reconciliation failure abort expiry/retention for
+        # every other surface (codex P1).
+        try:
+            closed = await self.close_triaged_findings_surfaces()
+        except Exception:
+            logger.warning("F092: findings-card reconciliation failed", exc_info=True)
+            closed = 0
+        if closed:
+            logger.info("F092: closed %d fully-triaged findings card(s)", closed)
+
         now = datetime.now(UTC)
         agent_id = self._settings.agent_id
         async with self._db.session() as session:
@@ -1147,12 +1166,35 @@ class SurfaceService:
             # silence claim can never both land.
             async with self.surface_lock(surface_id):
                 async with self._db.session() as session:
+                    # A findings card triaged after the reconciliation above
+                    # is left live for the next sweep to close, not expired.
+                    current = await self._get_own(session, surface_id)
+                    is_findings = (
+                        current is not None
+                        and current.kind == "heartbeat_findings"
+                    )
+                    observed_model = deepcopy(current.data_model) if is_findings else None
+                    if is_findings and _card_triaged(observed_model):
+                        continue
                     # Deadline REVALIDATED inside the claim (codex P1): a
                     # dedup refresh that ran while we waited for the lock
                     # moves expires_at into the future — claiming on
                     # liveness alone would delete the fresh card and record
                     # a false expired-unanswered row.
                     claim_now = datetime.now(UTC)
+                    # Codex R4 P1: recheck triage atomically with the expiry
+                    # claim. surface_lock is process-local and does not
+                    # serialise across workers; a final Resolve/Dismiss on
+                    # another worker can commit between the SELECT above and
+                    # this UPDATE. Binding data_model == observed_model makes
+                    # the claim a no-op when that happens — claimed[] will be
+                    # empty and the loop `continue`s, leaving the card for
+                    # the next sweep's close_triaged_findings_surfaces pass.
+                    _expiry_extra = (
+                        [A2uiSurface.data_model == observed_model]
+                        if is_findings and observed_model is not None
+                        else []
+                    )
                     claimed = (
                         (
                             await session.execute(
@@ -1163,6 +1205,7 @@ class SurfaceService:
                                     A2uiSurface.status == "live",
                                     A2uiSurface.expires_at.is_not(None),
                                     A2uiSurface.expires_at <= claim_now,
+                                    *_expiry_extra,
                                 )
                                 .values(status="expired", resolved_at=claim_now)
                                 .returning(
@@ -1237,6 +1280,97 @@ class SurfaceService:
                 )
             await session.commit()
         return expired
+
+    async def close_triaged_findings_surfaces(self) -> int:
+        """Resolve live heartbeat_findings cards whose findings are all answered.
+
+        The action handler closes a card on its final resolve/dismiss; this
+        catches the rest — cards triaged before that existed, and a final
+        press whose resolve failed to deliver. Idempotent: only live cards
+        whose every finding is resolve/dismiss are claimed, each under its
+        surface lock with the check repeated inside the claim. Status is
+        ``resolved`` (the user answered everything), with an ``auto_closed``
+        audit row so the close is attributable to the sweep. One card that
+        fails (e.g. a malformed legacy row) is logged and skipped, never
+        aborting the rest.
+        """
+        agent_id = self._settings.agent_id
+        async with self._db.session() as session:
+            candidates = (
+                await session.execute(
+                    select(A2uiSurface.surface_id, A2uiSurface.data_model).where(
+                        A2uiSurface.agent_id == agent_id,
+                        A2uiSurface.status == "live",
+                        A2uiSurface.kind == "heartbeat_findings",
+                    )
+                )
+            ).all()
+
+        closed = 0
+        for surface_id, data_model in candidates:
+            if not _card_triaged(data_model):
+                continue
+            try:
+                if await self._close_triaged_card(surface_id):
+                    closed += 1
+            except Exception:
+                logger.warning("F092: auto-close of %s failed; skipped", surface_id, exc_info=True)
+        return closed
+
+    async def _close_triaged_card(self, surface_id: str) -> bool:
+        """Claim one fully triaged findings card as resolved; False if lost."""
+        agent_id = self._settings.agent_id
+        async with self.surface_lock(surface_id):
+            async with self._db.session() as session:
+                surface = await self._get_own(session, surface_id)
+                if surface is None or surface.status != "live" or not _card_triaged(surface.data_model):
+                    return False
+                observed = deepcopy(surface.data_model)
+                now = datetime.now(UTC)
+                was_pushed = surface.push_notified_at is not None
+                # Conditional claim (codex P2): surface_lock is
+                # per-process, so a second sweeping process that read
+                # the same live row must win nothing here. Bound to the
+                # data model judged triaged (codex P1): a dedup refresh in
+                # another process can swap in an all-open card between the
+                # read and this UPDATE, and that card must stay live. The
+                # nonce rotates on every dedup replacement, so it binds too.
+                claimed = (
+                    await session.execute(
+                        update(A2uiSurface)
+                        .where(
+                            A2uiSurface.surface_id == surface_id,
+                            A2uiSurface.agent_id == agent_id,
+                            A2uiSurface.status == "live",
+                            A2uiSurface.nonce == surface.nonce,
+                            A2uiSurface.data_model == observed,
+                        )
+                        .values(status="resolved", resolved_at=now)
+                        .returning(A2uiSurface.surface_id)
+                    )
+                ).all()
+                if not claimed:
+                    return False
+                session.add(
+                    A2uiAction(
+                        agent_id=agent_id,
+                        surface_id=surface_id,
+                        action_name="auto_closed",
+                        actor="system:sweep",
+                        context={"reason": "every finding resolved or dismissed"},
+                        status="completed",
+                        completed_at=now,
+                    )
+                )
+                envelope = {"version": "v1.0", "deleteSurface": {"surfaceId": surface_id}}
+                row = A2uiOutbox(agent_id=agent_id, surface_id=surface_id, envelope=envelope)
+                session.add(row)
+                await session.commit()
+                seq = row.seq
+            self._broadcast(seq, envelope)
+            if was_pushed:
+                self._schedule_dismiss([surface_id])
+            return True
 
     async def invalidate_heartbeat_surfaces(self) -> int:
         """Expire live heartbeat surfaces at process start (codex P2).

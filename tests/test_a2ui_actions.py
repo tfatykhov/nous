@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 
 from nous.a2ui.actions import ActionRouter
 from nous.a2ui.builders import action_review, approval_gate, heartbeat_findings
@@ -38,6 +38,13 @@ APPROVAL_PARAMS = {
 
 FINDINGS_PARAMS = {
     "findings": [{"fingerprint": "fp-abc-123", "message": "Disk at 91%.", "urgency": "high"}]
+}
+
+TWO_FINDINGS_PARAMS = {
+    "findings": [
+        {"fingerprint": "fp-abc-123", "message": "Disk at 91%.", "urgency": "high"},
+        {"fingerprint": "fp-def-456", "message": "Backup is 2 days old."},
+    ]
 }
 
 
@@ -479,7 +486,7 @@ async def test_actor_defaults_to_unattributed(
 async def test_heartbeat_verbs_delegate_to_the_finding_store(
     router: ActionRouter, service: SurfaceService, db, finding_store: FakeFindingStore
 ) -> None:
-    surface_id = await service.push_built(heartbeat_findings(FINDINGS_PARAMS))
+    surface_id = await service.push_built(heartbeat_findings(TWO_FINDINGS_PARAMS))
     nonce = (await _surface_row(db, surface_id)).nonce
 
     status, payload = await router.handle(
@@ -502,6 +509,191 @@ async def test_heartbeat_verbs_delegate_to_the_finding_store(
     assert surface.data_model["status"]["fp-abc-123"].startswith("✓ Resolved")
     assert payload["message"].startswith("✓ Resolved")
     assert payload["resolved"] is False
+
+
+async def _press(router: ActionRouter, surface_id: str, nonce: str, name: str, fingerprint: str | None = None):
+    context = {"fingerprint": fingerprint} if fingerprint is not None else {}
+    return await router.handle(_body(name, surface_id, nonce=nonce, context=context), content_type=JSON)
+
+
+async def test_resolving_the_last_open_finding_closes_the_card(
+    router: ActionRouter, service: SurfaceService, db
+) -> None:
+    """Tim, 2026-10-10: once every finding has a resolution the card closes."""
+    surface_id = await service.push_built(heartbeat_findings(TWO_FINDINGS_PARAMS))
+    nonce = (await _surface_row(db, surface_id)).nonce
+
+    status, payload = await _press(router, surface_id, nonce, "heartbeat.resolve", "fp-abc-123")
+    assert status == 200 and payload["resolved"] is False
+    assert (await _surface_row(db, surface_id)).status == "live"
+
+    status, payload = await _press(router, surface_id, nonce, "heartbeat.resolve", "fp-def-456")
+    assert status == 200
+    assert payload["resolved"] is True
+    assert payload["message"].startswith("✓ Resolved"), "the final press still confirms"
+    surface = await _surface_row(db, surface_id)
+    assert surface.status == "resolved"
+    # The final patch landed before the resolve.
+    assert surface.data_model["findings"] == {"fp-abc-123": "resolve", "fp-def-456": "resolve"}
+    assert surface.data_model["status"]["fp-def-456"].startswith("✓ Resolved")
+
+
+async def test_a_mix_of_resolve_and_dismiss_closes_the_card(
+    router: ActionRouter, service: SurfaceService, db
+) -> None:
+    surface_id = await service.push_built(heartbeat_findings(TWO_FINDINGS_PARAMS))
+    nonce = (await _surface_row(db, surface_id)).nonce
+
+    await _press(router, surface_id, nonce, "heartbeat.dismiss", "fp-abc-123")
+    status, payload = await _press(router, surface_id, nonce, "heartbeat.resolve", "fp-def-456")
+
+    assert status == 200 and payload["resolved"] is True
+    assert (await _surface_row(db, surface_id)).status == "resolved"
+
+
+async def test_an_acknowledged_finding_keeps_the_card_open(
+    router: ActionRouter, service: SurfaceService, db
+) -> None:
+    """Acknowledge is not terminal: the item still waits for Resolve/Dismiss."""
+    surface_id = await service.push_built(heartbeat_findings(TWO_FINDINGS_PARAMS))
+    nonce = (await _surface_row(db, surface_id)).nonce
+
+    await _press(router, surface_id, nonce, "heartbeat.acknowledge", "fp-abc-123")
+    status, payload = await _press(router, surface_id, nonce, "heartbeat.resolve", "fp-def-456")
+
+    assert status == 200 and payload["resolved"] is False
+    surface = await _surface_row(db, surface_id)
+    assert surface.status == "live"
+    assert surface.data_model["findings"] == {"fp-abc-123": "acknowledge", "fp-def-456": "resolve"}
+
+
+@pytest.mark.parametrize("verb", ["resolve", "dismiss"])
+async def test_a_single_finding_card_closes_on_a_terminal_verb(
+    router: ActionRouter, service: SurfaceService, db, verb: str
+) -> None:
+    surface_id = await service.push_built(heartbeat_findings(FINDINGS_PARAMS))
+    nonce = (await _surface_row(db, surface_id)).nonce
+
+    status, payload = await _press(router, surface_id, nonce, f"heartbeat.{verb}", "fp-abc-123")
+
+    assert status == 200 and payload["resolved"] is True
+    surface = await _surface_row(db, surface_id)
+    assert surface.status == "resolved"
+    assert surface.data_model["findings"] == {"fp-abc-123": verb}
+
+
+async def test_a_single_finding_card_stays_open_on_acknowledge(
+    router: ActionRouter, service: SurfaceService, db
+) -> None:
+    surface_id = await service.push_built(heartbeat_findings(FINDINGS_PARAMS))
+    nonce = (await _surface_row(db, surface_id)).nonce
+
+    status, payload = await _press(router, surface_id, nonce, "heartbeat.acknowledge", "fp-abc-123")
+
+    assert status == 200 and payload["resolved"] is False
+    assert (await _surface_row(db, surface_id)).status == "live"
+
+
+async def test_a_press_on_a_legacy_list_findings_map_does_not_close_or_crash(
+    router: ActionRouter, service: SurfaceService, db
+) -> None:
+    """Codex P1 sweep-through: a malformed legacy card whose ``/findings`` is
+    a list cannot be merged into a triage check; the press must not raise
+    out of the handler, and the card is never closed on it."""
+    surface_id = await service.push_built(heartbeat_findings(FINDINGS_PARAMS))
+    async with db.session() as session:
+        await session.execute(
+            text(
+                "UPDATE nous_system.a2ui_surfaces SET data_model = "
+                "'{\"findings\": [\"fp-abc-123\"]}'::jsonb WHERE surface_id = :sid"
+            ),
+            {"sid": surface_id},
+        )
+        await session.commit()
+    nonce = (await _surface_row(db, surface_id)).nonce
+
+    status, payload = await _press(router, surface_id, nonce, "heartbeat.resolve", "fp-abc-123")
+
+    assert status != 500, payload
+    assert payload.get("resolved") is not True
+    assert (await _surface_row(db, surface_id)).status == "live"
+
+
+async def test_sweep_leaves_a_card_pushed_with_terminal_status_open(
+    service: SurfaceService, db, a2ui_agent_id: str
+) -> None:
+    """Codex P1: a caller-supplied resolve/dismiss status is not a user
+    answer, so the sweep must not auto-close the freshly pushed card."""
+    surface_id = await service.push_built(
+        heartbeat_findings(
+            {
+                "findings": [
+                    {"fingerprint": "fp-abc-123", "status": "resolve"},
+                    {"fingerprint": "fp-def-456", "status": "dismiss"},
+                ]
+            }
+        )
+    )
+
+    await service.expire_sweep()
+
+    surface = await _surface_row(db, surface_id)
+    assert surface.status == "live"
+    assert surface.data_model["findings"] == {"fp-abc-123": "open", "fp-def-456": "open"}
+    assert await _audits(db, a2ui_agent_id) == []
+
+
+async def test_sweep_closes_a_card_triaged_by_recorded_presses(
+    router: ActionRouter, service: SurfaceService, db, a2ui_agent_id: str, monkeypatch
+) -> None:
+    """Every finding answered through the router, but the final press's
+    resolve failed to deliver: the sweep closes the card."""
+    surface_id = await service.push_built(heartbeat_findings(TWO_FINDINGS_PARAMS))
+    nonce = (await _surface_row(db, surface_id)).nonce
+    await _press(router, surface_id, nonce, "heartbeat.dismiss", "fp-abc-123")
+
+    async def undelivered(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("delivery failed")
+
+    monkeypatch.setattr(service, "resolve", undelivered)
+    status, payload = await _press(router, surface_id, nonce, "heartbeat.resolve", "fp-def-456")
+    monkeypatch.undo()
+    assert status == 200 and payload["resolved"] is False
+    assert (await _surface_row(db, surface_id)).status == "live"
+
+    await service.expire_sweep()
+
+    assert (await _surface_row(db, surface_id)).status == "resolved"
+    audits = await _audits(db, a2ui_agent_id)
+    assert [(a.action_name, a.status) for a in audits] == [
+        ("heartbeat.dismiss", "completed"),
+        ("heartbeat.resolve", "completed"),
+        ("auto_closed", "completed"),
+    ]
+
+
+async def test_close_card_resolves_without_touching_the_finding_store(
+    router: ActionRouter,
+    service: SurfaceService,
+    db,
+    finding_store: FakeFindingStore,
+    a2ui_agent_id: str,
+) -> None:
+    surface_id = await service.push_built(heartbeat_findings(TWO_FINDINGS_PARAMS))
+    nonce = (await _surface_row(db, surface_id)).nonce
+    await _press(router, surface_id, nonce, "heartbeat.acknowledge", "fp-abc-123")
+    finding_store.calls.clear()
+
+    status, payload = await _press(router, surface_id, nonce, "heartbeat.close_card")
+
+    assert status == 200 and payload["resolved"] is True
+    assert finding_store.calls == []
+    assert finding_store.outcomes == []
+    surface = await _surface_row(db, surface_id)
+    assert surface.status == "resolved"
+    assert surface.data_model["findings"] == {"fp-abc-123": "acknowledge", "fp-def-456": "open"}
+    audits = await _audits(db, a2ui_agent_id)
+    assert (audits[-1].action_name, audits[-1].status) == ("heartbeat.close_card", "completed")
 
 
 async def test_unknown_fingerprint_fails_the_action_and_audits_it(

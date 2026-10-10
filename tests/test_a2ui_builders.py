@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from nous.a2ui.builders import TEMPLATES, action_review, approval_gate, heartbeat_findings
+from nous.a2ui.builders.heartbeat_findings import fully_triaged
 from nous.a2ui.dsl import BuiltSurface
 
 # ---------------------------------------------------------------------------
@@ -288,6 +289,21 @@ def test_heartbeat_findings_renders_a_card_per_finding() -> None:
     assert built.data_model["findings"] == {"abc123def456": "open", "999888777666": "open"}
 
 
+def test_heartbeat_findings_ignores_a_caller_supplied_status() -> None:
+    """Codex P1: a pushed resolve/dismiss status must not pre-triage a card,
+    or the sweep would auto-close it before anyone saw it."""
+    built = heartbeat_findings(
+        {
+            "findings": [
+                {"fingerprint": "fa", "status": "resolve"},
+                {"fingerprint": "fb", "status": "dismiss"},
+            ]
+        }
+    )
+
+    assert built.data_model["findings"] == {"fa": "open", "fb": "open"}
+
+
 def test_heartbeat_findings_explains_its_buttons_and_binds_a_status_line() -> None:
     """Tim, 2026-10-05: pressing a button showed nothing, and the three verbs
     were unexplained. The card now carries a legend and a per-finding status
@@ -310,8 +326,11 @@ def test_heartbeat_findings_wires_every_verb_to_each_finding() -> None:
         "heartbeat.acknowledge",
         "heartbeat.resolve",
         "heartbeat.dismiss",
+        "heartbeat.close_card",
     ]
     assert _action_names(built) == set(built.allowed_actions)
+    assert _by_id(built, "close")["action"]["event"]["name"] == "heartbeat.close_card"
+    assert _by_id(built, "root")["children"][-1] == "close"
 
     ack_context = _by_id(built, "f0_ack")["action"]["event"]["context"]
     assert ack_context == {"fingerprint": "abc123def456"}
@@ -328,7 +347,26 @@ def test_heartbeat_findings_renders_an_empty_state() -> None:
     built.validate()
 
     assert _text_of(built, "empty") == "No open findings."
-    assert _by_id(built, "root")["children"] == ["header", "empty"]  # no legend when empty
+    assert _by_id(built, "root")["children"] == ["header", "empty", "close"]  # no legend when empty
+
+
+def test_fully_triaged_needs_every_finding_resolved_or_dismissed() -> None:
+    assert fully_triaged({"a": "resolve", "b": "dismiss"})
+    assert fully_triaged({"a": "dismiss"})
+    assert not fully_triaged({"a": "resolve", "b": "acknowledge"})
+    assert not fully_triaged({"a": "resolve", "b": "open"})
+    # The build-time value is non-terminal, and an empty card is never triaged.
+    assert not fully_triaged(heartbeat_findings(FINDINGS_PARAMS).data_model["findings"])
+    assert not fully_triaged({})
+    assert not fully_triaged(None)
+
+
+@pytest.mark.parametrize("status", [["resolve"], {"verb": "resolve"}, None, 1])
+def test_fully_triaged_treats_a_malformed_status_as_open(status: Any) -> None:
+    """Codex P1: a legacy card holding an unhashable status made the set
+    lookup raise, aborting the whole expiry sweep. It is just not triaged."""
+    assert not fully_triaged({"a": status})
+    assert not fully_triaged({"a": "resolve", "b": status})
 
 
 def test_heartbeat_findings_defaults_its_title_to_the_count() -> None:

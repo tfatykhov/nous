@@ -665,7 +665,7 @@ def _register_default_handlers(router: ActionRouter) -> None:
                 store.record_outcome(fingerprint, OutcomeSignal.POSITIVE)
             except Exception:
                 logger.debug("F092 outcome signal failed", exc_info=True)
-        from .builders.heartbeat_findings import status_after
+        from .builders.heartbeat_findings import fully_triaged, status_after
 
         # Agent-raised findings never auto-close (codex P2), so their
         # acknowledge text must not promise it.
@@ -682,7 +682,15 @@ def _register_default_handlers(router: ActionRouter) -> None:
         # fingerprint would make the pointer upsert create a LIST parent.
         if isinstance((ctx.surface.data_model or {}).get("status"), dict):
             patches.append((f"/status/{_escape_pointer(fingerprint)}", status_text))
-        return ActionResult(message=status_text, data_patches=patches)
+        # Tim, 2026-10-10: a card whose every finding is resolved or
+        # dismissed has nothing left to ask, so the final press closes it.
+        # The router applies the patches first, then resolves.
+        return ActionResult(
+            message=status_text,
+            data_patches=patches,
+            # A malformed legacy map (a list) cannot be merged; never close on it.
+            resolve_surface=isinstance(offered, dict) and fully_triaged({**offered, fingerprint: verb}),
+        )
 
     async def hb_ack(ctx: ActionContext) -> ActionResult:
         return await _heartbeat_verb(ctx, "acknowledge")
@@ -692,6 +700,10 @@ def _register_default_handlers(router: ActionRouter) -> None:
 
     async def hb_dismiss(ctx: ActionContext) -> ActionResult:
         return await _heartbeat_verb(ctx, "dismiss")
+
+    async def hb_close_card(ctx: ActionContext) -> ActionResult:
+        # Hides the card only: findings keep their state in the store.
+        return ActionResult(message="card closed", resolve_surface=True)
 
     router.register("approval.choose", approval_choose, mutating=True, irreversible=True)
     router.register("approval.defer", approval_defer, mutating=False)
@@ -773,6 +785,7 @@ def _register_default_handlers(router: ActionRouter) -> None:
     router.register("heartbeat.acknowledge", hb_ack, mutating=True)
     router.register("heartbeat.resolve", hb_resolve, mutating=True)
     router.register("heartbeat.dismiss", hb_dismiss, mutating=True)
+    router.register("heartbeat.close_card", hb_close_card, mutating=False)
 
 
 def _escape_pointer(token: str) -> str:

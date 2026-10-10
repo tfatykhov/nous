@@ -616,6 +616,237 @@ class TestExpirySweep:
 
         assert await _outbox(db, a2ui_agent_id) == []
 
+    async def test_sweep_closes_fully_triaged_findings_cards_only(
+        self, service: SurfaceService, db, a2ui_agent_id: str
+    ) -> None:
+        """Cards triaged before auto-close existed (or whose final resolve
+        failed to deliver) are closed by the sweep; nothing else is touched."""
+
+        async def findings_card(**verbs: str) -> str:
+            sid = await service.push_built(
+                heartbeat_findings({"findings": [{"fingerprint": fp} for fp in verbs]})
+            )
+            for fp, verb in verbs.items():
+                if verb != "open":
+                    await service.update_data(sid, f"/findings/{fp}", verb)
+            return sid
+
+        triaged = await findings_card(fa="resolve", fb="dismiss")
+        acked = await findings_card(fc="resolve", fd="acknowledge")
+        untouched = await findings_card(fe="open")
+        empty = await service.push_built(heartbeat_findings({"findings": []}))
+        approval = await service.push_built(approval_gate(APPROVAL_PARAMS))
+
+        assert await service.expire_sweep() == 0, "auto-close is not expiry"
+
+        status = {s.surface_id: s.status for s in await _surfaces(db, a2ui_agent_id)}
+        assert status == {
+            triaged: "resolved",
+            acked: "live",
+            untouched: "live",
+            empty: "live",
+            approval: "live",
+        }
+        actions = await _actions(db, a2ui_agent_id)
+        assert [(a.surface_id, a.action_name, a.actor) for a in actions] == [
+            (triaged, "auto_closed", "system:sweep")
+        ]
+        outbox = await _outbox(db, a2ui_agent_id)
+        assert outbox[-1].surface_id == triaged
+        assert _envelope_kind(outbox[-1].envelope) == "deleteSurface"
+
+        # Idempotent: a second sweep claims nothing and writes nothing.
+        await service.expire_sweep()
+        assert len(await _actions(db, a2ui_agent_id)) == 1
+        assert len(await _outbox(db, a2ui_agent_id)) == len(outbox)
+
+    async def test_overdue_fully_triaged_card_closes_instead_of_expiring(
+        self, service: SurfaceService, db, a2ui_agent_id: str
+    ) -> None:
+        """Codex P1: a card whose final resolve failed near its deadline was
+        answered — the sweep must close it, never record expired_unanswered.
+        An overdue card with an untriaged finding still expires."""
+        triaged = await service.push_built(
+            heartbeat_findings({"findings": [{"fingerprint": "fa"}, {"fingerprint": "fb"}]})
+        )
+        await service.update_data(triaged, "/findings/fa", "resolve")
+        await service.update_data(triaged, "/findings/fb", "dismiss")
+        pending = await service.push_built(
+            heartbeat_findings({"findings": [{"fingerprint": "fc"}, {"fingerprint": "fd"}]})
+        )
+        await service.update_data(pending, "/findings/fc", "resolve")
+        async with db.session() as session:
+            await session.execute(
+                text(
+                    "UPDATE nous_system.a2ui_surfaces SET expires_at = now() - "
+                    "interval '1 hour' WHERE surface_id IN (:a, :b)"
+                ),
+                {"a": triaged, "b": pending},
+            )
+            await session.commit()
+
+        assert await service.expire_sweep() == 1
+
+        status = {s.surface_id: s.status for s in await _surfaces(db, a2ui_agent_id)}
+        assert status == {triaged: "resolved", pending: "expired"}
+        actions = {(a.surface_id, a.action_name) for a in await _actions(db, a2ui_agent_id)}
+        assert actions == {(triaged, "auto_closed"), (pending, "expired_unanswered")}
+
+    async def test_expiry_claim_skips_a_card_triaged_after_reconciliation(
+        self, service: SurfaceService, db, a2ui_agent_id: str, monkeypatch
+    ) -> None:
+        """Belt-and-braces: a card whose last finding is triaged between the
+        reconciliation and the expiry claim stays live for the next sweep."""
+        triaged = await service.push_built(heartbeat_findings({"findings": [{"fingerprint": "fa"}]}))
+        await service.update_data(triaged, "/findings/fa", "dismiss")
+        async with db.session() as session:
+            await session.execute(
+                text(
+                    "UPDATE nous_system.a2ui_surfaces SET expires_at = now() - "
+                    "interval '1 hour' WHERE surface_id = :sid"
+                ),
+                {"sid": triaged},
+            )
+            await session.commit()
+
+        async def missed() -> int:
+            return 0
+
+        monkeypatch.setattr(service, "close_triaged_findings_surfaces", missed)
+        assert await service.expire_sweep() == 0
+        assert [s.status for s in await _surfaces(db, a2ui_agent_id)] == ["live"]
+        assert await _actions(db, a2ui_agent_id) == []
+
+        monkeypatch.undo()
+        await service.expire_sweep()
+        assert [s.status for s in await _surfaces(db, a2ui_agent_id)] == ["resolved"]
+
+    async def test_malformed_findings_cards_do_not_abort_the_sweep(
+        self, service: SurfaceService, db, a2ui_agent_id: str
+    ) -> None:
+        """Codex P1: legacy cards with list/dict/null/int statuses (or a
+        non-object data model) are skipped, and expiry still runs for the
+        rest of the surfaces."""
+        malformed = [
+            '{"findings": {"fa": ["resolve"]}}',
+            '{"findings": {"fa": {"verb": "dismiss"}}}',
+            '{"findings": {"fa": null}}',
+            '{"findings": {"fa": 1}}',
+            '["resolve"]',
+        ]
+        bad = []
+        for model in malformed:
+            sid = await service.push_built(heartbeat_findings({"findings": [{"fingerprint": "fa"}]}))
+            async with db.session() as session:
+                await session.execute(
+                    text("UPDATE nous_system.a2ui_surfaces SET data_model = CAST(:m AS jsonb) WHERE surface_id = :sid"),
+                    {"m": model, "sid": sid},
+                )
+                await session.commit()
+            bad.append(sid)
+        overdue = await service.push_built(approval_gate(APPROVAL_PARAMS))
+        triaged = await service.push_built(heartbeat_findings({"findings": [{"fingerprint": "fz"}]}))
+        await service.update_data(triaged, "/findings/fz", "resolve")
+        async with db.session() as session:
+            await session.execute(
+                text(
+                    "UPDATE nous_system.a2ui_surfaces SET expires_at = now() - "
+                    "interval '1 hour' WHERE surface_id = ANY(:ids)"
+                ),
+                {"ids": [overdue, bad[0]]},
+            )
+            await session.commit()
+
+        assert await service.expire_sweep() == 2
+
+        status = {s.surface_id: s.status for s in await _surfaces(db, a2ui_agent_id)}
+        assert status[overdue] == "expired"
+        assert status[bad[0]] == "expired", "malformed and overdue: expires as unanswered"
+        assert [status[sid] for sid in bad[1:]] == ["live"] * 4
+        assert status[triaged] == "resolved"
+
+    async def test_one_failing_auto_close_is_skipped_and_the_sweep_goes_on(
+        self, service: SurfaceService, db, a2ui_agent_id: str, monkeypatch
+    ) -> None:
+        """Codex P1: the per-card close is exception-isolated, and a failed
+        reconciliation as a whole never stops expiry."""
+        first, second = [
+            await service.push_built(heartbeat_findings({"findings": [{"fingerprint": fp}]})) for fp in ("fa", "fb")
+        ]
+        await service.update_data(first, "/findings/fa", "dismiss")
+        await service.update_data(second, "/findings/fb", "resolve")
+        real_close = service._close_triaged_card
+
+        async def flaky_close(surface_id: str) -> bool:
+            if surface_id == first:
+                raise TypeError("malformed row")
+            return await real_close(surface_id)
+
+        monkeypatch.setattr(service, "_close_triaged_card", flaky_close)
+        assert await service.close_triaged_findings_surfaces() == 1
+        status = {s.surface_id: s.status for s in await _surfaces(db, a2ui_agent_id)}
+        assert status == {first: "live", second: "resolved"}
+
+        overdue = await service.push_built(approval_gate(APPROVAL_PARAMS))
+        async with db.session() as session:
+            await session.execute(
+                text(
+                    "UPDATE nous_system.a2ui_surfaces SET expires_at = now() - "
+                    "interval '1 hour' WHERE surface_id = :sid"
+                ),
+                {"sid": overdue},
+            )
+            await session.commit()
+
+        async def broken() -> int:
+            raise RuntimeError("reconciliation down")
+
+        monkeypatch.setattr(service, "close_triaged_findings_surfaces", broken)
+        assert await service.expire_sweep() == 1
+        assert {s.surface_id: s.status for s in await _surfaces(db, a2ui_agent_id)}[overdue] == "expired"
+
+    async def test_auto_close_loses_to_a_refresh_between_read_and_claim(
+        self, service: SurfaceService, db, a2ui_agent_id: str, monkeypatch
+    ) -> None:
+        """Codex P1: another process's dedup refresh swaps in an all-open
+        card after the sweep judged the old one triaged. The claim is bound
+        to the data model it judged, so the refreshed card stays live and no
+        delete envelope is written."""
+        sid = await service.push_built(heartbeat_findings({"findings": [{"fingerprint": "fa"}]}))
+        await service.update_data(sid, "/findings/fa", "resolve")
+        outbox_before = len(await _outbox(db, a2ui_agent_id))
+        real_get_own = service._get_own
+
+        async def get_own_then_refresh(session, surface_id):
+            surface = await real_get_own(session, surface_id)
+            async with db.session() as other:
+                await other.execute(
+                    text(
+                        "UPDATE nous_system.a2ui_surfaces SET data_model = "
+                        "CAST(:m AS jsonb), updated_at = now() WHERE surface_id = :sid"
+                    ),
+                    {"m": '{"findings": {"fb": "open"}, "status": {"fb": "open"}}', "sid": surface_id},
+                )
+                await other.commit()
+            return surface
+
+        monkeypatch.setattr(service, "_get_own", get_own_then_refresh)
+        assert await service.close_triaged_findings_surfaces() == 0
+        monkeypatch.undo()
+
+        [surface] = await _surfaces(db, a2ui_agent_id)
+        assert surface.status == "live"
+        assert surface.data_model["findings"] == {"fb": "open"}
+        assert await _actions(db, a2ui_agent_id) == []
+        assert len(await _outbox(db, a2ui_agent_id)) == outbox_before
+
+        # Unchanged card: closes exactly once.
+        await service.update_data(sid, "/findings/fb", "dismiss")
+        assert await service.close_triaged_findings_surfaces() == 1
+        assert await service.close_triaged_findings_surfaces() == 0
+        assert [s.status for s in await _surfaces(db, a2ui_agent_id)] == ["resolved"]
+        assert [a.action_name for a in await _actions(db, a2ui_agent_id)] == ["auto_closed"]
+
 
 # ---------------------------------------------------------------------------
 # replay / latest_seq — the lag window
