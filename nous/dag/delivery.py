@@ -46,8 +46,9 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = logging.getLogger(__name__)
 
-# Telegram rejects messages over 4096 chars.
-_TELEGRAM_MAX_CHARS = 3900
+# Telegram rejects messages over 4096 UTF-16 units. The push is plain text (no
+# parse_mode), so the raw string is what Telegram counts.
+_TELEGRAM_MAX_CHARS = 4096
 # Per-node lines in the deterministic template. A 50-node DAG must not
 # produce a 50-line push notification.
 _TEMPLATE_MAX_NODE_LINES = 12
@@ -265,7 +266,7 @@ class DAGResultDelivery:
             lines.append("Not run:" if stopped else "Problems:")
             for node in failed[:_TEMPLATE_MAX_NODE_LINES]:
                 detail = (node.error or "").strip().replace("\n", " ")
-                suffix = f" — {detail[:_NODE_ERROR_CHARS]}" if detail else ""
+                suffix = f" — {continuation.clip_text(detail, _NODE_ERROR_CHARS)}" if detail else ""
                 lines.append(f"  [{node.status}] {node.name}{suffix}")
             if len(failed) > _TEMPLATE_MAX_NODE_LINES:
                 lines.append(
@@ -407,7 +408,8 @@ class DAGResultDelivery:
                 "telegram", ok=True, required=False, detail="not configured"
             )
 
-        text = summary[:_TELEGRAM_MAX_CHARS]
+        marker = f"\u2026 [truncated \u2014 {{dropped}} more chars; full summary: dag_manage status {str(dag.id)[:8]}]"
+        text = continuation.clip_text(summary, _TELEGRAM_MAX_CHARS, marker=marker)
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         client = self._http or httpx.AsyncClient()
         try:

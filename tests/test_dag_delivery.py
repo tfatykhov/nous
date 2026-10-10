@@ -197,6 +197,7 @@ class TestDeliveryLegs:
 
         sent = http.post.await_args.kwargs["json"]["text"]
         assert len(sent) <= 4096
+        assert f"more chars; full summary: dag_manage status {str(dag.id)[:8]}]" in sent
 
 
 class TestAgentSummaryLeg:

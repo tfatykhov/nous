@@ -33,6 +33,11 @@ from nous.storage.models import Subtask
 
 logger = logging.getLogger(__name__)
 
+# The notification is plain text (no parse_mode), so Telegram's 4096 limit applies
+# to the UTF-16 units of the raw string; no HTML-escaping margin is needed.
+_TELEGRAM_MAX_UNITS = 4096
+_TASK_PREVIEW_UNITS = 100
+
 
 def _error_text(exc: BaseException) -> str:
     """What the row of a subtask whose turn failed says about the failure.
@@ -565,12 +570,16 @@ class SubtaskWorkerPool:
         if await self._superseded_by_continuation(subtask):
             return
 
+        task = continuation.clip_text(subtask.task, _TASK_PREVIEW_UNITS)
         if result is not None:
-            text = f"Subtask completed: {subtask.task[:100]}\n\nResult: {result[:500]}"
+            head, body, what = f"Subtask completed: {task}\n\nResult: ", result, "full result"
         elif error is not None:
-            text = f"Subtask failed: {subtask.task[:100]}\n\nError: {error[:300]}"
+            head, body, what = f"Subtask failed: {task}\n\nError: ", error, "full error"
         else:
             return
+        marker = f"\u2026 [truncated \u2014 {{dropped}} more chars; {what}: subtask {subtask.id.hex[:8]}]"
+        room = _TELEGRAM_MAX_UNITS - continuation.utf16_units(head)
+        text = head + continuation.clip_text(body, room, marker=marker)
 
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         try:
