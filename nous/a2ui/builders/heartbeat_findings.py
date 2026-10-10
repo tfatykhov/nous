@@ -55,7 +55,7 @@ def fully_triaged(findings: Any) -> bool:
     An empty card ("No open findings.") is never fully triaged: nobody
     answered anything on it, so it is left to expiry or Close card.
     """
-    return isinstance(findings, dict) and bool(findings) and all(v in TERMINAL_VERBS for v in findings.values())
+    return isinstance(findings, dict) and bool(findings) and all(isinstance(v, str) and v in TERMINAL_VERBS for v in findings.values())
 
 
 def status_after(verb: str, check_name: str | None) -> str:

@@ -1303,6 +1303,10 @@ class SurfaceService:
                                 A2uiSurface.surface_id == surface_id,
                                 A2uiSurface.agent_id == agent_id,
                                 A2uiSurface.status == "live",
+                                # Bind to the observed nonce: push_surface rotates it on
+                                # every dedup replacement, so a concurrent refresh that
+                                # resets all findings to open wins here and is not closed.
+                                A2uiSurface.nonce == surface.nonce,
                             )
                             .values(status="resolved", resolved_at=now)
                             .returning(A2uiSurface.surface_id)
