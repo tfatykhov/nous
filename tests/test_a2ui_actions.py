@@ -594,6 +594,59 @@ async def test_a_single_finding_card_stays_open_on_acknowledge(
     assert (await _surface_row(db, surface_id)).status == "live"
 
 
+async def test_sweep_leaves_a_card_pushed_with_terminal_status_open(
+    service: SurfaceService, db, a2ui_agent_id: str
+) -> None:
+    """Codex P1: a caller-supplied resolve/dismiss status is not a user
+    answer, so the sweep must not auto-close the freshly pushed card."""
+    surface_id = await service.push_built(
+        heartbeat_findings(
+            {
+                "findings": [
+                    {"fingerprint": "fp-abc-123", "status": "resolve"},
+                    {"fingerprint": "fp-def-456", "status": "dismiss"},
+                ]
+            }
+        )
+    )
+
+    await service.expire_sweep()
+
+    surface = await _surface_row(db, surface_id)
+    assert surface.status == "live"
+    assert surface.data_model["findings"] == {"fp-abc-123": "open", "fp-def-456": "open"}
+    assert await _audits(db, a2ui_agent_id) == []
+
+
+async def test_sweep_closes_a_card_triaged_by_recorded_presses(
+    router: ActionRouter, service: SurfaceService, db, a2ui_agent_id: str, monkeypatch
+) -> None:
+    """Every finding answered through the router, but the final press's
+    resolve failed to deliver: the sweep closes the card."""
+    surface_id = await service.push_built(heartbeat_findings(TWO_FINDINGS_PARAMS))
+    nonce = (await _surface_row(db, surface_id)).nonce
+    await _press(router, surface_id, nonce, "heartbeat.dismiss", "fp-abc-123")
+
+    async def undelivered(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("delivery failed")
+
+    monkeypatch.setattr(service, "resolve", undelivered)
+    status, payload = await _press(router, surface_id, nonce, "heartbeat.resolve", "fp-def-456")
+    monkeypatch.undo()
+    assert status == 200 and payload["resolved"] is False
+    assert (await _surface_row(db, surface_id)).status == "live"
+
+    await service.expire_sweep()
+
+    assert (await _surface_row(db, surface_id)).status == "resolved"
+    audits = await _audits(db, a2ui_agent_id)
+    assert [(a.action_name, a.status) for a in audits] == [
+        ("heartbeat.dismiss", "completed"),
+        ("heartbeat.resolve", "completed"),
+        ("auto_closed", "completed"),
+    ]
+
+
 async def test_close_card_resolves_without_touching_the_finding_store(
     router: ActionRouter,
     service: SurfaceService,

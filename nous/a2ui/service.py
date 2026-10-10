@@ -1293,8 +1293,23 @@ class SurfaceService:
                         continue
                     now = datetime.now(UTC)
                     was_pushed = surface.push_notified_at is not None
-                    surface.status = "resolved"
-                    surface.resolved_at = now
+                    # Conditional claim (codex P2): surface_lock is
+                    # per-process, so a second sweeping process that read
+                    # the same live row must win nothing here.
+                    claimed = (
+                        await session.execute(
+                            update(A2uiSurface)
+                            .where(
+                                A2uiSurface.surface_id == surface_id,
+                                A2uiSurface.agent_id == agent_id,
+                                A2uiSurface.status == "live",
+                            )
+                            .values(status="resolved", resolved_at=now)
+                            .returning(A2uiSurface.surface_id)
+                        )
+                    ).all()
+                    if not claimed:
+                        continue
                     session.add(
                         A2uiAction(
                             agent_id=agent_id,

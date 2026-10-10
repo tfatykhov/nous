@@ -289,6 +289,21 @@ def test_heartbeat_findings_renders_a_card_per_finding() -> None:
     assert built.data_model["findings"] == {"abc123def456": "open", "999888777666": "open"}
 
 
+def test_heartbeat_findings_ignores_a_caller_supplied_status() -> None:
+    """Codex P1: a pushed resolve/dismiss status must not pre-triage a card,
+    or the sweep would auto-close it before anyone saw it."""
+    built = heartbeat_findings(
+        {
+            "findings": [
+                {"fingerprint": "fa", "status": "resolve"},
+                {"fingerprint": "fb", "status": "dismiss"},
+            ]
+        }
+    )
+
+    assert built.data_model["findings"] == {"fa": "open", "fb": "open"}
+
+
 def test_heartbeat_findings_explains_its_buttons_and_binds_a_status_line() -> None:
     """Tim, 2026-10-05: pressing a button showed nothing, and the three verbs
     were unexplained. The card now carries a legend and a per-finding status

@@ -84,7 +84,11 @@ def heartbeat_findings(params: dict[str, Any]) -> Any:
     )
     s.data(
         {
-            "findings": {f["fingerprint"]: f.get("status", "open") for f in findings},
+            # Every finding starts open, whatever the caller passed (codex
+            # P1): a caller-supplied resolve/dismiss would let the sweep
+            # auto-close a card nobody saw. Only the action handler, after a
+            # recorded user press, writes a terminal verb here.
+            "findings": {f["fingerprint"]: "open" for f in findings},
             # Human-readable per-finding status the action handler patches,
             # so a button press visibly changes the card.
             "status": {f["fingerprint"]: OPEN_STATUS for f in findings},
