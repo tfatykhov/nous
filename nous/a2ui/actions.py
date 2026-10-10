@@ -688,7 +688,8 @@ def _register_default_handlers(router: ActionRouter) -> None:
         return ActionResult(
             message=status_text,
             data_patches=patches,
-            resolve_surface=fully_triaged({**offered, fingerprint: verb}),
+            # A malformed legacy map (a list) cannot be merged; never close on it.
+            resolve_surface=isinstance(offered, dict) and fully_triaged({**offered, fingerprint: verb}),
         )
 
     async def hb_ack(ctx: ActionContext) -> ActionResult:

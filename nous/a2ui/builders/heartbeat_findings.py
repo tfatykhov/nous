@@ -53,9 +53,15 @@ def fully_triaged(findings: Any) -> bool:
     """True when a card's ``/findings`` map is non-empty and all terminal.
 
     An empty card ("No open findings.") is never fully triaged: nobody
-    answered anything on it, so it is left to expiry or Close card.
+    answered anything on it, so it is left to expiry or Close card. A
+    non-string status (a malformed legacy row) is never terminal (codex P1):
+    a list or dict would make the set lookup raise and abort the sweep.
     """
-    return isinstance(findings, dict) and bool(findings) and all(isinstance(v, str) and v in TERMINAL_VERBS for v in findings.values())
+    return (
+        isinstance(findings, dict)
+        and bool(findings)
+        and all(isinstance(v, str) and v in TERMINAL_VERBS for v in findings.values())
+    )
 
 
 def status_after(verb: str, check_name: str | None) -> str:

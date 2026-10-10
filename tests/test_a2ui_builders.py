@@ -361,6 +361,14 @@ def test_fully_triaged_needs_every_finding_resolved_or_dismissed() -> None:
     assert not fully_triaged(None)
 
 
+@pytest.mark.parametrize("status", [["resolve"], {"verb": "resolve"}, None, 1])
+def test_fully_triaged_treats_a_malformed_status_as_open(status: Any) -> None:
+    """Codex P1: a legacy card holding an unhashable status made the set
+    lookup raise, aborting the whole expiry sweep. It is just not triaged."""
+    assert not fully_triaged({"a": status})
+    assert not fully_triaged({"a": "resolve", "b": status})
+
+
 def test_heartbeat_findings_defaults_its_title_to_the_count() -> None:
     assert heartbeat_findings({"findings": []}).title == "Heartbeat findings (0)"
     assert heartbeat_findings(FINDINGS_PARAMS).title == "Heartbeat findings (2)"

@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 
 from nous.a2ui.actions import ActionRouter
 from nous.a2ui.builders import action_review, approval_gate, heartbeat_findings
@@ -591,6 +591,31 @@ async def test_a_single_finding_card_stays_open_on_acknowledge(
     status, payload = await _press(router, surface_id, nonce, "heartbeat.acknowledge", "fp-abc-123")
 
     assert status == 200 and payload["resolved"] is False
+    assert (await _surface_row(db, surface_id)).status == "live"
+
+
+async def test_a_press_on_a_legacy_list_findings_map_does_not_close_or_crash(
+    router: ActionRouter, service: SurfaceService, db
+) -> None:
+    """Codex P1 sweep-through: a malformed legacy card whose ``/findings`` is
+    a list cannot be merged into a triage check; the press must not raise
+    out of the handler, and the card is never closed on it."""
+    surface_id = await service.push_built(heartbeat_findings(FINDINGS_PARAMS))
+    async with db.session() as session:
+        await session.execute(
+            text(
+                "UPDATE nous_system.a2ui_surfaces SET data_model = "
+                "'{\"findings\": [\"fp-abc-123\"]}'::jsonb WHERE surface_id = :sid"
+            ),
+            {"sid": surface_id},
+        )
+        await session.commit()
+    nonce = (await _surface_row(db, surface_id)).nonce
+
+    status, payload = await _press(router, surface_id, nonce, "heartbeat.resolve", "fp-abc-123")
+
+    assert status != 500, payload
+    assert payload.get("resolved") is not True
     assert (await _surface_row(db, surface_id)).status == "live"
 
 
