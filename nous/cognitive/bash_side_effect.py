@@ -219,7 +219,8 @@ def simple_commands(command: str) -> list[tuple[list[str], list[str], str]] | No
 
     For the F099 lineage shell allowlist (``tool_policy``), which must see
     exactly what runs. None: over the size cap, an unbalanced quote, a
-    redirect with no target, or a word that expands -- ``$`` or a backtick
+    redirect with no target, a redirect in either direction that names a
+    ``/dev/tcp`` or ``/dev/udp`` socket, or a word that expands -- ``$`` or a backtick
     outside single quotes, an unquoted glob, brace or tilde, or ``$`` or a
     backtick in the body of a heredoc whose delimiter is unquoted. Words are
     de-quoted; input redirections and heredoc bodies are dropped; an fd
@@ -250,6 +251,8 @@ def simple_commands(command: str) -> list[tuple[list[str], list[str], str]] | No
         expect: str | None = None
         for tok, is_operator in tokens:
             if not is_operator:
+                if expect is not None and any(dev in tok for dev in _NETWORK_REDIRECT):
+                    return None  # `cat < /dev/tcp/host/80` connects: an input redirect is not just a read
                 if expect == "out" or (expect == "dup" and not (tok.isdigit() or tok == "-")):
                     targets.append(tok)
                 elif expect is None:
