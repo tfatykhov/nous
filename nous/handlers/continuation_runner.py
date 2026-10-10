@@ -201,6 +201,8 @@ def make_propose_action_executor(
     ctx: ExecutionContext,
     dispatcher: Any,
     stage: Callable[[str, dict, str], Awaitable[UUID]],
+    lineage_shell: bool = False,
+    workspace_dir: str = "",
 ) -> Callable[..., Awaitable[tuple[str, bool]]]:
     """The executor of ``propose_action`` for one turn (the ``extra_tools`` shape: ``(text, is_error)``).
 
@@ -208,7 +210,8 @@ def make_propose_action_executor(
     not a side effect, R9). ``tool`` must be registered, must not spawn work (``schedule_task`` aside:
     ``PROPOSABLE_SPAWN_TOOLS``) and must NOT be one this lineage may already call (``internal_only_allowed``, judged
     as if the root were below its limits: a spawn tool removed at the limit is still not a proposal, because
-    approving one would route around the limit). The call must satisfy the
+    approving one would route around the limit). With ``lineage_shell``, a ``bash`` command the lineage
+    allowlist refuses (``tool_policy.lineage_bash_allowed``) is still a proposal. The call must satisfy the
     tool's schema, and no argument may start with an underscore. A refusal is an error text the model can act
     on; a non-terminal success returns to the model, which then ends the turn with ``ask``."""
     probe = dataclasses.replace(ctx, spawn_blocked=False)
@@ -233,7 +236,12 @@ def make_propose_action_executor(
                 "while the work is below its depth and spawn limits, and otherwise end with report, drop or ask.",
                 True,
             )
-        if tool_policy.internal_only_allowed(tool, ctx=probe):
+        if tool_policy.internal_only_allowed(tool, ctx=probe, lineage_shell=lineage_shell) and not (
+            tool == "bash"
+            and not tool_policy.lineage_bash_allowed(
+                probe, str(arguments.get("command", "")), workspace_dir=workspace_dir
+            )
+        ):
             return f"Error: {tool} is a tool you may call yourself, so call it yourself; it is not a proposal.", True
         problems = dispatcher.validate_call(tool, arguments)
         if problems:
@@ -982,7 +990,12 @@ class ContinuationRunner:
             extra_tools["propose_action"] = (
                 PROPOSE_ACTION_SCHEMA,
                 make_propose_action_executor(
-                    state, ctx=context, dispatcher=self._dispatcher, stage=self._stager(claim)
+                    state,
+                    ctx=context,
+                    dispatcher=self._dispatcher,
+                    stage=self._stager(claim),
+                    lineage_shell=settings.f099_lineage_shell,
+                    workspace_dir=settings.workspace_dir,
                 ),
             )
         try:

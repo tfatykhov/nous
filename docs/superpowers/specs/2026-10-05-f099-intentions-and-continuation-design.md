@@ -253,8 +253,8 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
 | Rule | Tools |
 |---|---|
 | Allowed | Tools whose `tool_class(name)` is `none` or `write`. **Fail closed** on an unknown tool. |
-| Denied, although `none`/`write` | `schedule_task`, `heartbeat_check_create`, `heartbeat_check_manage`, `create_censor`, `learn_skill`, `store_identity`, `complete_initiation`, `dag_manage`, `push_surface`, `compose_surface`, `bash`, `run_python`, `spawn_sync`, `resolve_decision`, `resolve_decisions` |
-| Allowed with a per-call check | `write_file` only under `<workspace_dir>/intentions/<root_id>/`; `cancel_task` only on its own lineage |
+| Denied, although `none`/`write` | `schedule_task`, `heartbeat_check_create`, `heartbeat_check_manage`, `create_censor`, `learn_skill`, `store_identity`, `complete_initiation`, `dag_manage`, `push_surface`, `compose_surface`, `bash` (unless `NOUS_F099_LINEAGE_SHELL`, below), `run_python`, `spawn_sync`, `resolve_decision`, `resolve_decisions` |
+| Allowed with a per-call check | `write_file` only under `<workspace_dir>/intentions/<root_id>/`; `cancel_task` only on its own lineage; `bash`, when `NOUS_F099_LINEAGE_SHELL` is on (the default), only for a command on the lineage shell allowlist (below) |
 | Spawn tools | `spawn_task` and `dag_create` are offered **only to `continuation` turns**, and are removed when the root reaches its depth or spawn limit. Other turns in the lineage get no spawn tools. |
 | Never offered | Class `external` or `irreversible` (today: `send_email`, `send_file`) |
 | Continuation turn only, as `extra_tools` | `propose_action`, `resolve_intention` |
@@ -263,7 +263,24 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
 - It refuses any call to a tool that was not offered, whatever `tool_offered_set_enforcement_mode` says. A forged `tool_use` for `send_email` is therefore refused, not merely logged.
 - It refuses any call that `classify_side_effect` rates `external`.
 - It enforces the `write_file` path rule and the `cancel_task` lineage rule.
+- It holds every `bash` call to the lineage shell allowlist (below), not to `classify_side_effect`. A refused command is `internal_only:external`.
 - Dynamic checks in a lineage get their declared tools intersected with the allowed set.
+
+**Lineage shell (`NOUS_F099_LINEAGE_SHELL`, default on).** A continuation that decides to delegate to Claude Code builds a DAG whose subtask runs `runner.sh launch` and then `gh pr view`. Without a shell that subtask ended `incomplete_blocked` (DAGs c1aad83b on 2026-10-08 and 3db05f15 on 2026-10-10), so the owner allowed shell in a lineage. The side-effect classifier cannot be the rule: it rates `rm -rf` a `write` and every `gh` call `external`. Each call is held to an allowlist instead (`tool_policy.lineage_bash_allowed`), which fails closed:
+- The command is read with the classifier's bash lexer (`bash_side_effect.simple_commands`). It is refused when that reader cannot see exactly what runs: `$` or a backtick outside single quotes, an unquoted glob, brace or tilde, a heredoc that expands, an unbalanced quote, or the size cap. Simple commands may be joined by `;`, `&&`, `||`, `|` and newlines only: no `&`, subshell or group.
+- Every simple command must be one of:
+  - a plain read: `cat`, `ls`, `head`, `tail`, `wc`, `grep`, `jq`, `echo`, `printf`, `pwd`, `cd`, `sleep`, `true`;
+  - a read-only `gh` call: `pr view|checks|list|diff|status`, `issue view|list`, `run view|list`, `repo view`, or `gh api ENDPOINT` as a GET. These refuse `--web`, `--watch` and `--hostname`. `gh api` also refuses a method other than GET, `-f`, `-F`, `--input`, `-H`, `graphql` and a full URL;
+  - `<workspace_dir>/claude-jobs/runner.sh`, the owner's Claude Code delegation path, by its exact path:
+    - `status|result|cancel <job id>`, `status` and `list [--active|--all]` are allowed;
+    - `launch <repo> <prompt>|--prompt-file <file>` is allowed with `--model`, `--effort`, `--base-branch`, `--prompt-file` and `--plugins` (installed plugins under `<workspace_dir>/plugins/` only);
+    - the repo name and option values must be quoteless names, because runner.sh interpolates them into `python3 -c`;
+    - `--sys-prompt`, `cleanup` and `gc` are refused.
+- An output redirection may target `/dev/null`, or a file under the root's `<workspace_dir>/intentions/<root_id>/` or under `<workspace_dir>/claude-jobs/prompts/`, once resolved. It may not target `runner.sh`, `repos.json` or a hook, which root runs. A prompt file must also be in one of those two directories.
+- In a continuation, the context policy judges an allowlisted call at `write`, so a read-only `gh` call is not a `level:external` deviation. The ledger still records the classifier's rating.
+- `propose_action` can still stage a `bash` command the allowlist refuses, such as `git push`, for the owner's approval.
+
+A launched Claude Code job is itself an agent with a shell and a GitHub token. That delegation is the one the owner sanctioned, and the job's own rules govern it, not this allowlist. Flag off: `bash` is denylisted and a lineage is offered exactly what it was before.
 
 **Extra-tool termination.**
 - Today any successful `extra_tools` call ends the loop. That changes: only a tool flagged *terminal* ends it.
@@ -284,7 +301,7 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
 | `ledger_key` | The execution-ledger key. |
 | `decided_at`, `executed_at`, `result` | Outcome. |
 
-1. `propose_action(tool, arguments, rationale)` only **stages** a proposal: `state='staged'`, carrying the turn's `claim_token`. It validates that `tool` is registered and is **not in the internal allowed set**, which means any outward tool or a denylisted local tool such as `schedule_task` or `bash`. The owner sees the exact call either way.
+1. `propose_action(tool, arguments, rationale)` only **stages** a proposal: `state='staged'`, carrying the turn's `claim_token`. It validates that `tool` is registered and is **not in the internal allowed set**, which means any outward tool, a denylisted local tool such as `schedule_task`, or a `bash` command the lineage shell allowlist refuses. The owner sees the exact call either way.
    - A turn that proposed anything must resolve with `ask`, and the runner enforces this.
    - Staged proposals become `pending`, and are published to the owner, **only in the fenced arrival commit** (§4.5.6), under the same `claim_token`.
    - If the attempt fails, times out, loses its lease, or ends without `resolve_intention`, the commit never happens. Its staged rows are then expired (`expired`) by the failure path, or swept on the lease release. A failed or stale attempt can therefore never leave an approvable proposal behind.
