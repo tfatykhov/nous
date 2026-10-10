@@ -21,6 +21,7 @@ from nous.api.tool_policy import (
     INTERNAL_ONLY_SPAWN_TOOLS,
     internal_only_allowed,
     internal_only_call_violation,
+    lineage_bash_allowed,
 )
 
 # Fixed ids: parametrize ids built from them must not change between collections (xdist).
@@ -238,7 +239,6 @@ def _runner_sh(tmp_path) -> str:
         "{R} status",
         "{R} status job-20261010-222549-6e37c52b",
         "{R} result job-20261010-222549-6e37c52b",
-        "{R} cancel job-20261010-222549-6e37c52b",
         "{R} list --active",
         "gh pr view 719",
         "gh pr view 719 --json state,mergeable -R tfatykhov/nous",
@@ -318,6 +318,8 @@ def test_the_lineage_shell_allows_the_delegation_path_and_reads(command, tmp_pat
         '{R} launch nous p --model "m\'x"',
         "{R} cleanup job-20261010-222549-6e37c52b",
         "{R} gc",
+        # cancel is not allowed: no ownership check (see #725)
+        "{R} cancel job-20261010-222549-6e37c52b",
         "{R} status ../../x",
         "{R}",
         "bash {R} status",
@@ -359,3 +361,41 @@ def test_a_lineage_shell_write_through_a_symlink_that_leaves_the_dir_is_refused(
     prompts.mkdir(parents=True)
     (prompts / "link").symlink_to(tmp_path)
     assert _shell(f"echo x > {prompts}/link/runner.sh", tmp_path) == "external"
+
+
+# -- P1/P2 from #723 (Codex findings, issue #725) -------------------------------
+
+
+def test_lineage_cancel_is_not_allowed(tmp_path):
+    """A continuation must not be able to cancel a runner job by ID alone — no ownership check."""
+    ctx = _internal()
+    workspace = str(tmp_path)
+    runner = f"{workspace}/claude-jobs/runner.sh"
+    assert not lineage_bash_allowed(ctx, f"{runner} cancel job-20260101-120000-abcd1234", workspace_dir=workspace)
+
+
+def test_lineage_status_and_result_still_allowed(tmp_path):
+    """status and result (read-only) should still work for a well-formed job ID."""
+    ctx = _internal()
+    workspace = str(tmp_path)
+    runner = f"{workspace}/claude-jobs/runner.sh"
+    for action in ("status", "result"):
+        assert lineage_bash_allowed(ctx, f"{runner} {action} job-20260101-120000-abcd1234", workspace_dir=workspace)
+
+
+def test_printf_v_is_blocked(tmp_path):
+    """printf -v VAR can override exported variables on bash — must be rejected."""
+    ctx = _internal()
+    workspace = str(tmp_path)
+    for cmd in [
+        "printf -v PATH /attacker/dir",
+        "printf -vPATH /attacker/dir",
+    ]:
+        assert not lineage_bash_allowed(ctx, cmd, workspace_dir=workspace)
+
+
+def test_printf_without_v_is_allowed(tmp_path):
+    """printf without -v is fine (writes to stdout only)."""
+    ctx = _internal()
+    workspace = str(tmp_path)
+    assert lineage_bash_allowed(ctx, "printf '%s\\n' hello", workspace_dir=workspace)

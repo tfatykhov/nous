@@ -97,7 +97,7 @@ INTERNAL_ONLY_LOGGED_TOOLS: frozenset[str] = frozenset({"web_fetch", "web_search
 # rates `rm -rf` a mere write. Read-only commands that cannot write, run or reach the network whatever
 # their arguments (no sort -o, sed -i, find -exec, date -s, tee):
 LINEAGE_READ_COMMANDS: frozenset[str] = frozenset(
-    {"cat", "ls", "head", "tail", "wc", "grep", "jq", "echo", "printf", "pwd", "cd", "sleep", "true"}
+    {"cat", "ls", "head", "tail", "wc", "grep", "jq", "echo", "pwd", "cd", "sleep", "true"}
 )
 # Read-only gh subcommands; `gh api` is checked on its own (_gh_api_get).
 LINEAGE_GH_READS: Mapping[str, frozenset[str]] = MappingProxyType(
@@ -209,6 +209,12 @@ def _gh_api_get(args: list[str]) -> bool:
     return endpoint is not None and "graphql" not in endpoint.lower() and "://" not in endpoint
 
 
+def _printf_allowed(args: list[str]) -> bool:
+    """printf is safe except for -v, which assigns to a shell variable on bash hosts
+    and can override exported variables like PATH. Reject any invocation that passes -v."""
+    return not any(a == "-v" or (a.startswith("-") and not a.startswith("--") and "v" in a.lstrip("-")) for a in args)
+
+
 def _runner_allowed(args: list[str], *, workspace: Path, readable: list[Path]) -> bool:
     """runner.sh: ``status|result|cancel <job id>``, ``status``, ``list [--active|--all]``, or ``launch <repo>
     <prompt>|--prompt-file <file>`` with ``--model``, ``--effort``, ``--base-branch``, ``--plugins`` (installed
@@ -221,7 +227,10 @@ def _runner_allowed(args: list[str], *, workspace: Path, readable: list[Path]) -
         return rest in ([], ["--active"], ["--all"])
     if action == "status" and not rest:
         return True
-    if action in ("status", "result", "cancel"):
+    # cancel is NOT allowed here: a lineage can list --all to enumerate ALL jobs
+    # (including other lineages') then cancel them; ownership cannot be verified
+    # without a runner.sh protocol change (see #725). Use propose_action instead.
+    if action in ("status", "result"):
         return len(rest) == 1 and _RUNNER_JOB_ID.fullmatch(rest[0]) is not None
     if action != "launch" or not rest or not _RUNNER_NAME.fullmatch(rest[0]):
         return False
@@ -282,6 +291,9 @@ def lineage_bash_allowed(ctx: ExecutionContext, command: str, *, workspace_dir: 
                 return False
         elif prog == "gh":
             if not _gh_allowed(args):
+                return False
+        elif prog == "printf":
+            if not _printf_allowed(args):
                 return False
         elif prog not in LINEAGE_READ_COMMANDS:
             return False
