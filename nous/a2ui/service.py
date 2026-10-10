@@ -1120,6 +1120,13 @@ class SurfaceService:
         that evidence into brain.decisions rides with the escalation
         integration, not this PR — a2ui_actions is the durable audit tier.)
         """
+        # Fully triaged findings cards close BEFORE the expiry claims (codex
+        # P1): an overdue card whose final resolve failed to deliver was
+        # answered, so it must end resolved, never expired_unanswered.
+        closed = await self.close_triaged_findings_surfaces()
+        if closed:
+            logger.info("F092: closed %d fully-triaged findings card(s)", closed)
+
         now = datetime.now(UTC)
         agent_id = self._settings.agent_id
         async with self._db.session() as session:
@@ -1148,6 +1155,15 @@ class SurfaceService:
             # silence claim can never both land.
             async with self.surface_lock(surface_id):
                 async with self._db.session() as session:
+                    # A findings card triaged after the reconciliation above
+                    # is left live for the next sweep to close, not expired.
+                    current = await self._get_own(session, surface_id)
+                    if (
+                        current is not None
+                        and current.kind == "heartbeat_findings"
+                        and fully_triaged((current.data_model or {}).get("findings"))
+                    ):
+                        continue
                     # Deadline REVALIDATED inside the claim (codex P1): a
                     # dedup refresh that ran while we waited for the lock
                     # moves expires_at into the future — claiming on
@@ -1206,10 +1222,6 @@ class SurfaceService:
                 if was_pushed:
                     self._schedule_dismiss([surface_id])
                 expired += 1
-
-        closed = await self.close_triaged_findings_surfaces()
-        if closed:
-            logger.info("F092: closed %d fully-triaged findings card(s)", closed)
 
         async with self._db.session() as session:
             # F092.1 amendment to the retention invariant (rev-arch #3):
