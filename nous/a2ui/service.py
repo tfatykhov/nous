@@ -1169,11 +1169,12 @@ class SurfaceService:
                     # A findings card triaged after the reconciliation above
                     # is left live for the next sweep to close, not expired.
                     current = await self._get_own(session, surface_id)
-                    if (
+                    is_findings = (
                         current is not None
                         and current.kind == "heartbeat_findings"
-                        and _card_triaged(current.data_model)
-                    ):
+                    )
+                    observed_model = deepcopy(current.data_model) if is_findings else None
+                    if is_findings and _card_triaged(observed_model):
                         continue
                     # Deadline REVALIDATED inside the claim (codex P1): a
                     # dedup refresh that ran while we waited for the lock
@@ -1181,6 +1182,19 @@ class SurfaceService:
                     # liveness alone would delete the fresh card and record
                     # a false expired-unanswered row.
                     claim_now = datetime.now(UTC)
+                    # Codex R4 P1: recheck triage atomically with the expiry
+                    # claim. surface_lock is process-local and does not
+                    # serialise across workers; a final Resolve/Dismiss on
+                    # another worker can commit between the SELECT above and
+                    # this UPDATE. Binding data_model == observed_model makes
+                    # the claim a no-op when that happens — claimed[] will be
+                    # empty and the loop `continue`s, leaving the card for
+                    # the next sweep's close_triaged_findings_surfaces pass.
+                    _expiry_extra = (
+                        [A2uiSurface.data_model == observed_model]
+                        if is_findings and observed_model is not None
+                        else []
+                    )
                     claimed = (
                         (
                             await session.execute(
@@ -1191,6 +1205,7 @@ class SurfaceService:
                                     A2uiSurface.status == "live",
                                     A2uiSurface.expires_at.is_not(None),
                                     A2uiSurface.expires_at <= claim_now,
+                                    *_expiry_extra,
                                 )
                                 .values(status="expired", resolved_at=claim_now)
                                 .returning(
