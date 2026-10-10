@@ -616,6 +616,50 @@ class TestExpirySweep:
 
         assert await _outbox(db, a2ui_agent_id) == []
 
+    async def test_sweep_closes_fully_triaged_findings_cards_only(
+        self, service: SurfaceService, db, a2ui_agent_id: str
+    ) -> None:
+        """Cards triaged before auto-close existed (or whose final resolve
+        failed to deliver) are closed by the sweep; nothing else is touched."""
+
+        async def findings_card(**verbs: str) -> str:
+            sid = await service.push_built(
+                heartbeat_findings({"findings": [{"fingerprint": fp} for fp in verbs]})
+            )
+            for fp, verb in verbs.items():
+                if verb != "open":
+                    await service.update_data(sid, f"/findings/{fp}", verb)
+            return sid
+
+        triaged = await findings_card(fa="resolve", fb="dismiss")
+        acked = await findings_card(fc="resolve", fd="acknowledge")
+        untouched = await findings_card(fe="open")
+        empty = await service.push_built(heartbeat_findings({"findings": []}))
+        approval = await service.push_built(approval_gate(APPROVAL_PARAMS))
+
+        assert await service.expire_sweep() == 0, "auto-close is not expiry"
+
+        status = {s.surface_id: s.status for s in await _surfaces(db, a2ui_agent_id)}
+        assert status == {
+            triaged: "resolved",
+            acked: "live",
+            untouched: "live",
+            empty: "live",
+            approval: "live",
+        }
+        actions = await _actions(db, a2ui_agent_id)
+        assert [(a.surface_id, a.action_name, a.actor) for a in actions] == [
+            (triaged, "auto_closed", "system:sweep")
+        ]
+        outbox = await _outbox(db, a2ui_agent_id)
+        assert outbox[-1].surface_id == triaged
+        assert _envelope_kind(outbox[-1].envelope) == "deleteSurface"
+
+        # Idempotent: a second sweep claims nothing and writes nothing.
+        await service.expire_sweep()
+        assert len(await _actions(db, a2ui_agent_id)) == 1
+        assert len(await _outbox(db, a2ui_agent_id)) == len(outbox)
+
 
 # ---------------------------------------------------------------------------
 # replay / latest_seq — the lag window

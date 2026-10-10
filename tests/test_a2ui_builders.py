@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from nous.a2ui.builders import TEMPLATES, action_review, approval_gate, heartbeat_findings
+from nous.a2ui.builders.heartbeat_findings import fully_triaged
 from nous.a2ui.dsl import BuiltSurface
 
 # ---------------------------------------------------------------------------
@@ -310,8 +311,11 @@ def test_heartbeat_findings_wires_every_verb_to_each_finding() -> None:
         "heartbeat.acknowledge",
         "heartbeat.resolve",
         "heartbeat.dismiss",
+        "heartbeat.close_card",
     ]
     assert _action_names(built) == set(built.allowed_actions)
+    assert _by_id(built, "close")["action"]["event"]["name"] == "heartbeat.close_card"
+    assert _by_id(built, "root")["children"][-1] == "close"
 
     ack_context = _by_id(built, "f0_ack")["action"]["event"]["context"]
     assert ack_context == {"fingerprint": "abc123def456"}
@@ -328,7 +332,18 @@ def test_heartbeat_findings_renders_an_empty_state() -> None:
     built.validate()
 
     assert _text_of(built, "empty") == "No open findings."
-    assert _by_id(built, "root")["children"] == ["header", "empty"]  # no legend when empty
+    assert _by_id(built, "root")["children"] == ["header", "empty", "close"]  # no legend when empty
+
+
+def test_fully_triaged_needs_every_finding_resolved_or_dismissed() -> None:
+    assert fully_triaged({"a": "resolve", "b": "dismiss"})
+    assert fully_triaged({"a": "dismiss"})
+    assert not fully_triaged({"a": "resolve", "b": "acknowledge"})
+    assert not fully_triaged({"a": "resolve", "b": "open"})
+    # The build-time value is non-terminal, and an empty card is never triaged.
+    assert not fully_triaged(heartbeat_findings(FINDINGS_PARAMS).data_model["findings"])
+    assert not fully_triaged({})
+    assert not fully_triaged(None)
 
 
 def test_heartbeat_findings_defaults_its_title_to_the_count() -> None:

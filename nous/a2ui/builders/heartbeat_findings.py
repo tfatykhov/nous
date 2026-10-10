@@ -22,7 +22,9 @@ LEGEND = (
     "- **Resolve** — handled. Closes it now and tells the heartbeat this was a "
     "useful alert.\n"
     "- **Dismiss** — noise. Closes it now and counts against that check, so "
-    "the heartbeat learns to raise alerts like this less often."
+    "the heartbeat learns to raise alerts like this less often.\n"
+    "\nThe card closes by itself once every item is resolved or dismissed; "
+    "**Close card** hides it sooner without changing any finding."
 )
 
 OPEN_STATUS = "Status: open — waiting for you"
@@ -39,6 +41,21 @@ STATUS_AFTER = {
 # check ran successfully this cycle, and no runner check owns these.
 AGENT_CHECK_PREFIX = "agent:"
 STATUS_AFTER_AGENT_ACK = "✓ Acknowledged — still tracked; Resolve or Dismiss it when done"
+
+
+# Verbs that end a finding's life on the card. Acknowledge is NOT terminal:
+# an agent-raised item stays open until Resolve/Dismiss (see LEGEND), and the
+# build-time "open" value is not a verb at all.
+TERMINAL_VERBS = frozenset({"resolve", "dismiss"})
+
+
+def fully_triaged(findings: Any) -> bool:
+    """True when a card's ``/findings`` map is non-empty and all terminal.
+
+    An empty card ("No open findings.") is never fully triaged: nobody
+    answered anything on it, so it is left to expiry or Close card.
+    """
+    return isinstance(findings, dict) and bool(findings) and all(v in TERMINAL_VERBS for v in findings.values())
 
 
 def status_after(verb: str, check_name: str | None) -> str:
@@ -61,6 +78,7 @@ def heartbeat_findings(params: dict[str, Any]) -> Any:
             "heartbeat.acknowledge",
             "heartbeat.resolve",
             "heartbeat.dismiss",
+            "heartbeat.close_card",
         ],
         expires_in=timedelta(hours=float(params.get("expires_hours", 72))),
     )
@@ -126,6 +144,20 @@ def heartbeat_findings(params: dict[str, Any]) -> Any:
     if not findings:
         children.append("empty")
         components.append(Text("empty", "No open findings."))
+
+    # Hides the card without touching any finding (actions.py).
+    children.append("close")
+    components.extend(
+        [
+            Button(
+                "close",
+                child="close_l",
+                variant="borderless",
+                action=event("heartbeat.close_card", {}),
+            ),
+            Text("close_l", "Close card"),
+        ]
+    )
 
     s.add(Column("root", children=children, align="stretch"), *components)
     return s.build()

@@ -39,6 +39,7 @@ from nous.storage.database import Database
 from nous.storage.models import A2uiAction, A2uiOutbox, A2uiSurface
 
 from .actions import EXPIRED_UNANSWERED
+from .builders.heartbeat_findings import fully_triaged
 from .dsl import BuiltSurface, SurfaceValidationError
 from .grammar import lint_micro_app
 
@@ -1206,6 +1207,10 @@ class SurfaceService:
                     self._schedule_dismiss([surface_id])
                 expired += 1
 
+        closed = await self.close_triaged_findings_surfaces()
+        if closed:
+            logger.info("F092: closed %d fully-triaged findings card(s)", closed)
+
         async with self._db.session() as session:
             # F092.1 amendment to the retention invariant (rev-arch #3):
             # the age cutoff now applies to LIVE surfaces' rows too.
@@ -1237,6 +1242,68 @@ class SurfaceService:
                 )
             await session.commit()
         return expired
+
+    async def close_triaged_findings_surfaces(self) -> int:
+        """Resolve live heartbeat_findings cards whose findings are all answered.
+
+        The action handler closes a card on its final resolve/dismiss; this
+        catches the rest — cards triaged before that existed, and a final
+        press whose resolve failed to deliver. Idempotent: only live cards
+        whose every finding is resolve/dismiss are claimed, each under its
+        surface lock with the check repeated inside the claim. Status is
+        ``resolved`` (the user answered everything), with an ``auto_closed``
+        audit row so the close is attributable to the sweep.
+        """
+        agent_id = self._settings.agent_id
+        async with self._db.session() as session:
+            candidates = (
+                await session.execute(
+                    select(A2uiSurface.surface_id, A2uiSurface.data_model).where(
+                        A2uiSurface.agent_id == agent_id,
+                        A2uiSurface.status == "live",
+                        A2uiSurface.kind == "heartbeat_findings",
+                    )
+                )
+            ).all()
+
+        closed = 0
+        for surface_id, data_model in candidates:
+            if not fully_triaged((data_model or {}).get("findings")):
+                continue
+            async with self.surface_lock(surface_id):
+                async with self._db.session() as session:
+                    surface = await self._get_own(session, surface_id)
+                    if (
+                        surface is None
+                        or surface.status != "live"
+                        or not fully_triaged((surface.data_model or {}).get("findings"))
+                    ):
+                        continue
+                    now = datetime.now(UTC)
+                    was_pushed = surface.push_notified_at is not None
+                    surface.status = "resolved"
+                    surface.resolved_at = now
+                    session.add(
+                        A2uiAction(
+                            agent_id=agent_id,
+                            surface_id=surface_id,
+                            action_name="auto_closed",
+                            actor="system:sweep",
+                            context={"reason": "every finding resolved or dismissed"},
+                            status="completed",
+                            completed_at=now,
+                        )
+                    )
+                    envelope = {"version": "v1.0", "deleteSurface": {"surfaceId": surface_id}}
+                    row = A2uiOutbox(agent_id=agent_id, surface_id=surface_id, envelope=envelope)
+                    session.add(row)
+                    await session.commit()
+                    seq = row.seq
+                self._broadcast(seq, envelope)
+                if was_pushed:
+                    self._schedule_dismiss([surface_id])
+                closed += 1
+        return closed
 
     async def invalidate_heartbeat_surfaces(self) -> int:
         """Expire live heartbeat surfaces at process start (codex P2).
