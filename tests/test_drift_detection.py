@@ -399,7 +399,9 @@ def _drift_check(db, agent_id="agent-b"):
     check._last_snapshot = None
     check._last_anomalies = []
     check._last_counts_ok = False  # real _capture_snapshot overwrites this each tick
-    check._settings = MagicMock(agent_id=agent_id)
+    # Explicit, as in Settings: a bare MagicMock attribute is truthy, which
+    # silently turned the consolidation audit on for every test.
+    check._settings = MagicMock(agent_id=agent_id, consolidation_audit_enabled=False)
     return check
 
 
@@ -1004,6 +1006,7 @@ class TestFactsPrunedIsAGrossCount:
         # Previously inactive: 0..99. Now: 100..199 -- 100 pruned, 100 reactivated.
         row = _FakeRow(inactive_ids=list(_ids(range(100, 200))), **self._ROW)
         check = _drift_check(_FakeDB(row, []))
+        check._settings.consolidation_audit_enabled = True  # so the 100 can be residualized
         check._last_snapshot = BehaviorSnapshot(
             timestamp=datetime.now(UTC), fact_count=900, inactive_fact_count=100, inactive_ids=_ids(range(100))
         )
@@ -1564,6 +1567,9 @@ class TestTrendConsumersFilterPerMetric:
         data = await self._client_get("/behavior/trends?metric=sleep_prune_count")
         assert data["points"] == []
         assert data["stats"] == {}
+        # Counted, so a mostly-null window does not read as a quiet week:
+        # two v1 rows, the null row, and the newer writer's row.
+        assert data["excluded_incompatible"] == 4
 
     @pytest.mark.asyncio
     async def test_dashboard_filters_each_series_independently(self):

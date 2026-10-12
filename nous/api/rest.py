@@ -3091,7 +3091,11 @@ def create_app(
                 continue
             val = metrics.get(metric, 0)
             if val is None:
-                continue  # unknown, not 0 (sleep_prune_count with the consolidation audit off)
+                # Unknown, not 0 (sleep_prune_count with the consolidation
+                # audit off or a cycle running). Counted, so a mostly-null
+                # window does not read as a quiet week.
+                excluded += 1
+                continue
             points.append({"timestamp": row.timestamp.isoformat(), "value": val})
             values.append(float(val))
         stats = {}
