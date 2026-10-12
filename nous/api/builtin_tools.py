@@ -188,8 +188,10 @@ async def read_file_tool(
         if not content:
             return _mcp_response("(empty file)")
 
-        # On "\n" only, as wc -l, grep -n and sed -n count: splitlines()
-        # also breaks on \f, \v, \x1c-\x1e, \x85 and  /9.
+        # Counts "\n", after read_text's universal-newline translation, so a
+        # "\r\n" and a bare "\r" also end a line (grep -n would not count a
+        # bare "\r"). \f, \v, \x1c-\x1e, \x85 and  /9 no longer split a
+        # line, as they did with splitlines().
         lines = io.StringIO(content, newline="\n").readlines()
         total = len(lines)
         if offset >= total:
