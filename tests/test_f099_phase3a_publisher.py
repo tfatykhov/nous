@@ -220,4 +220,5 @@ async def test_an_unbound_service_is_a_no_op_even_with_the_flag_on(cards_env):  
     env.cont.set_surface_service(None)  # a deployment without the companion never binds one
     await ask_with_proposals(env)
     assert await env.publisher.push_due(now=later()) == 1
-    assert await live_cards(env) == [] and env.http.post.await_count == 1  # Task 12 adds: and the sweep returns 0
+    assert await live_cards(env) == [] and env.http.post.await_count == 1
+    assert await env.cont._settle_cards() == 0
