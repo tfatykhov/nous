@@ -392,6 +392,12 @@ class TestTolerantParsing:
         })
         assert r.findings == ["Revenue rose 4%; churn flat."]
 
+    def test_too_deeply_nested_string_becomes_one_item(self):
+        # json.loads raises RecursionError here, which is not a ValueError.
+        deep = "[" * 100_000
+        r = SubtaskReport.model_validate({"summary": "x", "findings": deep})
+        assert r.findings == [deep]
+
     def test_other_list_fields_are_coerced_too(self):
         r = SubtaskReport.model_validate({
             "summary": "x",

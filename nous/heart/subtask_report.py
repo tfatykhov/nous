@@ -121,7 +121,7 @@ class SubtaskReport(BaseModel):
                 elif isinstance(value, str):
                     try:
                         parsed = json.loads(value)
-                    except ValueError:
+                    except (ValueError, RecursionError):
                         parsed = None
                     data[key] = parsed if isinstance(parsed, list) else [value]
             data["confidence_reported"] = data.get("confidence") is not None
