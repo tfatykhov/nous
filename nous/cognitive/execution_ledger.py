@@ -440,16 +440,25 @@ _ERROR_REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), "[REDACTED_KEY]"),
     (re.compile(r"\bAIza[0-9A-Za-z_-]{35}"), "[REDACTED_KEY]"),
     (re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*"), "[REDACTED_JWT]"),
-    (re.compile(r"\b\d{8,10}:[A-Za-z0-9_-]{35}\b"), "[REDACTED_BOT_TOKEN]"),
+    # No \b before the digits: a bot-token URL is `.../bot<digits>:<token>`.
+    (re.compile(r"(?<!\d)\d{8,10}:[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])"), "[REDACTED_BOT_TOKEN]"),
     # A bare `Basic <b64>`: the value must look encoded, so "Basic authentication" survives.
     (re.compile(r"\bBasic\s+(?=\S*(?:[a-z][A-Z]|\d|[+/=]))[A-Za-z0-9+/]{12,}={0,2}"), "Basic [REDACTED]"),
-    # A credential label the redact_text patterns lack, or with ':' (prose such as
-    # "token: expired" survives: a ':' value must hold a digit).
-    (re.compile(r"((?:passphrase|private[_-]?key|credentials?)\s*=\s*)['\"]?[^\s'\",;&)]+", re.IGNORECASE),
-     r"\1[REDACTED]"),
+    # `label: value` and `label=value` for the labels redact_text lacks or covers only
+    # with '=', the label optionally quoted ({'password': 'x'}). A quoted value is
+    # masked up to its closing quote, an unquoted one up to a delimiter.
     (re.compile(
-        r"\b((?:api[_-]?key|apikey|access[_-]?token|auth[_-]?token|client[_-]?secret|token|secret|password|passwd)"
-        r"\s*:\s*)['\"]?(?=[^\s'\",;&)]*\d)[^\s'\",;&)]{6,}", re.IGNORECASE),
+        r"(?<![A-Za-z0-9])((?:passphrase|passwd|password|private[_-]?key|api[_-]?key|apikey"
+        r"|secret[_-]?access[_-]?key|secret[_-]?key|secret|client[_-]?secret"
+        r"|access[_-]?token|auth[_-]?token)['\"]?\s*[:=]\s*)(?:'[^']*'|\"[^\"]*\"|[^\s'\",;&)}\]]+)",
+        re.IGNORECASE), r"\1[REDACTED]"),
+    (re.compile(r"(?<![A-Za-z0-9])(credentials?\s*=\s*)(?:'[^']*'|\"[^\"]*\"|[^\s'\",;&)}\]]+)", re.IGNORECASE),
+     r"\1[REDACTED]"),
+    # A bare `token:` is the label most likely to be prose ("token: expired"),
+    # so its value must hold a digit.
+    (re.compile(
+        r"(?<![A-Za-z0-9])(token['\"]?\s*:\s*)(?:'(?=[^']*\d)[^']*'|\"(?=[^\"]*\d)[^\"]*\""
+        r"|(?=[^\s'\",;&)}\]]*\d)[^\s'\",;&)}\]]{6,})", re.IGNORECASE),
      r"\1[REDACTED]"),
     # https://<long token>@host (redact_text covers user:password@)
     (re.compile(r"(://)[A-Za-z0-9_.~%-]{20,}@"), r"\1[REDACTED]@"),

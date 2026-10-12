@@ -311,6 +311,29 @@ async def test_an_error_excerpt_masks_each_credential_format(store, db, value):
     assert secret not in summary and secret[:14] not in summary
 
 
+_BOT_TOKEN = "AAFd3x9Qz8L2mN4pR6sT8vW0yB1cD2eF3gH"
+# (message, the secret inside it): a label with no digit in its value, a quoted
+# label, a quoted value with a space, and a token that follows "bot" in a URL.
+_MASKED_IN_CONTEXT = [
+    ("config rejected, password: " + "letmeinplease" + " was wrong", "letmeinplease"),
+    ("config rejected, api_key: " + "ABCDEFGHIJKLMNOP" + " was wrong", "ABCDEFGHIJKLMNOP"),
+    ("config rejected, my_api_key = " + "'abcdefgh'" + " was wrong", "abcdefgh"),
+    ("bad input {'password': '" + "hunter22" + "'}", "hunter22"),
+    ("input_value={'password': '" + "hunter22" + "', 'host': 'x'}", "hunter22"),
+    ("bad input {'secret': '" + "correct horse" + "'}", "horse"),
+    ("bad input {'token': '" + "abc123xyz9" + "'}", "abc123xyz9"),
+    ("POST https://api.telegram.org/bot" + "123456789:" + _BOT_TOKEN + " failed", _BOT_TOKEN),
+]
+
+
+@pytest.mark.parametrize(("message", "secret"), _MASKED_IN_CONTEXT)
+@pytest.mark.asyncio
+async def test_an_error_excerpt_masks_quoted_labels_and_bot_token_urls(store, db, message, secret):
+    summary = await _closed_summary(store, db, "send_email", message)
+    assert "[REDACTED" in summary
+    assert secret not in summary and secret[:6] not in summary
+
+
 @pytest.mark.asyncio
 async def test_a_credential_across_the_300_character_cut_stays_masked(store, db):
     key = "sk-" + "ant-api03-" + "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
