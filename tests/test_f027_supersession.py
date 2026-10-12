@@ -644,11 +644,6 @@ class TestPhaseClusterConsolidation:
             assert call.args[0] == merged_detail.id  # source = superseding fact
             assert call.args[2] == "supersedes"
 
-
-# ===========================================================================
-# TestSleepPhaseRegistration
-# ===========================================================================
-
 class TestSleepPhaseRegistration:
     """Test that F027 phases are registered in _run_sleep."""
 
@@ -706,3 +701,83 @@ class TestSleepPhaseRegistration:
 
         await handler._run_sleep(event)
         handler._phase_cluster_consolidation.assert_called_once()
+
+
+@pytest.mark.postgres_only
+class TestClusterConsolidationTier1Exclusion:
+    """#592: cluster_consolidation bypasses admission, so a tier-1 (person /
+    preference / rule) fact is never a cluster member: a tier-1 cluster is left
+    alone (its facts stay in the User Profile), and a mixed subject merges only
+    its other facts."""
+
+    async def test_tier1_facts_are_never_merged(self, heart):
+        from sqlalchemy import select, text
+
+        from nous.handlers.sleep_handler import SleepHandler
+        from nous.storage.models import Fact
+
+        agent_id = f"test-592-{uuid4()}"
+        orig_heart_agent, orig_facts_agent = heart.agent_id, heart.facts.agent_id
+        heart.agent_id = agent_id
+        heart.facts.agent_id = agent_id
+        pref_ids = [uuid4() for _ in range(3)]
+        rule_ids = [uuid4() for _ in range(2)]
+        concept_ids = [uuid4() for _ in range(3)]
+        try:
+            async with heart.db.session() as s:
+                rows = [(fid, "user coffee", "preference") for fid in pref_ids]
+                rows += [(fid, "deploy pipeline", "rule") for fid in rule_ids]
+                rows += [(fid, "deploy pipeline", "concept") for fid in concept_ids]
+                for i, (fid, subject, category) in enumerate(rows):
+                    s.add(
+                        Fact(
+                            id=fid,
+                            agent_id=agent_id,
+                            subject=subject,
+                            content=f"{subject} observation {i}",
+                            category=category,
+                            source="fact_extractor",
+                            active=True,
+                            embedding=await heart._embeddings.embed(f"{subject} seed {i}"),
+                        )
+                    )
+                await s.commit()
+
+            # LLM that approves a merge of whatever cluster it is shown.
+            llm = MagicMock()
+            resp = MagicMock()
+            resp.content = [
+                {
+                    "type": "tool_use",
+                    "id": "t",
+                    "name": "merge_facts",
+                    "input": {
+                        "should_merge": True,
+                        "merged_content": "Consolidated deploy pipeline fact.",
+                        "confidence": 0.9,
+                    },
+                }
+            ]
+            llm.call = AsyncMock(return_value=resp)
+            bus = MagicMock()
+            bus.emit = AsyncMock()
+
+            handler = SleepHandler(MagicMock(), heart, heart.settings, bus, llm)
+            assert await handler._phase_cluster_consolidation({})
+
+            async with heart.db.session() as check:
+                for fid in pref_ids + rule_ids:
+                    f = await check.get(Fact, fid)
+                    assert f is not None and f.active is True, f"tier-1 fact {fid} was merged"
+                for fid in concept_ids:
+                    f = await check.get(Fact, fid)
+                    assert f is not None and f.active is False, "the non-tier-1 members still consolidate"
+                merged_q = select(Fact).where(Fact.agent_id == agent_id, Fact.source == "cluster_consolidation")
+                merged = (await check.execute(merged_q)).scalars().all()
+                assert [m.category for m in merged] == ["concept"]
+        finally:
+            heart.agent_id = orig_heart_agent
+            heart.facts.agent_id = orig_facts_agent
+            async with heart.db.session() as s:
+                await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": agent_id})
+                await s.commit()
