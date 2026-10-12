@@ -216,14 +216,15 @@ class ScheduleManager:
     async def deactivate(self, schedule_id: UUID) -> None:
         """Deactivate a schedule, and close its F099 container intention."""
         async with self._db.session() as session:
-            if undo_journal.get_journal() is not None:
-                await self._record_before_deactivate(session, schedule_id)
-            await session.execute(
-                update(Schedule)
-                .where(Schedule.id == schedule_id)
-                .values(active=False)
-            )
-            await session.commit()
+            async with undo_journal.discard_on_failure() as snapshot:
+                if undo_journal.get_journal() is not None:
+                    await self._record_before_deactivate(session, schedule_id, snapshot)
+                await session.execute(
+                    update(Schedule)
+                    .where(Schedule.id == schedule_id)
+                    .values(active=False)
+                )
+                await session.commit()
             logger.info("Deactivated schedule %s", schedule_id.hex[:8])
         await self._close_container(schedule_id)
 
@@ -251,16 +252,16 @@ class ScheduleManager:
                     .with_for_update()
                 )
             ).mappings().first()
+            if before is None and (current is None or not current["active"]):
+                return True, f"schedule {schedule_id} is already absent or inactive"
+            if before is not None and (before.get("agent_id") != self._agent_id or before.get("id") != schedule_id):
+                return False, "snapshot belongs to another schedule or agent; nothing changed"
             await on_current(dict(current) if current is not None else None)
             if before is None:
-                if current is None or not current["active"]:
-                    return True, f"schedule {schedule_id} is already absent or inactive"
                 await session.execute(update(table).where(table.c.id == schedule_id).values(active=False))
                 await session.commit()
                 deactivated = True
             else:
-                if before.get("agent_id") != self._agent_id or before.get("id") != schedule_id:
-                    return False, "snapshot belongs to another schedule or agent; nothing changed"
                 values = dict(before)
                 note = ""
                 if values.get("active"):
@@ -283,14 +284,17 @@ class ScheduleManager:
             await self._close_container(schedule_id)
         return True, f"deactivated schedule {schedule_id} (undoing its create; rows are never deleted)"
 
-    async def _record_before_deactivate(self, session: Any, schedule_id: UUID) -> None:
+    async def _record_before_deactivate(
+        self, session: Any, schedule_id: UUID, snapshot: undo_journal.PendingSnapshot
+    ) -> None:
         """Undo journal: the row before a deactivate, read under its row lock
         in the deactivate's own transaction, so a fire cannot commit between
         the snapshot and the deactivate (never raises: the reads run in a
         savepoint, and a failed one leaves the deactivate's transaction
         intact). A schedule with an F099 container intention is recorded but
         not restorable: the deactivate closes the container, and restore
-        never re-arms work against a closed intention."""
+        never re-arms work against a closed intention. Recorded through
+        ``snapshot``, so the deactivate can discard it if it does not commit."""
         try:
             table = Schedule.__table__
             async with session.begin_nested():
@@ -303,7 +307,7 @@ class ScheduleManager:
         except Exception:
             logger.warning("Undo journal: could not read schedule %s before deactivate", schedule_id, exc_info=True)
             return
-        await undo_journal.record_safe(
+        await snapshot.record(
             undo_journal.KIND_SCHEDULE,
             "deactivate",
             str(schedule_id),

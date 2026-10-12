@@ -40,7 +40,7 @@ import json
 import logging
 import os
 import threading
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -147,6 +147,8 @@ class UndoJournal:
     def _write_file(self, name: str, entry: dict[str, Any], data: bytes | None = None) -> None:
         data = _dump(entry) if data is None else data
         tmp = self._root / f".{name}.tmp"
+        # Callers hold _lock, so an existing tmp is a hard-killed write's leftover.
+        tmp.unlink(missing_ok=True)
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
             with os.fdopen(fd, "wb") as f:
@@ -225,9 +227,10 @@ class UndoJournal:
         await asyncio.to_thread(_mark)
 
     def discard(self, snapshot_id: str) -> None:
-        """Delete a snapshot whose mutation did not commit. Synchronous, so a
-        caller can run it while handling a cancellation. A snapshot not
-        written yet is tombstoned, so a write still in flight is dropped."""
+        """Delete a snapshot whose mutation did not commit. Blocking (it takes
+        the lock _write holds across fsync): callers use ``discard_safe``,
+        which runs it off the event loop. A snapshot not written yet is
+        tombstoned, so a write still in flight is dropped."""
         with self._lock:
             path = self._find(snapshot_id)
             if path is not None:
@@ -379,18 +382,61 @@ class RestoreResult:
     success: bool
     message: str
     pre_restore_id: str | None = None
+    not_found: bool = False
 
 
-def discard_safe(snapshot_id: str | None) -> None:
+async def discard_safe(snapshot_id: str | None) -> None:
     """Delete a snapshot recorded for a mutation that did not commit, so no
-    restore can apply it; never raises. A no-op for None (nothing recorded)."""
+    restore can apply it; never raises. A no-op for None (nothing recorded).
+    Runs in a worker thread, off the event loop (#718), and is shielded: a
+    second cancel of the caller cannot drop a discard still queued."""
     journal = _journal
     if journal is None or snapshot_id is None:
         return
+
+    def _discard() -> None:
+        try:
+            journal.discard(snapshot_id)
+        except Exception:
+            logger.warning("Undo journal: could not discard snapshot %s", snapshot_id, exc_info=True)
+
+    await asyncio.shield(asyncio.to_thread(_discard))
+
+
+@dataclass
+class PendingSnapshot:
+    """The snapshot a ``discard_on_failure`` block records. Its id is chosen
+    before the write, so a cancel mid-write (the write still lands in its
+    thread) knows what to discard; it is None when nothing was recorded or
+    the write failed, leaving no tombstone to leak (#718)."""
+
+    id: str | None = None
+
+    async def record(self, kind: str, action: str, target: str, before: Any, **kwargs: Any) -> None:
+        """``record_safe`` under this pending id; never raises."""
+        self.id = uuid4().hex
+        self.id = await record_safe(kind, action, target, before, snapshot_id=self.id, **kwargs)
+
+    async def record_model(self, kind: str, action: str, model: Any, *, label: str | None = None) -> None:
+        """``record_model_safe`` under this pending id; never raises."""
+        self.id = uuid4().hex
+        self.id = await record_model_safe(kind, action, model, label=label, snapshot_id=self.id)
+
+
+@contextlib.asynccontextmanager
+async def discard_on_failure() -> AsyncIterator[PendingSnapshot]:
+    """Wrap the record, write and commit of a mutation snapshotted before its
+    commit (record through the yielded ``PendingSnapshot``): when any of
+    them fails or is cancelled, the snapshot is discarded, so no restore
+    applies it over newer state. A cancel during the commit itself may drop
+    a landed mutation's snapshot: that loses its undo, never applies a wrong
+    one."""
+    pending = PendingSnapshot()
     try:
-        journal.discard(snapshot_id)
-    except Exception:
-        logger.warning("Undo journal: could not discard snapshot %s", snapshot_id, exc_info=True)
+        yield pending
+    except BaseException:
+        await discard_safe(pending.id)
+        raise
 
 
 @dataclass
@@ -415,9 +461,16 @@ async def restore(snapshot_id: str, deps: RestoreDeps, journal: UndoJournal | No
     journal = journal or _journal
     if journal is None:
         return RestoreResult(False, "undo journal is not enabled")
-    entry = await journal.get(snapshot_id)
+    try:
+        entry = await journal.get(snapshot_id)
+    except FileNotFoundError:  # pruned between the lookup and the read
+        entry = None
+    except (OSError, ValueError) as exc:
+        return RestoreResult(False, f"snapshot {snapshot_id} could not be read: {type(exc).__name__}")
     if entry is None:
-        return RestoreResult(False, f"snapshot {snapshot_id!r} not found")
+        return RestoreResult(False, f"snapshot {snapshot_id!r} not found", not_found=True)
+    if not isinstance(entry, dict) or not {"kind", "target", "before"} <= entry.keys():
+        return RestoreResult(False, f"snapshot {snapshot_id} is malformed; not restoring")
     if not entry.get("restorable"):
         return RestoreResult(False, f"snapshot {snapshot_id} is not restorable: {entry.get('note')}")
 

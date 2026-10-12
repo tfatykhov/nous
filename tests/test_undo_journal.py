@@ -21,6 +21,7 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous import undo_journal
 from nous.api.builtin_tools import write_file_tool
@@ -79,6 +80,23 @@ async def _row(db, model, row_id) -> dict | None:
 
 def _agent() -> str:
     return f"test-undo-{uuid.uuid4().hex[:8]}"
+
+
+def _slow_write(journal: UndoJournal, monkeypatch) -> tuple[threading.Event, threading.Event, threading.Event]:
+    """Hold journal writes in their worker thread until ``release`` is set."""
+    write = journal._write
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def _write(entry):
+        entered.set()
+        release.wait(5)
+        try:
+            write(entry)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(journal, "_write", _write)
+    return entered, release, finished
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +177,42 @@ class TestJournalStore:
             "none": None,
         }
         assert undo_journal.decode_row(undo_journal.encode_row(row)) == row
+
+    async def test_restore_endpoint_maps_missing_to_404_and_malformed_to_409(self, workspace, journal):
+        # Review of #712: journal.get() ran outside restore()'s try, so a
+        # pruned or malformed snapshot raised through the endpoint (a 500).
+        from nous.api.rest import create_app
+        from nous.config import Settings
+
+        app = create_app(
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(schedules=None),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            Settings(workspace_dir=str(workspace)),
+        )
+        bad = uuid.uuid4().hex
+        journal._root.mkdir(parents=True, exist_ok=True)
+        journal._write_file(f"20260101T000000000000-{bad}.json", {}, b"not json")
+        keyless = uuid.uuid4().hex
+        journal._write_file(f"20260101T000000000001-{keyless}.json", {"restorable": True})
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            missing = await client.post(f"/undo/snapshots/{uuid.uuid4().hex}/restore")
+            malformed = await client.post(f"/undo/snapshots/{bad}/restore")
+            shapeless = await client.post(f"/undo/snapshots/{keyless}/restore")
+        assert missing.status_code == 404 and missing.json()["success"] is False
+        assert malformed.status_code == 409 and malformed.json()["success"] is False
+        assert shapeless.status_code == 409 and "malformed" in shapeless.json()["message"]
+
+    async def test_stale_tmp_from_a_killed_write_does_not_block_mark_restored(self, tmp_path):
+        # Review of #712: a hard kill between os.open and os.replace left
+        # .{name}.tmp behind, and every later rewrite of that id hit O_EXCL.
+        j = UndoJournal(str(tmp_path / "j"))
+        sid = await j.record("config", "x", "t", {"n": 1})
+        (j.root / f".{j._find(sid).name}.tmp").write_bytes(b"partial")
+        await j.mark_restored(sid, "ok")
+        assert (await j.get(sid))["restore_result"] == "ok"
 
     def test_configure_respects_flag(self, tmp_path):
         s = SimpleNamespace(
@@ -355,6 +409,56 @@ class TestScheduleKind:
         row = await _row(db, Schedule, sched.id)
         assert row is not None and row["active"] is False
 
+    async def test_deactivate_that_does_not_commit_discards_its_snapshot(self, db, schedules, journal, monkeypatch):
+        # Review of #712: the deactivate snapshot is recorded before the
+        # commit; a failed commit left it behind for a later restore.
+        sched = await schedules.create(task="t", schedule_type="recurring", interval_seconds=3600)
+
+        async def _fail(self):
+            raise RuntimeError("commit failed")
+
+        monkeypatch.setattr(AsyncSession, "commit", _fail)
+        with pytest.raises(RuntimeError, match="commit failed"):
+            await schedules.deactivate(sched.id)
+        monkeypatch.undo()
+        assert [e["action"] for e in await journal.list(500)] == ["create"]
+        assert (await _row(db, Schedule, sched.id))["active"] is True
+
+    async def test_deactivate_cancelled_mid_snapshot_write_leaves_no_orphan(self, db, schedules, journal, monkeypatch):
+        # Review of PR B: the deactivate's journal-minted id was lost to a
+        # cancel during the write, which still landed afterwards.
+        sched = await schedules.create(task="t", schedule_type="recurring", interval_seconds=3600)
+        entered, release, finished = _slow_write(journal, monkeypatch)
+        task = asyncio.create_task(schedules.deactivate(sched.id))
+        assert await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 5)
+        assert [e["action"] for e in await journal.list(500)] == ["create"]
+        assert not journal._discarded
+        assert (await _row(db, Schedule, sched.id))["active"] is True
+
+    async def test_refused_restore_records_no_pre_restore(self, db, schedules, journal):
+        # Review of PR B: the owner/id refusal ran after on_current.
+        sched = await schedules.create(task="t", schedule_type="recurring", interval_seconds=3600)
+        row = await _row(db, Schedule, sched.id)
+        row["agent_id"] = "someone-else"
+        sid = await journal.record("schedule", "deactivate", str(sched.id), undo_journal.encode_row(row))
+        result = await undo_journal.restore(sid, RestoreDeps(schedules=schedules), journal)
+        assert not result.success and result.pre_restore_id is None
+        assert not [e for e in await journal.list(500) if e["source"] == "pre_restore"]
+
+    async def test_noop_restore_of_create_records_no_pre_restore(self, db, schedules, journal):
+        # Review of #712: a restore that changes nothing still recorded a pre_restore entry.
+        sched = await schedules.create(task="t", schedule_type="recurring", interval_seconds=3600)
+        await schedules.deactivate(sched.id)
+        entry = await _only(journal, "schedule", "create")
+        result = await undo_journal.restore(entry["id"], RestoreDeps(schedules=schedules), journal)
+        assert result.success and result.pre_restore_id is None
+        assert not [e for e in await journal.list(500) if e["source"] == "pre_restore"]
+
     async def test_container_backed_deactivate_is_not_restorable(self, db, schedules, journal):
         spec = IntentionSpec(intent="Check daily", origin_kind="interactive", container=True)
         sched = await schedules.create(task="Check", schedule_type="recurring", interval_seconds=1800, intention=spec)
@@ -447,6 +551,15 @@ class TestCheckKind:
         assert row is not None and row["enabled"] is False
         assert loader._registry.get_check(row["name"]) is None
 
+    async def test_noop_restore_of_create_records_no_pre_restore(self, db, loader, journal):
+        # Review of #712: a restore that changes nothing still recorded a pre_restore entry.
+        check_id = await _make_check(loader)
+        await loader.manage_check("disable", (await _row(db, DynamicCheckModel, check_id))["name"])
+        entry = await _only(journal, "heartbeat_check", "create")
+        result = await undo_journal.restore(entry["id"], RestoreDeps(check_loader=loader), journal)
+        assert result.success and result.pre_restore_id is None
+        assert not [e for e in await journal.list(500) if e["source"] == "pre_restore"]
+
     async def test_name_clash_refuses(self, db, loader, journal):
         check_id = await _make_check(loader)
         name = (await _row(db, DynamicCheckModel, check_id))["name"]
@@ -455,6 +568,9 @@ class TestCheckKind:
         entry = await _only(journal, "heartbeat_check", "delete")
         result = await undo_journal.restore(entry["id"], RestoreDeps(check_loader=loader), journal)
         assert not result.success and "nothing changed" in result.message
+        # Review of PR B: a refused restore records no pre_restore entry.
+        assert result.pre_restore_id is None
+        assert not [e for e in await journal.list(500) if e["source"] == "pre_restore"]
 
     async def test_dag_check_restore_is_refused(self, db, loader, journal):
         created = await loader.create_check(name=f"dag-{uuid.uuid4().hex[:6]}", description="d", prompt="p")
@@ -500,6 +616,16 @@ class TestCheckKind:
             await loader.manage_check("update", created["name"], updates)
         assert [e["action"] for e in await journal.list(500)] == ["create"]
         assert await _row(db, DynamicCheckModel, uuid.UUID(created["id"])) == before
+
+    async def test_update_with_no_allowed_field_records_and_commits_nothing(self, db, loader, journal):
+        # Review of #712 (residual of #714 item 2): an update whose keys are
+        # all outside allowed_fields still journaled a snapshot and committed.
+        check_id = await _make_check(loader)
+        before = await _row(db, DynamicCheckModel, check_id)
+        result = await loader.manage_check("update", before["name"], {"bogus": 1, "name": "renamed"})
+        assert result == {"status": "updated", "name": before["name"]}
+        assert [e["action"] for e in await journal.list(500)] == ["create"]
+        assert await _row(db, DynamicCheckModel, check_id) == before
 
     async def test_refused_disable_records_nothing(self, db, loader, journal, monkeypatch):
         check_id = await _make_check(loader)
@@ -561,6 +687,48 @@ class TestCheckKind:
         assert (await _row(db, DynamicCheckModel, check_id))["enabled"] is True
         assert not loader._registry.get_check(name)._self_disabled
 
+    @pytest.mark.parametrize(("action", "updates"), [("enable", None), ("delete", None), ("update", {"prompt": "p2"})])
+    async def test_mutation_that_does_not_commit_discards_its_snapshot(
+        self, db, loader, journal, monkeypatch, action, updates
+    ):
+        # Review of #712: enable, delete and update snapshot before the
+        # commit, so a failed commit left a snapshot that, restored later,
+        # silently overwrote newer edits.
+        check_id = await _make_check(loader)
+        before = await _row(db, DynamicCheckModel, check_id)
+
+        async def _fail(self):
+            raise RuntimeError("commit failed")
+
+        monkeypatch.setattr(AsyncSession, "commit", _fail)
+        with pytest.raises(RuntimeError, match="commit failed"):
+            await loader.manage_check(action, before["name"], updates)
+        monkeypatch.undo()
+        assert [e["action"] for e in await journal.list(500)] == ["create"]
+        assert await _row(db, DynamicCheckModel, check_id) == before
+
+    @pytest.mark.parametrize(("action", "updates"), [("enable", None), ("delete", None), ("update", {"prompt": "p2"})])
+    async def test_mutation_cancelled_mid_snapshot_write_leaves_no_orphan(
+        self, db, loader, journal, monkeypatch, action, updates
+    ):
+        # Review of PR B: cancelled while record()'s thread write was in
+        # flight, the mutation never learned the journal-minted id, so the
+        # write that landed afterwards survived; restoring it later reverted
+        # a newer committed edit.
+        check_id = await _make_check(loader)
+        before = await _row(db, DynamicCheckModel, check_id)
+        entered, release, finished = _slow_write(journal, monkeypatch)
+        task = asyncio.create_task(loader.manage_check(action, before["name"], updates))
+        assert await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 5)
+        assert [e["action"] for e in await journal.list(500)] == ["create"]
+        assert not journal._discarded
+        assert await _row(db, DynamicCheckModel, check_id) == before
+
     async def test_disable_cancelled_mid_snapshot_write_leaves_no_orphan(self, db, loader, journal, monkeypatch):
         # Codex P2 on #717: cancelled while record()'s thread write was in
         # flight, the disable never learned the snapshot id, so the write that
@@ -591,6 +759,59 @@ class TestCheckKind:
         assert [e["action"] for e in await journal.list(500)] == ["create"]
         assert not journal._discarded
         assert (await _row(db, DynamicCheckModel, check_id))["enabled"] is True
+
+    async def test_discard_does_not_block_the_event_loop(self, db, loader, journal):
+        # #718 (1): discard took the journal's threading lock on the event
+        # loop, while _write holds that lock across fsync. Here the lock is
+        # released only by a loop task: on the loop, the discard waits out
+        # the holder's 5 s timeout and the task never runs before it.
+        check_id = await _make_check(loader)
+        name = (await _row(db, DynamicCheckModel, check_id))["name"]
+        held, release = threading.Event(), threading.Event()
+        ticked: list[bool] = []
+        tasks: list[asyncio.Task] = []
+
+        def _hold():
+            with journal._lock:
+                held.set()
+                release.wait(5)
+
+        async def _tick():
+            await asyncio.sleep(0.05)
+            ticked.append(True)
+            release.set()
+
+        async def _persist(session, capture):
+            threading.Thread(target=_hold, daemon=True).start()
+            assert await asyncio.to_thread(held.wait, 5)
+            tasks.append(asyncio.create_task(_tick()))
+            raise RuntimeError("compensation write failed")
+
+        with pytest.raises(RuntimeError):
+            await loader.manage_check("disable", name, capture={"refuse_if_running": True, "persist": _persist})
+        assert ticked == [True]
+        assert [e["action"] for e in await journal.list(500)] == ["create"]
+        await tasks[0]
+
+    async def test_failed_snapshot_write_then_failed_disable_leaves_no_tombstone(
+        self, db, loader, journal, monkeypatch
+    ):
+        # #718 (2): the snapshot write failed (nothing landed), the disable
+        # then failed, and its discard tombstoned an id no write would ever
+        # consume, so _discarded grew without bound during an outage.
+        check_id = await _make_check(loader)
+        name = (await _row(db, DynamicCheckModel, check_id))["name"]
+
+        def _disk_full(*args, **kwargs):
+            raise OSError("disk full")
+
+        async def _persist(session, capture):
+            raise RuntimeError("compensation write failed")
+
+        monkeypatch.setattr(journal, "_write_file", _disk_full)
+        with pytest.raises(RuntimeError):
+            await loader.manage_check("disable", name, capture={"refuse_if_running": True, "persist": _persist})
+        assert not journal._discarded
 
     async def test_snapshot_failure_does_not_block(self, db, loader, failing_journal, caplog):
         with caplog.at_level(logging.WARNING, logger="nous.undo_journal"):

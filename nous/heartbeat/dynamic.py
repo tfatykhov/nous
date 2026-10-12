@@ -916,16 +916,17 @@ class DynamicCheckLoader:
             if model is None:
                 raise ValueError(f"Dynamic check '{name}' not found")
 
-            if action in ("enable", "delete"):
-                # Undo journal: the row before this action (never blocks).
-                # disable and update record only once they will proceed.
-                await undo_journal.record_model_safe(undo_journal.KIND_CHECK, action, model, label=name)
-
+            # Undo journal: each action records the row before it (never
+            # blocks), inside a block that discards the snapshot when the
+            # action does not commit. disable and update record only once
+            # they will proceed.
             if action == "enable":
-                model.enabled = True
-                model.metadata_ = {**_meta(model), _STATE_TOKEN_KEY: uuid4().hex}
-                model.updated_at = datetime.now(UTC)
-                await session.commit()
+                async with undo_journal.discard_on_failure() as snapshot:
+                    await snapshot.record_model(undo_journal.KIND_CHECK, action, model, label=name)
+                    model.enabled = True
+                    model.metadata_ = {**_meta(model), _STATE_TOKEN_KEY: uuid4().hex}
+                    model.updated_at = datetime.now(UTC)
+                    await session.commit()
                 await self._sync_locked()
                 return {"status": "enabled", "name": name}
 
@@ -953,16 +954,22 @@ class DynamicCheckLoader:
                     gate._self_disabled = True
                 # Chosen before the write (codex P2, PR #717): a cancel
                 # during the write must still know which snapshot to discard.
-                snapshot_id = uuid4().hex
+                snapshot_id: str | None = uuid4().hex
                 try:
                     # Undo journal (never blocks), recorded only once the
                     # disable will proceed: the refusal above is decided and
                     # gated before this await (codex P2, PR #715), so a run
                     # starting mid-write cannot turn it into a refusal that
                     # leaves the snapshot behind.
-                    await undo_journal.record_model_safe(
-                        undo_journal.KIND_CHECK, action, model, label=name, snapshot_id=snapshot_id
-                    )
+                    if (
+                        await undo_journal.record_model_safe(
+                            undo_journal.KIND_CHECK, action, model, label=name, snapshot_id=snapshot_id
+                        )
+                        is None
+                    ):
+                        # Nothing landed: a discard would only leave a
+                        # tombstone no write ever consumes (#718).
+                        snapshot_id = None
                     prior_enabled = model.enabled
                     token = uuid4().hex
                     model.enabled = False
@@ -991,7 +998,7 @@ class DynamicCheckLoader:
                     # undo could apply over newer settings. A cancel during
                     # the commit itself may drop a landed disable's snapshot:
                     # that loses its undo, never applies a wrong one.
-                    undo_journal.discard_safe(snapshot_id)
+                    await undo_journal.discard_safe(snapshot_id)
                     raise
                 # codex P2 (PR #656): flag the in-memory check only once the
                 # disable is durable. Flagging before the commit left a failed
@@ -1013,8 +1020,10 @@ class DynamicCheckLoader:
 
             elif action == "delete":
                 check_id = str(model.id)
-                await session.delete(model)
-                await session.commit()
+                async with undo_journal.discard_on_failure() as snapshot:
+                    await snapshot.record_model(undo_journal.KIND_CHECK, action, model, label=name)
+                    await session.delete(model)
+                    await session.commit()
                 self._registry.unregister(name)
                 self._signatures.pop(name, None)
                 self._cancel_active_runs(name)
@@ -1058,6 +1067,9 @@ class DynamicCheckLoader:
                     if key == "interval_seconds" and value < MIN_INTERVAL_SECONDS:
                         raise ValueError(f"Minimum interval is {MIN_INTERVAL_SECONDS} seconds")
                     changes[key] = value
+                if not changes:
+                    # No allowed field: nothing to record, write or resync.
+                    return {"status": "updated", "name": name}
 
                 def _after(key: str) -> Any:
                     return changes[key] if key in changes else getattr(model, key)
@@ -1075,11 +1087,12 @@ class DynamicCheckLoader:
                 if current_on_complete and not current_on_complete.issubset(current_tools):
                     raise ValueError("on_complete_tools must be a subset of check tools")
                 # Undo journal: the row before this update (never blocks).
-                await undo_journal.record_model_safe(undo_journal.KIND_CHECK, action, model, label=name)
-                for key, value in changes.items():
-                    setattr(model, key, value)
-                model.updated_at = datetime.now(UTC)
-                await session.commit()
+                async with undo_journal.discard_on_failure() as snapshot:
+                    await snapshot.record_model(undo_journal.KIND_CHECK, action, model, label=name)
+                    for key, value in changes.items():
+                        setattr(model, key, value)
+                    model.updated_at = datetime.now(UTC)
+                    await session.commit()
                 await self._sync_locked()
                 return {"status": "updated", "name": name}
 
@@ -1123,12 +1136,9 @@ class DynamicCheckLoader:
                     ).first() is not None
                     if dag_owned:
                         return False, f"check {name!r} belongs to a DAG node; restore refused, nothing changed"
-                await on_current(dict(current) if current is not None else None)
-                if before is None:
-                    if current is None or not current["enabled"]:
-                        return True, f"check {check_id} is already absent or disabled"
-                    name = current["name"]
-                else:
+                if before is None and (current is None or not current["enabled"]):
+                    return True, f"check {check_id} is already absent or disabled"
+                if before is not None:
                     if before.get("agent_id") != self._agent_id or before.get("id") != check_id:
                         return False, "snapshot belongs to another check or agent; nothing changed"
                     clash = (
@@ -1141,6 +1151,10 @@ class DynamicCheckLoader:
                     ).first()
                     if clash is not None:
                         return False, f"another check is now named {before['name']!r}; nothing changed"
+                await on_current(dict(current) if current is not None else None)
+                if before is None:
+                    name = current["name"]
+                else:
                     values = dict(before)
                     # The journal lives in the workspace: a row read from it
                     # gets the same tool filter as create_check.
