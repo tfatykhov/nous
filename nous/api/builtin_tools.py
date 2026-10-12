@@ -158,7 +158,8 @@ async def read_file_tool(
         limit: Number of lines to read (0 = all). Capped at
             _READ_FILE_MAX_LINES lines / _READ_FILE_MAX_CHARS chars per call;
             a page that stops before the end of the file ends with a
-            trailer naming the next offset.
+            trailer naming the next offset, and a single line over the
+            char cap is cut with a trailer saying so.
         _workspace_dir: Internal param set by registration closure
 
     Returns:
@@ -196,7 +197,8 @@ async def read_file_tool(
 
         # The requested window, then the page cap: at most
         # _READ_FILE_MAX_LINES lines and _READ_FILE_MAX_CHARS chars, but
-        # always at least one whole line. Lines are never sampled or cut.
+        # always at least one line. Lines are never sampled; one is cut only
+        # when it alone is over the char cap (a minified JSON, say).
         requested_end = min(offset + limit, total) if limit > 0 else total
         end = offset
         chars = 0
@@ -207,6 +209,16 @@ async def read_file_tool(
             end += 1
         page = "".join(lines[offset:end])
 
+        notes: list[str] = []
+        line = page.removesuffix("\n")
+        if end == offset + 1 and len(line) > _READ_FILE_MAX_CHARS:
+            # The next offset still moves past this line, so paging advances.
+            page = line[:_READ_FILE_MAX_CHARS]
+            notes.append(
+                f"[read_file: line {end} was cut at {_READ_FILE_MAX_CHARS:,} of {len(line):,} chars. "
+                "read_file cannot page within a line; use bash `head -c` / `tail -c` (they count bytes) "
+                "for the rest.]"
+            )
         if end < total:
             # A capped explicit read is continued with the rest of its range;
             # anything else (an unbounded read, or an explicit window honoured
@@ -214,12 +226,14 @@ async def read_file_tool(
             # window never silently hides the rest of the file.
             capped = limit > 0 and end < requested_end
             next_call = f"offset={end}, limit={requested_end - end}" if capped else f"offset={end}"
-            if not page.endswith("\n"):
-                page += "\n"
-            page += (
+            notes.append(
                 f"[read_file: showing lines {offset + 1}–{end} of {total}. "
                 f"Call read_file(path, {next_call}) for the next part.]"
             )
+        if notes:
+            if not page.endswith("\n"):
+                page += "\n"
+            page += "\n".join(notes)
         return _mcp_response(page)
 
     except ValueError as e:
@@ -814,7 +828,8 @@ _READ_FILE_SCHEMA: dict[str, Any] = {
             "description": (
                 f"Number of lines to read (0 = all). A page is capped at {_READ_FILE_MAX_LINES} lines / "
                 f"{_READ_FILE_MAX_CHARS:,} chars; a page that stops before the end of the file ends with a "
-                "trailer naming the next offset."
+                "trailer naming the next offset. A single line over the char cap is cut, with a trailer "
+                "saying so."
             ),
             "default": 0,
             "minimum": 0,

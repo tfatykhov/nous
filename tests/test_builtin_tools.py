@@ -273,6 +273,10 @@ _TRAILER = re.compile(
     r"\n\[read_file: showing lines (\d+)–(\d+) of (\d+)\. "
     r"Call read_file\(path, offset=(\d+)(?:, limit=(\d+))?\) for the next part\.\]$"
 )
+_CUT = re.compile(
+    r"\[read_file: line (\d+) was cut at ([\d,]+) of ([\d,]+) chars\. "
+    r"read_file cannot page within a line; use bash `head -c` / `tail -c` \(they count bytes\) for the rest\.\]"
+)
 
 
 def _prose_report(n_lines: int = 300, width: int = 200) -> str:
@@ -384,16 +388,42 @@ class TestReadFilePagination:
         assert text == content
 
     @pytest.mark.asyncio
-    async def test_single_line_over_char_cap_is_whole_then_trailed(self, tmp_path):
+    async def test_single_line_file_over_char_cap_is_cut_with_trailer(self, tmp_path):
+        # A minified JSON: one line, ~10x the char cap, no final newline.
+        content = '{"k": "' + "v" * (10 * _READ_FILE_MAX_CHARS) + '"}'
+        (tmp_path / "min.json").write_text(content, encoding="utf-8")
+
+        text = _extract_text(await read_file_tool(path="min.json", _workspace_dir=str(tmp_path)))
+
+        m = _CUT.search(text)
+        assert m, text[-300:]
+        assert text.endswith(m.group(0)), "no next-part trailer: there is no next line"
+        assert m.groups() == ("1", f"{_READ_FILE_MAX_CHARS:,}", f"{len(content):,}")
+        assert text[: m.start()] == content[:_READ_FILE_MAX_CHARS] + "\n"
+
+    @pytest.mark.asyncio
+    async def test_line_over_char_cap_is_cut_and_paging_advances(self, tmp_path):
         content = "x" * (_READ_FILE_MAX_CHARS + 10) + "\nsecond\n"
         (tmp_path / "wide.txt").write_text(content, encoding="utf-8")
 
         text = _extract_text(await read_file_tool(path="wide.txt", _workspace_dir=str(tmp_path)))
 
-        m = _TRAILER.search(text)
-        assert m
+        cut, m = _CUT.search(text), _TRAILER.search(text)
+        assert cut and m, text[-400:]
+        assert cut.groups() == ("1", f"{_READ_FILE_MAX_CHARS:,}", f"{_READ_FILE_MAX_CHARS + 10:,}")
         assert m.groups() == ("1", "1", "2", "1", None)
-        assert text[: m.start() + 1] == "x" * (_READ_FILE_MAX_CHARS + 10) + "\n"
+        assert text[: cut.start()] == "x" * _READ_FILE_MAX_CHARS + "\n"
+        text = _extract_text(await read_file_tool(path="wide.txt", offset=1, _workspace_dir=str(tmp_path)))
+        assert text == "second\n"
+
+    @pytest.mark.asyncio
+    async def test_line_at_char_cap_is_not_cut(self, tmp_path):
+        # The cap counts the line's text, not its newline.
+        content = "x" * _READ_FILE_MAX_CHARS + "\n"
+        (tmp_path / "full.txt").write_text(content, encoding="utf-8")
+
+        text = _extract_text(await read_file_tool(path="full.txt", _workspace_dir=str(tmp_path)))
+        assert text == content
 
     @pytest.mark.asyncio
     async def test_lines_are_counted_on_newline_only(self, tmp_path):
