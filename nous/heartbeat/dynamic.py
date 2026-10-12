@@ -953,16 +953,22 @@ class DynamicCheckLoader:
                     gate._self_disabled = True
                 # Chosen before the write (codex P2, PR #717): a cancel
                 # during the write must still know which snapshot to discard.
-                snapshot_id = uuid4().hex
+                snapshot_id: str | None = uuid4().hex
                 try:
                     # Undo journal (never blocks), recorded only once the
                     # disable will proceed: the refusal above is decided and
                     # gated before this await (codex P2, PR #715), so a run
                     # starting mid-write cannot turn it into a refusal that
                     # leaves the snapshot behind.
-                    await undo_journal.record_model_safe(
-                        undo_journal.KIND_CHECK, action, model, label=name, snapshot_id=snapshot_id
-                    )
+                    if (
+                        await undo_journal.record_model_safe(
+                            undo_journal.KIND_CHECK, action, model, label=name, snapshot_id=snapshot_id
+                        )
+                        is None
+                    ):
+                        # Nothing landed: a discard would only leave a
+                        # tombstone no write ever consumes (#718).
+                        snapshot_id = None
                     prior_enabled = model.enabled
                     token = uuid4().hex
                     model.enabled = False
@@ -991,7 +997,7 @@ class DynamicCheckLoader:
                     # undo could apply over newer settings. A cancel during
                     # the commit itself may drop a landed disable's snapshot:
                     # that loses its undo, never applies a wrong one.
-                    undo_journal.discard_safe(snapshot_id)
+                    await undo_journal.discard_safe(snapshot_id)
                     raise
                 # codex P2 (PR #656): flag the in-memory check only once the
                 # disable is durable. Flagging before the commit left a failed

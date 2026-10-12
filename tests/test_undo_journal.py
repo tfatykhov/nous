@@ -652,6 +652,59 @@ class TestCheckKind:
         assert not journal._discarded
         assert (await _row(db, DynamicCheckModel, check_id))["enabled"] is True
 
+    async def test_discard_does_not_block_the_event_loop(self, db, loader, journal):
+        # #718 (1): discard took the journal's threading lock on the event
+        # loop, while _write holds that lock across fsync. Here the lock is
+        # released only by a loop task: on the loop, the discard waits out
+        # the holder's 5 s timeout and the task never runs before it.
+        check_id = await _make_check(loader)
+        name = (await _row(db, DynamicCheckModel, check_id))["name"]
+        held, release = threading.Event(), threading.Event()
+        ticked: list[bool] = []
+        tasks: list[asyncio.Task] = []
+
+        def _hold():
+            with journal._lock:
+                held.set()
+                release.wait(5)
+
+        async def _tick():
+            await asyncio.sleep(0.05)
+            ticked.append(True)
+            release.set()
+
+        async def _persist(session, capture):
+            threading.Thread(target=_hold, daemon=True).start()
+            assert await asyncio.to_thread(held.wait, 5)
+            tasks.append(asyncio.create_task(_tick()))
+            raise RuntimeError("compensation write failed")
+
+        with pytest.raises(RuntimeError):
+            await loader.manage_check("disable", name, capture={"refuse_if_running": True, "persist": _persist})
+        assert ticked == [True]
+        assert [e["action"] for e in await journal.list(500)] == ["create"]
+        await tasks[0]
+
+    async def test_failed_snapshot_write_then_failed_disable_leaves_no_tombstone(
+        self, db, loader, journal, monkeypatch
+    ):
+        # #718 (2): the snapshot write failed (nothing landed), the disable
+        # then failed, and its discard tombstoned an id no write would ever
+        # consume, so _discarded grew without bound during an outage.
+        check_id = await _make_check(loader)
+        name = (await _row(db, DynamicCheckModel, check_id))["name"]
+
+        def _disk_full(*args, **kwargs):
+            raise OSError("disk full")
+
+        async def _persist(session, capture):
+            raise RuntimeError("compensation write failed")
+
+        monkeypatch.setattr(journal, "_write_file", _disk_full)
+        with pytest.raises(RuntimeError):
+            await loader.manage_check("disable", name, capture={"refuse_if_running": True, "persist": _persist})
+        assert not journal._discarded
+
     async def test_snapshot_failure_does_not_block(self, db, loader, failing_journal, caplog):
         with caplog.at_level(logging.WARNING, logger="nous.undo_journal"):
             check_id = await _make_check(loader)

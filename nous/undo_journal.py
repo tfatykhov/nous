@@ -227,9 +227,10 @@ class UndoJournal:
         await asyncio.to_thread(_mark)
 
     def discard(self, snapshot_id: str) -> None:
-        """Delete a snapshot whose mutation did not commit. Synchronous, so a
-        caller can run it while handling a cancellation. A snapshot not
-        written yet is tombstoned, so a write still in flight is dropped."""
+        """Delete a snapshot whose mutation did not commit. Blocking (it takes
+        the lock _write holds across fsync): callers use ``discard_safe``,
+        which runs it off the event loop. A snapshot not written yet is
+        tombstoned, so a write still in flight is dropped."""
         with self._lock:
             path = self._find(snapshot_id)
             if path is not None:
@@ -384,16 +385,22 @@ class RestoreResult:
     not_found: bool = False
 
 
-def discard_safe(snapshot_id: str | None) -> None:
+async def discard_safe(snapshot_id: str | None) -> None:
     """Delete a snapshot recorded for a mutation that did not commit, so no
-    restore can apply it; never raises. A no-op for None (nothing recorded)."""
+    restore can apply it; never raises. A no-op for None (nothing recorded).
+    Runs in a worker thread, off the event loop (#718), and is shielded: a
+    second cancel of the caller cannot drop a discard still queued."""
     journal = _journal
     if journal is None or snapshot_id is None:
         return
-    try:
-        journal.discard(snapshot_id)
-    except Exception:
-        logger.warning("Undo journal: could not discard snapshot %s", snapshot_id, exc_info=True)
+
+    def _discard() -> None:
+        try:
+            journal.discard(snapshot_id)
+        except Exception:
+            logger.warning("Undo journal: could not discard snapshot %s", snapshot_id, exc_info=True)
+
+    await asyncio.shield(asyncio.to_thread(_discard))
 
 
 @dataclass
