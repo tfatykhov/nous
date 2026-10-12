@@ -299,6 +299,42 @@ class TestDagCreateTool:
         assert "\n2. Node 'a': stall_timeout_seconds=120" in text
 
     @pytest.mark.asyncio
+    async def test_dag_create_names_every_bad_node(self, tools, dag_store):
+        """Each node spec that fails to build is reported, prefixed with its
+        name (or its index when the name is missing), in one error."""
+        result = await tools._handlers["dag_create"](
+            name="bad-nodes",
+            nodes=[
+                {"name": "n1", "type": "subtask", "instructions": "A", "timeout_seconds": 0},
+                {"name": "n2", "type": "subtask", "instructions": "B"},
+                {"name": "n3", "type": "subtask", "instructions": "C", "timeout_seconds": 0},
+                {"type": "subtask", "instructions": "D"},
+            ],
+            edges=[{"from_node": "n1", "to_node": "n2"}],
+        )
+
+        text = result["content"][0]["text"]
+        assert text.startswith("Error creating DAG: 3 problems:\n"), text
+        assert "\n1. node 'n1': timeout_seconds: Input should be greater than or equal to 1" in text
+        assert "\n2. node 'n3': timeout_seconds: Input should be greater than or equal to 1" in text
+        assert "\n3. nodes[3]: name: " in text
+        assert await dag_store.count_active() == 0
+
+    @pytest.mark.asyncio
+    async def test_dag_create_validator_error_without_message(self, tools, dag_store, monkeypatch):
+        """A validator ValueError with an empty message still yields a problem,
+        and the handler never reaches store.create without a built request."""
+
+        def raise_empty(self):
+            raise ValueError("")
+
+        monkeypatch.setattr(DAGCreateRequest, "compute_waves", raise_empty)
+        result = await tools._handlers["dag_create"](name="empty-msg", nodes=_simple_nodes(), edges=[])
+
+        assert result["content"][0]["text"] == "Error creating DAG: Value error,"
+        assert await dag_store.count_active() == 0
+
+    @pytest.mark.asyncio
     async def test_dag_create_notes_disabled_inherited_stall(self, db):
         """The premarket DAG with stall detection on and a 60s node timeout
         under a 300s inherited stall: created, with a Note naming the node

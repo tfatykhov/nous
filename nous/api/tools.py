@@ -5566,6 +5566,18 @@ def register_dag_tools(
     undoable_accepted = bool(getattr(cfg, "compensation_enabled", False))
     intentions_on = intentions.enabled(cfg)
 
+    def _validation_problems(exc: ValidationError, prefix: str = "") -> list[str]:
+        """One line per problem in ``exc``: its field path, then its message
+        without pydantic's "Value error, " prefix. Never empty: a validator
+        that raised with no message is reported by pydantic's own msg."""
+        problems: list[str] = []
+        for err in exc.errors():
+            loc = ".".join(str(p) for p in err["loc"])
+            msg = str(err["msg"])
+            for line in msg.removeprefix("Value error, ").splitlines() or [msg.strip()]:
+                problems.append(f"{prefix}{loc}: {line}" if loc else f"{prefix}{line}")
+        return problems or [f"{prefix}{exc}"]
+
     async def dag_create(**kwargs: Any) -> dict:
         """Create a DAG with dependency-tracked nodes."""
         # F087: refuse rather than create a DAG nothing will ever advance.
@@ -5617,99 +5629,103 @@ def register_dag_tools(
                 )
 
             # Every violation the schema and the store would raise is listed in
-            # one error, so a run does not spend an attempt per problem. A node
-            # spec that fails to build still stops there: later nodes go unchecked.
+            # one error, so a run does not spend an attempt per problem. Every
+            # bad node is named; the DAG-level checks run once all nodes build.
             node_specs: list[DAGNodeSpec] = []
             schema_problems: list[str] = []
-            try:
-                # Parse nodes
-                for n in kwargs.get("nodes", []):
-                    # F066.1 (2026-05-23): the orchestrator + schemas + migration
-                    # shipped fix-node support, but this handler historically only
-                    # threaded a fixed set of fields into DAGNodeSpec — so fix-node
-                    # fields (parent_node, fix_actions, max_fix_attempts,
-                    # expected_modes) were silently dropped at the tool surface,
-                    # making fix nodes unauthorable via dag_create. Same silent-
-                    # drop pattern affected F064.1's stall_timeout_seconds. The
-                    # block below threads every field the schema accepts so
-                    # future field additions to DAGNodeSpec land in dag_create
-                    # automatically as long as the tool schema description in
-                    # register() also exposes them.
-                    node_data: dict[str, Any] = {
-                        "name": n["name"],
-                        "type": DAGNodeType(n["type"]),
-                        "instructions": n.get("instructions", ""),
-                        "description": n.get("description", ""),
-                        "tools": n.get("tools"),
-                        "frame_type": n.get("frame_type"),
-                        "model": n.get("model"),
-                        "timeout_seconds": n.get("timeout_seconds"),
-                        "completion_condition": n.get("completion_condition"),
-                        "completion_check": n.get("completion_check"),
-                        "completion_check_interval": n.get("completion_check_interval"),
-                        "max_check_attempts": n.get("max_check_attempts"),
-                        "stall_timeout_seconds": n.get("stall_timeout_seconds"),
-                        # F066.1 fix-node fields. Optional except for type='fix';
-                        # the DAGCreateRequest validator enforces parent_node +
-                        # non-empty fix_actions when type=='fix'.
-                        "parent_node": n.get("parent_node"),
-                        "fix_actions": n.get("fix_actions"),
-                        "expected_modes": n.get("expected_modes", []),
-                    }
-                    # max_fix_attempts has no nullable type (ge=1, le=3). Only
-                    # forward it if the caller supplied a value so pydantic's
-                    # default (1) applies otherwise.
-                    if "max_fix_attempts" in n:
-                        node_data["max_fix_attempts"] = n["max_fix_attempts"]
-                    # Harness Phase 2.8: undoable declaration. Empty values count
-                    # as not given (LLM-authored JSON emits null / "" for "none").
-                    if undoable_accepted and n.get("undoable"):
-                        node_data["undoable"] = n["undoable"]
-                    # Harness Phase 3: approval-node fields — threaded explicitly
-                    # (the F066.1 silent-drop lesson above).
-                    for key in ("options", "default_option", "recommended_option", "answer_timeout_seconds"):
-                        if key in n:
-                            node_data[key] = n[key]
+            request: DAGCreateRequest | None = None
+            # Parse nodes
+            for i, n in enumerate(kwargs.get("nodes", [])):
+                # F066.1 (2026-05-23): the orchestrator + schemas + migration
+                # shipped fix-node support, but this handler historically only
+                # threaded a fixed set of fields into DAGNodeSpec — so fix-node
+                # fields (parent_node, fix_actions, max_fix_attempts,
+                # expected_modes) were silently dropped at the tool surface,
+                # making fix nodes unauthorable via dag_create. Same silent-
+                # drop pattern affected F064.1's stall_timeout_seconds. The
+                # block below threads every field the schema accepts so
+                # future field additions to DAGNodeSpec land in dag_create
+                # automatically as long as the tool schema description in
+                # register() also exposes them.
+                node_data: dict[str, Any] = {
+                    "name": n.get("name"),
+                    "type": DAGNodeType(n["type"]),
+                    "instructions": n.get("instructions", ""),
+                    "description": n.get("description", ""),
+                    "tools": n.get("tools"),
+                    "frame_type": n.get("frame_type"),
+                    "model": n.get("model"),
+                    "timeout_seconds": n.get("timeout_seconds"),
+                    "completion_condition": n.get("completion_condition"),
+                    "completion_check": n.get("completion_check"),
+                    "completion_check_interval": n.get("completion_check_interval"),
+                    "max_check_attempts": n.get("max_check_attempts"),
+                    "stall_timeout_seconds": n.get("stall_timeout_seconds"),
+                    # F066.1 fix-node fields. Optional except for type='fix';
+                    # the DAGCreateRequest validator enforces parent_node +
+                    # non-empty fix_actions when type=='fix'.
+                    "parent_node": n.get("parent_node"),
+                    "fix_actions": n.get("fix_actions"),
+                    "expected_modes": n.get("expected_modes", []),
+                }
+                # max_fix_attempts has no nullable type (ge=1, le=3). Only
+                # forward it if the caller supplied a value so pydantic's
+                # default (1) applies otherwise.
+                if "max_fix_attempts" in n:
+                    node_data["max_fix_attempts"] = n["max_fix_attempts"]
+                # Harness Phase 2.8: undoable declaration. Empty values count
+                # as not given (LLM-authored JSON emits null / "" for "none").
+                if undoable_accepted and n.get("undoable"):
+                    node_data["undoable"] = n["undoable"]
+                # Harness Phase 3: approval-node fields — threaded explicitly
+                # (the F066.1 silent-drop lesson above).
+                for key in ("options", "default_option", "recommended_option", "answer_timeout_seconds"):
+                    if key in n:
+                        node_data[key] = n[key]
+                try:
                     node_specs.append(DAGNodeSpec(**node_data))
+                except ValidationError as e:
+                    name = n.get("name")
+                    label = f"node '{name}'" if isinstance(name, str) and name else f"nodes[{i}]"
+                    schema_problems.extend(_validation_problems(e, f"{label}: "))
 
-                # Parse edges
-                edge_specs: list[DAGEdgeSpec] = []
-                for e in kwargs.get("edges", []):
-                    edge_specs.append(
-                        DAGEdgeSpec(
-                            from_node=e["from_node"],
-                            to_node=e["to_node"],
-                            edge_type=e.get("edge_type", "dependency"),
+            if not schema_problems:
+                try:
+                    # Parse edges
+                    edge_specs: list[DAGEdgeSpec] = []
+                    for e in kwargs.get("edges", []):
+                        edge_specs.append(
+                            DAGEdgeSpec(
+                                from_node=e["from_node"],
+                                to_node=e["to_node"],
+                                edge_type=e.get("edge_type", "dependency"),
+                            )
                         )
-                    )
 
-                description = kwargs.get("description")
-                request = DAGCreateRequest(
-                    name=kwargs["name"],
-                    description=kwargs.get("description", ""),
-                    source=kwargs.get("source", "conversation"),
-                    token_budget=kwargs.get("token_budget"),
-                    nodes=node_specs,
-                    edges=edge_specs,
-                    # F098: injected by ToolDispatcher on a conversation turn.
-                    origin_channel=kwargs.get("_channel"),
-                    origin_session_id=kwargs.get("_session_id"),
-                    # F099 Phase 0a: why the DAG exists. Before Phase 1 the only
-                    # reason text a dag_create call carries is its description.
-                    # F099: why the DAG exists. The model's own intent when it wrote
-                    # one; otherwise (flag off, or a generated intent) the stripped
-                    # description, as in Phase 0a (plan D1).
-                    original_request=(
-                        spec.intent
-                        if spec is not None and intentions.intent_line(kwargs.get("intent"))
-                        else ((description.strip() or None) if isinstance(description, str) else None)
-                    ),
-                )
-            except ValidationError as e:
-                for err in e.errors():
-                    loc = ".".join(str(p) for p in err["loc"])
-                    for line in str(err["msg"]).removeprefix("Value error, ").splitlines():
-                        schema_problems.append(f"{loc}: {line}" if loc else line)
+                    description = kwargs.get("description")
+                    request = DAGCreateRequest(
+                        name=kwargs["name"],
+                        description=kwargs.get("description", ""),
+                        source=kwargs.get("source", "conversation"),
+                        token_budget=kwargs.get("token_budget"),
+                        nodes=node_specs,
+                        edges=edge_specs,
+                        # F098: injected by ToolDispatcher on a conversation turn.
+                        origin_channel=kwargs.get("_channel"),
+                        origin_session_id=kwargs.get("_session_id"),
+                        # F099 Phase 0a: why the DAG exists. Before Phase 1 the only
+                        # reason text a dag_create call carries is its description.
+                        # F099: why the DAG exists. The model's own intent when it wrote
+                        # one; otherwise (flag off, or a generated intent) the stripped
+                        # description, as in Phase 0a (plan D1).
+                        original_request=(
+                            spec.intent
+                            if spec is not None and intentions.intent_line(kwargs.get("intent"))
+                            else ((description.strip() or None) if isinstance(description, str) else None)
+                        ),
+                    )
+                except ValidationError as e:
+                    schema_problems.extend(_validation_problems(e))
             _, store_problems, timeout_notes = store.resolve_node_timeouts(node_specs)
             problems = schema_problems + store_problems
             if len(problems) == 1:
@@ -5717,6 +5733,10 @@ def register_dag_tools(
             if problems:
                 numbered = "\n".join(f"{i}. {p}" for i, p in enumerate(problems, 1))
                 return _tool_error(f"Error creating DAG: {len(problems)} problems:\n{numbered}")
+            if request is None:
+                # Unreachable while _validation_problems never returns []; the
+                # guard keeps an unbuilt request away from store.create.
+                return _tool_error("Error creating DAG: the request failed validation")
 
             dag = await store.create(request, **intentions.intention_kwargs(spec))
             await orchestrator.start_dag(dag.id)
