@@ -25,7 +25,7 @@ from sqlalchemy import select
 from nous.api import tool_policy
 from nous.api.execution_context import ExecutionContext
 from nous.api.tool_classes import tool_class
-from nous.brain import continuation
+from nous.brain import continuation, intention_calibration
 from nous.brain.continuation import INTENT_SESSION_PREFIX, Resolution
 from nous.brain.intentions import AUTHORITY_INTERNAL
 from nous.cancellation import cancel_requested
@@ -595,9 +595,9 @@ class ContinuationRunner:
 
     async def run_once(self) -> continuation.SweepReport:
         """One sweep, in order: release claims older than the lease, expire roots past their TTL, end the
-        roots left waiting on nothing, expire proposals, wake answered or expired questions, push the owner rows
-        that are due, and launch every root that is due while a slot is free. Every step is isolated; with
-        continuation off it does nothing."""
+        roots left waiting on nothing, expire proposals, wake answered or expired questions, grade the arrivals
+        whose chain has ended (3d), push the owner rows that are due, and launch every root that is due while a
+        slot is free. Every step is isolated; with continuation off it does nothing."""
         if not continuation.enabled(self._settings):
             return continuation.SweepReport(0, 0, 0, 0, (), None)
         await self._step("cancel sweep", self._cancel_sweep)
@@ -609,6 +609,7 @@ class ContinuationRunner:
         # release_stale_claims has already expired the staged rows of every stale claim (2d-3 review m3).
         expired_proposals = await self._step("proposal expiry", self._expire_proposals, [])
         await self._step("question wake", self._wake_questions)
+        await self._step("calibration", self._calibrate)
         await self._step("approved resume", self._resume_approved)
         pushed = await self._step("owner push", self._push, 0)
         launched, next_due = await self._step("launch", self._launch, ([], None))
@@ -736,6 +737,16 @@ class ContinuationRunner:
             await session.commit()
         if woken:  # the sweep launches next, so no wake()
             logger.info("F099: woke answered or expired question(s): %s", woken)
+
+    async def _calibrate(self) -> int:
+        """Phase 3d: grade the Brain decisions of arrivals whose rows now hold a signal (a proposal the owner
+        decided, a cancel, a report, a drop, a bound). Flag-gated: with calibration off it reads nothing."""
+        if self._brain is None or not continuation.calibration_enabled(self._settings):
+            return 0
+        async with self._db.session() as session:
+            return await intention_calibration.grade_arrivals(
+                session, self._agent_id, brain=self._brain, settings=self._settings
+            )
 
     async def _resume_approved(self) -> int:
         """Start again the approved calls nothing started (a crash between the decision and the claim, carry-over 11).

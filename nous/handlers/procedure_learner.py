@@ -17,6 +17,7 @@ import math
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from nous.brain import continuation
 from nous.brain.brain import Brain
 from nous.brain.embeddings import EmbeddingProvider
 from nous.config import Settings
@@ -232,13 +233,15 @@ class ProcedureLearner:
             # then use remaining budget for partials so skewed distributions
             # don't shrink the total candidate pool below _TOTAL_WINDOW.
             _TOTAL_WINDOW = 100
+            # Arrival decisions are lineage evidence, not procedures (F099 3d).
+            exclusion = continuation.arrival_exclusion(self._settings)
             decisions_success, _ = await self._brain.list_decisions(
-                limit=_TOTAL_WINDOW, outcome="success", reviewed=True
+                limit=_TOTAL_WINDOW, outcome="success", reviewed=True, **exclusion
             )
             _remaining = max(0, _TOTAL_WINDOW - len(decisions_success))
             if _remaining > 0:
                 decisions_partial, _ = await self._brain.list_decisions(
-                    limit=_remaining, outcome="partial", reviewed=True
+                    limit=_remaining, outcome="partial", reviewed=True, **exclusion
                 )
             else:
                 decisions_partial = []

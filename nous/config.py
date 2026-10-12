@@ -1242,6 +1242,10 @@ class Settings(BaseSettings):
     continuation_turn_timeout_seconds: int = Field(default=780, ge=60)
     continuation_max_attempts: int = Field(default=3, ge=1)
     intention_proposal_ttl_hours: float = Field(default=24, gt=0)
+    # F099 Phase 3d: grade every arrival's Brain decision from the lineage's own rows (a proposal the owner
+    # decided, a cancel, a report, a drop, a bound) and keep those decisions out of the generic review feeds.
+    # Needs continuation_enabled. Default off.
+    intention_calibration_enabled: bool = False
     # F099 lineage shell: offer bash to internal_only turns (continuations and the subtasks and
     # DAG nodes of a lineage), each call held to tool_policy.lineage_bash_allowed (runner.sh,
     # read-only gh and plain reads). Off: bash stays on the internal_only denylist (as before).
@@ -3131,6 +3135,16 @@ class Settings(BaseSettings):
                 "NOUS_CONTINUATION_ENABLED=true needs NOUS_INTENTIONS_ENABLED=true; continuation stays OFF."
             )
             object.__setattr__(self, "continuation_enabled", False)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_intention_calibration_dependency(self) -> "Settings":
+        """F099 Phase 3d: grading an arrival needs the arrivals a continuation writes."""
+        if self.intention_calibration_enabled and not self.continuation_enabled:
+            logging.getLogger(__name__).warning(
+                "NOUS_INTENTION_CALIBRATION_ENABLED=true needs NOUS_CONTINUATION_ENABLED=true; calibration stays OFF."
+            )
+            object.__setattr__(self, "intention_calibration_enabled", False)
         return self
 
     @model_validator(mode="after")

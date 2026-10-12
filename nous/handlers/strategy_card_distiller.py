@@ -30,7 +30,7 @@ from sqlalchemy.exc import IntegrityError
 from nous.brain.schemas import GRADED_OUTCOMES
 from nous.cognitive.deliberation import description_was_cut_by_capture
 from nous.handlers import LLMClient, call_background_llm_structured
-from nous.handlers.decision_reviewer import AUTO_REVIEWER
+from nous.handlers.decision_reviewer import NON_DISTILLING_REVIEWERS
 from nous.heart.schemas import STRATEGY_CARD_KIND, ProcedureInput
 from nous.utils import leaked_markup_start
 
@@ -198,10 +198,11 @@ class StrategyCardDistiller:
                 decision_id_raw,
             )
             return
-        if outcome not in GRADED_OUTCOMES or reviewer == AUTO_REVIEWER:
-            # A review that distils no card: noise/superseded, or the
-            # auto-reviewer's grade, which is a heuristic (a low stated
-            # confidence, a PR state) and not an observed outcome. It goes
+        if outcome not in GRADED_OUTCOMES or reviewer in NON_DISTILLING_REVIEWERS:
+            # A review that distils no card: noise/superseded, or the grade
+            # of a heuristic or lineage reviewer: the auto-reviewer's (a low
+            # stated confidence, a PR state) or an F099 arrival's (how its
+            # chain ended), neither an observed outcome of a strategy. It goes
             # to the retire-only reconcile, which reads the outcome and the
             # reviewer from the decision row and retires the cards that row
             # does not call for.
@@ -487,7 +488,7 @@ class StrategyCardDistiller:
         The row decides both things a card depends on. Its outcome: every active
         card distilled for a different outcome is soft-deleted. Who reviewed it: a
         card stands for an outcome that somebody observed, so a decision that is
-        not graded, was graded by the auto-reviewer's heuristic, or is gone keeps
+        not graded, was graded by a heuristic or lineage reviewer, or is gone keeps
         no card at all. Its text: a decision whose stored text cannot carry a
         lesson keeps no card either. Returns the decision when it may have a
         card, else None. The caller commits.
@@ -500,7 +501,7 @@ class StrategyCardDistiller:
         why = "ungraded, auto-reviewed or gone"
         if decision is None:
             logger.warning("StrategyCardDistiller: decision %s not found", decision_id)
-        elif decision.outcome not in GRADED_OUTCOMES or decision.reviewer == AUTO_REVIEWER:
+        elif decision.outcome not in GRADED_OUTCOMES or decision.reviewer in NON_DISTILLING_REVIEWERS:
             decision = None
         elif not _text_can_carry_a_lesson(decision):
             decision, why = None, "its text cannot carry a lesson"

@@ -16,6 +16,7 @@ import re
 from typing import Any
 
 from nous.api.tools import ToolDispatcher, _tool_error
+from nous.brain import continuation
 
 from .builders import TEMPLATES
 from .dsl import SurfaceValidationError
@@ -688,9 +689,12 @@ def register_a2ui_tools(
                 # Bound pushed into SQL (same class as codex round 3 on the
                 # sources registry): a Python slice after the fetch still
                 # materializes the whole age window.
+                # F099 3d: register_a2ui_tools takes no settings; the service carries them.
+                exclusion = continuation.arrival_exclusion(getattr(surface_service, "_settings", None))
                 unreviewed = await brain.get_unreviewed(
                     max_age_days=int(params.get("max_age_days", 30)),
                     limit=max(1, min(int(params.get("max_decisions", 15)), 50)),
+                    **exclusion,
                 )
             except Exception as exc:
                 return _tool_error(f"Could not fetch unreviewed decisions: {exc}")

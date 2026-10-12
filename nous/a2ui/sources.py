@@ -28,6 +28,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
+from nous.brain import continuation
+
 logger = logging.getLogger(__name__)
 
 Fetcher = Callable[[dict], Awaitable[Any]]
@@ -698,6 +700,7 @@ def build_default_registry(
             rows = await brain.get_unreviewed(
                 max_age_days=int(params.get("max_age_days", 30)),
                 limit=_limit(params, 20),
+                **continuation.arrival_exclusion(settings),
             )
             return [
                 {
