@@ -212,6 +212,7 @@ class SurfaceService:
         refuse_fallback_overwrite: bool = False,
         notify_text: str | None = None,
         reserved_key_ok: bool = False,
+        telegram_ping: bool | None = None,
         pre_broadcast: Callable[[], None] | None = None,
         pre_broadcast_rollback: Callable[[], None] | None = None,
         _dedup_retry: bool = False,
@@ -225,6 +226,12 @@ class SurfaceService:
         Two producers racing the same key are serialized by the partial
         UNIQUE index on (agent_id, dedup_key) WHERE live (codex P2): the
         loser's insert raises and retries once down the update path.
+
+        ``telegram_ping``: ``None`` keeps the ``a2ui_telegram_notify_enabled``
+        rule (``_telegram_ping_wanted``); ``False`` never sends the
+        ``[companion]`` ping; ``True`` always does (no production caller passes
+        True). The FCM alert is unaffected. Only the owner's intention cards
+        pass ``False``: their Telegram message is the publisher's own.
 
         ``refuse_fallback_overwrite`` marks this push as a DEGRADED render:
         if it would replace a healthy live app it raises
@@ -316,6 +323,7 @@ class SurfaceService:
                         refuse_fallback_overwrite=refuse_fallback_overwrite,
                         notify_text=notify_text,
                         reserved_key_ok=reserved_key_ok,
+                        telegram_ping=telegram_ping,
                         pre_broadcast=pre_broadcast,
                         pre_broadcast_rollback=pre_broadcast_rollback,
                         _race_retries=_race_retries,
@@ -334,6 +342,7 @@ class SurfaceService:
                 refuse_fallback_overwrite=refuse_fallback_overwrite,
                 notify_text=notify_text,
                 reserved_key_ok=reserved_key_ok,
+                telegram_ping=telegram_ping,
                 pre_broadcast=pre_broadcast,
                 pre_broadcast_rollback=pre_broadcast_rollback,
                 _race_retries=_race_retries,
@@ -364,6 +373,7 @@ class SurfaceService:
         refuse_fallback_overwrite: bool = False,
         notify_text: str | None = None,
         reserved_key_ok: bool = False,
+        telegram_ping: bool | None = None,
         pre_broadcast: Callable[[], None] | None = None,
         pre_broadcast_rollback: Callable[[], None] | None = None,
         agent_id: str,
@@ -382,6 +392,7 @@ class SurfaceService:
                 refuse_fallback_overwrite=refuse_fallback_overwrite,
                 notify_text=notify_text,
                 reserved_key_ok=reserved_key_ok,
+                telegram_ping=telegram_ping,
                 pre_broadcast=pre_broadcast,
                 pre_broadcast_rollback=pre_broadcast_rollback,
                 agent_id=agent_id,
@@ -407,6 +418,7 @@ class SurfaceService:
                 refuse_fallback_overwrite=refuse_fallback_overwrite,
                 notify_text=notify_text,
                 reserved_key_ok=reserved_key_ok,
+                telegram_ping=telegram_ping,
                 pre_broadcast=pre_broadcast,
                 pre_broadcast_rollback=pre_broadcast_rollback,
                 _dedup_retry=_dedup_retry,
@@ -424,6 +436,7 @@ class SurfaceService:
         refuse_fallback_overwrite: bool = False,
         notify_text: str | None = None,
         reserved_key_ok: bool = False,
+        telegram_ping: bool | None = None,
         pre_broadcast: Callable[[], None] | None = None,
         pre_broadcast_rollback: Callable[[], None] | None = None,
         agent_id: str,
@@ -654,6 +667,7 @@ class SurfaceService:
                     refuse_fallback_overwrite=refuse_fallback_overwrite,
                     notify_text=notify_text,
                     reserved_key_ok=reserved_key_ok,
+                    telegram_ping=telegram_ping,
                     pre_broadcast=pre_broadcast,
                     pre_broadcast_rollback=pre_broadcast_rollback,
                     _dedup_retry=True,
@@ -664,7 +678,8 @@ class SurfaceService:
 
         should_notify = built.priority >= 1 if notify is None else notify
         if created and should_notify:
-            if self._telegram_ping_wanted(built, notify):
+            wanted = self._telegram_ping_wanted(built, notify) if telegram_ping is None else telegram_ping
+            if wanted:
                 self._schedule_bg(self._notify_telegram(built.title, surface_id, text=notify_text))
             # F097: the same condition that stamped push_notified_at above.
             # `_push_intended` is the single definition both read, so the flag
