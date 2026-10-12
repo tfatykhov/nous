@@ -96,18 +96,10 @@ class ProcessFaultCheck(BaseCheck):
 
         recorder = ProcessRecorder(self._db, self._agent_id)
 
-        # Fetch enough rows to populate both the 5-run recent window AND the
-        # full baseline_window for ratio-collapse detection.  The ratio check
-        # skips the 5 newest rows when building the baseline, so we need at
-        # least baseline_window + 5 valid runs; fetching that many raw rows
-        # ensures the baseline is never empty when the minimum setting of 5 is
-        # used.
-        # Fetch enough rows to populate both the 5-run recent window AND the
-        # full baseline_window for ratio-collapse detection.  The ratio check
-        # skips the 5 newest rows when building the baseline, so we need at
-        # least baseline_window + 5 valid runs; fetching that many raw rows
-        # ensures the baseline is never empty when the minimum setting of 5 is
-        # used.
+        # Raw-row window for the missed-run, consecutive-error and zero-change
+        # checks and the sleep baseline below.  Ratio-collapse detection fetches
+        # its own eligible rows (get_recent_ratio_runs), so this depth no longer
+        # bounds it.
         fetch_limit = max(baseline_window + 5, consec_err_threshold + 1)
         now = datetime.now(UTC)
         runs_by_phase = {p: await recorder.get_recent_runs(p, limit=fetch_limit) for p in _SLEEP_PHASES}
@@ -152,16 +144,33 @@ class ProcessFaultCheck(BaseCheck):
             finished_runs = [r for r in runs if r["status"] == "finished"]
 
             # ----------------------------------------------------------------
-            # 1. Missed run: no finished row in the last N hours
+            # 1. Consecutive errors (before the missed-run check, whose
+            #    ``continue`` would otherwise hide a phase that only errors)
             # ----------------------------------------------------------------
+            recent = runs[:consec_err_threshold]
+            if len(recent) >= consec_err_threshold and all(r["status"] == "error" for r in recent):
+                findings.append(
+                    Finding(
+                        source="fault_detector",
+                        summary=(
+                            f"Process {process_name!r} failed with errors in {consec_err_threshold} consecutive runs"
+                        ),
+                        urgency="high",
+                        needs_action=True,
+                        check_name=self.name,
+                    )
+                )
+
+            # ----------------------------------------------------------------
+            # 2. Missed run: no finished row in the last N hours
+            # ----------------------------------------------------------------
+            # With no finished row fetched, the phase has not completed since
+            # at least its oldest fetched row (a lower bound, like log_age_hours).
             last_finished = next((r for r in runs if r["status"] == "finished"), None)
-            if last_finished is None:
-                gap_hours = max_gap_hours + 1  # trigger the check
-            else:
-                last_ts: datetime = last_finished["started_at"]
-                if last_ts.tzinfo is None:
-                    last_ts = last_ts.replace(tzinfo=UTC)
-                gap_hours = (now - last_ts).total_seconds() / 3600.0
+            last_ts: datetime = (last_finished or runs[-1])["started_at"]
+            if last_ts.tzinfo is None:
+                last_ts = last_ts.replace(tzinfo=UTC)
+            gap_hours = (now - last_ts).total_seconds() / 3600.0
 
             if gap_hours > max_gap_hours:
                 findings.append(
@@ -177,23 +186,6 @@ class ProcessFaultCheck(BaseCheck):
                     )
                 )
                 continue  # don't pile on with other findings for a missing phase
-
-            # ----------------------------------------------------------------
-            # 2. Consecutive errors
-            # ----------------------------------------------------------------
-            recent = runs[:consec_err_threshold]
-            if len(recent) >= consec_err_threshold and all(r["status"] == "error" for r in recent):
-                findings.append(
-                    Finding(
-                        source="fault_detector",
-                        summary=(
-                            f"Process {process_name!r} failed with errors in {consec_err_threshold} consecutive runs"
-                        ),
-                        urgency="high",
-                        needs_action=True,
-                        check_name=self.name,
-                    )
-                )
 
             # ----------------------------------------------------------------
             # 3. stale_scan zero-change collapse + population check
@@ -225,13 +217,9 @@ class ProcessFaultCheck(BaseCheck):
             # ----------------------------------------------------------------
             # 4. Output/input ratio collapse vs trailing baseline
             # ----------------------------------------------------------------
-            ratio_runs = [
-                r
-                for r in finished_runs
-                if r.get("items_examined") is not None
-                and r["items_examined"] > 0
-                and r.get("items_changed") is not None
-            ]
+            # Fetched separately and filtered in SQL: a raw-row window would let
+            # error/skipped/uninstrumented rows crowd eligible runs out of it.
+            ratio_runs = await recorder.get_recent_ratio_runs(process_name, limit=baseline_window + 5)
             if len(ratio_runs) >= baseline_window + 5:
                 baseline_ratios = [
                     r["items_changed"] / r["items_examined"]
@@ -267,7 +255,8 @@ class ProcessFaultCheck(BaseCheck):
         Mirrors _phase_stale_scan's category exclusion so the population
         count and the scan agree on which facts are eligible.
         """
-        excluded: list[str] = list(getattr(self._settings, "stale_scan_excluded_categories", None) or ["rule"])
+        # Same normalisation as the phase: an explicit [] excludes nothing.
+        excluded: list[str] = list(getattr(self._settings, "stale_scan_excluded_categories", ["rule"]) or [])
         try:
             from sqlalchemy import text
 
