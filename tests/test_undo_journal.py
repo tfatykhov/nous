@@ -440,6 +440,16 @@ class TestScheduleKind:
         assert not journal._discarded
         assert (await _row(db, Schedule, sched.id))["active"] is True
 
+    async def test_refused_restore_records_no_pre_restore(self, db, schedules, journal):
+        # Review of PR B: the owner/id refusal ran after on_current.
+        sched = await schedules.create(task="t", schedule_type="recurring", interval_seconds=3600)
+        row = await _row(db, Schedule, sched.id)
+        row["agent_id"] = "someone-else"
+        sid = await journal.record("schedule", "deactivate", str(sched.id), undo_journal.encode_row(row))
+        result = await undo_journal.restore(sid, RestoreDeps(schedules=schedules), journal)
+        assert not result.success and result.pre_restore_id is None
+        assert not [e for e in await journal.list(500) if e["source"] == "pre_restore"]
+
     async def test_noop_restore_of_create_records_no_pre_restore(self, db, schedules, journal):
         # Review of #712: a restore that changes nothing still recorded a pre_restore entry.
         sched = await schedules.create(task="t", schedule_type="recurring", interval_seconds=3600)
@@ -558,6 +568,9 @@ class TestCheckKind:
         entry = await _only(journal, "heartbeat_check", "delete")
         result = await undo_journal.restore(entry["id"], RestoreDeps(check_loader=loader), journal)
         assert not result.success and "nothing changed" in result.message
+        # Review of PR B: a refused restore records no pre_restore entry.
+        assert result.pre_restore_id is None
+        assert not [e for e in await journal.list(500) if e["source"] == "pre_restore"]
 
     async def test_dag_check_restore_is_refused(self, db, loader, journal):
         created = await loader.create_check(name=f"dag-{uuid.uuid4().hex[:6]}", description="d", prompt="p")

@@ -1138,10 +1138,7 @@ class DynamicCheckLoader:
                         return False, f"check {name!r} belongs to a DAG node; restore refused, nothing changed"
                 if before is None and (current is None or not current["enabled"]):
                     return True, f"check {check_id} is already absent or disabled"
-                await on_current(dict(current) if current is not None else None)
-                if before is None:
-                    name = current["name"]
-                else:
+                if before is not None:
                     if before.get("agent_id") != self._agent_id or before.get("id") != check_id:
                         return False, "snapshot belongs to another check or agent; nothing changed"
                     clash = (
@@ -1154,6 +1151,10 @@ class DynamicCheckLoader:
                     ).first()
                     if clash is not None:
                         return False, f"another check is now named {before['name']!r}; nothing changed"
+                await on_current(dict(current) if current is not None else None)
+                if before is None:
+                    name = current["name"]
+                else:
                     values = dict(before)
                     # The journal lives in the workspace: a row read from it
                     # gets the same tool filter as create_check.

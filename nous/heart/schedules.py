@@ -254,14 +254,14 @@ class ScheduleManager:
             ).mappings().first()
             if before is None and (current is None or not current["active"]):
                 return True, f"schedule {schedule_id} is already absent or inactive"
+            if before is not None and (before.get("agent_id") != self._agent_id or before.get("id") != schedule_id):
+                return False, "snapshot belongs to another schedule or agent; nothing changed"
             await on_current(dict(current) if current is not None else None)
             if before is None:
                 await session.execute(update(table).where(table.c.id == schedule_id).values(active=False))
                 await session.commit()
                 deactivated = True
             else:
-                if before.get("agent_id") != self._agent_id or before.get("id") != schedule_id:
-                    return False, "snapshot belongs to another schedule or agent; nothing changed"
                 values = dict(before)
                 note = ""
                 if values.get("active"):
