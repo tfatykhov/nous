@@ -26,9 +26,11 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import select, update
 
-from nous.brain import intentions
+from nous.a2ui.intention_keys import KIND_PROPOSAL, KIND_QUESTION, parse_key
+from nous.brain import continuation, intentions
 from nous.brain.intentions import IntentionSpec
 from nous.dag.approval import node_id_from_dedup_key, refusal_message
+from nous.owner_actions import ANSWER_REFUSALS, DECISION_REFUSALS, clean_actor
 from nous.storage.models import A2uiAction, A2uiSurface
 
 logger = logging.getLogger(__name__)
@@ -146,6 +148,7 @@ class ActionRouter:
         self._action_watchers: set[asyncio.Task] = set()
         _register_default_handlers(self)
         _register_phase2_handlers(self)
+        _register_intention_handlers(self)
         _register_default_functions(self)
         _register_micro_app_handlers(self)
         _register_micro_app_functions(self)
@@ -865,6 +868,94 @@ def _register_phase2_handlers(router: ActionRouter) -> None:
     router.register("decision.resolve", decision_resolve, mutating=True)
     router.register("dag.retry", dag_retry, mutating=True)
     router.register("dag.cancel", dag_cancel, mutating=True, irreversible=True)
+
+
+def _register_intention_handlers(router: ActionRouter) -> None:
+    """F099 Phase 3a: the owner's verbs on the proposal and question cards. Each is the SAME runner function the REST
+    route and the Telegram bot call (``decide_proposal``, ``answer_question``); none has semantics of its own, and no
+    agent tool reaches them. The subject is ALWAYS the card's own key (``parse_key(surface.dedup_key)``): the context
+    carries the id too and must equal it, and a surface without an ``intention:`` key of the right kind is refused
+    (S6), so no other card can ever offer one of these verbs. ``irreversible=True`` on approve is registry metadata:
+    an approve runs an outward call. There is no client-side confirmation step."""
+    not_running = "continuation is not running"  # the routes' 503, as a card refusal
+    not_this_card = "this button does not belong to this card"
+    answer_required = f"an answer is required (at most {continuation.ANSWER_MAX_CHARS} characters)"
+
+    def _runner() -> Any:
+        runner = router._continuation_runner
+        return runner if runner is not None and continuation.cards_enabled(router._settings) else None
+
+    def _actor(ctx: ActionContext) -> str:
+        return clean_actor(f"companion:{ctx.actor}", default="companion")
+
+    def _context(ctx: ActionContext) -> dict:
+        return ctx.context if isinstance(ctx.context, dict) else {}
+
+    def _subject(ctx: ActionContext, kind: str, field: str) -> UUID | None:
+        parsed = parse_key(getattr(ctx.surface, "dedup_key", None))
+        if parsed is None or parsed[0] != kind or parsed[1] is None:
+            return None
+        return parsed[1] if _context(ctx).get(field) == str(parsed[1]) else None
+
+    async def _decide(ctx: ActionContext, *, approve: bool) -> ActionResult:
+        runner = _runner()
+        if runner is None:
+            return ActionResult(ok=False, message=not_running)
+        proposal_id = _subject(ctx, KIND_PROPOSAL, "proposalId")
+        if proposal_id is None:
+            return ActionResult(ok=False, message=not_this_card)
+        # An approve must not hold the request (and the surface lock) for the tool: wait=False (owner answer 3).
+        extra = {"wait": False} if approve else {}
+        try:
+            outcome = await runner.decide_proposal(proposal_id, approve=approve, actor=_actor(ctx), **extra)
+        except continuation.ProposalNotFound:
+            return ActionResult(ok=False, message="no such proposal")
+        except Exception:
+            logger.exception("F099 intention card: deciding proposal %s failed", proposal_id.hex[:8])
+            return ActionResult(ok=False, message="the decision could not be processed")
+        if outcome.refusal is not None:
+            # The card stays with the fixed sentence; the settle sweep closes it within a minute.
+            sentence = DECISION_REFUSALS.get(outcome.refusal, DECISION_REFUSALS[continuation.REFUSE_STATE])
+            return ActionResult(ok=False, message=sentence)
+        if approve:
+            message = "Approved; running" if outcome.changed else f"Already approved ({outcome.state})"
+        else:
+            message = "Rejected" if outcome.changed else "Already rejected"
+        return ActionResult(message=message, resolve_surface=True)  # R1: the card closes at the tap
+
+    async def approve(ctx: ActionContext) -> ActionResult:
+        return await _decide(ctx, approve=True)
+
+    async def reject(ctx: ActionContext) -> ActionResult:
+        return await _decide(ctx, approve=False)
+
+    async def answer(ctx: ActionContext) -> ActionResult:
+        runner = _runner()
+        if runner is None:
+            return ActionResult(ok=False, message=not_running)
+        question_id = _subject(ctx, KIND_QUESTION, "questionId")
+        if question_id is None:
+            return ActionResult(ok=False, message=not_this_card)
+        # The Button resolves {"path": "/answer"} on web and Android before posting, so the typed text is in the
+        # action CONTEXT, which is what the censor gate reads. The submitted data model is deliberately not read
+        # (C13): it is shape-checked but never censored.
+        text = continuation.valid_answer_text(_context(ctx).get("text"))
+        if text is None:
+            return ActionResult(ok=False, message=answer_required)
+        try:
+            await runner.answer_question(question_id, text=text, actor=_actor(ctx))
+        except continuation.QuestionNotFound:
+            return ActionResult(ok=False, message="no such question")
+        except continuation.AnswerRefused as refused:
+            return ActionResult(ok=False, message=ANSWER_REFUSALS.get(refused.reason, "The answer was not recorded."))
+        except Exception:
+            logger.exception("F099 intention card: answering question %s failed", question_id.hex[:8])
+            return ActionResult(ok=False, message="the answer could not be processed")
+        return ActionResult(message="Answer sent", resolve_surface=True)
+
+    router.register("intention.approve", approve, mutating=True, irreversible=True)
+    router.register("intention.reject", reject, mutating=True)
+    router.register("intention.answer", answer, mutating=True)
 
 
 def _register_default_functions(router: ActionRouter) -> None:
