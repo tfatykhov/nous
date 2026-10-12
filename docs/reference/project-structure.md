@@ -71,8 +71,8 @@ nous/
 │   │   ├── session_monitor.py     # Session timeout monitoring
 │   │   ├── sleep_handler.py       # Sleep/reflection handler
 │   │   ├── subtask_worker.py      # Async subtask execution
-│   │   ├── continuation_runner.py # F099 Phase 2c: ContinuationRunner (the loop, the turn, resolve_intention, the follow-up and fallbacks), build_arrival_prompt
-│   │   ├── continuation_publisher.py # F099 Phase 2c: OwnerPublisher, the owner push to Telegram (quiet-hours aware, once per row); Phase 2d: PROPOSAL rows with buttons, QUESTION rows with force_reply, escaped HTML
+│   │   ├── continuation_runner.py # F099 Phase 2c: ContinuationRunner (the loop, the turn, resolve_intention, the follow-up and fallbacks), build_arrival_prompt; Phase 3a: the card settle step
+│   │   ├── continuation_publisher.py # F099 Phase 2c: OwnerPublisher, the owner push to Telegram (quiet-hours aware, once per row); Phase 2d: PROPOSAL rows with buttons, QUESTION rows with force_reply, escaped HTML; Phase 3a: the companion card leg
 │   │   ├── task_scheduler.py      # Cron/one-shot scheduling
 │   │   └── time_parser.py         # Natural language time parsing
 │   ├── skills/                 # Skill discovery system (F011)
@@ -117,6 +117,7 @@ nous/
 │   │   ├── sources.py          # Dashboard data sources (F095 agent_script)
 │   │   ├── actions.py          # Action gate: allowlist → nonce → rate → censor
 │   │   ├── push.py             # F097 FCM leg (data-only messages)
+│   │   ├── intention_keys.py   # F099 Phase 3a: the reserved intention: dedup keys (leaf)
 │   │   ├── dsl.py / builders/  # Template-first surface construction
 │   │   └── catalogs/           # A2UI v1.0 vendored @ pinned commit d9086fb
 │   ├── security/
