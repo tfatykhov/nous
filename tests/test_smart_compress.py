@@ -324,8 +324,12 @@ class TestSmartCompressEntryPoint:
         mirroring this file's own established pattern for exactly this
         class of assertion (test_non_refetchable_preserves_original
         above, for web_fetch).
+
+        #724 made dag_manage exempt by default, so node_result now passes
+        through whole. This pins the cache for an operator who compresses
+        it again (the `[]` kill switch).
         """
-        settings = Settings(_env_file=None, smart_compress_enabled=True)
+        settings = Settings(_env_file=None, smart_compress_enabled=True, smart_compress_exempt_tools=[])
         lines = [f"line {i}: processing step {i} completed" for i in range(60)]
         lines.append("Traceback (most recent call last):")
         lines.append("RuntimeError: failed to complete the fix-stage retry")
@@ -468,3 +472,38 @@ class TestReadFileExempt:
         result = await smart_compress("bash", {}, text, settings)
 
         assert result.was_compressed is True
+
+
+class TestDagManageExempt:
+    """#724: a DAG summary over 4096 units is cut for Telegram with a marker
+    saying `dag_manage status <id>` shows the stored summary. A failed DAG's
+    status carries error words, so SmartCompress sampled it in a chat turn
+    (about 47 of 120 summary lines kept) and the marker was false exactly
+    where the reader acts on it."""
+
+    @staticmethod
+    def _failed_status() -> str:
+        lines = [
+            "DAG: nightly-migration (deadbeef)",
+            "Status: failed",
+            "Nodes (2):",
+            "  [X] migrate (subtask, w0) — failed | error: step 3 failed: lock timeout",
+            "  [-] verify (check, w1) — cancelled",
+            "Summary:",
+        ]
+        lines += [f"Paragraph {i}: migration step {i} {'failed' if i % 9 == 0 else 'finished'}." for i in range(120)]
+        return "\n".join(lines)
+
+    def test_default_exempts_dag_manage(self):
+        assert "dag_manage" in Settings(_env_file=None).smart_compress_exempt_tools
+
+    @pytest.mark.asyncio
+    async def test_failed_dag_status_passes_through(self):
+        settings = Settings(_env_file=None, smart_compress_enabled=True)
+        text = self._failed_status()
+        assert is_crushable(text, min_chars=settings.smart_compress_min_chars)
+
+        result = await smart_compress("dag_manage", {"action": "status", "dag_id": "deadbeef"}, text, settings)
+
+        assert result.was_compressed is False
+        assert result.text == text

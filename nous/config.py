@@ -1020,7 +1020,7 @@ class Settings(BaseSettings):
     smart_compress_max_k: int = Field(default=50, description="Max items to keep per compressed result")
     smart_compress_elbow_threshold: float = Field(default=0.3, description="Score cliff threshold for adaptive K")
     smart_compress_exempt_tools: list[str] = Field(
-        default=["recall_deep", "recall_recent", "read_file"],
+        default=["recall_deep", "recall_recent", "read_file", "dag_manage"],
         description=(
             "Tools whose output SmartCompress must pass through untouched. "
             "SmartCompress ranks by ORIGINAL POSITION (30% head + 15% tail) and "
@@ -1044,6 +1044,12 @@ class Settings(BaseSettings):
             "the model asked to read silently drops the middle (a 303-line report "
             "kept 63 lines, 2026-10-07); read_file_tool pages instead, returning "
             "a contiguous window plus a trailer naming the next offset. "
+            "dag_manage is exempt because a Telegram push over 4096 units is cut with a "
+            "marker pointing at `dag_manage status <id>` for the stored summary, and a "
+            "failed DAG's status (error words) was sampled to ~47 of 120 summary lines "
+            "(#724). Its size is bounded by the DAG: at most 10 nodes, one line each "
+            "(result preview 500 chars), plus the stored summary; node_result returns one "
+            "node's whole result, as its contract says. "
             "Set to `[]` to restore compression for every tool (kill switch)."
         ),
     )

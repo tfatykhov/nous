@@ -348,6 +348,38 @@ class TestFinishedDagOutputIsRecoverable:
         assert "Deployed the new pricing page" in text
 
     @pytest.mark.asyncio
+    async def test_status_shows_the_stored_summary_in_full(self, tools, dag_store, db):
+        """#724: a Telegram push over 4096 units is cut with a marker that
+        points at `dag_manage status <8-hex>`, so status must show the
+        stored summary itself, whole. Before the fix it never rendered
+        delivery_summary or result_summary at all.
+        """
+        dag = await dag_store.create(_one("long-summary-dag"))
+        await dag_store.update_dag_status(dag.id, "completed", result_summary="All nodes completed successfully")
+        summary = "".join(f"Paragraph {i}: the migration step {i} finished cleanly.\n" for i in range(120))
+        assert len(summary) > 4096
+        async with db.session() as session:
+            await session.execute(
+                update(ExecutionDAG).where(ExecutionDAG.id == dag.id).values(delivery_summary=summary)
+            )
+            await session.commit()
+
+        text = (await tools._handlers["dag_manage"](action="status", dag_id=str(dag.id)[:8]))["content"][0]["text"]
+
+        assert summary.strip() in text
+
+    @pytest.mark.asyncio
+    async def test_status_falls_back_to_result_summary(self, tools, dag_store):
+        """With the agent-summary leg off nothing is in delivery_summary;
+        status then shows result_summary, as `recent` does."""
+        dag = await dag_store.create(_one("template-dag"))
+        await dag_store.update_dag_status(dag.id, "failed", result_summary="Failed nodes: n-distinctive")
+
+        text = (await tools._handlers["dag_manage"](action="status", dag_id=str(dag.id)))["content"][0]["text"]
+
+        assert "Failed nodes: n-distinctive" in text
+
+    @pytest.mark.asyncio
     async def test_status_truncates_long_results_and_names_the_recovery_command(
         self, tools, dag_store
     ):
