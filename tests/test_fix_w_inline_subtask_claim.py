@@ -378,6 +378,23 @@ async def test_a_cancelled_hardened_inline_call_emits_its_outcome(db):
     assert (data["attempts"], data["tokens_in"], data["tokens_out"], data["tool_calls_made"]) == (2, 11, 7, 3)
 
 
+async def test_a_cancelled_hardened_inline_call_stores_its_usage_on_the_row(db):
+    """#586: the usage of the run so far is stored with the cancellation."""
+    heart = _heart(db)
+    settings = _settings(hardened=True)
+    settings.subtask_max_attempts = 2
+    turn = _RetriedTurn(heart.subtasks, until=asyncio.Event())
+    tools = create_subtask_tools(heart, settings, runner=turn)
+
+    call = await _cancelled_inline_call(tools, turn)
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+    (row,) = await heart.subtasks.list(limit=10)
+    assert (row.status, row.final_outcome, row.result) == ("cancelled", "cancelled", None)
+    assert (row.attempts, row.tokens_in, row.tokens_out, row.tool_calls_made) == (2, 11, 7, 3)
+
+
 @pytest.mark.parametrize("how", ["finished first", "close failed"])
 async def test_a_cancelled_inline_call_emits_no_outcome_its_row_does_not_have(db, how):
     """Parity pin: green before this change too. A cancellation whose close

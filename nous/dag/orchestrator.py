@@ -37,7 +37,7 @@ single function, and each was discovered separately during review.
    subtask has. `cancel_dag`, failure propagation and the reaper all
    terminalize a node while the worker may still run (`SubtaskManager.cancel`
    bounds the leak, it does not preempt). Claims are only finalized for
-   subtasks in `_SETTLED_SUBTASK_STATUSES`; anything else stays retryable.
+   subtasks `_subtask_usage_settled` accepts; anything else stays retryable.
 
 A recurring lesson across all three: two consecutive commits are a crash
 window. Prefer one transaction, or a sweep that can resume from the
@@ -159,12 +159,29 @@ _BUDGET_WARNING_RATIO = 0.80
 # "enforcement already curtailed work on this DAG" from "nothing to curtail".
 _BUDGET_CANCEL_ERROR = "Token budget exceeded"
 
-# Subtask states whose token counters will never change again, so a one-shot
-# claim over them is safe. 'cancelled' qualifies because SubtaskManager.cancel
-# makes the row terminal and the worker's eventual complete()/fail() is a
-# no-op against the terminal guard — the persisted counters are the last word,
-# even though a cancelled worker's final usage was never flushed.
-_SETTLED_SUBTASK_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+def _subtask_usage_settled(subtask: object, grace_seconds: int) -> bool:
+    """Whether a subtask's token counters will never change again.
+
+    Only then is a one-shot claim over them safe. 'completed' and 'failed' are
+    final. 'cancelled' is final only once the cancelled run has reported
+    (#586): SubtaskManager.cancel does not stop a running worker, which stores
+    its usage on the row when it unwinds (record_cancelled_usage, which also
+    sets ``attempts``). A row cancelled before it started has no run to wait
+    for, and a worker that died never reports, so the wait ends at the run's
+    own timeout plus grace.
+    """
+    status = getattr(subtask, "status", None)
+    if status in ("completed", "failed"):
+        return True
+    if status != "cancelled":
+        return False
+    started_at = getattr(subtask, "started_at", None)
+    if started_at is None or (getattr(subtask, "attempts", 0) or 0) > 0:
+        return True
+    timeout = getattr(subtask, "timeout_seconds", None) or 0
+    return datetime.now(UTC) > started_at + timedelta(seconds=timeout + grace_seconds)
+
 
 # Node types whose work executes as a heart.subtasks row, and which therefore
 # carry a subtask_id. Every F087 backstop — wall-clock reaper, token roll-up,
@@ -574,6 +591,7 @@ class DAGOrchestrator:
         # rather than detached. Awaited directly, still outside `_lock`
         # since it isn't part of any single DAG's state machine.
         await self._sweep_leaked_heartbeat_checks()
+        await self._sweep_unclaimed_tokens()
 
         return len(dags)
 
@@ -686,6 +704,35 @@ class DAGOrchestrator:
                     "node %s — will retry next tick",
                     node.check_name, node.name,
                 )
+
+    async def _sweep_unclaimed_tokens(self) -> None:
+        """#586: claim the tokens of a node whose subtask settled after its DAG ended.
+
+        Every other reconciliation runs for a live DAG or before delivery, but
+        a run cancelled with its DAG reports its usage only when it unwinds,
+        up to its whole timeout later. Fast DB-only work like the heartbeat
+        sweep above, so inline. The window is the longest a run can still
+        report: the node timeout ceiling plus grace.
+        """
+        if not self._subtask_mgr:
+            return
+        since = datetime.now(UTC) - timedelta(
+            seconds=self._settings.dag_node_max_timeout + self._settings.dag_node_timeout_grace_seconds
+        )
+        try:
+            dags = await self._store.get_terminal_dags_with_unclaimed_tokens(
+                since,
+                delivered_only=self._settings.dag_result_delivery_enabled,
+                limit=self._settings.dag_delivery_batch_size,
+            )
+        except Exception:
+            logger.exception("F087: could not query terminal DAGs with unclaimed tokens")
+            return
+        for dag in dags:
+            try:
+                await self._reconcile_token_accounting(dag)
+            except Exception:
+                logger.exception("F087: token reconciliation failed for terminal DAG %s", str(dag.id)[:8])
 
     async def _run_delivery_sweep(self) -> None:
         """Body of the detached sweep. Never raises into the task."""
@@ -1240,7 +1287,10 @@ class DAGOrchestrator:
             subtask = await self._subtask_mgr.get(node.subtask_id)
             if subtask is None:
                 return True
-            if subtask.status not in _SETTLED_SUBTASK_STATUSES:
+            # A cancelled run that has yet to report its usage (#586) does not
+            # hold the retry back, since it may run for its whole timeout: the
+            # attempt is banked with the usage stored so far.
+            if subtask.status not in ("completed", "failed", "cancelled"):
                 # Not settled yet — its counters could still change, so
                 # claiming now would freeze the wrong value (invariant 3).
                 # Blocking the reset keeps the attempt reachable.
@@ -1280,9 +1330,11 @@ class DAGOrchestrator:
 
         Returns True when every terminal node is accounted for. The delivery
         sweep uses that to avoid publishing a total it knows is incomplete
-        (@codex P2 on 2e27143) — a delivered DAG leaves the sweep permanently,
-        so an announcement made over a half-counted total can never be
-        corrected.
+        (@codex P2 on 2e27143) — an announcement made over a half-counted
+        total can never be corrected. The one exception is a node whose
+        cancelled run has yet to report its usage (#586): it is left unclaimed
+        but does not count against the return, and _sweep_unclaimed_tokens
+        claims it after delivery.
         """
         if not self._subtask_mgr:
             return True
@@ -1308,11 +1360,12 @@ class DAGOrchestrator:
                 await self._count_node_tokens(
                     node, SimpleNamespace(tokens_in=0, tokens_out=0), dag
                 )
-            elif subtask.status in _SETTLED_SUBTASK_STATUSES:
+            elif _subtask_usage_settled(subtask, self._settings.dag_node_timeout_grace_seconds):
                 await self._count_node_tokens(node, subtask, dag)
             else:
                 # @codex P2 on fa988e7: the node is terminal but its subtask
-                # is still pending/running — cancel_dag, failure propagation
+                # is still pending/running (or cancelled with its run yet to
+                # report its usage, #586) — cancel_dag, failure propagation
                 # and the reaper all mark a node terminal while the worker may
                 # still be executing (SubtaskManager.cancel bounds the leak,
                 # it does not preempt). Claiming now would freeze the CURRENT
@@ -1323,7 +1376,11 @@ class DAGOrchestrator:
                     "deferring the token claim until it settles",
                     node.name, subtask.status,
                 )
-                complete = False
+                # #586: a cancelled run may take its whole timeout to report,
+                # so it does not hold the DAG's notice back; the claim lands
+                # later through _sweep_unclaimed_tokens.
+                if subtask.status != "cancelled":
+                    complete = False
                 continue
             # _count_node_tokens swallows its own errors, so the flag it sets
             # is the only honest signal that the claim actually landed.
