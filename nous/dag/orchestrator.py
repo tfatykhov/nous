@@ -434,6 +434,8 @@ class DAGOrchestrator:
         won = await self._store.transition_node(
             node.id, from_statuses=_NON_TERMINAL, status="cancelled", error=error
         )
+        # Terminal either way: a lost write lost to another terminal writer.
+        self._release_check(node)
         if won:
             node.status = "cancelled"
             node.error = error
@@ -1584,6 +1586,7 @@ class DAGOrchestrator:
                     node.id, status="completed", completed_at=datetime.now(UTC),
                 )
                 node.status = "completed"
+                self._release_check(node)
                 continue
 
             # codex P1 round 4: the completion-check deadline must not start
@@ -1771,6 +1774,19 @@ class DAGOrchestrator:
         """Whether node's heartbeat check has a run executing right now."""
         registry = getattr(self._dynamic_loader, "_registry", None)
         return _registry_run_in_flight(registry, node.check_name)
+
+    def _release_check(self, node: DAGNode) -> None:
+        """Drop the registry's per-name state for a node that is now terminal.
+
+        #668: launch protects a check's retained failure from eviction until
+        its node consumes it, which a terminal node never will, so each
+        terminal write of a check node calls this (_sync_check_node and
+        _abandon_check release inline). A failure that the disable's cancelled
+        run records later lands unprotected, under the registry's cap. No-op
+        for non-check nodes.
+        """
+        registry = getattr(self._dynamic_loader, "_registry", None)
+        _registry_consume_disabled_run_failure(registry, node.check_name)
 
     async def _fail_if_final_run_failed(self, node: DAGNode, **fields: Any) -> bool:
         """Fail an awaiting_check node whose self-disabling final run failed.
@@ -2011,11 +2027,18 @@ class DAGOrchestrator:
         if last_check_at is not None:
             node.last_check_at = last_check_at
 
-        await self._cancel_heartbeat_check(node)
-        # Unfence after the disable so a re-enable that raced in stays
-        # fenced until now; a check re-enabled after this point is fine.
-        if callable(end_finalization):
-            end_finalization(node.check_name)
+        # The node is terminal from here on, so its cleanup must survive a
+        # cancel during the disable (#668): a stale fence would block the
+        # worker of a retry, which re-registers the same check name. A disable
+        # interrupted this way is retried by _sweep_leaked_heartbeat_checks.
+        try:
+            await self._cancel_heartbeat_check(node)
+        finally:
+            self._release_check(node)
+            # Unfence after the disable so a re-enable that raced in stays
+            # fenced until now; a check re-enabled after this point is fine.
+            if callable(end_finalization):
+                end_finalization(node.check_name)
 
     async def _cancel_heartbeat_check(self, node: DAGNode) -> None:
         """Disable the heartbeat check for a node that resolved via shell completion_check.
@@ -2400,6 +2423,7 @@ class DAGOrchestrator:
             node.status = "failed"
             node.error = error_msg
             node.completed_at = now
+            self._release_check(node)
 
     async def _check_stalled_nodes(self, dag: ExecutionDAG) -> None:
         """F064.1: mark running nodes failed when no activity ping arrived in time.
@@ -2450,6 +2474,7 @@ class DAGOrchestrator:
                 node.status = "failed"
                 node.error = error_msg
                 node.completed_at = now
+                self._release_check(node)
 
     async def _read_node_result(self, node: DAGNode, dag: ExecutionDAG) -> str | None:
         """Read result from status file convention, fall back to node's existing result.

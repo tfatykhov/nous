@@ -1941,3 +1941,168 @@ async def test_disable_enable_during_finalization_stays_fenced():
     assert node.status == "completed"
     agent.run_turn.assert_not_called()  # neither the tick nor the trigger ran it
     loader.manage_check.assert_awaited_once_with(action="disable", name="dag-worker")
+
+
+# ---------------------------------------------------------------------------
+# #668: once a check node's row is terminal, its check name is in none of the
+# registry's _dag_protected, _finalizing or _fenced, and any failure retained
+# for it has been consumed. A node that is not terminal keeps its protection.
+# ---------------------------------------------------------------------------
+
+
+def _assert_released(registry: CheckRegistry, name: str) -> None:
+    assert name not in registry._dag_protected
+    assert name not in registry._finalizing
+    assert not registry.is_fenced(name)
+    assert not registry.self_disabled_run_failed(name)
+
+
+def _launched_check_node(**node_fields):
+    """A running check node whose check holds launch protection and a retained
+    failure, wired to a real CheckRegistry."""
+    from types import SimpleNamespace
+
+    from nous.dag.orchestrator import DAGOrchestrator
+
+    registry = CheckRegistry()
+    registry.register(
+        DynamicCheck(
+            check_id="dag-check-id",
+            name="dag-worker",
+            prompt="do the node's work",
+            tools=[],
+            interval=1,
+            timeout=30,
+            runner=MagicMock(),
+        )
+    )
+    registry.protect_from_eviction("dag-worker")  # as _launch_check_node does
+    registry.begin_run("dag-worker")
+    registry.end_run("dag-worker", False, self_disabled=True)
+    loader = MagicMock()
+    loader._registry = registry
+
+    async def manage_check(action, name):
+        registry.unregister(name)
+
+    loader.manage_check = AsyncMock(side_effect=manage_check)
+    store = AsyncMock()
+    store.transition_node = AsyncMock(return_value=True)
+    orch = DAGOrchestrator(store=store, dynamic_loader=loader, settings=Settings(_env_file=None))
+    fields = {
+        "id": "node-1",
+        "name": "monitor",
+        "node_type": "check",
+        "check_name": "dag-worker",
+        "subtask_id": None,
+        "status": "running",
+        "error": None,
+        "result": None,
+        "check_attempts": 0,
+        "last_check_at": None,
+    }
+    fields.update(node_fields)
+    return orch, registry, loader, store, SimpleNamespace(**fields)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["completed", "failed"])
+async def test_finalized_awaiting_check_node_releases_its_check_name(status):
+    orch, registry, _, _, node = _launched_check_node(status="awaiting_check")
+
+    await orch._finalize_awaiting_check_node(node, status=status)
+
+    assert node.status == status
+    _assert_released(registry, "dag-worker")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("won", [True, False])
+async def test_cancelled_check_node_releases_its_check_name(won):
+    # A lost transition means another writer already made the node terminal.
+    orch, registry, _, store, node = _launched_check_node()
+    store.transition_node.return_value = won
+
+    await orch._cancel_one(node, "cancelled")
+
+    _assert_released(registry, "dag-worker")
+
+
+@pytest.mark.asyncio
+async def test_stalled_check_node_releases_its_check_name():
+    from datetime import UTC, timedelta
+    from types import SimpleNamespace
+
+    orch, registry, _, _, node = _launched_check_node(
+        stall_timeout_seconds=60,
+        last_activity_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+
+    await orch._check_stalled_nodes(SimpleNamespace(id="dag-1", nodes=[node]))
+
+    assert node.status == "failed"
+    _assert_released(registry, "dag-worker")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disable_takes", [True, False])
+async def test_reaped_check_node_releases_its_check_name_only_when_terminal(disable_takes):
+    from datetime import UTC, timedelta
+    from types import SimpleNamespace
+
+    orch, registry, loader, _, node = _launched_check_node(
+        timeout_seconds=60,
+        started_at=datetime.now(UTC) - timedelta(days=1),
+    )
+    if not disable_takes:
+        loader.manage_check = AsyncMock()  # the check stays registered and active
+
+    await orch._reap_overrun_nodes(SimpleNamespace(id="dag-1", nodes=[node]))
+
+    if disable_takes:
+        assert node.status == "failed"
+        _assert_released(registry, "dag-worker")
+    else:
+        # The reap is deferred: the node is still running, so it keeps both.
+        assert node.status == "running"
+        assert "dag-worker" in registry._dag_protected
+        assert registry.self_disabled_run_failed("dag-worker")
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_check_disable_still_ends_finalization():
+    """#668: a cancel (e.g. shutdown cancelling a tick) while finalization
+    awaits the disable must not leave the name fenced: the node is already
+    terminal, and a retry re-registers the same deterministic name."""
+    orch, registry, loader, _, node = _launched_check_node(status="awaiting_check")
+    disabling = asyncio.Event()
+
+    async def manage_check(action, name):
+        disabling.set()
+        await asyncio.Event().wait()  # the loader/DB never answers
+
+    loader.manage_check = AsyncMock(side_effect=manage_check)
+    task = asyncio.create_task(orch._finalize_awaiting_check_node(node, status="failed"))
+    await disabling.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert node.status == "failed"  # the terminal write landed before the cancel
+    assert "dag-worker" not in registry._finalizing
+    assert not registry.is_fenced("dag-worker")
+    _assert_released(registry, "dag-worker")
+    # A retried node re-registers the same name; its worker must be able to run.
+    registry.unregister("dag-worker")
+    registry.register(
+        DynamicCheck(
+            check_id="dag-check-id-2",
+            name="dag-worker",
+            prompt="retry",
+            tools=[],
+            interval=1,
+            timeout=30,
+            runner=MagicMock(),
+        )
+    )
+    assert [c.name for c in registry.get_due_checks()] == ["dag-worker"]
