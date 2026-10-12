@@ -386,6 +386,16 @@ class TestReadFilePagination:
         assert text[: m.start() + 1] == "x" * (_READ_FILE_MAX_CHARS + 10) + "\n"
 
     @pytest.mark.asyncio
+    async def test_lines_are_counted_on_newline_only(self, tmp_path):
+        # \f and   are not line breaks to wc -l, grep -n or sed -n.
+        (tmp_path / "ff.txt").write_text("a\fb\nc d\ne\n", encoding="utf-8")
+
+        text = _extract_text(await read_file_tool(path="ff.txt", offset=1, _workspace_dir=str(tmp_path)))
+        assert text == "c d\ne\n"
+        text = _extract_text(await read_file_tool(path="ff.txt", offset=3, _workspace_dir=str(tmp_path)))
+        assert text == "[read_file: offset 3 is past the end of the file (3 lines).]"
+
+    @pytest.mark.asyncio
     async def test_offset_past_end_is_reported(self, tmp_path):
         (tmp_path / "short.txt").write_text("a\nb\n", encoding="utf-8")
 

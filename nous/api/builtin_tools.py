@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import errno
 import hashlib
+import io
 import logging
 import os
 import stat
@@ -185,7 +186,9 @@ async def read_file_tool(
         if not content:
             return _mcp_response("(empty file)")
 
-        lines = content.splitlines(keepends=True)
+        # On "\n" only, as wc -l, grep -n and sed -n count: splitlines()
+        # also breaks on \f, \v, \x1c-\x1e, \x85 and  /9.
+        lines = io.StringIO(content, newline="\n").readlines()
         total = len(lines)
         if offset >= total:
             return _mcp_response(f"[read_file: offset {offset} is past the end of the file ({total} lines).]")
