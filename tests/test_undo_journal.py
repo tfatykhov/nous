@@ -178,11 +178,15 @@ class TestJournalStore:
         bad = uuid.uuid4().hex
         journal._root.mkdir(parents=True, exist_ok=True)
         journal._write_file(f"20260101T000000000000-{bad}.json", {}, b"not json")
+        keyless = uuid.uuid4().hex
+        journal._write_file(f"20260101T000000000001-{keyless}.json", {"restorable": True})
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             missing = await client.post(f"/undo/snapshots/{uuid.uuid4().hex}/restore")
             malformed = await client.post(f"/undo/snapshots/{bad}/restore")
+            shapeless = await client.post(f"/undo/snapshots/{keyless}/restore")
         assert missing.status_code == 404 and missing.json()["success"] is False
         assert malformed.status_code == 409 and malformed.json()["success"] is False
+        assert shapeless.status_code == 409 and "malformed" in shapeless.json()["message"]
 
     async def test_stale_tmp_from_a_killed_write_does_not_block_mark_restored(self, tmp_path):
         # Review of #712: a hard kill between os.open and os.replace left
