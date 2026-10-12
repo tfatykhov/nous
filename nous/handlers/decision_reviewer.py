@@ -18,6 +18,7 @@ from uuid import UUID
 
 from nous.brain import continuation
 from nous.brain.brain import DecisionAlreadyReviewed, DecisionNotFound
+from nous.brain.intention_calibration import INTENTION_REVIEWER
 from nous.cancellation import cancel_requested
 
 if TYPE_CHECKING:
@@ -30,6 +31,9 @@ logger = logging.getLogger(__name__)
 # decision_reviewed event (the strategy-card distiller) read it to tell a
 # heuristic auto-review from a review somebody actually made.
 AUTO_REVIEWER = "auto"
+# Reviews a card must not be distilled from: a heuristic grade (auto) and a lineage grade (f099, Phase 3d) are
+# not outcomes somebody observed for a strategy.
+NON_DISTILLING_REVIEWERS = frozenset({AUTO_REVIEWER, INTENTION_REVIEWER})
 
 
 # ---------------------------------------------------------------------------
