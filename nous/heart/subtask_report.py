@@ -29,6 +29,7 @@ Notes for future maintainers:
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from pydantic import (
@@ -44,6 +45,9 @@ from pydantic import (
 #: deliberately mid-scale: it asserts neither trust nor doubt, and pairs with
 #: ``confidence_reported=False`` so downstream calibration can exclude it.
 DEFAULT_CONFIDENCE = 0.5
+
+#: List fields a model sometimes sends as one string (or JSON-encoded list).
+_LIST_FIELDS = ("findings", "next_actions", "evidence_refs")
 
 
 class SubtaskReport(BaseModel):
@@ -96,9 +100,30 @@ class SubtaskReport(BaseModel):
         Round trips are kept honest by ``_omit_unreported_confidence`` below,
         which drops the defaulted ``confidence`` from the dump so it is absent
         here on the way back in.
+
+        It also tolerates the shapes models emit for "nothing" or "a list":
+        a null or blank ``confidence`` counts as omitted (dropped before the
+        stamp, so it stays unreported), and a list field given as a string
+        becomes the JSON list it encodes, else ``[string]``; a null or blank
+        string becomes ``[]``. Non-string list items still fail validation.
         """
         if isinstance(data, dict):
             data = dict(data)
+            confidence = data.get("confidence")
+            if confidence is None or (isinstance(confidence, str) and not confidence.strip()):
+                data.pop("confidence", None)
+            for key in _LIST_FIELDS:
+                if key not in data:
+                    continue
+                value = data[key]
+                if value is None or (isinstance(value, str) and not value.strip()):
+                    data[key] = []
+                elif isinstance(value, str):
+                    try:
+                        parsed = json.loads(value)
+                    except (ValueError, RecursionError):
+                        parsed = None
+                    data[key] = parsed if isinstance(parsed, list) else [value]
             data["confidence_reported"] = data.get("confidence") is not None
         return data
 
