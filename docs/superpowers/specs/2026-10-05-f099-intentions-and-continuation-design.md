@@ -254,7 +254,7 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
 |---|---|
 | Allowed | Tools whose `tool_class(name)` is `none` or `write`. **Fail closed** on an unknown tool. |
 | Denied, although `none`/`write` | `schedule_task`, `heartbeat_check_create`, `heartbeat_check_manage`, `create_censor`, `learn_skill`, `store_identity`, `complete_initiation`, `dag_manage`, `push_surface`, `compose_surface`, `bash` (unless `NOUS_F099_LINEAGE_SHELL`, below), `run_python`, `spawn_sync`, `resolve_decision`, `resolve_decisions` |
-| Allowed with a per-call check | `write_file` only under `<workspace_dir>/intentions/<root_id>/`; `cancel_task` only on its own lineage; `bash`, when `NOUS_F099_LINEAGE_SHELL` is on (the default), only for a command on the lineage shell allowlist (below) |
+| Allowed with a per-call check | `write_file` only under `<workspace_dir>/intentions/<root_id>/`, plus `<workspace_dir>/claude-jobs/prompts/` when `NOUS_F099_LINEAGE_SHELL` is on; `cancel_task` only on its own lineage; `bash`, when `NOUS_F099_LINEAGE_SHELL` is on (the default), only for a command on the lineage shell allowlist (below) |
 | Spawn tools | `spawn_task` and `dag_create` are offered **only to `continuation` turns**, and are removed when the root reaches its depth or spawn limit. Other turns in the lineage get no spawn tools. |
 | Never offered | Class `external` or `irreversible` (today: `send_email`, `send_file`) |
 | Continuation turn only, as `extra_tools` | `propose_action`, `resolve_intention` |
@@ -520,7 +520,7 @@ The F098 A and C classification of scheduled, inline and spawn rows is pinned, a
   - the node, callback and fix subtasks of a DAG it creates;
   - that DAG's dynamic checks.
 - **Forged calls.** A forged `tool_use` for `send_email`, `run_python` or `bash` is refused in both loops.
-- `write_file` outside `intentions/<root>/` is refused. `cancel_task` on foreign work is refused. A continuation's `dag_create` creates a child, not a root. The F087 summary turn does not run for `internal_only` DAGs.
+- `write_file` outside `intentions/<root>/` (and `claude-jobs/prompts/` when the lineage shell is on) is refused. `cancel_task` on foreign work is refused. A continuation's `dag_create` creates a child, not a root. The F087 summary turn does not run for `internal_only` DAGs.
 - **Injection test.** A result body that asks for `send_email` produces no send. The test asserts the refusal, not the model's behaviour.
 - **Claim.** Concurrent claimers with an arrival committed in between get exactly one continuation per root. A fan-out whose results land inside the debounce window is consumed as one batch arrival. `report` intentions are never claimed; they close at write time. A killed process's claim is released by the lease. A stale token cannot commit. Debounce has a max-wait.
 - Each gate row behaves as specified.
