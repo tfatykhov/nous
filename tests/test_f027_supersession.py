@@ -644,80 +644,6 @@ class TestPhaseClusterConsolidation:
             assert call.args[0] == merged_detail.id  # source = superseding fact
             assert call.args[2] == "supersedes"
 
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        ("first_category", "expected"),
-        [
-            ("rule", "technical"),
-            ("person", "technical"),
-            ("preference", "technical"),
-            ("technical", "technical"),
-            ("concept", "concept"),
-        ],
-    )
-    async def test_merged_fact_never_inherits_tier1_category(self, first_category, expected):
-        """#592: cluster_consolidation bypasses admission, so the merged fact
-        must not inherit a tier-1 (person/preference/rule) category from
-        facts[0]; non-tier-1 categories pass through unchanged."""
-        merge_result = {"should_merge": True, "merged_content": "consolidated fact", "confidence": 0.85}
-        client = _mock_llm_response(merge_result)
-        handler, heart = self._make_handler(llm_client=client)
-        handler._interrupted = False
-
-        def _session(**attrs):
-            s = AsyncMock()
-            s.__aenter__ = AsyncMock(return_value=s)
-            s.__aexit__ = AsyncMock(return_value=False)
-            for k, v in attrs.items():
-                setattr(s, k, v)
-            return s
-
-        cluster_result = MagicMock()
-        cluster_result.all.return_value = [("test_subject", 3)]
-        facts = []
-        for i, cat in enumerate([first_category, "concept", "technical"]):
-            f = MagicMock()
-            f.id = uuid4()
-            f.category = cat
-            f.content = f"fact {i}"
-            f.created_at = datetime.now(UTC)
-            facts.append(f)
-        fact_result = MagicMock()
-        fact_result.scalars.return_value.all.return_value = facts
-
-        def _make_orm(*_a, **_k):
-            m = MagicMock()
-            m.superseded_by = None
-            return m
-
-        sessions = iter(
-            [
-                _session(execute=AsyncMock(return_value=cluster_result)),
-                _session(execute=AsyncMock(return_value=fact_result)),
-            ]
-        )
-        deactivate_session = _session(get=AsyncMock(side_effect=_make_orm))
-        heart.db.session = lambda: next(sessions, deactivate_session)
-        heart.agent_id = "test"
-        merged_detail = MagicMock()
-        merged_detail.id = uuid4()
-        heart.learn = AsyncMock(return_value=merged_detail)
-        heart.link_facts = AsyncMock()
-        heart.facts.inherit_conflict_slot_keys = AsyncMock()
-
-        stats = {}
-        assert await handler._phase_cluster_consolidation(stats) is True
-        assert stats["clusters_merged"] == 1
-        heart.learn.assert_awaited_once()
-        fact_input = heart.learn.await_args.args[0]
-        assert fact_input.source == "cluster_consolidation"
-        assert fact_input.category == expected
-
-
-# ===========================================================================
-# TestSleepPhaseRegistration
-# ===========================================================================
-
 class TestSleepPhaseRegistration:
     """Test that F027 phases are registered in _run_sleep."""
 
@@ -775,3 +701,83 @@ class TestSleepPhaseRegistration:
 
         await handler._run_sleep(event)
         handler._phase_cluster_consolidation.assert_called_once()
+
+
+@pytest.mark.postgres_only
+class TestClusterConsolidationTier1Exclusion:
+    """#592: cluster_consolidation bypasses admission, so a tier-1 (person /
+    preference / rule) fact is never a cluster member: a tier-1 cluster is left
+    alone (its facts stay in the User Profile), and a mixed subject merges only
+    its other facts."""
+
+    async def test_tier1_facts_are_never_merged(self, heart):
+        from sqlalchemy import select, text
+
+        from nous.handlers.sleep_handler import SleepHandler
+        from nous.storage.models import Fact
+
+        agent_id = f"test-592-{uuid4()}"
+        orig_heart_agent, orig_facts_agent = heart.agent_id, heart.facts.agent_id
+        heart.agent_id = agent_id
+        heart.facts.agent_id = agent_id
+        pref_ids = [uuid4() for _ in range(3)]
+        rule_ids = [uuid4() for _ in range(2)]
+        concept_ids = [uuid4() for _ in range(3)]
+        try:
+            async with heart.db.session() as s:
+                rows = [(fid, "user coffee", "preference") for fid in pref_ids]
+                rows += [(fid, "deploy pipeline", "rule") for fid in rule_ids]
+                rows += [(fid, "deploy pipeline", "concept") for fid in concept_ids]
+                for i, (fid, subject, category) in enumerate(rows):
+                    s.add(
+                        Fact(
+                            id=fid,
+                            agent_id=agent_id,
+                            subject=subject,
+                            content=f"{subject} observation {i}",
+                            category=category,
+                            source="fact_extractor",
+                            active=True,
+                            embedding=await heart._embeddings.embed(f"{subject} seed {i}"),
+                        )
+                    )
+                await s.commit()
+
+            # LLM that approves a merge of whatever cluster it is shown.
+            llm = MagicMock()
+            resp = MagicMock()
+            resp.content = [
+                {
+                    "type": "tool_use",
+                    "id": "t",
+                    "name": "merge_facts",
+                    "input": {
+                        "should_merge": True,
+                        "merged_content": "Consolidated deploy pipeline fact.",
+                        "confidence": 0.9,
+                    },
+                }
+            ]
+            llm.call = AsyncMock(return_value=resp)
+            bus = MagicMock()
+            bus.emit = AsyncMock()
+
+            handler = SleepHandler(MagicMock(), heart, heart.settings, bus, llm)
+            assert await handler._phase_cluster_consolidation({})
+
+            async with heart.db.session() as check:
+                for fid in pref_ids + rule_ids:
+                    f = await check.get(Fact, fid)
+                    assert f is not None and f.active is True, f"tier-1 fact {fid} was merged"
+                for fid in concept_ids:
+                    f = await check.get(Fact, fid)
+                    assert f is not None and f.active is False, "the non-tier-1 members still consolidate"
+                merged_q = select(Fact).where(Fact.agent_id == agent_id, Fact.source == "cluster_consolidation")
+                merged = (await check.execute(merged_q)).scalars().all()
+                assert [m.category for m in merged] == ["concept"]
+        finally:
+            heart.agent_id = orig_heart_agent
+            heart.facts.agent_id = orig_facts_agent
+            async with heart.db.session() as s:
+                await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": agent_id})
+                await s.commit()

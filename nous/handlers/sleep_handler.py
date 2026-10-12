@@ -25,7 +25,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from nous.brain.brain import Brain
 from nous.cognitive.context import TIER1_FACT_CATEGORIES
@@ -39,6 +39,9 @@ from nous.heart.schemas import FactInput, FactRejected
 from nous.storage.models import Fact
 
 logger = logging.getLogger(__name__)
+
+# #592: a cluster-consolidation member is never a tier-1 fact (NULL category stays in scope).
+_NOT_TIER1 = or_(Fact.category.is_(None), Fact.category.notin_(TIER1_FACT_CATEGORIES))
 
 _REFLECTION_PROMPT = (
     """You are an AI agent reviewing your recent activity. Analyze the following
@@ -1652,6 +1655,11 @@ class SleepHandler:
                 # cluster must NEVER be consolidated (the 6th background-machinery
                 # member). Exclude them from BOTH the count and the member fetch
                 # below; is_distinct_from keeps NULL-source normal facts in scope.
+                # #592: tier-1 (person/preference/rule) facts are never cluster
+                # members either. This phase bypasses admission, so a merged fact
+                # inheriting a tier-1 category would launder a mislabeled source
+                # into the always-on User Profile, and recategorizing instead would
+                # drop genuine profile facts out of it. NULL category stays in scope.
                 stmt = (
                     select(Fact.subject, func.count().label("cnt"))
                     .where(
@@ -1659,6 +1667,7 @@ class SleepHandler:
                         Fact.active == True,  # noqa: E712
                         Fact.subject.isnot(None),
                         Fact.source.is_distinct_from("exemplar_extractor"),
+                        _NOT_TIER1,
                     )
                     .group_by(Fact.subject)
                     .having(func.count() >= min_facts)
@@ -1688,6 +1697,7 @@ class SleepHandler:
                             Fact.active == True,  # noqa: E712
                             Fact.subject == subject,
                             Fact.source.is_distinct_from("exemplar_extractor"),  # codex r9: never a cluster member
+                            _NOT_TIER1,  # #592: never a cluster member
                         )
                         .order_by(Fact.created_at.desc())
                     )
@@ -1773,14 +1783,6 @@ class SleepHandler:
                     )
                     continue
 
-                # Tier-1 category guard (#592): cluster_consolidation bypasses
-                # admission, so inheriting facts[0]'s person/preference/rule
-                # would launder a mislabeled source fact into the always-on
-                # User Profile. Mirrors the reflection/enumerative drift guards.
-                merged_category = facts[0].category
-                if merged_category in TIER1_FACT_CATEGORIES:
-                    merged_category = "technical"
-
                 # Create merged fact. 1c: exclude the still-active cluster
                 # members so Leg-2 dedup can't confirm the merged restatement
                 # AS one of them and discard the merged content.
@@ -1790,7 +1792,7 @@ class SleepHandler:
                         content=merge_result["merged_content"],
                         source="cluster_consolidation",
                         confidence=float(merge_result.get("confidence", 0.8)),
-                        category=merged_category,
+                        category=facts[0].category,
                     ),
                     exclude_ids=[f.id for f in facts],
                 )
