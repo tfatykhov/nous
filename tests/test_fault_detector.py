@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
 
@@ -423,6 +424,96 @@ class TestProcessFaultCheckConsecutiveErrors:
         error_findings = [f for f in result.findings if "failed with errors" in f.summary]
         assert not error_findings
 
+    @staticmethod
+    async def _run_check(runs: dict[str, list[dict]], eligible_count: int = 0, **overrides) -> CheckResult:
+        check = ProcessFaultCheck(db=MagicMock(), settings=_mock_settings(**overrides), agent_id="test-agent")
+
+        async def _fake_get(process_name, limit=20):
+            return runs.get(process_name, [])[:limit]
+
+        async def _fake_ratio_get(process_name, limit=20):
+            return []
+
+        async def _fake_count(*a, **kw):
+            return eligible_count
+
+        recorder_mock = AsyncMock()
+        recorder_mock.get_recent_runs = _fake_get
+        recorder_mock.get_recent_ratio_runs = _fake_ratio_get
+        with patch("nous.heartbeat.fault_detector.ProcessRecorder", return_value=recorder_mock):
+            with patch.object(check, "_count_stale_eligible", _fake_count):
+                return await check.run()
+
+    @pytest.mark.asyncio
+    async def test_errors_with_no_finished_row_report_the_streak_not_a_gap(self):
+        """#665: a phase whose only rows are fresh errors is a high-urgency error
+        streak, not a 'not completed in 49h' gap.
+
+        Mutation evidence: restore the synthetic ``gap_hours = max_gap_hours + 1``
+        and its ``continue`` and no error finding is produced.
+        """
+        now = datetime.now(UTC)
+        runs = {"sleep/stale_scan": [_run(now, h, status="error") for h in (0.1, 0.2, 0.3)]}
+
+        result = await self._run_check(runs)
+
+        error_findings = [f for f in result.findings if "failed with errors" in f.summary]
+        assert error_findings and error_findings[0].urgency == "high"
+        assert not any("not completed" in f.summary for f in result.findings)
+
+    @pytest.mark.asyncio
+    async def test_errors_with_no_finished_row_older_than_gap_report_both(self):
+        """With no finished row in the whole (short) history, the gap is measured
+        from the oldest fetched row."""
+        now = datetime.now(UTC)
+        runs = {"sleep/stale_scan": [_run(now, h, status="error") for h in (50.0, 51.0, 52.0)]}
+
+        result = await self._run_check(runs)
+
+        assert any("failed with errors" in f.summary for f in result.findings)
+        assert any("not completed in 52h" in f.summary for f in result.findings)
+
+    @pytest.mark.asyncio
+    async def test_full_window_without_a_finished_row_reports_a_gap(self):
+        """A full fetch window (baseline_window + 5 = 25 rows) with no finished
+        row is truncated history: the last finish is older than every fetched
+        row, so a frequent phase that keeps skipping is flagged even though
+        all fetched rows are younger than the 48h gap.
+
+        Mutation evidence: anchor the gap on the oldest fetched row regardless
+        of window size and no gap finding is produced.
+        """
+        now = datetime.now(UTC)
+        runs = {"sleep/stale_scan": [_run(now, 0.5 * i, status="skipped") for i in range(1, 26)]}
+
+        result = await self._run_check(runs)
+
+        missed = [f for f in result.findings if "stale_scan" in f.summary and "no finished run" in f.summary]
+        assert missed and "among the last 25 recorded runs" in missed[0].summary
+        assert not any("not completed" in f.summary for f in result.findings)  # no fabricated hours
+
+    @pytest.mark.asyncio
+    async def test_zero_change_threshold_above_ratio_window_still_fires(self):
+        """The raw fetch must be deep enough for the zero-change check: with
+        ratio_baseline_window=5 and zero_change_threshold=12 it used to fetch
+        only 10 rows, so 12 zero-change runs could never be seen.
+        """
+        now = datetime.now(UTC)
+        runs = {
+            "sleep/stale_scan": [
+                _run(now, h, status="finished", items_examined=50, items_changed=0) for h in range(1, 15)
+            ]
+        }
+
+        result = await self._run_check(
+            runs,
+            eligible_count=100,
+            fault_detector_ratio_baseline_window=5,
+            fault_detector_zero_change_threshold=12,
+        )
+
+        assert any("0 deactivations in last 12 runs" in f.summary for f in result.findings)
+
 
 class TestProcessFaultCheckZeroChangeCollapse:
     """Detect stale_scan running but changing nothing while facts are eligible."""
@@ -516,6 +607,7 @@ class TestProcessFaultCheckRatioCollapse:
 
         recorder_mock = AsyncMock()
         recorder_mock.get_recent_runs = _fake_get
+        recorder_mock.get_recent_ratio_runs = _fake_get
         with patch("nous.heartbeat.fault_detector.ProcessRecorder", return_value=recorder_mock):
             with patch.object(check, "_count_stale_eligible", _fake_count):
                 result = await check.run()
@@ -555,6 +647,7 @@ class TestProcessFaultCheckRatioCollapse:
 
         recorder_mock = AsyncMock()
         recorder_mock.get_recent_runs = _fake_get
+        recorder_mock.get_recent_ratio_runs = _fake_get
         with patch("nous.heartbeat.fault_detector.ProcessRecorder", return_value=recorder_mock):
             with patch.object(check, "_count_stale_eligible", _fake_count):
                 result = await check.run()
@@ -588,6 +681,7 @@ class TestProcessFaultCheckRatioCollapse:
 
         recorder_mock = AsyncMock()
         recorder_mock.get_recent_runs = _fake_get
+        recorder_mock.get_recent_ratio_runs = _fake_get
         with patch("nous.heartbeat.fault_detector.ProcessRecorder", return_value=recorder_mock):
             with patch.object(check, "_count_stale_eligible", _fake_count):
                 result = await check.run()
@@ -837,6 +931,7 @@ class TestRatioCollapseBaselineFetch:
 
         recorder_mock = AsyncMock()
         recorder_mock.get_recent_runs = _fake_get
+        recorder_mock.get_recent_ratio_runs = _fake_get
         with patch("nous.heartbeat.fault_detector.ProcessRecorder", return_value=recorder_mock):
             with patch.object(check, "_count_stale_eligible", _fake_count):
                 result = await check.run()
@@ -878,6 +973,7 @@ class TestRatioCollapseBaselineFetch:
 
         recorder_mock = AsyncMock()
         recorder_mock.get_recent_runs = _fake_get
+        recorder_mock.get_recent_ratio_runs = _fake_get
         with patch("nous.heartbeat.fault_detector.ProcessRecorder", return_value=recorder_mock):
             with patch.object(check, "_count_stale_eligible", _fake_count):
                 result = await check.run()
@@ -887,3 +983,88 @@ class TestRatioCollapseBaselineFetch:
             "Expected ratio-collapse finding with minimum baseline_window=5; "
             "empty baseline means detection is permanently disabled"
         )
+
+
+# ---------------------------------------------------------------------------
+# Real-Postgres regressions (#665)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+class TestProcessFaultCheckAgainstPostgres:
+    """The fetch and count queries themselves, against a real database."""
+
+    @pytest.mark.asyncio
+    async def test_isolated_error_does_not_disable_ratio_collapse(self, db):
+        """#665: one error among the newest baseline_window + 5 rows must not
+        leave the ratio check one eligible sample short.
+
+        Mutation evidence: fetch baseline_window + 5 raw rows and filter in
+        Python (the old code) and no ratio finding is produced.
+        """
+        from sqlalchemy import text
+
+        agent_id = f"test-fd665-ratio-{uuid4().hex[:8]}"
+        now = datetime.now(UTC)
+        rows = [(h, "finished", 100, 2) for h in range(1, 6)]  # 5 recent, collapsed
+        rows.append((3.5, "error", None, None))  # one isolated error among them
+        rows += [(h, "finished", 100, 50) for h in range(6, 26)]  # 20 baseline, healthy
+        try:
+            async with db.session() as session:
+                for h, status, examined, changed in rows:
+                    await session.execute(
+                        text(
+                            "INSERT INTO nous_system.process_run_log "
+                            "(agent_id, process_name, started_at, status, items_examined, items_changed) "
+                            "VALUES (:a, 'sleep/stale_scan', :ts, :st, :ex, :ch)"
+                        ),
+                        {"a": agent_id, "ts": now - timedelta(hours=h), "st": status, "ex": examined, "ch": changed},
+                    )
+                await session.commit()
+
+            check = ProcessFaultCheck(db=db, settings=_mock_settings(), agent_id=agent_id)
+            result = await check.run()
+        finally:
+            async with db.session() as session:
+                await session.execute(
+                    text("DELETE FROM nous_system.process_run_log WHERE agent_id = :a"), {"a": agent_id}
+                )
+                await session.commit()
+
+        ratio_findings = [f for f in result.findings if "ratio" in f.summary]
+        assert ratio_findings, f"Expected a ratio-collapse finding, got {[f.summary for f in result.findings]}"
+
+    @pytest.mark.asyncio
+    async def test_explicitly_empty_exclusion_list_counts_rule_facts(self, db):
+        """#665: stale_scan_excluded_categories=[] excludes nothing, as in
+        _phase_stale_scan, so an aged 'rule' fact is counted.
+
+        Mutation evidence: restore ``or ["rule"]`` and the count is 0.
+        """
+        from sqlalchemy import text
+
+        agent_id = f"test-fd665-excl-{uuid4().hex[:8]}"
+        try:
+            async with db.session() as session:
+                await session.execute(
+                    text(
+                        "INSERT INTO heart.facts (agent_id, content, category, created_at) "
+                        "VALUES (:a, 'always answer in English', 'rule', now() - interval '90 days')"
+                    ),
+                    {"a": agent_id},
+                )
+                await session.commit()
+
+            empty = ProcessFaultCheck(
+                db=db, settings=_mock_settings(stale_scan_excluded_categories=[]), agent_id=agent_id
+            )
+            default = ProcessFaultCheck(db=db, settings=_mock_settings(), agent_id=agent_id)
+            empty_count = await empty._count_stale_eligible(60)
+            default_count = await default._count_stale_eligible(60)
+        finally:
+            async with db.session() as session:
+                await session.execute(text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": agent_id})
+                await session.commit()
+
+        assert empty_count == 1
+        assert default_count == 0

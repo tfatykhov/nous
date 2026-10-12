@@ -212,6 +212,32 @@ class ProcessRecorder:
         Each row: {id, status, started_at, finished_at,
                    items_examined, items_changed, error_message}.
         """
+        return await self._recent_runs("get_recent_runs", process_name, limit, "")
+
+    async def get_recent_ratio_runs(
+        self,
+        process_name: str,
+        limit: int = 20,
+    ) -> list[dict]:
+        """Like get_recent_runs, but only rows with an output/input ratio:
+        status 'finished', items_examined > 0 and items_changed recorded.
+
+        Filtered in SQL so the LIMIT counts eligible rows, not raw ones.
+        """
+        return await self._recent_runs(
+            "get_recent_ratio_runs",
+            process_name,
+            limit,
+            "AND status = 'finished' AND items_examined > 0 AND items_changed IS NOT NULL ",
+        )
+
+    async def _recent_runs(
+        self,
+        caller: str,
+        process_name: str,
+        limit: int,
+        extra_where: str,
+    ) -> list[dict]:
         try:
             async with self._db.session() as session:
                 result = await session.execute(
@@ -220,8 +246,7 @@ class ProcessRecorder:
                         "       items_examined, items_changed, error_message "
                         "FROM nous_system.process_run_log "
                         "WHERE agent_id = :agent_id "
-                        "  AND process_name = :process_name "
-                        "ORDER BY started_at DESC "
+                        "  AND process_name = :process_name " + extra_where + "ORDER BY started_at DESC "
                         "LIMIT :limit"
                     ),
                     {
@@ -233,9 +258,7 @@ class ProcessRecorder:
                 rows = result.mappings().all()
                 return [dict(r) for r in rows]
         except Exception:
-            logger.warning(
-                "ProcessRecorder.get_recent_runs failed for %s", process_name, exc_info=True
-            )
+            logger.warning("ProcessRecorder.%s failed for %s", caller, process_name, exc_info=True)
             return []
 
     async def get_all_process_names(self) -> list[str]:
