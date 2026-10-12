@@ -34,6 +34,15 @@ ContextKind = Literal[
 CONTEXT_KINDS: tuple[str, ...] = get_args(ContextKind)
 # A caller is waiting on the turn. Everything else runs with nobody in the loop.
 FOREGROUND_KINDS: frozenset[str] = frozenset({"interactive", "mcp"})
+# bash's timeout, when the call names none, in a background turn that is not short
+# (ExecutionContext.is_short_turn); a short turn keeps the 30 s foreground default. With the
+# default NOUS_TOOL_TIMEOUT (120 s) the runner's own per-tool wait ends such a call at the same
+# moment and replaces bash's retry hint with its generic timeout; prod runs 2000 s.
+BACKGROUND_BASH_TIMEOUT = 120  # seconds
+# Background kinds that are short all the same: a person waits on a companion tap, and a
+# heartbeat check (DynamicCheck.timeout, 30 s by default) and a DAG summary
+# (NOUS_DAG_DELIVERY_AGENT_SUMMARY_TIMEOUT_SECONDS, 120 s) are bounded as a whole.
+SHORT_BACKGROUND_KINDS: frozenset[str] = frozenset({"agent_action", "heartbeat_check", "dag_summary"})
 
 
 def _as_uuid(value: Any) -> UUID | None:
@@ -93,6 +102,10 @@ class ExecutionContext:
     arrival_id: UUID | None = None  # continuation: the arrival this turn decides
     claim_token: UUID | None = None  # continuation: the claim this turn runs under
     spawn_blocked: bool = False  # continuation: the root is at its depth or spawn limit
+    # The bound on the whole turn in seconds, when it is set per turn: a subtask row's
+    # timeout_seconds, which the worker and the inline spawn path wait for (a DAG node's row
+    # carries the node's timeout).
+    turn_timeout: int | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in CONTEXT_KINDS:
@@ -109,6 +122,13 @@ class ExecutionContext:
     @property
     def is_background(self) -> bool:
         return self.kind not in FOREGROUND_KINDS
+
+    @property
+    def is_short_turn(self) -> bool:
+        """Someone waits on the turn, or the turn would end before a call at bash's background default could."""
+        if not self.is_background or self.kind in SHORT_BACKGROUND_KINDS:
+            return True
+        return self.turn_timeout is not None and self.turn_timeout <= BACKGROUND_BASH_TIMEOUT
 
     @classmethod
     def for_subtask(cls, subtask: Any, session_id: str) -> ExecutionContext:
@@ -151,6 +171,8 @@ class ExecutionContext:
             intention_id=intention_id,
             root_intention_id=root_intention_id,
             authority=authority,
+            # 0 or missing: the worker falls back to NOUS_SUBTASK_DEFAULT_TIMEOUT, so no per-turn bound.
+            turn_timeout=getattr(subtask, "timeout_seconds", None) or None,
         )
 
 

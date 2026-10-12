@@ -527,6 +527,10 @@ class ToolDispatcher:
                 # scheduled turn composes origin="agent" apps (F092.1 push
                 # path); a chat turn composes origin="chat".
                 args = {**args, "_is_background": is_background}
+            if name == "bash":
+                # bash's longer default timeout would outlast a short turn, which would then
+                # be cancelled before the call returned its output or its timeout error.
+                args = {**args, "_long_timeout": not ctx.is_short_turn}
             if session_id is not None and name == "spawn_task":
                 args = {**args, "_session_id": session_id}
             if ctx.decision_id and name in ("spawn_task", "spawn_sync"):

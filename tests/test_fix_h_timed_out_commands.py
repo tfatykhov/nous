@@ -527,3 +527,23 @@ async def test_a_job_that_holds_no_output_outlives_a_bash_command_that_ended_in_
     assert "timed out" not in result["content"][0]["text"]
     job = await _recorded_pid(workspace, "job.pid")
     await _assert_still_running(job, "a job that held none of the command's output was killed")
+
+
+async def test_a_bash_command_whose_child_escaped_its_group_returns_once_the_kill_wait_ends(workspace, caplog):
+    """Parity pin: green before this change too (#680). A child that started a
+    session of its own is not killed with the group and holds the command's
+    pipes, so the call cannot see them close. It returns when the kill wait
+    ends, about timeout + _KILL_WAIT_SECONDS, not when the child exits."""
+    from nous.utils import _KILL_WAIT_SECONDS
+
+    started = time.monotonic()
+    with caplog.at_level(logging.WARNING, logger="nous.utils"):
+        result = await asyncio.wait_for(
+            bash_tool(ESCAPED, timeout=1, _workspace_dir=str(workspace)), 1 + _KILL_WAIT_SECONDS + LIMIT
+        )
+    elapsed = time.monotonic() - started
+
+    assert result["content"][0]["text"].startswith("Command timed out after 1s.")
+    assert 1 + _KILL_WAIT_SECONDS - 0.5 <= elapsed < 1 + _KILL_WAIT_SECONDS + 3, elapsed
+    assert any("had not ended" in r.getMessage() for r in caplog.records if r.name == "nous.utils")
+    await _assert_still_running(await _recorded_pid(workspace), "the escaped child was killed with the group")

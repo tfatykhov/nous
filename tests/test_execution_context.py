@@ -90,6 +90,35 @@ def test_for_subtask_tolerates_legacy_rows():
     assert ctx.kind == "dag_node" and ctx.dag_id is None
 
 
+@pytest.mark.parametrize(
+    ("metadata", "timeout_seconds", "short"),
+    [
+        ({}, 90, True),  # spawn_sync inline, NOUS_INLINE_SUBTASK_TIMEOUT
+        ({}, 60, True),  # spawn_task(timeout=60), run by a worker
+        ({}, 120, True),  # the turn ends when a 120 s call would
+        ({}, 600, False),
+        ({}, 0, False),  # the worker falls back to NOUS_SUBTASK_DEFAULT_TIMEOUT
+        ({}, None, False),
+        ({"schedule_id": "ab12"}, 60, True),
+        ({"dag_id": str(uuid.uuid4()), "node_name": "n"}, 120, True),
+        ({"dag_id": str(uuid.uuid4()), "node_name": "n"}, 6000, False),
+    ],
+)
+def test_for_subtask_marks_a_turn_its_row_bounds_at_the_bash_default_or_less(metadata, timeout_seconds, short):
+    """The worker and the inline spawn path wait for the row's timeout_seconds: a turn bounded at
+    BACKGROUND_BASH_TIMEOUT or less would be cancelled before a call at that default returned."""
+    row = SimpleNamespace(id=uuid.uuid4(), metadata_=metadata, timeout_seconds=timeout_seconds)
+    ctx = ExecutionContext.for_subtask(row, "s")
+    assert ctx.turn_timeout == (timeout_seconds or None) and ctx.is_short_turn is short
+
+
+def test_short_turns_by_kind_alone():
+    """Short whatever the turn's own bound: someone waits on it, or its kind is bounded at 120 s or
+    less by default. Any other background kind is short only when its turn_timeout says so."""
+    short = {kind for kind in CONTEXT_KINDS if _valid_context(kind).is_short_turn}
+    assert short == {"interactive", "mcp", "agent_action", "heartbeat_check", "dag_summary"}
+
+
 def test_resolve_context_defaults():
     assert resolve_context(None, is_background=False, session_id="s").kind == "interactive"
     bg = resolve_context(None, is_background=True, session_id="s")

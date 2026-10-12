@@ -157,6 +157,120 @@ class TestBashTool:
         assert workspace.exists()
 
 
+class TestBashTimeouts:
+    """The default timeout follows the turn, and a timeout says what to retry with.
+
+    The calls go through ToolDispatcher.dispatch to the registered bash tool.
+    The constants are patched to 1s so a timeout is quick; the other one is
+    set far above the command, so only the one the turn picks can fire.
+    """
+
+    SLOW = f'{sys.executable} -c "import time; time.sleep(3)"'
+
+    @staticmethod
+    def _dispatcher(tmp_path):
+        from types import SimpleNamespace
+
+        from nous.api.builtin_tools import register_builtin_tools
+        from nous.api.tools import ToolDispatcher
+
+        d = ToolDispatcher()
+        register_builtin_tools(d, SimpleNamespace(workspace_dir=str(tmp_path / "ws")))
+        return d
+
+    @staticmethod
+    def _defaults(monkeypatch, *, foreground, background):
+        monkeypatch.setattr("nous.api.builtin_tools._DEFAULT_BASH_TIMEOUT", foreground, raising=False)
+        monkeypatch.setattr("nous.api.builtin_tools._BACKGROUND_BASH_TIMEOUT", background, raising=False)
+
+    @staticmethod
+    def _context(kind):
+        """The turn's context; "row-60" is a subtask row bounded at 60s (spawn_task(timeout=60), or
+        spawn_sync at its 90s default), "row-600" one bounded at 600s."""
+        import uuid
+        from types import SimpleNamespace
+
+        from nous.api.execution_context import ExecutionContext
+
+        if kind.startswith("row-"):
+            row = SimpleNamespace(id=uuid.uuid4(), timeout_seconds=int(kind.removeprefix("row-")))
+            return ExecutionContext.for_subtask(row, "s")
+        return ExecutionContext(kind=kind)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kind", ["interactive", "mcp", "agent_action", "heartbeat_check", "dag_summary", "row-60"])
+    async def test_foreground_default_stays_30(self, tmp_path, monkeypatch, kind):
+        """Someone waits on these turns (a companion tap too), or the whole turn
+        is bounded at 120s or less, so a 120s call would be cancelled with it: a
+        heartbeat check, a DAG summary, a subtask whose row says so."""
+        self._defaults(monkeypatch, foreground=1, background=60)
+        text, is_error = await self._dispatcher(tmp_path).dispatch(
+            "bash", {"command": self.SLOW}, context=self._context(kind)
+        )
+        assert is_error and text.startswith("Command timed out after 1s."), text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "kind", ["subtask", "row-600", "dag_node", "scheduled", "heartbeat_triage", "heartbeat_callback", "background"]
+    )
+    async def test_background_default_timeout_is_120(self, tmp_path, monkeypatch, kind):
+        self._defaults(monkeypatch, foreground=60, background=1)
+        text, is_error = await self._dispatcher(tmp_path).dispatch(
+            "bash", {"command": self.SLOW}, context=self._context(kind)
+        )
+        assert is_error and text.startswith("Command timed out after 1s."), text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("kind", "sent", "foreground", "background"), [("interactive", True, 1, 60), ("dag_node", False, 60, 1)]
+    )
+    async def test_model_sent_long_timeout_is_stripped(self, tmp_path, monkeypatch, kind, sent, foreground, background):
+        """Only dispatch sets _long_timeout: the value the model sent is dropped."""
+        self._defaults(monkeypatch, foreground=foreground, background=background)
+        text, is_error = await self._dispatcher(tmp_path).dispatch(
+            "bash", {"command": self.SLOW, "_long_timeout": sent}, context=self._context(kind)
+        )
+        assert is_error and text.startswith("Command timed out after 1s."), text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("sent", "effective"), [(1, 1), (0, 1)])
+    async def test_explicit_timeout_honoured_in_background(self, tmp_path, monkeypatch, sent, effective):
+        """Parity pin: green before this change too. An explicit timeout wins
+        over the background default, and is still clamped to 1..300."""
+        from nous.api.execution_context import ExecutionContext
+
+        self._defaults(monkeypatch, foreground=60, background=60)
+        text, is_error = await self._dispatcher(tmp_path).dispatch(
+            "bash", {"command": self.SLOW, "timeout": sent}, context=ExecutionContext(kind="dag_node")
+        )
+        assert is_error and text.startswith(f"Command timed out after {effective}s."), text
+
+    @pytest.mark.asyncio
+    async def test_timeout_error_names_retry_value(self, tmp_path, monkeypatch):
+        from nous.cognitive.ledger_store import _BASH_TIMEOUT
+
+        result = await bash_tool(command=self.SLOW, timeout=1, _workspace_dir=str(tmp_path))
+        text = _extract_text(result)
+        assert text.startswith("Command timed out after 1s. Retry with timeout=2 (max 300).\nCommand: "), text
+        assert _BASH_TIMEOUT.match(text)
+
+        # At the cap a longer timeout does not exist: detach and poll, or split.
+        monkeypatch.setattr("nous.api.builtin_tools._MAX_BASH_TIMEOUT", 1)
+        text = _extract_text(await bash_tool(command=self.SLOW, timeout=1, _workspace_dir=str(tmp_path)))
+        assert text.startswith("Command timed out after 1s. "), text
+        assert "Retry with" not in text and "nohup" in text and "split" in text, text
+        assert _BASH_TIMEOUT.match(text)
+
+    def test_schema_states_both_defaults(self):
+        """The schema gives no single default: it would tell a background turn 30."""
+        from nous.api import builtin_tools
+
+        assert (builtin_tools._DEFAULT_BASH_TIMEOUT, builtin_tools._BACKGROUND_BASH_TIMEOUT) == (30, 120)
+        prop = builtin_tools._BASH_SCHEMA["properties"]["timeout"]
+        assert "default" not in prop
+        assert "30" in prop["description"] and "120" in prop["description"], prop["description"]
+
+
 # ---------------------------------------------------------------------------
 # read_file_tool tests
 # ---------------------------------------------------------------------------
