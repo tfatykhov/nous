@@ -10,16 +10,17 @@ view renders it as text nodes only.
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, any_, exists, func, select
+from sqlalchemy import and_, any_, exists, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from nous.api.harness_dashboard import window_start
 from nous.brain import continuation
+from nous.heart.result_inbox import _percentile
 from nous.storage.models import Decision, Intention, IntentionArrival, IntentionProposal, ResultInbox
 
 LIMIT_MAX = 200
@@ -226,10 +227,145 @@ async def _tree(session: AsyncSession, agent_id: str, roots: list[Intention], *,
     return views
 
 
+# Contract 4.9.3 (+ C4): rows nobody will ever read, and rows still waiting for their turn. One statement so the
+# two numbers are disjoint. ``delivered_at IS NULL`` leaves out the rows a cancel stamped (SILENT_SESSION_ID) and the
+# rollback stamped (ROLLBACK_UNDELIVERABLE_ID): those are "closed, not lost" (result_inbox.py:454-473).
+_RESULTS_STUCK_SQL = text(
+    """
+    SELECT
+      count(*) FILTER (WHERE i.state IN ('closed', 'cancelled', 'expired')
+                         OR root.root_cancelled_at IS NOT NULL OR root.root_expired_at IS NOT NULL) AS lost,
+      count(*) FILTER (WHERE i.state IN ('result_ready', 'awaiting_owner', 'deciding')
+                         AND root.root_cancelled_at IS NULL AND root.root_expired_at IS NULL) AS waiting
+    FROM heart.result_inbox r
+    JOIN brain.intentions i ON i.agent_id = r.agent_id AND i.id = r.intention_id
+    JOIN brain.intentions root ON root.agent_id = i.agent_id AND root.id = i.root_id
+    WHERE r.agent_id = :a AND r.channel IS NULL AND r.session_id IS NULL AND r.delivered_at IS NULL
+      AND r.created_at < :cutoff
+    """
+)
+
+
+async def _results_stuck(session: AsyncSession, agent_id: str, *, settings: Any, now: datetime) -> tuple[int, int, int]:
+    grace = int(settings.continuation_lease_seconds) + int(settings.continuation_max_wait_seconds) + 60
+    row = (await session.execute(_RESULTS_STUCK_SQL, {"a": agent_id, "cutoff": now - timedelta(seconds=grace)})).one()
+    return int(row.lost), int(row.waiting), grace
+
+
+async def _latency(session: AsyncSession, agent_id: str, *, since: datetime) -> dict[str, Any]:
+    rows = (
+        await session.execute(
+            select(IntentionArrival.decided_at, _FIRST_RESULT_AT).where(
+                IntentionArrival.agent_id == agent_id,
+                IntentionArrival.decided_at >= since,
+                func.cardinality(IntentionArrival.inbox_ids) > 0,
+            )
+        )
+    ).all()
+    # ASCENDING: _percentile indexes the list it is given by rank
+    values = sorted((decided - first).total_seconds() for decided, first in rows if first is not None)
+    if not values:
+        return {"p50": None, "p90": None, "max": None, "n": 0}
+    return {
+        "p50": _percentile(values, 0.50),
+        "p90": _percentile(values, 0.90),
+        "max": round(values[-1], 1),
+        "n": len(values),
+    }
+
+
 async def get_metrics(
     session: AsyncSession, agent_id: str, *, settings: Any, since: datetime, now: datetime
 ) -> dict[str, Any]:
-    return {}  # Task 3c.3 and 3c.4
+    """The metrics of contract 4.9, each a read over existing tables; ``since`` is the start of the window."""
+    A = IntentionArrival
+    decided = (A.agent_id == agent_id, A.decided_at >= since)
+    by_outcome = (
+        await session.execute(
+            select(A.decision, A.outcome, A.gate_reason.is_not(None).label("gated"), func.count())
+            .where(*decided)
+            .group_by(A.decision, A.outcome, A.gate_reason.is_not(None))
+            .order_by(A.decision, A.outcome, A.gate_reason.is_not(None))
+        )
+    ).all()
+    lost, waiting, grace = await _results_stuck(session, agent_id, settings=settings, now=now)
+    unpushed = (
+        await session.execute(
+            select(func.count()).where(
+                ResultInbox.agent_id == agent_id,
+                ResultInbox.source_kind == continuation.SOURCE_INTENTION_REPORT,
+                ResultInbox.pushed_at.is_(None),
+                ResultInbox.push_after < now - timedelta(hours=1),
+                ResultInbox.delivered_at.is_(None),
+                ResultInbox.channel.like("telegram:%"),
+                ResultInbox.created_at >= since,  # C7
+            )
+        )
+    ).scalar_one()
+    proposals = dict(
+        (
+            await session.execute(
+                select(IntentionProposal.state, func.count())
+                .where(
+                    IntentionProposal.agent_id == agent_id,
+                    IntentionProposal.state != "staged",
+                    IntentionProposal.created_at >= since,
+                )
+                .group_by(IntentionProposal.state)
+            )
+        ).all()
+    )
+    reasons = {r: 0 for r in continuation.GATE_REASONS}
+    for reason, n in (
+        await session.execute(
+            select(A.gate_reason, func.count()).where(*decided, A.gate_reason.is_not(None)).group_by(A.gate_reason)
+        )
+    ).all():
+        reasons[reason] = int(n)
+    expired_roots = (
+        await session.execute(
+            select(func.count()).where(
+                Intention.agent_id == agent_id, Intention.id == Intention.root_id, Intention.root_expired_at >= since
+            )
+        )
+    ).scalar_one()
+    stalls = (
+        await session.execute(
+            select(
+                func.count().filter(A.progress.is_(False), A.gate_reason.is_(None)),
+                func.count().filter(A.progress_claimed.is_(True), A.progress.is_(False)),
+                func.count().filter(A.gate_reason == "budget_stall"),
+                func.count().filter(A.progress_claimed.is_(True)),
+                func.count().filter(A.progress_claimed.is_(True), A.progress.is_(True)),
+            ).where(*decided)
+        )
+    ).one()
+    ungradable = (
+        await session.execute(select(func.count()).where(*decided, A.decision_record_id.is_(None)))
+    ).scalar_one()
+    return {
+        "arrivals_by_decision_outcome": [
+            {"decision": d, "outcome": o, "gated": bool(g), "count": int(n)} for d, o, g, n in by_outcome
+        ],
+        "result_to_decision_latency_s": await _latency(session, agent_id, since=since),
+        "results_lost": lost,
+        "results_waiting": waiting,
+        "results_lost_grace_s": grace,
+        "owner_rows_unpushed": int(unpushed),
+        "proposals_by_state": {
+            "counts": {s: int(n) for s, n in proposals.items()},
+            "approved_total": sum(int(proposals.get(s, 0)) for s in ("approved", "executing", "executed", "failed")),
+        },
+        "escalations_by_cause": {"by_reason": reasons, "expired_roots": int(expired_roots)},
+        "stalls": {
+            "verified_no_progress": int(stalls[0]),
+            "claimed_not_credited": int(stalls[1]),
+            "stall_escalations": int(stalls[2]),
+            "progress_claimed": int(stalls[3]),
+            "progress_credited": int(stalls[4]),
+        },
+        "arrivals_ungradable": int(ungradable),
+    }
 
 
 async def get_intentions_data(
