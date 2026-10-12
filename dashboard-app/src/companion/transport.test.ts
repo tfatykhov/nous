@@ -229,7 +229,7 @@ describe('Transport — live only once the stream opens (#660)', () => {
     const { stream, transport } = connected();
     active = transport;
     await transport.connect();
-    expect(store.connection).not.toBe('live');
+    expect(store.connection).toBe('connecting');
 
     stream.state.handlers!.onOpen();
     expect(store.connection).toBe('live');
