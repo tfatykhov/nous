@@ -401,6 +401,161 @@ def test_printf_without_v_is_allowed(tmp_path):
     assert lineage_bash_allowed(ctx, "printf '%s\\n' hello", workspace_dir=workspace)
 
 
+# -- post-merge review P1-1: read arguments stay under the workspace -------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # the review's probes
+        "cat /proc/self/environ",
+        "grep -r TOKEN /proc/1/environ",
+        "cat /etc/passwd",
+        "cat ../x",
+        "cat .ssh/id_rsa",
+        "cd claude-jobs; cat .claude-home/oauth-token",
+        # hidden components, absolute or relative
+        "cat {W}/.ssh/id_rsa",
+        "cat claude-jobs/.claude-home/oauth-token",
+        "head -n 5 bitsgap/.secrets/key",
+        "tail -c 10 .env",
+        "wc -l .nous-undo/x",
+        "ls .ssh",
+        "ls /",
+        "ls ..",
+        "cat '~/x'",
+        "ls '~'",
+        "cat x -- /etc/passwd",
+        "cat -- /etc/passwd",
+        "head -5 ../x",
+        "wc --files0-from=list",
+        "wc --files0-from list",
+        # cd
+        "cd",
+        "cd -",
+        "cd '~'",
+        "cd /etc",
+        "cd ..",
+        "cd .ssh",
+        "cd claude-jobs/.claude-home",
+        "cd -P /etc",
+        "cd a b",
+        "cd /etc && cat passwd",
+        # grep: files, pattern files, recursion
+        "grep x /proc/1/environ",
+        "grep -e x /etc/passwd",
+        "grep -ie x /etc/passwd",
+        "grep -f /etc/passwd x",
+        "grep -f/etc/passwd x",
+        "grep -if /etc/passwd x",
+        "grep --file=/proc/self/environ x",
+        "grep --file /proc/self/environ x",
+        "grep --exclude-from=/etc/x y z",
+        "grep -r TOKEN .",
+        "grep -R x claude-jobs",
+        "grep -rn x .",
+        "grep -nr x .",
+        "grep --recursive x .",
+        "grep --dereference-recursive x .",
+        "grep --rec x .",
+        "grep -d recurse x .",
+        "grep -drecurse x .",
+        "grep --directories=recurse x .",
+        "grep --directories recurse x .",
+        "grep -e x -- .ssh/id_rsa",
+        # jq: data files, program files, imports, env
+        "jq . /etc/passwd",
+        "jq '.a' .ssh/k.json",
+        "jq --rawfile x /proc/self/environ -n '$x'",
+        "jq -n --slurpfile x .ssh/k.json '$x'",
+        "jq -n '$x' --rawfile x /etc/passwd",
+        "jq -f /etc/x",
+        "jq -f intentions/{RID}/p.jq",
+        "jq --from-file intentions/{RID}/p.jq",
+        "jq -nf intentions/{RID}/p.jq",
+        "jq --args -n '$ARGS' x",
+        "jq --jsonargs -n '$ARGS' 1",
+        "jq -L /etc -n 1",
+        "jq --run-tests x",
+        'jq -n \'import "c" as $c {{search: "/root"}}; $c\'',
+        "jq -n 'include \"c\"; 1'",
+        "jq -n '$ENV'",
+        "jq -n 'env.GITHUB_TOKEN'",
+        # an input redirection is a read too, whatever the command
+        "cat < /proc/self/environ",
+        "grep x < .ssh/id_rsa",
+        "jq . 0</etc/passwd",
+        "echo < /etc/shadow",
+        "cd claude-jobs; cat < .claude-home/oauth-token",
+    ],
+)
+def test_the_lineage_shell_refuses_a_read_outside_the_workspace_or_into_a_hidden_dir(command, tmp_path):
+    command = command.format(W=tmp_path, RID=RID)
+    assert _shell(command, tmp_path) == "external"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "jq '.items[0]' intentions/{RID}/r.json",
+        "jq -r '.a' {W}/intentions/{RID}/r.json",
+        "jq '.a' intentions/{RID}/r.json --indent 2",
+        "jq -n --arg x /etc/passwd '$x'",
+        "jq -n --argjson x 1 '$x'",
+        "jq --rawfile t intentions/{RID}/t.txt -n '$t'",
+        "jq -nr '1'",
+        "grep -n error intentions/{RID}/log.txt",
+        "grep -e .ssh -n intentions/{RID}/log.txt",
+        "grep -A 3 -i error intentions/{RID}/log.txt",
+        "grep -c -e x -e y claude-jobs/a.log claude-jobs/b.log",
+        "grep -f intentions/{RID}/patterns.txt claude-jobs/a.log",
+        "grep --color=never -m2 x claude-jobs/a.log",
+        "gh pr view 1 | grep -n state",
+        "cat claude-jobs/prompts/p.md",
+        "cat ./claude-jobs/prompts/p.md -",
+        "head -n 5 intentions/{RID}/log.txt",
+        "tail -20 claude-jobs/x.log",
+        "tail --lines=3 claude-jobs/x.log",
+        "wc -l claude-jobs/prompts/p.md",
+        "ls",
+        "ls -la",
+        "ls -la claude-jobs/prompts",
+        "cd claude-jobs && ls prompts",
+        "cd {W}/intentions/{RID} && cat r.json",
+        "cd intentions; cd {RID}; jq . r.json",
+        "echo ../.ssh /etc/passwd",
+        "pwd; sleep 1; true",
+        "jq .a < intentions/{RID}/r.json",
+        "cat < /dev/null",
+        "grep x <<< y",
+    ],
+)
+def test_the_lineage_shell_still_allows_reads_under_the_workspace(command, tmp_path):
+    command = command.format(W=tmp_path, RID=RID)
+    assert _shell(command, tmp_path) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs symlinks")
+def test_a_relative_read_is_checked_from_every_directory_an_earlier_cd_could_reach(tmp_path):
+    """`x` is harmless from the workspace, but after `cd sub` it is a link to a key."""
+    (tmp_path / ".ssh").mkdir()
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "x").symlink_to(tmp_path / ".ssh" / "id_rsa")
+    assert _shell("cat x", tmp_path) is None
+    assert _shell("cd sub; cat x", tmp_path) == "external"
+    assert _shell("cd sub || true; head x", tmp_path) == "external"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs symlinks")
+def test_a_read_or_cd_through_a_symlink_into_a_hidden_dir_is_refused(tmp_path):
+    (tmp_path / ".ssh").mkdir()
+    (tmp_path / "ok").mkdir()
+    (tmp_path / "ok" / "link").symlink_to(tmp_path / ".ssh")
+    assert _shell("cat ok/link/id_rsa", tmp_path) == "external"
+    assert _shell("cd ok/link", tmp_path) == "external"
+    assert _shell("ls ok", tmp_path) is None
+
+
 # -- post-merge review P1-1: a lineage's bash runs with an allowlisted environment ---
 
 

@@ -99,6 +99,83 @@ INTERNAL_ONLY_LOGGED_TOOLS: frozenset[str] = frozenset({"web_fetch", "web_search
 LINEAGE_READ_COMMANDS: frozenset[str] = frozenset(
     {"cat", "ls", "head", "tail", "wc", "grep", "jq", "echo", "pwd", "cd", "sleep", "true"}
 )
+
+
+@dataclass(frozen=True)
+class _ArgRoles:
+    """How a read command's options take values. ``short`` / ``long`` map an option to ``flag``, ``value`` (one
+    word that names no file), ``file`` (one word that does), ``pair`` (two words, neither a file) or ``pair_file``
+    (two words, the second a file). ``closed``: an option not in the maps is refused, since GNU accepts any
+    abbreviation of a long option and an unknown one may be ``--recursive`` or ``--file``; otherwise it is a
+    flag. ``refused_long`` is refused with every abbreviation of it."""
+
+    short: Mapping[str, str]
+    long: Mapping[str, str]
+    closed: bool = False
+    refused_long: frozenset[str] = frozenset()
+
+
+_HEAD_ROLES = _ArgRoles({"n": "value", "c": "value"}, {"--lines": "value", "--bytes": "value"})
+_GREP_FLAG_LONG = (
+    "--extended-regexp --fixed-strings --basic-regexp --perl-regexp --ignore-case --no-ignore-case --word-regexp "
+    "--line-regexp --null-data --no-messages --invert-match --byte-offset --line-number --line-buffered "
+    "--with-filename --no-filename --only-matching --quiet --silent --text --files-without-match "
+    "--files-with-matches --count --initial-tab --null --color --colour --no-group-separator --help --version"
+)
+_GREP_VALUE_LONG = (
+    "--regexp --max-count --after-context --before-context --context --directories --devices --binary-files "
+    "--label --include --exclude --exclude-dir --group-separator"
+)
+_JQ_FLAG_LONG = (
+    "--null-input --raw-input --slurp --compact-output --tab --ascii-output --unbuffered --sort-keys --color-output "
+    "--monochrome-output --raw-output --raw-output0 --join-output --exit-status --seq --stream --stream-errors "
+    "--help --version --build-configuration"
+)
+# The read commands whose arguments can name a file: each such argument must resolve under the workspace with no
+# hidden component (_readable). grep's recursion (-r, -R, -d recurse) is refused: it descends into hidden
+# directories. jq's -f/--from-file and -L are refused (a program file, or a module search path, can import any
+# .json file), and so are --args/--jsonargs. cd takes exactly one directory.
+_READ_ARG_ROLES: Mapping[str, _ArgRoles] = MappingProxyType(
+    {
+        "cat": _ArgRoles({}, {}),
+        "ls": _ArgRoles({}, {}),
+        "wc": _ArgRoles({}, {}, refused_long=frozenset({"--files0-from"})),
+        "head": _HEAD_ROLES,
+        "tail": _ArgRoles(
+            {**_HEAD_ROLES.short, "s": "value"},
+            {**_HEAD_ROLES.long, **dict.fromkeys(("--pid", "--sleep-interval", "--max-unchanged-stats"), "value")},
+        ),
+        "grep": _ArgRoles(
+            {
+                **dict.fromkeys("EFGPiywxzsvVbHhnTZaIUcLloqu0123456789", "flag"),
+                **dict.fromkeys("eABCmdD", "value"),
+                "f": "file",
+            },
+            {
+                **dict.fromkeys(_GREP_FLAG_LONG.split(), "flag"),
+                **dict.fromkeys(_GREP_VALUE_LONG.split(), "value"),
+                "--file": "file",
+                "--exclude-from": "file",
+            },
+            closed=True,
+        ),
+        "jq": _ArgRoles(
+            dict.fromkeys("nrscejaSCMhV", "flag"),
+            {
+                **dict.fromkeys(_JQ_FLAG_LONG.split(), "flag"),
+                "--indent": "value",
+                "--arg": "pair",
+                "--argjson": "pair",
+                "--rawfile": "pair_file",
+                "--slurpfile": "pair_file",
+            },
+            closed=True,
+        ),
+    }
+)
+# A jq filter that reads the environment (GITHUB_TOKEN is left in it) or imports a module or data file.
+_JQ_REFUSED = re.compile(r"\$ENV|\benv\b|\bimport\b|\binclude\b")
+_MAX_LINEAGE_CWDS = 16  # directories a chain of cd could have left the shell in; more is refused
 # Read-only gh subcommands; `gh api` is checked on its own (_gh_api_get).
 LINEAGE_GH_READS: Mapping[str, frozenset[str]] = MappingProxyType(
     {
@@ -169,6 +246,102 @@ def _under(path: str, dirs: list[Path]) -> bool:
         return any(target.is_relative_to(d.resolve()) for d in dirs)
     except (OSError, ValueError):
         return False
+
+
+def _readable(path: str, cwds: list[Path], workspace: Path) -> list[Path] | None:
+    """Where ``path`` resolves from each of ``cwds`` (symlinks and ``..`` followed), or None when one of them is
+    outside ``workspace`` or has a hidden component below it (``.ssh``, ``.env``, ``claude-jobs/.claude-home``,
+    ``.nous-undo``). ``cwds`` and ``workspace`` are resolved. ``~`` is refused."""
+    if path.startswith("~") or "\x00" in path:
+        return None
+    try:
+        targets = [Path(path).resolve()] if path.startswith("/") else [(d / path).resolve() for d in cwds]
+        if all(
+            t.is_relative_to(workspace) and not any(p.startswith(".") for p in t.relative_to(workspace).parts)
+            for t in targets
+        ):
+            return targets
+    except (OSError, ValueError, RuntimeError):  # an unresolvable name, a symlink loop
+        pass
+    return None
+
+
+def _split_read_args(args: list[str], roles: _ArgRoles) -> tuple[list[str], list[str], list[tuple[str, str]]] | None:
+    """``(operands, file values, (option, value) pairs)`` of a read command's arguments, or None when an option
+    is refused, unknown to a closed ``roles``, or missing its value."""
+    operands: list[str] = []
+    files: list[str] = []
+    values: list[tuple[str, str]] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a == "--":
+            operands += args[i:]
+            break
+        if a == "-" or not a.startswith("-"):
+            operands.append(a)
+            continue
+        if a.startswith("--"):
+            name, eq, value = a.partition("=")
+            role = roles.long.get(name, None if roles.closed else "flag")
+            if role is None or any(r.startswith(name) for r in roles.refused_long):
+                return None
+            if role.startswith("pair"):
+                if eq or i + 1 >= len(args):
+                    return None
+                option, value = name, args[i + 1]
+                i += 2
+            elif role == "flag":
+                continue
+            elif eq:
+                option = name
+            elif i < len(args):
+                option, value = name, args[i]
+                i += 1
+            else:
+                return None
+        else:
+            for j, letter in enumerate(a[1:], 2):
+                role = roles.short.get(letter, None if roles.closed else "flag")
+                if role is None:
+                    return None
+                if role != "flag":
+                    break
+            else:
+                continue
+            option, value = f"-{letter}", a[j:]
+            if not value:
+                if i >= len(args):
+                    return None
+                value = args[i]
+                i += 1
+        if role.endswith("file"):
+            files.append(value)
+        else:
+            values.append((option, value))
+    return operands, files, values
+
+
+def _read_paths(prog: str, args: list[str]) -> list[str] | None:
+    """The arguments of a read command that name a file (for ``cd``, its directory), or None when the call is
+    refused whatever its paths name."""
+    if prog == "cd":  # bare `cd` goes to $HOME, `cd -` to $OLDPWD; no option (-P) either
+        return args if len(args) == 1 and not args[0].startswith("-") else None
+    split = _split_read_args(args, _READ_ARG_ROLES[prog])
+    if split is None:
+        return None
+    operands, files, values = split
+    if prog == "grep":
+        if any(opt in ("-d", "--directories") and value not in ("read", "skip") for opt, value in values):
+            return None
+        if not files and not any(opt in ("-e", "--regexp") for opt, _ in values):
+            operands = operands[1:]  # the pattern
+    elif prog == "jq":
+        if operands and _JQ_REFUSED.search(operands[0]):
+            return None
+        operands = operands[1:]  # the filter
+    return files + [o for o in operands if o != "-"]
 
 
 def _gh_allowed(args: list[str]) -> bool:
@@ -267,25 +440,43 @@ def lineage_bash_allowed(ctx: ExecutionContext, command: str, *, workspace_dir: 
     root's own ``<workspace_dir>/intentions/<root_id>/`` or ``<workspace_dir>/claude-jobs/prompts/``.
     Anything the reader cannot see exactly (``$``, a backtick, a glob, an unquoted heredoc that expands, an
     unbalanced quote) is refused, so a chain or substitution that reaches a refused command is refused.
+
+    Reads are confined too: a file a read command or an input redirection names, and a ``cd`` target, must
+    resolve under ``<workspace_dir>`` with no hidden component (``_readable``), from the workspace (the shell's
+    cwd) and from every directory an earlier ``cd`` in the command could have reached. ``CDPATH`` is not in a
+    lineage's environment (``builtin_tools._LINEAGE_BASH_ENV``), so ``cd`` goes where it says.
     """
     commands = simple_commands(command)
-    if commands is None or not any(words for words, _, _ in commands):
+    if commands is None or not any(words for words, _, _, _ in commands):
         return False
     workspace = Path(workspace_dir)
     jobs = workspace / "claude-jobs"
     writable = [jobs / "prompts"]
     if ctx.root_intention_id is not None:
         writable.append(workspace / "intentions" / str(ctx.root_intention_id))
-    for words, targets, op in commands:
+    root = workspace.resolve()
+    cwds = [root]
+    for words, targets, sources, op in commands:
         if op not in _LINEAGE_JOINS:
             return False
         if not words:
-            if targets:
+            if targets or sources:
                 return False
             continue
         if not all(t in _LINEAGE_SINKS or _under(t, writable) for t in targets):
             return False
+        if not all(s in _LINEAGE_SINKS or _readable(s, cwds, root) is not None for s in sources):
+            return False
         prog, args = words[0], words[1:]
+        if prog in _READ_ARG_ROLES or prog == "cd":
+            paths = _read_paths(prog, args)
+            reached = None if paths is None else [_readable(p, cwds, root) for p in paths]
+            if reached is None or None in reached:
+                return False
+            if prog == "cd":
+                cwds = list(dict.fromkeys([*cwds, *reached[0]]))
+                if len(cwds) > _MAX_LINEAGE_CWDS:
+                    return False
         if prog == str(jobs / "runner.sh"):
             if not _runner_allowed(args, workspace=workspace, readable=writable):
                 return False
