@@ -358,6 +358,56 @@ class TestDAGCreateRequest:
         waves = req.compute_waves()
         assert all(w == 0 for w in waves.values())
 
+    def test_fix_nodes_excluded_from_parallel_and_wave_limits(self):
+        """The orchestrator never dispatches a fix node by wave, so fix nodes
+        count toward neither limit; compute_waves still places them."""
+
+        def fix(name: str, parent: str) -> DAGNodeSpec:
+            return DAGNodeSpec(name=name, type=DAGNodeType.fix, parent_node=parent, fix_actions=["retry_as_is"])
+
+        # Prod's premarket shape: 4 research nodes, 3 of them with a fix node.
+        research = [f"r{i}" for i in range(4)]
+        req = DAGCreateRequest(
+            name="premarket",
+            nodes=[_node(r) for r in research] + [fix(f"fix-{r}", r) for r in research[:3]],
+            edges=[DAGEdgeSpec(from_node=r, to_node=f"fix-{r}", edge_type="on_failure") for r in research[:3]],
+        )
+        assert req.compute_waves() == {**dict.fromkeys(research, 0), "fix-r0": 0, "fix-r1": 0, "fix-r2": 0}
+
+        # A full 4-wave chain with a fix node on its wave-3 parent, and one
+        # with a dependency edge INTO that fix node, which puts it at wave 4.
+        chain = [_node(f"n{i}") for i in range(4)]
+        chain_edges = [DAGEdgeSpec(from_node=f"n{i}", to_node=f"n{i + 1}") for i in range(3)]
+        on_failure = DAGEdgeSpec(from_node="n3", to_node="fix-n3", edge_type="on_failure")
+        DAGCreateRequest(name="deep-fix", nodes=[*chain, fix("fix-n3", "n3")], edges=[*chain_edges, on_failure])
+        into_fix = DAGEdgeSpec(from_node="n3", to_node="fix-n3")
+        req = DAGCreateRequest(
+            name="deep-fix-dep", nodes=[*chain, fix("fix-n3", "n3")], edges=[*chain_edges, on_failure, into_fix]
+        )
+        assert req.compute_waves()["fix-n3"] == 4
+
+        # A non-fix child of a fix node is still counted.
+        with pytest.raises(ValueError, match="exceeds maximum.*got wave 5"):
+            DAGCreateRequest(
+                name="fix-child",
+                nodes=[*chain, fix("fix-n3", "n3"), _node("after-fix")],
+                edges=[*chain_edges, on_failure, into_fix, DAGEdgeSpec(from_node="fix-n3", to_node="after-fix")],
+            )
+
+    def test_overlimit_reports_waves_and_parallel_together(self):
+        """Both limit violations come back in one error, so a caller fixes
+        them in one attempt instead of discovering them one at a time."""
+        with pytest.raises(ValidationError) as excinfo:
+            DAGCreateRequest(
+                name="wide-and-deep",
+                nodes=[_node(f"w{i}") for i in range(5)] + [_node(f"c{i}") for i in range(1, 5)],
+                edges=[DAGEdgeSpec(from_node="w0", to_node="c1")]
+                + [DAGEdgeSpec(from_node=f"c{i}", to_node=f"c{i + 1}") for i in range(1, 4)],
+            )
+        message = str(excinfo.value)
+        assert "exceeds maximum 4 waves (0-3), got wave 4" in message
+        assert "Wave 0 has 5 parallel nodes, max is 4" in message
+
 
 # ---------------------------------------------------------------------------
 # F046: DAGNodeSpec timeout field validation (Pydantic-level)

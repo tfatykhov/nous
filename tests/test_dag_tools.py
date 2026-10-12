@@ -244,6 +244,75 @@ class TestDagCreateTool:
 
         dag_store.create = original_create  # Restore
 
+    @pytest.mark.asyncio
+    async def test_dag_create_reports_schema_and_store_violations_together(self, tools, dag_store):
+        """Prod's premarket DAG (4 research nodes, 3 with a fix node) plus a
+        fifth research node and an explicit stall above its node's timeout:
+        both problems come back in one numbered error, and nothing is created."""
+        research = [f"research-{i}" for i in range(5)]
+        nodes = [{"name": r, "type": "subtask", "instructions": "Research"} for r in research]
+        nodes[0].update(timeout_seconds=60, stall_timeout_seconds=120)
+        nodes += [
+            {
+                "name": f"fix-{r}",
+                "type": "fix",
+                "instructions": "Recover",
+                "parent_node": r,
+                "fix_actions": ["retry_as_is"],
+            }
+            for r in research[:3]
+        ]
+        edges = [{"from_node": r, "to_node": f"fix-{r}", "edge_type": "on_failure"} for r in research[:3]]
+
+        result = await tools._handlers["dag_create"](name="premarket", nodes=nodes, edges=edges)
+
+        text = result["content"][0]["text"]
+        assert text.startswith("Error creating DAG: 2 problems:\n"), text
+        assert "\n1. Wave 0 has 5 parallel nodes, max is 4" in text
+        assert "\n2. Node 'research-0': stall_timeout_seconds=120" in text
+        assert "never fire" in text
+        assert "Value error" not in text
+        assert await dag_store.count_active() == 0
+
+    @pytest.mark.asyncio
+    async def test_dag_create_notes_disabled_inherited_stall(self, db):
+        """The premarket DAG with stall detection on and a 60s node timeout
+        under a 300s inherited stall: created, with a Note naming the node
+        whose inherited stall was disabled."""
+        settings = Settings(_env_file=None, dag_stall_detection_enabled=True, dag_node_default_stall_timeout=300)
+        store = DAGStore(db, agent_id=f"test-dag-tools-{uuid.uuid4().hex[:8]}", settings=settings)
+        orchestrator = DAGOrchestrator(
+            store=store, subtask_mgr=AsyncMock(), dynamic_loader=AsyncMock(), settings=settings
+        )
+        orchestrator.clock_wired = True
+        dispatcher = ToolDispatcher()
+        register_dag_tools(dispatcher, store, orchestrator)
+        research = [f"research-{i}" for i in range(4)]
+        nodes = [{"name": r, "type": "subtask", "instructions": "Research", "timeout_seconds": 60} for r in research]
+        nodes += [
+            {
+                "name": f"fix-{r}",
+                "type": "fix",
+                "instructions": "Recover",
+                "parent_node": r,
+                "fix_actions": ["retry_as_is"],
+            }
+            for r in research[:3]
+        ]
+        edges = [{"from_node": r, "to_node": f"fix-{r}", "edge_type": "on_failure"} for r in research[:3]]
+
+        result = await dispatcher._handlers["dag_create"](name="premarket", nodes=nodes, edges=edges)
+
+        text = result["content"][0]["text"]
+        assert "Created DAG 'premarket'" in text, text
+        notes = [line for line in text.splitlines() if line.startswith("Note: ")]
+        assert len(notes) == 4
+        assert "node 'research-0': the inherited stall_timeout=300 exceeds its wall-clock timeout 60" in notes[0]
+        dag = (await store.get_active_dags())[0]
+        assert {n.name: n.stall_timeout_seconds for n in dag.nodes if not n.name.startswith("fix-")} == dict.fromkeys(
+            research, 0
+        )
+
 
 # ------------------------------------------------------------------
 # dag_manage

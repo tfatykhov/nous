@@ -461,19 +461,34 @@ class DAGCreateRequest(BaseModel):
         # --- cycle detection + wave computation ---
         waves = self.compute_waves()
 
+        # Fix nodes are left out of both limits: the orchestrator never
+        # dispatches one by wave (_find_ready_nodes skips them), it runs one
+        # only when its parent fails. Both problems are reported together,
+        # one per line, so a caller can fix them in one attempt.
+        counted = [w for name, w in waves.items() if nodes_by_name[name].type != DAGNodeType.fix]
+        limit_problems: list[str] = []
+
         # --- max waves ---
-        if waves:
-            max_wave = max(waves.values())
+        if counted:
+            max_wave = max(counted)
             if max_wave >= MAX_WAVES:
-                raise ValueError(f"DAG exceeds maximum {MAX_WAVES} waves (0-{MAX_WAVES - 1}), got wave {max_wave}")
+                limit_problems.append(
+                    f"DAG exceeds maximum {MAX_WAVES} waves (0-{MAX_WAVES - 1}), got wave {max_wave}; "
+                    "merge sequential steps into one node or split the work into separate DAGs"
+                )
 
         # --- max parallel per wave ---
         wave_counts: dict[int, int] = defaultdict(int)
-        for w in waves.values():
+        for w in counted:
             wave_counts[w] += 1
-        for w, count in wave_counts.items():
+        for w, count in sorted(wave_counts.items()):
             if count > MAX_PARALLEL_PER_WAVE:
-                raise ValueError(f"Wave {w} has {count} parallel nodes, max is {MAX_PARALLEL_PER_WAVE}")
+                limit_problems.append(
+                    f"Wave {w} has {count} parallel nodes, max is {MAX_PARALLEL_PER_WAVE} (fix nodes are not "
+                    "counted); merge nodes or move some behind a dependency edge"
+                )
+        if limit_problems:
+            raise ValueError("\n".join(limit_problems))
 
         # --- Harness Phase 2.8: proceed-default requires all downstream undoable ---
         self._validate_proceed_defaults(nodes_by_name)
