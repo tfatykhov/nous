@@ -1126,10 +1126,10 @@ class DynamicCheckLoader:
                     ).first() is not None
                     if dag_owned:
                         return False, f"check {name!r} belongs to a DAG node; restore refused, nothing changed"
+                if before is None and (current is None or not current["enabled"]):
+                    return True, f"check {check_id} is already absent or disabled"
                 await on_current(dict(current) if current is not None else None)
                 if before is None:
-                    if current is None or not current["enabled"]:
-                        return True, f"check {check_id} is already absent or disabled"
                     name = current["name"]
                 else:
                     if before.get("agent_id") != self._agent_id or before.get("id") != check_id:

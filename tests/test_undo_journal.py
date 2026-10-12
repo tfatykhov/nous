@@ -387,6 +387,15 @@ class TestScheduleKind:
         row = await _row(db, Schedule, sched.id)
         assert row is not None and row["active"] is False
 
+    async def test_noop_restore_of_create_records_no_pre_restore(self, db, schedules, journal):
+        # Review of #712: a restore that changes nothing still recorded a pre_restore entry.
+        sched = await schedules.create(task="t", schedule_type="recurring", interval_seconds=3600)
+        await schedules.deactivate(sched.id)
+        entry = await _only(journal, "schedule", "create")
+        result = await undo_journal.restore(entry["id"], RestoreDeps(schedules=schedules), journal)
+        assert result.success and result.pre_restore_id is None
+        assert not [e for e in await journal.list(500) if e["source"] == "pre_restore"]
+
     async def test_container_backed_deactivate_is_not_restorable(self, db, schedules, journal):
         spec = IntentionSpec(intent="Check daily", origin_kind="interactive", container=True)
         sched = await schedules.create(task="Check", schedule_type="recurring", interval_seconds=1800, intention=spec)
@@ -478,6 +487,15 @@ class TestCheckKind:
         row = await _row(db, DynamicCheckModel, check_id)
         assert row is not None and row["enabled"] is False
         assert loader._registry.get_check(row["name"]) is None
+
+    async def test_noop_restore_of_create_records_no_pre_restore(self, db, loader, journal):
+        # Review of #712: a restore that changes nothing still recorded a pre_restore entry.
+        check_id = await _make_check(loader)
+        await loader.manage_check("disable", (await _row(db, DynamicCheckModel, check_id))["name"])
+        entry = await _only(journal, "heartbeat_check", "create")
+        result = await undo_journal.restore(entry["id"], RestoreDeps(check_loader=loader), journal)
+        assert result.success and result.pre_restore_id is None
+        assert not [e for e in await journal.list(500) if e["source"] == "pre_restore"]
 
     async def test_name_clash_refuses(self, db, loader, journal):
         check_id = await _make_check(loader)

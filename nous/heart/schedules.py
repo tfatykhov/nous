@@ -251,10 +251,10 @@ class ScheduleManager:
                     .with_for_update()
                 )
             ).mappings().first()
+            if before is None and (current is None or not current["active"]):
+                return True, f"schedule {schedule_id} is already absent or inactive"
             await on_current(dict(current) if current is not None else None)
             if before is None:
-                if current is None or not current["active"]:
-                    return True, f"schedule {schedule_id} is already absent or inactive"
                 await session.execute(update(table).where(table.c.id == schedule_id).values(active=False))
                 await session.commit()
                 deactivated = True
