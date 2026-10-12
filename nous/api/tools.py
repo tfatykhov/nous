@@ -3017,7 +3017,7 @@ async def _persist_and_emit_inline_outcome(
         )
 
 
-async def _close_cancelled_inline_subtask(heart: Heart, subtask_id: UUID) -> bool:
+async def _close_cancelled_inline_subtask(heart: Heart, subtask_id: UUID, state: Any = None) -> bool:
     """The call that was running this subtask inline was cancelled: cancel the row.
 
     The row was claimed for that call when it was created, so no worker will
@@ -3025,14 +3025,31 @@ async def _close_cancelled_inline_subtask(heart: Heart, subtask_id: UUID) -> boo
     caller cannot interrupt it, and a failed write is logged rather than
     raised, so the cancellation itself always gets through. Returns whether
     this write closed the row (not when the row already had its outcome).
+
+    ``state`` (a HardenedRunState) carries the usage the run reached before it
+    was cancelled; it is stored on the cancelled row (#586).
     """
     import asyncio
 
     try:
-        return await asyncio.shield(heart.subtasks.cancel(subtask_id))
+        closed = await asyncio.shield(heart.subtasks.cancel(subtask_id))
     except Exception:
         logger.warning("Could not mark inline subtask %s cancelled", subtask_id.hex[:8], exc_info=True)
         return False
+    if state is not None:
+        try:
+            await asyncio.shield(
+                heart.subtasks.record_cancelled_usage(
+                    subtask_id,
+                    attempts=state.attempts,
+                    tokens_in=state.tokens_in,
+                    tokens_out=state.tokens_out,
+                    tool_calls_made=state.tool_calls_made,
+                )
+            )
+        except Exception:
+            logger.warning("Could not store the usage of cancelled subtask %s", subtask_id.hex[:8], exc_info=True)
+    return closed
 
 
 async def _close_inline_intention(heart: Any, subtask_id: UUID, reason: str = intentions.CLOSE_LEGACY) -> None:
@@ -3331,7 +3348,8 @@ def create_subtask_tools(
                         # tool timeout): close the row it claimed, or nothing will.
                         # execute_hardened leaves the outcome event to this caller
                         # too; emitted only when this close set the row's outcome.
-                        if await _close_cancelled_inline_subtask(heart, subtask.id) and _outcome_emitter is not None:
+                        closed = await _close_cancelled_inline_subtask(heart, subtask.id, state)
+                        if closed and _outcome_emitter is not None:
                             await _outcome_emitter(
                                 subtask,
                                 ValidationResult.failed("cancelled", "Inline call cancelled"),

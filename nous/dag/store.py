@@ -879,6 +879,41 @@ class DAGStore:
             )
             return list(result.scalars().all())
 
+    async def get_terminal_dags_with_unclaimed_tokens(
+        self, since: datetime, *, delivered_only: bool, limit: int = 5
+    ) -> list[ExecutionDAG]:
+        """#586: terminal DAGs with a finished subtask node whose tokens are unclaimed.
+
+        A node's claim waits until its subtask's counters are final, and a run
+        cancelled with its DAG reports its usage only when it unwinds — often
+        after the DAG was delivered, which takes it out of every other sweep.
+        ``since`` bounds the window on the DAG's ``completed_at``: no run
+        reports later than its own timeout plus grace. ``delivered_only``
+        leaves undelivered DAGs to the delivery sweep, which reconciles them
+        itself. Newest first.
+        """
+        unclaimed = (
+            select(DAGNode.id)
+            .where(DAGNode.dag_id == ExecutionDAG.id)
+            .where(DAGNode.subtask_id.is_not(None))
+            .where(DAGNode.tokens_counted.is_(False))
+            .where(DAGNode.status.in_(sorted(TERMINAL_NODE_STATUSES)))
+        )
+        query = (
+            select(ExecutionDAG)
+            .where(ExecutionDAG.agent_id == self._agent_id)
+            .where(ExecutionDAG.status.in_(_TERMINAL_DAG_STATUSES))
+            .where(ExecutionDAG.completed_at >= since)
+            .where(unclaimed.exists())
+        )
+        if delivered_only:
+            query = query.where(ExecutionDAG.delivered_at.is_not(None))
+        async with self._db.session() as session:
+            result = await session.execute(
+                query.options(selectinload(ExecutionDAG.nodes)).order_by(ExecutionDAG.completed_at.desc()).limit(limit)
+            )
+            return list(result.scalars().all())
+
     async def get_terminal_check_nodes_with_enabled_heartbeat(
         self, limit: int = 20
     ) -> list[DAGNode]:

@@ -216,6 +216,13 @@ class SubtaskManager:
                     "Skipped completing subtask %s — already terminal (e.g. cancelled)",
                     subtask_id.hex[:8],
                 )
+                await self.record_cancelled_usage(
+                    subtask_id,
+                    attempts=attempts,
+                    tokens_in=tokens_in,
+                    tokens_out=tokens_out,
+                    tool_calls_made=tool_calls_made,
+                )
                 return
             # F061: include outcome in log so operators can grep for the new
             # 5-state enum (completed / incomplete_blocked / ...). Falls back
@@ -280,6 +287,13 @@ class SubtaskManager:
                     "Skipped failing subtask %s — already terminal (e.g. cancelled)",
                     subtask_id.hex[:8],
                 )
+                await self.record_cancelled_usage(
+                    subtask_id,
+                    attempts=attempts,
+                    tokens_in=tokens_in,
+                    tokens_out=tokens_out,
+                    tool_calls_made=tool_calls_made,
+                )
                 return
             if final_outcome is not None:
                 logger.warning(
@@ -298,7 +312,8 @@ class SubtaskManager:
         with no way to stop it. Cancellation now flips a running row to
         'cancelled' immediately, making it terminal for DAG accounting; the
         in-flight worker is bounded by the subtask timeout and its eventual
-        complete()/fail() is a no-op thanks to the terminal-state guard there.
+        complete()/fail() is a no-op thanks to the terminal-state guard there,
+        except for its usage (record_cancelled_usage, #586).
         (The worker is not asyncio-cancelled mid-call — true preemption is a
         deeper enhancement; this bounds the leak rather than eliminating it.)
 
@@ -316,6 +331,46 @@ class SubtaskManager:
                     final_outcome="cancelled",
                     completed_at=datetime.now(UTC),
                 )
+            )
+            await session.commit()
+            return result.rowcount > 0
+
+    async def record_cancelled_usage(
+        self,
+        subtask_id: UUID,
+        *,
+        attempts: int | None = None,
+        tokens_in: int | None = None,
+        tokens_out: int | None = None,
+        tool_calls_made: int | None = None,
+    ) -> bool:
+        """Store the usage of a run whose subtask was cancelled under it (#586).
+
+        cancel() does not stop the worker, and the terminal-state guard turns
+        its complete()/fail() into a no-op, so the counters of a subtask
+        cancelled mid-run stayed 0 — and the DAG roll-up summed that 0. This
+        write touches only the counters, never status, result or error, and
+        only on a cancelled row. Each value is the run's cumulative total, so
+        it is kept with GREATEST: writing the same usage twice adds nothing.
+
+        ``attempts`` > 0 is also the sign the DAG roll-up waits for: the run
+        has reported, so the counters are final. Returns whether a row was
+        written.
+        """
+        counters = {
+            "attempts": attempts,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "tool_calls_made": tool_calls_made,
+        }
+        values = {
+            name: func.greatest(getattr(Subtask, name), value) for name, value in counters.items() if value is not None
+        }
+        if not values:
+            return False
+        async with self._db.session() as session:
+            result = await session.execute(
+                update(Subtask).where(Subtask.id == subtask_id).where(Subtask.status == "cancelled").values(**values)
             )
             await session.commit()
             return result.rowcount > 0
