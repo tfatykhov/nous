@@ -275,6 +275,30 @@ class TestDagCreateTool:
         assert await dag_store.count_active() == 0
 
     @pytest.mark.asyncio
+    async def test_dag_create_cycle_does_not_hide_store_violations(self, tools):
+        """A cycle stops validate_dag before any store check; the handler still
+        runs the store checks over the built node specs."""
+        result = await tools._handlers["dag_create"](
+            name="cycle-and-stall",
+            nodes=[
+                {
+                    "name": "a",
+                    "type": "subtask",
+                    "instructions": "A",
+                    "timeout_seconds": 60,
+                    "stall_timeout_seconds": 120,
+                },
+                {"name": "b", "type": "subtask", "instructions": "B"},
+            ],
+            edges=[{"from_node": "a", "to_node": "b"}, {"from_node": "b", "to_node": "a"}],
+        )
+
+        text = result["content"][0]["text"]
+        assert text.startswith("Error creating DAG: 2 problems:\n"), text
+        assert "\n1. DAG contains a cycle" in text
+        assert "\n2. Node 'a': stall_timeout_seconds=120" in text
+
+    @pytest.mark.asyncio
     async def test_dag_create_notes_disabled_inherited_stall(self, db):
         """The premarket DAG with stall detection on and a 60s node timeout
         under a 300s inherited stall: created, with a Note naming the node

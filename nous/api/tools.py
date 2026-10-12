@@ -5707,7 +5707,9 @@ def register_dag_tools(
                 )
             except ValidationError as e:
                 for err in e.errors():
-                    schema_problems.extend(str(err["msg"]).removeprefix("Value error, ").splitlines())
+                    loc = ".".join(str(p) for p in err["loc"])
+                    for line in str(err["msg"]).removeprefix("Value error, ").splitlines():
+                        schema_problems.append(f"{loc}: {line}" if loc else line)
             _, store_problems, timeout_notes = store.resolve_node_timeouts(node_specs)
             problems = schema_problems + store_problems
             if len(problems) == 1:
