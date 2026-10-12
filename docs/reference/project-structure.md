@@ -34,6 +34,7 @@ nous/
 │   │   ├── guardrails.py       # CEL expression guardrails
 │   │   ├── intentions.py       # F099: brain.intentions — spec, wake-policy defaults, lineage (a fire only under an open container), in-transaction insert, legacy close
 │   │   ├── continuation.py     # F099 Phase 2: the continuation store: the inbox primitives, the same-transaction move of a continue result, owner-facing rows, the startup rollback; Phase 2c: the claim, the gate and the budgets (derived from rows), the fenced commit, failure and lease, the TTL sweep, the ask wake rule (the runner that calls it: `handlers/continuation_runner.py`); Phase 2d: staging, publish and expiry of proposals, the owner's decisions and answers
+│   │   ├── intention_calibration.py # F099 Phase 3d: grades each arrival's Brain decision from lineage rows (owner approve/reject, cancel, how the chain ended), reviewer `f099`; flag NOUS_INTENTION_CALIBRATION_ENABLED
 │   │   ├── quality.py          # Decision quality scoring
 │   │   ├── schemas.py          # Pydantic models
 │   │   └── spreading_activation.py  # Density-gated multi-hop graph traversal
