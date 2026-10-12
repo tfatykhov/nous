@@ -1097,6 +1097,7 @@ class BehaviorDriftCheck(BaseCheck):
         inactive_fact_count = 0
         inactive_ids: frozenset = frozenset()
         sleep_ids: frozenset = frozenset()
+        sleep_running = False
         counts_ok = False
         if self._db:
             try:
@@ -1120,6 +1121,13 @@ class BehaviorDriftCheck(BaseCheck):
                     # inactive ids, so the lookback just has to exceed one
                     # interval plus the audit's write lag; being generous only
                     # costs rows. It is not a cutoff on the counts.
+                    #
+                    # sleep_running: the auditor writes a cycle's action rows
+                    # only in close(), which drains them BEFORE it marks the
+                    # cycle finished, so while a cycle is 'running' its prunes
+                    # have no rows yet. The 6-hour bound (cycles take minutes)
+                    # keeps a cycle orphaned by a killed process from
+                    # blinding the residual for good.
                     result = await session.execute(
                         text(
                             "SELECT "
@@ -1138,7 +1146,10 @@ class BehaviorDriftCheck(BaseCheck):
                             " CROSS JOIN LATERAL unnest(a.target_ids) AS t(id) "
                             " WHERE a.agent_id = :aid "
                             " AND a.op IN ('deactivate', 'supersede', 'merge') "
-                            " AND a.created_at > now() - interval '7 days') AS sleep_ids"
+                            " AND a.created_at > now() - interval '7 days') AS sleep_ids, "
+                            "EXISTS (SELECT 1 FROM nous_system.consolidation_cycles c "
+                            " WHERE c.agent_id = :aid AND c.status = 'running' "
+                            " AND c.started_at > now() - interval '6 hours') AS sleep_running"
                         ),
                         {"aid": self._settings.agent_id},
                     )
@@ -1153,6 +1164,7 @@ class BehaviorDriftCheck(BaseCheck):
                         inactive_ids = frozenset(row.inactive_ids or ())
                         inactive_fact_count = len(inactive_ids)
                         sleep_ids = frozenset(row.sleep_ids or ())
+                        sleep_running = bool(row.sleep_running)
                         counts_ok = True
             except Exception:
                 logger.warning("Snapshot: DB query failed", exc_info=True)
@@ -1215,11 +1227,14 @@ class BehaviorDriftCheck(BaseCheck):
         facts_pruned = len(newly_inactive)
 
         # The part of facts_pruned a sleep cycle did, which residualizes it
-        # (#720). The actions are recorded only with the consolidation audit
-        # on; off, the count is unknown, so None rather than a fabricated 0.
-        # Residual limit: the audit writes its rows after the phase commits,
-        # so a tick landing in that gap counts those prunes as unexplained.
-        sleep_prune_count = len(newly_inactive & sleep_ids) if self._settings.consolidation_audit_enabled else None
+        # (#720). It is unknown, so None rather than a fabricated 0, when the
+        # consolidation audit is off (no actions are recorded) and while a
+        # cycle is running (its actions are not written until it closes, and
+        # the next tick cannot correct a 0: those ids are in prev by then).
+        if self._settings.consolidation_audit_enabled and not sleep_running:
+            sleep_prune_count = len(newly_inactive & sleep_ids)
+        else:
+            sleep_prune_count = None
 
         bus_data = self._bus_stats.to_dict() if self._bus_stats else {}
         handlers = bus_data.get("handlers", {})

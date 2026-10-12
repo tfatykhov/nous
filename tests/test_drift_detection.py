@@ -353,6 +353,7 @@ class _FakeRow:
         # Fact ids a sleep cycle deactivated (consolidation_actions); none
         # unless a test says otherwise.
         kw.setdefault("sleep_ids", [])
+        kw.setdefault("sleep_running", False)
         self.__dict__.update(kw)
 
 
@@ -565,8 +566,9 @@ class TestCountsAreAgentScoped:
         sql, params = sink[0]
         assert params == {"aid": "agent-b"}
         # Both halves of each residualized pair must be scoped, or they stop
-        # describing the same population (the sixth is the sleep-prune ids).
-        assert sql.count("agent_id = :aid") == 6
+        # describing the same population (the sixth and seventh are the
+        # sleep-prune ids and the running-cycle check).
+        assert sql.count("agent_id = :aid") == 7
         for table in ("heart.facts", "heart.episodes", "heart.censors", "heart.procedures"):
             assert table in sql
 
@@ -1055,7 +1057,7 @@ class TestFactsPrunedResidualizedAgainstSleepPrunes:
 
     _ROW = dict(facts=900, episodes=10, censors=2, procedures=5)
 
-    async def _snapshot(self, *, pruned: int, by_sleep: int, audit_enabled: bool = True):
+    async def _snapshot(self, *, pruned: int, by_sleep: int, audit_enabled: bool = True, sleep_running: bool = False):
         # Previously inactive: 0..99. Now also 100..100+pruned-1; the first
         # `by_sleep` of those were deactivated by a sleep cycle. The sleep ids
         # also name a fact that was already inactive (5) and an active merge
@@ -1064,6 +1066,7 @@ class TestFactsPrunedResidualizedAgainstSleepPrunes:
         row = _FakeRow(
             inactive_ids=list(_ids(range(100), newly)),
             sleep_ids=list(_ids(range(100, 100 + by_sleep), range(5, 6), range(10_000, 10_001))),
+            sleep_running=sleep_running,
             **self._ROW,
         )
         check = _drift_check(_FakeDB(row, []))
@@ -1123,6 +1126,18 @@ class TestFactsPrunedResidualizedAgainstSleepPrunes:
         assert found.current == 150
         assert found.residualized_by is None
         assert found.raw_current is None
+
+    @pytest.mark.asyncio
+    async def test_tick_during_a_sleep_cycle_is_unknown_not_unexplained(self):
+        """The auditor writes its action rows only when the cycle closes
+        (7-14 min on prod), so a tick inside a cycle sees its prunes with no
+        action rows yet. Reading that as 0 sleep prunes judged routine
+        cleanup as unexplained at floor 50 (and the next tick cannot correct
+        it). A running cycle makes the count unknown: gross, floor 100."""
+        snap = await self._snapshot(pruned=95, by_sleep=0, sleep_running=True)
+        assert snap.facts_pruned == 95
+        assert snap.sleep_prune_count is None
+        assert self._facts_pruned_anomalies(snap) == []
 
     @pytest.mark.asyncio
     async def test_audit_off_gross_prune_of_95_is_quiet(self):
@@ -1199,6 +1214,54 @@ class TestFactsPrunedResidualizedAgainstSleepPrunes:
                 await s.execute(
                     text("DELETE FROM nous_system.consolidation_actions WHERE agent_id IN (:a, :b)"),
                     {"a": aid, "b": other},
+                )
+                await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :aid"), {"aid": aid})
+                await s.commit()
+
+    @pytest.mark.asyncio
+    @pytest.mark.postgres_only
+    async def test_real_query_running_cycle_makes_the_count_unknown(self, db):
+        """Against real tables: a recent 'running' cycle of this agent makes
+        sleep_prune_count None; one orphaned 7 hours ago does not."""
+        from uuid import uuid4
+
+        from sqlalchemy import text
+
+        aid = f"test-hbdrift-{uuid4().hex[:8]}"
+        fid = uuid4()
+        try:
+            async with db.session() as s:
+                await s.execute(
+                    text("INSERT INTO heart.facts (id, agent_id, content, active) VALUES (:id, :aid, 'x', true)"),
+                    {"id": fid, "aid": aid},
+                )
+                await s.execute(
+                    text(
+                        "INSERT INTO nous_system.consolidation_cycles (agent_id, started_at, status) "
+                        "VALUES (:aid, now() - interval '7 hours', 'running')"
+                    ),
+                    {"aid": aid},
+                )
+                await s.commit()
+            check = _drift_check(db, agent_id=aid)
+            check._settings.consolidation_audit_enabled = True
+            check._last_snapshot = await check._capture_snapshot()
+            assert check._last_snapshot.sleep_prune_count == 0  # the orphan is ignored
+
+            async with db.session() as s:
+                await s.execute(text("UPDATE heart.facts SET active = false WHERE id = :id"), {"id": fid})
+                await s.execute(
+                    text("INSERT INTO nous_system.consolidation_cycles (agent_id, status) VALUES (:aid, 'running')"),
+                    {"aid": aid},
+                )
+                await s.commit()
+            snap = await check._capture_snapshot()
+            assert snap.facts_pruned == 1
+            assert snap.sleep_prune_count is None
+        finally:
+            async with db.session() as s:
+                await s.execute(
+                    text("DELETE FROM nous_system.consolidation_cycles WHERE agent_id = :aid"), {"aid": aid}
                 )
                 await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :aid"), {"aid": aid})
                 await s.commit()
