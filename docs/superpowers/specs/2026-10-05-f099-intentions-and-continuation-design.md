@@ -272,11 +272,12 @@ Volume over 30 days (completed subtasks, excluding DAG nodes, plus DAGs):
   - a plain read: `cat`, `ls`, `head`, `tail`, `wc`, `grep`, `jq`, `echo`, `printf`, `pwd`, `cd`, `sleep`, `true`;
   - a read-only `gh` call: `pr view|checks|list|diff|status`, `issue view|list`, `run view|list`, `repo view`, or `gh api ENDPOINT` as a GET. These refuse `--web`, `--watch` and `--hostname`. `gh api` also refuses a method other than GET, `-f`, `-F`, `--input`, `-H`, `graphql` and a full URL;
   - `<workspace_dir>/claude-jobs/runner.sh`, the owner's Claude Code delegation path, by its exact path:
-    - `status|result|cancel <job id>`, `status` and `list [--active|--all]` are allowed;
+    - `status|result <job id>`, `status` and `list [--active|--all]` are allowed;
     - `launch <repo> <prompt>|--prompt-file <file>` is allowed with `--model`, `--effort`, `--base-branch`, `--prompt-file` and `--plugins` (installed plugins under `<workspace_dir>/plugins/` only);
     - the repo name and option values must be quoteless names, because runner.sh interpolates them into `python3 -c`;
-    - `--sys-prompt`, `cleanup` and `gc` are refused.
+    - `--sys-prompt`, `cancel`, `cleanup` and `gc` are refused. `cancel` cannot check that the job is the lineage's own (#725), so a lineage cancels a job through `propose_action`.
 - An output redirection may target `/dev/null`, or a file under the root's `<workspace_dir>/intentions/<root_id>/` or under `<workspace_dir>/claude-jobs/prompts/`, once resolved. It may not target `runner.sh`, `repos.json` or a hook, which root runs. A prompt file must also be in one of those two directories.
+- Reads are confined too (post-merge review 2026-10-11, P1-1). Every argument of `cat`, `ls`, `head`, `tail`, `wc`, `grep`, `jq` or `cd` that names a file, and every `<` input, must resolve under `<workspace_dir>` with no hidden component (`.ssh`, `.env`, `claude-jobs/.claude-home`), checked from every directory an earlier `cd` could reach. `grep -r`, `jq -f`/`-L`/`--args`, a jq filter that reads `$ENV`/`env` or imports, and `&>`/`&>>` (dash backgrounds the command) are refused. The command runs with an allowlisted environment: locale, `PATH`, `HOME` and the like, plus `GITHUB_TOKEN`, which `gh` and `runner.sh launch` need. Nous's other keys and passwords are not in it.
 - In a continuation, the context policy judges an allowlisted call at `write`, so a read-only `gh` call is not a `level:external` deviation. The ledger still records the classifier's rating.
 - `propose_action` can still stage a `bash` command the allowlist refuses, such as `git push`, for the owner's approval.
 

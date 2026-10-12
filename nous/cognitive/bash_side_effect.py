@@ -213,19 +213,21 @@ _BARE_EXPANSION = re.compile(r"[$`*?\[{~]")
 _DQ_EXPANSION = re.compile(r"[$`]")
 
 
-def simple_commands(command: str) -> list[tuple[list[str], list[str], str]] | None:
-    """Every simple command in ``command`` as ``(words, output targets, the
-    operator after it)``, or None when it cannot be read exactly.
+def simple_commands(command: str) -> list[tuple[list[str], list[str], list[str], str]] | None:
+    """Every simple command in ``command`` as ``(words, output targets, input
+    files, the operator after it)``, or None when it cannot be read exactly.
 
     For the F099 lineage shell allowlist (``tool_policy``), which must see
     exactly what runs. None: over the size cap, an unbalanced quote, a
-    redirect with no target, a redirect in either direction that names a
+    redirect with no target, ``&>`` or ``&>>`` (bash redirects both streams,
+    dash backgrounds the command), a redirect in either direction that names a
     ``/dev/tcp`` or ``/dev/udp`` socket, or a word that expands -- ``$`` or a backtick
     outside single quotes, an unquoted glob, brace or tilde, or ``$`` or a
     backtick in the body of a heredoc whose delimiter is unquoted. Words are
-    de-quoted; input redirections and heredoc bodies are dropped; an fd
-    duplication (``2>&1``) is not an output target; the operator after the
-    last command is ``""``. Total: anything unexpected is None.
+    de-quoted; a file a ``<`` or ``<&`` redirection reads is an input file,
+    a heredoc delimiter, herestring or body is not; an fd duplication
+    (``2>&1``, ``<&0``) is no target; the operator after the last command is
+    ``""``. Total: anything unexpected is None.
     """
     if len(command) > _MAX_COMMAND_CHARS:
         return None
@@ -245,9 +247,10 @@ def simple_commands(command: str) -> list[tuple[list[str], list[str], str]] | No
         tokens = _lex(kept)
         if tokens is None:
             return None
-        commands: list[tuple[list[str], list[str], str]] = []
+        commands: list[tuple[list[str], list[str], list[str], str]] = []
         words: list[str] = []
         targets: list[str] = []
+        sources: list[str] = []
         expect: str | None = None
         for tok, is_operator in tokens:
             if not is_operator:
@@ -255,25 +258,31 @@ def simple_commands(command: str) -> list[tuple[list[str], list[str], str]] | No
                     return None  # `cat < /dev/tcp/host/80` connects: an input redirect is not just a read
                 if expect == "out" or (expect == "dup" and not (tok.isdigit() or tok == "-")):
                     targets.append(tok)
+                elif expect == "src" or (expect == "srcdup" and not (tok.isdigit() or tok == "-")):
+                    sources.append(tok)
                 elif expect is None:
                     words.append(tok)
                 expect = None
                 continue
             for op in _OPERATOR.findall(tok):
-                if expect is not None:
-                    return None
+                if expect is not None or op in ("&>", "&>>"):
+                    return None  # dash, prod's /bin/sh, reads `a &>f` as `a &` then `>f`
                 if op in _OUTPUT_REDIRECTS:
                     expect = "out"
                 elif op == ">&":
                     expect = "dup"
+                elif op == "<":
+                    expect = "src"
+                elif op == "<&":
+                    expect = "srcdup"
                 elif op in _INPUT_REDIRECTS:
                     expect = "in"
                 else:
-                    commands.append((words, targets, op))
-                    words, targets = [], []
+                    commands.append((words, targets, sources, op))
+                    words, targets, sources = [], [], []
         if expect is not None:
             return None
-        commands.append((words, targets, ""))
+        commands.append((words, targets, sources, ""))
         return commands
     except Exception:
         return None
