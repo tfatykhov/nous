@@ -28,6 +28,7 @@ from typing import Any
 from sqlalchemy import func, select
 
 from nous.brain.brain import Brain
+from nous.cognitive.context import TIER1_FACT_CATEGORIES
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.handlers import LLMClient, call_background_llm_structured
@@ -1772,6 +1773,14 @@ class SleepHandler:
                     )
                     continue
 
+                # Tier-1 category guard (#592): cluster_consolidation bypasses
+                # admission, so inheriting facts[0]'s person/preference/rule
+                # would launder a mislabeled source fact into the always-on
+                # User Profile. Mirrors the reflection/enumerative drift guards.
+                merged_category = facts[0].category
+                if merged_category in TIER1_FACT_CATEGORIES:
+                    merged_category = "technical"
+
                 # Create merged fact. 1c: exclude the still-active cluster
                 # members so Leg-2 dedup can't confirm the merged restatement
                 # AS one of them and discard the merged content.
@@ -1781,7 +1790,7 @@ class SleepHandler:
                         content=merge_result["merged_content"],
                         source="cluster_consolidation",
                         confidence=float(merge_result.get("confidence", 0.8)),
-                        category=facts[0].category,
+                        category=merged_category,
                     ),
                     exclude_ids=[f.id for f in facts],
                 )

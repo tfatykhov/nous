@@ -644,6 +644,75 @@ class TestPhaseClusterConsolidation:
             assert call.args[0] == merged_detail.id  # source = superseding fact
             assert call.args[2] == "supersedes"
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("first_category", "expected"),
+        [
+            ("rule", "technical"),
+            ("person", "technical"),
+            ("preference", "technical"),
+            ("technical", "technical"),
+            ("concept", "concept"),
+        ],
+    )
+    async def test_merged_fact_never_inherits_tier1_category(self, first_category, expected):
+        """#592: cluster_consolidation bypasses admission, so the merged fact
+        must not inherit a tier-1 (person/preference/rule) category from
+        facts[0]; non-tier-1 categories pass through unchanged."""
+        merge_result = {"should_merge": True, "merged_content": "consolidated fact", "confidence": 0.85}
+        client = _mock_llm_response(merge_result)
+        handler, heart = self._make_handler(llm_client=client)
+        handler._interrupted = False
+
+        def _session(**attrs):
+            s = AsyncMock()
+            s.__aenter__ = AsyncMock(return_value=s)
+            s.__aexit__ = AsyncMock(return_value=False)
+            for k, v in attrs.items():
+                setattr(s, k, v)
+            return s
+
+        cluster_result = MagicMock()
+        cluster_result.all.return_value = [("test_subject", 3)]
+        facts = []
+        for i, cat in enumerate([first_category, "concept", "technical"]):
+            f = MagicMock()
+            f.id = uuid4()
+            f.category = cat
+            f.content = f"fact {i}"
+            f.created_at = datetime.now(UTC)
+            facts.append(f)
+        fact_result = MagicMock()
+        fact_result.scalars.return_value.all.return_value = facts
+
+        def _make_orm(*_a, **_k):
+            m = MagicMock()
+            m.superseded_by = None
+            return m
+
+        sessions = iter(
+            [
+                _session(execute=AsyncMock(return_value=cluster_result)),
+                _session(execute=AsyncMock(return_value=fact_result)),
+            ]
+        )
+        deactivate_session = _session(get=AsyncMock(side_effect=_make_orm))
+        heart.db.session = lambda: next(sessions, deactivate_session)
+        heart.agent_id = "test"
+        merged_detail = MagicMock()
+        merged_detail.id = uuid4()
+        heart.learn = AsyncMock(return_value=merged_detail)
+        heart.link_facts = AsyncMock()
+        heart.facts.inherit_conflict_slot_keys = AsyncMock()
+
+        stats = {}
+        assert await handler._phase_cluster_consolidation(stats) is True
+        assert stats["clusters_merged"] == 1
+        heart.learn.assert_awaited_once()
+        fact_input = heart.learn.await_args.args[0]
+        assert fact_input.source == "cluster_consolidation"
+        assert fact_input.category == expected
+
 
 # ===========================================================================
 # TestSleepPhaseRegistration
