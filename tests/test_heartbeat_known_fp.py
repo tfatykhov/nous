@@ -338,6 +338,42 @@ def test_unreadable_file_is_retried_once_readable(tmp_path, monkeypatch, caplog:
     assert store.ingest(_finding("third SNN integration deferral")) == FindingAction.AUTO_CLOSE
 
 
+def test_stat_failure_warns_once_and_keeps_last_good(tmp_path, monkeypatch, caplog: pytest.LogCaptureFixture) -> None:
+    # #712/#715 review: a non-ENOENT stat() failure logged a warning on every
+    # finding ingest; #715 made only the open() failure warn once.
+    from nous.heartbeat import known_fp
+
+    path = tmp_path / "fp.json"
+    _write(path, {"rules": [SNN_RULE]})
+    real_stat = os.stat
+    failing = [False]
+
+    def _stat(target, *args, **kwargs):
+        if str(target) == str(path) and failing[0]:
+            raise PermissionError(13, "Permission denied", str(target))
+        return real_stat(target, *args, **kwargs)
+
+    monkeypatch.setattr(known_fp.os, "stat", _stat)
+    store = _store(KnownFalsePositiveRules(str(path), today=lambda: TODAY))
+    assert store.ingest(_finding("first SNN integration deferral")) == FindingAction.AUTO_CLOSE
+
+    failing[0] = True
+    with caplog.at_level(logging.WARNING, logger="nous.heartbeat.known_fp"):
+        for n in range(3):
+            assert store.ingest(_finding(f"stat fails {n} SNN integration deferral")) == FindingAction.AUTO_CLOSE
+    assert sum("unreadable" in r.getMessage() for r in caplog.records) == 1
+
+    # A recovery re-arms the warning for the next failure.
+    failing[0] = False
+    assert store.ingest(_finding("recovered SNN integration deferral")) == FindingAction.AUTO_CLOSE
+    caplog.clear()
+    failing[0] = True
+    with caplog.at_level(logging.WARNING, logger="nous.heartbeat.known_fp"):
+        store.ingest(_finding("fails again SNN integration deferral"))
+        store.ingest(_finding("fails again twice SNN integration deferral"))
+    assert sum("unreadable" in r.getMessage() for r in caplog.records) == 1
+
+
 def test_malformed_file_with_unchanged_mtime_keeps_last_good(tmp_path) -> None:
     path = tmp_path / "fp.json"
     _write(path, {"rules": [SNN_RULE]})

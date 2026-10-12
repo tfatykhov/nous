@@ -151,6 +151,7 @@ class KnownFalsePositiveRules:
         self._loaded_mtime: int | None = None
         self._failed_mtime: int | None = None  # warn once per bad file version, not every tick
         self._missing_logged = False
+        self._stat_failed_logged = False  # warn once per stat() failure streak, not every ingest
         self._expired_warned: set[KnownFalsePositiveRule] = set()
 
     @property
@@ -198,11 +199,17 @@ class KnownFalsePositiveRules:
             self._rules = []
             self._loaded_mtime = None
             self._failed_mtime = None
+            self._stat_failed_logged = False
             return
         except OSError:
-            logger.warning("Known-FP rule file %s unreadable; keeping the last good rules", self._path, exc_info=True)
+            if not self._stat_failed_logged:
+                self._stat_failed_logged = True
+                logger.warning(
+                    "Known-FP rule file %s unreadable; keeping the last good rules", self._path, exc_info=True
+                )
             return
         self._missing_logged = False
+        self._stat_failed_logged = False
         if mtime == self._loaded_mtime:
             return
         # The mtime is cached only once the file has been read and parsed: a
