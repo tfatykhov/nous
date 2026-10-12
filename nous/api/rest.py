@@ -2567,7 +2567,7 @@ def create_app(
         result = await undo_journal.restore(request.path_params["id"], deps, journal)
         return JSONResponse(
             {"success": result.success, "message": result.message, "pre_restore_id": result.pre_restore_id},
-            status_code=200 if result.success else 409,
+            status_code=200 if result.success else 404 if result.not_found else 409,
         )
 
     async def heartbeat_check_trigger(request: Request) -> JSONResponse:

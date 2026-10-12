@@ -379,6 +379,7 @@ class RestoreResult:
     success: bool
     message: str
     pre_restore_id: str | None = None
+    not_found: bool = False
 
 
 def discard_safe(snapshot_id: str | None) -> None:
@@ -415,9 +416,16 @@ async def restore(snapshot_id: str, deps: RestoreDeps, journal: UndoJournal | No
     journal = journal or _journal
     if journal is None:
         return RestoreResult(False, "undo journal is not enabled")
-    entry = await journal.get(snapshot_id)
+    try:
+        entry = await journal.get(snapshot_id)
+    except FileNotFoundError:  # pruned between the lookup and the read
+        entry = None
+    except (OSError, ValueError) as exc:
+        return RestoreResult(False, f"snapshot {snapshot_id} could not be read: {type(exc).__name__}")
     if entry is None:
-        return RestoreResult(False, f"snapshot {snapshot_id!r} not found")
+        return RestoreResult(False, f"snapshot {snapshot_id!r} not found", not_found=True)
+    if not isinstance(entry, dict) or not {"kind", "target", "before"} <= entry.keys():
+        return RestoreResult(False, f"snapshot {snapshot_id} is malformed; not restoring")
     if not entry.get("restorable"):
         return RestoreResult(False, f"snapshot {snapshot_id} is not restorable: {entry.get('note')}")
 

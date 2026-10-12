@@ -72,7 +72,7 @@ Documented routes served by `nous/api/rest.py`, which is the full list. Part of 
 | POST | `/heartbeat/trigger` | Force immediate heartbeat tick |
 | PUT | `/heartbeat/config` | Update heartbeat intervals/budget at runtime (the prior values are recorded in the undo journal) |
 | GET | `/undo/snapshots` | Undo journal: newest snapshots, newest first, without their payloads (`limit`, default 50, max 500) |
-| POST | `/undo/snapshots/{id}/restore` | Undo journal: owner-run restore of one snapshot; snapshots the current state first (`pre_restore_id`). 409 with a message when it refuses |
+| POST | `/undo/snapshots/{id}/restore` | Undo journal: owner-run restore of one snapshot; snapshots the current state first (`pre_restore_id`). 404 when the snapshot does not exist, 409 with a message when it refuses (including a malformed snapshot) |
 | POST | `/heartbeat/check/{name}/trigger` | Force a specific check to run |
 | POST | `/heartbeat/check/{name}/reset` | Reset circuit breaker for a failed check |
 | GET | `/heartbeat/findings` | All tracked findings with state/age |

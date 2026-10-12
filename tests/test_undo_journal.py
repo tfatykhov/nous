@@ -160,6 +160,29 @@ class TestJournalStore:
         }
         assert undo_journal.decode_row(undo_journal.encode_row(row)) == row
 
+    async def test_restore_endpoint_maps_missing_to_404_and_malformed_to_409(self, workspace, journal):
+        # Review of #712: journal.get() ran outside restore()'s try, so a
+        # pruned or malformed snapshot raised through the endpoint (a 500).
+        from nous.api.rest import create_app
+        from nous.config import Settings
+
+        app = create_app(
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(schedules=None),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            Settings(workspace_dir=str(workspace)),
+        )
+        bad = uuid.uuid4().hex
+        journal._root.mkdir(parents=True, exist_ok=True)
+        journal._write_file(f"20260101T000000000000-{bad}.json", {}, b"not json")
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            missing = await client.post(f"/undo/snapshots/{uuid.uuid4().hex}/restore")
+            malformed = await client.post(f"/undo/snapshots/{bad}/restore")
+        assert missing.status_code == 404 and missing.json()["success"] is False
+        assert malformed.status_code == 409 and malformed.json()["success"] is False
+
     def test_configure_respects_flag(self, tmp_path):
         s = SimpleNamespace(
             undo_journal_enabled=False,
