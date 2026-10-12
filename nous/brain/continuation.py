@@ -1774,6 +1774,89 @@ async def arrival_is_terminal(
     return terminal
 
 
+QUESTION_AWAITED, QUESTION_ANSWERED, QUESTION_CLOSED = "awaited", "answered", "closed"
+
+
+async def question_card_state(
+    session: AsyncSession, agent_id: str, question_id: UUID, *, settings: Any = None, now: datetime | None = None
+) -> str:
+    """What a question card should do (Phase 3a, R2): ``awaited`` while something still waits for the owner's
+    answer, else ``answered`` (the owner answered it; the card closes ``resolved``) or ``closed`` (the card closes
+    ``expired``). ONE predicate for the settle sweep and the card leg of the publisher.
+
+    ``awaited`` means all of: the owner has not answered the arrival, the answer window is open (tested only when
+    ``settings`` is given), the root has neither marker, and some intention of the arrival is still
+    ``awaiting_owner`` with ``wake_policy='continue'`` AND this arrival is the latest arrival listing it
+    (``_latest_arrival_of``, the predicate of the wake). The last term is what makes an old, answered-and-re-asked
+    question stale although its window is open. It is stricter than ``record_answer``, which holds a late answer for
+    a moved-on arrival on purpose: a card is for something the owner can still decide. A question that does not
+    exist (a vanished row) is ``closed``."""
+    now = now or datetime.now(UTC)
+    question = (
+        await session.execute(
+            select(ResultInbox).where(
+                ResultInbox.agent_id == agent_id,
+                ResultInbox.source_kind == SOURCE_INTENTION_REPORT,
+                ResultInbox.source_id == question_id,
+                ResultInbox.msg_type == MSG_QUESTION,
+            )
+        )
+    ).scalar_one_or_none()
+    if question is None or question.arrival_id is None:
+        return QUESTION_CLOSED
+    arrival = (
+        await session.execute(
+            select(IntentionArrival).where(
+                IntentionArrival.agent_id == agent_id, IntentionArrival.id == question.arrival_id
+            )
+        )
+    ).scalar_one_or_none()
+    if arrival is None:
+        return QUESTION_CLOSED
+    owner_answered = (
+        await session.execute(
+            select(
+                exists().where(
+                    ResultInbox.agent_id == agent_id,
+                    ResultInbox.source_kind == SOURCE_INTENTION_REPORT,
+                    ResultInbox.arrival_id == arrival.id,
+                    ResultInbox.msg_type == "INFORM",
+                    ResultInbox.correlation_id.like(f"{ANSWER_CORRELATION_PREFIX}%"),
+                )
+            )
+        )
+    ).scalar_one()
+    if owner_answered:
+        return QUESTION_ANSWERED
+    if settings is not None and question_window_start(question) <= now - timedelta(
+        hours=float(settings.intention_proposal_ttl_hours)
+    ):
+        return QUESTION_CLOSED
+    if await _root_end_state(session, agent_id, arrival.root_id) is not None:
+        return QUESTION_CLOSED
+    waiting = (
+        await session.execute(
+            select(Intention.id)
+            .where(
+                Intention.agent_id == agent_id,
+                Intention.id.in_(list(arrival.intention_ids)),
+                Intention.state == STATE_AWAITING_OWNER,
+                Intention.wake_policy == intentions.WAKE_CONTINUE,
+                _latest_arrival_of(agent_id, arrival.root_id, arrival.n),
+            )
+            .limit(1)
+        )
+    ).first()
+    return QUESTION_AWAITED if waiting is not None else QUESTION_CLOSED
+
+
+async def question_awaited(
+    session: AsyncSession, agent_id: str, question_id: UUID, *, settings: Any = None, now: datetime | None = None
+) -> bool:
+    """``question_card_state(...) == "awaited"``: does the question still have something to answer? (R2)"""
+    return await question_card_state(session, agent_id, question_id, settings=settings, now=now) == QUESTION_AWAITED
+
+
 def _latest_arrival_of(agent_id: Any, root_id: Any, n: Any) -> ColumnElement[bool]:
     """The wake invariant: arrival ``n`` of ``root_id`` is the latest arrival listing ``Intention``. An older one
     was woken and claimed past: the intention, ``awaiting_owner`` again, waits on its newer ask, and woken by the
