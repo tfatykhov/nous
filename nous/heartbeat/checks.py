@@ -16,7 +16,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from nous.brain import Brain
+from nous.brain import Brain, continuation
 from nous.brain.embeddings import EmbeddingProvider
 from nous.config import Settings
 from nous.heart import Heart
@@ -52,6 +52,7 @@ class HealthCheck(BaseCheck):
         super().__init__()
         self._heart = heart
         self._brain = brain
+        self._settings = settings
         self.interval = settings.heartbeat_health_interval
         self._params = {
             # increases_findings: raising stale_decision_days WIDENS the
@@ -78,7 +79,9 @@ class HealthCheck(BaseCheck):
         # 1. Unreviewed decisions
         try:
             stale_days = int(self.get_param_value("stale_decision_days"))
-            unreviewed = await self._brain.get_unreviewed(max_age_days=stale_days)
+            unreviewed = await self._brain.get_unreviewed(
+                max_age_days=stale_days, **continuation.arrival_exclusion(self._settings)
+            )
             if unreviewed and len(findings) < max_findings:
                 findings.append(
                     Finding(

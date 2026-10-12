@@ -2366,6 +2366,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 outcome=outcome,
                 reviewed=reviewed,
                 date_to=date_to,
+                **continuation.arrival_exclusion(settings),
             )
             if not decisions:
                 return {"content": [{"type": "text", "text": "No matching decisions."}]}

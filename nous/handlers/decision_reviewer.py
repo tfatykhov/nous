@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
+from nous.brain import continuation
 from nous.brain.brain import DecisionAlreadyReviewed, DecisionNotFound
 from nous.cancellation import cancel_requested
 
@@ -271,7 +272,9 @@ class DecisionReviewer:
             return
 
         try:
-            decisions = await self._brain.get_session_decisions(session_id)
+            decisions = await self._brain.get_session_decisions(
+                session_id, **continuation.arrival_exclusion(self._settings)
+            )
             for decision in decisions:
                 if decision.reviewed_at is not None:
                     continue
@@ -288,7 +291,9 @@ class DecisionReviewer:
 
     async def sweep(self, max_age_days: int = 30) -> list[ReviewResult]:
         """Sweep all unreviewed decisions. Standalone for future scheduler."""
-        unreviewed = await self._brain.get_unreviewed(max_age_days=max_age_days)
+        unreviewed = await self._brain.get_unreviewed(
+            max_age_days=max_age_days, **continuation.arrival_exclusion(self._settings)
+        )
         results = []
         for decision in unreviewed:
             outcome = await self._check_signals(decision)

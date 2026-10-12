@@ -57,7 +57,7 @@ from nous.api.execution_context import ExecutionContext
 from nous.api.intention_routes import build_intention_routes
 from nous.api.models import Attachment
 from nous.api.runner import AgentRunner
-from nous.brain import Brain, intentions
+from nous.brain import Brain, continuation, intentions
 from nous.brain.intentions import IntentionSpec
 from nous.cognitive import CognitiveLayer
 from nous.cognitive.context import PROFILE_CORE_TAG, TIER1_FACT_CATEGORIES
@@ -1109,6 +1109,7 @@ def create_app(
         decisions = await brain.get_unreviewed(
             max_age_days=max_age_days,
             stakes=stakes,
+            **continuation.arrival_exclusion(settings),
         )
         decisions = decisions[:limit]
         return JSONResponse({
