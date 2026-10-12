@@ -82,8 +82,10 @@ class DriftDetector:
         # sleep_prune_count (#720), so that cleanup explains itself and the
         # floor is back to 50 for UNEXPLAINED prunes. With the consolidation
         # audit off, sleep_prune_count is unknown and facts_pruned is judged
-        # gross at this floor, so those cycles fire again there.
-        "facts_pruned":            {"k": 2.0, "min_samples": 10, "min_abs_deviation": 50.0},
+        # gross, which cannot tell that cleanup from drift, so the gross path
+        # keeps the #719 floor (min_abs_deviation_unresidualized).
+        "facts_pruned":            {"k": 2.0, "min_samples": 10, "min_abs_deviation": 50.0,
+                                    "min_abs_deviation_unresidualized": 100.0},
         "findings_created":        {"k": 2.0, "min_samples": 10},
         "episodes_compacted":      {"k": 2.0, "min_samples": 10},
         "contradictions_resolved": {"k": 2.0, "min_samples": 10},
@@ -94,8 +96,10 @@ class DriftDetector:
         current_metrics = current.to_metrics_dict()
         for metric, config in self.THRESHOLDS.items():
             explainer, sign = self.RESIDUALIZE.get(metric, (None, 0))
+            floor = config.get("min_abs_deviation", 0.0)
             if explainer is not None and current_metrics.get(explainer) is None:
                 explainer = None  # unknown explanation: judge the raw metric
+                floor = config.get("min_abs_deviation_unresidualized", floor)
 
             def _value_of(
                 metrics: dict[str, Any], _m: str = metric, _e: str | None = explainer, _s: int = sign
@@ -127,7 +131,6 @@ class DriftDetector:
                 continue
             current_val = _value_of(current_metrics)  # never None: its explainer was checked above
             deviation = current_val - mean
-            floor = config.get("min_abs_deviation", 0.0)
             if abs(deviation) < floor:
                 continue
 

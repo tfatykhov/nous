@@ -1116,13 +1116,21 @@ class TestFactsPrunedResidualizedAgainstSleepPrunes:
         """Sleep prunes are only recorded with NOUS_CONSOLIDATION_AUDIT_ENABLED.
         With it off the count is unknown, so it is stored as absent rather
         than as a fabricated 0, and facts_pruned is judged gross."""
-        snap = await self._snapshot(pruned=95, by_sleep=95, audit_enabled=False)
+        snap = await self._snapshot(pruned=150, by_sleep=150, audit_enabled=False)
         assert snap.sleep_prune_count is None
         assert snap.to_metrics_dict()["sleep_prune_count"] is None
         (found,) = self._facts_pruned_anomalies(snap)
-        assert found.current == 95
+        assert found.current == 150
         assert found.residualized_by is None
         assert found.raw_current is None
+
+    @pytest.mark.asyncio
+    async def test_audit_off_gross_prune_of_95_is_quiet(self):
+        """A gross count cannot tell routine sleep cleanup (78/91/83 facts)
+        from drift, so it keeps the #719 floor of 100; only a residual gets
+        the floor of 50. Default-config deployments run with the audit off."""
+        snap = await self._snapshot(pruned=95, by_sleep=95, audit_enabled=False)
+        assert self._facts_pruned_anomalies(snap) == []
 
     def test_baseline_rows_without_the_explainer_are_not_residualized(self):
         """A residual is never fabricated for a row that cannot be explained:
