@@ -11,6 +11,7 @@ then ticking the orchestrator. No `freezegun` dependency.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -194,16 +195,12 @@ class TestStoreLevelStallEnforcement:
             await store_stall_on.create(req)
 
     @pytest.mark.asyncio
-    async def test_store_rejects_inherited_global_default_above_node_timeout(
-        self, db
-    ):
-        """@codex P2 on dc914be: when stall_timeout_seconds is unset on the
-        spec but the inherited NOUS_DAG_NODE_DEFAULT_STALL_TIMEOUT exceeds
-        this node's wall-clock timeout, the store must raise. Otherwise
-        the global default would silently never fire for nodes with short
-        timeouts."""
-        # Settings with global stall default=300 but a node timeout of 60.
-        # Without the fix this silently inserts; with it, raises.
+    async def test_inherited_stall_above_node_timeout_is_disabled(self, db, caplog):
+        """@codex P2 on dc914be made an inherited NOUS_DAG_NODE_DEFAULT_STALL_TIMEOUT
+        above a node's wall-clock timeout visible; it no longer refuses the
+        DAG. The stall could never fire before the reap, so the node is stored
+        with stall_timeout_seconds=0 (disabled) and the change is logged. A
+        node whose timeout covers the default keeps inheriting it (None)."""
         s = Settings(
             dag_stall_detection_enabled=True,
             dag_node_default_stall_timeout=300,
@@ -213,7 +210,7 @@ class TestStoreLevelStallEnforcement:
         )
         store = DAGStore(db, f"test-stall-inherit-{uuid.uuid4().hex[:8]}", s)
         req = DAGCreateRequest(
-            name="bad-inherit-dag",
+            name="short-inherit-dag",
             nodes=[
                 DAGNodeSpec(
                     name="short-node",
@@ -221,10 +218,16 @@ class TestStoreLevelStallEnforcement:
                     timeout_seconds=60,
                     # stall_timeout_seconds omitted → inherits global 300
                 ),
+                DAGNodeSpec(name="long-node", type=DAGNodeType.subtask, timeout_seconds=900),
             ],
         )
-        with pytest.raises(ValueError, match="inherited global stall_timeout"):
-            await store.create(req)
+        with caplog.at_level(logging.INFO, logger="nous.dag.store"):
+            dag = await store.create(req)
+        stalls = {n.name: n.stall_timeout_seconds for n in dag.nodes}
+        assert stalls == {"short-node": 0, "long-node": None}
+        assert any(
+            "short-node" in r.getMessage() and "stall detection is disabled" in r.getMessage() for r in caplog.records
+        )
 
     @pytest.mark.asyncio
     async def test_store_rejects_stall_above_resolved_default(self, store_stall_on):

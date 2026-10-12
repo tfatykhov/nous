@@ -5547,6 +5547,8 @@ def register_dag_tools(
     settings: Any = None,
 ) -> None:
     """F038: Register DAG orchestration tools."""
+    from pydantic import ValidationError
+
     from nous.dag.approval import approval_line, card_link
     from nous.dag.schemas import DAGCreateRequest, DAGEdgeSpec, DAGNodeSpec, DAGNodeType
 
@@ -5563,6 +5565,18 @@ def register_dag_tools(
     # node that set it could not write at all, with nothing wired to snapshot.
     undoable_accepted = bool(getattr(cfg, "compensation_enabled", False))
     intentions_on = intentions.enabled(cfg)
+
+    def _validation_problems(exc: ValidationError, prefix: str = "") -> list[str]:
+        """One line per problem in ``exc``: its field path, then its message
+        without pydantic's "Value error, " prefix. Never empty: a validator
+        that raised with no message is reported by pydantic's own msg."""
+        problems: list[str] = []
+        for err in exc.errors():
+            loc = ".".join(str(p) for p in err["loc"])
+            msg = str(err["msg"])
+            for line in msg.removeprefix("Value error, ").splitlines() or [msg.strip()]:
+                problems.append(f"{prefix}{loc}: {line}" if loc else f"{prefix}{line}")
+        return problems or [f"{prefix}{exc}"]
 
     async def dag_create(**kwargs: Any) -> dict:
         """Create a DAG with dependency-tracked nodes."""
@@ -5614,9 +5628,14 @@ def register_dag_tools(
                     cfg,
                 )
 
-            # Parse nodes
+            # Every violation the schema and the store would raise is listed in
+            # one error, so a run does not spend an attempt per problem. Every
+            # bad node is named; the DAG-level checks run once all nodes build.
             node_specs: list[DAGNodeSpec] = []
-            for n in kwargs.get("nodes", []):
+            schema_problems: list[str] = []
+            request: DAGCreateRequest | None = None
+            # Parse nodes
+            for i, n in enumerate(kwargs.get("nodes", [])):
                 # F066.1 (2026-05-23): the orchestrator + schemas + migration
                 # shipped fix-node support, but this handler historically only
                 # threaded a fixed set of fields into DAGNodeSpec — so fix-node
@@ -5629,7 +5648,7 @@ def register_dag_tools(
                 # automatically as long as the tool schema description in
                 # register() also exposes them.
                 node_data: dict[str, Any] = {
-                    "name": n["name"],
+                    "name": n.get("name"),
                     "type": DAGNodeType(n["type"]),
                     "instructions": n.get("instructions", ""),
                     "description": n.get("description", ""),
@@ -5663,41 +5682,61 @@ def register_dag_tools(
                 for key in ("options", "default_option", "recommended_option", "answer_timeout_seconds"):
                     if key in n:
                         node_data[key] = n[key]
-                node_specs.append(DAGNodeSpec(**node_data))
+                try:
+                    node_specs.append(DAGNodeSpec(**node_data))
+                except ValidationError as e:
+                    name = n.get("name")
+                    label = f"node '{name}'" if isinstance(name, str) and name else f"nodes[{i}]"
+                    schema_problems.extend(_validation_problems(e, f"{label}: "))
 
-            # Parse edges
-            edge_specs: list[DAGEdgeSpec] = []
-            for e in kwargs.get("edges", []):
-                edge_specs.append(
-                    DAGEdgeSpec(
-                        from_node=e["from_node"],
-                        to_node=e["to_node"],
-                        edge_type=e.get("edge_type", "dependency"),
+            if not schema_problems:
+                try:
+                    # Parse edges
+                    edge_specs: list[DAGEdgeSpec] = []
+                    for e in kwargs.get("edges", []):
+                        edge_specs.append(
+                            DAGEdgeSpec(
+                                from_node=e["from_node"],
+                                to_node=e["to_node"],
+                                edge_type=e.get("edge_type", "dependency"),
+                            )
+                        )
+
+                    description = kwargs.get("description")
+                    request = DAGCreateRequest(
+                        name=kwargs["name"],
+                        description=kwargs.get("description", ""),
+                        source=kwargs.get("source", "conversation"),
+                        token_budget=kwargs.get("token_budget"),
+                        nodes=node_specs,
+                        edges=edge_specs,
+                        # F098: injected by ToolDispatcher on a conversation turn.
+                        origin_channel=kwargs.get("_channel"),
+                        origin_session_id=kwargs.get("_session_id"),
+                        # F099 Phase 0a: why the DAG exists. Before Phase 1 the only
+                        # reason text a dag_create call carries is its description.
+                        # F099: why the DAG exists. The model's own intent when it wrote
+                        # one; otherwise (flag off, or a generated intent) the stripped
+                        # description, as in Phase 0a (plan D1).
+                        original_request=(
+                            spec.intent
+                            if spec is not None and intentions.intent_line(kwargs.get("intent"))
+                            else ((description.strip() or None) if isinstance(description, str) else None)
+                        ),
                     )
-                )
-
-            description = kwargs.get("description")
-            request = DAGCreateRequest(
-                name=kwargs["name"],
-                description=kwargs.get("description", ""),
-                source=kwargs.get("source", "conversation"),
-                token_budget=kwargs.get("token_budget"),
-                nodes=node_specs,
-                edges=edge_specs,
-                # F098: injected by ToolDispatcher on a conversation turn.
-                origin_channel=kwargs.get("_channel"),
-                origin_session_id=kwargs.get("_session_id"),
-                # F099 Phase 0a: why the DAG exists. Before Phase 1 the only
-                # reason text a dag_create call carries is its description.
-                # F099: why the DAG exists. The model's own intent when it wrote
-                # one; otherwise (flag off, or a generated intent) the stripped
-                # description, as in Phase 0a (plan D1).
-                original_request=(
-                    spec.intent
-                    if spec is not None and intentions.intent_line(kwargs.get("intent"))
-                    else ((description.strip() or None) if isinstance(description, str) else None)
-                ),
-            )
+                except ValidationError as e:
+                    schema_problems.extend(_validation_problems(e))
+            _, store_problems, timeout_notes = store.resolve_node_timeouts(node_specs)
+            problems = schema_problems + store_problems
+            if len(problems) == 1:
+                return _tool_error(f"Error creating DAG: {problems[0]}")
+            if problems:
+                numbered = "\n".join(f"{i}. {p}" for i, p in enumerate(problems, 1))
+                return _tool_error(f"Error creating DAG: {len(problems)} problems:\n{numbered}")
+            if request is None:
+                # Unreachable while _validation_problems never returns []; the
+                # guard keeps an unbuilt request away from store.create.
+                return _tool_error("Error creating DAG: the request failed validation")
 
             dag = await store.create(request, **intentions.intention_kwargs(spec))
             await orchestrator.start_dag(dag.id)
@@ -5718,6 +5757,8 @@ def register_dag_tools(
                 lines.append(f"  Wave {w}: {', '.join(wave_groups[w])}")
             lines.append(f"Status: {actual_status}")
 
+            for timeout_note in timeout_notes:
+                lines.append(f"Note: {timeout_note}.")
             if wants_approval and not getattr(cfg, "a2ui_public_base_url", ""):
                 lines.append(
                     "Note: NOUS_A2UI_PUBLIC_BASE_URL is unset, so the Telegram "
