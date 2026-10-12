@@ -124,6 +124,12 @@ export class Transport {
           if (data.type === 'resync') void this.reconnect();
         },
         onOpen: () => {
+          // Live, and the backoff reset, only once the socket OPENS (#660):
+          // set at construction, an endpoint that never opens showed the
+          // hydrated snapshots as live, and every cycle reset the attempt
+          // that onError had just grown, pinning the backoff at tier one.
+          store.connection = 'live';
+          this.attempt = 0;
           if (wasPartial && !this.partialRetried) {
             // The index came from the SW's degraded offline warm, and the
             // stream OPENING (not merely constructing — codex round 6) is
@@ -154,8 +160,6 @@ export class Transport {
           if (!this.stopped) setTimeout(() => void this.cycle(), delay);
         },
       });
-      store.connection = 'live';
-      this.attempt = 0;
     } catch {
       store.connection = 'error';
       this.attempt += 1;
