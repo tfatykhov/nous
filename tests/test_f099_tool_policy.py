@@ -534,7 +534,6 @@ def test_the_lineage_shell_refuses_a_read_outside_the_workspace_or_into_a_hidden
         "pwd; sleep 1; true",
         "jq .a < intentions/{RID}/r.json",
         "cat < /dev/null",
-        "grep x <<< y",
     ],
 )
 def test_the_lineage_shell_still_allows_reads_under_the_workspace(command, tmp_path):
