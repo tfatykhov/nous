@@ -18,7 +18,7 @@ import pytest
 from nous.a2ui.tools import register_a2ui_tools
 from nous.api.tools import ToolDispatcher
 from nous.heartbeat.finding_store import FindingStore
-from nous.heartbeat.known_fp import KnownFalsePositiveRules, parse_rule
+from nous.heartbeat.known_fp import MAX_REVIEW_HORIZON_DAYS, KnownFalsePositiveRules, parse_rule
 from nous.heartbeat.schemas import Finding, FindingAction, FindingState
 
 TODAY = date(2026, 10, 8)
@@ -40,7 +40,7 @@ SITE_RULE = {
 
 
 def _rules(*raw: dict, today: date = TODAY) -> KnownFalsePositiveRules:
-    return KnownFalsePositiveRules(rules=[parse_rule(r) for r in raw], today=lambda: today)
+    return KnownFalsePositiveRules(rules=[parse_rule(r, today=today) for r in raw], today=lambda: today)
 
 
 def _store(rules: KnownFalsePositiveRules | None) -> FindingStore:
@@ -191,7 +191,7 @@ def test_rule_still_matches_on_its_review_by_date() -> None:
 
 def test_auto_closed_finding_flows_normally_once_its_rule_expires() -> None:
     day = [TODAY]
-    rule = parse_rule({**SNN_RULE, "review_by": TODAY.isoformat()})
+    rule = parse_rule({**SNN_RULE, "review_by": TODAY.isoformat()}, today=TODAY)
     rules = KnownFalsePositiveRules(rules=[rule], today=lambda: day[0])
     store = _store(rules)
     assert store.ingest(_finding()) == FindingAction.AUTO_CLOSE
@@ -248,6 +248,52 @@ def test_invalid_rules_are_skipped_and_valid_ones_load(tmp_path) -> None:
     )
     rules = KnownFalsePositiveRules(str(path), today=lambda: TODAY)
     assert [r.id for r in rules.rules] == ["snn-integration-deferral"]
+
+
+# ---------------------------------------------------------------------------
+# review_by horizon: the file is agent-writable, so no rule may be permanent
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("days_out", [MAX_REVIEW_HORIZON_DAYS + 1, 365, (date(2099, 12, 31) - TODAY).days])
+def test_rule_reviewed_beyond_the_horizon_is_rejected_not_clamped(
+    tmp_path, days_out: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    # P2-1 on #711: an agent-written {"contains": "error", "review_by":
+    # "2099-12-31"} rule closed every non-high finding mentioning "error"
+    # forever. A clamp to load date + 90 would be recomputed at every load
+    # and roll forward forever, so the rule is invalid instead.
+    path = tmp_path / "fp.json"
+    review_by = (TODAY + timedelta(days=days_out)).isoformat()
+    _write(path, {"rules": [{**SNN_RULE, "review_by": review_by}]})
+    store = _store(KnownFalsePositiveRules(str(path), today=lambda: TODAY))
+    with caplog.at_level(logging.WARNING, logger="nous.heartbeat.known_fp"):
+        assert store.ingest(_finding("first SNN integration deferral")) == FindingAction.TRIAGE
+        assert store.ingest(_finding("second SNN integration deferral")) == FindingAction.TRIAGE
+    skipped = [r for r in caplog.records if "skipping rule" in r.getMessage()]
+    assert len(skipped) == 1  # warned once per file version, not per ingest
+    assert "review_by" in skipped[0].getMessage()
+
+
+def test_rule_reviewed_exactly_at_the_horizon_loads() -> None:
+    review_by = (TODAY + timedelta(days=MAX_REVIEW_HORIZON_DAYS)).isoformat()
+    store = _store(_rules({**SNN_RULE, "review_by": review_by}))
+    assert store.ingest(_finding()) == FindingAction.AUTO_CLOSE
+
+
+def test_rule_beyond_the_horizon_is_rejected_by_parse_rule() -> None:
+    review_by = (TODAY + timedelta(days=MAX_REVIEW_HORIZON_DAYS + 1)).isoformat()
+    with pytest.raises(ValueError, match="review_by"):
+        parse_rule({**SNN_RULE, "review_by": review_by}, today=TODAY)
+
+
+def test_prod_shaped_rules_stay_valid(tmp_path) -> None:
+    # Prod's rules all have review_by 2026-11-30; on 2026-10-11 that is 50
+    # days out, well inside the horizon.
+    path = tmp_path / "fp.json"
+    _write(path, {"rules": [{**SNN_RULE, "review_by": "2026-11-30"}, {**SITE_RULE, "review_by": "2026-11-30"}]})
+    rules = KnownFalsePositiveRules(str(path), today=lambda: date(2026, 10, 11))
+    assert [r.id for r in rules.rules] == ["snn-integration-deferral", "cognition-engines-action-not-deployed"]
 
 
 def test_file_is_reloaded_on_change_and_bad_edit_keeps_last_good(tmp_path) -> None:
@@ -307,14 +353,16 @@ def test_matching_errors_are_contained() -> None:
         def _maybe_reload(self) -> None:
             raise RuntimeError("boom")
 
-    store = _store(_Broken(rules=[parse_rule(SNN_RULE)]))
+    store = _store(_Broken(rules=[parse_rule(SNN_RULE, today=TODAY)]))
     assert store.ingest(_finding()) == FindingAction.TRIAGE
 
 
 def test_example_file_parses() -> None:
     here = os.path.dirname(__file__)
     path = os.path.join(here, "..", "docs", "examples", "known_false_positives.example.json")
-    rules = KnownFalsePositiveRules(path, today=lambda: date(2026, 1, 1))
+    # The load date must be within MAX_REVIEW_HORIZON_DAYS of the example's
+    # review_by (2026-12-31), or every example rule is rejected as too far out.
+    rules = KnownFalsePositiveRules(path, today=lambda: TODAY)
     assert len(rules.rules) == 4
 
 
