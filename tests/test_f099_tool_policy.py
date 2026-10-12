@@ -176,6 +176,8 @@ def test_write_file_under_the_root_dir_is_allowed(tmp_path):
         "intentions",
         f"intentions/{str(RID)[:8]}/notes.md",
         f"intentions/{RID}-sibling/notes.md",
+        # _write omits lineage_shell, so this pins the keyword default as closed.
+        "claude-jobs/prompts/x.md",
     ],
 )
 def test_write_file_outside_the_root_dir_is_refused(tmp_path, path):
