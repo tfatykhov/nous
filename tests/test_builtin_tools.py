@@ -325,7 +325,9 @@ class TestReadFilePagination:
 
     @staticmethod
     async def _page_through(tmp_path, path: str, offset: int, limit: int) -> tuple[str, int]:
-        """Follow trailers exactly as the model would; return (text, calls)."""
+        """Follow trailers exactly as the model would, stopping at the end of
+        the range it asked for; return (text, calls)."""
+        stop = offset + limit if limit > 0 else None
         pieces, calls = [], 0
         while True:
             calls += 1
@@ -339,15 +341,23 @@ class TestReadFilePagination:
             assert int(m.group(1)) == offset + 1
             pieces.append(text[: m.start() + 1])
             offset, limit = int(m.group(4)), int(m.group(5) or 0)
+            if offset == stop:
+                # The range is read; the trailer still says the file goes on.
+                assert limit == 0
+                return "".join(pieces), calls
 
     @pytest.mark.asyncio
-    async def test_explicit_offset_limit_is_exact_and_untrailed(self, tmp_path):
+    async def test_explicit_offset_limit_is_exact_and_trailed_while_lines_remain(self, tmp_path):
         content = _prose_report(n_lines=1000, width=60)
         (tmp_path / "big.md").write_text(content, encoding="utf-8")
         lines = content.splitlines(keepends=True)
 
+        # The window is honoured exactly, and the trailer says the file goes on.
         text = _extract_text(await read_file_tool(path="big.md", offset=950, limit=10, _workspace_dir=str(tmp_path)))
-        assert text == "".join(lines[950:960])
+        m = _TRAILER.search(text)
+        assert m, text[-300:]
+        assert m.groups() == ("951", "960", "1000", "960", None)
+        assert text[: m.start() + 1] == "".join(lines[950:960])
 
         # A limit past EOF returns the rest, with no spurious trailer.
         text = _extract_text(await read_file_tool(path="big.md", offset=990, limit=500, _workspace_dir=str(tmp_path)))

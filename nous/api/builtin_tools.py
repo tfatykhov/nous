@@ -157,7 +157,8 @@ async def read_file_tool(
         offset: Line offset to start reading from (0-indexed)
         limit: Number of lines to read (0 = all). Capped at
             _READ_FILE_MAX_LINES lines / _READ_FILE_MAX_CHARS chars per call;
-            a capped page ends with a trailer naming the next offset.
+            a page that stops before the end of the file ends with a
+            trailer naming the next offset.
         _workspace_dir: Internal param set by registration closure
 
     Returns:
@@ -206,12 +207,13 @@ async def read_file_tool(
             end += 1
         page = "".join(lines[offset:end])
 
-        if end < requested_end:
-            # The suggested call must itself be trailed if it is capped: an
-            # explicit limit is never trailed when honoured exactly, so an
-            # unbounded read is continued unbounded, and an explicit one
-            # with the rest of its range.
-            next_call = f"offset={end}, limit={requested_end - end}" if limit > 0 else f"offset={end}"
+        if end < total:
+            # A capped explicit read is continued with the rest of its range;
+            # anything else (an unbounded read, or an explicit window honoured
+            # exactly that stops before EOF) is continued unbounded, so a
+            # window never silently hides the rest of the file.
+            capped = limit > 0 and end < requested_end
+            next_call = f"offset={end}, limit={requested_end - end}" if capped else f"offset={end}"
             if not page.endswith("\n"):
                 page += "\n"
             page += (
@@ -811,7 +813,8 @@ _READ_FILE_SCHEMA: dict[str, Any] = {
             "type": "integer",
             "description": (
                 f"Number of lines to read (0 = all). A page is capped at {_READ_FILE_MAX_LINES} lines / "
-                f"{_READ_FILE_MAX_CHARS:,} chars; a capped page ends with a trailer naming the next offset."
+                f"{_READ_FILE_MAX_CHARS:,} chars; a page that stops before the end of the file ends with a "
+                "trailer naming the next offset."
             ),
             "default": 0,
             "minimum": 0,
