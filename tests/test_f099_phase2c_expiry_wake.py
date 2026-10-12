@@ -590,6 +590,72 @@ async def test_one_root_can_hold_two_awaiting_arrivals_and_each_wakes_alone(env_
     assert (await intention_of(env, "subtask", child.source_id)).state == "awaiting_owner"  # its own question is open
 
 
+@pytest.mark.parametrize("first", ["answered", "expired"])
+async def test_an_old_arrival_does_not_wake_an_intention_that_asked_again(env_factory, first):  # noqa: F811
+    """Prod 2026-10-08 and 10-10: ask, answer, wake, claim, ask again. The first arrival is still terminal and still
+    lists the intention, which now waits on the second: only the second may wake it. Woken by the first, it was
+    claimed with no row and dropped, and the second question was left with nothing waiting for its answer."""
+    env = await env_factory(**CONT)
+    root = await make_root(env)
+    old = await _ask(env, root, question="First question?")
+    if first == "answered":
+        await _answer(env, old.arrival_id, root)
+    else:
+        await _age_question(env, old.arrival_id)
+    assert await _wake(env) == [root.id]
+    new = await _commit(env, await claim(env, root.id), Resolution("ask", "Second question?", True, 0.8))
+    assert await _wake(env) == []
+    async with env.db.session() as s:
+        assert await continuation.wake_arrival(s, env.agent, old.arrival_id) == []
+        await s.commit()
+    assert (await intention_of(env, "subtask", root.source_id)).state == "awaiting_owner"
+    assert await claim(env, root.id) is None
+    late = await _answer(env, old.arrival_id, root, "A late word on the first question.")
+    assert late.inserted and late.state_after == "awaiting_owner"  # held, not lost
+    await _answer(env, new.arrival_id, root, "Yes to the second.")
+    assert await _wake(env) == [root.id]
+    got = await claim(env, root.id)
+    assert {r.body for r in got.inbox_rows} == {"A late word on the first question.", "Yes to the second."}
+
+
+async def test_a_stale_arrival_does_not_take_a_slot_of_the_sweep(env_factory):  # noqa: F811
+    """The sweep takes the oldest roots first, ``limit`` arrivals at a time. An arrival that can wake nothing any
+    more must not be one of them, or a root that asked twice would hold back every root after it."""
+    env = await env_factory(**CONT)
+    asked_twice = await make_root(env)  # the older root: first in the sweep's order
+    old = await _ask(env, asked_twice)
+    await _answer(env, old.arrival_id, asked_twice)
+    assert await _wake(env) == [asked_twice.id]
+    await _commit(env, await claim(env, asked_twice.id), Resolution("ask", "Second question?", True, 0.8))
+    answered = await make_root(env)
+    done = await _ask(env, answered)
+    await _answer(env, done.arrival_id, answered)
+    async with env.db.session() as s:
+        # Two slots: the older root's open second ask takes one, as any ask still waiting does.
+        woken = await continuation.wake_terminal_arrivals(s, env.agent, settings=env.settings, limit=2)
+        await s.commit()
+    assert woken == [answered.id]
+
+
+async def test_an_arrival_still_wakes_the_intentions_no_later_arrival_lists(env_factory):  # noqa: F811
+    """The rule is per intention: of a batch, the one that asked again waits on its newer arrival, and the rest
+    wake with the batch. The claim keeps a woken batch together, so the child is moved on by hand."""
+    env = await env_factory(**CONT)
+    root = await make_root(env)
+    child = await make_child(env, root)
+    await record(env, root)
+    await record(env, child)
+    first = await _commit(env, await claim(env, root.id), Resolution("ask", "First question?", True, 0.8))
+    await set_intention(env, child.id, state="result_ready", result_at=datetime.now(UTC))
+    again = await claim(env, root.id)
+    assert {i.id for i in again.intentions} == {child.id}
+    await _commit(env, again, Resolution("ask", "Second question?", True, 0.8))
+    await _answer(env, first.arrival_id, root)
+    assert await _wake(env) == [root.id]
+    assert (await intention_of(env, "subtask", root.source_id)).state == "result_ready"
+    assert (await intention_of(env, "subtask", child.source_id)).state == "awaiting_owner"  # its own question is open
+
+
 async def test_an_expiry_and_a_wake_that_meet_on_an_expired_question_do_not_deadlock(env_factory, monkeypatch):  # noqa: F811
     """Root first in the wake too. The arrival lists the low-id child before the high-id root, so a wake that
     locked the arrival's intentions in that order would hold the child while the expiry holds the root and

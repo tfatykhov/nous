@@ -1764,11 +1764,26 @@ async def arrival_is_terminal(
     return terminal
 
 
+def _latest_arrival_of(agent_id: Any, root_id: Any, n: Any) -> ColumnElement[bool]:
+    """The wake invariant: arrival ``n`` of ``root_id`` is the latest arrival listing ``Intention``. An older one
+    was woken and claimed past: the intention, ``awaiting_owner`` again, waits on its newer ask, and woken by the
+    old one it would be claimed with no row (prod 2026-10-08). ``n`` is per root, ``max + 1`` under the root lock."""
+    later = aliased(IntentionArrival)
+    # Explicit: nested in the sweep's EXISTS, auto-correlation would cross-join the outer arrival, not refer to it.
+    return ~exists().where(
+        later.agent_id == agent_id,
+        later.root_id == root_id,
+        later.n > n,
+        Intention.id == any_(later.intention_ids),
+    ).correlate_except(later)
+
+
 async def wake_arrival(
     session: AsyncSession, agent_id: str, arrival_id: UUID, *, now: datetime | None = None
 ) -> list[UUID]:
-    """T5: every intention of the arrival still ``awaiting_owner`` goes back to ``result_ready``, so the
-    rows held meanwhile (answers, late results) are one batch at the next claim. Returns their ids.
+    """T5: every intention of the arrival still ``awaiting_owner`` on it (it is their latest arrival) goes back to
+    ``result_ready``, so the rows held meanwhile (answers, late results) are one batch at the next claim. Returns
+    their ids. A row written for an older arrival stays held: it joins the batch the newer arrival wakes.
 
     Takes the root first (the one lock order): a caller that writes to the arrival's intentions before
     waking it must lock the root before those writes."""
@@ -1794,6 +1809,7 @@ async def wake_arrival(
             Intention.id.in_(list(arrival.intention_ids)),
             Intention.state == STATE_AWAITING_OWNER,
             Intention.wake_policy == intentions.WAKE_CONTINUE,
+            _latest_arrival_of(agent_id, arrival.root_id, arrival.n),
         )
         .values(state=STATE_RESULT_READY, result_at=now, updated_at=now)
         .returning(Intention.id)
@@ -1806,13 +1822,16 @@ async def wake_terminal_arrivals(
     session: AsyncSession, agent_id: str, *, settings: Any, now: datetime | None = None, limit: int = 50
 ) -> list[UUID]:
     """The sweep's backstop for T5: wake every ``ask`` arrival that is terminal and still has an
-    intention ``awaiting_owner``. An arrival that expired unanswered gets one ``INFORM`` row per
-    intention it woke saying so (``source_id`` derived from the arrival and the intention: idempotent),
+    intention ``awaiting_owner`` on it (its latest arrival). An arrival that expired unanswered gets one ``INFORM``
+    row per intention it woke saying so (``source_id`` derived from the arrival and the intention: idempotent),
     so the woken claim has something to show. Returns the woken intention ids. Does not commit."""
     now = now or datetime.now(UTC)
     root = aliased(Intention)
+    # An older arrival wakes nothing: selected, it would take a slot of the limit on every sweep.
     waiting = exists().where(
-        Intention.id == any_(IntentionArrival.intention_ids), Intention.state == STATE_AWAITING_OWNER
+        Intention.id == any_(IntentionArrival.intention_ids),
+        Intention.state == STATE_AWAITING_OWNER,
+        _latest_arrival_of(agent_id, IntentionArrival.root_id, IntentionArrival.n),
     )
     arrivals = (
         (

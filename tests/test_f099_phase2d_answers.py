@@ -157,6 +157,47 @@ async def test_an_answer_after_the_sweep_woke_an_expired_question_is_refused(env
     assert refused.value.reason == "expired"
 
 
+async def test_a_late_answer_to_a_question_whose_arrival_moved_on_waits_for_the_newer_one(env_factory):  # noqa: F811
+    """A question can be answerable after its arrival woke: it expired, the sweep woke the intention, the intention
+    asked again, and the deadline was then raised. The answer is kept (held) but does not wake the intention, which
+    waits on its newer question: it joins the batch that question wakes."""
+    env = await env_factory(**CONT)
+    root, old_qid, old = await _ask(env, note="First question?")
+    await _age_question(env, old.arrival_id)
+    async with env.db.session() as s:
+        assert await continuation.wake_terminal_arrivals(s, env.agent, settings=env.settings) == [root.id]
+        await s.commit()
+    new = await commit_ask(env, await claim(env, root.id), "Second question?")
+    new_qid = await _question_id(env, new.arrival_id)
+    env.settings.intention_proposal_ttl_hours = 48.0  # the first question is answerable again
+    late = await _answer(env, old_qid, "Late: yes to the first.")
+    assert (late.intention_ids, late.woke_arrival) == ((root.id,), False)
+    assert (await intention_of(env, "subtask", root.source_id)).state == "awaiting_owner"
+    assert (await _answer(env, new_qid, "Yes to the second.")).woke_arrival is True
+    got = await claim(env, root.id)
+    assert {r.body for r in got.inbox_rows} == {"Late: yes to the first.", "Yes to the second."}
+
+
+async def test_a_late_decision_on_a_proposal_whose_arrival_moved_on_waits_for_the_newer_question(env_factory):  # noqa: F811
+    """A pending proposal holds its arrival, so only a lineage the pre-fix sweep woke from an older arrival can have
+    asked again meanwhile: built by hand. The decision is kept (held) and joins the batch of the newer question."""
+    env = await env_factory(**CONT)
+    asked = await ask_with_proposals(env)
+    (pid,) = asked.ids
+    await set_intention(env, asked.root.id, state="result_ready", result_at=datetime.now(UTC))
+    new = await commit_ask(env, await claim(env, asked.root.id), "Second question?")
+    async with env.db.session() as s:
+        out = await continuation.decide_proposal(
+            s, env.agent, pid, approve=False, actor="telegram:42", settings=env.settings
+        )
+        await s.commit()
+    assert (out.state, out.changed, out.woke_arrival) == ("rejected", True, False)
+    assert (await intention_of(env, "subtask", asked.root.source_id)).state == "awaiting_owner"
+    assert (await _answer(env, await _question_id(env, new.arrival_id), "Yes.")).woke_arrival is True
+    got = await claim(env, asked.root.id)
+    assert {r.title for r in got.inbox_rows} == {f"Proposal {pid.hex[:8]}: rejected", "Owner's answer"}
+
+
 async def test_only_an_owner_answer_answers_a_question(env_factory):  # noqa: F811
     """Final review m8: a proposal's outcome is an INFORM of the arrival too. C4 keeps a QUESTION and proposals out
     of one arrival, but the wake rule must not depend on it: built directly here, such an INFORM answers nothing."""

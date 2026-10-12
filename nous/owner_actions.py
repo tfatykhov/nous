@@ -22,8 +22,9 @@ CALLBACK_DATA_MAX_BYTES = 64  # Telegram's limit on a button's callback data
 _CALLBACK_RE = re.compile(rf"{CALLBACK_NAMESPACE}:({KIND_PROPOSAL}):([0-9a-f]{{32}}):([ar])")
 
 # Fixed, server-authored vocabulary: what the owner reads when a decision or an answer is refused. Never a
-# model's text. `ended` also covers a question whose arrival has already moved on (its intentions were woken or
-# closed): nothing is waiting for the answer.
+# model's text. `ended` also covers a question whose arrival has already moved on and whose intentions are no
+# longer awaiting the owner (claimed or closed): nothing is waiting for the answer. One that asked again is still
+# awaiting, so the answer is held for its newer arrival instead.
 DECISION_REFUSALS = {
     "expired": "That proposal expired before it was decided, so it did not run.",
     "ended": "That work has already ended, so nothing ran.",
