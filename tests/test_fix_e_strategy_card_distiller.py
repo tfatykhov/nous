@@ -572,3 +572,24 @@ async def test_a_database_error_on_the_edge_does_not_roll_the_card_back(rig):
     cards = await _cards(rig)
     assert _state(cards) == [(True, "success")]
     assert await _edges(rig, cards[0].id) == []
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_name_taken_twenty_times_still_gets_a_card(rig):
+    """#667: with the name and its suffixes (2) through (20) all taken by active
+    procedures, the card is stored as '(21)'. A bounded search returned the taken
+    '(20)' unchecked, every retry hit the unique index, and the decision got no card."""
+    name = "Prefer reversible rollouts"
+    async with rig.db.session() as s:
+        for taken in [name] + [f"{name} ({n})" for n in range(2, 21)]:
+            s.add(Procedure(agent_id=rig.agent_id, name=taken, active=True))
+        await s.commit()
+    decision = await rig.record()
+
+    with patch(LLM, new_callable=AsyncMock, return_value=_card(name)):
+        await rig.brain.review(decision.id, outcome="success", result="zero downtime", reviewer="agent")
+        await rig.settle()
+
+    cards = [c for c in await _cards(rig) if c.runtime_metadata.get("source_decision_id") == str(decision.id)]
+    assert [(c.name, c.active) for c in cards] == [(f"{name} (21)", True)]
