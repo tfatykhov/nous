@@ -338,15 +338,40 @@ def _read_paths(prog: str, args: list[str]) -> list[str] | None:
         if not files and not any(opt in ("-e", "--regexp") for opt, _ in values):
             operands = operands[1:]  # the pattern
     elif prog == "jq":
-        if operands and _JQ_REFUSED.search(operands[0]):
+        if operands and not _jq_filter_allowed(operands[0]):
             return None
         operands = operands[1:]  # the filter
     return files + [o for o in operands if o != "-"]
 
 
+def _jq_filter_allowed(text: str) -> bool:
+    """A jq filter (jq's own, or gh's ``--jq``, run by gojq) that reads no environment and imports nothing."""
+    return _JQ_REFUSED.search(text) is None
+
+
+def _gh_jq_filters(args: list[str]) -> list[str]:
+    """Every word that may be a gh ``--jq`` / ``-q`` filter: ``--jq X``, ``--jq=X``, and the value of a ``q``
+    in a shorthand cluster (``-q X``, ``-qX``, ``-q=X``, ``-cq X``). A word that only might be one is included:
+    a false match only refuses. ``--template`` / ``-t`` are not checked: gh's Go template functions (text/template's
+    builtins plus color, join, pluck, tablerow, timeago, timefmt, truncate, hyperlink) cannot read the environment."""
+    filters: list[str] = []
+    for i, a in enumerate(args):
+        nxt = args[i + 1 : i + 2]
+        if a == "--jq":
+            filters += nxt
+        elif a.startswith("--jq="):
+            filters.append(a.removeprefix("--jq="))
+        elif not a.startswith("--") and a.startswith("-") and "q" in a:
+            rest = a[a.index("q") + 1 :].removeprefix("=")
+            filters += [rest] if rest else nxt
+    return filters
+
+
 def _gh_allowed(args: list[str]) -> bool:
     """A read-only gh call: a subcommand in LINEAGE_GH_READS, or ``gh api`` GET."""
     if any(a.startswith(_GH_OUTWARD_FLAGS) for a in args):
+        return False
+    if not all(_jq_filter_allowed(f) for f in _gh_jq_filters(args)):
         return False
     if args[:1] == ["api"]:
         return _gh_api_get(args[1:])

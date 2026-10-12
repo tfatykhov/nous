@@ -563,6 +563,30 @@ def test_a_read_or_cd_through_a_symlink_into_a_hidden_dir_is_refused(tmp_path):
     assert _shell("ls ok", tmp_path) is None
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh api repos/a/b --jq '$ENV.GITHUB_TOKEN'",
+        "gh api repos/a/b --jq='$ENV.GITHUB_TOKEN'",
+        "gh pr view 1 --json title -q 'env'",
+        "gh pr view 1 --json title -q'env.GITHUB_TOKEN'",
+        "gh pr view 1 --json title -cq 'env'",
+        "gh api repos/a/b -q 'import \"x\" as $x; $x'",
+    ],
+)
+def test_a_gh_jq_filter_that_reads_the_environment_is_refused(command, tmp_path):
+    """gh runs --jq with gojq, which reads the environment, and GITHUB_TOKEN is left in a lineage's."""
+    assert _shell(command, tmp_path) == "external"
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["gh api repos/a/b --jq '.title'", "gh pr view 1 --json title -q .title", "gh pr view 1 --json title --jq=.title"],
+)
+def test_an_ordinary_gh_jq_filter_is_still_allowed(command, tmp_path):
+    assert _shell(command, tmp_path) is None
+
+
 # -- post-merge review P1-1: a lineage's bash runs with an allowlisted environment ---
 
 
