@@ -326,8 +326,13 @@ def _split_read_args(args: list[str], roles: _ArgRoles) -> tuple[list[str], list
 def _read_paths(prog: str, args: list[str]) -> list[str] | None:
     """The arguments of a read command that name a file (for ``cd``, its directory), or None when the call is
     refused whatever its paths name."""
-    if prog == "cd":  # bare `cd` goes to $HOME, `cd -` to $OLDPWD; no option (-P) either
-        return args if len(args) == 1 and not args[0].startswith("-") else None
+    if prog == "cd":
+        # Bare `cd` goes to $HOME, `cd -` to $OLDPWD; no option (-L, -P) either. No `..` component: cd resolves
+        # it LOGICALLY (`l/..` is where the link l sits), _readable physically (the link target's parent), so
+        # after a link `cd l/../..` leaves the workspace while _readable sees it stay. A read argument's `..` is
+        # resolved by the kernel, physically, and needs no such rule.
+        ok = len(args) == 1 and not args[0].startswith("-") and ".." not in args[0].split("/")
+        return args if ok else None
     split = _split_read_args(args, _READ_ARG_ROLES[prog])
     if split is None:
         return None

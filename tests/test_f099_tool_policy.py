@@ -562,6 +562,59 @@ def test_a_read_or_cd_through_a_symlink_into_a_hidden_dir_is_refused(tmp_path):
     assert _shell("ls ok", tmp_path) is None
 
 
+def _deep_link_workspace(tmp_path):
+    """The review's workspace: ``ws/l`` is a plain-named link to a deeper directory, and a file sits outside."""
+    ws = tmp_path / "ws"
+    root_dir = ws / "intentions" / str(RID)
+    root_dir.mkdir(parents=True)
+    (ws / "l").symlink_to(root_dir)
+    (tmp_path / "outside").mkdir()
+    (tmp_path / "outside" / "secret.txt").write_text("outside-secret")
+    (ws / "intentions" / "x").write_text("physical-parent")
+    (ws / "x").write_text("logical-parent")
+    (root_dir / "x.md").write_text("root-file")
+    return ws
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs symlinks")
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd l/../..; cat outside/secret.txt",
+        "cd intentions/{RID}/../../l/../..; cat x",
+        "cd l; cd ..; cat x",
+        "cd ..",
+        "cd l/..",
+        "cd -L intentions",
+        "cd -P intentions",
+    ],
+)
+def test_a_cd_target_with_a_dotdot_component_is_refused(command, tmp_path):
+    """dash's cd resolves `..` LOGICALLY (l/.. is the directory l sits in), the policy physically (l/.. is the
+    link target's parent), so `cd l/../..` would leave the workspace while the policy saw it stay inside."""
+    ws = _deep_link_workspace(tmp_path)
+    assert _violation("bash", {"command": command.format(RID=RID)}, ws) == "external"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs symlinks and /bin/sh")
+def test_a_read_after_cd_through_a_link_is_judged_from_the_physical_directory_the_kernel_reads(tmp_path):
+    """A read argument's `..` is resolved by the kernel from the PHYSICAL cwd, as the policy resolves it."""
+    import subprocess
+
+    ws = _deep_link_workspace(tmp_path)
+
+    def sh(command: str) -> str:
+        return subprocess.run(["/bin/sh", "-c", command], cwd=ws, capture_output=True, text=True).stdout
+
+    assert _violation("bash", {"command": f"cd intentions/{RID}; cat x.md"}, ws) is None
+    assert _violation("bash", {"command": "cd l; cat x.md"}, ws) is None
+    assert sh("cd l; cat x.md") == "root-file"
+    # `../x` after `cd l` is ws/intentions/x to the kernel, not ws/x: the physical base, as the policy has it.
+    assert sh("cd l; cat ../x") == "physical-parent"
+    # Still refused: from the workspace, another directory the shell may be in, `../x` leaves it.
+    assert _violation("bash", {"command": "cd l; cat ../x"}, ws) == "external"
+
+
 @pytest.mark.parametrize(
     "command",
     [
