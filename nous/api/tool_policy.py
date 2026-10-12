@@ -216,8 +216,32 @@ def internal_only_allowed(name: str, *, ctx: ExecutionContext, lineage_shell: bo
     return True
 
 
-def _write_path_allowed(ctx: ExecutionContext, tool_input: Mapping[str, Any], workspace_dir: str) -> bool:
-    """A write_file target is inside ``<workspace_dir>/intentions/<root_id>/`` once resolved.
+def lineage_write_dirs(ctx: ExecutionContext, workspace_dir: str, *, lineage_shell: bool) -> list[Path]:
+    """The resolved directories an internal_only turn may write into: the root's own
+    ``<workspace_dir>/intentions/<root_id>/`` when it has a root, and ``<workspace_dir>/claude-jobs/prompts/``
+    only with ``lineage_shell`` (a prompt file there is for ``runner.sh launch``, which only the lineage shell
+    can run). Shared by write_file (``_write_path_allowed``) and the lineage shell's redirections."""
+    workspace = Path(workspace_dir).resolve()
+    dirs: list[Path] = []
+    if ctx.root_intention_id is not None:
+        dirs.append(workspace / "intentions" / str(ctx.root_intention_id))
+    if lineage_shell:
+        dirs.append(workspace / "claude-jobs" / "prompts")
+    return dirs
+
+
+def write_path_refusal_hint(ctx: ExecutionContext, workspace_dir: str, *, lineage_shell: bool) -> str:
+    """Where write_file may write in this turn, appended to its ``write_path`` refusal."""
+    if ctx.root_intention_id is None:
+        return "write_file may not write in this turn: it has no root intention."
+    dirs = " or ".join(f"{d}/" for d in lineage_write_dirs(ctx, workspace_dir, lineage_shell=lineage_shell))
+    return f"write_file may only write under {dirs}."
+
+
+def _write_path_allowed(
+    ctx: ExecutionContext, tool_input: Mapping[str, Any], workspace_dir: str, *, lineage_shell: bool = False
+) -> bool:
+    """A write_file target is inside one of ``lineage_write_dirs`` once resolved.
 
     Resolves the way the tool does (``builtin_tools._validate_path``): relative to the
     workspace, symlinks and ``..`` followed. A lineage with no root id, or a call with
@@ -230,11 +254,11 @@ def _write_path_allowed(ctx: ExecutionContext, tool_input: Mapping[str, Any], wo
         return False
     try:
         workspace = Path(workspace_dir).resolve()
-        root_dir = workspace / "intentions" / str(ctx.root_intention_id)
+        dirs = lineage_write_dirs(ctx, workspace_dir, lineage_shell=lineage_shell)
         target = Path(path).resolve() if Path(path).is_absolute() else (workspace / path).resolve()
     except (OSError, ValueError):  # an unresolvable name
         return False
-    return target.is_relative_to(root_dir)
+    return any(target.is_relative_to(d) for d in dirs)
 
 
 def _under(path: str, dirs: list[Path]) -> bool:
@@ -485,9 +509,7 @@ def lineage_bash_allowed(ctx: ExecutionContext, command: str, *, workspace_dir: 
         return False
     workspace = Path(workspace_dir)
     jobs = workspace / "claude-jobs"
-    writable = [jobs / "prompts"]
-    if ctx.root_intention_id is not None:
-        writable.append(workspace / "intentions" / str(ctx.root_intention_id))
+    writable = lineage_write_dirs(ctx, workspace_dir, lineage_shell=True)  # bash is offered only with the shell
     root = workspace.resolve()
     cwds = [root]
     for words, targets, sources, op in commands:
@@ -526,14 +548,20 @@ def lineage_bash_allowed(ctx: ExecutionContext, command: str, *, workspace_dir: 
 
 
 def internal_only_call_violation(
-    ctx: ExecutionContext, name: str, tool_input: Mapping[str, Any], *, workspace_dir: str
+    ctx: ExecutionContext,
+    name: str,
+    tool_input: Mapping[str, Any],
+    *,
+    workspace_dir: str,
+    lineage_shell: bool = False,
 ) -> str | None:
     """The per-call rules of an internal_only turn, for a tool that WAS offered.
 
     ``"external"``: ``classify_side_effect`` rates the call external (or
     irreversible), such as a URL in run_python; for bash, the command is not on
     the lineage allowlist (``lineage_bash_allowed``). ``"write_path"``: write_file outside
-    its root's directory. ``"foreign_cancel"``: cancel_task with an id that is not a
+    ``lineage_write_dirs`` (``claude-jobs/prompts/`` only with ``lineage_shell``, i.e.
+    ``NOUS_F099_LINEAGE_SHELL``). ``"foreign_cancel"``: cancel_task with an id that is not a
     UUID. The cancel_task lineage check needs the target's row, so it lives in the
     handler (``tools.py``); this sync function only rejects what needs no read.
     """
@@ -544,7 +572,7 @@ def internal_only_call_violation(
         return None
     if classify_side_effect(name, dict(tool_input)) in ("external", "irreversible"):
         return "external"
-    if name == "write_file" and not _write_path_allowed(ctx, tool_input, workspace_dir):
+    if name == "write_file" and not _write_path_allowed(ctx, tool_input, workspace_dir, lineage_shell=lineage_shell):
         return "write_path"
     if name == "cancel_task":
         try:

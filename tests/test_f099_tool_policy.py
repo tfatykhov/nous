@@ -203,6 +203,89 @@ def test_write_file_through_a_symlink_that_leaves_the_root_dir_is_refused(tmp_pa
     assert _write(tmp_path, f"intentions/{RID}/link/x.md") == "write_path"
 
 
+# -- write_file under claude-jobs/prompts/ (friction scan F3) -------------------
+# prompts/ is writable iff the lineage can launch, i.e. with NOUS_F099_LINEAGE_SHELL. Every test passes the flag
+# explicitly; the base has no such keyword.
+
+
+def _write_with(tmp_path, path, *, lineage_shell, ctx=None):
+    return internal_only_call_violation(
+        ctx or _internal(),
+        "write_file",
+        {"path": path, "content": "x"},
+        workspace_dir=str(tmp_path),
+        lineage_shell=lineage_shell,
+    )
+
+
+def test_write_file_allowed_under_claude_jobs_prompts(tmp_path):
+    for path in (
+        "claude-jobs/prompts/task.md",
+        "claude-jobs/prompts/deep/er/task.md",
+        str(tmp_path / "claude-jobs" / "prompts" / "abs.md"),
+        f"intentions/{RID}/notes.md",  # PIN: the root's own dir stays writable
+    ):
+        assert _write_with(tmp_path, path, lineage_shell=True) is None, path
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "claude-jobs/prompts/../runner.sh",
+        "claude-jobs/runner.sh",
+        "{W}/claude-jobs/runner.sh",
+        "claude-jobs/.claude-home/settings.json",
+        "claude-jobs/prompts/../.claude-home/settings.json",
+        "claude-jobs/prompts-sibling/task.md",
+        "claude-jobs",
+        "claude-jobs/prompts/a\x00b",
+    ],
+)
+def test_write_file_prompts_dir_rejects_escapes(tmp_path, path):  # PIN: the base refuses these too
+    assert _write_with(tmp_path, path.format(W=tmp_path), lineage_shell=True) == "write_path"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs symlinks")
+def test_write_file_prompts_dir_rejects_a_symlink_out(tmp_path):  # PIN: the base refuses it too
+    prompts = tmp_path / "claude-jobs" / "prompts"
+    prompts.mkdir(parents=True)
+    (prompts / "link").symlink_to(tmp_path / "claude-jobs")
+    assert _write_with(tmp_path, "claude-jobs/prompts/link/runner.sh", lineage_shell=True) == "write_path"
+
+
+def test_write_file_into_prompts_is_refused_with_the_lineage_shell_off(tmp_path):  # PIN: the base refuses it too
+    assert _write_with(tmp_path, "claude-jobs/prompts/task.md", lineage_shell=False) == "write_path"
+    assert _write_with(tmp_path, f"intentions/{RID}/notes.md", lineage_shell=False) is None
+
+
+def test_write_file_still_refused_without_root(tmp_path):  # PIN: the base refuses it too
+    damaged = _internal(root_intention_id=None, intention_id=None)
+    assert _write_with(tmp_path, "claude-jobs/prompts/task.md", lineage_shell=True, ctx=damaged) == "write_path"
+
+
+def test_lineage_write_dirs_are_resolved_and_follow_the_flag(tmp_path):
+    from nous.api.tool_policy import lineage_write_dirs
+
+    ws = tmp_path.resolve()
+    root_dir, prompts = ws / "intentions" / str(RID), ws / "claude-jobs" / "prompts"
+    assert lineage_write_dirs(_internal(), str(tmp_path), lineage_shell=True) == [root_dir, prompts]
+    assert lineage_write_dirs(_internal(), str(tmp_path), lineage_shell=False) == [root_dir]
+    damaged = _internal(root_intention_id=None, intention_id=None)
+    assert lineage_write_dirs(damaged, str(tmp_path), lineage_shell=True) == [prompts]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a bash redirect target must start with /")
+def test_writable_dirs_shared_with_bash(tmp_path):
+    """write_file and the lineage shell's redirections accept the same directories, and refuse the same sibling."""
+    from nous.api.tool_policy import lineage_write_dirs
+
+    for d in lineage_write_dirs(_internal(), str(tmp_path), lineage_shell=True):
+        assert _write_with(tmp_path, f"{d}/x.md", lineage_shell=True) is None
+        assert _shell(f"echo x > {d}/x.md", tmp_path) is None
+        assert _write_with(tmp_path, f"{d}-sibling/x.md", lineage_shell=True) == "write_path"
+        assert _shell(f"echo x > {d}-sibling/x.md", tmp_path) == "external"
+
+
 def test_cancel_task_needs_a_uuid_here_and_the_lineage_check_is_the_handlers(tmp_path):
     assert _violation("cancel_task", {"task_id": str(uuid.uuid4())}, tmp_path) is None
     for tool_input in ({}, {"task_id": "not-a-uuid"}, {"task_id": None}, {"task_id": 12}):

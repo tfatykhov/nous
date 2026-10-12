@@ -183,6 +183,27 @@ def test_a_lineage_with_no_root_may_not_write_a_file(tmp_path):
     assert refusal is not None and "(write_path)" in refusal.text
 
 
+@pytest.mark.parametrize("lineage_shell", [True, False])
+def test_a_write_path_refusal_names_the_directories_write_file_may_use(tmp_path, lineage_shell):
+    """claude-jobs/prompts/ is writable, and named, iff the lineage shell is on (the lineage can launch)."""
+    r, _ = _runner(OFFERED, workspace_dir=str(tmp_path), f099_lineage_shell=lineage_shell)
+    ws = tmp_path.resolve()
+    refusal = _auth(r, _internal(), "write_file", OFFERED, {"path": "notes.md", "content": "x"})
+    assert refusal is not None and refusal.code == "internal_only" and "(write_path)" in refusal.text
+    assert f"{ws / 'intentions' / str(RID)}/" in refusal.text
+    assert (f"{ws / 'claude-jobs' / 'prompts'}/" in refusal.text) is lineage_shell
+    prompts = {"path": "claude-jobs/prompts/task.md", "content": "x"}
+    assert (_auth(r, _internal(), "write_file", OFFERED, prompts) is None) is lineage_shell
+
+
+def test_a_write_path_refusal_without_a_root_names_no_directory(tmp_path):
+    r, _ = _runner(OFFERED, workspace_dir=str(tmp_path), f099_lineage_shell=True)
+    damaged = ExecutionContext(kind="subtask", session_id="s1", authority="internal_only")
+    refusal = _auth(r, damaged, "write_file", OFFERED, {"path": "claude-jobs/prompts/task.md", "content": "x"})
+    assert refusal is not None and refusal.code == "internal_only" and "(write_path)" in refusal.text
+    assert "no root intention" in refusal.text and "claude-jobs" not in refusal.text
+
+
 @pytest.mark.parametrize(("offered_mode", "policy_mode"), MODES)
 def test_a_cancel_task_whose_id_is_not_a_uuid_is_refused_in_every_mode(offered_mode, policy_mode):  # PIN
     """The per-call rule's foreign_cancel, through the runner's strict block (not the unit alone)."""

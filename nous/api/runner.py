@@ -545,7 +545,11 @@ class AgentRunner:
                 strict = "undeclared"
             elif ctx.authority == AUTHORITY_INTERNAL:
                 strict = tool_policy.internal_only_call_violation(
-                    ctx, tool_name, tool_input, workspace_dir=self._settings.workspace_dir
+                    ctx,
+                    tool_name,
+                    tool_input,
+                    workspace_dir=self._settings.workspace_dir,
+                    lineage_shell=self._settings.f099_lineage_shell,
                 )
             if strict is not None:
                 scope = "internal_only" if ctx.authority == AUTHORITY_INTERNAL else ctx.kind
@@ -563,7 +567,12 @@ class AgentRunner:
                     },
                     session_id=session_id,
                 )
-                return Refusal(f"Tool error: '{tool_name}' is not allowed in this turn ({strict}).", "internal_only")
+                text = f"Tool error: '{tool_name}' is not allowed in this turn ({strict})."
+                if strict == "write_path":
+                    text += " " + tool_policy.write_path_refusal_hint(
+                        ctx, self._settings.workspace_dir, lineage_shell=self._settings.f099_lineage_shell
+                    )
+                return Refusal(text, "internal_only")
 
         offered_mode = self._settings.tool_offered_set_enforcement_mode
         if offered_mode != "off" and tool_name not in offered_names:
