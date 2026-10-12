@@ -1242,6 +1242,9 @@ class Settings(BaseSettings):
     continuation_turn_timeout_seconds: int = Field(default=780, ge=60)
     continuation_max_attempts: int = Field(default=3, ge=1)
     intention_proposal_ttl_hours: float = Field(default=24, gt=0)
+    # F099 Phase 3a: the owner's proposal and question cards on the companion (Approve / Reject, a free-text
+    # answer). Pushed beside the Telegram message, never instead of it. Needs continuation_enabled and a2ui_enabled.
+    intention_cards_enabled: bool = False
     # F099 lineage shell: offer bash to internal_only turns (continuations and the subtasks and
     # DAG nodes of a lineage), each call held to tool_policy.lineage_bash_allowed (runner.sh,
     # read-only gh and plain reads). Off: bash stays on the internal_only denylist (as before).
@@ -3131,6 +3134,17 @@ class Settings(BaseSettings):
                 "NOUS_CONTINUATION_ENABLED=true needs NOUS_INTENTIONS_ENABLED=true; continuation stays OFF."
             )
             object.__setattr__(self, "continuation_enabled", False)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_intention_cards_dependency(self) -> "Settings":
+        """F099 Phase 3a: the cards are companion surfaces of a running continuation."""
+        if self.intention_cards_enabled and not (self.continuation_enabled and self.a2ui_enabled):
+            logging.getLogger(__name__).warning(
+                "NOUS_INTENTION_CARDS_ENABLED=true needs NOUS_CONTINUATION_ENABLED=true and NOUS_A2UI_ENABLED=true; "
+                "the intention cards stay OFF."
+            )
+            object.__setattr__(self, "intention_cards_enabled", False)
         return self
 
     @model_validator(mode="after")

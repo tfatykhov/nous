@@ -165,6 +165,16 @@ def enabled(settings: Any) -> bool:
     return getattr(settings, "continuation_enabled", False) is True and intentions.enabled(settings)
 
 
+def cards_enabled(settings: Any) -> bool:
+    """NOUS_INTENTION_CARDS_ENABLED, read so that a mocked Settings counts as off. Re-checks both prerequisites for a
+    settings object that bypassed the validator (the main.py flag gate forces ``continuation_enabled`` off after it)."""
+    return (
+        enabled(settings)
+        and getattr(settings, "intention_cards_enabled", False) is True
+        and getattr(settings, "a2ui_enabled", False) is True
+    )
+
+
 def close_reason_for(settings: Any) -> str:
     """The close reason of a ``none``, ``remember`` or ``report`` intention (ruling 2):
     ``delivered`` with the flag on, ``legacy`` (Phase 1's) otherwise."""
