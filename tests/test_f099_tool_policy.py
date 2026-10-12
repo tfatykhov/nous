@@ -510,6 +510,7 @@ def test_the_lineage_shell_refuses_a_read_outside_the_workspace_or_into_a_hidden
         "jq -n --argjson x 1 '$x'",
         "jq --rawfile t intentions/{RID}/t.txt -n '$t'",
         "jq -nr '1'",
+        "jq -R . intentions/{RID}/log.txt",
         "grep -n error intentions/{RID}/log.txt",
         "grep -e .ssh -n intentions/{RID}/log.txt",
         "grep -A 3 -i error intentions/{RID}/log.txt",

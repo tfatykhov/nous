@@ -160,7 +160,7 @@ _READ_ARG_ROLES: Mapping[str, _ArgRoles] = MappingProxyType(
             closed=True,
         ),
         "jq": _ArgRoles(
-            dict.fromkeys("nrscejaSCMhV", "flag"),
+            dict.fromkeys("nrRscejaSCMhV", "flag"),
             {
                 **dict.fromkeys(_JQ_FLAG_LONG.split(), "flag"),
                 "--indent": "value",
