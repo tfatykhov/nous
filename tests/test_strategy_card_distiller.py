@@ -1083,6 +1083,30 @@ async def test_make_unique_name_appends_suffix_on_collision(mock_brain, mock_hea
     assert result == "x" * 74 + " (2)", f"Expected one space before the suffix, got {result!r}"
 
 
+@pytest.mark.asyncio
+async def test_make_unique_name_keeps_searching_past_twenty(mock_brain, mock_heart):
+    """#667: with the name and (2)..(20) taken, the next free suffix (21) comes
+    back; a bounded search returned the taken (20) unchecked. A three-digit
+    suffix still fits the 80-character name."""
+    distiller = StrategyCardDistiller(
+        brain=mock_brain,
+        heart=mock_heart,
+        settings=_make_settings(),
+        bus=None,
+        llm_client=None,
+    )
+    taken = MagicMock(scalar_one_or_none=MagicMock(return_value=uuid4()))
+    free = MagicMock(scalar_one_or_none=MagicMock(return_value=None))
+    session = MagicMock()
+
+    session.execute = AsyncMock(side_effect=[taken] * 20 + [free])
+    assert await distiller._make_unique_name("Validate Before Deploying", session) == "Validate Before Deploying (21)"
+
+    session.execute = AsyncMock(side_effect=[taken] * 100 + [free])
+    result = await distiller._make_unique_name("x" * 80, session)
+    assert result == "x" * 74 + " (101)", f"Expected an 80-character name, got {result!r}"
+
+
 # ---------------------------------------------------------------------------
 # 28. test_update_body_propagates_kind (Finding P2 #1 — procedures.py:163)
 # ---------------------------------------------------------------------------

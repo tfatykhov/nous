@@ -30,6 +30,10 @@
   // that did nothing. The server's message ("✓ Resolved — …") is shown
   // inline under the button.
   let notice = $state('');
+  // Siblings share a parent (ancestors ends with this button's own id), and
+  // in a template, a scope. Only the latest successful press in the group
+  // keeps its notice visible.
+  const noticeGroup = $derived(`${surfaceId}|${ancestors.at(-2) ?? ''}|${scope?.base ?? ''}`);
 
   const ctx = $derived({ dataModel: store.surfaces[surfaceId]?.dataModel ?? {}, scope });
   const failures = $derived(runChecks(comp.checks as CheckRule[] | undefined, ctx));
@@ -59,7 +63,10 @@
     try {
       const result = await transport.postAction(surfaceId, action.event.name, comp.id, resolved);
       if (!result.ok) error = result.message || 'action failed';
-      else notice = result.message || 'Done ✓';
+      else {
+        notice = result.message || 'Done ✓';
+        store.noticeOwner[noticeGroup] = comp.id;
+      }
     } finally {
       busy = false;
     }
@@ -79,7 +86,7 @@
   </button>
   {#if error}
     <span class="err" role="alert">{error}</span>
-  {:else if notice}
+  {:else if notice && store.noticeOwner[noticeGroup] === comp.id}
     <span class="ok" role="status">{notice}</span>
   {/if}
 </span>

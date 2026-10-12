@@ -77,6 +77,10 @@ export class SurfaceStore {
    * gone. Identity, not `at`: stamps are second-precision, and an action
    * finishing plus a retap can land in the same server second. */
   stampSeen = $state<Record<string, string>>({});
+  /** Which button of each group of sibling buttons (keyed by ButtonView)
+   * shows its success notice: only the latest press, so Acknowledge then
+   * Resolve on one finding does not leave two contradictory notices. */
+  noticeOwner = $state<Record<string, string>>({});
   /** Highest seq seen — the resume point, NOT the dedupe test. */
   lastSeq = 0;
   /** Membership dedupe: seqs can legitimately arrive OUT OF ORDER (two
@@ -357,6 +361,7 @@ export class SurfaceStore {
     this.doneAt = {};
     this.tappedAt = {};
     this.stampSeen = {};
+    this.noticeOwner = {};
   }
 
   /** A server-forced resync (control: resync) or reconnect: the surfaces

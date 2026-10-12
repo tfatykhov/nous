@@ -571,9 +571,12 @@ class StrategyCardDistiller:
 
         from nous.storage.models import Procedure
 
-        base = name[: _MAX_NAME_CHARS - 5].rstrip()  # reserve room for ' (NN)' suffix
         candidate = name
-        for suffix_n in range(2, 21):
+        suffix_n = 1
+        # Unbounded (#667): a capped search handed back its last, still-taken
+        # candidate, so every insert retry hit the unique index and the
+        # decision never got its card.
+        while True:
             result = await session.execute(
                 select(Procedure.id)
                 .where(Procedure.agent_id == self._brain.agent_id)
@@ -583,10 +586,11 @@ class StrategyCardDistiller:
             )
             if result.scalar_one_or_none() is None:
                 return candidate
-            candidate = f"{base} ({suffix_n})"
-        # Exhausted retries; return the last candidate and let the store call
-        # raise the constraint error rather than silently losing the card.
-        return candidate
+            suffix_n += 1
+            suffix = f" ({suffix_n})"
+            # Reserve room for at least ' (NN)', more once the suffix is wider.
+            base = name[: _MAX_NAME_CHARS - max(5, len(suffix))].rstrip()
+            candidate = f"{base}{suffix}"
 
     async def shutdown(self) -> None:
         """Await all in-flight distillation tasks before process shutdown.

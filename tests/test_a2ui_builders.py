@@ -553,3 +553,14 @@ def test_ack_status_does_not_promise_auto_close_for_agent_findings() -> None:
     assert "auto-close" in status_after("acknowledge", None)
     assert status_after("resolve", "agent:x:1") == status_after("resolve", "disk_usage")
     assert "agent:" in LEGEND
+
+
+def test_dismiss_does_not_promise_tuning_for_agent_findings() -> None:
+    """#701: HeartbeatTuner only reads registry checks, so dismissing an
+    agent-raised finding tunes nothing; neither the status line nor the
+    legend may claim it does for those items."""
+    from nous.a2ui.builders.heartbeat_findings import LEGEND, status_after
+
+    assert "counted against" not in status_after("dismiss", "agent:facts:1a2b3c4d")
+    assert "counted against" in status_after("dismiss", "disk_usage")
+    assert "have no check to tune" in LEGEND

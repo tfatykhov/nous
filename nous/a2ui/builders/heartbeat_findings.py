@@ -23,6 +23,8 @@ LEGEND = (
     "useful alert.\n"
     "- **Dismiss** — noise. Closes it now and counts against that check, so "
     "the heartbeat learns to raise alerts like this less often.\n"
+    "Items Nous raised itself (check `agent:…`) have no check to tune: "
+    "Resolve and Dismiss only close them.\n"
     "\nThe card closes by itself once every item is resolved or dismissed; "
     "**Close card** hides it sooner without changing any finding."
 )
@@ -41,6 +43,8 @@ STATUS_AFTER = {
 # check ran successfully this cycle, and no runner check owns these.
 AGENT_CHECK_PREFIX = "agent:"
 STATUS_AFTER_AGENT_ACK = "✓ Acknowledged — still tracked; Resolve or Dismiss it when done"
+# Nor are they tuned: HeartbeatTuner only reads the outcomes of registry checks.
+STATUS_AFTER_AGENT_DISMISS = "✓ Dismissed — closed as noise"
 
 
 # Verbs that end a finding's life on the card. Acknowledge is NOT terminal:
@@ -65,9 +69,12 @@ def fully_triaged(findings: Any) -> bool:
 
 
 def status_after(verb: str, check_name: str | None) -> str:
-    """Status line for a finding after ``verb``, honest about auto-close."""
-    if verb == "acknowledge" and (check_name or "").startswith(AGENT_CHECK_PREFIX):
-        return STATUS_AFTER_AGENT_ACK
+    """Status line for a finding after ``verb``, honest about auto-close and tuning."""
+    if (check_name or "").startswith(AGENT_CHECK_PREFIX):
+        if verb == "acknowledge":
+            return STATUS_AFTER_AGENT_ACK
+        if verb == "dismiss":
+            return STATUS_AFTER_AGENT_DISMISS
     return STATUS_AFTER.get(verb, f"{verb}d")
 
 
