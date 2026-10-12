@@ -12,10 +12,17 @@ autonomy, not a strategy: the card distiller and the procedure learner ignore it
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from dataclasses import dataclass, field
+from typing import Any
 from uuid import UUID
 
+from sqlalchemy import and_, exists, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
+
 from nous.brain import continuation
+from nous.storage.models import Decision, Intention, IntentionArrival, IntentionProposal
 
 logger = logging.getLogger(__name__)
 
@@ -100,3 +107,172 @@ def grade_for(arrival_id: UUID, ev: RootEvidence) -> Grade | None:
             if last.decision == "drop":  # row 9
                 return Grade("partial", f"chain dropped after {_after(n)}")
     return None
+
+
+def _candidates(agent_id: str, limit: int):
+    """Arrivals with a Brain record, not graded by anybody, whose rows already hold a signal (S3). The signal
+    predicate is in the WHERE so an open root with nothing to say cannot take the page's slots; oldest first."""
+    root = aliased(Intention)
+    open_row = aliased(Intention)
+    staged = aliased(IntentionProposal)
+    return (
+        select(IntentionArrival.id, IntentionArrival.root_id, IntentionArrival.decision_record_id)
+        .join(
+            Decision,
+            and_(Decision.id == IntentionArrival.decision_record_id, Decision.agent_id == IntentionArrival.agent_id),
+        )
+        .join(root, and_(root.agent_id == IntentionArrival.agent_id, root.id == IntentionArrival.root_id))
+        .where(
+            IntentionArrival.agent_id == agent_id,
+            or_(Decision.outcome.is_(None), Decision.outcome.in_(REGRADED_OUTCOMES)),
+            or_(
+                root.root_cancelled_at.is_not(None),
+                root.root_expired_at.is_not(None),
+                ~exists().where(
+                    open_row.agent_id == agent_id,
+                    open_row.root_id == IntentionArrival.root_id,
+                    open_row.state.in_(continuation.OPEN_STATES),
+                ),
+                exists().where(
+                    staged.agent_id == agent_id,
+                    staged.arrival_id == IntentionArrival.id,
+                    staged.state.in_(PROPOSAL_SIGNAL_STATES),
+                ),
+            ),
+        )
+        .order_by(IntentionArrival.decided_at, IntentionArrival.id)
+        .limit(limit)
+    )
+
+
+async def _load_evidence(session: AsyncSession, agent_id: str, root_ids: list[UUID]) -> dict[UUID, RootEvidence]:
+    """One bulk read per fact, for every root of the page."""
+    markers = {
+        row.id: row
+        for row in (
+            await session.execute(
+                select(Intention.id, Intention.root_cancelled_at, Intention.root_expired_at).where(
+                    Intention.agent_id == agent_id, Intention.id.in_(root_ids)
+                )
+            )
+        ).all()
+    }
+    open_roots = set(
+        (
+            await session.execute(
+                select(Intention.root_id)
+                .where(
+                    Intention.agent_id == agent_id,
+                    Intention.root_id.in_(root_ids),
+                    Intention.state.in_(continuation.OPEN_STATES),
+                )
+                .distinct()
+            )
+        ).scalars()
+    )
+    ttl_roots = set(
+        (
+            await session.execute(
+                select(Intention.root_id)
+                .where(
+                    Intention.agent_id == agent_id,
+                    Intention.root_id.in_(root_ids),
+                    Intention.state == continuation.STATE_EXPIRED,
+                )
+                .distinct()
+            )
+        ).scalars()
+    )
+    lasts = {
+        row.root_id: LastArrival(row.n, row.decision, row.outcome, row.gate_reason)
+        for row in (
+            await session.execute(
+                select(
+                    IntentionArrival.root_id,
+                    IntentionArrival.n,
+                    IntentionArrival.decision,
+                    IntentionArrival.outcome,
+                    IntentionArrival.gate_reason,
+                )
+                .where(IntentionArrival.agent_id == agent_id, IntentionArrival.root_id.in_(root_ids))
+                .distinct(IntentionArrival.root_id)
+                .order_by(IntentionArrival.root_id, IntentionArrival.n.desc())
+            )
+        ).all()
+    }
+    proposals: dict[UUID, dict[UUID, list[tuple[UUID, str, str | None]]]] = defaultdict(lambda: defaultdict(list))
+    for row in (
+        await session.execute(
+            select(
+                IntentionProposal.root_id,
+                IntentionProposal.arrival_id,
+                IntentionProposal.id,
+                IntentionProposal.state,
+                IntentionProposal.decided_by,
+            ).where(
+                IntentionProposal.agent_id == agent_id,
+                IntentionProposal.root_id.in_(root_ids),
+                IntentionProposal.arrival_id.is_not(None),
+                IntentionProposal.state.in_(PROPOSAL_SIGNAL_STATES),
+            )
+        )
+    ).all():
+        proposals[row.root_id][row.arrival_id].append((row.id, row.state, row.decided_by))
+    evidence: dict[UUID, RootEvidence] = {}
+    for root_id in root_ids:
+        mark = markers.get(root_id)
+        cancelled = mark is not None and mark.root_cancelled_at is not None
+        expired = mark is not None and mark.root_expired_at is not None
+        evidence[root_id] = RootEvidence(
+            cancelled=cancelled,
+            expired=expired,
+            ttl=root_id in ttl_roots,
+            closed=not cancelled and not expired and root_id not in open_roots,
+            last=lasts.get(root_id),
+            proposals=dict(proposals.get(root_id, {})),
+        )
+    return evidence
+
+
+async def grade_arrivals(
+    session: AsyncSession, agent_id: str, *, brain: Any, settings: Any, limit: int = GRADE_BATCH
+) -> int:
+    """Grade up to ``limit`` arrival decisions whose rows now hold a signal. Returns how many reviews it wrote.
+
+    ``session`` only reads. Each review is its own transaction (``Brain.review`` with no session, which also emits
+    ``decision_reviewed`` after its commit), written with ``preserve_graded=True``: a ``success``, ``partial`` or
+    ``failure`` written by anyone, the owner in an interactive turn included, is never replaced, while ``pending``
+    and ``noise`` are (that is the repair). ``only_if_unreviewed`` is NOT used: it would leave every background
+    ``noise`` row as it is. A review that lands between the read and the write raises ``ValueError`` (a graded row,
+    or ``DecisionNotFound``, its subclass): that row is skipped and the pass goes on. Idempotent: a graded row is
+    no longer a candidate. Does nothing with the flag off or without a Brain."""
+    if brain is None or not continuation.calibration_enabled(settings):
+        return 0
+    rows = (await session.execute(_candidates(agent_id, limit))).all()
+    if not rows:
+        return 0
+    evidence = await _load_evidence(session, agent_id, sorted({row.root_id for row in rows}))
+    written = 0
+    for row in rows:
+        grade = grade_for(row.id, evidence[row.root_id])
+        if grade is None:
+            continue
+        try:
+            await brain.review(
+                row.decision_record_id,
+                outcome=grade.outcome,
+                result=grade.result,
+                reviewer=INTENTION_REVIEWER,
+                preserve_graded=True,
+            )
+        except ValueError:  # graded since the read, or deleted: it stands
+            logger.info("F099: arrival decision %s was settled by somebody else; left as it is", row.decision_record_id)
+            continue
+        except Exception:
+            logger.warning("F099: could not grade arrival decision %s", row.decision_record_id, exc_info=True)
+            continue
+        written += 1
+    if written == 0 and len(rows) >= limit:
+        # Every candidate of a full page was skipped: a page that cannot move. Visible, never silent.
+        logger.warning("F099: a calibration pass of %d candidates graded none; the page may be stuck", len(rows))
+    return written
