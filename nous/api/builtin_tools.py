@@ -32,6 +32,11 @@ logger = logging.getLogger(__name__)
 
 # Limits
 _MAX_BASH_TIMEOUT = 300  # seconds
+# bash's timeout when the call names none. A person or an agent waits on a foreground
+# call, and on a companion action (agent_action); every other background turn is bounded
+# by its own subtask, DAG node or check timeout, so it can wait longer.
+_DEFAULT_BASH_TIMEOUT = 30  # seconds
+_BACKGROUND_BASH_TIMEOUT = 120  # seconds
 _MAX_OUTPUT_CHARS = 100 * 1024  # 100KB
 _MAX_FILE_SIZE = 1 * 1024 * 1024  # 1MB
 _UNDO_WRITE_LOCK_WAIT_SECONDS = 5.0  # write_file's wait for its path lock when the undo journal takes it
@@ -94,24 +99,29 @@ def _validate_path(path_str: str, workspace_dir: str) -> Path:
 
 async def bash_tool(
     command: str,
-    timeout: int = 30,
+    timeout: int | None = None,
     *,
     _workspace_dir: str = "/tmp/nous-workspace",
     _lineage: bool = False,
+    _is_background: bool = False,
 ) -> dict[str, Any]:
     """Execute a shell command in the workspace directory.
 
     Args:
         command: Shell command to execute
-        timeout: Timeout in seconds (default 30, max 300)
+        timeout: Timeout in seconds (max 300). None: 30, or 120 in a
+            background turn
         _workspace_dir: Internal param set by registration closure
         _lineage: An internal_only (F099 lineage) call, set by dispatch: the
             command gets only the _LINEAGE_BASH_ENV variables
+        _is_background: Set by dispatch; picks the default timeout
 
     Returns:
         MCP-format response with stdout + stderr
     """
     try:
+        if timeout is None:
+            timeout = _BACKGROUND_BASH_TIMEOUT if _is_background else _DEFAULT_BASH_TIMEOUT
         # Clamp timeout
         effective_timeout = max(1, min(timeout, _MAX_BASH_TIMEOUT))
 
@@ -134,7 +144,16 @@ async def bash_tool(
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=effective_timeout)
         except TimeoutError:
             await kill_process_group(proc)
-            return _tool_error(f"Command timed out after {effective_timeout}s.\nCommand: {command}")
+            # The first sentence is matched as is (ledger_store._BASH_TIMEOUT,
+            # compaction, monitor): add to it, never reword it.
+            if effective_timeout < _MAX_BASH_TIMEOUT:
+                hint = f"Retry with timeout={min(2 * effective_timeout, _MAX_BASH_TIMEOUT)} (max {_MAX_BASH_TIMEOUT})."
+            else:
+                hint = (
+                    f"{_MAX_BASH_TIMEOUT}s is the longest a call can wait: run the command detached "
+                    "(nohup ... > out.log 2>&1 &) and poll its output in later calls, or split it into shorter steps."
+                )
+            return _tool_error(f"Command timed out after {effective_timeout}s. {hint}\nCommand: {command}")
         except asyncio.CancelledError:
             # The calling turn was cancelled (e.g. its heartbeat check was
             # disabled by the DAG mid-run): don't leave the command running.
@@ -832,8 +851,10 @@ _BASH_SCHEMA: dict[str, Any] = {
         "command": {"type": "string", "description": "Shell command to execute"},
         "timeout": {
             "type": "integer",
-            "description": "Timeout in seconds (default 30, max 300)",
-            "default": 30,
+            "description": (
+                f"Timeout in seconds (max {_MAX_BASH_TIMEOUT}). Omitted: {_DEFAULT_BASH_TIMEOUT} in a "
+                f"conversation, {_BACKGROUND_BASH_TIMEOUT} in a background task"
+            ),
             "minimum": 1,
             "maximum": 300,
         },
@@ -890,8 +911,12 @@ def register_builtin_tools(dispatcher: ToolDispatcher, settings: Settings) -> No
     """
     workspace = settings.workspace_dir
 
-    async def _bash(command: str, timeout: int = 30, _lineage: bool = False) -> dict[str, Any]:
-        return await bash_tool(command, timeout, _workspace_dir=workspace, _lineage=_lineage)
+    async def _bash(
+        command: str, timeout: int | None = None, _lineage: bool = False, _is_background: bool = False
+    ) -> dict[str, Any]:
+        return await bash_tool(
+            command, timeout, _workspace_dir=workspace, _lineage=_lineage, _is_background=_is_background
+        )
 
     async def _read_file(path: str, offset: int = 0, limit: int = 0) -> dict[str, Any]:
         return await read_file_tool(path, offset, limit, _workspace_dir=workspace)

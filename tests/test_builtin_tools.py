@@ -157,6 +157,110 @@ class TestBashTool:
         assert workspace.exists()
 
 
+class TestBashTimeouts:
+    """The default timeout follows the turn, and a timeout says what to retry with.
+
+    The calls go through ToolDispatcher.dispatch to the registered bash tool.
+    The constants are patched to 1s so a timeout is quick; the other one is
+    set far above the command, so only the one the turn picks can fire.
+    """
+
+    SLOW = f'{sys.executable} -c "import time; time.sleep(3)"'
+
+    @staticmethod
+    def _dispatcher(tmp_path):
+        from types import SimpleNamespace
+
+        from nous.api.builtin_tools import register_builtin_tools
+        from nous.api.tools import ToolDispatcher
+
+        d = ToolDispatcher()
+        register_builtin_tools(d, SimpleNamespace(workspace_dir=str(tmp_path / "ws")))
+        return d
+
+    @staticmethod
+    def _defaults(monkeypatch, *, foreground, background):
+        monkeypatch.setattr("nous.api.builtin_tools._DEFAULT_BASH_TIMEOUT", foreground, raising=False)
+        monkeypatch.setattr("nous.api.builtin_tools._BACKGROUND_BASH_TIMEOUT", background, raising=False)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kind", ["interactive", "mcp", "agent_action"])
+    async def test_foreground_default_stays_30(self, tmp_path, monkeypatch, kind):
+        """A person or an agent waits on these turns, a companion tap (agent_action) too."""
+        from nous.api.execution_context import ExecutionContext
+
+        self._defaults(monkeypatch, foreground=1, background=60)
+        text, is_error = await self._dispatcher(tmp_path).dispatch(
+            "bash", {"command": self.SLOW}, context=ExecutionContext(kind=kind)
+        )
+        assert is_error and text.startswith("Command timed out after 1s."), text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kind", ["subtask", "dag_node", "scheduled", "heartbeat_check"])
+    async def test_background_default_timeout_is_120(self, tmp_path, monkeypatch, kind):
+        from nous.api.execution_context import ExecutionContext
+
+        self._defaults(monkeypatch, foreground=60, background=1)
+        text, is_error = await self._dispatcher(tmp_path).dispatch(
+            "bash", {"command": self.SLOW}, context=ExecutionContext(kind=kind)
+        )
+        assert is_error and text.startswith("Command timed out after 1s."), text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("kind", "sent", "foreground", "background"), [("interactive", True, 1, 60), ("dag_node", False, 60, 1)]
+    )
+    async def test_model_sent_is_background_is_stripped(
+        self, tmp_path, monkeypatch, kind, sent, foreground, background
+    ):
+        """Only dispatch sets _is_background: the value the model sent is dropped."""
+        from nous.api.execution_context import ExecutionContext
+
+        self._defaults(monkeypatch, foreground=foreground, background=background)
+        text, is_error = await self._dispatcher(tmp_path).dispatch(
+            "bash", {"command": self.SLOW, "_is_background": sent}, context=ExecutionContext(kind=kind)
+        )
+        assert is_error and text.startswith("Command timed out after 1s."), text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("sent", "effective"), [(1, 1), (0, 1)])
+    async def test_explicit_timeout_honoured_in_background(self, tmp_path, monkeypatch, sent, effective):
+        """Parity pin: green before this change too. An explicit timeout wins
+        over the background default, and is still clamped to 1..300."""
+        from nous.api.execution_context import ExecutionContext
+
+        self._defaults(monkeypatch, foreground=60, background=60)
+        text, is_error = await self._dispatcher(tmp_path).dispatch(
+            "bash", {"command": self.SLOW, "timeout": sent}, context=ExecutionContext(kind="dag_node")
+        )
+        assert is_error and text.startswith(f"Command timed out after {effective}s."), text
+
+    @pytest.mark.asyncio
+    async def test_timeout_error_names_retry_value(self, tmp_path, monkeypatch):
+        from nous.cognitive.ledger_store import _BASH_TIMEOUT
+
+        result = await bash_tool(command=self.SLOW, timeout=1, _workspace_dir=str(tmp_path))
+        text = _extract_text(result)
+        assert text.startswith("Command timed out after 1s. Retry with timeout=2 (max 300).\nCommand: "), text
+        assert _BASH_TIMEOUT.match(text)
+
+        # At the cap a longer timeout does not exist: detach and poll, or split.
+        monkeypatch.setattr("nous.api.builtin_tools._MAX_BASH_TIMEOUT", 1)
+        text = _extract_text(await bash_tool(command=self.SLOW, timeout=1, _workspace_dir=str(tmp_path)))
+        assert text.startswith("Command timed out after 1s. "), text
+        assert "Retry with" not in text and "nohup" in text and "split" in text, text
+        assert _BASH_TIMEOUT.match(text)
+
+    def test_schema_states_both_defaults(self):
+        """The schema gives no single default: it would tell a background turn 30."""
+        from nous.api import builtin_tools
+
+        assert (builtin_tools._DEFAULT_BASH_TIMEOUT, builtin_tools._BACKGROUND_BASH_TIMEOUT) == (30, 120)
+        prop = builtin_tools._BASH_SCHEMA["properties"]["timeout"]
+        assert "default" not in prop
+        assert "30" in prop["description"] and "120" in prop["description"], prop["description"]
+
+
 # ---------------------------------------------------------------------------
 # read_file_tool tests
 # ---------------------------------------------------------------------------

@@ -334,8 +334,11 @@ class ToolDispatcher:
     """
 
     # Tools that read the injected ``_is_background`` flag (#541/#642 decision
-    # resolution; F092.1 compose_surface origin). One set for every consumer.
-    _BACKGROUND_AWARE_TOOLS: frozenset[str] = frozenset({"resolve_decision", "resolve_decisions", "compose_surface"})
+    # resolution; F092.1 compose_surface origin; bash's default timeout). One
+    # set for every consumer.
+    _BACKGROUND_AWARE_TOOLS: frozenset[str] = frozenset(
+        {"resolve_decision", "resolve_decisions", "compose_surface", "bash"}
+    )
 
     def __init__(
         self,
@@ -527,6 +530,10 @@ class ToolDispatcher:
                 # scheduled turn composes origin="agent" apps (F092.1 push
                 # path); a chat turn composes origin="chat".
                 args = {**args, "_is_background": is_background}
+            if name == "bash" and ctx.kind == "agent_action":
+                # A person tapped a companion action and waits on it, and nous/a2ui
+                # has no bound of its own: bash keeps the foreground default timeout.
+                args = {**args, "_is_background": False}
             if session_id is not None and name == "spawn_task":
                 args = {**args, "_session_id": session_id}
             if ctx.decision_id and name in ("spawn_task", "spawn_sync"):
