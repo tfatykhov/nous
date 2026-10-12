@@ -86,6 +86,12 @@ class DriftDetector:
         # keeps the #719 floor (min_abs_deviation_unresidualized).
         "facts_pruned":            {"k": 2.0, "min_samples": 10, "min_abs_deviation": 50.0,
                                     "min_abs_deviation_unresidualized": 100.0},
+        # Residualization explains sleep prunes away from facts_pruned by
+        # design, so a runaway sleep phase (a stale_scan burst of 2,000)
+        # would be silent there. Tracked on its own, at the #719 floor that
+        # routine cleanup (~80 per cycle) stays under. Null (audit off) is
+        # unknown: skipped, never read as 0.
+        "sleep_prune_count":       {"k": 2.0, "min_samples": 10, "min_abs_deviation": 100.0},
         "findings_created":        {"k": 2.0, "min_samples": 10},
         "episodes_compacted":      {"k": 2.0, "min_samples": 10},
         "contradictions_resolved": {"k": 2.0, "min_samples": 10},
@@ -104,7 +110,10 @@ class DriftDetector:
             def _value_of(
                 metrics: dict[str, Any], _m: str = metric, _e: str | None = explainer, _s: int = sign
             ) -> float | None:
-                value = float(metrics.get(_m, 0))
+                raw = metrics.get(_m, 0)
+                if raw is None:
+                    return None
+                value = float(raw)
                 if _e:
                     explained = metrics.get(_e)
                     if explained is None:
@@ -129,7 +138,9 @@ class DriftDetector:
                 stddev = statistics.stdev(values)
             except statistics.StatisticsError:
                 continue
-            current_val = _value_of(current_metrics)  # never None: its explainer was checked above
+            current_val = _value_of(current_metrics)
+            if current_val is None:
+                continue  # unknown this tick: nothing to judge
             deviation = current_val - mean
             if abs(deviation) < floor:
                 continue

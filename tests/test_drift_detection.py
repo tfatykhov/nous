@@ -1214,6 +1214,48 @@ class TestFactsPrunedResidualizedAgainstSleepPrunes:
         assert params == {"aid": "agent-b"}
 
 
+class TestRunawaySleepPhaseFiresOnSleepPruneCount:
+    """Residualization explains sleep prunes away from facts_pruned by design,
+    so a runaway sleep phase (a stale_scan burst of 2,000) would be silent
+    there. sleep_prune_count is drift-tracked in its own right, with a floor
+    of 100 so routine cleanup (~80 per cycle) stays quiet.
+    """
+
+    _ROUTINE = [70, 80, 90, 75, 85, 80, 78, 82, 88, 72, 80, 84]
+
+    def _history(self):
+        return [
+            BehaviorSnapshot(timestamp=datetime.now(UTC), facts_pruned=n, sleep_prune_count=n) for n in self._ROUTINE
+        ]
+
+    def _by_metric(self, current, history):
+        return {a.metric: a for a in DriftDetector().detect(current, history)}
+
+    def test_stale_scan_burst_fires_on_sleep_prune_count(self):
+        current = BehaviorSnapshot(timestamp=datetime.now(UTC), facts_pruned=2000, sleep_prune_count=2000)
+        by_metric = self._by_metric(current, self._history())
+        assert "facts_pruned" not in by_metric  # fully explained by sleep
+        found = by_metric["sleep_prune_count"]
+        assert found.current == 2000
+        assert found.direction == "up"
+        assert found.residualized_by is None
+
+    def test_routine_sleep_volume_is_quiet(self):
+        current = BehaviorSnapshot(timestamp=datetime.now(UTC), facts_pruned=95, sleep_prune_count=95)
+        assert "sleep_prune_count" not in self._by_metric(current, self._history())
+
+    def test_unknown_values_are_skipped_not_read_as_zero(self):
+        audit_off = [BehaviorSnapshot(timestamp=datetime.now(UTC), facts_pruned=80) for _ in range(12)]
+        history = self._history() + audit_off
+        unknown = BehaviorSnapshot(timestamp=datetime.now(UTC), facts_pruned=80)
+        assert "sleep_prune_count" not in self._by_metric(unknown, history)
+
+        burst = BehaviorSnapshot(timestamp=datetime.now(UTC), facts_pruned=2000, sleep_prune_count=2000)
+        found = self._by_metric(burst, history)["sleep_prune_count"]
+        # The null rows did not enter the baseline as zeros (mean would be ~40).
+        assert found.mean == round(sum(self._ROUTINE) / len(self._ROUTINE), 2)
+
+
 class TestV2FactsPrunedCarriesOverAsInactiveDelta:
     """v2 stored the signed inactive delta under facts_pruned. Readers rename
     it to inactive_fact_delta so fact_count_delta keeps its residualized
