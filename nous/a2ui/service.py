@@ -34,6 +34,7 @@ import httpx
 from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 
+from nous.a2ui.intention_keys import INTENTION_DEDUP_PREFIX as _INTENTION_PREFIX
 from nous.dag.approval import DEDUP_PREFIX as _DAG_APPROVAL_PREFIX
 from nous.storage.database import Database
 from nous.storage.models import A2uiAction, A2uiOutbox, A2uiSurface
@@ -236,6 +237,13 @@ class SurfaceService:
             # the node. Only the orchestrator may use it.
             raise ReservedDedupKeyError(
                 f"dedup_key prefix {_DAG_APPROVAL_PREFIX!r} is reserved for DAG approval cards"
+            )
+        if dedup_key and dedup_key.startswith(_INTENTION_PREFIX) and not reserved_key_ok:
+            # F099 Phase 3a: the owner's proposal and question cards. A push under this prefix would replace a
+            # card's text in place (same id, taps still answer its row) or mint a card whose buttons call an owner
+            # action. Only the continuation's publisher may use it.
+            raise ReservedDedupKeyError(
+                f"dedup_key prefix {_INTENTION_PREFIX!r} is reserved for the owner's intention cards"
             )
         if self._push_session_blocked(session_id):
             # F092.2: this session belongs to a cancelled agent-action
@@ -1227,7 +1235,8 @@ class SurfaceService:
                     # record of what happened; after an outage longer than
                     # wait + grace this startup expiry would otherwise write
                     # "expired, unanswered" for a card that was answered.
-                    if not (claimed[0][1] or "").startswith(_DAG_APPROVAL_PREFIX):
+                    # F099 Phase 3a: the same for an intention card (S1): the proposal or question row is the record.
+                    if not (claimed[0][1] or "").startswith((_DAG_APPROVAL_PREFIX, _INTENTION_PREFIX)):
                         session.add(
                             A2uiAction(
                                 agent_id=agent_id,
