@@ -2083,6 +2083,35 @@ def create_app(
             logger.error("Dashboard attention error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    async def dashboard_intentions(request: Request) -> JSONResponse:
+        """GET /dashboard/intentions — F099 Phase 3c: every intention root as a tree, and the metrics beside it
+        (``window`` 24h|7d|30d, ``state`` open|all, ``limit`` 1 to 200). With NOUS_CONTINUATION_ENABLED off it
+        answers 200 {"continuation": false, "roots": [], "metrics": null} and opens no session. Read-only."""
+        from nous.api import intention_dashboard
+        from nous.brain import continuation
+
+        qp = request.query_params
+        raw_limit = qp.get("limit", "50")
+        if not (raw_limit.isascii() and raw_limit.isdigit()):
+            return JSONResponse(
+                {"error": f"limit must be a whole number from 1 to {intention_dashboard.LIMIT_MAX}"}, status_code=400
+            )
+        window, state, limit = qp.get("window", "7d"), qp.get("state", "all"), int(raw_limit)
+        try:
+            intention_dashboard.check_query(window, state, limit)
+            if not continuation.enabled(settings):
+                return JSONResponse(intention_dashboard.disabled_payload())
+            async with database.session() as session:
+                data = await intention_dashboard.get_intentions_data(
+                    session, settings.agent_id, settings=settings, window=window, state=state, limit=limit
+                )
+            return JSONResponse(data)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        except Exception as e:
+            logger.error("Dashboard intentions error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     async def dashboard_dag(request: Request) -> JSONResponse:
         """GET /dashboard/dag - DAG orchestration overview for dashboard."""
         try:
@@ -3535,6 +3564,7 @@ def create_app(
         Route("/dashboard/dag", dashboard_dag),
         Route("/dashboard/execution", dashboard_execution),
         Route("/dashboard/harness", dashboard_harness),
+        Route("/dashboard/intentions", dashboard_intentions),
         Route("/dashboard/attention", dashboard_attention),
         # F040: Graph density dashboard
         Route("/dashboard/density", dashboard_density),
