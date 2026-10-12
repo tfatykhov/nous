@@ -219,7 +219,8 @@ def simple_commands(command: str) -> list[tuple[list[str], list[str], list[str],
 
     For the F099 lineage shell allowlist (``tool_policy``), which must see
     exactly what runs. None: over the size cap, an unbalanced quote, a
-    redirect with no target, a redirect in either direction that names a
+    redirect with no target, ``&>`` or ``&>>`` (bash redirects both streams,
+    dash backgrounds the command), a redirect in either direction that names a
     ``/dev/tcp`` or ``/dev/udp`` socket, or a word that expands -- ``$`` or a backtick
     outside single quotes, an unquoted glob, brace or tilde, or ``$`` or a
     backtick in the body of a heredoc whose delimiter is unquoted. Words are
@@ -264,8 +265,8 @@ def simple_commands(command: str) -> list[tuple[list[str], list[str], list[str],
                 expect = None
                 continue
             for op in _OPERATOR.findall(tok):
-                if expect is not None:
-                    return None
+                if expect is not None or op in ("&>", "&>>"):
+                    return None  # dash, prod's /bin/sh, reads `a &>f` as `a &` then `>f`
                 if op in _OUTPUT_REDIRECTS:
                     expect = "out"
                 elif op == ">&":

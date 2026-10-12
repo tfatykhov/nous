@@ -401,6 +401,12 @@ def test_printf_without_v_is_allowed(tmp_path):
     assert lineage_bash_allowed(ctx, "printf '%s\\n' hello", workspace_dir=workspace)
 
 
+@pytest.mark.parametrize("op", ["&>", "&>>"])
+def test_the_lineage_shell_refuses_the_bash_only_redirect_of_both_streams(op, tmp_path):
+    """dash, prod's /bin/sh, reads `cat a &>f` as `cat a &` and then `>f`: a backgrounded command."""
+    assert _shell(f"cat {tmp_path}/a.md {op} {tmp_path}/intentions/{RID}/n.md", tmp_path) == "external"
+
+
 # -- post-merge review P1-1: read arguments stay under the workspace -------------
 
 
