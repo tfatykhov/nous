@@ -40,7 +40,7 @@ import json
 import logging
 import os
 import threading
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -401,6 +401,20 @@ async def discard_safe(snapshot_id: str | None) -> None:
             logger.warning("Undo journal: could not discard snapshot %s", snapshot_id, exc_info=True)
 
     await asyncio.shield(asyncio.to_thread(_discard))
+
+
+@contextlib.asynccontextmanager
+async def discard_on_failure(snapshot_id: str | None) -> AsyncIterator[None]:
+    """Wrap the write + commit of a mutation recorded as ``snapshot_id``
+    before its commit: when they fail or are cancelled, the snapshot is
+    discarded, so no restore applies it over newer state. A cancel during
+    the commit itself may drop a landed mutation's snapshot: that loses its
+    undo, never applies a wrong one."""
+    try:
+        yield
+    except BaseException:
+        await discard_safe(snapshot_id)
+        raise
 
 
 @dataclass

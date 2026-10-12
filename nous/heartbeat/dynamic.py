@@ -916,16 +916,18 @@ class DynamicCheckLoader:
             if model is None:
                 raise ValueError(f"Dynamic check '{name}' not found")
 
+            recorded = None
             if action in ("enable", "delete"):
                 # Undo journal: the row before this action (never blocks).
                 # disable and update record only once they will proceed.
-                await undo_journal.record_model_safe(undo_journal.KIND_CHECK, action, model, label=name)
+                recorded = await undo_journal.record_model_safe(undo_journal.KIND_CHECK, action, model, label=name)
 
             if action == "enable":
-                model.enabled = True
-                model.metadata_ = {**_meta(model), _STATE_TOKEN_KEY: uuid4().hex}
-                model.updated_at = datetime.now(UTC)
-                await session.commit()
+                async with undo_journal.discard_on_failure(recorded):
+                    model.enabled = True
+                    model.metadata_ = {**_meta(model), _STATE_TOKEN_KEY: uuid4().hex}
+                    model.updated_at = datetime.now(UTC)
+                    await session.commit()
                 await self._sync_locked()
                 return {"status": "enabled", "name": name}
 
@@ -1019,8 +1021,9 @@ class DynamicCheckLoader:
 
             elif action == "delete":
                 check_id = str(model.id)
-                await session.delete(model)
-                await session.commit()
+                async with undo_journal.discard_on_failure(recorded):
+                    await session.delete(model)
+                    await session.commit()
                 self._registry.unregister(name)
                 self._signatures.pop(name, None)
                 self._cancel_active_runs(name)
@@ -1084,11 +1087,12 @@ class DynamicCheckLoader:
                 if current_on_complete and not current_on_complete.issubset(current_tools):
                     raise ValueError("on_complete_tools must be a subset of check tools")
                 # Undo journal: the row before this update (never blocks).
-                await undo_journal.record_model_safe(undo_journal.KIND_CHECK, action, model, label=name)
-                for key, value in changes.items():
-                    setattr(model, key, value)
-                model.updated_at = datetime.now(UTC)
-                await session.commit()
+                recorded = await undo_journal.record_model_safe(undo_journal.KIND_CHECK, action, model, label=name)
+                async with undo_journal.discard_on_failure(recorded):
+                    for key, value in changes.items():
+                        setattr(model, key, value)
+                    model.updated_at = datetime.now(UTC)
+                    await session.commit()
                 await self._sync_locked()
                 return {"status": "updated", "name": name}
 

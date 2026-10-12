@@ -21,6 +21,7 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous import undo_journal
 from nous.api.builtin_tools import write_file_tool
@@ -387,6 +388,21 @@ class TestScheduleKind:
         row = await _row(db, Schedule, sched.id)
         assert row is not None and row["active"] is False
 
+    async def test_deactivate_that_does_not_commit_discards_its_snapshot(self, db, schedules, journal, monkeypatch):
+        # Review of #712: the deactivate snapshot is recorded before the
+        # commit; a failed commit left it behind for a later restore.
+        sched = await schedules.create(task="t", schedule_type="recurring", interval_seconds=3600)
+
+        async def _fail(self):
+            raise RuntimeError("commit failed")
+
+        monkeypatch.setattr(AsyncSession, "commit", _fail)
+        with pytest.raises(RuntimeError, match="commit failed"):
+            await schedules.deactivate(sched.id)
+        monkeypatch.undo()
+        assert [e["action"] for e in await journal.list(500)] == ["create"]
+        assert (await _row(db, Schedule, sched.id))["active"] is True
+
     async def test_noop_restore_of_create_records_no_pre_restore(self, db, schedules, journal):
         # Review of #712: a restore that changes nothing still recorded a pre_restore entry.
         sched = await schedules.create(task="t", schedule_type="recurring", interval_seconds=3600)
@@ -620,6 +636,26 @@ class TestCheckKind:
         assert [e["action"] for e in await journal.list(500)] == ["create"]
         assert (await _row(db, DynamicCheckModel, check_id))["enabled"] is True
         assert not loader._registry.get_check(name)._self_disabled
+
+    @pytest.mark.parametrize(("action", "updates"), [("enable", None), ("delete", None), ("update", {"prompt": "p2"})])
+    async def test_mutation_that_does_not_commit_discards_its_snapshot(
+        self, db, loader, journal, monkeypatch, action, updates
+    ):
+        # Review of #712: enable, delete and update snapshot before the
+        # commit, so a failed commit left a snapshot that, restored later,
+        # silently overwrote newer edits.
+        check_id = await _make_check(loader)
+        before = await _row(db, DynamicCheckModel, check_id)
+
+        async def _fail(self):
+            raise RuntimeError("commit failed")
+
+        monkeypatch.setattr(AsyncSession, "commit", _fail)
+        with pytest.raises(RuntimeError, match="commit failed"):
+            await loader.manage_check(action, before["name"], updates)
+        monkeypatch.undo()
+        assert [e["action"] for e in await journal.list(500)] == ["create"]
+        assert await _row(db, DynamicCheckModel, check_id) == before
 
     async def test_disable_cancelled_mid_snapshot_write_leaves_no_orphan(self, db, loader, journal, monkeypatch):
         # Codex P2 on #717: cancelled while record()'s thread write was in
