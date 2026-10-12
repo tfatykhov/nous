@@ -82,6 +82,23 @@ def _agent() -> str:
     return f"test-undo-{uuid.uuid4().hex[:8]}"
 
 
+def _slow_write(journal: UndoJournal, monkeypatch) -> tuple[threading.Event, threading.Event, threading.Event]:
+    """Hold journal writes in their worker thread until ``release`` is set."""
+    write = journal._write
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def _write(entry):
+        entered.set()
+        release.wait(5)
+        try:
+            write(entry)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(journal, "_write", _write)
+    return entered, release, finished
+
+
 # ---------------------------------------------------------------------------
 # Journal store: retention
 # ---------------------------------------------------------------------------
@@ -407,6 +424,22 @@ class TestScheduleKind:
         assert [e["action"] for e in await journal.list(500)] == ["create"]
         assert (await _row(db, Schedule, sched.id))["active"] is True
 
+    async def test_deactivate_cancelled_mid_snapshot_write_leaves_no_orphan(self, db, schedules, journal, monkeypatch):
+        # Review of PR B: the deactivate's journal-minted id was lost to a
+        # cancel during the write, which still landed afterwards.
+        sched = await schedules.create(task="t", schedule_type="recurring", interval_seconds=3600)
+        entered, release, finished = _slow_write(journal, monkeypatch)
+        task = asyncio.create_task(schedules.deactivate(sched.id))
+        assert await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 5)
+        assert [e["action"] for e in await journal.list(500)] == ["create"]
+        assert not journal._discarded
+        assert (await _row(db, Schedule, sched.id))["active"] is True
+
     async def test_noop_restore_of_create_records_no_pre_restore(self, db, schedules, journal):
         # Review of #712: a restore that changes nothing still recorded a pre_restore entry.
         sched = await schedules.create(task="t", schedule_type="recurring", interval_seconds=3600)
@@ -659,6 +692,28 @@ class TestCheckKind:
             await loader.manage_check(action, before["name"], updates)
         monkeypatch.undo()
         assert [e["action"] for e in await journal.list(500)] == ["create"]
+        assert await _row(db, DynamicCheckModel, check_id) == before
+
+    @pytest.mark.parametrize(("action", "updates"), [("enable", None), ("delete", None), ("update", {"prompt": "p2"})])
+    async def test_mutation_cancelled_mid_snapshot_write_leaves_no_orphan(
+        self, db, loader, journal, monkeypatch, action, updates
+    ):
+        # Review of PR B: cancelled while record()'s thread write was in
+        # flight, the mutation never learned the journal-minted id, so the
+        # write that landed afterwards survived; restoring it later reverted
+        # a newer committed edit.
+        check_id = await _make_check(loader)
+        before = await _row(db, DynamicCheckModel, check_id)
+        entered, release, finished = _slow_write(journal, monkeypatch)
+        task = asyncio.create_task(loader.manage_check(action, before["name"], updates))
+        assert await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 5)
+        assert [e["action"] for e in await journal.list(500)] == ["create"]
+        assert not journal._discarded
         assert await _row(db, DynamicCheckModel, check_id) == before
 
     async def test_disable_cancelled_mid_snapshot_write_leaves_no_orphan(self, db, loader, journal, monkeypatch):

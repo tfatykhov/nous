@@ -216,10 +216,9 @@ class ScheduleManager:
     async def deactivate(self, schedule_id: UUID) -> None:
         """Deactivate a schedule, and close its F099 container intention."""
         async with self._db.session() as session:
-            recorded = None
-            if undo_journal.get_journal() is not None:
-                recorded = await self._record_before_deactivate(session, schedule_id)
-            async with undo_journal.discard_on_failure(recorded):
+            async with undo_journal.discard_on_failure() as snapshot:
+                if undo_journal.get_journal() is not None:
+                    await self._record_before_deactivate(session, schedule_id, snapshot)
                 await session.execute(
                     update(Schedule)
                     .where(Schedule.id == schedule_id)
@@ -285,15 +284,17 @@ class ScheduleManager:
             await self._close_container(schedule_id)
         return True, f"deactivated schedule {schedule_id} (undoing its create; rows are never deleted)"
 
-    async def _record_before_deactivate(self, session: Any, schedule_id: UUID) -> str | None:
+    async def _record_before_deactivate(
+        self, session: Any, schedule_id: UUID, snapshot: undo_journal.PendingSnapshot
+    ) -> None:
         """Undo journal: the row before a deactivate, read under its row lock
         in the deactivate's own transaction, so a fire cannot commit between
         the snapshot and the deactivate (never raises: the reads run in a
         savepoint, and a failed one leaves the deactivate's transaction
         intact). A schedule with an F099 container intention is recorded but
         not restorable: the deactivate closes the container, and restore
-        never re-arms work against a closed intention. Returns the snapshot
-        id, or None when nothing was recorded."""
+        never re-arms work against a closed intention. Recorded through
+        ``snapshot``, so the deactivate can discard it if it does not commit."""
         try:
             table = Schedule.__table__
             async with session.begin_nested():
@@ -301,12 +302,12 @@ class ScheduleManager:
                     await session.execute(select(table).where(table.c.id == schedule_id).with_for_update())
                 ).mappings().first()
                 if prior is None:
-                    return None
+                    return
                 container = await self._container_state(session, schedule_id)
         except Exception:
             logger.warning("Undo journal: could not read schedule %s before deactivate", schedule_id, exc_info=True)
-            return None
-        return await undo_journal.record_safe(
+            return
+        await snapshot.record(
             undo_journal.KIND_SCHEDULE,
             "deactivate",
             str(schedule_id),

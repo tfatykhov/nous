@@ -403,17 +403,39 @@ async def discard_safe(snapshot_id: str | None) -> None:
     await asyncio.shield(asyncio.to_thread(_discard))
 
 
+@dataclass
+class PendingSnapshot:
+    """The snapshot a ``discard_on_failure`` block records. Its id is chosen
+    before the write, so a cancel mid-write (the write still lands in its
+    thread) knows what to discard; it is None when nothing was recorded or
+    the write failed, leaving no tombstone to leak (#718)."""
+
+    id: str | None = None
+
+    async def record(self, kind: str, action: str, target: str, before: Any, **kwargs: Any) -> None:
+        """``record_safe`` under this pending id; never raises."""
+        self.id = uuid4().hex
+        self.id = await record_safe(kind, action, target, before, snapshot_id=self.id, **kwargs)
+
+    async def record_model(self, kind: str, action: str, model: Any, *, label: str | None = None) -> None:
+        """``record_model_safe`` under this pending id; never raises."""
+        self.id = uuid4().hex
+        self.id = await record_model_safe(kind, action, model, label=label, snapshot_id=self.id)
+
+
 @contextlib.asynccontextmanager
-async def discard_on_failure(snapshot_id: str | None) -> AsyncIterator[None]:
-    """Wrap the write + commit of a mutation recorded as ``snapshot_id``
-    before its commit: when they fail or are cancelled, the snapshot is
-    discarded, so no restore applies it over newer state. A cancel during
-    the commit itself may drop a landed mutation's snapshot: that loses its
-    undo, never applies a wrong one."""
+async def discard_on_failure() -> AsyncIterator[PendingSnapshot]:
+    """Wrap the record, write and commit of a mutation snapshotted before its
+    commit (record through the yielded ``PendingSnapshot``): when any of
+    them fails or is cancelled, the snapshot is discarded, so no restore
+    applies it over newer state. A cancel during the commit itself may drop
+    a landed mutation's snapshot: that loses its undo, never applies a wrong
+    one."""
+    pending = PendingSnapshot()
     try:
-        yield
+        yield pending
     except BaseException:
-        await discard_safe(snapshot_id)
+        await discard_safe(pending.id)
         raise
 
 

@@ -916,14 +916,13 @@ class DynamicCheckLoader:
             if model is None:
                 raise ValueError(f"Dynamic check '{name}' not found")
 
-            recorded = None
-            if action in ("enable", "delete"):
-                # Undo journal: the row before this action (never blocks).
-                # disable and update record only once they will proceed.
-                recorded = await undo_journal.record_model_safe(undo_journal.KIND_CHECK, action, model, label=name)
-
+            # Undo journal: each action records the row before it (never
+            # blocks), inside a block that discards the snapshot when the
+            # action does not commit. disable and update record only once
+            # they will proceed.
             if action == "enable":
-                async with undo_journal.discard_on_failure(recorded):
+                async with undo_journal.discard_on_failure() as snapshot:
+                    await snapshot.record_model(undo_journal.KIND_CHECK, action, model, label=name)
                     model.enabled = True
                     model.metadata_ = {**_meta(model), _STATE_TOKEN_KEY: uuid4().hex}
                     model.updated_at = datetime.now(UTC)
@@ -1021,7 +1020,8 @@ class DynamicCheckLoader:
 
             elif action == "delete":
                 check_id = str(model.id)
-                async with undo_journal.discard_on_failure(recorded):
+                async with undo_journal.discard_on_failure() as snapshot:
+                    await snapshot.record_model(undo_journal.KIND_CHECK, action, model, label=name)
                     await session.delete(model)
                     await session.commit()
                 self._registry.unregister(name)
@@ -1087,8 +1087,8 @@ class DynamicCheckLoader:
                 if current_on_complete and not current_on_complete.issubset(current_tools):
                     raise ValueError("on_complete_tools must be a subset of check tools")
                 # Undo journal: the row before this update (never blocks).
-                recorded = await undo_journal.record_model_safe(undo_journal.KIND_CHECK, action, model, label=name)
-                async with undo_journal.discard_on_failure(recorded):
+                async with undo_journal.discard_on_failure() as snapshot:
+                    await snapshot.record_model(undo_journal.KIND_CHECK, action, model, label=name)
                     for key, value in changes.items():
                         setattr(model, key, value)
                     model.updated_at = datetime.now(UTC)
