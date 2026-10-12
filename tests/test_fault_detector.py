@@ -459,7 +459,8 @@ class TestProcessFaultCheckConsecutiveErrors:
 
     @pytest.mark.asyncio
     async def test_errors_with_no_finished_row_older_than_gap_report_both(self):
-        """With no finished row, the gap is measured from the oldest fetched row."""
+        """With no finished row in the whole (short) history, the gap is measured
+        from the oldest fetched row."""
         now = datetime.now(UTC)
         runs = {"sleep/stale_scan": [_run(now, h, status="error") for h in (50.0, 51.0, 52.0)]}
 
@@ -467,6 +468,23 @@ class TestProcessFaultCheckConsecutiveErrors:
 
         assert any("failed with errors" in f.summary for f in result.findings)
         assert any("not completed in 52h" in f.summary for f in result.findings)
+
+    @pytest.mark.asyncio
+    async def test_full_window_without_a_finished_row_reports_a_gap(self):
+        """A full fetch window (baseline_window + 5 = 25 rows) with no finished
+        row is truncated history: the last finish is older than every fetched
+        row, so a frequent phase that keeps skipping is flagged even though
+        all fetched rows are younger than the 48h gap.
+
+        Mutation evidence: anchor the gap on the oldest fetched row regardless
+        of window size and no gap finding is produced.
+        """
+        now = datetime.now(UTC)
+        runs = {"sleep/stale_scan": [_run(now, 0.5 * i, status="skipped") for i in range(1, 26)]}
+
+        result = await self._run_check(runs)
+
+        assert any("stale_scan" in f.summary and "not completed" in f.summary for f in result.findings)
 
 
 class TestProcessFaultCheckZeroChangeCollapse:

@@ -164,13 +164,18 @@ class ProcessFaultCheck(BaseCheck):
             # ----------------------------------------------------------------
             # 2. Missed run: no finished row in the last N hours
             # ----------------------------------------------------------------
-            # With no finished row fetched, the phase has not completed since
-            # at least its oldest fetched row (a lower bound, like log_age_hours).
+            # With no finished row fetched: a full window means the history is
+            # truncated and the last finish is older than every fetched row, so
+            # flag it; a short window is the whole history, so the phase has not
+            # completed since its oldest row.
             last_finished = next((r for r in runs if r["status"] == "finished"), None)
-            last_ts: datetime = (last_finished or runs[-1])["started_at"]
-            if last_ts.tzinfo is None:
-                last_ts = last_ts.replace(tzinfo=UTC)
-            gap_hours = (now - last_ts).total_seconds() / 3600.0
+            if last_finished is None and len(runs) >= fetch_limit:
+                gap_hours = max_gap_hours + 1  # trigger the check
+            else:
+                last_ts: datetime = (last_finished or runs[-1])["started_at"]
+                if last_ts.tzinfo is None:
+                    last_ts = last_ts.replace(tzinfo=UTC)
+                gap_hours = (now - last_ts).total_seconds() / 3600.0
 
             if gap_hours > max_gap_hours:
                 findings.append(
