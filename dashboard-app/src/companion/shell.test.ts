@@ -74,6 +74,20 @@ describe('Companion shell — switcher', () => {
     expect(chips).toContain('decisions');
   });
 
+  it('labels the owner cards: proposal, question and the active-intentions card (F099 Phase 3a)', () => {
+    seed('nous:continuation:intention_proposal:aaa001');
+    seed('nous:continuation:intention_question:bbb002');
+    seed('nous:continuation:intention_active:ccc003');
+    const { container } = render(Companion);
+
+    const chips = [...container.querySelectorAll('.switcher .chip')].map((c) =>
+      c.textContent?.trim(),
+    );
+    expect(chips).toContain('proposal');
+    expect(chips).toContain('question');
+    expect(chips).toContain('intentions');
+  });
+
   it('stays hidden for a single surface', () => {
     seed('nous:chat:micro_app:aaa001');
     const { container } = render(Companion);

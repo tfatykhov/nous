@@ -32,6 +32,9 @@
     decision_sweep: 'decisions',
     dag_monitor: 'DAG',
     memory_graph: 'graph',
+    intention_proposal: 'proposal',
+    intention_question: 'question',
+    intention_active: 'intentions',
   };
 
   function kindOf(surfaceId: string): string {
