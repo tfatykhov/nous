@@ -31,16 +31,26 @@ class DriftDetector:
     """Z-score based behavioral drift detection."""
 
     # Metrics whose movement is mechanically explained by another metric in
-    # the SAME snapshot. The explanation is added back before testing for
-    # anomaly, so an accounted-for change residualizes to ~0 and stays quiet
-    # while an UNACCOUNTED change of the same size still fires at full
-    # strength. inactive_fact_delta rises by exactly as much as
-    # fact_count_delta falls for a deactivation (and the reverse for a
-    # reactivation), hence addition. It is the SIGNED net, deliberately not
-    # facts_pruned: the gross prune count would over-explain any interval
-    # that also reactivated facts.
-    RESIDUALIZE: dict[str, str] = {
-        "fact_count_delta": "inactive_fact_delta",
+    # the SAME snapshot, as (explainer, sign). sign * explainer is added
+    # before testing for anomaly, so an accounted-for change residualizes to
+    # ~0 and stays quiet while an UNACCOUNTED change of the same size still
+    # fires at full strength.
+    #
+    # inactive_fact_delta rises by exactly as much as fact_count_delta falls
+    # for a deactivation (and the reverse for a reactivation), hence +1. It is
+    # the SIGNED net, deliberately not facts_pruned: the gross prune count
+    # would over-explain any interval that also reactivated facts.
+    #
+    # sleep_prune_count is the part of facts_pruned a sleep cycle did, hence
+    # -1: routine sleep cleanup is not drift (#720). It is a subset of the
+    # same newly-inactive id set, so the residual cannot go below 0.
+    #
+    # An explainer that is absent (None) is unknown, not 0. When the current
+    # snapshot lacks it the metric is judged raw; a baseline row lacking it
+    # is left out of a residualized baseline.
+    RESIDUALIZE: dict[str, tuple[str, int]] = {
+        "fact_count_delta": ("inactive_fact_delta", 1),
+        "facts_pruned": ("sleep_prune_count", -1),
     }
 
     # Per-metric absolute floor on |current - mean|. A z-score computed over a
@@ -66,18 +76,22 @@ class DriftDetector:
         # branch has no scale to judge against, and the prune is silent on
         # both metrics at once.
         #
-        # Floor raised from 50 → 100 (fix/facts-pruned-drift-fp): a normal
-        # sleep cycle running stale_scan + cluster_consolidation legitimately
-        # prunes 70–100 ephemeral micro-artifact facts (Garmin sync states,
-        # fitness snapshots, bare issue# fragments). Observed: Oct 2=78,
-        # Oct 8=91, Oct 9=83 — all false positives at k=2/floor=50.
-        # Raising the floor to 100 suppresses routine sleep-cycle cleanup
-        # while still catching genuinely anomalous mass pruning (RL sweep
-        # gone wrong, etc.) which would manifest at 150+.
-        # Long-term fix: residualize facts_pruned against a sleep_prune_count
-        # metric in the snapshot (analogous to inactive_fact_delta for
-        # fact_count_delta). Tracked in GitHub issue.
-        "facts_pruned":            {"k": 2.0, "min_samples": 10, "min_abs_deviation": 100.0},
+        # #719 raised this floor to 100 because routine sleep-cycle cleanup
+        # (stale_scan + cluster_consolidation, 78/91/83 facts on Oct 2/8/9)
+        # fired at 50. facts_pruned is now residualized against
+        # sleep_prune_count (#720), so that cleanup explains itself and the
+        # floor is back to 50 for UNEXPLAINED prunes. With the consolidation
+        # audit off, sleep_prune_count is unknown and facts_pruned is judged
+        # gross, which cannot tell that cleanup from drift, so the gross path
+        # keeps the #719 floor (min_abs_deviation_unresidualized).
+        "facts_pruned":            {"k": 2.0, "min_samples": 10, "min_abs_deviation": 50.0,
+                                    "min_abs_deviation_unresidualized": 100.0},
+        # Residualization explains sleep prunes away from facts_pruned by
+        # design, so a runaway sleep phase (a stale_scan burst of 2,000)
+        # would be silent there. Tracked on its own, at the #719 floor that
+        # routine cleanup (~80 per cycle) stays under. Null (audit off) is
+        # unknown: skipped, never read as 0.
+        "sleep_prune_count":       {"k": 2.0, "min_samples": 10, "min_abs_deviation": 100.0},
         "findings_created":        {"k": 2.0, "min_samples": 10},
         "episodes_compacted":      {"k": 2.0, "min_samples": 10},
         "contradictions_resolved": {"k": 2.0, "min_samples": 10},
@@ -87,22 +101,35 @@ class DriftDetector:
         anomalies: list[Anomaly] = []
         current_metrics = current.to_metrics_dict()
         for metric, config in self.THRESHOLDS.items():
-            explainer = self.RESIDUALIZE.get(metric)
+            explainer, sign = self.RESIDUALIZE.get(metric, (None, 0))
+            floor = config.get("min_abs_deviation", 0.0)
+            if explainer is not None and current_metrics.get(explainer) is None:
+                explainer = None  # unknown explanation: judge the raw metric
+                floor = config.get("min_abs_deviation_unresidualized", floor)
 
-            def _value_of(metrics: dict[str, Any], _m: str = metric, _e: str | None = explainer) -> float:
-                value = float(metrics.get(_m, 0))
+            def _value_of(
+                metrics: dict[str, Any], _m: str = metric, _e: str | None = explainer, _s: int = sign
+            ) -> float | None:
+                raw = metrics.get(_m, 0)
+                if raw is None:
+                    return None
+                value = float(raw)
                 if _e:
-                    value += float(metrics.get(_e, 0))
+                    explained = metrics.get(_e)
+                    if explained is None:
+                        return None
+                    value += _s * float(explained)
                 return value
 
             # Per-metric version filter: a baseline row written under an
             # older definition of THIS metric (or of its explainer) is left
             # out, while the same row still counts for unchanged metrics.
             values = [
-                _value_of(s.to_metrics_dict())
+                value
                 for s in history
                 if metric_comparable(metric, s.metrics_version)
                 and (explainer is None or metric_comparable(explainer, s.metrics_version))
+                and (value := _value_of(s.to_metrics_dict())) is not None
             ]
             if len(values) < config["min_samples"]:
                 continue
@@ -112,8 +139,9 @@ class DriftDetector:
             except statistics.StatisticsError:
                 continue
             current_val = _value_of(current_metrics)
+            if current_val is None:
+                continue  # unknown this tick: nothing to judge
             deviation = current_val - mean
-            floor = config.get("min_abs_deviation", 0.0)
             if abs(deviation) < floor:
                 continue
 

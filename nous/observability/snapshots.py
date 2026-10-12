@@ -15,7 +15,9 @@ from typing import Any
 #:   3 -> facts_pruned is GROSS deactivations (inactive-ID set difference);
 #:        the signed inactive-count delta v2 stored under facts_pruned moved
 #:        to inactive_fact_delta (see normalize_stored_metrics).
-SNAPSHOT_METRICS_VERSION = 3
+#:   4 -> sleep_prune_count introduced (null when the consolidation audit is
+#:        off); it residualizes facts_pruned.
+SNAPSHOT_METRICS_VERSION = 4
 
 #: Metrics whose DEFINITION changed at each version, including metrics that
 #: were introduced then (a v1 row has no value for those, and reading one back
@@ -39,6 +41,11 @@ METRIC_DEFINITION_CHANGES: dict[int, frozenset[str]] = {
         # Net inactive-count delta -> gross deactivation count. A net delta
         # reports 100 pruned + 100 reactivated as 0, hiding the mass prune.
         "facts_pruned",
+    }),
+    4: frozenset({
+        # Newly introduced: a v3 row has no value, and reading one as 0 would
+        # explain none of that row's prunes.
+        "sleep_prune_count",
     }),
 }
 
@@ -134,6 +141,11 @@ class BehaviorSnapshot:
     sleep_ran: bool = False
     episodes_compacted: int = 0
     facts_pruned: int = 0
+    # How many of facts_pruned a sleep cycle deactivated (newly inactive ids
+    # that nous_system.consolidation_actions records a sleep phase
+    # deactivating). It explains facts_pruned. None = unknown: the
+    # consolidation audit that records those actions is off.
+    sleep_prune_count: int | None = None
     contradictions_resolved: int = 0
 
     # Event bus health
@@ -160,7 +172,8 @@ class BehaviorSnapshot:
             "checks_run": self.checks_run, "findings_created": self.findings_created,
             "findings_resolved": self.findings_resolved, "triage_sessions_opened": self.triage_sessions_opened,
             "sleep_ran": int(self.sleep_ran), "episodes_compacted": self.episodes_compacted,
-            "facts_pruned": self.facts_pruned, "contradictions_resolved": self.contradictions_resolved,
+            "facts_pruned": self.facts_pruned, "sleep_prune_count": self.sleep_prune_count,
+            "contradictions_resolved": self.contradictions_resolved,
             "events_processed": self.events_processed, "events_dropped": self.events_dropped,
             "handler_error_count": self.handler_error_count, "handler_error_rate": self.handler_error_rate,
             "turns_processed": self.turns_processed, "avg_turn_latency_ms": self.avg_turn_latency_ms,

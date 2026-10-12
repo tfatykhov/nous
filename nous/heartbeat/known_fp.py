@@ -14,7 +14,10 @@ once) and logs a warning; it never raises into the heartbeat. See
 
 Safety: a rule is matched only up to and including its ``review_by`` date.
 After that it stops matching (the finding flows normally) and logs one
-warning, so no rule is permanent. Urgency is not checked here; the
+warning, so no rule is permanent. The file is agent-writable, so a rule whose
+``review_by`` is more than ``MAX_REVIEW_HORIZON_DAYS`` after the load date is
+invalid (skipped with a warning), not clamped: a clamp would be recomputed at
+every load and roll forward forever. Urgency is not checked here; the
 FindingStore never auto-closes high-urgency or escalated findings.
 """
 
@@ -26,7 +29,7 @@ import os
 import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from nous.heartbeat.schemas import Finding
@@ -36,6 +39,9 @@ logger = logging.getLogger(__name__)
 # Agent-authored companion items are tracked as "agent:<check>:<digest>"
 # (nous/a2ui/tools.py), so a rule's `check` also matches that namespace.
 _AGENT_CHECK_PREFIX = "agent:"
+
+# Furthest a rule's review_by may lie after the load date.
+MAX_REVIEW_HORIZON_DAYS = 90
 
 
 @dataclass(frozen=True)
@@ -67,8 +73,8 @@ class KnownFalsePositiveRule:
         return today > self.review_by
 
 
-def parse_rule(raw: Any) -> KnownFalsePositiveRule:
-    """Build a rule from one JSON object. Raises ValueError if it is invalid."""
+def parse_rule(raw: Any, *, today: date) -> KnownFalsePositiveRule:
+    """Build a rule from one JSON object loaded on ``today``. Raises ValueError if it is invalid."""
     if not isinstance(raw, dict):
         raise ValueError("rule must be a JSON object")
 
@@ -104,6 +110,12 @@ def parse_rule(raw: Any) -> KnownFalsePositiveRule:
         review_by = date.fromisoformat(review_by_text)  # type: ignore[arg-type]
     except ValueError as exc:
         raise ValueError(f"'review_by' must be YYYY-MM-DD: {exc}") from exc
+    horizon = today + timedelta(days=MAX_REVIEW_HORIZON_DAYS)
+    if review_by > horizon:
+        raise ValueError(
+            f"'review_by' {review_by.isoformat()} is more than {MAX_REVIEW_HORIZON_DAYS} days out "
+            f"(latest allowed: {horizon.isoformat()})"
+        )
     try:
         regex = re.compile(pattern, re.IGNORECASE) if pattern is not None else None
     except re.error as exc:
@@ -139,6 +151,7 @@ class KnownFalsePositiveRules:
         self._loaded_mtime: int | None = None
         self._failed_mtime: int | None = None  # warn once per bad file version, not every tick
         self._missing_logged = False
+        self._stat_failed_logged = False  # warn once per stat() failure streak, not every ingest
         self._expired_warned: set[KnownFalsePositiveRule] = set()
 
     @property
@@ -186,11 +199,17 @@ class KnownFalsePositiveRules:
             self._rules = []
             self._loaded_mtime = None
             self._failed_mtime = None
+            self._stat_failed_logged = False
             return
         except OSError:
-            logger.warning("Known-FP rule file %s unreadable; keeping the last good rules", self._path, exc_info=True)
+            if not self._stat_failed_logged:
+                self._stat_failed_logged = True
+                logger.warning(
+                    "Known-FP rule file %s unreadable; keeping the last good rules", self._path, exc_info=True
+                )
             return
         self._missing_logged = False
+        self._stat_failed_logged = False
         if mtime == self._loaded_mtime:
             return
         # The mtime is cached only once the file has been read and parsed: a
@@ -216,9 +235,10 @@ class KnownFalsePositiveRules:
         self._failed_mtime = None
         rules: list[KnownFalsePositiveRule] = []
         seen_ids: set[str] = set()
+        today = self._today()
         for index, raw in enumerate(raw_rules):
             try:
-                rule = parse_rule(raw)
+                rule = parse_rule(raw, today=today)
                 if rule.id in seen_ids:
                     raise ValueError(f"duplicate id {rule.id!r}")
             except ValueError as exc:

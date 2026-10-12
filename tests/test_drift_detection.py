@@ -80,6 +80,7 @@ class TestBehaviorSnapshot:
             "tool_calls",
             "inactive_fact_count",
             "inactive_fact_delta",
+            "sleep_prune_count",
         }
         assert set(d.keys()) == expected_keys
 
@@ -349,6 +350,10 @@ class _FakeRow:
         # inactive_facts=N is shorthand for "facts 0..N-1 are inactive".
         if "inactive_facts" in kw:
             kw["inactive_ids"] = list(_ids(range(kw.pop("inactive_facts"))))
+        # Fact ids a sleep cycle deactivated (consolidation_actions); none
+        # unless a test says otherwise.
+        kw.setdefault("sleep_ids", [])
+        kw.setdefault("sleep_running", False)
         self.__dict__.update(kw)
 
 
@@ -394,7 +399,9 @@ def _drift_check(db, agent_id="agent-b"):
     check._last_snapshot = None
     check._last_anomalies = []
     check._last_counts_ok = False  # real _capture_snapshot overwrites this each tick
-    check._settings = MagicMock(agent_id=agent_id)
+    # Explicit, as in Settings: a bare MagicMock attribute is truthy, which
+    # silently turned the consolidation audit on for every test.
+    check._settings = MagicMock(agent_id=agent_id, consolidation_audit_enabled=False)
     return check
 
 
@@ -560,9 +567,10 @@ class TestCountsAreAgentScoped:
         await check._capture_snapshot()
         sql, params = sink[0]
         assert params == {"aid": "agent-b"}
-        # Both halves of the residualized pair must be scoped, or they stop
-        # describing the same population.
-        assert sql.count("agent_id = :aid") == 5
+        # Both halves of each residualized pair must be scoped, or they stop
+        # describing the same population (the sixth and seventh are the
+        # sleep-prune ids and the running-cycle check).
+        assert sql.count("agent_id = :aid") == 7
         for table in ("heart.facts", "heart.episodes", "heart.censors", "heart.procedures"):
             assert table in sql
 
@@ -998,6 +1006,7 @@ class TestFactsPrunedIsAGrossCount:
         # Previously inactive: 0..99. Now: 100..199 -- 100 pruned, 100 reactivated.
         row = _FakeRow(inactive_ids=list(_ids(range(100, 200))), **self._ROW)
         check = _drift_check(_FakeDB(row, []))
+        check._settings.consolidation_audit_enabled = True  # so the 100 can be residualized
         check._last_snapshot = BehaviorSnapshot(
             timestamp=datetime.now(UTC), fact_count=900, inactive_fact_count=100, inactive_ids=_ids(range(100))
         )
@@ -1014,9 +1023,12 @@ class TestFactsPrunedIsAGrossCount:
     @pytest.mark.asyncio
     async def test_offset_mass_prune_fires_and_residual_stays_quiet(self):
         snap = await self._offset_prune_snapshot()
-        quiet = [BehaviorSnapshot(timestamp=datetime.now(UTC)) for _ in range(12)]
+        # No sleep cycle recorded these prunes, so all 100 are unexplained.
+        assert snap.sleep_prune_count == 0
+        quiet = [BehaviorSnapshot(timestamp=datetime.now(UTC), sleep_prune_count=0) for _ in range(12)]
         by_metric = {a.metric: a for a in DriftDetector().detect(snap, quiet)}
         assert by_metric["facts_pruned"].current == 100
+        assert by_metric["facts_pruned"].residualized_by == "sleep_prune_count"
         assert "fact_count_delta" not in by_metric
 
     @pytest.mark.asyncio
@@ -1036,6 +1048,278 @@ class TestFactsPrunedIsAGrossCount:
         quiet = [BehaviorSnapshot(timestamp=datetime.now(UTC)) for _ in range(12)]
         current = BehaviorSnapshot(timestamp=datetime.now(UTC), fact_count_delta=80, inactive_fact_delta=-80)
         assert DriftDetector().detect(current, quiet) == []
+
+
+class TestFactsPrunedResidualizedAgainstSleepPrunes:
+    """#720: routine sleep-cycle pruning (stale_scan, F027/F031 merges and
+    supersessions) is not drift. facts_pruned is residualized against
+    sleep_prune_count, the newly inactive facts that a sleep cycle recorded
+    deactivating in nous_system.consolidation_actions, so only UNEXPLAINED
+    prunes are judged, and the floor is back to 50.
+    """
+
+    _ROW = dict(facts=900, episodes=10, censors=2, procedures=5)
+
+    async def _snapshot(self, *, pruned: int, by_sleep: int, audit_enabled: bool = True, sleep_running: bool = False):
+        # Previously inactive: 0..99. Now also 100..100+pruned-1; the first
+        # `by_sleep` of those were deactivated by a sleep cycle. The sleep ids
+        # also name a fact that was already inactive (5) and an active merge
+        # target (10_000): neither is a prune this interval.
+        newly = range(100, 100 + pruned)
+        row = _FakeRow(
+            inactive_ids=list(_ids(range(100), newly)),
+            sleep_ids=list(_ids(range(100, 100 + by_sleep), range(5, 6), range(10_000, 10_001))),
+            sleep_running=sleep_running,
+            **self._ROW,
+        )
+        check = _drift_check(_FakeDB(row, []))
+        check._settings.consolidation_audit_enabled = audit_enabled
+        check._last_snapshot = BehaviorSnapshot(
+            timestamp=datetime.now(UTC), fact_count=900, inactive_fact_count=100, inactive_ids=_ids(range(100))
+        )
+        return await check._capture_snapshot()
+
+    def _quiet(self, n=12):
+        return [BehaviorSnapshot(timestamp=datetime.now(UTC), facts_pruned=0, sleep_prune_count=0) for _ in range(n)]
+
+    def _facts_pruned_anomalies(self, snap):
+        return [a for a in DriftDetector().detect(snap, self._quiet()) if a.metric == "facts_pruned"]
+
+    @pytest.mark.asyncio
+    async def test_snapshot_counts_only_newly_inactive_sleep_ids(self):
+        snap = await self._snapshot(pruned=95, by_sleep=60)
+        assert snap.facts_pruned == 95
+        assert snap.sleep_prune_count == 60
+
+    @pytest.mark.asyncio
+    async def test_sleep_driven_prune_of_95_is_quiet(self):
+        snap = await self._snapshot(pruned=95, by_sleep=95)
+        assert self._facts_pruned_anomalies(snap) == []
+
+    @pytest.mark.asyncio
+    async def test_sleep_driven_mass_prune_is_quiet(self):
+        # 150 is past the old floor of 100: without residualization it fires.
+        snap = await self._snapshot(pruned=150, by_sleep=150)
+        assert self._facts_pruned_anomalies(snap) == []
+
+    @pytest.mark.asyncio
+    async def test_non_sleep_prune_of_95_fires(self):
+        snap = await self._snapshot(pruned=95, by_sleep=0)
+        (found,) = self._facts_pruned_anomalies(snap)
+        assert found.current == 95
+        assert found.residualized_by == "sleep_prune_count"
+        assert found.raw_current == 95
+
+    @pytest.mark.asyncio
+    async def test_unexplained_part_of_a_mixed_prune_fires(self):
+        snap = await self._snapshot(pruned=160, by_sleep=100)
+        (found,) = self._facts_pruned_anomalies(snap)
+        assert found.current == 60
+        assert found.raw_current == 160
+
+    @pytest.mark.asyncio
+    async def test_audit_off_means_unknown_not_zero(self):
+        """Sleep prunes are only recorded with NOUS_CONSOLIDATION_AUDIT_ENABLED.
+        With it off the count is unknown, so it is stored as absent rather
+        than as a fabricated 0, and facts_pruned is judged gross."""
+        snap = await self._snapshot(pruned=150, by_sleep=150, audit_enabled=False)
+        assert snap.sleep_prune_count is None
+        assert snap.to_metrics_dict()["sleep_prune_count"] is None
+        (found,) = self._facts_pruned_anomalies(snap)
+        assert found.current == 150
+        assert found.residualized_by is None
+        assert found.raw_current is None
+
+    @pytest.mark.asyncio
+    async def test_tick_during_a_sleep_cycle_is_unknown_not_unexplained(self):
+        """The auditor writes its action rows only when the cycle closes
+        (7-14 min on prod), so a tick inside a cycle sees its prunes with no
+        action rows yet. Reading that as 0 sleep prunes judged routine
+        cleanup as unexplained at floor 50 (and the next tick cannot correct
+        it). A running cycle makes the count unknown: gross, floor 100."""
+        snap = await self._snapshot(pruned=95, by_sleep=0, sleep_running=True)
+        assert snap.facts_pruned == 95
+        assert snap.sleep_prune_count is None
+        assert self._facts_pruned_anomalies(snap) == []
+
+    @pytest.mark.asyncio
+    async def test_audit_off_gross_prune_of_95_is_quiet(self):
+        """A gross count cannot tell routine sleep cleanup (78/91/83 facts)
+        from drift, so it keeps the #719 floor of 100; only a residual gets
+        the floor of 50. Default-config deployments run with the audit off."""
+        snap = await self._snapshot(pruned=95, by_sleep=95, audit_enabled=False)
+        assert self._facts_pruned_anomalies(snap) == []
+
+    def test_baseline_rows_without_the_explainer_are_not_residualized(self):
+        """A residual is never fabricated for a row that cannot be explained:
+        v3 rows (written before sleep_prune_count existed) and audit-off rows
+        (stored as null) are left out of a residualized baseline."""
+        from dataclasses import replace
+
+        current = BehaviorSnapshot(timestamp=datetime.now(UTC), facts_pruned=95, sleep_prune_count=95)
+        # Every baseline row would make a residual of 0 look like a -300 drop
+        # if its missing explainer were read as 0; none of them is usable.
+        v3 = [BehaviorSnapshot(timestamp=datetime.now(UTC), metrics_version=3, facts_pruned=300) for _ in range(12)]
+        audit_off = [replace(s, metrics_version=4, sleep_prune_count=None) for s in v3]
+        assert [a for a in DriftDetector().detect(current, v3) if a.metric == "facts_pruned"] == []
+        assert [a for a in DriftDetector().detect(current, audit_off) if a.metric == "facts_pruned"] == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.postgres_only
+    async def test_real_query_counts_sleep_deactivations_only(self, db):
+        """The sleep-id subquery against real tables: only deactivating ops,
+        only this agent, only facts that became inactive this interval."""
+        from uuid import uuid4
+
+        from sqlalchemy import text
+
+        aid = f"test-hbdrift-{uuid4().hex[:8]}"
+        other = f"{aid}-other"
+        stale, merged, by_hand, learned, already = (uuid4() for _ in range(5))
+        try:
+            async with db.session() as s:
+                for fid in (stale, merged, by_hand, learned, already):
+                    await s.execute(
+                        text("INSERT INTO heart.facts (id, agent_id, content, active) VALUES (:id, :aid, 'x', true)"),
+                        {"id": fid, "aid": aid},
+                    )
+                await s.execute(text("UPDATE heart.facts SET active = false WHERE id = :id"), {"id": already})
+                await s.commit()
+            check = _drift_check(db, agent_id=aid)
+            check._settings.consolidation_audit_enabled = True
+            check._last_snapshot = await check._capture_snapshot()
+
+            async with db.session() as s:
+                await s.execute(
+                    text("UPDATE heart.facts SET active = false WHERE id = ANY(:ids)"),
+                    {"ids": [stale, merged, by_hand, learned]},
+                )
+                for agent, op, ids in (
+                    (aid, "deactivate", [stale]),
+                    (aid, "merge", [merged]),
+                    (aid, "learn", [learned]),  # not a deactivation
+                    (aid, "deactivate", [already]),  # inactive before this interval
+                    (other, "deactivate", [by_hand]),  # another agent's action
+                ):
+                    await s.execute(
+                        text(
+                            "INSERT INTO nous_system.consolidation_actions (agent_id, phase, op, target_ids) "
+                            "VALUES (:aid, 'test', :op, :ids)"
+                        ),
+                        {"aid": agent, "op": op, "ids": ids},
+                    )
+                await s.commit()
+            snap = await check._capture_snapshot()
+            assert snap.facts_pruned == 4
+            assert snap.sleep_prune_count == 2  # stale + merged
+        finally:
+            async with db.session() as s:
+                await s.execute(
+                    text("DELETE FROM nous_system.consolidation_actions WHERE agent_id IN (:a, :b)"),
+                    {"a": aid, "b": other},
+                )
+                await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :aid"), {"aid": aid})
+                await s.commit()
+
+    @pytest.mark.asyncio
+    @pytest.mark.postgres_only
+    async def test_real_query_running_cycle_makes_the_count_unknown(self, db):
+        """Against real tables: a recent 'running' cycle of this agent makes
+        sleep_prune_count None; one orphaned 7 hours ago does not."""
+        from uuid import uuid4
+
+        from sqlalchemy import text
+
+        aid = f"test-hbdrift-{uuid4().hex[:8]}"
+        fid = uuid4()
+        try:
+            async with db.session() as s:
+                await s.execute(
+                    text("INSERT INTO heart.facts (id, agent_id, content, active) VALUES (:id, :aid, 'x', true)"),
+                    {"id": fid, "aid": aid},
+                )
+                await s.execute(
+                    text(
+                        "INSERT INTO nous_system.consolidation_cycles (agent_id, started_at, status) "
+                        "VALUES (:aid, now() - interval '7 hours', 'running')"
+                    ),
+                    {"aid": aid},
+                )
+                await s.commit()
+            check = _drift_check(db, agent_id=aid)
+            check._settings.consolidation_audit_enabled = True
+            check._last_snapshot = await check._capture_snapshot()
+            assert check._last_snapshot.sleep_prune_count == 0  # the orphan is ignored
+
+            async with db.session() as s:
+                await s.execute(text("UPDATE heart.facts SET active = false WHERE id = :id"), {"id": fid})
+                await s.execute(
+                    text("INSERT INTO nous_system.consolidation_cycles (agent_id, status) VALUES (:aid, 'running')"),
+                    {"aid": aid},
+                )
+                await s.commit()
+            snap = await check._capture_snapshot()
+            assert snap.facts_pruned == 1
+            assert snap.sleep_prune_count is None
+        finally:
+            async with db.session() as s:
+                await s.execute(
+                    text("DELETE FROM nous_system.consolidation_cycles WHERE agent_id = :aid"), {"aid": aid}
+                )
+                await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :aid"), {"aid": aid})
+                await s.commit()
+
+    @pytest.mark.asyncio
+    async def test_sleep_ids_come_from_the_same_statement_scoped_to_the_agent(self):
+        sink = []
+        check = _drift_check(_FakeDB(_FakeRow(inactive_facts=1, **self._ROW), sink))
+        await check._capture_snapshot()
+        sql, params = sink[0]
+        assert len(sink) == 1
+        assert "nous_system.consolidation_actions" in sql
+        assert params == {"aid": "agent-b"}
+
+
+class TestRunawaySleepPhaseFiresOnSleepPruneCount:
+    """Residualization explains sleep prunes away from facts_pruned by design,
+    so a runaway sleep phase (a stale_scan burst of 2,000) would be silent
+    there. sleep_prune_count is drift-tracked in its own right, with a floor
+    of 100 so routine cleanup (~80 per cycle) stays quiet.
+    """
+
+    _ROUTINE = [70, 80, 90, 75, 85, 80, 78, 82, 88, 72, 80, 84]
+
+    def _history(self):
+        return [
+            BehaviorSnapshot(timestamp=datetime.now(UTC), facts_pruned=n, sleep_prune_count=n) for n in self._ROUTINE
+        ]
+
+    def _by_metric(self, current, history):
+        return {a.metric: a for a in DriftDetector().detect(current, history)}
+
+    def test_stale_scan_burst_fires_on_sleep_prune_count(self):
+        current = BehaviorSnapshot(timestamp=datetime.now(UTC), facts_pruned=2000, sleep_prune_count=2000)
+        by_metric = self._by_metric(current, self._history())
+        assert "facts_pruned" not in by_metric  # fully explained by sleep
+        found = by_metric["sleep_prune_count"]
+        assert found.current == 2000
+        assert found.direction == "up"
+        assert found.residualized_by is None
+
+    def test_routine_sleep_volume_is_quiet(self):
+        current = BehaviorSnapshot(timestamp=datetime.now(UTC), facts_pruned=95, sleep_prune_count=95)
+        assert "sleep_prune_count" not in self._by_metric(current, self._history())
+
+    def test_unknown_values_are_skipped_not_read_as_zero(self):
+        audit_off = [BehaviorSnapshot(timestamp=datetime.now(UTC), facts_pruned=80) for _ in range(12)]
+        history = self._history() + audit_off
+        unknown = BehaviorSnapshot(timestamp=datetime.now(UTC), facts_pruned=80)
+        assert "sleep_prune_count" not in self._by_metric(unknown, history)
+
+        burst = BehaviorSnapshot(timestamp=datetime.now(UTC), facts_pruned=2000, sleep_prune_count=2000)
+        found = self._by_metric(burst, history)["sleep_prune_count"]
+        # The null rows did not enter the baseline as zeros (mean would be ~40).
+        assert found.mean == round(sum(self._ROUTINE) / len(self._ROUTINE), 2)
 
 
 class TestV2FactsPrunedCarriesOverAsInactiveDelta:
@@ -1191,7 +1475,7 @@ class TestMetricComparable:
         combine two definitions."""
         from nous.observability.snapshots import metric_comparable
 
-        for metric, explainer in DriftDetector.RESIDUALIZE.items():
+        for metric, (explainer, _sign) in DriftDetector.RESIDUALIZE.items():
             assert metric_comparable(metric, 1) == metric_comparable(explainer, 1)
 
 
@@ -1221,6 +1505,7 @@ class TestTrendConsumersFilterPerMetric:
                 metrics={
                     "fact_count_delta": -2,
                     "handler_error_rate": 0.2,
+                    "sleep_prune_count": None,  # consolidation audit off: unknown
                     "metrics_version": SNAPSHOT_METRICS_VERSION,
                 },
             ),
@@ -1275,6 +1560,16 @@ class TestTrendConsumersFilterPerMetric:
         data = await self._client_get("/behavior/trends?metric=fact_count_delta")
         assert [p["value"] for p in data["points"]] == [-2]
         assert data["excluded_incompatible"] == 3
+
+    @pytest.mark.asyncio
+    async def test_trends_skips_unknown_values(self):
+        # A null metric is unknown, not 0, and must not 500 the endpoint.
+        data = await self._client_get("/behavior/trends?metric=sleep_prune_count")
+        assert data["points"] == []
+        assert data["stats"] == {}
+        # Counted, so a mostly-null window does not read as a quiet week:
+        # two v1 rows, the null row, and the newer writer's row.
+        assert data["excluded_incompatible"] == 4
 
     @pytest.mark.asyncio
     async def test_dashboard_filters_each_series_independently(self):
