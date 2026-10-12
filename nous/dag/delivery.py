@@ -408,7 +408,11 @@ class DAGResultDelivery:
                 "telegram", ok=True, required=False, detail="not configured"
             )
 
-        marker = f"\u2026 [truncated \u2014 {{dropped}} more chars; full summary: dag_manage status {str(dag.id)[:8]}]"
+        # Not "full": the stored summary was itself written from node results cut to _SUMMARY_RESULT_CHARS (#724).
+        marker = (
+            f"\u2026 [truncated \u2014 {{dropped}} more chars; "
+            f"dag_manage status {str(dag.id)[:8]} shows the stored summary and every node]"
+        )
         text = continuation.clip_text(summary, _TELEGRAM_MAX_CHARS, marker=marker)
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         client = self._http or httpx.AsyncClient()

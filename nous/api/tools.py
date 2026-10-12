@@ -5839,6 +5839,13 @@ def register_dag_tools(
                             base = getattr(cfg, "a2ui_public_base_url", "")
                             line += f" | card: {card_link(node.surface_id, base)}"
                     lines.append(line)
+                # #724: a Telegram push over 4096 units is cut with a marker
+                # pointing here, so the stored summary is shown whole. Same
+                # preference as `recent`: the agent-authored delivery_summary,
+                # else the generic result_summary.
+                summary = dag.delivery_summary or dag.result_summary
+                if summary:
+                    lines.append(f"Summary:\n{summary}")
                 return {"content": [{"type": "text", "text": "\n".join(lines)}]}
 
             elif action == "cancel":
