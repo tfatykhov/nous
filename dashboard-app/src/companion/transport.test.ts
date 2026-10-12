@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Transport, type StreamFactory, type StreamHandlers } from './transport';
 import { store } from './store.svelte';
 
@@ -121,6 +121,7 @@ describe('Transport — hydration-first connect', () => {
     expect(store.surfaces.a.components.root.text).toBe('a');
     expect(store.surfaces.a.nonce).toBe('na');
     expect(store.surfaces.a.priority).toBe(2);
+    stream.state.handlers!.onOpen();
     expect(store.connection).toBe('live');
   });
 
@@ -204,6 +205,54 @@ describe('Transport — stream errors re-enter hydration', () => {
 
     expect(stream.state.closed).toBeGreaterThanOrEqual(1);
     expect(counts.index).toBe(2);
+  });
+});
+
+describe('Transport — live only once the stream opens (#660)', () => {
+  // Construction is not connection: a stream endpoint that never opens
+  // (proxy refusing streaming, expired-session redirect) must not show the
+  // hydrated snapshots as live, and must not reset the reconnect backoff.
+  function connected(backoffMs = 0) {
+    const stream = fakeStream();
+    const { impl } = fakeFetch((url) =>
+      url === '/a2ui/surfaces' ? response({ latest_seq: 1, surfaces: [] }) : response({}),
+    );
+    return { stream, transport: new Transport({ streamFactory: stream.factory, fetchImpl: impl, backoffMs }) };
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('is not live until the stream opens', async () => {
+    const { stream, transport } = connected();
+    active = transport;
+    await transport.connect();
+    expect(store.connection).not.toBe('live');
+
+    stream.state.handlers!.onOpen();
+    expect(store.connection).toBe('live');
+  });
+
+  it('backs off further on each consecutive error, and an open resets it', async () => {
+    vi.useFakeTimers();
+    const timer = vi.spyOn(globalThis, 'setTimeout');
+    const { stream, transport } = connected(1000);
+    active = transport;
+    await transport.connect();
+
+    for (let i = 0; i < 3; i++) {
+      stream.state.handlers!.onError();
+      // Fire the scheduled reconnect; the new cycle constructs a stream
+      // that never opens.
+      await vi.advanceTimersByTimeAsync(30000);
+    }
+    expect(timer.mock.calls.map((c) => c[1])).toEqual([2000, 4000, 8000]);
+
+    stream.state.handlers!.onOpen();
+    stream.state.handlers!.onError();
+    expect(timer.mock.calls.at(-1)![1]).toBe(2000);
   });
 });
 
@@ -355,12 +404,12 @@ describe('Transport — partial offline-warm index (F092 Phase 4)', () => {
 
     expect(indexCalls).toBe(2);
     expect(Object.keys(store.surfaces).sort()).toEqual(['a', 'b']);
-    expect(store.connection).toBe('live');
 
     // The refreshed (full) stream opening again must not re-trigger.
     stream.state.handlers!.onOpen();
     await flush();
     expect(indexCalls).toBe(2);
+    expect(store.connection).toBe('live');
   });
 
   it('does not loop when the refreshed index is partial again', async () => {
