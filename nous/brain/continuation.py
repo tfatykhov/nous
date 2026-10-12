@@ -2442,6 +2442,20 @@ def _has_surrogate(text: str) -> bool:
     return any(unicodedata.category(ch) == "Cs" for ch in text)
 
 
+ANSWER_MAX_CHARS = 8000  # the owner's text; record_answer clips it again to the inbox body cap
+
+
+def valid_answer_text(text: Any) -> str | None:
+    """The owner's answer as every owner surface accepts it, else None: a string that is not blank, at most
+    ``ANSWER_MAX_CHARS`` long, with no NUL and no lone surrogate (Postgres refuses a NUL and the UTF-8 encode a lone
+    surrogate: refused here, not a 500 from the store). The REST routes and the A2UI card call this one function."""
+    if not isinstance(text, str) or not text.strip() or len(text) > ANSWER_MAX_CHARS:
+        return None
+    if _has_nul(text) or _has_surrogate(text):
+        return None
+    return text
+
+
 def _contains(value: Any, test: Callable[[str], bool]) -> bool:
     """``test`` holds for a string anywhere in a JSON value, keys included. PostgreSQL's ``jsonb`` and ``text``
     refuse a NUL and a lone surrogate, and ``render_arguments`` shows both as escapes, so they have to be looked for
