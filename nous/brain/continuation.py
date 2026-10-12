@@ -2433,6 +2433,23 @@ def proposal_note(note: str | None) -> str:
     return clip_shown(" ".join((note or "").split()), PROPOSAL_NOTE_MAX_CHARS)
 
 
+# Phase 3a: what a card shows of model-authored text. A fence opens only at a line start on both renderers
+# (`^\s*```(.*)$`, markdown.ts and Markdown.kt), so every line that would be one gets a leading middle dot.
+CARD_TRUNCATED = "\n[truncated]"
+_FENCE_LINE = re.compile(r"^(?=[^\S\n]*```)", re.MULTILINE)
+
+
+def card_text(text: str, limit: int) -> str:
+    """Model-authored ``text`` as a card shows it, inside ONE fenced block the builder adds: line breaks normalised
+    to ``\\n`` (a lone ``\\r`` is a break on some renderers), every control, format, bidi and zero-width character as
+    ``\\uXXXX``, cut at a character boundary to ``limit`` UTF-16 units with a ``[truncated]`` marker (``clip_shown``,
+    so never inside an escape), and every line that matches a renderer's fence regex prefixed with a middle dot and
+    a space (``\\u00b7 ``) so it can neither close the block nor open another. The prefix adds 2 units per neutralised
+    line, so the result can exceed ``limit`` by that much."""
+    shown = clip_shown(text.replace("\r\n", "\n").replace("\r", "\n"), limit, marker=CARD_TRUNCATED)
+    return _FENCE_LINE.sub("\u00b7 ", shown)
+
+
 def _has_nul(text: str) -> bool:
     return "\x00" in text
 
