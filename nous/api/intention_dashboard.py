@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, any_, exists, func, select, text
+from sqlalchemy import ARRAY, Text, and_, any_, bindparam, exists, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -274,6 +274,122 @@ async def _latency(session: AsyncSession, agent_id: str, *, since: datetime) -> 
     }
 
 
+TOP_ROOTS = 10
+
+METRIC_KEYS = (
+    "arrivals_by_decision_outcome",
+    "result_to_decision_latency_s",
+    "results_lost",
+    "results_waiting",
+    "results_lost_grace_s",
+    "owner_rows_unpushed",
+    "proposals_by_state",
+    "escalations_by_cause",
+    "stalls",
+    "arrivals_ungradable",
+    "token_spend",
+)
+
+_CONTEXT_LOG_ACTIVE_SQL = text(
+    "SELECT DISTINCT session_id FROM nous_system.context_log "
+    "WHERE agent_id = :a AND session_id LIKE :p AND timestamp >= :since"
+)
+_CONTEXT_LOG_SUMS_SQL = text(
+    "SELECT session_id, coalesce(sum(input_tokens_actual), 0) AS input_uncached, "
+    "coalesce(sum(output_tokens), 0) AS output, "
+    "coalesce(sum(cache_creation), 0) AS cache_write, coalesce(sum(cache_read), 0) AS cache_read, count(*) AS calls "
+    "FROM nous_system.context_log WHERE agent_id = :a AND session_id = ANY(:sessions) GROUP BY session_id"
+).bindparams(bindparam("sessions", type_=ARRAY(Text)))
+
+
+def _root_of_session(session_id: str) -> UUID | None:
+    try:
+        return UUID(session_id.removeprefix(continuation.INTENT_SESSION_PREFIX))
+    except ValueError:
+        return None
+
+
+def _parts_view(parts: continuation.TokenParts) -> dict[str, int]:
+    return {
+        "arrivals_in": parts.arrivals_in,
+        "arrivals_out": parts.arrivals_out,
+        "failed_tokens": parts.failed,
+        "subtask_tokens": parts.subtasks,
+        "dag_tokens": parts.dags,
+        "total": parts.total,
+    }
+
+
+async def _token_spend(session: AsyncSession, agent_id: str, *, since: datetime) -> dict[str, Any]:
+    """Contract 4.9.8 as amended by S4, C2 and C3. ``intent-%`` ``context_log`` rows are CONTINUATION turns only
+    (subtask and DAG sessions have their own ids), so the second column is not the whole of the first."""
+    prefix = continuation.INTENT_SESSION_PREFIX
+    cohort: set[UUID] = set(
+        (
+            await session.execute(
+                select(IntentionArrival.root_id)
+                .where(IntentionArrival.agent_id == agent_id, IntentionArrival.decided_at >= since)
+                .distinct()
+            )
+        ).scalars()
+    )
+    active = await session.execute(_CONTEXT_LOG_ACTIVE_SQL, {"a": agent_id, "p": f"{prefix}%", "since": since})
+    for (sid,) in active.all():
+        if (rid := _root_of_session(sid)) is not None:
+            cohort.add(rid)
+    ids = sorted(cohort)
+    parts = await continuation.root_token_parts(session, agent_id, ids)
+    sums: dict[UUID, dict[str, int]] = {}
+    intents: dict[UUID, str] = {}
+    if ids:
+        logged = await session.execute(
+            _CONTEXT_LOG_SUMS_SQL, {"a": agent_id, "sessions": [f"{prefix}{i}" for i in ids]}
+        )
+        for row in logged.all():
+            sums[_root_of_session(row.session_id)] = {
+                "input_uncached": int(row.input_uncached),
+                "output": int(row.output),
+                "cache_write": int(row.cache_write),
+                "cache_read": int(row.cache_read),
+                "calls": int(row.calls),
+            }
+        intents = dict(
+            (
+                await session.execute(
+                    select(Intention.id, Intention.intent).where(Intention.agent_id == agent_id, Intention.id.in_(ids))
+                )
+            ).all()
+        )
+    empty = {"input_uncached": 0, "output": 0, "cache_write": 0, "cache_read": 0, "calls": 0}
+    rows = []
+    for rid in ids:
+        p, c = parts[rid], sums.get(rid, empty)
+        rows.append(
+            {
+                "root_id": str(rid),
+                "short_id": continuation.short_id(rid),
+                "intent": intents.get(rid),
+                "budget_counted": _parts_view(p),
+                "context_log": c,
+                "unattributed_output": c["output"] - p.arrivals_out,
+            }
+        )
+    rows.sort(key=lambda r: (-r["budget_counted"]["total"], -r["context_log"]["output"], r["root_id"]))
+    total_parts = continuation.TokenParts(
+        *(sum(getattr(parts[i], f) for i in ids) for f in ("arrivals_in", "arrivals_out", "failed", "subtasks", "dags"))
+    )
+    total_log = {k: sum(r["context_log"][k] for r in rows) for k in empty}
+    return {
+        "basis": "lifetime_of_active_roots",
+        "roots_counted": len(ids),
+        "budget_counted": _parts_view(total_parts),
+        "context_log": total_log,
+        "unattributed_output": total_log["output"] - total_parts.arrivals_out,
+        "failed_tokens": total_parts.failed,
+        "top_roots": rows[:TOP_ROOTS],
+    }
+
+
 async def get_metrics(
     session: AsyncSession, agent_id: str, *, settings: Any, since: datetime, now: datetime
 ) -> dict[str, Any]:
@@ -365,6 +481,7 @@ async def get_metrics(
             "progress_credited": int(stalls[4]),
         },
         "arrivals_ungradable": int(ungradable),
+        "token_spend": await _token_spend(session, agent_id, since=since),
     }
 
 
