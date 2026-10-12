@@ -1058,6 +1058,9 @@ class DynamicCheckLoader:
                     if key == "interval_seconds" and value < MIN_INTERVAL_SECONDS:
                         raise ValueError(f"Minimum interval is {MIN_INTERVAL_SECONDS} seconds")
                     changes[key] = value
+                if not changes:
+                    # No allowed field: nothing to record, write or resync.
+                    return {"status": "updated", "name": name}
 
                 def _after(key: str) -> Any:
                     return changes[key] if key in changes else getattr(model, key)

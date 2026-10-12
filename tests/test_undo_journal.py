@@ -533,6 +533,16 @@ class TestCheckKind:
         assert [e["action"] for e in await journal.list(500)] == ["create"]
         assert await _row(db, DynamicCheckModel, uuid.UUID(created["id"])) == before
 
+    async def test_update_with_no_allowed_field_records_and_commits_nothing(self, db, loader, journal):
+        # Review of #712 (residual of #714 item 2): an update whose keys are
+        # all outside allowed_fields still journaled a snapshot and committed.
+        check_id = await _make_check(loader)
+        before = await _row(db, DynamicCheckModel, check_id)
+        result = await loader.manage_check("update", before["name"], {"bogus": 1, "name": "renamed"})
+        assert result == {"status": "updated", "name": before["name"]}
+        assert [e["action"] for e in await journal.list(500)] == ["create"]
+        assert await _row(db, DynamicCheckModel, check_id) == before
+
     async def test_refused_disable_records_nothing(self, db, loader, journal, monkeypatch):
         check_id = await _make_check(loader)
         name = (await _row(db, DynamicCheckModel, check_id))["name"]
