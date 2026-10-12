@@ -3090,6 +3090,8 @@ def create_app(
                 excluded += 1
                 continue
             val = metrics.get(metric, 0)
+            if val is None:
+                continue  # unknown, not 0 (sleep_prune_count with the consolidation audit off)
             points.append({"timestamp": row.timestamp.isoformat(), "value": val})
             values.append(float(val))
         stats = {}

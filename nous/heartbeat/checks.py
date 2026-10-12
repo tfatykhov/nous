@@ -1096,6 +1096,7 @@ class BehaviorDriftCheck(BaseCheck):
         fact_count = episode_count = censor_count = procedure_count = 0
         inactive_fact_count = 0
         inactive_ids: frozenset = frozenset()
+        sleep_ids: frozenset = frozenset()
         counts_ok = False
         if self._db:
             try:
@@ -1112,6 +1113,13 @@ class BehaviorDriftCheck(BaseCheck):
                     # unscoped count would let another agent's writes move this
                     # agent's deltas -- and for the residualized pair, let agent
                     # A's prune explain away agent B's unexplained fact drop.
+                    #
+                    # sleep_ids: facts a sleep cycle recorded deactivating
+                    # (stale_scan deactivate, F031 supersede/merge/remove, F027
+                    # merge sources). Only intersected with this tick's newly
+                    # inactive ids, so the lookback just has to exceed one
+                    # interval plus the audit's write lag; being generous only
+                    # costs rows. It is not a cutoff on the counts.
                     result = await session.execute(
                         text(
                             "SELECT "
@@ -1124,7 +1132,13 @@ class BehaviorDriftCheck(BaseCheck):
                             "(SELECT COUNT(*) FROM heart.procedures "
                             " WHERE agent_id = :aid AND active = true) AS procedures, "
                             "(SELECT COALESCE(array_agg(id), '{}') FROM heart.facts "
-                            " WHERE agent_id = :aid AND active = false) AS inactive_ids"
+                            " WHERE agent_id = :aid AND active = false) AS inactive_ids, "
+                            "(SELECT COALESCE(array_agg(DISTINCT t.id), '{}') "
+                            " FROM nous_system.consolidation_actions a "
+                            " CROSS JOIN LATERAL unnest(a.target_ids) AS t(id) "
+                            " WHERE a.agent_id = :aid "
+                            " AND a.op IN ('deactivate', 'supersede', 'merge') "
+                            " AND a.created_at > now() - interval '7 days') AS sleep_ids"
                         ),
                         {"aid": self._settings.agent_id},
                     )
@@ -1138,6 +1152,7 @@ class BehaviorDriftCheck(BaseCheck):
                         )
                         inactive_ids = frozenset(row.inactive_ids or ())
                         inactive_fact_count = len(inactive_ids)
+                        sleep_ids = frozenset(row.sleep_ids or ())
                         counts_ok = True
             except Exception:
                 logger.warning("Snapshot: DB query failed", exc_info=True)
@@ -1196,7 +1211,15 @@ class BehaviorDriftCheck(BaseCheck):
         # a fact deactivated, reactivated and deactivated again within one
         # interval counts once; only an always-on audit log could see that.
         # The ID set costs O(inactive facts) per tick.
-        facts_pruned = len(inactive_ids - prev.inactive_ids) if prev else 0
+        newly_inactive = inactive_ids - prev.inactive_ids if prev else frozenset()
+        facts_pruned = len(newly_inactive)
+
+        # The part of facts_pruned a sleep cycle did, which residualizes it
+        # (#720). The actions are recorded only with the consolidation audit
+        # on; off, the count is unknown, so None rather than a fabricated 0.
+        # Residual limit: the audit writes its rows after the phase commits,
+        # so a tick landing in that gap counts those prunes as unexplained.
+        sleep_prune_count = len(newly_inactive & sleep_ids) if self._settings.consolidation_audit_enabled else None
 
         bus_data = self._bus_stats.to_dict() if self._bus_stats else {}
         handlers = bus_data.get("handlers", {})
@@ -1213,6 +1236,7 @@ class BehaviorDriftCheck(BaseCheck):
             inactive_ids=inactive_ids,
             inactive_fact_delta=inactive_fact_delta,
             facts_pruned=facts_pruned,
+            sleep_prune_count=sleep_prune_count,
             episode_count=episode_count,
             episode_count_delta=episode_count - (prev.episode_count if prev else episode_count),
             active_censor_count=censor_count,
