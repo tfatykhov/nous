@@ -401,6 +401,16 @@ def test_printf_without_v_is_allowed(tmp_path):
     assert lineage_bash_allowed(ctx, "printf '%s\\n' hello", workspace_dir=workspace)
 
 
+def test_printf_v_is_only_an_option_in_the_leading_option_position(tmp_path):
+    """#727: only a LEADING -v assigns; after the format, or after --, it is an argument printf prints."""
+    ctx = _internal()
+    workspace = str(tmp_path)
+    for cmd in ["printf '%s' -value", "printf -- '%s' -v", "printf '%s %s' a -v", "printf -- -v"]:
+        assert lineage_bash_allowed(ctx, cmd, workspace_dir=workspace), cmd
+    for cmd in ["printf -v x hi", "printf -vx hi", "printf -nv x hi"]:
+        assert not lineage_bash_allowed(ctx, cmd, workspace_dir=workspace), cmd
+
+
 @pytest.mark.parametrize("op", ["&>", "&>>"])
 def test_the_lineage_shell_refuses_the_bash_only_redirect_of_both_streams(op, tmp_path):
     """dash, prod's /bin/sh, reads `cat a &>f` as `cat a &` and then `>f`: a backgrounded command."""

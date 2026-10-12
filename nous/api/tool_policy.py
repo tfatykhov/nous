@@ -414,15 +414,19 @@ def _gh_api_get(args: list[str]) -> bool:
 
 def _printf_allowed(args: list[str]) -> bool:
     """printf is safe except for -v, which assigns to a shell variable on bash hosts
-    and can override exported variables like PATH. Reject any invocation that passes -v."""
-    return not any(a == "-v" or (a.startswith("-") and not a.startswith("--") and "v" in a.lstrip("-")) for a in args)
+    and can override exported variables like PATH. Only the leading option can be -v:
+    ``--`` ends the options, and the first other word is the format, after which a
+    ``-v`` is an argument printf prints. (Bash refuses any other option, so a ``-v``
+    after one never assigns.)"""
+    first = args[0] if args else ""
+    return not (first != "--" and first.startswith("-") and len(first) > 1 and "v" in first)
 
 
 def _runner_allowed(args: list[str], *, workspace: Path, readable: list[Path]) -> bool:
-    """runner.sh: ``status|result|cancel <job id>``, ``status``, ``list [--active|--all]``, or ``launch <repo>
+    """runner.sh: ``status|result <job id>``, ``status``, ``list [--active|--all]``, or ``launch <repo>
     <prompt>|--prompt-file <file>`` with ``--model``, ``--effort``, ``--base-branch``, ``--plugins`` (installed
-    plugins only) and ``--prompt-file`` (one of ``readable``). No ``--sys-prompt``; ``cleanup`` and ``gc``
-    are not a lineage's to run."""
+    plugins only) and ``--prompt-file`` (one of ``readable``). No ``--sys-prompt``; ``cancel``, ``cleanup`` and
+    ``gc`` are not a lineage's to run (a lineage cancels a job through ``propose_action``)."""
     if not args:
         return False
     action, rest = args[0], args[1:]
