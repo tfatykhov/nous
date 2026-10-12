@@ -40,6 +40,29 @@ _UNDO_WRITE_LOCK_WAIT_SECONDS = 5.0  # write_file's wait for its path lock when 
 # sampling silently dropped the middle of a 303-line report (2026-10-07).
 _READ_FILE_MAX_LINES = 400
 _READ_FILE_MAX_CHARS = 48_000
+# The only variables a lineage's bash (F099 lineage shell) inherits; the process holds every API key and
+# password. GITHUB_TOKEN stays on purpose: gh authenticates only through it, and `runner.sh launch`, which
+# a lineage may run ungated (owner decision), hands it to the job anyway.
+_LINEAGE_BASH_ENV = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "LANG",
+        "LANGUAGE",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        "TERM",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "TMPDIR",
+        "NO_COLOR",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "GH_HOST",
+    }
+)
 
 
 def _mcp_response(text: str) -> dict[str, Any]:
@@ -73,6 +96,7 @@ async def bash_tool(
     timeout: int = 30,
     *,
     _workspace_dir: str = "/tmp/nous-workspace",
+    _lineage: bool = False,
 ) -> dict[str, Any]:
     """Execute a shell command in the workspace directory.
 
@@ -80,6 +104,8 @@ async def bash_tool(
         command: Shell command to execute
         timeout: Timeout in seconds (default 30, max 300)
         _workspace_dir: Internal param set by registration closure
+        _lineage: An internal_only (F099 lineage) call, set by dispatch: the
+            command gets only the _LINEAGE_BASH_ENV variables
 
     Returns:
         MCP-format response with stdout + stderr
@@ -97,6 +123,7 @@ async def bash_tool(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(workspace),
+            env={k: v for k, v in os.environ.items() if k in _LINEAGE_BASH_ENV} if _lineage else None,
             # Own process group, so a timeout or a cancelled turn can stop the
             # whole command (``a; b``, pipelines), not only the /bin/sh parent.
             start_new_session=True,
@@ -840,8 +867,8 @@ def register_builtin_tools(dispatcher: ToolDispatcher, settings: Settings) -> No
     """
     workspace = settings.workspace_dir
 
-    async def _bash(command: str, timeout: int = 30) -> dict[str, Any]:
-        return await bash_tool(command, timeout, _workspace_dir=workspace)
+    async def _bash(command: str, timeout: int = 30, _lineage: bool = False) -> dict[str, Any]:
+        return await bash_tool(command, timeout, _workspace_dir=workspace, _lineage=_lineage)
 
     async def _read_file(path: str, offset: int = 0, limit: int = 0) -> dict[str, Any]:
         return await read_file_tool(path, offset, limit, _workspace_dir=workspace)

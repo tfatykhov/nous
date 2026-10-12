@@ -551,6 +551,10 @@ class ToolDispatcher:
                         "_authority": ctx.authority,
                         "_root_intention_id": str(ctx.root_intention_id) if ctx.root_intention_id else "",
                     }
+                if name == "bash":
+                    # The lineage shell: the command runs with an allowlisted environment, not the
+                    # process's API keys. Same condition as the lineage_bash_allowed enforcement.
+                    args = {**args, "_lineage": True}
             if ctx.channel and name in ("spawn_task", "dag_create"):
                 # F098: the channel outlives the session, so the result can
                 # reach the conversation after the session has expired.

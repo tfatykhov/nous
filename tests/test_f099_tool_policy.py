@@ -399,3 +399,42 @@ def test_printf_without_v_is_allowed(tmp_path):
     ctx = _internal()
     workspace = str(tmp_path)
     assert lineage_bash_allowed(ctx, "printf '%s\\n' hello", workspace_dir=workspace)
+
+
+# -- post-merge review P1-1: a lineage's bash runs with an allowlisted environment ---
+
+
+def _bash_dispatcher(tmp_path):
+    from types import SimpleNamespace
+
+    from nous.api.builtin_tools import register_builtin_tools
+    from nous.api.tools import ToolDispatcher
+
+    d = ToolDispatcher()
+    register_builtin_tools(d, SimpleNamespace(workspace_dir=str(tmp_path / "ws")))
+    return d
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX shell and printenv")
+async def test_a_lineage_bash_call_sees_only_the_allowlisted_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("NOUS_TEST_PLANTED_SECRET", "planted-s3cret")
+    monkeypatch.setenv("GITHUB_TOKEN", "planted-gh-token")
+    d = _bash_dispatcher(tmp_path)
+    command = "printenv NOUS_TEST_PLANTED_SECRET; printenv GITHUB_TOKEN; printenv PATH"
+    text, _ = await d.dispatch("bash", {"command": command}, context=_internal("continuation"))
+    assert "planted-s3cret" not in text
+    # Kept on purpose: gh authenticates only through it, and runner.sh launch hands it to the job.
+    assert "planted-gh-token" in text
+    assert os.environ["PATH"] in text
+    # The model cannot switch the scrub off: an argument named with "_" is the dispatcher's.
+    text, _ = await d.dispatch("bash", {"command": command, "_lineage": False}, context=_internal("continuation"))
+    assert "planted-s3cret" not in text
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX shell and printenv")
+@pytest.mark.parametrize("ctx", [None, ExecutionContext(kind="subtask", session_id="s")])
+async def test_a_bash_call_outside_a_lineage_keeps_the_full_environment(tmp_path, monkeypatch, ctx):
+    monkeypatch.setenv("NOUS_TEST_PLANTED_SECRET", "planted-s3cret")
+    d = _bash_dispatcher(tmp_path)
+    text, _ = await d.dispatch("bash", {"command": "printenv NOUS_TEST_PLANTED_SECRET"}, context=ctx)
+    assert "planted-s3cret" in text
