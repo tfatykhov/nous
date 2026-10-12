@@ -105,11 +105,17 @@ def render_report_html(title: str, body: str) -> str:
 class OwnerPublisher:
     """Sends the owner-facing rows that are due to Telegram, once each (see the module docstring)."""
 
-    def __init__(self, *, database: Any, settings: Any, http_client: Any = None) -> None:
+    def __init__(self, *, database: Any, settings: Any, http_client: Any = None, surface_service: Any = None) -> None:
         self._db = database
         self._settings = settings
         self._http = http_client
+        self._surface_service = surface_service  # Phase 3a: the card leg; None while unbound
         self._lock = asyncio.Lock()  # one sweep at a time: the stamp is the idempotence, this spares the duplicate send
+
+    def set_surface_service(self, service: Any) -> None:
+        """Bind the surface service (main.py, once it exists; the publisher is built first). While it is None the
+        card leg is a no-op."""
+        self._surface_service = service
 
     async def push_due(self, limit: int = PUSH_BATCH, *, now: datetime | None = None) -> int:
         """Send up to ``limit`` due rows; the number sent. Inert without the flag or a bot token."""

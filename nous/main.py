@@ -1403,6 +1403,10 @@ async def create_components(settings: Settings) -> dict:
         # config: it records the reason and reports itself unconfigured.
         push_service = PushService(database, settings)
         surface_service = SurfaceService(database, settings, heart=heart, push=push_service)
+        if continuation_runner is not None:
+            # F099 Phase 3a: the owner's cards. The runner (and its publisher) were built earlier and need the service
+            # only for the card leg; a deployment without the companion never binds one, and every card step is a no-op.
+            continuation_runner.set_surface_service(surface_service)
 
     # F038: DAG Orchestration
     dag_orchestrator = None
@@ -1586,6 +1590,7 @@ async def create_components(settings: Settings) -> dict:
             composer=composer,
             compensation_registry=_comp_registry,
             snapshot_store=_snap_store,
+            continuation_runner=continuation_runner,
         )
         register_a2ui_tools(
             dispatcher,

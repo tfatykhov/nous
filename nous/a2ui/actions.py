@@ -112,6 +112,7 @@ class ActionRouter:
         composer: Any = None,
         compensation_registry: Any = None,
         snapshot_store: Any = None,
+        continuation_runner: Any = None,
     ):
         self._db = database
         self._settings = settings
@@ -120,6 +121,7 @@ class ActionRouter:
         self._brain = brain
         self._heartbeat = heartbeat_runner
         self._dag_orchestrator = dag_orchestrator
+        self._continuation_runner = continuation_runner  # F099 Phase 3a: the owner's verbs on the intention cards
         # F092.1: SurfaceComposer for app.refine (recompose) and app.refresh
         # (source re-read). None => the micro-app functions report unavailable.
         self._composer = composer

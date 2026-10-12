@@ -529,6 +529,7 @@ class ContinuationRunner:
         self._cancelled: set[UUID] = set()
         self._cancel_dag = cancel_dag
         self._view_checked_at: datetime | None = None
+        self._surface_service: Any = None  # Phase 3a, bound late (set_surface_service)
 
     @property
     def running_roots(self) -> frozenset[UUID]:
@@ -537,6 +538,15 @@ class ContinuationRunner:
     def set_cancel_dag(self, cancel_dag: Callable[[UUID, str], Awaitable[None]] | None) -> None:
         """Bind ``DAGOrchestrator.cancel_dag`` (main.py, once the orchestrator exists)."""
         self._cancel_dag = cancel_dag
+
+    def set_surface_service(self, service: Any) -> None:
+        """Bind the A2UI surface service (main.py, once it exists; the runner is built before it, like the DAG
+        cancel). It is handed to the owner publisher too. While it is None, the card leg of the publisher and the
+        ``card settle`` step are no-ops (R5)."""
+        self._surface_service = service
+        setter = getattr(self._publisher, "set_surface_service", None)
+        if setter is not None:
+            setter(service)
 
     def root_is_cancelled(self, root_id: UUID) -> bool:
         """The in-process view of cancelled roots, for ``AgentRunner.set_cancelled_roots``. A set lookup: no
