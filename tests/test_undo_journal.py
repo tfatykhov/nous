@@ -183,6 +183,15 @@ class TestJournalStore:
         assert missing.status_code == 404 and missing.json()["success"] is False
         assert malformed.status_code == 409 and malformed.json()["success"] is False
 
+    async def test_stale_tmp_from_a_killed_write_does_not_block_mark_restored(self, tmp_path):
+        # Review of #712: a hard kill between os.open and os.replace left
+        # .{name}.tmp behind, and every later rewrite of that id hit O_EXCL.
+        j = UndoJournal(str(tmp_path / "j"))
+        sid = await j.record("config", "x", "t", {"n": 1})
+        (j.root / f".{j._find(sid).name}.tmp").write_bytes(b"partial")
+        await j.mark_restored(sid, "ok")
+        assert (await j.get(sid))["restore_result"] == "ok"
+
     def test_configure_respects_flag(self, tmp_path):
         s = SimpleNamespace(
             undo_journal_enabled=False,

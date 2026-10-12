@@ -147,6 +147,8 @@ class UndoJournal:
     def _write_file(self, name: str, entry: dict[str, Any], data: bytes | None = None) -> None:
         data = _dump(entry) if data is None else data
         tmp = self._root / f".{name}.tmp"
+        # Callers hold _lock, so an existing tmp is a hard-killed write's leftover.
+        tmp.unlink(missing_ok=True)
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
             with os.fdopen(fd, "wb") as f:
