@@ -116,11 +116,12 @@ class TestSubtaskReportValidation:
             })
 
     def test_wrong_findings_type_rejected(self):
+        # A string is coerced (TestTolerantParsing); other non-lists still fail.
         with pytest.raises(ValidationError):
             SubtaskReport.model_validate({
                 "summary": "x",
                 "confidence": 0.5,
-                "findings": "should be a list",
+                "findings": 42,
             })
 
 
@@ -370,3 +371,117 @@ class TestPersistOutcomeUsesTheNormalizedPayload:
         )
         stored = heart.subtasks.complete.await_args.kwargs["report_jsonb"]
         assert stored["confidence_reported"] is False
+
+
+class TestTolerantParsing:
+    """Friction scan F4: models send list fields as one string and a null or
+    "" confidence. Each used to fail the whole subtask as validation_failed.
+    """
+
+    def test_json_string_findings_become_that_list(self):
+        r = SubtaskReport.model_validate({
+            "summary": "x",
+            "findings": '["a", "b"]',
+        })
+        assert r.findings == ["a", "b"]
+
+    def test_plain_string_findings_become_one_item(self):
+        r = SubtaskReport.model_validate({
+            "summary": "x",
+            "findings": "Revenue rose 4%; churn flat.",
+        })
+        assert r.findings == ["Revenue rose 4%; churn flat."]
+
+    def test_other_list_fields_are_coerced_too(self):
+        r = SubtaskReport.model_validate({
+            "summary": "x",
+            "next_actions": '["rerun", "notify"]',
+            "evidence_refs": "fact-uuid-1",
+        })
+        assert r.next_actions == ["rerun", "notify"]
+        assert r.evidence_refs == ["fact-uuid-1"]
+
+    def test_null_or_blank_lists_become_empty(self):
+        r = SubtaskReport.model_validate({
+            "summary": "x",
+            "findings": None,
+            "next_actions": "",
+            "evidence_refs": "   ",
+        })
+        assert r.findings == []
+        assert r.next_actions == []
+        assert r.evidence_refs == []
+
+    @pytest.mark.parametrize("confidence", [None, "", "  "])
+    def test_null_or_blank_confidence_counts_as_unreported(self, confidence):
+        r = SubtaskReport.model_validate({
+            "summary": "x",
+            "confidence": confidence,
+        })
+        assert r.confidence == DEFAULT_CONFIDENCE
+        assert r.confidence_reported is False
+
+    @pytest.mark.parametrize("confidence", [85, "high", -0.1])
+    def test_out_of_range_or_word_confidence_still_rejected(self, confidence):
+        """Parity pin (passes on base): tolerance stops at absence."""
+        with pytest.raises(ValidationError):
+            SubtaskReport.model_validate({
+                "summary": "x",
+                "confidence": confidence,
+            })
+
+    @pytest.mark.parametrize("payload", [
+        {"summary": "x", "confidence_level": "high"},
+        {"summary": "x", "findings": [1, 2]},
+        {"summary": "x", "findings": '["a", 1]'},
+        {"summary": "x", "evidence_refs": {"id": "f1"}},
+    ])
+    def test_unknown_key_and_non_string_items_still_rejected(self, payload):
+        """Parity pin (passes on base): extra="forbid" and list[str] hold."""
+        with pytest.raises(ValidationError):
+            SubtaskReport.model_validate(payload)
+
+    def test_blank_confidence_stays_unreported_across_a_dump_round_trip(self):
+        r = SubtaskReport.model_validate({
+            "summary": "x",
+            "confidence": "",
+            "findings": "one",
+        })
+        d = r.model_dump()
+        assert "confidence" not in d
+        reloaded = SubtaskReport.model_validate(d)
+        assert reloaded.confidence_reported is False
+        assert reloaded.findings == ["one"]
+
+    def test_validator_completes_a_report_with_string_findings(self):
+        from nous.heart.subtask_validator import validate_report
+
+        result = validate_report(
+            {
+                "summary": "Checked the three feeds; all current as of today.",
+                "findings": "all three feeds current",
+                "confidence": "",
+            },
+            min_summary_chars=1,
+        )
+        assert result.ok, result.reason
+        assert result.outcome == "completed"
+        assert result.report.findings == ["all three feeds current"]
+        assert result.report.confidence_reported is False
+
+
+class TestSubmitFinalReportSchemaConfidenceDefault:
+    """Parity pin (passes on base): the served schema advertises 0.5, never
+    "", as the confidence default. The F4 plan blamed a "" default; on
+    89ea70c3 there is none, so this guards against one being introduced.
+    """
+
+    @pytest.mark.parametrize("payload_enabled", [False, True])
+    def test_confidence_default_is_numeric(self, payload_enabled):
+        from nous.api.subtask_tools import build_submit_final_report_schema
+
+        schema = build_submit_final_report_schema(payload_enabled)
+        confidence = schema["input_schema"]["properties"]["confidence"]
+        assert confidence["default"] == DEFAULT_CONFIDENCE
+        assert confidence["default"] != ""
+        assert confidence["type"] == "number"
