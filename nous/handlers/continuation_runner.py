@@ -1418,12 +1418,16 @@ class ContinuationRunner:
     # these, and so will the A2UI ActionRouter (Phase 3). They are not tools.
     # ------------------------------------------------------------------
 
-    async def decide_proposal(self, proposal_id: UUID, *, approve: bool, actor: str) -> continuation.ProposalExecution:
+    async def decide_proposal(
+        self, proposal_id: UUID, *, approve: bool, actor: str, wait: bool = True
+    ) -> continuation.ProposalExecution:
         """The owner's decision on a proposal. An approve of a proposal that is ``approved`` (decided just now, or
         by an earlier call that never got as far as running it) runs the call and returns its result; every other
         outcome is the store's. A refusal is a result (``refusal``), never an exception; raises
         ``continuation.ProposalNotFound`` for an unknown id. The inline execution is shielded from the caller's
-        cancellation (see below)."""
+        cancellation (see below). ``wait=False`` (the A2UI card) starts the execution of an approved proposal in its
+        tracked task and returns the store's ``approved`` without awaiting it; the call's outcome reaches the owner
+        through the chain's next report. The REST routes and the bot keep ``wait=True``."""
         async with self._db.session() as session:
             decision = await continuation.decide_proposal(
                 session, self._agent_id, proposal_id, approve=approve, actor=actor, settings=self._settings
@@ -1436,6 +1440,12 @@ class ContinuationRunner:
         if decision.woke_arrival:
             self.wake()
         if approve and decision.refusal is None and decision.state == continuation.PROPOSAL_APPROVED:
+            if not wait:
+                # Tracked in _executing (stop() waits for it) and fenced by claim_execution; _resume_approved
+                # recovers a restart, as for a REST client that went away. Nothing awaits it: the card's request
+                # (and the surface lock it holds) is short.
+                self._start_execution(proposal_id)
+                return decision
             # Shielded: a REST client that goes away cancels its request task, and that must not cancel a call the
             # owner approved half way (it would sit `executing` until the in-doubt sweep). Tracked, so a graceful
             # stop() waits for it (bounded); a process stop still ends it, and the proposal is failed in doubt as
