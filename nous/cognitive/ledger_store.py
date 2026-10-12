@@ -9,7 +9,8 @@ client-generated id — the COMMIT may have landed even when the wait timed
 out). The RUNNER decides what a failure means: Phase 1b fails open; Phase 2b
 makes keyed sends fail closed. Rows never hold free text: an argument value
 is kept only when its shape proves it is not free text (or it is the call's
-target path), and tool output is never stored (durable_key_args, _summary).
+target path), and tool output is stored only as its shape, plus a redacted excerpt
+of an error's message (durable_key_args, _summary).
 
 Deployment assumption: ONE Nous process per (database, agent_id). The startup
 sweep marks every 'pending' row 'unknown' because only a dead process can
@@ -32,13 +33,20 @@ from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from nous.api.execution_context import ExecutionContext
-from nous.cognitive.execution_ledger import bash_exit_code, classify_side_effect, redact_text
+from nous.cognitive.execution_ledger import (
+    bash_exit_code,
+    classify_side_effect,
+    redact_error_text,
+    redact_text,
+)
 from nous.storage.models import LEDGER_STATUSES, CompensationSnapshot, ExecutionLedgerEntry
 
 logger = logging.getLogger(__name__)
 
 KEY_ARG_CHARS = 200
 RESULT_SUMMARY_CHARS = 500
+ERROR_EXCERPT_CHARS = 300
+_ERROR_EXCERPT_SCAN_CHARS = 2000
 _CLOSABLE = ("pending", "unknown")
 # Harness Phase 2b: the statuses that HOLD an idempotency key -- the partial
 # unique index's predicate (migration 075), one definition for the lookups.
@@ -215,28 +223,43 @@ class DuplicateSend(Exception):
 _BASH_TIMEOUT = re.compile(r"\ACommand timed out after \d+s\.")
 
 
-def _summary(text: str | None, output_of: str | None = None) -> str | None:
+def _summary(text: str | None, output_of: str | None = None, status: str | None = None) -> str | None:
     """Durable form of a result.
 
-    ``output_of`` names the tool when ``text`` is that tool's output, which is
-    never stored: handlers echo their arguments back (a fact's subject, a
-    subtask's answer, a quoted email body) and bash / run_python print
-    whatever the code prints (`cat .env; touch x` is a write whose output is a
-    secrets file). None of that is vettable by pattern redaction, and the
-    arguments are already hashed in key_args. Only the shape survives: its
-    length, plus bash's authoritative exit-code trailer and timeout line.
+    ``output_of`` names the tool when ``text`` is that tool's output. Output is
+    stored as its shape only: handlers echo their arguments back (a fact's
+    subject, a subtask's answer, a quoted email body) and bash / run_python
+    print whatever the code prints (`cat .env; touch x` is a write whose
+    output is a secrets file). None of that is vettable by pattern redaction,
+    and the arguments are already hashed in key_args. The shape is its length,
+    plus bash's authoritative exit-code trailer and timeout line. The one
+    exception is a call that closed ``error``: its first ERROR_EXCERPT_CHARS
+    characters are kept after ``redact_error_text``, so a diagnostics job can
+    see why it failed. That redaction cannot recognize an unlabeled value, so
+    an error that repeats an argument can still carry it.
     Harness-authored notes (outcome unknown, refusals) are kept, redacted.
     """
     if not text:
         return None
     if output_of is not None:
         parts: list[str] = []
+        body = text
         if output_of == "bash":
+            # The timeout error echoes the command, which key_args only hashes.
+            body = body.split("\nCommand:", 1)[0]
             if timeout := _BASH_TIMEOUT.match(text):
                 parts.append(timeout.group(0))
+                body = body[timeout.end():]
             if (exit_code := bash_exit_code(text)) is not None:
                 parts.append(f"exit code {exit_code}")
-        parts.append(f"{len(text)} chars of output, not stored")
+        excerpt = ""
+        if status == "error":
+            # Redact the whole scan window, then cut: a secret across the cut stays masked.
+            excerpt = redact_error_text(body.strip()[:_ERROR_EXCERPT_SCAN_CHARS])[:ERROR_EXCERPT_CHARS]
+        if excerpt:
+            parts.append(f"{len(text)} chars of output, error excerpt: {excerpt}")
+        else:
+            parts.append(f"{len(text)} chars of output, not stored")
         return "; ".join(parts)
     return redact_text(text)[:RESULT_SUMMARY_CHARS]
 
@@ -328,7 +351,7 @@ class LedgerStore:
             raise ValueError(f"cannot close a ledger row as {status!r}")
         values: dict[str, Any] = {
             "status": status,
-            "result_summary": _summary(result_summary, output_of),
+            "result_summary": _summary(result_summary, output_of, status),
             "completed_at": func.now(),
         }
         if external_ref is not None:

@@ -428,6 +428,64 @@ def redact_text(text: str) -> str:
     return text
 
 
+# redact_error_text adds these to redact_text for an error message that is
+# stored as written. Each is a format that identifies itself (a provider key
+# prefix, a JWT, a credential label) or a blob that no prose or path looks like.
+_B64 = "A-Za-z0-9+/_"
+_ERROR_REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\b(?:sk|pk|rk)-[A-Za-z0-9_-]{20,}"), "[REDACTED_KEY]"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}"), "[REDACTED_KEY]"),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,}"), "[REDACTED_KEY]"),
+    (re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"), "[REDACTED_KEY]"),
+    (re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), "[REDACTED_KEY]"),
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{35}"), "[REDACTED_KEY]"),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*"), "[REDACTED_JWT]"),
+    (re.compile(r"\b\d{8,10}:[A-Za-z0-9_-]{35}\b"), "[REDACTED_BOT_TOKEN]"),
+    # A bare `Basic <b64>`: the value must look encoded, so "Basic authentication" survives.
+    (re.compile(r"\bBasic\s+(?=\S*(?:[a-z][A-Z]|\d|[+/=]))[A-Za-z0-9+/]{12,}={0,2}"), "Basic [REDACTED]"),
+    # A credential label the redact_text patterns lack, or with ':' (prose such as
+    # "token: expired" survives: a ':' value must hold a digit).
+    (re.compile(r"((?:passphrase|private[_-]?key|credentials?)\s*=\s*)['\"]?[^\s'\",;&)]+", re.IGNORECASE),
+     r"\1[REDACTED]"),
+    (re.compile(
+        r"\b((?:api[_-]?key|apikey|access[_-]?token|auth[_-]?token|client[_-]?secret|token|secret|password|passwd)"
+        r"\s*:\s*)['\"]?(?=[^\s'\",;&)]*\d)[^\s'\",;&)]{6,}", re.IGNORECASE),
+     r"\1[REDACTED]"),
+    # https://<long token>@host (redact_text covers user:password@)
+    (re.compile(r"(://)[A-Za-z0-9_.~%-]{20,}@"), r"\1[REDACTED]@"),
+    (re.compile(r"([?&](?:key|sig|signature|auth|x-amz-signature|x-amz-credential)=)[^&\s'\"]+", re.IGNORECASE),
+     r"\1[REDACTED]"),
+    # Hex of 32+ (a digest or key; a 7-16 character commit hash is shorter).
+    (re.compile(r"\b[0-9a-fA-F]{32,}\b"), "[REDACTED_HEX]"),
+]
+# Base64 of 40+ characters mixing upper, lower and digits. A run is left alone
+# when it reads as a path (3+ slashes and no '+', which paths never hold).
+_B64_BLOB = re.compile(
+    rf"(?<![{_B64}=])(?=[{_B64}]*[A-Z])(?=[{_B64}]*[a-z])(?=[{_B64}]*\d)[{_B64}]{{40,}}={{0,2}}"
+)
+
+
+def _mask_blob(match: re.Match[str]) -> str:
+    blob = match.group(0)
+    if blob.count("/") >= 3 and "+" not in blob:
+        return blob
+    return "[REDACTED_BLOB]"
+
+
+def redact_error_text(text: str) -> str:
+    """``redact_text`` plus well-known credential formats and long random-looking strings.
+
+    For an error message stored as written (the execution ledger's error
+    excerpt). Prose, paths, hyphenated identifiers and short commit hashes pass
+    through. It cannot recognize an unlabeled value in free text (a traceback
+    line, a message that repeats its arguments).
+    """
+    text = redact_text(text)
+    for pattern, replacement in _ERROR_REDACT_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return _B64_BLOB.sub(_mask_blob, text)
+
+
 def redact_key_args(tool_name: str, key_args: dict[str, str]) -> dict[str, str]:
     """Redact sensitive patterns from key_args before external exposure."""
     if tool_name != "bash":

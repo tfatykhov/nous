@@ -1,5 +1,6 @@
 """Harness Phase 1b: durable execution ledger."""
 
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -260,6 +261,101 @@ async def test_no_tool_output_is_stored_because_handlers_echo_their_arguments(st
                             result_summary="Fact learned successfully.\nSubject: sk-ABCDEFGHIJKLMNOP")
     summary = (await _row(db, entry_id)).result_summary
     assert "sk-" not in summary and "chars of output" in summary
+
+
+async def _closed_summary(store, db, tool, text, *, status="error"):
+    """Open a row for ``tool`` and close it with ``text`` as its raw output."""
+    entry_id = await store.open_entry(context=ExecutionContext(kind="subtask"), tool_name=tool,
+                                      tool_input={"code": "x"}, turn=1)
+    await store.close_entry(entry_id, status=status, output_of=tool, result_summary=text)
+    return (await _row(db, entry_id)).result_summary
+
+
+# Synthetic placeholders, split so no source line is itself a credential shape.
+_MASKED_VALUES = [
+    "sk-" + "ant-api03-" + "AbCdEfGhIjKlMnOpQrStUvWx",
+    "ghp_" + "a1B2c3D4e5" * 4,
+    "github_pat_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3",
+    "xoxb-" + "1234567890-abcdefghij",
+    "AKIA" + "ABCDEFGHIJKLMNOP",
+    "AIza" + "A1b2C3d4E5" * 3 + "f6G7h",
+    "eyJ" + "hbGciOiJIUzI1NiJ9." + "eyJzdWIiOiIxMjM0NTY3ODkwIn0." + "dBjftJeZ4CVPmB92K27uh",
+    "123456789:" + "AAFd3x9Qz8L2mN4pR6sT8vW0yB1cD2eF3gH",
+    "Basic " + "dXNlcjpwYXNzd29yZDEyMzQ=",
+    "client_secret: " + "a1b2c3d4e5f6",
+    "https://" + "abcdefghijklmnopqrstuvwxyz0123" + "@example.invalid/x",
+    "0123456789abcdef" * 2 + "0123456789abcdef",
+    "Zm9vYmFyQmF6UXV4MTIzNDU2Nzg5MGFiY2RlZmdoaWprbG1ub3A=",
+]
+
+
+@pytest.mark.asyncio
+async def test_an_error_row_keeps_a_short_excerpt_of_the_message(store, db):
+    summary = await _closed_summary(store, db, "send_email", "SMTP connect failed: connection refused by mail host")
+    assert "SMTP connect failed: connection refused by mail host" in summary
+    assert summary.startswith(f"{len('SMTP connect failed: connection refused by mail host')} chars of output")
+
+
+@pytest.mark.asyncio
+async def test_an_error_excerpt_is_cut_to_300_characters(store, db):
+    summary = await _closed_summary(store, db, "send_email", "boom " * 400)
+    assert len(summary.split("error excerpt: ", 1)[1]) == 300
+
+
+@pytest.mark.parametrize("value", _MASKED_VALUES)
+@pytest.mark.asyncio
+async def test_an_error_excerpt_masks_each_credential_format(store, db, value):
+    summary = await _closed_summary(store, db, "send_email", f"provider rejected the request ({value}) so nothing left")
+    assert "provider rejected the request" in summary
+    secret = value.split()[-1]  # the value without a label such as "Basic" or "client_secret:"
+    assert secret not in summary and secret[:14] not in summary
+
+
+@pytest.mark.asyncio
+async def test_a_credential_across_the_300_character_cut_stays_masked(store, db):
+    key = "sk-" + "ant-api03-" + "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
+    lead = ("refused: " + "stuck " * 50)[:289] + " "  # the key starts at 290, so 10 characters sit inside the cut
+    summary = await _closed_summary(store, db, "send_email", lead + key + " tail")
+    assert "refused: stuck stuck" in summary
+    assert "sk-ant" not in summary and "AbCdEf" not in summary
+
+
+@pytest.mark.parametrize("benign", [
+    "No such file or directory: 'claude-jobs/prompts/x.md'",
+    "Basic authentication failed",
+    "Invalid token: expired",
+    "revert 457a8813 and a131f36a9f first",
+    "run-2026-10-12-nightly-diagnostics-weekly-report-job failed",
+    "node 3f9a1234-5678-4abc-9def-0123456789ab has no approval",
+    "/home/user/projects/Nous2/nous/cognitive/execution_ledger_store.py not found",
+])
+@pytest.mark.asyncio
+async def test_an_error_excerpt_leaves_ordinary_text_alone(store, db, benign):
+    assert benign in await _closed_summary(store, db, "dag_create", benign)
+
+
+@pytest.mark.asyncio
+async def test_a_success_output_is_still_not_stored(store, db):
+    text = "Sent to someone about the invoice"
+    assert text in await _closed_summary(store, db, "send_email", text, status="error")
+    summary = await _closed_summary(store, db, "send_email", text, status="success")
+    assert "invoice" not in summary and summary.endswith("chars of output, not stored")
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_row_stores_the_shape_only(store, db):
+    text = "connection reset by peer"
+    assert text in await _closed_summary(store, db, "send_email", text, status="error")
+    summary = await _closed_summary(store, db, "send_email", text, status="unknown")
+    assert "connection reset" not in summary and summary.endswith("chars of output, not stored")
+
+
+@pytest.mark.asyncio
+async def test_a_bash_error_excerpt_drops_the_command_line(store, db):
+    summary = await _closed_summary(store, db, "bash", "Command timed out after 30s.\nCommand: echo hunter2 > f")
+    assert re.match(r"Command timed out after \d+s\.", summary) and "hunter2" not in summary
+    summary = await _closed_summary(store, db, "bash", "spawn failed: no shell\nCommand: echo hunter2 > f")
+    assert "spawn failed: no shell" in summary and "hunter2" not in summary
 
 
 @pytest.mark.asyncio
