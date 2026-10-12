@@ -24,6 +24,7 @@ from typing import Any
 
 from nous import undo_journal
 from nous.api.call_outcome import current_outcome
+from nous.api.execution_context import BACKGROUND_BASH_TIMEOUT
 from nous.api.tools import ToolDispatcher, _tool_error
 from nous.config import Settings
 from nous.utils import kill_process_group
@@ -33,9 +34,9 @@ logger = logging.getLogger(__name__)
 # Limits
 _MAX_BASH_TIMEOUT = 300  # seconds
 # bash's timeout when the call names none: 30 s in a short turn (ExecutionContext.is_short_turn),
-# 120 s in any other background turn, which a longer subtask, DAG node or lineage bound covers.
+# BACKGROUND_BASH_TIMEOUT in any other background turn.
 _DEFAULT_BASH_TIMEOUT = 30  # seconds
-_BACKGROUND_BASH_TIMEOUT = 120  # seconds
+_BACKGROUND_BASH_TIMEOUT = BACKGROUND_BASH_TIMEOUT
 _MAX_OUTPUT_CHARS = 100 * 1024  # 100KB
 _MAX_FILE_SIZE = 1 * 1024 * 1024  # 1MB
 _UNDO_WRITE_LOCK_WAIT_SECONDS = 5.0  # write_file's wait for its path lock when the undo journal takes it

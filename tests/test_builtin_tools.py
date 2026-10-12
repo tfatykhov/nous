@@ -185,22 +185,24 @@ class TestBashTimeouts:
 
     @staticmethod
     def _context(kind):
-        """The turn's context; "inline" is a subtask row its caller claimed, as spawn_sync does."""
+        """The turn's context; "row-60" is a subtask row bounded at 60s (spawn_task(timeout=60), or
+        spawn_sync at its 90s default), "row-600" one bounded at 600s."""
         import uuid
         from types import SimpleNamespace
 
         from nous.api.execution_context import ExecutionContext
 
-        if kind == "inline":
-            return ExecutionContext.for_subtask(SimpleNamespace(id=uuid.uuid4(), worker_id="inline"), "s")
+        if kind.startswith("row-"):
+            row = SimpleNamespace(id=uuid.uuid4(), timeout_seconds=int(kind.removeprefix("row-")))
+            return ExecutionContext.for_subtask(row, "s")
         return ExecutionContext(kind=kind)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("kind", ["interactive", "mcp", "agent_action", "heartbeat_check", "dag_summary", "inline"])
+    @pytest.mark.parametrize("kind", ["interactive", "mcp", "agent_action", "heartbeat_check", "dag_summary", "row-60"])
     async def test_foreground_default_stays_30(self, tmp_path, monkeypatch, kind):
         """Someone waits on these turns (a companion tap too), or the whole turn
-        is bounded at 120s or less by default, so a 120s call would be cancelled
-        with it: a heartbeat check, a DAG summary, an inline subtask."""
+        is bounded at 120s or less, so a 120s call would be cancelled with it: a
+        heartbeat check, a DAG summary, a subtask whose row says so."""
         self._defaults(monkeypatch, foreground=1, background=60)
         text, is_error = await self._dispatcher(tmp_path).dispatch(
             "bash", {"command": self.SLOW}, context=self._context(kind)
@@ -209,7 +211,7 @@ class TestBashTimeouts:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "kind", ["subtask", "dag_node", "scheduled", "heartbeat_triage", "heartbeat_callback", "background"]
+        "kind", ["subtask", "row-600", "dag_node", "scheduled", "heartbeat_triage", "heartbeat_callback", "background"]
     )
     async def test_background_default_timeout_is_120(self, tmp_path, monkeypatch, kind):
         self._defaults(monkeypatch, foreground=60, background=1)
