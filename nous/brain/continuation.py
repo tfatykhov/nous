@@ -165,6 +165,19 @@ def enabled(settings: Any) -> bool:
     return getattr(settings, "continuation_enabled", False) is True and intentions.enabled(settings)
 
 
+def calibration_enabled(settings: Any) -> bool:
+    """NOUS_INTENTION_CALIBRATION_ENABLED, with the same rule as ``enabled``: a mocked or partial settings
+    object counts as off (``is True``), and the continuation must be on."""
+    return enabled(settings) and getattr(settings, "intention_calibration_enabled", False) is True
+
+
+def arrival_exclusion(settings: Any) -> dict[str, bool]:
+    """The keyword every model-facing decision feed spreads into its Brain call. Empty with the flag off, so
+    the call is exactly the call of before this flag existed (a feed's test double with an exact signature
+    still works); ``exclude_intention_arrivals=True`` with it on."""
+    return {"exclude_intention_arrivals": True} if calibration_enabled(settings) else {}
+
+
 def close_reason_for(settings: Any) -> str:
     """The close reason of a ``none``, ``remember`` or ``report`` intention (ruling 2):
     ``delivered`` with the flag on, ``legacy`` (Phase 1's) otherwise."""

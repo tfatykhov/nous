@@ -66,6 +66,8 @@ services:
       - NOUS_CONTINUATION_TURN_TIMEOUT_SECONDS=${NOUS_CONTINUATION_TURN_TIMEOUT_SECONDS:-780}
       - NOUS_CONTINUATION_MAX_ATTEMPTS=${NOUS_CONTINUATION_MAX_ATTEMPTS:-3}
       - NOUS_INTENTION_PROPOSAL_TTL_HOURS=${NOUS_INTENTION_PROPOSAL_TTL_HOURS:-24}
+      # F099 Phase 3d: grade each arrival's Brain decision from the lineage's rows (needs continuation).
+      - NOUS_INTENTION_CALIBRATION_ENABLED=${NOUS_INTENTION_CALIBRATION_ENABLED:-false}
       # F087: agent-authored DAG delivery summary. Off by default (costs one
       # LLM turn per finished DAG); falls back to the deterministic template
       # on timeout/failure, so delivery never depends on the LLM being up.
