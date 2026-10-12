@@ -90,6 +90,20 @@ def test_for_subtask_tolerates_legacy_rows():
     assert ctx.kind == "dag_node" and ctx.dag_id is None
 
 
+@pytest.mark.parametrize(("worker_id", "inline"), [("inline", True), ("worker-1", False), (None, False)])
+def test_for_subtask_marks_a_row_its_caller_runs_inline(worker_id, inline):
+    """The inline spawn path claims its row with INLINE_WORKER_ID; a worker's dequeue writes its own id."""
+    row = SimpleNamespace(id=uuid.uuid4(), metadata_={}, worker_id=worker_id)
+    ctx = ExecutionContext.for_subtask(row, "s")
+    assert ctx.kind == "subtask" and ctx.inline is inline and ctx.is_short_turn is inline
+
+
+def test_short_turns_are_the_foreground_and_the_background_turns_bounded_at_120s_or_less():
+    """A turn bounded as a whole at 120 s or less by default is short: bash keeps its 30 s default there."""
+    short = {kind for kind in CONTEXT_KINDS if _valid_context(kind).is_short_turn}
+    assert short == {"interactive", "mcp", "agent_action", "heartbeat_check", "dag_summary"}
+
+
 def test_resolve_context_defaults():
     assert resolve_context(None, is_background=False, session_id="s").kind == "interactive"
     bg = resolve_context(None, is_background=True, session_id="s")

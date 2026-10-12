@@ -183,26 +183,38 @@ class TestBashTimeouts:
         monkeypatch.setattr("nous.api.builtin_tools._DEFAULT_BASH_TIMEOUT", foreground, raising=False)
         monkeypatch.setattr("nous.api.builtin_tools._BACKGROUND_BASH_TIMEOUT", background, raising=False)
 
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("kind", ["interactive", "mcp", "agent_action"])
-    async def test_foreground_default_stays_30(self, tmp_path, monkeypatch, kind):
-        """A person or an agent waits on these turns, a companion tap (agent_action) too."""
+    @staticmethod
+    def _context(kind):
+        """The turn's context; "inline" is a subtask row its caller claimed, as spawn_sync does."""
+        import uuid
+        from types import SimpleNamespace
+
         from nous.api.execution_context import ExecutionContext
 
+        if kind == "inline":
+            return ExecutionContext.for_subtask(SimpleNamespace(id=uuid.uuid4(), worker_id="inline"), "s")
+        return ExecutionContext(kind=kind)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kind", ["interactive", "mcp", "agent_action", "heartbeat_check", "dag_summary", "inline"])
+    async def test_foreground_default_stays_30(self, tmp_path, monkeypatch, kind):
+        """Someone waits on these turns (a companion tap too), or the whole turn
+        is bounded at 120s or less by default, so a 120s call would be cancelled
+        with it: a heartbeat check, a DAG summary, an inline subtask."""
         self._defaults(monkeypatch, foreground=1, background=60)
         text, is_error = await self._dispatcher(tmp_path).dispatch(
-            "bash", {"command": self.SLOW}, context=ExecutionContext(kind=kind)
+            "bash", {"command": self.SLOW}, context=self._context(kind)
         )
         assert is_error and text.startswith("Command timed out after 1s."), text
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("kind", ["subtask", "dag_node", "scheduled", "heartbeat_check"])
+    @pytest.mark.parametrize(
+        "kind", ["subtask", "dag_node", "scheduled", "heartbeat_triage", "heartbeat_callback", "background"]
+    )
     async def test_background_default_timeout_is_120(self, tmp_path, monkeypatch, kind):
-        from nous.api.execution_context import ExecutionContext
-
         self._defaults(monkeypatch, foreground=60, background=1)
         text, is_error = await self._dispatcher(tmp_path).dispatch(
-            "bash", {"command": self.SLOW}, context=ExecutionContext(kind=kind)
+            "bash", {"command": self.SLOW}, context=self._context(kind)
         )
         assert is_error and text.startswith("Command timed out after 1s."), text
 
@@ -210,15 +222,11 @@ class TestBashTimeouts:
     @pytest.mark.parametrize(
         ("kind", "sent", "foreground", "background"), [("interactive", True, 1, 60), ("dag_node", False, 60, 1)]
     )
-    async def test_model_sent_is_background_is_stripped(
-        self, tmp_path, monkeypatch, kind, sent, foreground, background
-    ):
-        """Only dispatch sets _is_background: the value the model sent is dropped."""
-        from nous.api.execution_context import ExecutionContext
-
+    async def test_model_sent_long_timeout_is_stripped(self, tmp_path, monkeypatch, kind, sent, foreground, background):
+        """Only dispatch sets _long_timeout: the value the model sent is dropped."""
         self._defaults(monkeypatch, foreground=foreground, background=background)
         text, is_error = await self._dispatcher(tmp_path).dispatch(
-            "bash", {"command": self.SLOW, "_is_background": sent}, context=ExecutionContext(kind=kind)
+            "bash", {"command": self.SLOW, "_long_timeout": sent}, context=self._context(kind)
         )
         assert is_error and text.startswith("Command timed out after 1s."), text
 

@@ -15,6 +15,7 @@ from typing import Any, Literal, get_args
 from uuid import UUID
 
 from nous.brain.intentions import AUTHORITIES, AUTHORITY_INTERNAL, AUTHORITY_OWNER
+from nous.heart.subtasks import INLINE_WORKER_ID
 
 ContextKind = Literal[
     "interactive",         # REST /chat, /chat/stream — a person is in the loop
@@ -34,6 +35,12 @@ ContextKind = Literal[
 CONTEXT_KINDS: tuple[str, ...] = get_args(ContextKind)
 # A caller is waiting on the turn. Everything else runs with nobody in the loop.
 FOREGROUND_KINDS: frozenset[str] = frozenset({"interactive", "mcp"})
+# Background kinds that are short all the same: a person waits on a companion tap, and a
+# heartbeat check (DynamicCheck.timeout, 30 s by default) and a DAG summary
+# (NOUS_DAG_DELIVERY_AGENT_SUMMARY_TIMEOUT_SECONDS, 120 s) are bounded as a whole. An
+# inline subtask (NOUS_INLINE_SUBTASK_TIMEOUT, 90 s) is one too; its kind is "subtask",
+# so ``inline`` marks it. See ExecutionContext.is_short_turn.
+SHORT_BACKGROUND_KINDS: frozenset[str] = frozenset({"agent_action", "heartbeat_check", "dag_summary"})
 
 
 def _as_uuid(value: Any) -> UUID | None:
@@ -93,6 +100,8 @@ class ExecutionContext:
     arrival_id: UUID | None = None  # continuation: the arrival this turn decides
     claim_token: UUID | None = None  # continuation: the claim this turn runs under
     spawn_blocked: bool = False  # continuation: the root is at its depth or spawn limit
+    # A subtask its caller runs in the calling turn (spawn_sync, spawn_task with await_result).
+    inline: bool = False
 
     def __post_init__(self) -> None:
         if self.kind not in CONTEXT_KINDS:
@@ -109,6 +118,11 @@ class ExecutionContext:
     @property
     def is_background(self) -> bool:
         return self.kind not in FOREGROUND_KINDS
+
+    @property
+    def is_short_turn(self) -> bool:
+        """Someone waits on the turn, or it is bounded as a whole at 120 s or less by default."""
+        return not self.is_background or self.kind in SHORT_BACKGROUND_KINDS or self.inline
 
     @classmethod
     def for_subtask(cls, subtask: Any, session_id: str) -> ExecutionContext:
@@ -151,6 +165,8 @@ class ExecutionContext:
             intention_id=intention_id,
             root_intention_id=root_intention_id,
             authority=authority,
+            # The caller claims an inline row in its INSERT; a worker's dequeue writes its own id.
+            inline=getattr(subtask, "worker_id", None) == INLINE_WORKER_ID,
         )
 
 

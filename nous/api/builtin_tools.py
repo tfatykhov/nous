@@ -32,9 +32,8 @@ logger = logging.getLogger(__name__)
 
 # Limits
 _MAX_BASH_TIMEOUT = 300  # seconds
-# bash's timeout when the call names none. A person or an agent waits on a foreground
-# call, and on a companion action (agent_action); every other background turn is bounded
-# by its own subtask, DAG node or check timeout, so it can wait longer.
+# bash's timeout when the call names none: 30 s in a short turn (ExecutionContext.is_short_turn),
+# 120 s in any other background turn, which a longer subtask, DAG node or lineage bound covers.
 _DEFAULT_BASH_TIMEOUT = 30  # seconds
 _BACKGROUND_BASH_TIMEOUT = 120  # seconds
 _MAX_OUTPUT_CHARS = 100 * 1024  # 100KB
@@ -103,25 +102,26 @@ async def bash_tool(
     *,
     _workspace_dir: str = "/tmp/nous-workspace",
     _lineage: bool = False,
-    _is_background: bool = False,
+    _long_timeout: bool = False,
 ) -> dict[str, Any]:
     """Execute a shell command in the workspace directory.
 
     Args:
         command: Shell command to execute
-        timeout: Timeout in seconds (max 300). None: 30, or 120 in a
-            background turn
+        timeout: Timeout in seconds (max 300). None: 30, or 120 when
+            ``_long_timeout``
         _workspace_dir: Internal param set by registration closure
         _lineage: An internal_only (F099 lineage) call, set by dispatch: the
             command gets only the _LINEAGE_BASH_ENV variables
-        _is_background: Set by dispatch; picks the default timeout
+        _long_timeout: Set by dispatch for a background turn that is not a
+            short one (ExecutionContext.is_short_turn)
 
     Returns:
         MCP-format response with stdout + stderr
     """
     try:
         if timeout is None:
-            timeout = _BACKGROUND_BASH_TIMEOUT if _is_background else _DEFAULT_BASH_TIMEOUT
+            timeout = _BACKGROUND_BASH_TIMEOUT if _long_timeout else _DEFAULT_BASH_TIMEOUT
         # Clamp timeout
         effective_timeout = max(1, min(timeout, _MAX_BASH_TIMEOUT))
 
@@ -853,7 +853,7 @@ _BASH_SCHEMA: dict[str, Any] = {
             "type": "integer",
             "description": (
                 f"Timeout in seconds (max {_MAX_BASH_TIMEOUT}). Omitted: {_DEFAULT_BASH_TIMEOUT} in a "
-                f"conversation, {_BACKGROUND_BASH_TIMEOUT} in a background task"
+                f"conversation or a short background turn, {_BACKGROUND_BASH_TIMEOUT} in a longer background task"
             ),
             "minimum": 1,
             "maximum": 300,
@@ -912,10 +912,10 @@ def register_builtin_tools(dispatcher: ToolDispatcher, settings: Settings) -> No
     workspace = settings.workspace_dir
 
     async def _bash(
-        command: str, timeout: int | None = None, _lineage: bool = False, _is_background: bool = False
+        command: str, timeout: int | None = None, _lineage: bool = False, _long_timeout: bool = False
     ) -> dict[str, Any]:
         return await bash_tool(
-            command, timeout, _workspace_dir=workspace, _lineage=_lineage, _is_background=_is_background
+            command, timeout, _workspace_dir=workspace, _lineage=_lineage, _long_timeout=_long_timeout
         )
 
     async def _read_file(path: str, offset: int = 0, limit: int = 0) -> dict[str, Any]:
