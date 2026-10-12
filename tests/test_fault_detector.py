@@ -425,17 +425,21 @@ class TestProcessFaultCheckConsecutiveErrors:
         assert not error_findings
 
     @staticmethod
-    async def _run_check(runs: dict[str, list[dict]]) -> CheckResult:
-        check = ProcessFaultCheck(db=MagicMock(), settings=_mock_settings(), agent_id="test-agent")
+    async def _run_check(runs: dict[str, list[dict]], eligible_count: int = 0, **overrides) -> CheckResult:
+        check = ProcessFaultCheck(db=MagicMock(), settings=_mock_settings(**overrides), agent_id="test-agent")
 
         async def _fake_get(process_name, limit=20):
             return runs.get(process_name, [])[:limit]
 
+        async def _fake_ratio_get(process_name, limit=20):
+            return []
+
         async def _fake_count(*a, **kw):
-            return 0
+            return eligible_count
 
         recorder_mock = AsyncMock()
         recorder_mock.get_recent_runs = _fake_get
+        recorder_mock.get_recent_ratio_runs = _fake_ratio_get
         with patch("nous.heartbeat.fault_detector.ProcessRecorder", return_value=recorder_mock):
             with patch.object(check, "_count_stale_eligible", _fake_count):
                 return await check.run()
@@ -484,7 +488,31 @@ class TestProcessFaultCheckConsecutiveErrors:
 
         result = await self._run_check(runs)
 
-        assert any("stale_scan" in f.summary and "not completed" in f.summary for f in result.findings)
+        missed = [f for f in result.findings if "stale_scan" in f.summary and "no finished run" in f.summary]
+        assert missed and "among the last 25 recorded runs" in missed[0].summary
+        assert not any("not completed" in f.summary for f in result.findings)  # no fabricated hours
+
+    @pytest.mark.asyncio
+    async def test_zero_change_threshold_above_ratio_window_still_fires(self):
+        """The raw fetch must be deep enough for the zero-change check: with
+        ratio_baseline_window=5 and zero_change_threshold=12 it used to fetch
+        only 10 rows, so 12 zero-change runs could never be seen.
+        """
+        now = datetime.now(UTC)
+        runs = {
+            "sleep/stale_scan": [
+                _run(now, h, status="finished", items_examined=50, items_changed=0) for h in range(1, 15)
+            ]
+        }
+
+        result = await self._run_check(
+            runs,
+            eligible_count=100,
+            fault_detector_ratio_baseline_window=5,
+            fault_detector_zero_change_threshold=12,
+        )
+
+        assert any("0 deactivations in last 12 runs" in f.summary for f in result.findings)
 
 
 class TestProcessFaultCheckZeroChangeCollapse:

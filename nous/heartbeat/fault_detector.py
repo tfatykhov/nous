@@ -100,7 +100,7 @@ class ProcessFaultCheck(BaseCheck):
         # checks and the sleep baseline below.  Ratio-collapse detection fetches
         # its own eligible rows (get_recent_ratio_runs), so this depth no longer
         # bounds it.
-        fetch_limit = max(baseline_window + 5, consec_err_threshold + 1)
+        fetch_limit = max(baseline_window + 5, consec_err_threshold + 1, zero_change_threshold)
         now = datetime.now(UTC)
         runs_by_phase = {p: await recorder.get_recent_runs(p, limit=fetch_limit) for p in _SLEEP_PHASES}
 
@@ -170,21 +170,26 @@ class ProcessFaultCheck(BaseCheck):
             # completed since its oldest row.
             last_finished = next((r for r in runs if r["status"] == "finished"), None)
             if last_finished is None and len(runs) >= fetch_limit:
-                gap_hours = max_gap_hours + 1  # trigger the check
+                missed = True
+                missed_summary = (
+                    f"Process {process_name!r} has no finished run among the last "
+                    f"{len(runs)} recorded runs (threshold {max_gap_hours}h)"
+                )
             else:
                 last_ts: datetime = (last_finished or runs[-1])["started_at"]
                 if last_ts.tzinfo is None:
                     last_ts = last_ts.replace(tzinfo=UTC)
                 gap_hours = (now - last_ts).total_seconds() / 3600.0
+                missed = gap_hours > max_gap_hours
+                missed_summary = (
+                    f"Process {process_name!r} has not completed in {int(gap_hours)}h (threshold {max_gap_hours}h)"
+                )
 
-            if gap_hours > max_gap_hours:
+            if missed:
                 findings.append(
                     Finding(
                         source="fault_detector",
-                        summary=(
-                            f"Process {process_name!r} has not completed "
-                            f"in {int(gap_hours)}h (threshold {max_gap_hours}h)"
-                        ),
+                        summary=missed_summary,
                         urgency="normal",
                         needs_action=True,
                         check_name=self.name,
