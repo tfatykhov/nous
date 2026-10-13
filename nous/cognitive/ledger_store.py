@@ -59,7 +59,7 @@ _ERROR_EXCERPT_SCAN_CHARS = 2000
 DETAIL_INPUT_CHARS = 16000
 DETAIL_OUTPUT_CHARS = 16000
 _DETAIL_SCAN_PAD = 256
-_SECRET_NAME = re.compile(r"(?i)(key|token|secret|passw|credential|private)")
+_SECRET_NAME = re.compile(r"(?i)(key|token|secret|passw|credential|private|service_account)")
 _SECRET_MIN_CHARS = 8
 SECRET_MASK = "[REDACTED_SECRET]"
 _CLOSABLE = ("pending", "unknown")
@@ -200,7 +200,12 @@ def _own_secrets() -> tuple[str, ...]:
     bash inherits ``os.environ``, so ``echo $DB_PASSWORD`` prints a raw value no
     pattern matches. Cached once; tests call ``_own_secrets.cache_clear()``.
     """
-    values = {v for k, v in os.environ.items() if _SECRET_NAME.search(k) and len(v) >= _SECRET_MIN_CHARS}
+    values: set[str] = set()
+    for k, v in os.environ.items():
+        if _SECRET_NAME.search(k) and len(v) >= _SECRET_MIN_CHARS:
+            # A tool input is stored as JSON, and run_python can print a repr:
+            # the escaped spellings of a value must be masked too.
+            values.update((v, json.dumps(v, ensure_ascii=False)[1:-1], json.dumps(v)[1:-1], repr(v)[1:-1]))
     return tuple(sorted(values, key=len, reverse=True))
 
 
@@ -217,14 +222,22 @@ def detail_text(text: str, cap: int) -> str:
     Over the cap, the head and the tail are kept with a marker between. Each
     side is redacted over its own scan window BEFORE it is cut, so a secret
     straddling the cut is still masked, and the regexes never see more than
-    ``cap`` + 2 * ``_DETAIL_SCAN_PAD`` characters of an unbounded output.
+    ``cap`` + 2 * pad characters of an unbounded output. The pad covers the
+    longest own secret. The last ``pad`` characters of a redacted window (its
+    first, for the tail) are dropped: a secret cut by the window edge is only
+    partly masked there, and masking shrinks the text so raw edge text would
+    otherwise slide into the kept part.
     """
     if len(text) <= cap:
         return _redact_detail(text)
     half = cap // 2
-    head = _redact_detail(text[: half + _DETAIL_SCAN_PAD])[:half]
-    tail = _redact_detail(text[-(half + _DETAIL_SCAN_PAD):])[-half:]
-    return f"{head}\n…[{len(text) - 2 * half} chars cut]…\n{tail}"
+    pad = max([_DETAIL_SCAN_PAD, *map(len, _own_secrets())])
+    head = _redact_detail(text[: half + pad])
+    tail = _redact_detail(text[-(half + pad):])
+    head = head[: min(half, len(head) - pad)] if len(head) > pad else ""
+    keep = min(half, len(tail) - pad)
+    tail = tail[-keep:] if keep > 0 else ""
+    return f"{head}\n…[middle cut]…\n{tail}"
 
 
 def detail_input(tool_name: str, tool_input: dict[str, Any]) -> str:
@@ -322,7 +335,7 @@ def _summary(
         excerpt = ""
         if status == "error":
             # Redact the whole scan window, then cut: a secret across the cut stays masked.
-            excerpt = redact_error_text(body.strip()[:_ERROR_EXCERPT_SCAN_CHARS])[:ERROR_EXCERPT_CHARS]
+            excerpt = _redact_detail(body.strip()[:_ERROR_EXCERPT_SCAN_CHARS])[:ERROR_EXCERPT_CHARS]
         if excerpt:
             parts.append(f"{len(text)} chars of output, error excerpt: {excerpt}")
         else:

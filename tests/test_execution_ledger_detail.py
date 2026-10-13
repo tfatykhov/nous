@@ -142,8 +142,8 @@ def test_a_long_text_keeps_head_and_tail_and_masks_a_secret_across_the_cut(own_s
     assert len(text) > 100_000 and lead.__len__() + 10 == half
     out = detail_text(text, DETAIL_OUTPUT_CHARS)
     assert out.startswith("HEAD-") and out.endswith("-TAIL")
-    assert "chars cut]" in out and "\n…[" in out
-    assert DETAIL_OUTPUT_CHARS < len(out) < DETAIL_OUTPUT_CHARS + 100
+    assert "\n…[middle cut]…\n" in out
+    assert DETAIL_OUTPUT_CHARS - 100 < len(out) < DETAIL_OUTPUT_CHARS + 100
     assert own_secret not in out and own_secret[:12] not in out and own_secret[-12:] not in out
     assert "[REDACTED_" in out  # the mask itself may be cut by the head bound
 
@@ -263,3 +263,94 @@ async def test_search_matches_text_found_only_in_the_input_or_output(store, db, 
     assert [r["input_preview"] for r in (await _exec(db, agent, q="ZEBRAFILE"))["rows"]] == ["touch /tmp/zebrafile"]
     assert [r["input_preview"] for r in (await _exec(db, agent, q="giraffe"))["rows"]] == ["touch /tmp/other"]
     assert (await _exec(db, agent, q="nomatchanywhere"))["rows"] == []
+
+
+# ---- review fixes ----
+
+
+def _set_secret(monkeypatch, value, name="NOUS_TEST_FAKE_TOKEN"):
+    monkeypatch.setenv(name, value)
+    ledger_store._own_secrets.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _clear_secret_cache():
+    yield
+    ledger_store._own_secrets.cache_clear()
+
+
+def _longest_shared_run(secret: str, text: str, run: int = 8) -> str | None:
+    """A run of ``run`` characters of ``secret`` that survives in ``text``, else None."""
+    for i in range(len(secret) - run + 1):
+        if secret[i : i + run] in text:
+            return secret[i : i + run]
+    return None
+
+
+@pytest.mark.asyncio
+async def test_an_own_secret_with_quote_backslash_and_newline_is_masked_in_every_spelling(store, db, monkeypatch):
+    secret = 'pw"with\slash\nline-' + uuid.uuid4().hex
+    _set_secret(monkeypatch, secret)
+    escaped = json.dumps(secret, ensure_ascii=False)[1:-1]
+    entry = await _run(
+        store,
+        tool="write_file",
+        tool_input={"path": "/tmp/p", "content": secret},
+        output=f"saw {secret} and {escaped} and {secret!r}",
+    )
+    row = await _row(db, entry)
+    for text in (row.input_text, row.output_text):
+        assert secret not in text and escaped not in text and repr(secret)[1:-1] not in text
+        assert _longest_shared_run(uuid.UUID(secret[-32:]).hex, text) is None
+    assert SECRET_MASK in row.input_text
+
+
+def test_a_secret_longer_than_the_scan_pad_does_not_leak_at_the_cut(monkeypatch):
+    secret = "".join(uuid.uuid4().hex for _ in range(10))[:300]
+    _set_secret(monkeypatch, secret)
+    half = DETAIL_OUTPUT_CHARS // 2
+    filler = "lorem ipsum dolor sit amet\n"
+    text = (filler * 400)[: half - 20] + secret + filler * 4000
+    out = detail_text(text, DETAIL_OUTPUT_CHARS)
+    assert _longest_shared_run(secret, out) is None
+
+
+def test_masking_that_shrinks_the_head_does_not_let_raw_window_edge_text_in(monkeypatch):
+    secret = "".join(uuid.uuid4().hex for _ in range(2))[:60]
+    _set_secret(monkeypatch, secret)
+    half = DETAIL_OUTPUT_CHARS // 2
+    pad = ledger_store._DETAIL_SCAN_PAD
+    filler = "lorem ipsum dolor sit amet\n"
+    early = (filler + secret + "\n") * 40  # each mask shrinks the head
+    at_edge = half + pad - 30
+    text = early + (filler * 400)[: at_edge - len(early)] + secret + filler * 4000
+    assert len(text) > DETAIL_OUTPUT_CHARS
+    out = detail_text(text, DETAIL_OUTPUT_CHARS)
+    assert _longest_shared_run(secret, out) is None
+    assert out.count(SECRET_MASK) >= 40
+    # nothing masked: the bound is unchanged
+    plain = detail_text(filler * 2000, DETAIL_OUTPUT_CHARS)
+    assert DETAIL_OUTPUT_CHARS - len(filler) < len(plain) - len("\n…[middle cut]…\n") <= DETAIL_OUTPUT_CHARS
+
+
+@pytest.mark.parametrize("detail", [False, True])
+@pytest.mark.asyncio
+async def test_an_error_excerpt_masks_an_own_secret(db, agent, monkeypatch, detail):
+    secret = "zq" + uuid.uuid4().hex
+    _set_secret(monkeypatch, secret)
+    store = LedgerStore(db, agent, detail_enabled=detail)
+    entry = await _run(
+        store,
+        tool="run_python",
+        tool_input={"code": "raise ValueError(SECRET)"},
+        output=f"Traceback (most recent call last):\nValueError: {secret}",
+        status="error",
+    )
+    row = await _row(db, entry)
+    assert secret not in row.result_summary and "error excerpt" in row.result_summary
+
+
+def test_a_service_account_variable_is_collected_as_a_secret(monkeypatch):
+    value = "eyJ" + uuid.uuid4().hex * 4
+    _set_secret(monkeypatch, value, name="GOOGLE_SERVICE_ACCOUNT_JSON")
+    assert value in ledger_store._own_secrets()

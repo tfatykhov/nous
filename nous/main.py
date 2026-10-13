@@ -72,7 +72,11 @@ async def _execution_ledger_maintenance_loop(
                     detail_retention_days=settings.execution_ledger_detail_retention_days,
                 )
                 last_prune = loop.time()
-                logger.info("Harness: execution ledger retention pruned %d rows", pruned)
+                logger.info(
+                    "Harness: execution ledger retention pruned %d rows, detail window %d days",
+                    pruned,
+                    settings.execution_ledger_detail_retention_days,
+                )
             await asyncio.sleep(settings.execution_ledger_sweep_interval_seconds)
             await ledger_store.mark_orphans_unknown(
                 older_than_seconds=effective_orphan_threshold(settings),
