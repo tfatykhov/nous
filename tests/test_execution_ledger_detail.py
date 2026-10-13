@@ -145,7 +145,6 @@ def test_a_long_text_keeps_head_and_tail_and_masks_a_secret_across_the_cut(own_s
     assert "\n…[middle cut]…\n" in out
     assert DETAIL_OUTPUT_CHARS - 100 < len(out) < DETAIL_OUTPUT_CHARS + 100
     assert own_secret not in out and own_secret[:12] not in out and own_secret[-12:] not in out
-    assert "[REDACTED_" in out  # the mask itself may be cut by the head bound
 
 
 @pytest.mark.asyncio
