@@ -623,6 +623,9 @@ export interface DagDashboardData {
 export interface ExecutionModes {
   persist: boolean;
   retention_days: number;
+  /** Migration 086: whether the redacted call input and output are stored. */
+  detail: boolean;
+  detail_retention_days: number;
   offered_set: string;
   context_policy: string;
   claim_verification: string;
@@ -663,6 +666,10 @@ export interface ExecutionRow {
   refusal_code: string | null;
   result_summary: string | null;
   key_args: Record<string, unknown>;
+  /** First 240 characters of the stored call input, or null when none is stored. */
+  input_preview: string | null;
+  has_input: boolean;
+  has_output: boolean;
   idempotency_key: string | null;
   external_ref: string | null;
   session_id: string | null;
@@ -675,6 +682,15 @@ export interface ExecutionRow {
   turn: number | null;
   tombstone: boolean;
   held_by: ExecutionHolder | null;
+}
+
+/** GET /dashboard/execution/{id}: the stored (redacted, capped) input and output of one call. */
+export interface ExecutionDetail {
+  id: string;
+  tool_name: string;
+  status: string;
+  input_text: string | null;
+  output_text: string | null;
 }
 
 export interface ExecutionData {

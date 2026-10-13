@@ -3,7 +3,8 @@
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
   import { pushCounts } from '../lib/stores/attention';
-  import type { ExecutionData, ExecutionRow } from '../lib/types/api';
+  import { onDestroy } from 'svelte';
+  import type { ExecutionData, ExecutionDetail, ExecutionRow } from '../lib/types/api';
   import StatGrid from '../lib/ui/StatGrid.svelte';
   import DataTable from '../lib/ui/DataTable.svelte';
   import FilterBar from '../lib/ui/FilterBar.svelte';
@@ -155,6 +156,30 @@
   }
 
   const sqlEls: Record<string, HTMLElement | null> = {};
+
+  // The stored command and output are fetched when a row is first expanded,
+  // once per id: the list carries only a preview.
+  type Fetched = { state: 'loading' } | { state: 'error' } | { state: 'ok'; data: ExecutionDetail };
+  let details = $state<Record<string, Fetched>>({});
+  const inflight = new AbortController();
+  onDestroy(() => inflight.abort());
+
+  async function loadDetail(r: ExecutionRow) {
+    const have = details[r.id];
+    if ((!r.has_input && !r.has_output) || (have && have.state !== 'error')) return;
+    details[r.id] = { state: 'loading' };
+    try {
+      const data = await apiGet<ExecutionDetail>(`/dashboard/execution/${r.id}`, { signal: inflight.signal });
+      details[r.id] = { state: 'ok', data };
+    } catch {
+      if (inflight.signal.aborted) return;
+      details[r.id] = { state: 'error' };
+    }
+  }
+
+  function inputLabel(tool: string): string {
+    return tool === 'bash' ? 'Command' : tool === 'run_python' ? 'Code' : 'Input';
+  }
 </script>
 
 <header class="view-head">
@@ -179,6 +204,7 @@
       <span class="mode-pill {modePillClass(d.modes.context_policy)}">Context policy: {d.modes.context_policy}</span>
       <span class="mode-pill {modePillClass(d.modes.claim_verification)}">Claim checks: {d.modes.claim_verification}</span>
       <span class="mode-pill {modePillClass(d.modes.action_gating)}">Action gating: {d.modes.action_gating}</span>
+      <span class="mode-pill {d.modes.detail ? 'mode-enforce' : 'mode-off'}">Detail capture: {d.modes.detail ? `on · ${d.modes.detail_retention_days > 0 ? `${d.modes.detail_retention_days}-day retention` : 'kept with the row'}` : 'off'}</span>
     </div>
   </div>
 
@@ -270,7 +296,9 @@ WHERE id = '{r.id}' AND status = 'unknown';</code>
   <section class="table-card">
     <div class="table-head">
       <h2>Calls</h2>
-      <span class="small muted">Free-text arguments are stored as sha256 + length; tool output is never stored.</span>
+      <span class="small muted">{d.modes.detail
+        ? 'Commands, code and output are stored redacted and capped. Other free-text arguments are stored as sha256 + length.'
+        : 'Free-text arguments are stored as sha256 + length; tool output is not stored.'}</span>
     </div>
     {#if rows.length === 0}
       <p class="empty">{d.modes.persist ? 'No side-effecting calls match these filters.' : 'Nothing is being recorded.'}</p>
@@ -281,6 +309,7 @@ WHERE id = '{r.id}' AND status = 'unknown';</code>
         mode="cards"
         rowKey={(r: ExecutionRow) => r.id}
         rowLabel={(r: ExecutionRow) => `${r.tool_name} at ${fmtUtc(r.created_at)}`}
+        onrowclick={loadDetail}
       >
         {#snippet cell(r: ExecutionRow, c: { key: string })}
           {#if c.key === 'when'}
@@ -297,10 +326,15 @@ WHERE id = '{r.id}' AND status = 'unknown';</code>
             <!-- Persistence off: no LedgerStore is installed, so no retry is refused. -->
             {#if r.status === 'unknown'}<span class="small muted"> {!r.idempotency_key ? 'nothing held' : d.modes.persist ? 'holds a send' : 'holds nothing while persistence is off'}</span>{/if}
           {:else if c.key === 'target'}
-            <span class="target">{ledgerTarget(r.key_args, r.tombstone)}</span>
+            {#if r.input_preview}
+              <span class="target-preview mono" title={r.input_preview}>{r.input_preview}</span>
+            {:else}
+              <span class="target">{ledgerTarget(r.key_args, r.tombstone)}</span>
+            {/if}
           {/if}
         {/snippet}
         {#snippet detail(r: ExecutionRow)}
+          {@const fetched = details[r.id]}
           <dl class="detail-grid">
             {#if r.held_by}
               <div><dt>Key currently held by</dt>
@@ -309,6 +343,23 @@ WHERE id = '{r.id}' AND status = 'unknown';</code>
             {#if r.idempotency_key}<div><dt>Idempotency key</dt><dd class="mono wrap">{r.idempotency_key}</dd></div>{/if}
             <div><dt>Context</dt><dd>{r.context_kind}{r.dag_name ? ` · ${r.dag_name}${r.node_name ? ` / ${r.node_name}` : ''}` : ''}{r.turn != null ? ` · turn ${r.turn}` : ''}</dd></div>
             {#if r.session_id}<div><dt>Session</dt><dd class="mono wrap">{r.session_id}{r.parent_session_id ? ` (parent ${r.parent_session_id})` : ''}</dd></div>{/if}
+            <div class="detail-wide">
+              {#if !r.has_input && !r.has_output}
+                <dt>{inputLabel(r.tool_name)} and output</dt>
+                <dd class="muted">{r.tombstone ? 'Removed by retention.' : 'Not recorded: detail capture was off when this ran, or retention cleared it.'}</dd>
+              {:else if !fetched || fetched.state === 'loading'}
+                <dd class="muted">Loading…</dd>
+              {:else if fetched.state === 'error'}
+                <dd class="error-text" role="alert">Could not load the stored text. Collapse the row and open it again to retry.</dd>
+              {:else}
+                {#if fetched.data.input_text}
+                  <dt>{inputLabel(r.tool_name)}</dt>
+                  <dd><pre class="stored mono">{fetched.data.input_text}</pre></dd>
+                {/if}
+                <dt>Output</dt>
+                <dd>{#if fetched.data.output_text}<pre class="stored mono">{fetched.data.output_text}</pre>{:else}<span class="muted">No output recorded.</span>{/if}</dd>
+              {/if}
+            </div>
             <div><dt>Key args</dt><dd class="mono wrap">{r.tombstone ? 'removed by retention' : JSON.stringify(r.key_args)}</dd></div>
             {#if r.result_summary}<div><dt>Stored note</dt><dd class="mono wrap">{r.result_summary}</dd></div>{/if}
             {#if r.external_ref}<div><dt>Provider ref</dt><dd class="mono wrap">{r.external_ref}</dd></div>{/if}
@@ -397,6 +448,11 @@ WHERE id = '{r.id}' AND status = 'unknown';</code>
   .effect-irreversible { background: rgba(248, 113, 113, 0.15); color: var(--red); }
   .target { overflow-wrap: anywhere; font-size: 0.8125rem; }
   .detail-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 0.625rem 1.5rem; margin: 0; padding: 0.5rem 0; }
+  .detail-wide { grid-column: 1 / -1; }
+  .stored { margin: 0.25rem 0 0.5rem; padding: 0.5rem 0.625rem; border-radius: 8px; background: var(--bg);
+    border: 1px solid var(--border); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; }
+  .target-preview { display: block; max-width: 28rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .error-text { color: var(--red); }
   .detail-grid dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
   .detail-grid dd { margin: 0.125rem 0 0; font-size: 0.8125rem; }
   .mono { font-family: var(--font-mono); font-size: 0.75rem; }
