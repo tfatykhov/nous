@@ -69,6 +69,17 @@ class HealthCheck(BaseCheck):
                 0.05,
                 increases_findings=True,
             ),
+            # Minimum scored activations (success + failure) before a procedure
+            # can appear in the low-effectiveness finding.  Default 5 prevents
+            # newly-registered procedures from generating FP alerts.
+            "min_scored_activations": TunableParam(
+                "min_scored_activations",
+                5,   # default — need at least 5 scored runs
+                1,   # min (lower = more sensitive)
+                20,  # max
+                1,
+                increases_findings=False,  # raising this suppresses findings
+            ),
             "max_findings_per_run": TunableParam("max_findings_per_run", 10, 3, 25, 1, increases_findings=True),
         }
 
@@ -132,7 +143,10 @@ class HealthCheck(BaseCheck):
         # 4. Low-effectiveness procedures
         try:
             threshold = self.get_param_value("low_effectiveness_threshold")
-            low_procs = await self._heart.procedures.get_low_effectiveness(threshold=threshold)
+            min_scored = int(self.get_param_value("min_scored_activations"))
+            low_procs = await self._heart.procedures.get_low_effectiveness(
+                threshold=threshold, min_scored=min_scored
+            )
             if low_procs and len(findings) < max_findings:
                 findings.append(
                     Finding(

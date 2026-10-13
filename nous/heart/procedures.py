@@ -818,20 +818,25 @@ class ProcedureManager:
     # ------------------------------------------------------------------
 
     async def get_low_effectiveness(
-        self, threshold: float = 0.5, session: AsyncSession | None = None,
+        self,
+        threshold: float = 0.5,
+        min_scored: int = 5,
+        session: AsyncSession | None = None,
     ) -> list[ProcedureSummary]:
         """Return active procedures with effectiveness below threshold.
 
-        Only includes procedures that have been activated at least once
-        (i.e. have success + failure > 0).
+        Only includes procedures that have been scored at least *min_scored*
+        times (success + failure >= min_scored).  The default of 5 prevents
+        newly-registered procedures with 1–4 scored activations from
+        generating false-positive low-effectiveness heartbeat findings.
         """
         if session is None:
             async with self.db.session() as session:
-                return await self._get_low_effectiveness(threshold, session)
-        return await self._get_low_effectiveness(threshold, session)
+                return await self._get_low_effectiveness(threshold, min_scored, session)
+        return await self._get_low_effectiveness(threshold, min_scored, session)
 
     async def _get_low_effectiveness(
-        self, threshold: float, session: AsyncSession,
+        self, threshold: float, min_scored: int, session: AsyncSession,
     ) -> list[ProcedureSummary]:
         result = await session.execute(
             select(Procedure)
@@ -842,6 +847,9 @@ class ProcedureManager:
 
         low: list[ProcedureSummary] = []
         for p in procedures:
+            scored = (p.success_count or 0) + (p.failure_count or 0)
+            if scored < min_scored:
+                continue  # insufficient data — skip to avoid FP alerts
             eff = self._compute_effectiveness(p)
             if eff is not None and eff < threshold:
                 low.append(ProcedureSummary(
