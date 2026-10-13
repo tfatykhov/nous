@@ -1094,6 +1094,24 @@ class SurfaceService:
             )
             return [(sid, key) for sid, key in rows.all()]
 
+    async def live_data_model(self, dedup_key: str) -> dict | None:
+        """The data model of this agent's live card with ``dedup_key``, or None when none is live. One read, no lock:
+        a producer that rebuilds a card on a schedule compares it (a fingerprint) before it pushes."""
+        async with self._db.session() as session:
+            model = (
+                await session.execute(
+                    select(A2uiSurface.data_model)
+                    .where(
+                        A2uiSurface.agent_id == self._settings.agent_id,
+                        A2uiSurface.dedup_key == dedup_key,
+                        A2uiSurface.status == "live",
+                    )
+                    .order_by(A2uiSurface.created_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+        return dict(model) if model is not None else None
+
     @staticmethod
     def _is_own_action_push(pending: Any, session_id: str | None) -> bool:
         """Is this push the pending agent action's own recompose? (F092.2 —

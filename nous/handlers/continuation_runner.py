@@ -22,7 +22,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 
-from nous.a2ui.intention_keys import INTENTION_DEDUP_PREFIX, KIND_PROPOSAL, KIND_QUESTION, parse_key
+from nous.a2ui.intention_keys import ACTIVE_KEY, INTENTION_DEDUP_PREFIX, KIND_PROPOSAL, KIND_QUESTION, parse_key
 from nous.api import tool_policy
 from nous.api.execution_context import ExecutionContext
 from nous.api.tool_classes import tool_class
@@ -534,6 +534,7 @@ class ContinuationRunner:
         self._cancel_dag = cancel_dag
         self._view_checked_at: datetime | None = None
         self._surface_service: Any = None  # Phase 3a, bound late (set_surface_service)
+        self._active_card_refused: str | None = None  # 3b: the fingerprint the censor gate last refused (logged once)
 
     @property
     def running_roots(self) -> frozenset[UUID]:
@@ -611,7 +612,7 @@ class ContinuationRunner:
         """One sweep, in order: release claims older than the lease, expire roots past their TTL, end the
         roots left waiting on nothing, expire proposals, wake answered or expired questions, close the owner's cards
         that no longer have anything to ask, grade the arrivals whose chain has ended (3d), push the owner rows that
-        are due, and launch every root that is due while a
+        are due, keep the Active intentions card (3b), and launch every root that is due while a
         slot is free. Every step is isolated; with continuation off it does nothing."""
         if not continuation.enabled(self._settings):
             return continuation.SweepReport(0, 0, 0, 0, (), None)
@@ -628,6 +629,7 @@ class ContinuationRunner:
         await self._step("calibration", self._calibrate)
         await self._step("approved resume", self._resume_approved)
         pushed = await self._step("owner push", self._push, 0)
+        await self._step("active card", self._active_card)  # Phase 3b: a no-op with the cards off or no service
         launched, next_due = await self._step("launch", self._launch, ([], None))
         return continuation.SweepReport(
             len(released), len(expired), len(expired_proposals), pushed, tuple(launched), next_due
@@ -803,6 +805,59 @@ class ContinuationRunner:
                     "F099: could not settle the card %s; the next sweep tries again", surface_id, exc_info=True
                 )
         return closed
+
+    async def _active_card(self) -> int:
+        """Keep the one Active intentions card (3b) in step with the open roots: pushed silently when what it shows
+        changed (its fingerprint), closed when no root is open. 0 and no read at all with the owner cards off or no
+        surface service (R5). Returns 1 for a push, else the number of cards closed."""
+        service = self._surface_service
+        if service is None or not continuation.cards_enabled(self._settings):
+            return 0
+        from nous.a2ui.builders import intention_cards  # lazily: the builders pull in the schema validator
+
+        shown_max = intention_cards.ACTIVE_CARD_ROOTS
+        async with self._db.session() as session:
+            views = await continuation.list_roots(
+                session,
+                self._agent_id,
+                state="open",
+                limit=shown_max + 1,
+                settings=self._settings,
+                exclude_containers=True,  # a schedule's container is not work in flight; the bot still lists it
+            )
+            shown = views[:shown_max]
+            reports = await continuation.newest_reports(session, self._agent_id, [UUID(v["id"]) for v in shown])
+        if not shown:
+            return len(await service.close_by_dedup_key(ACTIVE_KEY, "resolved"))
+        settings = self._settings
+        built = intention_cards.intention_active(
+            {
+                "roots": shown,
+                "reports": reports,
+                "more": len(views) > shown_max,
+                "maxima": {
+                    "depth": settings.continuation_max_depth,
+                    "spawns": settings.continuation_max_spawns_per_root,
+                    "turns": settings.continuation_max_turns_per_root,
+                    "tokens": settings.continuation_max_tokens_per_root,
+                },
+            }
+        )
+        fingerprint = built.data_model["fingerprint"]
+        live = await service.live_data_model(ACTIVE_KEY)
+        if live is not None and live.get("fingerprint") == fingerprint:
+            return 0
+        try:
+            await service.push_built(built, dedup_key=ACTIVE_KEY, notify=False, reserved_key_ok=True)
+        except PermissionError:
+            # The companion censor gate refused the card (a listed intent or report matched it). Nothing to retry
+            # until what the card shows changes: say so once per fingerprint, not every sweep.
+            if self._active_card_refused != fingerprint:
+                self._active_card_refused = fingerprint
+                logger.info("F099: the Active intentions card was refused by a censor; it is not shown")
+            return 0
+        self._active_card_refused = None
+        return 1
 
     async def _settled_status(self, parsed: tuple[str, UUID | None] | None, states: dict[UUID, str]) -> str | None:
         """The status a card closes with, or None while it still has something to ask the owner."""

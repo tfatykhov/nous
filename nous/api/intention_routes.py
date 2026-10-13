@@ -204,7 +204,8 @@ def build_intention_routes(*, database: Any, settings: Any, continuation_runner:
         view belongs to the continuation, and with it off nothing can be cancelled (the cancel answers 503), so a
         deployment on prod's flags sees no change and pays nothing. With it on, every open root is listed, the
         open Phase 1 roots (a schedule's container included) among them, and they can be cancelled. The budgets of
-        each root are read per root (several queries): a card should ask for ``limit=10``.
+        each root are read per root (several queries): the active card asks for 11 and shows 10. With the owner cards
+        on, each root also carries ``awaiting`` (3b).
 
         The list carries model-authored text raw: ``intent``, ``progress``, ``gate_reason``, and the arguments,
         rationale and result of each proposal. Any surface that renders it (the Phase 3 cards included) must escape

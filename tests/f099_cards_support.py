@@ -193,3 +193,20 @@ async def tap(env, surface_id, name, context, *, model=None, actor="alice"):
     if model is not None:  # the renderer ships its local data model with the action (transport.ts)
         body["a2uiRendererDataModel"] = {"surfaces": {surface_id: model}}
     return await env.router.handle(body, content_type="application/json", actor=actor)
+
+
+async def report(env, root, intention, body, *, hours_ago=0):
+    """A REPORT row of ``intention`` (in ``root``'s lineage), written as ``commit_arrival`` writes one, then aged.
+    Returns its id (the row's ``source_id``)."""
+    async with env.db.session() as s:
+        report_id = await continuation.insert_report(
+            s, env.agent, kind="REPORT", title="Update: x", body=body, channel="telegram:8080",
+            intention_id=intention.id, root_id=root.id,
+        )  # fmt: skip
+        await s.execute(
+            update(ResultInbox)
+            .where(ResultInbox.source_id == report_id)
+            .values(created_at=datetime.now(UTC) - timedelta(hours=hours_ago))
+        )
+        await s.commit()
+    return report_id

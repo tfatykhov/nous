@@ -26,11 +26,11 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import select, update
 
-from nous.a2ui.intention_keys import KIND_PROPOSAL, KIND_QUESTION, parse_key
+from nous.a2ui.intention_keys import KIND_ACTIVE, KIND_PROPOSAL, KIND_QUESTION, parse_key
 from nous.brain import continuation, intentions
 from nous.brain.intentions import IntentionSpec
 from nous.dag.approval import node_id_from_dedup_key, refusal_message
-from nous.owner_actions import ANSWER_REFUSALS, DECISION_REFUSALS, clean_actor
+from nous.owner_actions import ANSWER_REFUSALS, CANCEL_REFUSALS, DECISION_REFUSALS, clean_actor
 from nous.storage.models import A2uiAction, A2uiSurface
 
 logger = logging.getLogger(__name__)
@@ -953,9 +953,49 @@ def _register_intention_handlers(router: ActionRouter) -> None:
             return ActionResult(ok=False, message="the answer could not be processed")
         return ActionResult(message="Answer sent", resolve_surface=True)
 
+    async def cancel(ctx: ActionContext) -> ActionResult:
+        """The active card's Cancel: the owner's cancel of one listed root, the same ``cancel_root`` the REST route and
+        the bot call (no agent tool reaches it). The root is the one the BUTTON names, accepted only if it is a key
+        of the card's server copy of ``/roots`` (the ``_heartbeat_verb`` rule): the card is one surface for several
+        subjects, so the dedup key alone cannot name it. ``irreversible=True`` is registry metadata: there is no
+        client-side confirmation step."""
+        runner = _runner()
+        if runner is None:
+            return ActionResult(ok=False, message=not_running)
+        parsed = parse_key(getattr(ctx.surface, "dedup_key", None))
+        if parsed is None or parsed[0] != KIND_ACTIVE:
+            return ActionResult(ok=False, message=not_this_card)
+        raw = _context(ctx).get("rootId")
+        try:
+            root_id = UUID(raw) if isinstance(raw, str) else None
+        except ValueError:
+            root_id = None
+        listed = (ctx.surface.data_model or {}).get("roots")
+        if root_id is None or not isinstance(listed, dict) or str(root_id) not in listed:
+            return ActionResult(ok=False, message="that intention is not on this card")
+        try:
+            outcome = await runner.cancel_root(root_id, reason="cancelled from companion", actor=_actor(ctx))
+        except continuation.RootNotFound:
+            return ActionResult(ok=False, message="no such intention")
+        except continuation.CancelRefused as refused:
+            return ActionResult(ok=False, message=CANCEL_REFUSALS.get(refused.reason, "That work cannot be cancelled."))
+        except Exception:
+            logger.exception("F099 intention card: cancelling root %s failed", root_id.hex[:8])
+            return ActionResult(ok=False, message="the cancel could not be processed")
+        message = (
+            "Already cancelled"
+            if outcome.already_cancelled
+            else f"Cancelled: {outcome.cancelled_intentions} piece(s) of work stopped"
+        )
+        if outcome.truncated:
+            message += f" (more remain: send /cancel_intention {root_id.hex[:8]} in chat)"
+        # No resolve: other roots remain on the card. The next sweep rebuilds it without this one.
+        return ActionResult(message=message, data_patches=[(f"/roots/{_escape_pointer(str(root_id))}/status", message)])
+
     router.register("intention.approve", approve, mutating=True, irreversible=True)
     router.register("intention.reject", reject, mutating=True)
     router.register("intention.answer", answer, mutating=True)
+    router.register("intention.cancel", cancel, mutating=True, irreversible=True)
 
 
 def _register_default_functions(router: ActionRouter) -> None:
