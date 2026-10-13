@@ -1523,3 +1523,66 @@ export interface RetrievalDetail extends Omit<RetrievalEntry, 'has_candidates'> 
   candidates_by_disposition: Record<string, RetrievalCandidate[]> | null;
   expansions: RetrievalExpansion[];
 }
+
+// ── /dashboard/intentions (F099 Phase 3c) ────────────────────────────────
+// Model-authored strings (intent, note, rationale, arguments, result, title) arrive RAW: render as text only.
+
+export interface IntentionLimits {
+  depth: number; spawns: number; turns: number; tokens: number; stalls: number;
+  spawn_blocked: boolean; escalate: string | null;
+}
+export interface IntentionNode {
+  id: string; parent_id: string | null; depth: number; source_kind: string; source_id: string; state: string;
+  close_reason: string | null; intent: string; created_at: string | null; result_at: string | null;
+  closed_at: string | null; attempts: number; failed_tokens: number; children: IntentionNode[];
+}
+export interface IntentionArrival {
+  id: string; n: number; intention_ids: string[]; decision: string | null; note: string | null;
+  progress_claimed: boolean | null; progress: boolean | null; confidence: number | null; gate_reason: string | null;
+  outcome: string; tokens_in: number; tokens_out: number; decided_at: string | null;
+  decision_record_id: string | null; decision_outcome: string | null; decision_reviewer: string | null;
+  result_to_decision_s: number | null;
+}
+export interface IntentionProposalView {
+  id: string; short_id: string; root_id: string; intention_id: string; arrival_id: string | null; tool: string;
+  arguments: unknown; rationale: string; state: string; deadline: string | null; decided_at: string | null;
+  decided_by: string | null; result: string | null;
+}
+export interface IntentionOwnerRow {
+  id: string; msg_type: string; title: string; created_at: string | null; push_after: string | null;
+  pushed_at: string | null; delivered_at: string | null;
+}
+export interface IntentionRoot {
+  id: string; short_id: string; intent: string; state: string; wake_policy: string; authority: string;
+  origin_kind: string; origin_channel: string | null; created_at: string | null; deadline: string | null;
+  root_cancelled_at: string | null; root_expired_at: string | null; closed_at: string | null;
+  limits: IntentionLimits | null; children: IntentionNode[]; arrivals: IntentionArrival[];
+  proposals: IntentionProposalView[]; owner_rows: IntentionOwnerRow[];
+}
+export interface TokenColumns {
+  arrivals_in: number; arrivals_out: number; failed_tokens: number; subtask_tokens: number; dag_tokens: number; total: number;
+}
+export interface ContextLogColumns {
+  input_uncached: number; output: number; cache_write: number; cache_read: number; calls: number;
+}
+export interface IntentionMetrics {
+  arrivals_by_decision_outcome: { decision: string | null; outcome: string; gated: boolean; count: number }[];
+  result_to_decision_latency_s: { p50: number | null; p90: number | null; max: number | null; n: number };
+  results_lost: number; results_waiting: number; results_lost_grace_s: number; owner_rows_unpushed: number;
+  proposals_by_state: { counts: Record<string, number>; approved_total: number };
+  escalations_by_cause: { by_reason: Record<string, number>; expired_roots: number };
+  stalls: {
+    verified_no_progress: number; claimed_not_credited: number; stall_escalations: number;
+    progress_claimed: number; progress_credited: number;
+  };
+  arrivals_ungradable: number;
+  token_spend: {
+    basis: string; roots_counted: number; budget_counted: TokenColumns; context_log: ContextLogColumns;
+    unattributed_output: number; failed_tokens: number;
+    top_roots: { root_id: string; short_id: string; intent: string | null; budget_counted: TokenColumns;
+      context_log: ContextLogColumns; unattributed_output: number }[];
+  };
+}
+export interface IntentionsData {
+  continuation: boolean; window?: string; roots: IntentionRoot[]; metrics: IntentionMetrics | null;
+}
