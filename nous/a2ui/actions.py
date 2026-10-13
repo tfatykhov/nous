@@ -988,7 +988,7 @@ def _register_intention_handlers(router: ActionRouter) -> None:
             else f"Cancelled: {outcome.cancelled_intentions} piece(s) of work stopped"
         )
         if outcome.truncated:
-            message += " (more remain: tap again)"
+            message += f" (more remain: send /cancel_intention {root_id.hex[:8]} in chat)"
         # No resolve: other roots remain on the card. The next sweep rebuilds it without this one.
         return ActionResult(message=message, data_patches=[(f"/roots/{_escape_pointer(str(root_id))}/status", message)])
 

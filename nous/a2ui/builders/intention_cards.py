@@ -221,7 +221,7 @@ def intention_question(
 
 ACTIVE_CARD_ROOTS = 10  # the roots the card lists; the runner asks for one more to know whether there are others
 ACTIVE_CARD_TTL = timedelta(hours=6)  # a safety net: a card nothing closes (continuation turned off) still ends
-INTENT_CARD_CHARS, REPORT_CARD_CHARS = 300, 600
+REPORT_CARD_CHARS = 600
 # The words of RootView.state, the bot's list (nous/telegram_bot.py is another process, so this is a second copy).
 _STATE_WORDS = {
     "pending": "running",
@@ -291,7 +291,7 @@ def intention_active(params: dict[str, Any]) -> BuiltSurface:
         awaiting_text = _awaiting_text(root.get("awaiting") or [])
         model[rid] = {
             "short_id": root["short_id"],
-            "intent_text": fence(continuation.card_text(root.get("intent") or "", INTENT_CARD_CHARS)),
+            "intent_text": fence(continuation.card_text(root.get("intent") or "", INTENT_CHARS)),
             "state": root["state"],
             "open_rows": root["open_rows"],
             **{key: (limits or {}).get(key) for key in ("depth", "spawns", "turns", "tokens")},

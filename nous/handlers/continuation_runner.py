@@ -534,6 +534,7 @@ class ContinuationRunner:
         self._cancel_dag = cancel_dag
         self._view_checked_at: datetime | None = None
         self._surface_service: Any = None  # Phase 3a, bound late (set_surface_service)
+        self._active_card_refused: str | None = None  # 3b: the fingerprint the censor gate last refused (logged once)
 
     @property
     def running_roots(self) -> frozenset[UUID]:
@@ -817,7 +818,12 @@ class ContinuationRunner:
         shown_max = intention_cards.ACTIVE_CARD_ROOTS
         async with self._db.session() as session:
             views = await continuation.list_roots(
-                session, self._agent_id, state="open", limit=shown_max + 1, settings=self._settings
+                session,
+                self._agent_id,
+                state="open",
+                limit=shown_max + 1,
+                settings=self._settings,
+                exclude_containers=True,  # a schedule's container is not work in flight; the bot still lists it
             )
             shown = views[:shown_max]
             reports = await continuation.newest_reports(session, self._agent_id, [UUID(v["id"]) for v in shown])
@@ -837,10 +843,20 @@ class ContinuationRunner:
                 },
             }
         )
+        fingerprint = built.data_model["fingerprint"]
         live = await service.live_data_model(ACTIVE_KEY)
-        if live is not None and live.get("fingerprint") == built.data_model["fingerprint"]:
+        if live is not None and live.get("fingerprint") == fingerprint:
             return 0
-        await service.push_built(built, dedup_key=ACTIVE_KEY, notify=False, reserved_key_ok=True)
+        try:
+            await service.push_built(built, dedup_key=ACTIVE_KEY, notify=False, reserved_key_ok=True)
+        except PermissionError:
+            # The companion censor gate refused the card (a listed intent or report matched it). Nothing to retry
+            # until what the card shows changes: say so once per fingerprint, not every sweep.
+            if self._active_card_refused != fingerprint:
+                self._active_card_refused = fingerprint
+                logger.info("F099: the Active intentions card was refused by a censor; it is not shown")
+            return 0
+        self._active_card_refused = None
         return 1
 
     async def _settled_status(self, parsed: tuple[str, UUID | None] | None, states: dict[UUID, str]) -> str | None:

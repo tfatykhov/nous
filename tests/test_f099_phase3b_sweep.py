@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from f099_cards_support import CARDS, card_row, cards_env, live_cards, report  # noqa: F401
+from f099_dashboard_support import put_intention
 from f099_support import CONT, add_arrival, ask_with_proposals, env_factory, make_root, runner_env  # noqa: F401
 from test_f099_phase2c_parity import NoDatabase
 
@@ -37,6 +38,31 @@ async def test_one_open_root_is_pushed_silently_with_the_reserved_key(cards_env)
     assert (card.kind, card.origin, card.priority) == ("intention_active", "continuation", 0)
     assert card.allowed_actions == ["intention.cancel"] and card.push_notified_at is None  # never notifies
     assert env.pings == [] and set(card.data_model["roots"]) == {str(root.id)}
+
+
+async def test_a_schedule_container_is_not_on_the_card_but_the_bot_still_lists_it(cards_env):  # noqa: F811
+    # A container stays open for as long as its schedule lives, and its cancel deactivates the schedule for good:
+    # it is not work in flight, so the card leaves it out (prod had five open containers and no other root).
+    env = await cards_env()
+    container = await put_intention(env, intent="a daily report", wake_policy="container")
+    assert await env.cont._active_card() == 0 and await card_row(env, ACTIVE_KEY) is None
+    async with env.db.session() as session:
+        listed = await continuation.list_roots(session, env.agent, state="open", limit=11, settings=env.settings)
+    assert [v["id"] for v in listed] == [str(container.id)]  # GET /intentions and the bot are unchanged
+    root = await make_root(env)
+    assert await env.cont._active_card() == 1
+    assert set((await card_row(env, ACTIVE_KEY)).data_model["roots"]) == {str(root.id)}
+
+
+async def test_a_card_the_censor_refuses_is_logged_once_and_never_raises(cards_env, monkeypatch, caplog):  # noqa: F811
+    env = await cards_env()
+    await make_root(env)
+    monkeypatch.setattr(env.service, "push_built", AsyncMock(side_effect=PermissionError("censored")))
+    with caplog.at_level("INFO", logger="nous.handlers.continuation_runner"):
+        assert await env.cont._active_card() == 0
+        assert await env.cont._active_card() == 0  # the same state: no second line
+    refused = [r for r in caplog.records if "refused by a censor" in r.getMessage()]
+    assert len(refused) == 1 and refused[0].levelname == "INFO"
 
 
 async def test_an_unchanged_state_is_not_pushed_again_and_each_change_is(cards_env):  # noqa: F811

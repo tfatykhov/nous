@@ -67,13 +67,14 @@ async def test_a_listed_root_is_cancelled_through_the_runner_and_its_line_is_pat
     runner.cancel_root.assert_awaited_once_with(rid, reason="cancelled from companion", actor=f"companion:{ACTOR}")
 
 
-async def test_a_repeat_says_so_and_a_truncated_cascade_says_to_tap_again():
+async def test_a_repeat_says_so_and_a_truncated_cascade_says_how_to_finish_it():
     rid = uuid.uuid4()
     router = _router(_runner(return_value=continuation.CancelOutcome(root_id=rid, already_cancelled=True)))
     assert (await _run(router, _ctx(router, rid))).message == "Already cancelled"
     truncated = continuation.CancelOutcome(root_id=rid, cancelled_intentions=1, truncated=True)
     router = _router(_runner(return_value=truncated))
-    assert (await _run(router, _ctx(router, rid))).message.endswith("(more remain: tap again)")
+    hint = f"(more remain: send /cancel_intention {rid.hex[:8]} in chat)"
+    assert (await _run(router, _ctx(router, rid))).message.endswith(hint)
 
 
 @pytest.mark.parametrize(

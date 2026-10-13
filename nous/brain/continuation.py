@@ -4588,18 +4588,22 @@ async def newest_reports(session: AsyncSession, agent_id: str, root_ids: Sequenc
 
 
 async def list_roots(
-    session: AsyncSession, agent_id: str, *, state: str, limit: int, settings: Any
+    session: AsyncSession, agent_id: str, *, state: str, limit: int, settings: Any, exclude_containers: bool = False
 ) -> list[dict[str, Any]]:
     """The roots the owner can act on, newest first, each as a JSON-ready view (contract ``RootView``), in the
     caller's transaction. ``state`` is ``open`` (no root marker, and an intention of the lineage still open: a
     finished lineage, and one that was cancelled or expired, are not listed) or ``all``. A view carries the root's
     own columns, its budgets (``root_limits``, none for a container), up to ``LINEAGE_VIEW_MAX`` lineage rows, its
     newest ``ARRIVALS_VIEW_MAX`` arrivals and its open proposals; with the owner cards on, also ``awaiting`` (3b).
+    ``exclude_containers`` leaves schedule containers out of the page (the Active intentions card: a container stays
+    open for as long as its schedule lives, and its cancel deactivates the schedule for good).
     Raises ``ValueError`` for another ``state``. Read-only; seven queries for the page plus the budget reads of
     each root."""
     if state not in ROOT_STATES:
         raise ValueError(f"state must be one of {ROOT_STATES}, not {state!r}")
     query = select(Intention).where(Intention.agent_id == agent_id, Intention.id == Intention.root_id)
+    if exclude_containers:
+        query = query.where(Intention.wake_policy != intentions.WAKE_CONTAINER)
     if state == "open":
         lineage_row = aliased(Intention)
         query = query.where(
