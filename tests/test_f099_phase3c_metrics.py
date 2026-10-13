@@ -85,6 +85,10 @@ async def test_results_lost_four_cases_and_results_waiting(env_factory):  # noqa
     await root_with_row(state="pending", created_ago=old)
     m = await _metrics(env)
     assert (m["results_lost"], m["results_waiting"]) == (1, 1)
+    # a waiting state under a cancelled root is lost, never waiting: the two numbers are disjoint (C4)
+    await root_with_row(cancelled=True, state="result_ready", created_ago=old)
+    m = await _metrics(env)
+    assert (m["results_lost"], m["results_waiting"]) == (2, 1)
     assert m["results_lost_grace_s"] == _grace(env)
 
 

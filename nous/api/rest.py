@@ -2088,11 +2088,10 @@ def create_app(
         (``window`` 24h|7d|30d, ``state`` open|all, ``limit`` 1 to 200). With NOUS_CONTINUATION_ENABLED off it
         answers 200 {"continuation": false, "roots": [], "metrics": null} and opens no session. Read-only."""
         from nous.api import intention_dashboard
-        from nous.brain import continuation
 
         qp = request.query_params
         raw_limit = qp.get("limit", "50")
-        if not (raw_limit.isascii() and raw_limit.isdigit()):
+        if not (raw_limit.isascii() and raw_limit.isdigit() and len(raw_limit) <= 4):
             return JSONResponse(
                 {"error": f"limit must be a whole number from 1 to {intention_dashboard.LIMIT_MAX}"}, status_code=400
             )

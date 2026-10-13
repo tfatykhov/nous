@@ -99,8 +99,8 @@ describe('Intentions view', () => {
 
   it('PIN: no view file uses the raw-HTML directive', () => {
     // Mutation: add the directive to any of these files and this fails.
-    // vitest runs from the dashboard-app root; import.meta.url is not a file URL under jsdom.
-    for (const f of ['src/views/Intentions.svelte', 'src/lib/intentions.ts'].map((p) => resolve(process.cwd(), p))) {
+    // Resolved from this file's directory, so the pin does not depend on where vitest is started.
+    for (const f of [resolve(__dirname, 'Intentions.svelte'), resolve(__dirname, '../lib/intentions.ts')]) {
       expect(readFileSync(f, 'utf-8')).not.toContain('{@html');
     }
   });
