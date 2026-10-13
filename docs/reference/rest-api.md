@@ -91,7 +91,7 @@ Documented routes served by `nous/api/rest.py`, which is the full list. Part of 
 | GET | `/a2ui/stream` | F092: SSE surface envelopes (id = outbox seq; `Last-Event-ID` wins over `?since=`) |
 | GET | `/a2ui/surfaces` | F092: live-surface index for hydration (never includes nonces) |
 | GET | `/a2ui/surfaces/{surface_id}` | F092: full snapshot as a single `createSurface` envelope |
-| POST | `/a2ui/action` | F092: renderer→agent user action (allowlist/nonce/rate/censor gated, audited) |
+| POST | `/a2ui/action` | F092: renderer→agent user action (allowlist/nonce/rate/censor gated, audited). F099 Phase 3a: with `NOUS_INTENTION_CARDS_ENABLED`, the verbs `intention.approve` and `intention.reject` (on a proposal card) and `intention.answer` (on a question card, free text) run the same owner actions as `/intentions/proposals/{id}/decide` and `/intentions/questions/{id}/answer`. They are offered only by server-built cards whose reserved `intention:` dedup key names the proposal or question: the id comes from the key, never from the request. An approve returns `Approved; running` and closes the card; a refusal leaves the card up with the same fixed sentence the REST routes answer. No new route. |
 | GET | `/a2ui/catalog/{name}` | F092: serve a vendored catalog by short name (basic, nous-core) |
 | GET | `/companion` | F092: redirect to the built companion entry (fragment deep links survive) |
 | GET | `/companion/a/{surface_id}` | F092.1 Phase 4: shareable path-form per-app deep link — redirects into the hash router (`#/a/<id>`, alias of `#/s/`) |

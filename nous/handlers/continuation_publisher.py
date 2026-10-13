@@ -12,6 +12,11 @@ parses no entity inside ``pre``. Before the HTML escape, the characters ``contin
 as escapes (bidi, zero-width, control) are shown as escapes in the rationale, the note and the question too
 (``continuation.render_text``). A REPORT is sent the same way (2d final review m4): the model learns its own
 proposal's short id in the turn, so a report it shapes could otherwise carry a tappable ``/approve <id>``.
+
+Phase 3a: with NOUS_INTENTION_CARDS_ENABLED on and the surface service bound, a due PROPOSAL or QUESTION also gets a
+companion card (``a2ui/builders/intention_cards.py``), pushed BEFORE its Telegram send. The card leg alerts the phone
+through FCM and sends no ``[companion]`` ping; the Telegram message stays and is the fallback. A failed card is a
+WARNING and never blocks or delays the message.
 """
 
 from __future__ import annotations
@@ -26,9 +31,11 @@ from uuid import UUID
 import httpx
 from sqlalchemy import select, update
 
+from nous.a2ui.builders.intention_cards import CardNotBuilt, intention_proposal, intention_question
+from nous.a2ui.intention_keys import proposal_key, question_key
 from nous.brain import continuation
 from nous.owner_actions import ACTION_APPROVE, ACTION_REJECT, callback_data
-from nous.storage.models import IntentionArrival, IntentionProposal, ResultInbox
+from nous.storage.models import Intention, IntentionArrival, IntentionProposal, ResultInbox
 
 logger = logging.getLogger(__name__)
 
@@ -105,11 +112,17 @@ def render_report_html(title: str, body: str) -> str:
 class OwnerPublisher:
     """Sends the owner-facing rows that are due to Telegram, once each (see the module docstring)."""
 
-    def __init__(self, *, database: Any, settings: Any, http_client: Any = None) -> None:
+    def __init__(self, *, database: Any, settings: Any, http_client: Any = None, surface_service: Any = None) -> None:
         self._db = database
         self._settings = settings
         self._http = http_client
+        self._surface_service = surface_service  # Phase 3a: the card leg; None while unbound
         self._lock = asyncio.Lock()  # one sweep at a time: the stamp is the idempotence, this spares the duplicate send
+
+    def set_surface_service(self, service: Any) -> None:
+        """Bind the surface service (main.py, once it exists; the publisher is built first). While it is None the
+        card leg is a no-op."""
+        self._surface_service = service
 
     async def push_due(self, limit: int = PUSH_BATCH, *, now: datetime | None = None) -> int:
         """Send up to ``limit`` due rows; the number sent. Inert without the flag or a bot token."""
@@ -147,6 +160,7 @@ class OwnerPublisher:
             for row in rows:
                 proposal = proposals.get(row.proposal_id) if row.proposal_id is not None else None
                 note = notes.get(proposal.arrival_id) if proposal is not None else None
+                await self._push_card(row, proposal, note, now)  # Phase 3a: BEFORE the Telegram send, never raises
                 result, message_id = await self._send(token, row, proposal, note)
                 if result == TRANSIENT:
                     break  # an outage is not hammered: the rows stay due for the next sweep
@@ -190,9 +204,121 @@ class OwnerPublisher:
             )
         return proposals, notes
 
+    async def _push_card(self, row: ResultInbox, proposal: Any, note: str | None, now: datetime) -> None:
+        """Phase 3a: the companion card of a PROPOSAL or QUESTION row, pushed BEFORE its Telegram send. The card leg
+        alerts the phone through FCM (``notify=True``, fixed ``notify_text``) and sends NO ``[companion]`` Telegram
+        ping (``telegram_ping=False``): the message ``_send`` posts next IS the Telegram alert, and the fallback when
+        FCM is unconfigured. A failure here is a WARNING with the row id and no model text; the row is stamped by the
+        Telegram send whatever happened here, so a card is never retried and never blocks the owner's message. A
+        replacement push (a transient Telegram failure left the row due) alerts nothing. Off, or with no service
+        bound, this does nothing."""
+        service = self._surface_service
+        if service is None or not continuation.cards_enabled(self._settings):
+            return
+        if row.msg_type not in (continuation.MSG_PROPOSAL, continuation.MSG_QUESTION):
+            return
+        try:
+            card = await self._card_for(row, proposal, note, now)
+            if card is None:
+                return
+            built, dedup_key, notify_text = card
+            await service.push_built(
+                built,
+                dedup_key=dedup_key,
+                notify=True,
+                notify_text=notify_text,
+                reserved_key_ok=True,
+                telegram_ping=False,
+            )
+        except Exception as exc:  # never the message: it may carry model text
+            why = exc.reason if isinstance(exc, CardNotBuilt) else type(exc).__name__  # a fixed word either way
+            logger.warning(
+                "F099: the companion card of row %s was not pushed (%s); Telegram carries it", row.id.hex[:8], why
+            )
+
+    async def _card_for(
+        self, row: ResultInbox, proposal: Any, note: str | None, now: datetime
+    ) -> tuple[Any, str, str] | None:
+        """``(built surface, dedup key, notify text)``, or None when there is nothing to ask the owner: exactly what
+        ``_payload`` skips for a PROPOSAL (S7: gone, or no longer pending), and for a QUESTION that nothing waits for
+        any more (``continuation.question_awaited``) or whose answer window is over. Fixed words only in the notify
+        text: the tool is a registered name (the builder checks it) and a short id."""
+        settings = self._settings
+        async with self._db.session() as session:
+            if row.msg_type == continuation.MSG_PROPOSAL:
+                if proposal is None or proposal.state != continuation.PROPOSAL_PENDING:
+                    return None
+                if proposal.deadline is None or proposal.deadline <= now:
+                    return None
+                built = intention_proposal(
+                    proposal_id=proposal.id,
+                    root_id=proposal.root_id,
+                    arrival_id=proposal.arrival_id,
+                    tool=proposal.tool,
+                    deadline=proposal.deadline,
+                    intent=await self._root_intent(session, proposal.root_id),
+                    rationale=proposal.rationale,
+                    arguments=proposal.arguments,
+                    note=note,
+                    trace_id=await self._trace_of(session, proposal.arrival_id),
+                    now=now,
+                )
+                notify_text = f"Approval needed {continuation.short_id(proposal.id)}: {proposal.tool}"
+                return built, proposal_key(proposal.id), notify_text
+            if row.arrival_id is None:
+                return None
+            if not await continuation.question_awaited(
+                session, settings.agent_id, row.source_id, settings=settings, now=now
+            ):
+                return None
+            window = timedelta(hours=float(settings.intention_proposal_ttl_hours))
+            deadline = continuation.question_window_start(row) + window
+            if deadline <= now:
+                return None
+            arrival = (
+                await session.execute(
+                    select(IntentionArrival.root_id, IntentionArrival.decision_record_id).where(
+                        IntentionArrival.agent_id == settings.agent_id, IntentionArrival.id == row.arrival_id
+                    )
+                )
+            ).first()
+            if arrival is None:
+                return None
+            built = intention_question(
+                question_id=row.source_id,
+                root_id=arrival.root_id,
+                arrival_id=row.arrival_id,
+                question=row.body,
+                intent=await self._root_intent(session, arrival.root_id),
+                deadline=deadline,
+                trace_id=str(arrival.decision_record_id) if arrival.decision_record_id else None,
+                now=now,
+            )
+            return built, question_key(row.source_id), "Question from Nous"
+
+    async def _root_intent(self, session: Any, root_id: UUID) -> str:
+        intent = (
+            await session.execute(
+                select(Intention.intent).where(Intention.agent_id == self._settings.agent_id, Intention.id == root_id)
+            )
+        ).scalar_one_or_none()
+        return intent or ""
+
+    async def _trace_of(self, session: Any, arrival_id: UUID | None) -> str | None:
+        if arrival_id is None:
+            return None
+        record = (
+            await session.execute(
+                select(IntentionArrival.decision_record_id).where(
+                    IntentionArrival.agent_id == self._settings.agent_id, IntentionArrival.id == arrival_id
+                )
+            )
+        ).scalar_one_or_none()
+        return str(record) if record else None
+
     def _payload(self, row: ResultInbox, chat_id: str, proposal: Any, note: str | None) -> dict[str, Any] | None:
         """The sendMessage body of ``row``, or None when there is nothing to send (a PROPOSAL whose proposal is
-        gone or no longer pending: its buttons would approve nothing)."""
+        gone or no longer pending: its buttons would approve nothing). The card leg (``_card_for``) skips the same."""
         if row.msg_type == continuation.MSG_PROPOSAL:
             if proposal is None or proposal.state != continuation.PROPOSAL_PENDING:
                 return None

@@ -25,13 +25,13 @@ from nous.owner_actions import (  # the one refusal vocabulary (fixed sentences)
     ANSWER_REFUSALS,
     CANCEL_REFUSALS,
     DECISION_REFUSALS,
+    clean_actor,
 )
 
 logger = logging.getLogger(__name__)
 
-ACTOR_MAX_CHARS = 100
 REASON_MAX_CHARS = 200
-ANSWER_MAX_CHARS = 8000  # the owner's text; record_answer clips it again to the inbox body cap
+ANSWER_MAX_CHARS = continuation.ANSWER_MAX_CHARS  # one definition; the name stays importable from here
 LIST_LIMIT_MAX = 100
 NOT_RUNNING = "continuation is not running"
 
@@ -49,10 +49,8 @@ async def _object_body(request: Request) -> dict[str, Any] | None:
 
 
 def _actor(body: dict[str, Any]) -> str:
-    """Who decided, as data: printable characters only, clipped; ``rest`` when blank."""
-    raw = str(body.get("actor") or "")
-    cleaned = "".join(ch for ch in raw if ch.isprintable())[:ACTOR_MAX_CHARS].strip()
-    return cleaned or "rest"
+    """Who decided, as data (``owner_actions.clean_actor``); ``rest`` when blank."""
+    return clean_actor(body.get("actor"), default="rest")
 
 
 def _is_int(value: Any) -> bool:
@@ -161,13 +159,7 @@ def build_intention_routes(*, database: Any, settings: Any, continuation_runner:
         )
 
     def _text_of(body: dict[str, Any]) -> str | None:
-        text = body.get("text")
-        if not isinstance(text, str) or not text.strip() or len(text) > ANSWER_MAX_CHARS:
-            return None
-        # Postgres refuses a NUL and the UTF-8 encode a lone surrogate: refused here, not a 500 from the store.
-        if continuation._has_nul(text) or continuation._has_surrogate(text):
-            return None
-        return text
+        return continuation.valid_answer_text(body.get("text"))
 
     async def answer(request: Request) -> JSONResponse:
         """POST /intentions/questions/{id}/answer"""

@@ -19,6 +19,15 @@ CALLBACK_NAMESPACE = "f099"
 KIND_PROPOSAL = "p"
 ACTION_APPROVE, ACTION_REJECT = "a", "r"
 CALLBACK_DATA_MAX_BYTES = 64  # Telegram's limit on a button's callback data
+ACTOR_MAX_CHARS = 100  # decided_by and the answer's correlation id are clipped to this
+
+
+def clean_actor(raw: object, *, default: str) -> str:
+    """Who decided, as data: printable characters only, clipped to ``ACTOR_MAX_CHARS``; ``default`` when blank."""
+    cleaned = "".join(ch for ch in str(raw or "") if ch.isprintable())[:ACTOR_MAX_CHARS].strip()
+    return cleaned or default
+
+
 _CALLBACK_RE = re.compile(rf"{CALLBACK_NAMESPACE}:({KIND_PROPOSAL}):([0-9a-f]{{32}}):([ar])")
 
 # Fixed, server-authored vocabulary: what the owner reads when a decision or an answer is refused. Never a

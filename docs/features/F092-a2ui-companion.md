@@ -531,6 +531,16 @@ The persistent surface (Q4, decided). Transcript rendered from `event: message` 
 
 ---
 
+### 11.1 Intention cards (F099 Phase 3a)
+
+With `NOUS_INTENTION_CARDS_ENABLED` on, a proposal and a question the owner is shown on Telegram are also pushed as companion cards, pushed beside the Telegram message and never instead of it. Two kinds (`intention_proposal`, `intention_question`), three verbs (`intention.approve`, `intention.reject`, `intention.answer`). The verbs call the same runner functions as the REST routes and the bot (`decide_proposal`, `answer_question`); no agent tool reaches them.
+
+- **Identity.** The cards live under the reserved dedup prefix `intention:` (`nous/a2ui/intention_keys.py`). `SurfaceService.push_built` refuses it unless the caller passes `reserved_key_ok=True` (only the DAG orchestrator and the continuation publisher do; a test pins the set). Every handler takes its subject from the card's own key, never from the client; the context id must equal it.
+- **Text.** Everything a model wrote (intent, rationale, call arguments, the arrival's note, the question) reaches a card only through `continuation.card_text` and sits inside ONE fenced block held by a data-model field the components bind to. Titles, labels, `notify_text` and `allowed_actions` are fixed words, so model text can never become a button or an approval. A rationale or call that would not fit whole is not clipped: the card is not built and Telegram carries the proposal.
+- **Notification.** The card push alerts the phone through FCM once and sends no `[companion]` Telegram ping (`push_built(telegram_ping=False)`); the publisher's own Telegram message, with its buttons, stays and is the fallback when FCM is not configured. A replacement push (a transient Telegram failure) alerts nothing.
+- **Verbs.** Approve returns `Approved; running` at once (`decide_proposal(wait=False)`) and closes the card; the call's result reaches the owner through the chain's next report. A question card takes free text, validated by the same `valid_answer_text` as the REST route; the answer travels in the action context, so the companion censor gate sees it.
+- **Settle.** A `card settle` step of the continuation sweep closes a card whose row no longer needs the owner: a proposal card as soon as the proposal is not `pending` (`resolved` for approved, executing, executed, failed and rejected; `expired` for expired and cancelled), a question card when `continuation.question_card_state` is not `awaited`. A replacement push rebuilds the question card whole, so text typed into its field is lost.
+
 ## 12. Renderer implementation
 
 ### 12.0 Client platform: why Svelte, not Flutter
@@ -756,7 +766,8 @@ nous/a2ui/
 │   ├── decision_sweep.py
 │   ├── heartbeat_findings.py
 │   ├── memory_graph.py
-│   └── dag_monitor.py
+│   ├── dag_monitor.py
+│   └── intention_cards.py   # F099 Phase 3a: proposal and question cards (NOT a template)
 └── catalogs/
     ├── basic/catalog.json         # vendored upstream @ pinned commit
     ├── nous_core/catalog.json

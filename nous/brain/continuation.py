@@ -165,6 +165,16 @@ def enabled(settings: Any) -> bool:
     return getattr(settings, "continuation_enabled", False) is True and intentions.enabled(settings)
 
 
+def cards_enabled(settings: Any) -> bool:
+    """NOUS_INTENTION_CARDS_ENABLED, read so that a mocked Settings counts as off. Re-checks both prerequisites for a
+    settings object that bypassed the validator (the main.py flag gate forces ``continuation_enabled`` off after it)."""
+    return (
+        enabled(settings)
+        and getattr(settings, "intention_cards_enabled", False) is True
+        and getattr(settings, "a2ui_enabled", False) is True
+    )
+
+
 def calibration_enabled(settings: Any) -> bool:
     """NOUS_INTENTION_CALIBRATION_ENABLED, with the same rule as ``enabled``: a mocked or partial settings
     object counts as off (``is True``), and the continuation must be on."""
@@ -1951,6 +1961,89 @@ async def arrival_is_terminal(
     return terminal
 
 
+QUESTION_AWAITED, QUESTION_ANSWERED, QUESTION_CLOSED = "awaited", "answered", "closed"
+
+
+async def question_card_state(
+    session: AsyncSession, agent_id: str, question_id: UUID, *, settings: Any = None, now: datetime | None = None
+) -> str:
+    """What a question card should do (Phase 3a, R2): ``awaited`` while something still waits for the owner's
+    answer, else ``answered`` (the owner answered it; the card closes ``resolved``) or ``closed`` (the card closes
+    ``expired``). ONE predicate for the settle sweep and the card leg of the publisher.
+
+    ``awaited`` means all of: the owner has not answered the arrival, the answer window is open (tested only when
+    ``settings`` is given), the root has neither marker, and some intention of the arrival is still
+    ``awaiting_owner`` with ``wake_policy='continue'`` AND this arrival is the latest arrival listing it
+    (``_latest_arrival_of``, the predicate of the wake). The last term is what makes an old, answered-and-re-asked
+    question stale although its window is open. It is stricter than ``record_answer``, which holds a late answer for
+    a moved-on arrival on purpose: a card is for something the owner can still decide. A question that does not
+    exist (a vanished row) is ``closed``."""
+    now = now or datetime.now(UTC)
+    question = (
+        await session.execute(
+            select(ResultInbox).where(
+                ResultInbox.agent_id == agent_id,
+                ResultInbox.source_kind == SOURCE_INTENTION_REPORT,
+                ResultInbox.source_id == question_id,
+                ResultInbox.msg_type == MSG_QUESTION,
+            )
+        )
+    ).scalar_one_or_none()
+    if question is None or question.arrival_id is None:
+        return QUESTION_CLOSED
+    arrival = (
+        await session.execute(
+            select(IntentionArrival).where(
+                IntentionArrival.agent_id == agent_id, IntentionArrival.id == question.arrival_id
+            )
+        )
+    ).scalar_one_or_none()
+    if arrival is None:
+        return QUESTION_CLOSED
+    owner_answered = (
+        await session.execute(
+            select(
+                exists().where(
+                    ResultInbox.agent_id == agent_id,
+                    ResultInbox.source_kind == SOURCE_INTENTION_REPORT,
+                    ResultInbox.arrival_id == arrival.id,
+                    ResultInbox.msg_type == "INFORM",
+                    ResultInbox.correlation_id.like(f"{ANSWER_CORRELATION_PREFIX}%"),
+                )
+            )
+        )
+    ).scalar_one()
+    if owner_answered:
+        return QUESTION_ANSWERED
+    if settings is not None and question_window_start(question) <= now - timedelta(
+        hours=float(settings.intention_proposal_ttl_hours)
+    ):
+        return QUESTION_CLOSED
+    if await _root_end_state(session, agent_id, arrival.root_id) is not None:
+        return QUESTION_CLOSED
+    waiting = (
+        await session.execute(
+            select(Intention.id)
+            .where(
+                Intention.agent_id == agent_id,
+                Intention.id.in_(list(arrival.intention_ids)),
+                Intention.state == STATE_AWAITING_OWNER,
+                Intention.wake_policy == intentions.WAKE_CONTINUE,
+                _latest_arrival_of(agent_id, arrival.root_id, arrival.n),
+            )
+            .limit(1)
+        )
+    ).first()
+    return QUESTION_AWAITED if waiting is not None else QUESTION_CLOSED
+
+
+async def question_awaited(
+    session: AsyncSession, agent_id: str, question_id: UUID, *, settings: Any = None, now: datetime | None = None
+) -> bool:
+    """``question_card_state(...) == "awaited"``: does the question still have something to answer? (R2)"""
+    return await question_card_state(session, agent_id, question_id, settings=settings, now=now) == QUESTION_AWAITED
+
+
 def _latest_arrival_of(agent_id: Any, root_id: Any, n: Any) -> ColumnElement[bool]:
     """The wake invariant: arrival ``n`` of ``root_id`` is the latest arrival listing ``Intention``. An older one
     was woken and claimed past: the intention, ``awaiting_owner`` again, waits on its newer ask, and woken by the
@@ -2610,6 +2703,23 @@ def proposal_note(note: str | None) -> str:
     return clip_shown(" ".join((note or "").split()), PROPOSAL_NOTE_MAX_CHARS)
 
 
+# Phase 3a: what a card shows of model-authored text. A fence opens only at a line start on both renderers
+# (`^\s*```(.*)$`, markdown.ts and Markdown.kt), so every line that would be one gets a leading middle dot.
+CARD_TRUNCATED = "\n[truncated]"
+_FENCE_LINE = re.compile(r"^(?=[^\S\n]*```)", re.MULTILINE)
+
+
+def card_text(text: str, limit: int) -> str:
+    """Model-authored ``text`` as a card shows it, inside ONE fenced block the builder adds: line breaks normalised
+    to ``\\n`` (a lone ``\\r`` is a break on some renderers), every control, format, bidi and zero-width character as
+    ``\\uXXXX``, cut at a character boundary to ``limit`` UTF-16 units with a ``[truncated]`` marker (``clip_shown``,
+    so never inside an escape), and every line that matches a renderer's fence regex prefixed with a middle dot and
+    a space (``\\u00b7 ``) so it can neither close the block nor open another. The prefix adds 2 units per neutralised
+    line, so the result can exceed ``limit`` by that much."""
+    shown = clip_shown(text.replace("\r\n", "\n").replace("\r", "\n"), limit, marker=CARD_TRUNCATED)
+    return _FENCE_LINE.sub("\u00b7 ", shown)
+
+
 def _has_nul(text: str) -> bool:
     return "\x00" in text
 
@@ -2617,6 +2727,20 @@ def _has_nul(text: str) -> bool:
 def _has_surrogate(text: str) -> bool:
     """A lone UTF-16 half (category ``Cs``): the UTF-8 wire and ``jsonb`` refuse it."""
     return any(unicodedata.category(ch) == "Cs" for ch in text)
+
+
+ANSWER_MAX_CHARS = 8000  # the owner's text; record_answer clips it again to the inbox body cap
+
+
+def valid_answer_text(text: Any) -> str | None:
+    """The owner's answer as every owner surface accepts it, else None: a string that is not blank, at most
+    ``ANSWER_MAX_CHARS`` long, with no NUL and no lone surrogate (Postgres refuses a NUL and the UTF-8 encode a lone
+    surrogate: refused here, not a 500 from the store). The REST routes and the A2UI card call this one function."""
+    if not isinstance(text, str) or not text.strip() or len(text) > ANSWER_MAX_CHARS:
+        return None
+    if _has_nul(text) or _has_surrogate(text):
+        return None
+    return text
 
 
 def _contains(value: Any, test: Callable[[str], bool]) -> bool:

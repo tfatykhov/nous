@@ -22,6 +22,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 
+from nous.a2ui.intention_keys import INTENTION_DEDUP_PREFIX, KIND_PROPOSAL, KIND_QUESTION, parse_key
 from nous.api import tool_policy
 from nous.api.execution_context import ExecutionContext
 from nous.api.tool_classes import tool_class
@@ -473,6 +474,9 @@ STRAY_DAG_BATCH = 10  # the DAGs under cancelled roots one sweep cancels
 # The sweep waits this long for the owner push, then goes on: a slow Telegram must not delay a launch (12).
 PUSH_WAIT_SECONDS = 5.0
 RESUME_BATCH = 5  # the approved calls one sweep starts again
+SETTLE_CLOSE_BATCH = (
+    50  # the most cards one sweep closes; every live card is examined (the set is the owner's open items)
+)
 # What the model and the owner are told of a call whose outcome is not known. Never the exception's message: it
 # can echo the call's arguments.
 TIMEOUT_TEXT = (
@@ -529,6 +533,7 @@ class ContinuationRunner:
         self._cancelled: set[UUID] = set()
         self._cancel_dag = cancel_dag
         self._view_checked_at: datetime | None = None
+        self._surface_service: Any = None  # Phase 3a, bound late (set_surface_service)
 
     @property
     def running_roots(self) -> frozenset[UUID]:
@@ -537,6 +542,15 @@ class ContinuationRunner:
     def set_cancel_dag(self, cancel_dag: Callable[[UUID, str], Awaitable[None]] | None) -> None:
         """Bind ``DAGOrchestrator.cancel_dag`` (main.py, once the orchestrator exists)."""
         self._cancel_dag = cancel_dag
+
+    def set_surface_service(self, service: Any) -> None:
+        """Bind the A2UI surface service (main.py, once it exists; the runner is built before it, like the DAG
+        cancel). It is handed to the owner publisher too. While it is None, the card leg of the publisher and the
+        ``card settle`` step are no-ops (R5)."""
+        self._surface_service = service
+        setter = getattr(self._publisher, "set_surface_service", None)
+        if setter is not None:
+            setter(service)
 
     def root_is_cancelled(self, root_id: UUID) -> bool:
         """The in-process view of cancelled roots, for ``AgentRunner.set_cancelled_roots``. A set lookup: no
@@ -595,8 +609,9 @@ class ContinuationRunner:
 
     async def run_once(self) -> continuation.SweepReport:
         """One sweep, in order: release claims older than the lease, expire roots past their TTL, end the
-        roots left waiting on nothing, expire proposals, wake answered or expired questions, grade the arrivals
-        whose chain has ended (3d), push the owner rows that are due, and launch every root that is due while a
+        roots left waiting on nothing, expire proposals, wake answered or expired questions, close the owner's cards
+        that no longer have anything to ask, grade the arrivals whose chain has ended (3d), push the owner rows that
+        are due, and launch every root that is due while a
         slot is free. Every step is isolated; with continuation off it does nothing."""
         if not continuation.enabled(self._settings):
             return continuation.SweepReport(0, 0, 0, 0, (), None)
@@ -609,6 +624,7 @@ class ContinuationRunner:
         # release_stale_claims has already expired the staged rows of every stale claim (2d-3 review m3).
         expired_proposals = await self._step("proposal expiry", self._expire_proposals, [])
         await self._step("question wake", self._wake_questions)
+        await self._step("card settle", self._settle_cards)  # Phase 3a: a no-op with the cards off or no service bound
         await self._step("calibration", self._calibrate)
         await self._step("approved resume", self._resume_approved)
         pushed = await self._step("owner push", self._push, 0)
@@ -737,6 +753,80 @@ class ContinuationRunner:
             await session.commit()
         if woken:  # the sweep launches next, so no wake()
             logger.info("F099: woke answered or expired question(s): %s", woken)
+
+    async def _settle_cards(self) -> int:
+        """Phase 3a: close the owner's ``intention:`` cards whose row no longer needs the owner. The handlers' own
+        ``resolve_surface`` is the fast path; this is the backstop for everything decided elsewhere (Telegram, REST,
+        the sweep, a cancel). A proposal card closes as soon as its proposal is not ``pending`` (R1): ``resolved``
+        for approved, executing, executed, failed and rejected, ``expired`` for expired and cancelled. A question card
+        closes when ``continuation.question_card_state`` is not ``awaited`` (R2): ``resolved`` when the owner answered
+        it, else ``expired``. A card whose row vanished, or whose key is not one we build, closes ``expired``. The
+        active-intentions card is not ours (3b). Every live card is examined; at most ``SETTLE_CLOSE_BATCH`` are
+        closed. A card that fails is logged and left for the next sweep. Returns the cards it closed. Does nothing,
+        and touches no service, with the cards off or no service bound."""
+        service = self._surface_service
+        if service is None or not continuation.cards_enabled(self._settings):
+            return 0
+        cards = [
+            (surface_id, parse_key(key))
+            for surface_id, key in await service.live_cards_by_prefix(INTENTION_DEDUP_PREFIX)
+        ]
+        if not cards:
+            return 0
+        proposal_ids = [parsed[1] for _sid, parsed in cards if parsed is not None and parsed[0] == KIND_PROPOSAL]
+        states: dict[UUID, str] = {}
+        if proposal_ids:
+            async with self._db.session() as session:
+                states = dict(
+                    (
+                        await session.execute(
+                            select(IntentionProposal.id, IntentionProposal.state).where(
+                                IntentionProposal.agent_id == self._agent_id, IntentionProposal.id.in_(proposal_ids)
+                            )
+                        )
+                    ).all()
+                )
+        closed = 0
+        for surface_id, parsed in cards:
+            if closed >= SETTLE_CLOSE_BATCH:
+                break
+            try:
+                status = await self._settled_status(parsed, states)
+                if status is None:
+                    continue
+                await service.close(surface_id, status)
+                closed += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "F099: could not settle the card %s; the next sweep tries again", surface_id, exc_info=True
+                )
+        return closed
+
+    async def _settled_status(self, parsed: tuple[str, UUID | None] | None, states: dict[UUID, str]) -> str | None:
+        """The status a card closes with, or None while it still has something to ask the owner."""
+        if parsed is None:
+            return "expired"  # under the reserved prefix but not a key we build: nothing can answer it
+        kind, subject = parsed
+        if kind == KIND_PROPOSAL:
+            state = states.get(subject)
+            if state is None:
+                return "expired"
+            if state in (continuation.PROPOSAL_STAGED, continuation.PROPOSAL_PENDING):
+                return None
+            return (
+                "expired" if state in (continuation.PROPOSAL_EXPIRED, continuation.PROPOSAL_CANCELLED) else "resolved"
+            )
+        if kind == KIND_QUESTION:
+            async with self._db.session() as session:
+                state = await continuation.question_card_state(
+                    session, self._agent_id, subject, settings=self._settings
+                )
+            if state == continuation.QUESTION_AWAITED:
+                return None
+            return "resolved" if state == continuation.QUESTION_ANSWERED else "expired"
+        return None  # the active-intentions card belongs to 3b's own step
 
     async def _calibrate(self) -> int:
         """Phase 3d: grade the Brain decisions of arrivals whose rows now hold a signal (a proposal the owner
@@ -1429,12 +1519,16 @@ class ContinuationRunner:
     # these, and so will the A2UI ActionRouter (Phase 3). They are not tools.
     # ------------------------------------------------------------------
 
-    async def decide_proposal(self, proposal_id: UUID, *, approve: bool, actor: str) -> continuation.ProposalExecution:
+    async def decide_proposal(
+        self, proposal_id: UUID, *, approve: bool, actor: str, wait: bool = True
+    ) -> continuation.ProposalExecution:
         """The owner's decision on a proposal. An approve of a proposal that is ``approved`` (decided just now, or
         by an earlier call that never got as far as running it) runs the call and returns its result; every other
         outcome is the store's. A refusal is a result (``refusal``), never an exception; raises
         ``continuation.ProposalNotFound`` for an unknown id. The inline execution is shielded from the caller's
-        cancellation (see below)."""
+        cancellation (see below). ``wait=False`` (the A2UI card) starts the execution of an approved proposal in its
+        tracked task and returns the store's ``approved`` without awaiting it; the call's outcome reaches the owner
+        through the chain's next report. The REST routes and the bot keep ``wait=True``."""
         async with self._db.session() as session:
             decision = await continuation.decide_proposal(
                 session, self._agent_id, proposal_id, approve=approve, actor=actor, settings=self._settings
@@ -1447,6 +1541,12 @@ class ContinuationRunner:
         if decision.woke_arrival:
             self.wake()
         if approve and decision.refusal is None and decision.state == continuation.PROPOSAL_APPROVED:
+            if not wait:
+                # Tracked in _executing (stop() waits for it) and fenced by claim_execution; _resume_approved
+                # recovers a restart, as for a REST client that went away. Nothing awaits it: the card's request
+                # (and the surface lock it holds) is short.
+                self._start_execution(proposal_id)
+                return decision
             # Shielded: a REST client that goes away cancels its request task, and that must not cancel a call the
             # owner approved half way (it would sit `executing` until the in-doubt sweep). Tracked, so a graceful
             # stop() waits for it (bounded); a process stop still ends it, and the proposal is failed in doubt as
