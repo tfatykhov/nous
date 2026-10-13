@@ -21,6 +21,7 @@
   import Consolidation from './views/Consolidation.svelte';
   import Identity from './views/Identity.svelte';
   import Harness from './views/Harness.svelte';
+  import Intentions from './views/Intentions.svelte';
   import { usePoll } from '$lib/poll';
   import { attentionPoll, attentionCounts } from '$lib/stores/attention';
 
@@ -210,6 +211,8 @@
     <Identity />
   {:else if $currentRoute === 'harness'}
     <Harness />
+  {:else if $currentRoute === 'intentions'}
+    <Intentions />
   {/if}
 </main>
 

@@ -1245,6 +1245,10 @@ class Settings(BaseSettings):
     # F099 Phase 3a: the owner's proposal and question cards on the companion (Approve / Reject, a free-text
     # answer). Pushed beside the Telegram message, never instead of it. Needs continuation_enabled and a2ui_enabled.
     intention_cards_enabled: bool = False
+    # F099 Phase 3d: grade every arrival's Brain decision from the lineage's own rows (a proposal the owner
+    # decided, a cancel, a report, a drop, a bound) and keep those decisions out of the generic review feeds.
+    # Needs continuation_enabled. Default off.
+    intention_calibration_enabled: bool = False
     # F099 lineage shell: offer bash to internal_only turns (continuations and the subtasks and
     # DAG nodes of a lineage), each call held to tool_policy.lineage_bash_allowed (runner.sh,
     # read-only gh and plain reads). Off: bash stays on the internal_only denylist (as before).
@@ -3145,6 +3149,16 @@ class Settings(BaseSettings):
                 "the intention cards stay OFF."
             )
             object.__setattr__(self, "intention_cards_enabled", False)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_intention_calibration_dependency(self) -> "Settings":
+        """F099 Phase 3d: grading an arrival needs the arrivals a continuation writes."""
+        if self.intention_calibration_enabled and not self.continuation_enabled:
+            logging.getLogger(__name__).warning(
+                "NOUS_INTENTION_CALIBRATION_ENABLED=true needs NOUS_CONTINUATION_ENABLED=true; calibration stays OFF."
+            )
+            object.__setattr__(self, "intention_calibration_enabled", False)
         return self
 
     @model_validator(mode="after")

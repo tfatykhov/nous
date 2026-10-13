@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import case, delete, func, or_, select, text, update
+from sqlalchemy import ColumnElement, case, delete, exists, func, or_, select, text, update
 from sqlalchemy import event as sa_event
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,6 +54,7 @@ from nous.storage.models import (
     Event,
     Fact,
     GraphEdge,
+    IntentionArrival,
     Procedure,
     Thought,
 )
@@ -65,6 +66,21 @@ _NOISE_KEYWORDS = frozenset({
     "completed", "done", "finished", "success", "started",
     "status", "progress", "update", "checked", "confirmed",
 })
+
+
+def _arrival_linked() -> ColumnElement[bool]:
+    """EXISTS: the decision is the Brain record of an F099 arrival (``intention_arrivals.decision_record_id``).
+    The one predicate for "an arrival decision": not the ``f099`` tag (``DecisionSummary.tags`` is always
+    empty) and not the ``intent-`` session (a continuation turn may call ``record_decision`` itself, and
+    those rows are ordinary decisions)."""
+    return (
+        exists()
+        .where(
+            IntentionArrival.agent_id == Decision.agent_id,
+            IntentionArrival.decision_record_id == Decision.id,
+        )
+        .correlate(Decision)
+    )
 
 
 class DecisionNotFound(ValueError):
@@ -191,17 +207,23 @@ class Brain:
         sort: str = "created_at",
         order: str = "desc",
         session: AsyncSession | None = None,
+        exclude_intention_arrivals: bool = False,
     ) -> tuple[list[DecisionSummary], int]:
-        """List decisions with optional filters. Returns (decisions, total_count)."""
+        """List decisions with optional filters. Returns (decisions, total_count).
+
+        exclude_intention_arrivals drops the Brain records of F099 arrivals (calibration, Phase 3d).
+        """
         if session is None:
             async with self.db.session() as session:
                 return await self._list_decisions(
                     limit, offset, agent_id, category, stakes, outcome,
                     confidence_min, date_from, date_to, reviewed, sort, order, session,
+                    exclude_intention_arrivals,
                 )
         return await self._list_decisions(
             limit, offset, agent_id, category, stakes, outcome,
             confidence_min, date_from, date_to, reviewed, sort, order, session,
+            exclude_intention_arrivals,
         )
 
     async def _list_decisions(
@@ -219,6 +241,7 @@ class Brain:
         sort: str,
         order: str,
         session: AsyncSession,
+        exclude_intention_arrivals: bool = False,
     ) -> tuple[list[DecisionSummary], int]:
         from sqlalchemy import func as sa_func
 
@@ -241,6 +264,8 @@ class Brain:
             conditions.append(Decision.reviewed_at.isnot(None))
         elif reviewed is False:
             conditions.append(Decision.reviewed_at.is_(None))
+        if exclude_intention_arrivals:
+            conditions.append(~_arrival_linked())
 
         # Count
         count_q = select(sa_func.count()).select_from(Decision).where(*conditions)
@@ -1308,21 +1333,28 @@ class Brain:
 
     async def get_session_decisions(
         self, session_id: str, session: AsyncSession | None = None,
+        exclude_intention_arrivals: bool = False,
     ) -> list[DecisionSummary]:
-        """Fetch decisions made during a specific session."""
+        """Fetch decisions made during a specific session.
+
+        exclude_intention_arrivals drops the Brain records of F099 arrivals (calibration, Phase 3d).
+        """
         if session is None:
             async with self.db.session() as session:
-                return await self._get_session_decisions(session_id, session)
-        return await self._get_session_decisions(session_id, session)
+                return await self._get_session_decisions(session_id, session, exclude_intention_arrivals)
+        return await self._get_session_decisions(session_id, session, exclude_intention_arrivals)
 
     async def _get_session_decisions(
         self, session_id: str, session: AsyncSession,
+        exclude_intention_arrivals: bool = False,
     ) -> list[DecisionSummary]:
         stmt = (
             select(Decision)
             .where(Decision.agent_id == self.agent_id, Decision.session_id == session_id)
             .order_by(Decision.created_at)
         )
+        if exclude_intention_arrivals:
+            stmt = stmt.where(~_arrival_linked())
         result = await session.execute(stmt)
         return [self._decision_to_summary(d) for d in result.scalars().all()]
 
@@ -1333,20 +1365,23 @@ class Brain:
     async def get_unreviewed(
         self, max_age_days: int = 30, stakes: str | None = None,
         session: AsyncSession | None = None, limit: int | None = None,
+        exclude_intention_arrivals: bool = False,
     ) -> list[DecisionSummary]:
         """Fetch unreviewed decisions, optionally filtered by stakes.
 
         ``limit`` pushes the bound into SQL (F092.1 sources — a Python
         slice after ``.all()`` still materializes the whole window).
+        exclude_intention_arrivals drops the Brain records of F099 arrivals
+        (calibration, Phase 3d), before the limit.
         """
         if session is None:
             async with self.db.session() as session:
-                return await self._get_unreviewed(max_age_days, stakes, session, limit)
-        return await self._get_unreviewed(max_age_days, stakes, session, limit)
+                return await self._get_unreviewed(max_age_days, stakes, session, limit, exclude_intention_arrivals)
+        return await self._get_unreviewed(max_age_days, stakes, session, limit, exclude_intention_arrivals)
 
     async def _get_unreviewed(
         self, max_age_days: int, stakes: str | None, session: AsyncSession,
-        limit: int | None = None,
+        limit: int | None = None, exclude_intention_arrivals: bool = False,
     ) -> list[DecisionSummary]:
         cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
         stmt = (
@@ -1360,6 +1395,8 @@ class Brain:
         )
         if stakes:
             stmt = stmt.where(Decision.stakes == stakes)
+        if exclude_intention_arrivals:
+            stmt = stmt.where(~_arrival_linked())
         if limit is not None:
             stmt = stmt.limit(limit)
         result = await session.execute(stmt)

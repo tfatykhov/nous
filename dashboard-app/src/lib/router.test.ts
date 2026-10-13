@@ -7,8 +7,8 @@ describe('router', () => {
   it('defaults to overview when hash empty', () => { initRouter(); expect(get(currentRoute)).toBe('overview'); });
   it('reads the hash route', () => { location.hash = '#/cache'; initRouter(); expect(get(currentRoute)).toBe('cache'); });
   it('falls back to overview on unknown route', () => { location.hash = '#/nope'; initRouter(); expect(get(currentRoute)).toBe('overview'); });
-  // 18 since F091 added the 'retrieval' route without updating this count.
-  it('lists all 19 routes', () => { expect(ROUTES.length).toBe(19); });
+  it('lists all 20 routes', () => { expect(ROUTES.length).toBe(20); });
+  it('includes the intentions route', () => { expect(ROUTES).toContain('intentions'); });
   it('includes the harness route', () => { expect(ROUTES).toContain('harness'); });
   it('includes the identity route', () => { expect(ROUTES).toContain('identity'); });
   it('unknown fragment (e.g. skip-link #main-content) leaves current route unchanged', () => {

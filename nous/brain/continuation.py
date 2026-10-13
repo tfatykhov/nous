@@ -175,6 +175,19 @@ def cards_enabled(settings: Any) -> bool:
     )
 
 
+def calibration_enabled(settings: Any) -> bool:
+    """NOUS_INTENTION_CALIBRATION_ENABLED, with the same rule as ``enabled``: a mocked or partial settings
+    object counts as off (``is True``), and the continuation must be on."""
+    return enabled(settings) and getattr(settings, "intention_calibration_enabled", False) is True
+
+
+def arrival_exclusion(settings: Any) -> dict[str, bool]:
+    """The keyword every model-facing decision feed spreads into its Brain call. Empty with the flag off, so
+    the call is exactly the call of before this flag existed (a feed's test double with an exact signature
+    still works); ``exclude_intention_arrivals=True`` with it on."""
+    return {"exclude_intention_arrivals": True} if calibration_enabled(settings) else {}
+
+
 def close_reason_for(settings: Any) -> str:
     """The close reason of a ``none``, ``remember`` or ``report`` intention (ruling 2):
     ``delivered`` with the flag on, ``legacy`` (Phase 1's) otherwise."""
@@ -591,6 +604,180 @@ async def root_limits(session: AsyncSession, agent_id: str, root_id: UUID, *, se
     elif spawns >= max_spawns:
         escalate = "limit_spawns"
     return RootLimits(depth, spawns, turns, tokens, stalls, depth >= max_depth or spawns >= max_spawns, escalate)
+
+
+@dataclass(frozen=True)
+class TokenParts:
+    """What a root's token budget is made of (the five terms ``root_limits`` adds up)."""
+
+    arrivals_in: int = 0
+    arrivals_out: int = 0
+    failed: int = 0  # Intention.failed_tokens: in plus out of the attempts that wrote no arrival
+    subtasks: int = 0  # lineage subtasks outside a DAG
+    dags: int = 0  # lineage DAGs' tokens_consumed
+
+    @property
+    def total(self) -> int:
+        return self.arrivals_in + self.arrivals_out + self.failed + self.subtasks + self.dags
+
+
+@dataclass(frozen=True)
+class _Tally:
+    depth: int = 0
+    spawns: int = 0
+    turns: int = 0
+    parts: TokenParts = field(default_factory=TokenParts)
+
+
+async def _root_tallies(session: AsyncSession, agent_id: str, root_ids: Iterable[UUID]) -> dict[UUID, _Tally]:
+    """Every term ``root_limits`` reads except the stall scan, for many roots, as GROUP BY ``root_id``."""
+    ids = list(dict.fromkeys(root_ids))
+    if not ids:
+        return {}
+    depth: dict[UUID, int] = {}
+    spawns: dict[UUID, int] = {}
+    failed: dict[UUID, int] = {}
+    for rid, d, s, f in (
+        await session.execute(
+            select(
+                Intention.root_id,
+                func.coalesce(func.max(Intention.depth), 0),
+                func.count(Intention.id).filter(Intention.depth > 0),
+                func.coalesce(func.sum(Intention.failed_tokens), 0),
+            )
+            .where(Intention.agent_id == agent_id, Intention.root_id.in_(ids))
+            .group_by(Intention.root_id)
+        )
+    ).all():
+        depth[rid], spawns[rid], failed[rid] = int(d), int(s), int(f)
+    subtasks = {
+        rid: int(t)
+        for rid, t in (
+            await session.execute(
+                select(Intention.root_id, func.coalesce(func.sum(Subtask.tokens_in + Subtask.tokens_out), 0))
+                .join(
+                    Subtask,
+                    and_(Subtask.agent_id == Intention.agent_id, cast(Subtask.id, Text) == Intention.source_id),
+                )
+                .where(
+                    Intention.agent_id == agent_id,
+                    Intention.root_id.in_(ids),
+                    Intention.source_kind == "subtask",
+                    Subtask.dag_node_id.is_(None),
+                )
+                .group_by(Intention.root_id)
+            )
+        ).all()
+    }
+    dags = {
+        rid: int(t)
+        for rid, t in (
+            await session.execute(
+                select(Intention.root_id, func.coalesce(func.sum(ExecutionDAG.tokens_consumed), 0))
+                .join(
+                    ExecutionDAG,
+                    and_(
+                        ExecutionDAG.agent_id == Intention.agent_id,
+                        cast(ExecutionDAG.id, Text) == Intention.source_id,
+                    ),
+                )
+                .where(Intention.agent_id == agent_id, Intention.root_id.in_(ids), Intention.source_kind == "dag")
+                .group_by(Intention.root_id)
+            )
+        ).all()
+    }
+    arrivals = {
+        rid: (int(a_in), int(a_out), int(turns))
+        for rid, a_in, a_out, turns in (
+            await session.execute(
+                select(
+                    IntentionArrival.root_id,
+                    func.coalesce(func.sum(IntentionArrival.tokens_in), 0),
+                    func.coalesce(func.sum(IntentionArrival.tokens_out), 0),
+                    func.count(IntentionArrival.id).filter(IntentionArrival.gate_reason.is_(None)),
+                )
+                .where(IntentionArrival.agent_id == agent_id, IntentionArrival.root_id.in_(ids))
+                .group_by(IntentionArrival.root_id)
+            )
+        ).all()
+    }
+    out: dict[UUID, _Tally] = {}
+    for rid in ids:
+        a_in, a_out, turns = arrivals.get(rid, (0, 0, 0))
+        parts = TokenParts(a_in, a_out, failed.get(rid, 0), subtasks.get(rid, 0), dags.get(rid, 0))
+        out[rid] = _Tally(depth.get(rid, 0), spawns.get(rid, 0), turns, parts)
+    return out
+
+
+async def root_token_parts(session: AsyncSession, agent_id: str, root_ids: Iterable[UUID]) -> dict[UUID, TokenParts]:
+    """The five terms of each root's token budget (3c, the dashboard's ``token_spend``). Read-only."""
+    return {rid: tally.parts for rid, tally in (await _root_tallies(session, agent_id, root_ids)).items()}
+
+
+async def root_limits_many(
+    session: AsyncSession, agent_id: str, root_ids: Iterable[UUID], *, settings: Any
+) -> dict[UUID, RootLimits]:
+    """``root_limits`` for many roots in a fixed number of queries (3c, ruling R4): the aggregates as GROUP BY
+    ``root_id``, the stall scan as one windowed query. Pinned equal to ``root_limits`` for every root in
+    ``tests/test_f099_phase3c_limits.py``. ``root_limits`` is not edited (#744), so the escalation ladder below is
+    a deliberate copy: change both together. An id that names no root gets zeros, as ``root_limits`` does.
+    Read-only."""
+    ids = list(dict.fromkeys(root_ids))
+    if not ids:
+        return {}
+    tallies = await _root_tallies(session, agent_id, ids)
+    stall_limit = int(settings.continuation_stall_limit)
+    ranked = (
+        select(
+            IntentionArrival.root_id.label("root_id"),
+            IntentionArrival.progress.label("progress"),
+            func.row_number()
+            .over(partition_by=IntentionArrival.root_id, order_by=IntentionArrival.n.desc())
+            .label("rk"),
+        )
+        .where(
+            IntentionArrival.agent_id == agent_id,
+            IntentionArrival.root_id.in_(ids),
+            IntentionArrival.gate_reason.is_(None),
+            IntentionArrival.progress.is_not(None),
+        )
+        .subquery()
+    )
+    stalls: dict[UUID, int] = {rid: 0 for rid in ids}
+    running: set[UUID] = set(ids)  # roots whose trailing run of verified no-progress arrivals is still unbroken
+    for rid, verified in (
+        await session.execute(
+            select(ranked.c.root_id, ranked.c.progress)
+            .where(ranked.c.rk <= stall_limit)
+            .order_by(ranked.c.root_id, ranked.c.rk)
+        )
+    ).all():
+        if rid not in running:
+            continue
+        if verified is not False:
+            running.discard(rid)
+            continue
+        stalls[rid] += 1
+    max_depth, max_spawns = settings.continuation_max_depth, settings.continuation_max_spawns_per_root
+    out: dict[UUID, RootLimits] = {}
+    for rid in ids:
+        t = tallies[rid]
+        tokens = t.parts.total
+        escalate: str | None = None
+        if t.turns >= settings.continuation_max_turns_per_root:
+            escalate = "budget_turns"
+        elif tokens >= settings.continuation_max_tokens_per_root:
+            escalate = "budget_tokens"
+        elif stalls[rid] >= stall_limit:
+            escalate = "budget_stall"
+        elif t.depth >= max_depth:
+            escalate = "limit_depth"
+        elif t.spawns >= max_spawns:
+            escalate = "limit_spawns"
+        out[rid] = RootLimits(
+            t.depth, t.spawns, t.turns, tokens, stalls[rid], t.depth >= max_depth or t.spawns >= max_spawns, escalate
+        )
+    return out
 
 
 async def decision_outcome(session: AsyncSession, agent_id: str, decision_id: UUID) -> str | None:
