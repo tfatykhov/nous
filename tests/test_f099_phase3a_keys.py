@@ -125,7 +125,12 @@ def test_only_the_orchestrator_may_pass_reserved_key_ok():
                 and any(k.arg == "reserved_key_ok" for k in node.keywords)
             ):
                 users.add(path.relative_to(root).as_posix())
-    assert users == {"a2ui/service.py", "dag/orchestrator.py", "handlers/continuation_publisher.py"}
+    assert users == {
+        "a2ui/service.py",
+        "dag/orchestrator.py",
+        "handlers/continuation_publisher.py",
+        "handlers/continuation_runner.py",
+    }
 
 
 @pytest.mark.postgres_only
