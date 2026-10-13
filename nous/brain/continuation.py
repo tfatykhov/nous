@@ -17,7 +17,7 @@ import re
 import unicodedata
 import uuid
 from collections import defaultdict
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -4559,6 +4559,32 @@ async def _awaiting_views(
             }
         )
     return out
+
+
+async def newest_reports(session: AsyncSession, agent_id: str, root_ids: Sequence[UUID]) -> dict[str, dict[str, str]]:
+    """The newest REPORT row of each root, by the lineage its intention belongs to (3b: the active card shows it,
+    read-only). ``body`` is the model's text, raw: whoever shows it passes it through ``card_text``. One query."""
+    if not root_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(Intention.root_id, ResultInbox.source_id, ResultInbox.body, ResultInbox.created_at)
+            .select_from(ResultInbox)
+            .join(Intention, and_(Intention.agent_id == ResultInbox.agent_id, Intention.id == ResultInbox.intention_id))
+            .where(
+                ResultInbox.agent_id == agent_id,
+                ResultInbox.source_kind == SOURCE_INTENTION_REPORT,
+                ResultInbox.msg_type == MSG_REPORT,
+                Intention.root_id.in_(list(root_ids)),
+            )
+            .distinct(Intention.root_id)
+            .order_by(Intention.root_id, ResultInbox.created_at.desc(), ResultInbox.id.desc())
+        )
+    ).all()
+    return {
+        str(row.root_id): {"id": str(row.source_id), "body": row.body, "created_at": _iso(row.created_at) or ""}
+        for row in rows
+    }
 
 
 async def list_roots(

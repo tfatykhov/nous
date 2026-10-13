@@ -9,6 +9,7 @@ from f099_cards_support import (
     answer,
     ask,
     question_id_of,
+    report,
 )
 from f099_support import (
     CONT,
@@ -16,6 +17,7 @@ from f099_support import (
     claim,
     commit_ask,
     env_factory,  # noqa: F401
+    make_child,
     make_root,
     runner_env,  # noqa: F401
 )
@@ -123,3 +125,29 @@ def test_the_bot_reads_a_root_the_same_with_or_without_awaiting():  # PIN
     }  # fmt: skip
     extra = [{"arrival_id": "a", "n": 1, "proposal_ids": ["p"], "question_ids": ["q"]}]
     assert describe_intentions({"roots": [{**root, "awaiting": extra}]}) == describe_intentions({"roots": [root]})
+
+
+async def _newest(env, root_ids):
+    async with env.db.session() as s:
+        return await continuation.newest_reports(s, env.agent, root_ids)
+
+
+async def test_the_newest_report_of_a_root_comes_from_anywhere_in_its_lineage(runner_env):  # noqa: F811
+    env = await runner_env(**CARDS)
+    a = await make_root(env)
+    child = await make_child(env, a)
+    b = await make_root(env)
+    await report(env, a, a, "old report", hours_ago=3)
+    newest = await report(env, a, child, "new report", hours_ago=1)
+    other = await report(env, b, b, "the other root", hours_ago=2)
+    got = await _newest(env, [a.id, b.id])
+    assert got[str(a.id)]["id"] == str(newest) and got[str(a.id)]["body"] == "new report"
+    assert got[str(b.id)]["id"] == str(other)
+
+
+async def test_only_reports_count_and_a_root_without_one_is_absent(runner_env):  # noqa: F811
+    env = await runner_env(**CARDS)
+    asked = await ask_with_proposals(env, count=1)  # a PROPOSAL row, no REPORT
+    bare = await make_root(env)
+    assert await _newest(env, [asked.root.id, bare.id]) == {}
+    assert await _newest(env, []) == {}
