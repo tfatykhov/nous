@@ -12,6 +12,8 @@ proposal) rather than clipped.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
@@ -20,7 +22,8 @@ from uuid import UUID
 
 from nous.brain import continuation
 
-from ..dsl import BuiltSurface, Button, Column, Row, Surface, Text, TextField, event
+from ..dsl import BuiltSurface, Button, Card, Column, Divider, Row, Surface, Text, TextField, event
+from .heartbeat_findings import _escape_pointer
 
 # What a card shows of each model-authored string, in UTF-16 units (contract section 4.3).
 INTENT_CHARS = 300
@@ -213,4 +216,133 @@ def intention_question(
             variant="caption",
         ),
     )
+    return s.build()
+
+
+ACTIVE_CARD_ROOTS = 10  # the roots the card lists; the runner asks for one more to know whether there are others
+ACTIVE_CARD_TTL = timedelta(hours=6)  # a safety net: a card nothing closes (continuation turned off) still ends
+INTENT_CARD_CHARS, REPORT_CARD_CHARS = 300, 600
+# The words of RootView.state, the bot's list (nous/telegram_bot.py is another process, so this is a second copy).
+_STATE_WORDS = {
+    "pending": "running",
+    "result_ready": "result ready",
+    "deciding": "thinking",
+    "awaiting_owner": "waiting for you",
+}
+_DOT = " \u00b7 "
+CANCEL_NOTE = "Cancel stops everything under that intention."
+MORE_NOTE = (
+    f"More than {ACTIVE_CARD_ROOTS} intentions are open: the {ACTIVE_CARD_ROOTS} newest are shown. "
+    "/intentions in chat lists them."
+)
+
+
+def _awaiting_text(entries: list[dict[str, Any]]) -> str:
+    """What the owner is waited on for, in fixed words and the short ids the server minted. Empty when nothing is."""
+    proposals = [p for entry in entries for p in entry.get("proposal_ids", [])]
+    questions = sum(len(entry.get("question_ids", [])) for entry in entries)
+    parts: list[str] = []
+    if proposals:
+        shown = ", ".join(p.replace("-", "")[:8] for p in proposals[:3])
+        parts.append(f"proposal {shown}" + (f" (+{len(proposals) - 3} more)" if len(proposals) > 3 else ""))
+    if questions:
+        parts.append(f"{questions} question" + ("" if questions == 1 else "s"))
+    return "Waiting for you: " + " and ".join(parts) if parts else ""
+
+
+def active_fingerprint(roots: list[dict[str, Any]], reports: dict[str, dict[str, str]], *, more: bool = False) -> str:
+    """What the card shows, as a hash: the runner pushes a replacement only when it changes (a replacement rotates the
+    card's nonce). Per root: id, state, newest arrival n, the ids it awaits, depth/spawns/turns and the
+    newest report's id. ``tokens`` is left out on purpose (it moves with every arrival, which already moves ``n``)."""
+    rows = []
+    for root in roots:
+        limits = root.get("limits") or {}
+        arrivals = root.get("arrivals") or []
+        awaited = sorted(i for e in root.get("awaiting") or [] for i in (*e["proposal_ids"], *e["question_ids"]))
+        rows.append(
+            [
+                root["id"], root["state"], arrivals[-1]["n"] if arrivals else 0, awaited,
+                [limits.get(key) for key in ("depth", "spawns", "turns")], (reports.get(root["id"]) or {}).get("id"),
+            ]
+        )  # fmt: skip
+    rows.sort(key=lambda row: row[0])
+    return hashlib.sha1(json.dumps([more, rows], separators=(",", ":")).encode()).hexdigest()
+
+
+def intention_active(params: dict[str, Any]) -> BuiltSurface:
+    """The one Active intentions card (3b): the owner's open roots, what each waits on, its newest report, and one
+    Cancel per root. ``params`` = ``{"roots": RootViews newest first, "reports": newest_reports(...), "maxima":
+    {depth, spawns, turns, tokens}, "more": bool}``. Not in ``TEMPLATES``: only the runner builds it, under the
+    reserved ``intention:active`` key. Raises ``ValueError`` for no root (the runner closes the card instead)."""
+    roots, reports, maxima = params["roots"], params.get("reports") or {}, params["maxima"]
+    if not roots:
+        raise ValueError("intention_active needs at least one root: the runner closes the card instead")
+    s = Surface(
+        kind="intention_active", origin="continuation", title="Active intentions", priority=0,
+        allowed_actions=["intention.cancel"], expires_in=ACTIVE_CARD_TTL,
+    )  # fmt: skip
+    model: dict[str, Any] = {}
+    children: list[str] = ["header", "note"]
+    components: list[dict] = [Text("header", "## Active intentions"), Text("note", CANCEL_NOTE, variant="caption")]
+    for i, root in enumerate(roots):
+        rid, p = root["id"], f"r{i}"
+        limits = root.get("limits")
+        report = reports.get(rid)
+        awaiting_text = _awaiting_text(root.get("awaiting") or [])
+        model[rid] = {
+            "short_id": root["short_id"],
+            "intent_text": fence(continuation.card_text(root.get("intent") or "", INTENT_CARD_CHARS)),
+            "state": root["state"],
+            "open_rows": root["open_rows"],
+            **{key: (limits or {}).get(key) for key in ("depth", "spawns", "turns", "tokens")},
+            "awaiting_text": awaiting_text,
+            "report_text": fence(continuation.card_text(report["body"], REPORT_CARD_CHARS)) if report else "",
+            "status": "Scheduled" if limits is None else "Running",
+        }
+        if limits is None:
+            meta = f"{root['short_id']}{_DOT}scheduled"
+        else:
+            word = _STATE_WORDS.get(root["state"], "open")
+            meta = _DOT.join(
+                (
+                    root["short_id"],
+                    word,
+                    f"depth {limits['depth']}/{maxima['depth']}",
+                    f"spawns {limits['spawns']}/{maxima['spawns']}",
+                    f"turns {limits['turns']}/{maxima['turns']}",
+                    f"tokens {limits['tokens']}/{maxima['tokens']}",
+                )
+            )
+        at = f"/roots/{_escape_pointer(rid)}"
+        inner = [f"{p}_intent", f"{p}_meta"]
+        body = [Text(f"{p}_intent", {"path": f"{at}/intent_text"}), Text(f"{p}_meta", meta, variant="caption")]
+        if awaiting_text:
+            inner.append(f"{p}_wait")
+            body.append(Text(f"{p}_wait", {"path": f"{at}/awaiting_text"}, variant="caption"))
+        if report:
+            inner += [f"{p}_report_h", f"{p}_report"]
+            stamp = report["created_at"][:16].replace("T", " ")
+            body += [
+                Text(f"{p}_report_h", f"Latest report, {stamp} UTC", variant="caption"),
+                Text(f"{p}_report", {"path": f"{at}/report_text"}),
+            ]
+        inner += [f"{p}_status", f"{p}_cancel"]
+        body += [
+            Text(f"{p}_status", {"path": f"{at}/status"}),
+            Button(
+                f"{p}_cancel", child=f"{p}_cancel_l", variant="borderless",
+                action=event("intention.cancel", {"rootId": rid}),
+            ),
+            Text(f"{p}_cancel_l", "Cancel"),
+        ]  # fmt: skip
+        components += [Card(p, child=f"{p}_col"), Column(f"{p}_col", children=inner), *body]
+        children.append(p)
+        if i < len(roots) - 1:
+            children.append(f"{p}_div")
+            components.append(Divider(f"{p}_div"))
+    if params.get("more"):
+        children.append("more")
+        components.append(Text("more", MORE_NOTE, variant="caption"))
+    s.data({"fingerprint": active_fingerprint(roots, reports, more=bool(params.get("more"))), "roots": model})
+    s.add(Column("root", children=children, align="stretch"), *components)
     return s.build()
