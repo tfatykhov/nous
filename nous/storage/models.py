@@ -1757,8 +1757,10 @@ class ExecutionLedgerEntry(Base):
     """Harness Phase 1b: durable record of one side-effecting tool call.
 
     See migration 074. Written by ``nous.cognitive.ledger_store.LedgerStore``:
-    'pending' before dispatch, closed after; never holds free text or tool
-    output (``durable_key_args``, ``_summary``).
+    'pending' before dispatch, closed after. Holds no free text or tool
+    output (``durable_key_args``, ``_summary``) unless detail capture is on:
+    then ``input_text`` and ``output_text`` hold the redacted, bounded call
+    input and output (migration 086).
     """
 
     __tablename__ = "execution_ledger"
@@ -1814,6 +1816,10 @@ class ExecutionLedgerEntry(Base):
     dispatched_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Migration 086: the call's input and output, redacted and capped. NULL
+    # unless NOUS_EXECUTION_LEDGER_DETAIL_ENABLED was on, or after retention.
+    input_text: Mapped[str | None] = mapped_column(Text)
+    output_text: Mapped[str | None] = mapped_column(Text)
 
 
 class ProcessRunLog(Base):

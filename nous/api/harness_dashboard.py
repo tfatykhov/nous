@@ -32,6 +32,7 @@ LEDGER_STATUSES = ("pending", "success", "error", "blocked", "unknown")
 EFFECTS = ("write", "external", "irreversible")
 ATTENTION_CAP = 20
 MAX_Q = 100
+INPUT_PREVIEW_CHARS = 240
 
 
 def _iso(ts: datetime | None) -> str | None:
@@ -195,6 +196,11 @@ def _row_view(r: Any, dags: dict, nodes: dict, holders: dict) -> dict:
         "refusal_code": _refusal_code(r.status, r.result_summary),
         "result_summary": r.result_summary,
         "key_args": r.key_args or {},
+        # The list carries a preview only: 50-200 rows of up to 32 KB each would
+        # be megabytes per poll. The full texts come from get_execution_detail.
+        "input_preview": r.input_text[:INPUT_PREVIEW_CHARS] if r.input_text else None,
+        "has_input": bool(r.input_text),
+        "has_output": bool(r.output_text),
         "idempotency_key": r.idempotency_key,
         "external_ref": r.external_ref,
         "session_id": r.session_id,
@@ -266,6 +272,8 @@ async def get_execution_data(
             func.lower(func.coalesce(L.idempotency_key, "")).like(pattern, escape="\\"),
             func.lower(func.coalesce(L.external_ref, "")).like(pattern, escape="\\"),
             func.lower(cast(L.key_args, Text)).like(pattern, escape="\\"),
+            func.lower(func.coalesce(L.input_text, "")).like(pattern, escape="\\"),
+            func.lower(func.coalesce(L.output_text, "")).like(pattern, escape="\\"),
         ))
     if cursor:
         ts, row_id = cursor
@@ -288,6 +296,26 @@ async def get_execution_data(
         "rows": [_row_view(r, dags, nodes, holders) for r in page],
         "next_before": f"{_iso(last.created_at)},{last.id}" if has_more and last else None,
     }
+
+
+async def get_execution_detail(session: AsyncSession, agent_id: str, entry_id: str) -> dict[str, Any] | None:
+    """GET /dashboard/execution/{id}: the stored input and output of one row.
+
+    None for a missing row or another agent's. Raises ValueError on a bad id.
+    """
+    try:
+        row_id = UUID(entry_id)
+    except ValueError:
+        raise ValueError(f"invalid id {entry_id!r}") from None
+    L = ExecutionLedgerEntry
+    r = (await session.execute(
+        select(L.id, L.tool_name, L.status, L.input_text, L.output_text)
+        .where(L.id == row_id, L.agent_id == agent_id)
+    )).first()
+    if r is None:
+        return None
+    return {"id": str(r.id), "tool_name": r.tool_name, "status": r.status,
+            "input_text": r.input_text, "output_text": r.output_text}
 
 
 # ── §3.3 Harness: what each rule flagged ──────────────────────────────────

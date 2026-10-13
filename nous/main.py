@@ -63,11 +63,13 @@ async def _execution_ledger_maintenance_loop(
     loop = asyncio.get_running_loop()
     while True:
         try:
-            if settings.execution_ledger_retention_days > 0 and (
-                last_prune is None or loop.time() - last_prune >= 86400
-            ):
+            if (
+                settings.execution_ledger_retention_days > 0
+                or settings.execution_ledger_detail_retention_days > 0
+            ) and (last_prune is None or loop.time() - last_prune >= 86400):
                 pruned = await ledger_store.prune(
                     retention_days=settings.execution_ledger_retention_days,
+                    detail_retention_days=settings.execution_ledger_detail_retention_days,
                 )
                 last_prune = loop.time()
                 logger.info("Harness: execution ledger retention pruned %d rows", pruned)
@@ -923,6 +925,7 @@ async def create_components(settings: Settings) -> dict:
             settings.agent_id,
             write_timeout_seconds=settings.execution_ledger_write_timeout_seconds,
             keyed_write_timeout_seconds=settings.execution_ledger_keyed_write_timeout_seconds,
+            detail_enabled=settings.execution_ledger_detail_enabled,
         )
         runner.set_ledger_store(ledger_store)
 
