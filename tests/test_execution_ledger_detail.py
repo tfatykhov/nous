@@ -288,7 +288,7 @@ def _longest_shared_run(secret: str, text: str, run: int = 8) -> str | None:
 
 @pytest.mark.asyncio
 async def test_an_own_secret_with_quote_backslash_and_newline_is_masked_in_every_spelling(store, db, monkeypatch):
-    secret = 'pw"with\slash\nline-' + uuid.uuid4().hex
+    secret = 'pw"with\\slash\nline-' + uuid.uuid4().hex
     _set_secret(monkeypatch, secret)
     escaped = json.dumps(secret, ensure_ascii=False)[1:-1]
     entry = await _run(
