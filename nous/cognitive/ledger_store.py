@@ -10,7 +10,11 @@ out). The RUNNER decides what a failure means: Phase 1b fails open; Phase 2b
 makes keyed sends fail closed. Rows never hold free text: an argument value
 is kept only when its shape proves it is not free text (or it is the call's
 target path), and tool output is stored only as its shape, plus a redacted excerpt
-of an error's message (durable_key_args, _summary).
+of an error's message (durable_key_args, _summary). The exception is detail
+capture (migration 086, off by default): the call's input and output are then
+stored too, masked by this process's own secret values and by redact_error_text
+and capped (detail_text). An unlabeled value in free text that is not one of
+this process's own secrets can still pass that redaction.
 
 Deployment assumption: ONE Nous process per (database, agent_id). The startup
 sweep marks every 'pending' row 'unknown' because only a dead process can
@@ -21,15 +25,18 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
+import os
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, exists, func, select, update
+from sqlalchemy import delete, exists, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from nous.api.execution_context import ExecutionContext
@@ -47,6 +54,14 @@ KEY_ARG_CHARS = 200
 RESULT_SUMMARY_CHARS = 500
 ERROR_EXCERPT_CHARS = 300
 _ERROR_EXCERPT_SCAN_CHARS = 2000
+# Detail capture (migration 086): the caps on a stored input / output, and how
+# far past each cut the redaction scans so a secret across the cut stays masked.
+DETAIL_INPUT_CHARS = 16000
+DETAIL_OUTPUT_CHARS = 16000
+_DETAIL_SCAN_PAD = 256
+_SECRET_NAME = re.compile(r"(?i)(key|token|secret|passw|credential|private|service_account)")
+_SECRET_MIN_CHARS = 8
+SECRET_MASK = "[REDACTED_SECRET]"
 _CLOSABLE = ("pending", "unknown")
 # Harness Phase 2b: the statuses that HOLD an idempotency key -- the partial
 # unique index's predicate (migration 075), one definition for the lookups.
@@ -178,6 +193,65 @@ def durable_key_args(tool_name: str, args: dict[str, Any]) -> dict[str, str]:
     return out
 
 
+@lru_cache(maxsize=1)
+def _own_secrets() -> tuple[str, ...]:
+    """This process's secret values, longest first.
+
+    bash inherits ``os.environ``, so ``echo $DB_PASSWORD`` prints a raw value no
+    pattern matches. Cached once; tests call ``_own_secrets.cache_clear()``.
+    """
+    values: set[str] = set()
+    for k, v in os.environ.items():
+        if _SECRET_NAME.search(k) and len(v) >= _SECRET_MIN_CHARS:
+            # A tool input is stored as JSON, and run_python can print a repr:
+            # the escaped spellings of a value must be masked too.
+            values.update((v, json.dumps(v, ensure_ascii=False)[1:-1], json.dumps(v)[1:-1], repr(v)[1:-1]))
+    return tuple(sorted(values, key=len, reverse=True))
+
+
+def _redact_detail(text: str) -> str:
+    """Own secret values first, then the reviewed pattern redaction."""
+    for secret in _own_secrets():
+        text = text.replace(secret, SECRET_MASK)
+    return redact_error_text(text)
+
+
+def detail_text(text: str, cap: int) -> str:
+    """``text`` redacted and bounded to about ``cap`` characters.
+
+    Over the cap, the head and the tail are kept with a marker between. Each
+    side is redacted over its own scan window BEFORE it is cut, so a secret
+    straddling the cut is still masked, and the regexes never see more than
+    ``cap`` + 2 * pad characters of an unbounded output. The pad covers the
+    longest own secret. The last ``pad`` characters of a redacted window (its
+    first, for the tail) are dropped: a secret cut by the window edge is only
+    partly masked there, and masking shrinks the text so raw edge text would
+    otherwise slide into the kept part.
+    """
+    if len(text) <= cap:
+        return _redact_detail(text)
+    half = cap // 2
+    pad = max([_DETAIL_SCAN_PAD, *map(len, _own_secrets())])
+    head = _redact_detail(text[: half + pad])
+    tail = _redact_detail(text[-(half + pad):])
+    head = head[: min(half, len(head) - pad)] if len(head) > pad else ""
+    keep = min(half, len(tail) - pad)
+    tail = tail[-keep:] if keep > 0 else ""
+    return f"{head}\n…[middle cut]…\n{tail}"
+
+
+def detail_input(tool_name: str, tool_input: dict[str, Any]) -> str:
+    """The text the model sent for a call, redacted and bounded."""
+    code = None
+    if tool_name == "bash":
+        code = tool_input.get("command") or tool_input.get("cmd")
+    elif tool_name == "run_python":
+        code = tool_input.get("code")
+    if not isinstance(code, str):
+        code = json.dumps(tool_input, ensure_ascii=False, indent=2, sort_keys=True, default=str)
+    return detail_text(code, DETAIL_INPUT_CHARS)
+
+
 def effective_orphan_threshold(settings: Any) -> float:
     """Never sweep a row whose call may legitimately still be running."""
     longest = max(
@@ -223,7 +297,10 @@ class DuplicateSend(Exception):
 _BASH_TIMEOUT = re.compile(r"\ACommand timed out after \d+s\.")
 
 
-def _summary(text: str | None, output_of: str | None = None, status: str | None = None) -> str | None:
+def _summary(
+    text: str | None, output_of: str | None = None, status: str | None = None,
+    output_stored: bool = False,
+) -> str | None:
     """Durable form of a result.
 
     ``output_of`` names the tool when ``text`` is that tool's output. Output is
@@ -238,6 +315,9 @@ def _summary(text: str | None, output_of: str | None = None, status: str | None 
     see why it failed. That redaction cannot recognize an unlabeled value, so
     an error that repeats an argument can still carry it.
     Harness-authored notes (outcome unknown, refusals) are kept, redacted.
+    That is the default. With detail capture on (``output_stored``) the output
+    itself is in ``output_text`` -- redacted and capped by ``detail_text`` --
+    and the note just says how long it was.
     """
     if not text:
         return None
@@ -255,11 +335,11 @@ def _summary(text: str | None, output_of: str | None = None, status: str | None 
         excerpt = ""
         if status == "error":
             # Redact the whole scan window, then cut: a secret across the cut stays masked.
-            excerpt = redact_error_text(body.strip()[:_ERROR_EXCERPT_SCAN_CHARS])[:ERROR_EXCERPT_CHARS]
+            excerpt = _redact_detail(body.strip()[:_ERROR_EXCERPT_SCAN_CHARS])[:ERROR_EXCERPT_CHARS]
         if excerpt:
             parts.append(f"{len(text)} chars of output, error excerpt: {excerpt}")
         else:
-            parts.append(f"{len(text)} chars of output, not stored")
+            parts.append(f"{len(text)} chars of output" + ("" if output_stored else ", not stored"))
         return "; ".join(parts)
     return redact_text(text)[:RESULT_SUMMARY_CHARS]
 
@@ -270,6 +350,7 @@ class LedgerStore:
     def __init__(
         self, database: Any, agent_id: str, *, write_timeout_seconds: float = 2.0,
         keyed_write_timeout_seconds: float = 10.0,
+        detail_enabled: bool = False,
     ) -> None:
         self._db = database
         self._agent_id = agent_id
@@ -277,6 +358,7 @@ class LedgerStore:
         # Phase 2b: a keyed send fails CLOSED on a ledger failure, so its
         # writes wait longer than an ordinary row's.
         self._keyed_timeout = keyed_write_timeout_seconds
+        self._detail = detail_enabled
 
     async def open_entry(
         self, *, context: ExecutionContext, tool_name: str,
@@ -349,11 +431,15 @@ class LedgerStore:
         """
         if status not in _TERMINAL:
             raise ValueError(f"cannot close a ledger row as {status!r}")
+        # Harness notes (output_of None) are not tool output: never in output_text.
+        store_output = self._detail and output_of is not None and bool(result_summary)
         values: dict[str, Any] = {
             "status": status,
-            "result_summary": _summary(result_summary, output_of, status),
+            "result_summary": _summary(result_summary, output_of, status, output_stored=store_output),
             "completed_at": func.now(),
         }
+        if store_output:
+            values["output_text"] = detail_text(result_summary, DETAIL_OUTPUT_CHARS)
         if external_ref is not None:
             values["external_ref"] = external_ref
 
@@ -410,8 +496,12 @@ class LedgerStore:
             await s.commit()
             return (never_sent.rowcount or 0) + (rest.rowcount or 0)
 
-    async def prune(self, *, retention_days: int) -> int:
+    async def prune(self, *, retention_days: int, detail_retention_days: int = 0) -> int:
         """Delete this agent's CLOSED rows older than ``retention_days``.
+
+        ``retention_days`` 0 deletes nothing. ``detail_retention_days`` > 0
+        clears ``input_text`` / ``output_text`` of closed rows older than that
+        and keeps the rows.
 
         Never a 'pending' row: retention and the call timeouts are configured
         independently, so a live long-running call can be older than the
@@ -419,13 +509,37 @@ class LedgerStore:
         close would then update nothing. The orphan sweep closes a genuinely
         dead 'pending' row first; retention takes it after that.
         """
+        deleted = 0
+        if retention_days > 0:
+            deleted = await self._prune_rows(retention_days)
+        if detail_retention_days > 0:
+            await self._clear_detail(detail_retention_days)
+        return deleted
+
+    async def _clear_detail(self, detail_retention_days: int) -> None:
+        """Clear the stored input / output of closed rows older than the window."""
+        cutoff = datetime.now(UTC) - timedelta(days=detail_retention_days)
+        async with self._db.session() as s:
+            await s.execute(
+                update(ExecutionLedgerEntry)
+                .where(ExecutionLedgerEntry.agent_id == self._agent_id)
+                .where(ExecutionLedgerEntry.status != "pending")
+                .where(ExecutionLedgerEntry.created_at < cutoff)
+                .where(or_(ExecutionLedgerEntry.input_text.is_not(None),
+                           ExecutionLedgerEntry.output_text.is_not(None)))
+                .values(input_text=None, output_text=None)
+            )
+            await s.commit()
+
+    async def _prune_rows(self, retention_days: int) -> int:
         cutoff = datetime.now(UTC) - timedelta(days=retention_days)
         # Phase 2b: a keyed row that HOLDS its key ('success' = sent, 'unknown'
         # = maybe delivered) is the only thing standing between a late retry
         # -- a retry_node after the window -- and a second delivery. It is not
         # deleted but reduced to a tombstone: the key, its status, the
-        # provider id and the context ids stay; the recipients and the summary
-        # go, so retention still applies to what the row held.
+        # provider id and the context ids stay; the recipients, the summary
+        # and the stored input / output go, so retention still applies to what
+        # the row held.
         holds_key = (ExecutionLedgerEntry.idempotency_key.is_not(None)
                      & ExecutionLedgerEntry.status.in_(("success", "unknown")))
         async with self._db.session() as s:
@@ -434,7 +548,7 @@ class LedgerStore:
                 .where(ExecutionLedgerEntry.agent_id == self._agent_id)
                 .where(ExecutionLedgerEntry.created_at < cutoff)
                 .where(holds_key)
-                .values(key_args={}, result_summary=None)
+                .values(key_args={}, result_summary=None, input_text=None, output_text=None)
             )
             result = await s.execute(
                 delete(ExecutionLedgerEntry)
@@ -524,6 +638,7 @@ class LedgerStore:
                 key_args=durable_key_args(tool_name, tool_input),
                 status=status,
                 result_summary=_summary(result_summary),
+                input_text=detail_input(tool_name, tool_input) if self._detail else None,
                 idempotency_key=idempotency_key,
                 completed_at=None if status == "pending" else datetime.now(UTC),
             )

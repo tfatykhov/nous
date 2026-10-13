@@ -2014,6 +2014,8 @@ def create_app(
         return {
             "persist": settings.execution_ledger_persist_enabled,
             "retention_days": settings.execution_ledger_retention_days,
+            "detail": settings.execution_ledger_detail_enabled,
+            "detail_retention_days": settings.execution_ledger_detail_retention_days,
             "offered_set": settings.tool_offered_set_enforcement_mode,
             "context_policy": settings.tool_context_policy_mode,
             "claim_verification": (
@@ -2045,6 +2047,22 @@ def create_app(
             return JSONResponse({"error": str(e)}, status_code=400)
         except Exception as e:
             logger.error("Dashboard execution error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def dashboard_execution_detail(request: Request) -> JSONResponse:
+        """GET /dashboard/execution/{entry_id} — the stored input and output of one row."""
+        from nous.api.harness_dashboard import get_execution_detail
+
+        try:
+            async with database.session() as session:
+                data = await get_execution_detail(session, settings.agent_id, request.path_params["entry_id"])
+            if data is None:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            return JSONResponse(data)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        except Exception as e:
+            logger.error("Dashboard execution detail error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
     async def dashboard_harness(request: Request) -> JSONResponse:
@@ -3562,6 +3580,7 @@ def create_app(
         # F038: DAG orchestration dashboard
         Route("/dashboard/dag", dashboard_dag),
         Route("/dashboard/execution", dashboard_execution),
+        Route("/dashboard/execution/{entry_id}", dashboard_execution_detail),
         Route("/dashboard/harness", dashboard_harness),
         Route("/dashboard/intentions", dashboard_intentions),
         Route("/dashboard/attention", dashboard_attention),

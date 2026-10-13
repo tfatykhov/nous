@@ -12,7 +12,7 @@ import { attentionOverride, attentionPoll } from '../lib/stores/attention';
 // `scope:hash16` keys, no invented causes.
 
 const MODES = {
-  persist: true, retention_days: 90, offered_set: 'warn', context_policy: 'warn',
+  persist: true, retention_days: 90, detail: true, detail_retention_days: 30, offered_set: 'warn', context_policy: 'warn',
   claim_verification: 'enforce', action_gating: 'off', events_persisted: true,
 };
 const ID = '8f2c41d0-5b7e-4a3c-9d21-6e0f3a1b7c44';
@@ -20,7 +20,7 @@ const row = (over: Record<string, unknown> = {}) => ({
   id: crypto.randomUUID(), created_at: '2026-09-25T12:40:19+00:00', completed_at: null, dispatched_at: null,
   tool_name: 'bash', context_kind: 'subtask', side_effect_type: 'write', status: 'success',
   refusal_code: null, result_summary: null, key_args: { command_sha256: '3f9a1234', command_len: 412 },
-  idempotency_key: null, external_ref: null, session_id: 's-1', parent_session_id: null, subtask_id: null,
+  input_preview: null, has_input: false, has_output: false, idempotency_key: null, external_ref: null, session_id: 's-1', parent_session_id: null, subtask_id: null,
   dag_id: null, dag_name: null, dag_node_id: null, node_name: null, turn: 3, tombstone: false, held_by: null,
   ...over,
 });
@@ -42,6 +42,8 @@ let execution: Record<string, unknown> = EXECUTION;
 let olderFails = false;
 let harnessPatterns: unknown[] | null = null;
 let attention: Record<string, unknown> = {};
+let detailBody: Record<string, unknown> | null = null;
+let detailFetches: string[] = [];
 
 const STATUS = {
   memory: { total_facts: 1, total_episodes: 1, total_chunks: 0, total_decisions: 1, total_procedures: 0,
@@ -128,6 +130,10 @@ function install() {
     // A 4xx is not retried by apiGet, so the failure surfaces at once.
     if (olderFails && url.includes('before=')) return { ok: false, status: 400, json: async () => ({}) } as Response;
     const harness = HARNESS(harnessPersisted);
+    if (url.startsWith('/dashboard/execution/')) {
+      detailFetches.push(url);
+      return { ok: true, status: 200, json: async () => detailBody } as Response;
+    }
     const body = url.startsWith('/dashboard/execution') ? execution
       : url.startsWith('/dashboard/harness') ? (harnessPatterns ? { ...harness, patterns: harnessPatterns } : harness)
       : url.startsWith('/dashboard/dag') ? dag
@@ -149,6 +155,7 @@ function install() {
 describe('harness dashboard views', () => {
   beforeEach(() => {
     harnessPersisted = true; execution = EXECUTION; dag = DAG; olderFails = false; harnessPatterns = null; attention = {};
+    detailBody = null; detailFetches = [];
     attentionOverride.set({});
     install();
   });
@@ -182,6 +189,54 @@ describe('harness dashboard views', () => {
     expect(container.textContent).not.toContain('connection dropped');
     expect(container.textContent).toContain('command sha256:3f9a1234… (412 chars)');
     expect(container.textContent).toContain('details removed by retention');
+  });
+
+  it('Ledger shows the stored command as the target and fetches command and output once when a row opens', async () => {
+    const id = crypto.randomUUID();
+    execution = { ...EXECUTION, attention: [], attention_total: 0, rows: [row({
+      id, input_preview: 'touch /tmp/report.txt', has_input: true, has_output: true })] };
+    detailBody = { id, tool_name: 'bash', status: 'success', input_text: 'touch /tmp/report.txt && echo done',
+      output_text: 'done\n[exit code: 0]' };
+    const { container } = render(Ledger);
+    const preview = await screen.findByText('touch /tmp/report.txt');
+    expect(preview.getAttribute('title')).toBe('touch /tmp/report.txt');
+    expect(container.textContent).not.toContain('command sha256:3f9a1234');
+    expect(detailFetches).toHaveLength(0);
+    const open = screen.getByRole('button', { name: /Show details for bash/ });
+    await fireEvent.click(open);
+    expect(await screen.findByText('touch /tmp/report.txt && echo done')).toBeTruthy();
+    expect(container.querySelectorAll('pre.stored')[1]?.textContent).toBe('done\n[exit code: 0]');
+    expect(container.textContent).toContain('Command');
+    expect(detailFetches).toEqual([`/dashboard/execution/${id}`]);
+    await fireEvent.click(open); // collapse
+    await fireEvent.click(open); // expand again: cached, not fetched again
+    expect(await screen.findByText('touch /tmp/report.txt && echo done')).toBeTruthy();
+    expect(detailFetches).toHaveLength(1);
+  });
+
+  it('Ledger renders stored text as text, never as markup', async () => {
+    const id = crypto.randomUUID();
+    execution = { ...EXECUTION, attention: [], attention_total: 0, rows: [row({
+      id, input_preview: 'echo <b>x</b>', has_input: true, has_output: true })] };
+    detailBody = { id, tool_name: 'bash', status: 'success', input_text: 'echo <b>x</b>', output_text: '<b>x</b>' };
+    const { container } = render(Ledger);
+    await fireEvent.click(await screen.findByRole('button', { name: /Show details for bash/ }));
+    await waitFor(() => expect(container.querySelectorAll('pre.stored')).toHaveLength(2));
+    expect(container.querySelector('pre.stored')?.textContent).toBe('echo <b>x</b>');
+    expect(container.querySelector('b')).toBeNull();
+  });
+
+  it('Ledger says a row has nothing recorded, without fetching, when capture was off or retention cleared it', async () => {
+    execution = { ...EXECUTION, attention: [], attention_total: 0, rows: [
+      row({ id: crypto.randomUUID() }),
+      row({ id: crypto.randomUUID(), tool_name: 'send_email', key_args: {}, idempotency_key: 'k:1', tombstone: true }),
+    ] };
+    const { container } = render(Ledger);
+    const opens = await screen.findAllByRole('button', { name: /Show details for/ });
+    for (const b of opens) await fireEvent.click(b);
+    expect(container.textContent).toContain('Not recorded: detail capture was off when this ran, or retention cleared it.');
+    expect(container.textContent).toContain('Removed by retention.');
+    expect(detailFetches).toHaveLength(0);
   });
 
   it('Ledger counts every held send, not the page it shows, and tells the badge the same number', async () => {

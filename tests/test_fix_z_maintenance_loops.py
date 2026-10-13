@@ -148,6 +148,7 @@ def _settings(**overrides: Any) -> SimpleNamespace:
     values: dict[str, Any] = {
         "agent_id": "test",
         "execution_ledger_retention_days": 90,
+        "execution_ledger_detail_retention_days": 0,
         "execution_ledger_sweep_interval_seconds": TICK,
         "execution_ledger_pending_unknown_after_seconds": 3600,
         "retrieval_telemetry_retention_days": 14,
@@ -163,12 +164,14 @@ class _Ledger:
 
     def __init__(self, went_on: asyncio.Event | None, first_prune: _First) -> None:
         self.pruned: list[int] = []
+        self.detail_pruned: list[int] = []
         self.swept: list[float | None] = []
         self._went_on, self._first_prune = went_on, first_prune
 
-    async def prune(self, *, retention_days: int) -> int:
+    async def prune(self, *, retention_days: int, detail_retention_days: int = 0) -> int:
         await self._first_prune()
         self.pruned.append(retention_days)
+        self.detail_pruned.append(detail_retention_days)
         if self._went_on is not None:
             self._went_on.set()
         return 3
@@ -452,6 +455,27 @@ def test_the_ledger_loop_does_not_prune_when_retention_is_off(monkeypatch):
 
     assert ledger.pruned == []
     assert ledger.swept
+
+
+def test_the_ledger_loop_clears_stored_detail_even_when_row_retention_is_off(monkeypatch):
+    _short_intervals(monkeypatch)
+    went_on = asyncio.Event()
+    ledger = _Ledger(went_on, _First(None))
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            main._execution_ledger_maintenance_loop(
+                _settings(execution_ledger_retention_days=0, execution_ledger_detail_retention_days=30),
+                ledger,
+                _Cards(None, _First(None)),
+            )
+        )
+        await _expect(went_on, "the loop never pruned")
+        await main.shutdown_components({"execution_ledger_task": task})
+
+    _run(scenario)
+
+    assert ledger.pruned == [0] and ledger.detail_pruned == [30]
 
 
 def test_a_ledger_pass_that_keeps_failing_is_tried_again_once_per_retry_interval(monkeypatch):

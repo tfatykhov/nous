@@ -1606,6 +1606,10 @@ class Settings(BaseSettings):
     # (a duplicate could not be ruled out), so it waits longer.
     execution_ledger_keyed_write_timeout_seconds: float = Field(default=10.0, gt=0)
     execution_ledger_retention_days: int = Field(default=90, ge=0)  # 0 disables pruning
+    # Owner decision 2026-10-13 (migration 086): also keep the redacted call
+    # input and tool output. Cleared after the retention below, 0 = never.
+    execution_ledger_detail_enabled: bool = False
+    execution_ledger_detail_retention_days: int = Field(default=30, ge=0)
     # 'pending' rows older than this are swept to 'unknown'. The effective
     # threshold is never below the longest legitimate call (see
     # ledger_store.effective_orphan_threshold).

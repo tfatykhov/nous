@@ -70,6 +70,9 @@ services:
       - NOUS_INTENTION_CARDS_ENABLED=${NOUS_INTENTION_CARDS_ENABLED:-false}
       # F099 Phase 3d: grade each arrival's Brain decision from the lineage's rows (needs continuation).
       - NOUS_INTENTION_CALIBRATION_ENABLED=${NOUS_INTENTION_CALIBRATION_ENABLED:-false}
+      # Execution ledger: also keep the redacted call input and tool output (migration 086).
+      - NOUS_EXECUTION_LEDGER_DETAIL_ENABLED=${NOUS_EXECUTION_LEDGER_DETAIL_ENABLED:-false}
+      - NOUS_EXECUTION_LEDGER_DETAIL_RETENTION_DAYS=${NOUS_EXECUTION_LEDGER_DETAIL_RETENTION_DAYS:-30}
       # F087: agent-authored DAG delivery summary. Off by default (costs one
       # LLM turn per finished DAG); falls back to the deterministic template
       # on timeout/failure, so delivery never depends on the LLM being up.
