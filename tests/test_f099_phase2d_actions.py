@@ -299,6 +299,12 @@ DD826783_OUTPUT = (
         ("foo; echo done", "STDERR:\nbash: line 1: foo: command not found\ndone\nExit code: 0", "failed"),
         # A single command's trailer is its own exit: trusted, whatever it printed.
         ("cat build.log", "error: one of the steps\nExit code: 0", "executed"),
+        # So is a pure && chain's: its 0 says every command in it succeeded.
+        ("cd /repo && cat build.log", "error: one of the steps\nExit code: 0", "executed"),
+        # `;`, `||` and a pipe can mask an earlier command's failure: the output is read.
+        ("cd /repo; cat build.log", "error: one of the steps\nExit code: 0", "failed"),
+        ("make || cat build.log", "error: one of the steps\nExit code: 0", "failed"),
+        ("make 2>&1 | tail -5", "error: one of the steps\nExit code: 0", "failed"),
         # A compound command whose output has no failure line, or only one that is not at a line start.
         (
             "cd /tmp/nous-workspace && gh issue create --title t",
