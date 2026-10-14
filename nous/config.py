@@ -1619,6 +1619,10 @@ class Settings(BaseSettings):
 
     claim_verification_enabled: bool = True
     claim_verification_mode: Literal["shadow", "warn", "enforce"] = "enforce"
+    # F099 gate hardening B: check a subtask's final report and a continuation note against the calls their work
+    # recorded (ClaimVerifier.verify_report). Follows claim_verification_mode: shadow logs, warn annotates, enforce
+    # also withholds the arrival's progress credit. Needs claim_verification_enabled and the durable ledger.
+    claim_verification_reports_enabled: bool = True
 
     action_gating_enabled: bool = True
     action_gating_mode: Literal["shadow", "warn", "enforce"] = "enforce"

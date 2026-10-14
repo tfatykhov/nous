@@ -20,7 +20,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from nous.a2ui.intention_keys import ACTIVE_KEY, INTENTION_DEDUP_PREFIX, KIND_PROPOSAL, KIND_QUESTION, parse_key
 from nous.api import tool_policy
@@ -30,10 +30,18 @@ from nous.brain import continuation, intention_calibration
 from nous.brain.continuation import INTENT_SESSION_PREFIX, Resolution
 from nous.brain.intentions import AUTHORITY_INTERNAL
 from nous.cancellation import cancel_requested
+from nous.cognitive.claim_verifier import ClaimVerifier, ClaimViolation, Evidence, unverified_note
 from nous.cognitive.execution_ledger import bash_exit_code
 from nous.events import Event
 from nous.heart.result_inbox import format_inbox_messages, neutralize_delimiters
-from nous.storage.models import ExecutionDAG, Intention, IntentionArrival, IntentionProposal, Subtask
+from nous.storage.models import (
+    ExecutionDAG,
+    ExecutionLedgerEntry,
+    Intention,
+    IntentionArrival,
+    IntentionProposal,
+    Subtask,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +138,28 @@ class ArrivalState:
     @property
     def tokens(self) -> tuple[int, int]:
         return self.tokens_in, self.tokens_out
+
+
+@dataclass(frozen=True)
+class LineageCalls:
+    """What a lineage's work recorded in the durable execution ledger (F099 gate hardening B): every call of the
+    root's continuation thread and of its subtasks and DAGs, and those of each source alone. ``cancelled`` is true
+    when the root or an intention of it was cancelled, which no tool call records when the owner did it."""
+
+    calls: tuple[Evidence, ...] = ()
+    by_source: dict[UUID, tuple[Evidence, ...]] = field(default_factory=dict)
+    cancelled: bool = False
+
+
+def _ledger_row_evidence(row: Any) -> Evidence:
+    """A durable ledger row as claim evidence. The row keeps a hash of a command or a script, never the text, so
+    those are names-only evidence unless detail capture kept the redacted input."""
+    if row.tool_name in ("bash", "run_python"):
+        key = "command" if row.tool_name == "bash" else "code"
+        args = {key: row.input_text} if row.input_text else {}
+    else:
+        args = {str(k): str(v) for k, v in (row.key_args or {}).items()}
+    return Evidence(row.tool_name, args, None, row.side_effect_type, ok=row.status == "success")
 
 
 def make_resolve_intention_executor(
@@ -378,6 +408,7 @@ def build_arrival_prompt(
     *,
     root_intent: str | None = None,
     observed: ObservedState | None = None,
+    unverified: Sequence[tuple[Any, list[ClaimViolation]]] = (),
 ) -> str:
     """The turn's input, from rows only (spec 4.5.4): the idle monitor deletes conversation state, so
     nothing here can come from it. ``children_of_failed_attempt`` is read as the children the claimed
@@ -389,7 +420,8 @@ def build_arrival_prompt(
     (they are in the request's tool list) and the typed summary of ``expected_result`` (the row body already is
     2b's envelope): neither is repeated here. ``observed`` is the harness's read of the root, the intentions and
     their work, and the proposals: the turn is told that it may claim an outcome only if a row shows it (a turn
-    that had no ground truth once reported a cancel that nobody had asked for as failed)."""
+    that had no ground truth once reported a cancel that nobody had asked for as failed). ``unverified`` pairs a
+    result row with the action claims in it that no call its work recorded backs (F099 gate hardening B)."""
     lines = [
         "This is a continuation turn: you are acting on your own, on work you started earlier. Nobody is "
         "waiting for this reply, and you cannot send anything outward from here. If something needs the "
@@ -425,6 +457,11 @@ def build_arrival_prompt(
     lines += ["", "## Results to decide on"]
     results = format_inbox_messages(rows, max(len(rows), 1), header=CONTINUATION_RESULTS_HEADER)
     lines.append(results or "(No result rows came with this arrival.)")
+    if unverified:
+        lines += ["", "## Claims in these results that no recorded call backs"]
+        for row, violations in unverified:
+            title = neutralize_delimiters(" ".join(str(row.title or "").split())[:80])
+            lines.append(f"- {title} ({row.source_kind} {str(row.source_id)[:8]}): {unverified_note(violations)}")
 
     lines += [
         "",
@@ -1116,11 +1153,27 @@ class ContinuationRunner:
         # Carry-over 3: the thread of this root starts empty. A previous arrival whose end_conversation timed out,
         # raised or was cancelled from outside left its messages and its ledger behind, and this one would run on top.
         self._runner.discard_conversation(session_id)
+        mode = self._reports_mode()
+        lineage = LineageCalls()
         async with self._db.session() as session:
             earlier, spawned, root_intent, root_decision = await self._lineage_context(session, claim)
             observed = await self._observed_state(session, claim, spawned)
+            if mode is not None:
+                try:
+                    lineage = await self._lineage_calls(session, claim.root_id)
+                except Exception:  # the check never stands in the way of the turn: unread, nothing is checked
+                    logger.warning("F099: could not read the calls of root %s", claim.root_id, exc_info=True)
+                    mode = None
+        unverified = self._unverified_results(claim, lineage) if mode is not None else []
         prompt = build_arrival_prompt(
-            claim, earlier, spawned, limits, settings, root_intent=root_intent, observed=observed
+            claim,
+            earlier,
+            spawned,
+            limits,
+            settings,
+            root_intent=root_intent,
+            observed=observed,
+            unverified=unverified if mode in ("warn", "enforce") else (),
         )
         context = ExecutionContext(
             kind="continuation",
@@ -1175,6 +1228,7 @@ class ContinuationRunner:
                 name in MEMORY_WRITE_TOOLS and status == "success"
                 for name, status in self._runner.executed_tools(session_id)
             )
+            turn_calls = self._runner.session_evidence(session_id) if mode is not None else []
         finally:
             await self._end_conversation(session_id)
         tokens = state.tokens
@@ -1187,7 +1241,7 @@ class ContinuationRunner:
             # ask the store the same question it asks (claim_owner_channel) and commit at once as a fallback report
             # of the note (decision report, never ask); that REPORT, with no channel either, is logged at ERROR by
             # the commit, as in 2c-1.
-            note = state.resolution.note
+            note, _unbacked = self._vet_note(claim, state.resolution.note, lineage, turn_calls, mode)
             return await self._commit(
                 claim,
                 resolution=Resolution("report", note, False, state.resolution.confidence),
@@ -1197,12 +1251,14 @@ class ContinuationRunner:
                 arrival_id=arrival_id,
             )
         if state.resolution is not None:
+            note, unbacked = self._vet_note(claim, state.resolution.note, lineage, turn_calls, mode)
             return await self._commit(
                 claim,
-                resolution=state.resolution,
+                resolution=dataclasses.replace(state.resolution, note=note),
                 outcome=continuation.OUTCOME_RESOLVED,
                 tokens=tokens,
                 wrote_memory=wrote_memory,
+                unverified_claims=unbacked and mode == "enforce",
                 model_decision=True,
                 arrival_id=arrival_id,
             )
@@ -1213,6 +1269,7 @@ class ContinuationRunner:
             if raw
             else "The work finished with nothing to report."
         )
+        body, _unbacked = self._vet_note(claim, body, lineage, turn_calls, mode)
         return await self._commit(
             claim,
             resolution=Resolution("report", body, False, 0.3),
@@ -1271,6 +1328,119 @@ class ContinuationRunner:
             state.tokens_in += spent["input_tokens"]
             state.tokens_out += spent["output_tokens"]
         return text or ""
+
+    def _reports_mode(self) -> str | None:
+        """The claim-verification mode reports are checked in, or None when the check is off (F099 gate hardening
+        B). Without the durable ledger nothing of the lineage is recorded, so every claim would read as unbacked."""
+        settings = self._settings
+        if not (
+            settings.claim_verification_enabled
+            and settings.claim_verification_reports_enabled
+            and settings.execution_ledger_enabled
+            and settings.execution_ledger_persist_enabled
+        ):
+            return None
+        return settings.claim_verification_mode
+
+    async def _lineage_calls(self, session: Any, root_id: UUID) -> LineageCalls:
+        """Two reads: the root's intentions (their sources and the cancel markers), then the durable ledger rows of
+        the root's thread and of those sources, from the root's creation on (the agent and time index)."""
+        intentions = (
+            await session.execute(
+                select(
+                    Intention.source_kind,
+                    Intention.source_id,
+                    Intention.state,
+                    Intention.root_cancelled_at,
+                    Intention.created_at,
+                ).where(Intention.agent_id == self._agent_id, Intention.root_id == root_id)
+            )
+        ).all()
+        if not intentions:
+            return LineageCalls()
+        sources: dict[str, set[UUID]] = {"subtask": set(), "dag": set()}
+        for row in intentions:
+            if row.source_kind in sources:
+                try:
+                    sources[row.source_kind].add(UUID(str(row.source_id)))
+                except ValueError:
+                    continue
+        cancelled = any(r.state == continuation.STATE_CANCELLED or r.root_cancelled_at is not None for r in intentions)
+        E = ExecutionLedgerEntry
+        scope = [E.session_id == f"{INTENT_SESSION_PREFIX}{root_id}"]
+        if sources["subtask"]:
+            scope.append(E.subtask_id.in_(sources["subtask"]))
+        if sources["dag"]:
+            scope.append(E.dag_id.in_(sources["dag"]))
+        rows = (
+            await session.execute(
+                select(
+                    E.tool_name, E.status, E.key_args, E.input_text, E.side_effect_type, E.subtask_id, E.dag_id
+                ).where(
+                    E.agent_id == self._agent_id,
+                    E.created_at >= min(r.created_at for r in intentions),
+                    or_(*scope),
+                )
+            )
+        ).all()
+        calls: list[Evidence] = []
+        by_source: dict[UUID, list[Evidence]] = {}
+        for row in rows:
+            evidence = _ledger_row_evidence(row)
+            calls.append(evidence)
+            for source in {row.subtask_id, row.dag_id} - {None}:
+                by_source.setdefault(source, []).append(evidence)
+        return LineageCalls(tuple(calls), {k: tuple(v) for k, v in by_source.items()}, cancelled)
+
+    def _unverified_results(
+        self, claim: continuation.Claim, lineage: LineageCalls
+    ) -> list[tuple[Any, list[ClaimViolation]]]:
+        """Each result row of a subtask or DAG, checked against the calls that work alone recorded: a subtask's
+        final report is backed by its own tool log, not by a sibling's."""
+        verifier = ClaimVerifier()
+        flagged: list[tuple[Any, list[ClaimViolation]]] = []
+        for row in claim.inbox_rows:
+            if row.source_kind not in ("subtask", "dag"):
+                continue
+            result = verifier.verify_report(
+                row.body or "", list(lineage.by_source.get(row.source_id, ())), cancelled=lineage.cancelled
+            )
+            if not result.verified:
+                flagged.append((row, result.violations))
+                logger.info(
+                    "F099: result %s of root %s has %d unbacked claim(s): %s",
+                    str(row.source_id)[:8],
+                    claim.root_id,
+                    len(result.violations),
+                    [v.claimed_text[:80] for v in result.violations],
+                )
+        return flagged
+
+    def _vet_note(
+        self,
+        claim: continuation.Claim,
+        note: str,
+        lineage: LineageCalls,
+        turn_calls: list[Evidence],
+        mode: str | None,
+    ) -> tuple[str, bool]:
+        """The arrival's note checked against every call of the lineage and of this turn. Returns the note (with the
+        unverified-claims line appended in warn and enforce) and whether a claim was unbacked. Never blocks."""
+        if mode is None:
+            return note, False
+        result = ClaimVerifier().verify_report(note, [*lineage.calls, *turn_calls], cancelled=lineage.cancelled)
+        if result.verified:
+            return note, False
+        logger.warning(
+            "F099: the note of root %s has %d unbacked claim(s) (%s): %s",
+            claim.root_id,
+            len(result.violations),
+            mode,
+            [v.claimed_text[:80] for v in result.violations],
+        )
+        if mode == "shadow":
+            return note, True
+        return f"{note}\n\n{unverified_note(result.violations)}", True
 
     async def _owner_channel(self, claim: continuation.Claim) -> str | None:
         """Where an owner-facing row of this claim goes: the store's own answer (``claim_owner_channel``, the
@@ -1447,6 +1617,7 @@ class ContinuationRunner:
         tokens: tuple[int, int] = (0, 0),
         report_text: str | None = None,
         wrote_memory: bool = False,
+        unverified_claims: bool = False,
         arrival_id: UUID | None = None,
         model_decision: bool = False,
     ) -> continuation.ArrivalCommit | None:
@@ -1469,6 +1640,7 @@ class ContinuationRunner:
                     settings=self._settings,
                     report_text=report_text,
                     wrote_memory=wrote_memory,
+                    unverified_claims=unverified_claims,
                     arrival_id=arrival_id,
                 )
                 if done is None:

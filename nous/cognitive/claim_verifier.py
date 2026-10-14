@@ -53,6 +53,9 @@ class Evidence:
     # bash: what the command runs when already read -- the ledger reads it at
     # record time from the WHOLE command; None = unreadable
     invocations: tuple[Invocation, ...] | None = field(default=_UNREAD, repr=False, compare=False)
+    # False: the call failed or was blocked -- evidence only that it was TRIED
+    # (a report's verdict on an action, verify_report)
+    ok: bool = True
 
     @cached_property
     def runs(self) -> tuple[Invocation, ...] | None:
@@ -106,6 +109,8 @@ class Claim:
     kind: str
     text: str
     target: str | None = None  # a path or recipient the claim names
+    span: tuple[int, int] = field(default=(0, 0), compare=False)
+    attempt_only: bool = False  # a verdict on an action: any recorded try of it backs the claim
 
 
 # First person: "I", "I've", "I have", "I just", "I also" ... The "I" is
@@ -1415,12 +1420,122 @@ def evidence_level(claim: Claim, ev: Evidence) -> str:
     return _code_level(claim, ev.args.get("code", ""))
 
 
+# Report claims (F099 gate hardening B). A subtask's final report and a
+# continuation turn's note speak in verdicts and the passive voice ("Email
+# sent.", "PR #12 merged", "test 6 FAILED: the cancel did not take effect"),
+# not only in the first person, and nobody reads a correction after them.
+# verify_report checks them against the calls recorded for the work; the chat
+# path (verify) does not use these patterns.
+REPORT_KINDS: dict[str, ClaimKind] = {
+    "merge": ClaimKind("bash", frozenset({"bash", "run_python"})),
+    "pr_create": ClaimKind("bash", frozenset({"bash", "run_python"})),
+    "test_run": ClaimKind("bash", frozenset({"bash", "run_python"})),
+    "cancel": ClaimKind("cancel_task", frozenset({"cancel_task", "dag", "dag_manage"})),
+}
+# What a command must run to back the claim: `gh pr merge`, `git merge`, the
+# merge API; `gh pr create`, a POST to /pulls; a test runner or a CI read.
+_REPORT_SIGNALS = {
+    "merge": re.compile(r"\bmerge\b|/merges?\b", re.I),
+    "pr_create": re.compile(r"\bpr\s+create\b|/pulls\b|create_pull|create-pull", re.I),
+    "test_run": re.compile(r"pytest|unittest|\b(?:tox|nox|vitest|jest|phpunit|rspec)\b"
+                           r"|\b(?:npm|pnpm|yarn|make|just|go|cargo|mvn|gradle)\s+(?:run\s+)?test"
+                           r"|\bpr\s+checks\b|\brun\s+(?:view|watch|list)\b", re.I),
+}
+_PR = r"(?:PR|pull\s+request)(?:\s*#\d+)?"
+_PASSIVE = r"\s+(?:(?:was|were|has\s+been|have\s+been|got|is|is\s+now)\s+)?"
+_CANCELLABLE = r"(?:task|subtask|run|job|dag|schedule|intention|work|chain)"
+# (pattern, kind, attempt_only). Active forms need the first person or a
+# sentence opening ("Merged PR #4."): "Tim merged PR #4" is not the agent's.
+_REPORT_PATTERNS: list[tuple[str, str, bool]] = [
+    (rf"\b(?:e-?mails?|messages?){_PASSIVE}sent\b{_NOT_BY}", "email", False),
+    (rf"{_OPENING}(?:sent|e-?mailed)\s+(?:the\s+|an\s+)?e-?mail\b", "email", False),
+    (rf"\b{_PR}{_PASSIVE}merged\b{_NOT_BY}", "merge", False),
+    (rf"(?:{_FIRST}|{_OPENING})merged\s+(?:the\s+)?(?:{_PR}|#\d+|branch)", "merge", False),
+    (rf"\b{_PR}{_PASSIVE}(?:opened|created|raised|filed)\b{_NOT_BY}", "pr_create", False),
+    (rf"(?:{_FIRST}|{_OPENING})(?:opened|created|raised|filed)\s+(?:a\s+|the\s+)?(?:new\s+|draft\s+)?{_PR}",
+     "pr_create", False),
+    (rf"(?:{_FIRST}|{_OPENING})cancel+ed\s+(?:the\s+|that\s+|this\s+)?(?:[\w-]+\s+)?{_CANCELLABLE}\b",
+     "cancel", False),
+    (rf"\b{_CANCELLABLE}(?:\s+[0-9a-f]{{6,}})?{_PASSIVE}cancel+ed\b{_NOT_BY}", "cancel", False),
+    # a verdict on a cancel says one was issued, whatever it did
+    (r"\bcancel(?:l?ation)?\s+(?:did\s+not|didn['’]t|failed|worked|succeeded|took\s+effect|was\s+ignored)"
+     r"(?:\s+[\w-]+){0,3}", "cancel", True),
+    (r"\b(?:tests?|test\s+suite|pytest|checks|CI)\s+(?:all\s+)?(?:passed|pass(?:es)?|failed|fail|(?:are|is)\s+green)\b",
+     "test_run", False),
+    (rf"(?:{_FIRST}|{_OPENING})ran\s+(?:the\s+|all\s+)?(?:[\w-]+\s+)?(?:tests?|test\s+suite|pytest)\b",
+     "test_run", False),
+]
+# Earlier in the clause: the claim is denied, planned or asked for, not made
+# ("No email was sent", "Next: open a PR", "make sure the tests pass").
+_REPORT_HEDGE = re.compile(
+    r"\b(?:no|not|never|nothing|without|will|would|should|shall|could|can|must|may|might|once|until"
+    r"|need(?:s|ed)?\s+to|ha(?:ve|s)\s+to|going\s+to|want(?:s|ed)?\s+to|try(?:ing)?\s+to|next|ensure"
+    r"|make\s+sure|so\s+that)\b|n['’]t\b",
+    re.IGNORECASE)
+UNVERIFIED_MARKER = "[Unverified claims]"
+_UNVERIFIED_SHOWN = 5
+
+
+def report_level(claim: Claim, ev: Evidence) -> str:
+    """How well one recorded call supports one report claim: exact, plausible or none.
+
+    A failed or blocked call backs only a verdict on the action (``attempt_only``):
+    "the cancel did not take effect" says a cancel was issued, not that it worked.
+    """
+    if not ev.ok and not claim.attempt_only:
+        return "none"
+    if claim.kind in CLAIM_KINDS:
+        if not ev.ok:  # a failed send or write backs no claim that it happened
+            return "none"
+        return evidence_level(claim, ev)
+    kind = REPORT_KINDS[claim.kind]
+    if ev.tool_name not in kind.capable_tools:
+        return "none"
+    if claim.kind == "cancel":
+        action = ev.args.get("action")
+        if ev.tool_name != "cancel_task" and action is not None:
+            return "exact" if action == "cancel" else "none"
+        return "exact" if ev.tool_name == "cancel_task" else "plausible"
+    code = ev.args.get("command") or ev.args.get("cmd") or ev.args.get("code") or ""
+    if not code:  # names only: the durable ledger keeps a hash of a command
+        return "plausible"
+    if (claim.kind != "test_run" and not claim.attempt_only
+            and ev.exit_code is not None and ev.exit_code != 0):
+        return "none"  # a test run that fails still ran the tests
+    return "exact" if _REPORT_SIGNALS[claim.kind].search(code) else "none"
+
+
+def ledger_evidence(actions: Any) -> list[Evidence]:
+    """Every call of an in-memory ledger as evidence, the failed ones marked."""
+    return [
+        Evidence(a.tool_name, a.evidence_args, a.exit_code, a.side_effect_type,
+                 a.invocations if a.tool_name == "bash" else _UNREAD, ok=a.status == "success")
+        for a in actions
+    ]
+
+
+def unverified_note(violations: list[ClaimViolation]) -> str:
+    """The line a report or arrival note carries for its unbacked claims.
+
+    The claims are quoted, so reading the note again extracts none of them."""
+    quoted = "; ".join(
+        '"' + " ".join(v.claimed_text.replace('"', "'").split())[:120] + '"'
+        for v in violations[:_UNVERIFIED_SHOWN]
+    )
+    more = f" (and {len(violations) - _UNVERIFIED_SHOWN} more)" if len(violations) > _UNVERIFIED_SHOWN else ""
+    return (f"{UNVERIFIED_MARKER} No recorded tool call of this work backs: {quoted}{more}. "
+            "Treat these as not observed.")
+
+
 class ClaimVerifier:
     """Verifies that action claims in assistant responses are grounded in actual tool use."""
 
     def __init__(self) -> None:
         self._compiled: list[tuple[re.Pattern[str], str]] = [
             (re.compile(pattern, re.IGNORECASE), kind) for pattern, kind in _CLAIM_PATTERNS
+        ]
+        self._report: list[tuple[re.Pattern[str], str, bool]] = [
+            (re.compile(pattern, re.IGNORECASE), kind, attempt) for pattern, kind, attempt in _REPORT_PATTERNS
         ]
 
     def verify(
@@ -1501,6 +1616,75 @@ class ClaimVerifier:
             claims=checks,
         )
 
+    def verify_report(
+        self, text: str, evidence: list[Evidence], *, cancelled: bool = False,
+    ) -> VerificationResult:
+        """Check a final report's action claims against the calls its work recorded.
+
+        For a subtask's final report and a continuation turn's note: the
+        first-person claims ``verify`` reads, plus the verdicts and passive
+        forms a report uses (``_REPORT_PATTERNS``). ``evidence`` is every
+        recorded call of the work, failed ones marked ``ok=False``;
+        ``cancelled`` is true when the work was cancelled outside any tool call
+        (the owner's cancel), which backs a claim about a cancel.
+        Deterministic and model-free; it never blocks anything.
+        """
+        first = self._extract_claims(text)
+        claims = first + self._extract_report_claims(text, first)
+        if not claims:
+            return VerificationResult(verified=True)
+        checks: list[ClaimCheck] = []
+        violations: list[ClaimViolation] = []
+        for claim in claims:
+            if claim.kind == "cancel" and cancelled:
+                level = "exact"
+            else:
+                level = _best(["none", *(report_level(claim, ev) for ev in evidence)])
+            checks.append(ClaimCheck(claim.kind, claim.text, level))
+            if level == "none":
+                kind = CLAIM_KINDS.get(claim.kind) or REPORT_KINDS[claim.kind]
+                violations.append(ClaimViolation(
+                    claimed_text=claim.text,
+                    expected_tool=kind.primary_tool,
+                    found_in_turn=False,
+                    found_in_ledger=False,
+                    capable_tools=tuple(sorted(kind.capable_tools)),
+                ))
+        if not violations:
+            return VerificationResult(verified=True, claims=checks)
+        return VerificationResult(verified=False, violations=violations,
+                                  correction=unverified_note(violations), claims=checks)
+
+    def _extract_report_claims(self, text: str, first: list[Claim]) -> list[Claim]:
+        """The report-only claims in ``text`` (see ``_REPORT_PATTERNS``), in document order.
+
+        Quoted text, questions, conditions and hedged clauses are not claims;
+        a span one of ``first`` (``_extract_claims``'s) took for the same kind
+        is not taken twice.
+        """
+        text = _QUOTED.sub(_blank, text).replace("**", "")
+        clause_starts = [m.end() for m in _CLAUSE_END.finditer(text)]
+        clause_ends = [m.start() for m in _CLAUSE_END.finditer(text)]
+        taken = {(c.kind, c.span) for c in first}
+        found: list[Claim] = []
+        for pattern, kind, attempt in self._report:
+            for match in pattern.finditer(text):
+                start, end = match.span()
+                k = bisect_left(clause_ends, end)
+                if k < len(clause_ends) and text[clause_ends[k]] == "?":
+                    continue
+                c = bisect_right(clause_starts, start) - 1
+                prefix = text[clause_starts[c] if c >= 0 else 0:start]
+                if _CONDITION.search(prefix) or _REPORT_HEDGE.search(prefix):
+                    continue
+                if any(k2 == kind and s < end and start < e for k2, (s, e) in taken):
+                    continue
+                taken.add((kind, (start, end)))
+                found.append(Claim(kind=kind, text=match.group(0).strip(), span=(start, end),
+                                   attempt_only=attempt))
+        found.sort(key=lambda claim: claim.span[0])
+        return found
+
     def _extract_claims(self, text: str) -> list[Claim]:
         """Every first-person completion claim in ``text``, in document order.
 
@@ -1544,7 +1728,8 @@ class ClaimVerifier:
                     target = target.rstrip(".,;:)")
                     if "@" in target:
                         target = target.lower()
-                found.append((start, Claim(kind=kind, text=match.group(0).strip(), target=target)))
+                found.append((start, Claim(kind=kind, text=match.group(0).strip(), target=target,
+                                           span=(start, end))))
         found.sort(key=lambda item: item[0])
         return [claim for _, claim in found]
 

@@ -1,0 +1,307 @@
+"""F099 gate hardening B: a subtask's final report and a continuation note are checked against their tool log.
+
+The soak failed gate criterion 5: on 2026-10-07 a continuation turn wrote "F099 test 6 FAILED. The cancel did not
+take effect." when nobody had issued a cancel, stored it as a fact, and the ``learn_fact`` earned the arrival its
+progress credit. ``ClaimVerifier.verify_report`` reads the verdicts and passive forms a report uses and checks them
+against the calls the work recorded; an unbacked claim is annotated and, in enforce, not credited. Nothing is blocked.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, datetime
+from types import SimpleNamespace
+
+import pytest
+from f099_support import (
+    env_factory,  # noqa: F401
+    finish,
+    make_child,
+    make_root,
+    record,
+    runner_env,  # noqa: F401
+    use,
+)
+from sqlalchemy import select
+
+from nous.brain import continuation
+from nous.brain.continuation import Resolution, RootLimits
+from nous.cognitive.claim_verifier import UNVERIFIED_MARKER, ClaimVerifier, Evidence
+from nous.config import Settings
+from nous.handlers.continuation_runner import ContinuationRunner, build_arrival_prompt
+from nous.storage.models import ExecutionLedgerEntry, IntentionArrival
+
+# The note arrival 1 of root 9851eb16 committed, verbatim.
+TEST_6_NOTE = (
+    "F099 test 6 FAILED. The cancel did not take effect. The `sleep 240` subtask (8f10c3ba) finished at 22:06 UTC "
+    "and still woke me with a continuation turn for the chain that was supposed to be cancelled. I recorded the "
+    "failure as a fact (0b194534) and spawned nothing, so the chain is closed. Next step: check the cancel path "
+    "(/cancel_intention or POST /intentions/{root_id}/cancel). Either it never marked the root intention "
+    "cancelled, or the result inbox ignores a cancelled status when it delivers a wake-up."
+)
+# The fact it stored (0b194534).
+TEST_6_FACT = (
+    "F099 test 6 FAIL: the cancel did NOT work. Subtask 8f10c3ba (sleep 240, wake_policy=continue) finished at "
+    "2026-10-07 22:06 UTC and still delivered a continuation turn to the root intention that was meant to be cancelled."
+)
+# All the incident's lineage recorded: the learn_fact of the false claim.
+INCIDENT_LOG = [Evidence("learn_fact", {"category": "technical"})]
+
+
+def _verify(text, evidence=(), **kwargs):
+    return ClaimVerifier().verify_report(text, list(evidence), **kwargs)
+
+
+def _kinds(text):
+    return [c.kind for c in _verify(text).claims]
+
+
+# ---- the verifier ---------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text", [TEST_6_NOTE, TEST_6_FACT])
+def test_the_test_6_cancel_verdict_is_unbacked(text):
+    result = _verify(text, INCIDENT_LOG)
+    assert not result.verified
+    assert [v.expected_tool for v in result.violations] == ["cancel_task"]
+    assert result.correction.startswith(UNVERIFIED_MARKER) and "cancel did not" in result.correction.lower()
+
+
+def test_a_cancel_that_was_issued_backs_the_verdict_even_when_it_failed():
+    """'The cancel did not take effect' says a cancel was tried, not that it worked."""
+    tried = Evidence("cancel_task", {"task_id": str(uuid.uuid4())}, ok=False)
+    assert _verify(TEST_6_NOTE, [*INCIDENT_LOG, tried]).verified
+
+
+def test_an_owner_cancel_backs_the_verdict():
+    """The owner's cancel (REST, the companion) is no tool call: the lineage's cancel marker backs it."""
+    assert _verify(TEST_6_NOTE, INCIDENT_LOG, cancelled=True).verified
+
+
+def test_a_false_email_sent_claim_is_unbacked():
+    result = _verify("Email sent.", INCIDENT_LOG)
+    assert not result.verified and result.violations[0].expected_tool == "send_email"
+
+
+def test_a_send_email_call_backs_email_sent():
+    assert _verify("Email sent.", [Evidence("send_email", {"to": "tim@example.com"})]).verified
+    assert _verify("Email sent to tim@example.com.", [Evidence("send_email", {"to": "tim@example.com"})]).verified
+
+
+def test_a_failed_send_does_not_back_email_sent():
+    assert not _verify("Email sent.", [Evidence("send_email", {"to": "tim@example.com"}, ok=False)]).verified
+
+
+def test_a_send_to_someone_else_does_not_back_the_named_recipient():
+    assert not _verify("Email sent to tim@example.com.", [Evidence("send_email", {"to": "bob@example.com"})]).verified
+
+
+@pytest.mark.parametrize(
+    ("text", "command", "verified"),
+    [
+        ("PR #4 merged.", "gh pr merge 4 --squash", True),
+        ("PR #4 merged.", "gh pr view 4", False),
+        ("Opened PR #12 for review.", "gh pr create --fill", True),
+        ("Opened PR #12 for review.", "git push origin HEAD", False),
+        ("All tests passed.", "uv run pytest tests/ -q", True),
+        ("All tests passed.", "ls tests", False),
+    ],
+)
+def test_a_command_backs_only_the_action_it_runs(text, command, verified):
+    assert _verify(text, [Evidence("bash", {"command": command}, exit_code=0)]).verified is verified
+
+
+def test_a_test_run_that_failed_still_ran_the_tests():
+    assert _verify("The tests failed.", [Evidence("bash", {"command": "pytest -q"}, exit_code=1)]).verified
+
+
+def test_a_merge_that_exited_non_zero_does_not_back_merged():
+    assert not _verify("PR #4 merged.", [Evidence("bash", {"command": "gh pr merge 4"}, exit_code=1)]).verified
+
+
+def test_a_durable_row_keeps_no_command_so_any_shell_call_is_plausible():
+    """The durable ledger hashes a command: names-only evidence, never a false flag."""
+    assert _verify("PR #4 merged.", [Evidence("bash", {})]).verified
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "No email was sent.",
+        "The email was not sent.",
+        "Next: open a PR.",
+        "Make sure the tests pass.",
+        "Once merged, redeploy.",
+        "Tim merged PR #4.",  # someone else's action
+        "The subtask was cancelled by Tim.",
+        "Was the email sent?",
+        "If the cancel failed, check the inbox.",
+        'The subtask said "Email sent" but I could not confirm it.',  # quoted
+    ],
+)
+def test_denied_planned_asked_and_quoted_actions_are_not_claims(text):
+    assert _kinds(text) == []
+
+
+def test_first_person_claims_are_read_too_and_not_twice():
+    result = _verify("I saved the report to /tmp/a.md and the email was sent.")
+    assert [c.kind for c in result.claims] == ["file_write", "email"]
+    assert [c.kind for c in _verify("I sent the email to tim@example.com.").claims] == ["email"]
+
+
+def test_the_annotation_carries_no_claim_of_its_own():
+    """A note read again (the next arrival's prompt, a copy into a later note) is not flagged for the annotation."""
+    annotated = f"Done.\n\n{_verify('Email sent. PR #4 merged.').correction}"
+    assert _kinds(annotated) == []
+
+
+def test_the_chat_path_is_unchanged():
+    """verify (the interactive path) does not read the report-only forms."""
+    assert ClaimVerifier().verify("Email sent. PR #4 merged.", [], None).verified
+
+
+# ---- progress credit -------------------------------------------------------------------------------------------
+
+
+async def test_an_unbacked_claim_is_not_credited_as_progress():
+    """The incident's arrival claimed progress and wrote memory (the false fact), so it was credited."""
+    resolution = Resolution("report", TEST_6_NOTE, True, 0.9)
+    kwargs = {"since": None, "resolution": resolution, "outcome": continuation.OUTCOME_RESOLVED, "gate_reason": None}
+    assert await continuation._verified_progress(None, "a", [], wrote_memory=True, **kwargs) is True
+    assert (
+        await continuation._verified_progress(None, "a", [], wrote_memory=True, unverified_claims=True, **kwargs)
+        is False
+    )
+
+
+# ---- the prompt ------------------------------------------------------------------------------------------------
+
+
+def test_the_prompt_flags_a_result_whose_claims_its_work_did_not_record():
+    settings = Settings(_env_file=None, result_inbox_enabled=True, intentions_enabled=True, continuation_enabled=True)
+    limits = RootLimits(depth=1, spawns=0, turns=0, tokens=0, stalls=0, spawn_blocked=False, escalate=None)
+    row = SimpleNamespace(
+        msg_type="INFORM",
+        source_kind="subtask",
+        source_id=uuid.uuid4(),
+        created_at=datetime(2026, 10, 7, 22, 6, tzinfo=UTC),
+        title="Mail Tim",
+        body="Email sent.",
+    )
+    intention = SimpleNamespace(intent="mail Tim", depth=0, origin_kind="interactive", origin_decision_id=None)
+    claim = SimpleNamespace(intentions=[intention], inbox_rows=[row])
+    violations = _verify(row.body).violations
+    prompt = build_arrival_prompt(claim, [], [], limits, settings, unverified=[(row, violations)])
+    assert "## Claims in these results that no recorded call backs" in prompt
+    assert f"Mail Tim (subtask {str(row.source_id)[:8]}): {UNVERIFIED_MARKER}" in prompt
+    assert "## Claims in these results" not in build_arrival_prompt(claim, [], [], limits, settings)
+
+
+# ---- end to end ------------------------------------------------------------------------------------------------
+
+LEARN_FACT_SCHEMA = {
+    "type": "object",
+    "properties": {"content": {"type": "string"}, "category": {"type": "string"}},
+    "required": ["content"],
+}
+
+
+def _register_learn_fact(env) -> list[dict]:
+    calls: list[dict] = []
+
+    async def learn_fact(**kwargs):
+        calls.append(kwargs)
+        return {"content": [{"type": "text", "text": "Learned."}]}
+
+    env.dispatcher.register("learn_fact", learn_fact, LEARN_FACT_SCHEMA)
+    return calls
+
+
+def _cont(env) -> ContinuationRunner:
+    return ContinuationRunner(
+        database=env.db, settings=env.settings, runner=env.runner, heart=env.heart, brain=env.brain, bus=env.bus
+    )
+
+
+async def _arrival(env, root_id) -> IntentionArrival:
+    async with env.db.session() as s:
+        query = select(IntentionArrival).where(
+            IntentionArrival.agent_id == env.agent, IntentionArrival.root_id == root_id
+        )
+        return (await s.execute(query)).scalar_one()
+
+
+async def _incident(runner_env, **settings):  # noqa: F811
+    """The 2026-10-07 shape: nobody cancelled the root; its child finished and woke it; the turn stored the false
+    verdict as a fact and reported it, claiming progress."""
+    env = await runner_env(
+        [use("learn_fact", content=TEST_6_FACT, category="technical")],
+        [use("resolve_intention", decision="report", note=TEST_6_NOTE, progress=True, confidence=0.9)],
+        **settings,
+    )
+    learned = _register_learn_fact(env)
+    root = await make_root(env)
+    child = await make_child(env, root)
+    await finish(env, await env.heart.subtasks.get(uuid.UUID(child.source_id)))
+    await record(env, child, body="Slept 240 seconds.")
+    assert await _cont(env).run_arrival(root.id) is not None
+    assert learned  # the memory write happened: without the check it would earn the credit
+    return await _arrival(env, root.id)
+
+
+@pytest.mark.postgres_only
+async def test_the_incident_arrival_is_annotated_and_not_credited(runner_env):  # noqa: F811
+    arrival = await _incident(runner_env)
+    assert arrival.note.startswith(TEST_6_NOTE)
+    assert UNVERIFIED_MARKER in arrival.note and "cancel did not take effect" in arrival.note
+    assert arrival.progress_claimed is True and arrival.progress is False  # counted in claimed_not_credited
+
+
+@pytest.mark.postgres_only
+async def test_warn_annotates_and_still_credits(runner_env):  # noqa: F811
+    arrival = await _incident(runner_env, claim_verification_mode="warn")
+    assert UNVERIFIED_MARKER in arrival.note and arrival.progress is True
+
+
+@pytest.mark.postgres_only
+async def test_shadow_and_off_leave_the_arrival_alone(runner_env):  # noqa: F811
+    for settings in ({"claim_verification_mode": "shadow"}, {"claim_verification_reports_enabled": False}):
+        arrival = await _incident(runner_env, **settings)
+        assert arrival.note == TEST_6_NOTE and arrival.progress is True
+
+
+async def _email_result(runner_env, *, sent: bool):  # noqa: F811
+    env = await runner_env(
+        [use("resolve_intention", decision="drop", note="Nothing to do.", progress=False, confidence=1)]
+    )
+    root = await make_root(env)
+    if sent:  # what the subtask's own send_email left in the durable ledger
+        async with env.db.session() as s:
+            s.add(
+                ExecutionLedgerEntry(
+                    agent_id=env.agent,
+                    session_id=f"subtask-{root.source_id[:8]}",
+                    context_kind="subtask",
+                    subtask_id=uuid.UUID(root.source_id),
+                    tool_name="send_email",
+                    side_effect_type="external",
+                    key_args={"to": "tim@example.com"},
+                    status="success",
+                )
+            )
+            await s.commit()
+    await record(env, root, body="Email sent to tim@example.com.")
+    assert await _cont(env).run_arrival(root.id) is not None
+    return str(env.model.calls[0]["messages"])
+
+
+@pytest.mark.postgres_only
+async def test_a_subtask_report_of_an_email_it_never_sent_is_flagged(runner_env):  # noqa: F811
+    sent = await _email_result(runner_env, sent=False)
+    assert "Claims in these results that no recorded call backs" in sent and UNVERIFIED_MARKER in sent
+
+
+@pytest.mark.postgres_only
+async def test_a_subtask_report_backed_by_its_own_send_is_not_flagged(runner_env):  # noqa: F811
+    sent = await _email_result(runner_env, sent=True)
+    assert UNVERIFIED_MARKER not in sent

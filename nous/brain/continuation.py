@@ -981,6 +981,7 @@ async def _verified_progress(
     outcome: str,
     gate_reason: str | None,
     wrote_memory: bool,
+    unverified_claims: bool = False,
 ) -> bool | None:
     """Spec 4.5.4: the model's claim, kept only if the arrival spawned work (a child of a claimed
     intention created at or after ``since``, the claim's ``claimed_at``), changed the plan (``revise``)
@@ -991,10 +992,12 @@ async def _verified_progress(
     committed, so the bound is exact. A child an earlier arrival spawned under an intention claimed again
     (a T11 send-back, an answered question) does not count. Nor does one an earlier attempt spawned before
     its lease was released: that spawn belongs to no arrival. Conservative: the stall budget trips sooner,
-    and the turn budget still caps the lineage."""
+    and the turn budget still caps the lineage. ``unverified_claims``: the note claims an action no recorded
+    call backs (F099 gate hardening B), so the claim is not credited, whatever else the turn did (a
+    ``learn_fact`` of the false claim would otherwise credit it)."""
     if gate_reason is not None or outcome == OUTCOME_FAILED:
         return None
-    if outcome == OUTCOME_FALLBACK or not resolution.progress_claimed:
+    if outcome == OUTCOME_FALLBACK or not resolution.progress_claimed or unverified_claims:
         return False
     if resolution.decision == "revise" or wrote_memory:
         return True
@@ -1091,6 +1094,7 @@ async def commit_arrival(
     settings: Any,
     report_text: str | None = None,
     wrote_memory: bool = False,
+    unverified_claims: bool = False,
     arrival_id: UUID | None = None,
     now: datetime | None = None,
 ) -> ArrivalCommit | None:
@@ -1104,7 +1108,8 @@ async def commit_arrival(
     and writes nothing, as a fallback that asks is.
     A ``failed_report`` (``fail_attempt``'s, at the cap) charges one attempt on every claimed intention and
     keeps the count; every other outcome resets it to 0.
-    ``wrote_memory`` is the turn's evidence for ``progress``. ``arrival_id`` is the id the turn's context
+    ``wrote_memory`` is the turn's evidence for ``progress``; ``unverified_claims`` withholds it (the note claims
+    an action no recorded call backs). ``arrival_id`` is the id the turn's context
     carried. Does not commit and emits nothing: the runner emits ``intention.arrival_decided`` after it
     commits.
 
@@ -1135,6 +1140,7 @@ async def commit_arrival(
                 settings=settings,
                 report_text=report_text,
                 wrote_memory=wrote_memory,
+                unverified_claims=unverified_claims,
                 arrival_id=arrival_id or uuid.uuid4(),
                 now=now or datetime.now(UTC),
             )
@@ -1160,6 +1166,7 @@ async def _commit_arrival(
     settings: Any,
     report_text: str | None,
     wrote_memory: bool,
+    unverified_claims: bool,
     arrival_id: UUID,
     now: datetime,
 ) -> ArrivalCommit:
@@ -1280,6 +1287,7 @@ async def _commit_arrival(
         outcome=outcome,
         gate_reason=gate_reason,
         wrote_memory=wrote_memory,
+        unverified_claims=unverified_claims,
     )
     decision_record_id = await _record_brain(session, brain, claim=claim, resolution=resolution, ids=ids, n=n)
 
