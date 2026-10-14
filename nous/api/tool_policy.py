@@ -8,6 +8,7 @@ are the INTENDED policy; in `warn` mode a deviation is logged and persisted as
 from __future__ import annotations
 
 import re
+import shlex
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -18,7 +19,7 @@ from typing import Any
 from nous.api.execution_context import FOREGROUND_KINDS, ExecutionContext
 from nous.api.tool_classes import is_compensable_call, tool_class
 from nous.brain.intentions import AUTHORITY_INTERNAL
-from nous.cognitive.bash_side_effect import simple_commands
+from nous.cognitive.bash_side_effect import classify_bash_command, command_invocations, command_string, simple_commands
 from nous.cognitive.execution_ledger import classify_side_effect
 
 _ALL = frozenset({"none", "write", "external", "irreversible"})
@@ -586,40 +587,107 @@ def internal_only_call_violation(
 # it. heartbeat_triage's CONTEXT_POLICY row is local-only, but the policy mode is `warn` in prod, so the merge ran.
 # heartbeat_outward_violation is a floor the runner enforces whatever the mode, as it does F099's: a triage turn
 # may not do what a continuation turn would have to propose. Reads stay allowed (a triage reads PRs and the local
-# API all the time); outward writes are refused: a send, a gh call that is not a read (_gh_allowed), a git push.
+# API all the time); outward writes are refused: a send, a gh call that is not a read (_gh_allowed), a git push,
+# and any other program the shell classifier rates external (a curl/wget/httpie write, ssh, scp, nc, aws ...).
 HEARTBEAT_OUTWARD_TEXT = (
     "Tool error: a heartbeat turn may not act outward (merge, comment, push or send) on its own: that needs the "
     "owner's approval. Do not retry it in another form; tell the owner what you would do and why, and stop."
 )
 # What the shell walk cannot read exactly (a `$`, a glob, a brace) and run_python's code, read as text: a gh call
-# with a write verb, `gh api` in any form, or a git push. Narrow on purpose; the walk is the rule.
+# with a write verb, `gh api` in any form, a git push, or a curl/wget that sends data. Narrow on purpose; the walk
+# is the rule.
 _OUTWARD_TEXT = re.compile(
     r"\bgh\b[\s\S]*\b(?:merge|comment|close|create|edit|review|reopen|ready|delete|rerun|lock)\b"
     r"|\bgh\s+api\b|\bgit\b[\s\S]*\bpush\b"
+    r"|\b(?:curl|wget)\b[\s\S]*(?:\s-[A-Za-z]*[dFTK]|--(?:data|form|json|post|body|upload|config)"
+    r"|-X\s*(?:POST|PUT|PATCH|DELETE))"
 )
-_SHELLS = frozenset({"sh", "bash", "dash", "zsh"})
+_SSH = re.compile(r"(?:^|[\s;&|(/'\"])ssh\s")
+_SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh"})
 _MAX_SHELL_NESTING = 3
+_CURL_WRITE_LONG = ("--data", "--form", "--upload-file", "--json", "--config")
+_WGET_WRITE_LONG = ("--post-data", "--post-file", "--body-data", "--body-file")
+_READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_HTTP_WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _method_value(args: list[str], i: int) -> str | None:
+    """The HTTP method given by the option at ``args[i]`` (``-X POST``, ``-XPOST``, ``-sX POST``, ``--request=POST``,
+    ``--method POST``), else None."""
+    a = args[i]
+    if a.startswith(("--request=", "--method=")):
+        return a.split("=", 1)[1]
+    if a in ("--request", "--method"):
+        return args[i + 1] if i + 1 < len(args) else ""
+    flags = a[1:] if a.startswith("-") and not a.startswith("--") else ""
+    if "X" in flags:
+        tail = flags.split("X", 1)[1]
+        return tail or (args[i + 1] if i + 1 < len(args) else "")
+    return None
+
+
+def _http_client_writes(prog: str, args: list[str]) -> bool:
+    """Whether a curl, wget or httpie call sends data or a non-read method. The classifier rates every call of these
+    ``external``, a plain GET included, so this separates the writes; anything it cannot place counts as a write."""
+    for i, a in enumerate(args):
+        method = _method_value(args, i) if prog != "http" and prog != "httpie" else None
+        if method is not None and method.upper() not in _READ_METHODS:
+            return True
+        if prog == "curl":
+            flags = a[1:] if a.startswith("-") and not a.startswith("--") else ""
+            if a.startswith(_CURL_WRITE_LONG) or any(c in flags for c in "dFTK"):
+                return True
+        elif prog == "wget":
+            if a.startswith(_WGET_WRITE_LONG):
+                return True
+        else:  # httpie: `http [flags] [METHOD] URL [items]`
+            if a in ("-f", "--form", "-j", "--json", "--multipart") or a.upper() in _HTTP_WRITE_METHODS:
+                return True
+            sep = re.search(r"[=:@]", a)
+            if (
+                not a.startswith("-")
+                and sep
+                and a[sep.start() :][:2] != "=="
+                and (a[sep.start()] != ":" or a[sep.start() :][:2] == ":=")
+            ):
+                return True  # a data item (`k=v`, `k:=json`, `k@file`); `k==v` and `H:v` only read
+    return False
+
+
+def _invocation_outward(prog: str, args: list[str], depth: int) -> bool:
+    """One resolved ``(program, args)`` of a shell command: ``gh`` that is not a read, ``git ... push``, a shell
+    given a command string (read again, to a bounded depth), or any other program the classifier rates external
+    (curl, wget, httpie when they write; ssh, scp, nc, aws, mail ... always)."""
+    name = prog.rsplit("/", 1)[-1]
+    if name.startswith("$") or "`" in name:
+        return True  # a program the walk cannot name
+    if name == "gh":
+        return not _gh_allowed(args)
+    if name == "git":
+        return "push" in args
+    if name in _SHELLS or name == "eval":
+        script = command_string(name, args)
+        if script is None:
+            return False
+        return depth >= _MAX_SHELL_NESTING or _shell_outward(script, depth + 1)
+    if classify_bash_command(shlex.join([name, *args])) != "external":
+        return False
+    if name in ("curl", "wget", "http", "httpie"):
+        return _http_client_writes("http" if name == "httpie" else name, args)
+    return True
 
 
 def _shell_outward(command: str, depth: int = 0) -> bool:
-    """Whether a shell command makes an outward write: any word that runs ``gh`` (also through xargs, env or a
-    path) with arguments ``_gh_allowed`` does not take as a read, ``git ... push``, or a ``sh -c`` / ``bash -c``
-    string that does. A command the walk cannot read is judged by ``_OUTWARD_TEXT``."""
-    commands = simple_commands(command)
-    if commands is None:
+    """Whether a shell command makes an outward write. Every simple command is read the way the side-effect
+    classifier reads it (``command_invocations``: wrappers, ``env``, ``xargs``, ``bash -c`` with any flag cluster,
+    ``eval``, ``;`` ``&&`` ``||`` ``|`` chains, nested strings), then judged by ``_invocation_outward``. A command it
+    cannot read is judged by ``_OUTWARD_TEXT``."""
+    if _SSH.search(command):
+        return True  # command_invocations reads through ssh to the remote command; ssh itself is the outward act
+    invocations = command_invocations(command)
+    if invocations is None:
         return _OUTWARD_TEXT.search(command) is not None
-    for words, _, _, _ in commands:
-        for i, word in enumerate(words):
-            prog, rest = word.rsplit("/", 1)[-1], words[i + 1 :]
-            if prog == "gh" and not _gh_allowed(rest):
-                return True
-            if prog == "git" and "push" in rest:
-                return True
-            if prog in _SHELLS and "-c" in rest:
-                script = rest[rest.index("-c") + 1 : rest.index("-c") + 2]
-                if depth >= _MAX_SHELL_NESTING or (script and _shell_outward(script[0], depth + 1)):
-                    return True
-    return False
+    return any(_invocation_outward(prog, args, depth) for prog, args in invocations)
 
 
 def heartbeat_outward_violation(tool_name: str, tool_input: Mapping[str, Any]) -> bool:
@@ -631,11 +699,7 @@ def heartbeat_outward_violation(tool_name: str, tool_input: Mapping[str, Any]) -
         return True
     if tool_name == "bash":
         command = tool_input.get("command")
-        return (
-            isinstance(command, str)
-            and classify_side_effect(tool_name, dict(tool_input)) in ("external", "irreversible")
-            and _shell_outward(command)
-        )
+        return isinstance(command, str) and _shell_outward(command)
     if tool_name == "run_python":
         code = tool_input.get("code")
         return isinstance(code, str) and _OUTWARD_TEXT.search(code) is not None
