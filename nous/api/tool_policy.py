@@ -582,6 +582,66 @@ def internal_only_call_violation(
     return None
 
 
+# Gate criterion 1 (PR #721, 2026-10-10): a heartbeat triage turn merged a PR 36 minutes after the owner parked
+# it. heartbeat_triage's CONTEXT_POLICY row is local-only, but the policy mode is `warn` in prod, so the merge ran.
+# heartbeat_outward_violation is a floor the runner enforces whatever the mode, as it does F099's: a triage turn
+# may not do what a continuation turn would have to propose. Reads stay allowed (a triage reads PRs and the local
+# API all the time); outward writes are refused: a send, a gh call that is not a read (_gh_allowed), a git push.
+HEARTBEAT_OUTWARD_TEXT = (
+    "Tool error: a heartbeat turn may not act outward (merge, comment, push or send) on its own: that needs the "
+    "owner's approval. Do not retry it in another form; tell the owner what you would do and why, and stop."
+)
+# What the shell walk cannot read exactly (a `$`, a glob, a brace) and run_python's code, read as text: a gh call
+# with a write verb, `gh api` in any form, or a git push. Narrow on purpose; the walk is the rule.
+_OUTWARD_TEXT = re.compile(
+    r"\bgh\b[\s\S]*\b(?:merge|comment|close|create|edit|review|reopen|ready|delete|rerun|lock)\b"
+    r"|\bgh\s+api\b|\bgit\b[\s\S]*\bpush\b"
+)
+_SHELLS = frozenset({"sh", "bash", "dash", "zsh"})
+_MAX_SHELL_NESTING = 3
+
+
+def _shell_outward(command: str, depth: int = 0) -> bool:
+    """Whether a shell command makes an outward write: any word that runs ``gh`` (also through xargs, env or a
+    path) with arguments ``_gh_allowed`` does not take as a read, ``git ... push``, or a ``sh -c`` / ``bash -c``
+    string that does. A command the walk cannot read is judged by ``_OUTWARD_TEXT``."""
+    commands = simple_commands(command)
+    if commands is None:
+        return _OUTWARD_TEXT.search(command) is not None
+    for words, _, _, _ in commands:
+        for i, word in enumerate(words):
+            prog, rest = word.rsplit("/", 1)[-1], words[i + 1 :]
+            if prog == "gh" and not _gh_allowed(rest):
+                return True
+            if prog == "git" and "push" in rest:
+                return True
+            if prog in _SHELLS and "-c" in rest:
+                script = rest[rest.index("-c") + 1 : rest.index("-c") + 2]
+                if depth >= _MAX_SHELL_NESTING or (script and _shell_outward(script[0], depth + 1)):
+                    return True
+    return False
+
+
+def heartbeat_outward_violation(tool_name: str, tool_input: Mapping[str, Any]) -> bool:
+    """Whether a heartbeat_triage call acts outward: a tool whose class is external or irreversible (send_email,
+    send_file), a bash command the classifier rates outward that writes (``_shell_outward``), or run_python code
+    that reads as one (``_OUTWARD_TEXT``)."""
+    cls = tool_class(tool_name)
+    if cls is not None and cls.side_effect in ("external", "irreversible"):
+        return True
+    if tool_name == "bash":
+        command = tool_input.get("command")
+        return (
+            isinstance(command, str)
+            and classify_side_effect(tool_name, dict(tool_input)) in ("external", "irreversible")
+            and _shell_outward(command)
+        )
+    if tool_name == "run_python":
+        code = tool_input.get("code")
+        return isinstance(code, str) and _OUTWARD_TEXT.search(code) is not None
+    return False
+
+
 def undoable_violation(ctx: ExecutionContext, tool_name: str, tool_input: Mapping[str, Any]) -> str | None:
     """``"not_compensable"`` when an ``undoable`` context makes a call that
     has a side effect and cannot be undone, else None.

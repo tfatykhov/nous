@@ -574,6 +574,22 @@ class AgentRunner:
                     )
                 return Refusal(text, "internal_only")
 
+        # Gate criterion 1: a heartbeat triage turn may not act outward (the PR #721 merge), whatever the modes
+        # say; its policy row is local-only, and `warn` let the merge run. Reads still run.
+        if ctx.kind == "heartbeat_triage" and tool_policy.heartbeat_outward_violation(tool_name, tool_input):
+            logger.warning("Harness: refused outward %r in a heartbeat_triage turn (session=%s)", tool_name, session_id)
+            self._log_f026_decision(
+                "harness_context_policy_violation",
+                {
+                    "tool_name": tool_name,
+                    "context_kind": ctx.kind,
+                    "violation": "heartbeat_outward",
+                    "mode": "enforce",
+                },
+                session_id=session_id,
+            )
+            return Refusal(tool_policy.HEARTBEAT_OUTWARD_TEXT, "context_policy")
+
         offered_mode = self._settings.tool_offered_set_enforcement_mode
         if offered_mode != "off" and tool_name not in offered_names:
             logger.warning(
