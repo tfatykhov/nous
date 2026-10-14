@@ -1166,9 +1166,9 @@ async def _commit_arrival(
     settings: Any,
     report_text: str | None,
     wrote_memory: bool,
-    unverified_claims: bool,
     arrival_id: UUID,
     now: datetime,
+    unverified_claims: bool = False,
 ) -> ArrivalCommit:
     ids = sorted(i.id for i in claim.intentions)
     root_id, deepest = claim.root_id, claim.deepest
