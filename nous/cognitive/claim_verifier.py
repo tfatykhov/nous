@@ -361,6 +361,7 @@ class _PyFacts:
     recipient_unknown: bool = False                   # a recipient held in a variable
     # what it runs through a shell / subprocess, read like bash (argv kept)
     invocations: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
+    checked_invocations: set[int] = field(default_factory=set)  # indices in invocations that propagate failure
     run_unknown: bool = False                         # a subprocess whose argv is not written out
     deploys: bool = False
     hints: set[str] = field(default_factory=set)      # claim kinds an unknown callee is named for
@@ -825,10 +826,20 @@ def _call_facts(node: ast.Call, facts: _PyFacts, aliases: dict[str, str], local:
             argv = ast.List(elts=list(args)) if args else None  # the argv IS the arguments
         else:
             argv = args[0] if args else kws.get("args")
+        # subprocess.check_call/check_output always raise on failure;
+        # subprocess.run is checked only when check=True is passed explicitly
+        _chk = kws.get("check")
+        _is_checked = (
+            name in ("subprocess.check_call", "subprocess.check_output")
+            or (name == "subprocess.run" and isinstance(_chk, ast.Constant) and _chk.value is True)
+        )
         if isinstance(argv, (ast.List, ast.Tuple)):  # argv: the executable and ITS arguments
             items = _literals(argv)
             if items:
+                _idx = len(facts.invocations)
                 facts.invocations.append((program_name(items[0]), tuple(items[1:])))
+                if _is_checked:
+                    facts.checked_invocations.add(_idx)
             else:
                 facts.run_unknown = True
         elif (line := _literal(argv)) is not None:  # a shell line: read like bash
@@ -1451,6 +1462,7 @@ _NOT_TESTING = frozenset({
     "--list-sessions", "--list-tests", "--list-tests-xml", "--list-suites", "--list-groups", "-list", "--no-run",
     "--dry-run", "-DskipTests", "-Dmaven.test.skip",
 })
+_GH_RUN_EXIT_STATUS = frozenset({"--exit-status"})  # gh run view/watch must carry this to reflect CI outcome
 _NOT_TESTING_SHORT = {"pytest": frozenset({"-V"}), "py.test": frozenset({"-V"}),
                       "tox": frozenset({"-l", "-a", "-n"}), "nox": frozenset({"-l"})}
 _PR_NUMBER = re.compile(r"/pull/(\d+)|^#?(\d+)$")
@@ -1535,7 +1547,13 @@ def _report_hit(kind: str, prog: str, args: tuple[str, ...], number: str | None,
     if base in _TEST_PROGRAMS:
         return True
     if base == "gh":
-        return pos[:2] == ["pr", "checks"] or (pos[:1] == ["run"] and pos[1:2] in (["view"], ["watch"], ["list"]))
+        if pos[:2] == ["pr", "checks"]:
+            return True
+        # `gh run list` only lists runs; `gh run view/watch` require --exit-status
+        # to reflect the run's outcome — without it they exit 0 even on failure
+        if pos[:1] == ["run"] and pos[1:2] in (["view"], ["watch"]):
+            return _has_flag(args, _GH_RUN_EXIT_STATUS)
+        return False
     if base in _INTERPRETERS or base.startswith("python3."):
         if "-m" in args:
             return args[args.index("-m") + 1:][:1] in (("pytest",), ("unittest",))
@@ -1573,8 +1591,15 @@ def _report_run_level(claim: Claim, ev: Evidence) -> str:
         facts = _python_facts(ev.args.get("code") or "")
         if facts is None:
             return "plausible" if EVIDENCE_TRUNCATED in (ev.args.get("code") or "") else "none"
-        if any(_report_hit(claim.kind, p, a, number, pr=pr) for p, a in facts.invocations):
-            return "exact"
+        _matching = [i for i, (p, a) in enumerate(facts.invocations)
+                     if _report_hit(claim.kind, p, a, number, pr=pr)]
+        if _matching:
+            # return "exact" only when the subprocess propagates failure
+            # (check_call, check_output, or run(check=True)); a plain
+            # subprocess.run can succeed while the inner command fails
+            if any(i in facts.checked_invocations for i in _matching):
+                return "exact"
+            return "plausible"
         return "plausible" if facts.run_unknown else "none"
     runs = ev.runs
     if runs is None:  # unreadable: it cannot disprove anything

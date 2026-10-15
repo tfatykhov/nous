@@ -475,7 +475,7 @@ def build_arrival_prompt(
         lines += ["", "## Claims in these results that no recorded call backs"]
         for row, violations in unverified:
             title = neutralize_delimiters(" ".join(str(row.title or "").split())[:80])
-            lines.append(f"- {title} ({row.source_kind} {str(row.source_id)[:8]}): {unverified_note(violations)}")
+            lines.append(f"- {title} ({row.source_kind} {str(row.source_id)[:8]}): {neutralize_delimiters(unverified_note(violations))}")
 
     lines += [
         "",
@@ -1465,7 +1465,7 @@ class ContinuationRunner:
         )
         if mode == "shadow":
             return note, True
-        return f"{note}\n\n{unverified_note(result.violations)}", True
+        return f"{note}\n\n{neutralize_delimiters(unverified_note(result.violations))}", True
 
     async def _owner_channel(self, claim: continuation.Claim) -> str | None:
         """Where an owner-facing row of this claim goes: the store's own answer (``claim_owner_channel``, the
