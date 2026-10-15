@@ -23,6 +23,10 @@ services:
       - NOUS_THINKING_BUDGET=${NOUS_THINKING_BUDGET:-10000}
       - NOUS_EFFORT=${NOUS_EFFORT:-high}
       - NOUS_WORKSPACE_DIR=${NOUS_WORKSPACE_DIR:-/tmp/nous-workspace}
+      - CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-/tmp/nous-workspace/claude-jobs/.claude-home/.claude}
+      - CSTP_TOKEN=${CSTP_TOKEN:-}
+      # Bare: passed only when .env sets it, so forge's own default URL applies otherwise
+      - CSTP_MCP_URL
       - BRAVE_SEARCH_API_KEY=${BRAVE_SEARCH_API_KEY:-}
       - NOUS_EVENT_BUS_ENABLED=${NOUS_EVENT_BUS_ENABLED:-true}
       - NOUS_EPISODE_SUMMARY_ENABLED=${NOUS_EPISODE_SUMMARY_ENABLED:-true}
@@ -143,6 +147,8 @@ services:
     volumes:
       # F042: persist downloaded cross-encoder models across container restarts
       - huggingface_cache:/root/.cache/huggingface
+      # The agent's workspace, and in it the claude CLI's CLAUDE_CONFIG_DIR: survives rebuilds
+      - nous-workspace:/tmp/nous-workspace
       # F097: the two Firebase files, read-only. The host paths come from the
       # env so a deployment without push simply mounts nothing — uncomment and
       # point NOUS_A2UI_FCM_*_FILE at the container paths to enable:
@@ -210,3 +216,4 @@ volumes:
   pgdata:
   huggingface_cache:
   nous_eval_db_data:
+  nous-workspace:

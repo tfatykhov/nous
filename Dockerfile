@@ -12,7 +12,7 @@ WORKDIR /app
 # Install system tools, build deps, and agent runtime packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
     postgresql-client curl wget \
-    git jq tree ripgrep \
+    git make jq tree ripgrep \
     sqlite3 \
     gcc python3-dev pkg-config libfreetype6-dev \
     pandoc \
@@ -53,6 +53,23 @@ COPY --from=dashboard /build/static/dashboard-v2/dist ./static/dashboard-v2/dist
 # runner.sh runs Claude Code as claude-runner to bypass root restriction on
 # --dangerously-skip-permissions.
 RUN npm install -g @anthropic-ai/claude-code
+
+# Claude Code plugins, pre-installed into a read-only seed: a run registers the seed's marketplaces
+# and loads its plugins with no download. Which ones a run loads is settings.json's enabledPlugins
+# (in CLAUDE_CONFIG_DIR, on the workspace volume). Rebuilt each build, so plugins refresh per deploy.
+ENV CLAUDE_CODE_PLUGIN_SEED_DIR=/opt/claude-plugins-seed
+RUN export CLAUDE_CODE_PLUGIN_CACHE_DIR=/opt/claude-plugins-seed CLAUDE_CONFIG_DIR=/tmp/claude-seed-build \
+    && claude plugin marketplace add anthropics/claude-plugins-official \
+    && claude plugin marketplace add forrestchang/andrej-karpathy-skills \
+    && claude plugin marketplace add tfatykhov/cognition-engines-marketplace \
+    && for p in superpowers code-review feature-dev claude-md-management pr-review-toolkit \
+         code-simplifier frontend-design; do \
+         claude plugin install "$p@claude-plugins-official" || exit 1; \
+       done \
+    && claude plugin install andrej-karpathy-skills@karpathy-skills \
+    && claude plugin install forge@cognition-engines \
+    && rm -rf /tmp/claude-seed-build \
+    && chmod -R a+rX /opt/claude-plugins-seed
 
 RUN useradd --create-home --shell /bin/bash claude-runner \
     && chown -R claude-runner:claude-runner /tmp/nous-workspace \
