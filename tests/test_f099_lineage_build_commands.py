@@ -78,10 +78,10 @@ ALLOWED = [
     "cd nous && pytest --lf --durations=10 --no-header -ql",
     "cd nous && pytest --deselect tests/test_a.py::test_b tests",
     # ruff
-    "cd nous && ruff check",
-    "cd nous && ruff check nous tests --statistics",
-    "cd nous && ruff check --no-fix --output-format concise -q .",
-    "cd nous && ruff check --select E501 --ignore F401 nous",
+    "cd nous && ruff check --no-fix --no-fix-only",
+    "cd nous && ruff check --no-fix nous tests --statistics --no-fix-only",
+    "cd nous && ruff check --no-fix --no-fix-only --output-format concise -q .",
+    "cd nous && ruff check --no-fix-only --no-fix --select E501 --ignore F401 nous",
     "cd nous && ruff format --check",
     "cd nous && ruff format --diff nous/",
     # make
@@ -187,17 +187,24 @@ REFUSED = [
     "cd nous && pytest .git/hooks",
     "cd nous && pytest -k",
     # ruff: writes and other configs
-    "cd nous && ruff check --fix",
-    "cd nous && ruff check --unsafe-fixes --fix",
-    "cd nous && ruff check --add-noqa",
-    "cd nous && ruff check --watch",
-    "cd nous && ruff check --config /tmp/ruff.toml",
-    "cd nous && ruff check --config 'lint.select=[]'",
-    "cd nous && ruff check --extend /tmp/x.toml",
-    "cd nous && ruff check -o /tmp/x",
-    "cd nous && ruff check --output-file=/tmp/x",
-    "cd nous && ruff check --cache-dir /tmp/c",
-    "cd nous && ruff check /etc",
+    "cd nous && ruff check",
+    "cd nous && ruff check --no-fix",
+    "cd nous && ruff check --no-fix-only",
+    "cd nous && ruff check -- --no-fix --no-fix-only",
+    "cd nous && ruff check --no-fix -- --no-fix-only nous",
+    "cd nous && ruff format -- --check nous",
+    "cd nous && ruff format -- --diff",
+    "cd nous && ruff check --no-fix --no-fix-only --fix",
+    "cd nous && ruff check --no-fix --no-fix-only --unsafe-fixes --fix",
+    "cd nous && ruff check --no-fix --no-fix-only --add-noqa",
+    "cd nous && ruff check --no-fix --no-fix-only --watch",
+    "cd nous && ruff check --no-fix --no-fix-only --config /tmp/ruff.toml",
+    "cd nous && ruff check --no-fix --no-fix-only --config 'lint.select=[]'",
+    "cd nous && ruff check --no-fix --no-fix-only --extend /tmp/x.toml",
+    "cd nous && ruff check --no-fix --no-fix-only -o /tmp/x",
+    "cd nous && ruff check --no-fix --no-fix-only --output-file=/tmp/x",
+    "cd nous && ruff check --no-fix --no-fix-only --cache-dir /tmp/c",
+    "cd nous && ruff check --no-fix --no-fix-only /etc",
     "cd nous && ruff format",
     "cd nous && ruff format nous",
     "cd nous && ruff format --check --config x.toml",
@@ -291,7 +298,7 @@ def test_a_path_that_leaves_the_repo_through_a_symlink_is_refused(ws):
     assert _allowed("cd nous && pytest out", ws) is False
     assert _allowed("cd nous && pytest out/test_evil.py::test_x", ws) is False
     assert _allowed("cd nous && git diff etc/passwd tests/test_a.py", ws) is False
-    assert _allowed("cd nous && ruff check etc", ws) is False
+    assert _allowed("cd nous && ruff check --no-fix --no-fix-only etc", ws) is False
     assert _allowed("cd link && pytest", ws) is True  # resolves to the repo itself
 
 
@@ -432,10 +439,24 @@ async def test_make_runs_without_any_secret_in_its_environment(ws, secrets, tmp_
 @pytest.mark.skipif(shutil.which("ruff") is None, reason="needs ruff")
 async def test_ruff_runs_without_any_secret_in_its_environment(ws, secrets):
     # ruff runs no repo code; the environment it and the rest of the command see is the shell's.
-    command = "cd nous && ruff check --no-cache nous; printenv"
+    command = "cd nous && ruff check --no-fix --no-fix-only --no-cache nous; printenv"
     text, _ = await _bash_dispatcher(ws).dispatch("bash", {"command": command}, context=_internal())
     assert "All checks passed" in text and "PATH=" in text
     _no_secret(text)
+
+
+@pytest.mark.skipif(shutil.which("ruff") is None, reason="needs ruff")
+async def test_ruff_check_does_not_write_when_the_repos_config_fixes(ws):
+    """`ruff check` applies fixes when a repo's config sets fix or fix-only; --no-fix alone does not stop fix-only."""
+    (ws / "nous" / "pyproject.toml").write_text('[tool.ruff]\nfix-only = true\n[tool.ruff.lint]\nselect = ["F401"]\n')
+    source = ws / "nous" / "nous" / "a.py"
+    source.write_text("import os\n")
+    assert _allowed("cd nous && ruff check --no-fix nous", ws) is False
+    command = "cd nous && ruff check --no-fix --no-fix-only --no-cache nous"
+    assert _allowed(command, ws) is True
+    text, _ = await _bash_dispatcher(ws).dispatch("bash", {"command": command}, context=_internal())
+    assert "F401" in text  # ruff ran and found the unused import
+    assert source.read_text() == "import os\n"
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="needs git")

@@ -279,7 +279,8 @@ _RUFF_ROLES: Mapping[str, _ArgRoles] = MappingProxyType(
             {"q": "flag"},
             {
                 **dict.fromkeys(
-                    "--quiet --statistics --no-cache --no-fix --show-fixes --exit-zero --diff".split(), "flag"
+                    "--quiet --statistics --no-cache --no-fix --no-fix-only --show-fixes --exit-zero --diff".split(),
+                    "flag",
                 ),
                 **dict.fromkeys(("--output-format", "--select", "--ignore", "--extend-select"), "value"),
             },
@@ -636,7 +637,9 @@ def _git_allowed(args: list[str], repo: Path) -> bool:
 def _build_allowed(prog: str, args: list[str], repo: Path) -> bool:
     """A build command (LINEAGE_BUILD_PROGRAMS) whose options are all in its closed map and whose paths stay in
     ``repo``. ``make`` takes only LINEAGE_MAKE_TARGETS (at least one: a bare make runs the default goal) and
-    ``-k``/``-s``: no ``-f``, ``-C``, ``-I``, ``--eval`` or ``VAR=value``."""
+    ``-k``/``-s``: no ``-f``, ``-C``, ``-I``, ``--eval`` or ``VAR=value``. ``ruff format`` needs ``--check`` or
+    ``--diff``, and ``ruff check`` both ``--no-fix`` and ``--no-fix-only``, before any ``--``: a repo's ``fix`` or
+    ``fix-only`` setting would otherwise write."""
     if prog == "git":
         return _git_allowed(args, repo)
     if prog == "make":
@@ -646,7 +649,10 @@ def _build_allowed(prog: str, args: list[str], repo: Path) -> bool:
     if prog == "ruff":
         if not args or args[0] not in _RUFF_ROLES:
             return False
-        if args[0] == "format" and not any(a in ("--check", "--diff") for a in args):
+        opts = set(args[: args.index("--")] if "--" in args else args)  # after `--` a word is a file
+        if args[0] == "format" and not opts & {"--check", "--diff"}:
+            return False
+        if args[0] == "check" and not {"--no-fix", "--no-fix-only"} <= opts:  # a repo's fix/fix-only would write
             return False
         split = _split_read_args(args[1:], _RUFF_ROLES[args[0]])
     else:
@@ -673,7 +679,8 @@ def lineage_bash_refusal_hint(*, build_commands: bool) -> str:
     if build_commands:
         text += (
             "; and, in a git repo's top level reached by `cd <repo> &&`: git status|log|diff|show, pytest, "
-            f"ruff check, ruff format --check|--diff, make {'|'.join(sorted(LINEAGE_MAKE_TARGETS))}, "
+            "ruff check --no-fix --no-fix-only, ruff format --check|--diff, "
+            f"make {'|'.join(sorted(LINEAGE_MAKE_TARGETS))}, "
             "each with a fixed set of options and paths inside the repo, in a bash call without gh or runner.sh"
         )
     return text + ". Join commands with ; && || | only. Propose anything else to the owner with propose_action."
