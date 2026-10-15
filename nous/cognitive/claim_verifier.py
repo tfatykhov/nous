@@ -1439,6 +1439,26 @@ REPORT_KINDS: dict[str, ClaimKind] = {
 _TEST_PROGRAMS = frozenset({"pytest", "py.test", "tox", "nox", "vitest", "jest", "phpunit", "rspec"})
 _TEST_RUNNERS = frozenset({"npm", "pnpm", "yarn", "make", "just", "go", "cargo", "mvn", "gradle"})
 _PR_NUMBER = re.compile(r"/pull/(\d+)|^#?(\d+)$")
+_GH_API_FIELDS = ("-f", "-F", "--field", "--raw-field", "--input")
+
+
+def _gh_api_method(args: tuple[str, ...]) -> str:
+    """The HTTP method a `gh api` call uses: `-X`/`--method` when given, else
+    POST if it adds parameters and GET if not (`gh help api`)."""
+    method, fields = None, False
+    for i, a in enumerate(args):
+        if a in ("-X", "--method"):
+            method = args[i + 1] if i + 1 < len(args) else ""
+        elif a.startswith("--method="):
+            method = a[len("--method="):]
+        elif a.startswith("-X"):
+            method = a[2:]
+        elif a in _GH_API_FIELDS or a.startswith(("--field=", "--raw-field=", "--input=")) \
+                or (a[:2] in ("-f", "-F") and not a.startswith("--")):
+            fields = True
+    if method is not None:
+        return method.upper()
+    return "POST" if fields else "GET"
 
 
 def _pr_numbers(args: list[str]) -> set[str]:
@@ -1458,12 +1478,16 @@ def _report_hit(kind: str, prog: str, args: tuple[str, ...], number: str | None)
     if kind in ("merge", "pr_create") and base in ("gh", "hub", "git"):
         if base == "gh" and pos[:1] == ["api"]:
             paths = pos[1:]
+            method = _gh_api_method(args)
+            # each endpoint acts only on its own method: a GET of
+            # `pulls/4/merge` asks whether it was merged
             if kind == "merge":
-                if not any(re.search(r"/(?:pulls/\d+/)?merges?$", p) for p in paths):
+                if any(re.search(r"/pulls/\d+/merge$", p) for p in paths):
+                    if method != "PUT":
+                        return False
+                elif not (any(re.search(r"/merges$", p) for p in paths) and method == "POST"):
                     return False
-            elif not any(re.search(r"/pulls$", p) for p in paths):
-                return False
-            if "GET" in args:
+            elif not (any(re.search(r"/pulls$", p) for p in paths) and method == "POST"):
                 return False
             named = _pr_numbers(paths)
             return not (kind == "merge" and number and named and number not in named)
@@ -1491,9 +1515,28 @@ def _report_hit(kind: str, prog: str, args: tuple[str, ...], number: str | None)
     return _is_script(prog) and bool(_TESTY.search(prog))
 
 
+def _test_outcome(claim: Claim) -> str | None:
+    """What a test claim says the run gave: "pass", "fail", or None ("I ran the tests")."""
+    if claim.kind != "test_run":
+        return None
+    if re.search(r"\bfail", claim.text, re.IGNORECASE):
+        return "fail"
+    return "pass" if re.search(r"\b(?:pass|green)", claim.text, re.IGNORECASE) else None
+
+
 def _report_run_level(claim: Claim, ev: Evidence) -> str:
     """Whether one recorded bash or run_python call RAN what a report claim says."""
     number = (m.group(1) if (m := re.search(r"#(\d+)", claim.text)) else None)
+    if _test_outcome(claim) is not None:
+        # the exit status is the LAST command's: only a test run there gave it
+        # (a run_python exit is the script's, not the tests')
+        runs = ev.runs if ev.tool_name == "bash" else None
+        if not runs:
+            return "none"
+        prog, args, _ = runs[-1]
+        if _report_hit(claim.kind, prog, args, number):
+            return "exact"
+        return "plausible" if prog.startswith("$") or _is_script(prog) else "none"
     if ev.tool_name == "run_python":
         facts = _python_facts(ev.args.get("code") or "")
         if facts is None:
@@ -1545,7 +1588,12 @@ _REPORT_HEDGE = re.compile(
 # Earlier in the clause: someone else said it, or the text quotes an
 # instruction -- "The subtask said the email was sent", "per the task, merge
 # the PR". The agent's own "I said ..." is its own claim.
-_SENTENCE_END = re.compile(r"[.!?\n]")
+# A reporting word reaches to the end of its clause, not past a new one: in
+# "The build reported a warning, but I pushed the changes" the push is claimed.
+_REPORTED_SCOPE_END = re.compile(
+    r"[.!?;\n]|\b(?:but|yet|however|whereas)\b|,\s*(?:so|while|although|though)\b"
+    r"|\band\s+(?=(?:then\s+)?(?:(?-i:I)|we)\b)",
+    re.IGNORECASE)
 _REPORTED = re.compile(
     r"(?<!\bI )(?<!\bwe )(?<!\bI['’]ve )(?<!\bI have )"
     r"\b(?:said|says|stated?s?|claim(?:s|ed|ing)|report(?:s|ed|ing)|told|tells|mention(?:s|ed)"
@@ -1554,10 +1602,10 @@ _REPORTED = re.compile(
     re.IGNORECASE)
 
 
-def _reported_before(reported: list[int], sentence_starts: list[int], start: int) -> bool:
-    """True if a reporting word comes earlier in the same sentence as ``start``."""
-    k = bisect_right(sentence_starts, start) - 1
-    i = bisect_left(reported, sentence_starts[k] if k >= 0 else 0)
+def _reported_before(reported: list[int], scope_starts: list[int], start: int) -> bool:
+    """True if a reporting word comes earlier in the same reported clause as ``start``."""
+    k = bisect_right(scope_starts, start) - 1
+    i = bisect_left(reported, scope_starts[k] if k >= 0 else 0)
     return i < len(reported) and reported[i] < start
 
 
@@ -1585,6 +1633,9 @@ def report_level(claim: Claim, ev: Evidence) -> str:
         if ev.tool_name != "cancel_task" and action is not None:
             return "exact" if action == "cancel" else "none"
         return "exact" if ev.tool_name == "cancel_task" else "plausible"
+    outcome = _test_outcome(claim)
+    if outcome is not None and (ev.exit_code is None or (ev.exit_code == 0) != (outcome == "pass")):
+        return "none"  # a pass needs exit 0 and a failure a non-zero exit; an unknown exit backs neither
     code = ev.args.get("command") or ev.args.get("cmd") or ev.args.get("code") or ""
     if not code:  # names only: the durable ledger keeps a hash of a command
         return "plausible"
@@ -1755,7 +1806,7 @@ class ClaimVerifier:
         clause_starts = [m.end() for m in _CLAUSE_END.finditer(text)]
         clause_ends = [m.start() for m in _CLAUSE_END.finditer(text)]
         reported = [m.start() for m in _REPORTED.finditer(text)]
-        sentence_ends = [m.end() for m in _SENTENCE_END.finditer(text)]
+        scope_starts = [m.end() for m in _REPORTED_SCOPE_END.finditer(text)]
         taken = {(c.kind, c.span) for c in first}
         found: list[Claim] = []
         for pattern, kind, attempt in self._report:
@@ -1768,7 +1819,7 @@ class ClaimVerifier:
                 prefix = text[clause_starts[c] if c >= 0 else 0:start]
                 if _CONDITION.search(prefix) or _REPORT_HEDGE.search(prefix):
                     continue
-                if _reported_before(reported, sentence_ends, start):
+                if _reported_before(reported, scope_starts, start):
                     continue
                 if any(k2 == kind and s < end and start < e for k2, (s, e) in taken):
                     continue
@@ -1791,7 +1842,7 @@ class ClaimVerifier:
         first_claims = [m.start() for m in _FIRST_CLAIM_RE.finditer(text)]
         conditions = [m.start() for m in _CONDITION.finditer(text)]
         reported = [m.start() for m in _REPORTED.finditer(text)]
-        sentence_ends = [m.end() for m in _SENTENCE_END.finditer(text)]
+        scope_starts = [m.end() for m in _REPORTED_SCOPE_END.finditer(text)]
         spans: dict[str, list[tuple[int, int]]] = {}
         found: list[tuple[int, Claim]] = []
         for pattern, kind in self._compiled:
@@ -1805,7 +1856,7 @@ class ClaimVerifier:
                 i = bisect_left(conditions, clause)
                 if i < len(conditions) and conditions[i] < start:
                     continue  # "if I pushed", "check whether it was saved": a condition
-                if _reported_before(reported, sentence_ends, start):
+                if _reported_before(reported, scope_starts, start):
                     continue  # "the subtask said I sent it": reported, not claimed
                 subj = match.groupdict().get("subj")
                 if subj is not None and not _FIRST_RE.match(subj):

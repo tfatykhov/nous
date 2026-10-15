@@ -174,6 +174,74 @@ def test_a_test_run_that_failed_still_ran_the_tests():
     assert _verify("The tests failed.", [Evidence("bash", {"command": "pytest -q"}, exit_code=1)]).verified
 
 
+@pytest.mark.parametrize(
+    ("text", "command", "exit_code", "verified"),
+    [
+        ("All tests passed.", "pytest -q", 0, True),
+        ("All tests passed.", "pytest -q", 1, False),
+        ("The tests failed.", "pytest -q", 1, True),
+        ("The tests failed.", "pytest -q", 0, False),
+        ("CI is green.", "gh pr checks 4", 1, False),
+        # no exit status, or one another command gave
+        ("All tests passed.", "pytest -q", None, False),
+        ("All tests passed.", "pytest -q || true", 0, False),
+        ("The tests failed.", "pytest -q; echo done", 1, False),
+        # "ran the tests" claims no outcome
+        ("I ran the tests.", "pytest -q", 1, True),
+    ],
+)
+def test_a_test_claim_must_match_the_exit_status(text, command, exit_code, verified):
+    assert _verify(text, [Evidence("bash", {"command": command}, exit_code=exit_code)]).verified is verified
+
+
+def test_a_test_claim_is_not_backed_by_a_run_python_exit():
+    ran = "import subprocess\nsubprocess.run(['pytest', '-q'])"
+    assert not _verify("All tests passed.", [Evidence("run_python", {"code": ran})]).verified
+
+
+@pytest.mark.parametrize(
+    ("command", "verified"),
+    [
+        # gh api defaults to GET, or POST once a field is given
+        ("gh api repos/o/r/pulls/4/merge", False),
+        ("gh api repos/o/r/pulls/4/merge -f merge_method=squash", False),
+        ("gh api repos/o/r/pulls/4/merge --raw-field merge_method=squash", False),
+        ("gh api -X GET repos/o/r/pulls/4/merge", False),
+        ("gh api -X POST repos/o/r/pulls/4/merge", False),
+        ("gh api -X PUT repos/o/r/pulls/4/merge", True),
+        ("gh api -XPUT repos/o/r/pulls/4/merge", True),
+        ("gh api --method PUT repos/o/r/pulls/4/merge", True),
+        ("gh api --method=put repos/o/r/pulls/4/merge -f merge_method=squash", True),
+        ("gh api -X PUT repos/o/r/pulls/5/merge", False),
+    ],
+)
+def test_a_rest_merge_needs_put(command, verified):
+    assert _verify("PR #4 merged.", [Evidence("bash", {"command": command}, exit_code=0)]).verified is verified
+
+
+@pytest.mark.parametrize(
+    ("command", "verified"),
+    [
+        ("gh api repos/o/r/pulls", False),  # a list
+        ("gh api -X GET repos/o/r/pulls -f state=open", False),
+        ("gh api repos/o/r/pulls -f title=x -f head=b -f base=main", True),
+        ("gh api --method POST repos/o/r/pulls --input pr.json", True),
+    ],
+)
+def test_a_rest_pr_create_needs_post(command, verified):
+    assert (
+        _verify("Opened PR #12 for review.", [Evidence("bash", {"command": command}, exit_code=0)]).verified is verified
+    )
+
+
+def test_reported_speech_ends_at_its_clause():
+    claims = _verify("The build reported a warning, but I pushed the changes.").claims
+    assert [c.kind for c in claims] == ["vcs_push"]
+    assert [c.kind for c in _verify("The subtask said the build broke and I merged PR #4.").claims] == ["merge"]
+    # still reported within its own clause
+    assert [c.kind for c in _verify("I pushed it, but the subtask said the email was sent.").claims] == ["vcs_push"]
+
+
 def test_a_merge_that_exited_non_zero_does_not_back_merged():
     assert not _verify("PR #4 merged.", [Evidence("bash", {"command": "gh pr merge 4"}, exit_code=1)]).verified
 
