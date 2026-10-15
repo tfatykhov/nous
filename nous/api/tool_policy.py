@@ -654,6 +654,34 @@ def _http_client_writes(prog: str, args: list[str]) -> bool:
     return False
 
 
+# Git subcommands that cannot update a remote or run another program: an allowlist, so `send-pack`, `http-push`,
+# `svn dcommit`, `p4 submit`, `rebase --exec`, an alias and anything new are refused.
+_GIT_LOCAL = frozenset({
+    "status", "log", "diff", "show", "fetch", "pull", "rev-parse", "rev-list", "ls-files", "ls-tree", "ls-remote",
+    "blame", "grep", "describe", "shortlog", "cat-file", "show-ref", "for-each-ref", "merge-base", "name-rev",
+    "diff-tree", "diff-files", "diff-index", "count-objects", "check-ignore", "whatchanged", "reflog", "request-pull",
+    "add", "commit", "checkout", "switch", "restore", "merge", "stash", "tag", "init", "clone", "mv", "rm",
+})
+_GIT_OPTS_WITH_VALUE = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"})
+_GIT_REMOTE_READ = frozenset({"-v", "--verbose", "show", "get-url"})
+
+
+def _git_read_or_local(args: list[str]) -> bool:
+    """Whether a ``git`` call is on the allowlist: global options skipped (``-C dir``, ``-c k=v``), then a read-only or
+    local subcommand. ``branch`` and ``remote`` only when they list."""
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        i += 2 if args[i] in _GIT_OPTS_WITH_VALUE else 1
+    if i >= len(args):
+        return True  # bare `git` or `git --version`
+    sub, rest = args[i], args[i + 1 :]
+    if sub == "branch":
+        return all(a in ("-l", "--list", "-a", "-r", "-v", "-vv", "--show-current", "--contains") for a in rest)
+    if sub == "remote":
+        return all(a in _GIT_REMOTE_READ for a in rest)
+    return sub in _GIT_LOCAL
+
+
 def _invocation_outward(prog: str, args: list[str], depth: int) -> bool:
     """One resolved ``(program, args)`` of a shell command: ``gh`` that is not a read, ``git ... push``, a shell
     given a command string (read again, to a bounded depth), or any other program the classifier rates external
@@ -664,7 +692,7 @@ def _invocation_outward(prog: str, args: list[str], depth: int) -> bool:
     if name == "gh":
         return not _gh_allowed(args)
     if name == "git":
-        return "push" in args
+        return not _git_read_or_local(args)
     if name in _SHELLS or name == "eval":
         script = command_string(name, args)
         if script is None:

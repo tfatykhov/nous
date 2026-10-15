@@ -1368,3 +1368,19 @@ class TestQuotedSubstitutions:
         assert git_subcommand(["--help", "commit"]) is None
         assert git_subcommand(["-C", "r", "push"]) == ("push", [])
         assert _classify_bash_command("git --version push") == "none"
+
+
+class TestNegatedMaskedFailure:
+    @pytest.mark.parametrize("cmd, line", [
+        ("! git push origin main", "fatal: unable to access 'x': Could not resolve host"),
+        ("! psql -c 'select 1'", "psql: error: connection to server failed"),
+    ])
+    def test_a_negated_single_command_keeps_the_failure_scan(self, cmd, line):
+        from nous.cognitive.execution_ledger import bash_masked_failure
+
+        assert bash_masked_failure(cmd, f"{line}\nExit code: 0") is not None
+
+    def test_a_plain_single_command_exit_is_still_trusted(self):
+        from nous.cognitive.execution_ledger import bash_masked_failure
+
+        assert bash_masked_failure("git push origin main", "fatal: x\nExit code: 0") is None

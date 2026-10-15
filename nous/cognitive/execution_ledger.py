@@ -179,6 +179,7 @@ def bash_masked_failure(command: str, result: str | None) -> str | None:
         (  # one command in the foreground: a trailing `&` or a subshell hides its exit
             sum(1 for words, _, _, _ in commands if words) <= 1
             and not any(op in ("&", "(", ")") for _, _, _, op in commands)
+            and not any(words and words[0] == "!" for words, _, _, _ in commands)  # `!` inverts the exit
         )
         or all(  # a newline after `&&` only continues the chain
             op in ("&&", "") and words[0] != "!" if words else op in ("\n", "")
