@@ -12,7 +12,7 @@ WORKDIR /app
 # Install system tools, build deps, and agent runtime packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
     postgresql-client curl wget \
-    git jq tree ripgrep \
+    git make jq tree ripgrep \
     sqlite3 \
     gcc python3-dev pkg-config libfreetype6-dev \
     pandoc \
