@@ -141,6 +141,8 @@ services:
     volumes:
       # F042: persist downloaded cross-encoder models across container restarts
       - huggingface_cache:/root/.cache/huggingface
+      # The agent's workspace, and in it the claude CLI's CLAUDE_CONFIG_DIR: survives rebuilds
+      - nous-workspace:/tmp/nous-workspace
       # F097: the two Firebase files, read-only. The host paths come from the
       # env so a deployment without push simply mounts nothing — uncomment and
       # point NOUS_A2UI_FCM_*_FILE at the container paths to enable:
@@ -208,3 +210,4 @@ volumes:
   pgdata:
   huggingface_cache:
   nous_eval_db_data:
+  nous-workspace:
