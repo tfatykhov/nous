@@ -53,6 +53,9 @@ class Evidence:
     # bash: what the command runs when already read -- the ledger reads it at
     # record time from the WHOLE command; None = unreadable
     invocations: tuple[Invocation, ...] | None = field(default=_UNREAD, repr=False, compare=False)
+    # False: the call failed or was blocked -- evidence only that it was TRIED
+    # (a report's verdict on an action, verify_report)
+    ok: bool = True
 
     @cached_property
     def runs(self) -> tuple[Invocation, ...] | None:
@@ -106,6 +109,8 @@ class Claim:
     kind: str
     text: str
     target: str | None = None  # a path or recipient the claim names
+    span: tuple[int, int] = field(default=(0, 0), compare=False)
+    attempt_only: bool = False  # a verdict on an action: any recorded try of it backs the claim
 
 
 # First person: "I", "I've", "I have", "I just", "I also" ... The "I" is
@@ -356,6 +361,7 @@ class _PyFacts:
     recipient_unknown: bool = False                   # a recipient held in a variable
     # what it runs through a shell / subprocess, read like bash (argv kept)
     invocations: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
+    checked_invocations: set[int] = field(default_factory=set)  # indices in invocations that propagate failure
     run_unknown: bool = False                         # a subprocess whose argv is not written out
     deploys: bool = False
     hints: set[str] = field(default_factory=set)      # claim kinds an unknown callee is named for
@@ -820,10 +826,20 @@ def _call_facts(node: ast.Call, facts: _PyFacts, aliases: dict[str, str], local:
             argv = ast.List(elts=list(args)) if args else None  # the argv IS the arguments
         else:
             argv = args[0] if args else kws.get("args")
+        # subprocess.check_call/check_output always raise on failure;
+        # subprocess.run is checked only when check=True is passed explicitly
+        _chk = kws.get("check")
+        _is_checked = (
+            name in ("subprocess.check_call", "subprocess.check_output")
+            or (name == "subprocess.run" and isinstance(_chk, ast.Constant) and _chk.value is True)
+        )
         if isinstance(argv, (ast.List, ast.Tuple)):  # argv: the executable and ITS arguments
             items = _literals(argv)
             if items:
+                _idx = len(facts.invocations)
                 facts.invocations.append((program_name(items[0]), tuple(items[1:])))
+                if _is_checked:
+                    facts.checked_invocations.add(_idx)
             else:
                 facts.run_unknown = True
         elif (line := _literal(argv)) is not None:  # a shell line: read like bash
@@ -1415,12 +1431,308 @@ def evidence_level(claim: Claim, ev: Evidence) -> str:
     return _code_level(claim, ev.args.get("code", ""))
 
 
+# Report claims (F099 gate hardening B). A subtask's final report and a
+# continuation turn's note speak in verdicts and the passive voice ("Email
+# sent.", "PR #12 merged", "test 6 FAILED: the cancel did not take effect"),
+# not only in the first person, and nobody reads a correction after them.
+# verify_report checks them against the calls recorded for the work; the chat
+# path (verify) does not use these patterns.
+REPORT_KINDS: dict[str, ClaimKind] = {
+    "merge": ClaimKind("bash", frozenset({"bash", "run_python"})),
+    "pr_create": ClaimKind("bash", frozenset({"bash", "run_python"})),
+    "test_run": ClaimKind("bash", frozenset({"bash", "run_python"})),
+    "cancel": ClaimKind("cancel_task", frozenset({"cancel_task", "dag", "dag_manage"})),
+}
+# What a command must RUN to back the claim: read from the parsed invocations
+# (the shell wrappers -- `bash -lc`, `env`, `cd x &&` -- already unwrapped), never
+# from the command text, so `echo merge`, `cat pytest.log` and `grep 'gh pr
+# merge'` back nothing.
+_TEST_PROGRAMS = frozenset({"pytest", "py.test", "tox", "nox", "vitest", "jest", "phpunit", "rspec"})
+_TEST_RUNNERS = frozenset({"npm", "pnpm", "yarn", "make", "just", "go", "cargo", "mvn", "gradle"})
+# Modes that exit 0 without doing what the claim says: help and version
+# output, a dry run or a browser form (`gh pr create --dry-run|--web`), a
+# merge only scheduled or unscheduled (`gh pr merge --auto|--disable-auto`),
+# and test runs that list or collect but execute nothing.
+_HELP_FLAGS = frozenset({"-h", "--help", "--version"})
+_NOT_CREATING = frozenset({"--dry-run", "-w", "--web"})
+_NOT_MERGING = frozenset({"--auto", "--disable-auto"})
+_NOT_TESTING = frozenset({
+    "--collect-only", "--co", "--fixtures", "--fixtures-per-test", "--markers", "--setup-plan", "--setup-only",
+    "--listTests", "--showConfig", "--list", "--listenvs", "--listenvs-all", "--showconfig", "--notest",
+    "--list-sessions", "--list-tests", "--list-tests-xml", "--list-suites", "--list-groups", "-list", "--no-run",
+    "--dry-run", "-DskipTests", "-Dmaven.test.skip",
+})
+_GH_RUN_EXIT_STATUS = frozenset({"--exit-status"})  # gh run view/watch must carry this to reflect CI outcome
+_NOT_TESTING_SHORT = {"pytest": frozenset({"-V"}), "py.test": frozenset({"-V"}),
+                      "tox": frozenset({"-l", "-a", "-n"}), "nox": frozenset({"-l"})}
+_PR_NUMBER = re.compile(r"/pull/(\d+)|^#?(\d+)$")
+_GH_API_FIELDS = ("-f", "-F", "--field", "--raw-field", "--input")
+
+
+def _gh_api_method(args: tuple[str, ...]) -> str:
+    """The HTTP method a `gh api` call uses: `-X`/`--method` when given, else
+    POST if it adds parameters and GET if not (`gh help api`)."""
+    method, fields = None, False
+    for i, a in enumerate(args):
+        if a in ("-X", "--method"):
+            method = args[i + 1] if i + 1 < len(args) else ""
+        elif a.startswith("--method="):
+            method = a[len("--method="):]
+        elif a.startswith("-X"):
+            method = a[2:]
+        elif a in _GH_API_FIELDS or a.startswith(("--field=", "--raw-field=", "--input=")) \
+                or (a[:2] in ("-f", "-F") and not a.startswith("--")):
+            fields = True
+    if method is not None:
+        return method.upper()
+    return "POST" if fields else "GET"
+
+
+def _pr_numbers(args: list[str]) -> set[str]:
+    """The pull-request numbers a command names (`4`, `#4`, `.../pull/4`, `.../pulls/4/merge`)."""
+    found: set[str] = set()
+    for a in args:
+        m = _PR_NUMBER.search(a) or re.search(r"/pulls/(\d+)", a)
+        if m:
+            found.add(next(g for g in m.groups() if g))
+    return found
+
+
+def _has_flag(args: tuple[str, ...], flags: frozenset[str]) -> bool:
+    """True if ``args`` carries one of ``flags``, bare or as ``--flag=value``."""
+    return any(a.split("=", 1)[0] in flags for a in args)
+
+
+def _report_hit(kind: str, prog: str, args: tuple[str, ...], number: str | None, *, pr: bool = False) -> bool:
+    """True if this one invocation does what a report claim of ``kind`` says.
+
+    ``pr``: the claim names a pull request, which a local `git merge` does not merge."""
+    base = _base(prog)
+    pos = _positional(args)
+    if _has_flag(args, _HELP_FLAGS):
+        return False
+    if kind in ("merge", "pr_create") and base in ("gh", "hub", "git"):
+        if base == "gh" and pos[:1] == ["api"]:
+            paths = pos[1:]
+            method = _gh_api_method(args)
+            # each endpoint acts only on its own method: a GET of
+            # `pulls/4/merge` asks whether it was merged
+            if kind == "merge":
+                if any(re.search(r"/pulls/\d+/merge$", p) for p in paths):
+                    if method != "PUT":
+                        return False
+                elif not (any(re.search(r"/merges$", p) for p in paths) and method == "POST"):
+                    return False
+            elif not (any(re.search(r"/pulls$", p) for p in paths) and method == "POST"):
+                return False
+            named = _pr_numbers(paths)
+            return not (kind == "merge" and number and named and number not in named)
+        if kind == "merge":
+            if base == "git":
+                return not pr and pos[:1] == ["merge"]
+            if base == "gh" and pos[:2] == ["pr", "merge"]:
+                if _has_flag(args, _NOT_MERGING):
+                    return False
+                named = _pr_numbers(pos[2:])
+                return not (number and named and number not in named)
+            return False
+        if base == "gh" and pos[:2] == ["pr", "create"]:
+            return not _has_flag(args, _NOT_CREATING)
+        return base == "hub" and pos[:1] == ["pull-request"]
+    if kind != "test_run":
+        return False
+    if _has_flag(args, _NOT_TESTING) or _has_flag(args, _NOT_TESTING_SHORT.get(base, frozenset())) \
+            or (base == "vitest" and pos[:1] == ["list"]):
+        return False
+    if base in _TEST_PROGRAMS:
+        return True
+    if base == "gh":
+        if pos[:2] == ["pr", "checks"]:
+            return True
+        # `gh run list` only lists runs; `gh run view/watch` require --exit-status
+        # to reflect the run's outcome — without it they exit 0 even on failure
+        if pos[:1] == ["run"] and pos[1:2] in (["view"], ["watch"]):
+            return _has_flag(args, _GH_RUN_EXIT_STATUS)
+        return False
+    if base in _INTERPRETERS or base.startswith("python3."):
+        if "-m" in args:
+            return args[args.index("-m") + 1:][:1] in (("pytest",), ("unittest",))
+        return bool(_TESTY.search(" ".join(pos[:1])))
+    if base in _TASK_RUNNERS or base in _TEST_RUNNERS:
+        # `uv run pytest`, `npm run test`, `make test`, `go test ./...`
+        return any(a in _TEST_PROGRAMS or a in ("test", "unittest") for a in pos[:4])
+    return _is_script(prog) and bool(_TESTY.search(prog))
+
+
+def _test_outcome(claim: Claim) -> str | None:
+    """What a test claim says the run gave: "pass", "fail", or None ("I ran the tests")."""
+    if claim.kind != "test_run":
+        return None
+    if re.search(r"\bfail", claim.text, re.IGNORECASE):
+        return "fail"
+    return "pass" if re.search(r"\b(?:pass|green)", claim.text, re.IGNORECASE) else None
+
+
+def _report_run_level(claim: Claim, ev: Evidence) -> str:
+    """Whether one recorded bash or run_python call RAN what a report claim says."""
+    number = (m.group(1) if (m := re.search(r"#(\d+)", claim.text)) else None)
+    pr = bool(re.search(r"\bPR\b|\bpull\s+request|#\d+", claim.text, re.IGNORECASE))
+    if _test_outcome(claim) is not None:
+        # the exit status is the LAST command's: only a test run there gave it
+        # (a run_python exit is the script's, not the tests')
+        runs = ev.runs if ev.tool_name == "bash" else None
+        if not runs:
+            return "none"
+        prog, args, _ = runs[-1]
+        if _report_hit(claim.kind, prog, args, number, pr=pr):
+            return "exact"
+        return "plausible" if prog.startswith("$") or _is_script(prog) else "none"
+    if ev.tool_name == "run_python":
+        facts = _python_facts(ev.args.get("code") or "")
+        if facts is None:
+            return "plausible" if EVIDENCE_TRUNCATED in (ev.args.get("code") or "") else "none"
+        _matching = [i for i, (p, a) in enumerate(facts.invocations)
+                     if _report_hit(claim.kind, p, a, number, pr=pr)]
+        if _matching:
+            # return "exact" only when the subprocess propagates failure
+            # (check_call, check_output, or run(check=True)); a plain
+            # subprocess.run can succeed while the inner command fails
+            if any(i in facts.checked_invocations for i in _matching):
+                return "exact"
+            return "plausible"
+        return "plausible" if facts.run_unknown else "none"
+    runs = ev.runs
+    if runs is None:  # unreadable: it cannot disprove anything
+        return "plausible"
+    if any(_report_hit(claim.kind, prog, args, number, pr=pr) for prog, args, _ in runs):
+        return "exact"
+    succeeded = runs[:-1] if ev.exit_code not in (None, 0) else runs
+    # a script or an expansion could have run it; a read or an echo could not
+    return "plausible" if any(p.startswith("$") or _is_script(p) for p, _, _ in succeeded) else "none"
+
+
+_PR = r"(?:PR|pull\s+request)(?:\s*#\d+)?"
+_PASSIVE = r"\s+(?:(?:was|were|has\s+been|have\s+been|got|is|is\s+now)\s+)?"
+_CANCELLABLE = r"(?:task|subtask|run|job|dag|schedule|intention|work|chain)"
+# (pattern, kind, attempt_only). Active forms need the first person or a
+# sentence opening ("Merged PR #4."): "Tim merged PR #4" is not the agent's.
+_REPORT_PATTERNS: list[tuple[str, str, bool]] = [
+    (rf"\b(?:e-?mails?|messages?){_PASSIVE}sent\b{_NOT_BY}", "email", False),
+    (rf"{_OPENING}(?:sent|e-?mailed)\s+(?:the\s+|an\s+)?e-?mail\b", "email", False),
+    (rf"\b{_PR}{_PASSIVE}merged\b{_NOT_BY}", "merge", False),
+    (rf"(?:{_FIRST}|{_OPENING})merged\s+(?:the\s+)?(?:{_PR}|#\d+|branch)", "merge", False),
+    (rf"\b{_PR}{_PASSIVE}(?:opened|created|raised|filed)\b{_NOT_BY}", "pr_create", False),
+    (rf"(?:{_FIRST}|{_OPENING})(?:opened|created|raised|filed)\s+(?:a\s+|the\s+)?(?:new\s+|draft\s+)?{_PR}",
+     "pr_create", False),
+    (rf"(?:{_FIRST}|{_OPENING})cancel+ed\s+(?:the\s+|that\s+|this\s+)?(?:[\w-]+\s+)?{_CANCELLABLE}\b",
+     "cancel", False),
+    (rf"\b{_CANCELLABLE}(?:\s+[0-9a-f]{{6,}})?{_PASSIVE}cancel+ed\b{_NOT_BY}", "cancel", False),
+    # a verdict on a cancel says one was issued, whatever it did
+    (r"\bcancel(?:l?ation)?\s+(?:did\s+not|didn['’]t|failed|worked|succeeded|took\s+effect|was\s+ignored)"
+     r"(?:\s+[\w-]+){0,3}", "cancel", True),
+    (r"\b(?:tests?|test\s+suite|pytest|checks|CI)\s+(?:all\s+)?(?:passed|pass(?:es)?|failed|fail|(?:are|is)\s+green)\b",
+     "test_run", False),
+    (rf"(?:{_FIRST}|{_OPENING})ran\s+(?:the\s+|all\s+)?(?:[\w-]+\s+)?(?:tests?|test\s+suite|pytest)\b",
+     "test_run", False),
+]
+# Earlier in the clause: the claim is denied, planned or asked for, not made
+# ("No email was sent", "Next: open a PR", "make sure the tests pass").
+_REPORT_HEDGE = re.compile(
+    r"\b(?:no|not|never|nothing|without|will|would|should|shall|could|can|must|may|might|once|until"
+    r"|need(?:s|ed)?\s+to|ha(?:ve|s)\s+to|going\s+to|want(?:s|ed)?\s+to|try(?:ing)?\s+to|next|ensure"
+    r"|make\s+sure|so\s+that)\b|n['’]t\b",
+    re.IGNORECASE)
+# Earlier in the clause: someone else said it, or the text quotes an
+# instruction -- "The subtask said the email was sent", "per the task, merge
+# the PR". The agent's own "I said ..." is its own claim.
+# A reporting word reaches to the end of its clause, not past a new one: in
+# "The build reported a warning, but I pushed the changes" the push is claimed.
+_REPORTED_SCOPE_END = re.compile(
+    r"[.!?;\n]|\b(?:but|yet|however|whereas)\b|,\s*(?:so|while|although|though)\b"
+    r"|\band\s+(?=(?:then\s+)?(?:(?-i:I)|we)\b)",
+    re.IGNORECASE)
+_REPORTED = re.compile(
+    r"(?<!\bI )(?<!\bwe )(?<!\bI['’]ve )(?<!\bI have )"
+    r"\b(?:said|says|stated?s?|claim(?:s|ed|ing)|report(?:s|ed|ing)|told|tells|mention(?:s|ed)"
+    r"|assert(?:s|ed)|insist(?:s|ed)|indicat(?:es|ed)|repl(?:y|ies|ied)|respond(?:s|ed)"
+    r"|believ(?:es|ed)|thinks|instruct(?:s|ed|ions?)|asked|requested|according\s+to|per\s+the)\b",
+    re.IGNORECASE)
+
+
+def _reported_before(reported: list[int], scope_starts: list[int], start: int) -> bool:
+    """True if a reporting word comes earlier in the same reported clause as ``start``."""
+    k = bisect_right(scope_starts, start) - 1
+    i = bisect_left(reported, scope_starts[k] if k >= 0 else 0)
+    return i < len(reported) and reported[i] < start
+
+
+UNVERIFIED_MARKER = "[Unverified claims]"
+_UNVERIFIED_SHOWN = 5
+
+
+def report_level(claim: Claim, ev: Evidence) -> str:
+    """How well one recorded call supports one report claim: exact, plausible or none.
+
+    A failed or blocked call backs only a verdict on the action (``attempt_only``):
+    "the cancel did not take effect" says a cancel was issued, not that it worked.
+    """
+    if not ev.ok and not claim.attempt_only:
+        return "none"
+    if claim.kind in CLAIM_KINDS:
+        if not ev.ok:  # a failed send or write backs no claim that it happened
+            return "none"
+        return evidence_level(claim, ev)
+    kind = REPORT_KINDS[claim.kind]
+    if ev.tool_name not in kind.capable_tools:
+        return "none"
+    if claim.kind == "cancel":
+        action = ev.args.get("action")
+        if ev.tool_name != "cancel_task" and action is not None:
+            return "exact" if action == "cancel" else "none"
+        return "exact" if ev.tool_name == "cancel_task" else "plausible"
+    outcome = _test_outcome(claim)
+    if outcome is not None and (ev.exit_code is None or (ev.exit_code == 0) != (outcome == "pass")):
+        return "none"  # a pass needs exit 0 and a failure a non-zero exit; an unknown exit backs neither
+    code = ev.args.get("command") or ev.args.get("cmd") or ev.args.get("code") or ""
+    if not code:  # names only: the durable ledger keeps a hash of a command
+        return "plausible"
+    if (claim.kind != "test_run" and not claim.attempt_only
+            and ev.exit_code is not None and ev.exit_code != 0):
+        return "none"  # a test run that fails still ran the tests
+    return _report_run_level(claim, ev)
+
+
+def ledger_evidence(actions: Any) -> list[Evidence]:
+    """Every call of an in-memory ledger as evidence, the failed ones marked."""
+    return [
+        Evidence(a.tool_name, a.evidence_args, a.exit_code, a.side_effect_type,
+                 a.invocations if a.tool_name == "bash" else _UNREAD, ok=a.status == "success")
+        for a in actions
+    ]
+
+
+def unverified_note(violations: list[ClaimViolation]) -> str:
+    """The line a report or arrival note carries for its unbacked claims.
+
+    The claims are quoted, so reading the note again extracts none of them."""
+    quoted = "; ".join(
+        '"' + " ".join(v.claimed_text.replace('"', "'").split())[:120] + '"'
+        for v in violations[:_UNVERIFIED_SHOWN]
+    )
+    more = f" (and {len(violations) - _UNVERIFIED_SHOWN} more)" if len(violations) > _UNVERIFIED_SHOWN else ""
+    return (f"{UNVERIFIED_MARKER} No recorded tool call of this work backs: {quoted}{more}. "
+            "Treat these as not observed.")
+
+
 class ClaimVerifier:
     """Verifies that action claims in assistant responses are grounded in actual tool use."""
 
     def __init__(self) -> None:
         self._compiled: list[tuple[re.Pattern[str], str]] = [
             (re.compile(pattern, re.IGNORECASE), kind) for pattern, kind in _CLAIM_PATTERNS
+        ]
+        self._report: list[tuple[re.Pattern[str], str, bool]] = [
+            (re.compile(pattern, re.IGNORECASE), kind, attempt) for pattern, kind, attempt in _REPORT_PATTERNS
         ]
 
     def verify(
@@ -1501,6 +1813,79 @@ class ClaimVerifier:
             claims=checks,
         )
 
+    def verify_report(
+        self, text: str, evidence: list[Evidence], *, cancelled: bool = False,
+    ) -> VerificationResult:
+        """Check a final report's action claims against the calls its work recorded.
+
+        For a subtask's final report and a continuation turn's note: the
+        first-person claims ``verify`` reads, plus the verdicts and passive
+        forms a report uses (``_REPORT_PATTERNS``). ``evidence`` is every
+        recorded call of the work, failed ones marked ``ok=False``;
+        ``cancelled`` is true when the work was cancelled outside any tool call
+        (the owner's cancel), which backs a claim about a cancel.
+        Deterministic and model-free; it never blocks anything.
+        """
+        first = self._extract_claims(text)
+        claims = first + self._extract_report_claims(text, first)
+        if not claims:
+            return VerificationResult(verified=True)
+        checks: list[ClaimCheck] = []
+        violations: list[ClaimViolation] = []
+        for claim in claims:
+            if claim.kind == "cancel" and cancelled:
+                level = "exact"
+            else:
+                level = _best(["none", *(report_level(claim, ev) for ev in evidence)])
+            checks.append(ClaimCheck(claim.kind, claim.text, level))
+            if level == "none":
+                kind = CLAIM_KINDS.get(claim.kind) or REPORT_KINDS[claim.kind]
+                violations.append(ClaimViolation(
+                    claimed_text=claim.text,
+                    expected_tool=kind.primary_tool,
+                    found_in_turn=False,
+                    found_in_ledger=False,
+                    capable_tools=tuple(sorted(kind.capable_tools)),
+                ))
+        if not violations:
+            return VerificationResult(verified=True, claims=checks)
+        return VerificationResult(verified=False, violations=violations,
+                                  correction=unverified_note(violations), claims=checks)
+
+    def _extract_report_claims(self, text: str, first: list[Claim]) -> list[Claim]:
+        """The report-only claims in ``text`` (see ``_REPORT_PATTERNS``), in document order.
+
+        Quoted text, questions, conditions and hedged clauses are not claims;
+        a span one of ``first`` (``_extract_claims``'s) took for the same kind
+        is not taken twice.
+        """
+        text = _QUOTED.sub(_blank, text).replace("**", "")
+        clause_starts = [m.end() for m in _CLAUSE_END.finditer(text)]
+        clause_ends = [m.start() for m in _CLAUSE_END.finditer(text)]
+        reported = [m.start() for m in _REPORTED.finditer(text)]
+        scope_starts = [m.end() for m in _REPORTED_SCOPE_END.finditer(text)]
+        taken = {(c.kind, c.span) for c in first}
+        found: list[Claim] = []
+        for pattern, kind, attempt in self._report:
+            for match in pattern.finditer(text):
+                start, end = match.span()
+                k = bisect_left(clause_ends, end)
+                if k < len(clause_ends) and text[clause_ends[k]] == "?":
+                    continue
+                c = bisect_right(clause_starts, start) - 1
+                prefix = text[clause_starts[c] if c >= 0 else 0:start]
+                if _CONDITION.search(prefix) or _REPORT_HEDGE.search(prefix):
+                    continue
+                if _reported_before(reported, scope_starts, start):
+                    continue
+                if any(k2 == kind and s < end and start < e for k2, (s, e) in taken):
+                    continue
+                taken.add((kind, (start, end)))
+                found.append(Claim(kind=kind, text=match.group(0).strip(), span=(start, end),
+                                   attempt_only=attempt))
+        found.sort(key=lambda claim: claim.span[0])
+        return found
+
     def _extract_claims(self, text: str) -> list[Claim]:
         """Every first-person completion claim in ``text``, in document order.
 
@@ -1513,6 +1898,8 @@ class ClaimVerifier:
         clause_starts = [m.end() for m in ends]
         first_claims = [m.start() for m in _FIRST_CLAIM_RE.finditer(text)]
         conditions = [m.start() for m in _CONDITION.finditer(text)]
+        reported = [m.start() for m in _REPORTED.finditer(text)]
+        scope_starts = [m.end() for m in _REPORTED_SCOPE_END.finditer(text)]
         spans: dict[str, list[tuple[int, int]]] = {}
         found: list[tuple[int, Claim]] = []
         for pattern, kind in self._compiled:
@@ -1526,6 +1913,8 @@ class ClaimVerifier:
                 i = bisect_left(conditions, clause)
                 if i < len(conditions) and conditions[i] < start:
                     continue  # "if I pushed", "check whether it was saved": a condition
+                if _reported_before(reported, scope_starts, start):
+                    continue  # "the subtask said I sent it": reported, not claimed
                 subj = match.groupdict().get("subj")
                 if subj is not None and not _FIRST_RE.match(subj):
                     # an "and <verb>" clause: a claim only after a first-person
@@ -1544,7 +1933,8 @@ class ClaimVerifier:
                     target = target.rstrip(".,;:)")
                     if "@" in target:
                         target = target.lower()
-                found.append((start, Claim(kind=kind, text=match.group(0).strip(), target=target)))
+                found.append((start, Claim(kind=kind, text=match.group(0).strip(), target=target,
+                                           span=(start, end))))
         found.sort(key=lambda item: item[0])
         return [claim for _, claim in found]
 

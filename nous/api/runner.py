@@ -54,7 +54,7 @@ from nous.brain.brain import Brain
 from nous.brain.continuation import INTENT_SESSION_PREFIX
 from nous.brain.intentions import AUTHORITY_INTERNAL
 from nous.cognitive.action_gate import ActionGate
-from nous.cognitive.claim_verifier import ClaimVerifier, Evidence, IntentTracker
+from nous.cognitive.claim_verifier import ClaimVerifier, Evidence, IntentTracker, ledger_evidence
 from nous.cognitive.execution_ledger import (
     ExecutionLedger,
     bash_exit_code,
@@ -4050,6 +4050,15 @@ Rules:
         """
         ledger = self._ledgers.get(session_id)
         return [(a.tool_name, a.status) for a in ledger.actions] if ledger else []
+
+    def session_evidence(self, session_id: str) -> list[Evidence]:
+        """Every call this session's execution ledger recorded, as claim evidence (failed ones marked).
+
+        Read BEFORE the session ends, like ``executed_tools``: the continuation runner checks the turn's
+        note against it (F099 gate hardening B).
+        """
+        ledger = self._ledgers.get(session_id)
+        return ledger_evidence(ledger.actions) if ledger else []
 
     def _verify_claims(
         self,
