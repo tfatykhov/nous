@@ -111,6 +111,65 @@ def test_a_command_backs_only_the_action_it_runs(text, command, verified):
     assert _verify(text, [Evidence("bash", {"command": command}, exit_code=0)]).verified is verified
 
 
+@pytest.mark.parametrize(
+    ("text", "command", "verified"),
+    [
+        # a command that only MENTIONS the token backs nothing
+        ("PR #4 merged.", "echo merge", False),
+        ("PR #4 merged.", "echo 'gh pr merge 4'", False),
+        ("PR #4 merged.", "grep -r 'gh pr merge 4' docs/", False),
+        ("PR #4 merged.", "# gh pr merge 4\nls", False),
+        ("All tests passed.", "cat pytest.log", False),
+        ("All tests passed.", "echo pytest passed", False),
+        ("Opened PR #12 for review.", "echo gh pr create", False),
+        # a different PR than the one claimed
+        ("PR #4 merged.", "gh pr merge 5", False),
+        ("PR #4 merged.", "gh pr merge https://github.com/o/r/pull/5", False),
+        # real invocations
+        ("PR #4 merged.", "gh pr merge 4", True),
+        ("PR #4 merged.", "gh pr merge --squash", True),
+        ("PR #4 merged.", "gh api -X PUT repos/o/r/pulls/4/merge", True),
+        ("All tests passed.", "python -m pytest -q", True),
+        ("All tests passed.", "npm run test", True),
+        # wrapped invocations
+        ("PR #4 merged.", "bash -lc 'cd /repo && gh pr merge 4 --squash'", True),
+        ("PR #4 merged.", "env GH_TOKEN=x gh pr merge 4", True),
+        ("PR #4 merged.", "cd /repo && gh pr merge 4", True),
+        ("All tests passed.", "cd /repo && uv run pytest tests/ -q", True),
+        ("All tests passed.", "bash -lc 'echo start; pytest -q'", True),
+        ("All tests passed.", "bash -lc 'echo pytest'", False),
+    ],
+)
+def test_report_evidence_is_the_executed_program_not_the_command_text(text, command, verified):
+    assert _verify(text, [Evidence("bash", {"command": command}, exit_code=0)]).verified is verified
+
+
+def test_run_python_backs_a_report_only_by_what_it_runs():
+    ran = "import subprocess\nsubprocess.run(['gh', 'pr', 'merge', '4'])"
+    assert _verify("PR #4 merged.", [Evidence("run_python", {"code": ran})]).verified
+    assert not _verify("PR #4 merged.", [Evidence("run_python", {"code": "print('gh pr merge 4')"})]).verified
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The subtask said the email was sent, but I could not confirm it.",
+        "The subtask reported PR #4 merged; I did not check.",
+        "According to the log, tests passed.",
+        "Tim told me the PR #4 was merged.",
+        "The task said: Email sent.",
+        "The instructions say the tests passed before the change.",
+    ],
+)
+def test_reported_speech_is_not_the_agents_claim(text):
+    assert _verify(text).claims == []
+
+
+def test_the_agents_own_statement_is_still_a_claim():
+    assert [c.kind for c in _verify("I confirmed the PR #4 was merged.").claims] == ["merge"]
+    assert [c.kind for c in _verify("I reported that the email was sent.").claims] == ["email"]
+
+
 def test_a_test_run_that_failed_still_ran_the_tests():
     assert _verify("The tests failed.", [Evidence("bash", {"command": "pytest -q"}, exit_code=1)]).verified
 
