@@ -27,8 +27,9 @@ from sqlalchemy import select
 from nous.brain import continuation
 from nous.brain.continuation import Resolution, RootLimits
 from nous.cognitive.claim_verifier import UNVERIFIED_MARKER, ClaimVerifier, Evidence
+from nous.cognitive.ledger_store import _summary
 from nous.config import Settings
-from nous.handlers.continuation_runner import ContinuationRunner, build_arrival_prompt
+from nous.handlers.continuation_runner import ContinuationRunner, _ledger_row_evidence, build_arrival_prompt
 from nous.storage.models import ExecutionLedgerEntry, IntentionArrival
 
 # The note arrival 1 of root 9851eb16 committed, verbatim.
@@ -252,6 +253,110 @@ def test_a_durable_row_keeps_no_command_so_any_shell_call_is_plausible():
 
 
 @pytest.mark.parametrize(
+    ("text", "command", "verified"),
+    [
+        ("PR #4 merged.", "gh pr merge 4 --squash", True),
+        ("PR #4 merged.", "gh pr merge 4 --auto --squash", False),
+        ("PR #4 merged.", "gh pr merge 4 --auto=true", False),
+        ("PR #4 merged.", "gh pr merge 4 --disable-auto", False),
+        ("PR #4 merged.", "gh pr merge --help", False),
+        # a local merge merges a branch, not a pull request
+        ("PR #4 merged.", "git merge feature", False),
+        ("I merged the pull request.", "git merge feature", False),
+        ("I merged the branch.", "git merge feature", True),
+    ],
+)
+def test_a_merge_claim_needs_a_merge_that_happened(text, command, verified):
+    assert _verify(text, [Evidence("bash", {"command": command}, exit_code=0)]).verified is verified
+
+
+@pytest.mark.parametrize(
+    ("command", "verified"),
+    [
+        ("gh pr create --fill", True),
+        ("gh pr create --dry-run --fill", False),
+        ("gh pr create --web", False),
+        ("gh pr create -w", False),
+        ("gh pr create -h", False),
+    ],
+)
+def test_a_pr_create_claim_needs_a_command_that_creates(command, verified):
+    assert _verify("Opened PR #12.", [Evidence("bash", {"command": command}, exit_code=0)]).verified is verified
+
+
+@pytest.mark.parametrize(
+    ("command", "verified"),
+    [
+        ("pytest -q", True),
+        ("python -m pytest tests/", True),
+        ("pytest -l -q", True),  # --showlocals
+        ("pytest --collect-only -q", False),
+        ("pytest --co", False),
+        ("python -m pytest --co tests/", False),
+        ("uv run pytest --help", False),
+        ("pytest -h", False),
+        ("pytest --version", False),
+        ("pytest -V", False),
+        ("pytest --fixtures", False),
+        ("pytest --markers", False),
+        ("jest --listTests", False),
+        ("vitest list", False),
+        ("tox -l", False),
+        ("tox --notest", False),
+        ("nox --list-sessions", False),
+        ("phpunit --list-tests", False),
+        ("mvn test -Dmaven.test.skip=true", False),
+        ("go test -list . ./...", False),
+        ("cargo test --no-run", False),
+        ("cargo test -- --list", False),
+    ],
+)
+def test_a_test_mode_that_runs_nothing_backs_no_pass(command, verified):
+    assert _verify("All tests passed.", [Evidence("bash", {"command": command}, exit_code=0)]).verified is verified
+
+
+@pytest.mark.parametrize(
+    ("summary", "exit_code"),
+    [
+        ("exit code 0; 812 chars of output, not stored", 0),
+        ("exit code 1; 812 chars of output", 1),
+        ("Command timed out after 30s.; exit code -9; 12 chars of output", -9),
+        ("40 chars of output, error excerpt: x; exit code 0", None),  # output, not the trailer
+        ("12 chars of output, not stored", None),
+        ("never dispatched", None),
+        (None, None),
+    ],
+)
+def test_a_durable_bash_row_keeps_its_exit_code(summary, exit_code):
+    row = SimpleNamespace(
+        tool_name="bash",
+        status="success",
+        key_args={},
+        input_text="pytest -q",
+        result_summary=summary,
+        side_effect_type="write",
+    )
+    assert _ledger_row_evidence(row).exit_code == exit_code
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_the_exit_code_the_ledger_store_writes_is_the_one_read_back(exit_code):
+    summary = _summary(f"ok\nExit code: {exit_code}", "bash", "success")
+    row = SimpleNamespace(
+        tool_name="bash",
+        status="success",
+        key_args={},
+        input_text="pytest -q",
+        result_summary=summary,
+        side_effect_type="write",
+    )
+    evidence = _ledger_row_evidence(row)
+    assert evidence.exit_code == exit_code
+    assert _verify("All tests passed.", [evidence]).verified is (exit_code == 0)
+    assert _verify("The tests failed.", [evidence]).verified is (exit_code == 1)
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "No email was sent.",
@@ -432,3 +537,49 @@ async def test_a_subtask_report_of_an_email_it_never_sent_is_flagged(runner_env)
 async def test_a_subtask_report_backed_by_its_own_send_is_not_flagged(runner_env):  # noqa: F811
     sent = await _email_result(runner_env, sent=True)
     assert UNVERIFIED_MARKER not in sent
+
+
+async def _test_result(runner_env, *, exit_code: int, claim: str):  # noqa: F811
+    env = await runner_env(
+        [use("resolve_intention", decision="drop", note="Nothing to do.", progress=False, confidence=1)]
+    )
+    root = await make_root(env)
+    async with env.db.session() as s:
+        s.add(
+            ExecutionLedgerEntry(
+                agent_id=env.agent,
+                session_id=f"subtask-{root.source_id[:8]}",
+                context_kind="subtask",
+                subtask_id=uuid.UUID(root.source_id),
+                tool_name="bash",
+                side_effect_type="write",
+                key_args={},
+                input_text="pytest -q",
+                result_summary=_summary(f"...\nExit code: {exit_code}", "bash", "success"),
+                status="success",
+            )
+        )
+        await s.commit()
+    await record(env, root, body=claim)
+    assert await _cont(env).run_arrival(root.id) is not None
+    return str(env.model.calls[0]["messages"])
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize(
+    ("exit_code", "claim", "flagged"),
+    [
+        (0, "All tests passed.", False),
+        (1, "The tests failed.", False),
+        (1, "All tests passed.", True),
+        (0, "The tests failed.", True),
+    ],
+)
+async def test_a_subtask_test_report_is_checked_against_its_durable_exit_code(
+    runner_env,  # noqa: F811
+    exit_code,
+    claim,
+    flagged,
+):
+    sent = await _test_result(runner_env, exit_code=exit_code, claim=claim)
+    assert (UNVERIFIED_MARKER in sent) is flagged

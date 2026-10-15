@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import re
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -151,15 +152,28 @@ class LineageCalls:
     cancelled: bool = False
 
 
+def _summary_exit_code(summary: str | None) -> int | None:
+    """The bash exit code a durable result summary keeps (``LedgerStore._summary``: an optional timeout line, then
+    ``exit code N``, then the output's length); None when it has none. The parts after the length are an error
+    excerpt, which is command output and never read."""
+    for part in (summary or "").split("; "):
+        if m := re.fullmatch(r"exit code (-?\d+)", part):
+            return int(m.group(1))
+        if re.match(r"\d+ chars of output", part):
+            break
+    return None
+
+
 def _ledger_row_evidence(row: Any) -> Evidence:
     """A durable ledger row as claim evidence. The row keeps a hash of a command or a script, never the text, so
-    those are names-only evidence unless detail capture kept the redacted input."""
+    those are names-only evidence unless detail capture kept the redacted input. A bash row keeps its exit code."""
     if row.tool_name in ("bash", "run_python"):
         key = "command" if row.tool_name == "bash" else "code"
         args = {key: row.input_text} if row.input_text else {}
     else:
         args = {str(k): str(v) for k, v in (row.key_args or {}).items()}
-    return Evidence(row.tool_name, args, None, row.side_effect_type, ok=row.status == "success")
+    exit_code = _summary_exit_code(row.result_summary) if row.tool_name == "bash" else None
+    return Evidence(row.tool_name, args, exit_code, row.side_effect_type, ok=row.status == "success")
 
 
 def make_resolve_intention_executor(
@@ -1379,7 +1393,14 @@ class ContinuationRunner:
         rows = (
             await session.execute(
                 select(
-                    E.tool_name, E.status, E.key_args, E.input_text, E.side_effect_type, E.subtask_id, E.dag_id
+                    E.tool_name,
+                    E.status,
+                    E.key_args,
+                    E.input_text,
+                    E.result_summary,
+                    E.side_effect_type,
+                    E.subtask_id,
+                    E.dag_id,
                 ).where(
                     E.agent_id == self._agent_id,
                     E.created_at >= min(r.created_at for r in intentions),

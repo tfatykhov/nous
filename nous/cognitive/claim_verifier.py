@@ -1438,6 +1438,21 @@ REPORT_KINDS: dict[str, ClaimKind] = {
 # merge'` back nothing.
 _TEST_PROGRAMS = frozenset({"pytest", "py.test", "tox", "nox", "vitest", "jest", "phpunit", "rspec"})
 _TEST_RUNNERS = frozenset({"npm", "pnpm", "yarn", "make", "just", "go", "cargo", "mvn", "gradle"})
+# Modes that exit 0 without doing what the claim says: help and version
+# output, a dry run or a browser form (`gh pr create --dry-run|--web`), a
+# merge only scheduled or unscheduled (`gh pr merge --auto|--disable-auto`),
+# and test runs that list or collect but execute nothing.
+_HELP_FLAGS = frozenset({"-h", "--help", "--version"})
+_NOT_CREATING = frozenset({"--dry-run", "-w", "--web"})
+_NOT_MERGING = frozenset({"--auto", "--disable-auto"})
+_NOT_TESTING = frozenset({
+    "--collect-only", "--co", "--fixtures", "--fixtures-per-test", "--markers", "--setup-plan", "--setup-only",
+    "--listTests", "--showConfig", "--list", "--listenvs", "--listenvs-all", "--showconfig", "--notest",
+    "--list-sessions", "--list-tests", "--list-tests-xml", "--list-suites", "--list-groups", "-list", "--no-run",
+    "--dry-run", "-DskipTests", "-Dmaven.test.skip",
+})
+_NOT_TESTING_SHORT = {"pytest": frozenset({"-V"}), "py.test": frozenset({"-V"}),
+                      "tox": frozenset({"-l", "-a", "-n"}), "nox": frozenset({"-l"})}
 _PR_NUMBER = re.compile(r"/pull/(\d+)|^#?(\d+)$")
 _GH_API_FIELDS = ("-f", "-F", "--field", "--raw-field", "--input")
 
@@ -1471,10 +1486,19 @@ def _pr_numbers(args: list[str]) -> set[str]:
     return found
 
 
-def _report_hit(kind: str, prog: str, args: tuple[str, ...], number: str | None) -> bool:
-    """True if this one invocation does what a report claim of ``kind`` says."""
+def _has_flag(args: tuple[str, ...], flags: frozenset[str]) -> bool:
+    """True if ``args`` carries one of ``flags``, bare or as ``--flag=value``."""
+    return any(a.split("=", 1)[0] in flags for a in args)
+
+
+def _report_hit(kind: str, prog: str, args: tuple[str, ...], number: str | None, *, pr: bool = False) -> bool:
+    """True if this one invocation does what a report claim of ``kind`` says.
+
+    ``pr``: the claim names a pull request, which a local `git merge` does not merge."""
     base = _base(prog)
     pos = _positional(args)
+    if _has_flag(args, _HELP_FLAGS):
+        return False
     if kind in ("merge", "pr_create") and base in ("gh", "hub", "git"):
         if base == "gh" and pos[:1] == ["api"]:
             paths = pos[1:]
@@ -1493,13 +1517,20 @@ def _report_hit(kind: str, prog: str, args: tuple[str, ...], number: str | None)
             return not (kind == "merge" and number and named and number not in named)
         if kind == "merge":
             if base == "git":
-                return pos[:1] == ["merge"]
+                return not pr and pos[:1] == ["merge"]
             if base == "gh" and pos[:2] == ["pr", "merge"]:
+                if _has_flag(args, _NOT_MERGING):
+                    return False
                 named = _pr_numbers(pos[2:])
                 return not (number and named and number not in named)
             return False
-        return (base == "gh" and pos[:2] == ["pr", "create"]) or (base == "hub" and pos[:1] == ["pull-request"])
+        if base == "gh" and pos[:2] == ["pr", "create"]:
+            return not _has_flag(args, _NOT_CREATING)
+        return base == "hub" and pos[:1] == ["pull-request"]
     if kind != "test_run":
+        return False
+    if _has_flag(args, _NOT_TESTING) or _has_flag(args, _NOT_TESTING_SHORT.get(base, frozenset())) \
+            or (base == "vitest" and pos[:1] == ["list"]):
         return False
     if base in _TEST_PROGRAMS:
         return True
@@ -1527,6 +1558,7 @@ def _test_outcome(claim: Claim) -> str | None:
 def _report_run_level(claim: Claim, ev: Evidence) -> str:
     """Whether one recorded bash or run_python call RAN what a report claim says."""
     number = (m.group(1) if (m := re.search(r"#(\d+)", claim.text)) else None)
+    pr = bool(re.search(r"\bPR\b|\bpull\s+request|#\d+", claim.text, re.IGNORECASE))
     if _test_outcome(claim) is not None:
         # the exit status is the LAST command's: only a test run there gave it
         # (a run_python exit is the script's, not the tests')
@@ -1534,20 +1566,20 @@ def _report_run_level(claim: Claim, ev: Evidence) -> str:
         if not runs:
             return "none"
         prog, args, _ = runs[-1]
-        if _report_hit(claim.kind, prog, args, number):
+        if _report_hit(claim.kind, prog, args, number, pr=pr):
             return "exact"
         return "plausible" if prog.startswith("$") or _is_script(prog) else "none"
     if ev.tool_name == "run_python":
         facts = _python_facts(ev.args.get("code") or "")
         if facts is None:
             return "plausible" if EVIDENCE_TRUNCATED in (ev.args.get("code") or "") else "none"
-        if any(_report_hit(claim.kind, p, a, number) for p, a in facts.invocations):
+        if any(_report_hit(claim.kind, p, a, number, pr=pr) for p, a in facts.invocations):
             return "exact"
         return "plausible" if facts.run_unknown else "none"
     runs = ev.runs
     if runs is None:  # unreadable: it cannot disprove anything
         return "plausible"
-    if any(_report_hit(claim.kind, prog, args, number) for prog, args, _ in runs):
+    if any(_report_hit(claim.kind, prog, args, number, pr=pr) for prog, args, _ in runs):
         return "exact"
     succeeded = runs[:-1] if ev.exit_code not in (None, 0) else runs
     # a script or an expansion could have run it; a read or an echo could not
