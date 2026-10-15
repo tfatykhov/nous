@@ -429,11 +429,12 @@ async def test_policy_warn_runs_an_offered_call_and_records_it():
     events = []
     r._log_f026_decision = lambda kind, data, session_id: events.append((kind, data))
     r._call_api = _one_tool_call_then_done("send_email")
-    await _run_loop(r, is_background=True, context=ExecutionContext(kind="heartbeat_triage"))
+    # background, not heartbeat_triage: a triage send is refused in every mode (test_heartbeat_outward_floor.py)
+    await _run_loop(r, is_background=True, context=ExecutionContext(kind="background"))
     assert [c[0] for c in d.calls] == ["send_email"]
     assert (
         "harness_context_policy_violation",
-        {"tool_name": "send_email", "context_kind": "heartbeat_triage", "violation": "level:external", "mode": "warn"},
+        {"tool_name": "send_email", "context_kind": "background", "violation": "level:external", "mode": "warn"},
     ) in events
 
 
@@ -560,7 +561,7 @@ def test_not_compensable_blocks_in_warn_mode():
 def test_regular_policy_violation_still_passes_in_warn_mode():
     """Only not_compensable force-blocks; other violations still warn-through."""
     r, _d = _runner(["send_email"], tool_context_policy_mode="warn")
-    ctx = ExecutionContext(kind="heartbeat_triage", session_id="s1")
+    ctx = ExecutionContext(kind="background", session_id="s1")  # a triage send is refused in every mode
     # send_email is external → violation "level:external", NOT not_compensable
     refusal = r._authorize_tool_call(ctx, "send_email", {"send_email"}, "s1", {})
     assert refusal is None, "A non-not_compensable violation should not block in warn mode"

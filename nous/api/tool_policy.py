@@ -8,6 +8,7 @@ are the INTENDED policy; in `warn` mode a deviation is logged and persisted as
 from __future__ import annotations
 
 import re
+import shlex
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -18,7 +19,7 @@ from typing import Any
 from nous.api.execution_context import FOREGROUND_KINDS, ExecutionContext
 from nous.api.tool_classes import is_compensable_call, tool_class
 from nous.brain.intentions import AUTHORITY_INTERNAL
-from nous.cognitive.bash_side_effect import simple_commands
+from nous.cognitive.bash_side_effect import classify_bash_command, command_invocations, command_string, simple_commands
 from nous.cognitive.execution_ledger import classify_side_effect
 
 _ALL = frozenset({"none", "write", "external", "irreversible"})
@@ -580,6 +581,223 @@ def internal_only_call_violation(
         except (TypeError, ValueError):
             return "foreign_cancel"
     return None
+
+
+# Gate criterion 1 (PR #721, 2026-10-10): a heartbeat triage turn merged a PR 36 minutes after the owner parked
+# it. heartbeat_triage's CONTEXT_POLICY row is local-only, but the policy mode is `warn` in prod, so the merge ran.
+# heartbeat_outward_violation is a floor the runner enforces whatever the mode, as it does F099's: a triage turn
+# may not do what a continuation turn would have to propose. Reads stay allowed (a triage reads PRs and the local
+# API all the time); outward writes are refused: a send, a gh call that is not a read (_gh_allowed), a git push,
+# and any other program the shell classifier rates external (a curl/wget/httpie write, ssh, scp, nc, aws ...).
+HEARTBEAT_OUTWARD_TEXT = (
+    "Tool error: a heartbeat turn may not act outward (merge, comment, push or send) on its own: that needs the "
+    "owner's approval. Do not retry it in another form; tell the owner what you would do and why, and stop."
+)
+# What the shell walk cannot read exactly (a `$`, a glob, a brace) and run_python's code, read as text: a gh call
+# with a write verb, `gh api` in any form, a git push, or a curl/wget that sends data. Narrow on purpose; the walk
+# is the rule.
+_OUTWARD_TEXT = re.compile(
+    r"\bgh\b[\s\S]*\b(?:merge|comment|close|create|edit|review|reopen|ready|delete|rerun|lock)\b"
+    r"|\bgh\s+api\b|\bgit\b[\s\S]*\bpush\b"
+    r"|\b(?:curl|wget)\b[\s\S]*(?:\s-[A-Za-z]*[dFTK]|--(?:data|form|json|post|body|upload|config)"
+    r"|-X\s*(?:POST|PUT|PATCH|DELETE))"
+)
+_SSH = re.compile(r"(?:^|[\s;&|(/'\"])ssh\s")
+_SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh"})
+_MAX_SHELL_NESTING = 3
+# curl, wget and httpie (with its `https`, `xh` and `xhs` forms) are default-deny (PR #753 review round 4): every
+# call is a write unless it is a known read form, a GET or HEAD with only the options below and no body. Four
+# rounds each found one more way to send a body (`http --raw`, `@file`, stdin), so the rule names the reads
+# instead. A flag missing here is a false write: add it once it is known not to send anything.
+_HTTP_CLIENTS = frozenset({"curl", "wget", "http", "https", "httpie", "xh", "xhs"})
+_READ_METHODS = frozenset({"GET", "HEAD"})
+# Per client: (short flags with no value, short flags taking a value, long flags with no value, long flags taking
+# a value). The method flags (curl -X/--request, wget --method) are read by _http_client_writes itself.
+_HTTP_READ_FLAGS: dict[str, tuple[str, str, frozenset[str], frozenset[str]]] = {
+    "curl": (
+        "sSLfiIvkgGO46",
+        "HomAweruxX",
+        frozenset({
+            "--silent", "--show-error", "--location", "--fail", "--fail-with-body", "--include", "--head",
+            "--verbose", "--insecure", "--compressed", "--globoff", "--get", "--remote-name", "--no-progress-meter",
+        }),
+        frozenset({
+            "--header", "--output", "--max-time", "--connect-timeout", "--user-agent", "--write-out", "--referer",
+            "--range", "--user", "--retry", "--max-redirs", "--url", "--request",
+        }),
+    ),
+    "wget": (
+        "qSc",
+        "OTtUP",
+        frozenset({"--quiet", "--spider", "--server-response", "--no-verbose", "-nv", "--no-check-certificate"}),
+        frozenset({
+            "--output-document", "--timeout", "--tries", "--user-agent", "--header", "--directory-prefix",
+            "--max-redirect", "--method",
+        }),
+    ),
+    "http": (
+        "hbvFqdI",
+        "posa",
+        frozenset({
+            "--headers", "--body", "--verbose", "--follow", "--check-status", "--download", "--quiet",
+            "--ignore-stdin",
+        }),
+        frozenset({"--print", "--output", "--style", "--auth", "--timeout", "--pretty", "--verify"}),
+    ),
+}
+# Stdin a client may send as the body: any input redirect (`< f`, `<<`, `<<<`) where a client runs, or a pipe
+# into one (`echo x | curl -d @- u`, `cat f | http u`, `... | xargs curl`). Read as text: the walk drops both.
+_CLIENT_WORD = r"(?:^|[\s;&|(/'\"`])(?:curl|wget|https?|httpie|xhs?)(?=[\s;&|)'\"`]|$)"
+_HTTP_CLIENT_TEXT = re.compile(_CLIENT_WORD)
+_PIPE_INTO_CLIENT = re.compile(r"\|&?[^;&|\n]*?" + _CLIENT_WORD)
+# A httpie request item: the first separator in it decides; only a header (`H:v`) and a query (`k==v`) read.
+_HTTPIE_SEP = re.compile(r":=@|:=|==|=@|=|:|@")
+
+
+def _http_client_writes(prog: str, args: list[str]) -> bool:
+    """Whether a curl, wget or httpie call may send something: True unless every argument is on the read-only
+    allowlist (``_HTTP_READ_FLAGS``) and the method, if given, is GET or HEAD. A word the walk cannot know (``$``,
+    a backtick) could be a flag, so it is a write too. httpie: ``[flags] [METHOD] URL [items]``, where an item
+    other than a header or a query is a body, which also makes the call a POST."""
+    kind = "http" if prog not in ("curl", "wget") else prog
+    short, short_value, long_flags, long_value = _HTTP_READ_FLAGS[kind]
+    positionals: list[str] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if "$" in a or "`" in a:
+            return True
+        if a.startswith("--") or a in long_flags:
+            name, eq, value = a.partition("=")
+            if name in long_flags and not eq:
+                i += 1
+                continue
+            if name not in long_value:
+                return True
+            if not eq:
+                if i + 1 >= len(args):
+                    return True
+                i += 1
+                value = args[i]
+            if name in ("--request", "--method") and value.upper() not in _READ_METHODS:
+                return True
+            i += 1
+            continue
+        if a.startswith("-") and a != "-":
+            j = 1
+            while j < len(a):
+                c = a[j]
+                if c in short:
+                    j += 1
+                    continue
+                if c not in short_value:
+                    return True
+                value = a[j + 1 :]
+                if not value:
+                    if i + 1 >= len(args):
+                        return True
+                    i += 1
+                    value = args[i]
+                if kind == "curl" and c == "X" and value.upper() not in _READ_METHODS:
+                    return True
+                break
+            i += 1
+            continue
+        positionals.append(a)
+        i += 1
+    if kind != "http":
+        return False
+    if len(positionals) >= 2 and positionals[0].isalpha():
+        if positionals[0].upper() not in _READ_METHODS:
+            return True
+        positionals = positionals[1:]
+    for item in positionals[1:]:
+        sep = _HTTPIE_SEP.search(item)
+        if sep is None or sep.group() not in (":", "=="):
+            return True
+    return False
+
+
+# Git subcommands that cannot update a remote or run another program: an allowlist, so `send-pack`, `http-push`,
+# `svn dcommit`, `p4 submit`, `rebase --exec`, an alias and anything new are refused.
+_GIT_LOCAL = frozenset({
+    "status", "log", "diff", "show", "fetch", "pull", "rev-parse", "rev-list", "ls-files", "ls-tree", "ls-remote",
+    "blame", "grep", "describe", "shortlog", "cat-file", "show-ref", "for-each-ref", "merge-base", "name-rev",
+    "diff-tree", "diff-files", "diff-index", "count-objects", "check-ignore", "whatchanged", "reflog", "request-pull",
+    "add", "commit", "checkout", "switch", "restore", "merge", "stash", "tag", "init", "clone", "mv", "rm",
+})
+_GIT_OPTS_WITH_VALUE = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"})
+_GIT_REMOTE_READ = frozenset({"-v", "--verbose", "show", "get-url"})
+
+
+def _git_read_or_local(args: list[str]) -> bool:
+    """Whether a ``git`` call is on the allowlist: global options skipped (``-C dir``, ``-c k=v``), then a read-only or
+    local subcommand. ``branch`` and ``remote`` only when they list."""
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        i += 2 if args[i] in _GIT_OPTS_WITH_VALUE else 1
+    if i >= len(args):
+        return True  # bare `git` or `git --version`
+    sub, rest = args[i], args[i + 1 :]
+    if sub == "branch":
+        return all(a in ("-l", "--list", "-a", "-r", "-v", "-vv", "--show-current", "--contains") for a in rest)
+    if sub == "remote":
+        return all(a in _GIT_REMOTE_READ for a in rest)
+    return sub in _GIT_LOCAL
+
+
+def _invocation_outward(prog: str, args: list[str], depth: int) -> bool:
+    """One resolved ``(program, args)`` of a shell command: ``gh`` that is not a read, ``git ... push``, a shell
+    given a command string (read again, to a bounded depth), or any other program the classifier rates external
+    (curl, wget, httpie when they write; ssh, scp, nc, aws, mail ... always)."""
+    name = prog.rsplit("/", 1)[-1]
+    if name.startswith("$") or "`" in name:
+        return True  # a program the walk cannot name
+    if name == "gh":
+        return not _gh_allowed(args)
+    if name == "git":
+        return not _git_read_or_local(args)
+    if name in _SHELLS or name == "eval":
+        script = command_string(name, args)
+        if script is None:
+            return False
+        return depth >= _MAX_SHELL_NESTING or _shell_outward(script, depth + 1)
+    if name in _HTTP_CLIENTS:
+        return _http_client_writes(name, args)
+    return classify_bash_command(shlex.join([name, *args])) == "external"
+
+
+def _shell_outward(command: str, depth: int = 0) -> bool:
+    """Whether a shell command makes an outward write. Every simple command is read the way the side-effect
+    classifier reads it (``command_invocations``: wrappers, ``env``, ``xargs``, ``bash -c`` with any flag cluster,
+    ``eval``, ``;`` ``&&`` ``||`` ``|`` chains, nested strings), then judged by ``_invocation_outward``. A command it
+    cannot read is judged by ``_OUTWARD_TEXT``."""
+    if _SSH.search(command):
+        return True  # command_invocations reads through ssh to the remote command; ssh itself is the outward act
+    invocations = command_invocations(command)
+    if invocations is None:
+        return _OUTWARD_TEXT.search(command) is not None or _HTTP_CLIENT_TEXT.search(command) is not None
+    if any(prog.rsplit("/", 1)[-1] in _HTTP_CLIENTS for prog, _ in invocations) and (
+        "<" in command or _PIPE_INTO_CLIENT.search(command)
+    ):
+        return True  # the body may come from stdin
+    return any(_invocation_outward(prog, args, depth) for prog, args in invocations)
+
+
+def heartbeat_outward_violation(tool_name: str, tool_input: Mapping[str, Any]) -> bool:
+    """Whether a heartbeat_triage call acts outward: a tool whose class is external or irreversible (send_email,
+    send_file), a bash command the classifier rates outward that writes (``_shell_outward``), or run_python code
+    that reads as one (``_OUTWARD_TEXT``)."""
+    cls = tool_class(tool_name)
+    if cls is not None and cls.side_effect in ("external", "irreversible"):
+        return True
+    if tool_name == "bash":
+        command = tool_input.get("command")
+        return isinstance(command, str) and _shell_outward(command)
+    if tool_name == "run_python":
+        code = tool_input.get("code")
+        return isinstance(code, str) and _OUTWARD_TEXT.search(code) is not None
+    return False
 
 
 def undoable_violation(ctx: ExecutionContext, tool_name: str, tool_input: Mapping[str, Any]) -> str | None:
