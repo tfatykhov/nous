@@ -316,3 +316,54 @@ def test_build_embed_text_none_fields():
         implementation_notes=None,
     )
     assert result == "Minimal"
+
+
+# ---------------------------------------------------------------------------
+# skip_until_scored — post-fix grace period for low-effectiveness check
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_low_effectiveness_skip_until_scored(heart, session):
+    """A procedure with runtime_metadata.skip_until_scored is suppressed until
+    its scored activations reach the specified floor, allowing a recently-fixed
+    procedure to accumulate new data before re-appearing in heartbeat findings.
+    """
+    # Create a procedure with 3S / 5F (scored=8, Laplace eff = 4/10 = 0.4)
+    detail = await heart.store_procedure(
+        _procedure_input(name="Post-fix grace period test procedure"),
+        session=session,
+    )
+    for _ in range(3):
+        await heart.record_procedure_outcome(detail.id, "success", session=session)
+    for _ in range(5):
+        await heart.record_procedure_outcome(detail.id, "failure", session=session)
+
+    # Without skip_until_scored it appears in the low-effectiveness list
+    low = await heart.procedures.get_low_effectiveness(threshold=0.5, min_scored=5, session=session)
+    assert any(p.id == detail.id for p in low), "Should appear without skip_until_scored"
+
+    # Set skip_until_scored = 12 (need 4 more scored after the 8 we have)
+    await session.execute(
+        __import__("sqlalchemy").text(
+            "UPDATE heart.procedures SET runtime_metadata = :meta WHERE id = :pid"
+        ),
+        {"meta": __import__("json").dumps({"skip_until_scored": 12}), "pid": str(detail.id)},
+    )
+    await session.flush()
+
+    # Now it should NOT appear (scored 8 < skip_until 12)
+    low2 = await heart.procedures.get_low_effectiveness(threshold=0.5, min_scored=5, session=session)
+    assert not any(p.id == detail.id for p in low2), (
+        "Should be suppressed while scored < skip_until_scored"
+    )
+
+    # Simulate 4 more activations (neutral — don't change success/failure balance here,
+    # just bump scored to 12 by adding 4 more failures so scored reaches 12)
+    for _ in range(4):
+        await heart.record_procedure_outcome(detail.id, "failure", session=session)
+
+    # Now scored == 12 == skip_until_scored → back in the list
+    low3 = await heart.procedures.get_low_effectiveness(threshold=0.5, min_scored=5, session=session)
+    assert any(p.id == detail.id for p in low3), (
+        "Should reappear once scored >= skip_until_scored"
+    )

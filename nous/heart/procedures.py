@@ -850,6 +850,13 @@ class ProcedureManager:
             scored = (p.success_count or 0) + (p.failure_count or 0)
             if scored < min_scored:
                 continue  # insufficient data — skip to avoid FP alerts
+            # runtime_metadata.skip_until_scored lets a recently-fixed procedure
+            # suppress the low-effectiveness finding until enough new post-fix
+            # activations have accumulated to give a fair signal.
+            meta = p.runtime_metadata or {}
+            skip_until = meta.get("skip_until_scored") if isinstance(meta, dict) else None
+            if skip_until is not None and scored < int(skip_until):
+                continue  # post-fix grace period — not enough new data yet
             eff = self._compute_effectiveness(p)
             if eff is not None and eff < threshold:
                 low.append(ProcedureSummary(
