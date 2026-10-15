@@ -25,6 +25,8 @@ services:
       - NOUS_WORKSPACE_DIR=${NOUS_WORKSPACE_DIR:-/tmp/nous-workspace}
       - CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-/tmp/nous-workspace/claude-jobs/.claude-home/.claude}
       - CSTP_TOKEN=${CSTP_TOKEN:-}
+      # Bare: passed only when .env sets it, so forge's own default URL applies otherwise
+      - CSTP_MCP_URL
       - BRAVE_SEARCH_API_KEY=${BRAVE_SEARCH_API_KEY:-}
       - NOUS_EVENT_BUS_ENABLED=${NOUS_EVENT_BUS_ENABLED:-true}
       - NOUS_EPISODE_SUMMARY_ENABLED=${NOUS_EPISODE_SUMMARY_ENABLED:-true}
