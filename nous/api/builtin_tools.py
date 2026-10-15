@@ -69,6 +69,41 @@ _LINEAGE_BASH_ENV = frozenset(
         "GH_HOST",
     }
 )
+# A lineage command that runs a build program (tool_policy.LINEAGE_BUILD_PROGRAMS, NOUS_F099_LINEAGE_BUILD_COMMANDS):
+# pytest and make run the repo's code, so the command gets the same variables minus the GitHub token, plus fixed
+# values: git ignores a repo's fsmonitor hook and signature checks (a `%G` format placeholder verifies with `false`,
+# not a repo's gpg program), never pages, prompts or takes the index lock for `status`, and Python writes no bytecode
+# and loads no user site-packages.
+_LINEAGE_BUILD_ENV = _LINEAGE_BASH_ENV - {"GITHUB_TOKEN", "GH_TOKEN", "GH_HOST"}
+_LINEAGE_BUILD_FIXED_ENV: dict[str, str] = {
+    "GIT_PAGER": "cat",
+    "PAGER": "cat",
+    "GIT_CONFIG_COUNT": "6",
+    "GIT_CONFIG_KEY_0": "core.fsmonitor",
+    "GIT_CONFIG_VALUE_0": "false",
+    "GIT_CONFIG_KEY_1": "log.showSignature",
+    "GIT_CONFIG_VALUE_1": "false",
+    "GIT_CONFIG_KEY_2": "gpg.program",
+    "GIT_CONFIG_VALUE_2": "false",
+    "GIT_CONFIG_KEY_3": "gpg.openpgp.program",
+    "GIT_CONFIG_VALUE_3": "false",
+    "GIT_CONFIG_KEY_4": "gpg.x509.program",
+    "GIT_CONFIG_VALUE_4": "false",
+    "GIT_CONFIG_KEY_5": "gpg.ssh.program",
+    "GIT_CONFIG_VALUE_5": "false",
+    "GIT_OPTIONAL_LOCKS": "0",
+    "GIT_TERMINAL_PROMPT": "0",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONNOUSERSITE": "1",
+}
+
+
+def _lineage_env(build: bool) -> dict[str, str]:
+    """The environment of a lineage's bash: the _LINEAGE_BASH_ENV variables, or for a build command the
+    _LINEAGE_BUILD_ENV ones and _LINEAGE_BUILD_FIXED_ENV."""
+    keep = _LINEAGE_BUILD_ENV if build else _LINEAGE_BASH_ENV
+    env = {k: v for k, v in os.environ.items() if k in keep}
+    return {**env, **_LINEAGE_BUILD_FIXED_ENV} if build else env
 
 
 def _mcp_response(text: str) -> dict[str, Any]:
@@ -103,6 +138,7 @@ async def bash_tool(
     *,
     _workspace_dir: str = "/tmp/nous-workspace",
     _lineage: bool = False,
+    _lineage_build: bool = False,
     _long_timeout: bool = False,
 ) -> dict[str, Any]:
     """Execute a shell command in the workspace directory.
@@ -114,6 +150,9 @@ async def bash_tool(
         _workspace_dir: Internal param set by registration closure
         _lineage: An internal_only (F099 lineage) call, set by dispatch: the
             command gets only the _LINEAGE_BASH_ENV variables
+        _lineage_build: Set by dispatch with ``_lineage`` when the command runs
+            a build program: the _LINEAGE_BUILD_ENV environment (no GitHub
+            token) and no stdin
         _long_timeout: Set by dispatch for a background turn that is not a
             short one (ExecutionContext.is_short_turn)
 
@@ -132,10 +171,11 @@ async def bash_tool(
 
         proc = await asyncio.create_subprocess_shell(
             command,
+            stdin=asyncio.subprocess.DEVNULL if _lineage and _lineage_build else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(workspace),
-            env={k: v for k, v in os.environ.items() if k in _LINEAGE_BASH_ENV} if _lineage else None,
+            env=_lineage_env(_lineage_build) if _lineage else None,
             # Own process group, so a timeout or a cancelled turn can stop the
             # whole command (``a; b``, pipelines), not only the /bin/sh parent.
             start_new_session=True,
@@ -913,10 +953,19 @@ def register_builtin_tools(dispatcher: ToolDispatcher, settings: Settings) -> No
     workspace = settings.workspace_dir
 
     async def _bash(
-        command: str, timeout: int | None = None, _lineage: bool = False, _long_timeout: bool = False
+        command: str,
+        timeout: int | None = None,
+        _lineage: bool = False,
+        _lineage_build: bool = False,
+        _long_timeout: bool = False,
     ) -> dict[str, Any]:
         return await bash_tool(
-            command, timeout, _workspace_dir=workspace, _lineage=_lineage, _long_timeout=_long_timeout
+            command,
+            timeout,
+            _workspace_dir=workspace,
+            _lineage=_lineage,
+            _lineage_build=_lineage_build,
+            _long_timeout=_long_timeout,
         )
 
     async def _read_file(path: str, offset: int = 0, limit: int = 0) -> dict[str, Any]:

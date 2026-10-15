@@ -247,6 +247,7 @@ def make_propose_action_executor(
     dispatcher: Any,
     stage: Callable[[str, dict, str], Awaitable[UUID]],
     lineage_shell: bool = False,
+    build_commands: bool = False,
     workspace_dir: str = "",
 ) -> Callable[..., Awaitable[tuple[str, bool]]]:
     """The executor of ``propose_action`` for one turn (the ``extra_tools`` shape: ``(text, is_error)``).
@@ -256,9 +257,9 @@ def make_propose_action_executor(
     ``PROPOSABLE_SPAWN_TOOLS``) and must NOT be one this lineage may already call (``internal_only_allowed``, judged
     as if the root were below its limits: a spawn tool removed at the limit is still not a proposal, because
     approving one would route around the limit). With ``lineage_shell``, a ``bash`` command the lineage
-    allowlist refuses (``tool_policy.lineage_bash_allowed``) is still a proposal. The call must satisfy the
-    tool's schema, and no argument may start with an underscore. A refusal is an error text the model can act
-    on; a non-terminal success returns to the model, which then ends the turn with ``ask``."""
+    allowlist refuses (``tool_policy.lineage_bash_allowed``, with ``build_commands``) is still a proposal. The
+    call must satisfy the tool's schema, and no argument may start with an underscore. A refusal is an error text
+    the model can act on; a non-terminal success returns to the model, which then ends the turn with ``ask``."""
     probe = dataclasses.replace(ctx, spawn_blocked=False)
 
     async def propose_action(**kwargs: Any) -> tuple[str, bool]:
@@ -284,7 +285,7 @@ def make_propose_action_executor(
         if tool_policy.internal_only_allowed(tool, ctx=probe, lineage_shell=lineage_shell) and not (
             tool == "bash"
             and not tool_policy.lineage_bash_allowed(
-                probe, str(arguments.get("command", "")), workspace_dir=workspace_dir
+                probe, str(arguments.get("command", "")), workspace_dir=workspace_dir, build_commands=build_commands
             )
         ):
             return f"Error: {tool} is a tool you may call yourself, so call it yourself; it is not a proposal.", True
@@ -1222,6 +1223,7 @@ class ContinuationRunner:
                     dispatcher=self._dispatcher,
                     stage=self._stager(claim),
                     lineage_shell=settings.f099_lineage_shell,
+                    build_commands=settings.f099_lineage_build_commands,
                     workspace_dir=settings.workspace_dir,
                 ),
             )

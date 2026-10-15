@@ -191,6 +191,106 @@ _LINEAGE_SINKS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr"})
 _GH_API_VALUE_FLAGS = frozenset({"--jq", "-q", "--template", "-t"})
 _GH_API_FLAGS = frozenset({"--paginate", "--slurp", "--silent", "--include", "-i", "--verbose"})
 _GH_OUTWARD_FLAGS = ("--web", "-w", "--watch", "--hostname")
+# F099 lineage build commands (NOUS_F099_LINEAGE_BUILD_COMMANDS): a lineage may verify a build itself. These run
+# only in a repo's top level, reached by `cd <repo> &&` (_build_repo), and with a closed option map each. pytest and
+# make run the repo's own code, so the repo must be one the lineage cannot write into; the command runs without the
+# GitHub token (builtin_tools._LINEAGE_BUILD_ENV, set by dispatch through lineage_runs_build).
+LINEAGE_BUILD_PROGRAMS: frozenset[str] = frozenset({"git", "pytest", "ruff", "make"})
+LINEAGE_MAKE_TARGETS: frozenset[str] = frozenset({"test", "lint", "check", "typecheck", "format-check", "build"})
+_MAKE_FLAGS = frozenset({"-k", "-s", "--keep-going", "--silent", "--no-print-directory"})
+
+
+@dataclass(frozen=True)
+class _GitRoles:
+    """A read-only git subcommand's options. ``flags``: long options, with or without ``=value``. ``values``: long
+    options that must carry ``=value``; the next word is never taken as a value, because `git diff -U /etc/passwd x`
+    would read it as a path and compare a file outside the repo. ``short``: one letter per word, ``flag`` or ``value``
+    (attached, ``-n5``). ``counts``: ``-<number>`` (``git log -5``)."""
+
+    flags: frozenset[str]
+    values: frozenset[str]
+    short: Mapping[str, str]
+    counts: bool = False
+
+
+_GIT_DIFF_FLAGS = (
+    "--stat --shortstat --numstat --dirstat --summary --name-only --name-status --patch --no-patch --raw --color "
+    "--no-color --word-diff --no-ext-diff --no-textconv --ignore-all-space --ignore-space-change --ignore-blank-lines "
+    "--ignore-cr-at-eol --minimal --patience --histogram --full-index --abbrev --no-renames --find-renames"
+)
+_GIT_LOG_FLAGS = (
+    "--oneline --graph --decorate --no-decorate --all --branches --tags --remotes --reverse --merges --no-merges "
+    "--first-parent --follow --date-order --topo-order --abbrev-commit --no-abbrev-commit --left-right --source "
+    "--pretty"
+)
+_GIT_LOG_VALUES = (
+    "--max-count --skip --since --after --until --before --author --committer --grep --format --date --diff-filter "
+    "--unified"
+)
+_GIT_DIFF_SHORT = {**dict.fromkeys("pusw", "flag"), "U": "value"}
+_GIT_LOG_ROLES = _GitRoles(
+    frozenset(f"{_GIT_DIFF_FLAGS} {_GIT_LOG_FLAGS}".split()),
+    frozenset(_GIT_LOG_VALUES.split()),
+    {**_GIT_DIFF_SHORT, "n": "value"},
+    counts=True,
+)
+# No --output, --ext-diff, --textconv, --no-index (a diff of any two files), -O<orderfile>, --submodule, and no
+# option before the subcommand (-C, -c, --git-dir, --work-tree, --exec-path, -p).
+LINEAGE_GIT_READS: Mapping[str, _GitRoles] = MappingProxyType(
+    {
+        "status": _GitRoles(
+            frozenset(
+                "--short --branch --porcelain --long --verbose --show-stash --ahead-behind --no-ahead-behind "
+                "--ignored --untracked-files --no-renames --renames".split()
+            ),
+            frozenset(),
+            {**dict.fromkeys("sbvz", "flag"), "u": "value"},
+        ),
+        "log": _GIT_LOG_ROLES,
+        "show": _GIT_LOG_ROLES,
+        "diff": _GitRoles(
+            frozenset(f"{_GIT_DIFF_FLAGS} --cached --staged --merge-base --exit-code --quiet --check".split()),
+            frozenset({"--diff-filter", "--unified"}),
+            _GIT_DIFF_SHORT,
+        ),
+    }
+)
+# pytest: no -p (a plugin), -c / --rootdir / --confcutdir / -o (another config or root), --pyargs (an installed
+# package's tests), --basetemp / --junitxml / --resultlog (writes), --import-mode.
+_PYTEST_ROLES = _ArgRoles(
+    {**dict.fromkeys("qvxsl", "flag"), **dict.fromkeys("kmr", "value")},
+    {
+        **dict.fromkeys(
+            (
+                "--quiet --verbose --exitfirst --showlocals --co --collect-only --lf --last-failed --ff "
+                "--failed-first --sw --stepwise --no-header --strict-markers --runxfail"
+            ).split(),
+            "flag",
+        ),
+        **dict.fromkeys(("--tb", "--maxfail", "--durations", "--deselect"), "value"),
+    },
+    closed=True,
+)
+# ruff: no --fix / --unsafe-fixes / --add-noqa / --watch (writes or never ends), --config / --extend (another
+# config), -o / --output-file, --cache-dir. `ruff format` only checks: --check or --diff is required.
+_RUFF_ROLES: Mapping[str, _ArgRoles] = MappingProxyType(
+    {
+        "check": _ArgRoles(
+            {"q": "flag"},
+            {
+                **dict.fromkeys(
+                    "--quiet --statistics --no-cache --no-fix --no-fix-only --show-fixes --exit-zero --diff".split(),
+                    "flag",
+                ),
+                **dict.fromkeys(("--output-format", "--select", "--ignore", "--extend-select"), "value"),
+            },
+            closed=True,
+        ),
+        "format": _ArgRoles(
+            {"q": "flag"}, dict.fromkeys("--check --diff --quiet --no-cache".split(), "flag"), closed=True
+        ),
+    }
+)
 # A runner.sh repo name or option value: interpolated into a `python3 -c` string by runner.sh, so no quotes.
 _RUNNER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 _RUNNER_BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9_./-]*")
@@ -490,7 +590,108 @@ def _runner_allowed(args: list[str], *, workspace: Path, readable: list[Path]) -
     return True
 
 
-def lineage_bash_allowed(ctx: ExecutionContext, command: str, *, workspace_dir: str) -> bool:
+def _build_repo(cwd: Path, root: Path, writable: list[Path]) -> bool:
+    """``cwd`` (resolved) is a repo's top level a build command may run in: below the workspace, holding ``.git``,
+    and neither inside nor around a directory a lineage may write (``lineage_write_dirs``, and ``intentions/`` as a
+    whole: another root's lineage writes its own ``intentions/<root>/``), so no lineage can plant the
+    ``.git/config``, Makefile or conftest.py that runs."""
+    if cwd == root or not cwd.is_relative_to(root) or not (cwd / ".git").exists():
+        return False
+    dirs = [d.resolve() for d in (*writable, root / "intentions")]
+    return not any(cwd.is_relative_to(d) or d.is_relative_to(cwd) for d in dirs)
+
+
+def _in_repo(operand: str, repo: Path) -> bool:
+    """A build command's operand stays in ``repo``: not absolute, no ``~`` or ``..`` component, and it resolves under
+    ``repo`` with no hidden component (a symlink out, ``.git``), whether or not it exists yet. A git revision
+    (``HEAD``, ``main..HEAD``) resolves to a name in the repo too; git and pytest reject what names nothing."""
+    if operand.startswith(("/", "~")) or ".." in operand.split("/"):
+        return False
+    return _readable(operand.split("::", 1)[0], [repo], repo) is not None  # a pytest node id: path::Class::test
+
+
+def _git_allowed(args: list[str], repo: Path) -> bool:
+    """``git status|log|show|diff`` with the options in LINEAGE_GIT_READS, and operands that stay in ``repo``."""
+    if not args or args[0] not in LINEAGE_GIT_READS:
+        return False
+    roles = LINEAGE_GIT_READS[args[0]]
+    rest = args[1:]
+    for i, a in enumerate(rest):
+        if a == "--":
+            return all(_in_repo(o, repo) for o in rest[i + 1 :])
+        if a.startswith("--"):
+            name, eq, _ = a.partition("=")
+            if not (name in roles.flags or (eq and name in roles.values)):
+                return False
+        elif a.startswith("-") and len(a) > 1:
+            role = roles.short.get(a[1])
+            if roles.counts and a[1:].isdigit():
+                continue
+            if role is None or (role == "flag" and len(a) > 2) or (role == "value" and len(a) == 2):
+                return False
+        elif not _in_repo(a, repo):
+            return False
+    return True
+
+
+def _build_allowed(prog: str, args: list[str], repo: Path) -> bool:
+    """A build command (LINEAGE_BUILD_PROGRAMS) whose options are all in its closed map and whose paths stay in
+    ``repo``. ``make`` takes only LINEAGE_MAKE_TARGETS (at least one: a bare make runs the default goal) and
+    ``-k``/``-s``: no ``-f``, ``-C``, ``-I``, ``--eval`` or ``VAR=value``. ``ruff format`` needs ``--check`` or
+    ``--diff``, and ``ruff check`` both ``--no-fix`` and ``--no-fix-only``, before any ``--``: a repo's ``fix`` or
+    ``fix-only`` setting would otherwise write. No word may start with ``@``: pytest and ruff read ``@file`` as a
+    response file whose lines become arguments, anywhere in the command (after ``--`` too)."""
+    if any(a.startswith("@") for a in args):
+        return False
+    if prog == "git":
+        return _git_allowed(args, repo)
+    if prog == "make":
+        return any(a in LINEAGE_MAKE_TARGETS for a in args) and all(
+            a in LINEAGE_MAKE_TARGETS or a in _MAKE_FLAGS for a in args
+        )
+    if prog == "ruff":
+        if not args or args[0] not in _RUFF_ROLES:
+            return False
+        opts = set(args[: args.index("--")] if "--" in args else args)  # after `--` a word is a file
+        if args[0] == "format" and not opts & {"--check", "--diff"}:
+            return False
+        if args[0] == "check" and not {"--no-fix", "--no-fix-only"} <= opts:  # a repo's fix/fix-only would write
+            return False
+        split = _split_read_args(args[1:], _RUFF_ROLES[args[0]])
+    else:
+        split = _split_read_args(args, _PYTEST_ROLES)
+    return split is not None and all(_in_repo(o, repo) for o in split[0])
+
+
+def lineage_runs_build(command: str) -> bool:
+    """Whether a lineage's bash ``command`` runs a build program, so dispatch gives it the build environment (no
+    GitHub token). True when the command cannot be read exactly: the scrub fails closed."""
+    commands = simple_commands(command)
+    if commands is None:
+        return True
+    return any(words and Path(words[0]).name in LINEAGE_BUILD_PROGRAMS for words, _, _, _ in commands)
+
+
+def lineage_bash_refusal_hint(*, build_commands: bool) -> str:
+    """What the lineage shell allows, appended to its refusal."""
+    text = (
+        "The lineage shell allows only: plain reads (cat, ls, head, tail, wc, grep, jq, echo, printf, pwd, cd, "
+        "sleep, true) inside the workspace; read-only gh calls (pr view|checks|list|diff|status, issue view|list, "
+        "run view|list, repo view, gh api GET); claude-jobs/runner.sh launch|status|list|result"
+    )
+    if build_commands:
+        text += (
+            "; and, in a git repo's top level reached by `cd <repo> &&`: git status|log|diff|show, pytest, "
+            "ruff check --no-fix --no-fix-only, ruff format --check|--diff, "
+            f"make {'|'.join(sorted(LINEAGE_MAKE_TARGETS))}, "
+            "each with a fixed set of options and paths inside the repo, in a bash call without gh or runner.sh"
+        )
+    return text + ". Join commands with ; && || | only. Propose anything else to the owner with propose_action."
+
+
+def lineage_bash_allowed(
+    ctx: ExecutionContext, command: str, *, workspace_dir: str, build_commands: bool = False
+) -> bool:
     """Whether an internal_only turn may run this bash ``command`` (F099 lineage shell).
 
     An allowlist, failing closed: every simple command must be a LINEAGE_READ_COMMANDS command, a read-only
@@ -504,18 +705,32 @@ def lineage_bash_allowed(ctx: ExecutionContext, command: str, *, workspace_dir: 
     resolve under ``<workspace_dir>`` with no hidden component (``_readable``), from the workspace (the shell's
     cwd) and from every directory an earlier ``cd`` in the command could have reached. ``CDPATH`` is not in a
     lineage's environment (``builtin_tools._LINEAGE_BASH_ENV``), so ``cd`` goes where it says.
+
+    ``build_commands`` (``NOUS_F099_LINEAGE_BUILD_COMMANDS``) also allows LINEAGE_BUILD_PROGRAMS (``_build_allowed``)
+    where the shell's cwd is known to be a repo's top level (``_build_repo``). A ``cd`` sets that cwd when it is not
+    skipped by an ``||`` or run in a pipeline (a subshell), and a relative one needs the cwd known; it stays known
+    only while every later join is ``&&`` or ``|``, so the command runs only if the ``cd`` succeeded. A build
+    command runs the whole command without the GitHub token (``lineage_runs_build``), so it may not be joined with
+    ``gh`` or ``runner.sh``, which need the token.
     """
     commands = simple_commands(command)
     if commands is None or not any(words for words, _, _, _ in commands):
         return False
+    builds = needs_token = False
     workspace = Path(workspace_dir)
     jobs = workspace / "claude-jobs"
     writable = lineage_write_dirs(ctx, workspace_dir, lineage_shell=True)  # bash is offered only with the shell
     root = workspace.resolve()
     cwds = [root]
+    cwd: Path | None = root  # where the shell surely is, for a build command
+    moved = False  # cwd is where a cd went: sure only while that cd's success gates what runs
+    prev: str | None = None
     for words, targets, sources, op in commands:
         if op not in _LINEAGE_JOINS:
             return False
+        after, prev = prev, op  # the join before this command; this one's is the next one's
+        if moved and after not in ("&&", "|"):
+            cwd = None  # `cd x; pytest` runs pytest where the shell was if the cd failed
         if not words:
             if targets or sources:
                 return False
@@ -534,18 +749,30 @@ def lineage_bash_allowed(ctx: ExecutionContext, command: str, *, workspace_dir: 
                 cwds = list(dict.fromkeys([*cwds, *reached[0]]))
                 if len(cwds) > _MAX_LINEAGE_CWDS:
                     return False
+                base = [root] if args[0].startswith("/") else [cwd] if cwd is not None else None
+                runs = after in (None, "&&", ";", "\n") and op != "|"  # not skipped, not in a subshell
+                target = _readable(args[0], base, root) if runs and base is not None else None
+                cwd, moved = (target[0] if target else None), True
         if prog == str(jobs / "runner.sh"):
             if not _runner_allowed(args, workspace=workspace, readable=writable):
                 return False
+            needs_token = True
         elif prog == "gh":
             if not _gh_allowed(args):
                 return False
+            needs_token = True
         elif prog == "printf":
             if not _printf_allowed(args):
                 return False
+        elif build_commands and prog in LINEAGE_BUILD_PROGRAMS:
+            if cwd is None or not _build_repo(cwd, root, writable):
+                return False
+            if not _build_allowed(prog, args, cwd):
+                return False
+            builds = True
         elif prog not in LINEAGE_READ_COMMANDS:
             return False
-    return True
+    return not (builds and needs_token)
 
 
 def internal_only_call_violation(
@@ -555,12 +782,14 @@ def internal_only_call_violation(
     *,
     workspace_dir: str,
     lineage_shell: bool = False,
+    build_commands: bool = False,
 ) -> str | None:
     """The per-call rules of an internal_only turn, for a tool that WAS offered.
 
     ``"external"``: ``classify_side_effect`` rates the call external (or
     irreversible), such as a URL in run_python; for bash, the command is not on
-    the lineage allowlist (``lineage_bash_allowed``). ``"write_path"``: write_file outside
+    the lineage allowlist (``lineage_bash_allowed``, with the build commands when ``build_commands``, i.e.
+    ``NOUS_F099_LINEAGE_BUILD_COMMANDS``). ``"write_path"``: write_file outside
     ``lineage_write_dirs`` (``claude-jobs/prompts/`` only with ``lineage_shell``, i.e.
     ``NOUS_F099_LINEAGE_SHELL``). ``"foreign_cancel"``: cancel_task with an id that is not a
     UUID. The cancel_task lineage check needs the target's row, so it lives in the
@@ -568,7 +797,9 @@ def internal_only_call_violation(
     """
     if name == "bash":
         command = tool_input.get("command")
-        if not isinstance(command, str) or not lineage_bash_allowed(ctx, command, workspace_dir=workspace_dir):
+        if not isinstance(command, str) or not lineage_bash_allowed(
+            ctx, command, workspace_dir=workspace_dir, build_commands=build_commands
+        ):
             return "external"
         return None
     if classify_side_effect(name, dict(tool_input)) in ("external", "irreversible"):

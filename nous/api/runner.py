@@ -550,6 +550,7 @@ class AgentRunner:
                     tool_input,
                     workspace_dir=self._settings.workspace_dir,
                     lineage_shell=self._settings.f099_lineage_shell,
+                    build_commands=self._settings.f099_lineage_build_commands,
                 )
             if strict is not None:
                 scope = "internal_only" if ctx.authority == AUTHORITY_INTERNAL else ctx.kind
@@ -571,6 +572,10 @@ class AgentRunner:
                 if strict == "write_path":
                     text += " " + tool_policy.write_path_refusal_hint(
                         ctx, self._settings.workspace_dir, lineage_shell=self._settings.f099_lineage_shell
+                    )
+                elif strict == "external" and tool_name == "bash" and ctx.authority == AUTHORITY_INTERNAL:
+                    text += " " + tool_policy.lineage_bash_refusal_hint(
+                        build_commands=self._settings.f099_lineage_build_commands
                     )
                 return Refusal(text, "internal_only")
 
