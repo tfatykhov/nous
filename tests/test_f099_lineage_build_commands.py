@@ -186,6 +186,14 @@ REFUSED = [
     "cd nous && pytest /tmp/test_evil.py",
     "cd nous && pytest .git/hooks",
     "cd nous && pytest -k",
+    # a response file: its lines become arguments (pytest 8.2+, ruff), in any position
+    "cd nous && pytest @tests/args",
+    "cd nous && pytest @{W}/intentions/{RID}/args",
+    "cd nous && pytest -k @tests/args",
+    "cd nous && pytest -- @tests/args",
+    "cd nous && ruff check --no-fix --no-fix-only @tests/args",
+    "cd nous && ruff format --check @tests/args",
+    "cd nous && git log @tests/args",
     # ruff: writes and other configs
     "cd nous && ruff check",
     "cd nous && ruff check --no-fix",
