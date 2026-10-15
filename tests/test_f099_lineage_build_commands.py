@@ -266,9 +266,17 @@ def test_every_escape_and_anything_off_the_option_maps_is_refused(command, ws):
 def test_a_repo_the_lineage_can_write_into_is_not_one_a_build_may_run_in(ws):
     """The lineage may write_file under intentions/<root>/ and claude-jobs/prompts/: a .git, Makefile or conftest.py
     it plants there must not turn pytest or make into run_python."""
-    for planted in (ws / "intentions" / str(RID), ws / "intentions" / str(RID) / "x", ws / "claude-jobs"):
+    other_root = ws / "intentions" / "00000000-0000-0000-0000-000000000009"  # another lineage writes its own dir
+    for planted in (
+        ws / "intentions" / str(RID),
+        ws / "intentions" / str(RID) / "x",
+        ws / "claude-jobs",
+        other_root,
+        other_root / "evil",
+        ws / "intentions",
+    ):
         (planted / ".git").mkdir(parents=True)
-        cd = planted.relative_to(ws)
+        cd = planted.relative_to(ws).as_posix()
         for command in (f"cd {cd} && pytest", f"cd {cd} && make test", f"cd {cd} && git status"):
             assert _allowed(command, ws) is False, command
 
@@ -436,6 +444,36 @@ async def test_git_runs_without_the_token_and_ignores_the_repos_fsmonitor(ws, se
     text, _ = await _bash_dispatcher(ws).dispatch("bash", {"command": command}, context=_internal())
     _no_secret(text)
     assert "GIT_CONFIG_KEY_0=core.fsmonitor" in text and "GIT_CONFIG_VALUE_0=false" in text
+
+
+@pytest.mark.skipif(os.name == "nt" or shutil.which("git") is None, reason="a POSIX shell and git")
+async def test_a_signature_placeholder_does_not_run_the_repos_gpg_program(ws, tmp_path_factory):
+    """A `%G` format placeholder verifies the commit's signature with gpg.program, which repo config names."""
+    import subprocess
+
+    repo, marker = ws / "nous", tmp_path_factory.mktemp("gpg") / "ran"
+    shutil.rmtree(repo / ".git")
+    fake_gpg = repo / "fake-gpg.sh"
+    fake_gpg.write_text(f"#!/bin/sh\ntouch {marker}\n")
+    fake_gpg.chmod(0o755)
+
+    def git(*args: str, stdin: str = "") -> str:
+        return subprocess.run(["git", *args], cwd=repo, input=stdin, capture_output=True, text=True, check=True).stdout
+
+    git("init", "-q")
+    git("config", "gpg.program", str(fake_gpg))
+    tree = git("mktree").strip()
+    sig = " -----BEGIN PGP SIGNATURE-----\n \n iQ==\n -----END PGP SIGNATURE-----"
+    commit = f"tree {tree}\nauthor a <a@b> 0 +0000\ncommitter a <a@b> 0 +0000\ngpgsig{sig}\n\nsigned\n"
+    git("update-ref", "HEAD", git("hash-object", "-t", "commit", "-w", "--stdin", stdin=commit).strip())
+    command = "cd nous && git log --format=%GK"
+    assert _allowed(command, ws) is True
+
+    git("log", "--format=%GK")  # control: without the pins, git runs the repo's gpg program
+    assert marker.exists()
+    marker.unlink()
+    await _bash_dispatcher(ws).dispatch("bash", {"command": command}, context=_internal())
+    assert not marker.exists()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="a POSIX shell")

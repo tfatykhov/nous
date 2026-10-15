@@ -71,17 +71,26 @@ _LINEAGE_BASH_ENV = frozenset(
 )
 # A lineage command that runs a build program (tool_policy.LINEAGE_BUILD_PROGRAMS, NOUS_F099_LINEAGE_BUILD_COMMANDS):
 # pytest and make run the repo's code, so the command gets the same variables minus the GitHub token, plus fixed
-# values: git ignores a repo's fsmonitor hook and signature checks, never pages, prompts or takes the index lock for
-# `status`, and Python writes no bytecode and loads no user site-packages.
+# values: git ignores a repo's fsmonitor hook and signature checks (a `%G` format placeholder verifies with `false`,
+# not a repo's gpg program), never pages, prompts or takes the index lock for `status`, and Python writes no bytecode
+# and loads no user site-packages.
 _LINEAGE_BUILD_ENV = _LINEAGE_BASH_ENV - {"GITHUB_TOKEN", "GH_TOKEN", "GH_HOST"}
 _LINEAGE_BUILD_FIXED_ENV: dict[str, str] = {
     "GIT_PAGER": "cat",
     "PAGER": "cat",
-    "GIT_CONFIG_COUNT": "2",
+    "GIT_CONFIG_COUNT": "6",
     "GIT_CONFIG_KEY_0": "core.fsmonitor",
     "GIT_CONFIG_VALUE_0": "false",
     "GIT_CONFIG_KEY_1": "log.showSignature",
     "GIT_CONFIG_VALUE_1": "false",
+    "GIT_CONFIG_KEY_2": "gpg.program",
+    "GIT_CONFIG_VALUE_2": "false",
+    "GIT_CONFIG_KEY_3": "gpg.openpgp.program",
+    "GIT_CONFIG_VALUE_3": "false",
+    "GIT_CONFIG_KEY_4": "gpg.x509.program",
+    "GIT_CONFIG_VALUE_4": "false",
+    "GIT_CONFIG_KEY_5": "gpg.ssh.program",
+    "GIT_CONFIG_VALUE_5": "false",
     "GIT_OPTIONAL_LOCKS": "0",
     "GIT_TERMINAL_PROMPT": "0",
     "PYTHONDONTWRITEBYTECODE": "1",

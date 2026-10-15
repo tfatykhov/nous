@@ -591,11 +591,12 @@ def _runner_allowed(args: list[str], *, workspace: Path, readable: list[Path]) -
 
 def _build_repo(cwd: Path, root: Path, writable: list[Path]) -> bool:
     """``cwd`` (resolved) is a repo's top level a build command may run in: below the workspace, holding ``.git``,
-    and neither inside nor around a directory the lineage may write (``lineage_write_dirs``), so the lineage cannot
-    plant the ``.git/config``, Makefile or conftest.py that runs."""
+    and neither inside nor around a directory a lineage may write (``lineage_write_dirs``, and ``intentions/`` as a
+    whole: another root's lineage writes its own ``intentions/<root>/``), so no lineage can plant the
+    ``.git/config``, Makefile or conftest.py that runs."""
     if cwd == root or not cwd.is_relative_to(root) or not (cwd / ".git").exists():
         return False
-    dirs = [d.resolve() for d in writable]
+    dirs = [d.resolve() for d in (*writable, root / "intentions")]
     return not any(cwd.is_relative_to(d) or d.is_relative_to(cwd) for d in dirs)
 
 
