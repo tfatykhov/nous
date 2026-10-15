@@ -639,9 +639,13 @@ def _build_allowed(prog: str, args: list[str], repo: Path) -> bool:
     ``repo``. ``make`` takes only LINEAGE_MAKE_TARGETS (at least one: a bare make runs the default goal) and
     ``-k``/``-s``: no ``-f``, ``-C``, ``-I``, ``--eval`` or ``VAR=value``. ``ruff format`` needs ``--check`` or
     ``--diff``, and ``ruff check`` both ``--no-fix`` and ``--no-fix-only``, before any ``--``: a repo's ``fix`` or
-    ``fix-only`` setting would otherwise write. No word may start with ``@``: pytest and ruff read ``@file`` as a
-    response file whose lines become arguments, anywhere in the command (after ``--`` too)."""
-    if any(a.startswith("@") for a in args):
+    ``fix-only`` setting would otherwise write. No pytest or ruff word may start with ``@``: both read ``@file`` as a
+    response file whose lines become arguments, anywhere in the command (after ``--`` too); git and make do not, so
+    a git revision like ``@{u}..`` stays. No pytest word may start with ``-p``: pytest loads ``-p NAME``/``-pNAME``
+    as a plugin from the raw arguments before it parses them, so after ``--`` too."""
+    if prog in ("pytest", "ruff") and any(a.startswith("@") for a in args):
+        return False
+    if prog == "pytest" and any(a.startswith("-p") for a in args):
         return False
     if prog == "git":
         return _git_allowed(args, repo)

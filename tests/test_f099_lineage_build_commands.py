@@ -65,6 +65,9 @@ ALLOWED = [
     "cd nous && git diff --name-only origin/main...HEAD",
     "cd nous && git diff -U5 --no-ext-diff --no-textconv 'HEAD~1' -- tests",
     "cd nous && git diff --unified=0 --diff-filter=M --exit-code",
+    # git reads no response file: `@` revisions stay (quoted: the lexer refuses a bare brace or tilde)
+    "cd nous && git log --oneline '@{{u}}..'",  # str.format: {{u}} is @{u}
+    "cd nous && git diff '@~1'",
     "cd nous && git show",
     "cd nous && git show --stat HEAD",
     "cd nous && git show HEAD:tests/test_a.py",
@@ -193,7 +196,12 @@ REFUSED = [
     "cd nous && pytest -- @tests/args",
     "cd nous && ruff check --no-fix --no-fix-only @tests/args",
     "cd nous && ruff format --check @tests/args",
-    "cd nous && git log @tests/args",
+    # a plugin: pytest reads -p NAME / -pNAME from the raw arguments before parsing them, after `--` too
+    "cd nous && pytest -- -p evil",
+    "cd nous && pytest tests -- -pevil",
+    "cd nous && pytest -- -p no:cacheprovider",
+    "cd nous && pytest -k '-p evil'",
+    "cd nous && pytest -- '-p' evil",
     # ruff: writes and other configs
     "cd nous && ruff check",
     "cd nous && ruff check --no-fix",
