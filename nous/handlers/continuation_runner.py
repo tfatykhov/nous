@@ -258,8 +258,8 @@ def make_propose_action_executor(
     as if the root were below its limits: a spawn tool removed at the limit is still not a proposal, because
     approving one would route around the limit). With ``lineage_shell``, a ``bash`` command the lineage
     allowlist refuses (``tool_policy.lineage_bash_allowed``, with ``build_commands``) is still a proposal. The
-    call must satisfy the tool's schema, and no argument may start with an underscore. A refusal is an error text the model can act
-    on; a non-terminal success returns to the model, which then ends the turn with ``ask``."""
+    call must satisfy the tool's schema, and no argument may start with an underscore. A refusal is an error text
+    the model can act on; a non-terminal success returns to the model, which then ends the turn with ``ask``."""
     probe = dataclasses.replace(ctx, spawn_blocked=False)
 
     async def propose_action(**kwargs: Any) -> tuple[str, bool]:
