@@ -1398,3 +1398,47 @@ class TestSubshellMaskedFailure:
         from nous.cognitive.execution_ledger import bash_masked_failure
 
         assert bash_masked_failure(cmd, "error: build failed\nExit code: 0") == "error: build failed"
+
+
+class TestNestedStringMaskedFailure:
+    @pytest.mark.parametrize("cmd", [
+        "bash -c 'psql x; cat out'",
+        'sh -c "false; true"',
+        'eval "psql x; cat y"',
+        'bash -c "$CMD"',
+        "bash -c '$CMD'",
+        "env FOO=1 bash -c 'a; b'",
+        "timeout 5 sh -c 'a || true'",
+        "nohup bash -c 'a | b'",
+        "sudo -u x bash -c 'a; b'",
+        "xargs sh -c 'a; b'",
+        "bash -c \"sh -c 'a; b'\"",
+        "cd /repo && bash -c 'a; b'",
+        "bash -c '! psql x'",
+        "bash -c 'psql x' &",
+        "bash script.sh",
+        "bash <<< 'psql x; cat out'",
+        "env -S 'psql x; cat out'",
+        "ssh host 'psql x; cat out'",
+        "find . -exec psql x {} ;",
+        "docker exec c sh -c 'psql x; cat out'",
+        "X=1",
+    ])
+    def test_a_command_that_can_mask_a_failure_is_scanned(self, cmd):
+        from nous.cognitive.execution_ledger import bash_masked_failure
+
+        out = "psql: error: connection to server failed\nExit code: 0"
+        assert bash_masked_failure(cmd, out) == "psql: error: connection to server failed"
+
+    @pytest.mark.parametrize("cmd", [
+        "cat build.log",
+        "bash -c 'cat build.log'",
+        "sh -c 'cd /repo && cat build.log'",
+        "timeout 5 bash -c 'cat build.log'",
+        "env FOO=1 cat build.log",
+        "eval cat build.log",
+    ])
+    def test_a_nested_lone_command_is_trusted(self, cmd):
+        from nous.cognitive.execution_ledger import bash_masked_failure
+
+        assert bash_masked_failure(cmd, "error: unused import\nExit code: 0") is None
