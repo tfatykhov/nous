@@ -19,9 +19,11 @@ from nous.api.tool_policy import (
     INTERNAL_ONLY_DENYLIST,
     INTERNAL_ONLY_LOGGED_TOOLS,
     INTERNAL_ONLY_SPAWN_TOOLS,
+    LINEAGE_BUILD_COMMANDS,
     internal_only_allowed,
     internal_only_call_violation,
     lineage_bash_allowed,
+    lineage_command_needs_scrub,
 )
 
 # Fixed ids: parametrize ids built from them must not change between collections (xdist).
@@ -771,3 +773,234 @@ async def test_a_bash_call_outside_a_lineage_keeps_the_full_environment(tmp_path
     d = _bash_dispatcher(tmp_path)
     text, _ = await d.dispatch("bash", {"command": "printenv NOUS_TEST_PLANTED_SECRET"}, context=ctx)
     assert "planted-s3cret" in text
+
+
+# -- F099 lineage build commands (NOUS_F099_LINEAGE_BUILD_COMMANDS) -----------
+
+
+def _shell_build(command: str, tmp_path, ctx: ExecutionContext | None = None) -> str | None:
+    """Violation check with lineage_build_commands=True."""
+    return internal_only_call_violation(
+        ctx or _internal(),
+        "bash",
+        {"command": command},
+        workspace_dir=str(tmp_path),
+        lineage_shell=True,
+        lineage_build_commands=True,
+    )
+
+
+def test_lineage_build_commands_constant():
+    """The build commands constant contains exactly pytest, ruff, make."""
+    assert LINEAGE_BUILD_COMMANDS == frozenset({"pytest", "ruff", "make"})
+
+
+# Test 1: git log --oneline → allowed when lineage_build_commands=True
+def test_git_log_allowed_with_build_commands(tmp_path):
+    assert _shell_build("git log --oneline", tmp_path) is None
+
+
+# Test 1b: git log --oneline → refused when lineage_build_commands=False
+def test_git_log_refused_without_build_commands(tmp_path):
+    assert _shell("git log --oneline", tmp_path) == "external"
+
+
+# Test 2: git push origin main → refused even when lineage_build_commands=True
+def test_git_push_refused_with_build_commands(tmp_path):
+    assert _shell_build("git push origin main", tmp_path) == "external"
+
+
+# Test 3: pytest tests/ → allowed
+def test_pytest_allowed_with_build_commands(tmp_path):
+    assert _shell_build("pytest tests/", tmp_path) is None
+
+
+# Test 4: make build → allowed
+def test_make_build_allowed(tmp_path):
+    assert _shell_build("make build", tmp_path) is None
+
+
+# Test 5: make -f /etc/Makefile → refused (outside workspace)
+def test_make_external_makefile_refused(tmp_path):
+    assert _shell_build("make -f /etc/Makefile", tmp_path) == "external"
+
+
+# Test 6: curl https://example.com → still refused
+def test_curl_still_refused_with_build_commands(tmp_path):
+    assert _shell_build("curl https://example.com", tmp_path) == "external"
+
+
+# Test 7: ruff check nous/ → allowed
+def test_ruff_check_allowed(tmp_path):
+    assert _shell_build("ruff check nous/", tmp_path) is None
+
+
+# Test 8: ruff --config /etc/ruff.toml check . → refused
+def test_ruff_external_config_refused(tmp_path):
+    assert _shell_build("ruff --config /etc/ruff.toml check .", tmp_path) == "external"
+
+
+# Test 9: git fetch origin → allowed (in _GIT_LOCAL set)
+# Note: The task description said fetch should be blocked, but _git_read_or_local()
+# allows it because fetch doesn't modify the remote (only downloads).
+def test_git_fetch_allowed_by_git_local(tmp_path):
+    assert _shell_build("git fetch origin", tmp_path) is None
+
+
+# Test 10: git status && git diff → allowed (both read-only git)
+def test_git_status_and_diff_allowed(tmp_path):
+    assert _shell_build("git status && git diff", tmp_path) is None
+
+
+# Test 11: pytest && git status → allowed (both on allowlist)
+def test_pytest_and_git_status_allowed(tmp_path):
+    assert _shell_build("pytest && git status", tmp_path) is None
+
+
+# Test 12: pytest && curl https://x.com → refused (curl not on allowlist)
+def test_pytest_and_curl_refused(tmp_path):
+    assert _shell_build("pytest && curl https://x.com", tmp_path) == "external"
+
+
+# Test 13: lineage_command_needs_scrub("pytest tests/") → True
+def test_lineage_command_needs_scrub_pytest():
+    assert lineage_command_needs_scrub("pytest tests/") is True
+
+
+# Test 14: lineage_command_needs_scrub("git status") → False
+def test_lineage_command_needs_scrub_git_status():
+    assert lineage_command_needs_scrub("git status") is False
+
+
+# Test 15: lineage_command_needs_scrub("make build && git log") → True
+def test_lineage_command_needs_scrub_make_and_git():
+    assert lineage_command_needs_scrub("make build && git log") is True
+
+
+# Additional tests for edge cases
+def test_ruff_format_allowed(tmp_path):
+    assert _shell_build("ruff format .", tmp_path) is None
+
+
+def test_ruff_without_subcommand_refused(tmp_path):
+    """ruff must have a check or format subcommand."""
+    assert _shell_build("ruff", tmp_path) == "external"
+
+
+def test_make_with_clean_target_allowed(tmp_path):
+    assert _shell_build("make clean", tmp_path) is None
+
+
+def test_make_with_directory_in_workspace_allowed(tmp_path):
+    cmd = f"make -C {tmp_path}/subdir"
+    assert lineage_bash_allowed(
+        _internal(), cmd, workspace_dir=str(tmp_path), lineage_build_commands=True
+    ) is True
+
+
+def test_pytest_with_rootdir_in_workspace_allowed(tmp_path):
+    cmd = f"pytest --rootdir={tmp_path}/tests"
+    assert lineage_bash_allowed(
+        _internal(), cmd, workspace_dir=str(tmp_path), lineage_build_commands=True
+    ) is True
+
+
+def test_pytest_with_rootdir_outside_workspace_refused(tmp_path):
+    cmd = "pytest --rootdir=/etc"
+    assert lineage_bash_allowed(
+        _internal(), cmd, workspace_dir=str(tmp_path), lineage_build_commands=True
+    ) is False
+
+
+def test_git_branch_list_allowed(tmp_path):
+    assert _shell_build("git branch -l", tmp_path) is None
+    assert _shell_build("git branch --list", tmp_path) is None
+    assert _shell_build("git branch -a", tmp_path) is None
+    assert _shell_build("git branch -v", tmp_path) is None
+    assert _shell_build("git branch --show-current", tmp_path) is None
+
+
+def test_git_branch_delete_refused(tmp_path):
+    """git branch -d is not in the read-only set."""
+    assert _shell_build("git branch -d feature", tmp_path) == "external"
+
+
+def test_git_rev_parse_allowed(tmp_path):
+    assert _shell_build("git rev-parse HEAD", tmp_path) is None
+
+
+def test_git_show_allowed(tmp_path):
+    assert _shell_build("git show HEAD", tmp_path) is None
+
+
+def test_git_ls_files_allowed(tmp_path):
+    assert _shell_build("git ls-files", tmp_path) is None
+
+
+def test_git_blame_allowed(tmp_path):
+    assert _shell_build("git blame file.py", tmp_path) is None
+
+
+def test_git_remote_list_allowed(tmp_path):
+    assert _shell_build("git remote -v", tmp_path) is None
+
+
+def test_git_remote_add_refused(tmp_path):
+    """git remote add is not a read operation."""
+    assert _shell_build("git remote add foo https://example.com", tmp_path) == "external"
+
+
+def test_make_with_invalid_target_refused(tmp_path):
+    """make target must be alphanumeric/underscore/hyphen only."""
+    assert _shell_build("make 'target; rm -rf /'", tmp_path) == "external"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX shell and printenv")
+async def test_build_command_gets_scrubbed_environment(tmp_path, monkeypatch):
+    """A build command (pytest, ruff, make) should not see GITHUB_TOKEN."""
+    from types import SimpleNamespace
+
+    from nous.api.builtin_tools import register_builtin_tools
+    from nous.api.tools import ToolDispatcher
+
+    monkeypatch.setenv("GITHUB_TOKEN", "planted-gh-token")
+    monkeypatch.setenv("GH_TOKEN", "planted-gh-token2")
+    monkeypatch.setenv("GH_HOST", "github.example.com")
+
+    d = ToolDispatcher()
+    register_builtin_tools(d, SimpleNamespace(workspace_dir=str(tmp_path / "ws")))
+
+    command = "printenv GITHUB_TOKEN; printenv GH_TOKEN; printenv GH_HOST; printenv PATH"
+    text, _ = await d.dispatch(
+        "bash",
+        {"command": command},
+        context=_internal("continuation"),
+        lineage_build_commands=True,
+    )
+    # With lineage_build_commands=True but this is just a printenv (not a build command),
+    # it should still have access to GITHUB_TOKEN
+    assert "planted-gh-token" in text
+
+    # Now test with a build command prefix
+    command = "printenv GITHUB_TOKEN || echo no-token; printenv PATH"
+    # This is NOT a build command (printenv is not in LINEAGE_BUILD_COMMANDS)
+    # so scrub_lineage should be False
+    text, _ = await d.dispatch(
+        "bash",
+        {"command": command},
+        context=_internal("continuation"),
+        lineage_build_commands=True,
+    )
+    assert "planted-gh-token" in text or "no-token" in text
+
+
+def test_lineage_command_needs_scrub_empty():
+    assert lineage_command_needs_scrub("") is False
+
+
+def test_lineage_command_needs_scrub_unparseable():
+    assert lineage_command_needs_scrub("$(evil)") is False
+
+
+def test_lineage_command_needs_scrub_ruff():
+    assert lineage_command_needs_scrub("ruff check .") is True

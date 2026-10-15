@@ -36,7 +36,7 @@ from uuid import UUID
 from nous.api.call_outcome import CallOutcome
 from nous.api.call_outcome import _current as _outcome_var  # the one setter (harness 2b)
 from nous.api.execution_context import ExecutionContext, resolve_context
-from nous.api.tool_policy import INTERNAL_ONLY_LOGGED_TOOLS
+from nous.api.tool_policy import INTERNAL_ONLY_LOGGED_TOOLS, lineage_command_needs_scrub
 from nous.brain import continuation, intentions
 from nous.brain.brain import Brain
 from nous.brain.intentions import AUTHORITY_INTERNAL
@@ -442,6 +442,7 @@ class ToolDispatcher:
         turn_number: int | None = None,
         context: ExecutionContext | None = None,
         outcome: CallOutcome | None = None,
+        lineage_build_commands: bool = False,
     ) -> tuple[str, bool]:
         """Dispatch a tool call and return (result_text, is_error).
 
@@ -458,6 +459,10 @@ class ToolDispatcher:
         outcome: the call's CallOutcome (harness Phase 2b). The handler reads
         it through ``current_outcome()``; it is set and reset around the
         handler call here, inside this one task.
+
+        lineage_build_commands: when True and the call is an internal_only bash,
+        build/test commands (pytest, ruff, make) run with a credential-scrubbed
+        environment (no GITHUB_TOKEN/GH_TOKEN/GH_HOST).
         """
         ctx = resolve_context(context, is_background=is_background, session_id=session_id)
         is_background = ctx.is_background
@@ -558,7 +563,9 @@ class ToolDispatcher:
                 if name == "bash":
                     # The lineage shell: the command runs with an allowlisted environment, not the
                     # process's API keys. Same condition as the lineage_bash_allowed enforcement.
-                    args = {**args, "_lineage": True}
+                    command = args.get("command", "")
+                    scrub = lineage_build_commands and lineage_command_needs_scrub(command)
+                    args = {**args, "_lineage": True, "_scrub_lineage": scrub}
             if ctx.channel and name in ("spawn_task", "dag_create"):
                 # F098: the channel outlives the session, so the result can
                 # reach the conversation after the session has expired.

@@ -1253,6 +1253,11 @@ class Settings(BaseSettings):
     # DAG nodes of a lineage), each call held to tool_policy.lineage_bash_allowed (runner.sh,
     # read-only gh and plain reads). Off: bash stays on the internal_only denylist (as before).
     f099_lineage_shell: bool = True
+    # F099 lineage build commands: extend the lineage shell allowlist to include read-only git
+    # commands (status, log, diff, show, etc.) and build/test/lint tools (pytest, ruff, make).
+    # Build commands run with a credential-scrubbed environment (no GITHUB_TOKEN, GH_TOKEN, GH_HOST)
+    # so code under test cannot use them. Requires f099_lineage_shell. Off: only reads + gh + runner.sh.
+    f099_lineage_build_commands: bool = True
 
     # F098 Phase C: result memory — a finished background subtask result
     # becomes an episode (+ document chunks), so recall_deep can find it.

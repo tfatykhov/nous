@@ -101,6 +101,14 @@ LINEAGE_READ_COMMANDS: frozenset[str] = frozenset(
     {"cat", "ls", "head", "tail", "wc", "grep", "jq", "echo", "pwd", "cd", "sleep", "true"}
 )
 
+# Commands allowed when f099_lineage_build_commands is on.
+# Git is handled separately via _git_read_or_local(). These take the same path/workspace
+# confinement as LINEAGE_READ_COMMANDS but run with a credential-scrubbed environment.
+LINEAGE_BUILD_COMMANDS: frozenset[str] = frozenset({"pytest", "ruff", "make"})
+
+# Pattern for a make target: alphanumeric, underscore, hyphen only.
+_MAKE_TARGET = re.compile(r"^[A-Za-z0-9_-]+$")
+
 
 @dataclass(frozen=True)
 class _ArgRoles:
@@ -490,7 +498,104 @@ def _runner_allowed(args: list[str], *, workspace: Path, readable: list[Path]) -
     return True
 
 
-def lineage_bash_allowed(ctx: ExecutionContext, command: str, *, workspace_dir: str) -> bool:
+def _pytest_allowed(args: list[str], *, cwds: list[Path], root: Path) -> bool:
+    """Whether a pytest invocation is safe: paths must resolve under workspace, and
+    --rootdir/--confcutdir (if present) must not point outside."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a in ("--rootdir", "--confcutdir", "--basetemp", "-c", "--co", "--cache-dir"):
+            if i >= len(args):
+                return False
+            path = args[i]
+            if _readable(path, cwds, root) is None:
+                return False
+            i += 1
+        elif a.startswith(("--rootdir=", "--confcutdir=", "--basetemp=", "-c=", "--cache-dir=")):
+            path = a.split("=", 1)[1]
+            if _readable(path, cwds, root) is None:
+                return False
+        elif a.startswith("-") and not a.startswith("--"):
+            continue
+        elif a.startswith("--"):
+            continue
+        else:
+            if _readable(a, cwds, root) is None:
+                return False
+    return True
+
+
+def _ruff_allowed(args: list[str], *, cwds: list[Path], root: Path) -> bool:
+    """Whether a ruff invocation is safe: only check/format subcommands, and
+    --config (if present) must not point outside workspace."""
+    if not args:
+        return False
+    sub = args[0]
+    if sub not in ("check", "format"):
+        return False
+    rest = args[1:]
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        i += 1
+        if a in ("--config", "--cache-dir"):
+            if i >= len(rest):
+                return False
+            path = rest[i]
+            if _readable(path, cwds, root) is None:
+                return False
+            i += 1
+        elif a.startswith(("--config=", "--cache-dir=")):
+            path = a.split("=", 1)[1]
+            if _readable(path, cwds, root) is None:
+                return False
+        elif a.startswith("-") and not a.startswith("--"):
+            continue
+        elif a.startswith("--"):
+            continue
+        else:
+            if _readable(a, cwds, root) is None:
+                return False
+    return True
+
+
+def _make_allowed(args: list[str], *, cwds: list[Path], root: Path) -> bool:
+    """Whether a make invocation is safe: bare `make` or `make <target>` where target
+    is alphanumeric/underscore/hyphen only. No -f, -C pointing outside workspace."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a in ("-f", "--file", "--makefile", "-C", "--directory"):
+            if i >= len(args):
+                return False
+            path = args[i]
+            if _readable(path, cwds, root) is None:
+                return False
+            i += 1
+        elif a.startswith(("-f", "--file=", "--makefile=", "-C", "--directory=")):
+            if "=" in a:
+                path = a.split("=", 1)[1]
+            else:
+                path = a[2:]
+            if _readable(path, cwds, root) is None:
+                return False
+        elif a.startswith("-"):
+            continue
+        else:
+            if not _MAKE_TARGET.fullmatch(a):
+                return False
+    return True
+
+
+def lineage_bash_allowed(
+    ctx: ExecutionContext,
+    command: str,
+    *,
+    workspace_dir: str,
+    lineage_build_commands: bool = False,
+) -> bool:
     """Whether an internal_only turn may run this bash ``command`` (F099 lineage shell).
 
     An allowlist, failing closed: every simple command must be a LINEAGE_READ_COMMANDS command, a read-only
@@ -543,9 +648,33 @@ def lineage_bash_allowed(ctx: ExecutionContext, command: str, *, workspace_dir: 
         elif prog == "printf":
             if not _printf_allowed(args):
                 return False
+        elif lineage_build_commands and prog == "git":
+            if not _git_read_or_local(args):
+                return False
+        elif lineage_build_commands and prog == "pytest":
+            if not _pytest_allowed(args, cwds=cwds, root=root):
+                return False
+        elif lineage_build_commands and prog == "ruff":
+            if not _ruff_allowed(args, cwds=cwds, root=root):
+                return False
+        elif lineage_build_commands and prog == "make":
+            if not _make_allowed(args, cwds=cwds, root=root):
+                return False
         elif prog not in LINEAGE_READ_COMMANDS:
             return False
     return True
+
+
+def lineage_command_needs_scrub(command: str) -> bool:
+    """Whether a lineage bash command includes a build/test invocation that must run
+    without API-credential env vars (GITHUB_TOKEN, GH_TOKEN, GH_HOST)."""
+    commands = simple_commands(command)
+    if commands is None:
+        return False
+    return any(
+        words and words[0].rsplit("/", 1)[-1] in LINEAGE_BUILD_COMMANDS
+        for words, _, _, _ in commands
+    )
 
 
 def internal_only_call_violation(
@@ -555,6 +684,7 @@ def internal_only_call_violation(
     *,
     workspace_dir: str,
     lineage_shell: bool = False,
+    lineage_build_commands: bool = False,
 ) -> str | None:
     """The per-call rules of an internal_only turn, for a tool that WAS offered.
 
@@ -568,7 +698,9 @@ def internal_only_call_violation(
     """
     if name == "bash":
         command = tool_input.get("command")
-        if not isinstance(command, str) or not lineage_bash_allowed(ctx, command, workspace_dir=workspace_dir):
+        if not isinstance(command, str) or not lineage_bash_allowed(
+            ctx, command, workspace_dir=workspace_dir, lineage_build_commands=lineage_build_commands
+        ):
             return "external"
         return None
     if classify_side_effect(name, dict(tool_input)) in ("external", "irreversible"):

@@ -247,6 +247,7 @@ def make_propose_action_executor(
     dispatcher: Any,
     stage: Callable[[str, dict, str], Awaitable[UUID]],
     lineage_shell: bool = False,
+    lineage_build_commands: bool = False,
     workspace_dir: str = "",
 ) -> Callable[..., Awaitable[tuple[str, bool]]]:
     """The executor of ``propose_action`` for one turn (the ``extra_tools`` shape: ``(text, is_error)``).
@@ -284,7 +285,10 @@ def make_propose_action_executor(
         if tool_policy.internal_only_allowed(tool, ctx=probe, lineage_shell=lineage_shell) and not (
             tool == "bash"
             and not tool_policy.lineage_bash_allowed(
-                probe, str(arguments.get("command", "")), workspace_dir=workspace_dir
+                probe,
+                str(arguments.get("command", "")),
+                workspace_dir=workspace_dir,
+                lineage_build_commands=lineage_build_commands,
             )
         ):
             return f"Error: {tool} is a tool you may call yourself, so call it yourself; it is not a proposal.", True
@@ -1222,6 +1226,7 @@ class ContinuationRunner:
                     dispatcher=self._dispatcher,
                     stage=self._stager(claim),
                     lineage_shell=settings.f099_lineage_shell,
+                    lineage_build_commands=settings.f099_lineage_build_commands,
                     workspace_dir=settings.workspace_dir,
                 ),
             )

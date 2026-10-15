@@ -550,6 +550,7 @@ class AgentRunner:
                     tool_input,
                     workspace_dir=self._settings.workspace_dir,
                     lineage_shell=self._settings.f099_lineage_shell,
+                    lineage_build_commands=self._settings.f099_lineage_build_commands,
                 )
             if strict is not None:
                 scope = "internal_only" if ctx.authority == AUTHORITY_INTERNAL else ctx.kind
@@ -3020,6 +3021,7 @@ class AgentRunner:
                         turn_number=turn_number,  # F091 (caller-captured)
                         context=ctx,  # harness Phase 1a
                         outcome=outcome,  # harness Phase 2b
+                        lineage_build_commands=self._settings.f099_lineage_build_commands,
                     )
                 except asyncio.CancelledError:
                     # Subtask timeout / shutdown: the side effect may
@@ -4283,6 +4285,7 @@ Rules:
                     turn_number=turn_number,  # F091 (caller-captured)
                     context=context,  # harness Phase 1a
                     outcome=outcome,  # harness Phase 2b
+                    lineage_build_commands=self._settings.f099_lineage_build_commands,
                 ),
                 timeout=timeout,
             )

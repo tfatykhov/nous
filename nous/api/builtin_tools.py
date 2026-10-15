@@ -69,6 +69,9 @@ _LINEAGE_BASH_ENV = frozenset(
         "GH_HOST",
     }
 )
+# Like _LINEAGE_BASH_ENV but without API credentials, for build/test commands that
+# should not be able to use GITHUB_TOKEN or GH_TOKEN in code under test.
+_LINEAGE_BUILD_BASH_ENV = _LINEAGE_BASH_ENV - {"GITHUB_TOKEN", "GH_TOKEN", "GH_HOST"}
 
 
 def _mcp_response(text: str) -> dict[str, Any]:
@@ -103,6 +106,7 @@ async def bash_tool(
     *,
     _workspace_dir: str = "/tmp/nous-workspace",
     _lineage: bool = False,
+    _scrub_lineage: bool = False,
     _long_timeout: bool = False,
 ) -> dict[str, Any]:
     """Execute a shell command in the workspace directory.
@@ -114,6 +118,8 @@ async def bash_tool(
         _workspace_dir: Internal param set by registration closure
         _lineage: An internal_only (F099 lineage) call, set by dispatch: the
             command gets only the _LINEAGE_BASH_ENV variables
+        _scrub_lineage: When True (and _lineage is True), use the credential-
+            scrubbed environment (_LINEAGE_BUILD_BASH_ENV) for build commands
         _long_timeout: Set by dispatch for a background turn that is not a
             short one (ExecutionContext.is_short_turn)
 
@@ -130,12 +136,18 @@ async def bash_tool(
         workspace = Path(_workspace_dir)
         workspace.mkdir(parents=True, exist_ok=True)
 
+        # Determine environment
+        env: dict[str, str] | None = None
+        if _lineage:
+            allowed = _LINEAGE_BUILD_BASH_ENV if _scrub_lineage else _LINEAGE_BASH_ENV
+            env = {k: v for k, v in os.environ.items() if k in allowed}
+
         proc = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(workspace),
-            env={k: v for k, v in os.environ.items() if k in _LINEAGE_BASH_ENV} if _lineage else None,
+            env=env,
             # Own process group, so a timeout or a cancelled turn can stop the
             # whole command (``a; b``, pipelines), not only the /bin/sh parent.
             start_new_session=True,
@@ -913,10 +925,19 @@ def register_builtin_tools(dispatcher: ToolDispatcher, settings: Settings) -> No
     workspace = settings.workspace_dir
 
     async def _bash(
-        command: str, timeout: int | None = None, _lineage: bool = False, _long_timeout: bool = False
+        command: str,
+        timeout: int | None = None,
+        _lineage: bool = False,
+        _scrub_lineage: bool = False,
+        _long_timeout: bool = False,
     ) -> dict[str, Any]:
         return await bash_tool(
-            command, timeout, _workspace_dir=workspace, _lineage=_lineage, _long_timeout=_long_timeout
+            command,
+            timeout,
+            _workspace_dir=workspace,
+            _lineage=_lineage,
+            _scrub_lineage=_scrub_lineage,
+            _long_timeout=_long_timeout,
         )
 
     async def _read_file(path: str, offset: int = 0, limit: int = 0) -> dict[str, Any]:
