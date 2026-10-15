@@ -1719,6 +1719,7 @@ dependencies = [
 [package.optional-dependencies]
 agent = [
     { name = "aiohttp" },
+    { name = "aiosqlite" },
     { name = "beautifulsoup4" },
     { name = "google-api-python-client" },
     { name = "google-auth" },
@@ -1729,6 +1730,7 @@ agent = [
     { name = "pillow" },
     { name = "pypdf" },
     { name = "pytest" },
+    { name = "pytest-asyncio" },
     { name = "python-docx" },
     { name = "python-pptx" },
     { name = "ruff" },
@@ -1757,6 +1759,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", marker = "extra == 'agent'", specifier = ">=3.9,<4.0" },
+    { name = "aiosqlite", marker = "extra == 'agent'", specifier = ">=0.22.1" },
     { name = "anthropic", specifier = ">=0.52,<1.0" },
     { name = "asyncpg", specifier = ">=0.30,<1.0" },
     { name = "beautifulsoup4", marker = "extra == 'agent'", specifier = ">=4.12,<5.0" },
@@ -1779,6 +1782,7 @@ requires-dist = [
     { name = "pypdf", marker = "extra == 'agent'", specifier = ">=5.0,<6.0" },
     { name = "pytest", marker = "extra == 'agent'", specifier = ">=8.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "pytest-asyncio", marker = "extra == 'agent'", specifier = ">=0.24" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
     { name = "python-docx", marker = "extra == 'agent'", specifier = ">=1.0,<2.0" },
     { name = "python-pptx", marker = "extra == 'agent'", specifier = ">=1.0,<2.0" },
