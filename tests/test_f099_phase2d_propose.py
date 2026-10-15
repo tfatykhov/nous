@@ -68,6 +68,7 @@ def _propose(
     stage_error: Exception | None = None,
     proposal_id=None,
     lineage_shell: bool = False,
+    build_commands: bool = False,
     workspace_dir: str = "/tmp/nous-workspace",
 ):
     """The executor over a fake store: ``(executor, state, staged calls)``."""
@@ -97,6 +98,7 @@ def _propose(
         dispatcher=dispatcher,
         stage=fake_stage,
         lineage_shell=lineage_shell,
+        build_commands=build_commands,
         workspace_dir=workspace_dir,
     )
     return executor, state, staged

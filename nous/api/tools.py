@@ -36,7 +36,7 @@ from uuid import UUID
 from nous.api.call_outcome import CallOutcome
 from nous.api.call_outcome import _current as _outcome_var  # the one setter (harness 2b)
 from nous.api.execution_context import ExecutionContext, resolve_context
-from nous.api.tool_policy import INTERNAL_ONLY_LOGGED_TOOLS
+from nous.api.tool_policy import INTERNAL_ONLY_LOGGED_TOOLS, lineage_runs_build
 from nous.brain import continuation, intentions
 from nous.brain.brain import Brain
 from nous.brain.intentions import AUTHORITY_INTERNAL
@@ -557,8 +557,10 @@ class ToolDispatcher:
                     }
                 if name == "bash":
                     # The lineage shell: the command runs with an allowlisted environment, not the
-                    # process's API keys. Same condition as the lineage_bash_allowed enforcement.
-                    args = {**args, "_lineage": True}
+                    # process's API keys. Same condition as the lineage_bash_allowed enforcement. A build
+                    # command (git, pytest, ruff, make) runs the repo's code: it gets no GitHub token either.
+                    build = lineage_runs_build(str(args.get("command", "")))
+                    args = {**args, "_lineage": True, "_lineage_build": build}
             if ctx.channel and name in ("spawn_task", "dag_create"):
                 # F098: the channel outlives the session, so the result can
                 # reach the conversation after the session has expired.
