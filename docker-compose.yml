@@ -24,6 +24,7 @@ services:
       - NOUS_EFFORT=${NOUS_EFFORT:-high}
       - NOUS_WORKSPACE_DIR=${NOUS_WORKSPACE_DIR:-/tmp/nous-workspace}
       - CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-/tmp/nous-workspace/claude-jobs/.claude-home/.claude}
+      - CSTP_TOKEN=${CSTP_TOKEN:-}
       - BRAVE_SEARCH_API_KEY=${BRAVE_SEARCH_API_KEY:-}
       - NOUS_EVENT_BUS_ENABLED=${NOUS_EVENT_BUS_ENABLED:-true}
       - NOUS_EPISODE_SUMMARY_ENABLED=${NOUS_EPISODE_SUMMARY_ENABLED:-true}
