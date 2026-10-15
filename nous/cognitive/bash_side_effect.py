@@ -802,6 +802,15 @@ def _command_start(words: list[str]) -> int | None:
         i = start
 
 
+def exec_target(words: list[str]) -> tuple[str, list[str]] | None:
+    """The program a simple command runs and its arguments, past reserved
+    words, assignments, ``env`` and wrappers (a command-string runner -- ``env
+    -S``, ``flock -c``, ``watch`` -- is itself the program); None when nothing
+    runs."""
+    i = _command_start(words)
+    return None if i is None else (_program(words[i]), words[i + 1:])
+
+
 def _lex(command: str) -> list[tuple[str, bool]] | None:
     """``(text, is_operator)`` tokens with bash quoting; None if unbalanced."""
     tokens: list[tuple[str, bool]] = []

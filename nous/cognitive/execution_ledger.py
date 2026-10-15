@@ -17,6 +17,8 @@ from typing import Any
 from nous.api.tool_classes import TOOL_CLASSES, code_reaches_network
 from nous.cognitive.bash_side_effect import classify_bash_command as _classify_bash_command
 from nous.cognitive.bash_side_effect import command_runs as _command_runs
+from nous.cognitive.bash_side_effect import command_string as _command_string
+from nous.cognitive.bash_side_effect import exec_target as _exec_target
 from nous.cognitive.bash_side_effect import simple_commands as _simple_commands
 
 logger = logging.getLogger(__name__)
@@ -160,32 +162,71 @@ def bash_exit_code(result: str | None) -> int | None:
     return int(match.group(1)) if match else None
 
 
+# Programs whose exit is a command STRING's (re-read by the rules below, one level deeper).
+_STRING_RUNNERS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "su", "eval"})
+# Programs that run other commands in a way not unwrapped here (a script file, a remote host, find -exec,
+# env -S, flock -c, watch): their exit cannot be trusted to be one command's.
+_OPAQUE_RUNNERS = frozenset({
+    "env", "flock", "watch", "ssh", "source", ".", "builtin", "find", "parallel", "busybox", "script",
+})
+_MAX_UNWRAP_DEPTH = 3
+_SHELL_CONTROL = re.compile(r"[;|&\n]")
+
+
+def _runs_one_program(words: list[str], depth: int) -> bool:
+    """Whether a simple command's exit is provably that of the one program it runs (fail closed). A shell's
+    ``-c`` string or ``eval``'s is re-read with the same rules; any other runner, or an argument that holds
+    shell control syntax or names a shell, is not trusted."""
+    if not words:
+        return True
+    target = _exec_target(words)
+    if target is None:
+        return False
+    prog, args = target
+    if prog in _STRING_RUNNERS:
+        inner = _command_string(prog, args)
+        return inner is not None and _exit_is_trusted(inner, depth + 1)
+    return prog not in _OPAQUE_RUNNERS and not any(
+        _SHELL_CONTROL.search(a) or a.rsplit("/", 1)[-1] in _STRING_RUNNERS for a in args
+    )
+
+
+def _exit_is_trusted(command: str, depth: int = 0) -> bool:
+    """Whether a command's exit 0 speaks for every command it ran: one foreground command, or a pure ``&&``
+    chain, each running one known program (``_runs_one_program``)."""
+    if depth > _MAX_UNWRAP_DEPTH:
+        return False
+    commands = _simple_commands(command.rstrip())  # a trailing newline ends no chain
+    if commands is None or any(words and words[0] == "!" for words, _, _, _ in commands):  # `!` inverts
+        return False
+    if not all(_runs_one_program(words, depth) for words, _, _, _ in commands):
+        return False
+    if sum(1 for words, _, _, _ in commands if words) <= 1 and not any(op == "&" for _, _, _, op in commands):
+        return True  # one command in the foreground: a trailing `&` hides its exit, parentheses do not
+    prev = ""
+    for words, _, _, op in commands:
+        if op == "\n" and not words and prev in ("&&", "("):
+            continue  # a newline after `&&` only continues the chain
+        if op not in ("&&", "(", ")", ""):
+            return False
+        prev = op
+    return True
+
+
 def bash_masked_failure(command: str, result: str | None) -> str | None:
     """The first failure line in the output of a bash call whose trailer says exit 0 but cannot speak for every
     command it ran, else None.
 
     The trailer is the exit of the shell, i.e. of its LAST command: in ``psql ... > out 2>&1; cat out`` it is
     cat's 0 although psql failed (proposal dd826783, 2026-10-10). So the output is read, only when the trailer
-    says 0 and the command is more than one simple command (or cannot be read exactly): a single command's
+    says 0 and the exit is not provably every command's (``_exit_is_trusted``, fail closed): a single command's
     trailer is its own exit and is trusted (unless backgrounded), in a subshell too (``(cat build.log)``). So is a
     pure ``&&`` chain's (``cd /repo && (cat build.log)``): its 0 says every command in it ran and succeeded.
-    ``;``, ``||``, a pipe, ``&`` or ``!`` can mask an earlier failure, in a subshell as anywhere else. A heuristic,
+    ``;``, ``||``, a pipe, ``&`` or ``!`` can mask an earlier failure, in a subshell as anywhere else, and so can
+    a nested string (``bash -c 'psql ...; cat out'``, ``eval``), which is re-read by the same rules. A heuristic,
     kept narrow (``_BASH_FAILURE_LINE``); the trailer stays the authority whenever it says non-zero."""
-    if result is None or bash_exit_code(result) != 0:
+    if result is None or bash_exit_code(result) != 0 or _exit_is_trusted(command):
         return None
-    commands = _simple_commands(command.rstrip())  # a trailing newline ends no chain
-    if commands is not None and not any(words and words[0] == "!" for words, _, _, _ in commands):  # `!` inverts
-        if sum(1 for words, _, _, _ in commands if words) <= 1 and not any(op == "&" for _, _, _, op in commands):
-            return None  # one command in the foreground: a trailing `&` hides its exit, parentheses do not
-        prev = ""
-        for words, _, _, op in commands:
-            if op == "\n" and not words and prev in ("&&", "("):
-                continue  # a newline after `&&` only continues the chain
-            if op not in ("&&", "(", ")", ""):
-                break
-            prev = op
-        else:
-            return None
     match = _BASH_FAILURE_LINE.search(_BASH_EXIT_CODE.sub("", result))
     return match.group(0) if match else None
 
