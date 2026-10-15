@@ -829,6 +829,15 @@ class ProcedureManager:
         times (success + failure >= min_scored).  The default of 5 prevents
         newly-registered procedures with 1–4 scored activations from
         generating false-positive low-effectiveness heartbeat findings.
+
+        A procedure whose ``runtime_metadata.skip_until_scored`` is an integer
+        is also left out while its scored count (cumulative, not counted from
+        the fix) is below that number. This is the grace period after a fix.
+        Merge the key in, don't replace the column, because strategy cards and
+        skills keep other keys there:
+        ``SET runtime_metadata = coalesce(runtime_metadata, '{}') || '{"skip_until_scored": 10}'``.
+        Re-registering a skill rewrites ``runtime_metadata``, so set the key
+        after the re-registration.
         """
         if session is None:
             async with self.db.session() as session:
@@ -850,6 +859,22 @@ class ProcedureManager:
             scored = (p.success_count or 0) + (p.failure_count or 0)
             if scored < min_scored:
                 continue  # insufficient data — skip to avoid FP alerts
+            # runtime_metadata.skip_until_scored lets a recently-fixed procedure
+            # suppress the low-effectiveness finding until enough new post-fix
+            # activations have accumulated to give a fair signal.
+            meta = p.runtime_metadata or {}
+            skip_until = meta.get("skip_until_scored") if isinstance(meta, dict) else None
+            if isinstance(skip_until, int):
+                if scored < skip_until:
+                    continue  # post-fix grace period — not enough new data yet
+            elif skip_until is not None:
+                # A hand-written value that is not a whole number: report this
+                # procedure as usual. Raising here would abort the scan, and the
+                # heartbeat would lose every other procedure's finding with it.
+                logger.warning(
+                    "Procedure %s: ignoring runtime_metadata.skip_until_scored=%r (not an integer)",
+                    p.id, skip_until,
+                )
             eff = self._compute_effectiveness(p)
             if eff is not None and eff < threshold:
                 low.append(ProcedureSummary(
