@@ -11,6 +11,7 @@ from nous.heart import (
     ProcedureInput,
     ProcedureSummary,
 )
+from nous.storage.models import Procedure
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -322,6 +323,13 @@ def test_build_embed_text_none_fields():
 # skip_until_scored — post-fix grace period for low-effectiveness check
 # ---------------------------------------------------------------------------
 
+
+async def _set_runtime_metadata(session, procedure_id, meta: dict) -> None:
+    procedure = await session.get(Procedure, procedure_id)
+    procedure.runtime_metadata = meta
+    await session.flush()
+
+
 @pytest.mark.asyncio
 async def test_get_low_effectiveness_skip_until_scored(heart, session):
     """A procedure with runtime_metadata.skip_until_scored is suppressed until
@@ -343,19 +351,11 @@ async def test_get_low_effectiveness_skip_until_scored(heart, session):
     assert any(p.id == detail.id for p in low), "Should appear without skip_until_scored"
 
     # Set skip_until_scored = 12 (need 4 more scored after the 8 we have)
-    await session.execute(
-        __import__("sqlalchemy").text(
-            "UPDATE heart.procedures SET runtime_metadata = :meta WHERE id = :pid"
-        ),
-        {"meta": __import__("json").dumps({"skip_until_scored": 12}), "pid": str(detail.id)},
-    )
-    await session.flush()
+    await _set_runtime_metadata(session, detail.id, {"skip_until_scored": 12})
 
     # Now it should NOT appear (scored 8 < skip_until 12)
     low2 = await heart.procedures.get_low_effectiveness(threshold=0.5, min_scored=5, session=session)
-    assert not any(p.id == detail.id for p in low2), (
-        "Should be suppressed while scored < skip_until_scored"
-    )
+    assert not any(p.id == detail.id for p in low2), "Should be suppressed while scored < skip_until_scored"
 
     # Simulate 4 more activations (neutral — don't change success/failure balance here,
     # just bump scored to 12 by adding 4 more failures so scored reaches 12)
@@ -364,6 +364,33 @@ async def test_get_low_effectiveness_skip_until_scored(heart, session):
 
     # Now scored == 12 == skip_until_scored → back in the list
     low3 = await heart.procedures.get_low_effectiveness(threshold=0.5, min_scored=5, session=session)
-    assert any(p.id == detail.id for p in low3), (
-        "Should reappear once scored >= skip_until_scored"
+    assert any(p.id == detail.id for p in low3), "Should reappear once scored >= skip_until_scored"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_value", ["12", [12], 12.5])
+async def test_get_low_effectiveness_ignores_malformed_skip_until_scored(heart, session, bad_value):
+    """A skip_until_scored that is not an integer is ignored for that procedure.
+
+    The scan must not raise: the heartbeat catches around the whole call, so one
+    bad row would hide every other procedure's low-effectiveness finding.
+    """
+    bad = await heart.store_procedure(
+        _procedure_input(name="Malformed skip_until_scored procedure"),
+        session=session,
     )
+    other = await heart.store_procedure(
+        _procedure_input(name="Plain low-effectiveness procedure"),
+        session=session,
+    )
+    for pid in (bad.id, other.id):
+        await heart.record_procedure_outcome(pid, "success", session=session)
+        for _ in range(5):
+            await heart.record_procedure_outcome(pid, "failure", session=session)
+
+    await _set_runtime_metadata(session, bad.id, {"skip_until_scored": bad_value})
+
+    low = await heart.procedures.get_low_effectiveness(threshold=0.5, min_scored=5, session=session)
+    ids = {p.id for p in low}
+    assert other.id in ids, "One malformed row must not hide another procedure's finding"
+    assert bad.id in ids, "A malformed value is ignored, so the procedure is still reported"
