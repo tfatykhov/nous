@@ -287,10 +287,33 @@ def test_a_path_that_leaves_the_repo_through_a_symlink_is_refused(ws):
     assert _allowed("cd link && pytest", ws) is True  # resolves to the repo itself
 
 
+def test_a_build_command_is_not_joined_with_gh_or_runner_sh(ws):
+    """A build command runs the whole command without the GitHub token, so gh or runner.sh joined to it would fail:
+    the pair is refused, and each half alone is allowed."""
+    runner = f"{ws}/claude-jobs/runner.sh"
+    for build, token in (
+        ("cd nous && git status", "gh pr view 1"),
+        ("cd nous && pytest -q", "gh pr checks 1"),
+        ("cd nous && make test", f"{runner} status"),
+    ):
+        assert _allowed(build, ws) is True and _allowed(token, ws) is True
+        for command in (f"{build} && {token}", f"{token}; {build}", f"{token} | head && {build}"):
+            assert _allowed(command, ws) is False, command
+    for command in ALLOWED:  # every allowed build command is scrubbed
+        assert lineage_runs_build(command.format(W=ws, RID=RID)) is True, command
+
+
 def test_the_refusal_names_what_is_allowed(ws):
     on, off = lineage_bash_refusal_hint(build_commands=True), lineage_bash_refusal_hint(build_commands=False)
     make = "make " + "|".join(sorted(LINEAGE_MAKE_TARGETS))
-    for needle in ("git status|log|diff|show", "pytest", "ruff check", "ruff format --check|--diff", make):
+    for needle in (
+        "git status|log|diff|show",
+        "pytest",
+        "ruff check",
+        "ruff format --check|--diff",
+        make,
+        "without gh or runner.sh",
+    ):
         assert needle in on and needle not in off
     for needle in ("cat", "gh api GET", "runner.sh", "propose_action", "cd <repo> &&"):
         assert needle in on

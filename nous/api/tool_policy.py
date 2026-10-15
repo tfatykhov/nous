@@ -673,7 +673,7 @@ def lineage_bash_refusal_hint(*, build_commands: bool) -> str:
         text += (
             "; and, in a git repo's top level reached by `cd <repo> &&`: git status|log|diff|show, pytest, "
             f"ruff check, ruff format --check|--diff, make {'|'.join(sorted(LINEAGE_MAKE_TARGETS))}, "
-            "each with a fixed set of options and paths inside the repo"
+            "each with a fixed set of options and paths inside the repo, in a bash call without gh or runner.sh"
         )
     return text + ". Join commands with ; && || | only. Propose anything else to the owner with propose_action."
 
@@ -698,11 +698,14 @@ def lineage_bash_allowed(
     ``build_commands`` (``NOUS_F099_LINEAGE_BUILD_COMMANDS``) also allows LINEAGE_BUILD_PROGRAMS (``_build_allowed``)
     where the shell's cwd is known to be a repo's top level (``_build_repo``). A ``cd`` sets that cwd when it is not
     skipped by an ``||`` or run in a pipeline (a subshell), and a relative one needs the cwd known; it stays known
-    only while every later join is ``&&`` or ``|``, so the command runs only if the ``cd`` succeeded.
+    only while every later join is ``&&`` or ``|``, so the command runs only if the ``cd`` succeeded. A build
+    command runs the whole command without the GitHub token (``lineage_runs_build``), so it may not be joined with
+    ``gh`` or ``runner.sh``, which need the token.
     """
     commands = simple_commands(command)
     if commands is None or not any(words for words, _, _, _ in commands):
         return False
+    builds = needs_token = False
     workspace = Path(workspace_dir)
     jobs = workspace / "claude-jobs"
     writable = lineage_write_dirs(ctx, workspace_dir, lineage_shell=True)  # bash is offered only with the shell
@@ -742,9 +745,11 @@ def lineage_bash_allowed(
         if prog == str(jobs / "runner.sh"):
             if not _runner_allowed(args, workspace=workspace, readable=writable):
                 return False
+            needs_token = True
         elif prog == "gh":
             if not _gh_allowed(args):
                 return False
+            needs_token = True
         elif prog == "printf":
             if not _printf_allowed(args):
                 return False
@@ -753,9 +758,10 @@ def lineage_bash_allowed(
                 return False
             if not _build_allowed(prog, args, cwd):
                 return False
+            builds = True
         elif prog not in LINEAGE_READ_COMMANDS:
             return False
-    return True
+    return not (builds and needs_token)
 
 
 def internal_only_call_violation(
