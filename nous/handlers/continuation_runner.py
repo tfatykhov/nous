@@ -30,7 +30,7 @@ from nous.brain import continuation, intention_calibration
 from nous.brain.continuation import INTENT_SESSION_PREFIX, Resolution
 from nous.brain.intentions import AUTHORITY_INTERNAL
 from nous.cancellation import cancel_requested
-from nous.cognitive.execution_ledger import bash_exit_code
+from nous.cognitive.execution_ledger import bash_exit_code, bash_masked_failure
 from nous.events import Event
 from nous.heart.result_inbox import format_inbox_messages, neutralize_delimiters
 from nous.storage.models import ExecutionDAG, Intention, IntentionArrival, IntentionProposal, Subtask
@@ -488,6 +488,10 @@ RAISED_TEXT = (
     "whether it happened before asking for it again."
 )
 NO_DISPATCHER_TEXT = "no tool dispatcher is configured; it was NOT run"
+MASKED_FAILURE_TEXT = (
+    "Inferred failure: the command exited 0, but that is the exit of its last command only, and its output says "
+    "an earlier one failed ({line!r}). It was NOT run again: check what it did before asking for it again."
+)
 
 
 class ContinuationRunner:
@@ -1688,8 +1692,15 @@ class ContinuationRunner:
                 # bash reports a non-zero exit in its text ("Exit code: N"), not as an error: the call failed all the
                 # same, so it is recorded failed and the intention is told so (the 50c7aa53 incident).
                 failed_exit = proposal.tool == "bash" and bash_exit_code(call.text) not in (None, 0)
-                ok, send_key = not call.is_error and not failed_exit, call.send_key
+                # The exit 0 of a compound command is its last command's: one that printed a failure before it is
+                # failed too, with the failure named first (the dd826783 incident: `psql ... > f 2>&1; cat f`).
+                masked = None
+                if proposal.tool == "bash" and not call.is_error and not failed_exit:
+                    masked = bash_masked_failure(str(proposal.arguments.get("command", "")), call.text)
+                ok, send_key = not call.is_error and not failed_exit and masked is None, call.send_key
                 result, error = (call.text, None) if ok else (None, call.text)
+                if masked is not None:
+                    error = f"{MASKED_FAILURE_TEXT.format(line=masked)}\n{call.text}"
         except asyncio.CancelledError:
             raise
         except TimeoutError:

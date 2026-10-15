@@ -17,6 +17,7 @@ from typing import Any
 from nous.api.tool_classes import TOOL_CLASSES, code_reaches_network
 from nous.cognitive.bash_side_effect import classify_bash_command as _classify_bash_command
 from nous.cognitive.bash_side_effect import command_runs as _command_runs
+from nous.cognitive.bash_side_effect import simple_commands as _simple_commands
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,15 @@ _EVIDENCE_ARGS: dict[str, tuple[str, ...]] = {
 }
 # bash_tool always appends this trailer: the authoritative wrapper status.
 _BASH_EXIT_CODE = re.compile(r"(?:\A|\n)Exit code: (-?\d+)\s*\Z")
+# A line a command prints when it failed (bash_masked_failure). Anchored at the start of a line and
+# case-sensitive, so it stays narrow: psql (a client error, and a server error with its two spaces), git's
+# fatal:, the error: prefix of git, gh and most CLIs, gh's HTTP 4xx/5xx, a Python traceback, and the shell's
+# "not found" for a missing program.
+_BASH_FAILURE_LINE = re.compile(
+    r"^(?:psql: error: |ERROR:  |fatal: |error: |HTTP [45]\d\d: |Traceback \(most recent call last\):$"
+    r"|(?:/bin/)?(?:ba|da|z)?sh: .*not found$).*$",
+    re.MULTILINE,
+)
 
 
 def _bounded(value: str, limit: int | None) -> str:
@@ -148,6 +158,36 @@ def bash_exit_code(result: str | None) -> int | None:
         return None
     match = _BASH_EXIT_CODE.search(result)
     return int(match.group(1)) if match else None
+
+
+def bash_masked_failure(command: str, result: str | None) -> str | None:
+    """The first failure line in the output of a bash call whose trailer says exit 0 but cannot speak for every
+    command it ran, else None.
+
+    The trailer is the exit of the shell, i.e. of its LAST command: in ``psql ... > out 2>&1; cat out`` it is
+    cat's 0 although psql failed (proposal dd826783, 2026-10-10). So the output is read, only when the trailer
+    says 0 and the command is more than one simple command (or cannot be read exactly): a single command's
+    trailer is its own exit and is trusted (unless backgrounded), in a subshell too (``(cat build.log)``). So is a
+    pure ``&&`` chain's (``cd /repo && (cat build.log)``): its 0 says every command in it ran and succeeded.
+    ``;``, ``||``, a pipe, ``&`` or ``!`` can mask an earlier failure, in a subshell as anywhere else. A heuristic,
+    kept narrow (``_BASH_FAILURE_LINE``); the trailer stays the authority whenever it says non-zero."""
+    if result is None or bash_exit_code(result) != 0:
+        return None
+    commands = _simple_commands(command.rstrip())  # a trailing newline ends no chain
+    if commands is not None and not any(words and words[0] == "!" for words, _, _, _ in commands):  # `!` inverts
+        if sum(1 for words, _, _, _ in commands if words) <= 1 and not any(op == "&" for _, _, _, op in commands):
+            return None  # one command in the foreground: a trailing `&` hides its exit, parentheses do not
+        prev = ""
+        for words, _, _, op in commands:
+            if op == "\n" and not words and prev in ("&&", "("):
+                continue  # a newline after `&&` only continues the chain
+            if op not in ("&&", "(", ")", ""):
+                break
+            prev = op
+        else:
+            return None
+    match = _BASH_FAILURE_LINE.search(_BASH_EXIT_CODE.sub("", result))
+    return match.group(0) if match else None
 
 
 # ---------------------------------------------------------------------------

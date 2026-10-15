@@ -278,6 +278,74 @@ async def test_an_approved_bash_call_is_failed_when_it_exits_non_zero(runner_env
         assert (row.result, row.error) == (output, None) and "it ran" in inform.body
 
 
+DD826783_COMMAND = (
+    "mkdir -p /tmp/nous-workspace/findings-autoclose && psql -h postgres -U nous -d nous -c '\\d heart.schedules' "
+    "-c \"select id, left(prompt,4000) from heart.schedules where id::text like 'c309770a%'\" "
+    "> /tmp/nous-workspace/findings-autoclose/schedule-inspect.txt 2>&1; "
+    "cat /tmp/nous-workspace/findings-autoclose/schedule-inspect.txt"
+)
+DD826783_OUTPUT = (
+    "Password for user nous:\n"
+    'psql: error: connection to server at "postgres" (172.23.0.4), port 5432 failed: fe_sendauth: no password '
+    "supplied\n\nExit code: 0"
+)
+
+
+@pytest.mark.parametrize(
+    ("command", "output", "state"),
+    [
+        (DD826783_COMMAND, DD826783_OUTPUT, "failed"),  # the incident, verbatim
+        ("cd /repo && git push origin main | tail -1", "fatal: could not read Username\nExit code: 0", "failed"),
+        ("foo; echo done", "STDERR:\nbash: line 1: foo: command not found\ndone\nExit code: 0", "failed"),
+        # A single command's trailer is its own exit: trusted, whatever it printed.
+        ("cat build.log", "error: one of the steps\nExit code: 0", "executed"),
+        # So is a pure && chain's: its 0 says every command in it succeeded.
+        ("cd /repo && cat build.log", "error: one of the steps\nExit code: 0", "executed"),
+        # `;`, `||` and a pipe can mask an earlier command's failure: the output is read.
+        ("cd /repo; cat build.log", "error: one of the steps\nExit code: 0", "failed"),
+        ("make || cat build.log", "error: one of the steps\nExit code: 0", "failed"),
+        ("make 2>&1 | tail -5", "error: one of the steps\nExit code: 0", "failed"),
+        # A backgrounded command: the trailer is not that command's own exit.
+        ("make &", "error: one of the steps\nExit code: 0", "failed"),
+        # A subshell is read like what is in it: one command is trusted, one that can mask a failure is not.
+        ("(cat build.log)", "error: one of the steps\nExit code: 0", "executed"),
+        ("(make; true)", "error: one of the steps\nExit code: 0", "failed"),
+        # A compound command whose output has no failure line, or only one that is not at a line start.
+        (
+            "cd /tmp/nous-workspace && gh issue create --title t",
+            "https://github.com/o/r/issues/714\n\nExit code: 0",
+            "executed",
+        ),
+        ("a; b", "the log says  error: nothing\nExit code: 0", "executed"),
+    ],
+)
+async def test_an_approved_bash_call_whose_earlier_command_failed_is_failed(runner_env, command, output, state):  # noqa: F811
+    """Proposal dd826783 (2026-10-10): `psql ... > f 2>&1; cat f` exited 0, cat's exit, while psql had failed, and
+    the proposal was stored executed. The failure is inferred from the output of a compound command only, named
+    first in the error, and the intention is told the call failed."""
+    env = await runner_env()
+    calls = []
+
+    async def bash(**kwargs):
+        calls.append(kwargs)
+        return {"content": [{"type": "text", "text": output}]}
+
+    env.dispatcher.register("bash", bash, BASH_SCHEMA)
+    _root, got = await claimed(env)
+    pid = await stage(env, got, tool="bash", arguments={"command": command})
+    done = await commit_ask(env, got)
+    out = await _cont(env).decide_proposal(pid, approve=True, actor="t")
+    assert [c["command"] for c in calls] == [command] and out.state == state
+    row = await proposal_row(env, pid)
+    assert row.state == state
+    (inform,) = await _informs(env, done.arrival_id)
+    if state == "failed":
+        assert row.result is None and row.error.startswith("Inferred failure") and row.error.endswith(output)
+        assert "but it failed" in inform.body
+    else:
+        assert (row.result, row.error) == (output, None) and "it ran" in inform.body
+
+
 async def test_a_timeout_is_failed_in_doubt_and_never_rerun(runner_env, monkeypatch):  # noqa: F811
     env = await runner_env()
     started = []
