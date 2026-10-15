@@ -1384,3 +1384,17 @@ class TestNegatedMaskedFailure:
         from nous.cognitive.execution_ledger import bash_masked_failure
 
         assert bash_masked_failure("git push origin main", "fatal: x\nExit code: 0") is None
+
+
+class TestSubshellMaskedFailure:
+    @pytest.mark.parametrize("cmd", ["(cat build.log)", "cd /repo && (cat build.log)", "(make && cat build.log)"])
+    def test_a_subshell_with_no_masking_operator_is_trusted(self, cmd):
+        from nous.cognitive.execution_ledger import bash_masked_failure
+
+        assert bash_masked_failure(cmd, "error: unused import\nExit code: 0") is None
+
+    @pytest.mark.parametrize("cmd", ["(false; true)", "(make || true)", "(make | cat)", "(! make)", "(make) &"])
+    def test_a_subshell_that_can_mask_a_failure_is_scanned(self, cmd):
+        from nous.cognitive.execution_ledger import bash_masked_failure
+
+        assert bash_masked_failure(cmd, "error: build failed\nExit code: 0") == "error: build failed"

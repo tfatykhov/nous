@@ -305,9 +305,11 @@ DD826783_OUTPUT = (
         ("cd /repo; cat build.log", "error: one of the steps\nExit code: 0", "failed"),
         ("make || cat build.log", "error: one of the steps\nExit code: 0", "failed"),
         ("make 2>&1 | tail -5", "error: one of the steps\nExit code: 0", "failed"),
-        # A backgrounded command or a subshell: the trailer is not that command's own exit.
+        # A backgrounded command: the trailer is not that command's own exit.
         ("make &", "error: one of the steps\nExit code: 0", "failed"),
-        ("(make)", "error: one of the steps\nExit code: 0", "failed"),
+        # A subshell is read like what is in it: one command is trusted, one that can mask a failure is not.
+        ("(cat build.log)", "error: one of the steps\nExit code: 0", "executed"),
+        ("(make; true)", "error: one of the steps\nExit code: 0", "failed"),
         # A compound command whose output has no failure line, or only one that is not at a line start.
         (
             "cd /tmp/nous-workspace && gh issue create --title t",

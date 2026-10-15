@@ -605,52 +605,116 @@ _OUTWARD_TEXT = re.compile(
 _SSH = re.compile(r"(?:^|[\s;&|(/'\"])ssh\s")
 _SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh"})
 _MAX_SHELL_NESTING = 3
-_CURL_WRITE_LONG = ("--data", "--form", "--upload-file", "--json", "--config")
-_WGET_WRITE_LONG = ("--post-data", "--post-file", "--body-data", "--body-file")
-_READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
-_HTTP_WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
-
-
-def _method_value(args: list[str], i: int) -> str | None:
-    """The HTTP method given by the option at ``args[i]`` (``-X POST``, ``-XPOST``, ``-sX POST``, ``--request=POST``,
-    ``--method POST``), else None."""
-    a = args[i]
-    if a.startswith(("--request=", "--method=")):
-        return a.split("=", 1)[1]
-    if a in ("--request", "--method"):
-        return args[i + 1] if i + 1 < len(args) else ""
-    flags = a[1:] if a.startswith("-") and not a.startswith("--") else ""
-    if "X" in flags:
-        tail = flags.split("X", 1)[1]
-        return tail or (args[i + 1] if i + 1 < len(args) else "")
-    return None
+# curl, wget and httpie (with its `https`, `xh` and `xhs` forms) are default-deny (PR #753 review round 4): every
+# call is a write unless it is a known read form, a GET or HEAD with only the options below and no body. Four
+# rounds each found one more way to send a body (`http --raw`, `@file`, stdin), so the rule names the reads
+# instead. A flag missing here is a false write: add it once it is known not to send anything.
+_HTTP_CLIENTS = frozenset({"curl", "wget", "http", "https", "httpie", "xh", "xhs"})
+_READ_METHODS = frozenset({"GET", "HEAD"})
+# Per client: (short flags with no value, short flags taking a value, long flags with no value, long flags taking
+# a value). The method flags (curl -X/--request, wget --method) are read by _http_client_writes itself.
+_HTTP_READ_FLAGS: dict[str, tuple[str, str, frozenset[str], frozenset[str]]] = {
+    "curl": (
+        "sSLfiIvkgGO46",
+        "HomAweruxX",
+        frozenset({
+            "--silent", "--show-error", "--location", "--fail", "--fail-with-body", "--include", "--head",
+            "--verbose", "--insecure", "--compressed", "--globoff", "--get", "--remote-name", "--no-progress-meter",
+        }),
+        frozenset({
+            "--header", "--output", "--max-time", "--connect-timeout", "--user-agent", "--write-out", "--referer",
+            "--range", "--user", "--retry", "--max-redirs", "--url", "--request",
+        }),
+    ),
+    "wget": (
+        "qSc",
+        "OTtUP",
+        frozenset({"--quiet", "--spider", "--server-response", "--no-verbose", "-nv", "--no-check-certificate"}),
+        frozenset({
+            "--output-document", "--timeout", "--tries", "--user-agent", "--header", "--directory-prefix",
+            "--max-redirect", "--method",
+        }),
+    ),
+    "http": (
+        "hbvFqdI",
+        "posa",
+        frozenset({
+            "--headers", "--body", "--verbose", "--follow", "--check-status", "--download", "--quiet",
+            "--ignore-stdin",
+        }),
+        frozenset({"--print", "--output", "--style", "--auth", "--timeout", "--pretty", "--verify"}),
+    ),
+}
+# Stdin a client may send as the body: any input redirect (`< f`, `<<`, `<<<`) where a client runs, or a pipe
+# into one (`echo x | curl -d @- u`, `cat f | http u`, `... | xargs curl`). Read as text: the walk drops both.
+_CLIENT_WORD = r"(?:^|[\s;&|(/'\"`])(?:curl|wget|https?|httpie|xhs?)(?=[\s;&|)'\"`]|$)"
+_HTTP_CLIENT_TEXT = re.compile(_CLIENT_WORD)
+_PIPE_INTO_CLIENT = re.compile(r"\|&?[^;&|\n]*?" + _CLIENT_WORD)
+# A httpie request item: the first separator in it decides; only a header (`H:v`) and a query (`k==v`) read.
+_HTTPIE_SEP = re.compile(r":=@|:=|==|=@|=|:|@")
 
 
 def _http_client_writes(prog: str, args: list[str]) -> bool:
-    """Whether a curl, wget or httpie call sends data or a non-read method. The classifier rates every call of these
-    ``external``, a plain GET included, so this separates the writes; anything it cannot place counts as a write."""
-    for i, a in enumerate(args):
-        method = _method_value(args, i) if prog != "http" and prog != "httpie" else None
-        if method is not None and method.upper() not in _READ_METHODS:
+    """Whether a curl, wget or httpie call may send something: True unless every argument is on the read-only
+    allowlist (``_HTTP_READ_FLAGS``) and the method, if given, is GET or HEAD. A word the walk cannot know (``$``,
+    a backtick) could be a flag, so it is a write too. httpie: ``[flags] [METHOD] URL [items]``, where an item
+    other than a header or a query is a body, which also makes the call a POST."""
+    kind = "http" if prog not in ("curl", "wget") else prog
+    short, short_value, long_flags, long_value = _HTTP_READ_FLAGS[kind]
+    positionals: list[str] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if "$" in a or "`" in a:
             return True
-        if prog == "curl":
-            flags = a[1:] if a.startswith("-") and not a.startswith("--") else ""
-            if a.startswith(_CURL_WRITE_LONG) or any(c in flags for c in "dFTK"):
+        if a.startswith("--") or a in long_flags:
+            name, eq, value = a.partition("=")
+            if name in long_flags and not eq:
+                i += 1
+                continue
+            if name not in long_value:
                 return True
-        elif prog == "wget":
-            if a.startswith(_WGET_WRITE_LONG):
+            if not eq:
+                if i + 1 >= len(args):
+                    return True
+                i += 1
+                value = args[i]
+            if name in ("--request", "--method") and value.upper() not in _READ_METHODS:
                 return True
-        else:  # httpie: `http [flags] [METHOD] URL [items]`
-            if a in ("-f", "--form", "-j", "--json", "--multipart") or a.upper() in _HTTP_WRITE_METHODS:
-                return True
-            sep = re.search(r"[=:@]", a)
-            if (
-                not a.startswith("-")
-                and sep
-                and a[sep.start() :][:2] != "=="
-                and (a[sep.start()] != ":" or a[sep.start() :][:2] == ":=")
-            ):
-                return True  # a data item (`k=v`, `k:=json`, `k@file`); `k==v` and `H:v` only read
+            i += 1
+            continue
+        if a.startswith("-") and a != "-":
+            j = 1
+            while j < len(a):
+                c = a[j]
+                if c in short:
+                    j += 1
+                    continue
+                if c not in short_value:
+                    return True
+                value = a[j + 1 :]
+                if not value:
+                    if i + 1 >= len(args):
+                        return True
+                    i += 1
+                    value = args[i]
+                if kind == "curl" and c == "X" and value.upper() not in _READ_METHODS:
+                    return True
+                break
+            i += 1
+            continue
+        positionals.append(a)
+        i += 1
+    if kind != "http":
+        return False
+    if len(positionals) >= 2 and positionals[0].isalpha():
+        if positionals[0].upper() not in _READ_METHODS:
+            return True
+        positionals = positionals[1:]
+    for item in positionals[1:]:
+        sep = _HTTPIE_SEP.search(item)
+        if sep is None or sep.group() not in (":", "=="):
+            return True
     return False
 
 
@@ -698,11 +762,9 @@ def _invocation_outward(prog: str, args: list[str], depth: int) -> bool:
         if script is None:
             return False
         return depth >= _MAX_SHELL_NESTING or _shell_outward(script, depth + 1)
-    if classify_bash_command(shlex.join([name, *args])) != "external":
-        return False
-    if name in ("curl", "wget", "http", "httpie"):
-        return _http_client_writes("http" if name == "httpie" else name, args)
-    return True
+    if name in _HTTP_CLIENTS:
+        return _http_client_writes(name, args)
+    return classify_bash_command(shlex.join([name, *args])) == "external"
 
 
 def _shell_outward(command: str, depth: int = 0) -> bool:
@@ -714,7 +776,11 @@ def _shell_outward(command: str, depth: int = 0) -> bool:
         return True  # command_invocations reads through ssh to the remote command; ssh itself is the outward act
     invocations = command_invocations(command)
     if invocations is None:
-        return _OUTWARD_TEXT.search(command) is not None
+        return _OUTWARD_TEXT.search(command) is not None or _HTTP_CLIENT_TEXT.search(command) is not None
+    if any(prog.rsplit("/", 1)[-1] in _HTTP_CLIENTS for prog, _ in invocations) and (
+        "<" in command or _PIPE_INTO_CLIENT.search(command)
+    ):
+        return True  # the body may come from stdin
     return any(_invocation_outward(prog, args, depth) for prog, args in invocations)
 
 
