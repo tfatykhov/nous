@@ -143,6 +143,34 @@ async def test_fallback_adds_partial_matches_after_the_all_words_row(eval_db, ch
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("query", "expected", "first", "n_fallback"),
+    [
+        ("alpha bravo yankee zulu", "ABC", "A", 3),        # A has two of the words
+        ("bravo yankee zulu", "AC", None, 2),              # A and C tie on one word
+    ],
+)
+async def test_zero_all_words_hits_runs_the_fallback_with_empty_and_ids(
+    eval_db, chunks, monkeypatch, query, expected, first, n_fallback
+):
+    """The dominant production path: a long query matches NO row on every word,
+    so the fallback statement runs with ``:and_ids == []`` (asyncpg must still
+    type it as uuid[]). 'yankee' and 'zulu' occur in no chunk."""
+    agent_id, ids = chunks
+    monkeypatch.setattr("nous.heart.search._resolve_keyword_or_fallback_enabled", lambda: True)
+    without, sink_off = await _search(eval_db, agent_id, query=query)     # no opt-in
+    assert without == []
+    assert sink_off == [{"n_keyword": 0, "n_keyword_fallback": None}]
+
+    got, sink = await _search(eval_db, agent_id, query=query, any_word_fallback=True)
+    assert set(got) == {ids[k] for k in expected}          # D shares no word
+    assert len(got) == len(set(got))
+    if first is not None:
+        assert got[0] == ids[first]
+    assert sink == [{"n_keyword": 0, "n_keyword_fallback": n_fallback}]
+
+
+@pytest.mark.asyncio
 async def test_a_cold_cache_skips_the_fallback_then_the_background_fill_enables_it(
     eval_db, chunks, monkeypatch
 ):
