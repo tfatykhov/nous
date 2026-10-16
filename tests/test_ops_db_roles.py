@@ -28,6 +28,11 @@ def test_the_scorer_is_granted_exactly_the_tables_the_job_reads():
     assert f"GRANT SELECT, INSERT, UPDATE ON {HEARTBEAT_TABLE} TO nous_scorer;" in ROLES
 
 
+def test_verify_expects_the_scorer_to_read_as_many_tables_as_the_job_reads():
+    counts = re.findall(r"has_table_privilege\(''nous_scorer'', c\.oid, ''SELECT''\)\) = (\d+)", VERIFY)
+    assert counts == [str(len(SOURCE_TABLES))]
+
+
 def test_nothing_else_is_granted_to_the_scorer():
     grants = re.findall(r"^GRANT .* TO [^;]*nous_scorer[^;]*;$", _statements(ROLES), re.M)
     allowed = {f"GRANT SELECT ON {t} TO nous_scorer;" for t in SOURCE_TABLES} | {

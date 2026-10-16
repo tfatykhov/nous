@@ -3,13 +3,16 @@
 -- Database roles for the Nous deployment. Idempotent: safe to run again at any time.
 --
 -- Run it on the database host, as a superuser, with the two passwords in the environment
--- (they are read inside the container, so they never appear on a command line):
+-- (they are read inside the container, so they never appear on a command line). A password is letters and
+-- digits only (openssl rand -hex 24), because the application puts it in its connection URL without escaping:
 --
 --   docker exec -i -e NOUS_APP_DB_PASSWORD -e NOUS_SCORER_DB_PASSWORD nous-postgres \
 --       psql -U nous_admin -d nous -X -v ON_ERROR_STOP=1 -f - < scripts/ops/db_roles.sql
 --
 -- The first run happens while the bootstrap superuser can still log in, so it uses -U nous
 -- (the role the database image created). Later runs use -U nous_admin.
+-- The first run changes the owner of every application table, which takes an ACCESS EXCLUSIVE lock on each:
+-- stop the application first, or expect the run to wait for the application's open transactions.
 --
 -- Run it after the application has applied migrations 087 and 088: it refuses to run without scoring.task_scores
 -- and scoring.scorer_heartbeat. Every refusal raises an error: psql prints "ERROR:  <reason>" and exits 3.
@@ -24,7 +27,8 @@
 --   <bootstrap>  the superuser the database image created (role oid 10). PostgreSQL does not allow
 --                it to lose SUPERUSER, so its login is disabled and its password removed.
 --
--- Everything runs in one transaction. A failed step leaves the database as it was.
+-- Everything runs in one transaction. A failed step leaves the database as it was. Every REVOKE cascades: it also
+-- takes away what the role passed on through a grant option, so a run converges on a chain of grants.
 
 \set ON_ERROR_STOP on
 \set VERBOSITY terse
@@ -36,7 +40,10 @@ SELECT current_setting('is_superuser') = 'on' AS is_super \gset
 \endif
 
 -- The bootstrap superuser is role oid 10. It cannot be demoted, so it is locked instead.
-SELECT rolname AS bootstrap FROM pg_roles WHERE oid = 10 \gset
+SELECT rolname AS bootstrap, rolname = 'nous_admin' AS bootstrap_is_admin FROM pg_roles WHERE oid = 10 \gset
+\if :bootstrap_is_admin
+    DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: the bootstrap superuser (role oid 10) is named nous_admin, and this script disables its login. Create the database with another POSTGRES_USER.'; END $$;
+\endif
 SELECT current_database() AS dbname \gset
 
 SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nous_app') AS app_exists,
@@ -44,13 +51,25 @@ SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nous_app') AS app_exists,
        (to_regclass('scoring.task_scores') IS NOT NULL
         AND to_regclass('scoring.scorer_heartbeat') IS NOT NULL) AS scoring_exists \gset
 
+-- The passwords are tested in psql's own shell, so that no query but ALTER ROLE carries them.
 \set app_password `printenv NOUS_APP_DB_PASSWORD`
 \set scorer_password `printenv NOUS_SCORER_DB_PASSWORD`
-SELECT length(:'app_password') > 0 AS has_app_pw, length(:'scorer_password') > 0 AS has_scorer_pw \gset
+\set has_app_pw `test -n "$NOUS_APP_DB_PASSWORD" && echo true || echo false`
+\set has_scorer_pw `test -n "$NOUS_SCORER_DB_PASSWORD" && echo true || echo false`
+\set app_pw_ok `case "$NOUS_APP_DB_PASSWORD" in *[!A-Za-z0-9]*) echo false;; *) echo true;; esac`
+\set scorer_pw_ok `case "$NOUS_SCORER_DB_PASSWORD" in *[!A-Za-z0-9]*) echo false;; *) echo true;; esac`
 
 \if :scoring_exists
 \else
     DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: scoring.task_scores or scoring.scorer_heartbeat does not exist. Start the application first (it applies migrations 087 and 088), then run this script.'; END $$;
+\endif
+\if :app_pw_ok
+\else
+    DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: NOUS_APP_DB_PASSWORD must be letters and digits only (openssl rand -hex 24)'; END $$;
+\endif
+\if :scorer_pw_ok
+\else
+    DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: NOUS_SCORER_DB_PASSWORD must be letters and digits only (openssl rand -hex 24)'; END $$;
 \endif
 \if :has_app_pw
 \else
@@ -107,7 +126,7 @@ ALTER ROLE nous_scorer SET row_security = off;
 -- 2. Database: the administrator owns it (so grants on it are the administrator's alone). Only the
 --    two named roles may connect.
 ALTER DATABASE :"dbname" OWNER TO nous_admin;
-REVOKE ALL ON DATABASE :"dbname" FROM PUBLIC;
+REVOKE ALL ON DATABASE :"dbname" FROM PUBLIC, nous_app, nous_scorer CASCADE;
 GRANT CONNECT, TEMP ON DATABASE :"dbname" TO nous_app;
 GRANT CREATE ON DATABASE :"dbname" TO nous_app;
 GRANT CONNECT ON DATABASE :"dbname" TO nous_scorer;
@@ -151,9 +170,10 @@ BEGIN
                            CASE o.prokind WHEN 'p' THEN 'PROCEDURE' WHEN 'a' THEN 'AGGREGATE' ELSE 'FUNCTION' END,
                            o.sig, s.owner_role);
         END LOOP;
+        -- enums, domains and ranges (a range's multirange type follows it; PostgreSQL refuses to alter one directly)
         FOR o IN
             SELECT t.oid::regtype AS tname, t.typtype FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
-            WHERE n.nspname = s.sch AND t.typtype IN ('e', 'd') AND pg_get_userbyid(t.typowner) <> s.owner_role
+            WHERE n.nspname = s.sch AND t.typtype IN ('e', 'd', 'r') AND pg_get_userbyid(t.typowner) <> s.owner_role
         LOOP
             EXECUTE format('ALTER %s %s OWNER TO %I', CASE o.typtype WHEN 'd' THEN 'DOMAIN' ELSE 'TYPE' END,
                            o.tname, s.owner_role);
@@ -163,10 +183,10 @@ END
 $own$;
 
 -- 4. scoring: owned by nous_admin, written by the scorer, read by the application.
-REVOKE ALL ON SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer;
-REVOKE ALL ON ALL TABLES IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer;
-REVOKE ALL ON ALL SEQUENCES IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer;
-REVOKE ALL ON ALL FUNCTIONS IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer;
+REVOKE ALL ON SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer CASCADE;
+REVOKE ALL ON ALL TABLES IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer CASCADE;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer CASCADE;
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer CASCADE;
 GRANT USAGE ON SCHEMA scoring TO nous_app, nous_scorer;
 GRANT SELECT ON ALL TABLES IN SCHEMA scoring TO nous_app;
 -- (the ownership loop of section 3 and the line above cover every table in scoring, so both are owned by
@@ -198,9 +218,9 @@ ALTER DEFAULT PRIVILEGES FOR ROLE nous_admin IN SCHEMA scoring GRANT SELECT ON T
 
 -- 5. The scorer reads exactly the tables that task_score_job.SOURCE_TABLES names (a test compares this
 --    list with that constant), and nothing else in the application schemas.
-REVOKE ALL ON ALL TABLES IN SCHEMA brain, heart, nous_system FROM nous_scorer;
-REVOKE ALL ON ALL SEQUENCES IN SCHEMA brain, heart, nous_system FROM nous_scorer;
-REVOKE ALL ON ALL FUNCTIONS IN SCHEMA brain, heart, nous_system FROM nous_scorer;
+REVOKE ALL ON ALL TABLES IN SCHEMA brain, heart, nous_system FROM nous_scorer CASCADE;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA brain, heart, nous_system FROM nous_scorer CASCADE;
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA brain, heart, nous_system FROM nous_scorer CASCADE;
 GRANT USAGE ON SCHEMA brain, heart, nous_system TO nous_scorer;
 -- source tables begin
 GRANT SELECT ON brain.decisions TO nous_scorer;
@@ -225,8 +245,9 @@ BEGIN
           FROM pg_auth_members am JOIN pg_roles g ON g.oid = am.roleid JOIN pg_roles r ON r.oid = am.member
          WHERE g.rolname IN ('nous_app', 'nous_scorer', 'nous_admin')
             OR r.rolname IN ('nous_app', 'nous_scorer', 'nous_admin')
+         ORDER BY 1, 2
     LOOP
-        EXECUTE format('REVOKE %I FROM %I', m.grp, m.mem);
+        EXECUTE format('REVOKE %I FROM %I CASCADE', m.grp, m.mem);
     END LOOP;
 END
 $members$;
@@ -241,8 +262,9 @@ BEGIN
         SELECT DISTINCT x.parname, a.grantee
           FROM pg_parameter_acl x, LATERAL aclexplode(x.paracl) a
          WHERE a.grantee IN (0, 'nous_app'::regrole, 'nous_scorer'::regrole)
+         ORDER BY 1, 2
     LOOP
-        EXECUTE format('REVOKE ALL ON PARAMETER %I FROM %s', p.parname,
+        EXECUTE format('REVOKE ALL ON PARAMETER %I FROM %s CASCADE', p.parname,
                        CASE WHEN p.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(p.grantee)) END);
     END LOOP;
 END
@@ -282,6 +304,10 @@ BEGIN
 
     IF (SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = current_database()) <> 'nous_admin' THEN
         RAISE EXCEPTION 'nous_admin does not own the database';
+    END IF;
+
+    IF NOT (SELECT rolcanlogin FROM pg_roles WHERE rolname = 'nous_admin') THEN
+        RAISE EXCEPTION 'nous_admin cannot log in';
     END IF;
 END
 $post$;

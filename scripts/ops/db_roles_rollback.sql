@@ -10,6 +10,8 @@
 -- NOUS_LEGACY_DB_PASSWORD is the password the application used before the roles were split (the
 -- DB_PASSWORD line of the host .env). Then set NOUS_APP_DB_USER to the bootstrap role's name
 -- (nous) and NOUS_APP_DB_PASSWORD to that password in .env, and recreate the application container.
+-- It must be letters and digits only, as the application puts it in its connection URL without escaping;
+-- if the old one is not, use a new one (openssl rand -hex 24) in its place.
 --
 -- A refusal raises an error: psql prints "ERROR:  <reason>" and exits 3.
 
@@ -20,11 +22,17 @@ SELECT current_setting('is_superuser') = 'on' AS is_super \gset
 \else
     DO $$ BEGIN RAISE EXCEPTION 'db_roles_rollback.sql: connect as nous_admin'; END $$;
 \endif
+-- The password is tested in psql's own shell, so that no query but ALTER ROLE carries it.
 \set legacy_password `printenv NOUS_LEGACY_DB_PASSWORD`
-SELECT length(:'legacy_password') > 0 AS has_pw \gset
+\set has_pw `test -n "$NOUS_LEGACY_DB_PASSWORD" && echo true || echo false`
+\set pw_ok `case "$NOUS_LEGACY_DB_PASSWORD" in *[!A-Za-z0-9]*) echo false;; *) echo true;; esac`
 \if :has_pw
 \else
     DO $$ BEGIN RAISE EXCEPTION 'db_roles_rollback.sql: set NOUS_LEGACY_DB_PASSWORD'; END $$;
+\endif
+\if :pw_ok
+\else
+    DO $$ BEGIN RAISE EXCEPTION 'db_roles_rollback.sql: NOUS_LEGACY_DB_PASSWORD must be letters and digits only (openssl rand -hex 24)'; END $$;
 \endif
 SELECT rolname AS bootstrap FROM pg_roles WHERE oid = 10 \gset
 ALTER ROLE :"bootstrap" LOGIN PASSWORD :'legacy_password';

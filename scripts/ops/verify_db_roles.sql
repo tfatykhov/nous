@@ -121,15 +121,15 @@ BEGIN
             'SELECT NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolsuper AND oid <> 10 AND rolname <> ''nous_admin'')', 'true', NULL),
         ('nous_admin owns the database', 'nous_admin',
             'SELECT pg_get_userbyid(datdba) = ''nous_admin'' FROM pg_database WHERE datname = current_database()', 'true', NULL),
-        ('only the app and scorer roles may connect', 'nous_admin',
+        ('PUBLIC cannot connect to the database', 'nous_admin',
             'SELECT NOT has_database_privilege(0::oid, (SELECT oid FROM pg_database WHERE datname = current_database()), ''CONNECT'')', 'true', NULL),
         ('the app owns every object in its schemas', 'nous_admin',
             'SELECT NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.relnamespace::regnamespace::text IN (''brain'', ''heart'', ''nous_system'') AND c.relkind IN (''r'', ''p'', ''v'', ''m'', ''f'', ''S'') AND pg_get_userbyid(c.relowner) <> ''nous_app'')', 'true', NULL),
         ('nous_admin owns the scoring schema and its tables', 'nous_admin',
-            'SELECT pg_get_userbyid((SELECT nspowner FROM pg_namespace WHERE nspname = ''scoring'')) = ''nous_admin'' AND NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.relnamespace = ''scoring''::regnamespace AND c.relkind IN (''r'', ''S'', ''v'') AND pg_get_userbyid(c.relowner) <> ''nous_admin'')', 'true', NULL),
+            'SELECT pg_get_userbyid((SELECT nspowner FROM pg_namespace WHERE nspname = ''scoring'')) = ''nous_admin'' AND NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.relnamespace = ''scoring''::regnamespace AND c.relkind IN (''r'', ''p'', ''v'', ''m'', ''f'', ''S'') AND pg_get_userbyid(c.relowner) <> ''nous_admin'')', 'true', NULL),
         ('PUBLIC has nothing on scoring', 'nous_admin',
             'SELECT NOT has_schema_privilege(0::oid, ''scoring'', ''USAGE'') AND NOT has_table_privilege(0::oid, ''scoring.task_scores'', ''SELECT'') AND NOT has_table_privilege(0::oid, ''scoring.scorer_heartbeat'', ''SELECT'')', 'true', NULL),
-        ('scorer holds SELECT on exactly ten application tables and nothing else there', 'nous_admin',
+        ('scorer holds SELECT on exactly as many application tables as SOURCE_TABLES names, and nothing else there', 'nous_admin',
             'SELECT (SELECT count(*) FROM pg_class c WHERE c.relnamespace::regnamespace::text IN (''brain'', ''heart'', ''nous_system'') AND c.relkind IN (''r'', ''p'', ''v'', ''m'', ''f'') AND has_table_privilege(''nous_scorer'', c.oid, ''SELECT'')) = 10 AND NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.relnamespace::regnamespace::text IN (''brain'', ''heart'', ''nous_system'') AND c.relkind IN (''r'', ''p'', ''v'', ''m'', ''f'') AND (has_table_privilege(''nous_scorer'', c.oid, ''INSERT'') OR has_table_privilege(''nous_scorer'', c.oid, ''UPDATE'') OR has_table_privilege(''nous_scorer'', c.oid, ''DELETE'') OR has_table_privilege(''nous_scorer'', c.oid, ''TRUNCATE'') OR has_table_privilege(''nous_scorer'', c.oid, ''TRIGGER'') OR has_table_privilege(''nous_scorer'', c.oid, ''REFERENCES'')))', 'true', NULL),
         ('scorer holds only SELECT, INSERT, UPDATE on task_scores', 'nous_admin',
             'SELECT has_table_privilege(''nous_scorer'', ''scoring.task_scores'', ''SELECT'') AND has_table_privilege(''nous_scorer'', ''scoring.task_scores'', ''INSERT'') AND has_table_privilege(''nous_scorer'', ''scoring.task_scores'', ''UPDATE'') AND NOT has_table_privilege(''nous_scorer'', ''scoring.task_scores'', ''DELETE'') AND NOT has_table_privilege(''nous_scorer'', ''scoring.task_scores'', ''TRUNCATE'') AND NOT has_table_privilege(''nous_scorer'', ''scoring.task_scores'', ''TRIGGER'')', 'true', NULL),
@@ -171,8 +171,10 @@ BEGIN
                 ok := c.expect = 'ok';
             END IF;
         EXCEPTION WHEN OTHERS THEN
-            err := SQLERRM;
-            ok := c.expect = 'error';
+            -- a refusal must be a privilege error (42501): a missing column or table, a timeout or a statement that
+            -- cannot run here would prove nothing
+            err := SQLSTATE || ' ' || SQLERRM;
+            ok := c.expect = 'error' AND SQLSTATE = '42501';
         END;
         RESET ROLE;
         IF ok AND c.after IS NOT NULL THEN
