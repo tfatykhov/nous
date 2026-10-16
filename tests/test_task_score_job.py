@@ -781,6 +781,26 @@ async def test_a_failed_pass_leaves_an_error_heartbeat_and_none_of_its_scores(db
     assert not any("heartbeat" in r.getMessage() for r in caplog.records)
 
 
+async def test_the_scores_and_the_ok_heartbeat_commit_together_or_not_at_all(db, agent, monkeypatch):
+    # The SQLite-lane twin of the role test without the heartbeat grant: an ok heartbeat that cannot be written takes
+    # the pass's scores with it, because both are one transaction.
+    async with db.session() as s:
+        s.add_all(_errored_subtask(agent, NOW - timedelta(hours=1)))
+        await s.commit()
+    real = job.upsert_heartbeat
+
+    async def ok_heartbeat_fails(session, agent_id, *, now, submitted=None, error=None):
+        if error is None:
+            raise _HeartbeatBroke("the ok heartbeat")
+        await real(session, agent_id, now=now, submitted=submitted, error=error)
+
+    monkeypatch.setattr(job, "upsert_heartbeat", ok_heartbeat_fails)
+    with pytest.raises(_HeartbeatBroke):
+        await job.run_scoring_pass(db, agent, now=NOW)
+    assert await rows(db, agent) == []
+    assert await heartbeats(db, agent) == []
+
+
 async def test_a_first_pass_that_fails_leaves_an_error_heartbeat_with_nothing_committed_yet(db, agent, monkeypatch):
     monkeypatch.setattr(job, "gather_signals", _raise(_PassBroke("the gatherer failed")))
     monkeypatch.setattr(job, "_open_database", lambda settings: _Shared(db))

@@ -101,7 +101,7 @@ nous/
 │   │   ├── process_recorder.py # #653 nous_system.process_run_log writer (fail-open)
 │   │   ├── task_scoring.py     # Task scores: the pure task scorer; holds every constant and SCORER_VERSION
 │   │   ├── task_score_gatherer.py # Task scores: reads a scoring pass's signals in a bounded number of queries
-│   │   ├── task_score_job.py   # Task scores: the one-shot scoring pass (`python -m nous.observability.task_score_job`), the only writer of scoring.task_scores
+│   │   ├── task_score_job.py   # Task scores: the one-shot scoring pass (`python -m nous.observability.task_score_job`), the only writer of `scoring.task_scores` and `scoring.scorer_heartbeat` (migration 088, its one-row-per-agent liveness record)
 │   │   ├── autonomy_inventory.py # Autonomy inventory: per tool, successes by who was in the loop (owner present, approved, autonomous), and censor activity
 │   │   ├── drift.py            # Drift detection
 │   │   └── snapshots.py        # Graph hub snapshots

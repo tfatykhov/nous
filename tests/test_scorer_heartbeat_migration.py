@@ -11,6 +11,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
+from nous.observability import task_score_job as job
 from nous.storage.migrator import _split_sql_statements
 from nous.storage.models import ScorerHeartbeat
 
@@ -53,6 +54,12 @@ def test_the_columns_match_the_orm_model():
     body = _split_sql_statements(_sql())[0]
     sql_columns = set(re.findall(r"^\s{4}([a-z_]+)\s+(?:TEXT|VARCHAR|TIMESTAMPTZ|INTEGER)", body, re.M))
     assert sql_columns == {c.name for c in ScorerHeartbeat.__table__.columns}
+
+
+def test_the_error_width_is_the_same_in_the_sql_the_model_and_the_job():
+    # the job truncates the class name to the column: a wider name would fail the error heartbeat's write
+    (width,) = re.findall(r"^\s{4}last_error\s+VARCHAR\((\d+)\)", _split_sql_statements(_sql())[0], re.M)
+    assert int(width) == ScorerHeartbeat.__table__.c.last_error.type.length == job.ERROR_CHARS
 
 
 def test_the_constraints_match_the_orm_model():
