@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import math
+from contextvars import ContextVar
 from functools import lru_cache
 from uuid import UUID
 
@@ -144,6 +145,67 @@ HYBRID_DROP_STAGES = frozenset({
     "keyword_filter",
     "keyword_filter_limit",
 })
+
+# A4 Step 1: write-only telemetry sink for the keyword sub-leg. A ContextVar, not
+# a parameter: `hybrid_search` is reached through three managers, `Heart.recall`,
+# the context engine and the chunk helper, and threading a keyword through every
+# one of those signatures (and every test double of them) buys nothing. The
+# variable is per asyncio task and a child task copies the reference, so the
+# sequential awaits in `Heart._recall` and `hybrid_search_multi` all see it.
+# Default None => `hybrid_search` appends nothing.
+_KEYWORD_STATS_SINK: ContextVar[list | None] = ContextVar(
+    "nous_keyword_stats_sink", default=None
+)
+
+
+async def with_keyword_stats(sink: list | None, awaitable):
+    """Await ``awaitable`` with ``sink`` installed as the keyword-stats sink.
+
+    While it runs, every ``hybrid_search`` call appends ONE record
+    ``{"n_keyword": int | None, "n_keyword_fallback": int | None}`` to ``sink``
+    (list order == call order, so a multi-variant search yields one record per
+    variant). ``n_keyword`` is the row count of the ALL-WORDS keyword sub-query,
+    taken before the merge and before any fallback (``None`` when the keyword leg
+    did not run). Fold the list with ``summarize_keyword_stats``. Passing
+    ``sink=None`` installs nothing. Write-only: no returned value, order or SQL
+    depends on it. The previous sink is restored on exit, so scopes nest.
+    """
+    token = _KEYWORD_STATS_SINK.set(sink)
+    try:
+        return await awaitable
+    finally:
+        _KEYWORD_STATS_SINK.reset(token)
+
+
+def summarize_keyword_stats(records: list[dict]) -> dict[str, int] | None:
+    """Fold the per-call records into the optional ``Leg`` fields.
+
+    One record exists per ``hybrid_search`` call, i.e. per (table x query
+    variant). The result's keys are exactly ``Leg`` field names, so a caller can
+    write ``trace.leg(name, **summary)``:
+
+    - ``n_keyword_queries``: how many calls ran the all-words keyword sub-query.
+      This is the DENOMINATOR of the zero-hit rate: ``n_keyword_zero`` alone is
+      uninterpretable (3 zeros of 9 differs from 3 zeros of 3).
+    - ``n_keyword_zero``: of those, how many returned no rows.
+    - ``n_keyword_fallback``: rows the any-word fallback appended (summed);
+      present only if at least one call ran the fallback. The all-words count is
+      never changed by the fallback, so flipping the flag never changes what the
+      zero-hit rate means.
+
+    Keys are omitted when no record knows the value; ``None`` for no records.
+    """
+    if not records:
+        return None
+    kw = [r["n_keyword"] for r in records if r.get("n_keyword") is not None]
+    fb = [r["n_keyword_fallback"] for r in records if r.get("n_keyword_fallback") is not None]
+    out: dict[str, int] = {}
+    if kw:
+        out["n_keyword_queries"] = len(kw)
+        out["n_keyword_zero"] = sum(1 for n in kw if n == 0)
+    if fb:
+        out["n_keyword_fallback"] = sum(fb)
+    return out or None
 
 
 def _rrf_merge(
@@ -414,6 +476,7 @@ async def hybrid_search(
     # leg — force it on even when the channel toggle is off, else the filter
     # would drop EVERY result in a vector-only deployment.
     keyword_enabled = _resolve_keyword_enabled() or embedding is None or require_keyword_hit
+    n_keyword: int | None = None
     if keyword_enabled:
         keyword_sql = text(f"""
             SELECT t.id,
@@ -427,6 +490,11 @@ async def hybrid_search(
         """)
         result = await session.execute(keyword_sql, params)
         keyword_results = [(row.id, float(row.score)) for row in result.all()]
+        n_keyword = len(keyword_results)
+
+    stats_sink = _KEYWORD_STATS_SINK.get()
+    if stats_sink is not None:
+        stats_sink.append({"n_keyword": n_keyword, "n_keyword_fallback": None})
 
     if embedding is None:
         # Keyword-only fallback — return keyword results directly
