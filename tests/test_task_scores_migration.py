@@ -11,6 +11,8 @@ from sqlalchemy import text
 from nous.storage.migrator import _split_sql_statements
 from nous.storage.models import TaskScore
 
+pytestmark = pytest.mark.scoring_writer
+
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "sql" / "migrations" / "087_task_scores.sql"
 

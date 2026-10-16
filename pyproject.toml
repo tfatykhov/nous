@@ -69,6 +69,7 @@ markers = [
     "integration: requires live PostgreSQL (run with --integration)",
     "eval: F051 retrieval-eval-harness unit tests (no DB required)",
     "postgres_only: requires real PostgreSQL (skipped unless NOUS_TEST_DB=postgres)",
+    "scoring_writer: writes the scoring schema or creates roles as the connected role (deselected in the DB roles CI job, where that role is nous_app)",
 ]
 
 [tool.ruff]
