@@ -3,7 +3,7 @@ text-embedding-3-large @ 1536-dim) into the local eval DB under a distinct
 agent_id, reusing the tested nous_eval.corpus_loader for the load side.
 
 Run:
-    export PROD_PW=...           # prod DB_PASSWORD
+    export PROD_PW=...           # password of the PROD_DB_USER login (default nous_app)
     PYTHONPATH=. DB_HOST=localhost DB_PORT=5432 uv run python scripts/diag/copy_prod_corpus.py
 """
 

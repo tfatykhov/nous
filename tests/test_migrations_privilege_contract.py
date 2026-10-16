@@ -3,7 +3,8 @@
 A statement that needs more, or that resolves to the public schema, would stop the application from starting on the
 next deploy, so the obvious cases are caught here. This is a cheap hint, not the gate: the gate is the "DB roles" CI
 job, which applies every migration as the application role. DDL that a migration builds as a string inside a DO block
-or a function body is not read here (dollar-quoted bodies are blanked before matching) and is left to that job.
+or a function body is not read here (string literals and dollar-quoted bodies are blanked before matching) and is
+left to that job.
 """
 
 from __future__ import annotations
@@ -29,7 +30,10 @@ _RULES: tuple[tuple[str, str], ...] = (
     (r"\bOWNER\s+TO\b", "ownership belongs to scripts/ops/db_roles.sql"),
     (r"\bCREATE\s+(ROLE|USER|DATABASE)\b", "roles and databases belong to the administrator"),
     (r"\bscoring\s*\.", "the scoring schema is written by the scorer and changed by the administrator"),
-    (r"\bpublic\s*\.", "the application role cannot create objects in public"),
+    (
+        r"\bpublic\s*\.",
+        "do not name public: the application role cannot create there, and its helpers resolve through search_path",
+    ),
     (
         rf"\bCREATE\s+(OR\s+REPLACE\s+)?(FUNCTION|PROCEDURE|AGGREGATE|OPERATOR|TYPE|DOMAIN|VIEW"
         rf"|MATERIALIZED\s+VIEW)\s+{_NOT_APP}",
@@ -74,11 +78,22 @@ _RULES: tuple[tuple[str, str], ...] = (
 )
 
 
+# one leftmost-wins pass, so a quote inside a comment or a -- inside a string is read as part of what encloses it
+_LITERALS_AND_COMMENTS = re.compile(r"'(?:[^']|'')*'|/\*.*?\*/|--[^\n]*|\$(\w*)\$.*?\$\1\$", re.S)
+
+
+def _blank_one(match: re.Match[str]) -> str:
+    text = match.group(0)
+    if text.startswith("'"):
+        return "''"
+    if text.startswith("$"):
+        return "$$ $$"
+    return " "
+
+
 def _blank(sql: str) -> str:
-    """The SQL without comments (/* */ and --) and with dollar-quoted bodies blanked."""
-    sql = re.sub(r"/\*.*?\*/", " ", sql, flags=re.S)
-    sql = re.sub(r"--[^\n]*", " ", sql)
-    return re.sub(r"\$(\w*)\$.*?\$\1\$", "$$ $$", sql, flags=re.S)
+    """The SQL without comments (/* */ and --), with string literals and dollar-quoted bodies blanked."""
+    return _LITERALS_AND_COMMENTS.sub(_blank_one, sql)
 
 
 def privilege_violations(sql: str) -> list[str]:
@@ -118,6 +133,13 @@ def privilege_violations(sql: str) -> list[str]:
         "ALTER SEQUENCE foo_seq RESTART;",
         "/* header */ CREATE TABLE foo (id int);",
         "CREATE TABLE foo (id int); -- trailing comment",
+        "INSERT INTO nous_system.cfg (k, v) VALUES ('note', 'a -- b'), ('k2', 'v2'); CREATE TABLE foo (id int);",
+        (
+            "INSERT INTO nous_system.cfg (k, v) VALUES ('a /* b');\n"
+            "CREATE TABLE foo (id int);\n"
+            "INSERT INTO nous_system.cfg (k, v) VALUES ('c */ d');"
+        ),
+        "COMMENT ON TABLE heart.facts IS 'don''t'; CREATE TABLE foo (id int);",
     ],
 )
 def test_the_rules_catch_what_the_application_role_cannot_do(sql):
@@ -146,6 +168,7 @@ def test_the_rules_catch_what_the_application_role_cannot_do(sql):
         "/* CREATE TABLE foo (id int); */ SELECT 1; -- CREATE EXTENSION x",
         "DO $do$ BEGIN EXECUTE 'CREATE TABLE foo (id int)'; END $do$;",
         "CREATE FUNCTION heart.f() RETURNS int LANGUAGE plpgsql AS $$ DECLARE n int; BEGIN SELECT 1 INTO n; END $$;",
+        "COMMENT ON TABLE heart.facts IS 'callers may grant access';",
     ],
 )
 def test_the_rules_leave_ordinary_migrations_alone(sql):

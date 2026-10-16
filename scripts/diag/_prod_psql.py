@@ -1,6 +1,7 @@
 """Read-only helper: run a SQL query (or pg_dump) on PROD via SSH + docker exec.
 
 Secrets come from PROD_SSH_* env vars — never the command line / this file.
+The psql / pg_dump login is PROD_PG_USER (default nous_admin).
 Usage:
   PROD_SSH_HOST=.. PROD_SSH_USER=.. PROD_SSH_PW=.. \
     uv run python scripts/diag/_prod_psql.py sql "SELECT count(*) FROM heart.facts;"
