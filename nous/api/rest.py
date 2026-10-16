@@ -2101,6 +2101,24 @@ def create_app(
             logger.error("Dashboard attention error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    async def dashboard_autonomy(request: Request) -> JSONResponse:
+        """GET /dashboard/autonomy — the autonomy scoreboard (plan v2, A3). Read-only; ``days`` 1 to 90, default 7."""
+        from nous.api.autonomy_dashboard import get_autonomy_data, parse_days
+
+        try:
+            days = parse_days(request.query_params.get("days"))
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        try:
+            async with database.session() as session:
+                data = await get_autonomy_data(
+                    session, settings.agent_id, days=days, events_persisted=settings.f026_persistence_enabled
+                )
+            return JSONResponse(data)
+        except Exception as e:
+            logger.error("Dashboard autonomy error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     async def dashboard_intentions(request: Request) -> JSONResponse:
         """GET /dashboard/intentions — F099 Phase 3c: every intention root as a tree, and the metrics beside it
         (``window`` 24h|7d|30d, ``state`` open|all, ``limit`` 1 to 200). With NOUS_CONTINUATION_ENABLED off it
@@ -3584,6 +3602,7 @@ def create_app(
         Route("/dashboard/harness", dashboard_harness),
         Route("/dashboard/intentions", dashboard_intentions),
         Route("/dashboard/attention", dashboard_attention),
+        Route("/dashboard/autonomy", dashboard_autonomy),
         # F040: Graph density dashboard
         Route("/dashboard/density", dashboard_density),
         # F035.6: Consolidation audit diff dashboard — detail (path param) MUST
