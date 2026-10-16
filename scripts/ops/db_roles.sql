@@ -1,0 +1,277 @@
+-- scripts/ops/db_roles.sql
+--
+-- Database roles for the Nous deployment. Idempotent: safe to run again at any time.
+--
+-- Run it on the database host, as a superuser, with the two passwords in the environment
+-- (they are read inside the container, so they never appear on a command line):
+--
+--   docker exec -i -e NOUS_APP_DB_PASSWORD -e NOUS_SCORER_DB_PASSWORD nous-postgres \
+--       psql -U nous_admin -d nous -X -v ON_ERROR_STOP=1 -f - < scripts/ops/db_roles.sql
+--
+-- The first run happens while the bootstrap superuser can still log in, so it uses -U nous
+-- (the role the database image created). Later runs use -U nous_admin.
+--
+-- Run it after the application has applied migrations 087 and 088: it refuses to run without scoring.task_scores
+-- and scoring.scorer_heartbeat. Every refusal raises an error: psql prints "ERROR:  <reason>" and exits 3.
+--
+-- Roles after this script:
+--   nous_admin   superuser, no password: reachable only through docker exec on the database host.
+--                Owns the database, the scoring schema and its tables (scoring.task_scores, scoring.scorer_heartbeat).
+--   nous_app     the application role: owns the brain, heart and nous_system schemas and their
+--                tables, may create objects in the database, may read the two scoring tables.
+--   nous_scorer  the scoring job: reads the tables named in task_score_job.SOURCE_TABLES, and
+--                reads, inserts and updates scoring.task_scores and scoring.scorer_heartbeat. Nothing else.
+--   <bootstrap>  the superuser the database image created (role oid 10). PostgreSQL does not allow
+--                it to lose SUPERUSER, so its login is disabled and its password removed.
+--
+-- Everything runs in one transaction. A failed step leaves the database as it was.
+
+\set ON_ERROR_STOP on
+\set VERBOSITY terse
+
+SELECT current_setting('is_superuser') = 'on' AS is_super \gset
+\if :is_super
+\else
+    DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: connect as a superuser (nous_admin, or the bootstrap role on the first run)'; END $$;
+\endif
+
+-- The bootstrap superuser is role oid 10. It cannot be demoted, so it is locked instead.
+SELECT rolname AS bootstrap FROM pg_roles WHERE oid = 10 \gset
+SELECT current_database() AS dbname \gset
+
+SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nous_app') AS app_exists,
+       EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nous_scorer') AS scorer_exists,
+       (to_regclass('scoring.task_scores') IS NOT NULL
+        AND to_regclass('scoring.scorer_heartbeat') IS NOT NULL) AS scoring_exists \gset
+
+\set app_password `printenv NOUS_APP_DB_PASSWORD`
+\set scorer_password `printenv NOUS_SCORER_DB_PASSWORD`
+SELECT length(:'app_password') > 0 AS has_app_pw, length(:'scorer_password') > 0 AS has_scorer_pw \gset
+
+\if :scoring_exists
+\else
+    DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: scoring.task_scores or scoring.scorer_heartbeat does not exist. Start the application first (it applies migrations 087 and 088), then run this script.'; END $$;
+\endif
+\if :has_app_pw
+\else
+    \if :app_exists
+    \else
+        DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: set NOUS_APP_DB_PASSWORD for the first run'; END $$;
+    \endif
+\endif
+\if :has_scorer_pw
+\else
+    \if :scorer_exists
+    \else
+        DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: set NOUS_SCORER_DB_PASSWORD for the first run'; END $$;
+    \endif
+\endif
+
+BEGIN;
+
+-- 1. Roles. Created by a superuser, so the creator holds no membership in them.
+DO $roles$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nous_admin') THEN
+        CREATE ROLE nous_admin;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nous_app') THEN
+        CREATE ROLE nous_app;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nous_scorer') THEN
+        CREATE ROLE nous_scorer;
+    END IF;
+END
+$roles$;
+
+ALTER ROLE nous_admin WITH SUPERUSER LOGIN PASSWORD NULL;
+ALTER ROLE nous_app WITH NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS LOGIN;
+ALTER ROLE nous_scorer WITH NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS LOGIN;
+
+\if :has_app_pw
+    ALTER ROLE nous_app PASSWORD :'app_password';
+\endif
+\if :has_scorer_pw
+    ALTER ROLE nous_scorer PASSWORD :'scorer_password';
+\endif
+
+-- Neither the administrator nor the scorer resolves names through a schema named after the login: the application
+-- role may create schemas, and a schema called nous_admin or nous_scorer would otherwise come first.
+ALTER ROLE nous_admin SET search_path = pg_catalog, public;
+
+-- The scorer reads tables that the application owns. Pin what it resolves and refuse row policies,
+-- so that nothing the application defines can run with the scorer's privileges.
+ALTER ROLE nous_scorer SET search_path = pg_catalog, scoring;
+ALTER ROLE nous_scorer SET row_security = off;
+
+-- 2. Database: the administrator owns it (so grants on it are the administrator's alone). Only the
+--    two named roles may connect.
+ALTER DATABASE :"dbname" OWNER TO nous_admin;
+REVOKE ALL ON DATABASE :"dbname" FROM PUBLIC;
+GRANT CONNECT, TEMP ON DATABASE :"dbname" TO nous_app;
+GRANT CREATE ON DATABASE :"dbname" TO nous_app;
+GRANT CONNECT ON DATABASE :"dbname" TO nous_scorer;
+
+-- 3. Ownership. The application owns its three schemas and everything in them, the administrator owns
+--    the scoring schema. Only objects with another owner are touched, so a second run changes nothing.
+DO $own$
+DECLARE
+    s record;
+    o record;
+BEGIN
+    FOR s IN
+        SELECT * FROM (VALUES ('brain', 'nous_app'), ('heart', 'nous_app'), ('nous_system', 'nous_app'),
+                              ('scoring', 'nous_admin')) AS v(sch, owner_role)
+    LOOP
+        IF (SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = s.sch) <> s.owner_role THEN
+            EXECUTE format('ALTER SCHEMA %I OWNER TO %I', s.sch, s.owner_role);
+        END IF;
+        -- tables, views, foreign tables first (their indexes, toast tables and owned sequences follow)
+        FOR o IN
+            SELECT c.relname, c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = s.sch AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+              AND pg_get_userbyid(c.relowner) <> s.owner_role
+        LOOP
+            EXECUTE format('ALTER %s %I.%I OWNER TO %I',
+                           CASE o.relkind WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW'
+                                          WHEN 'f' THEN 'FOREIGN TABLE' ELSE 'TABLE' END,
+                           s.sch, o.relname, s.owner_role);
+        END LOOP;
+        FOR o IN
+            SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = s.sch AND c.relkind = 'S' AND pg_get_userbyid(c.relowner) <> s.owner_role
+        LOOP
+            EXECUTE format('ALTER SEQUENCE %I.%I OWNER TO %I', s.sch, o.relname, s.owner_role);
+        END LOOP;
+        FOR o IN
+            SELECT p.oid::regprocedure AS sig, p.prokind FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname = s.sch AND pg_get_userbyid(p.proowner) <> s.owner_role
+        LOOP
+            EXECUTE format('ALTER %s %s OWNER TO %I',
+                           CASE o.prokind WHEN 'p' THEN 'PROCEDURE' WHEN 'a' THEN 'AGGREGATE' ELSE 'FUNCTION' END,
+                           o.sig, s.owner_role);
+        END LOOP;
+        FOR o IN
+            SELECT t.oid::regtype AS tname, t.typtype FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+            WHERE n.nspname = s.sch AND t.typtype IN ('e', 'd') AND pg_get_userbyid(t.typowner) <> s.owner_role
+        LOOP
+            EXECUTE format('ALTER %s %s OWNER TO %I', CASE o.typtype WHEN 'd' THEN 'DOMAIN' ELSE 'TYPE' END,
+                           o.tname, s.owner_role);
+        END LOOP;
+    END LOOP;
+END
+$own$;
+
+-- 4. scoring: owned by nous_admin, written by the scorer, read by the application.
+REVOKE ALL ON SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer;
+REVOKE ALL ON ALL TABLES IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer;
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer;
+GRANT USAGE ON SCHEMA scoring TO nous_app, nous_scorer;
+GRANT SELECT ON ALL TABLES IN SCHEMA scoring TO nous_app;
+-- (the ownership loop of section 3 and the line above cover every table in scoring, so both are owned by
+-- nous_admin and readable by the application)
+GRANT SELECT, INSERT, UPDATE ON scoring.task_scores TO nous_scorer;
+GRANT SELECT, INSERT, UPDATE ON scoring.scorer_heartbeat TO nous_scorer;
+-- The application role may set default privileges for objects it creates, in any schema it can use. In scoring
+-- it creates nothing, so bring every default it has set there back to the built-in default: take away each
+-- grantee (PUBLIC, the administrator, the scorer, itself) and restore what PostgreSQL grants without a row.
+DO $defacl$
+DECLARE
+    d record;
+    -- pg_default_acl.defaclobjtype to the keyword ALTER DEFAULT PRIVILEGES takes, written once for both loops
+    kinds constant jsonb := '{"r": "TABLES", "S": "SEQUENCES", "f": "FUNCTIONS", "T": "TYPES"}';
+BEGIN
+    FOR d IN
+        SELECT DISTINCT x.defaclobjtype AS objtype, a.grantee
+          FROM pg_default_acl x, LATERAL aclexplode(x.defaclacl) a
+         WHERE x.defaclrole = 'nous_app'::regrole AND x.defaclnamespace = 'scoring'::regnamespace
+    LOOP
+        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE nous_app IN SCHEMA scoring REVOKE ALL ON %s FROM %s',
+                       kinds ->> d.objtype::text,
+                       CASE WHEN d.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(d.grantee)) END);
+    END LOOP;
+    FOR d IN
+        SELECT x.defaclobjtype AS objtype FROM pg_default_acl x
+         WHERE x.defaclrole = 'nous_app'::regrole AND x.defaclnamespace = 'scoring'::regnamespace
+    LOOP
+        -- what is left is an ACL that differs from the built-in default only by what was revoked above
+        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE nous_app IN SCHEMA scoring GRANT ALL ON %s TO %s',
+                       kinds ->> d.objtype::text,
+                       CASE WHEN d.objtype IN ('f', 'T') THEN 'nous_app, PUBLIC' ELSE 'nous_app' END);
+    END LOOP;
+END
+$defacl$;
+ALTER DEFAULT PRIVILEGES FOR ROLE nous_admin IN SCHEMA scoring REVOKE ALL ON TABLES FROM PUBLIC, nous_app, nous_scorer;
+ALTER DEFAULT PRIVILEGES FOR ROLE nous_admin IN SCHEMA scoring GRANT SELECT ON TABLES TO nous_app;
+
+-- 5. The scorer reads exactly the tables that task_score_job.SOURCE_TABLES names (a test compares this
+--    list with that constant), and nothing else in the application schemas.
+REVOKE ALL ON ALL TABLES IN SCHEMA brain, heart, nous_system FROM nous_scorer;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA brain, heart, nous_system FROM nous_scorer;
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA brain, heart, nous_system FROM nous_scorer;
+GRANT USAGE ON SCHEMA brain, heart, nous_system TO nous_scorer;
+-- source tables begin
+GRANT SELECT ON brain.decisions TO nous_scorer;
+GRANT SELECT ON brain.intention_arrivals TO nous_scorer;
+GRANT SELECT ON brain.intention_proposals TO nous_scorer;
+GRANT SELECT ON brain.intentions TO nous_scorer;
+GRANT SELECT ON heart.subtasks TO nous_scorer;
+GRANT SELECT ON nous_system.compensation_snapshots TO nous_scorer;
+GRANT SELECT ON nous_system.dag_nodes TO nous_scorer;
+GRANT SELECT ON nous_system.events TO nous_scorer;
+GRANT SELECT ON nous_system.execution_dags TO nous_scorer;
+GRANT SELECT ON nous_system.execution_ledger TO nous_scorer;
+-- source tables end
+
+-- 5b. No role is a member of the three roles above, and none of them is a member of any role.
+DO $members$
+DECLARE
+    m record;
+BEGIN
+    FOR m IN
+        SELECT g.rolname AS grp, r.rolname AS mem
+          FROM pg_auth_members am JOIN pg_roles g ON g.oid = am.roleid JOIN pg_roles r ON r.oid = am.member
+         WHERE g.rolname IN ('nous_app', 'nous_scorer', 'nous_admin')
+            OR r.rolname IN ('nous_app', 'nous_scorer', 'nous_admin')
+    LOOP
+        EXECUTE format('REVOKE %I FROM %I', m.grp, m.mem);
+    END LOOP;
+END
+$members$;
+
+-- 6. Last: the bootstrap superuser can no longer log in, and has no password. Everything before
+--    this ran as a role that holds its own privileges, so nothing above depended on it.
+ALTER ROLE :"bootstrap" NOLOGIN PASSWORD NULL;
+
+-- 7. Postconditions. A failure here rolls the whole run back.
+DO $post$
+DECLARE
+    bad text;
+BEGIN
+    SELECT string_agg(rolname, ', ') INTO bad FROM pg_roles
+     WHERE rolname IN ('nous_app', 'nous_scorer')
+       AND (rolsuper OR rolcreaterole OR rolcreatedb OR rolreplication OR rolbypassrls);
+    IF bad IS NOT NULL THEN RAISE EXCEPTION 'role has an elevated attribute: %', bad; END IF;
+
+    SELECT string_agg(r.rolname || ' in ' || g.rolname, ', ') INTO bad
+      FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.member JOIN pg_roles g ON g.oid = m.roleid
+     WHERE r.rolname IN ('nous_app', 'nous_scorer') OR g.rolname IN ('nous_app', 'nous_scorer', 'nous_admin');
+    IF bad IS NOT NULL THEN RAISE EXCEPTION 'unexpected role membership: %', bad; END IF;
+
+    SELECT string_agg(n.nspname || '.' || c.relname, ', ') INTO bad
+      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+       AND ((n.nspname IN ('brain', 'heart', 'nous_system') AND pg_get_userbyid(c.relowner) <> 'nous_app')
+         OR (n.nspname = 'scoring' AND pg_get_userbyid(c.relowner) <> 'nous_admin'));
+    IF bad IS NOT NULL THEN RAISE EXCEPTION 'object with the wrong owner: %', bad; END IF;
+
+    IF (SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = current_database()) <> 'nous_admin' THEN
+        RAISE EXCEPTION 'nous_admin does not own the database';
+    END IF;
+END
+$post$;
+
+COMMIT;
+
+\echo 'db_roles.sql: done'
