@@ -465,21 +465,60 @@ class TestDocFreqCacheNeverBlocksARecall:
         with patch.object(search_mod, "_load_doc_freq", _loader(error=RuntimeError("db down"))):
             await _go(s, any_word_fallback=True)                # must not raise
             await _settle()
-        assert search_mod._DF_CACHE[KEY] == stale
+        assert search_mod._DF_CACHE[KEY][1] is s.df             # the old df is still served
+        assert search_mod._DF_CACHE[KEY][0] > stale[0]          # ...its retry pushed back
         assert KEY not in search_mod._DF_REFRESHING             # a later call can retry
         assert "doc-frequency refresh failed" in caplog.text
 
     @pytest.mark.asyncio
-    async def test_a_failed_first_fill_leaves_the_key_cold(self):
+    async def test_a_failed_first_fill_backs_off_with_an_empty_entry(self):
         vector, keyword, fallback = _fixture()
         s = _Sess(vector, keyword, fallback)
         search_mod._DF_CACHE.clear()
         with patch.object(search_mod, "_load_doc_freq", _loader(error=RuntimeError("x"))):
             await _go(s, any_word_fallback=True)
             await _settle()
-            assert KEY not in search_mod._DF_CACHE
+            assert search_mod._DF_CACHE[KEY][1] == {}           # warm but EMPTY
             await _go(s, any_word_fallback=True)                # still just skips
-        assert not s.fallback_calls
+        assert not s.fallback_calls and not s.calls("or_lexemes")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("had_entry", [False, True], ids=["cold", "stale"])
+    async def test_a_failed_refresh_backs_off_then_retries(self, had_entry, caplog):
+        """With the flag on and a ts_stat that always fails, every recall used to
+        schedule a new refresh and log a new traceback. A failure now stamps the
+        key fresh for `_DF_RETRY_SECONDS`; once that window passes, ONE refresh is
+        scheduled again. A previous df keeps being served throughout."""
+        vector, keyword, fallback = _fixture()
+        s = _Sess(vector, keyword, fallback)
+        old_df = s.df
+        if had_entry:
+            search_mod._DF_CACHE[KEY] = (time.monotonic() - search_mod._DF_TTL_SECONDS - 1, old_df)
+        else:
+            search_mod._DF_CACHE.clear()
+        caplog.set_level(logging.WARNING)
+        calls: list = []
+        with patch.object(search_mod, "_load_doc_freq", _loader(error=RuntimeError("x"), calls=calls)):
+            await _go(s, any_word_fallback=True)
+            await _settle()
+            assert calls == [KEY]
+            loaded_at, df = search_mod._DF_CACHE[KEY]
+            assert (df is old_df) if had_entry else (df == {})
+            age = time.monotonic() - loaded_at
+            assert search_mod._DF_TTL_SECONDS - search_mod._DF_RETRY_SECONDS <= age < search_mod._DF_TTL_SECONDS
+
+            await _go(s, any_word_fallback=True)                # immediately after: backing off
+            await _settle()
+            assert calls == [KEY] and KEY not in search_mod._DF_REFRESHING
+            assert caplog.text.count("doc-frequency refresh failed") == 1
+
+            search_mod._DF_CACHE[KEY] = (loaded_at - search_mod._DF_RETRY_SECONDS, df)   # window passes
+            await _go(s, any_word_fallback=True)
+            await _settle()
+        assert calls == [KEY, KEY]
+        # the old df was served on every call; a cold key ran nothing at all
+        assert len(s.fallback_calls) == (3 if had_entry else 0)
+        assert search_mod._DF_RETRY_SECONDS == 300.0
 
     @pytest.mark.asyncio
     async def test_a_session_without_a_bind_cannot_schedule_and_just_skips(self):

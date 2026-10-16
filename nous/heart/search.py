@@ -76,12 +76,12 @@ async def set_local_ef_search(session: AsyncSession, value: int) -> None:
 def _cached_settings(_env_fingerprint: tuple) -> "object":
     """Construct Settings at most once per env-fingerprint (audit P3).
 
-    The three resolvers below ran a full pydantic-settings construction
+    The resolvers below ran a full pydantic-settings construction
     (~300-field env + .env parse) on EVERY hybrid_search call — 2-3x per
     search, ~10x per recall. The cache key is the tuple of env vars these
-    resolvers actually depend on, so tests that monkeypatch NOUS_RRF_K /
-    NOUS_VECTOR_WEIGHT / NOUS_HYBRID_SEARCH_KEYWORD_ENABLED still see
-    fresh values (changed env → new fingerprint → new Settings).
+    resolvers actually depend on (the vars in ``_FINGERPRINT_VARS``), so
+    tests that monkeypatch any of them still see fresh values (changed
+    env → new fingerprint → new Settings).
     RuntimeConfig overrides are NOT cached — they are consulted per call.
     """
     from nous.config import Settings
@@ -214,6 +214,7 @@ _OR_MAX_LEXEMES = 8
 # a stale entry is served while ONE background task per key refreshes it, and a
 # cold key skips the fallback for that call while the same task fills it.
 _DF_TTL_SECONDS = 3600.0
+_DF_RETRY_SECONDS = 300.0  # back-off after a failed refresh (see _schedule_df_refresh)
 _DF_CACHE: dict[tuple[str, str], tuple[float, dict[str, int]]] = {}
 _DF_REFRESHING: dict[tuple[str, str], asyncio.Task] = {}
 _df_logger = logging.getLogger(__name__ + ".df_cache")
@@ -222,6 +223,7 @@ _df_logger = logging.getLogger(__name__ + ".df_cache")
 async def _load_doc_freq(bind, table: str, agent_id: str) -> dict[str, int]:
     """Lexeme -> number of documents containing it, for one agent's rows. Opens its
     OWN session on ``bind`` so it never touches (or outlives) a request's."""
+    # Counts inactive rows and ignores the caller's extra_where, so rarity is approximate (precision only).
     async with AsyncSession(bind) as s:
         result = await s.execute(
             text(
@@ -236,8 +238,12 @@ async def _load_doc_freq(bind, table: str, agent_id: str) -> dict[str, int]:
 
 def _schedule_df_refresh(session, table: str, agent_id: str) -> None:
     """Start a background refresh unless one is already in flight for this key.
-    Errors are logged and swallowed: a failed refresh leaves the old entry in
-    place (and a cold key cold), so the fallback degrades, the recall does not."""
+    Errors are logged and swallowed, so the fallback degrades, the recall does
+    not. A failure also BACKS OFF for ``_DF_RETRY_SECONDS``: an old entry keeps
+    its df (still served) with its timestamp pushed so it reads fresh until then,
+    and a cold key gets an EMPTY entry (no lexeme is usable, so no fallback
+    statement runs). Without this, a ``ts_stat`` that always fails would be
+    re-scheduled, and log a traceback, on every recall."""
     key = (table, agent_id)
     running = _DF_REFRESHING.get(key)
     if running is not None and not running.done():
@@ -252,6 +258,11 @@ def _schedule_df_refresh(session, table: str, agent_id: str) -> None:
         except Exception:
             _df_logger.warning("A4: doc-frequency refresh failed for %s/%s", table, agent_id,
                                exc_info=True)
+            previous = _DF_CACHE.get(key)
+            _DF_CACHE[key] = (
+                time.monotonic() - _DF_TTL_SECONDS + _DF_RETRY_SECONDS,
+                previous[1] if previous is not None else {},
+            )
         finally:
             _DF_REFRESHING.pop(key, None)
 
@@ -290,13 +301,15 @@ async def _any_word_query(session, table: str, agent_id: str, query_text: str) -
     """The OR tsquery text over the K rarest usable lexemes, or ``None``.
 
     ``None`` when the doc-frequency cache is cold (a background fill is
-    scheduled; this call simply runs no fallback), the query has fewer than two
-    lexemes (any-word == all-words, or nothing at all: empty and all-stopword
-    queries), or none occurs in the table (an unknown lexeme can never match, and
-    a stale cache entry just drops it).
+    scheduled; this call simply runs no fallback) or empty (an empty table, or
+    the back-off entry after a failed first fill: nothing can be usable, so not
+    even the lexeme statement runs), the query has fewer than two lexemes
+    (any-word == all-words, or nothing at all: empty and all-stopword queries),
+    or none occurs in the table (an unknown lexeme can never match, and a stale
+    cache entry just drops it).
     """
     df = _doc_freq_for_recall(session, table, agent_id)
-    if df is None:
+    if not df:
         return None
     res = await session.execute(
         text("/* or_lexemes */ SELECT tsvector_to_array(to_tsvector('english', :query_text)) AS lexemes"),

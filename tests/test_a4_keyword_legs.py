@@ -252,7 +252,7 @@ class TestContextPath:
         with patch("nous.cognitive.context.get_active_retrieval_logger", return_value=logger):
             return await engine.build(agent_id="a", session_id="s1",
                                       input_text="do a task now", frame=frame,
-                                      session=AsyncMock())
+                                      session=None)
 
     @pytest.mark.asyncio
     async def test_context_facts_and_episodes_legs_carry_the_counts(self):
