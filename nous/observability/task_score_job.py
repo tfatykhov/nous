@@ -37,6 +37,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.dag.approval import as_utc
+from nous.log_redaction import configure_logging
 from nous.observability.task_score_gatherer import chunked, gather_signals
 from nous.observability.task_scoring import (
     LEAF_KIND,
@@ -275,7 +276,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--window-days", type=int, default=SCORING_WINDOW_DAYS, help="days of finished tasks to re-score"
     )
     args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    configure_logging(logging.INFO)
     try:
         return asyncio.run(_run(args.agent_id, args.window_days))
     except Exception:
