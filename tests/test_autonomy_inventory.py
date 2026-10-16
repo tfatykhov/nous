@@ -49,9 +49,10 @@ async def inventory(db, agent, **kw):
 
 def test_every_context_kind_has_exactly_one_bucket():
     buckets = {kind: inv.context_bucket(kind) for kind in CONTEXT_KINDS}
-    assert {k for k, b in buckets.items() if b == "owner_present"} == {"interactive", "mcp"}
+    # agent_action is the owner's companion tap (F092.2): the owner starts the turn, as in a chat
+    assert {k for k, b in buckets.items() if b == "owner_present"} == {"interactive", "mcp", "agent_action"}
     assert {k for k, b in buckets.items() if b == "approved"} == {"approved_action"}
-    assert {"scheduled", "dag_node", "subtask", "heartbeat_triage", "continuation", "agent_action"} <= {
+    assert {"scheduled", "dag_node", "subtask", "heartbeat_triage", "continuation"} <= {
         k for k, b in buckets.items() if b == "autonomous"
     }
     assert inv.context_bucket("a_kind_added_later") == "autonomous"  # an unknown path is not "asked"
@@ -74,6 +75,7 @@ async def test_counts_by_status_context_bucket_effect_and_compensable(db, agent)
                 row(agent, "write_file", "mcp"),
                 row(agent, "bash", "interactive"),
                 row(agent, "bash", "heartbeat_triage", effect="external"),
+                row(agent, "learn_fact", "agent_action"),
             ]
         )
         await s.commit()
@@ -89,9 +91,12 @@ async def test_counts_by_status_context_bucket_effect_and_compensable(db, agent)
     assert wf["by_context"] == {"owner_present": 2, "approved": 0, "autonomous": 0}
     assert (wf["compensable"], wf["de_facto_level"]) == (True, "L0")  # write_file has a compensator
     assert got["bash"]["side_effects"] == {"write": 1, "external": 1}
+    tapped = got["learn_fact"]  # run only from the owner's companion tap
+    assert tapped["by_context"] == {"owner_present": 1, "approved": 0, "autonomous": 0}
+    assert tapped["de_facto_level"] == "L0"
     async with db.session() as s:
         ordered = [t["tool_name"] for t in await inv.get_autonomy_inventory(s, agent, now=NOW)]
-    assert ordered == ["send_email", "bash", "write_file"]
+    assert ordered == ["send_email", "bash", "write_file", "learn_fact"]
 
 
 async def test_a_tool_that_mostly_fails_is_counted_by_its_successes(db, agent):

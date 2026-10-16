@@ -8,6 +8,10 @@ bucket counts (``by_context``, ``side_effects``) and the de-facto level read the
 ``by_status`` shows how many attempts failed or were refused. A refused row (status ``blocked``)
 did not run at all.
 
+Buckets: ``owner_present`` is a turn the owner started (interactive, mcp, and ``agent_action``: the
+owner's companion app.act tap, F092.2), ``approved`` is ``approved_action``, and every other kind,
+including one added later, is ``autonomous``.
+
 Limit: ``approved`` counts only the F099 ``approved_action`` path (a proposal the owner approved).
 A call that ran inside a DAG after an approval node is bucketed ``autonomous`` here, because the
 ledger row names the DAG node's context, not the approval card.
@@ -29,13 +33,16 @@ from nous.api.tool_classes import TOOL_CLASSES
 from nous.storage.models import Censor, ExecutionLedgerEntry
 
 INVENTORY_DAYS = 30
+# The owner started the turn. agent_action is a background kind for the runtime (nobody waits on
+# the reply), so it is added here rather than to FOREGROUND_KINDS, which the tool policy reads.
+OWNER_PRESENT_KINDS: frozenset[str] = FOREGROUND_KINDS | {"agent_action"}
 APPROVED_KINDS: frozenset[str] = frozenset({"approved_action"})
 PROVENANCES: tuple[str, ...] = ("auto", "agent", "human")  # heart.censors.provenance
 
 
 def context_bucket(context_kind: str) -> str:
-    """``owner_present`` (interactive, mcp: a caller waits), ``approved`` (approved_action), else ``autonomous``."""
-    if context_kind in FOREGROUND_KINDS:
+    """``owner_present`` (interactive, mcp, agent_action), ``approved`` (approved_action), else ``autonomous``."""
+    if context_kind in OWNER_PRESENT_KINDS:
         return "owner_present"
     if context_kind in APPROVED_KINDS:
         return "approved"
@@ -95,7 +102,7 @@ async def get_censor_activity(
     """Censors created and deactivated in the last ``days``, by provenance (auto, agent, human).
 
     ``deactivated`` counts inactive censors last touched in the window: the table keeps no deactivation
-    time, so ``updated_at`` stands in for it.
+    time, so ``updated_at`` stands in for it, and any later update to an inactive censor re-counts it.
     """
     since = (now or datetime.now(UTC)) - timedelta(days=days)
     by_provenance = {p: {"created": 0, "deactivated": 0} for p in PROVENANCES}
