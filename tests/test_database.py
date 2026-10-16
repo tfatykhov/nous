@@ -11,16 +11,16 @@ async def test_connection(db):
 
 
 async def test_schemas_exist(db):
-    """brain, heart, nous_system schemas are present."""
+    """brain, heart, nous_system and scoring schemas are present."""
     async with db.engine.connect() as conn:
         result = await conn.execute(
             text(
                 "SELECT schema_name FROM information_schema.schemata "
-                "WHERE schema_name IN ('brain', 'heart', 'nous_system')"
+                "WHERE schema_name IN ('brain', 'heart', 'nous_system', 'scoring')"
             )
         )
         schemas = {row[0] for row in result}
-    assert schemas == {"brain", "heart", "nous_system"}
+    assert schemas == {"brain", "heart", "nous_system", "scoring"}
 
 
 async def test_extensions(db):
@@ -66,6 +66,8 @@ async def test_all_tables_exist(db):
         ("nous_system", "process_run_log"),
         # Harness Phase 2.8: compensation snapshots (migration 080)
         ("nous_system", "compensation_snapshots"),
+        # Task scores, in a schema of their own (migration 087)
+        ("scoring", "task_scores"),
         # brain (12)
         ("brain", "decisions"),
         ("brain", "decision_tags"),
@@ -111,7 +113,7 @@ async def test_all_tables_exist(db):
         result = await conn.execute(
             text(
                 "SELECT table_schema, table_name FROM information_schema.tables "
-                "WHERE table_schema IN ('brain', 'heart', 'nous_system') "
+                "WHERE table_schema IN ('brain', 'heart', 'nous_system', 'scoring') "
                 "AND table_type = 'BASE TABLE'"
             )
         )

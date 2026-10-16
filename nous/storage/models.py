@@ -1896,3 +1896,55 @@ class CompensationSnapshot(Base):
         DateTime(timezone=True), nullable=True
     )
     revert_result: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class TaskScore(Base):
+    """Migration 087: one deterministic row per finished task and scorer version.
+
+    A subtask is the unit that is scored (a leaf). A DAG run and an intention root get a roll-up row with
+    ``score`` NULL that holds counts only. Telemetry, in a schema of its own (``scoring``) that is meant to be owned
+    by a separate database role, so the app can read the scores and not write them; until that role exists the app
+    role owns the schema. Written only by ``nous.observability.task_score_job`` (a one-shot command meant to run as
+    a separate service under that role), read by ``GET /dashboard/autonomy``, exposed to no agent tool.
+    ``evidence`` holds the ids behind each count. See ``nous.observability.task_scoring``.
+    """
+
+    __tablename__ = "task_scores"
+    __table_args__ = (
+        UniqueConstraint("agent_id", "task_kind", "task_id", "scorer_version", name="uq_task_scores_task"),
+        CheckConstraint("task_kind IN ('subtask', 'dag', 'intention')", name="ck_task_scores_kind"),
+        CheckConstraint(
+            "outcome IN ('done_self', 'done_verified', 'partial', 'failed', 'not_scored')",
+            name="ck_task_scores_outcome",
+        ),
+        CheckConstraint("score IS NULL OR task_kind = 'subtask'", name="ck_task_scores_leaf_only"),
+        CheckConstraint("outcome <> 'not_scored' OR score IS NULL", name="ck_task_scores_not_scored"),
+        Index("idx_task_scores_agent_version_finished", "agent_id", "scorer_version", "finished_at"),
+        {"schema": "scoring"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, server_default=func.gen_random_uuid()
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    task_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    finished_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    scorer_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    outcome: Mapped[str] = mapped_column(String(16), nullable=False)
+    not_scored_reason: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    owner_grade: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    owner_overrides: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    unverified_claims: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    harness_errors: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    refusals: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    children_scored: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    children_mean_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    settled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    evidence: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+    first_scored_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    scored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

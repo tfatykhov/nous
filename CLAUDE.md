@@ -16,7 +16,7 @@ Cognitive Layer (hooks into LLM calls)
     └── Event Bus (async handlers for automation)
 
 Runtime: Direct Anthropic API + tool dispatch loop
-Storage: PostgreSQL + pgvector (one DB, three schemas: brain/heart/system)
+Storage: PostgreSQL + pgvector (one DB, four schemas: brain/heart/system/scoring)
 API: REST (see docs/reference/rest-api.md) + MCP server + Telegram bot (streaming)
 ```
 
@@ -84,7 +84,8 @@ Annotated map of the main modules: [docs/reference/project-structure.md](docs/re
 
 ### Database
 
-- Three schemas: `brain`, `heart`, `nous_system` (55 tables total: brain 12, heart 19, nous_system 24 — ground truth is the expected set in `tests/test_database.py::test_all_tables_exist`)
+- Four schemas: `brain`, `heart`, `nous_system`, `scoring` (56 tables total: brain 12, heart 19, nous_system 24, scoring 1 — ground truth is the expected set in `tests/test_database.py::test_all_tables_exist`)
+- `scoring.task_scores` (migration 087) is in a schema of its own because a schema's owner can drop its tables and the app role owns the other three: `scoring` is meant to be owned by a separate database role (not created by the migration), so the app can read the scores but not write them; until that role exists the app role owns the schema. Only the scoring job (`python -m nous.observability.task_score_job`, meant to run as a separate service under that role) writes it, and no agent tool touches it
 - `nous_system.execution_ledger` (migration 074, harness Phase 1b) is the durable record of side-effecting tool calls; it assumes one Nous process per (database, agent_id)
 - All tables are agent-scoped (`agent_id` column) for multi-agent readiness
 - Use `vector(1536)` for embeddings (text-embedding-3-small)
