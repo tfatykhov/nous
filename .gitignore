@@ -19,6 +19,8 @@ nous.db
 # gen_nous_procedure_qrels.py against your own nous-prod-snapshot.
 tests/fixtures/qrels_nous_prod*.jsonl
 tests/fixtures/qrels_longmemeval.jsonl
+# Local-only, prod-derived qrels; never committed.
+tests/fixtures/qrels_prod_snapshot*.jsonl
 # Same rule, second location: generated qrels also land under reports/ when a
 # probe writes there. Verified 2026-08-24 that these carry prod content
 # verbatim (a mined query opened "Given that France has right-hand drive

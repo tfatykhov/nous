@@ -21,7 +21,12 @@ from nous.cognitive.usage_tracker import UsageTracker
 from nous.config import Settings
 from nous.heart.heart import Heart
 from nous.heart.schemas import is_strategy_card
-from nous.heart.search import _wrap_with_score, apply_frame_boost
+from nous.heart.search import (
+    _wrap_with_score,
+    apply_frame_boost,
+    summarize_keyword_stats,
+    with_keyword_stats,
+)
 from nous.observability.retrieval_logger import get_active as get_active_retrieval_logger
 from nous.observability.retrieval_trace import (
     BELOW_FLOOR,
@@ -297,6 +302,13 @@ class ContextEngine:
                 else f"retrieval plan skipped '{mem_type}'"
             )
             tr.leg(leg, attempted=False, n_returned=0, skip_reason=reason)
+
+        @_tr_guard
+        def _tr_keyword(leg: str, stats: list) -> None:
+            """A4: report the leg's keyword sub-query counts, if any were taken."""
+            summary = summarize_keyword_stats(stats)
+            if summary:
+                tr.leg(leg, attempted=True, **summary)
 
         @_tr_guard
         def _tr_enter(items: list, mem_type: str, leg: str) -> list:
@@ -948,9 +960,13 @@ class ContextEngine:
                 limit = _limits.get("fact", DEFAULT_FETCH_LIMITS.get("fact", 5))
                 q_text = _query_texts.get("fact", _default_query)
                 # Tier 3: exclude Tier 1 categories from semantic search
-                facts = await self._heart.search_facts(
-                    q_text, limit=limit, session=session,
-                    exclude_categories=TIER1_FACT_CATEGORIES,
+                _kw_facts: list = []
+                facts = await with_keyword_stats(
+                    _kw_facts if tr.enabled else None,
+                    self._heart.search_facts(
+                        q_text, limit=limit, session=session,
+                        exclude_categories=TIER1_FACT_CATEGORIES,
+                    ),
                 )
                 logger.info("Tier3 facts: %d results, has_embeddings=%s, scores=%s, subjects=%s",
                     len(facts) if facts else 0, self._has_embeddings,
@@ -958,6 +974,7 @@ class ContextEngine:
                     [(getattr(f, "subject", "") or "")[:30] for f in (facts or [])[:5]])
                 # Outside the `if` — see the decisions leg above.
                 _tr_enter(facts or [], "fact", "context_facts")
+                _tr_keyword("context_facts", _kw_facts)
                 if facts:
                     # Gap-2: resolve same-subject current-vs-stale conflicts (demote +
                     # tag) BEFORE the staleness/boost/relevance pipeline, so a superseded
@@ -1564,8 +1581,13 @@ class ContextEngine:
             try:
                 limit = _limits.get("episode", DEFAULT_FETCH_LIMITS.get("episode", 5))
                 q_text = _query_texts.get("episode", _default_query)
-                episodes = await self._heart.search_episodes(q_text, limit=limit, session=session)
+                _kw_episodes: list = []
+                episodes = await with_keyword_stats(
+                    _kw_episodes if tr.enabled else None,
+                    self._heart.search_episodes(q_text, limit=limit, session=session),
+                )
                 _tr_enter(episodes, "episode", "context_episodes")
+                _tr_keyword("context_episodes", _kw_episodes)
                 # Filter out system/internal episodes
                 _before = episodes
                 episodes = [e for e in episodes if not _is_system_episode(e)]

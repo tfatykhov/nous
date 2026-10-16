@@ -133,6 +133,14 @@ class Candidate:
         }
 
 
+# Leg fields that are serialized only when known (A4).
+_LEG_OPTIONAL_COUNTS = (
+    "n_keyword_queries",
+    "n_keyword_zero",
+    "n_keyword_fallback",
+)
+
+
 @dataclass
 class Leg:
     """One retrieval leg's summary. ``attempted`` distinguishes a leg that ran
@@ -165,9 +173,20 @@ class Leg:
     score_max: float | None = None
     error: str | None = None
     skip_reason: str | None = None
+    # A4: keyword sub-leg counts for the hybrid-search legs. ``None`` means "this
+    # leg does not know", and ``to_dict`` then omits the key, so legs that never
+    # report them (and every row written before A4) serialize exactly as they
+    # always did. Folded by ``heart.search.summarize_keyword_stats`` over every
+    # ``hybrid_search`` call the leg made (one per table x query variant):
+    # ``n_keyword_queries`` is how many ran the all-words keyword sub-query,
+    # ``n_keyword_zero`` how many of those found nothing, ``n_keyword_fallback``
+    # the rows the experimental any-word fallback appended.
+    n_keyword_queries: int | None = None
+    n_keyword_zero: int | None = None
+    n_keyword_fallback: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "name": self.name,
             "attempted": self.attempted,
             "n_returned": self.n_returned,
@@ -178,6 +197,11 @@ class Leg:
             "error": self.error,
             "skip_reason": self.skip_reason,
         }
+        for key in _LEG_OPTIONAL_COUNTS:
+            value = getattr(self, key)
+            if value is not None:
+                d[key] = value
+        return d
 
 
 @dataclass
@@ -319,8 +343,15 @@ class RetrievalTrace:
         error: str | None = None,
         skip_reason: str | None = None,
         scores: list[float] | None = None,
+        n_keyword_queries: int | None = None,
+        n_keyword_zero: int | None = None,
+        n_keyword_fallback: int | None = None,
     ) -> None:
-        """Record (or update) one leg's summary. Idempotent per name."""
+        """Record (or update) one leg's summary. Idempotent per name.
+
+        The A4 keyword counts follow the ``n_dropped`` rule: ``None`` leaves
+        whatever is already recorded alone, so a later rollup pass that does not
+        know them cannot erase them."""
         entry = self._legs.get(name)
         if entry is None:
             entry = Leg(name=name, attempted=attempted)
@@ -332,6 +363,13 @@ class RetrievalTrace:
             entry.n_deduped = n_deduped
         if n_dropped is not None:
             entry.n_dropped = n_dropped
+        for key, value in (
+            ("n_keyword_queries", n_keyword_queries),
+            ("n_keyword_zero", n_keyword_zero),
+            ("n_keyword_fallback", n_keyword_fallback),
+        ):
+            if value is not None:
+                setattr(entry, key, value)
         if error is not None:
             entry.error = error
         if skip_reason is not None:

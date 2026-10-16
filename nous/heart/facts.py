@@ -3319,6 +3319,7 @@ class FactManager:
                 extra_params=extra_params,
                 limit=primary_limit,
                 penalty_limit=penalty_limit,
+                any_word_fallback=True,
             )
         else:
             results = await hybrid_search(
@@ -3332,6 +3333,7 @@ class FactManager:
                 limit=primary_limit,
                 require_keyword_hit=require_keyword_hit,
                 penalty_limit=penalty_limit,
+                any_word_fallback=True,
             )
 
         # F075 L3: fuse the date-window leg (position-based RRF). Present only when

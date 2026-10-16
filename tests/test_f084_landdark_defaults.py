@@ -21,7 +21,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _COMPOSE = _REPO_ROOT / "docker-compose.yml"
 
 #: env vars for features documented as land-dark (default OFF).
-_LAND_DARK_SWITCHES = ["NOUS_EXTRACTION_ENUMERATIVE_ENABLED"]
+_LAND_DARK_SWITCHES = [
+    "NOUS_EXTRACTION_ENUMERATIVE_ENABLED",
+    "NOUS_HYBRID_KEYWORD_OR_FALLBACK_ENABLED",
+]
 
 
 def _compose_default(var: str) -> str | None:

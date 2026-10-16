@@ -492,6 +492,7 @@ class EpisodeManager:
                 active_filter=False,
                 extra_where=_episode_where,
                 penalty_limit=penalty_limit,
+                any_word_fallback=True,
             )
         else:
             results = await hybrid_search(
@@ -504,6 +505,7 @@ class EpisodeManager:
                 active_filter=False,
                 extra_where=_episode_where,
                 penalty_limit=penalty_limit,
+                any_word_fallback=True,
             )
 
         if not results:

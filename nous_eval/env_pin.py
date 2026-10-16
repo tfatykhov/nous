@@ -111,7 +111,21 @@ _RESOLVER_VARS = {
     "NOUS_RRF_K": "rrf_k",
     "NOUS_VECTOR_WEIGHT": "vector_weight",
     "NOUS_HYBRID_SEARCH_KEYWORD_ENABLED": "hybrid_search_keyword_enabled",
+    "NOUS_HYBRID_KEYWORD_OR_FALLBACK_ENABLED": "hybrid_keyword_or_fallback_enabled",
 }
+
+
+def publish_resolver_env(settings: Settings) -> None:
+    """Write `settings`' resolver-read fields into `os.environ`.
+
+    Callable on its own so a probe that varies one of these per ARM can
+    re-publish between arms (`pinned_runtime` publishes once per run).
+    """
+    for var, field in _RESOLVER_VARS.items():
+        value = getattr(settings, field)
+        os.environ[var] = (
+            str(value).lower() if isinstance(value, bool) else str(value)
+        )
 
 
 @contextlib.contextmanager
@@ -123,11 +137,7 @@ def pinned_runtime(settings: Settings):
     its `Settings` object still runs someone else's RRF constant.
     """
     with hidden_env():
-        for var, field in _RESOLVER_VARS.items():
-            value = getattr(settings, field)
-            os.environ[var] = (
-                str(value).lower() if isinstance(value, bool) else str(value)
-            )
+        publish_resolver_env(settings)
         yield
 
 

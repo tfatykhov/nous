@@ -129,3 +129,27 @@ def test_environment_restored_exactly(monkeypatch):
         pass
     after = {k: v for k, v in os.environ.items() if k.startswith("NOUS_")}
     assert before == after
+
+
+def test_every_live_fingerprint_var_is_published_by_the_pin():
+    """A flag read live by the search resolvers but missing from the pin is read
+    from the ambient shell in every 'pinned' probe -- how the f054_keyword_off
+    arm came to measure nothing."""
+    from nous.heart.search import _FINGERPRINT_VARS
+    from nous_eval.env_pin import _RESOLVER_VARS
+
+    assert set(_RESOLVER_VARS) == set(_FINGERPRINT_VARS)
+
+
+def test_publish_resolver_env_switches_the_fallback_flag_between_arms(monkeypatch):
+    from nous.heart import search
+    from nous_eval.env_pin import publish_resolver_env
+
+    monkeypatch.setenv("NOUS_HYBRID_KEYWORD_OR_FALLBACK_ENABLED", "true")  # ambient
+    with pinned_runtime(pinned_settings()):
+        assert search._resolve_keyword_or_fallback_enabled() is False
+        publish_resolver_env(pinned_settings(hybrid_keyword_or_fallback_enabled=True))
+        assert search._resolve_keyword_or_fallback_enabled() is True
+        publish_resolver_env(pinned_settings())
+        assert search._resolve_keyword_or_fallback_enabled() is False
+    assert os.environ["NOUS_HYBRID_KEYWORD_OR_FALLBACK_ENABLED"] == "true"

@@ -78,6 +78,8 @@ services:
       # read-only git, pytest, ruff and make in a repo's top level, run without the GitHub token.
       - NOUS_F099_LINEAGE_SHELL=${NOUS_F099_LINEAGE_SHELL:-true}
       - NOUS_F099_LINEAGE_BUILD_COMMANDS=${NOUS_F099_LINEAGE_BUILD_COMMANDS:-true}
+      # A4 Step 2: any-word keyword fallback. Experiment, lands dark.
+      - NOUS_HYBRID_KEYWORD_OR_FALLBACK_ENABLED=${NOUS_HYBRID_KEYWORD_OR_FALLBACK_ENABLED:-false}
       # Execution ledger: also keep the redacted call input and tool output (migration 086).
       - NOUS_EXECUTION_LEDGER_DETAIL_ENABLED=${NOUS_EXECUTION_LEDGER_DETAIL_ENABLED:-false}
       - NOUS_EXECUTION_LEDGER_DETAIL_RETENTION_DAYS=${NOUS_EXECUTION_LEDGER_DETAIL_RETENTION_DAYS:-30}

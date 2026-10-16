@@ -36,6 +36,7 @@ from sqlalchemy import select
 
 from nous.heart.exemplars import parse_label
 from nous.heart.keys import extract_entity_candidates, normalize_key
+from nous.heart.search import summarize_keyword_stats, with_keyword_stats
 from nous.observability.retrieval_trace import (
     BELOW_FLOOR,
     DEDUPED,
@@ -307,6 +308,12 @@ class _PipelineAccumulator:
     # drain runs at assembly, after every other leg has claimed its slots —
     # losers last, globally, not just within this leg.
     chunk_dropped: list = field(default_factory=list)
+
+    # A4: the chunk leg's per-call keyword records (one per ``hybrid_search``
+    # call). Same lifetime rules as ``chunk_dropped``: filled while the helper
+    # runs, folded into the leg at assembly, cleared if the leg's content fetch
+    # raises.
+    chunk_keyword_stats: list = field(default_factory=list)
 
     # R3.3 Stage 1.6: keyed fact-leg rows (raw SQLAlchemy Row objects from
     # FactManager.fetch_by_entity_keys — id, content, learned_at,
@@ -774,6 +781,12 @@ async def run_recall_pipeline(
     # below are sampled and capped. That split is what keeps an absence
     # meaningful: a gold chunk missing from the array might be a sampling or
     # cap artifact, but the count never lies about how many the leg cut.
+    # A4: the chunk leg's keyword counts. Only when the helper really ran a
+    # hybrid_search (the vector-only branch appends nothing), so a leg that never
+    # queried keywords is not reported as having zero keyword hits.
+    _chunk_kw_summary = summarize_keyword_stats(acc.chunk_keyword_stats)
+    if _chunk_kw_summary:
+        tr.leg("chunk", attempted=True, **_chunk_kw_summary)
     if acc.chunk_dropped:
         tr.leg("chunk", attempted=True, n_dropped=len(acc.chunk_dropped))
         _served_keys = {(r.id, r.type) for r in results}
@@ -905,7 +918,12 @@ async def _run_stages(
             # telemetry off, which is exactly the cost the master flag is
             # supposed to buy back.
             _heart_cut: list = []
-            heart_results = await heart.recall(
+            # A4: same gate as `_heart_cut`; installed around the call, so no
+            # Heart / manager signature carries it.
+            _heart_kw: list = []
+            heart_results = await with_keyword_stats(
+                _heart_kw if tr.enabled else None,
+                heart.recall(
                 query, limit=limit, types=heart_types,
                 dropped_out=_heart_cut if tr.enabled else None,
                 residual_activations=residual_activations,  # F055
@@ -916,8 +934,15 @@ async def _run_stages(
                 # surfaces them as n_stage_errors["heart_recall_<type>"],
                 # so a crashed fact leg no longer looks like an empty one.
                 stage_errors=acc.stage_errors,
+                ),
             )
             acc.heart_results = list(heart_results or [])
+            # A4: how many of the per-type keyword sub-queries found nothing. NB
+            # this creates the `heart_primary` leg during the stage, earlier than
+            # before, so the order of the `legs` array changes (rankings do not).
+            _heart_kw_summary = summarize_keyword_stats(_heart_kw)
+            if _heart_kw_summary:
+                tr.leg("heart_primary", attempted=True, **_heart_kw_summary)
             # F091: register SURVIVORS FIRST. `add` is first-wins and refuses
             # new ids once max_candidates is reached, so registering the cut
             # set first let the losers consume every slot — the survivors then
@@ -953,7 +978,9 @@ async def _run_stages(
         # (chunks_searched True + n_stage_errors["chunk_recall"] non-zero).
         acc.chunks_searched = True
         try:
-            acc.chunk_results = await _search_episode_chunks(
+            acc.chunk_results = await with_keyword_stats(
+                acc.chunk_keyword_stats if tr.enabled else None,
+                _search_episode_chunks(
                 heart=heart,
                 query=query,
                 agent_id=heart.agent_id,
@@ -989,6 +1016,7 @@ async def _run_stages(
                 # round-trips. `tr.add` still no-ops on unsampled rows, so only
                 # the tuples are wasted, and only briefly.
                 dropped_out=acc.chunk_dropped if tr.enabled else None,
+                ),
             )
             if not getattr(settings, "chunk_hybrid_search_enabled", False):
                 # C1: the vector-only branch's cut is pushed into SQL, so it
@@ -1020,6 +1048,7 @@ async def _run_stages(
             # A bound that fabricates a confident wrong reading is worse than
             # no bound.
             acc.chunk_dropped.clear()
+            acc.chunk_keyword_stats.clear()
             # Match the sibling stages' pattern (spreading_activation,
             # decision_neighbors): log + count. Non-eval callers (recall_deep
             # tool) discard the stats counter, so the log is the operator's
@@ -2340,6 +2369,7 @@ async def _search_episode_chunks(
                 # top-10). None = previous coupled behaviour.
                 penalty_limit=getattr(settings, "chunk_rrf_penalty_limit", None),
                 dropped_out=dropped_out,
+                any_word_fallback=True,
             )
             if not ranked:
                 return []
