@@ -211,6 +211,18 @@ class Settings(BaseSettings):
     # preserved; absolute thresholds may need tuning if you flip this off.
     hybrid_search_keyword_enabled: bool = True
 
+    # A4 Step 2 (2026-10-16, lands DARK): any-word keyword fallback.
+    # The keyword leg uses plainto_tsquery, which ANDs every lexeme, so a query
+    # of ~50 words matches almost nothing. When on, a hybrid_search call that
+    # opted in (``any_word_fallback=True``), has an embedding, and is not
+    # ``require_keyword_hit`` appends rows matching ANY of the query's 8 rarest
+    # lexemes after the all-words rows, capped so that a fallback row's keyword
+    # term never falls below the absent-from-the-list penalty (see
+    # ``_fallback_slots``). Read live from the environment by
+    # ``nous.heart.search._resolver_settings`` (like NOUS_RRF_K), so eval probes
+    # must publish it per arm.
+    hybrid_keyword_or_fallback_enabled: bool = False
+
     # F017: Relevance floor
     relevance_floor_enabled: bool = True
 

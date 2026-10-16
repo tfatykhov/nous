@@ -2369,6 +2369,7 @@ async def _search_episode_chunks(
                 # top-10). None = previous coupled behaviour.
                 penalty_limit=getattr(settings, "chunk_rrf_penalty_limit", None),
                 dropped_out=dropped_out,
+                any_word_fallback=True,
             )
             if not ranked:
                 return []

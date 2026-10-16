@@ -429,6 +429,7 @@ class ProcedureManager:
                 extra_params=extra_params,
                 limit=limit,
                 penalty_limit=penalty_limit,
+                any_word_fallback=True,
             )
         else:
             results = await hybrid_search(
@@ -441,6 +442,7 @@ class ProcedureManager:
                 extra_params=extra_params,
                 limit=limit,
                 penalty_limit=penalty_limit,
+                any_word_fallback=True,
             )
 
         if not results:

@@ -10,8 +10,11 @@ in cross-type recall results.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import math
+import time
 from contextvars import ContextVar
 from functools import lru_cache
 from uuid import UUID
@@ -86,14 +89,22 @@ def _cached_settings(_env_fingerprint: tuple) -> "object":
     return Settings()
 
 
+# The env vars the resolvers below read LIVE (through a fresh ``Settings()``).
+# A module constant so ``nous_eval.env_pin`` can be tested against it: a flag
+# added here but not published by the eval pin is read from the ambient shell
+# in every "pinned" probe.
+_FINGERPRINT_VARS = (
+    "NOUS_RRF_K",
+    "NOUS_VECTOR_WEIGHT",
+    "NOUS_HYBRID_SEARCH_KEYWORD_ENABLED",
+    "NOUS_HYBRID_KEYWORD_OR_FALLBACK_ENABLED",
+)
+
+
 def _resolver_settings() -> "object | None":
     import os
 
-    fingerprint = (
-        os.environ.get("NOUS_RRF_K"),
-        os.environ.get("NOUS_VECTOR_WEIGHT"),
-        os.environ.get("NOUS_HYBRID_SEARCH_KEYWORD_ENABLED"),
-    )
+    fingerprint = tuple(os.environ.get(var) for var in _FINGERPRINT_VARS)
     try:
         return _cached_settings(fingerprint)
     except Exception:
@@ -145,6 +156,183 @@ HYBRID_DROP_STAGES = frozenset({
     "keyword_filter",
     "keyword_filter_limit",
 })
+
+
+def _resolve_keyword_or_fallback_enabled() -> bool:
+    """Resolve hybrid_keyword_or_fallback_enabled from settings > default False.
+
+    A4 Step 2. Unlike ``_resolve_keyword_enabled`` this fails CLOSED: if the
+    settings cannot be built the experiment is off, not on.
+    """
+    settings = _resolver_settings()
+    if settings is None:
+        return False
+    return bool(getattr(settings, "hybrid_keyword_or_fallback_enabled", False))
+
+
+def _fallback_slots(n_and: int, limit: int, penalty_base: int) -> int:
+    """How many any-word rows may be appended after ``n_and`` all-words rows.
+
+    The constraint: appending a row to the keyword list must never push that
+    document's KEYWORD TERM below the absent penalty. ``_rrf_merge`` gives the
+    0-based keyword index ``i`` a term of ``kw_weight / (k + i)`` and an absent
+    document the term for ``penalty_rank = penalty_base + 1`` (``penalty_base``
+    is ``penalty_limit`` when pinned, else ``limit``). Presence is at least as
+    good as absence iff ``i <= penalty_rank`` -- past it, presence scores WORSE
+    (the crossover documented on ``_rrf_merge``'s ``cap_ranks_at_penalty``).
+    Fallback rows go AFTER the all-words rows, so the legal indices are
+    ``n_and .. penalty_base + 1`` inclusive: ``penalty_base + 2 - n_and`` slots.
+    Index ``penalty_rank`` itself ties absence (a no-op row), so the bound is
+    tight: one more row would be strictly worse. Do NOT fill to the SQL window
+    (``limit * 3``): that is exactly the violation.
+
+    This is a statement about the keyword TERM, not about final membership: a
+    boosted fallback document can still push another document off a per-variant
+    ``limit`` slice, which is the intended effect of the experiment.
+
+    Not triggered when the all-words query already returned ``limit`` rows.
+    """
+    if n_and >= limit:
+        return 0
+    return max(0, penalty_base + 2 - n_and)
+
+
+# The any-word query is restricted to the K rarest query lexemes. Measured on
+# nous_eval_prod with 57-68 word queries: matching ALL lexemes with ts_rank_cd
+# costs ~1000 ms per statement (61% of the table matches and ts_rank_cd runs on
+# every match), ranking once costs ~500 ms (ts_rank_cd) or ~114 ms (ts_rank);
+# K = 8 rare lexemes costs ~1 ms (median 18-40 matches). It also raises
+# precision: the common words that made 61% of the table match are the first to
+# go. A module constant, not a setting: it is part of the experiment's identity.
+_OR_MAX_LEXEMES = 8
+
+# Per-process document-frequency cache: (table, agent_id) -> (loaded_at, {lexeme:
+# ndoc}). The key assumes ONE DATABASE PER PROCESS (the table name is schema-
+# qualified but the database is not part of it); a process that serves several
+# databases would share entries between them. Never loaded inside a recall:
+# ``ts_stat`` costs ~25-125 ms on a few thousand rows and grows with the table, so
+# a stale entry is served while ONE background task per key refreshes it, and a
+# cold key skips the fallback for that call while the same task fills it.
+_DF_TTL_SECONDS = 3600.0
+_DF_CACHE: dict[tuple[str, str], tuple[float, dict[str, int]]] = {}
+_DF_REFRESHING: dict[tuple[str, str], asyncio.Task] = {}
+_df_logger = logging.getLogger(__name__ + ".df_cache")
+
+
+async def _load_doc_freq(bind, table: str, agent_id: str) -> dict[str, int]:
+    """Lexeme -> number of documents containing it, for one agent's rows. Opens its
+    OWN session on ``bind`` so it never touches (or outlives) a request's."""
+    async with AsyncSession(bind) as s:
+        result = await s.execute(
+            text(
+                "/* or_stat */ SELECT word, ndoc FROM ts_stat("
+                "format('SELECT search_tsv FROM %s WHERE agent_id = %L', "
+                "CAST(:tbl AS text), CAST(:agent AS text)))"
+            ),
+            {"tbl": table, "agent": agent_id},
+        )
+        return {row.word: int(row.ndoc) for row in result.all()}
+
+
+def _schedule_df_refresh(session, table: str, agent_id: str) -> None:
+    """Start a background refresh unless one is already in flight for this key.
+    Errors are logged and swallowed: a failed refresh leaves the old entry in
+    place (and a cold key cold), so the fallback degrades, the recall does not."""
+    key = (table, agent_id)
+    running = _DF_REFRESHING.get(key)
+    if running is not None and not running.done():
+        return
+    bind = getattr(session, "bind", None)
+    if bind is None:
+        return
+
+    async def _refresh() -> None:
+        try:
+            _DF_CACHE[key] = (time.monotonic(), await _load_doc_freq(bind, table, agent_id))
+        except Exception:
+            _df_logger.warning("A4: doc-frequency refresh failed for %s/%s", table, agent_id,
+                               exc_info=True)
+        finally:
+            _DF_REFRESHING.pop(key, None)
+
+    # no await between the check above and this store, so two callers cannot
+    # both start one
+    _DF_REFRESHING[key] = asyncio.get_running_loop().create_task(_refresh())
+
+
+def _doc_freq_for_recall(session, table: str, agent_id: str) -> dict[str, int] | None:
+    """The cached df, or ``None`` when the key is cold. Never awaits the database.
+    Stale entries are returned and a refresh is scheduled."""
+    key = (table, agent_id)
+    cached = _DF_CACHE.get(key)
+    if cached is None:
+        _schedule_df_refresh(session, table, agent_id)
+        return None
+    if time.monotonic() - cached[0] >= _DF_TTL_SECONDS:
+        _schedule_df_refresh(session, table, agent_id)
+    return cached[1]
+
+
+def _or_tsquery(lexemes: list[str]) -> str:
+    """``'a' | 'b'`` text for a tsquery CAST, quoting each lexeme.
+
+    The lexemes come from Postgres (``tsvector_to_array``), so they are already
+    stemmed and stop-worded; quoting them keeps punctuation inside a token from
+    being read as an operator, and the CAST (not ``to_tsquery``) avoids stemming
+    twice.
+    """
+    return " | ".join(
+        "'" + w.replace("\\", "\\\\").replace("'", "''") + "'" for w in lexemes
+    )
+
+
+async def _any_word_query(session, table: str, agent_id: str, query_text: str) -> str | None:
+    """The OR tsquery text over the K rarest usable lexemes, or ``None``.
+
+    ``None`` when the doc-frequency cache is cold (a background fill is
+    scheduled; this call simply runs no fallback), the query has fewer than two
+    lexemes (any-word == all-words, or nothing at all: empty and all-stopword
+    queries), or none occurs in the table (an unknown lexeme can never match, and
+    a stale cache entry just drops it).
+    """
+    df = _doc_freq_for_recall(session, table, agent_id)
+    if df is None:
+        return None
+    res = await session.execute(
+        text("/* or_lexemes */ SELECT tsvector_to_array(to_tsvector('english', :query_text)) AS lexemes"),
+        {"query_text": query_text},
+    )
+    rows = res.all()
+    lexemes = list(rows[0].lexemes or []) if rows else []
+    if len(lexemes) < 2:
+        return None
+    usable = sorted((w for w in lexemes if df.get(w, 0) > 0), key=lambda w: (df[w], w))
+    usable = usable[:_OR_MAX_LEXEMES]
+    return _or_tsquery(usable) if usable else None
+
+
+def _any_word_sql(table: str, filter_clauses: str):
+    """The fallback statement. The ``or_fallback`` marker is load-bearing: the
+    statement also contains ``ts_rank_cd``, so a test double that routes on that
+    would otherwise feed all-words rows back as any-word rows.
+
+    Rank ONCE, in a subquery (only the order is used). Excluding the all-words
+    ids in SQL lets ``LIMIT`` be the exact slot count; the caller filters again,
+    because correctness of the cap must not rest on this clause alone.
+    """
+    return text(f"""
+        /* or_fallback */
+        SELECT id, sc FROM (
+            SELECT t.id, ts_rank_cd(t.search_tsv, CAST(:or_query AS tsquery)) AS sc
+            FROM {table} t
+            WHERE t.search_tsv @@ CAST(:or_query AS tsquery)
+                AND NOT (t.id = ANY(:and_ids))
+                {filter_clauses}
+        ) s
+        ORDER BY sc DESC, id
+        LIMIT :fallback_cap
+    """)
+
 
 # A4 Step 1: write-only telemetry sink for the keyword sub-leg. A ContextVar, not
 # a parameter: `hybrid_search` is reached through three managers, `Heart.recall`,
@@ -290,6 +478,7 @@ async def hybrid_search(
     penalty_limit: int | None = None,
     require_keyword_hit: bool = False,
     dropped_out: list | None = None,
+    any_word_fallback: bool = False,
 ) -> list[tuple[UUID, float]]:
     """Hybrid vector + keyword search over a Heart table using RRF.
 
@@ -381,6 +570,20 @@ async def hybrid_search(
             and served by the fusion would be recorded as a drop that the
             fusion then appears to "rescue", and ``_rrf_merge_n``'s own slice
             would be invisible. A multi-query sink needs per-variant identity.
+        any_word_fallback: A4 Step 2 opt-in, default False. When True AND the
+            ``NOUS_HYBRID_KEYWORD_OR_FALLBACK_ENABLED`` flag is on AND this call
+            has an embedding AND is not ``require_keyword_hit``, a thin
+            all-words keyword result (fewer than ``limit`` rows) is topped up
+            with rows matching ANY of the query's 8 rarest lexemes, appended
+            AFTER the all-words rows and capped by ``_fallback_slots`` so that a
+            fallback row's keyword term never falls below the absent penalty.
+            Opt-in per call because this function is shared: the graph
+            densifier and other callers that never asked for it keep today's
+            behaviour. ``require_keyword_hit`` keeps all-words semantics by
+            design -- the Session Profile leg uses it as a relevance gate, and an
+            any-word gate would pass on any shared word. The keyword-only exit
+            (``embedding is None``) has no merge, so the penalty analysis does
+            not apply and it is excluded.
 
     Returns:
         List of (id, rrf_score) ordered by score DESC.
@@ -477,6 +680,7 @@ async def hybrid_search(
     # would drop EVERY result in a vector-only deployment.
     keyword_enabled = _resolve_keyword_enabled() or embedding is None or require_keyword_hit
     n_keyword: int | None = None
+    n_keyword_fallback: int | None = None
     if keyword_enabled:
         keyword_sql = text(f"""
             SELECT t.id,
@@ -492,9 +696,47 @@ async def hybrid_search(
         keyword_results = [(row.id, float(row.score)) for row in result.all()]
         n_keyword = len(keyword_results)
 
+        # A4 Step 2. `n_keyword` above is the all-words count and stays so.
+        if (
+            any_word_fallback
+            and embedding is not None
+            and not require_keyword_hit
+            and _resolve_keyword_or_fallback_enabled()
+        ):
+            slots = _fallback_slots(n_keyword, limit, fetch_base)
+            or_query = (
+                await _any_word_query(session, table, agent_id, query_text)
+                if slots > 0
+                else None
+            )
+            if or_query is not None:
+                fb_result = await session.execute(
+                    _any_word_sql(table, filter_clauses),
+                    {
+                        **params,
+                        "or_query": or_query,
+                        "and_ids": [doc_id for doc_id, _ in keyword_results],
+                        "fallback_cap": slots,
+                    },
+                )
+                # Filter against the all-words ids HERE, not only in SQL: a
+                # document returned twice would take its LATER fallback index
+                # in `_rrf_merge`, which can be past the penalty rank -- the
+                # exact violation `_fallback_slots` exists to prevent.
+                and_set = {doc_id for doc_id, _ in keyword_results}
+                fallback = [
+                    (row.id, float(row.sc) / (1.0 + float(row.sc)))
+                    for row in fb_result.all()
+                    if row.id not in and_set
+                ][:slots]
+                keyword_results = keyword_results + fallback
+                n_keyword_fallback = len(fallback)
+
     stats_sink = _KEYWORD_STATS_SINK.get()
     if stats_sink is not None:
-        stats_sink.append({"n_keyword": n_keyword, "n_keyword_fallback": None})
+        stats_sink.append(
+            {"n_keyword": n_keyword, "n_keyword_fallback": n_keyword_fallback}
+        )
 
     if embedding is None:
         # Keyword-only fallback — return keyword results directly
@@ -647,6 +889,7 @@ async def hybrid_search_multi(
     vector_weight: float | None = None,
     active_filter: bool = True,
     penalty_limit: int | None = None,
+    any_word_fallback: bool = False,
 ) -> list[tuple[UUID, float]]:
     """Multi-query hybrid search over a Heart table (F050).
 
@@ -679,6 +922,10 @@ async def hybrid_search_multi(
             vector/keyword ``_rrf_merge``, and the cross-variant fusion runs
             ``_rrf_merge_n``. Pinning only one would leave the other coupled.
             ``None`` (default) preserves today's behaviour exactly.
+        any_word_fallback: A4 Step 2 opt-in, forwarded to every per-variant
+            ``hybrid_search`` call. The cross-variant fusion is unchanged. The
+            keyword-stats sink (``with_keyword_stats``) is a ContextVar, so each
+            variant's call appends its own record with no forwarding.
 
     Returns:
         List of ``(id, rrf_score)`` ordered by score DESC, length ``<= limit``.
@@ -708,6 +955,7 @@ async def hybrid_search_multi(
             vector_weight=vector_weight,
             active_filter=active_filter,
             penalty_limit=penalty_limit,
+            any_word_fallback=any_word_fallback,
         )
 
     rrf_k = _resolve_rrf_k()
@@ -740,6 +988,7 @@ async def hybrid_search_multi(
             vector_weight=vector_weight,
             active_filter=active_filter,
             penalty_limit=penalty_limit,
+            any_word_fallback=any_word_fallback,
         )
         ranked_lists.append(per_variant)
 
