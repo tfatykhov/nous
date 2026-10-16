@@ -19,6 +19,7 @@ import asyncio
 import logging
 import sys
 import uuid
+from collections import Counter
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -39,6 +40,7 @@ from nous.observability.task_scoring import (
 from nous.storage.models import TaskScore as TaskScoreRow
 
 if TYPE_CHECKING:
+    from nous.config import Settings
     from nous.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -90,7 +92,8 @@ async def upsert_scores(
     """Insert each score, or refresh the row with the same (agent, kind, task, scorer_version). Does not commit.
 
     A row of another ``scorer_version`` is never touched (re-scoring under a new version adds rows), and a row that is
-    already ``settled`` is left as it is.
+    already ``settled`` is left as it is. Returns the number of rows submitted, a settled row the database skips
+    included: the drivers do not agree on what a multi-row upsert reports as its row count.
     """
     for start in range(0, len(scores), UPSERT_CHUNK):
         rows = [
@@ -156,7 +159,7 @@ async def run_scoring_pass(
 ) -> int:
     """Score every task of ``agent_id`` finished in the window and upsert the rows in one transaction.
 
-    The leaves are scored first: the roll-ups read their scores. Returns the number of rows written.
+    The leaves are scored first: the roll-ups read their scores. Returns the number of rows submitted to the upsert.
     """
     now = now or datetime.now(UTC)
     async with database.session() as session:
@@ -171,44 +174,50 @@ async def run_scoring_pass(
             for sig in (*gathered.dags, *gathered.chains)
             if (row := score_rollup(sig, leaf_scores, now)) is not None
         ]
-        written = await upsert_scores(session, agent_id, [*leaves, *rollups], scored_at=now)
+        submitted = await upsert_scores(session, agent_id, [*leaves, *rollups], scored_at=now)
         await session.commit()
+    rollup_kinds = Counter(row.task_kind for row in rollups)  # score_rollup can decline one: count what was sent
     logger.info(
-        "Autonomy A1: wrote %d row(s): %d subtask(s), %d DAG run(s), %d intention root(s) (agent=%s, window=%dd)",
-        written,
+        "Autonomy A1: submitted %d row(s): %d subtask(s), %d DAG run(s), %d intention root(s) (agent=%s, window=%dd)",
+        submitted,
         len(leaves),
-        len(gathered.dags),
-        len(gathered.chains),
+        rollup_kinds["dag"],
+        rollup_kinds["intention"],
         agent_id,
         window_days,
     )
-    return written
+    return submitted
 
 
-def _open_database() -> Database:
-    from nous.config import Settings
+def _open_database(settings: Settings) -> Database:
     from nous.storage.database import Database
 
-    return Database(Settings())
+    return Database(settings)
 
 
 async def _run(agent_id: str | None, window_days: int) -> int:
+    from nous.config import Settings
+
+    settings = Settings()
     # No database.connect(): its schema probe reads information_schema for the three app schemas, which the
     # scoring role does not need to see. The engine connects on the first query.
-    database = _open_database()
+    database = _open_database(settings)
     try:
         if agent_id is None:
-            from nous.config import Settings
-
-            agent_id = Settings().agent_id
+            agent_id = settings.agent_id
         await run_scoring_pass(database, agent_id, window_days=window_days)
     finally:
-        await database.disconnect()
+        try:
+            await database.disconnect()
+        except Exception:
+            # Closing the pool is not the pass: it neither fails a pass that committed nor hides a pass's own error.
+            logger.warning("Autonomy A1: the database disconnect failed after the pass", exc_info=True)
     return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """The command. 0 when the pass wrote its rows, 1 when anything failed."""
+    """The command. 0 when the pass committed its rows (a failed disconnect afterwards is only logged), 1 when
+    anything else failed."""
     parser = argparse.ArgumentParser(
         prog="python -m nous.observability.task_score_job", description=__doc__.split("\n")[0]
     )

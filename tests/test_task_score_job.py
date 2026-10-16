@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from contextlib import asynccontextmanager
@@ -454,10 +455,100 @@ async def test_the_command_scores_the_agent_it_is_given(db, agent, monkeypatch):
     async with db.session() as s:
         s.add(sub)
         await s.commit()
-    monkeypatch.setattr(job, "_open_database", lambda: _Shared(db))
+    monkeypatch.setattr(job, "_open_database", lambda settings: _Shared(db))
 
     assert await job._run(agent, 15) == 0
     assert [r.task_id for r in await rows(db, agent)] == [str(sub.id)]
+
+
+async def _done_subtask(db, agent) -> Subtask:
+    sub = Subtask(
+        id=uuid.uuid4(),
+        agent_id=agent,
+        task="t",
+        status="completed",
+        final_outcome="completed",
+        completed_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+    async with db.session() as s:
+        s.add(sub)
+        await s.commit()
+    return sub
+
+
+async def test_the_command_builds_its_settings_once_and_scores_their_agent(db, agent, monkeypatch):
+    import nous.config
+    import nous.storage.database
+
+    made: list[object] = []
+    opened: list[object] = []
+
+    class OneSettings:
+        def __init__(self):
+            self.agent_id = agent
+            made.append(self)
+
+    def database(settings):
+        opened.append(settings)
+        return _Shared(db)
+
+    monkeypatch.setattr(nous.config, "Settings", OneSettings)
+    monkeypatch.setattr(nous.storage.database, "Database", database)
+    sub = await _done_subtask(db, agent)
+
+    assert await job._run(None, 15) == 0  # no --agent-id: the agent comes from the settings
+    assert len(made) == 1 and opened == made
+    assert [r.task_id for r in await rows(db, agent)] == [str(sub.id)]
+
+
+async def test_the_log_counts_the_rows_submitted_by_kind(db, agent, monkeypatch, caplog):
+    await _done_subtask(db, agent)
+    async with db.session() as s:
+        s.add(
+            ExecutionDAG(
+                id=uuid.uuid4(),
+                agent_id=agent,
+                name="d",
+                status="completed",
+                completed_at=datetime.now(UTC) - timedelta(hours=1),
+            )
+        )
+        await s.commit()
+    real = job.score_rollup
+
+    def no_dag_rollup(signals, leaf_scores, now):  # a roll-up the scorer declines (score_rollup returns None)
+        return None if signals.task_kind == "dag" else real(signals, leaf_scores, now)
+
+    monkeypatch.setattr(job, "score_rollup", no_dag_rollup)
+    with caplog.at_level(logging.INFO, logger=job.__name__):
+        assert await job.run_scoring_pass(db, agent) == 1
+    [line] = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Autonomy A1:")]
+    assert "submitted 1 row(s): 1 subtask(s), 0 DAG run(s), 0 intention root(s)" in line, line
+
+
+class _DisconnectFails(_Shared):
+    async def disconnect(self):
+        raise RuntimeError("the pool is already gone")
+
+
+async def test_a_failing_disconnect_after_a_committed_pass_still_exits_zero(db, agent, monkeypatch, caplog):
+    sub = await _done_subtask(db, agent)
+    monkeypatch.setattr(job, "_open_database", lambda settings: _DisconnectFails(db))
+
+    with caplog.at_level(logging.INFO, logger=job.__name__):
+        assert await job._run(agent, 15) == 0
+    assert [r.task_id for r in await rows(db, agent)] == [str(sub.id)]  # the pass committed
+    assert [r.levelname for r in caplog.records if "disconnect" in r.getMessage()] == ["WARNING"]
+
+
+async def test_a_failed_pass_is_not_masked_by_a_failing_disconnect(monkeypatch):
+    class Broken(_DisconnectFails):
+        def session(self):
+            raise RuntimeError("database went away")
+
+    monkeypatch.setattr(job, "_open_database", lambda settings: Broken(None))
+    with pytest.raises(RuntimeError, match="database went away"):
+        await job._run("nous-default", 15)
 
 
 def test_the_exit_code_is_zero_after_a_pass_and_nonzero_after_a_failure(monkeypatch):
