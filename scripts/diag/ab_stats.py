@@ -59,6 +59,23 @@ def pooled_deltas(dumps: list[dict], arm: str, against: str = "baseline") -> lis
     return out
 
 
+def fired_summary(baseline_kw, arm_kw, shared) -> tuple[int, int]:
+    """(eligible, fired): of the queries whose BASELINE all-words keyword sub-query
+    found nothing (the only ones a fallback can act on), how many the arm added
+    rows to."""
+    eligible = [i for i in shared if baseline_kw[i]["zero"] > 0]
+    return len(eligible), sum(1 for i in eligible if arm_kw[i]["fallback"] > 0)
+
+
+def pooled_fired(dumps: list[dict], arm: str, against: str = "baseline") -> tuple[int, int]:
+    """`fired_summary` summed over each dump's shared population."""
+    eligible = fired = 0
+    for d in dumps:
+        e, f = fired_summary(d["arms"][against]["kw"], d["arms"][arm]["kw"], d["shared"])
+        eligible, fired = eligible + e, fired + f
+    return eligible, fired
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--arm", required=True)
@@ -82,7 +99,10 @@ def main() -> int:
         x, y = dd["arms"][a.arm]["ms"], dd["arms"][a.against]["ms"]
         added.extend(x[i] - y[i] for i in dd["shared"])
     print(f"added latency per recall: mean {statistics.mean(added):.1f} ms, "
-          f"p95 {percentile(added, 0.95):.1f} ms (n={len(added)})")
+          f"p95 {percentile(added, 0.95):.1f} ms, max {max(added):+.1f} ms (n={len(added)})")
+    elig, fired = pooled_fired(dumps, a.arm, a.against)
+    print(f"keyword fallback fired on {fired}/{elig} pooled queries with a zero-hit "
+          f"{a.against} sub-query" + (f" = {fired / elig:.0%}" if elig else ""))
     return 0
 
 

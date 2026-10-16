@@ -58,3 +58,35 @@ def test_main_refuses_an_empty_shared_population(tmp_path, capsys, monkeypatch):
 def test_percentile():
     assert st.percentile([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 0.95) == 10
     assert st.percentile([], 0.95) == 0.0
+
+
+def test_main_reports_the_max_added_latency_and_the_pooled_fired_rate(tmp_path, capsys, monkeypatch):
+    import json
+    import sys
+
+    def kw(zero, fallback):
+        return [{"queries": 9, "zero": z, "fallback": f} for z, f in zip(zero, fallback)]
+
+    dump = tmp_path / "d.json"
+    dump.write_text(json.dumps({"shared": [0, 1, 2], "arms": {
+        "baseline": {"rr": [0.0, 0.5, 1.0], "ms": [10.0, 10.0, 10.0],
+                     "kw": kw([1, 0, 2], [0, 0, 0])},
+        "x": {"rr": [0.5, 0.5, 1.0], "ms": [12.0, 40.0, 11.0],
+              "kw": kw([1, 0, 2], [3, 0, 0])}}}), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["ab_stats", "--arm", "x", str(dump)])
+    assert st.main() == 0
+    out = capsys.readouterr().out
+    assert "max +30.0" in out
+    # eligible = baseline zero > 0 (queries 0 and 2); x appended rows on query 0 only
+    assert "fired on 1/2" in out
+
+
+def test_pooled_fired_sums_each_dumps_shared_population():
+    def kw(zero, fallback):
+        return [{"zero": z, "fallback": f} for z, f in zip(zero, fallback)]
+
+    d1 = {"shared": [0, 2], "arms": {"baseline": {"kw": kw([1, 1, 0], [0, 0, 0])},
+                                      "x": {"kw": kw([1, 1, 0], [4, 4, 4])}}}
+    d2 = {"shared": [0], "arms": {"baseline": {"kw": kw([2], [0])}, "x": {"kw": kw([2], [0])}}}
+    # d1: query 1 is outside shared, query 2 had no zero-hit sub-query -> 1/1; d2 -> 0/1
+    assert st.pooled_fired([d1, d2], "x") == (2, 1)

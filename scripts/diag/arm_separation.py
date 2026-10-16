@@ -72,7 +72,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))   # ab_stats (not a package)
 
-from ab_stats import bootstrap_ci, percentile, sign_test_p  # noqa: E402
+from ab_stats import bootstrap_ci, fired_summary, percentile, sign_test_p  # noqa: E402
 
 from nous.api.retrieval_pipeline import run_recall_pipeline  # noqa: E402
 from nous.brain.brain import Brain  # noqa: E402
@@ -162,12 +162,8 @@ def kw_from_trace(trace) -> dict:
     return agg
 
 
-def fired_summary(baseline_kw, arm_kw, shared) -> tuple[int, int]:
-    """(eligible, fired): of the queries whose BASELINE all-words keyword sub-query
-    found nothing (the only ones a fallback can act on), how many the arm added
-    rows to."""
-    eligible = [i for i in shared if baseline_kw[i]["zero"] > 0]
-    return len(eligible), sum(1 for i in eligible if arm_kw[i]["fallback"] > 0)
+# `fired_summary` (imported from ab_stats) is the ONE definition of "the fallback
+# fired": this run's ARM INERT gate and ab_stats' pooled rate must not diverge.
 
 
 async def warm_expansions(heart, qrels, agent_id: str) -> int:
@@ -313,8 +309,10 @@ def build_settings(args):
         # eval_off() forces expansion off. Prod runs it on, and with it the
         # per-variant hybrid_search_multi path, so a run that claims prod shape
         # must turn it back on AND wire an expander (see _run_arm_pinned). The
-        # Anthropic credentials are process-env inputs, injected like the
-        # embedding key because pinned_settings hides the environment.
+        # Anthropic credentials are read here and passed explicitly, like the
+        # embedding key. hidden_env hides only NOUS_*/DB_*, so Settings would also
+        # pick ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN up through their
+        # validation aliases; passing them keeps every input of the run explicit.
         overrides["query_expansion_enabled"] = True
         overrides["anthropic_api_key"] = os.environ.get("ANTHROPIC_API_KEY", "")
         overrides["anthropic_auth_token"] = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
@@ -353,6 +351,13 @@ async def run(args, base) -> int:
           f"expansion={'ON' if args.query_expansion else 'off'}\n")
     arms = select_arms(args.arms.split(",") if args.arms else None, args.control)
     control = CONTROLS[args.control][0]
+    # One discarded pass with the baseline settings BEFORE the first timed arm.
+    # Baseline always runs first, so without this it alone pays the cold costs
+    # (Postgres buffers, HNSW pages, plan caches) and every later arm runs warm:
+    # "added vs baseline" would read low, a bias toward shipping. Its result,
+    # timings included, is dropped; only the passes below are measured.
+    await run_arm(arms["baseline"], qrels, base, args.top_k, args.query_expansion)
+    print("  warm-up pass (baseline settings) done -- discarded, timings not recorded")
     out = {}
     for name, flags in arms.items():
         out[name] = await run_arm(flags, qrels, base, args.top_k, args.query_expansion)
@@ -437,7 +442,11 @@ async def run(args, base) -> int:
         share = n_fired / n_elig if n_elig else 0.0
         print(f"or_fallback fired on {n_fired}/{n_elig} queries with a "
               f"zero-hit baseline sub-query = {share:.0%} ({rows} rows appended)")
-        if not n_elig or share < 0.5:
+        if not n_elig:
+            print("ARM INERT: no shared query had a zero-hit baseline sub-query; this qrel "
+                  "set cannot exercise the fallback -- results withheld.")
+            return 4
+        if share < 0.5:
             print("ARM INERT: the fallback fired on under 50% of the queries it "
                   "could act on -- results withheld.")
             return 4
@@ -470,9 +479,13 @@ async def run(args, base) -> int:
         if name != "baseline":
             added = [out[name]["ms"][i] - out["baseline"]["ms"][i] for i in shared]
             extra = (f"   added vs baseline: mean {statistics.mean(added):+.1f} "
-                     f"p95 {percentile(added, 0.95):+.1f}") if added else ""
+                     f"p95 {percentile(added, 0.95):+.1f} max {max(added):+.1f}") if added else ""
+            if name == CONTROLS["keyword_only"][0]:
+                # vector_weight=0 changes only the fusion weights: same SQL as
+                # baseline, so its added latency is the arm-ORDER residue.
+                extra += "   <- order-bias check (same SQL as baseline, expect ~0)"
         print(f"{name:<20} mean {statistics.mean(v):7.1f}  p95 {percentile(v, 0.95):7.1f}"
-              f"  arm wall {out[name]['wall_s']:.1f}s{extra}" if v else name)
+              f"  max {max(v):7.1f}  arm wall {out[name]['wall_s']:.1f}s{extra}" if v else name)
     for name in arms:
         if out[name]["cold_df_ms"]:
             print("cold ts_stat load per table (background in production, never inside a "
@@ -499,9 +512,11 @@ async def run(args, base) -> int:
           "'related but dissimilar' — that needs an end-task oracle.")
     if args.out_json:
         # Per-query dump for `ab_stats.py` pooling. Indices are qrel positions.
+        # `kw` lets the pooled fired rate be recomputed (ab_stats.pooled_fired).
         Path(args.out_json).write_text(json.dumps({
             "qrels": str(args.qrels), "db": args.db, "shared": shared,
-            "arms": {n: {"rr": out[n]["rr"], "ms": out[n]["ms"]} for n in arms},
+            "arms": {n: {"rr": out[n]["rr"], "ms": out[n]["ms"], "kw": out[n]["kw"]}
+                     for n in arms},
         }), encoding="utf-8")
     return 0
 
