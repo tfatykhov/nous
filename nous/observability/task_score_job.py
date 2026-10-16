@@ -29,7 +29,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nous.observability.task_score_gatherer import _chunks, gather_signals
+from nous.observability.task_score_gatherer import chunked, gather_signals
 from nous.observability.task_scoring import (
     LEAF_KIND,
     SCORER_VERSION,
@@ -142,7 +142,7 @@ async def _stored_leaf_scores(session: AsyncSession, agent_id: str, task_ids: Se
     child never scored has no row and stays uncounted; a stored ``not_scored`` row has score NULL and is not counted.
     """
     found: dict[str, float | None] = {}
-    for chunk in _chunks(list(task_ids)):
+    for chunk in chunked(list(task_ids)):
         result = await session.execute(
             select(TaskScoreRow.task_id, TaskScoreRow.score).where(
                 TaskScoreRow.agent_id == agent_id,

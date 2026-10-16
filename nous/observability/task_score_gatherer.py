@@ -84,7 +84,8 @@ class _LedgerRow(NamedTuple):
     reverted: bool
 
 
-def _chunks(values: Sequence[Any], size: int = CHUNK) -> Iterator[Sequence[Any]]:
+def chunked(values: Sequence[Any], size: int = CHUNK) -> Iterator[Sequence[Any]]:
+    """``values`` in consecutive slices of at most ``size`` (the ids of one IN list each)."""
     for start in range(0, len(values), size):
         yield values[start : start + size]
 
@@ -112,7 +113,7 @@ class _Pass:
         missing = [d for d in dict.fromkeys(dag_ids) if d not in self._subtasks]
         for dag_id in missing:
             self._subtasks[dag_id] = []
-        for chunk in _chunks(missing):
+        for chunk in chunked(missing):
             result = await self._session.execute(
                 select(Subtask.id, DAGNode.dag_id)
                 .join(DAGNode, Subtask.dag_node_id == DAGNode.id)
@@ -129,7 +130,7 @@ class _Pass:
         model's own say-so."""
         missing = [d for d in dict.fromkeys(dag_ids) if d not in self._checked]
         found: set[UUID] = set()
-        for chunk in _chunks(missing):
+        for chunk in chunked(missing):
             result = await self._session.execute(
                 select(DAGNode.dag_id)
                 .join(ExecutionDAG, ExecutionDAG.id == DAGNode.dag_id)
@@ -167,7 +168,7 @@ async def _ledger_rows(
         (L.dag_id, list(dag_ids)),
         (L.session_id, list(session_ids)),
     ):
-        for chunk in _chunks(values):
+        for chunk in chunked(values):
             result = await session.execute(
                 select(
                     L.id, L.tool_name, L.status, L.result_summary, L.subtask_id, L.dag_id, L.session_id, C.reverted_at
@@ -207,7 +208,7 @@ async def _unverified_claim_events(
 ) -> list[tuple[str, str]]:
     """(session_id, event id) of every claim-check event in these sessions whose verdict was ``verified: false``."""
     found: list[tuple[str, str]] = []
-    for chunk in _chunks(list(session_ids)):
+    for chunk in chunked(list(session_ids)):
         result = await session.execute(
             select(Event.id, Event.session_id, Event.data).where(
                 Event.agent_id == agent_id, Event.event_type == CLAIMS_EVENT, Event.session_id.in_(chunk)
@@ -223,7 +224,7 @@ async def _unverified_claim_events(
 async def _owner_grades(session: AsyncSession, agent_id: str, decision_ids: Sequence[UUID]) -> dict[UUID, str]:
     """decision id -> outcome, for the decisions the owner graded (reviewer ``a2ui``: success, partial, failure)."""
     graded: dict[UUID, str] = {}
-    for chunk in _chunks(list(dict.fromkeys(decision_ids))):
+    for chunk in chunked(list(dict.fromkeys(decision_ids))):
         result = await session.execute(
             select(Decision.id, Decision.outcome).where(
                 Decision.agent_id == agent_id,
@@ -264,7 +265,7 @@ async def _origin_decisions(
     could win the earliest-row rule the grade would land on no unit at all.
     """
     mine: dict[str, tuple[Any, UUID]] = {}
-    for chunk in _chunks(list(source_ids)):
+    for chunk in chunked(list(source_ids)):
         result = await session.execute(
             select(Intention.id, Intention.created_at, Intention.source_id, Intention.origin_decision_id).where(
                 Intention.agent_id == agent_id,
@@ -278,7 +279,7 @@ async def _origin_decisions(
         for r in result:
             mine[r.source_id] = (r, r.origin_decision_id)
     earliest: dict[UUID, tuple[datetime, str]] = {}
-    for chunk in _chunks(list({d for _, d in mine.values()})):
+    for chunk in chunked(list({d for _, d in mine.values()})):
         result = await session.execute(
             select(Intention.id, Intention.created_at, Intention.origin_decision_id).where(
                 Intention.agent_id == agent_id,
@@ -358,7 +359,7 @@ async def _leaf_signals(session: AsyncSession, agent_id: str, since: datetime, r
     for sess, event_id in await _unverified_claim_events(session, agent_id, list(session_task)):
         evidence[session_task[sess]]["unverified_claims"].append(event_id)
     dag_of: dict[UUID, UUID] = {}
-    for chunk in _chunks(ids):
+    for chunk in chunked(ids):
         result = await session.execute(
             select(Subtask.id, DAGNode.dag_id)
             .join(DAGNode, Subtask.dag_node_id == DAGNode.id)
@@ -462,7 +463,7 @@ async def _chain_signals(session: AsyncSession, agent_id: str, since: datetime, 
     child_subtasks: dict[str, list[str]] = defaultdict(list)
     lineage_dags: dict[UUID, str] = {}
     schedule_roots: dict[str, str] = {}  # source id of a depth-0 schedule intention -> its root
-    for chunk in _chunks(root_ids):
+    for chunk in chunked(root_ids):
         for row in await session.execute(
             select(Intention.root_id, Intention.depth, Intention.source_kind, Intention.source_id).where(
                 Intention.agent_id == agent_id, Intention.root_id.in_(chunk)
@@ -484,7 +485,7 @@ async def _chain_signals(session: AsyncSession, agent_id: str, since: datetime, 
 
     # Proposals: an owner rejection is an override. "proposal-<id>" is the ledger session of an approved one.
     session_root = {f"intent-{rid}": str(rid) for rid in root_ids}
-    for chunk in _chunks(root_ids):
+    for chunk in chunked(root_ids):
         for p in await session.execute(
             select(
                 IntentionProposal.id, IntentionProposal.root_id, IntentionProposal.state, IntentionProposal.decided_by
@@ -495,7 +496,7 @@ async def _chain_signals(session: AsyncSession, agent_id: str, since: datetime, 
                 evidence[str(p.root_id)]["proposals_rejected"].append(str(p.id))
 
     # Arrivals: the claim checker marks a flagged note, and each arrival names the decision it recorded.
-    for chunk in _chunks(root_ids):
+    for chunk in chunked(root_ids):
         for a in await session.execute(
             select(
                 IntentionArrival.root_id,
