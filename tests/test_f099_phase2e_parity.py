@@ -99,8 +99,8 @@ async def test_a_new_intention_starts_with_no_failed_tokens(env_factory):  # noq
 
 def test_2e_added_one_migration_and_no_setting():  # PIN: changes when a later PR adds one on purpose
     migrations = sorted((Path(__file__).resolve().parents[1] / "sql" / "migrations").glob("*.sql"))
-    assert migrations[-2].name == "085_intention_failed_tokens_and_cancel_index.sql"
-    assert migrations[-1].name == "086_execution_ledger_detail.sql"  # the execution ledger detail, after 2e
+    assert migrations[-2].name == "086_execution_ledger_detail.sql"  # the execution ledger detail, after 2e
+    assert migrations[-1].name == "087_task_scores.sql"  # task scores
     assert not [name for name in Settings.model_fields if "cancel" in name or "failed_tokens" in name]
 
 
