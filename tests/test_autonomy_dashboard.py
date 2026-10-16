@@ -17,6 +17,7 @@ from nous.storage.models import (
     Decision,
     Event,
     ExecutionLedgerEntry,
+    ScorerHeartbeat,
     Subtask,
     TaskScore,
 )
@@ -280,6 +281,64 @@ async def test_last_scored_at_is_the_latest_score_write(db, agent):
     assert abs(datetime.fromisoformat(ts["first_scored_at"]) - (NOW - timedelta(days=9))) < timedelta(seconds=1)
 
 
+def heartbeat(agent, *, status="ok", error=None, run=None, ok=None, submitted=None) -> ScorerHeartbeat:
+    return ScorerHeartbeat(
+        agent_id=agent,
+        scorer_version=SCORER_VERSION,
+        last_run_at=run or NOW - timedelta(minutes=10),
+        last_status=status,
+        last_error=error,
+        last_ok_at=ok,
+        rows_submitted=submitted,
+    )
+
+
+def near(iso: str | None, when: datetime) -> bool:
+    return iso is not None and abs(datetime.fromisoformat(iso) - when) < timedelta(seconds=1)
+
+
+async def test_the_scorer_is_none_without_a_heartbeat(db, agent):
+    await add(db, heartbeat(f"{agent}-other"), score_row(agent))  # a score row is not a heartbeat
+    assert (await data(db, agent))["task_scores"]["scorer"] is None
+
+
+async def test_the_scorer_is_this_agents_heartbeat(db, agent):
+    run = NOW - timedelta(minutes=10)
+    await add(
+        db,
+        heartbeat(agent, run=run, ok=run, submitted=12),
+        heartbeat(f"{agent}-other", status="error", error="RuntimeError", run=NOW - timedelta(days=3)),
+    )
+    scorer = (await data(db, agent))["task_scores"]["scorer"]
+    assert set(scorer) == {"scorer_version", "last_run_at", "last_status", "last_error", "last_ok_at", "rows_submitted"}
+    assert (scorer["scorer_version"], scorer["last_status"], scorer["last_error"], scorer["rows_submitted"]) == (
+        SCORER_VERSION,
+        "ok",
+        None,
+        12,
+    )
+    assert near(scorer["last_run_at"], run) and near(scorer["last_ok_at"], run)
+
+
+async def test_a_failed_pass_shows_its_status_and_exception_class(db, agent):
+    last_ok = NOW - timedelta(days=2)
+    await add(
+        db,
+        heartbeat(agent, status="error", error="ProgrammingError", ok=last_ok, submitted=7),
+        heartbeat(f"{agent}-never", status="error", error="ConnectionRefusedError"),  # it never committed a pass
+    )
+    scorer = (await data(db, agent))["task_scores"]["scorer"]
+    assert (scorer["last_status"], scorer["last_error"], scorer["rows_submitted"]) == ("error", "ProgrammingError", 7)
+    assert near(scorer["last_run_at"], NOW - timedelta(minutes=10)) and near(scorer["last_ok_at"], last_ok)
+    never = (await data(db, f"{agent}-never"))["task_scores"]["scorer"]
+    assert (never["last_status"], never["last_error"], never["last_ok_at"], never["rows_submitted"]) == (
+        "error",
+        "ConnectionRefusedError",
+        None,
+        None,
+    )
+
+
 async def test_the_inventory_and_censors_are_part_of_the_scoreboard(db, agent):
     await add(
         db,
@@ -366,11 +425,13 @@ async def test_the_shape_with_nothing_recorded(db, agent):
         "scorer_version",
         "first_scored_at",
         "last_scored_at",
+        "scorer",
         "headline",
         "subtasks",
         "rollups",
     }
     assert set(got["task_scores"]["rollups"]) == {"dag", "intention"}
+    assert got["task_scores"]["scorer"] is None
 
 
 async def test_the_headline_shows_verified_share_overrides_and_penalties_side_by_side(db, agent):

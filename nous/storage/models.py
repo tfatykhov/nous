@@ -1948,3 +1948,28 @@ class TaskScore(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     scored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ScorerHeartbeat(Base):
+    """Migration 088: one row per agent saying when the scoring command last ran and how that pass ended.
+
+    Every pass overwrites it: ``last_run_at``, ``last_status`` and ``last_error`` (the exception class name, never its
+    message) describe the latest pass, ok or error; ``last_ok_at`` and ``rows_submitted`` the latest one that
+    committed, in the same transaction as its scores. Telemetry in the ``scoring`` schema beside ``TaskScore``: written
+    only by ``nous.observability.task_score_job``, read by ``GET /dashboard/autonomy``, exposed to no agent tool.
+    """
+
+    __tablename__ = "scorer_heartbeat"
+    __table_args__ = (
+        CheckConstraint("last_status IN ('ok', 'error')", name="ck_scorer_heartbeat_status"),
+        CheckConstraint("(last_status = 'error') = (last_error IS NOT NULL)", name="ck_scorer_heartbeat_error"),
+        {"schema": "scoring"},
+    )
+
+    agent_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    scorer_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    last_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_status: Mapped[str] = mapped_column(String(8), nullable=False)
+    last_error: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    last_ok_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rows_submitted: Mapped[int | None] = mapped_column(Integer, nullable=True)
