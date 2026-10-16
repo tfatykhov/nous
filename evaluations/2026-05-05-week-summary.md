@@ -14,7 +14,7 @@ view: *what was tested, what shipped, what's open*.
 |---|---|
 | Vector search (pgvector cosine) | baseline |
 | Keyword search (PG FTS / tsvector) | collapses standalone (MRR 0.07/0.35); ties baseline as part of RRF |
-| RRF hybrid fusion | `rrf_k_low` +0.7% MRR; `rrf_k_high` -9.5%; F054 keyword-toggle validated |
+| RRF hybrid fusion | `rrf_k_low` +0.7% MRR; `rrf_k_high` -9.5%; vector-only fusion (`vector_weight=1.0`) ties default RRF; the F054 keyword toggle itself is unmeasured (RUNS.md footnote 1) |
 | Cross-encoder rerank (F042) | corpus-dependent: +4% MRR on prod, **-5% on LongMemEval** (CE off wins on personal-Q&A) |
 | MMR diversity (F030) | global-flip falsified; per-consumer needed |
 | MMR skip-after-CE (F030.1) | validated as default — disabling regresses both corpora |

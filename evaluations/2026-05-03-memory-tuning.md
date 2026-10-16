@@ -461,6 +461,13 @@ current behavior).
 Predicted: ties baseline. Validates flag wires to production hot path.
 Operator opt-out is real and lossless on these corpora.
 
+> **Correction (2026-10-16):** this arm measured nothing. `hybrid_search_keyword_enabled`
+> is read from the process environment at search time and the run never published the
+> arm's value there, so both columns ran with the keyword leg on, which is why they are
+> identical. The flag's wiring and the "lossless" claim are unmeasured, and the opt-out is
+> untested. The channel-isolation result (`vector_only`, which sets `vector_weight=1.0`) is
+> a separate measurement and stands. See footnote 1 in [RUNS.md](RUNS.md).
+
 ### Caveat documented
 
 Empty keyword channel uniformly suppresses the keyword half of the RRF

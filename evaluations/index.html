@@ -371,7 +371,7 @@
     <tr><td>MMR diversity</td><td>ON, <code>mmr_skip_after_ce=True</code></td><td><code>mmr_enabled</code>, <code>mmr_diversity_weight</code></td><td>F030.1 default validated. Chaining MMR after CE neutralizes lift.</td></tr>
     <tr><td>Spreading activation</td><td><code>auto</code> (density &gt;= 3.0)</td><td><code>spreading_activation_enabled</code>, <code>..._density_threshold</code></td><td>Measurable no-op on current eval corpora.</td></tr>
     <tr><td>RRF fusion</td><td><code>vector_weight=0.7</code>, <code>rrf_k=60</code></td><td><code>vector_weight</code>, <code>rrf_k</code></td><td>Tuning is corpus-noise. Don't touch defaults.</td></tr>
-    <tr><td>Keyword channel</td><td>ON</td><td><code>hybrid_search_keyword_enabled</code></td><td>F054. Vector-only ties default RRF on lme. Operator opt-out for vector-dominant corpora.</td></tr>
+    <tr><td>Keyword channel</td><td>ON</td><td><code>hybrid_search_keyword_enabled</code></td><td>F054. Vector-only fusion (<code>vector_weight=1.0</code>) ties default RRF on lme. The toggle itself is unmeasured (footnote 1 in <code>evaluations/RUNS.md</code>), so the opt-out is untested.</td></tr>
     <tr><td>Orphan-edge pruning</td><td>ON, 1000/cycle</td><td><code>dead_edge_pruning_enabled</code>, <code>..._max_per_cycle</code></td><td>F053 sleep phase. Not measured by retrieval eval.</td></tr>
   </tbody>
 </table>
@@ -644,6 +644,10 @@ if keyword_enabled:
 </table>
 
 <p>Predicted: ties baseline. Validates flag wires to production hot path. Operator opt-out is real and lossless on these corpora.</p>
+
+<div class="callout warn">
+<strong>Correction (2026-10-16):</strong> this arm measured nothing. <code>hybrid_search_keyword_enabled</code> is read from the process environment at search time and the run never published the arm's value there, so both columns ran with the keyword leg on, which is why they are identical. The flag's wiring and the "lossless" claim are unmeasured, and the opt-out is untested. The channel-isolation result (<code>vector_only</code>, which sets <code>vector_weight=1.0</code>) is a separate measurement and stands. See footnote 1 in <code>evaluations/RUNS.md</code>.
+</div>
 
 <div class="callout warn">
 <strong>Caveat documented:</strong> Empty keyword channel uniformly suppresses the keyword half of the RRF score (penalty rank), preserving order but shifting absolute scores. May interact with <code>relevance_floor</code> / <code>staleness_penalty</code> consumers if flipped off in prod.
