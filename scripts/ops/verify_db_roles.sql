@@ -12,7 +12,8 @@
 -- That holds only while pg_hba.conf lets nothing but the local socket and loopback in without a password:
 -- every other line that covers all users, or nous_admin, must use scram-sha-256 (a role with no password
 -- cannot pass it) or reject, and no line beyond loopback may use trust, md5 or password. The pg_hba
--- checks below read pg_hba_file_rules (the file as last loaded) and fail when that changes.
+-- checks below read pg_hba_file_rules (the file as it is on disk, which the server applies at the next
+-- reload) and fail when that changes.
 
 \set ON_ERROR_STOP on
 \set VERBOSITY terse
@@ -87,7 +88,8 @@ BEGIN
         ('app CREATE SCHEMA IF NOT EXISTS is a no-op', 'nous_app', 'CREATE SCHEMA IF NOT EXISTS scoring', 'ok', NULL),
         ('app cannot run a program', 'nous_app', 'COPY (SELECT 1) TO PROGRAM ''true''', 'error', NULL),
         ('app cannot read a server file', 'nous_app', 'SELECT pg_read_file(''/etc/hostname'')', 'error', NULL),
-        ('app cannot ALTER SYSTEM', 'nous_app', 'ALTER SYSTEM SET work_mem = ''8MB''', 'error', NULL),
+        ('no parameter privilege (SET or ALTER SYSTEM) is granted to the app, the scorer or PUBLIC', 'nous_admin',
+            'SELECT NOT EXISTS (SELECT 1 FROM pg_parameter_acl p, LATERAL aclexplode(p.paracl) a WHERE a.grantee IN (0, ''nous_app''::regrole, ''nous_scorer''::regrole))', 'true', NULL),
         ('app cannot write to public', 'nous_app', 'CREATE TABLE public.zz (i int)', 'error', NULL),
         ('app still works in its own schemas', 'nous_app',
             'CREATE TABLE brain.zz_verify (i int); INSERT INTO brain.zz_verify VALUES (1); DROP TABLE brain.zz_verify', 'ok', NULL),

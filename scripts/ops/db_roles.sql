@@ -174,12 +174,12 @@ GRANT SELECT ON ALL TABLES IN SCHEMA scoring TO nous_app;
 GRANT SELECT, INSERT, UPDATE ON scoring.task_scores TO nous_scorer;
 GRANT SELECT, INSERT, UPDATE ON scoring.scorer_heartbeat TO nous_scorer;
 -- The application role may set default privileges for objects it creates, in any schema it can use. In scoring
--- it creates nothing, so bring every default it has set there back to the built-in default: take away each
--- grantee (PUBLIC, the administrator, the scorer, itself) and restore what PostgreSQL grants without a row.
+-- it creates nothing, so remove every default it has set there: take away each grantee (PUBLIC, the administrator,
+-- the scorer, itself). A per-schema entry left with no grantee is deleted, which leaves the built-in default.
 DO $defacl$
 DECLARE
     d record;
-    -- pg_default_acl.defaclobjtype to the keyword ALTER DEFAULT PRIVILEGES takes, written once for both loops
+    -- pg_default_acl.defaclobjtype to the keyword ALTER DEFAULT PRIVILEGES takes
     kinds constant jsonb := '{"r": "TABLES", "S": "SEQUENCES", "f": "FUNCTIONS", "T": "TYPES"}';
 BEGIN
     FOR d IN
@@ -190,15 +190,6 @@ BEGIN
         EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE nous_app IN SCHEMA scoring REVOKE ALL ON %s FROM %s',
                        kinds ->> d.objtype::text,
                        CASE WHEN d.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(d.grantee)) END);
-    END LOOP;
-    FOR d IN
-        SELECT x.defaclobjtype AS objtype FROM pg_default_acl x
-         WHERE x.defaclrole = 'nous_app'::regrole AND x.defaclnamespace = 'scoring'::regnamespace
-    LOOP
-        -- what is left is an ACL that differs from the built-in default only by what was revoked above
-        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE nous_app IN SCHEMA scoring GRANT ALL ON %s TO %s',
-                       kinds ->> d.objtype::text,
-                       CASE WHEN d.objtype IN ('f', 'T') THEN 'nous_app, PUBLIC' ELSE 'nous_app' END);
     END LOOP;
 END
 $defacl$;
@@ -240,6 +231,23 @@ BEGIN
 END
 $members$;
 
+-- 5c. Neither the application, the scorer nor PUBLIC holds a privilege on a server parameter (SET or ALTER SYSTEM).
+--     %I quotes a dotted name such as plpgsql.extra_warnings as one identifier, which the command accepts.
+DO $params$
+DECLARE
+    p record;
+BEGIN
+    FOR p IN
+        SELECT DISTINCT x.parname, a.grantee
+          FROM pg_parameter_acl x, LATERAL aclexplode(x.paracl) a
+         WHERE a.grantee IN (0, 'nous_app'::regrole, 'nous_scorer'::regrole)
+    LOOP
+        EXECUTE format('REVOKE ALL ON PARAMETER %I FROM %s', p.parname,
+                       CASE WHEN p.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(p.grantee)) END);
+    END LOOP;
+END
+$params$;
+
 -- 6. Last: the bootstrap superuser can no longer log in, and has no password. Everything before
 --    this ran as a role that holds its own privileges, so nothing above depended on it.
 ALTER ROLE :"bootstrap" NOLOGIN PASSWORD NULL;
@@ -258,6 +266,12 @@ BEGIN
       FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.member JOIN pg_roles g ON g.oid = m.roleid
      WHERE r.rolname IN ('nous_app', 'nous_scorer') OR g.rolname IN ('nous_app', 'nous_scorer', 'nous_admin');
     IF bad IS NOT NULL THEN RAISE EXCEPTION 'unexpected role membership: %', bad; END IF;
+
+    SELECT string_agg(DISTINCT x.parname || ' to '
+                      || CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END, ', ') INTO bad
+      FROM pg_parameter_acl x, LATERAL aclexplode(x.paracl) a
+     WHERE a.grantee IN (0, 'nous_app'::regrole, 'nous_scorer'::regrole);
+    IF bad IS NOT NULL THEN RAISE EXCEPTION 'parameter privilege granted: %', bad; END IF;
 
     SELECT string_agg(n.nspname || '.' || c.relname, ', ') INTO bad
       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
