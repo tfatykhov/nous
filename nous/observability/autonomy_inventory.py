@@ -33,8 +33,8 @@ from nous.api.tool_classes import TOOL_CLASSES
 from nous.storage.models import Censor, ExecutionLedgerEntry
 
 INVENTORY_DAYS = 30
-# The owner started the turn. agent_action is a background kind for the runtime (nobody waits on
-# the reply), so it is added here rather than to FOREGROUND_KINDS, which the tool policy reads.
+# The owner started the turn. To the runtime agent_action is a background kind (is_background), so it
+# is added here rather than to FOREGROUND_KINDS, which the tool policy and is_background read.
 OWNER_PRESENT_KINDS: frozenset[str] = FOREGROUND_KINDS | {"agent_action"}
 APPROVED_KINDS: frozenset[str] = frozenset({"approved_action"})
 PROVENANCES: tuple[str, ...] = ("auto", "agent", "human")  # heart.censors.provenance
