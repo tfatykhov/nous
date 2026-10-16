@@ -286,11 +286,12 @@ async def test_a_chain_keeps_only_its_own_sessions_and_names_its_subtasks(db, ag
     node = DAGNode(id=uuid.uuid4(), dag_id=dag.id, name="n", node_type="subtask")
     await add(db, node)
     in_dag = subtask(agent, dag_node_id=node.id)
-    d_arrival, d_origin = decision(agent, "partial"), decision(agent, "success")
+    d_arrival, d_origin = decision(agent, "partial"), decision(agent, "failure")
     await add(db, in_dag, d_arrival, d_origin)
-    top = await root(db, agent, source_kind="subtask", source_id=str(sub.id))
+    # A schedule-kind depth-0 root that is not a container: in prod only the pre-container (pre-F099 I1) schedule shape.
+    top = await root(db, agent, origin_decision_id=d_origin.id)
+    await spawned(db, agent, top, "subtask", sub.id)
     await spawned(db, agent, top, "dag", dag.id)
-    await spawned(db, agent, top, "schedule", uuid.uuid4(), origin_decision_id=d_origin.id)
     arrival = IntentionArrival(
         agent_id=agent,
         root_id=top.id,
@@ -337,9 +338,12 @@ async def test_a_chain_keeps_only_its_own_sessions_and_names_its_subtasks(db, ag
 
     c = chains[str(top.id)]
     assert (c.status, c.harness_errors, c.refusals) == ("delivered", 2, 0)
-    assert c.owner_overrides == 1 and c.evidence["proposals_rejected"] == [str(rejected_owner.id)]  # not the system's
+    assert c.evidence["proposals_rejected"] == [str(rejected_owner.id)]  # not the system's
+    assert c.owner_overrides == 2  # the owner's rejected proposal and the root's decision the owner graded failure
     assert c.unverified_claims == 2  # the flagged arrival note and the claim event
-    assert c.owner_grade == "partial"  # the arrival's decision (partial) and the schedule root's (success): the worst
+    assert c.owner_grade == "failure"  # the arrival's decision (partial) and the schedule root's (failure): the worst
+    assert sorted(c.evidence["grade_decisions"]) == sorted([str(d_arrival.id), str(d_origin.id)])
+    assert c.evidence["failure_graded"] == [str(d_origin.id)]
     assert sorted(c.child_ids) == sorted([str(sub.id), str(in_dag.id)])
     assert c.tokens is None  # a chain's spend is its subtasks' and DAGs': not summed on the roll-up
 
@@ -519,6 +523,51 @@ async def test_sibling_roots_with_the_same_created_at_are_ordered_by_id(db, agen
     winner, loser = (a, b) if str(r1.id) < str(r2.id) else (b, a)
     leaves, _, _ = await gather(db, agent)
     assert {k: v.owner_overrides for k, v in leaves.items()} == {str(winner.id): 1, str(loser.id): 0}
+
+
+async def test_an_earlier_schedule_container_does_not_take_a_shared_decision_from_a_subtask_root(db, agent):
+    # A container is a depth-0 row carrying the creating turn's decision, but it is not a scored unit.
+    d = decision(agent, "failure")
+    sub = subtask(agent)
+    await add(db, d, sub)
+    early = NOW - timedelta(hours=5)
+    await root(
+        db,
+        agent,
+        wake_policy="container",
+        state="pending",
+        close_reason=None,
+        closed_at=None,
+        origin_decision_id=d.id,
+        created_at=early,
+    )
+    await root(
+        db,
+        agent,
+        source_kind="subtask",
+        source_id=str(sub.id),
+        origin_decision_id=d.id,
+        created_at=early + timedelta(seconds=30),
+    )
+    s = (await gather(db, agent))[0][str(sub.id)]
+    assert (s.owner_grade, s.owner_overrides) == ("failure", 1)
+
+
+@pytest.mark.parametrize("dag_first", [True, False])
+async def test_a_decision_shared_by_a_dag_root_and_a_subtask_root_goes_to_the_earliest_only(db, agent, dag_first):
+    d = decision(agent, "failure")
+    sub = subtask(agent)
+    dag = ExecutionDAG(id=uuid.uuid4(), agent_id=agent, name="d", status="completed", completed_at=NOW)
+    await add(db, d, sub, dag)
+    early = NOW - timedelta(hours=5)
+    dag_at, sub_at = (early, early + timedelta(seconds=30)) if dag_first else (early + timedelta(seconds=30), early)
+    await root(db, agent, source_kind="dag", source_id=str(dag.id), origin_decision_id=d.id, created_at=dag_at)
+    await root(db, agent, source_kind="subtask", source_id=str(sub.id), origin_decision_id=d.id, created_at=sub_at)
+
+    leaves, dags, _ = await gather(db, agent)
+
+    got = (dags[str(dag.id)].owner_overrides, leaves[str(sub.id)].owner_overrides)
+    assert got == ((1, 0) if dag_first else (0, 1))  # one tap, one override, on the earliest root's unit
 
 
 async def test_a_dag_subtask_lookup_is_scoped_to_the_agent(db, agent):

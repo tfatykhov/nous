@@ -11,7 +11,9 @@ so a failing subtask inside a DAG inside a chain is penalised once:
 - a ledger row with a ``subtask_id``                       -> that subtask
 - a ledger row with a ``dag_id`` and no ``subtask_id``      -> that DAG run (a DAG-level penalty)
 - a ledger row with neither, in an ``intent-`` or ``proposal-`` session of a chain -> the chain
-- a claim-check event in a ``subtask-`` session             -> that subtask
+- a claim-check event in a ``subtask-`` session             -> that subtask (a continuation-enabled scheduled
+  subtask runs in a shared ``schedule-<hex8>-<n>`` session instead, and its claim events are not attributed:
+  this undercounts, it never overcounts)
 - a claim-check event in an ``intent-`` session, an arrival note carrying the unverified marker,
   a proposal the owner rejected                             -> the chain
 - a decision linked to a subtask or DAG by the DEPTH-0 intention row that spawned it -> that unit; a decision
@@ -20,7 +22,7 @@ so a failing subtask inside a DAG inside a chain is penalised once:
 A DEPTH-0 row only: the continuation runner stamps the root's ``origin_decision_id`` on every child it spawns
 (``continuation_runner.py`` lines 1207, 1549, 1870), so reading the children would hand one owner grade to every
 unit of the chain. And a decision that several roots share (one turn that spawned several roots) goes to the
-earliest of them by (created_at, id) only.
+earliest of them by (created_at, id) only; a schedule container, which is not a scored unit, never takes part.
 """
 
 from __future__ import annotations
@@ -257,7 +259,9 @@ async def _origin_decisions(
     """source id -> the decision that spawned it, through the DEPTH-0 intention row written at spawn time.
 
     Children are not read (the runner copies the root's decision onto each), and a decision shared by several
-    depth-0 rows goes to the earliest of them only, so an owner grade lands on one unit.
+    depth-0 rows goes to the earliest of them only, so an owner grade lands on one unit. Schedule containers are
+    left out of both reads: a container carries its creating turn's decision but is not a scored unit, so if it
+    could win the earliest-row rule the grade would land on no unit at all.
     """
     mine: dict[str, tuple[Any, UUID]] = {}
     for chunk in _chunks(list(source_ids)):
@@ -265,6 +269,7 @@ async def _origin_decisions(
             select(Intention.id, Intention.created_at, Intention.source_id, Intention.origin_decision_id).where(
                 Intention.agent_id == agent_id,
                 Intention.depth == 0,
+                Intention.wake_policy != "container",
                 Intention.source_kind == source_kind,
                 Intention.source_id.in_(chunk),
                 Intention.origin_decision_id.is_not(None),
@@ -276,7 +281,10 @@ async def _origin_decisions(
     for chunk in _chunks(list({d for _, d in mine.values()})):
         result = await session.execute(
             select(Intention.id, Intention.created_at, Intention.origin_decision_id).where(
-                Intention.agent_id == agent_id, Intention.depth == 0, Intention.origin_decision_id.in_(chunk)
+                Intention.agent_id == agent_id,
+                Intention.depth == 0,
+                Intention.wake_policy != "container",  # a schedule container is not a scored unit: it must not win
+                Intention.origin_decision_id.in_(chunk),
             )
         )
         for r in result:
@@ -354,7 +362,7 @@ async def _leaf_signals(session: AsyncSession, agent_id: str, since: datetime, r
         result = await session.execute(
             select(Subtask.id, DAGNode.dag_id)
             .join(DAGNode, Subtask.dag_node_id == DAGNode.id)
-            .where(Subtask.id.in_(chunk))
+            .where(Subtask.agent_id == agent_id, Subtask.id.in_(chunk))
         )
         dag_of.update({r.id: r.dag_id for r in result})
     checked = await run.checked(list(set(dag_of.values())))
