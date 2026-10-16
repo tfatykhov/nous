@@ -18,6 +18,7 @@ from nous.storage.models import (
     Base,
     CompensationSnapshot,
     DAGNode,
+    Decision,
     ExecutionDAG,
     ExecutionLedgerEntry,
     Intention,
@@ -488,6 +489,7 @@ _FORBIDDEN = re.compile(
 
 
 async def _seed_one_of_each(db, agent):
+    """A subtask and a chain that reach every read of a pass: each of SOURCE_TABLES, and SCORE_TABLE itself."""
     sub = Subtask(
         id=uuid.uuid4(),
         agent_id=agent,
@@ -496,22 +498,61 @@ async def _seed_one_of_each(db, agent):
         final_outcome="completed",
         completed_at=datetime.now(UTC) - timedelta(hours=1),
     )
+    # A child of the chain that finished before the window: the pass looks up its stored score in SCORE_TABLE.
+    early = Subtask(
+        id=uuid.uuid4(),
+        agent_id=agent,
+        task="t",
+        status="completed",
+        final_outcome="completed",
+        completed_at=datetime.now(UTC) - timedelta(days=16),
+    )
+    # The owner's grade on the decision that spawned the subtask: the grade path reads brain.decisions.
+    grade = Decision(
+        id=uuid.uuid4(),
+        agent_id=agent,
+        description="d",
+        confidence=0.5,
+        category="process",
+        stakes="low",
+        outcome="success",
+        reviewer="a2ui",
+    )
     rid = uuid.uuid4()
     async with db.session() as s:
-        s.add(sub)
+        s.add_all([sub, early, grade])
         s.add(
-            Intention(
+            Intention(  # depth 0 and sourced from the subtask: it links the subtask to its origin decision
                 id=rid,
                 agent_id=agent,
                 root_id=rid,
                 source_kind="subtask",
                 source_id=str(sub.id),
+                origin_decision_id=grade.id,
                 intent="i",
                 origin_kind="interactive",
                 wake_policy="continue",
                 state="closed",
                 close_reason="delivered",
                 closed_at=datetime.now(UTC) - timedelta(minutes=30),
+            )
+        )
+        s.add(
+            Intention(
+                id=uuid.uuid4(),
+                agent_id=agent,
+                root_id=rid,
+                parent_id=rid,
+                depth=1,
+                source_kind="subtask",
+                source_id=str(early.id),
+                intent="c",
+                origin_kind="continuation",
+                wake_policy="continue",
+                authority="internal_only",
+                state="closed",
+                close_reason="resolved",
+                closed_at=early.completed_at,
             )
         )
         s.add(
@@ -553,9 +594,10 @@ async def test_a_pass_issues_only_selects_and_the_scores_upsert(db, agent):
         if head == "INSERT":  # the only write is the scores upsert
             writes |= {name.split(".")[-1] for name in re.findall(r"\bINSERT\s+INTO\s+([\w.]+)", statement, re.I)}
 
-    # The privilege contract is derived, not copied: every table the pass reads is in SOURCE_TABLES, and the only
-    # table it writes is SCORE_TABLE. Dropping a table from SOURCE_TABLES, or pointing SCORE_TABLE elsewhere, fails
-    # here on the SQLite lane as well as on Postgres.
+    # The privilege contract is derived, not copied: the tables the pass reads are exactly SOURCE_TABLES plus
+    # SCORE_TABLE (the stored scores of children that finished before the window), and the only table it writes is
+    # SCORE_TABLE. Dropping a table from SOURCE_TABLES, granting one the pass never reads, or pointing SCORE_TABLE
+    # elsewhere fails here on the SQLite lane as well as on Postgres.
     models_say: dict[str, set[str]] = {}
     for table in Base.metadata.tables.values():
         models_say.setdefault(table.name, set()).add(table.fullname)  # the schema the models put each table in
@@ -563,10 +605,11 @@ async def test_a_pass_issues_only_selects_and_the_scores_upsert(db, agent):
     assert writes == {job.SCORE_TABLE.split(".")[-1]}, writes
     for name in sorted(writes):
         assert models_say[name] == {job.SCORE_TABLE}, (name, models_say[name])
-    for name in sorted(reads):
-        assert models_say[name] <= set(job.SOURCE_TABLES), (
-            f"{name} is read but {models_say[name]} is not in SOURCE_TABLES"
-        )
+    read_tables = {fullname for name in reads for fullname in models_say[name]}
+    granted = set(job.SOURCE_TABLES) | {job.SCORE_TABLE}
+    assert read_tables == granted, (
+        f"read but not granted: {sorted(read_tables - granted)}; granted but not read: {sorted(granted - read_tables)}"
+    )
 
 
 @pytest.mark.postgres_only
