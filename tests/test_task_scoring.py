@@ -1,4 +1,4 @@
-"""Task scoring v1 (autonomy plan v2, A1): the pure scorer. No database."""
+"""Task scoring v1: the pure scorer. No database."""
 
 from __future__ import annotations
 
@@ -211,7 +211,7 @@ def test_ledger_row_classes(tool, status, summary, expected):
     ("decided_by", "expected"),
     [
         ("telegram:42", True),
-        ("companion:tim", True),
+        ("companion:owner", True),
         ("rest", True),
         ("system", False),
         ("system:expiry", False),

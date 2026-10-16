@@ -33,7 +33,7 @@ def test_the_migration_splits_into_a_schema_a_table_and_an_index():
 
 
 def test_the_migration_creates_only_the_schema_and_the_table():
-    # Ownership and grants belong to the integrity plan's ops script: the migrator runs as the app role.
+    # Ownership and grants are not this migration's job: the migrator runs as the app role.
     code = _code().upper()
     for word in ("GRANT", "REVOKE", "OWNER", "ROLE", "ALTER", "DROP", "AUTHORIZATION"):
         assert not re.search(rf"\b{word}\b", code), word

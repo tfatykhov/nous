@@ -1,9 +1,9 @@
-"""Autonomy inventory (autonomy plan v2, A2): what each tool did, and who was in the loop when it did.
+"""Autonomy inventory: what each tool did, and who was in the loop when it did.
 
 Read-only, from the durable execution ledger. A read-only call writes no ledger row, so only
 side-effecting tools appear. The inventory is a measurement, not a policy: it grants nothing.
 
-A row is a run only if it succeeded: prod's ``dag_create`` had 149 error rows among 315, so the
+A row is a run only if it succeeded: a tool can fail more often than it succeeds, so the
 bucket counts (``by_context``, ``side_effects``) and the de-facto level read the SUCCESSES, and
 ``by_status`` shows how many attempts failed or were refused. A refused row (status ``blocked``)
 did not run at all.

@@ -1,4 +1,4 @@
-"""Task scoring v1 (autonomy plan v2, A1): the gatherer reads the signals each finished task earned."""
+"""Task scoring v1: the gatherer reads the signals each finished task earned."""
 
 from __future__ import annotations
 
@@ -288,7 +288,7 @@ async def test_a_chain_keeps_only_its_own_sessions_and_names_its_subtasks(db, ag
     in_dag = subtask(agent, dag_node_id=node.id)
     d_arrival, d_origin = decision(agent, "partial"), decision(agent, "failure")
     await add(db, in_dag, d_arrival, d_origin)
-    # A schedule-kind depth-0 root that is not a container: in prod only the pre-container (pre-F099 I1) schedule shape.
+    # A schedule-kind depth-0 root that is not a container: the schedule shape from before containers (pre-F099 I1).
     top = await root(db, agent, origin_decision_id=d_origin.id)
     await spawned(db, agent, top, "subtask", sub.id)
     await spawned(db, agent, top, "dag", dag.id)
@@ -319,7 +319,7 @@ async def test_a_chain_keeps_only_its_own_sessions_and_names_its_subtasks(db, ag
         )
 
     rejected_owner, rejected_system = proposal("rejected", "telegram:42"), proposal("rejected", "system")
-    approved = proposal("executed", "companion:tim")
+    approved = proposal("executed", "companion:owner")
     await add(db, arrival, rejected_owner, rejected_system, approved)
     await add(
         db,

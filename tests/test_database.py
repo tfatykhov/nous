@@ -66,7 +66,7 @@ async def test_all_tables_exist(db):
         ("nous_system", "process_run_log"),
         # Harness Phase 2.8: compensation snapshots (migration 080)
         ("nous_system", "compensation_snapshots"),
-        # Autonomy plan v2 A1: task scores, in a schema of their own (migration 087)
+        # Task scores, in a schema of their own (migration 087)
         ("scoring", "task_scores"),
         # brain (12)
         ("brain", "decisions"),

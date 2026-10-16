@@ -136,6 +136,7 @@ All shipped implementation specs with PR references:
 | 011.2 | Multimodal File Support | 🚧 In Review (feat/F024-inbound-attachments) | — image/document/text-file attachments across Telegram + REST; implemented pending merge (F024 inbound attachments) |
 | 012.1 | Frame Splitting | 📋 Specced | — parallel cognitive frames via sub-agents (deferred to F024) |
 | 012.2 | Subtask Enhancements Light | 📋 Specced | — replaces 012.1 with lighter subtask improvements |
+| — | Task Scores and Autonomy Scoreboard | ✅ Shipped | — `scoring.task_scores` (migration 087): one deterministic score per finished subtask, with count-only roll-ups for DAG runs and intention roots (interactive turns are not scored in v1), written only by the one-shot `python -m nous.observability.task_score_job`; autonomy inventory (per tool, who was in the loop); read-only `GET /dashboard/autonomy` |
 
 ### P1: Cognitive Enhancement
 | Feature | Name | Status | Description |

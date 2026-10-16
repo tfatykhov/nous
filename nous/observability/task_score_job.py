@@ -1,11 +1,11 @@
-"""Task scoring v1: the one-shot command (autonomy plan v2, A1).
+"""Task scoring v1: the one-shot command.
 
     python -m nous.observability.task_score_job --agent-id nous-default
 
 scores every subtask, DAG run and intention root that finished in the last ``SCORING_WINDOW_DAYS`` into
 ``scoring.task_scores`` and exits: 0 when the pass committed, 1 when it failed (so the service wrapper can tell). It is
-not a loop inside the app and has no setting: the ``nous-scorer`` compose service (defined by the integrity plan)
-runs it every 900 s with its own database role, which keeps the writer of the scores outside the agent's process.
+not a loop inside the app and has no setting: it is meant to run on a timer as a separate service under its own
+database role, which keeps the writer of the scores outside the agent's process.
 The job needs only SELECT on the source tables and SELECT, INSERT and UPDATE on ``scoring.task_scores`` (it reads
 the stored scores of roll-up children there too): no DDL, no temp table, no advisory lock, no delete.
 ``GET /dashboard/autonomy`` shows ``last_scored_at``, so a dead scorer is visible.
@@ -179,7 +179,7 @@ async def run_scoring_pass(
         await session.commit()
     rollup_kinds = Counter(row.task_kind for row in rollups)  # score_rollup can decline one: count what was sent
     logger.info(
-        "Autonomy A1: submitted %d row(s): %d subtask(s), %d DAG run(s), %d intention root(s) (agent=%s, window=%dd)",
+        "Task scores: submitted %d row(s): %d subtask(s), %d DAG run(s), %d intention root(s) (agent=%s, window=%dd)",
         submitted,
         len(leaves),
         rollup_kinds["dag"],
@@ -212,7 +212,7 @@ async def _run(agent_id: str | None, window_days: int) -> int:
             await database.disconnect()
         except Exception:
             # Closing the pool is not the pass: it neither fails a pass that committed nor hides a pass's own error.
-            logger.warning("Autonomy A1: the database disconnect failed after the pass", exc_info=True)
+            logger.warning("Task scores: the database disconnect failed after the pass", exc_info=True)
     return 0
 
 
@@ -231,7 +231,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         return asyncio.run(_run(args.agent_id, args.window_days))
     except Exception:
-        logger.exception("Autonomy A1: the scoring pass failed")
+        logger.exception("Task scores: the scoring pass failed")
         return 1
 
 

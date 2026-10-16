@@ -1,20 +1,22 @@
--- 087: task scores (autonomy plan v2, Phase A1)
+-- 087: task scores
 --
 -- One deterministic row per finished task and scorer version, in its OWN schema, scoring.
 -- Why a schema of its own: in Postgres the owner of a schema can drop any table in it, and
 -- the app role owns brain, heart and nous_system, so a scores table in one of those could
--- never be protected from the app. The integrity plan's ops script creates the roles, makes
--- a separate scoring role the owner of this schema and table, and gives the app role SELECT
--- only. This migration runs as the app role through the migrator, so it creates the schema
+-- never be protected from the app. The schema and table are meant to be owned by a separate
+-- scoring role that gives the app role SELECT only. Until that role exists the app role owns
+-- them. This migration runs as the app role through the migrator, so it creates the schema
 -- and the table and nothing else. No owner, no grant, no role here, and it is idempotent.
+-- Deploy order: CREATE SCHEMA needs the database-level CREATE privilege, so apply this
+-- migration before any role hardening takes that privilege away from the app role.
 --
 -- A subtask is the unit that is scored (a leaf, with a score). A DAG run and an intention
 -- root get a roll-up row whose score is NULL and that holds counts only, so that one failing
 -- subtask inside a DAG inside a chain is penalised exactly once.
 --
 -- Telemetry: written only by the one-shot scoring command
--- (python -m nous.observability.task_score_job, run by the nous-scorer service), read by
--- GET /dashboard/autonomy, and reached by no agent tool.
+-- (python -m nous.observability.task_score_job, meant to run as a separate service under its
+-- own database role), read by GET /dashboard/autonomy, and reached by no agent tool.
 --
 -- Each run re-scores every task finished in the last 15 days, so a row is refreshed
 -- in place (upsert on the unique key). settled is true once the task is older than

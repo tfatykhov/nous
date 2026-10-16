@@ -1,4 +1,4 @@
-"""Task scoring v1 (autonomy plan v2, A1): the upsert, one scoring pass, and the command."""
+"""Task scoring v1: the upsert, one scoring pass, and the command."""
 
 from __future__ import annotations
 
@@ -522,7 +522,7 @@ async def test_the_log_counts_the_rows_submitted_by_kind(db, agent, monkeypatch,
     monkeypatch.setattr(job, "score_rollup", no_dag_rollup)
     with caplog.at_level(logging.INFO, logger=job.__name__):
         assert await job.run_scoring_pass(db, agent) == 1
-    [line] = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Autonomy A1:")]
+    [line] = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Task scores:")]
     assert "submitted 1 row(s): 1 subtask(s), 0 DAG run(s), 0 intention root(s)" in line, line
 
 

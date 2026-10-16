@@ -2102,7 +2102,7 @@ def create_app(
             return JSONResponse({"error": str(e)}, status_code=500)
 
     async def dashboard_autonomy(request: Request) -> JSONResponse:
-        """GET /dashboard/autonomy — the autonomy scoreboard (plan v2, A3). Read-only; ``days`` 1 to 90, default 7."""
+        """GET /dashboard/autonomy — the autonomy scoreboard. Read-only; ``days`` 1 to 90, default 7."""
         from nous.api.autonomy_dashboard import get_autonomy_data, parse_days
 
         try:

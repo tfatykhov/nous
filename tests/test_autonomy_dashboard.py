@@ -1,4 +1,4 @@
-"""GET /dashboard/autonomy data (autonomy plan v2, A3): taps, grades, task scores, inventory, warn classes."""
+"""GET /dashboard/autonomy data (the autonomy scoreboard): taps, grades, task scores, inventory, warn classes."""
 
 from __future__ import annotations
 

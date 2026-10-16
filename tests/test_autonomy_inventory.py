@@ -1,4 +1,4 @@
-"""Autonomy inventory (autonomy plan v2, A2): per tool, who was in the loop and how often it worked."""
+"""Autonomy inventory: per tool, who was in the loop and how often it worked."""
 
 from __future__ import annotations
 

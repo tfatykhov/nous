@@ -1902,11 +1902,11 @@ class TaskScore(Base):
     """Migration 087: one deterministic row per finished task and scorer version.
 
     A subtask is the unit that is scored (a leaf). A DAG run and an intention root get a roll-up row with
-    ``score`` NULL that holds counts only. Telemetry, in a schema of its own (``scoring``) that the integrity plan
-    hands to a separate role, so the app can read the scores and not write them. Written only by
-    ``nous.observability.task_score_job`` (a one-shot command run by the ``nous-scorer`` service), read by
-    ``GET /dashboard/autonomy``, exposed to no agent tool. ``evidence`` holds the ids behind each count. See
-    ``nous.observability.task_scoring``.
+    ``score`` NULL that holds counts only. Telemetry, in a schema of its own (``scoring``) that is meant to be owned
+    by a separate database role, so the app can read the scores and not write them; until that role exists the app
+    role owns the schema. Written only by ``nous.observability.task_score_job`` (a one-shot command meant to run as
+    a separate service under that role), read by ``GET /dashboard/autonomy``, exposed to no agent tool.
+    ``evidence`` holds the ids behind each count. See ``nous.observability.task_scoring``.
     """
 
     __tablename__ = "task_scores"

@@ -1,4 +1,4 @@
-"""Task scoring v1: the pure part (autonomy plan v2, Phase A1).
+"""Task scoring v1: the pure part.
 
 No database and no clock here (the caller passes ``now``). ``task_score_gatherer`` collects a
 ``TaskSignals`` record per finished task, ``score_leaf`` and ``score_rollup`` turn it into the row

@@ -1,4 +1,4 @@
-"""GET /dashboard/autonomy (autonomy plan v2, A3): status codes, shape and agent scoping through the real app."""
+"""GET /dashboard/autonomy (the autonomy scoreboard): status codes, shape and agent scoping through the real app."""
 
 from __future__ import annotations
 

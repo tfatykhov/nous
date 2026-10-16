@@ -1,10 +1,10 @@
-"""GET /dashboard/autonomy (autonomy plan v2, A3): the scoreboard, read-only.
+"""GET /dashboard/autonomy: the autonomy scoreboard, read-only.
 
-Replaces the workspace SQL script. Agent-scoped like the harness dashboard, typed ORM
+Agent-scoped like the harness dashboard, typed ORM
 selects, aggregation in Python so SQLite (tests) and Postgres (prod) agree. It answers
 four questions: where does the owner's attention go (taps, approval cards, decision
 grades), how are tasks scoring (coverage and distribution), what does the agent do
-without asking (the A2 inventory), and which tool-policy rules would fire (warn classes).
+without asking (the autonomy inventory), and which tool-policy rules would fire (warn classes).
 """
 
 from __future__ import annotations

@@ -99,10 +99,10 @@ nous/
 │   │   ├── retrieval_logger.py # F091 retrieval telemetry (RETRIEVAL_PATHS lives here)
 │   │   ├── retrieval_trace.py  # F091 write-only trace collector + NullTrace
 │   │   ├── process_recorder.py # #653 nous_system.process_run_log writer (fail-open)
-│   │   ├── task_scoring.py     # Autonomy A1: the pure task scorer; holds every constant and SCORER_VERSION
-│   │   ├── task_score_gatherer.py # Autonomy A1: reads a scoring pass's signals in a bounded number of queries
-│   │   ├── task_score_job.py   # Autonomy A1: the one-shot scoring pass (`python -m nous.observability.task_score_job`), the only writer of scoring.task_scores
-│   │   ├── autonomy_inventory.py # Autonomy A2: per tool, successes by who was in the loop (owner present, approved, autonomous), and censor activity
+│   │   ├── task_scoring.py     # Task scores: the pure task scorer; holds every constant and SCORER_VERSION
+│   │   ├── task_score_gatherer.py # Task scores: reads a scoring pass's signals in a bounded number of queries
+│   │   ├── task_score_job.py   # Task scores: the one-shot scoring pass (`python -m nous.observability.task_score_job`), the only writer of scoring.task_scores
+│   │   ├── autonomy_inventory.py # Autonomy inventory: per tool, successes by who was in the loop (owner present, approved, autonomous), and censor activity
 │   │   ├── drift.py            # Drift detection
 │   │   └── snapshots.py        # Graph hub snapshots
 │   ├── dag/                    # F038/F087 DAG orchestration
@@ -131,7 +131,7 @@ nous/
 │       ├── rest.py             # Starlette REST API (the route list in `create_app`; see `docs/reference/rest-api.md`)
 │       ├── intention_routes.py # F099 Phase 2d: the four owner-action routes (decide, answer, list), thin over ContinuationRunner
 │       ├── intention_dashboard.py # F099 Phase 3c: GET /dashboard/intentions queries (the tree and the metrics), read-only, Postgres-only
-│       ├── autonomy_dashboard.py # Autonomy A3: GET /dashboard/autonomy data (taps, approval cards, grades, task scores, inventory, warn classes), read-only
+│       ├── autonomy_dashboard.py # Autonomy scoreboard: GET /dashboard/autonomy data (taps, approval cards, grades, task scores, inventory, warn classes), read-only
 │       ├── mcp.py              # MCP server (nous_chat, nous_decide, etc.)
 │       ├── runner.py           # Agent runner (tool loop, streaming)
 │       ├── tools.py            # Tool dispatcher + registration

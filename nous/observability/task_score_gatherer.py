@@ -1,4 +1,4 @@
-"""Task scoring v1: the signal gatherer (autonomy plan v2, A1).
+"""Task scoring v1: the signal gatherer.
 
 Read-only. For one agent and a window it collects a ``TaskSignals`` per finished subtask (the scored
 leaf), DAG run and intention root (the roll-ups), in a number of queries that depends on the size of
@@ -20,9 +20,10 @@ so a failing subtask inside a DAG inside a chain is penalised once:
   an arrival recorded, or the one behind a schedule-spawned root -> the chain
 
 A DEPTH-0 row only: the continuation runner stamps the root's ``origin_decision_id`` on every child it spawns
-(``continuation_runner.py`` lines 1207, 1549, 1870), so reading the children would hand one owner grade to every
-unit of the chain. And a decision that several roots share (one turn that spawned several roots) goes to the
-earliest of them by (created_at, id) only; a schedule container, which is not a scored unit, never takes part.
+(a continuation turn and an approved proposal's call both pass it on as the spawn's ``decision_id``), so reading the
+children would hand one owner grade to every unit of the chain. And a decision that several roots share (one turn
+that spawned several roots) goes to the earliest of them by (created_at, id) only; a schedule container, which is
+not a scored unit, never takes part.
 """
 
 from __future__ import annotations
