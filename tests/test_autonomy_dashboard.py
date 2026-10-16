@@ -143,9 +143,11 @@ async def test_taps_are_the_owners_in_the_window_grouped_by_action(db, agent):
         tap(agent, "heartbeat.acknowledge"),
         tap(agent, "heartbeat.resolve"),
         tap(agent, "heartbeat.resolve"),
-        tap(agent, "app.refresh"),
-        tap(agent, "approval.choose"),
+        tap(agent, "app.refresh", actor="owner"),  # a forwarded username is the owner too
+        tap(agent, "approval.choose", actor="owner@example.com"),  # and so is a forwarded email
         tap(agent, "heartbeat.resolve", actor="system:expiry"),  # an expiry is not a tap
+        tap(agent, "heartbeat.resolve", actor="system:restart"),  # nor is a restart's close
+        tap(agent, "decision.resolve", actor="system:sweep"),  # nor a sweep's
         tap(agent, "heartbeat.resolve", age_days=30),  # outside the window
         tap("someone-else", "heartbeat.resolve"),
     )
@@ -270,7 +272,7 @@ async def test_a_scorer_that_has_never_run_has_no_coverage_and_no_dates(db, agen
     assert (ts["subtasks"]["finished"], ts["subtasks"]["covered"], ts["subtasks"]["coverage"]) == (None, None, None)
 
 
-async def test_last_scored_at_shows_a_dead_cron(db, agent):
+async def test_last_scored_at_is_the_latest_score_write(db, agent):
     stale = NOW - timedelta(hours=7)
     await add(db, score_row(agent, scored=stale, first=NOW - timedelta(days=9)))
     ts = (await data(db, agent))["task_scores"]

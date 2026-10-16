@@ -8,7 +8,9 @@ not a loop inside the app and has no setting: it is meant to run on a timer as a
 database role, which keeps the writer of the scores outside the agent's process.
 The job needs only SELECT on the source tables and SELECT, INSERT and UPDATE on ``scoring.task_scores`` (it reads
 the stored scores of roll-up children there too): no DDL, no temp table, no advisory lock, no delete.
-``GET /dashboard/autonomy`` shows ``last_scored_at``, so a dead scorer is visible.
+``GET /dashboard/autonomy`` shows ``last_scored_at``, the time of the latest score write. A live scorer moves it
+whenever a task finished in the last 14 days, so a value much older than the scorer's interval means the scorer
+stopped; an agent with no task in 14 days shows no recent value.
 Owner grades and undos arrive days after a task ends, so every pass re-scores the whole
 window; a row is ``settled`` once its task is older than ``SETTLE_DAYS``.
 """

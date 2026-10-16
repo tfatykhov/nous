@@ -13,7 +13,7 @@ from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.dag.approval import as_utc
@@ -30,7 +30,10 @@ from nous.storage.models import (
 
 DAYS_DEFAULT = 7
 DAYS_MAX = 90
-OWNER_ACTOR = "unattributed"  # a2ui_actions.actor of a tap whose person the server cannot name: the owner
+# a2ui_actions.actor is "unattributed" for a person's tap, or the forwarded username or email when
+# NOUS_A2UI_TRUST_FORWARDED_IDENTITY is on and the proxy sends one. A row the server writes itself (an expiry, a
+# sweep, a restart) has a "system:<reason>" actor. So every actor without that prefix is the owner's tap.
+SYSTEM_ACTOR_PREFIX = "system:"
 TRIAGE_PREFIXES = ("heartbeat.", "decision.")
 APPROVAL_SURFACE_KIND = "approval_gate"
 POLICY_EVENT = "harness_context_policy_violation"  # runner._authorize_tool_call; data.mode is warn or enforce
@@ -60,11 +63,17 @@ def _round(value: float | None) -> float | None:
     return None if value is None else round(value, 4)
 
 
+def is_owner_tap() -> ColumnElement[bool]:
+    """An a2ui_actions row the owner made: its actor is not a ``system:`` one, whether it is named or not."""
+    return A2uiAction.actor.not_like(f"{SYSTEM_ACTOR_PREFIX}%")
+
+
 async def _taps(session: AsyncSession, agent_id: str, since: datetime) -> tuple[dict[str, Any], dict[str, int]]:
+    """The owner's taps by action, and the triage share of them; both read the same ``is_owner_tap`` rows."""
     rows = (
         await session.execute(
             select(A2uiAction.action_name, func.count().label("n"))
-            .where(A2uiAction.agent_id == agent_id, A2uiAction.actor == OWNER_ACTOR, A2uiAction.created_at >= since)
+            .where(A2uiAction.agent_id == agent_id, is_owner_tap(), A2uiAction.created_at >= since)
             .group_by(A2uiAction.action_name)
         )
     ).all()
@@ -117,7 +126,9 @@ async def _task_scores(session: AsyncSession, agent_id: str, since: datetime) ->
     """Subtasks are the scored unit. DAG runs and intention roots are roll-ups: counted apart, never in a score sum.
 
     Coverage is measured only from the scorer's first run (``first_scored_at``): tasks that finished before it
-    were never going to have a row. ``last_scored_at`` is the newest write, so a dead scorer shows as an old date.
+    were never going to have a row. ``last_scored_at`` is the time of the latest score write. A live scorer moves it
+    whenever a task finished in the last 14 days, so a value much older than the scorer's interval means the scorer
+    stopped; an agent with no task in 14 days shows no recent value.
     """
     T = TaskScore
     first, last = (
