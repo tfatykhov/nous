@@ -12,7 +12,7 @@
 -- means the scores committed. A pass that fails writes last_status error in a transaction
 -- of its own and leaves last_ok_at and rows_submitted as they were.
 --
--- last_run_at is the time of the latest pass that wrote the row, ok or error.
+-- last_run_at is when the latest pass, ok or error, wrote the row: its end, not its start.
 -- last_error is the exception class name only, never its message (the log has the detail).
 -- last_ok_at and rows_submitted are those of the latest pass that committed.
 --

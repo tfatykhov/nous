@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import uuid
@@ -12,6 +13,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import event, select, text
 from sqlalchemy.exc import IntegrityError, ProgrammingError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.dag.approval import as_utc
 from nous.observability import task_score_job as job
@@ -710,19 +712,22 @@ async def test_a_committed_pass_leaves_one_ok_heartbeat_that_the_next_pass_overw
     async with db.session() as s:
         s.add_all(_errored_subtask(agent, NOW - timedelta(hours=1)))
         await s.commit()
+    started = datetime.now(UTC)
     assert await job.run_scoring_pass(db, agent, now=NOW) == 1
     [hb] = await heartbeats(db, agent)
     assert (hb.scorer_version, hb.last_status, hb.last_error, hb.rows_submitted) == (SCORER_VERSION, "ok", None, 1)
-    assert as_utc(hb.last_run_at) == as_utc(hb.last_ok_at) == NOW
+    # stamped when written, not with the pass's now: a slow pass must not record a run that already looks stale
+    assert as_utc(hb.last_run_at) == as_utc(hb.last_ok_at)
+    assert started <= as_utc(hb.last_run_at) <= datetime.now(UTC)
+    first = as_utc(hb.last_run_at)
 
     async with db.session() as s:  # one more task, so the overwrite shows in rows_submitted as well
         s.add_all(_errored_subtask(agent, NOW))
         await s.commit()
-    later = NOW + timedelta(minutes=15)
-    assert await job.run_scoring_pass(db, agent, now=later) == 2
+    assert await job.run_scoring_pass(db, agent, now=NOW + timedelta(minutes=15)) == 2
     [hb] = await heartbeats(db, agent)
     assert (hb.last_status, hb.last_error, hb.rows_submitted) == ("ok", None, 2)
-    assert as_utc(hb.last_run_at) == as_utc(hb.last_ok_at) == later
+    assert as_utc(hb.last_run_at) == as_utc(hb.last_ok_at) >= first
 
 
 class _PassBroke(Exception):
@@ -760,6 +765,8 @@ async def test_a_failed_pass_leaves_an_error_heartbeat_and_none_of_its_scores(db
         await s.commit()
     assert await job.run_scoring_pass(db, agent, now=NOW) == 1
     [scored] = await rows(db, agent)
+    [ok] = await heartbeats(db, agent)
+    last_ok = as_utc(ok.last_ok_at)
 
     async with db.session() as s:
         s.add_all(_errored_subtask(agent, datetime.now(UTC) - timedelta(hours=1)))
@@ -777,7 +784,7 @@ async def test_a_failed_pass_leaves_an_error_heartbeat_and_none_of_its_scores(db
     assert (hb.last_status, hb.last_error, hb.scorer_version) == ("error", "_PassBroke", SCORER_VERSION)
     assert started <= as_utc(hb.last_run_at) <= datetime.now(UTC)
     # the last committed pass is still on record
-    assert (as_utc(hb.last_ok_at), hb.rows_submitted) == (NOW, 1)
+    assert (as_utc(hb.last_ok_at), hb.rows_submitted) == (last_ok, 1)
     assert not any("heartbeat" in r.getMessage() for r in caplog.records)
 
 
@@ -802,12 +809,20 @@ async def test_the_scores_and_the_ok_heartbeat_commit_together_or_not_at_all(db,
 
 
 async def test_a_first_pass_that_fails_leaves_an_error_heartbeat_with_nothing_committed_yet(db, agent, monkeypatch):
-    monkeypatch.setattr(job, "gather_signals", _raise(_PassBroke("the gatherer failed")))
+    failed_at: list[datetime] = []
+
+    async def gatherer_fails(*args, **kwargs):
+        await asyncio.sleep(0.01)
+        failed_at.append(datetime.now(UTC))
+        raise _PassBroke("the gatherer failed")
+
+    monkeypatch.setattr(job, "gather_signals", gatherer_fails)
     monkeypatch.setattr(job, "_open_database", lambda settings: _Shared(db))
     with pytest.raises(_PassBroke):
         await job._run(agent, 15)
     [hb] = await heartbeats(db, agent)
     assert (hb.last_status, hb.last_error, hb.last_ok_at, hb.rows_submitted) == ("error", "_PassBroke", None, None)
+    assert as_utc(hb.last_run_at) >= failed_at[0]  # stamped when written, after the pass failed, not when it started
 
 
 async def test_the_error_is_the_exception_class_name_only(db, agent, monkeypatch):
@@ -854,15 +869,19 @@ async def test_a_pass_for_one_agent_leaves_another_agents_heartbeat_alone(db, ag
     other = f"{agent}-other"
     await job.run_scoring_pass(db, other, now=NOW)
     await job.run_scoring_pass(db, agent, now=NOW + timedelta(hours=1))  # an ok pass
+    [before] = await heartbeats(db, other)
+    their_run = as_utc(before.last_run_at)
+    [ok] = await heartbeats(db, agent)
+    my_ok = as_utc(ok.last_ok_at)
     monkeypatch.setattr(job, "gather_signals", _raise(_PassBroke("the gatherer failed")))
     monkeypatch.setattr(job, "_open_database", lambda settings: _Shared(db))
     with pytest.raises(_PassBroke):
         await job._run(agent, 15)  # and a failed one
 
     [theirs] = await heartbeats(db, other)
-    assert (theirs.last_status, as_utc(theirs.last_run_at), theirs.rows_submitted) == ("ok", NOW, 0)
+    assert (theirs.last_status, as_utc(theirs.last_run_at), theirs.rows_submitted) == ("ok", their_run, 0)
     [mine] = await heartbeats(db, agent)
-    assert (mine.last_status, as_utc(mine.last_ok_at)) == ("error", NOW + timedelta(hours=1))
+    assert (mine.last_status, as_utc(mine.last_ok_at)) == ("error", my_ok)
 
 
 # Statements a scoring role holding only SELECT on the sources and INSERT/UPDATE on the scores can run.
@@ -1008,14 +1027,19 @@ async def _scoring_role(db, *, written: tuple[str, ...]):
 
         @asynccontextmanager
         async def session(self):
-            async with db.session() as s:
-                await s.execute(text(f"SET ROLE {role}"))
+            # One connection for the whole session. A session bound to the engine gives its connection back to the
+            # pool at each commit, so a RESET ROLE after the pass's commit ran on whichever connection the pool handed
+            # out next and could leave this one in the pool still switched to the role, for later tests to inherit.
+            async with db.engine.connect() as conn:
+                await conn.execute(text(f"SET ROLE {role}"))
+                await conn.commit()  # no transaction left open for the session to join: its commit must COMMIT
                 try:
-                    yield s
+                    async with AsyncSession(bind=conn, expire_on_commit=False) as s:
+                        yield s
                 finally:
-                    await s.rollback()
-                    await s.execute(text("RESET ROLE"))
-                    await s.commit()
+                    await conn.rollback()
+                    await conn.execute(text("RESET ROLE"))
+                    await conn.commit()
 
     async with db.engine.begin() as conn:
         await conn.execute(text(f"CREATE ROLE {role} NOLOGIN"))

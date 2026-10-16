@@ -158,7 +158,8 @@ async def upsert_heartbeat(
     submitted: int | None = None,
     error: Exception | None = None,
 ) -> None:
-    """Insert or overwrite the agent's heartbeat row for a pass that ran at ``now``. Does not commit.
+    """Insert or overwrite the agent's heartbeat row, stamped ``now``: the callers pass the time of this write, not
+    the pass's own ``now``, so a slow pass does not record a run that already looks stale. Does not commit.
 
     Without ``error`` the pass is committing ``submitted`` rows: ``ok``, and ``last_ok_at`` too. With one the pass
     failed: ``error`` and the exception's class name, never its message (it can carry data, the log has it), and the
@@ -263,7 +264,7 @@ async def run_scoring_pass(
         ]
         submitted = await upsert_scores(session, agent_id, [*leaves, *rollups], scored_at=now)
         # In the scores' transaction: the heartbeat says ok if and only if the scores committed.
-        await upsert_heartbeat(session, agent_id, now=now, submitted=submitted)
+        await upsert_heartbeat(session, agent_id, now=datetime.now(UTC), submitted=submitted)
         await session.commit()
     rollup_kinds = Counter(row.task_kind for row in rollups)  # score_rollup can decline one: count what was sent
     logger.info(
@@ -284,12 +285,12 @@ def _open_database(settings: Settings) -> Database:
     return Database(settings)
 
 
-async def _record_failed_pass(database: Database, agent_id: str, error: Exception, *, now: datetime) -> None:
+async def _record_failed_pass(database: Database, agent_id: str, error: Exception) -> None:
     """Write the error heartbeat of a failed pass in a transaction of its own. Best effort: it never raises, so the
     pass's own error is the one ``main`` reports."""
     try:
         async with database.session() as session:
-            await upsert_heartbeat(session, agent_id, now=now, error=error)
+            await upsert_heartbeat(session, agent_id, now=datetime.now(UTC), error=error)
             await session.commit()
     except Exception:
         logger.warning("Task scores: the heartbeat could not be written after a failed pass", exc_info=True)
@@ -309,7 +310,7 @@ async def _run(agent_id: str | None, window_days: int) -> int:
         try:
             await run_scoring_pass(database, agent_id, window_days=window_days, now=now)
         except Exception as exc:
-            await _record_failed_pass(database, agent_id, exc, now=now)
+            await _record_failed_pass(database, agent_id, exc)
             raise
     finally:
         try:
