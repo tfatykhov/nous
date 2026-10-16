@@ -15,7 +15,9 @@ stopped; an agent with no task in 14 days shows no recent value.
 Owner grades and undos arrive days after a task ends, so every pass re-scores the whole
 window; a row is ``settled`` once its task is older than ``SETTLE_DAYS``. A row still provisional although its task
 finished before the window start (no pass ran in the day it had to settle) pulls the window back to that task, so
-it is re-scored and settled: ``--window-days`` is the least a pass covers, not the most.
+it is re-scored and settled: ``--window-days`` is the least a pass covers, not the most. The reach-back stops at
+``MAX_REACHBACK_DAYS``: an older provisional row stays provisional and each pass logs a WARNING with how many there
+are and when the oldest finished.
 """
 
 from __future__ import annotations
@@ -53,6 +55,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 UPSERT_CHUNK = 200  # rows per INSERT: 21 columns each, far under asyncpg's 32767 bind parameters
+MAX_REACHBACK_DAYS = 30  # the furthest back a pass reaches to settle a provisional row (older ones are only logged)
 _KEY = ("agent_id", "task_kind", "task_id", "scorer_version")
 # The privilege contract of the scoring role: SELECT on these tables, SELECT + INSERT + UPDATE on SCORE_TABLE
 # (ON CONFLICT DO UPDATE reads the row), USAGE on their schemas, and nothing else. A pass also reads SCORE_TABLE
@@ -161,18 +164,18 @@ async def _stored_leaf_scores(session: AsyncSession, agent_id: str, task_ids: Se
     return found
 
 
-async def _oldest_provisional(session: AsyncSession, agent_id: str) -> datetime | None:
-    """When the oldest task of ``agent_id`` whose row under this ``SCORER_VERSION`` is not settled yet finished."""
-    oldest = (
-        await session.execute(
-            select(func.min(TaskScoreRow.finished_at)).where(
-                TaskScoreRow.agent_id == agent_id,
-                TaskScoreRow.scorer_version == SCORER_VERSION,
-                TaskScoreRow.settled.is_(False),
-            )
-        )
-    ).scalar_one()
-    return as_utc(oldest)
+async def _provisional_rows(
+    session: AsyncSession, agent_id: str, floor: datetime
+) -> tuple[datetime | None, int, datetime | None]:
+    """This agent's rows under this ``SCORER_VERSION`` that are not settled yet, split at ``floor``: when the oldest
+    task at or after it finished, and how many finished before it and when the oldest of those did."""
+    T = TaskScoreRow
+    provisional = (T.agent_id == agent_id, T.scorer_version == SCORER_VERSION, T.settled.is_(False))
+    oldest = (await session.execute(select(func.min(T.finished_at)).where(*provisional, T.finished_at >= floor))).one()
+    beyond = (
+        await session.execute(select(func.count(), func.min(T.finished_at)).where(*provisional, T.finished_at < floor))
+    ).one()
+    return as_utc(oldest[0]), beyond[0], as_utc(beyond[1])
 
 
 async def run_scoring_pass(
@@ -181,16 +184,27 @@ async def run_scoring_pass(
     """Score every task of ``agent_id`` finished in the window and upsert the rows in one transaction.
 
     The window reaches back further when a row is still provisional although its task finished before the window
-    start: it is re-scored and settled with fresh signals. The leaves are scored first: the roll-ups read their
-    scores. Returns the number of rows submitted to the upsert.
+    start: it is re-scored and settled with fresh signals. It never reaches back more than ``MAX_REACHBACK_DAYS``. The
+    leaves are scored first: the roll-ups read their scores. Returns the number of rows submitted to the upsert.
     """
     now = now or datetime.now(UTC)
     since = now - timedelta(days=window_days)
+    floor = min(since, now - timedelta(days=MAX_REACHBACK_DAYS))
     async with database.session() as session:
         # A row settles on the first pass after its task is SETTLE_DAYS old, and the window is only a day longer. With
         # no pass in that day the task leaves the window and its row would stay provisional for good, so the window
-        # reaches back to the oldest such row.
-        oldest = await _oldest_provisional(session, agent_id)
+        # reaches back to the oldest such row, but not past the floor: a row whose task can no longer be gathered
+        # would otherwise hold the window open and widen it every day.
+        oldest, beyond, beyond_oldest = await _provisional_rows(session, agent_id, floor)
+        if beyond:
+            logger.warning(
+                "Task scores: %d provisional row(s) finished more than %d days ago and stay provisional, the oldest "
+                "at %s (agent=%s)",
+                beyond,
+                MAX_REACHBACK_DAYS,
+                beyond_oldest.isoformat() if beyond_oldest is not None else None,
+                agent_id,
+            )
         if oldest is not None and oldest < since:
             since = oldest
             logger.info(

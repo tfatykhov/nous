@@ -485,6 +485,38 @@ async def test_without_a_stale_provisional_row_the_window_is_unchanged(db, agent
     assert not any("reaches back to" in r.getMessage() for r in caplog.records)
 
 
+async def test_the_reach_back_stops_at_the_cap_and_older_provisional_rows_are_logged(db, agent, caplog):
+    # A provisional row 45 days old (its task can no longer be settled by a pass) does not pull the window past
+    # MAX_REACHBACK_DAYS: a subtask 40 days old stays unscored and the 45-day row is left as it is. A provisional row
+    # inside the cap (20 days) still pulls the window back to itself and settles.
+    assert job.MAX_REACHBACK_DAYS == 30
+    ancient, ancient_error = _errored_subtask(agent, NOW - timedelta(days=45))
+    unscored, unscored_error = _errored_subtask(agent, NOW - timedelta(days=40))
+    stale, stale_error = _errored_subtask(agent, NOW - timedelta(days=20))
+    async with db.session() as s:
+        s.add_all([ancient, ancient_error, unscored, unscored_error, stale, stale_error])
+        await s.commit()
+    await upsert(
+        db,
+        agent,
+        [score(str(t.id), value=1.0, finished_at=t.completed_at) for t in (ancient, stale)],
+        at=NOW - timedelta(days=50),
+    )
+
+    with caplog.at_level(logging.INFO, logger=job.__name__):
+        assert await job.run_scoring_pass(db, agent, now=NOW) == 1
+    by_task = {r.task_id: r for r in await rows(db, agent)}
+    assert set(by_task) == {str(ancient.id), str(stale.id)}  # the 40-day subtask is out of the window
+    assert (by_task[str(stale.id)].settled, by_task[str(stale.id)].score) == (True, -0.1)
+    left = by_task[str(ancient.id)]
+    assert (left.settled, left.score, left.outcome) == (False, 1.0, "done_verified")  # untouched
+    [warning] = [r for r in caplog.records if r.levelno == logging.WARNING]
+    message = warning.getMessage()
+    assert "1 provisional row(s)" in message and (NOW - timedelta(days=45)).date().isoformat() in message, message
+    [reach] = [r.getMessage() for r in caplog.records if "reaches back to" in r.getMessage()]
+    assert (NOW - timedelta(days=20)).date().isoformat() in reach, reach
+
+
 async def test_the_number_of_queries_of_a_pass_does_not_grow_with_the_number_of_tasks(db, agent):
     async def count(n: int) -> int:
         a = f"{agent}-{n}"
