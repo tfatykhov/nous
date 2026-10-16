@@ -75,7 +75,7 @@ most recent eval. Update when new evidence arrives.
 | MMR diversity | ON, with `mmr_skip_after_ce=True` | `mmr_enabled`, `mmr_diversity_weight`, `mmr_skip_after_ce` | F030.1 default validated: chaining MMR after CE neutralizes CE's lift. Skip-after-CE is correct. |
 | Spreading activation | `auto` (gate at density >= 3.0) | `spreading_activation_enabled`, `spreading_activation_density_threshold` | Measurable no-op on current eval corpora. Forcing on doesn't move metrics. |
 | RRF fusion | `vector_weight=0.7`, `rrf_k=60` | `vector_weight`, `rrf_k` | Tuning is corpus-noise (max ±1.6% MRR). Not worth touching defaults. |
-| Keyword channel | ON (default) | `hybrid_search_keyword_enabled` | F054 validated: vector-only ties default RRF byte-for-byte on lme, -0.2% on prod. Operator opt-out for vector-dominant corpora. |
+| Keyword channel | ON (default) | `hybrid_search_keyword_enabled` | Vector-only fusion (`vector_weight=1.0`) ties default RRF byte-for-byte on lme, -0.2% on prod. The F054 flag itself is unmeasured: the `f054_keyword_off` arm never turned the keyword leg off ([RUNS.md](RUNS.md), footnote 1), so the opt-out is untested. |
 | Orphan-edge pruning | ON, 1000/cycle | `dead_edge_pruning_enabled`, `dead_edge_pruning_max_per_cycle` | F053 sleep phase. Not measured by retrieval eval (affects future graph density). |
 
 ## Eval framework reference

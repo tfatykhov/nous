@@ -646,6 +646,10 @@ if keyword_enabled:
 <p>Predicted: ties baseline. Validates flag wires to production hot path. Operator opt-out is real and lossless on these corpora.</p>
 
 <div class="callout warn">
+<strong>Correction (2026-10-16):</strong> this arm measured nothing. <code>hybrid_search_keyword_enabled</code> is read from the process environment at search time and the run never published the arm's value there, so both columns ran with the keyword leg on, which is why they are identical. The flag's wiring and the "lossless" claim are unmeasured, and the opt-out is untested. The channel-isolation result (<code>vector_only</code>, which sets <code>vector_weight=1.0</code>) is a separate measurement and stands. See footnote 1 in <code>evaluations/RUNS.md</code>.
+</div>
+
+<div class="callout warn">
 <strong>Caveat documented:</strong> Empty keyword channel uniformly suppresses the keyword half of the RRF score (penalty rank), preserving order but shifting absolute scores. May interact with <code>relevance_floor</code> / <code>staleness_penalty</code> consumers if flipped off in prod.
 </div>
 
