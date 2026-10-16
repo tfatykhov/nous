@@ -7,12 +7,15 @@ scores every subtask, DAG run and intention root that finished in the last ``SCO
 not a loop inside the app and has no setting: it is meant to run on a timer as a separate service under its own
 database role, which keeps the writer of the scores outside the agent's process.
 The job needs only SELECT on the source tables and SELECT, INSERT and UPDATE on ``scoring.task_scores`` (it reads
-the stored scores of roll-up children there too): no DDL, no temp table, no advisory lock, no delete.
+the oldest provisional row and the stored scores of roll-up children there too): no DDL, no temp table, no advisory
+lock, no delete.
 ``GET /dashboard/autonomy`` shows ``last_scored_at``, the time of the latest score write. A live scorer moves it
 whenever a task finished in the last 14 days, so a value much older than the scorer's interval means the scorer
 stopped; an agent with no task in 14 days shows no recent value.
 Owner grades and undos arrive days after a task ends, so every pass re-scores the whole
-window; a row is ``settled`` once its task is older than ``SETTLE_DAYS``.
+window; a row is ``settled`` once its task is older than ``SETTLE_DAYS``. A row still provisional although its task
+finished before the window start (no pass ran in the day it had to settle) pulls the window back to that task, so
+it is re-scored and settled: ``--window-days`` is the least a pass covers, not the most.
 """
 
 from __future__ import annotations
@@ -27,10 +30,11 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nous.dag.approval import as_utc
 from nous.observability.task_score_gatherer import chunked, gather_signals
 from nous.observability.task_scoring import (
     LEAF_KIND,
@@ -52,10 +56,10 @@ UPSERT_CHUNK = 200  # rows per INSERT: 21 columns each, far under asyncpg's 3276
 _KEY = ("agent_id", "task_kind", "task_id", "scorer_version")
 # The privilege contract of the scoring role: SELECT on these tables, SELECT + INSERT + UPDATE on SCORE_TABLE
 # (ON CONFLICT DO UPDATE reads the row), USAGE on their schemas, and nothing else. A pass also reads SCORE_TABLE
-# itself (the stored scores of roll-up children that finished before the window), which that SELECT covers, so
-# SCORE_TABLE is not a source. tests/test_task_score_job.py runs a pass as a role holding exactly this, and checks
-# that the tables a pass reads are exactly SOURCE_TABLES plus SCORE_TABLE, so a new table in the gatherer fails there
-# before it fails in prod.
+# itself (the oldest provisional row, and the stored scores of roll-up children that finished before the window),
+# which that SELECT covers, so SCORE_TABLE is not a source. tests/test_task_score_job.py runs a pass as a role holding
+# exactly this, and checks that the tables a pass reads are exactly SOURCE_TABLES plus SCORE_TABLE, so a new table in
+# the gatherer fails there before it fails in prod.
 SCORE_TABLE = "scoring.task_scores"
 SOURCE_TABLES = (
     "brain.decisions",
@@ -157,16 +161,44 @@ async def _stored_leaf_scores(session: AsyncSession, agent_id: str, task_ids: Se
     return found
 
 
+async def _oldest_provisional(session: AsyncSession, agent_id: str) -> datetime | None:
+    """When the oldest task of ``agent_id`` whose row under this ``SCORER_VERSION`` is not settled yet finished."""
+    oldest = (
+        await session.execute(
+            select(func.min(TaskScoreRow.finished_at)).where(
+                TaskScoreRow.agent_id == agent_id,
+                TaskScoreRow.scorer_version == SCORER_VERSION,
+                TaskScoreRow.settled.is_(False),
+            )
+        )
+    ).scalar_one()
+    return as_utc(oldest)
+
+
 async def run_scoring_pass(
     database: Database, agent_id: str, *, window_days: int = SCORING_WINDOW_DAYS, now: datetime | None = None
 ) -> int:
     """Score every task of ``agent_id`` finished in the window and upsert the rows in one transaction.
 
-    The leaves are scored first: the roll-ups read their scores. Returns the number of rows submitted to the upsert.
+    The window reaches back further when a row is still provisional although its task finished before the window
+    start: it is re-scored and settled with fresh signals. The leaves are scored first: the roll-ups read their
+    scores. Returns the number of rows submitted to the upsert.
     """
     now = now or datetime.now(UTC)
+    since = now - timedelta(days=window_days)
     async with database.session() as session:
-        gathered = await gather_signals(session, agent_id, since=now - timedelta(days=window_days))
+        # A row settles on the first pass after its task is SETTLE_DAYS old, and the window is only a day longer. With
+        # no pass in that day the task leaves the window and its row would stay provisional for good, so the window
+        # reaches back to the oldest such row.
+        oldest = await _oldest_provisional(session, agent_id)
+        if oldest is not None and oldest < since:
+            since = oldest
+            logger.info(
+                "Task scores: the window reaches back to %s, the oldest provisional row (agent=%s)",
+                since.isoformat(),
+                agent_id,
+            )
+        gathered = await gather_signals(session, agent_id, since=since)
         leaves = [row for sig in gathered.leaves if (row := score_leaf(sig, now)) is not None]
         leaf_scores = {row.task_id: row.score for row in leaves}
         missing = sorted({c for sig in (*gathered.dags, *gathered.chains) for c in sig.child_ids} - leaf_scores.keys())

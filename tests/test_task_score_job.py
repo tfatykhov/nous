@@ -13,6 +13,7 @@ import pytest_asyncio
 from sqlalchemy import event, select, text
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 
+from nous.dag.approval import as_utc
 from nous.observability import task_score_job as job
 from nous.observability.task_scoring import SCORER_VERSION, TaskScore
 from nous.storage.models import (
@@ -363,8 +364,8 @@ async def test_a_pass_writes_only_its_own_agents_rows(db, agent):
 
 
 async def test_a_settling_rollup_still_counts_a_child_that_finished_before_the_window(db, agent):
-    # A roll-up settles at SETTLE_DAYS (14) but the window is 15 days: a child that finished 1.5 days before its chain
-    # closed is out of the window by the time the chain settles. The pass reads that child's stored score instead.
+    # A roll-up settles at SETTLE_DAYS (14) but the window is 15 days: a child that finished 2.5 days before its chain
+    # closed is settled and out of the window by the time the chain settles. The pass reads its stored score instead.
     closed = NOW - timedelta(days=14, hours=1)
 
     async def chain(child_done: datetime) -> tuple[Subtask, uuid.UUID]:
@@ -407,7 +408,7 @@ async def test_a_settling_rollup_still_counts_a_child_that_finished_before_the_w
             await s.commit()
         return child, rid
 
-    kept, kept_root = await chain(NOW - timedelta(days=15, hours=12))  # inside the window at NOW-2d, outside at NOW
+    kept, kept_root = await chain(NOW - timedelta(days=16, hours=12))  # settles at NOW-2d, out of the window at NOW
     never, never_root = await chain(NOW - timedelta(days=17, hours=12))  # outside the window at both passes
 
     await job.run_scoring_pass(db, agent, now=NOW - timedelta(days=2))
@@ -416,6 +417,7 @@ async def test_a_settling_rollup_still_counts_a_child_that_finished_before_the_w
     assert by_task[str(never_root)].children_scored == 0
     stored = by_task[str(kept.id)].score
     assert stored == -0.1
+    assert by_task[str(kept.id)].settled  # so the pass at NOW has no provisional row to reach back for
 
     await job.run_scoring_pass(db, agent, now=NOW)  # the chains settle; neither child is in the window now
     by_task = {r.task_id: r for r in await rows(db, agent)}
@@ -425,6 +427,101 @@ async def test_a_settling_rollup_still_counts_a_child_that_finished_before_the_w
     assert str(never.id) not in by_task
     control = by_task[str(never_root)]
     assert (control.settled, control.children_scored, control.children_mean_score) == (True, 0, None)
+
+
+def _errored_subtask(agent, finished: datetime) -> tuple[Subtask, ExecutionLedgerEntry]:
+    """A completed subtask with one harness error, so its fresh score is -0.1."""
+    sub = Subtask(
+        id=uuid.uuid4(), agent_id=agent, task="t", status="completed", final_outcome="completed", completed_at=finished
+    )
+    error = ExecutionLedgerEntry(
+        agent_id=agent,
+        context_kind="subtask",
+        tool_name="bash",
+        side_effect_type="write",
+        status="error",
+        subtask_id=sub.id,
+    )
+    return sub, error
+
+
+async def test_a_provisional_row_past_the_window_is_rescored_and_settled(db, agent, caplog):
+    # A missed pass: the row was written while the task was young and never rewritten as settled. The task is now
+    # 17 days old, two days past the 15-day window start.
+    finished = NOW - timedelta(days=17)
+    sub, error = _errored_subtask(agent, finished)
+    async with db.session() as s:
+        s.add_all([sub, error])
+        await s.commit()
+    await upsert(db, agent, [score(str(sub.id), value=1.0, finished_at=finished)], at=NOW - timedelta(days=4))
+
+    with caplog.at_level(logging.INFO, logger=job.__name__):
+        assert await job.run_scoring_pass(db, agent, now=NOW) == 1
+    [row] = await rows(db, agent)
+    assert (row.settled, row.outcome, row.score, row.harness_errors) == (True, "done_self", -0.1, 1)  # recomputed
+    assert abs(as_utc(row.scored_at) - NOW) < timedelta(seconds=1)
+    assert any("reaches back to" in r.getMessage() for r in caplog.records)
+
+
+async def test_without_a_stale_provisional_row_the_window_is_unchanged(db, agent, caplog):
+    # A settled row 17 days old does not pull the window back, so a subtask 16 days old (never scored) stays out.
+    old, old_error = _errored_subtask(agent, NOW - timedelta(days=17))
+    out, out_error = _errored_subtask(agent, NOW - timedelta(days=16))
+    inside, inside_error = _errored_subtask(agent, NOW - timedelta(days=3))
+    async with db.session() as s:
+        s.add_all([old, old_error, out, out_error, inside, inside_error])
+        await s.commit()
+    settled = score(str(old.id), settled=True, finished_at=old.completed_at)
+    await upsert(db, agent, [settled], at=NOW - timedelta(days=3))
+
+    with caplog.at_level(logging.INFO, logger=job.__name__):
+        assert await job.run_scoring_pass(db, agent, now=NOW) == 1
+        # and a provisional row inside the window does not pull it back either
+        assert await job.run_scoring_pass(db, agent, now=NOW + timedelta(minutes=15)) == 1
+    by_task = {r.task_id: r for r in await rows(db, agent)}
+    assert set(by_task) == {str(old.id), str(inside.id)}
+    assert by_task[str(old.id)].score == 1.0  # settled: left alone
+    assert not by_task[str(inside.id)].settled
+    assert not any("reaches back to" in r.getMessage() for r in caplog.records)
+
+
+async def test_the_number_of_queries_of_a_pass_does_not_grow_with_the_number_of_tasks(db, agent):
+    async def count(n: int) -> int:
+        a = f"{agent}-{n}"
+        stale: list[Subtask] = []
+        async with db.session() as s:
+            for i in range(n):
+                dag = ExecutionDAG(id=uuid.uuid4(), agent_id=a, name="d", status="completed", completed_at=NOW)
+                node = DAGNode(id=uuid.uuid4(), dag_id=dag.id, name="n", node_type="subtask")
+                sub, error = _errored_subtask(a, NOW - timedelta(hours=1))
+                sub.dag_node_id = node.id
+                old, old_error = _errored_subtask(a, NOW - timedelta(days=17, hours=i))
+                s.add(dag)
+                await s.flush()
+                s.add(node)
+                await s.flush()
+                s.add_all([sub, error, old, old_error])
+                stale.append(old)
+            await s.commit()
+        # every stale task left a provisional row behind, so the window reaches back in both runs
+        await upsert(db, a, [score(str(t.id), finished_at=t.completed_at) for t in stale], at=NOW - timedelta(days=5))
+
+        statements: list[str] = []
+
+        def record(conn, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+
+        event.listen(db.engine.sync_engine, "before_cursor_execute", record)
+        try:
+            await job.run_scoring_pass(db, a, now=NOW)
+        finally:
+            event.remove(db.engine.sync_engine, "before_cursor_execute", record)
+        got = {r.task_id: r for r in await rows(db, a)}
+        assert len(got) == 3 * n  # n subtasks in the window, their n DAG runs, and the n stale subtasks
+        assert all(got[str(t.id)].settled and got[str(t.id)].score == -0.1 for t in stale)
+        return len(statements)
+
+    assert await count(2) == await count(12)
 
 
 class _Shared:
@@ -686,9 +783,9 @@ async def test_a_pass_issues_only_selects_and_the_scores_upsert(db, agent):
             writes |= {name.split(".")[-1] for name in re.findall(r"\bINSERT\s+INTO\s+([\w.]+)", statement, re.I)}
 
     # The privilege contract is derived, not copied: the tables the pass reads are exactly SOURCE_TABLES plus
-    # SCORE_TABLE (the stored scores of children that finished before the window), and the only table it writes is
-    # SCORE_TABLE. Dropping a table from SOURCE_TABLES, granting one the pass never reads, or pointing SCORE_TABLE
-    # elsewhere fails here on the SQLite lane as well as on Postgres.
+    # SCORE_TABLE (the oldest provisional row, the stored scores of children that finished before the window), and the
+    # only table it writes is SCORE_TABLE. Dropping a table from SOURCE_TABLES, granting one the pass never reads, or
+    # pointing SCORE_TABLE elsewhere fails here on the SQLite lane as well as on Postgres.
     models_say: dict[str, set[str]] = {}
     for table in Base.metadata.tables.values():
         models_say.setdefault(table.name, set()).add(table.fullname)  # the schema the models put each table in
