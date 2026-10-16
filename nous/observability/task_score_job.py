@@ -154,12 +154,12 @@ async def upsert_heartbeat(
     session: AsyncSession,
     agent_id: str,
     *,
-    now: datetime,
+    written_at: datetime,
     submitted: int | None = None,
     error: Exception | None = None,
 ) -> None:
-    """Insert or overwrite the agent's heartbeat row, stamped ``now``: the callers pass the time of this write, not
-    the pass's own ``now``, so a slow pass does not record a run that already looks stale. Does not commit.
+    """Insert or overwrite the agent's heartbeat row, stamped ``written_at``: the time of this write, not the pass's
+    own ``now``, so a slow pass does not record a run that already looks stale. Does not commit.
 
     Without ``error`` the pass is committing ``submitted`` rows: ``ok``, and ``last_ok_at`` too. With one the pass
     failed: ``error`` and the exception's class name, never its message (it can carry data, the log has it), and the
@@ -168,12 +168,12 @@ async def upsert_heartbeat(
     row: dict[str, object] = {
         "agent_id": agent_id,
         "scorer_version": SCORER_VERSION,
-        "last_run_at": now,
+        "last_run_at": written_at,
         "last_status": "ok" if error is None else "error",
         "last_error": None if error is None else type(error).__name__[:ERROR_CHARS],
     }
     if error is None:
-        row |= {"last_ok_at": now, "rows_submitted": submitted}
+        row |= {"last_ok_at": written_at, "rows_submitted": submitted}
     stmt = pg_insert(ScorerHeartbeatRow).values(row)
     # Only the columns this pass sets are overwritten, so a failed pass keeps the time and count of the last ok one.
     stmt = stmt.on_conflict_do_update(
@@ -264,7 +264,7 @@ async def run_scoring_pass(
         ]
         submitted = await upsert_scores(session, agent_id, [*leaves, *rollups], scored_at=now)
         # In the scores' transaction: the heartbeat says ok if and only if the scores committed.
-        await upsert_heartbeat(session, agent_id, now=datetime.now(UTC), submitted=submitted)
+        await upsert_heartbeat(session, agent_id, written_at=datetime.now(UTC), submitted=submitted)
         await session.commit()
     rollup_kinds = Counter(row.task_kind for row in rollups)  # score_rollup can decline one: count what was sent
     logger.info(
@@ -290,7 +290,7 @@ async def _record_failed_pass(database: Database, agent_id: str, error: Exceptio
     pass's own error is the one ``main`` reports."""
     try:
         async with database.session() as session:
-            await upsert_heartbeat(session, agent_id, now=datetime.now(UTC), error=error)
+            await upsert_heartbeat(session, agent_id, written_at=datetime.now(UTC), error=error)
             await session.commit()
     except Exception:
         logger.warning("Task scores: the heartbeat could not be written after a failed pass", exc_info=True)

@@ -719,15 +719,15 @@ async def test_a_committed_pass_leaves_one_ok_heartbeat_that_the_next_pass_overw
     # stamped when written, not with the pass's now: a slow pass must not record a run that already looks stale
     assert as_utc(hb.last_run_at) == as_utc(hb.last_ok_at)
     assert started <= as_utc(hb.last_run_at) <= datetime.now(UTC)
-    first = as_utc(hb.last_run_at)
-
     async with db.session() as s:  # one more task, so the overwrite shows in rows_submitted as well
         s.add_all(_errored_subtask(agent, NOW))
         await s.commit()
+    started = datetime.now(UTC)
     assert await job.run_scoring_pass(db, agent, now=NOW + timedelta(minutes=15)) == 2
     [hb] = await heartbeats(db, agent)
     assert (hb.last_status, hb.last_error, hb.rows_submitted) == ("ok", None, 2)
-    assert as_utc(hb.last_run_at) == as_utc(hb.last_ok_at) >= first
+    assert as_utc(hb.last_run_at) == as_utc(hb.last_ok_at)
+    assert started <= as_utc(hb.last_run_at) <= datetime.now(UTC)
 
 
 class _PassBroke(Exception):
@@ -796,10 +796,10 @@ async def test_the_scores_and_the_ok_heartbeat_commit_together_or_not_at_all(db,
         await s.commit()
     real = job.upsert_heartbeat
 
-    async def ok_heartbeat_fails(session, agent_id, *, now, submitted=None, error=None):
+    async def ok_heartbeat_fails(session, agent_id, *, written_at, submitted=None, error=None):
         if error is None:
             raise _HeartbeatBroke("the ok heartbeat")
-        await real(session, agent_id, now=now, submitted=submitted, error=error)
+        await real(session, agent_id, written_at=written_at, submitted=submitted, error=error)
 
     monkeypatch.setattr(job, "upsert_heartbeat", ok_heartbeat_fails)
     with pytest.raises(_HeartbeatBroke):
@@ -812,7 +812,7 @@ async def test_a_first_pass_that_fails_leaves_an_error_heartbeat_with_nothing_co
     failed_at: list[datetime] = []
 
     async def gatherer_fails(*args, **kwargs):
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)  # well above any clock's granularity, so a start-time stamp would be earlier
         failed_at.append(datetime.now(UTC))
         raise _PassBroke("the gatherer failed")
 
@@ -1018,12 +1018,13 @@ async def test_a_pass_issues_only_selects_and_the_scores_upsert(db, agent):
 
 @asynccontextmanager
 async def _scoring_role(db, *, written: tuple[str, ...]):
-    """A role holding the scoring privilege contract with write on ``written`` only, and the pool with every session
-    switched to it for the length of the pass. Dropped afterwards."""
+    """A role holding the scoring privilege contract with write on ``written`` only, and a stand-in for the database
+    whose sessions run as it. Dropped afterwards."""
     role = f"scorer_probe_{uuid.uuid4().hex[:8]}"
 
     class AsRole:
-        """The pool, with every session switched to the probe role for the length of the pass."""
+        """Sessions on one pooled connection each, switched to the probe role for the session's length and reset before
+        the connection goes back to the pool."""
 
         @asynccontextmanager
         async def session(self):
