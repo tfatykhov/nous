@@ -16,6 +16,7 @@ user = os.environ["PROD_SSH_USER"]
 pw = os.environ["PROD_SSH_PW"]
 port = int(os.environ.get("PROD_SSH_PORT", "22"))
 container = os.environ.get("PROD_PG_CONTAINER", "nous-postgres")
+pg_user = os.environ.get("PROD_PG_USER", "nous_admin")
 db = os.environ.get("PROD_PG_DB", "nous")
 
 cli = paramiko.SSHClient()
@@ -36,11 +37,11 @@ mode = sys.argv[1]
 
 if mode == "sql":
     sql = sys.argv[2].replace('"', '\\"')
-    print(run(f'docker exec {container} psql -U nous -d {db} -tAc "{sql}"'))
+    print(run(f'docker exec {container} psql -U {pg_user} -d {db} -tAc "{sql}"'))
 
 elif mode == "schema":
     cmd = (
-        f"docker exec {container} pg_dump -U nous -d {db} --schema-only --no-owner "
+        f"docker exec {container} pg_dump -U {pg_user} -d {db} --schema-only --no-owner "
         f"--no-privileges"
     )
     data = run(cmd, want_bytes=True)
@@ -56,7 +57,7 @@ elif mode == "dump":
         ]
     )
     cmd = (
-        f"docker exec {container} pg_dump -U nous -d {db} --data-only --no-owner "
+        f"docker exec {container} pg_dump -U {pg_user} -d {db} --data-only --no-owner "
         f"--no-privileges {tables}"
     )
     data = run(cmd, want_bytes=True)

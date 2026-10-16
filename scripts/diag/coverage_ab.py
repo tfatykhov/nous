@@ -29,7 +29,7 @@ from scripts.diag.coverage_audit import _PROMPT, _parse
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 PROD = dict(host=os.environ.get("PROD_HOST", "192.168.1.141"), port=5432,
-            user="nous", password=os.environ["PROD_PW"], database="nous")
+            user=os.environ.get("PROD_DB_USER", "nous_app"), password=os.environ["PROD_PW"], database="nous")
 AGENT = "nous-default"
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 10
 

@@ -57,7 +57,7 @@ def run(cmd: str):
 
 def qj(sql: str):
     w = "SELECT coalesce(json_agg(row_to_json(t)),json_build_array()) FROM (" + sql + ") t"
-    out, err = run('docker exec nous-postgres psql -U nous -d nous -tAc "' + w + '"')
+    out, err = run('docker exec nous-postgres psql -U nous_admin -d nous -tAc "' + w + '"')
     ln = next((l for l in out.splitlines() if l.strip().startswith("[")), None)
     if ln is None:
         print("ERR sql:", err[:600])

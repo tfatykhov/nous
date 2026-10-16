@@ -26,7 +26,7 @@ from nous.handlers.sleep_handler import (
 )
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-PROD = dict(host="192.168.1.141", port=5432, user="nous",
+PROD = dict(host="192.168.1.141", port=5432, user=os.environ.get("PROD_DB_USER", "nous_app"),
             password=os.environ["PROD_PW"], database="nous")
 AGENT = "nous-default"
 

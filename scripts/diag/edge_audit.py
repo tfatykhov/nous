@@ -13,7 +13,7 @@ import os
 import asyncpg
 
 PROD = dict(host=os.environ.get("PROD_HOST", "192.168.1.141"), port=5432,
-            user="nous", password=os.environ["PROD_PW"], database="nous")
+            user=os.environ.get("PROD_DB_USER", "nous_app"), password=os.environ["PROD_PW"], database="nous")
 AGENT = "nous-default"
 
 

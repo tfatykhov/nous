@@ -1,6 +1,6 @@
-import asyncio, asyncpg, sys
+import asyncio, asyncpg, os, sys
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-DSN = "postgresql://nous:nous_dev_password@192.168.1.141:5432/nous"
+DSN = os.environ["PROD_DSN"]
 async def main():
     c = await asyncpg.connect(DSN)
     try:

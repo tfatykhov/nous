@@ -22,7 +22,7 @@ from nous.config import Settings
 from nous.storage.database import Database
 from nous_eval.corpus_loader import load_corpus_from_jsonl
 
-PROD = dict(host="192.168.1.141", port=5432, user="nous",
+PROD = dict(host="192.168.1.141", port=5432, user=os.environ.get("PROD_DB_USER", "nous_app"),
             password=os.environ["PROD_PW"], database="nous")
 PROD_AGENT = "nous-default"
 LOCAL_AGENT = "nous-prod-fresh"
