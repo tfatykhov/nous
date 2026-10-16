@@ -7,11 +7,13 @@ scores every subtask, DAG run and intention root that finished in the last ``SCO
 not a loop inside the app and has no setting: it is meant to run on a timer as a separate service under its own
 database role, which keeps the writer of the scores outside the agent's process.
 The job needs only SELECT on the source tables and SELECT, INSERT and UPDATE on ``scoring.task_scores`` (it reads
-the oldest provisional row and the stored scores of roll-up children there too): no DDL, no temp table, no advisory
-lock, no delete.
-``GET /dashboard/autonomy`` shows ``last_scored_at``, the time of the latest score write. A live scorer moves it
-whenever a task finished in the last 14 days, so a value much older than the scorer's interval means the scorer
-stopped; an agent with no task in 14 days shows no recent value.
+the oldest provisional row and the stored scores of roll-up children there too) and on ``scoring.scorer_heartbeat``:
+no DDL, no temp table, no advisory lock, no delete.
+Every pass upserts the agent's row in ``scoring.scorer_heartbeat``: ``ok`` in the same transaction as the scores, or
+``error`` with the exception's class name in a transaction of its own (best effort: it never hides the pass's error).
+That row is the liveness signal, shown as ``scorer`` by ``GET /dashboard/autonomy``: a ``last_run_at`` much older than
+the scorer's interval means the scorer stopped or cannot write to ``scoring``. ``last_scored_at`` stays the time of
+the latest score write, which does not move while no task finished in the last 14 days.
 Owner grades and undos arrive days after a task ends, so every pass re-scores the whole
 window; a row is ``settled`` once its task is older than ``SETTLE_DAYS``. A row still provisional although its task
 finished before the window start (no pass ran in the day it had to settle) pulls the window back to that task, so
@@ -47,6 +49,7 @@ from nous.observability.task_scoring import (
     score_leaf,
     score_rollup,
 )
+from nous.storage.models import ScorerHeartbeat as ScorerHeartbeatRow
 from nous.storage.models import TaskScore as TaskScoreRow
 
 if TYPE_CHECKING:
@@ -57,14 +60,17 @@ logger = logging.getLogger(__name__)
 
 UPSERT_CHUNK = 200  # rows per INSERT: 21 columns each, far under asyncpg's 32767 bind parameters
 MAX_REACHBACK_DAYS = 30  # the furthest back a pass reaches to settle a provisional row (older ones are only logged)
+ERROR_CHARS = 120  # the width of scorer_heartbeat.last_error
 _KEY = ("agent_id", "task_kind", "task_id", "scorer_version")
-# The privilege contract of the scoring role: SELECT on these tables, SELECT + INSERT + UPDATE on SCORE_TABLE
-# (ON CONFLICT DO UPDATE reads the row), USAGE on their schemas, and nothing else. A pass also reads SCORE_TABLE
-# itself (the oldest provisional row, and the stored scores of roll-up children that finished before the window),
-# which that SELECT covers, so SCORE_TABLE is not a source. tests/test_task_score_job.py runs a pass as a role holding
-# exactly this, and checks that the tables a pass reads are exactly SOURCE_TABLES plus SCORE_TABLE, so a new table in
+# The privilege contract of the scoring role: SELECT on these tables, SELECT + INSERT + UPDATE on SCORE_TABLE and on
+# HEARTBEAT_TABLE (both are upserts, and ON CONFLICT DO UPDATE reads the row), USAGE on their schemas, and nothing
+# else. A pass also reads SCORE_TABLE itself (the oldest provisional row, and the stored scores of roll-up children
+# that finished before the window), which that SELECT covers, so SCORE_TABLE is not a source.
+# tests/test_task_score_job.py runs a pass as a role holding exactly this, and checks that the tables a pass reads are
+# exactly SOURCE_TABLES plus SCORE_TABLE and that it writes only SCORE_TABLE and HEARTBEAT_TABLE, so a new table in
 # the gatherer fails there before it fails in prod.
 SCORE_TABLE = "scoring.task_scores"
+HEARTBEAT_TABLE = "scoring.scorer_heartbeat"
 SOURCE_TABLES = (
     "brain.decisions",
     "brain.intention_arrivals",
@@ -142,6 +148,38 @@ async def upsert_scores(
         )
         await session.execute(stmt)
     return len(scores)
+
+
+async def upsert_heartbeat(
+    session: AsyncSession,
+    agent_id: str,
+    *,
+    written_at: datetime,
+    submitted: int | None = None,
+    error: Exception | None = None,
+) -> None:
+    """Insert or overwrite the agent's heartbeat row, stamped ``written_at``: the time of this write, not the pass's
+    own ``now``, so a slow pass does not record a run that already looks stale. Does not commit.
+
+    Without ``error`` the pass is committing ``submitted`` rows: ``ok``, and ``last_ok_at`` too. With one the pass
+    failed: ``error`` and the exception's class name, never its message (it can carry data, the log has it), and the
+    ``last_ok_at`` and ``rows_submitted`` of the last committed pass are left as they were.
+    """
+    row: dict[str, object] = {
+        "agent_id": agent_id,
+        "scorer_version": SCORER_VERSION,
+        "last_run_at": written_at,
+        "last_status": "ok" if error is None else "error",
+        "last_error": None if error is None else type(error).__name__[:ERROR_CHARS],
+    }
+    if error is None:
+        row |= {"last_ok_at": written_at, "rows_submitted": submitted}
+    stmt = pg_insert(ScorerHeartbeatRow).values(row)
+    # Only the columns this pass sets are overwritten, so a failed pass keeps the time and count of the last ok one.
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["agent_id"], set_={column: stmt.excluded[column] for column in row if column != "agent_id"}
+    )
+    await session.execute(stmt)
 
 
 async def _stored_leaf_scores(session: AsyncSession, agent_id: str, task_ids: Sequence[str]) -> dict[str, float | None]:
@@ -225,6 +263,8 @@ async def run_scoring_pass(
             if (row := score_rollup(sig, leaf_scores, now)) is not None
         ]
         submitted = await upsert_scores(session, agent_id, [*leaves, *rollups], scored_at=now)
+        # In the scores' transaction: the heartbeat says ok if and only if the scores committed.
+        await upsert_heartbeat(session, agent_id, written_at=datetime.now(UTC), submitted=submitted)
         await session.commit()
     rollup_kinds = Counter(row.task_kind for row in rollups)  # score_rollup can decline one: count what was sent
     logger.info(
@@ -245,6 +285,17 @@ def _open_database(settings: Settings) -> Database:
     return Database(settings)
 
 
+async def _record_failed_pass(database: Database, agent_id: str, error: Exception) -> None:
+    """Write the error heartbeat of a failed pass in a transaction of its own. Best effort: it never raises, so the
+    pass's own error is the one ``main`` reports."""
+    try:
+        async with database.session() as session:
+            await upsert_heartbeat(session, agent_id, written_at=datetime.now(UTC), error=error)
+            await session.commit()
+    except Exception:
+        logger.warning("Task scores: the heartbeat could not be written after a failed pass", exc_info=True)
+
+
 async def _run(agent_id: str | None, window_days: int) -> int:
     from nous.config import Settings
 
@@ -255,7 +306,12 @@ async def _run(agent_id: str | None, window_days: int) -> int:
     try:
         if agent_id is None:
             agent_id = settings.agent_id
-        await run_scoring_pass(database, agent_id, window_days=window_days)
+        now = datetime.now(UTC)
+        try:
+            await run_scoring_pass(database, agent_id, window_days=window_days, now=now)
+        except Exception as exc:
+            await _record_failed_pass(database, agent_id, exc)
+            raise
     finally:
         try:
             await database.disconnect()

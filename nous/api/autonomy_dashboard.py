@@ -24,6 +24,7 @@ from nous.storage.models import (
     A2uiSurface,
     Decision,
     Event,
+    ScorerHeartbeat,
     Subtask,
     TaskScore,
 )
@@ -122,13 +123,29 @@ def _verified_share(rows: list[Any]) -> dict[str, Any]:
     return {"scored": len(scored), "verified": verified, "share": _round(verified / len(scored)) if scored else None}
 
 
+def _scorer(beat: ScorerHeartbeat | None) -> dict[str, Any] | None:
+    """The scoring command's heartbeat row, or None before its first pass."""
+    if beat is None:
+        return None
+    return {
+        "scorer_version": beat.scorer_version,
+        "last_run_at": as_utc(beat.last_run_at).isoformat(),
+        "last_status": beat.last_status,
+        "last_error": beat.last_error,
+        "last_ok_at": as_utc(beat.last_ok_at).isoformat() if beat.last_ok_at is not None else None,
+        "rows_submitted": beat.rows_submitted,
+    }
+
+
 async def _task_scores(session: AsyncSession, agent_id: str, since: datetime) -> dict[str, Any]:
     """Subtasks are the scored unit. DAG runs and intention roots are roll-ups: counted apart, never in a score sum.
 
     Coverage is measured only from the scorer's first run (``first_scored_at``): tasks that finished before it
-    were never going to have a row. ``last_scored_at`` is the time of the latest score write. A live scorer moves it
-    whenever a task finished in the last 14 days, so a value much older than the scorer's interval means the scorer
-    stopped; an agent with no task in 14 days shows no recent value.
+    were never going to have a row. ``scorer`` is the heartbeat the scoring command writes after every pass, the
+    liveness signal: a ``last_run_at`` much older than the scorer's interval means the scorer stopped or cannot write
+    to ``scoring``, and ``last_status`` says how the latest pass ended. It is None until the first pass.
+    ``last_scored_at`` stays the time of the latest score write, which does not move while no task finished in the
+    last 14 days.
     """
     T = TaskScore
     first, last = (
@@ -168,10 +185,14 @@ async def _task_scores(session: AsyncSession, agent_id: str, since: datetime) ->
         ).scalar_one()
         covered = sum(1 for r in leaves if as_utc(r.finished_at) >= floor)
     outcomes = Counter(r.outcome for r in leaves)
+    beat = (
+        await session.execute(select(ScorerHeartbeat).where(ScorerHeartbeat.agent_id == agent_id))
+    ).scalar_one_or_none()
     return {
         "scorer_version": SCORER_VERSION,
         "first_scored_at": as_utc(first).isoformat() if first is not None else None,
         "last_scored_at": as_utc(last).isoformat() if last is not None else None,
+        "scorer": _scorer(beat),
         # The three numbers to read first, side by side. A subtask's score alone does not see the owner's overrides:
         # a rejected proposal, an undone chain call, an unverified-claim note and a DAG-level error all sit on
         # roll-ups, which are in no score sum. So the overrides and the penalties are counted over ALL units.

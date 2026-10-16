@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import uuid
@@ -12,6 +13,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import event, select, text
 from sqlalchemy.exc import IntegrityError, ProgrammingError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.dag.approval import as_utc
 from nous.observability import task_score_job as job
@@ -24,6 +26,7 @@ from nous.storage.models import (
     ExecutionDAG,
     ExecutionLedgerEntry,
     Intention,
+    ScorerHeartbeat,
     Subtask,
 )
 from nous.storage.models import (
@@ -73,6 +76,11 @@ async def upsert(db, agent, scores, at=NOW):
         n = await job.upsert_scores(s, agent, scores, scored_at=at)
         await s.commit()
     return n
+
+
+async def heartbeats(db, agent):
+    async with db.session() as s:
+        return (await s.execute(select(ScorerHeartbeat).where(ScorerHeartbeat.agent_id == agent))).scalars().all()
 
 
 async def test_the_unique_key_is_agent_kind_task_and_version(db, agent):
@@ -700,6 +708,182 @@ def test_the_command_refuses_a_bad_argument_with_a_usage_error():
     assert exit_info.value.code == 2
 
 
+async def test_a_committed_pass_leaves_one_ok_heartbeat_that_the_next_pass_overwrites(db, agent):
+    async with db.session() as s:
+        s.add_all(_errored_subtask(agent, NOW - timedelta(hours=1)))
+        await s.commit()
+    started = datetime.now(UTC)
+    assert await job.run_scoring_pass(db, agent, now=NOW) == 1
+    [hb] = await heartbeats(db, agent)
+    assert (hb.scorer_version, hb.last_status, hb.last_error, hb.rows_submitted) == (SCORER_VERSION, "ok", None, 1)
+    # stamped when written, not with the pass's now: a slow pass must not record a run that already looks stale
+    assert as_utc(hb.last_run_at) == as_utc(hb.last_ok_at)
+    assert started <= as_utc(hb.last_run_at) <= datetime.now(UTC)
+    async with db.session() as s:  # one more task, so the overwrite shows in rows_submitted as well
+        s.add_all(_errored_subtask(agent, NOW))
+        await s.commit()
+    started = datetime.now(UTC)
+    assert await job.run_scoring_pass(db, agent, now=NOW + timedelta(minutes=15)) == 2
+    [hb] = await heartbeats(db, agent)
+    assert (hb.last_status, hb.last_error, hb.rows_submitted) == ("ok", None, 2)
+    assert as_utc(hb.last_run_at) == as_utc(hb.last_ok_at)
+    assert started <= as_utc(hb.last_run_at) <= datetime.now(UTC)
+
+
+class _PassBroke(Exception):
+    """A failure inside a pass."""
+
+
+class _HeartbeatBroke(Exception):
+    """A failure of the heartbeat write after a failed pass."""
+
+
+def _fail_after_the_upsert(monkeypatch) -> list[int]:
+    """The pass sends its scores, then fails before it commits. Returns the row counts it sent."""
+    real = job.upsert_scores
+    sent: list[int] = []
+
+    async def upsert_then_fail(session, agent_id, scores, *, scored_at):
+        sent.append(await real(session, agent_id, scores, scored_at=scored_at))
+        raise _PassBroke("after the upsert")
+
+    monkeypatch.setattr(job, "upsert_scores", upsert_then_fail)
+    return sent
+
+
+def _raise(exc: Exception):
+    async def fail(*args, **kwargs):
+        raise exc
+
+    return fail
+
+
+async def test_a_failed_pass_leaves_an_error_heartbeat_and_none_of_its_scores(db, agent, monkeypatch, caplog):
+    first, first_error = _errored_subtask(agent, NOW - timedelta(hours=1))
+    async with db.session() as s:
+        s.add_all([first, first_error])
+        await s.commit()
+    assert await job.run_scoring_pass(db, agent, now=NOW) == 1
+    [scored] = await rows(db, agent)
+    [ok] = await heartbeats(db, agent)
+    last_ok = as_utc(ok.last_ok_at)
+
+    async with db.session() as s:
+        s.add_all(_errored_subtask(agent, datetime.now(UTC) - timedelta(hours=1)))
+        await s.commit()
+    sent = _fail_after_the_upsert(monkeypatch)
+    monkeypatch.setattr(job, "_open_database", lambda settings: _Shared(db))
+    started = datetime.now(UTC)
+    with caplog.at_level(logging.INFO, logger=job.__name__), pytest.raises(_PassBroke):
+        await job._run(agent, 15)
+
+    assert sent and sent[0] >= 1  # the pass did send rows: they were rolled back, not never written
+    [kept] = await rows(db, agent)
+    assert (kept.task_id, kept.score, as_utc(kept.scored_at)) == (scored.task_id, scored.score, NOW)
+    [hb] = await heartbeats(db, agent)
+    assert (hb.last_status, hb.last_error, hb.scorer_version) == ("error", "_PassBroke", SCORER_VERSION)
+    assert started <= as_utc(hb.last_run_at) <= datetime.now(UTC)
+    # the last committed pass is still on record
+    assert (as_utc(hb.last_ok_at), hb.rows_submitted) == (last_ok, 1)
+    assert not any("heartbeat" in r.getMessage() for r in caplog.records)
+
+
+async def test_the_scores_and_the_ok_heartbeat_commit_together_or_not_at_all(db, agent, monkeypatch):
+    # The SQLite-lane twin of the role test without the heartbeat grant: an ok heartbeat that cannot be written takes
+    # the pass's scores with it, because both are one transaction.
+    async with db.session() as s:
+        s.add_all(_errored_subtask(agent, NOW - timedelta(hours=1)))
+        await s.commit()
+    real = job.upsert_heartbeat
+
+    async def ok_heartbeat_fails(session, agent_id, *, written_at, submitted=None, error=None):
+        if error is None:
+            raise _HeartbeatBroke("the ok heartbeat")
+        await real(session, agent_id, written_at=written_at, submitted=submitted, error=error)
+
+    monkeypatch.setattr(job, "upsert_heartbeat", ok_heartbeat_fails)
+    with pytest.raises(_HeartbeatBroke):
+        await job.run_scoring_pass(db, agent, now=NOW)
+    assert await rows(db, agent) == []
+    assert await heartbeats(db, agent) == []
+
+
+async def test_a_first_pass_that_fails_leaves_an_error_heartbeat_with_nothing_committed_yet(db, agent, monkeypatch):
+    failed_at: list[datetime] = []
+
+    async def gatherer_fails(*args, **kwargs):
+        await asyncio.sleep(0.05)  # well above any clock's granularity, so a start-time stamp would be earlier
+        failed_at.append(datetime.now(UTC))
+        raise _PassBroke("the gatherer failed")
+
+    monkeypatch.setattr(job, "gather_signals", gatherer_fails)
+    monkeypatch.setattr(job, "_open_database", lambda settings: _Shared(db))
+    with pytest.raises(_PassBroke):
+        await job._run(agent, 15)
+    [hb] = await heartbeats(db, agent)
+    assert (hb.last_status, hb.last_error, hb.last_ok_at, hb.rows_submitted) == ("error", "_PassBroke", None, None)
+    assert as_utc(hb.last_run_at) >= failed_at[0]  # stamped when written, after the pass failed, not when it started
+
+
+async def test_the_error_is_the_exception_class_name_only(db, agent, monkeypatch):
+    class CarriesData(Exception):
+        pass
+
+    long_name = type("E" * 200, (Exception,), {})
+    for exc, expected in (
+        (CarriesData("token=abc in the message"), "CarriesData"),  # the message stays in the log
+        (long_name("x"), "E" * 120),  # truncated to the column
+    ):
+        monkeypatch.setattr(job, "gather_signals", _raise(exc))
+        monkeypatch.setattr(job, "_open_database", lambda settings: _Shared(db))
+        with pytest.raises(type(exc)):
+            await job._run(agent, 15)
+        [hb] = await heartbeats(db, agent)
+        assert hb.last_error == expected
+
+
+def test_when_the_heartbeat_cannot_be_written_either_the_pass_error_is_the_one_reported(monkeypatch, caplog):
+    class Unreachable(_Shared):
+        def __init__(self):
+            self.calls = 0
+
+        def session(self):
+            self.calls += 1
+            raise _PassBroke("the pass") if self.calls == 1 else _HeartbeatBroke("the heartbeat")
+
+    database = Unreachable()
+    monkeypatch.setattr(job, "_open_database", lambda settings: database)
+    with caplog.at_level(logging.INFO, logger=job.__name__):
+        assert job.main(["--agent-id", "nous-default"]) == 1
+    assert database.calls == 2  # the pass, then the heartbeat
+    records = [r for r in caplog.records if r.name == job.__name__]
+    [failed] = [r for r in records if r.levelno == logging.ERROR]
+    assert failed.getMessage() == "Task scores: the scoring pass failed"
+    assert failed.exc_info[0] is _PassBroke  # the pass's error, not the heartbeat's
+    [warning] = [r for r in records if r.levelno == logging.WARNING]
+    assert warning.getMessage() == "Task scores: the heartbeat could not be written after a failed pass"
+    assert warning.exc_info[0] is _HeartbeatBroke
+
+
+async def test_a_pass_for_one_agent_leaves_another_agents_heartbeat_alone(db, agent, monkeypatch):
+    other = f"{agent}-other"
+    await job.run_scoring_pass(db, other, now=NOW)
+    await job.run_scoring_pass(db, agent, now=NOW + timedelta(hours=1))  # an ok pass
+    [before] = await heartbeats(db, other)
+    their_run = as_utc(before.last_run_at)
+    [ok] = await heartbeats(db, agent)
+    my_ok = as_utc(ok.last_ok_at)
+    monkeypatch.setattr(job, "gather_signals", _raise(_PassBroke("the gatherer failed")))
+    monkeypatch.setattr(job, "_open_database", lambda settings: _Shared(db))
+    with pytest.raises(_PassBroke):
+        await job._run(agent, 15)  # and a failed one
+
+    [theirs] = await heartbeats(db, other)
+    assert (theirs.last_status, as_utc(theirs.last_run_at), theirs.rows_submitted) == ("ok", their_run, 0)
+    [mine] = await heartbeats(db, agent)
+    assert (mine.last_status, as_utc(mine.last_ok_at)) == ("error", my_ok)
+
+
 # Statements a scoring role holding only SELECT on the sources and INSERT/UPDATE on the scores can run.
 _FORBIDDEN = re.compile(
     r"\b(CREATE|DROP|ALTER|TRUNCATE|LOCK|GRANT|REVOKE|DELETE|TEMP|TEMPORARY|VACUUM|ANALYZE|LISTEN|NOTIFY)\b"
@@ -811,20 +995,20 @@ async def test_a_pass_issues_only_selects_and_the_scores_upsert(db, agent):
         assert not _FORBIDDEN.search(statement), statement  # no DDL, no temp table, no advisory lock, no delete
         # table names with the schema stripped: the SQLite lane maps every schema to "main"
         reads |= {name.split(".")[-1] for name in re.findall(r"\b(?:FROM|JOIN)\s+([\w.]+)", statement, re.I)}
-        if head == "INSERT":  # the only write is the scores upsert
+        if head == "INSERT":  # the only writes are the scores upsert and the heartbeat upsert
             writes |= {name.split(".")[-1] for name in re.findall(r"\bINSERT\s+INTO\s+([\w.]+)", statement, re.I)}
 
     # The privilege contract is derived, not copied: the tables the pass reads are exactly SOURCE_TABLES plus
     # SCORE_TABLE (the oldest provisional row, the stored scores of children that finished before the window), and the
-    # only table it writes is SCORE_TABLE. Dropping a table from SOURCE_TABLES, granting one the pass never reads, or
-    # pointing SCORE_TABLE elsewhere fails here on the SQLite lane as well as on Postgres.
+    # only tables it writes are SCORE_TABLE and HEARTBEAT_TABLE (an upsert with no FROM or JOIN, so not a read here).
+    # Dropping a table from SOURCE_TABLES, granting one the pass never reads, or pointing SCORE_TABLE or
+    # HEARTBEAT_TABLE elsewhere fails here on the SQLite lane as well as on Postgres.
     models_say: dict[str, set[str]] = {}
     for table in Base.metadata.tables.values():
         models_say.setdefault(table.name, set()).add(table.fullname)  # the schema the models put each table in
     assert reads, "the pass read nothing"
-    assert writes == {job.SCORE_TABLE.split(".")[-1]}, writes
-    for name in sorted(writes):
-        assert models_say[name] == {job.SCORE_TABLE}, (name, models_say[name])
+    write_tables = {fullname for name in writes for fullname in models_say[name]}
+    assert write_tables == {job.SCORE_TABLE, job.HEARTBEAT_TABLE}, write_tables
     read_tables = {fullname for name in reads for fullname in models_say[name]}
     granted = set(job.SOURCE_TABLES) | {job.SCORE_TABLE}
     assert read_tables == granted, (
@@ -832,48 +1016,76 @@ async def test_a_pass_issues_only_selects_and_the_scores_upsert(db, agent):
     )
 
 
-@pytest.mark.postgres_only
-async def test_a_pass_runs_as_a_role_with_only_select_on_the_sources_and_write_on_the_scores(db, agent):
+@asynccontextmanager
+async def _scoring_role(db, *, written: tuple[str, ...]):
+    """A role holding the scoring privilege contract with write on ``written`` only, and a stand-in for the database
+    whose sessions run as it. Dropped afterwards."""
     role = f"scorer_probe_{uuid.uuid4().hex[:8]}"
 
     class AsRole:
-        """The pool, with every session switched to the probe role for the length of the pass."""
+        """Sessions on one pooled connection each, switched to the probe role for the session's length and reset before
+        the connection goes back to the pool."""
 
         @asynccontextmanager
         async def session(self):
-            async with db.session() as s:
-                await s.execute(text(f"SET ROLE {role}"))
+            # One connection for the whole session. A session bound to the engine gives its connection back to the
+            # pool at each commit, so a RESET ROLE after the pass's commit ran on whichever connection the pool handed
+            # out next and could leave this one in the pool still switched to the role, for later tests to inherit.
+            async with db.engine.connect() as conn:
+                await conn.execute(text(f"SET ROLE {role}"))
+                await conn.commit()  # no transaction left open for the session to join: its commit must COMMIT
                 try:
-                    yield s
+                    async with AsyncSession(bind=conn, expire_on_commit=False) as s:
+                        yield s
                 finally:
-                    await s.rollback()
-                    await s.execute(text("RESET ROLE"))
-                    await s.commit()
+                    await conn.rollback()
+                    await conn.execute(text("RESET ROLE"))
+                    await conn.commit()
 
     async with db.engine.begin() as conn:
         await conn.execute(text(f"CREATE ROLE {role} NOLOGIN"))
         await conn.execute(text(f"GRANT {role} TO CURRENT_USER"))
-        for schema in {name.split(".")[0] for name in (*job.SOURCE_TABLES, job.SCORE_TABLE)}:
+        for schema in {name.split(".")[0] for name in (*job.SOURCE_TABLES, *written)}:
             await conn.execute(text(f"GRANT USAGE ON SCHEMA {schema} TO {role}"))
         for table in job.SOURCE_TABLES:
             await conn.execute(text(f"GRANT SELECT ON {table} TO {role}"))
-        await conn.execute(text(f"GRANT SELECT, INSERT, UPDATE ON {job.SCORE_TABLE} TO {role}"))
+        for table in written:
+            await conn.execute(text(f"GRANT SELECT, INSERT, UPDATE ON {table} TO {role}"))
     try:
-        await _seed_one_of_each(db, agent)
-        assert await job.run_scoring_pass(AsRole(), agent) == 2
-        assert await job.run_scoring_pass(AsRole(), agent) == 2  # the second pass takes the ON CONFLICT path
-        assert len(await rows(db, agent)) == 2
-
-        # and the role can do nothing more: no write elsewhere, no DDL, no delete of a score
-        for statement in (
-            "INSERT INTO nous_system.events (agent_id, event_type, data) VALUES ('x', 'x', '{}')",
-            "CREATE TABLE scoring.not_allowed (id int)",
-            "DELETE FROM scoring.task_scores",
-        ):
-            with pytest.raises(ProgrammingError):
-                async with AsRole().session() as s:
-                    await s.execute(text(statement))
+        yield AsRole()
     finally:
         async with db.engine.begin() as conn:
             await conn.execute(text(f"DROP OWNED BY {role}"))
             await conn.execute(text(f"DROP ROLE {role}"))
+
+
+@pytest.mark.postgres_only
+async def test_a_pass_runs_as_a_role_with_only_select_on_the_sources_and_write_on_the_scores(db, agent):
+    async with _scoring_role(db, written=(job.SCORE_TABLE, job.HEARTBEAT_TABLE)) as as_role:
+        await _seed_one_of_each(db, agent)
+        assert await job.run_scoring_pass(as_role, agent) == 2
+        assert await job.run_scoring_pass(as_role, agent) == 2  # the second pass takes the ON CONFLICT path
+        assert len(await rows(db, agent)) == 2
+        [hb] = await heartbeats(db, agent)  # written by the role: every session of the pass ran as it
+        assert (hb.last_status, hb.rows_submitted) == ("ok", 2)
+
+        # and the role can do nothing more: no write elsewhere, no DDL, no delete of a score or a heartbeat
+        for statement in (
+            "INSERT INTO nous_system.events (agent_id, event_type, data) VALUES ('x', 'x', '{}')",
+            "CREATE TABLE scoring.not_allowed (id int)",
+            "DELETE FROM scoring.task_scores",
+            "DELETE FROM scoring.scorer_heartbeat",
+        ):
+            with pytest.raises(ProgrammingError):
+                async with as_role.session() as s:
+                    await s.execute(text(statement))
+
+
+@pytest.mark.postgres_only
+async def test_without_the_heartbeat_grant_a_pass_fails_and_its_scores_do_not_commit(db, agent):
+    async with _scoring_role(db, written=(job.SCORE_TABLE,)) as as_role:
+        await _seed_one_of_each(db, agent)
+        with pytest.raises(ProgrammingError, match="permission denied for table scorer_heartbeat"):
+            await job.run_scoring_pass(as_role, agent)
+    assert await rows(db, agent) == []  # the scores and the heartbeat are one transaction
+    assert await heartbeats(db, agent) == []

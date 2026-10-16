@@ -68,6 +68,8 @@ async def test_all_tables_exist(db):
         ("nous_system", "compensation_snapshots"),
         # Task scores, in a schema of their own (migration 087)
         ("scoring", "task_scores"),
+        # The scoring command's heartbeat, one row per agent (migration 088)
+        ("scoring", "scorer_heartbeat"),
         # brain (12)
         ("brain", "decisions"),
         ("brain", "decision_tags"),
