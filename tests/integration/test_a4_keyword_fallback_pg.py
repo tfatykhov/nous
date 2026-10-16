@@ -1,9 +1,15 @@
 """A4 Step 2 against real Postgres: the SQL the mocked tests cannot run.
 
-Needs the eval Postgres on 127.0.0.1:5433 (database nous_eval_scratch) and is
-SKIPPED without it -- including on CI. Run it by hand before the fallback is ever
-enabled. Rows are written under a throwaway agent id and deleted afterwards
-(chunks cascade from the episode), mirroring test_r2_chunk_hybrid_e2e.py.
+Two gates, both required: pytest's ``--integration`` flag (tests/conftest.py
+skips everything under tests/integration/ without it, whatever :5433 says) and
+the eval Postgres on 127.0.0.1:5433 (database nous_eval_scratch). Missing either,
+it is SKIPPED -- including on CI. Run it by hand before the fallback is ever
+enabled:
+
+    uv run --extra dev pytest tests/integration/test_a4_keyword_fallback_pg.py --integration
+
+Rows are written under a throwaway agent id and deleted afterwards (chunks
+cascade from the episode), mirroring test_r2_chunk_hybrid_e2e.py.
 
 WARNING: the `eval_db` fixture uses `os.environ.setdefault`, so an exported
 DB_HOST / DB_PORT / DB_NAME / DB_USER / DB_PASSWORD redirects this test's WRITES
