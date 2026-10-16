@@ -108,7 +108,7 @@ class TestDatabase:
 # 3. Engine and table creation
 # ---------------------------------------------------------------------------
 
-_SCHEMA_PREFIXES = re.compile(r'\b(heart|brain|nous_system)\.')
+_SCHEMA_PREFIXES = re.compile(r'\b(heart|brain|nous_system|scoring)\.')
 
 
 def _rewrite_sql_for_sqlite(sql_text: str) -> str:
@@ -152,6 +152,7 @@ async def create_test_engine():
                 "brain": None,
                 "heart": None,
                 "nous_system": None,
+                "scoring": None,
             }
         },
         connect_args={"check_same_thread": False},
