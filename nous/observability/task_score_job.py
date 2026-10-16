@@ -3,11 +3,12 @@
     python -m nous.observability.task_score_job --agent-id nous-default
 
 scores every subtask, DAG run and intention root that finished in the last ``SCORING_WINDOW_DAYS`` into
-``scoring.task_scores`` and exits: 0 when the pass wrote, 1 when it failed (so the service wrapper can tell). It is
+``scoring.task_scores`` and exits: 0 when the pass committed, 1 when it failed (so the service wrapper can tell). It is
 not a loop inside the app and has no setting: the ``nous-scorer`` compose service (defined by the integrity plan)
 runs it every 900 s with its own database role, which keeps the writer of the scores outside the agent's process.
-The job needs only SELECT on the source tables and INSERT and UPDATE on ``scoring.task_scores``: no DDL, no temp
-table, no advisory lock, no delete. ``GET /dashboard/autonomy`` shows ``last_scored_at``, so a dead scorer is visible.
+The job needs only SELECT on the source tables and SELECT, INSERT and UPDATE on ``scoring.task_scores`` (it reads
+the stored scores of roll-up children there too): no DDL, no temp table, no advisory lock, no delete.
+``GET /dashboard/autonomy`` shows ``last_scored_at``, so a dead scorer is visible.
 Owner grades and undos arrive days after a task ends, so every pass re-scores the whole
 window; a row is ``settled`` once its task is older than ``SETTLE_DAYS``.
 """
