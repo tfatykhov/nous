@@ -360,6 +360,71 @@ async def test_a_pass_writes_only_its_own_agents_rows(db, agent):
     assert await rows(db, agent) == [] and await rows(db, other) == []
 
 
+async def test_a_settling_rollup_still_counts_a_child_that_finished_before_the_window(db, agent):
+    # A roll-up settles at SETTLE_DAYS (14) but the window is 15 days: a child that finished 1.5 days before its chain
+    # closed is out of the window by the time the chain settles. The pass reads that child's stored score instead.
+    closed = NOW - timedelta(days=14, hours=1)
+
+    async def chain(child_done: datetime) -> tuple[Subtask, uuid.UUID]:
+        child = Subtask(
+            id=uuid.uuid4(),
+            agent_id=agent,
+            task="t",
+            status="completed",
+            final_outcome="completed",
+            completed_at=child_done,
+        )
+        rid = uuid.uuid4()
+        async with db.session() as s:
+            s.add(child)
+            s.add(
+                Intention(
+                    id=rid,
+                    agent_id=agent,
+                    root_id=rid,
+                    source_kind="subtask",
+                    source_id=str(child.id),
+                    intent="i",
+                    origin_kind="interactive",
+                    wake_policy="continue",
+                    state="closed",
+                    close_reason="delivered",
+                    closed_at=closed,
+                )
+            )
+            s.add(  # one harness error, so the child's score is not the 0.0 of a clean self-report
+                ExecutionLedgerEntry(
+                    agent_id=agent,
+                    context_kind="subtask",
+                    tool_name="bash",
+                    side_effect_type="write",
+                    status="error",
+                    subtask_id=child.id,
+                )
+            )
+            await s.commit()
+        return child, rid
+
+    kept, kept_root = await chain(NOW - timedelta(days=15, hours=12))  # inside the window at NOW-2d, outside at NOW
+    never, never_root = await chain(NOW - timedelta(days=17, hours=12))  # outside the window at both passes
+
+    await job.run_scoring_pass(db, agent, now=NOW - timedelta(days=2))
+    by_task = {r.task_id: r for r in await rows(db, agent)}
+    assert (by_task[str(kept_root)].settled, by_task[str(kept_root)].children_scored) == (False, 1)
+    assert by_task[str(never_root)].children_scored == 0
+    stored = by_task[str(kept.id)].score
+    assert stored == -0.1
+
+    await job.run_scoring_pass(db, agent, now=NOW)  # the chains settle; neither child is in the window now
+    by_task = {r.task_id: r for r in await rows(db, agent)}
+    settled = by_task[str(kept_root)]
+    assert (settled.settled, settled.children_scored, settled.children_mean_score) == (True, 1, stored)
+    # A child that was never scored stays uncounted: no stored row, nothing made up.
+    assert str(never.id) not in by_task
+    control = by_task[str(never_root)]
+    assert (control.settled, control.children_scored, control.children_mean_score) == (True, 0, None)
+
+
 class _Shared:
     """The shared test database with a disconnect that leaves the pool alone."""
 

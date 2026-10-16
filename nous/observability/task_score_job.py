@@ -23,11 +23,14 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nous.observability.task_score_gatherer import gather_signals
+from nous.observability.task_score_gatherer import _chunks, gather_signals
 from nous.observability.task_scoring import (
+    LEAF_KIND,
+    SCORER_VERSION,
     SCORING_WINDOW_DAYS,
     TaskScore,
     score_leaf,
@@ -43,8 +46,11 @@ logger = logging.getLogger(__name__)
 UPSERT_CHUNK = 200  # rows per INSERT: 21 columns each, far under asyncpg's 32767 bind parameters
 _KEY = ("agent_id", "task_kind", "task_id", "scorer_version")
 # The privilege contract of the scoring role: SELECT on these tables, SELECT + INSERT + UPDATE on SCORE_TABLE
-# (ON CONFLICT DO UPDATE reads the row), USAGE on their schemas, and nothing else. tests/test_task_score_job.py
-# runs a pass as a role holding exactly this, so a new table in the gatherer fails there before it fails in prod.
+# (ON CONFLICT DO UPDATE reads the row), USAGE on their schemas, and nothing else. A pass also reads SCORE_TABLE
+# itself (the stored scores of roll-up children that finished before the window), which that SELECT covers, so
+# SCORE_TABLE is not a source. tests/test_task_score_job.py runs a pass as a role holding exactly this, and checks
+# that the tables a pass reads are exactly SOURCE_TABLES plus SCORE_TABLE, so a new table in the gatherer fails there
+# before it fails in prod.
 SCORE_TABLE = "scoring.task_scores"
 SOURCE_TABLES = (
     "brain.decisions",
@@ -124,6 +130,27 @@ async def upsert_scores(
     return len(scores)
 
 
+async def _stored_leaf_scores(session: AsyncSession, agent_id: str, task_ids: Sequence[str]) -> dict[str, float | None]:
+    """task id -> the stored score of each of these subtasks under this ``SCORER_VERSION`` that has a row.
+
+    A roll-up settles at ``SETTLE_DAYS`` but the window is one day longer, so a child that finished more than a day
+    before its DAG or chain closed is out of the window when the parent settles. Its stored row stands in for it. A
+    child never scored has no row and stays uncounted; a stored ``not_scored`` row has score NULL and is not counted.
+    """
+    found: dict[str, float | None] = {}
+    for chunk in _chunks(list(task_ids)):
+        result = await session.execute(
+            select(TaskScoreRow.task_id, TaskScoreRow.score).where(
+                TaskScoreRow.agent_id == agent_id,
+                TaskScoreRow.task_kind == LEAF_KIND,
+                TaskScoreRow.scorer_version == SCORER_VERSION,
+                TaskScoreRow.task_id.in_(chunk),
+            )
+        )
+        found.update({r.task_id: r.score for r in result})
+    return found
+
+
 async def run_scoring_pass(
     database: Database, agent_id: str, *, window_days: int = SCORING_WINDOW_DAYS, now: datetime | None = None
 ) -> int:
@@ -136,6 +163,9 @@ async def run_scoring_pass(
         gathered = await gather_signals(session, agent_id, since=now - timedelta(days=window_days))
         leaves = [row for sig in gathered.leaves if (row := score_leaf(sig, now)) is not None]
         leaf_scores = {row.task_id: row.score for row in leaves}
+        missing = sorted({c for sig in (*gathered.dags, *gathered.chains) for c in sig.child_ids} - leaf_scores.keys())
+        if missing:  # children that finished before the window: their stored scores, the fresh ones winning
+            leaf_scores = {**await _stored_leaf_scores(session, agent_id, missing), **leaf_scores}
         rollups = [
             row
             for sig in (*gathered.dags, *gathered.chains)

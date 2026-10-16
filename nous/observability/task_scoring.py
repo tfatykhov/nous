@@ -235,7 +235,8 @@ def score_rollup(signals: TaskSignals, leaf_scores: Mapping[str, float | None], 
 
     ``signals`` holds the penalties that belong to the unit itself (a DAG-only ledger row, an arrival note,
     a rejected proposal). The children's own penalties stay on the children. ``leaf_scores`` maps subtask id
-    to its score; a child that is absent (finished outside this pass) or not scored is not counted.
+    to its score: this pass's leaves, plus the stored rows of children that finished before the window (the job
+    reads those). A child absent from both (never scored) or not scored is not counted.
     """
     outcome = _outcome_of(signals)
     if outcome is None:
