@@ -66,13 +66,18 @@ import json
 import os
 import statistics
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # ab_stats (not a package)
+
+from ab_stats import bootstrap_ci, percentile, sign_test_p  # noqa: E402
 
 from nous.api.retrieval_pipeline import run_recall_pipeline  # noqa: E402
 from nous.brain.brain import Brain  # noqa: E402
 from nous.heart.heart import Heart  # noqa: E402
+from nous.observability.retrieval_trace import RetrievalTrace  # noqa: E402
 from nous.storage.database import Database  # noqa: E402
 from nous_eval.env_pin import (  # noqa: E402
     PROD_SHAPE,
@@ -84,15 +89,31 @@ from nous_eval.retrieval_runner import (  # noqa: E402
     make_eval_embedding_provider,
 )
 
-CONTROL = "POSCTRL_graph_off"
+# Positive controls; the gate uses ONE (--control). `graph_off` is the original:
+# it moves graph-gold qrels and may not move fact-gold ones, in which case the run
+# correctly refuses (exit 3 = no verdict). `keyword_only` zeroes the vector weight
+# and moves every fact-gold query. WHAT IT PROVES: that this qrel set is sensitive
+# to a gross change in the keyword/vector balance, and that an env-read setting
+# (NOUS_VECTOR_WEIGHT travels the same channel as the A4 flag) reaches the search
+# layer per arm. It does NOT prove that two arms which both pass differ
+# meaningfully -- that is what the paired CI below is for.
+CONTROLS = {
+    "graph_off": ("POSCTRL_graph_off", {"graph_recall_enabled": False}),
+    "keyword_only": ("POSCTRL_keyword_only", {"vector_weight": 0.0}),
+}
+CONTROL = CONTROLS["graph_off"][0]
 
 # Arms are (name -> Settings overrides). `baseline` and the control are always
 # present; everything else is the question being asked.
 ARMS: dict[str, dict] = {
     "baseline": {},
-    CONTROL: {"graph_recall_enabled": False},
+    CONTROLS["graph_off"][0]: CONTROLS["graph_off"][1],
+    CONTROLS["keyword_only"][0]: CONTROLS["keyword_only"][1],
     "spread_off": {"spreading_activation_enabled": "false"},
     "spread_on": {"spreading_activation_enabled": "true"},
+    # A4 Step 2: the any-word keyword fallback. Env-read flag: reaches the search
+    # layer only because run_arm re-publishes the resolver env per arm.
+    "or_fallback": {"hybrid_keyword_or_fallback_enabled": True},
     # C-S parity carries its PRECONDITIONS — the branch is gated on the scoring
     # policy that defines parity, so omitting either makes the flag inert and
     # this arm would silently measure the baseline.
@@ -114,6 +135,58 @@ ARMS: dict[str, dict] = {
 # Arms compared against something other than plain `baseline`.
 MATCHED_CONTROL = {"cs_parity": "cs_baseline"}
 
+# What runs when --arms is not given (the original behaviour).
+DEFAULT_ARMS = ("spread_off", "spread_on", "cs_parity", "cs_baseline")
+
+
+def select_arms(requested, control_key: str = "graph_off") -> dict[str, dict]:
+    """`baseline` and the chosen control always run, first; then the requested arms,
+    plus the matched control of any arm that is paired against one."""
+    control_name = CONTROLS[control_key][0]
+    names = list(requested) if requested else list(DEFAULT_ARMS)
+    unknown = [n for n in names if n not in ARMS]
+    if unknown:
+        raise ValueError(f"unknown arm(s) {unknown}; known: {sorted(ARMS)}")
+    names += [MATCHED_CONTROL[n] for n in names if n in MATCHED_CONTROL]
+    names = [n for n in names if n not in ("baseline", control_name)]
+    return {n: ARMS[n] for n in ["baseline", control_name, *names]}
+
+
+def kw_from_trace(trace) -> dict:
+    """Keyword counters summed over the legs that report them (A4 Step 1)."""
+    agg = {"queries": 0, "zero": 0, "fallback": 0}
+    for leg in trace.to_dict()["legs"]:
+        agg["queries"] += leg.get("n_keyword_queries", 0)
+        agg["zero"] += leg.get("n_keyword_zero", 0)
+        agg["fallback"] += leg.get("n_keyword_fallback", 0)
+    return agg
+
+
+def fired_summary(baseline_kw, arm_kw, shared) -> tuple[int, int]:
+    """(eligible, fired): of the queries whose BASELINE all-words keyword sub-query
+    found nothing (the only ones a fallback can act on), how many the arm added
+    rows to."""
+    eligible = [i for i in shared if baseline_kw[i]["zero"] > 0]
+    return len(eligible), sum(1 for i in eligible if arm_kw[i]["fallback"] > 0)
+
+
+async def warm_expansions(heart, qrels, agent_id: str) -> int:
+    """Expand every query twice. The first call fills heart.query_expansions (a
+    WRITE to the eval DB); the second must return the same list, which is what
+    guarantees every arm searches identical variants. Returns how many queries
+    really expanded; refuses if expansion is not live (a fail-open [query] is not
+    cached and would silently turn this into a no-expansion run)."""
+    n = 0
+    for q in qrels:
+        first = await heart._query_expander.expand(q["query"], agent_id)
+        again = await heart._query_expander.expand(q["query"], agent_id)
+        if first != again:
+            raise RuntimeError(f"expansion cache did not hold for {q['query'][:60]!r}")
+        n += len(first) > 1
+    if n < 0.9 * len(qrels):
+        raise RuntimeError(f"only {n}/{len(qrels)} queries expanded; check credentials/budget")
+    return n
+
 # PROD_SHAPE / EVAL_OFF live in nous_eval.env_pin so every probe selects the
 # SAME shape. Measured the hard way 2026-08-24: run from a checkout with prod's
 # .env the control moved 23/57 (served 86.5); run from a worktree WITHOUT it,
@@ -123,8 +196,19 @@ MATCHED_CONTROL = {"cs_parity": "cs_baseline"}
 # code-default behaviour deliberately instead.
 
 
-async def run_arm(flags, qrels, base, top_k):
+async def run_arm(flags, qrels, base, top_k, query_expansion=False):
     s = base.model_copy(update=flags)
+    # Re-publish THIS arm's resolver-read fields (NOUS_RRF_K, NOUS_VECTOR_WEIGHT,
+    # the keyword flags). The outer pinned_runtime publishes the BASE once; an arm
+    # that varies one of them via model_copy alone is invisible to
+    # nous.heart.search, which builds its own Settings() from os.environ. That is
+    # how a "keyword off" arm once measured nothing. hidden_env restores exactly,
+    # so nesting is safe.
+    with pinned_runtime(s):
+        return await _run_arm_pinned(s, qrels, top_k, query_expansion)
+
+
+async def _run_arm_pinned(s, qrels, top_k, query_expansion):
     db = Database(settings=s)
     await db.connect()
     # From `s`, never hardcoded (codex P2). Pinning the model to prod's here
@@ -136,16 +220,49 @@ async def run_arm(flags, qrels, base, top_k):
     emb = make_eval_embedding_provider(s)
     heart = Heart(database=db, settings=s, embedding_provider=emb)
     brain = Brain(database=db, settings=s, embedding_provider=emb)
-    # All three are INDEX-ALIGNED with `qrels`, carrying None where the query
-    # raised. Aggregation happens later, over a population shared by every arm.
-    rr, hit, served, errors = [], [], [], []
+    api_client = None
+    if query_expansion:
+        from nous.api.anthropic_client import create_client
+        from nous.heart.query_expansion import QueryExpander
+
+        api_client = create_client(s)
+        await api_client.start()
+        heart.set_query_expander(QueryExpander(
+            llm=api_client, settings=s, db=db, model=s.query_expansion_model))
+        n = await warm_expansions(heart, qrels, s.agent_id)
+        print(f"    expansion live: {n}/{len(qrels)} queries have variants")
+    # All are INDEX-ALIGNED with `qrels`, carrying None where the query raised.
+    # Aggregation happens later, over a population shared by every arm.
+    cold_df_ms: dict[str, float] = {}
+    if s.hybrid_keyword_or_fallback_enabled:
+        # A recall never loads the document-frequency cache itself (a cold key
+        # skips the fallback and a background task fills it), so an arm that
+        # measures the fallback must warm it first. Doing it here also times what
+        # a COLD ts_stat costs per table: the price production recalls never pay
+        # because the refresh runs in the background.
+        from nous.heart import search as heart_search
+
+        for table in ("heart.facts", "heart.episodes", "heart.procedures",
+                      "heart.episode_chunks"):
+            t_df = time.perf_counter()
+            df = await heart_search._load_doc_freq(db.engine, table, s.agent_id)
+            cold_df_ms[table] = (time.perf_counter() - t_df) * 1000
+            heart_search._DF_CACHE[(table, s.agent_id)] = (time.monotonic(), df)
+        print("    cold doc-frequency load (ts_stat), ms: "
+              + ", ".join(f"{t.split('.')[1]} {v:.0f}" for t, v in cold_df_ms.items()))
+    rr, hit, served, errors, kw, ms = [], [], [], [], [], []
+    t_arm = time.perf_counter()
     try:
         for idx, q in enumerate(qrels):
+            # A real trace: write-only, so ranking is unchanged, and it is what
+            # lets the run prove the fallback FIRED and detect expansion drift.
+            tr = RetrievalTrace(query=q["query"], capture_candidates=False)
+            t0 = time.perf_counter()
             try:
                 res, _ = await run_recall_pipeline(
                     query=q["query"], heart=heart, brain=brain, settings=s,
                     limit=top_k, memory_types=q.get("memory_types"),
-                    rerank_by_score=True)
+                    rerank_by_score=True, trace=tr)
             except Exception as exc:
                 # codex P1: NEVER score a raise as reciprocal rank 0. Arms run
                 # separately, so an asymmetric failure would read as genuine
@@ -162,6 +279,8 @@ async def run_arm(flags, qrels, base, top_k):
                 rr.append(None)
                 hit.append(None)
                 served.append(None)
+                kw.append(None)
+                ms.append(None)
                 continue
             ids = [str(r.id) for r in res]
             gold = set(q["gold_ids"])
@@ -169,12 +288,18 @@ async def run_arm(flags, qrels, base, top_k):
             rr.append(1.0 / rank if rank else 0.0)
             hit.append(any(x in gold for x in ids))
             served.append(len(ids))
+            kw.append(kw_from_trace(tr))
+            ms.append((time.perf_counter() - t0) * 1000)
     finally:
+        wall = time.perf_counter() - t_arm
+        if api_client is not None:
+            await api_client.close()
         await brain.close()
         if emb is not None:
             await emb.close()
         await db.disconnect()
-    return {"rr": rr, "hit": hit, "served": served, "errors": errors}
+    return {"rr": rr, "hit": hit, "served": served, "errors": errors,
+            "kw": kw, "ms": ms, "wall_s": wall, "cold_df_ms": cold_df_ms}
 
 
 def build_settings(args):
@@ -183,6 +308,16 @@ def build_settings(args):
     Both settings sources must be shut off, not just the dotenv one — see
     nous_eval.env_pin. `--defaults` pinned nothing at all before this.
     """
+    overrides = {**({} if args.defaults else PROD_SHAPE), **eval_off()}
+    if args.query_expansion:
+        # eval_off() forces expansion off. Prod runs it on, and with it the
+        # per-variant hybrid_search_multi path, so a run that claims prod shape
+        # must turn it back on AND wire an expander (see _run_arm_pinned). The
+        # Anthropic credentials are process-env inputs, injected like the
+        # embedding key because pinned_settings hides the environment.
+        overrides["query_expansion_enabled"] = True
+        overrides["anthropic_api_key"] = os.environ.get("ANTHROPIC_API_KEY", "")
+        overrides["anthropic_auth_token"] = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
     return pinned_settings(
         db_host=args.host, db_port=args.port, db_name=args.db,
         db_user=args.user, db_password=os.environ["EVAL_DB_PASSWORD"],
@@ -190,7 +325,7 @@ def build_settings(args):
         # The embedding key is the one input that MUST come from the process
         # environment, so it is read here and injected explicitly.
         openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
-        **({} if args.defaults else PROD_SHAPE), **eval_off())
+        **overrides)
 
 
 async def run(args, base) -> int:
@@ -214,11 +349,14 @@ async def run(args, base) -> int:
     shape = "CODE DEFAULTS" if args.defaults else "PROD SHAPE (pinned)"
     print(f"config: {shape}   (.env and NOUS_*/DB_* env NOT read)")
 
-    print(f"qrels: {len(qrels)}   top_k={args.top_k}   db={args.db}\n")
+    print(f"qrels: {len(qrels)}   top_k={args.top_k}   db={args.db}   "
+          f"expansion={'ON' if args.query_expansion else 'off'}\n")
+    arms = select_arms(args.arms.split(",") if args.arms else None, args.control)
+    control = CONTROLS[args.control][0]
     out = {}
-    for name, flags in ARMS.items():
-        out[name] = await run_arm(flags, qrels, base, args.top_k)
-        print(f"  ran {name}")
+    for name, flags in arms.items():
+        out[name] = await run_arm(flags, qrels, base, args.top_k, args.query_expansion)
+        print(f"  ran {name}  ({out[name]['wall_s']:.1f}s wall)")
 
 
     # The ONE population every number below is computed on: indices that
@@ -229,6 +367,16 @@ async def run(args, base) -> int:
     # queries or the guard is decorative.
     shared = [i for i in range(len(qrels))
               if all(r["rr"][i] is not None for r in out.values())]
+    # Expansion drift: the same query must have run the same number of keyword
+    # sub-queries (tables x variants) in every arm, else the arms searched
+    # different variants and the paired delta is not about the flag.
+    drift = [i for i in shared
+             if any(r["kw"][i]["queries"] != out["baseline"]["kw"][i]["queries"]
+                    for r in out.values())]
+    shared = [i for i in shared if i not in set(drift)]
+    if drift:
+        print(f"!! {len(drift)} queries ran a different number of keyword "
+              f"sub-queries across arms (expansion drift) -- EXCLUDED")
     dropped = len(qrels) - len(shared)
 
     def paired(name, against="baseline"):
@@ -242,7 +390,7 @@ async def run(args, base) -> int:
                 sum(1 for x in d if x < -1e-9), sum(1 for x in d if abs(x) <= 1e-9),
                 dropped)
 
-    cd, cb, cw, _ct, cskipped = paired(CONTROL)
+    cd, cb, cw, _ct, cskipped = paired(control)
     moved = cb + cw
     print("\n" + "=" * 62)
     n_err = sum(len(r["errors"]) for r in out.values())
@@ -274,6 +422,26 @@ async def run(args, base) -> int:
     print("Set discriminates => a null on the arms below is a RESULT.")
     print("=" * 62)
 
+    # Did the arm FIRE? Of the queries whose baseline all-words keyword sub-query
+    # found nothing (the only ones a fallback can act on), the fallback must have
+    # added rows to at least half. Otherwise the arm is inert and its dMRR of
+    # 0.0000 would read as a measured null -- the failure that made the old
+    # `f054_keyword_off` row meaningless. Both numbers are printed.
+    bq = sum(out["baseline"]["kw"][i]["queries"] for i in shared)
+    bz = sum(out["baseline"]["kw"][i]["zero"] for i in shared)
+    print(f"all-words keyword sub-queries with ZERO hits (baseline): {bz}/{bq}"
+          + (f" = {bz / bq:.0%}" if bq else ""))
+    if "or_fallback" in out:
+        n_elig, n_fired = fired_summary(out["baseline"]["kw"], out["or_fallback"]["kw"], shared)
+        rows = sum(out["or_fallback"]["kw"][i]["fallback"] for i in shared)
+        share = n_fired / n_elig if n_elig else 0.0
+        print(f"or_fallback fired on {n_fired}/{n_elig} queries with a "
+              f"zero-hit baseline sub-query = {share:.0%} ({rows} rows appended)")
+        if not n_elig or share < 0.5:
+            print("ARM INERT: the fallback fired on under 50% of the queries it "
+                  "could act on -- results withheld.")
+            return 4
+
     # Per-arm metrics are printed HERE, after the control passes — never before
     # (codex P1). Printing them during the run meant every MRR was already on
     # screen when the guard fired, so "arm results withheld" was false and a
@@ -285,7 +453,7 @@ async def run(args, base) -> int:
     # an asymmetric failure surfaces as an arm-specific metric change.
     print(f"\n--- per-arm metrics over {len(shared)} queries valid in ALL arms"
           + (f" ({dropped} dropped)" if dropped else "") + " ---")
-    for name in ARMS:
+    for name in arms:
         r = out[name]
         mrr = statistics.mean([r["rr"][i] for i in shared]) if shared else 0.0
         rec = (sum(1 for i in shared if r["hit"][i]) / len(shared)) if shared else 0.0
@@ -293,9 +461,27 @@ async def run(args, base) -> int:
         print(f"{name:<20} MRR@{args.top_k}={mrr:.4f}  "
               f"recall@served={rec:.4f}  avg_served={srv:.1f}")
 
+    # Wall-clock per recall (the pipeline, not one statement). The added latency
+    # of an arm is the paired per-query difference against baseline.
+    print("\n--- latency per recall, ms (shared queries) ---")
+    for name in arms:
+        v = [out[name]["ms"][i] for i in shared]
+        extra = ""
+        if name != "baseline":
+            added = [out[name]["ms"][i] - out["baseline"]["ms"][i] for i in shared]
+            extra = (f"   added vs baseline: mean {statistics.mean(added):+.1f} "
+                     f"p95 {percentile(added, 0.95):+.1f}") if added else ""
+        print(f"{name:<20} mean {statistics.mean(v):7.1f}  p95 {percentile(v, 0.95):7.1f}"
+              f"  arm wall {out[name]['wall_s']:.1f}s{extra}" if v else name)
+    for name in arms:
+        if out[name]["cold_df_ms"]:
+            print("cold ts_stat load per table (background in production, never inside a "
+                  "recall), ms: " + ", ".join(
+                      f"{t.split('.')[1]} {v:.0f}" for t, v in out[name]["cold_df_ms"].items()))
+
     print("\n--- paired vs baseline (per-query reciprocal rank) ---")
-    for name in ARMS:
-        if name in ("baseline", CONTROL) or name in MATCHED_CONTROL.values():
+    for name in arms:
+        if name in ("baseline", control) or name in MATCHED_CONTROL.values():
             continue
         against = MATCHED_CONTROL.get(name, "baseline")
         d, better, worse, ties, skipped = paired(name, against)
@@ -303,10 +489,20 @@ async def run(args, base) -> int:
         skip = f"  skipped={skipped}" if skipped else ""
         print(f"{name:<20} dMRR={d:+.4f}  better={better:>3}  "
               f"worse={worse:>3}  ties={ties:>3}{skip}{note}")
+        deltas = [out[name]["rr"][i] - out[against]["rr"][i] for i in shared]
+        _m, lo, hi = bootstrap_ci(deltas)
+        print(f"{'':<20} 95% bootstrap CI [{lo:+.4f}, {hi:+.4f}]   "
+              f"sign-test p={sign_test_p(better, worse):.4f}")
     print("\nCAVEAT to carry with any null: check what the gold ARE. If they are "
           "targets of the same\nedge family the mechanism traverses, the null is "
           "on favourable ground. And a cosine-\nfindable qrel set cannot credit "
           "'related but dissimilar' — that needs an end-task oracle.")
+    if args.out_json:
+        # Per-query dump for `ab_stats.py` pooling. Indices are qrel positions.
+        Path(args.out_json).write_text(json.dumps({
+            "qrels": str(args.qrels), "db": args.db, "shared": shared,
+            "arms": {n: {"rr": out[n]["rr"], "ms": out[n]["ms"]} for n in arms},
+        }), encoding="utf-8")
     return 0
 
 
@@ -323,6 +519,16 @@ def main() -> int:
                    help="Control must move MORE than this many queries to bless "
                         "the run. Default 1 = the measured repeated-run floor "
                         "on this corpus; raise it if your corpus is noisier.")
+    p.add_argument("--arms", default=None,
+                   help="Comma-separated arms to run besides baseline and the control "
+                        f"(known: {', '.join(sorted(ARMS))}). Default: the original four.")
+    p.add_argument("--control", choices=sorted(CONTROLS), default="graph_off",
+                   help="Which positive control gates the run.")
+    p.add_argument("--query-expansion", action="store_true",
+                   help="Match prod: enable F050 query expansion and wire an expander. "
+                        "Writes heart.query_expansions rows to the eval DB.")
+    p.add_argument("--out-json", default=None,
+                   help="Write per-query rr/ms for scripts/diag/ab_stats.py pooling.")
     p.add_argument("--defaults", action="store_true",
                    help="Measure CODE-DEFAULT config instead of the pinned prod "
                         "shape. Results are not comparable across the two.")
