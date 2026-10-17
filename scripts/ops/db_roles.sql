@@ -348,6 +348,32 @@ ALTER DEFAULT PRIVILEGES FOR ROLE nous_admin IN SCHEMA scoring GRANT SELECT ON T
 --    list with that constant), and nothing else in the application schemas.
 REVOKE ALL ON ALL TABLES IN SCHEMA brain, heart, nous_system FROM nous_scorer CASCADE;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA brain, heart, nous_system FROM nous_scorer CASCADE;
+-- The scorer reaches whatever PUBLIC may, so PUBLIC gets nothing on the application's tables and sequences
+-- (nous_app keeps everything as their owner), and no default privilege of nous_app hands new ones to PUBLIC or
+-- the scorer, per schema or globally. The default for functions is handled below.
+REVOKE ALL ON ALL TABLES IN SCHEMA brain, heart, nous_system FROM PUBLIC CASCADE;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA brain, heart, nous_system FROM PUBLIC CASCADE;
+DO $appdefacl$
+DECLARE
+    d record;
+    -- pg_default_acl.defaclobjtype to the keyword ALTER DEFAULT PRIVILEGES takes
+    kinds constant jsonb := '{"r": "TABLES", "S": "SEQUENCES"}';
+BEGIN
+    FOR d IN
+        SELECT DISTINCT n.nspname, x.defaclobjtype AS objtype, a.grantee
+          FROM pg_default_acl x LEFT JOIN pg_namespace n ON n.oid = x.defaclnamespace,
+               LATERAL aclexplode(x.defaclacl) a
+         WHERE x.defaclrole = 'nous_app'::regrole AND x.defaclobjtype IN ('r', 'S')
+           AND (x.defaclnamespace = 0 OR n.nspname IN ('brain', 'heart', 'nous_system'))
+           AND (a.grantee = 0 OR a.grantee = 'nous_scorer'::regrole)
+    LOOP
+        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE nous_app %s REVOKE ALL ON %s FROM %s',
+                       CASE WHEN d.nspname IS NULL THEN '' ELSE format('IN SCHEMA %I', d.nspname) END,
+                       kinds ->> d.objtype::text,
+                       CASE WHEN d.grantee = 0 THEN 'PUBLIC' ELSE 'nous_scorer' END);
+    END LOOP;
+END
+$appdefacl$;
 REVOKE ALL ON ALL ROUTINES IN SCHEMA brain, heart, nous_system FROM nous_scorer CASCADE;
 -- PUBLIC's default EXECUTE would let the scorer run any function in these schemas: take it from the existing ones,
 -- and from those nous_app creates later (globally: a per-schema REVOKE of a built-in default changes nothing).

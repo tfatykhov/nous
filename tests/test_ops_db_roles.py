@@ -233,3 +233,17 @@ def test_nobody_but_the_administrator_creates_in_public():
     # verify: the application's probe and the scorer's privilege check, both of which count PUBLIC's grants
     assert "('app cannot write to public', 'nous_app', 'CREATE TABLE public.zz (i int)', 'error', NULL)" in VERIFY
     assert "NOT has_schema_privilege(''nous_scorer'', ''public'', ''CREATE'')" in VERIFY
+
+
+def test_the_application_relations_grant_nothing_to_public_now_or_by_default():
+    # the scorer reaches whatever PUBLIC may: a re-run takes back PUBLIC's grants and the defaults that would hand
+    # new tables or sequences to PUBLIC or the scorer, before the scorer's own grants
+    first_scorer_grant = ROLES.index("GRANT USAGE ON SCHEMA brain, heart, nous_system TO nous_scorer;")
+    for revoke in (
+        "REVOKE ALL ON ALL TABLES IN SCHEMA brain, heart, nous_system FROM PUBLIC CASCADE;",
+        "REVOKE ALL ON ALL SEQUENCES IN SCHEMA brain, heart, nous_system FROM PUBLIC CASCADE;",
+        "ALTER DEFAULT PRIVILEGES FOR ROLE nous_app %s REVOKE ALL ON %s FROM %s",
+    ):
+        assert -1 < ROLES.find(revoke) < first_scorer_grant, revoke
+    label = "the application''s tables and sequences grant nothing to PUBLIC, now or by default"
+    assert f"('{label}', 'nous_admin'," in VERIFY
