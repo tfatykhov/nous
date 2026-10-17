@@ -130,7 +130,15 @@ def test_public_cannot_execute_application_functions_now_or_later():
     assert "ON ALL FUNCTIONS IN SCHEMA" not in ROLES
     # global: a per-schema REVOKE of the built-in default changes nothing
     assert "ALTER DEFAULT PRIVILEGES FOR ROLE nous_app REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;" in ROLES
-    assert "('no function in brain, heart or nous_system is executable by the scorer', 'nous_admin'," in VERIFY
+    # a function nous_admin creates in scoring later gets PUBLIC EXECUTE until db_roles.sql runs again: verify sees it
+    label = (
+        "no function in brain, heart, nous_system or scoring is executable by the scorer,"
+        " and none in scoring by the application role"
+    )
+    assert f"('{label}', 'nous_admin'," in VERIFY
+    check = VERIFY.split(label, 1)[1].split("\n        ('", 1)[0].replace("''", "'")
+    assert "n.nspname IN ('brain', 'heart', 'nous_system', 'scoring')" in check, check
+    assert "has_function_privilege('nous_app', p.oid, 'EXECUTE')" in check, check
     assert "('functions the application role creates are not executable by PUBLIC by default', 'nous_admin'," in VERIFY
 
 

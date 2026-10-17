@@ -213,6 +213,9 @@ REVOKE ALL ON SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer CASCADE;
 REVOKE ALL ON ALL TABLES IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer CASCADE;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer CASCADE;
 REVOKE ALL ON ALL ROUTINES IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer CASCADE;
+-- A function nous_admin creates in scoring later gets PUBLIC's EXECUTE until this script runs again, and verify
+-- fails on it meanwhile. No default privilege is set for nous_admin to prevent that: it also creates extension
+-- functions (CREATE or ALTER EXTENSION), which the application must be able to execute.
 -- Column privileges (pg_attribute.attacl) sit apart from a table's ACL. A table-level REVOKE also takes back the
 -- same grantee's column privileges, but in brain, heart and nous_system the table-level revokes name only the
 -- scorer, so a column grant to PUBLIC there would survive them. Take back every column privilege of PUBLIC, the
