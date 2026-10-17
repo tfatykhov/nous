@@ -77,7 +77,9 @@ def test_verify_fails_when_pg_hba_conf_has_a_line_the_server_cannot_parse():
 
 def test_public_cannot_execute_application_functions_now_or_later():
     # PUBLIC's default EXECUTE would let the scorer, which has USAGE on these schemas, run them
-    assert "REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA brain, heart, nous_system FROM PUBLIC;" in ROLES
+    assert "REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA brain, heart, nous_system FROM PUBLIC;" in ROLES
+    # ALL FUNCTIONS leaves procedures out; ALL ROUTINES covers both
+    assert "ON ALL FUNCTIONS IN SCHEMA" not in ROLES
     # global: a per-schema REVOKE of the built-in default changes nothing
     assert "ALTER DEFAULT PRIVILEGES FOR ROLE nous_app REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;" in ROLES
     assert "('no function in brain, heart or nous_system is executable by the scorer', 'nous_admin'," in VERIFY

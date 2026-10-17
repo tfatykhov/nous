@@ -186,7 +186,7 @@ $own$;
 REVOKE ALL ON SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer CASCADE;
 REVOKE ALL ON ALL TABLES IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer CASCADE;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer CASCADE;
-REVOKE ALL ON ALL FUNCTIONS IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer CASCADE;
+REVOKE ALL ON ALL ROUTINES IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer CASCADE;
 GRANT USAGE ON SCHEMA scoring TO nous_app, nous_scorer;
 GRANT SELECT ON ALL TABLES IN SCHEMA scoring TO nous_app;
 -- (the ownership loop of section 3 and the line above cover every table in scoring, so both are owned by
@@ -220,10 +220,10 @@ ALTER DEFAULT PRIVILEGES FOR ROLE nous_admin IN SCHEMA scoring GRANT SELECT ON T
 --    list with that constant), and nothing else in the application schemas.
 REVOKE ALL ON ALL TABLES IN SCHEMA brain, heart, nous_system FROM nous_scorer CASCADE;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA brain, heart, nous_system FROM nous_scorer CASCADE;
-REVOKE ALL ON ALL FUNCTIONS IN SCHEMA brain, heart, nous_system FROM nous_scorer CASCADE;
+REVOKE ALL ON ALL ROUTINES IN SCHEMA brain, heart, nous_system FROM nous_scorer CASCADE;
 -- PUBLIC's default EXECUTE would let the scorer run any function in these schemas: take it from the existing ones,
 -- and from those nous_app creates later (globally: a per-schema REVOKE of a built-in default changes nothing).
-REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA brain, heart, nous_system FROM PUBLIC;
+REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA brain, heart, nous_system FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE nous_app REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 GRANT USAGE ON SCHEMA brain, heart, nous_system TO nous_scorer;
 -- source tables begin
