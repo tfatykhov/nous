@@ -22,6 +22,7 @@
   import Identity from './views/Identity.svelte';
   import Harness from './views/Harness.svelte';
   import Intentions from './views/Intentions.svelte';
+  import Autonomy from './views/Autonomy.svelte';
   import { usePoll } from '$lib/poll';
   import { attentionPoll, attentionCounts } from '$lib/stores/attention';
 
@@ -213,6 +214,8 @@
     <Harness />
   {:else if $currentRoute === 'intentions'}
     <Intentions />
+  {:else if $currentRoute === 'autonomy'}
+    <Autonomy />
   {/if}
 </main>
 

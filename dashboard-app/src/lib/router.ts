@@ -3,7 +3,7 @@ import { writable } from 'svelte/store';
 export const ROUTES = [
   'overview','graph','browser','decisions','activity','heartbeat','observability',
   'health','admission','rubric','execution','cache','density','consolidation','dag','subtasks',
-  'identity','retrieval','harness','intentions',
+  'identity','retrieval','harness','intentions','autonomy',
 ] as const;
 export type RouteName = typeof ROUTES[number];
 

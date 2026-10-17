@@ -1602,3 +1602,79 @@ export interface IntentionMetrics {
 export interface IntentionsData {
   continuation: boolean; window?: string; roots: IntentionRoot[]; metrics: IntentionMetrics | null;
 }
+
+// ── /dashboard/autonomy (task scores, the owner's attention, autonomy inventory) ──
+
+export interface ScoreStats {
+  count: number;
+  mean: number | null;
+  p10: number | null;
+  p50: number | null;
+  p90: number | null;
+  overrides: number;
+}
+
+export interface VerifiedShare { scored: number; verified: number; share: number | null }
+
+export interface Penalties { harness_errors: number; refusals: number; unverified_claims: number }
+
+export interface InventoryTool {
+  tool_name: string;
+  total: number;
+  by_status: { success: number; error: number; blocked: number; other: number };
+  /** Over the successes only. */
+  by_context: { owner_present: number; approved: number; autonomous: number };
+  side_effects: Record<string, number>;
+  compensable: boolean;
+  de_facto_level: 'L0' | 'acts_without_asking';
+}
+
+export interface AutonomyData {
+  window_days: number;
+  taps: { total: number; by_action: { action_name: string; count: number }[] };
+  triage_taps: { heartbeat: number; decision: number };
+  approval_cards_asked: number;
+  decision_grades: { reviewer: string; outcome: string | null; count: number }[];
+  task_scores: {
+    scorer_version: number;
+    first_scored_at: string | null;
+    last_scored_at: string | null;
+    /** The heartbeat the scoring command writes after every pass; null before its first pass. */
+    scorer: {
+      scorer_version: number;
+      last_run_at: string;
+      last_status: string;
+      last_error: string | null;
+      last_ok_at: string | null;
+      rows_submitted: number | null;
+    } | null;
+    headline: {
+      verified_share: { provisional: VerifiedShare; settled: VerifiedShare };
+      owner_overrides: { total: number; subtasks: number; rollups: number };
+      harness_penalties: Penalties;
+    };
+    subtasks: {
+      /** null before the scorer's first run. */
+      finished: number | null;
+      covered: number | null;
+      coverage: number | null;
+      by_outcome: Record<string, number>;
+      provisional: ScoreStats;
+      settled: ScoreStats;
+    };
+    rollups: Record<string, {
+      count: number;
+      by_outcome: Record<string, number>;
+      own_penalties: Penalties & { owner_overrides: number };
+    }>;
+  };
+  /** Always the last 30 days, whatever `window_days` is. */
+  inventory: {
+    days: number;
+    tools: InventoryTool[];
+    censors: { days: number; by_provenance: Record<string, { created: number; deactivated: number }> };
+  };
+  events_persisted: boolean;
+  /** Empty when events_persisted is false: not measured, not "no warnings". At most 50. */
+  warn_classes: { mode: string; context_kind: string; violation: string; tool_name: string; count: number }[];
+}
