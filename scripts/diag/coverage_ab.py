@@ -10,7 +10,7 @@ cap is now candidate_facts_stable_limit (15) when broadened, which exceeds the
 measured ~5.4 facts/ep — so every extracted fact survives to storage. If the
 broadened output ever exceeds 15/ep, re-check against the stored set.
 
-    PROD_PW=... NOUS_BACKGROUND_MODEL=claude-sonnet-4-6 \\
+    PROD_HOST=... PROD_PW=... NOUS_BACKGROUND_MODEL=claude-sonnet-4-6 \\
     PYTHONPATH=. uv run python scripts/diag/coverage_ab.py [N]
 """
 
@@ -28,7 +28,7 @@ from nous.handlers.episode_summarizer import EpisodeSummarizer
 from scripts.diag.coverage_audit import _PROMPT, _parse
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-PROD = dict(host=os.environ.get("PROD_HOST", "192.168.1.141"), port=5432,
+PROD = dict(host=os.environ["PROD_HOST"], port=5432,
             user=os.environ.get("PROD_DB_USER", "nous_app"), password=os.environ["PROD_PW"], database="nous")
 AGENT = "nous-default"
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 10

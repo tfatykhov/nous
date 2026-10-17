@@ -6,7 +6,7 @@ event_dates + source_episode, so we can eyeball whether:
   (b) the two chained facts are narratively related (vs arbitrary co-episode dated facts).
 
 Run:
-    PROD_PW=... PYTHONPATH=. uv run python scripts/diag/probe_happened_before.py
+    PROD_HOST=... PROD_PW=... PYTHONPATH=. uv run python scripts/diag/probe_happened_before.py
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import asyncpg
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-PROD = dict(host=os.environ.get("PROD_HOST", "192.168.1.141"), port=5432,
+PROD = dict(host=os.environ["PROD_HOST"], port=5432,
             user=os.environ.get("PROD_DB_USER", "nous_app"), password=os.environ["PROD_PW"], database="nous")
 AGENT = "nous-default"
 

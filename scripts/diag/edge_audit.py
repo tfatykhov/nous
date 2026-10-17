@@ -2,7 +2,7 @@
 plus node-type totals, to investigate low/missing edge classes (esp. contradicts).
 
 Run:
-    PROD_PW=... PYTHONPATH=. uv run python scripts/diag/edge_audit.py
+    PROD_HOST=... PROD_PW=... PYTHONPATH=. uv run python scripts/diag/edge_audit.py
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import os
 
 import asyncpg
 
-PROD = dict(host=os.environ.get("PROD_HOST", "192.168.1.141"), port=5432,
+PROD = dict(host=os.environ["PROD_HOST"], port=5432,
             user=os.environ.get("PROD_DB_USER", "nous_app"), password=os.environ["PROD_PW"], database="nous")
 AGENT = "nous-default"
 
