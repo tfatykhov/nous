@@ -221,6 +221,10 @@ ALTER DEFAULT PRIVILEGES FOR ROLE nous_admin IN SCHEMA scoring GRANT SELECT ON T
 REVOKE ALL ON ALL TABLES IN SCHEMA brain, heart, nous_system FROM nous_scorer CASCADE;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA brain, heart, nous_system FROM nous_scorer CASCADE;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA brain, heart, nous_system FROM nous_scorer CASCADE;
+-- PUBLIC's default EXECUTE would let the scorer run any function in these schemas: take it from the existing ones,
+-- and from those nous_app creates later (globally: a per-schema REVOKE of a built-in default changes nothing).
+REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA brain, heart, nous_system FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE nous_app REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 GRANT USAGE ON SCHEMA brain, heart, nous_system TO nous_scorer;
 -- source tables begin
 GRANT SELECT ON brain.decisions TO nous_scorer;
