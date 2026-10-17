@@ -93,7 +93,7 @@ DO $$ BEGIN PERFORM pg_reload_conf(); PERFORM pg_sleep(1); END $$;
 -- nous_admin gets no password and the run commits before verify runs, so pg_hba.conf must already keep every
 -- network login beyond loopback on scram-sha-256 or reject. verify_db_roles.sql checks the same conditions.
 SELECT NOT EXISTS (SELECT 1 FROM pg_hba_file_rules WHERE error IS NOT NULL)
-       AND NOT EXISTS (SELECT 1 FROM pg_hba_file_rules r WHERE r.error IS NULL AND r.type <> 'local' AND NOT (r.address IN ('127.0.0.1', '::1', 'localhost')) AND r.auth_method NOT IN ('scram-sha-256', 'reject')) AS hba_ok \gset
+       AND NOT EXISTS (SELECT 1 FROM pg_hba_file_rules r WHERE r.error IS NULL AND r.type <> 'local' AND NOT ((r.address = '127.0.0.1' AND r.netmask = '255.255.255.255') OR (r.address = '::1' AND r.netmask = 'ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff') OR (r.address = 'localhost' AND r.netmask IS NULL)) AND r.auth_method NOT IN ('scram-sha-256', 'reject')) AS hba_ok \gset
 \if :hba_ok
 \else
     DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: pg_hba.conf has a line that does not parse or lets a network login in without scram-sha-256; fix it, reload (select pg_reload_conf()), then run this script'; END $$;
