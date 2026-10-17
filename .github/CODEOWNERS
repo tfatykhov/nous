@@ -5,6 +5,9 @@
 # rooted paths with * (within one segment) and a trailing /** or / for everything below a directory,
 # each with one owner. tests/test_protected_paths.py fails when a pattern is outside that subset,
 # names a directory without the trailing /** or matches no tracked file.
+# Other code that writes the rows the scorer reads (DAG orchestration, the runner, the heartbeat) is not
+# listed: it changes with most features, and the scores are a signal reviewed by the owner, not a
+# tamper-proof control.
 
 # The scorer, its tests, the page that reports it, the ORM models that define how scores and heartbeats are
 # stored, and the migrations (they create its tables and run as the application role, which owns the tables the
@@ -25,6 +28,11 @@
 /nous/cognitive/execution_ledger.py @tfatykhov
 /nous/cognitive/claim_verifier.py @tfatykhov
 /nous/api/execution_context.py @tfatykhov
+
+# The owner's own signals the scorer trusts: grades, decisions on proposals, undo
+/nous/a2ui/actions.py @tfatykhov
+/nous/owner_actions.py @tfatykhov
+/nous/api/compensation.py @tfatykhov
 
 # Evaluation sets, their loaders and generators
 /nous_eval/** @tfatykhov

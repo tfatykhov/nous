@@ -156,6 +156,20 @@ def test_every_module_the_scorer_imports_is_code_owned_or_exempt_with_a_reason()
     assert not stale, f"SCORER_IMPORT_EXEMPT names modules the scorer no longer imports: {stale}"
 
 
+def test_every_module_that_records_an_owner_grade_is_code_owned():
+    # the gatherer trusts reviews with reviewer "a2ui" as the owner's own grade
+    patterns = pp.parse_codeowners((ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8-sig"))
+    producers = sorted(
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "nous").rglob("*.py")
+        if "tests" not in path.relative_to(ROOT).parts
+        and ('reviewer="a2ui"' in (text := path.read_text(encoding="utf-8")) or "reviewer='a2ui'" in text)
+    )
+    assert producers, "no module records an owner grade any more: update this test"
+    unowned = [path for path in producers if not pp.protected([path], patterns)]
+    assert not unowned, f"modules that record owner grades and have no code owner: {unowned}"
+
+
 # -- a throwaway repository ---------------------------------------------------------------------------------
 
 
