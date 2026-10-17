@@ -8,6 +8,7 @@ the application reads), optionally from another directory or only up to a versio
 
 CI uses it to run new migrations under the application role. Prints the migrations applied; exits 1 on a
 failure, with the database error on stderr.
+A local run needs PYTHONPATH=. (CI installs the package with pip install -e).
 """
 
 from __future__ import annotations
