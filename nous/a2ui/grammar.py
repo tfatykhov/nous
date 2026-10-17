@@ -112,6 +112,33 @@ def _children_of(component: dict) -> list[str]:
     return ids
 
 
+# List-valued props whose renderer resolves a {path} on each ITEM, so a nested
+# binding there is correct. Every other literal array (KeyValueTable/DataTable/
+# DeltaList rows, DataTable columns, Timeline/ChipRow/ScoreCard items,
+# LineChart series, ...) is resolved ONCE as a whole and each cell printed with
+# toDisplayString — a nested binding renders as the raw JSON `{"path":"price"}`.
+#   - Tabs.tabs: TabsView resolves each tab's title.
+#   - Button.checks: runChecks resolves each condition (and its args).
+# Child keys are skipped too: they hold id refs or a repeat template.
+_PER_ITEM_RESOLVED = frozenset({("Tabs", "tabs"), ("Button", "checks")})
+
+
+def _nested_bindings(value: Any, where: str) -> list[str]:
+    """Locations of every {path} binding nested inside a literal list/dict.
+
+    Mirrors the renderer's isDataBinding: a dict with a string `path` that is
+    not a function call ({call, args} resolves its own args). Type-guarded
+    throughout — lint runs before schema validation and must never raise.
+    """
+    if isinstance(value, dict):
+        if isinstance(value.get("path"), str) and "call" not in value:
+            return [where]
+        return [loc for k, v in value.items() for loc in _nested_bindings(v, f"{where}.{k}")]
+    if isinstance(value, list):
+        return [loc for i, v in enumerate(value) for loc in _nested_bindings(v, f"{where}[{i}]")]
+    return []
+
+
 def _template_children(component: dict) -> list[dict]:
     """The `{componentId, path}` template children of a component (F093 §6.2)."""
     out = []
@@ -201,6 +228,26 @@ def lint_micro_app(
                     "strings; define each child as its own component and "
                     "reference it by id"
                 )
+        # Prod 2026-09-05 / 2026-10-17: `rows: [{key, value: {path}}]` passed
+        # every gate and shipped cells reading `{"path":"price"}`.
+        for prop, value in comp.items():
+            if not isinstance(value, list) or prop in _CHILD_KEYS:
+                continue
+            if (ctype, prop) in _PER_ITEM_RESOLVED:
+                continue
+            for i, item in enumerate(value):
+                fields = (
+                    "{" + ", ".join(k for k in item if isinstance(k, str)) + "}"
+                    if isinstance(item, dict)
+                    else "field"
+                )
+                for loc in _nested_bindings(item, f"{comp.get('id')}.{prop}[{i}]"):
+                    errors.append(
+                        f"{loc} is a {{path}} binding inside a literal array — this "
+                        "renders as raw JSON. Bind the whole prop instead "
+                        f"({prop}: {{path: '<list>'}}) to a source whose records "
+                        f"already have the final {fields} strings"
+                    )
         if ctype == "Section":
             title = comp.get("title")
             if not isinstance(title, str) or not title.strip():

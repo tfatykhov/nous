@@ -1795,3 +1795,99 @@ async def test_heartbeat_findings_not_ingested_when_push_is_blocked() -> None:
     assert is_error
     assert store.to_list() == [], "finding must not enter the store when the push is blocked"
     assert not service.pushed
+
+
+# ---------------------------------------------------------------------------
+# Nested {path} bindings inside literal array props (prod 2026-09-05 trader,
+# 2026-10-17 gridbot): the renderer resolves the array prop ONCE and prints
+# each cell with toDisplayString, so a per-item binding renders as raw JSON.
+# ---------------------------------------------------------------------------
+
+
+def _with_kv(kv: dict) -> list[dict]:
+    comps = _valid_components()
+    return [kv if c["id"] == "kv" else c for c in comps]
+
+
+def test_grammar_rejects_path_binding_nested_in_keyvaluetable_rows() -> None:
+    comps = _with_kv(
+        {
+            "id": "kv",
+            "component": "KeyValueTable",
+            "rows": [
+                {"key": "Live price", "value": {"path": "price"}},
+                {"key": "Grid", "value": "12 levels"},
+            ],
+        }
+    )
+
+    errors = [e for e in lint_micro_app(comps) if "inside a literal array" in e]
+
+    assert len(errors) == 1
+    assert errors[0].startswith("kv.rows[0].value is a {path} binding inside a literal array")
+    assert "rows: {path: '<list>'}" in errors[0]
+
+
+def test_grammar_accepts_rows_bound_as_one_path_and_all_literal_rows() -> None:
+    bound = _with_kv({"id": "kv", "component": "KeyValueTable", "rows": {"path": "/trip/flights"}})
+    literal = _with_kv(
+        {"id": "kv", "component": "KeyValueTable", "rows": [{"key": "Grid", "value": "12 levels"}]}
+    )
+
+    assert lint_micro_app(bound) == []
+    assert lint_micro_app(literal) == []
+
+
+def test_grammar_rejects_nested_bindings_in_other_literal_array_props() -> None:
+    comps = _with_kv(
+        {
+            "id": "kv",
+            "component": "DataTable",
+            "columns": [{"key": "coin", "label": {"path": "/labels/coin"}}],
+            "rows": [{"coin": {"path": "coin"}}, [{"path": "deep"}]],
+        }
+    )
+
+    errors = [e for e in lint_micro_app(comps) if "inside a literal array" in e]
+
+    assert sorted(e.split(" ", 1)[0] for e in errors) == [
+        "kv.columns[0].label",
+        "kv.rows[0].coin",
+        "kv.rows[1][0]",
+    ]
+
+
+def test_grammar_exempts_props_whose_items_the_renderer_resolves() -> None:
+    """TabsView resolves each tab title; Button.checks go through runChecks."""
+    comps = _valid_components()
+    comps[4] = {"id": "sec1", "component": "Section", "title": "Flights", "child": "tabs"}
+    comps += [
+        {
+            "id": "tabs",
+            "component": "Tabs",
+            "tabs": [
+                {"title": {"path": "/trip/leg1"}, "child": "kv"},
+                {"title": "Return", "child": "btn"},
+            ],
+        },
+        {
+            "id": "btn",
+            "component": "Button",
+            "child": "btn-label",
+            "action": {"event": {"name": "noop"}},
+            "checks": [
+                {"condition": {"call": "required", "args": {"value": {"path": "/trip/leg1"}}}}
+            ],
+        },
+        {"id": "btn-label", "component": "Text", "text": "Go"},
+    ]
+
+    assert [e for e in lint_micro_app(comps) if "inside a literal array" in e] == []
+
+
+def test_build_prompt_warns_against_nested_bindings_in_table_rows(composer: SurfaceComposer) -> None:
+    prompt = composer._build_prompt("show my grid bot", None, {})
+
+    for name in ("KeyValueTable", "DataTable"):
+        lines = [ln for ln in prompt.splitlines() if ln.startswith(f"- {name}: ")]
+        assert any("inside a literal" in ln and "raw JSON" in ln for ln in lines)

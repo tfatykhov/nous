@@ -212,7 +212,9 @@ _COMPONENT_USAGE: dict[str, str] = {
     "DataTable": (
         "a real table: columns = literal [{key, label, align?: start|end, "
         "secondary?}] (1-6), rows = path to record objects; align end for "
-        "numbers/dates, secondary for a supporting column."
+        "numbers/dates, secondary for a supporting column. Never put a "
+        "{\"path\": …} inside a literal rows/columns array — it renders as "
+        "raw JSON."
     ),
     "ChipRow": (
         "labelled status chips (data freshness, lane health): items = "
@@ -224,7 +226,10 @@ _COMPONENT_USAGE: dict[str, str] = {
     ),
     "KeyValueTable": (
         "attribute pairs for ONE thing (ledger per-item detail); "
-        "rows = [{key, value}]."
+        "rows = {\"path\": \"<list>\"} bound to records whose key and value "
+        "are already final strings, or a fully literal [{key, value}]. Never "
+        "a {\"path\": …} inside a literal rows array (value: {\"path\": "
+        "\"price\"}) — it renders as raw JSON."
     ),
     "List": (
         "light repeated children when a table is too heavy; "
