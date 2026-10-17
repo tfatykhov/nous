@@ -132,3 +132,15 @@ def test_public_cannot_execute_application_functions_now_or_later():
     assert "ALTER DEFAULT PRIVILEGES FOR ROLE nous_app REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;" in ROLES
     assert "('no function in brain, heart or nous_system is executable by the scorer', 'nous_admin'," in VERIFY
     assert "('functions the application role creates are not executable by PUBLIC by default', 'nous_admin'," in VERIFY
+
+
+def test_column_privileges_are_revoked_before_the_grants_and_verified():
+    # pg_attribute.attacl is separate from the table's ACL: a column grant to PUBLIC in the application schemas,
+    # where the table-level revokes name only the scorer, would survive them
+    first_grant = ROLES.index("GRANT USAGE ON SCHEMA scoring")
+    for revoke in (
+        "REVOKE ALL (%I) ON %s FROM PUBLIC, nous_app, nous_scorer CASCADE",
+        "REVOKE ALL (%I) ON %s FROM PUBLIC, nous_scorer CASCADE",
+    ):
+        assert -1 < ROLES.find(revoke) < first_grant, revoke
+    assert "('no column-level privilege reaches past the table-level grants', 'nous_admin'," in VERIFY

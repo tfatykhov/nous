@@ -144,6 +144,8 @@ BEGIN
             'SELECT NOT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname IN (''brain'', ''heart'', ''nous_system'') AND has_function_privilege(''nous_scorer'', p.oid, ''EXECUTE''))', 'true', NULL),
         ('functions the application role creates are not executable by PUBLIC by default', 'nous_admin',
             'SELECT EXISTS (SELECT 1 FROM pg_default_acl d WHERE d.defaclrole = ''nous_app''::regrole AND d.defaclnamespace = 0 AND d.defaclobjtype = ''f'' AND NOT EXISTS (SELECT 1 FROM aclexplode(d.defaclacl) a WHERE a.grantee = 0))', 'true', NULL),
+        ('no column-level privilege reaches past the table-level grants', 'nous_admin',
+            'SELECT NOT EXISTS (SELECT 1 FROM pg_attribute a JOIN pg_class r ON r.oid = a.attrelid JOIN pg_namespace n ON n.oid = r.relnamespace CROSS JOIN LATERAL aclexplode(a.attacl) x WHERE a.attnum > 0 AND NOT a.attisdropped AND ((n.nspname = ''scoring'' AND x.grantee IN (0, ''nous_app''::regrole, ''nous_scorer''::regrole)) OR (n.nspname IN (''brain'', ''heart'', ''nous_system'') AND x.grantee IN (0, ''nous_scorer''::regrole))))', 'true', NULL),
         ('scorer search_path and row_security are pinned', 'nous_admin',
             'SELECT EXISTS (SELECT 1 FROM pg_db_role_setting s WHERE s.setrole = (SELECT oid FROM pg_roles WHERE rolname = ''nous_scorer'') AND s.setdatabase = 0 AND ''search_path=pg_catalog, scoring'' = ANY (s.setconfig) AND ''row_security=off'' = ANY (s.setconfig))', 'true', NULL),
         ('pg_hba: every line of pg_hba.conf parses (with a broken line the server keeps rules this check cannot see)', 'nous_admin',

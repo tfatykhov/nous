@@ -213,6 +213,30 @@ REVOKE ALL ON SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer CASCADE;
 REVOKE ALL ON ALL TABLES IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer CASCADE;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer CASCADE;
 REVOKE ALL ON ALL ROUTINES IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer CASCADE;
+-- Column privileges (pg_attribute.attacl) sit apart from a table's ACL. A table-level REVOKE also takes back the
+-- same grantee's column privileges, but in brain, heart and nous_system the table-level revokes name only the
+-- scorer, so a column grant to PUBLIC there would survive them. Take back every column privilege of PUBLIC, the
+-- application and the scorer in scoring, and of PUBLIC and the scorer in the application schemas (the application
+-- owns those tables; its own grants stay). The table-level grants below then set what each role may do.
+DO $columns$
+DECLARE
+    c record;
+BEGIN
+    FOR c IN
+        SELECT a.attrelid::regclass AS rel, a.attname, n.nspname
+          FROM pg_attribute a JOIN pg_class r ON r.oid = a.attrelid JOIN pg_namespace n ON n.oid = r.relnamespace
+         WHERE a.attacl IS NOT NULL AND a.attnum > 0 AND NOT a.attisdropped
+           AND n.nspname IN ('scoring', 'brain', 'heart', 'nous_system')
+         ORDER BY 1, 2
+    LOOP
+        IF c.nspname = 'scoring' THEN
+            EXECUTE format('REVOKE ALL (%I) ON %s FROM PUBLIC, nous_app, nous_scorer CASCADE', c.attname, c.rel);
+        ELSE
+            EXECUTE format('REVOKE ALL (%I) ON %s FROM PUBLIC, nous_scorer CASCADE', c.attname, c.rel);
+        END IF;
+    END LOOP;
+END
+$columns$;
 GRANT USAGE ON SCHEMA scoring TO nous_app, nous_scorer;
 GRANT SELECT ON ALL TABLES IN SCHEMA scoring TO nous_app;
 -- (the ownership loop of section 3 and the line above cover every table in scoring, so both are owned by
