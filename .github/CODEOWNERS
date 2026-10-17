@@ -1,0 +1,44 @@
+# Paths that change what the reward measures, what the agent may do, or how a change reaches main.
+# A change here needs the owner (the ruleset on main requires code-owner review), and the
+# "Protected paths" check fails a pull request made under the agent's identity that touches one.
+# This file is read by scripts/ci/protected_paths.py as well as by GitHub, so patterns are limited to
+# rooted paths with * (within one segment) and ** (across segments). tests/test_protected_paths.py
+# fails when a pattern is outside that subset or matches no tracked file.
+
+# The scorer, its tables, its tests and the page that reports it
+/nous/observability/task_scoring.py @tfatykhov
+/nous/observability/task_score_gatherer.py @tfatykhov
+/nous/observability/task_score_job.py @tfatykhov
+/nous/api/autonomy_dashboard.py @tfatykhov
+/sql/migrations/087_task_scores.sql @tfatykhov
+/sql/migrations/088_scorer_heartbeat.sql @tfatykhov
+/tests/test_task_scor*.py @tfatykhov
+/tests/test_scorer_heartbeat_migration.py @tfatykhov
+
+# The evidence the scorer reads from the harness
+/nous/cognitive/ledger_store.py @tfatykhov
+/nous/cognitive/execution_ledger.py @tfatykhov
+
+# Evaluation sets, their loaders and generators
+/nous_eval/** @tfatykhov
+/tests/eval/** @tfatykhov
+/tests/fixtures/eval_*.jsonl @tfatykhov
+/scripts/eval/** @tfatykhov
+
+# What the agent may do
+/nous/api/tool_policy.py @tfatykhov
+/nous/api/tool_classes.py @tfatykhov
+/nous/cognitive/action_gate.py @tfatykhov
+/nous/cognitive/bash_side_effect.py @tfatykhov
+
+# Identity and values
+/nous/identity/** @tfatykhov
+/sql/seed.sql @tfatykhov
+
+# How a change reaches main and the deployment
+/.github/** @tfatykhov
+/scripts/ci/** @tfatykhov
+/tests/fixtures/migration_probe/** @tfatykhov
+/scripts/ops/** @tfatykhov
+/docker-compose.yml @tfatykhov
+/Dockerfile @tfatykhov
