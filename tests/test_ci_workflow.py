@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
 WORKFLOWS = Path(__file__).resolve().parent.parent / ".github" / "workflows"
+RULESET = Path(__file__).resolve().parent.parent / "scripts" / "ops" / "main-ruleset.json"
+GITHUB_ACTIONS_APP_ID = 15368
 
 
 def _step(name: str) -> str:
@@ -65,3 +68,29 @@ def test_the_roles_are_checked_again_after_the_later_migrations() -> None:
     assert later < again, "the second check must run after the later migrations"
     step = _step("Check the database roles again after the later migrations")
     assert "psql -U nous_admin -d nous" in step and "-f - < scripts/ops/verify_db_roles.sql" in step, step
+
+
+def _jobs_running_on_every_pull_request() -> set[str]:
+    """Names of the jobs whose workflow runs on every pull request: no path filter and no job-level ``if:``."""
+    names = set()
+    for workflow in sorted(WORKFLOWS.glob("*.yml")):
+        text = workflow.read_text()
+        on = re.search(r"^on:\n(.*?)^\S", text, re.M | re.S).group(1)
+        if not re.search(r"^  pull_request(_target)?:", on, re.M) or "paths" in on:
+            continue
+        for body in re.split(r"^  [\w-]+:[ \t]*\n", text.split("\njobs:\n", 1)[1], flags=re.M)[1:]:
+            name = re.search(r"^    name: (.+)$", body, re.M)
+            if name and not re.search(r"^    if:", body, re.M):
+                names.add(name.group(1).strip().strip("\"'"))
+    return names
+
+
+def test_every_required_check_runs_on_every_pull_request_and_comes_from_actions() -> None:
+    # A required check that skips some pull request (a path filter, a job-level if:) leaves it waiting forever; one
+    # not pinned to GitHub Actions is satisfied by a commit status of the same name posted by any Write account.
+    names = _jobs_running_on_every_pull_request()
+    assert "Tests" in names and ":core (JVM)" not in names, names  # the reader tells the two kinds apart
+    rules = json.loads(RULESET.read_text())["rules"]
+    checks = next(r for r in rules if r["type"] == "required_status_checks")["parameters"]["required_status_checks"]
+    assert {c["context"] for c in checks} <= names, checks
+    assert all(c.get("integration_id") == GITHUB_ACTIONS_APP_ID for c in checks), checks
