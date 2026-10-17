@@ -1,7 +1,8 @@
 -- scripts/ops/verify_db_roles.sql
 --
--- Checks the roles that scripts/ops/db_roles.sql sets up. Read-only in effect: everything runs in one
--- transaction that is rolled back, so a statement that unexpectedly succeeds changes nothing.
+-- Checks the roles that scripts/ops/db_roles.sql sets up. It first reloads the server's configuration (below);
+-- apart from that it is read-only in effect: the checks run in one transaction that is rolled back, so a
+-- statement that unexpectedly succeeds changes nothing.
 --
 --   docker exec -i nous-postgres psql -U nous_admin -d nous -X -v ON_ERROR_STOP=1 -f - < scripts/ops/verify_db_roles.sql
 --
@@ -12,9 +13,10 @@
 -- That holds only while pg_hba.conf lets nothing but the local socket and loopback in without a password:
 -- every network line beyond loopback, whichever users it names, must use scram-sha-256 (a role with no
 -- password cannot pass it) or reject, and no line beyond loopback may use trust, md5 or password. The pg_hba
--- checks below read pg_hba_file_rules (the file as it is on disk, which the server applies at the next
--- reload) and fail when that changes. That nous_admin can log in through the local socket is shown by this script
--- itself: it runs as nous_admin through docker exec.
+-- checks below read pg_hba_file_rules, which shows the file on disk; this script reloads the configuration and
+-- waits until it has taken effect before it reads it, so the rules it audits are the ones the server enforces.
+-- That nous_admin can log in through the local socket is shown by this script itself: it runs as nous_admin
+-- through docker exec.
 
 \set ON_ERROR_STOP on
 \set VERBOSITY terse
@@ -23,6 +25,29 @@ SELECT current_setting('is_superuser') = 'on' AS is_super \gset
 \if :is_super
 \else
     DO $$ BEGIN RAISE EXCEPTION 'verify_db_roles: connect as nous_admin'; END $$;
+\endif
+
+-- Reload, as db_roles.sql does: pg_reload_conf() only signals the postmaster, which re-reads the files and then
+-- signals every session. This session takes the new configuration at the start of its next top-level command
+-- after that signal, and only then does its pg_conf_load_time() advance; within one command it never does. So the
+-- reload, the wait and each look at pg_conf_load_time() are separate top-level commands.
+SELECT pg_conf_load_time() AS conf_t0 \gset
+DO $$
+BEGIN
+    IF NOT pg_reload_conf() THEN
+        RAISE EXCEPTION 'verify_db_roles: the server did not accept the configuration reload (pg_reload_conf returned false); fix that, then run verify again';
+    END IF;
+END $$;
+DO $$ BEGIN PERFORM pg_sleep(1); END $$;
+SELECT pg_conf_load_time() > :'conf_t0'::timestamptz AS conf_reloaded \gset
+\if :conf_reloaded
+\else
+    DO $$ BEGIN PERFORM pg_sleep(4); END $$;
+    SELECT pg_conf_load_time() > :'conf_t0'::timestamptz AS conf_reloaded \gset
+    \if :conf_reloaded
+    \else
+        DO $$ BEGIN RAISE EXCEPTION 'verify_db_roles: the server has not finished reloading its configuration; run verify again'; END $$;
+    \endif
 \endif
 
 SELECT to_regclass('scoring.task_scores') IS NOT NULL

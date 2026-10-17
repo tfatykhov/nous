@@ -8,6 +8,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 from nous.observability.task_score_job import HEARTBEAT_TABLE, SCORE_TABLE, SOURCE_TABLES
 
 OPS = Path(__file__).resolve().parents[1] / "scripts" / "ops"
@@ -166,18 +168,23 @@ def test_a_refused_reload_stops_the_run():
     assert reload < refusal < ROLES.index("FROM pg_hba_file_rules")
 
 
-def test_the_run_waits_until_this_session_has_reloaded_the_configuration():
+@pytest.mark.parametrize(
+    ("script", "name"), [(ROLES, "db_roles.sql"), (VERIFY, "verify_db_roles")], ids=["db_roles", "verify"]
+)
+def test_the_run_waits_until_this_session_has_reloaded_the_configuration(script, name):
     # pg_reload_conf() only signals; this session takes the new configuration at the start of a later top-level
-    # command, and pg_conf_load_time() then advances
-    t0 = ROLES.index("SELECT pg_conf_load_time() AS conf_t0 \\gset")
-    reload = ROLES.index("IF NOT pg_reload_conf() THEN")
-    block = ROLES[reload : ROLES.index("END $$;", reload)]
+    # command, and pg_conf_load_time() then advances. Both scripts reload before they read pg_hba_file_rules, so
+    # the rules they audit are the ones the server enforces.
+    t0 = script.index("SELECT pg_conf_load_time() AS conf_t0 \\gset")
+    reload = script.index("IF NOT pg_reload_conf() THEN")
+    block = script[reload : script.index("END $$;", reload)]
     assert "pg_sleep" not in block, block
+    assert f"RAISE EXCEPTION '{name}: the server did not accept the configuration reload" in block, block
     check = "SELECT pg_conf_load_time() > :'conf_t0'::timestamptz AS conf_reloaded \\gset"
-    first = ROLES.index(check)
-    second = ROLES.index(check, first + 1)
-    refusal = ROLES.index("RAISE EXCEPTION 'db_roles.sql: the server has not finished reloading its configuration")
-    assert t0 < reload < first < second < refusal < ROLES.index("FROM pg_hba_file_rules")
+    first = script.index(check)
+    second = script.index(check, first + 1)
+    refusal = script.index(f"RAISE EXCEPTION '{name}: the server has not finished reloading its configuration")
+    assert t0 < reload < first < second < refusal < script.index("FROM pg_hba_file_rules")
 
 
 def test_the_rollback_stores_a_scram_verifier():
