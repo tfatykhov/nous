@@ -139,6 +139,16 @@ SELECT NOT EXISTS (SELECT 1 FROM pg_hba_file_rules WHERE error IS NOT NULL)
     DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: pg_hba.conf has a line that does not parse or lets a network login in without scram-sha-256; fix it, reload (select pg_reload_conf()), then run this script'; END $$;
 \endif
 
+-- The application and the scorer log in over the network with a password, so some network line beyond loopback
+-- must use scram-sha-256. This is a necessary condition only: rule order and selectors are not predicted. The
+-- runbook's start-and-check steps find a service that cannot log in, and the rollback, which needs only the local
+-- socket, undoes the run. verify_db_roles.sql checks the same condition.
+SELECT EXISTS (SELECT 1 FROM pg_hba_file_rules r WHERE r.error IS NULL AND r.type <> 'local' AND NOT ((r.address = '127.0.0.1' AND r.netmask = '255.255.255.255') OR (r.address = '::1' AND r.netmask = 'ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff') OR (r.address = 'localhost' AND r.netmask IS NULL)) AND r.auth_method = 'scram-sha-256') AS hba_password_path \gset
+\if :hba_password_path
+\else
+    DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: pg_hba.conf has no network line that accepts a password login (scram-sha-256); the application and the scorer connect over the network; fix it, reload, then run this script'; END $$;
+\endif
+
 -- Prove that nous_admin can log in before the bootstrap role is locked. pg_hba_file_rules drops the quoting of
 -- selectors ("all" and all, "+nous_admin" and +nous_admin read the same), so the test is a real login, not a
 -- prediction. \connect - keeps the database, host and port, so it takes this session's path: the local socket
@@ -171,6 +181,27 @@ $roles$;
 
 ALTER ROLE nous_app WITH NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS LOGIN;
 ALTER ROLE nous_scorer WITH NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS LOGIN;
+-- A connection limit, an expiry or a setting left on a service role (default_transaction_read_only, say), for
+-- every database or for one, would stop the application or the scorer after the lock-out: clear them all. The
+-- scorer's two pinned settings are set again below.
+ALTER ROLE nous_app CONNECTION LIMIT -1 VALID UNTIL 'infinity';
+ALTER ROLE nous_scorer CONNECTION LIMIT -1 VALID UNTIL 'infinity';
+ALTER ROLE nous_app RESET ALL;
+ALTER ROLE nous_scorer RESET ALL;
+DO $settings$
+DECLARE
+    s record;
+BEGIN
+    FOR s IN
+        SELECT r.rolname, d.datname
+          FROM pg_db_role_setting x JOIN pg_roles r ON r.oid = x.setrole JOIN pg_database d ON d.oid = x.setdatabase
+         WHERE r.rolname IN ('nous_app', 'nous_scorer') AND x.setdatabase <> 0
+         ORDER BY 1, 2
+    LOOP
+        EXECUTE format('ALTER ROLE %I IN DATABASE %I RESET ALL', s.rolname, s.datname);
+    END LOOP;
+END
+$settings$;
 
 -- A new password is stored as a SCRAM verifier whatever the server's password_encryption.
 SET LOCAL password_encryption = 'scram-sha-256';
@@ -385,6 +416,11 @@ BEGIN
     SELECT string_agg(rolname, ', ') INTO bad FROM pg_authid
      WHERE rolname IN ('nous_app', 'nous_scorer') AND (rolpassword IS NULL OR rolpassword NOT LIKE 'SCRAM-SHA-256$%');
     IF bad IS NOT NULL THEN RAISE EXCEPTION 'password is not a SCRAM verifier: %', bad; END IF;
+
+    IF NOT (NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('nous_app', 'nous_scorer') AND (rolconnlimit <> -1 OR (rolvaliduntil IS NOT NULL AND rolvaliduntil <> 'infinity'))) AND NOT EXISTS (SELECT 1 FROM pg_db_role_setting s JOIN pg_roles r ON r.oid = s.setrole WHERE r.rolname = 'nous_app' OR (r.rolname = 'nous_scorer' AND NOT (s.setdatabase = 0 AND s.setconfig @> ARRAY['search_path=pg_catalog, scoring', 'row_security=off'] AND cardinality(s.setconfig) = 2)))) THEN
+        SELECT string_agg(rolname, ', ') INTO bad FROM pg_roles WHERE rolname IN ('nous_app', 'nous_scorer');
+        RAISE EXCEPTION 'login restriction or setting left on: %', bad;
+    END IF;
 
     SELECT string_agg(r.rolname || ' in ' || g.rolname, ', ') INTO bad
       FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.member JOIN pg_roles g ON g.oid = m.roleid

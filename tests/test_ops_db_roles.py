@@ -110,12 +110,17 @@ def test_the_script_refuses_to_run_while_pg_hba_lets_a_network_login_in_without_
     )
     verify_sql = VERIFY.replace("''", "'")
     assert "r.address IN (" not in ROLES and "r.address IN (" not in verify_sql
-    assert verify_sql.count(f"NOT {loopback}") == 2  # the trust/md5/password check and the network check
+    # the trust/md5/password check, the network check and the password-path check
+    assert verify_sql.count(f"NOT {loopback}") == 3
+    # the services log in over the network: a run needs at least one password path there
+    path_refusal = ROLES.index("RAISE EXCEPTION 'db_roles.sql: pg_hba.conf has no network line that accepts a password")
+    assert path_refusal < ROLES.index("CREATE ROLE nous_admin")
     # the same conditions as verify's pg_hba checks (whose SQL sits in a string, with its quotes doubled)
     for condition in (
         "FROM pg_hba_file_rules WHERE error IS NOT NULL",
         f"r.error IS NULL AND r.type <> 'local' AND NOT {loopback}"
         " AND r.auth_method NOT IN ('scram-sha-256', 'reject')",
+        f"r.error IS NULL AND r.type <> 'local' AND NOT {loopback} AND r.auth_method = 'scram-sha-256'",
     ):
         assert condition in ROLES[:begin], condition
         assert condition in verify_sql, condition
@@ -198,3 +203,17 @@ def test_the_service_roles_store_scram_verifiers_and_a_run_requires_them():
         assert -1 < ROLES.find(refusal) < begin, refusal
     assert "RAISE EXCEPTION 'password is not a SCRAM verifier: %'" in ROLES[ROLES.index("DO $post$") :]
     assert "('both service roles store a SCRAM verifier', 'nous_admin'," in VERIFY
+
+
+def test_inherited_login_restrictions_and_settings_are_reset_before_the_scorer_pins():
+    # a connection limit, an expiry or a setting such as default_transaction_read_only left on a service role
+    # would stop it after the lock-out
+    for role in ("nous_app", "nous_scorer"):
+        assert f"ALTER ROLE {role} CONNECTION LIMIT -1 VALID UNTIL 'infinity';" in ROLES, role
+    reset = ROLES.index("ALTER ROLE nous_scorer RESET ALL;")
+    assert "ALTER ROLE nous_app RESET ALL;" in ROLES
+    assert "IN DATABASE %I RESET ALL" in ROLES  # per-database settings of the two roles
+    assert reset < ROLES.index("ALTER ROLE nous_scorer SET search_path") < ROLES.index("ALTER ROLE nous_scorer SET row")
+    assert "RAISE EXCEPTION 'login restriction or setting left on: %'" in ROLES[ROLES.index("DO $post$") :]
+    label = "the service roles have no connection limit, expiry or setting but the scorer pins"
+    assert f"('{label}', 'nous_admin'," in VERIFY
