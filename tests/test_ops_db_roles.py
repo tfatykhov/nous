@@ -104,12 +104,13 @@ def test_the_script_refuses_to_run_while_pg_hba_lets_a_network_login_in_without_
     assert _statements(ROLES).count("\\connect") == 1
     # pg_hba_file_rules reads the file on disk: the server is made to enforce it before it is checked
     assert ROLES.index("pg_reload_conf()") < ROLES.index("FROM pg_hba_file_rules")
-    # loopback only with a host-length netmask: "127.0.0.1 0.0.0.0" has address 127.0.0.1 and matches every client
+    # loopback only with a host-length netmask: "127.0.0.1 0.0.0.0" has address 127.0.0.1 and matches every client;
+    # and only the numeric addresses: a host name such as localhost is matched by reverse and forward DNS
     loopback = (
         "((r.address = '127.0.0.1' AND r.netmask = '255.255.255.255')"
-        " OR (r.address = '::1' AND r.netmask = 'ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff')"
-        " OR (r.address = 'localhost' AND r.netmask IS NULL))"
+        " OR (r.address = '::1' AND r.netmask = 'ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff'))"
     )
+    assert "'localhost'" not in ROLES and "''localhost''" not in VERIFY
     verify_sql = VERIFY.replace("''", "'")
     assert "r.address IN (" not in ROLES and "r.address IN (" not in verify_sql
     # the trust/md5/password check, the network check and the password-path check
