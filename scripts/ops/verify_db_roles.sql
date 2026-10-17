@@ -13,7 +13,8 @@
 -- every network line beyond loopback, whichever users it names, must use scram-sha-256 (a role with no
 -- password cannot pass it) or reject, and no line beyond loopback may use trust, md5 or password. The pg_hba
 -- checks below read pg_hba_file_rules (the file as it is on disk, which the server applies at the next
--- reload) and fail when that changes.
+-- reload) and fail when that changes. That nous_admin can log in through the local socket is shown by this script
+-- itself: it runs as nous_admin through docker exec.
 
 \set ON_ERROR_STOP on
 \set VERBOSITY terse
@@ -151,8 +152,6 @@ BEGIN
             'SELECT NOT EXISTS (SELECT 1 FROM pg_hba_file_rules r WHERE r.error IS NULL AND r.type <> ''local'' AND r.auth_method IN (''trust'', ''md5'', ''password'') AND NOT ((r.address = ''127.0.0.1'' AND r.netmask = ''255.255.255.255'') OR (r.address = ''::1'' AND r.netmask = ''ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff'') OR (r.address = ''localhost'' AND r.netmask IS NULL)))', 'true', NULL),
         ('pg_hba: every network line beyond loopback uses scram-sha-256 or reject', 'nous_admin',
             'SELECT NOT EXISTS (SELECT 1 FROM pg_hba_file_rules r WHERE r.error IS NULL AND r.type <> ''local'' AND NOT ((r.address = ''127.0.0.1'' AND r.netmask = ''255.255.255.255'') OR (r.address = ''::1'' AND r.netmask = ''ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff'') OR (r.address = ''localhost'' AND r.netmask IS NULL)) AND r.auth_method NOT IN (''scram-sha-256'', ''reject''))', 'true', NULL),
-        ('pg_hba: nous_admin can log in through the local socket (the first matching local line is trust)', 'nous_admin',
-            'SELECT coalesce((SELECT r.auth_method = ''trust'' FROM pg_hba_file_rules r WHERE r.error IS NULL AND r.type = ''local'' AND (''all'' = ANY (r.user_name) OR ''nous_admin'' = ANY (r.user_name) OR ''+nous_admin'' = ANY (r.user_name) OR EXISTS (SELECT 1 FROM unnest(r.user_name) u WHERE u LIKE ''/%'' AND ''nous_admin'' ~ substr(u, 2))) AND (''all'' = ANY (r.database) OR current_database()::text = ANY (r.database) OR (''sameuser'' = ANY (r.database) AND current_database() = ''nous_admin'') OR (current_database() = ''nous_admin'' AND (''samerole'' = ANY (r.database) OR ''samegroup'' = ANY (r.database))) OR EXISTS (SELECT 1 FROM unnest(r.database) d WHERE d LIKE ''/%'' AND current_database()::text ~ substr(d, 2))) ORDER BY r.rule_number LIMIT 1), false)', 'true', NULL),
         ('the database holds only the schemas this deployment creates', 'nous_admin',
             'SELECT NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname NOT IN (''brain'', ''heart'', ''nous_system'', ''scoring'', ''public'', ''information_schema'') AND nspname !~ ''^pg_'')', 'true', NULL),
         ('the application role owns no schema but its own three', 'nous_admin',

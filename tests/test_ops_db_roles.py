@@ -84,13 +84,21 @@ def test_every_pg_hba_network_line_is_judged_whatever_users_it_names():
 
 
 def test_the_script_refuses_to_run_while_pg_hba_lets_a_network_login_in_without_scram():
-    # nous_admin has no password and the run commits before verify runs, so the refusals come before both
-    begin = ROLES.index("\nBEGIN;\n")
-    for refusal in (
-        "RAISE EXCEPTION 'db_roles.sql: pg_hba.conf has a line that does not parse",
-        "RAISE EXCEPTION 'db_roles.sql: pg_hba.conf does not let nous_admin in through the local socket",
-    ):
-        assert ROLES.index(refusal) < begin < ROLES.index("ALTER ROLE nous_admin"), refusal
+    # nous_admin has no password and the run commits before verify runs: the network refusal comes before nous_admin
+    # is set up, then the script logs in as nous_admin, and only then locks the bootstrap role
+    order = [
+        ROLES.index("RAISE EXCEPTION 'db_roles.sql: pg_hba.conf has a line that does not parse"),
+        ROLES.index("CREATE ROLE nous_admin"),
+        ROLES.index("ALTER ROLE nous_admin WITH SUPERUSER LOGIN PASSWORD NULL;"),
+        ROLES.index("\\connect - nous_admin"),
+        ROLES.index("\nBEGIN;\n"),
+        ROLES.index('ALTER ROLE :"bootstrap" NOLOGIN PASSWORD NULL;'),
+    ]
+    assert order == sorted(order), order
+    begin = order[4]
+    # the view drops the quoting of selectors, so local access is proven by the login, not predicted
+    assert "admin_local_ok" not in ROLES
+    assert _statements(ROLES).count("\\connect") == 1
     # pg_hba_file_rules reads the file on disk: the server is made to enforce it before it is checked
     assert ROLES.index("pg_reload_conf()") < ROLES.index("FROM pg_hba_file_rules")
     # loopback only with a host-length netmask: "127.0.0.1 0.0.0.0" has address 127.0.0.1 and matches every client
@@ -107,22 +115,12 @@ def test_the_script_refuses_to_run_while_pg_hba_lets_a_network_login_in_without_
         "FROM pg_hba_file_rules WHERE error IS NOT NULL",
         f"r.error IS NULL AND r.type <> 'local' AND NOT {loopback}"
         " AND r.auth_method NOT IN ('scram-sha-256', 'reject')",
-        # exact matching (a regular expression is evaluated; a role is a member of itself for + and samerole),
-        # in rule_number order, which follows include files
-        "coalesce((SELECT r.auth_method = 'trust' FROM pg_hba_file_rules r WHERE r.error IS NULL AND r.type = 'local'"
-        " AND ('all' = ANY (r.user_name) OR 'nous_admin' = ANY (r.user_name) OR '+nous_admin' = ANY (r.user_name)"
-        " OR EXISTS (SELECT 1 FROM unnest(r.user_name) u WHERE u LIKE '/%' AND 'nous_admin' ~ substr(u, 2)))"
-        " AND ('all' = ANY (r.database) OR current_database()::text = ANY (r.database)"
-        " OR ('sameuser' = ANY (r.database) AND current_database() = 'nous_admin')"
-        " OR (current_database() = 'nous_admin' AND ('samerole' = ANY (r.database) OR 'samegroup' = ANY (r.database)))"
-        " OR EXISTS (SELECT 1 FROM unnest(r.database) d WHERE d LIKE '/%' AND current_database()::text ~ substr(d, 2)))"
-        " ORDER BY r.rule_number LIMIT 1), false)",
     ):
         assert condition in ROLES[:begin], condition
         assert condition in verify_sql, condition
-    assert "r.line_number" not in ROLES and "r.line_number" not in verify_sql  # local to each included file
-    local_label = "pg_hba: nous_admin can log in through the local socket (the first matching local line is trust)"
-    assert f"('{local_label}', 'nous_admin'," in VERIFY
+    # verify runs as nous_admin through docker exec, which is itself the proof of local access
+    assert "r.type = 'local'" not in verify_sql
+    assert "through the local socket" not in VERIFY.split("$verify$", 1)[1]
 
 
 def test_public_cannot_execute_application_functions_now_or_later():

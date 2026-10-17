@@ -27,7 +27,8 @@
 --   <bootstrap>  the superuser the database image created (role oid 10). PostgreSQL does not allow
 --                it to lose SUPERUSER, so its login is disabled and its password removed.
 --
--- Everything runs in one transaction. A failed step leaves the database as it was. Every REVOKE cascades: it also
+-- After the refusals the script sets up nous_admin and logs in as it (see below); everything after that login runs
+-- in one transaction, so a failed step there leaves the database as it was. Every REVOKE cascades: it also
 -- takes away what the role passed on through a grant option, so a run converges on a chain of grants.
 
 \set ON_ERROR_STOP on
@@ -99,27 +100,27 @@ SELECT NOT EXISTS (SELECT 1 FROM pg_hba_file_rules WHERE error IS NOT NULL)
     DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: pg_hba.conf has a line that does not parse or lets a network login in without scram-sha-256; fix it, reload (select pg_reload_conf()), then run this script'; END $$;
 \endif
 
--- docker exec logs in as nous_admin through the local socket with no password, so the first local rule nous_admin
--- hits on this database (in rule_number order, which follows included files) must be trust, or the lock-out below
--- leaves no superuser that can log in. The match is decided exactly: the user is all, nous_admin, +nous_admin or a
--- regular expression that matches nous_admin; the database is all, this database, a regular expression that
--- matches it, or sameuser, samerole or samegroup when this database is named nous_admin. A role counts as a member
--- of itself for + and samerole; nous_admin has no other memberships, so no other +group or samerole matches it.
--- verify_db_roles.sql checks the same.
-SELECT coalesce((SELECT r.auth_method = 'trust' FROM pg_hba_file_rules r WHERE r.error IS NULL AND r.type = 'local' AND ('all' = ANY (r.user_name) OR 'nous_admin' = ANY (r.user_name) OR '+nous_admin' = ANY (r.user_name) OR EXISTS (SELECT 1 FROM unnest(r.user_name) u WHERE u LIKE '/%' AND 'nous_admin' ~ substr(u, 2))) AND ('all' = ANY (r.database) OR current_database()::text = ANY (r.database) OR ('sameuser' = ANY (r.database) AND current_database() = 'nous_admin') OR (current_database() = 'nous_admin' AND ('samerole' = ANY (r.database) OR 'samegroup' = ANY (r.database))) OR EXISTS (SELECT 1 FROM unnest(r.database) d WHERE d LIKE '/%' AND current_database()::text ~ substr(d, 2))) ORDER BY r.rule_number LIMIT 1), false) AS admin_local_ok \gset
-\if :admin_local_ok
+-- Prove that nous_admin can log in before the bootstrap role is locked. pg_hba_file_rules drops the quoting of
+-- selectors ("all" and all, "+nous_admin" and +nous_admin read the same), so the test is a real login, not a
+-- prediction. \connect - keeps the database, host and port, so it takes this session's path: the local socket
+-- under docker exec, TCP when this session came over TCP. If the login fails, psql reports it and exits 3 before
+-- anything below runs (without a terminal it may first print a password prompt; the login still fails, since
+-- nous_admin has no password). The bootstrap role then keeps its login, and nous_admin exists as a superuser
+-- without a password, which only a pg_hba line that trusts it lets in.
+SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nous_admin') AS admin_exists \gset
+\if :admin_exists
 \else
-    DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: pg_hba.conf does not let nous_admin in through the local socket without a password (the first matching local line must be trust); fix it, reload, then run this script'; END $$;
+    CREATE ROLE nous_admin;
 \endif
+ALTER ROLE nous_admin WITH SUPERUSER LOGIN PASSWORD NULL;
+\echo 'db_roles.sql: logging in as nous_admin through the same connection path, without a password'
+\connect - nous_admin
 
 BEGIN;
 
 -- 1. Roles. Created by a superuser, so the creator holds no membership in them.
 DO $roles$
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nous_admin') THEN
-        CREATE ROLE nous_admin;
-    END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nous_app') THEN
         CREATE ROLE nous_app;
     END IF;
@@ -129,7 +130,6 @@ BEGIN
 END
 $roles$;
 
-ALTER ROLE nous_admin WITH SUPERUSER LOGIN PASSWORD NULL;
 ALTER ROLE nous_app WITH NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS LOGIN;
 ALTER ROLE nous_scorer WITH NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS LOGIN;
 
