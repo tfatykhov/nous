@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { bars, count, pct, score, scorerHealth, SCORER_STALE_MIN } from './autonomy';
+import { bars, count, coverageFrom, pct, score, scorerHealth, SCORER_STALE_MIN } from './autonomy';
 
 const NOW = Date.parse('2026-10-17T21:00:00Z');
 const minsAgo = (m: number) => new Date(NOW - m * 60000).toISOString();
@@ -64,5 +64,17 @@ describe('formatters', () => {
       { key: 'a', count: 10, pct: 100 }, { key: 'b', count: 5, pct: 50 }, { key: 'c', count: 0, pct: 0 },
     ]);
     expect(bars([['a', 0]])).toEqual([{ key: 'a', count: 0, pct: 0 }]);
+  });
+});
+
+describe('coverageFrom', () => {
+  // The endpoint counts coverage from max(window start, first_scored_at).
+  it("names the scorer's first run while it falls inside the window", () => {
+    expect(coverageFrom(minsAgo(60), 7, NOW)).toMatch(/^Since the scorer's first run \(Oct 17 20:00 UTC/);
+  });
+
+  it('names the window once the first run is older than it', () => {
+    expect(coverageFrom(minsAgo(20 * 24 * 60), 7, NOW)).toBe('In the last 7 d');
+    expect(coverageFrom(minsAgo(20 * 24 * 60), 30, NOW)).toMatch(/^Since the scorer's first run/);
   });
 });

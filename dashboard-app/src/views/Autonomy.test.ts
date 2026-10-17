@@ -22,7 +22,7 @@ const FULL = () => ({
   decision_grades: [{ reviewer: 'a2ui', outcome: 'success', count: 2 }],
   task_scores: {
     scorer_version: 1,
-    first_scored_at: '2026-10-17T20:12:50+00:00',
+    first_scored_at: new Date(Date.now() - 60 * 60000).toISOString(),
     last_scored_at: new Date(Date.now() - 5 * 60000).toISOString(),
     scorer: {
       scorer_version: 1, last_run_at: new Date(Date.now() - 5 * 60000).toISOString(), last_status: 'ok',
@@ -52,6 +52,9 @@ const FULL = () => ({
       { tool_name: 'write_file', total: 10, by_status: { success: 10, error: 0, blocked: 0, other: 0 },
         by_context: { owner_present: 10, approved: 0, autonomous: 0 }, side_effects: { write: 10 },
         compensable: true, de_facto_level: 'L0' },
+      { tool_name: 'send_email', total: 3, by_status: { success: 0, error: 3, blocked: 0, other: 0 },
+        by_context: { owner_present: 0, approved: 0, autonomous: 0 }, side_effects: {},
+        compensable: false, de_facto_level: 'L0' },
     ],
     censors: { days: 30, by_provenance: { auto: { created: 2, deactivated: 1 }, agent: { created: 0, deactivated: 0 },
       human: { created: 1, deactivated: 0 } } },
@@ -87,17 +90,45 @@ describe('Autonomy view', () => {
     expect(screen.getByText('45%')).toBeTruthy(); // provisional verified share
     expect(text).toContain('Provisional: 18 of 40 scored subtasks');
     expect(text).toContain('2 on subtasks · 3 on DAG runs and intentions');
-    expect(text).toContain('44 of 50 finished subtasks scored (88%)');
+    expect(text).toMatch(/Since the scorer's first run \([^)]*\): 44 of 50 finished subtasks have a score row \(88%\)/);
+    // values sit beside their own labels
+    const valueOf = (label: string) => screen.getByText(label, { selector: 'dt' }).nextElementSibling?.textContent;
+    expect(valueOf('Approval cards asked')).toBe('3');
+    expect(valueOf('Taps in the companion')).toBe('6');
+    expect(valueOf('Harness errors')).toBe('7');
+    expect(valueOf('Refusals')).toBe('4');
+    expect(valueOf('Unverified claims')).toBe('1');
+    // DAG runs row: count, outcomes in display order (verified, self-reported, partial, failed, not scored),
+    // then its own harness errors, refusals, unverified claims and overrides
+    const dagRow = screen.getByText('DAG runs').closest('tr')!;
+    expect(Array.from(dagRow.querySelectorAll('td')).map((td) => td.textContent)).toEqual(
+      ['9', '6', '0', '0', '3', '0', '1', '2', '0', '1']);
+    expect(screen.getByText('no successful run')).toBeTruthy(); // L0 with zero successes is not "always with you"
     expect(screen.getByText('DAG runs')).toBeTruthy();
     expect(screen.getByText('Intention roots')).toBeTruthy();
     expect(text).toContain('Approval cards asked');
     expect(text).toContain('heartbeat.ack');
-    expect(text).toContain('1 of 2 tools ran at least once without you in the loop.');
+    expect(text).toContain('1 of 3 tools ran at least once without you in the loop.');
     expect(screen.getAllByText('Acts without asking').length).toBeGreaterThan(0);
     expect(text).toContain('Last 30 d, whatever the window');
     expect(text).toContain('level:external');
     expect(text).toContain('138');
     expect(text).not.toMatch(/NaN|undefined/);
+  });
+
+  it('fetches once on mount', async () => {
+    render(Autonomy);
+    await screen.findByText('Scorer running');
+    await new Promise((r) => setTimeout(r, 50));
+    expect(urls).toEqual(['/dashboard/autonomy?days=7']);
+  });
+
+  it('names the window when the scorer is older than it', async () => {
+    const full = FULL();
+    body = { ...full, task_scores: { ...full.task_scores, first_scored_at: new Date(Date.now() - 20 * 86_400_000).toISOString() } };
+    const { container } = render(Autonomy);
+    await screen.findByText('Scorer running');
+    expect(container.textContent).toContain('In the last 7 d: 44 of 50 finished subtasks have a score row (88%)');
   });
 
   it('fetches the chosen window', async () => {

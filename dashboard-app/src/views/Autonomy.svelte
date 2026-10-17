@@ -8,7 +8,7 @@
   import DataTable from '../lib/ui/DataTable.svelte';
   import { fmtWhen, FLAG_GLOSS } from '../lib/harness';
   import {
-    bars, count, pct, score, scorerHealth, OUTCOMES, OUTCOME_LABEL, ROLLUP_LABEL, CONTEXT_LABEL, LEVEL_LABEL,
+    bars, count, coverageFrom, pct, score, scorerHealth, OUTCOMES, OUTCOME_LABEL, ROLLUP_LABEL, CONTEXT_LABEL, LEVEL_LABEL,
   } from '../lib/autonomy';
 
   // GET /dashboard/autonomy: how tasks score, where the owner's attention goes,
@@ -107,13 +107,13 @@
           </div>
         {/each}
       </div>
-      <p class="small muted">Only a subtask the harness could confirm counts. Settled means finished more than 14 days ago, so a 7 d window has none.</p>
+      <p class="small muted">A subtask counts when the harness confirmed it or you graded it a success. Settled means finished more than 14 days ago, so a 7 d window has none.</p>
     </section>
     <section class="card" aria-labelledby="h-overrides">
       <h2 id="h-overrides">Your overrides</h2>
       <div class="big">{h.owner_overrides.total}</div>
       <div class="small muted">{h.owner_overrides.subtasks} on subtasks · {h.owner_overrides.rollups} on DAG runs and intentions</div>
-      <p class="small muted">Times you rejected, undid or corrected its work in {w}. Each one cancels a verified success.</p>
+      <p class="small muted">Times you rejected, undid or corrected its work in {w}. On a subtask, each one cancels a verified success; on a DAG run or intention it enters no score.</p>
     </section>
     <section class="card" aria-labelledby="h-penalties">
       <h2 id="h-penalties">Harness penalties</h2>
@@ -133,7 +133,7 @@
         {#if ts.subtasks.finished == null}
           Coverage is counted from the scorer's first run.
         {:else}
-          Since the scorer's first run: {ts.subtasks.covered} of {ts.subtasks.finished} finished subtasks scored ({pct(ts.subtasks.coverage)})
+          {coverageFrom(ts.first_scored_at, d.window_days)}: {ts.subtasks.covered} of {ts.subtasks.finished} finished subtasks have a score row ({pct(ts.subtasks.coverage)})
         {/if}
       </span>
     </div>
@@ -266,7 +266,11 @@
               {/each}
             </div>
           {:else if c.key === 'level'}
-            <span class="pill" class:pill-warn={t.de_facto_level !== 'L0'}>{LEVEL_LABEL[t.de_facto_level] ?? t.de_facto_level}</span>
+            {#if successes(t) === 0}
+              <span class="small muted">no successful run</span>
+            {:else}
+              <span class="pill" class:pill-warn={t.de_facto_level !== 'L0'}>{LEVEL_LABEL[t.de_facto_level] ?? t.de_facto_level}</span>
+            {/if}
           {:else if c.key === 'undo'}
             <span class="small" class:muted={!t.compensable}>{t.compensable ? 'yes' : 'no'}</span>
           {/if}

@@ -64,7 +64,19 @@ export function bars(entries: [string, number][]): { key: string; count: number;
   return entries.map(([key, count]) => ({ key, count, pct: Math.round((count / max) * 100) }));
 }
 
-/** task_scoring.OUTCOMES, in the scorer's order. */
+/**
+ * Where subtask coverage is counted from: the endpoint counts from the later of the window's start and the
+ * scorer's first run (``floor = max(since, first_scored_at)``), so name whichever one it is.
+ */
+export function coverageFrom(firstScoredAt: string | null, windowDays: number, now: number = Date.now()): string {
+  const windowStart = now - windowDays * 86_400_000;
+  if (firstScoredAt && new Date(firstScoredAt).getTime() > windowStart) {
+    return `Since the scorer's first run (${fmtWhen(firstScoredAt, now)})`;
+  }
+  return `In the last ${windowDays} d`;
+}
+
+/** task_scoring.OUTCOMES, in display order (verified first); every lookup is by key. */
 export const OUTCOMES = ['done_verified', 'done_self', 'partial', 'failed', 'not_scored'] as const;
 
 export const OUTCOME_LABEL: Record<string, string> = {
