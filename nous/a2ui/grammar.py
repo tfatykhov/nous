@@ -23,6 +23,8 @@ precisely what broke):
   by two different parents — the renderer's keyed each treats a repeated
   ref as a duplicate key, which is a Svelte crash that takes down the
   whole surface (rev-ui #4; the composer is an LLM).
+- No {path} binding nested inside a literal array prop (KeyValueTable rows
+  etc.): the renderer resolves the array once and prints each cell raw.
 """
 
 from __future__ import annotations
@@ -121,18 +123,21 @@ def _children_of(component: dict) -> list[str]:
 #   - Button.checks: runChecks resolves each condition (and its args).
 # Child keys are skipped too: they hold id refs or a repeat template.
 _PER_ITEM_RESOLVED = frozenset({("Tabs", "tabs"), ("Button", "checks")})
+# Literal-only array props (schema `type: array`, not a DynamicValue): the
+# repair hint cannot be "bind the whole prop".
+_LITERAL_ONLY = frozenset({("DataTable", "columns"), ("LineChart", "series")})
 
 
 def _nested_bindings(value: Any, where: str) -> list[str]:
     """Locations of every {path} binding nested inside a literal list/dict.
 
-    Mirrors the renderer's isDataBinding: a dict with a string `path` that is
-    not a function call. A call object is walked into, since inside a literal
+    Mirrors the renderer's isDataBinding: a dict with a string `path` and no
+    string `call` (isFunctionCall). A call object is walked into, since inside a literal
     array it is printed raw too. Type-guarded throughout — lint runs before
     schema validation and must never raise.
     """
     if isinstance(value, dict):
-        if isinstance(value.get("path"), str) and "call" not in value:
+        if isinstance(value.get("path"), str) and not isinstance(value.get("call"), str):
             return [where]
         return [loc for k, v in value.items() for loc in _nested_bindings(v, f"{where}.{k}")]
     if isinstance(value, list):
@@ -238,22 +243,28 @@ def lint_micro_app(
                 or (ctype, prop) in _PER_ITEM_RESOLVED
             ):
                 continue
-            for i, item in enumerate(value):
-                locs = _nested_bindings(item, f"{comp.get('id')}.{prop}[{i}]")
-                if not locs:
-                    continue
-                fields = (
-                    "{" + ", ".join(k for k in item if isinstance(k, str)) + "}"
-                    if isinstance(item, dict)
-                    else "field"
+            locs = _nested_bindings(value, f"{comp.get('id')}.{prop}")
+            if not locs:
+                continue
+            # One error per prop: a 20-row table with 3 bound cells would
+            # otherwise flood the repair prompt with 60 identical lines.
+            more = f" (and {len(locs) - 1} more)" if len(locs) > 1 else ""
+            if (ctype, prop) in _LITERAL_ONLY:
+                fix = f"`{prop}` is literal-only — write each value as a literal string"
+            else:
+                first = value[0] if isinstance(value[0], dict) else {}
+                keys = ", ".join(k for k in first if isinstance(k, str) and k != "path")
+                fields = f"{{{keys}}}" if keys else "field"
+                fix = (
+                    f"Bind the whole prop instead ({prop}: {{path: '<list>'}}) to a "
+                    f"source whose records already have the final {fields} "
+                    "strings, or show each live value as its own component "
+                    "(e.g. a StatTile with value: {path})"
                 )
-                for loc in locs:
-                    errors.append(
-                        f"{loc} is a {{path}} binding inside a literal array — this "
-                        "renders as raw JSON. Bind the whole prop instead "
-                        f"({prop}: {{path: '<list>'}}) to a source whose records "
-                        f"already have the final {fields} strings"
-                    )
+            errors.append(
+                f"{locs[0]}{more} is a {{path}} binding inside a literal array — "
+                f"this renders as raw JSON. {fix}"
+            )
         if ctype == "Section":
             title = comp.get("title")
             if not isinstance(title, str) or not title.strip():

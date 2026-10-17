@@ -1847,13 +1847,14 @@ def test_grammar_rejects_nested_bindings_in_other_literal_array_props() -> None:
         }
     )
 
-    errors = [e for e in lint_micro_app(comps) if "inside a literal array" in e]
+    errors = sorted(e for e in lint_micro_app(comps) if "inside a literal array" in e)
 
-    assert sorted(e.split(" ", 1)[0] for e in errors) == [
-        "kv.columns[0].label",
-        "kv.rows[0].coin",
-        "kv.rows[1][0]",
-    ]
+    # One error per prop, naming the first location and counting the rest.
+    assert len(errors) == 2
+    assert errors[0].startswith("kv.columns[0].label is a {path} binding")
+    assert "`columns` is literal-only" in errors[0]
+    assert errors[1].startswith("kv.rows[0].coin (and 1 more) is a {path} binding")
+    assert "rows: {path: '<list>'}" in errors[1]
 
 
 def test_grammar_exempts_props_whose_items_the_renderer_resolves() -> None:
