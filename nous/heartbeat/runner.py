@@ -1080,7 +1080,8 @@ class HeartbeatRunner:
             "\nPlease review these findings. This triage turn is LOCAL-ONLY: diagnose with memory "
             "tools (recall_deep, recall_recent) and read_file; record facts or decisions; and escalate to Tim "
             "when action is needed. Do not use bash, send messages, push, merge, or call external APIs "
-            "here. Outward actions belong in a scheduled task or DAG, not in heartbeat triage."
+            "here, and do not create or retry DAGs, tasks, schedules or checks: outward work needs Tim's approval, "
+            "so tell him what you would do and why."
         )
         message = "\n".join(lines)
 

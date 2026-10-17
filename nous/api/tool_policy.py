@@ -1035,6 +1035,42 @@ def heartbeat_outward_violation(tool_name: str, tool_input: Mapping[str, Any]) -
     return False
 
 
+# Codex P1 on PR #773: the triage prompt says local-only, but `warn` let a triage turn call dag_create, and a DAG's
+# nodes run at work levels (email, web). A triage turn may not start, schedule or re-arm work, whatever the modes.
+HEARTBEAT_SPAWN_TEXT = (
+    "Tool error: a heartbeat turn may not start, schedule or re-arm work (a DAG, task, schedule or check) on its "
+    "own: that needs the owner's approval. Do not retry it in another form; tell the owner what you would start "
+    "and why, and stop."
+)
+# The actions a triage turn may take on a manage tool, compared exactly as the handlers do. Anything else
+# (retry_node, enable, update, an action added later) is refused, and so are a check's disable and delete: on a
+# DAG node's check the DAG loop reads them as the node's completion and starts the next wave.
+_HEARTBEAT_MANAGE_ACTIONS: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        "dag_manage": frozenset({"list", "recent", "status", "node_result", "cancel"}),
+        "heartbeat_check_manage": frozenset({"list"}),
+    }
+)
+
+
+def is_spawn_tool(tool_name: str) -> bool:
+    """Whether ``tool_name`` starts other agent work (its class ``spawns``)."""
+    cls = tool_class(tool_name)
+    return cls is not None and cls.spawns
+
+
+def heartbeat_spawn_violation(tool_name: str, tool_input: Mapping[str, Any]) -> bool:
+    """Whether a heartbeat_triage call starts or delegates work: a spawn tool (dag_create, spawn_task, ...), or a
+    dag_manage / heartbeat_check_manage action outside ``_HEARTBEAT_MANAGE_ACTIONS``."""
+    if is_spawn_tool(tool_name):
+        return True
+    allowed = _HEARTBEAT_MANAGE_ACTIONS.get(tool_name)
+    if allowed is None:
+        return False
+    action = tool_input.get("action")
+    return not isinstance(action, str) or action not in allowed
+
+
 def undoable_violation(ctx: ExecutionContext, tool_name: str, tool_input: Mapping[str, Any]) -> str | None:
     """``"not_compensable"`` when an ``undoable`` context makes a call that
     has a side effect and cannot be undone, else None.
