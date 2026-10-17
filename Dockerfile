@@ -38,6 +38,18 @@ RUN mkdir -p /tmp/nous-workspace
 
 # Copy source BEFORE pip install (F5: non-editable install)
 COPY pyproject.toml .
+
+# Headless Chromium for Playwright (the agent's web research and web-app testing). The browser and its
+# system libraries are baked into the image, so they survive a rebuild, and the directory is readable by
+# every user, the job user included. This runs before the source is copied, so the layer is rebuilt only
+# when pyproject.toml changes; the version comes from the agent extra's playwright pin, which also fixes
+# the Chromium revision.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN pip install --no-cache-dir "$(python -c "import tomllib; print(next(d for d in tomllib.load(open('pyproject.toml', 'rb'))['project']['optional-dependencies']['agent'] if d.startswith('playwright')))")" \
+    && python -m playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/* \
+    && chmod -R a+rX /opt/ms-playwright
+
 COPY nous/ nous/
 # F042: [rerank] pulls sentence-transformers + torch (~2GB). The model
 # itself (~90MB) is downloaded on first use into $HF_HOME and persisted
