@@ -47,3 +47,13 @@ def test_the_roles_step_runs_both_scripts_as_files_in_one_session() -> None:
     # With `cat a b | psql` a missing file is a message on stderr and psql runs the other one.
     step = _step("Create the database roles and check them")
     assert "-f scripts/ops/db_roles.sql -f scripts/ops/verify_db_roles.sql" in step, step
+
+
+def test_the_roles_are_checked_again_after_the_later_migrations() -> None:
+    # A migration applied as nous_app can undo what the checks rely on (row security on a scorer input, say).
+    text = (WORKFLOWS / "ci.yml").read_text()
+    later = text.index("- name: Apply every later migration as the application role\n")
+    again = text.index("- name: Check the database roles again after the later migrations\n")
+    assert later < again, "the second check must run after the later migrations"
+    step = _step("Check the database roles again after the later migrations")
+    assert "psql -U nous_admin -d nous" in step and "-f - < scripts/ops/verify_db_roles.sql" in step, step

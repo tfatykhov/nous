@@ -157,6 +157,9 @@ jobs:
           DB_NAME: nous
         run: python scripts/ci/apply_migrations.py
 
+      - name: Check the database roles again after the later migrations
+        run: docker exec -i ${{ job.services.postgres.id }} psql -U nous_admin -d nous -X -v ON_ERROR_STOP=1 -f - < scripts/ops/verify_db_roles.sql
+
       - name: Run the tests as the application role
         env:
           DB_HOST: localhost
