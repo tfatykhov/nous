@@ -175,7 +175,7 @@ services:
       - -c
       - |
         while true; do
-          python -m nous.observability.task_score_job --agent-id "$${NOUS_AGENT_ID}" || echo "nous-scorer: task_score_job exited with status $$? at $$(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
+          timeout 900 python -m nous.observability.task_score_job --agent-id "$${NOUS_AGENT_ID}" || echo "nous-scorer: task_score_job exited with status $$? at $$(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
           sleep 900
         done
     healthcheck:
@@ -189,6 +189,8 @@ services:
       NOUS_AGENT_ID: ${NOUS_AGENT_ID:-nous-default}
     depends_on:
       postgres:
+        condition: service_healthy
+      nous:
         condition: service_healthy
     restart: unless-stopped
 
