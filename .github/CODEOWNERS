@@ -29,10 +29,13 @@
 /nous/cognitive/claim_verifier.py @tfatykhov
 /nous/api/execution_context.py @tfatykhov
 
-# The owner's own signals the scorer trusts: grades, decisions on proposals, undo
+# The owner's own signals the scorer trusts (grades, decisions on proposals, undo) and the central writer and
+# validation of decision reviews
 /nous/a2ui/actions.py @tfatykhov
 /nous/owner_actions.py @tfatykhov
 /nous/api/compensation.py @tfatykhov
+/nous/brain/brain.py @tfatykhov
+/nous/brain/schemas.py @tfatykhov
 
 # Evaluation sets, their loaders and generators
 /nous_eval/** @tfatykhov
