@@ -72,6 +72,7 @@ from nous.observability.snapshots import (
     normalize_stored_metrics,
     stored_metrics_version,
 )
+from nous.observability.task_score_gatherer import OWNER_GRADE_REVIEWER
 from nous.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -1068,6 +1069,13 @@ def create_app(
         outcome = body.get("outcome")
         result_text = body.get("result")
         reviewer = body.get("reviewer", "external")
+        # The scorer counts a review carrying this tag as the owner's own grade, and only the companion actions write
+        # it (in-process). Anything that reaches this endpoint could otherwise send it, so it is refused here.
+        if isinstance(reviewer, str) and reviewer.strip().lower() == OWNER_GRADE_REVIEWER:
+            return JSONResponse(
+                {"error": f'reviewer "{OWNER_GRADE_REVIEWER}" is reserved for the owner\'s companion actions'},
+                status_code=400,
+            )
         # codex #577 r3: this endpoint never read superseded_by, so external
         # supersessions landed with NULL lineage. Now that ReviewInput enforces
         # the invariant, NOT forwarding it would reject every REST supersession
