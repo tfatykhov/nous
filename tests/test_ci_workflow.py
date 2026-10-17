@@ -43,10 +43,18 @@ def test_the_qualified_probe_step_fails_unless_the_probe_was_applied() -> None:
     assert "9998_qualified_ddl" in step, step
 
 
-def test_the_roles_step_runs_both_scripts_as_files_in_one_session() -> None:
-    # With `cat a b | psql` a missing file is a message on stderr and psql runs the other one.
+def test_the_roles_step_runs_the_runbook_form_through_the_database_containers_socket() -> None:
+    # db_roles.sql logs in as nous_admin (no password) before it locks the bootstrap role; over TCP from the runner
+    # that login meets scram-sha-256 and fails, so both scripts go through the container's local socket.
     step = _step("Create the database roles and check them")
-    assert "-f scripts/ops/db_roles.sql -f scripts/ops/verify_db_roles.sql" in step, step
+    container = "${{ job.services.postgres.id }}"
+    roles = re.search(rf"docker exec -i [^\n]*{re.escape(container)} psql -U nous -d nous [^\n]*-f - < (\S+)", step)
+    check = re.search(rf"docker exec -i {re.escape(container)} psql -U nous_admin -d nous [^\n]*-f - < (\S+)", step)
+    assert roles and roles.group(1) == "scripts/ops/db_roles.sql", step
+    assert check and check.group(1) == "scripts/ops/verify_db_roles.sql", step
+    assert roles.start() < check.start(), step
+    assert "-e NOUS_APP_DB_PASSWORD -e NOUS_SCORER_DB_PASSWORD" in roles.group(0), roles.group(0)
+    assert "ON_ERROR_STOP=1" in roles.group(0) and "ON_ERROR_STOP=1" in check.group(0), step
 
 
 def test_the_roles_are_checked_again_after_the_later_migrations() -> None:

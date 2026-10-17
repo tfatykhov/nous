@@ -140,13 +140,11 @@ jobs:
 
       - name: Create the database roles and check them
         env:
-          PGHOST: localhost
-          PGUSER: nous
-          PGPASSWORD: nous_dev_password
-          PGDATABASE: nous
           NOUS_APP_DB_PASSWORD: ciapppassword1
           NOUS_SCORER_DB_PASSWORD: ciscorerpassword1
-        run: psql -X -v ON_ERROR_STOP=1 -f scripts/ops/db_roles.sql -f scripts/ops/verify_db_roles.sql
+        run: |
+          docker exec -i -e NOUS_APP_DB_PASSWORD -e NOUS_SCORER_DB_PASSWORD ${{ job.services.postgres.id }} psql -U nous -d nous -X -v ON_ERROR_STOP=1 -f - < scripts/ops/db_roles.sql
+          docker exec -i ${{ job.services.postgres.id }} psql -U nous_admin -d nous -X -v ON_ERROR_STOP=1 -f - < scripts/ops/verify_db_roles.sql
 
       - name: Apply every later migration as the application role
         env:
