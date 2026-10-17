@@ -79,7 +79,7 @@
 {#if $store.data}
   {@const d = $store.data}
   {@const ts = d.task_scores}
-  {@const health = scorerHealth(ts.scorer)}
+  {@const health = scorerHealth(ts.scorer, ts.scorer_version)}
   {@const h = ts.headline}
   {@const w = `${d.window_days} d`}
   {@const acting = d.inventory.tools.filter((t) => t.de_facto_level !== 'L0').length}

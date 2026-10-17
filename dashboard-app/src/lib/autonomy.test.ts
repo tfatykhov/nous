@@ -10,37 +10,43 @@ const beat = (over: Record<string, unknown> = {}) => ({
 
 describe('scorerHealth', () => {
   it('says the scorer has not run when there is no heartbeat row', () => {
-    const v = scorerHealth(null, NOW);
+    const v = scorerHealth(null, 1, NOW);
     expect(v.title).toBe('Scorer has not run yet');
     expect(v.tone).toBe('warn');
   });
 
   it('reports a fresh ok pass with its row count', () => {
-    const v = scorerHealth(beat(), NOW);
+    const v = scorerHealth(beat(), 1, NOW);
     expect(v).toMatchObject({ title: 'Scorer running', tone: 'ok' });
     expect(v.detail).toContain('1614 rows');
   });
 
   it('names the error of a failed pass and the last successful one', () => {
-    const v = scorerHealth(beat({ last_status: 'error', last_error: 'InsufficientPrivilege', last_ok_at: minsAgo(20) }), NOW);
+    const v = scorerHealth(beat({ last_status: 'error', last_error: 'InsufficientPrivilege', last_ok_at: minsAgo(20) }), 1, NOW);
     expect(v).toMatchObject({ title: 'Last pass failed', tone: 'warn' });
     expect(v.detail).toContain('InsufficientPrivilege');
     expect(v.detail).toContain('Last successful pass');
   });
 
   it('says so when no pass ever succeeded', () => {
-    const v = scorerHealth(beat({ last_status: 'error', last_error: 'X', last_ok_at: null }), NOW);
+    const v = scorerHealth(beat({ last_status: 'error', last_error: 'X', last_ok_at: null }), 1, NOW);
     expect(v.detail).toContain('No pass has succeeded yet.');
   });
 
   it('calls a heartbeat older than three intervals stopped, even when its last pass was ok', () => {
-    expect(scorerHealth(beat({ last_run_at: minsAgo(SCORER_STALE_MIN - 1) }), NOW).title).toBe('Scorer running');
-    const v = scorerHealth(beat({ last_run_at: minsAgo(SCORER_STALE_MIN + 1) }), NOW);
+    expect(scorerHealth(beat({ last_run_at: minsAgo(SCORER_STALE_MIN - 1) }), 1, NOW).title).toBe('Scorer running');
+    const v = scorerHealth(beat({ last_run_at: minsAgo(SCORER_STALE_MIN + 1) }), 1, NOW);
     expect(v).toMatchObject({ title: 'Scorer looks stopped', tone: 'warn' });
   });
 
+  it('warns when the scorer writes another version than the endpoint reads', () => {
+    const v = scorerHealth(beat({ scorer_version: 1 }), 2, NOW);
+    expect(v).toMatchObject({ title: 'Scorer version differs', tone: 'warn' });
+    expect(v.detail).toContain('writes version 1; this deployment reads version 2');
+  });
+
   it('leaves the row count out when the pass committed none', () => {
-    expect(scorerHealth(beat({ rows_submitted: null }), NOW).detail).not.toContain('rows');
+    expect(scorerHealth(beat({ rows_submitted: null }), 1, NOW).detail).not.toContain('rows');
   });
 });
 

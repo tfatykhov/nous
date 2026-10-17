@@ -12,8 +12,11 @@ export const SCORER_STALE_MIN = 3 * SCORER_INTERVAL_MIN;
 
 type Scorer = AutonomyData['task_scores']['scorer'];
 
-/** Derived from the scorer's heartbeat row, never stored. */
-export function scorerHealth(scorer: Scorer, now: number = Date.now()): Verdict {
+/**
+ * Derived from the scorer's heartbeat row, never stored. ``expectedVersion`` is the version the endpoint reads
+ * (``task_scores.scorer_version``): a scorer on another version writes rows the endpoint filters out.
+ */
+export function scorerHealth(scorer: Scorer, expectedVersion: number, now: number = Date.now()): Verdict {
   if (!scorer) {
     return {
       title: 'Scorer has not run yet',
@@ -29,6 +32,14 @@ export function scorerHealth(scorer: Scorer, now: number = Date.now()): Verdict 
       title: 'Scorer looks stopped',
       detail: `Last pass ${fmtWhen(scorer.last_run_at, now)}${failed ? ` (${scorer.last_error ?? 'failed'})` : ''}. `
         + `It runs every ${SCORER_INTERVAL_MIN} min, so no pass for ${SCORER_STALE_MIN} min means it stopped or cannot write.`,
+      tone: 'warn',
+    };
+  }
+  if (scorer.scorer_version !== expectedVersion) {
+    return {
+      title: 'Scorer version differs',
+      detail: `The scorer writes version ${scorer.scorer_version}; this deployment reads version ${expectedVersion}, `
+        + 'so its scores do not appear here. Rebuild and restart the nous-scorer service with the same release.',
       tone: 'warn',
     };
   }

@@ -180,6 +180,13 @@ describe('Autonomy view', () => {
     expect(screen.getByText(/InsufficientPrivilege/)).toBeTruthy();
   });
 
+  it('flags a scorer on another version than the endpoint reads', async () => {
+    const full = FULL();
+    body = { ...full, task_scores: { ...full.task_scores, scorer_version: 2 } };
+    render(Autonomy);
+    expect(await screen.findByText('Scorer version differs')).toBeTruthy();
+  });
+
   it('says so when the endpoint fails', async () => {
     status = 400;
     render(Autonomy);
