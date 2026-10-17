@@ -40,6 +40,7 @@
 /.github/** @tfatykhov
 /scripts/ci/** @tfatykhov
 /tests/fixtures/migration_probe/** @tfatykhov
+/tests/test_protected_paths.py @tfatykhov
 /scripts/ops/** @tfatykhov
 /docker-compose.yml @tfatykhov
 /Dockerfile @tfatykhov
