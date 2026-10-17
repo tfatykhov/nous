@@ -1857,6 +1857,53 @@ def test_grammar_rejects_nested_bindings_in_other_literal_array_props() -> None:
     assert "rows: {path: '<list>'}" in errors[1]
 
 
+@pytest.mark.parametrize("call", [None, 123, True, {"name": "fn"}])
+def test_grammar_rejects_nested_binding_with_non_string_call(call: Any) -> None:
+    """The renderer's isFunctionCall needs a STRING `call`; anything else is a binding."""
+    comps = _with_kv(
+        {
+            "id": "kv",
+            "component": "KeyValueTable",
+            "rows": [{"key": "Live price", "value": {"path": "price", "call": call}}],
+        }
+    )
+
+    errors = [e for e in lint_micro_app(comps) if "inside a literal array" in e]
+
+    assert len(errors) == 1
+    assert errors[0].startswith("kv.rows[0].value is a {path} binding")
+
+
+def test_grammar_does_not_flag_a_nested_function_call_as_a_binding() -> None:
+    comps = _with_kv(
+        {
+            "id": "kv",
+            "component": "KeyValueTable",
+            "rows": [{"key": "Live price", "value": {"path": "price", "call": "fn"}}],
+        }
+    )
+
+    assert [e for e in lint_micro_app(comps) if "inside a literal array" in e] == []
+
+
+def test_grammar_accepts_literal_records_with_a_path_field() -> None:
+    """Array items are records the renderer reads fields from and never
+    resolves, so a row or column with a `path` field is data, not a binding."""
+    comps = _with_kv(
+        {
+            "id": "kv",
+            "component": "DataTable",
+            "columns": [
+                {"key": "path", "label": "Path"},
+                {"path": "size", "key": "size", "label": "Size"},
+            ],
+            "rows": [{"path": "/usr/bin", "size": 12}, {"path": "/etc"}],
+        }
+    )
+
+    assert [e for e in lint_micro_app(comps) if "inside a literal array" in e] == []
+
+
 def test_grammar_exempts_props_whose_items_the_renderer_resolves() -> None:
     """TabsView resolves each tab title; Button.checks go through runChecks."""
     comps = _valid_components()

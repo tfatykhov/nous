@@ -128,20 +128,24 @@ _PER_ITEM_RESOLVED = frozenset({("Tabs", "tabs"), ("Button", "checks")})
 _LITERAL_ONLY = frozenset({("DataTable", "columns"), ("LineChart", "series")})
 
 
-def _nested_bindings(value: Any, where: str) -> list[str]:
-    """Locations of every {path} binding nested inside a literal list/dict.
+def _nested_bindings(value: Any, where: str, depth: int = 0) -> list[str]:
+    """Locations of every {path} binding nested inside a literal array prop.
 
     Mirrors the renderer's isDataBinding: a dict with a string `path` and no
-    string `call` (isFunctionCall). A call object is walked into, since inside a literal
-    array it is printed raw too. Type-guarded throughout — lint runs before
-    schema validation and must never raise.
+    string `call` (isFunctionCall); extra keys do not disqualify it. `value`
+    starts as the array prop itself (depth 0), and only depth >= 2 counts:
+    its items are records the renderer reads fields from and never resolves,
+    so a row or column with a `path` field (`{"path": "/usr/bin", "size":
+    12}`) is data. A call object is walked into, since inside a literal array
+    it is printed raw too. Type-guarded throughout — lint runs before schema
+    validation and must never raise.
     """
     if isinstance(value, dict):
-        if isinstance(value.get("path"), str) and not isinstance(value.get("call"), str):
+        if depth >= 2 and isinstance(value.get("path"), str) and not isinstance(value.get("call"), str):
             return [where]
-        return [loc for k, v in value.items() for loc in _nested_bindings(v, f"{where}.{k}")]
+        return [loc for k, v in value.items() for loc in _nested_bindings(v, f"{where}.{k}", depth + 1)]
     if isinstance(value, list):
-        return [loc for i, v in enumerate(value) for loc in _nested_bindings(v, f"{where}[{i}]")]
+        return [loc for i, v in enumerate(value) for loc in _nested_bindings(v, f"{where}[{i}]", depth + 1)]
     return []
 
 
@@ -253,7 +257,7 @@ def lint_micro_app(
                 fix = f"`{prop}` is literal-only — write each value as a literal string"
             else:
                 first = value[0] if isinstance(value[0], dict) else {}
-                keys = ", ".join(k for k in first if isinstance(k, str) and k != "path")
+                keys = ", ".join(k for k in first if isinstance(k, str))
                 fields = f"{{{keys}}}" if keys else "field"
                 fix = (
                     f"Bind the whole prop instead ({prop}: {{path: '<list>'}}) to a "
