@@ -77,23 +77,37 @@ def test_verify_fails_when_pg_hba_conf_has_a_line_the_server_cannot_parse():
 
 def test_every_pg_hba_network_line_is_judged_whatever_users_it_names():
     # a user selector such as /^nous_admin$ or +group would slip past a filter on user_name
-    assert "('pg_hba: every network line beyond loopback uses scram-sha-256 or reject', 'nous_admin'," in VERIFY
-    assert "user_name" not in VERIFY
+    label = "('pg_hba: every network line beyond loopback uses scram-sha-256 or reject', 'nous_admin',"
+    assert label in VERIFY
+    check = VERIFY.split(label, 1)[1].split("\n        ('", 1)[0]
+    assert "user_name" not in check, check
 
 
 def test_the_script_refuses_to_run_while_pg_hba_lets_a_network_login_in_without_scram():
-    # nous_admin has no password and the run commits before verify runs, so the refusal comes before both
-    refusal = ROLES.index("RAISE EXCEPTION 'db_roles.sql: pg_hba.conf has a line that does not parse")
+    # nous_admin has no password and the run commits before verify runs, so the refusals come before both
     begin = ROLES.index("\nBEGIN;\n")
-    assert refusal < begin < ROLES.index("ALTER ROLE nous_admin")
+    for refusal in (
+        "RAISE EXCEPTION 'db_roles.sql: pg_hba.conf has a line that does not parse",
+        "RAISE EXCEPTION 'db_roles.sql: pg_hba.conf does not let nous_admin in through the local socket",
+    ):
+        assert ROLES.index(refusal) < begin < ROLES.index("ALTER ROLE nous_admin"), refusal
+    # pg_hba_file_rules reads the file on disk: the server is made to enforce it before it is checked
+    assert ROLES.index("pg_reload_conf()") < ROLES.index("FROM pg_hba_file_rules")
     # the same conditions as verify's pg_hba checks (whose SQL sits in a string, with its quotes doubled)
     for condition in (
         "FROM pg_hba_file_rules WHERE error IS NOT NULL",
         "r.error IS NULL AND r.type <> 'local' AND NOT (r.address IN ('127.0.0.1', '::1', 'localhost'))"
         " AND r.auth_method NOT IN ('scram-sha-256', 'reject')",
+        "coalesce((SELECT r.auth_method = 'trust' FROM pg_hba_file_rules r WHERE r.error IS NULL AND r.type = 'local'"
+        " AND (r.user_name && ARRAY['all', 'nous_admin'] OR EXISTS (SELECT 1 FROM unnest(r.user_name) u"
+        " WHERE u LIKE '+%' OR u LIKE '/%')) AND (r.database && ARRAY['all', current_database()::text]"
+        " OR EXISTS (SELECT 1 FROM unnest(r.database) d WHERE d IN ('sameuser', 'samerole') OR d LIKE '/%'))"
+        " ORDER BY r.line_number LIMIT 1), false)",
     ):
-        assert condition in ROLES[:refusal], condition
+        assert condition in ROLES[:begin], condition
         assert condition in VERIFY.replace("''", "'"), condition
+    local_label = "pg_hba: nous_admin can log in through the local socket (the first matching local line is trust)"
+    assert f"('{local_label}', 'nous_admin'," in VERIFY
 
 
 def test_public_cannot_execute_application_functions_now_or_later():

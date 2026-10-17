@@ -151,6 +151,8 @@ BEGIN
             'SELECT NOT EXISTS (SELECT 1 FROM pg_hba_file_rules r WHERE r.error IS NULL AND r.type <> ''local'' AND r.auth_method IN (''trust'', ''md5'', ''password'') AND NOT (r.address IN (''127.0.0.1'', ''::1'', ''localhost'')))', 'true', NULL),
         ('pg_hba: every network line beyond loopback uses scram-sha-256 or reject', 'nous_admin',
             'SELECT NOT EXISTS (SELECT 1 FROM pg_hba_file_rules r WHERE r.error IS NULL AND r.type <> ''local'' AND NOT (r.address IN (''127.0.0.1'', ''::1'', ''localhost'')) AND r.auth_method NOT IN (''scram-sha-256'', ''reject''))', 'true', NULL),
+        ('pg_hba: nous_admin can log in through the local socket (the first matching local line is trust)', 'nous_admin',
+            'SELECT coalesce((SELECT r.auth_method = ''trust'' FROM pg_hba_file_rules r WHERE r.error IS NULL AND r.type = ''local'' AND (r.user_name && ARRAY[''all'', ''nous_admin''] OR EXISTS (SELECT 1 FROM unnest(r.user_name) u WHERE u LIKE ''+%'' OR u LIKE ''/%'')) AND (r.database && ARRAY[''all'', current_database()::text] OR EXISTS (SELECT 1 FROM unnest(r.database) d WHERE d IN (''sameuser'', ''samerole'') OR d LIKE ''/%'')) ORDER BY r.line_number LIMIT 1), false)', 'true', NULL),
         ('the database holds only the schemas this deployment creates', 'nous_admin',
             'SELECT NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname NOT IN (''brain'', ''heart'', ''nous_system'', ''scoring'', ''public'', ''information_schema'') AND nspname !~ ''^pg_'')', 'true', NULL),
         ('the application role owns no schema but its own three', 'nous_admin',

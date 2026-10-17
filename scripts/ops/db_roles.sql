@@ -86,6 +86,10 @@ SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nous_app') AS app_exists,
     \endif
 \endif
 
+-- pg_hba_file_rules shows the file on disk, which the server enforces only from its next reload: reload first, so
+-- that (a file with a parse error, which keeps the old rules, is refused below) the server enforces what is checked.
+DO $$ BEGIN PERFORM pg_reload_conf(); PERFORM pg_sleep(1); END $$;
+
 -- nous_admin gets no password and the run commits before verify runs, so pg_hba.conf must already keep every
 -- network login beyond loopback on scram-sha-256 or reject. verify_db_roles.sql checks the same conditions.
 SELECT NOT EXISTS (SELECT 1 FROM pg_hba_file_rules WHERE error IS NOT NULL)
@@ -93,6 +97,15 @@ SELECT NOT EXISTS (SELECT 1 FROM pg_hba_file_rules WHERE error IS NOT NULL)
 \if :hba_ok
 \else
     DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: pg_hba.conf has a line that does not parse or lets a network login in without scram-sha-256; fix it, reload (select pg_reload_conf()), then run this script'; END $$;
+\endif
+
+-- docker exec logs in as nous_admin through the local socket with no password, so the first local line that can
+-- match nous_admin on this database must be trust, or the lock-out below leaves no superuser that can log in. A
+-- +group or regular-expression selector, sameuser and samerole count as matching. verify_db_roles.sql checks the same.
+SELECT coalesce((SELECT r.auth_method = 'trust' FROM pg_hba_file_rules r WHERE r.error IS NULL AND r.type = 'local' AND (r.user_name && ARRAY['all', 'nous_admin'] OR EXISTS (SELECT 1 FROM unnest(r.user_name) u WHERE u LIKE '+%' OR u LIKE '/%')) AND (r.database && ARRAY['all', current_database()::text] OR EXISTS (SELECT 1 FROM unnest(r.database) d WHERE d IN ('sameuser', 'samerole') OR d LIKE '/%')) ORDER BY r.line_number LIMIT 1), false) AS admin_local_ok \gset
+\if :admin_local_ok
+\else
+    DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: pg_hba.conf does not let nous_admin in through the local socket without a password (the first matching local line must be trust); fix it, reload, then run this script'; END $$;
 \endif
 
 BEGIN;
