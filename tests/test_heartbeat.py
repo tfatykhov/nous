@@ -662,6 +662,20 @@ class TestHeartbeatRunner:
         assert runner._tokens_used_today == 800
 
     @pytest.mark.asyncio
+    async def test_cognitive_triage_prompt_matches_the_enforced_tool_set(self):
+        """Codex P1 on PR #773: the prompt must not point triage at DAGs or tasks the runner refuses to it."""
+        runner = self._make_runner()
+        runner._runner.run_turn = AsyncMock(return_value=("ok", MagicMock(), {}))
+        runner._runner.end_conversation = AsyncMock()
+
+        await runner._cognitive_triage([Finding(source="health", summary="Test", urgency="normal", needs_action=True)])
+
+        message = runner._runner.run_turn.call_args[0][1]
+        assert "LOCAL-ONLY" in message
+        assert "do not create or retry DAGs, tasks, schedules or checks" in message
+        assert "belong in a scheduled task or DAG" not in message
+
+    @pytest.mark.asyncio
     async def test_start_stop_lifecycle(self):
         """42. start/stop create and cancel the background task."""
         runner = self._make_runner()
