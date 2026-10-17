@@ -81,6 +81,21 @@ def test_every_pg_hba_network_line_is_judged_whatever_users_it_names():
     assert "user_name" not in VERIFY
 
 
+def test_the_script_refuses_to_run_while_pg_hba_lets_a_network_login_in_without_scram():
+    # nous_admin has no password and the run commits before verify runs, so the refusal comes before both
+    refusal = ROLES.index("RAISE EXCEPTION 'db_roles.sql: pg_hba.conf has a line that does not parse")
+    begin = ROLES.index("\nBEGIN;\n")
+    assert refusal < begin < ROLES.index("ALTER ROLE nous_admin")
+    # the same conditions as verify's pg_hba checks (whose SQL sits in a string, with its quotes doubled)
+    for condition in (
+        "FROM pg_hba_file_rules WHERE error IS NOT NULL",
+        "r.error IS NULL AND r.type <> 'local' AND NOT (r.address IN ('127.0.0.1', '::1', 'localhost'))"
+        " AND r.auth_method NOT IN ('scram-sha-256', 'reject')",
+    ):
+        assert condition in ROLES[:refusal], condition
+        assert condition in VERIFY.replace("''", "'"), condition
+
+
 def test_public_cannot_execute_application_functions_now_or_later():
     # PUBLIC's default EXECUTE would let the scorer, which has USAGE on these schemas, run them
     assert "REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA brain, heart, nous_system FROM PUBLIC;" in ROLES
