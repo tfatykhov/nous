@@ -127,8 +127,9 @@ def _nested_bindings(value: Any, where: str) -> list[str]:
     """Locations of every {path} binding nested inside a literal list/dict.
 
     Mirrors the renderer's isDataBinding: a dict with a string `path` that is
-    not a function call ({call, args} resolves its own args). Type-guarded
-    throughout — lint runs before schema validation and must never raise.
+    not a function call. A call object is walked into, since inside a literal
+    array it is printed raw too. Type-guarded throughout — lint runs before
+    schema validation and must never raise.
     """
     if isinstance(value, dict):
         if isinstance(value.get("path"), str) and "call" not in value:
@@ -231,17 +232,22 @@ def lint_micro_app(
         # Prod 2026-09-05 / 2026-10-17: `rows: [{key, value: {path}}]` passed
         # every gate and shipped cells reading `{"path":"price"}`.
         for prop, value in comp.items():
-            if not isinstance(value, list) or prop in _CHILD_KEYS:
-                continue
-            if (ctype, prop) in _PER_ITEM_RESOLVED:
+            if (
+                not isinstance(value, list)
+                or prop in _CHILD_KEYS
+                or (ctype, prop) in _PER_ITEM_RESOLVED
+            ):
                 continue
             for i, item in enumerate(value):
+                locs = _nested_bindings(item, f"{comp.get('id')}.{prop}[{i}]")
+                if not locs:
+                    continue
                 fields = (
                     "{" + ", ".join(k for k in item if isinstance(k, str)) + "}"
                     if isinstance(item, dict)
                     else "field"
                 )
-                for loc in _nested_bindings(item, f"{comp.get('id')}.{prop}[{i}]"):
+                for loc in locs:
                     errors.append(
                         f"{loc} is a {{path}} binding inside a literal array — this "
                         "renders as raw JSON. Bind the whole prop instead "

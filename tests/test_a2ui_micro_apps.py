@@ -1805,8 +1805,7 @@ async def test_heartbeat_findings_not_ingested_when_push_is_blocked() -> None:
 
 
 def _with_kv(kv: dict) -> list[dict]:
-    comps = _valid_components()
-    return [kv if c["id"] == "kv" else c for c in comps]
+    return [kv if c["id"] == "kv" else c for c in _valid_components()]
 
 
 def test_grammar_rejects_path_binding_nested_in_keyvaluetable_rows() -> None:
