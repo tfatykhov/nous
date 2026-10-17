@@ -78,21 +78,27 @@ _RULES: tuple[tuple[str, str], ...] = (
 )
 
 
-# one leftmost-wins pass, so a quote inside a comment or a -- inside a string is read as part of what encloses it
-_LITERALS_AND_COMMENTS = re.compile(r"'(?:[^']|'')*'|/\*.*?\*/|--[^\n]*|\$(\w*)\$.*?\$\1\$", re.S)
+# one leftmost-wins pass, so a quote inside a comment or a -- inside a string is read as part of what encloses it;
+# an E'' string may escape its quote with a backslash, and a quoted identifier may hold a quote or a --
+_LITERALS_AND_COMMENTS = re.compile(
+    r"""[Ee]'(?:[^'\\]|\\.|'')*'|"(?:[^"]|"")*"|'(?:[^']|'')*'|/\*.*?\*/|--[^\n]*|\$(\w*)\$.*?\$\1\$""", re.S
+)
 
 
 def _blank_one(match: re.Match[str]) -> str:
     text = match.group(0)
-    if text.startswith("'"):
+    if text.startswith(("'", "E'", "e'")):
         return "''"
+    if text.startswith('"'):
+        return "_q_"  # still a name, so heart."x" stays qualified and "heart".x does not
     if text.startswith("$"):
         return "$$ $$"
     return " "
 
 
 def _blank(sql: str) -> str:
-    """The SQL without comments (/* */ and --), with string literals and dollar-quoted bodies blanked."""
+    """The SQL without comments (/* */ and --), with string literals and dollar-quoted bodies blanked and quoted
+    identifiers replaced by a plain name."""
     return _LITERALS_AND_COMMENTS.sub(_blank_one, sql)
 
 
@@ -140,6 +146,8 @@ def privilege_violations(sql: str) -> list[str]:
             "INSERT INTO nous_system.cfg (k, v) VALUES ('c */ d');"
         ),
         "COMMENT ON TABLE heart.facts IS 'don''t'; CREATE TABLE foo (id int);",
+        r"INSERT INTO nous_system.cfg VALUES (E'it\'s'); SELECT 'x'; CREATE TABLE foo (id int); SELECT 'y';",
+        "CREATE TABLE heart.\"it's\" (id int); CREATE TABLE foo (id int); SELECT 'y';",
     ],
 )
 def test_the_rules_catch_what_the_application_role_cannot_do(sql):
@@ -169,6 +177,7 @@ def test_the_rules_catch_what_the_application_role_cannot_do(sql):
         "DO $do$ BEGIN EXECUTE 'CREATE TABLE foo (id int)'; END $do$;",
         "CREATE FUNCTION heart.f() RETURNS int LANGUAGE plpgsql AS $$ DECLARE n int; BEGIN SELECT 1 INTO n; END $$;",
         "COMMENT ON TABLE heart.facts IS 'callers may grant access';",
+        'CREATE TABLE heart."x" (id int);',
     ],
 )
 def test_the_rules_leave_ordinary_migrations_alone(sql):
