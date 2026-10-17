@@ -3,7 +3,8 @@ text-embedding-3-large @ 1536-dim) into the local eval DB under a distinct
 agent_id, reusing the tested nous_eval.corpus_loader for the load side.
 
 Run:
-    export PROD_PW=...           # prod DB_PASSWORD
+    export PROD_HOST=...         # the deployment's database host
+    export PROD_PW=...           # password of the PROD_DB_USER login (default nous_app)
     PYTHONPATH=. DB_HOST=localhost DB_PORT=5432 uv run python scripts/diag/copy_prod_corpus.py
 """
 
@@ -22,7 +23,7 @@ from nous.config import Settings
 from nous.storage.database import Database
 from nous_eval.corpus_loader import load_corpus_from_jsonl
 
-PROD = dict(host="192.168.1.141", port=5432, user="nous",
+PROD = dict(host=os.environ["PROD_HOST"], port=5432, user=os.environ.get("PROD_DB_USER", "nous_app"),
             password=os.environ["PROD_PW"], database="nous")
 PROD_AGENT = "nous-default"
 LOCAL_AGENT = "nous-prod-fresh"

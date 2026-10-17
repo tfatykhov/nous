@@ -15,6 +15,8 @@ from nous.observability import task_score_job as job
 from nous.storage.migrator import _split_sql_statements
 from nous.storage.models import ScorerHeartbeat
 
+pytestmark = pytest.mark.scoring_writer
+
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "sql" / "migrations" / "088_scorer_heartbeat.sql"
 

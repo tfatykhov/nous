@@ -33,6 +33,8 @@ from nous.storage.models import (
     TaskScore as TaskScoreRow,
 )
 
+pytestmark = pytest.mark.scoring_writer
+
 NOW = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
 
 

@@ -7,7 +7,7 @@ back atomically.
 
 Usage:
     NOUS_EVAL_FIXTURES_DIR=E:/Projects/nous-eval-fixtures/v2026-Q2 \
-    DB_HOST=192.168.1.141 DB_USER=nous DB_PASSWORD=nous_dev_password \
+    DB_HOST=<host> DB_USER=nous DB_PASSWORD=<password> \
     NOUS_EVAL_DB_HOST=127.0.0.1 NOUS_EVAL_DB_NAME=nous_eval_scratch \
     OPENAI_API_KEY=... \
     uv run python -m nous_eval.hand_labels_review

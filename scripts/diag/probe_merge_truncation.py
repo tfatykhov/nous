@@ -4,7 +4,7 @@ Pulls real prod pairs that were downgraded MERGE->KEEP_BOTH for missing content,
 re-runs the resolution LLM call at 300 (repro) vs 800 tokens, and reports whether
 merged_content appears only at the higher budget.
 
-    PROD_PW=... NOUS_BACKGROUND_MODEL=claude-sonnet-4-6 \\
+    PROD_HOST=... PROD_PW=... NOUS_BACKGROUND_MODEL=claude-sonnet-4-6 \\
     PYTHONPATH=. uv run python scripts/diag/probe_merge_truncation.py
 """
 
@@ -26,7 +26,7 @@ from nous.handlers.sleep_handler import (
 )
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-PROD = dict(host="192.168.1.141", port=5432, user="nous",
+PROD = dict(host=os.environ["PROD_HOST"], port=5432, user=os.environ.get("PROD_DB_USER", "nous_app"),
             password=os.environ["PROD_PW"], database="nous")
 AGENT = "nous-default"
 

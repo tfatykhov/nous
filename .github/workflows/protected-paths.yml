@@ -1,0 +1,47 @@
+name: Protected paths
+
+# Fails a pull request that is made under the agent's identity and changes a path listed in
+# .github/CODEOWNERS. It runs on pull_request_target so that the script and the CODEOWNERS it reads
+# come from the base branch: a pull request cannot edit its own check. Nothing from the pull request
+# is executed. Its commits are fetched as data and read with git.
+
+on:
+  pull_request_target:
+    branches: [main]
+    # No "edited": a pull request retargeted onto main runs this check only on its next push.
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: protected-paths-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  protected-paths:
+    name: Protected paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      # Emails the agents commit under (comma separated). The one place to change them.
+      NOUS_COMMIT_EMAILS: nous@tfatykhov.com,claude-runner@nous,nous@local,nous@agent,nous@agent.local,nous@localhost,nous@nous.ai,nous@cognition-engines.ai,runner@nous,claude-runner@users.noreply.github.com,noreply@anthropic.com,claude@anthropic.com,codex@openai.com
+      # Logins that open the agent's pull requests: the repository variable NOUS_PR_LOGINS, set when the
+      # agent's own GitHub account exists. Empty until then.
+      NOUS_PR_LOGINS: ${{ vars.NOUS_PR_LOGINS }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+      BASE_REF: ${{ github.event.pull_request.base.ref }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Check out the base branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch the pull request commits (data only)
+        run: git fetch --no-tags origin "+refs/pull/${PR_NUMBER}/head:refs/remotes/pr/head"
+
+      - name: Check the protected paths
+        run: python3 scripts/ci/protected_paths.py --base "origin/${BASE_REF}" --head "${HEAD_SHA}" --pr-author "${PR_AUTHOR}"

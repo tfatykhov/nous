@@ -87,3 +87,109 @@ jobs:
           DB_NAME: nous
           NOUS_TEST_DB: postgres
         run: pytest tests/ -v --tb=short
+
+  db-roles:
+    name: DB roles
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: []
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_DB: nous
+          POSTGRES_USER: nous
+          POSTGRES_PASSWORD: nous_dev_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nous"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev,runtime]" httpx
+
+      - name: Initialize the database (as the database image's superuser)
+        env:
+          PGHOST: localhost
+          PGUSER: nous
+          PGPASSWORD: nous_dev_password
+          PGDATABASE: nous
+        run: |
+          psql -f sql/init.sql
+          psql -f sql/seed.sql
+
+      - name: Apply the migrations up to 088 (as the superuser, with the application's migrator)
+        env:
+          DB_HOST: localhost
+          DB_PORT: "5432"
+          DB_USER: nous
+          DB_PASSWORD: nous_dev_password
+          DB_NAME: nous
+        run: python scripts/ci/apply_migrations.py --max-version 88
+
+      - name: Create the database roles and check them
+        env:
+          NOUS_APP_DB_PASSWORD: ciapppassword1
+          NOUS_SCORER_DB_PASSWORD: ciscorerpassword1
+        run: |
+          docker exec -i -e NOUS_APP_DB_PASSWORD -e NOUS_SCORER_DB_PASSWORD ${{ job.services.postgres.id }} psql -U nous -d nous -X -v ON_ERROR_STOP=1 -f - < scripts/ops/db_roles.sql
+          docker exec -i ${{ job.services.postgres.id }} psql -U nous_admin -d nous -X -v ON_ERROR_STOP=1 -f - < scripts/ops/verify_db_roles.sql
+
+      - name: Apply every later migration as the application role
+        env:
+          DB_HOST: localhost
+          DB_PORT: "5432"
+          DB_USER: nous_app
+          DB_PASSWORD: ciapppassword1
+          DB_NAME: nous
+        run: python scripts/ci/apply_migrations.py
+
+      - name: Check the database roles again after the later migrations
+        run: docker exec -i ${{ job.services.postgres.id }} psql -U nous_admin -d nous -X -v ON_ERROR_STOP=1 -f - < scripts/ops/verify_db_roles.sql
+
+      - name: Run the tests as the application role
+        env:
+          DB_HOST: localhost
+          DB_PORT: "5432"
+          DB_USER: nous_app
+          DB_PASSWORD: ciapppassword1
+          DB_NAME: nous
+          NOUS_TEST_DB: postgres
+        run: pytest tests/ -v --tb=short -m "not scoring_writer"
+
+      - name: Probe, qualified DDL applies under the application role
+        env:
+          DB_HOST: localhost
+          DB_PORT: "5432"
+          DB_USER: nous_app
+          DB_PASSWORD: ciapppassword1
+          DB_NAME: nous
+        run: |
+          python scripts/ci/apply_migrations.py --dir tests/fixtures/migration_probe/ok > probe.out
+          cat probe.out
+          grep -q "9998_qualified_ddl" probe.out
+
+      - name: Probe, an unqualified CREATE TABLE fails under the application role
+        env:
+          DB_HOST: localhost
+          DB_PORT: "5432"
+          DB_USER: nous_app
+          DB_PASSWORD: ciapppassword1
+          DB_NAME: nous
+        run: |
+          if python scripts/ci/apply_migrations.py --dir tests/fixtures/migration_probe/unqualified 2> probe.err; then
+            echo "the unqualified probe applied: the application role can create objects in public"
+            exit 1
+          fi
+          grep -q "permission denied for schema public" probe.err

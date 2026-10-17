@@ -1,0 +1,352 @@
+"""scripts/ci/protected_paths.py: the CODEOWNERS reader and the pull-request tripwire."""
+
+from __future__ import annotations
+
+import ast
+import importlib.util
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "scripts" / "ci" / "protected_paths.py"
+spec = importlib.util.spec_from_file_location("protected_paths", SCRIPT)
+pp = importlib.util.module_from_spec(spec)
+sys.modules["protected_paths"] = pp
+spec.loader.exec_module(pp)
+
+NOUS = "nous@tfatykhov.com"
+OWNER = "owner@example.com"
+PATTERNS = ["/scripts/ops/**", "/Dockerfile", "/tests/test_task_scor*.py", "/.github/**", "/nous/identity/"]
+
+
+def test_parse_ignores_comments_blank_lines_and_owners():
+    text = "# comment\n\n/a/** @owner\n/b.py @owner @other  # trailing\n"
+    assert pp.parse_codeowners(text) == ["/a/**", "/b.py"]
+
+
+@pytest.mark.parametrize(
+    "bad", ["*.py", "docs/x.md", "/a/[bc].py", "/a?b", "!/x", "/a/***", "/a\\ b", "/a/**/b", "/**/x", "/a**"]
+)
+def test_unsupported_patterns_fail_loudly(bad):
+    with pytest.raises(pp.UnsupportedPattern):
+        pp.parse_codeowners(f"{bad} @owner\n")
+
+
+@pytest.mark.parametrize(
+    ("path", "hit"),
+    [
+        ("scripts/ops/db_roles.sql", True),
+        ("scripts/ops/deep/er/x", True),
+        ("scripts/opsx/db_roles.sql", False),
+        ("scripts/ops", False),
+        ("Dockerfile", True),
+        ("Dockerfile.dev", False),
+        ("sub/Dockerfile", False),
+        ("tests/test_task_scoring.py", True),
+        ("tests/test_task_scores_migration.py", True),
+        ("tests/sub/test_task_scoring.py", False),
+        (".github/CODEOWNERS", True),
+        (".github/workflows/ci.yml", True),
+        ("nous/identity/manager.py", True),
+        ("nous/identity", False),
+        ("nous/identity_other.py", False),
+        ("scripts/ops/a\nb.sql", True),
+        ("Dockerfile\n", False),
+    ],
+)
+def test_pattern_matching(path, hit):
+    assert bool(pp.protected([path], PATTERNS)) is hit
+
+
+def test_the_real_codeowners_is_inside_the_supported_subset_and_every_pattern_still_matches_a_file():
+    text = (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8-sig")
+    patterns = pp.parse_codeowners(text)
+    assert patterns, "CODEOWNERS lists no path"
+    rules = [fields for fields in (line.split("#", 1)[0].split() for line in text.splitlines()) if fields]
+    assert all(len(fields) == 2 for fields in rules), "every line names exactly one owner (none is unowned on GitHub)"
+    assert len({fields[1] for fields in rules}) == 1, "every line names the same owner"
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=ROOT, check=True, capture_output=True, text=True
+    ).stdout.split("\0")
+    dead = [p for p in patterns if not pp.protected(tracked, [p])]
+    assert not dead, f"CODEOWNERS patterns that match no tracked file (renamed or mistyped?): {dead}"
+    dirs = {"/".join(parts[:i]) for parts in (p.split("/") for p in tracked if p) for i in range(1, len(parts))}
+    named = [p for p in patterns if not p.endswith(("/", "/**")) and pp.protected(dirs, [p])]
+    assert not named, f"patterns that name a directory (GitHub also covers what is below it; end them in /**): {named}"
+
+
+def test_codeowners_protects_itself_and_the_tripwire():
+    patterns = pp.parse_codeowners((ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8-sig"))
+    for path in (
+        ".github/CODEOWNERS",
+        ".github/workflows/protected-paths.yml",
+        "scripts/ci/protected_paths.py",
+        "scripts/ops/db_roles.sql",
+        "docker-compose.yml",
+        "Dockerfile",
+    ):
+        assert pp.protected([path], patterns), path
+
+
+# The scorer and the page that reports it: what they import decides the score as much as they do.
+SCORER = (
+    "nous/observability/task_scoring.py",
+    "nous/observability/task_score_gatherer.py",
+    "nous/observability/task_score_job.py",
+    "nous/observability/autonomy_inventory.py",
+    "nous/api/autonomy_dashboard.py",
+)
+# Modules the scorer imports that need no code owner, each with the reason.
+SCORER_IMPORT_EXEMPT = {
+    "nous/config.py": "settings; the scorer reads only its database login from it",
+    "nous/storage/database.py": "connection pool; no scoring semantics",
+    "nous/log_redaction.py": "logging",
+}
+
+
+def _module_file(module: str) -> str | None:
+    base = Path(*module.split("."))
+    for candidate in (base.with_suffix(".py"), base / "__init__.py"):
+        if (ROOT / candidate).is_file():
+            return candidate.as_posix()
+    return None
+
+
+def _nous_imports(path: str) -> dict[str, str]:
+    """The files that supply the nous.* names a module imports, at module level or inside a function."""
+    found: dict[str, str] = {}
+    package = path.split("/")[:-1]
+    for node in ast.walk(ast.parse((ROOT / path).read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            modules = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            if node.level:
+                base = ".".join(package[: len(package) - node.level + 1] + ([base] if base else []))
+            # a name with a file of its own is a submodule, otherwise an attribute of the module
+            modules = [f"{base}.{a.name}" if _module_file(f"{base}.{a.name}") else base for a in node.names]
+        else:
+            continue
+        for module in modules:
+            if module == "nous" or module.startswith("nous."):
+                file = _module_file(module)
+                assert file, f"{path}:{node.lineno}: cannot resolve {module}"
+                found.setdefault(file, f"{path}:{node.lineno}")
+    return found
+
+
+def test_every_module_the_scorer_imports_is_code_owned_or_exempt_with_a_reason():
+    patterns = pp.parse_codeowners((ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8-sig"))
+    imported: dict[str, str] = {}
+    for path in SCORER:
+        assert pp.protected([path], patterns), path
+        for file, where in _nous_imports(path).items():
+            imported.setdefault(file, where)
+    unowned = sorted(
+        f"{file} (imported at {where})"
+        for file, where in imported.items()
+        if file not in SCORER_IMPORT_EXEMPT and not pp.protected([file], patterns)
+    )
+    assert not unowned, f"add to CODEOWNERS, or to SCORER_IMPORT_EXEMPT with the reason: {unowned}"
+    stale = sorted(set(SCORER_IMPORT_EXEMPT) - set(imported))
+    assert not stale, f"SCORER_IMPORT_EXEMPT names modules the scorer no longer imports: {stale}"
+
+
+def test_every_module_that_records_an_owner_grade_is_code_owned():
+    # the gatherer trusts reviews with reviewer "a2ui" as the owner's own grade
+    patterns = pp.parse_codeowners((ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8-sig"))
+    producers = sorted(
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "nous").rglob("*.py")
+        if "tests" not in path.relative_to(ROOT).parts
+        and ('reviewer="a2ui"' in (text := path.read_text(encoding="utf-8")) or "reviewer='a2ui'" in text)
+    )
+    assert producers, "no module records an owner grade any more: update this test"
+    unowned = [path for path in producers if not pp.protected([path], patterns)]
+    assert not unowned, f"modules that record owner grades and have no code owner: {unowned}"
+
+
+# -- a throwaway repository ---------------------------------------------------------------------------------
+
+
+def git(repo: Path, *args: str, email: str = OWNER) -> str:
+    env = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": email,
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": email,
+        "PATH": os.environ["PATH"],
+        "HOME": str(repo),
+    }
+    return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True, env=env).stdout
+
+
+def commit(repo: Path, files: dict[str, str | None], email: str = OWNER) -> None:
+    for name, content in files.items():
+        path = repo / name
+        if content is None:
+            git(repo, "rm", "-q", name)
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+        git(repo, "add", name)
+    git(repo, "commit", "-q", "-m", "c", email=email)
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    git(tmp_path, "init", "-q", "-b", "main")
+    commit(tmp_path, {"README.md": "x", "scripts/ops/a.sql": "a", "app/x.py": "x"})
+    git(tmp_path, "branch", "pr")
+    git(tmp_path, "checkout", "-q", "pr")
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
+def run(emails=(NOUS,), login="", logins=()):
+    return pp.violations(PATTERNS, "main", "pr", list(emails), login, list(logins))
+
+
+def test_an_agent_commit_outside_the_protected_paths_is_clean(repo):
+    commit(repo, {"app/y.py": "y"}, email=NOUS)
+    assert run() == []
+
+
+def test_an_agent_commit_inside_a_protected_path_is_flagged(repo):
+    commit(repo, {"scripts/ops/new.sql": "n"}, email=NOUS)
+    assert [f for f in run() if "scripts/ops/new.sql" in f]
+
+
+def test_the_owner_changing_a_protected_path_is_not_flagged(repo):
+    commit(repo, {"scripts/ops/new.sql": "n"}, email=OWNER)
+    assert run() == []
+
+
+def test_a_deleted_protected_file_and_a_rename_out_of_a_protected_path_are_flagged(repo):
+    commit(repo, {"scripts/ops/a.sql": None}, email=NOUS)
+    assert run()
+    git(repo, "checkout", "-q", "main")
+    git(repo, "branch", "-q", "-D", "pr")
+    git(repo, "checkout", "-q", "-b", "pr")
+    git(repo, "mv", "scripts/ops/a.sql", "app/moved.sql")
+    git(repo, "commit", "-q", "-m", "mv", email=NOUS)
+    assert [f for f in run() if "scripts/ops/a.sql" in f]
+    assert [f for f in run(emails=(), login="nous-bot", logins=["nous-bot"]) if "scripts/ops/a.sql" in f]
+
+
+def test_the_committer_email_counts_as_well_as_the_author(repo):
+    (repo / "Dockerfile").write_text("FROM x")
+    git(repo, "add", "Dockerfile")
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "c", "--author", f"t <{OWNER}>"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        env={"GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": NOUS, "PATH": os.environ["PATH"], "HOME": str(repo)},
+    )
+    assert run()
+
+
+def test_email_match_is_case_insensitive(repo):
+    commit(repo, {".github/workflows/x.yml": "x"}, email=NOUS.upper())
+    assert run()
+
+
+def test_an_email_with_a_space_is_read_whole(repo):
+    commit(repo, {"Dockerfile": "FROM x"}, email="an agent@example.com")
+    assert run() == []
+    assert run(emails=["an agent@example.com"])
+
+
+def test_a_carriage_return_in_an_email_does_not_split_the_commit_record(repo):
+    # the commit object is written by hand, so the author email holds the carriage return as it is
+    (repo / "scripts" / "ops" / "cr.sql").write_text("c")
+    git(repo, "add", "scripts/ops/cr.sql")
+    tree = git(repo, "write-tree").strip()
+    parent = git(repo, "rev-parse", "HEAD").strip()
+    body = (
+        f"tree {tree}\nparent {parent}\n"
+        f"author t <a\rb@example.com> 1700000000 +0000\ncommitter t <{NOUS}> 1700000000 +0000\n\nc\n"
+    )
+    write = ["git", "hash-object", "-t", "commit", "-w", "--stdin"]
+    made = subprocess.run(write, cwd=repo, input=body.encode(), check=True, capture_output=True)
+    git(repo, "update-ref", "refs/heads/pr", made.stdout.decode().strip())
+    assert [f for f in run() if "scripts/ops/cr.sql" in f]
+
+
+def test_a_pull_request_opened_by_the_agent_login_is_judged_on_its_net_change_whatever_the_commit_email(repo):
+    commit(repo, {"Dockerfile": "FROM x"}, email="someone-else@example.com")
+    assert run() == []  # commits alone say nothing
+    findings = run(login="Nous-Bot", logins=["nous-bot"])
+    assert [f for f in findings if "Dockerfile" in f]
+
+
+def test_a_commit_that_is_undone_inside_the_pull_request_leaves_no_net_change(repo):
+    commit(repo, {"Dockerfile": "FROM x"}, email="someone-else@example.com")
+    commit(repo, {"Dockerfile": None}, email="someone-else@example.com")
+    assert run(login="nous-bot", logins=["nous-bot"]) == []
+
+
+def test_a_merge_commit_that_carries_a_protected_change_is_flagged(repo):
+    git(repo, "checkout", "-q", "main")
+    commit(repo, {"scripts/ops/main_side.sql": "m"})
+    git(repo, "checkout", "-q", "pr")
+    commit(repo, {"app/z.py": "z"})
+    git(repo, "merge", "-q", "--no-ff", "-m", "merge main", "main", email=NOUS)
+    assert [f for f in run() if "scripts/ops/main_side.sql" in f]
+
+
+def test_main_exits_one_when_flagged_and_zero_when_clean(repo, monkeypatch, capsys):
+    (repo / ".github").mkdir()
+    (repo / ".github" / "CODEOWNERS").write_text("/scripts/ops/** @owner\n")
+    monkeypatch.setenv("NOUS_COMMIT_EMAILS", NOUS)
+    commit(repo, {"app/y.py": "y"}, email=NOUS)
+    assert pp.main(["--base", "main", "--head", "pr"]) == 0
+    commit(repo, {"scripts/ops/n.sql": "n"}, email=NOUS)
+    assert pp.main(["--base", "main", "--head", "pr"]) == 1
+    assert "::error::protected path" in capsys.readouterr().out
+
+
+def test_a_path_with_a_line_break_cannot_start_a_second_workflow_command(repo, monkeypatch, capsys):
+    (repo / ".github").mkdir()
+    (repo / ".github" / "CODEOWNERS").write_text("/scripts/ops/** @owner\n")
+    monkeypatch.setenv("NOUS_COMMIT_EMAILS", NOUS)
+    monkeypatch.setenv("NOUS_PR_LOGINS", "nous-bot")
+    commit(repo, {"scripts/ops/n.sql": "n"}, email=NOUS)
+    monkeypatch.setattr(pp, "commit_changed_paths", lambda sha: ["scripts/ops/a\r\n::warning::b.sql"])
+    assert pp.main(["--base", "main", "--head", "pr"]) == 1
+    commands = [line for line in capsys.readouterr().out.splitlines() if line.startswith("::")]
+    assert len(commands) == 1, commands
+    assert commands[0].endswith(r"changes scripts/ops/a\r\n::warning::b.sql"), commands
+
+
+def test_main_reads_a_codeowners_that_starts_with_a_byte_order_mark(repo, monkeypatch):
+    (repo / "CODEOWNERS").write_text("\ufeff/scripts/ops/** @owner\n", encoding="utf-8")
+    monkeypatch.setenv("NOUS_COMMIT_EMAILS", NOUS)
+    commit(repo, {"scripts/ops/n.sql": "n"}, email=NOUS)
+    assert pp.main(["--codeowners", "CODEOWNERS", "--base", "main", "--head", "pr"]) == 1
+
+
+def test_main_refuses_to_run_without_an_identity_list_or_with_a_bad_codeowners(repo, monkeypatch):
+    (repo / "CODEOWNERS").write_text("*.py @owner\n")
+    monkeypatch.setenv("NOUS_COMMIT_EMAILS", NOUS)
+    assert pp.main(["--codeowners", "CODEOWNERS", "--base", "main", "--head", "pr"]) == 2
+    (repo / "CODEOWNERS").write_text("/scripts/ops/** @owner\n")
+    monkeypatch.setenv("NOUS_COMMIT_EMAILS", "")
+    assert pp.main(["--codeowners", "CODEOWNERS", "--base", "main", "--head", "pr"]) == 2
+
+
+def test_main_says_so_when_the_login_rule_has_nobody_to_apply_to(repo, monkeypatch, capsys):
+    (repo / ".github").mkdir()
+    (repo / ".github" / "CODEOWNERS").write_text("/scripts/ops/** @owner\n")
+    monkeypatch.setenv("NOUS_COMMIT_EMAILS", NOUS)
+    monkeypatch.delenv("NOUS_PR_LOGINS", raising=False)
+    assert pp.main(["--base", "main", "--head", "pr"]) == 0
+    assert "NOUS_PR_LOGINS is empty" in capsys.readouterr().out
+    monkeypatch.setenv("NOUS_PR_LOGINS", "nous-bot")
+    assert pp.main(["--base", "main", "--head", "pr"]) == 0
+    assert "NOUS_PR_LOGINS is empty" not in capsys.readouterr().out

@@ -7,8 +7,8 @@ services:
     environment:
       - DB_HOST=postgres
       - DB_PORT=5432
-      - DB_USER=nous
-      - DB_PASSWORD=${DB_PASSWORD:-nous_dev_password}
+      - DB_USER=${NOUS_APP_DB_USER:-nous}
+      - DB_PASSWORD=${NOUS_APP_DB_PASSWORD:-${DB_PASSWORD:-nous_dev_password}}
       - DB_NAME=nous
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN:-}
@@ -159,6 +159,40 @@ services:
       # app is served only the four public client values.
     depends_on:
       postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Scoring job: runs the one-shot scorer every 15 minutes under its own database role.
+  # Without NOUS_SCORER_DB_USER / NOUS_SCORER_DB_PASSWORD (local development) it uses the application's login,
+  # so nothing extra needs setting up. A deployment that ran scripts/ops/db_roles.sql sets both.
+  # No workspace volume: the job reads the database and nothing else.
+  nous-scorer:
+    build: .
+    container_name: nous-scorer
+    init: true
+    command:
+      - sh
+      - -c
+      - |
+        while true; do
+          started=$$(date +%s)
+          timeout 900 python -m nous.observability.task_score_job --agent-id "$${NOUS_AGENT_ID}" || echo "nous-scorer: task_score_job exited with status $$? at $$(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
+          rest=$$(( 900 - ($$(date +%s) - started) ))
+          if [ "$$rest" -gt 0 ]; then sleep "$$rest"; fi
+        done
+    healthcheck:
+      disable: true
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${NOUS_SCORER_DB_USER:-${NOUS_APP_DB_USER:-nous}}
+      DB_PASSWORD: ${NOUS_SCORER_DB_PASSWORD:-${NOUS_APP_DB_PASSWORD:-${DB_PASSWORD:-nous_dev_password}}}
+      DB_NAME: nous
+      NOUS_AGENT_ID: ${NOUS_AGENT_ID:-nous-default}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nous:
         condition: service_healthy
     restart: unless-stopped
 

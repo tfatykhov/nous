@@ -22,6 +22,8 @@ from nous.storage.models import (
     TaskScore,
 )
 
+pytestmark = pytest.mark.scoring_writer
+
 NOW = datetime.now(UTC)
 SHAPE = {
     "window_days",

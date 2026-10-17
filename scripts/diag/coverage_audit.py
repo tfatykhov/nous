@@ -5,7 +5,7 @@ facts, ask Sonnet which salient/queryable facts in the transcript are CAPTURED
 by an extracted fact vs MISSED, and classify each by type. Aggregates a coverage
 rate + a droppage-by-type histogram.
 
-    PROD_PW=... PYTHONPATH=. uv run python scripts/diag/coverage_audit.py [N]
+    PROD_HOST=... PROD_PW=... PYTHONPATH=. uv run python scripts/diag/coverage_audit.py [N]
 
 Cost: 1 Sonnet call per episode (~$0.02). N=20 ~ $0.40.
 """
@@ -26,8 +26,8 @@ from nous.config import Settings
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-PROD = dict(host=os.environ.get("PROD_HOST", "192.168.1.141"), port=5432,
-            user="nous", password=os.environ["PROD_PW"], database="nous")
+PROD = dict(host=os.environ["PROD_HOST"], port=5432,
+            user=os.environ.get("PROD_DB_USER", "nous_app"), password=os.environ["PROD_PW"], database="nous")
 AGENT = "nous-default"
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 20
 
