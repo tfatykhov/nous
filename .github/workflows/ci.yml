@@ -146,7 +146,7 @@ jobs:
           PGDATABASE: nous
           NOUS_APP_DB_PASSWORD: ciapppassword1
           NOUS_SCORER_DB_PASSWORD: ciscorerpassword1
-        run: cat scripts/ops/db_roles.sql scripts/ops/verify_db_roles.sql | psql -X -v ON_ERROR_STOP=1
+        run: psql -X -v ON_ERROR_STOP=1 -f scripts/ops/db_roles.sql -f scripts/ops/verify_db_roles.sql
 
       - name: Apply every later migration as the application role
         env:
@@ -174,7 +174,10 @@ jobs:
           DB_USER: nous_app
           DB_PASSWORD: ciapppassword1
           DB_NAME: nous
-        run: python scripts/ci/apply_migrations.py --dir tests/fixtures/migration_probe/ok
+        run: |
+          python scripts/ci/apply_migrations.py --dir tests/fixtures/migration_probe/ok > probe.out
+          cat probe.out
+          grep -q "9998_qualified_ddl" probe.out
 
       - name: Probe, an unqualified CREATE TABLE fails under the application role
         env:
