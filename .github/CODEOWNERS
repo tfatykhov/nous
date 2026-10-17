@@ -33,6 +33,7 @@
 # validation of decision reviews
 /nous/a2ui/actions.py @tfatykhov
 /nous/owner_actions.py @tfatykhov
+/nous/brain/continuation.py @tfatykhov
 /nous/api/compensation.py @tfatykhov
 /nous/brain/brain.py @tfatykhov
 /nous/brain/schemas.py @tfatykhov
