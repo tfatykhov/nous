@@ -140,6 +140,7 @@ Detailed reference lives in `docs/reference/` so it is read only when a task nee
 | [Project structure](docs/reference/project-structure.md) | Annotated map of the main modules in `nous/` and `nous_eval/` (not every file) | Locating a module |
 | [REST API](docs/reference/rest-api.md) | Documented endpoints (`nous/api/rest.py` is the full list) | Adding or changing an endpoint or dashboard route |
 | [Agent tools](docs/reference/agent-tools.md) | Documented agent tools and their frame access (the `dispatcher.register()` calls are the full list) | Adding or changing a tool |
+| [Repository rules](docs/reference/repository-rules.md) | The default-branch ruleset (`scripts/ops/main-ruleset.json`), the agent's GitHub account and `NOUS_PR_LOGINS` | Changing the ruleset, `.github/CODEOWNERS`, the `Protected paths` check or the name of a required CI job |
 | [Database roles](docs/reference/database-roles.md) | The Postgres roles of a deployment, the run order of `scripts/ops/db_roles.sql`, its checks and the rollback | Touching `scripts/ops/`, the compose database logins (`NOUS_APP_DB_*`, `NOUS_SCORER_DB_*`) or what a migration may contain |
 
 **Keep them in sync:** a new setting, shipped feature, module, endpoint or tool gets its row in the matching reference doc in the same PR, not in this file. Feature status also goes in `docs/features/INDEX.md`. Older specs that say "update the CLAUDE.md env table" mean `docs/reference/environment-variables.md`.
