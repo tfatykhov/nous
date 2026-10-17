@@ -152,3 +152,23 @@ def test_column_privileges_are_revoked_before_the_grants_and_verified():
     ):
         assert -1 < ROLES.find(revoke) < first_grant, revoke
     assert "('no column-level privilege reaches past the table-level grants', 'nous_admin'," in VERIFY
+
+
+def test_a_refused_reload_stops_the_run():
+    reload = ROLES.index("IF NOT pg_reload_conf() THEN")
+    refusal = ROLES.index("RAISE EXCEPTION 'db_roles.sql: the server did not accept the configuration reload")
+    assert reload < refusal < ROLES.index("FROM pg_hba_file_rules")
+
+
+def test_the_service_roles_store_scram_verifiers_and_a_run_requires_them():
+    # with password_encryption = md5 a new password would be an MD5 verifier, which the scram-only pg_hba rejects
+    begin = ROLES.index("\nBEGIN;\n")
+    scram = ROLES.index("SET LOCAL password_encryption = 'scram-sha-256';")
+    assert begin < scram < ROLES.index("PASSWORD :'app_password'") < ROLES.index("PASSWORD :'scorer_password'")
+    for refusal in (
+        "RAISE EXCEPTION 'db_roles.sql: nous_app''s stored password is not a SCRAM verifier",
+        "RAISE EXCEPTION 'db_roles.sql: nous_scorer''s stored password is not a SCRAM verifier",
+    ):
+        assert -1 < ROLES.find(refusal) < begin, refusal
+    assert "RAISE EXCEPTION 'password is not a SCRAM verifier: %'" in ROLES[ROLES.index("DO $post$") :]
+    assert "('both service roles store a SCRAM verifier', 'nous_admin'," in VERIFY

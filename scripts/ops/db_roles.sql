@@ -87,9 +87,33 @@ SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nous_app') AS app_exists,
     \endif
 \endif
 
+-- pg_hba lets the two service roles in with scram-sha-256 only, which an MD5 verifier (password_encryption = md5)
+-- or no password at all cannot pass. A new password is stored as SCRAM below; a run that sets none for a role
+-- whose stored password is not a SCRAM verifier stops here.
+SELECT EXISTS (SELECT 1 FROM pg_authid WHERE rolname = 'nous_app' AND (rolpassword IS NULL OR rolpassword NOT LIKE 'SCRAM-SHA-256$%')) AS app_pw_not_scram,
+       EXISTS (SELECT 1 FROM pg_authid WHERE rolname = 'nous_scorer' AND (rolpassword IS NULL OR rolpassword NOT LIKE 'SCRAM-SHA-256$%')) AS scorer_pw_not_scram \gset
+\if :app_pw_not_scram
+    \if :has_app_pw
+    \else
+        DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: nous_app''s stored password is not a SCRAM verifier; set NOUS_APP_DB_PASSWORD (a new password is stored as SCRAM) and run again'; END $$;
+    \endif
+\endif
+\if :scorer_pw_not_scram
+    \if :has_scorer_pw
+    \else
+        DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: nous_scorer''s stored password is not a SCRAM verifier; set NOUS_SCORER_DB_PASSWORD (a new password is stored as SCRAM) and run again'; END $$;
+    \endif
+\endif
+
 -- pg_hba_file_rules shows the file on disk, which the server enforces only from its next reload: reload first, so
 -- that (a file with a parse error, which keeps the old rules, is refused below) the server enforces what is checked.
-DO $$ BEGIN PERFORM pg_reload_conf(); PERFORM pg_sleep(1); END $$;
+DO $$
+BEGIN
+    IF NOT pg_reload_conf() THEN
+        RAISE EXCEPTION 'db_roles.sql: the server did not accept the configuration reload (pg_reload_conf returned false); fix that, then run this script';
+    END IF;
+    PERFORM pg_sleep(1);
+END $$;
 
 -- nous_admin gets no password and the run commits before verify runs, so pg_hba.conf must already keep every
 -- network login beyond loopback on scram-sha-256 or reject. verify_db_roles.sql checks the same conditions.
@@ -133,6 +157,8 @@ $roles$;
 ALTER ROLE nous_app WITH NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS LOGIN;
 ALTER ROLE nous_scorer WITH NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS LOGIN;
 
+-- A new password is stored as a SCRAM verifier whatever the server's password_encryption.
+SET LOCAL password_encryption = 'scram-sha-256';
 \if :has_app_pw
     ALTER ROLE nous_app PASSWORD :'app_password';
 \endif
@@ -340,6 +366,10 @@ BEGIN
      WHERE rolname IN ('nous_app', 'nous_scorer')
        AND (rolsuper OR rolcreaterole OR rolcreatedb OR rolreplication OR rolbypassrls);
     IF bad IS NOT NULL THEN RAISE EXCEPTION 'role has an elevated attribute: %', bad; END IF;
+
+    SELECT string_agg(rolname, ', ') INTO bad FROM pg_authid
+     WHERE rolname IN ('nous_app', 'nous_scorer') AND (rolpassword IS NULL OR rolpassword NOT LIKE 'SCRAM-SHA-256$%');
+    IF bad IS NOT NULL THEN RAISE EXCEPTION 'password is not a SCRAM verifier: %', bad; END IF;
 
     SELECT string_agg(r.rolname || ' in ' || g.rolname, ', ') INTO bad
       FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.member JOIN pg_roles g ON g.oid = m.roleid
