@@ -217,3 +217,12 @@ def test_inherited_login_restrictions_and_settings_are_reset_before_the_scorer_p
     assert "RAISE EXCEPTION 'login restriction or setting left on: %'" in ROLES[ROLES.index("DO $post$") :]
     label = "the service roles have no connection limit, expiry or setting but the scorer pins"
     assert f"('{label}', 'nous_admin'," in VERIFY
+
+
+def test_nobody_but_the_administrator_creates_in_public():
+    # clusters initialised with the pre-15 defaults let PUBLIC create in schema public
+    begin = ROLES.index("\nBEGIN;\n")
+    assert begin < ROLES.find("REVOKE CREATE ON SCHEMA public FROM PUBLIC, nous_app, nous_scorer CASCADE;")
+    # verify: the application's probe and the scorer's privilege check, both of which count PUBLIC's grants
+    assert "('app cannot write to public', 'nous_app', 'CREATE TABLE public.zz (i int)', 'error', NULL)" in VERIFY
+    assert "NOT has_schema_privilege(''nous_scorer'', ''public'', ''CREATE'')" in VERIFY

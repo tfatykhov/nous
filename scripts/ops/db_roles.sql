@@ -280,6 +280,9 @@ BEGIN
 END
 $own$;
 
+-- public: only the administrator creates there (older clusters let PUBLIC); USAGE stays for its functions and operators.
+REVOKE CREATE ON SCHEMA public FROM PUBLIC, nous_app, nous_scorer CASCADE;
+
 -- 4. scoring: owned by nous_admin, written by the scorer, read by the application.
 REVOKE ALL ON SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer CASCADE;
 REVOKE ALL ON ALL TABLES IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer CASCADE;
