@@ -175,8 +175,10 @@ services:
       - -c
       - |
         while true; do
+          started=$$(date +%s)
           timeout 900 python -m nous.observability.task_score_job --agent-id "$${NOUS_AGENT_ID}" || echo "nous-scorer: task_score_job exited with status $$? at $$(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
-          sleep 900
+          rest=$$(( 900 - ($$(date +%s) - started) ))
+          if [ "$$rest" -gt 0 ]; then sleep "$$rest"; fi
         done
     healthcheck:
       disable: true
