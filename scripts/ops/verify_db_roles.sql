@@ -10,8 +10,8 @@
 --
 -- nous_admin has no password and is meant to be reachable only through docker exec on the database host.
 -- That holds only while pg_hba.conf lets nothing but the local socket and loopback in without a password:
--- every other line that covers all users, or nous_admin, must use scram-sha-256 (a role with no password
--- cannot pass it) or reject, and no line beyond loopback may use trust, md5 or password. The pg_hba
+-- every network line beyond loopback, whichever users it names, must use scram-sha-256 (a role with no
+-- password cannot pass it) or reject, and no line beyond loopback may use trust, md5 or password. The pg_hba
 -- checks below read pg_hba_file_rules (the file as it is on disk, which the server applies at the next
 -- reload) and fail when that changes.
 
@@ -149,8 +149,8 @@ BEGIN
             'SELECT NOT EXISTS (SELECT 1 FROM pg_hba_file_rules WHERE error IS NOT NULL)', 'true', NULL),
         ('pg_hba: no trust, md5 or password line reaches beyond the local socket and loopback', 'nous_admin',
             'SELECT NOT EXISTS (SELECT 1 FROM pg_hba_file_rules r WHERE r.error IS NULL AND r.type <> ''local'' AND r.auth_method IN (''trust'', ''md5'', ''password'') AND NOT (r.address IN (''127.0.0.1'', ''::1'', ''localhost'')))', 'true', NULL),
-        ('pg_hba: every network line that covers all users or nous_admin uses scram-sha-256 or rejects', 'nous_admin',
-            'SELECT NOT EXISTS (SELECT 1 FROM pg_hba_file_rules r WHERE r.error IS NULL AND r.type <> ''local'' AND NOT (r.address IN (''127.0.0.1'', ''::1'', ''localhost'')) AND r.user_name && ARRAY[''all'', ''nous_admin''] AND r.auth_method NOT IN (''scram-sha-256'', ''reject''))', 'true', NULL),
+        ('pg_hba: every network line beyond loopback uses scram-sha-256 or reject', 'nous_admin',
+            'SELECT NOT EXISTS (SELECT 1 FROM pg_hba_file_rules r WHERE r.error IS NULL AND r.type <> ''local'' AND NOT (r.address IN (''127.0.0.1'', ''::1'', ''localhost'')) AND r.auth_method NOT IN (''scram-sha-256'', ''reject''))', 'true', NULL),
         ('the database holds only the schemas this deployment creates', 'nous_admin',
             'SELECT NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname NOT IN (''brain'', ''heart'', ''nous_system'', ''scoring'', ''public'', ''information_schema'') AND nspname !~ ''^pg_'')', 'true', NULL),
         ('the application role owns no schema but its own three', 'nous_admin',

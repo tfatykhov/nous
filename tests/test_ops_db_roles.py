@@ -75,6 +75,12 @@ def test_verify_fails_when_pg_hba_conf_has_a_line_the_server_cannot_parse():
     assert "'SELECT NOT EXISTS (SELECT 1 FROM pg_hba_file_rules WHERE error IS NOT NULL)', 'true'" in VERIFY
 
 
+def test_every_pg_hba_network_line_is_judged_whatever_users_it_names():
+    # a user selector such as /^nous_admin$ or +group would slip past a filter on user_name
+    assert "('pg_hba: every network line beyond loopback uses scram-sha-256 or reject', 'nous_admin'," in VERIFY
+    assert "user_name" not in VERIFY
+
+
 def test_public_cannot_execute_application_functions_now_or_later():
     # PUBLIC's default EXECUTE would let the scorer, which has USAGE on these schemas, run them
     assert "REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA brain, heart, nous_system FROM PUBLIC;" in ROLES
