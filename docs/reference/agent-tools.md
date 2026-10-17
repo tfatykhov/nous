@@ -2,6 +2,9 @@
 
 Documented tools the agent can call, and the cognitive frames each is offered in; the `dispatcher.register()` calls are the full list. Part of the [Nous development guide](../../CLAUDE.md).
 
+For an optional research workflow using `run_python`, see
+[Web research with Parallel Search MCP](../guides/parallel-search.md).
+
 | Tool | Frame Access | Description |
 |------|-------------|-------------|
 | `record_decision` | decision, task, debug, conversation, question | Record a decision with confidence + reasoning |
