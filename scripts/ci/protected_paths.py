@@ -96,13 +96,13 @@ def commits_by(emails: Sequence[str], base: str, head: str) -> list[str]:
     """Commits in base..head whose author or committer email is in ``emails`` (case-insensitive)."""
     wanted = {e.lower() for e in emails if e}
     flagged: list[str] = []
-    # NUL between the fields and records split on \n alone: an email can hold a space, or a character
-    # that splitlines() would break on.
-    out = _git("log", "--no-show-signature", "--format=%H%x00%ae%x00%ce", f"{base}..{head}")
-    for line in out.split("\n"):
-        if not line:
+    # Records end in NUL and fields are split on \x1f: an email can hold a space, or a \r that text mode
+    # reads as a line break.
+    out = _git("log", "-z", "--no-show-signature", "--format=%H%x1f%ae%x1f%ce", f"{base}..{head}")
+    for record in out.split("\0"):
+        if not record:
             continue
-        sha, author, committer = line.split("\0")
+        sha, author, committer = record.split("\x1f")
         if author.lower() in wanted or committer.lower() in wanted:
             flagged.append(sha)
     return flagged
@@ -150,7 +150,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"protected_paths: {exc}", file=sys.stderr)
         return 2
     for finding in findings:
-        print(f"::error::protected path: {finding}")
+        # a line break in a path would end this workflow command and start another
+        visible = finding.replace("\r", "\\r").replace("\n", "\\n")
+        print(f"::error::protected path: {visible}")
     if findings:
         print(
             f"protected_paths: {len(findings)} finding(s). A change under the agent's identity to a path in "

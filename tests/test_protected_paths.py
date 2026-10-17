@@ -183,6 +183,22 @@ def test_an_email_with_a_space_is_read_whole(repo):
     assert run(emails=["an agent@example.com"])
 
 
+def test_a_carriage_return_in_an_email_does_not_split_the_commit_record(repo):
+    # the commit object is written by hand, so the author email holds the carriage return as it is
+    (repo / "scripts" / "ops" / "cr.sql").write_text("c")
+    git(repo, "add", "scripts/ops/cr.sql")
+    tree = git(repo, "write-tree").strip()
+    parent = git(repo, "rev-parse", "HEAD").strip()
+    body = (
+        f"tree {tree}\nparent {parent}\n"
+        f"author t <a\rb@example.com> 1700000000 +0000\ncommitter t <{NOUS}> 1700000000 +0000\n\nc\n"
+    )
+    write = ["git", "hash-object", "-t", "commit", "-w", "--stdin"]
+    made = subprocess.run(write, cwd=repo, input=body.encode(), check=True, capture_output=True)
+    git(repo, "update-ref", "refs/heads/pr", made.stdout.decode().strip())
+    assert [f for f in run() if "scripts/ops/cr.sql" in f]
+
+
 def test_a_pull_request_opened_by_the_agent_login_is_judged_on_its_net_change_whatever_the_commit_email(repo):
     commit(repo, {"Dockerfile": "FROM x"}, email="someone-else@example.com")
     assert run() == []  # commits alone say nothing
@@ -216,8 +232,21 @@ def test_main_exits_one_when_flagged_and_zero_when_clean(repo, monkeypatch, caps
     assert "::error::protected path" in capsys.readouterr().out
 
 
+def test_a_path_with_a_line_break_cannot_start_a_second_workflow_command(repo, monkeypatch, capsys):
+    (repo / ".github").mkdir()
+    (repo / ".github" / "CODEOWNERS").write_text("/scripts/ops/** @owner\n")
+    monkeypatch.setenv("NOUS_COMMIT_EMAILS", NOUS)
+    monkeypatch.setenv("NOUS_PR_LOGINS", "nous-bot")
+    commit(repo, {"scripts/ops/n.sql": "n"}, email=NOUS)
+    monkeypatch.setattr(pp, "commit_changed_paths", lambda sha: ["scripts/ops/a\r\n::warning::b.sql"])
+    assert pp.main(["--base", "main", "--head", "pr"]) == 1
+    commands = [line for line in capsys.readouterr().out.splitlines() if line.startswith("::")]
+    assert len(commands) == 1, commands
+    assert commands[0].endswith(r"changes scripts/ops/a\r\n::warning::b.sql"), commands
+
+
 def test_main_reads_a_codeowners_that_starts_with_a_byte_order_mark(repo, monkeypatch):
-    (repo / "CODEOWNERS").write_text("﻿/scripts/ops/** @owner\n", encoding="utf-8")
+    (repo / "CODEOWNERS").write_text("\ufeff/scripts/ops/** @owner\n", encoding="utf-8")
     monkeypatch.setenv("NOUS_COMMIT_EMAILS", NOUS)
     commit(repo, {"scripts/ops/n.sql": "n"}, email=NOUS)
     assert pp.main(["--codeowners", "CODEOWNERS", "--base", "main", "--head", "pr"]) == 1
