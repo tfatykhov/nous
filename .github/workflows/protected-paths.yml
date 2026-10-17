@@ -24,8 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
-      # Emails the agent commits under (comma separated). The one place to change them.
-      NOUS_COMMIT_EMAILS: nous@tfatykhov.com,claude-runner@nous,nous@local,nous@agent,nous@agent.local,nous@localhost,nous@nous.ai,nous@cognition-engines.ai,runner@nous,claude-runner@users.noreply.github.com
+      # Emails the agents commit under (comma separated). The one place to change them.
+      NOUS_COMMIT_EMAILS: nous@tfatykhov.com,claude-runner@nous,nous@local,nous@agent,nous@agent.local,nous@localhost,nous@nous.ai,nous@cognition-engines.ai,runner@nous,claude-runner@users.noreply.github.com,noreply@anthropic.com,claude@anthropic.com,codex@openai.com
       # Logins that open the agent's pull requests: the repository variable NOUS_PR_LOGINS, set when the
       # agent's own GitHub account exists. Empty until then.
       NOUS_PR_LOGINS: ${{ vars.NOUS_PR_LOGINS }}
