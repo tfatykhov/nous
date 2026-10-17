@@ -248,3 +248,13 @@ def test_the_application_relations_grant_nothing_to_public_now_or_by_default():
         assert -1 < ROLES.find(revoke) < first_scorer_grant, revoke
     label = "the application''s tables and sequences grant nothing to PUBLIC, now or by default"
     assert f"('{label}', 'nous_admin'," in VERIFY
+
+
+def test_only_the_owner_creates_in_the_application_schemas():
+    # CREATE once granted to PUBLIC or the scorer survives the ownership change and the scorer's USAGE grant
+    revoke = ROLES.find("REVOKE CREATE ON SCHEMA brain, heart, nous_system FROM PUBLIC, nous_scorer CASCADE;")
+    assert -1 < revoke < ROLES.index("GRANT USAGE ON SCHEMA brain, heart, nous_system TO nous_scorer;")
+    for schema in ("brain", "heart", "nous_system"):
+        assert f"NOT has_schema_privilege(''nous_scorer'', ''{schema}'', ''CREATE'')" in VERIFY, schema
+    public_create = "('PUBLIC holds no CREATE on brain, heart, nous_system, scoring or public', 'nous_admin',"
+    assert public_create in VERIFY

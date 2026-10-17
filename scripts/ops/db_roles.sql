@@ -379,6 +379,8 @@ REVOKE ALL ON ALL ROUTINES IN SCHEMA brain, heart, nous_system FROM nous_scorer 
 -- and from those nous_app creates later (globally: a per-schema REVOKE of a built-in default changes nothing).
 REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA brain, heart, nous_system FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE nous_app REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+-- CREATE on the application schemas stays with nous_app, their owner: none for PUBLIC or the scorer.
+REVOKE CREATE ON SCHEMA brain, heart, nous_system FROM PUBLIC, nous_scorer CASCADE;
 GRANT USAGE ON SCHEMA brain, heart, nous_system TO nous_scorer;
 -- source tables begin
 GRANT SELECT ON brain.decisions TO nous_scorer;
