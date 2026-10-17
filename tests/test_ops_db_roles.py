@@ -107,14 +107,18 @@ def test_the_script_refuses_to_run_while_pg_hba_lets_a_network_login_in_without_
         "FROM pg_hba_file_rules WHERE error IS NOT NULL",
         f"r.error IS NULL AND r.type <> 'local' AND NOT {loopback}"
         " AND r.auth_method NOT IN ('scram-sha-256', 'reject')",
+        # exact matching (a regular expression is evaluated), in rule_number order, which follows include files
         "coalesce((SELECT r.auth_method = 'trust' FROM pg_hba_file_rules r WHERE r.error IS NULL AND r.type = 'local'"
-        " AND (r.user_name && ARRAY['all', 'nous_admin'] OR EXISTS (SELECT 1 FROM unnest(r.user_name) u"
-        " WHERE u LIKE '+%' OR u LIKE '/%')) AND (r.database && ARRAY['all', current_database()::text]"
-        " OR EXISTS (SELECT 1 FROM unnest(r.database) d WHERE d IN ('sameuser', 'samerole') OR d LIKE '/%'))"
-        " ORDER BY r.line_number LIMIT 1), false)",
+        " AND ('all' = ANY (r.user_name) OR 'nous_admin' = ANY (r.user_name) OR EXISTS (SELECT 1 FROM"
+        " unnest(r.user_name) u WHERE u LIKE '/%' AND 'nous_admin' ~ substr(u, 2)))"
+        " AND ('all' = ANY (r.database) OR current_database()::text = ANY (r.database)"
+        " OR ('sameuser' = ANY (r.database) AND current_database() = 'nous_admin') OR EXISTS (SELECT 1 FROM"
+        " unnest(r.database) d WHERE d LIKE '/%' AND current_database()::text ~ substr(d, 2)))"
+        " ORDER BY r.rule_number LIMIT 1), false)",
     ):
         assert condition in ROLES[:begin], condition
         assert condition in verify_sql, condition
+    assert "r.line_number" not in ROLES and "r.line_number" not in verify_sql  # local to each included file
     local_label = "pg_hba: nous_admin can log in through the local socket (the first matching local line is trust)"
     assert f"('{local_label}', 'nous_admin'," in VERIFY
 
