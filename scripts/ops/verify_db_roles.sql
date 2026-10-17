@@ -141,6 +141,8 @@ BEGIN
             'SELECT NOT has_database_privilege(''nous_scorer'', current_database(), ''CREATE'') AND NOT has_database_privilege(''nous_scorer'', current_database(), ''TEMP'') AND NOT has_schema_privilege(''nous_scorer'', ''scoring'', ''CREATE'') AND NOT has_schema_privilege(''nous_scorer'', ''public'', ''CREATE'')', 'true', NULL),
         ('scorer search_path and row_security are pinned', 'nous_admin',
             'SELECT EXISTS (SELECT 1 FROM pg_db_role_setting s WHERE s.setrole = (SELECT oid FROM pg_roles WHERE rolname = ''nous_scorer'') AND s.setdatabase = 0 AND ''search_path=pg_catalog, scoring'' = ANY (s.setconfig) AND ''row_security=off'' = ANY (s.setconfig))', 'true', NULL),
+        ('pg_hba: every line of pg_hba.conf parses (with a broken line the server keeps rules this check cannot see)', 'nous_admin',
+            'SELECT NOT EXISTS (SELECT 1 FROM pg_hba_file_rules WHERE error IS NOT NULL)', 'true', NULL),
         ('pg_hba: no trust, md5 or password line reaches beyond the local socket and loopback', 'nous_admin',
             'SELECT NOT EXISTS (SELECT 1 FROM pg_hba_file_rules r WHERE r.error IS NULL AND r.type <> ''local'' AND r.auth_method IN (''trust'', ''md5'', ''password'') AND NOT (r.address IN (''127.0.0.1'', ''::1'', ''localhost'')))', 'true', NULL),
         ('pg_hba: every network line that covers all users or nous_admin uses scram-sha-256 or rejects', 'nous_admin',

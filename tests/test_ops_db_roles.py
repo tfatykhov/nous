@@ -68,3 +68,8 @@ def test_the_logins_that_can_create_or_read_widely_do_not_resolve_names_through_
     assert "ALTER ROLE nous_admin SET search_path = pg_catalog, public;" in ROLES
     assert "ALTER ROLE nous_scorer SET search_path = pg_catalog, scoring;" in ROLES
     assert "pg_hba_file_rules" in VERIFY and "the database holds only the schemas" in VERIFY
+
+
+def test_verify_fails_when_pg_hba_conf_has_a_line_the_server_cannot_parse():
+    # the reload then fails and the server keeps rules that pg_hba_file_rules does not show
+    assert "'SELECT NOT EXISTS (SELECT 1 FROM pg_hba_file_rules WHERE error IS NOT NULL)', 'true'" in VERIFY
