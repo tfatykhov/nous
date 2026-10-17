@@ -23,6 +23,8 @@ precisely what broke):
   by two different parents — the renderer's keyed each treats a repeated
   ref as a duplicate key, which is a Svelte crash that takes down the
   whole surface (rev-ui #4; the composer is an LLM).
+- No {path} binding nested inside a literal array prop (KeyValueTable rows
+  etc.): the renderer resolves the array once and prints each cell raw.
 """
 
 from __future__ import annotations
@@ -110,6 +112,41 @@ def _children_of(component: dict) -> list[str]:
         if isinstance(tab, dict) and isinstance(tab.get("child"), str):
             ids.append(tab["child"])
     return ids
+
+
+# List-valued props whose renderer resolves a {path} on each ITEM, so a nested
+# binding there is correct. Every other literal array (KeyValueTable/DataTable/
+# DeltaList rows, DataTable columns, Timeline/ChipRow/ScoreCard items,
+# LineChart series, ...) is resolved ONCE as a whole and each cell printed with
+# toDisplayString — a nested binding renders as the raw JSON `{"path":"price"}`.
+#   - Tabs.tabs: TabsView resolves each tab's title.
+#   - Button.checks: runChecks resolves each condition (and its args).
+# Child keys are skipped too: they hold id refs or a repeat template.
+_PER_ITEM_RESOLVED = frozenset({("Tabs", "tabs"), ("Button", "checks")})
+# Literal-only array props (schema `type: array`, not a DynamicValue): the
+# repair hint cannot be "bind the whole prop".
+_LITERAL_ONLY = frozenset({("DataTable", "columns"), ("LineChart", "series")})
+
+
+def _nested_bindings(value: Any, where: str, depth: int = 0) -> list[str]:
+    """Locations of every {path} binding nested inside a literal array prop.
+
+    Mirrors the renderer's isDataBinding: a dict with a string `path` and no
+    string `call` (isFunctionCall); extra keys do not disqualify it. `value`
+    starts as the array prop itself (depth 0), and only depth >= 2 counts:
+    its items are records the renderer reads fields from and never resolves,
+    so a row or column with a `path` field (`{"path": "/usr/bin", "size":
+    12}`) is data. A call object is walked into, since inside a literal array
+    it is printed raw too. Type-guarded throughout — lint runs before schema
+    validation and must never raise.
+    """
+    if isinstance(value, dict):
+        if depth >= 2 and isinstance(value.get("path"), str) and not isinstance(value.get("call"), str):
+            return [where]
+        return [loc for k, v in value.items() for loc in _nested_bindings(v, f"{where}.{k}", depth + 1)]
+    if isinstance(value, list):
+        return [loc for i, v in enumerate(value) for loc in _nested_bindings(v, f"{where}[{i}]", depth + 1)]
+    return []
 
 
 def _template_children(component: dict) -> list[dict]:
@@ -201,6 +238,37 @@ def lint_micro_app(
                     "strings; define each child as its own component and "
                     "reference it by id"
                 )
+        # Prod 2026-09-05 / 2026-10-17: `rows: [{key, value: {path}}]` passed
+        # every gate and shipped cells reading `{"path":"price"}`.
+        for prop, value in comp.items():
+            if (
+                not isinstance(value, list)
+                or prop in _CHILD_KEYS
+                or (ctype, prop) in _PER_ITEM_RESOLVED
+            ):
+                continue
+            locs = _nested_bindings(value, f"{comp.get('id')}.{prop}")
+            if not locs:
+                continue
+            # One error per prop: a 20-row table with 3 bound cells would
+            # otherwise flood the repair prompt with 60 identical lines.
+            more = f" (and {len(locs) - 1} more)" if len(locs) > 1 else ""
+            if (ctype, prop) in _LITERAL_ONLY:
+                fix = f"`{prop}` is literal-only — write each value as a literal string"
+            else:
+                first = value[0] if isinstance(value[0], dict) else {}
+                keys = ", ".join(k for k in first if isinstance(k, str))
+                fields = f"{{{keys}}}" if keys else "field"
+                fix = (
+                    f"Bind the whole prop instead ({prop}: {{path: '<list>'}}) to a "
+                    f"source whose records already have the final {fields} "
+                    "strings, or show each live value as its own component "
+                    "(e.g. a StatTile with value: {path})"
+                )
+            errors.append(
+                f"{locs[0]}{more} is a {{path}} binding inside a literal array — "
+                f"this renders as raw JSON. {fix}"
+            )
         if ctype == "Section":
             title = comp.get("title")
             if not isinstance(title, str) or not title.strip():
