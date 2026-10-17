@@ -167,7 +167,7 @@ BEGIN
         ('scoring default privileges give the application role SELECT only, and the application role sets none', 'nous_admin',
             'SELECT NOT EXISTS (SELECT 1 FROM pg_default_acl d, LATERAL aclexplode(d.defaclacl) a WHERE d.defaclnamespace = ''scoring''::regnamespace AND (d.defaclrole = ''nous_app''::regrole OR (a.grantee = ''nous_app''::regrole AND a.privilege_type <> ''SELECT'') OR a.grantee = 0))', 'true', NULL),
         ('the scorer inputs are plain tables without row policies', 'nous_admin',
-            'SELECT NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.relnamespace::regnamespace::text IN (''brain'', ''heart'', ''nous_system'') AND has_table_privilege(''nous_scorer'', c.oid, ''SELECT'') AND (c.relkind <> ''r'' OR c.relrowsecurity OR c.relforcerowsecurity)) AND NOT EXISTS (SELECT 1 FROM pg_policy)', 'true', NULL)
+            'SELECT NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.relnamespace::regnamespace::text IN (''brain'', ''heart'', ''nous_system'') AND has_table_privilege(''nous_scorer'', c.oid, ''SELECT'') AND (c.relkind <> ''r'' OR c.relrowsecurity OR c.relforcerowsecurity)) AND NOT EXISTS (SELECT 1 FROM pg_policy p WHERE has_table_privilege(''nous_scorer'', p.polrelid, ''SELECT''))', 'true', NULL)
         ) AS t(label, run_as, stmt, expect, after)
     LOOP
         EXECUTE format('SET LOCAL ROLE %I', c.run_as);

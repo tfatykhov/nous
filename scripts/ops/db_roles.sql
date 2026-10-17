@@ -107,13 +107,28 @@ SELECT EXISTS (SELECT 1 FROM pg_authid WHERE rolname = 'nous_app' AND (rolpasswo
 
 -- pg_hba_file_rules shows the file on disk, which the server enforces only from its next reload: reload first, so
 -- that (a file with a parse error, which keeps the old rules, is refused below) the server enforces what is checked.
+-- pg_reload_conf() only signals the postmaster, which re-reads the files and then signals every session. This
+-- session takes the new configuration at the start of its next top-level command after that signal, and only then
+-- does its pg_conf_load_time() advance; within one command it never does. So the reload, the wait and each look
+-- at pg_conf_load_time() are separate top-level commands.
+SELECT pg_conf_load_time() AS conf_t0 \gset
 DO $$
 BEGIN
     IF NOT pg_reload_conf() THEN
         RAISE EXCEPTION 'db_roles.sql: the server did not accept the configuration reload (pg_reload_conf returned false); fix that, then run this script';
     END IF;
-    PERFORM pg_sleep(1);
 END $$;
+DO $$ BEGIN PERFORM pg_sleep(1); END $$;
+SELECT pg_conf_load_time() > :'conf_t0'::timestamptz AS conf_reloaded \gset
+\if :conf_reloaded
+\else
+    DO $$ BEGIN PERFORM pg_sleep(4); END $$;
+    SELECT pg_conf_load_time() > :'conf_t0'::timestamptz AS conf_reloaded \gset
+    \if :conf_reloaded
+    \else
+        DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: the server has not finished reloading its configuration (pg_conf_load_time did not advance); run this script again'; END $$;
+    \endif
+\endif
 
 -- nous_admin gets no password and the run commits before verify runs, so pg_hba.conf must already keep every
 -- network login beyond loopback on scram-sha-256 or reject. verify_db_roles.sql checks the same conditions.

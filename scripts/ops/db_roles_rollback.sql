@@ -35,5 +35,7 @@ SELECT current_setting('is_superuser') = 'on' AS is_super \gset
     DO $$ BEGIN RAISE EXCEPTION 'db_roles_rollback.sql: NOUS_LEGACY_DB_PASSWORD must be letters and digits only (openssl rand -hex 24)'; END $$;
 \endif
 SELECT rolname AS bootstrap FROM pg_roles WHERE oid = 10 \gset
+-- stored as a SCRAM verifier whatever the server's password_encryption: pg_hba accepts nothing else
+SET password_encryption = 'scram-sha-256';
 ALTER ROLE :"bootstrap" LOGIN PASSWORD :'legacy_password';
 \echo 'db_roles_rollback.sql: done'

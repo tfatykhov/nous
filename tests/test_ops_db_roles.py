@@ -13,6 +13,7 @@ from nous.observability.task_score_job import HEARTBEAT_TABLE, SCORE_TABLE, SOUR
 OPS = Path(__file__).resolve().parents[1] / "scripts" / "ops"
 ROLES = (OPS / "db_roles.sql").read_text(encoding="utf-8")
 VERIFY = (OPS / "verify_db_roles.sql").read_text(encoding="utf-8")
+ROLLBACK = (OPS / "db_roles_rollback.sql").read_text(encoding="utf-8")
 
 
 def _statements(sql: str) -> str:
@@ -158,6 +159,31 @@ def test_a_refused_reload_stops_the_run():
     reload = ROLES.index("IF NOT pg_reload_conf() THEN")
     refusal = ROLES.index("RAISE EXCEPTION 'db_roles.sql: the server did not accept the configuration reload")
     assert reload < refusal < ROLES.index("FROM pg_hba_file_rules")
+
+
+def test_the_run_waits_until_this_session_has_reloaded_the_configuration():
+    # pg_reload_conf() only signals; this session takes the new configuration at the start of a later top-level
+    # command, and pg_conf_load_time() then advances
+    t0 = ROLES.index("SELECT pg_conf_load_time() AS conf_t0 \\gset")
+    reload = ROLES.index("IF NOT pg_reload_conf() THEN")
+    block = ROLES[reload : ROLES.index("END $$;", reload)]
+    assert "pg_sleep" not in block, block
+    check = "SELECT pg_conf_load_time() > :'conf_t0'::timestamptz AS conf_reloaded \\gset"
+    first = ROLES.index(check)
+    second = ROLES.index(check, first + 1)
+    refusal = ROLES.index("RAISE EXCEPTION 'db_roles.sql: the server has not finished reloading its configuration")
+    assert t0 < reload < first < second < refusal < ROLES.index("FROM pg_hba_file_rules")
+
+
+def test_the_rollback_stores_a_scram_verifier():
+    assert "SET password_encryption = 'scram-sha-256';\nALTER ROLE :\"bootstrap\" LOGIN PASSWORD" in ROLLBACK
+
+
+def test_the_policy_check_looks_only_at_relations_the_scorer_reads():
+    sql = VERIFY.replace("''", "'")
+    assert "NOT EXISTS (SELECT 1 FROM pg_policy)" not in sql
+    scoped = "NOT EXISTS (SELECT 1 FROM pg_policy p WHERE has_table_privilege('nous_scorer', p.polrelid, 'SELECT'))"
+    assert scoped in sql
 
 
 def test_the_service_roles_store_scram_verifiers_and_a_run_requires_them():
