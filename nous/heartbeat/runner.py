@@ -1076,7 +1076,12 @@ class HeartbeatRunner:
         lines = ["[Heartbeat] The following items need attention:"]
         for f in findings:
             lines.append(f"- [{f.source}] {f.summary}")
-        lines.append("\nPlease review these findings and take any needed actions.")
+        lines.append(
+            "\nPlease review these findings. This triage turn is LOCAL-ONLY: diagnose with memory "
+            "tools (recall_deep, recall_recent) and read_file; record facts or decisions; and escalate to Tim "
+            "when action is needed. Do not use bash, send messages, push, merge, or call external APIs "
+            "here. Outward actions belong in a scheduled task or DAG, not in heartbeat triage."
+        )
         message = "\n".join(lines)
 
         session_id = f"heartbeat-{uuid4().hex[:8]}"
