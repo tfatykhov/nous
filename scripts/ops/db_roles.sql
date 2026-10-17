@@ -101,11 +101,12 @@ SELECT NOT EXISTS (SELECT 1 FROM pg_hba_file_rules WHERE error IS NOT NULL)
 
 -- docker exec logs in as nous_admin through the local socket with no password, so the first local rule nous_admin
 -- hits on this database (in rule_number order, which follows included files) must be trust, or the lock-out below
--- leaves no superuser that can log in. The match is decided exactly: the user is all, nous_admin or a regular
--- expression that matches nous_admin; the database is all, this database, sameuser when this database is named
--- nous_admin, or a regular expression that matches it. +group and samerole are taken not to match (nous_admin has
--- no role memberships). verify_db_roles.sql checks the same.
-SELECT coalesce((SELECT r.auth_method = 'trust' FROM pg_hba_file_rules r WHERE r.error IS NULL AND r.type = 'local' AND ('all' = ANY (r.user_name) OR 'nous_admin' = ANY (r.user_name) OR EXISTS (SELECT 1 FROM unnest(r.user_name) u WHERE u LIKE '/%' AND 'nous_admin' ~ substr(u, 2))) AND ('all' = ANY (r.database) OR current_database()::text = ANY (r.database) OR ('sameuser' = ANY (r.database) AND current_database() = 'nous_admin') OR EXISTS (SELECT 1 FROM unnest(r.database) d WHERE d LIKE '/%' AND current_database()::text ~ substr(d, 2))) ORDER BY r.rule_number LIMIT 1), false) AS admin_local_ok \gset
+-- leaves no superuser that can log in. The match is decided exactly: the user is all, nous_admin, +nous_admin or a
+-- regular expression that matches nous_admin; the database is all, this database, a regular expression that
+-- matches it, or sameuser, samerole or samegroup when this database is named nous_admin. A role counts as a member
+-- of itself for + and samerole; nous_admin has no other memberships, so no other +group or samerole matches it.
+-- verify_db_roles.sql checks the same.
+SELECT coalesce((SELECT r.auth_method = 'trust' FROM pg_hba_file_rules r WHERE r.error IS NULL AND r.type = 'local' AND ('all' = ANY (r.user_name) OR 'nous_admin' = ANY (r.user_name) OR '+nous_admin' = ANY (r.user_name) OR EXISTS (SELECT 1 FROM unnest(r.user_name) u WHERE u LIKE '/%' AND 'nous_admin' ~ substr(u, 2))) AND ('all' = ANY (r.database) OR current_database()::text = ANY (r.database) OR ('sameuser' = ANY (r.database) AND current_database() = 'nous_admin') OR (current_database() = 'nous_admin' AND ('samerole' = ANY (r.database) OR 'samegroup' = ANY (r.database))) OR EXISTS (SELECT 1 FROM unnest(r.database) d WHERE d LIKE '/%' AND current_database()::text ~ substr(d, 2))) ORDER BY r.rule_number LIMIT 1), false) AS admin_local_ok \gset
 \if :admin_local_ok
 \else
     DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: pg_hba.conf does not let nous_admin in through the local socket without a password (the first matching local line must be trust); fix it, reload, then run this script'; END $$;
