@@ -27,7 +27,9 @@ def test_parse_ignores_comments_blank_lines_and_owners():
     assert pp.parse_codeowners(text) == ["/a/**", "/b.py"]
 
 
-@pytest.mark.parametrize("bad", ["*.py", "docs/x.md", "/a/[bc].py", "/a?b", "!/x", "/a/***", "/a\\ b"])
+@pytest.mark.parametrize(
+    "bad", ["*.py", "docs/x.md", "/a/[bc].py", "/a?b", "!/x", "/a/***", "/a\\ b", "/a/**/b", "/**/x", "/a**"]
+)
 def test_unsupported_patterns_fail_loudly(bad):
     with pytest.raises(pp.UnsupportedPattern):
         pp.parse_codeowners(f"{bad} @owner\n")
@@ -51,6 +53,8 @@ def test_unsupported_patterns_fail_loudly(bad):
         ("nous/identity/manager.py", True),
         ("nous/identity", False),
         ("nous/identity_other.py", False),
+        ("scripts/ops/a\nb.sql", True),
+        ("Dockerfile\n", False),
     ],
 )
 def test_pattern_matching(path, hit):
@@ -58,17 +62,24 @@ def test_pattern_matching(path, hit):
 
 
 def test_the_real_codeowners_is_inside_the_supported_subset_and_every_pattern_still_matches_a_file():
-    patterns = pp.parse_codeowners((ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8"))
+    text = (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8-sig")
+    patterns = pp.parse_codeowners(text)
     assert patterns, "CODEOWNERS lists no path"
+    rules = [fields for fields in (line.split("#", 1)[0].split() for line in text.splitlines()) if fields]
+    assert all(len(fields) == 2 for fields in rules), "every line names exactly one owner (none is unowned on GitHub)"
+    assert len({fields[1] for fields in rules}) == 1, "every line names the same owner"
     tracked = subprocess.run(
         ["git", "ls-files", "-z"], cwd=ROOT, check=True, capture_output=True, text=True
     ).stdout.split("\0")
     dead = [p for p in patterns if not pp.protected(tracked, [p])]
     assert not dead, f"CODEOWNERS patterns that match no tracked file (renamed or mistyped?): {dead}"
+    dirs = {"/".join(parts[:i]) for parts in (p.split("/") for p in tracked if p) for i in range(1, len(parts))}
+    named = [p for p in patterns if not p.endswith(("/", "/**")) and pp.protected(dirs, [p])]
+    assert not named, f"patterns that name a directory (GitHub also covers what is below it; end them in /**): {named}"
 
 
 def test_codeowners_protects_itself_and_the_tripwire():
-    patterns = pp.parse_codeowners((ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8"))
+    patterns = pp.parse_codeowners((ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8-sig"))
     for path in (
         ".github/CODEOWNERS",
         ".github/workflows/protected-paths.yml",
@@ -166,6 +177,12 @@ def test_email_match_is_case_insensitive(repo):
     assert run()
 
 
+def test_an_email_with_a_space_is_read_whole(repo):
+    commit(repo, {"Dockerfile": "FROM x"}, email="an agent@example.com")
+    assert run() == []
+    assert run(emails=["an agent@example.com"])
+
+
 def test_a_pull_request_opened_by_the_agent_login_is_judged_on_its_net_change_whatever_the_commit_email(repo):
     commit(repo, {"Dockerfile": "FROM x"}, email="someone-else@example.com")
     assert run() == []  # commits alone say nothing
@@ -197,6 +214,13 @@ def test_main_exits_one_when_flagged_and_zero_when_clean(repo, monkeypatch, caps
     commit(repo, {"scripts/ops/n.sql": "n"}, email=NOUS)
     assert pp.main(["--base", "main", "--head", "pr"]) == 1
     assert "::error::protected path" in capsys.readouterr().out
+
+
+def test_main_reads_a_codeowners_that_starts_with_a_byte_order_mark(repo, monkeypatch):
+    (repo / "CODEOWNERS").write_text("﻿/scripts/ops/** @owner\n", encoding="utf-8")
+    monkeypatch.setenv("NOUS_COMMIT_EMAILS", NOUS)
+    commit(repo, {"scripts/ops/n.sql": "n"}, email=NOUS)
+    assert pp.main(["--codeowners", "CODEOWNERS", "--base", "main", "--head", "pr"]) == 1
 
 
 def test_main_refuses_to_run_without_an_identity_list_or_with_a_bad_codeowners(repo, monkeypatch):

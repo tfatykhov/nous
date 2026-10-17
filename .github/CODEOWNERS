@@ -2,8 +2,9 @@
 # A change here needs the owner (the ruleset on main requires code-owner review), and the
 # "Protected paths" check fails a pull request made under the agent's identity that touches one.
 # This file is read by scripts/ci/protected_paths.py as well as by GitHub, so patterns are limited to
-# rooted paths with * (within one segment), ** (across segments) and a trailing / for a directory.
-# tests/test_protected_paths.py fails when a pattern is outside that subset or matches no tracked file.
+# rooted paths with * (within one segment) and a trailing /** or / for everything below a directory,
+# each with the one owner. tests/test_protected_paths.py fails when a pattern is outside that subset,
+# names a directory without the trailing /** or matches no tracked file.
 
 # The scorer, its tables, its tests and the page that reports it
 /nous/observability/task_scoring.py @tfatykhov

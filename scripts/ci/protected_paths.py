@@ -4,7 +4,10 @@
 The protected paths are the ones in ``.github/CODEOWNERS``: this script reads that file, so the list is
 kept in one place. CODEOWNERS patterns are limited here to a subset whose meaning is the same for GitHub
 and for this script: rooted (``/``-prefixed) paths where ``*`` stays inside one path segment and ``**``
-crosses segments. Anything else makes the script fail, so the two readings cannot drift apart.
+appears only as a trailing ``/**`` (everything below a directory, the same as a trailing ``/``). Anything
+else makes the script fail, so the two readings cannot drift apart. A pattern without a trailing ``/`` or
+``/**`` must not name a directory (GitHub would also cover what is below it); tests/test_protected_paths.py
+checks that against the tracked files.
 
 A pull request is flagged when either
 
@@ -41,14 +44,15 @@ def parse_codeowners(text: str) -> list[str]:
         if not line:
             continue
         pattern = line.split()[0]
-        if not _SUPPORTED.match(pattern) or "***" in pattern:
+        if not _SUPPORTED.match(pattern) or "**" in pattern.removesuffix("/**"):
             raise UnsupportedPattern(f"CODEOWNERS line {lineno}: unsupported pattern {pattern!r}")
         patterns.append(pattern)
     return patterns
 
 
 def pattern_regex(pattern: str) -> re.Pattern[str]:
-    """Compile one rooted pattern. A trailing ``/`` or ``/**`` means everything below the directory."""
+    """Compile one rooted pattern for ``fullmatch``. A trailing ``/`` or ``/**`` means everything below the
+    directory."""
     body = pattern[1:]
     if body.endswith("/"):
         body += "**"
@@ -64,13 +68,13 @@ def pattern_regex(pattern: str) -> re.Pattern[str]:
         else:
             out.append(re.escape(body[i]))
             i += 1
-    return re.compile("^" + "".join(out) + "$")
+    return re.compile("".join(out), re.DOTALL)
 
 
 def protected(paths: Iterable[str], patterns: Sequence[str]) -> list[str]:
     """The paths that match at least one pattern."""
     compiled = [pattern_regex(p) for p in patterns]
-    return sorted({p for p in paths if any(rx.match(p) for rx in compiled)})
+    return sorted({p for p in paths if any(rx.fullmatch(p) for rx in compiled)})
 
 
 def _git(*args: str) -> str:
@@ -92,8 +96,13 @@ def commits_by(emails: Sequence[str], base: str, head: str) -> list[str]:
     """Commits in base..head whose author or committer email is in ``emails`` (case-insensitive)."""
     wanted = {e.lower() for e in emails if e}
     flagged: list[str] = []
-    for line in _git("log", "--format=%H %ae %ce", f"{base}..{head}").splitlines():
-        sha, author, committer = line.split(" ")
+    # NUL between the fields and records split on \n alone: an email can hold a space, or a character
+    # that splitlines() would break on.
+    out = _git("log", "--no-show-signature", "--format=%H%x00%ae%x00%ce", f"{base}..{head}")
+    for line in out.split("\n"):
+        if not line:
+            continue
+        sha, author, committer = line.split("\0")
         if author.lower() in wanted or committer.lower() in wanted:
             flagged.append(sha)
     return flagged
@@ -135,7 +144,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "its email. Set the repository variable to the agent account's login."
         )
     try:
-        patterns = parse_codeowners(Path(args.codeowners).read_text(encoding="utf-8"))
+        patterns = parse_codeowners(Path(args.codeowners).read_text(encoding="utf-8-sig"))
         findings = violations(patterns, args.base, args.head, emails, args.pr_author, logins)
     except (OSError, UnsupportedPattern, subprocess.CalledProcessError) as exc:
         print(f"protected_paths: {exc}", file=sys.stderr)
