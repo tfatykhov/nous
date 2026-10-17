@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import os
 import subprocess
@@ -89,6 +90,70 @@ def test_codeowners_protects_itself_and_the_tripwire():
         "Dockerfile",
     ):
         assert pp.protected([path], patterns), path
+
+
+# The scorer and the page that reports it: what they import decides the score as much as they do.
+SCORER = (
+    "nous/observability/task_scoring.py",
+    "nous/observability/task_score_gatherer.py",
+    "nous/observability/task_score_job.py",
+    "nous/observability/autonomy_inventory.py",
+    "nous/api/autonomy_dashboard.py",
+)
+# Modules the scorer imports that need no code owner, each with the reason.
+SCORER_IMPORT_EXEMPT = {
+    "nous/config.py": "settings; the scorer reads only its database login from it",
+    "nous/storage/database.py": "connection pool; no scoring semantics",
+    "nous/log_redaction.py": "logging",
+}
+
+
+def _module_file(module: str) -> str | None:
+    base = Path(*module.split("."))
+    for candidate in (base.with_suffix(".py"), base / "__init__.py"):
+        if (ROOT / candidate).is_file():
+            return candidate.as_posix()
+    return None
+
+
+def _nous_imports(path: str) -> dict[str, str]:
+    """The files that supply the nous.* names a module imports, at module level or inside a function."""
+    found: dict[str, str] = {}
+    package = path.split("/")[:-1]
+    for node in ast.walk(ast.parse((ROOT / path).read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            modules = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            if node.level:
+                base = ".".join(package[: len(package) - node.level + 1] + ([base] if base else []))
+            # a name with a file of its own is a submodule, otherwise an attribute of the module
+            modules = [f"{base}.{a.name}" if _module_file(f"{base}.{a.name}") else base for a in node.names]
+        else:
+            continue
+        for module in modules:
+            if module == "nous" or module.startswith("nous."):
+                file = _module_file(module)
+                assert file, f"{path}:{node.lineno}: cannot resolve {module}"
+                found.setdefault(file, f"{path}:{node.lineno}")
+    return found
+
+
+def test_every_module_the_scorer_imports_is_code_owned_or_exempt_with_a_reason():
+    patterns = pp.parse_codeowners((ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8-sig"))
+    imported: dict[str, str] = {}
+    for path in SCORER:
+        assert pp.protected([path], patterns), path
+        for file, where in _nous_imports(path).items():
+            imported.setdefault(file, where)
+    unowned = sorted(
+        f"{file} (imported at {where})"
+        for file, where in imported.items()
+        if file not in SCORER_IMPORT_EXEMPT and not pp.protected([file], patterns)
+    )
+    assert not unowned, f"add to CODEOWNERS, or to SCORER_IMPORT_EXEMPT with the reason: {unowned}"
+    stale = sorted(set(SCORER_IMPORT_EXEMPT) - set(imported))
+    assert not stale, f"SCORER_IMPORT_EXEMPT names modules the scorer no longer imports: {stale}"
 
 
 # -- a throwaway repository ---------------------------------------------------------------------------------

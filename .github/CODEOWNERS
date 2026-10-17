@@ -19,9 +19,12 @@
 /tests/test_task_scor*.py @tfatykhov
 /tests/test_scorer_heartbeat_migration.py @tfatykhov
 
-# The evidence the scorer reads from the harness
+# The evidence the scorer and the autonomy inventory read: the harness ledger, the verifier that marks claims
+# unverified, and which run kinds count as the owner being present
 /nous/cognitive/ledger_store.py @tfatykhov
 /nous/cognitive/execution_ledger.py @tfatykhov
+/nous/cognitive/claim_verifier.py @tfatykhov
+/nous/api/execution_context.py @tfatykhov
 
 # Evaluation sets, their loaders and generators
 /nous_eval/** @tfatykhov
@@ -29,11 +32,12 @@
 /tests/fixtures/eval_*.jsonl @tfatykhov
 /scripts/eval/** @tfatykhov
 
-# What the agent may do
+# What the agent may do, including the DAG approval gates
 /nous/api/tool_policy.py @tfatykhov
 /nous/api/tool_classes.py @tfatykhov
 /nous/cognitive/action_gate.py @tfatykhov
 /nous/cognitive/bash_side_effect.py @tfatykhov
+/nous/dag/approval.py @tfatykhov
 
 # Identity and values
 /nous/identity/** @tfatykhov
