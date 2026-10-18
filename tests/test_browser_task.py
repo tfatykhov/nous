@@ -119,6 +119,9 @@ class FakeExecutor:
     def current_url(self) -> str:
         return "https://example.com/done?token=abc#frag"
 
+    async def checked_final_url(self) -> str | None:
+        return self.current_url()
+
 
 def _fake_factory(executor: FakeExecutor):
     @asynccontextmanager
@@ -1351,6 +1354,28 @@ class TestAllowlistAtPlaywrightLayer:
             assert not list((tmp_path / "artifacts").glob("step-*.png"))  # nothing was captured
             assert session.active_page.url == "about:blank"
 
+    async def test_the_final_url_is_withheld_when_the_page_left_the_allowlist(
+        self, tmp_path: Path, site, dns: FakeDns, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A delayed redirect off the list, then the task ends: the URL is read only after enforcement."""
+        base, port = site
+        local = ("127.0.0.1", "localhost")
+        dns.answers["localhost"] = [["127.0.0.1"]]
+        monkeypatch.setattr(egress, "_permitted_address", lambda host, address: host in local)
+
+        async def let_through(self: BrowserSession, route: Any) -> None:
+            await route.continue_()
+
+        monkeypatch.setattr(BrowserSession, "_route", let_through)
+        async with BrowserSession(DomainAllowlist(["127.0.0.1"]), tmp_path / "artifacts") as session:
+            assert session._proxy is not None
+            session._proxy.allowlist = SimpleNamespace(allows=lambda url: url.split("/")[2].split(":")[0] in local)
+            executor = BrowserExecutor(session)
+            await executor.execute("navigate", {"url": f"{base}/delayed.html"})
+            await session.active_page.wait_for_url(f"http://localhost:{port}/**", timeout=15_000)  # it left
+            assert await executor.checked_final_url() is None
+            assert session.active_page.url == "about:blank"
+
     async def test_frame_redirected_off_the_allowlist_is_blanked(self, browser, site) -> None:
         executor, session = browser
         base, _ = site
@@ -2290,6 +2315,20 @@ class TestPointerButtonsAndImplicitSubmit:
             await executor.execute("type", {"text": "hello\n"})
         assert await session.active_page.title() == "t"
 
+    @pytest.mark.parametrize("keys", ["Enter", "NumpadEnter", "Shift+Enter"])
+    async def test_holding_enter_in_that_form_needs_confirmation(self, browser, keys: str) -> None:
+        executor, session = await self._open(browser, _ENTER_PAGE)
+        await session.active_page.focus("#msg_in")
+        with pytest.raises(ConfirmationRequired, match='"send"'):
+            await executor.execute("hold_key", {"text": keys, "duration": 0.1})
+        assert await session.active_page.title() == "t"
+
+    async def test_holding_enter_in_a_search_form_still_submits(self, browser) -> None:
+        executor, session = await self._open(browser, _ENTER_PAGE)
+        await session.active_page.focus("#find_in")
+        await executor.execute("hold_key", {"text": "Enter", "duration": 0.1})
+        assert await session.active_page.title() == "submitted:find"
+
     async def test_enter_in_a_search_form_still_submits(self, browser) -> None:
         executor, session = await self._open(browser, _ENTER_PAGE)
         await session.active_page.focus("#find_in")
@@ -2307,6 +2346,61 @@ class TestPointerButtonsAndImplicitSubmit:
         executor, session = await self._open(browser, _ENTER_PAGE)
         await session.active_page.focus("#plain_a")  # two text fields, no button: Enter does nothing
         await executor.execute("key", {"text": "Enter"})
+
+
+class TestFinalUrl:
+    async def test_an_off_list_final_url_is_not_reported(self, tmp_path: Path) -> None:
+        class Left(FakeExecutor):
+            def current_url(self) -> str:
+                return "http://off.example/leak/SECRETPATH"
+
+            async def checked_final_url(self) -> str | None:
+                return None
+
+        api = FakeApi([_response(_text("done"), stop_reason="end_turn")])
+        result = await run_browser_task(
+            "g", ["example.com"], settings=_settings(tmp_path), call_api=api, browser_factory=_fake_factory(Left())
+        )
+        out = result.render()
+        assert result.status == "completed" and result.final_url == ""
+        assert "SECRETPATH" not in out and "the page left the allowlist" in out
+
+
+_LINK_PAGE = """<!doctype html><html><head><title>t</title></head><body>
+<a id="cont" href="{base}/unsubscribe?token=abc">Continue</a>
+<a id="ok" href="{base}/second.html" onclick="document.title='ran:ok'; return false">Next</a>
+<form action="{base}/unsubscribe?x=1"><input type="submit" id="go" value="Continue"></form>
+</body></html>"""
+
+
+@needs_chromium
+class TestLinkDestination:
+    async def _open(self, browser, site) -> tuple[BrowserExecutor, BrowserSession]:
+        executor, session = browser
+        base, _ = site
+        await session.active_page.set_content(_LINK_PAGE.replace("{base}", base))
+        return executor, session
+
+    @pytest.mark.parametrize("tool", ["left_click", "right_click", "middle_click", "double_click", "triple_click"])
+    @pytest.mark.parametrize("selector", ["#cont", "#go"])
+    async def test_a_neutral_label_on_an_action_url_needs_confirmation(self, browser, site, tool, selector) -> None:
+        executor, session = await self._open(browser, site)
+        with pytest.raises(ConfirmationRequired, match='"unsubscribe"') as caught:
+            await executor.execute(tool, {"target": await _center(session, selector)})
+        assert "abc" not in str(caught.value)
+        assert _SEEN_HOSTS == []  # the request was never made
+
+    async def test_the_same_link_by_ref_needs_confirmation(self, browser, site) -> None:
+        executor, session = await self._open(browser, site)
+        target = await _ref_of(executor, "Continue")
+        with pytest.raises(ConfirmationRequired, match='"unsubscribe"'):
+            await executor.execute("left_click", {"target": target})
+        assert _SEEN_HOSTS == []
+
+    async def test_a_neutral_link_still_works(self, browser, site) -> None:
+        executor, session = await self._open(browser, site)
+        await executor.execute("left_click", {"target": await _center(session, "#ok")})
+        assert await session.active_page.title() == "ran:ok"
 
 
 class TestTeardownReserve:

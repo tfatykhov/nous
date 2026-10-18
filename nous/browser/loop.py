@@ -136,6 +136,8 @@ class BrowserExecutorLike(Protocol):
 
     def current_url(self) -> str: ...
 
+    async def checked_final_url(self) -> str | None: ...
+
 
 ApiCaller = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 BrowserFactory = Callable[[DomainAllowlist, Path], AbstractAsyncContextManager[BrowserExecutorLike]]
@@ -159,6 +161,7 @@ class BrowserTaskResult:
     run_id: str
     steps: int = 0
     final_url: str = ""
+    left_allowlist: bool = False
     screenshot_path: str | None = None
     blocked_requests: int = 0
 
@@ -168,6 +171,8 @@ class BrowserTaskResult:
             lines.append(f"blocked_requests (off the allowlist): {self.blocked_requests}")
         if self.final_url:
             lines.append(f"final_url: {self.final_url}")
+        elif self.left_allowlist:
+            lines.append("final_url: none (the page left the allowlist)")
         if self.screenshot_path:
             lines.append(f"final screenshot (saved for the owner): {self.screenshot_path}")
         if self.status == "needs_confirmation":
@@ -477,7 +482,9 @@ async def _run(
                 finished = True
             finally:
                 state.blocked_requests = executor.blocked_requests
-                state.final_url = _bare_url(executor.current_url())
+                final = await executor.checked_final_url()  # enforces the allowlist before the URL is read
+                state.left_allowlist = final is None
+                state.final_url = _bare_url(final) if final else ""
                 task = asyncio.current_task()
                 if not (task and task.cancelling()):  # after a timeout, close fast instead
                     state.screenshot_path = await executor.final_screenshot(artifacts_dir / "final.png")

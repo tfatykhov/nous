@@ -254,6 +254,15 @@ function implicitSubmit(c, form) {
   if (form.hasAttribute('action') || form.hasAttribute('onsubmit')) return {opaque: true, label: ''};
   return null;
 }
+// Where activating the element goes: its nearest link, or the form action of a submit control. Absolute, or ''.
+function destination(t, c) {
+  let dest = '';
+  const a = closestDeep(t, 'a[href],area[href]');
+  if (a) dest = a.getAttribute('href');
+  else if (isSubmitter(c) && c.form) dest = c.getAttribute('formaction') || c.form.getAttribute('action') || '';
+  if (!dest) return '';
+  try { return new URL(dest, c.ownerDocument.baseURI).href; } catch (_) { return ''; }
+}
 function info(el) {
   if (!el) return null;
   if (isFrame(el)) {
@@ -279,6 +288,7 @@ function info(el) {
     payment: isPayment(c),
     sensitiveForm: !!form && [...form.elements].some(e => isPassword(e) || isPayment(e)),
     implicitSubmit: implicitSubmit(c, form),
+    href: destination(t, c),
   };
 }
 """
@@ -370,6 +380,16 @@ class BrowserExecutor:
             return self.session.active_page.url
         except RuntimeError:
             return ""
+
+    async def checked_final_url(self) -> str | None:
+        """The active tab's URL once the allowlist has been enforced, or None when the page is (or has just
+        been) off it: an off-list URL can encode page data and must not reach the result."""
+        try:
+            await self._enforce_allowlist()
+        except BrowserActionError:
+            return None
+        url = self.current_url()
+        return None if self.session.blocks(url) else url
 
     async def final_screenshot(self, path: Path) -> str | None:
         """Save the active tab's viewport for the owner; never sent to any model. A tab that left the
@@ -506,6 +526,11 @@ class BrowserExecutor:
             )
         if info.get("sensitiveForm"):
             raise ConfirmationRequired(f"{action} inside a form with password or payment fields")
+        if info.get("href") and (word := consequential_url(info["href"])):
+            # A neutral label ("Continue") can hide an action URL: the GET happens on activation.
+            raise ConfirmationRequired(
+                f'{action} on a link or form whose destination contains "{word}" looks like a consequential step'
+            )
 
     @staticmethod
     def _guard_entry(info: dict[str, Any] | None) -> None:
@@ -736,7 +761,10 @@ class BrowserExecutor:
         page = self._page(tab_id)
         keys = [_key_name(k) for k in str(text).split("+") if k]
         if keys and keys[-1] in _ACTIVATING_KEYS:
-            self._guard(await self._focused_info(page), f"holding {keys[-1]}")
+            info = await self._focused_info(page)
+            self._guard(info, f"holding {keys[-1]}")
+            if keys[-1] in ("Enter", "NumpadEnter"):
+                self._guard_implicit_submit(info, "+".join(keys))
         for k in keys:
             await page.keyboard.down(k)
         try:
