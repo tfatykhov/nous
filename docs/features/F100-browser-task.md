@@ -25,8 +25,8 @@ or finding sources, `web_fetch` and `web_search` are cheaper.
 | Tool | `tools.py` | Registers `browser_task` when the flag is on (`main.py`). |
 
 **Model pinning.** The inner loop always uses `NOUS_BROWSER_TASK_MODEL` (default `claude-sonnet-5-5`), never
-the caller's model. The heartbeat (`claude-sonnet-4-6`) and critic (`claude-haiku-4-5`) models don't support
-the toolset. The setting is checked against `SUPPORTED_MODELS` (`claude-fable-5`, `-5-1`, `claude-mythos-5`,
+the caller's model. The background model (default `claude-sonnet-4-6`, which the heartbeat falls back to) and the
+critic as production runs it (`claude-haiku-4-5`) don't support the toolset. The setting is checked against `SUPPORTED_MODELS` (`claude-fable-5`, `-5-1`, `claude-mythos-5`,
 `-5-1`, `claude-opus-4-8`, `claude-opus-5`, `-5-5`, `claude-sonnet-5`, `-5-5`, `claude-haiku-5-5`). A bad value
 is logged at startup, and every call fails at once with a message that names the setting. The task never
 launches a browser or calls the API with an unsupported model.
@@ -65,7 +65,8 @@ logged and never changes a finished task's outcome. Only `end_turn` counts as co
    downloads are refused. Playwright does not route the redirects of a request it already allowed, so after
    every action, including one that failed, the executor checks each tab's and each frame's URL. A child frame
    that ended up off the list is blanked; a tab that did is blanked (closed if that fails) and the action fails. `navigate` refuses non-http(s) schemes and off-list hosts before loading anything. Loopback
-   and private addresses are reachable only if listed literally (e.g. `127.0.0.1`).
+   and private addresses are reachable only if listed literally (e.g. `127.0.0.1`); link-local (cloud
+   metadata) and unspecified addresses are refused even then.
 3. **Confirmation guard, two layers.** The task stops with `needs_confirmation` and does not take the step:
    - *Model layer.* The inner model must call the custom `request_confirmation` tool before logging in,
      entering credentials, paying, purchasing, booking, accepting terms, sending or posting messages,

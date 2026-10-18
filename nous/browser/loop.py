@@ -30,8 +30,9 @@ from nous.browser.session import BrowserSession, DomainAllowlist
 logger = logging.getLogger(__name__)
 
 # The models the browser toolset accepts (browser-use tool docs, Compatibility).
-# The heartbeat (claude-sonnet-4-6) and critic (claude-haiku-4-5) models are not in it,
-# which is why the inner loop never inherits a caller's model.
+# The background model (default claude-sonnet-4-6, which the heartbeat falls back to) and the
+# critic as production runs it (claude-haiku-4-5) are not in it, which is why the inner loop
+# never inherits a caller's model.
 SUPPORTED_MODELS = frozenset(
     {
         "claude-fable-5",
@@ -290,8 +291,15 @@ async def run_browser_task(
     if start_url and not allowlist.allows(start_url if "://" in start_url else f"https://{start_url}"):
         return BrowserTaskResult("error", f"start_url {start_url!r} is not on the allowed domains.", run_id)
 
-    steps_cap = max(1, min(int(max_steps or settings.browser_task_max_steps), settings.browser_task_max_steps))
-    timeout = min(float(settings.browser_task_timeout_seconds), settings.tool_timeout - TOOL_TIMEOUT_MARGIN_SECONDS)
+    try:
+        requested = int(max_steps or settings.browser_task_max_steps)
+    except (TypeError, ValueError):
+        requested = settings.browser_task_max_steps
+    steps_cap = max(1, min(requested, settings.browser_task_max_steps))
+    budget = settings.tool_timeout - TOOL_TIMEOUT_MARGIN_SECONDS
+    if budget < settings.browser_task_timeout_seconds:
+        logger.warning("browser_task: timeout clamped to %ss by NOUS_TOOL_TIMEOUT", max(1, budget))
+    timeout = max(1.0, min(float(settings.browser_task_timeout_seconds), budget))
     artifacts_dir = Path(settings.workspace_dir) / "browser-task" / run_id
     factory = browser_factory or _real_browser
     state = BrowserTaskResult("timeout", "", run_id)

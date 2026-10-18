@@ -37,6 +37,10 @@ class DomainAllowlist:
         bare = sorted(h for h in hosts if "." not in h and h != "localhost" and not _is_ip(h))
         if bare:
             raise ValueError(f"allowed_domains entries must be hosts, not bare suffixes: {', '.join(bare)}")
+        # Cloud metadata (169.254.169.254) and friends: never a legitimate browsing target.
+        local = sorted(h for h in hosts if _is_ip(h) and _never_browsable(h))
+        if local:
+            raise ValueError(f"allowed_domains may not name link-local or unspecified addresses: {', '.join(local)}")
         self.hosts = frozenset(hosts)
 
     @staticmethod
@@ -64,6 +68,11 @@ def _is_ip(host: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _never_browsable(host: str) -> bool:
+    ip = ipaddress.ip_address(host.strip("[]"))
+    return ip.is_link_local or ip.is_unspecified or ip.is_multicast
 
 
 async def _quietly(close: Callable[[], Awaitable[Any]]) -> None:

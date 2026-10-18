@@ -229,6 +229,11 @@ class TestDomainAllowlist:
         assert DomainAllowlist(["localhost"]).allows("http://localhost:8080/")
         assert DomainAllowlist(["::1"]).allows("http://[::1]:8080/")
 
+    @pytest.mark.parametrize("entry", ["169.254.169.254", "fe80::1", "0.0.0.0"])
+    def test_link_local_and_unspecified_addresses_are_rejected(self, entry: str) -> None:
+        with pytest.raises(ValueError, match="link-local"):
+            DomainAllowlist([entry])
+
     def test_empty_allowlist_is_rejected(self) -> None:
         with pytest.raises(ValueError):
             DomainAllowlist([])
@@ -269,6 +274,29 @@ class TestInnerLoop:
         )
         assert result.status == "max_steps"
         assert len(api.payloads) == 2
+
+    async def test_bad_max_steps_falls_back_to_the_setting(self, tmp_path: Path) -> None:
+        api = FakeApi([_response(_tool_use("screenshot"))], repeat_last=True)
+        result = await run_browser_task(
+            "g",
+            ["example.com"],
+            max_steps="lots",
+            settings=_settings(tmp_path, browser_task_max_steps=2),
+            call_api=api,
+            browser_factory=_fake_factory(FakeExecutor()),
+        )
+        assert result.status == "max_steps" and len(api.payloads) == 2
+
+    async def test_a_tiny_tool_timeout_still_leaves_a_positive_budget(self, tmp_path: Path) -> None:
+        api = FakeApi([_response(_text("Done."), stop_reason="end_turn")])
+        result = await run_browser_task(
+            "g",
+            ["example.com"],
+            settings=_settings(tmp_path, tool_timeout=5),
+            call_api=api,
+            browser_factory=_fake_factory(FakeExecutor()),
+        )
+        assert result.status == "completed"
 
     async def test_request_shape(self, tmp_path: Path) -> None:
         api = FakeApi([_response(_text("ok"), stop_reason="end_turn")])
