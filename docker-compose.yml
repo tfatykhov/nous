@@ -2,6 +2,8 @@ services:
   nous:
     build: .
     container_name: nous-agent
+    # Reap orphaned children (git, chrome, sleep ...): python as PID 1 never does, and they piled up as zombies.
+    init: true
     # F100 browser_task: the egress filter (iptables owner match on the nous-browser user) needs NET_ADMIN.
     # Without it the browser task refuses to start.
     cap_add:
