@@ -92,7 +92,11 @@ RUN useradd --create-home --shell /bin/bash claude-runner \
 # groups beyond its own, so a renderer exploit does not get root in the container that holds the
 # database and API credentials. nous/browser/chromium-as-user.sh drops to it with setpriv; its home only
 # holds Chromium's caches.
-RUN useradd --system --create-home --home-dir /home/nous-browser --shell /usr/sbin/nologin nous-browser \
+# iptables: the kernel egress rule that confines nous-browser to the local egress proxy
+# (nous/browser/firewall.py; needs cap_add NET_ADMIN at run time).
+RUN apt-get update && apt-get install -y --no-install-recommends iptables \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --create-home --home-dir /home/nous-browser --shell /usr/sbin/nologin nous-browser \
     && chmod 0755 /app/nous/browser/chromium-as-user.sh
 
 HEALTHCHECK --interval=30s --timeout=10s \

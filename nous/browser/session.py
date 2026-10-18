@@ -14,7 +14,7 @@ from types import TracebackType
 from typing import Any
 from urllib.parse import urlsplit
 
-from nous.browser import egress
+from nous.browser import egress, firewall
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,8 @@ CHROMIUM_ARGS = [
 ]
 # Chromium runs as this user when Nous runs as root (the container), through the setpriv wrapper.
 BROWSER_USER = "nous-browser"
+# The egress proxy's port when Chromium runs as BROWSER_USER: the one place the kernel rule lets it connect.
+DEFAULT_PROXY_PORT = 18181
 CHROMIUM_WRAPPER = Path(__file__).with_name("chromium-as-user.sh")
 SETPRIV = "/usr/bin/setpriv"
 # Each teardown step gets this long before Chromium is killed.
@@ -139,7 +141,8 @@ class DomainAllowlist:
             return False
         if parts.scheme not in ("http", "https") or not host:
             return False
-        return any(host == h or host.endswith("." + h) for h in self.hosts)
+        # An IP address entry matches that address only; a name entry also matches its subdomains.
+        return any(host == h or (host.endswith("." + h) and _ip(h) is None) for h in self.hosts)
 
 
 def _ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
@@ -230,9 +233,20 @@ class BrowserSession:
     Service workers (which bypass routing) and WebSockets are blocked; downloads are refused.
     """
 
-    def __init__(self, allowlist: DomainAllowlist, artifacts_dir: Path) -> None:
+    def __init__(
+        self,
+        allowlist: DomainAllowlist,
+        artifacts_dir: Path,
+        *,
+        proxy_port: int = DEFAULT_PROXY_PORT,
+        require_firewall: bool = True,
+    ) -> None:
         self.allowlist = allowlist
         self.artifacts_dir = artifacts_dir
+        # On the wrapper path the proxy listens on this fixed port, so the kernel rule can name it.
+        self.proxy_port = proxy_port
+        self.require_firewall = require_firewall
+        self._as_user = False
         self.blocked_requests = 0
         self.tabs: dict[str, Any] = {}  # tab_id -> playwright Page, in opening order
         self.active_tab: str | None = None
@@ -250,8 +264,18 @@ class BrowserSession:
 
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         try:
+            # On the wrapper path (Chromium as nous-browser) a kernel rule confines that user to the proxy,
+            # which then needs a known port; otherwise (development, tests) any free port will do.
+            self._as_user = _browser_user_unavailable() is None
+            if self._as_user:
+                await asyncio.to_thread(firewall.kill_user_processes, BROWSER_USER)
             self._proxy = egress.EgressProxy(self.allowlist, on_refuse=self._count_refusal)
-            port = await self._proxy.start()
+            port = await self._proxy.start(self.proxy_port if self._as_user else 0)
+            if self._as_user:
+                if self.require_firewall:
+                    await asyncio.to_thread(firewall.ensure_egress_filter, port, BROWSER_USER)
+                else:
+                    logger.warning("browser_task: the egress firewall is off; a browser exploit can bypass the proxy")
             self._playwright = await async_playwright().start()
             self._browser = await self._playwright.chromium.launch(
                 headless=True,
@@ -309,6 +333,9 @@ class BrowserSession:
                 cancelled = e
             except Exception:
                 logger.warning("browser_task: closing the egress proxy failed", exc_info=True)
+        if self._as_user:
+            # Whatever the browser user still owns, marker or not, ends with the session.
+            firewall.kill_user_processes(BROWSER_USER)
         if cancelled is not None:
             raise cancelled
 

@@ -2103,3 +2103,132 @@ def test_compose_passes_the_four_browser_settings_with_real_defaults() -> None:
         "NOUS_BROWSER_TASK_TIMEOUT_SECONDS": "110",
     }.items():
         assert f"      - {name}=${{{name}:-{default}}}\n" in text, name
+
+
+# ---------------------------------------------------------------------------
+# Round 3: select changes and consequential URLs
+# ---------------------------------------------------------------------------
+
+
+class TestConsequentialUrl:
+    @pytest.mark.parametrize(
+        "url, word",
+        [
+            ("https://example.com/unsubscribe?u=1", "unsubscribe"),
+            ("https://example.com/account/delete", "delete"),
+            ("https://example.com/x?action=cancelOrder", "cancel"),
+            ("https://example.com/checkout", "checkout"),
+            ("https://example.com/orders/approve/12", "approve"),
+            ("https://example.com/auth/magic/abc", "magic"),
+            ("https://example.com/logout", "logout"),
+            ("https://example.com/blog/how-to-cancel-a-subscription", "cancel"),
+            ("https://example.com/login?t=" + "a" * 20, "login"),
+            ("https://example.com/signin?ticket=1", "signin"),
+            ("https://example.com/page?token=SECRETVALUE", "a token, code or key parameter"),
+            ("https://example.com/page?Code=1", "a token, code or key parameter"),
+            ("https://example.com/page?api_key=1", "a token, code or key parameter"),
+        ],
+    )
+    def test_flags(self, url: str, word: str) -> None:
+        assert loop_executor.consequential_url(url) == word
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://example.com/",
+            "https://example.com/products?page=2&sort=price",
+            "https://example.com/login",  # a bare sign-in page: nothing happens on load
+            "https://example.com/payments-faq-not",  # word boundary: no match on 'payments'
+            "https://example.com/second.html#unsubscribe",  # the fragment is never sent
+        ],
+    )
+    def test_passes(self, url: str) -> None:
+        assert loop_executor.consequential_url(url) is None
+
+    def test_the_reason_never_echoes_the_query(self) -> None:
+        assert "SECRETVALUE" not in (loop_executor.consequential_url("https://example.com/p?token=SECRETVALUE") or "")
+
+
+from nous.browser import executor as loop_executor  # noqa: E402
+
+
+class TestNavigationGuard:
+    async def test_start_url_is_checked_before_any_browser_or_api_call(self, tmp_path: Path) -> None:
+        api = FakeApi([])
+        executor = FakeExecutor()
+        result = await run_browser_task(
+            "g",
+            ["example.com"],
+            start_url="https://example.com/unsubscribe?token=SECRETVALUE",
+            settings=_settings(tmp_path),
+            call_api=api,
+            browser_factory=_fake_factory(executor),
+        )
+        assert result.status == "needs_confirmation"
+        assert "unsubscribe" in result.summary and "SECRETVALUE" not in result.summary
+        assert executor.calls == [] and api.payloads == []
+
+    async def test_a_model_navigate_ends_the_task_with_needs_confirmation(self, tmp_path: Path) -> None:
+        api = FakeApi([_response(_tool_use("navigate", {"url": "https://example.com/account/delete?id=1"}))])
+        executor = FakeExecutor({"navigate": ConfirmationRequired('navigating to a URL containing "delete"')})
+        result = await run_browser_task(
+            "g", ["example.com"], settings=_settings(tmp_path), call_api=api, browser_factory=_fake_factory(executor)
+        )
+        assert result.status == "needs_confirmation" and "delete" in result.summary
+
+    @needs_chromium
+    async def test_the_real_executor_refuses_before_loading(self, browser, site) -> None:
+        executor, session = browser
+        base, _ = site
+        with pytest.raises(ConfirmationRequired, match="unsubscribe") as caught:
+            await executor.execute("navigate", {"url": f"{base}/unsubscribe?token=SECRETVALUE"})
+        assert "SECRETVALUE" not in str(caught.value)
+        assert _SEEN_HOSTS == []  # nothing was requested from the server
+
+
+_SELECT_PAGE = """<!doctype html><title>t</title>
+<label for=s>Plan</label>
+<select id=s onchange="document.title='changed:'+this.value">
+  <option>Keep</option><option>Delete account</option><option>Basic</option></select>
+<form><input type=password name=pw><label for=c>Country</label>
+<select id=c onchange="document.title='changed:'+this.value"><option>A</option><option>B</option></select></form>"""
+
+
+@needs_chromium
+class TestSelectGuard:
+    async def _open(self, browser) -> tuple[BrowserExecutor, BrowserSession]:
+        executor, session = browser
+        await session.active_page.set_content(_SELECT_PAGE)
+        return executor, session
+
+    async def test_choosing_a_consequential_option_needs_confirmation_and_changes_nothing(self, browser) -> None:
+        executor, session = await self._open(browser)
+        target = await _ref_of(executor, 'combobox "Plan"')
+        with pytest.raises(ConfirmationRequired, match="delete") as caught:
+            await executor.execute("form_input", {"target": target, "value": "Delete account"})
+        assert "Delete account" not in str(caught.value)
+        assert await session.active_page.title() == "t"  # no change event fired
+
+    async def test_an_innocent_option_still_works(self, browser) -> None:
+        executor, session = await self._open(browser)
+        await executor.execute("form_input", {"target": await _ref_of(executor, 'combobox "Plan"'), "value": "Basic"})
+        assert await session.active_page.title() == "changed:Basic"
+
+    async def test_a_select_in_a_password_form_needs_confirmation(self, browser) -> None:
+        executor, session = await self._open(browser)
+        with pytest.raises(ConfirmationRequired, match="password"):
+            await executor.execute(
+                "form_input", {"target": await _ref_of(executor, 'combobox "Country"'), "value": "B"}
+            )
+        assert await session.active_page.title() == "t"
+
+
+def test_ip_allowlist_entries_match_exactly_not_as_a_suffix() -> None:
+    allow = DomainAllowlist(["1.1.1.1"])
+    assert allow.allows("http://1.1.1.1/") and not allow.allows("http://x.1.1.1.1/")
+    assert DomainAllowlist(["example.com"]).allows("https://a.example.com/")
+
+
+@pytest.mark.parametrize("address", ["64:ff9b::a00:1", "64:ff9b::808:808"])
+def test_nat64_addresses_are_not_public(address: str) -> None:
+    assert not egress.address_permitted("x.example", ipaddress.ip_address(address))

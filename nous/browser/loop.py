@@ -11,6 +11,7 @@ turns invalidates the thinking that followed them.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import re
 import shutil
@@ -27,8 +28,14 @@ import httpx
 
 from nous.api.anthropic_client import _retry_delay, _should_retry
 from nous.api.preamble import CLAUDE_CODE_PREAMBLE
-from nous.browser.executor import BrowserActionError, BrowserExecutor, ConfirmationRequired
-from nous.browser.session import BrowserSession, DomainAllowlist, check_resolution, host_problem
+from nous.browser.executor import BrowserActionError, BrowserExecutor, ConfirmationRequired, consequential_url
+from nous.browser.session import (
+    DEFAULT_PROXY_PORT,
+    BrowserSession,
+    DomainAllowlist,
+    check_resolution,
+    host_problem,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -196,8 +203,16 @@ def _bare_url(url: str) -> str:
 
 
 @asynccontextmanager
-async def _real_browser(allowlist: DomainAllowlist, artifacts_dir: Path) -> AsyncIterator[BrowserExecutor]:
-    async with BrowserSession(allowlist, artifacts_dir) as session:
+async def _real_browser(
+    allowlist: DomainAllowlist,
+    artifacts_dir: Path,
+    *,
+    proxy_port: int = DEFAULT_PROXY_PORT,
+    require_firewall: bool = True,
+) -> AsyncIterator[BrowserExecutor]:
+    async with BrowserSession(
+        allowlist, artifacts_dir, proxy_port=proxy_port, require_firewall=require_firewall
+    ) as session:
         yield BrowserExecutor(session)
 
 
@@ -352,6 +367,13 @@ async def run_browser_task(
         await check_resolution(hosts)
     except ValueError as e:
         return BrowserTaskResult("error", str(e), run_id)
+    # Before the browser exists, so nothing is loaded: the inner model cannot ask first for start_url.
+    if start_url and (word := consequential_url(start_url if "://" in start_url else f"https://{start_url}")):
+        return BrowserTaskResult(
+            "needs_confirmation",
+            f'Confirmation needed: navigating to a URL containing "{word}" looks like a consequential step.',
+            run_id,
+        )
 
     try:
         requested = int(max_steps or settings.browser_task_max_steps)
@@ -375,7 +397,11 @@ async def run_browser_task(
         timeout = max(1.0, timeout - (clock.time() - started))
         runs_dir = Path(settings.workspace_dir) / "browser-task"
         await asyncio.to_thread(prune_runs, runs_dir)
-        factory = browser_factory or _real_browser
+        factory = browser_factory or functools.partial(
+            _real_browser,
+            proxy_port=getattr(settings, "browser_task_proxy_port", DEFAULT_PROXY_PORT),
+            require_firewall=getattr(settings, "browser_task_require_egress_firewall", True),
+        )
         state = BrowserTaskResult("timeout", "", run_id)
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as http:
             api = call_api or make_api_caller(settings, http, deadline=clock.time() + timeout)

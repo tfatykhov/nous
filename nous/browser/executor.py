@@ -21,7 +21,7 @@ import logging
 import re
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from nous.browser.session import VIEWPORT, BrowserSession
 
@@ -71,6 +71,45 @@ _CONSEQUENTIAL = re.compile(
     r"|(?:i )?(?:accept|agree)(?: to)?(?: the)? (?:terms|conditions|tos|eula|privacy))\b",
     re.IGNORECASE,
 )
+# URL guard (navigation is an action too: a GET can unsubscribe, sign in or delete). Heuristic, deliberately
+# blunt: the URL's path and query (names and values, camelCase split, punctuation as spaces; never the
+# fragment, which is not sent) are searched for these words. A plain page such as
+# /blog/how-to-cancel-a-subscription trips it as well; confirmation is cheap. Sign-in words count only
+# beside a token-like parameter, but a parameter named token, code or key trips on its own.
+_URL_CONSEQUENTIAL = re.compile(
+    r"\b(unsubscribe|delete|remove|cancel|confirm|approve|verify|magic|logout|log out|sign ?out"
+    r"|pay|payment|checkout|check out|purchase|subscribe|transfer)\b"
+)
+_URL_SIGN_IN = re.compile(r"\b(sign ?in|log ?in)\b")
+_URL_SECRET_PARAM = re.compile(r"\b(token|code|key)\b")
+_URL_TOKENISH_PARAM = re.compile(r"token|code|key|auth|otp|sig|ticket|nonce|secret")
+_URL_TOKENISH_VALUE = re.compile(r"[A-Za-z0-9_-]{16,}")
+
+
+def _url_words(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", re.sub(r"([a-z])([A-Z])", r"\1 \2", unquote(value)).lower()).strip()
+
+
+def consequential_url(url: str) -> str | None:
+    """The word that makes loading `url` look like a consequential step, or None. Only our own vocabulary
+    is returned, never any part of the URL: the query may carry a token."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return None
+    params = parse_qsl(parts.query, keep_blank_values=True)
+    text = _url_words(parts.path + " " + " ".join(f"{k} {v}" for k, v in params))
+    if match := _URL_CONSEQUENTIAL.search(text):
+        return " ".join(match.group(0).split())
+    if any(_URL_SECRET_PARAM.search(_url_words(k)) for k, _ in params):
+        return "a token, code or key parameter"
+    if (match := _URL_SIGN_IN.search(text)) and any(
+        _URL_TOKENISH_PARAM.search(k.lower()) or _URL_TOKENISH_VALUE.fullmatch(v) for k, v in params
+    ):
+        return " ".join(match.group(0).split())
+    return None
+
+
 _KEY_ALIASES = {
     "return": "Enter",
     "enter": "Enter",
@@ -220,6 +259,16 @@ function info(el) {
 _INFO_OF_ELEMENT = "(el) => {" + _ELEMENT_INFO_JS + "return info(el); }"
 _INFO_AT_POINT = "([x, y]) => {" + _ELEMENT_INFO_JS + "return info(deepAt(document, x, y)); }"
 _INFO_OF_FOCUS = "() => {" + _ELEMENT_INFO_JS + "return info(deepActive(document)); }"
+# The text a select_option(value) would act on: the chosen option's text, label and value, plus the select's
+# aria-label, title and <label>s (not the other options).
+_SELECT_CHOICE_JS = """(el, want) => {
+  const opts = [...el.options];
+  const o = opts.find(x => x.value === want) || opts.find(x => x.label === want || x.text === want);
+  const own = [el.getAttribute('aria-label'), el.title];
+  for (const l of (el.labels || [])) own.push(l.innerText || l.textContent);
+  const chosen = o ? [o.text, o.label, o.value] : [];
+  return [...own, ...chosen].filter(v => typeof v === 'string' && v).join(' ');
+}"""
 # Keys that activate the focused control the way a click does.
 _ACTIVATING_KEYS = frozenset({"Enter", "NumpadEnter", "Space", " "})
 _CREDENTIAL_AUTOCOMPLETE = re.compile(r"(?:^|\s)(?:cc-|current-password)")
@@ -476,6 +525,8 @@ class BrowserExecutor:
                 f"Error: Navigation refused. {urlsplit(url).hostname} is not on the domain allowlist "
                 f"({', '.join(sorted(self.session.allowlist.hosts))})."
             )
+        if word := consequential_url(url):
+            raise ConfirmationRequired(f'navigating to a URL containing "{word}" looks like a consequential step')
         await page.goto(url, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
         return [_text(f"Navigated to {url}")]
 
@@ -726,6 +777,10 @@ class BrowserExecutor:
         elif tag == "select":
             values = await locator.evaluate("el => [...el.options].map(o => o.value)")
             option = {"value": str(value)} if str(value) in values else {"label": str(value)}
+            # Choosing an option fires input/change, and a page can act on that: guard the chosen option's
+            # text and the select's own labels like a click, and the form context.
+            chosen = await locator.evaluate(_SELECT_CHOICE_JS, str(value))
+            self._guard({**info, "label": chosen}, "selecting")
             await locator.select_option(**option, timeout=ACTION_TIMEOUT_MS)
         else:
             await locator.fill(str(value), timeout=ACTION_TIMEOUT_MS)

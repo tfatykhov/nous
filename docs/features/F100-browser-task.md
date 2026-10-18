@@ -140,6 +140,15 @@ named like a run id are touched.
      not part of its label, so a search for "send money" does not trip it. The reason names only the matched
      guard word or that fixed reason, never the page's text. A trip ends the task. It is never returned to the
      model, so the model can't work around it.
+   - *Select changes and URLs.* Choosing a `<select>` option (`form_input`) is guarded like a click: the
+     chosen option's text and the select's own labels are matched against the same vocabulary, and a select in a
+     form with a password or payment field stops the task, before the change event can fire. Navigation is
+     guarded too: `start_url` (before the browser starts) and every model `navigate` have their path and query
+     searched for `unsubscribe`, `delete`, `remove`, `cancel`, `confirm`, `approve`, `verify`, `magic`,
+     `logout`, `pay`, `payment`, `checkout`, `purchase`, `subscribe`, `transfer`; a query parameter named
+     `token`, `code` or `key`; and `login`/`signin` beside a token-like parameter. It is a blunt heuristic
+     (`/blog/how-to-cancel-a-subscription` trips it; the fragment is not looked at; back, forward and reload
+     are not checked). The reason names only the matched word, never the URL.
    - No credentials are ever passed to the inner loop. A re-run of the same goal stops at the same step. Once
      the owner has confirmed, carrying the step out is Phase 2 work, or done by hand.
 4. **Fresh, isolated browser, as an unprivileged user.** Each call launches its own Chromium with an empty
@@ -167,14 +176,24 @@ named like a run id are touched.
 Known gaps for Phase 1:
 - **Chromium's sandbox is off** (Docker's default seccomp profile refuses user namespaces; see 4), so a
   renderer exploit runs code as `nous-browser` directly.
-- **The proxy is enforced by Chromium's configuration, not by the kernel.** Code running as `nous-browser`
-  after a renderer exploit shares the container's network namespace: it could open sockets directly to the
-  unauthenticated REST API on port 8000, to `nous-postgres` or to the LAN. Closing that needs a separate
-  network namespace or an egress firewall (Phase 2).
+- **A renderer escape is contained by a kernel rule, which needs `NET_ADMIN`.** Code running as
+  `nous-browser` shares the container's network namespace, so `nous/browser/firewall.py` installs, before each
+  launch, an iptables owner-match rule: `OUTPUT -m owner --uid-owner nous-browser -j NOUS_BROWSER`, and in that
+  chain `ACCEPT -o lo -d 127.0.0.1 -p tcp --dport <NOUS_BROWSER_TASK_PROXY_PORT>` then `REJECT` (IPv6: `REJECT`
+  only). The REST API, the database and the LAN are unreachable for that user. The proxy listens on that fixed
+  port (safe under the one-task-at-a-time slot). The chain is rebuilt atomically with `iptables-restore`, and
+  the effect is probed once per process as `nous-browser` (a decoy local port must refuse, the proxy port
+  must accept). **It fails closed**: no `iptables`, no `cap_add: [NET_ADMIN]`, a command error or a failed
+  probe makes the task refuse to start, with an error naming `cap_add: [NET_ADMIN]`
+  (`NOUS_BROWSER_TASK_REQUIRE_EGRESS_FIREWALL=false` is the escape hatch). The step is skipped on the
+  non-wrapper path (development, tests). At the start and end of every session all processes owned by
+  `nous-browser` are killed, whether or not they carry the session marker.
+  Remaining: unix-domain sockets (including abstract ones) and other non-IP channels are not filtered; the
+  rule does not stop code that escapes to root; with the firewall switched off the proxy is again only
+  Chromium's own configuration.
 - `nous-browser` can read world-readable files in the container (the application code, and the workspace if
   its mode allows).
 - Ports are not checked: an allowed host is reachable on any port Chromium allows.
-- NAT64 addresses (`64:ff9b::/96`) count as public; that matters only on a network with a NAT64 gateway.
 - A plain-http redirect to an off-list host renders the proxy's 403 text at that URL until the URL check
   blanks the tab; nothing reaches the host.
 - The executor guard still cannot see a consequential control that sits outside any form and carries a neutral
@@ -191,10 +210,12 @@ Known gaps for Phase 1:
 | `NOUS_BROWSER_TASK_MODEL` | `claude-sonnet-5-5` | Inner model; must be in `SUPPORTED_MODELS`. |
 | `NOUS_BROWSER_TASK_MAX_STEPS` | `30` | Cap on model turns per call. |
 | `NOUS_BROWSER_TASK_TIMEOUT_SECONDS` | `110` | Per-call wall clock, clamped to `NOUS_TOOL_TIMEOUT - 10`. |
+| `NOUS_BROWSER_TASK_PROXY_PORT` | `18181` | Fixed loopback port of the egress proxy when Chromium runs as `nous-browser` (> 1024). |
+| `NOUS_BROWSER_TASK_REQUIRE_EGRESS_FIREWALL` | `true` | Refuse to start the browser unless the kernel egress filter is installed and verified. |
 
 **Enabling in prod.** Prod's compose file passes the environment to the container through an explicit
 `environment:` list, so setting these variables in `.env` alone does nothing: enabling the tool needs
-`NOUS_BROWSER_TASK_*` lines in that list as well. The repo `docker-compose.yml` now carries all four with real defaults (`NOUS_BROWSER_TASK_ENABLED=${NOUS_BROWSER_TASK_ENABLED:-false}`, model `claude-sonnet-5-5`, max steps `30`, timeout `110`); **prod's hand-edited compose needs the same four lines**. Never use an empty default (`${VAR:-}`): the bool and numeric settings reject an empty string.
+`NOUS_BROWSER_TASK_*` lines in that list as well. The repo `docker-compose.yml` now carries all six with real defaults (`NOUS_BROWSER_TASK_ENABLED=${NOUS_BROWSER_TASK_ENABLED:-false}`, model `claude-sonnet-5-5`, max steps `30`, timeout `110`); **prod's hand-edited compose needs the same six lines, plus `cap_add: [NET_ADMIN]` on the `nous` service**. Never use an empty default (`${VAR:-}`): the bool and numeric settings reject an empty string.
 
 ## Phase 2 (future work)
 

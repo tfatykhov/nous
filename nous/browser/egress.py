@@ -43,12 +43,15 @@ _HOP_BY_HOP = frozenset(
 )
 _REFUSED_BODY = b"Blocked by the browser_task egress proxy."
 _PORT = re.compile(r"[0-9]{1,5}")
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
 
 
 def _permitted_address(host: str, address: IPAddress) -> bool:
     """The address rule: only globally routable unicast addresses (`is_global` alone admits multicast).
     Tests replace this function to reach a local server; no setting, tool argument or environment variable
     can change it."""
+    if isinstance(address, ipaddress.IPv6Address) and address in _NAT64:
+        return False  # a NAT64 gateway would turn it into any IPv4 address, private ones included
     return address.is_global and not address.is_multicast
 
 
@@ -100,8 +103,9 @@ class EgressProxy:
         self._server: asyncio.Server | None = None
         self._tasks: set[asyncio.Task[Any]] = set()
 
-    async def start(self) -> int:
-        self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0, limit=HEAD_LIMIT)
+    async def start(self, port: int = 0) -> int:
+        """Listen on 127.0.0.1:`port` (0: any free port). Returns the port."""
+        self._server = await asyncio.start_server(self._handle, "127.0.0.1", port, limit=HEAD_LIMIT)
         self.port = self._server.sockets[0].getsockname()[1]
         return self.port
 
