@@ -34,7 +34,7 @@ def test_the_scorer_version_and_every_constant_are_pinned():
         "Completion check timed out after",
         "Completion check exceeded max attempts",
     )
-    assert ts.NODE_CHECK_STATES == ("passed", "failed", "unconfirmed")
+    assert ts.NODE_CHECK_STATES == ("passed", "failed", "unconfirmed", "superseded")
     assert (ts.OVERRIDE_PENALTY, ts.UNVERIFIED_CLAIM_PENALTY) == (1.0, 0.5)
     assert (ts.HARNESS_ERROR_PENALTY, ts.HARNESS_ERROR_CAP) == (0.1, 0.5)
     assert (ts.REFUSAL_PENALTY, ts.REFUSAL_CAP, ts.SCORE_FLOOR) == (0.25, 0.5, -1.0)
@@ -51,6 +51,10 @@ def test_the_scorer_version_and_every_constant_are_pinned():
         ("test -f done", 1, True, "failed", "Completion check failed (exit code 1)", "failed"),
         ("test -f done", 5, True, "failed", "Completion check timed out after 600s (5 attempts)", "unconfirmed"),
         ("test -f done", 40, True, "failed", "Completion check exceeded max attempts (40)", "unconfirmed"),
+        # A fix node's skip_and_continue keeps the error: the failure must not disappear with it.
+        ("test -f done", 1, True, "skipped", "Completion check failed: no such file", "failed"),
+        ("test -f done", 5, True, "skipped", "Completion check timed out after 600s (5 attempts)", "unconfirmed"),
+        ("test -f done", 1, True, "skipped", None, None),
         ("test -f done", 1, True, "failed", "Check disabled itself but its final run failed", None),  # not the check
         ("test -f done", 1, True, "failed", None, None),
         ("test -f done", 1, True, "cancelled", None, None),
@@ -138,6 +142,9 @@ def test_final_outcome(raw, verified, expected):
         (sig(node_check="unconfirmed", owner_grade="success"), "done_verified", 1.0),
         (sig(node_check="failed", dag_checked=True), "failed", -0.5),  # its own failed check beats a DAG check node
         (sig(node_check="unconfirmed", dag_checked=True), "partial", 0.0),
+        (sig(node_check="superseded"), "partial", 0.0),  # an earlier attempt of a node that failed and was retried
+        (sig(node_check="superseded", dag_checked=True), "partial", 0.0),  # the retry's DAG check does not credit it
+        (sig(node_check="superseded", owner_grade="success"), "done_verified", 1.0),
         (sig(detail="incomplete_blocked", node_check="failed"), "partial", 0.0),  # only a "done" is taken away
         (sig(status="failed", detail="errored", node_check="unconfirmed"), "failed", -0.5),
         (sig(owner_grade="partial"), "done_self", 0.0),  # only a success grade confirms

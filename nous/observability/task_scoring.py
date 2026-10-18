@@ -19,8 +19,9 @@ v2: a subtask's own DAG node check can only take a "done" away. Nous writes ever
 itself, so one that passes confirms nothing and earns nothing (it is kept in the evidence, under
 ``node_check_passed``, for audits). One that the orchestrator ran and that said no is the harness
 contradicting the model's report: a definite failure (exit 1) makes the subtask ``failed``, and a check
-that never said yes before its timeout or attempt limit makes it ``partial``. The owner's success grade
-outranks both.
+that never said yes before its timeout or attempt limit makes it ``partial``. So does being an earlier
+attempt of a node that was retried (a node is retried only after it failed). The owner's success grade
+outranks all of these.
 """
 
 from __future__ import annotations
@@ -65,7 +66,9 @@ NODE_CHECK_UNCONFIRMED_PREFIXES: tuple[str, ...] = (
     "Completion check timed out after",
     "Completion check exceeded max attempts",
 )
-NODE_CHECK_STATES: tuple[str, ...] = ("passed", "failed", "unconfirmed")
+# "superseded": the subtask is an earlier attempt of a node that was retried. A node is retried only after it failed,
+# and the reset erases how, so the attempt's "done" was never confirmed (the gatherer decides this, not the node row).
+NODE_CHECK_STATES: tuple[str, ...] = ("passed", "failed", "unconfirmed", "superseded")
 
 _EXIT_CODE = re.compile(r"(?:^|; )exit code (-?\d+)")
 
@@ -232,13 +235,15 @@ def node_check_state(
     None unless the node carries a non-empty check that the orchestrator ran at least once, so a node whose check
     never got a poll (the worker never ran) says nothing either way. ``passed`` is a node that completed through its
     check; ``failed`` and ``unconfirmed`` come from the error it was failed with (``NODE_CHECK_FAILED_PREFIX``,
-    ``NODE_CHECK_UNCONFIRMED_PREFIXES``). Any other status or error is None.
+    ``NODE_CHECK_UNCONFIRMED_PREFIXES``), also once a fix node has skipped it: the skip keeps the error. Any other
+    status or error is None. The ``failed`` text goes on with the check's own stderr, so nothing after the prefix is
+    trusted to tell one kind of failure from another.
     """
     if not (completion_check or "").strip() or (check_attempts or 0) < 1 or last_check_at is None:
         return None
     if node_status == "completed":
         return "passed"
-    if node_status != "failed":
+    if node_status not in ("failed", "skipped"):
         return None
     error = node_error or ""
     if error.startswith(NODE_CHECK_FAILED_PREFIX):
@@ -257,13 +262,13 @@ def _outcome_of(signals: TaskSignals) -> tuple[str, str | None] | None:
         # The orchestrator ran the subtask's own check and it did not say yes: the model's "done" does not stand.
         if signals.node_check == "failed":
             raw = "failed"
-        elif signals.node_check == "unconfirmed":
+        elif signals.node_check in ("unconfirmed", "superseded"):
             raw = "partial"
     return final_outcome(raw, verified=signals.dag_checked or owner_confirmed)
 
 
 def score_leaf(signals: TaskSignals, now: datetime) -> TaskScore | None:
-    """The v1 composite for a subtask, or None for a task that has not finished.
+    """The composite for a subtask, or None for a task that has not finished.
 
     A cancelled subtask gets a ``not_scored`` row (score NULL), so coverage can tell it from a missed one.
     """

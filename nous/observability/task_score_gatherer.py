@@ -18,6 +18,8 @@ so a failing subtask inside a DAG inside a chain is penalised once:
   a proposal the owner rejected                             -> the chain
 - a decision linked to a subtask or DAG by the DEPTH-0 intention row that spawned it -> that unit; a decision
   an arrival recorded, or the one behind a schedule-spawned root -> the chain
+- how a DAG node's own completion_check ended (``node_check_<state>``) -> the subtask the node records as its
+  current attempt; every earlier attempt of that node gets ``node_check_superseded``
 
 A DEPTH-0 row only: the continuation runner stamps the root's ``origin_decision_id`` on every child it spawns
 (a continuation turn and an approved proposal's call both pass it on as the spawn's ``decision_id``), so reading the
@@ -126,7 +128,8 @@ class _Pass:
 
     async def checked(self, dag_ids: Sequence[UUID]) -> set[UUID]:
         """The DAGs that completed AND have a check node that completed AND carries a check (a non-empty
-        ``completion_check``): the one outside confirmation, besides the owner's grade, that v1 accepts for "done".
+        ``completion_check``): the one outside confirmation, besides the owner's grade, that the scorer accepts for
+        "done".
         A check node without a ``completion_check`` completes when the heartbeat's model disables it, which is the
         model's own say-so."""
         missing = [d for d in dict.fromkeys(dag_ids) if d not in self._checked]
@@ -381,13 +384,16 @@ async def _leaf_signals(session: AsyncSession, agent_id: str, since: datetime, r
         )
         for r in result:
             dag_of[r.id] = r.dag_id
-            # A retried node is reset and gets a new subtask, so its status and check columns describe the node's
-            # current attempt only: an earlier attempt linked to the same node must not take its outcome.
+            # The node row describes its current attempt only (dag_nodes.subtask_id). An earlier attempt linked to
+            # the same node is "superseded": the node was retried, which happens only after it failed, and the reset
+            # erased how. The fix stage's retry does not reset check_attempts, so a never-polled check of the new
+            # attempt can read as "unconfirmed" rather than None; both leave a "done" at 0.0.
             if r.node_subtask_id != r.id:
-                continue
-            state = ts.node_check_state(
-                r.completion_check, r.check_attempts, r.last_check_at, r.node_status, r.node_error
-            )
+                state: str | None = "superseded"
+            else:
+                state = ts.node_check_state(
+                    r.completion_check, r.check_attempts, r.last_check_at, r.node_status, r.node_error
+                )
             if state is not None:
                 node_check[r.id] = state
                 evidence[str(r.id)][f"node_check_{state}"].append(str(r.node_id))
