@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from nous.api.attachments import sanitize_filename
+from nous.api.preamble import CLAUDE_CODE_PREAMBLE
 
 if TYPE_CHECKING:
     from nous.api.models import Attachment
@@ -212,8 +213,16 @@ async def _transcribe_and_ingest_pdf(raw: bytes, heart: "Heart", settings: "Sett
             # SdkAnthropicClient._payload_to_kwargs (anthropic_client.py) indexes
             # payload["system"] unconditionally, so this key MUST be present on every
             # backend or the call raises and the fallback silently no-ops.
-            "system": "You are a document transcription engine. Transcribe the provided "
-                      "document's full text verbatim, with no commentary.",
+            # Block 0 is the Claude Code preamble: under an OAuth token any
+            # model but Haiku 4.5 (Haiku 5.5 included) answers 429 without it.
+            "system": [
+                {"type": "text", "text": CLAUDE_CODE_PREAMBLE},
+                {
+                    "type": "text",
+                    "text": "You are a document transcription engine. Transcribe the provided "
+                    "document's full text verbatim, with no commentary.",
+                },
+            ],
             "messages": [{"role": "user", "content": [
                 {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": b64}},
                 {"type": "text", "text": "Transcribe this document's full text verbatim."},

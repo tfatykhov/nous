@@ -80,7 +80,7 @@ async def test_the_fix_dispatcher_forces_its_tool_where_the_model_allows_it():
 
     (payload,) = payloads
     assert payload["tool_choice"] == {"type": "tool", "name": "choose_fix_action"}
-    assert payload["system"] == ""
+    assert payload["system"] == [{"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."}]
 
 
 async def test_the_fix_dispatcher_asks_for_its_tool_where_the_model_rejects_forcing():
@@ -90,7 +90,7 @@ async def test_the_fix_dispatcher_asks_for_its_tool_where_the_model_rejects_forc
 
     forced, asked = payloads
     assert "tool_choice" in forced and "tool_choice" not in asked
-    assert asked["system"] == _ASK.format("choose_fix_action")
+    assert asked["system"] == [*forced["system"], {"type": "text", "text": _ASK.format("choose_fix_action")}]
     assert {k: v for k, v in asked.items() if k != "system"} == {
         k: v for k, v in forced.items() if k not in ("system", "tool_choice")
     }
@@ -105,7 +105,7 @@ async def test_query_expansion_forces_its_tool_where_the_model_allows_it():
 
     (payload,) = payloads
     assert payload["tool_choice"] == {"type": "tool", "name": "expand_query"}
-    assert payload["system"].startswith("You rewrite search queries into semantic variants.")
+    assert payload["system"][-1]["text"].startswith("You rewrite search queries into semantic variants.")
 
 
 async def test_query_expansion_asks_for_its_tool_where_the_model_rejects_forcing():
@@ -116,7 +116,7 @@ async def test_query_expansion_asks_for_its_tool_where_the_model_rejects_forcing
 
     forced, asked = payloads
     assert "tool_choice" not in asked
-    assert asked["system"] == f"{forced['system']}\n\n{_ASK.format('expand_query')}"
+    assert asked["system"] == [*forced["system"], {"type": "text", "text": _ASK.format("expand_query")}]
 
 
 # Replies that are no whole answer, as (stop_reason, the reply's one block): cut off at max_tokens, refused,

@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import sqlalchemy.exc
 from sqlalchemy import text
 
+from nous.api.preamble import CLAUDE_CODE_PREAMBLE
 from nous.handlers import call_with_tool_choice
 from nous.heart.hashing import canonical_input_hash
 
@@ -327,7 +328,12 @@ class QueryExpander:
         payload: dict[str, Any] = {
             "model": self._model,
             "max_tokens": 256,
-            "system": _SYSTEM_PROMPT,
+            # Block 0 is the Claude Code preamble: under an OAuth token any
+            # model but Haiku 4.5 (Haiku 5.5 included) answers 429 without it.
+            "system": [
+                {"type": "text", "text": CLAUDE_CODE_PREAMBLE},
+                {"type": "text", "text": _SYSTEM_PROMPT},
+            ],
             "tools": [_TOOL],
             "tool_choice": _TOOL_CHOICE,
             "messages": [

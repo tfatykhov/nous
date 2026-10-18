@@ -134,6 +134,8 @@ nous/
 │       ├── autonomy_dashboard.py # Autonomy scoreboard: GET /dashboard/autonomy data (taps, approval cards, grades, task scores, inventory, warn classes), read-only
 │       ├── mcp.py              # MCP server (nous_chat, nous_decide, etc.)
 │       ├── runner.py           # Agent runner (tool loop, streaming)
+│       ├── preamble.py         # CLAUDE_CODE_PREAMBLE: system block 0 of every Messages request (one definition)
+│       ├── model_caps.py       # What a model accepts, by version: legacy Haiku, Haiku 5+ thinking disabled by default
 │       ├── tools.py            # Tool dispatcher + registration
 │       ├── retrieval_pipeline.py # F051: run_recall_pipeline (shared by recall_deep + eval)
 │       ├── execution_context.py # Harness 1a: who is calling (interactive, dag_node, …)

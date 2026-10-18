@@ -19,6 +19,7 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "claude-sonnet-4-5": 200_000,
     "claude-opus-4-5": 200_000,
     "claude-haiku-4-5": 200_000,
+    "claude-haiku-5-5": 1_000_000,
     "gpt-4o": 128_000,
     "gpt-4-turbo": 128_000,
 }
