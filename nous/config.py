@@ -3141,7 +3141,7 @@ class Settings(BaseSettings):
     browser_task_timeout_seconds: float = Field(
         default=110,
         gt=0,
-        description="F100: wall-clock limit per call; clamped to NOUS_TOOL_TIMEOUT minus 10s (teardown room), which cancels any tool.",
+        description="F100: wall-clock limit per call; clamped to NOUS_TOOL_TIMEOUT minus 25s (teardown room: 4 close steps of 5s, plus 5s), which cancels any tool.",
     )
     browser_task_proxy_port: int = Field(
         default=18181,

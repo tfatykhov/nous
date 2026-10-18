@@ -212,6 +212,9 @@ def kill_user_processes(user: str, proc_root: Path = Path("/proc"), kill: Callab
             break
         for pid in victims:
             try:
+                # The pid may have exited and been reused since the scan: look at it again right before the kill.
+                if not _owned_by((proc_root / str(pid) / "status").read_text(), uid):
+                    continue
                 kill(pid, _SIGKILL)
                 killed += 1
             except OSError:

@@ -42,6 +42,11 @@ CHROMIUM_WRAPPER = Path(__file__).with_name("chromium-as-user.sh")
 SETPRIV = "/usr/bin/setpriv"
 # Each teardown step gets this long before Chromium is killed.
 CLOSE_STEP_TIMEOUT = 5.0
+# Teardown closes the context, the browser, Playwright and the proxy, each bounded by CLOSE_STEP_TIMEOUT. The
+# time left after a task's own deadline for that to finish, so the dispatcher's cancel at NOUS_TOOL_TIMEOUT
+# never lands during cleanup: every step at its limit, plus 5 s for the rest.
+CLOSE_STEP_COUNT = 4
+TEARDOWN_RESERVE_SECONDS = CLOSE_STEP_COUNT * CLOSE_STEP_TIMEOUT + 5
 # Resolving the allowlist at task start; the egress proxy checks every connection again.
 START_RESOLVE_TIMEOUT = 5.0
 

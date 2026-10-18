@@ -49,7 +49,7 @@ thinking is left at the model default (adaptive).
 
 **Budget.** The limits are `NOUS_BROWSER_TASK_MAX_STEPS` model turns, which the `max_steps` argument can only
 lower, and `NOUS_BROWSER_TASK_TIMEOUT_SECONDS`. The timeout is clamped below `NOUS_TOOL_TIMEOUT` (default
-120 s) with 10 s left to close the browser, because the runner cancels any tool at that point and would
+120 s) with 25 s left to close the browser (four close steps of 5 s each, plus 5 s), because the runner cancels any tool at that point and would
 discard the result. After a timeout the final screenshot is skipped. A failure while closing the browser is
 logged and never changes a finished task's outcome. Only `end_turn` counts as completed; another stop reason
 (such as `max_tokens`) is an error, and a completed task's summary is the final turn's text only.
@@ -209,7 +209,7 @@ Known gaps for Phase 1:
 | `NOUS_BROWSER_TASK_ENABLED` | `false` | Register the tool. |
 | `NOUS_BROWSER_TASK_MODEL` | `claude-sonnet-5-5` | Inner model; must be in `SUPPORTED_MODELS`. |
 | `NOUS_BROWSER_TASK_MAX_STEPS` | `30` | Cap on model turns per call. |
-| `NOUS_BROWSER_TASK_TIMEOUT_SECONDS` | `110` | Per-call wall clock, clamped to `NOUS_TOOL_TIMEOUT - 10`. |
+| `NOUS_BROWSER_TASK_TIMEOUT_SECONDS` | `110` | Per-call wall clock, clamped to `NOUS_TOOL_TIMEOUT - 25`. |
 | `NOUS_BROWSER_TASK_PROXY_PORT` | `18181` | Fixed loopback port of the egress proxy when Chromium runs as `nous-browser` (> 1024). |
 | `NOUS_BROWSER_TASK_REQUIRE_EGRESS_FIREWALL` | `true` | Refuse to start the browser unless the kernel egress filter is installed and verified. |
 

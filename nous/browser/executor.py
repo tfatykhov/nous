@@ -229,6 +229,31 @@ function deepActive(doc) {
   }
   return e;
 }
+const IMPLICIT_TYPES = ['text', 'search', 'url', 'tel', 'email', 'password', 'date', 'month', 'week', 'time',
+  'datetime-local', 'number'];
+function isSubmitter(e) {
+  const ty = (e.getAttribute('type') || '').toLowerCase();
+  if (e.tagName === 'BUTTON') return ty === '' || ty === 'submit';
+  return e.tagName === 'INPUT' && (ty === 'submit' || ty === 'image');
+}
+// What Enter in a text field of a form would submit through: the form's default (first) submit control, with its
+// label, or `opaque` when there is none to inspect but the form still has an action or an onsubmit handler and
+// a single text field (which submits on Enter alone). Null when Enter submits nothing.
+function implicitSubmit(c, form) {
+  if (c.tagName !== 'INPUT' || !IMPLICIT_TYPES.includes((c.getAttribute('type') || 'text').toLowerCase())) return null;
+  if (!form) return null;
+  const btn = [...form.elements].find(isSubmitter);
+  if (btn) {
+    const parts = [btn.getAttribute('aria-label'), labelText(btn), btn.title, btn.alt, btn.innerText || btn.textContent,
+      btn.value];
+    return {opaque: false, label: parts.filter(v => typeof v === 'string' && v).join(' ').slice(0, 500)};
+  }
+  const fields = [...form.elements].filter(
+    e => e.tagName === 'INPUT' && IMPLICIT_TYPES.includes((e.getAttribute('type') || 'text').toLowerCase()));
+  if (fields.length > 1) return null;
+  if (form.hasAttribute('action') || form.hasAttribute('onsubmit')) return {opaque: true, label: ''};
+  return null;
+}
 function info(el) {
   if (!el) return null;
   if (isFrame(el)) {
@@ -253,6 +278,7 @@ function info(el) {
     textEntry: !!textEntry,
     payment: isPayment(c),
     sensitiveForm: !!form && [...form.elements].some(e => isPassword(e) || isPayment(e)),
+    implicitSubmit: implicitSubmit(c, form),
   };
 }
 """
@@ -496,10 +522,27 @@ class BrowserExecutor:
                 "entering text into a password or payment field (credentials are never provided)"
             )
 
+    @classmethod
+    def _guard_implicit_submit(cls, info: dict[str, Any] | None, chord: str) -> None:
+        """Enter in a text field submits its form through the form's default submit control: guard that control
+        (its label and values) as if it were clicked, and fail closed on a form with nothing to inspect."""
+        implicit = (info or {}).get("implicitSubmit")
+        if not implicit:
+            return
+        if implicit.get("opaque"):
+            raise ConfirmationRequired(
+                f"pressing {chord} would submit a form that has no submit control the guard can inspect"
+            )
+        cls._guard({"label": implicit.get("label", "")}, f"pressing {chord} submits a form; its submit control")
+
     async def _press(self, page: Any, chord: str) -> None:
         """Press one chord, checking the focused control first when the key activates it."""
-        if chord.split("+")[-1] in _ACTIVATING_KEYS:
-            self._guard(await self._focused_info(page), f"pressing {chord}")
+        key = chord.split("+")[-1]
+        if key in _ACTIVATING_KEYS:
+            info = await self._focused_info(page)
+            self._guard(info, f"pressing {chord}")
+            if key in ("Enter", "NumpadEnter"):
+                self._guard_implicit_submit(info, chord)
         await page.keyboard.press(chord)
 
     # -- navigation and capture ------------------------------------------------
@@ -564,8 +607,8 @@ class BrowserExecutor:
         self, target: dict[str, Any], modifiers: str | None, tab_id: str | None, *, button: str, clicks: int, label: str
     ) -> list[dict[str, Any]]:
         page = self._page(tab_id)
-        if button == "left":
-            self._guard(await self._info_at(page, target), label)
+        # Every button is guarded: a page can act from an auxclick or contextmenu handler as well as from click.
+        self._guard(await self._info_at(page, target), label)
         mods = _modifier_list(modifiers)
         if target.get("type") == "ref":
             locator = await self._locator(page, target)

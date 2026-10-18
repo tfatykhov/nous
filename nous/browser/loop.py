@@ -31,6 +31,7 @@ from nous.api.preamble import CLAUDE_CODE_PREAMBLE
 from nous.browser.executor import BrowserActionError, BrowserExecutor, ConfirmationRequired, consequential_url
 from nous.browser.session import (
     DEFAULT_PROXY_PORT,
+    TEARDOWN_RESERVE_SECONDS,
     BrowserSession,
     DomainAllowlist,
     check_resolution,
@@ -70,9 +71,8 @@ HALT_TEXT = "Not executed: an earlier action in this turn failed."
 CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27"
 MAX_TOKENS = 16_000
 SUMMARY_LIMIT = 4_000
-# The dispatcher cancels any tool at NOUS_TOOL_TIMEOUT; finishing first keeps our own result.
-# The margin also covers teardown (final screenshot, browser close) after our own timeout.
-TOOL_TIMEOUT_MARGIN_SECONDS = 10
+# The dispatcher cancels any tool at NOUS_TOOL_TIMEOUT; finishing first keeps our own result. The task's
+# timeout leaves TEARDOWN_RESERVE_SECONDS (session.py) of that for closing the browser.
 # An API retry is made only if it can start this long before the task's deadline; a retry-after pause is cut
 # to fit. Otherwise the call fails at once, naming the rate limit, instead of the task timing out.
 RETRY_WINDOW_SECONDS = 5.0
@@ -380,7 +380,7 @@ async def run_browser_task(
     except (TypeError, ValueError):
         requested = settings.browser_task_max_steps
     steps_cap = max(1, min(requested, settings.browser_task_max_steps))
-    budget = settings.tool_timeout - TOOL_TIMEOUT_MARGIN_SECONDS
+    budget = settings.tool_timeout - TEARDOWN_RESERVE_SECONDS
     if budget < settings.browser_task_timeout_seconds:
         logger.warning("browser_task: timeout clamped to %ss by NOUS_TOOL_TIMEOUT", max(1, budget))
     timeout = max(1.0, min(float(settings.browser_task_timeout_seconds), budget))

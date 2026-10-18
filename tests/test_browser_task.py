@@ -2232,3 +2232,110 @@ def test_ip_allowlist_entries_match_exactly_not_as_a_suffix() -> None:
 @pytest.mark.parametrize("address", ["64:ff9b::a00:1", "64:ff9b::808:808"])
 def test_nat64_addresses_are_not_public(address: str) -> None:
     assert not egress.address_permitted("x.example", ipaddress.ip_address(address))
+
+
+# ---------------------------------------------------------------------------
+# Fix round 4: every pointer button, Enter submitting a form, the teardown reserve
+# ---------------------------------------------------------------------------
+
+_BUTTON_PAGE = """<!doctype html><html><head><title>t</title></head><body>
+<button id="ctx" oncontextmenu="document.title='ran:ctx'; return false">Delete account</button>
+<button id="aux" onauxclick="document.title='ran:aux'">Delete account</button>
+<button id="ok" oncontextmenu="document.title='ran:ok'; return false">Details</button>
+</body></html>"""
+
+_ENTER_PAGE = """<!doctype html><html><head><title>t</title></head><body>
+<form id="msg" onsubmit="document.title='submitted:msg'; return false">
+  <input name="msg" id="msg_in"><button>Send</button></form>
+<form id="find" onsubmit="document.title='submitted:find'; return false">
+  <input name="q" id="find_in"><button>Search</button></form>
+<form id="bare" action="/elsewhere" onsubmit="document.title='submitted:bare'; return false">
+  <input name="n" id="bare_in"></form>
+<form id="plain"><input name="a" id="plain_a"><input name="b"></form>
+</body></html>"""
+
+
+@needs_chromium
+class TestPointerButtonsAndImplicitSubmit:
+    async def _open(self, browser, page: str) -> tuple[BrowserExecutor, BrowserSession]:
+        executor, session = browser
+        await session.active_page.set_content(page)
+        return executor, session
+
+    @pytest.mark.parametrize(("tool", "selector"), [("right_click", "#ctx"), ("middle_click", "#aux")])
+    async def test_a_non_left_click_on_a_consequential_control_needs_confirmation(
+        self, browser, tool: str, selector: str
+    ) -> None:
+        executor, session = await self._open(browser, _BUTTON_PAGE)
+        with pytest.raises(ConfirmationRequired, match='"delete"'):
+            await executor.execute(tool, {"target": await _center(session, selector)})
+        assert await session.active_page.title() == "t"  # the handler never ran
+
+    async def test_a_non_left_click_on_an_ordinary_control_still_works(self, browser) -> None:
+        executor, session = await self._open(browser, _BUTTON_PAGE)
+        await executor.execute("right_click", {"target": await _center(session, "#ok")})
+        assert await session.active_page.title() == "ran:ok"
+
+    async def test_enter_in_a_field_of_a_form_with_a_send_button_needs_confirmation(self, browser) -> None:
+        executor, session = await self._open(browser, _ENTER_PAGE)
+        await session.active_page.focus("#msg_in")
+        with pytest.raises(ConfirmationRequired, match='"send"'):
+            await executor.execute("key", {"text": "Enter"})
+        assert await session.active_page.title() == "t"  # not submitted
+
+    async def test_a_typed_newline_in_that_form_needs_confirmation(self, browser) -> None:
+        executor, session = await self._open(browser, _ENTER_PAGE)
+        await session.active_page.focus("#msg_in")
+        with pytest.raises(ConfirmationRequired, match='"send"'):
+            await executor.execute("type", {"text": "hello\n"})
+        assert await session.active_page.title() == "t"
+
+    async def test_enter_in_a_search_form_still_submits(self, browser) -> None:
+        executor, session = await self._open(browser, _ENTER_PAGE)
+        await session.active_page.focus("#find_in")
+        await executor.execute("key", {"text": "Enter"})
+        assert await session.active_page.title() == "submitted:find"
+
+    async def test_enter_in_a_form_with_no_submit_button_but_an_action_needs_confirmation(self, browser) -> None:
+        executor, session = await self._open(browser, _ENTER_PAGE)
+        await session.active_page.focus("#bare_in")
+        with pytest.raises(ConfirmationRequired, match="no submit control"):
+            await executor.execute("key", {"text": "Enter"})
+        assert await session.active_page.title() == "t"
+
+    async def test_enter_in_a_form_that_cannot_submit_is_not_guarded(self, browser) -> None:
+        executor, session = await self._open(browser, _ENTER_PAGE)
+        await session.active_page.focus("#plain_a")  # two text fields, no button: Enter does nothing
+        await executor.execute("key", {"text": "Enter"})
+
+
+class TestTeardownReserve:
+    def test_the_reserve_covers_every_close_step_at_its_limit(self) -> None:
+        from nous.browser import session as browser_session
+
+        assert browser_session.TEARDOWN_RESERVE_SECONDS == 4 * browser_session.CLOSE_STEP_TIMEOUT + 5 == 25
+
+    @pytest.mark.parametrize(("tool_timeout", "expected"), [(60, 35), (120, 95), (1000, 110)])
+    async def test_the_task_timeout_is_clamped_to_the_tool_timeout_less_the_reserve(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool_timeout: int, expected: int
+    ) -> None:
+        from nous.browser import loop as browser_loop
+
+        seen: dict[str, float] = {}
+
+        def fake_caller(settings, http, *, deadline):
+            seen["timeout"] = deadline - asyncio.get_running_loop().time()
+            return FakeApi([])
+
+        async def fake_run(*args, **kwargs) -> None:
+            return None
+
+        monkeypatch.setattr(browser_loop, "make_api_caller", fake_caller)
+        monkeypatch.setattr(browser_loop, "_run", fake_run)
+        await run_browser_task(
+            "g",
+            ["example.com"],
+            settings=_settings(tmp_path, tool_timeout=tool_timeout, browser_task_timeout_seconds=110),
+            browser_factory=_fake_factory(FakeExecutor()),
+        )
+        assert seen["timeout"] == pytest.approx(expected, abs=1.0)

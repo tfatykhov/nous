@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -165,6 +166,32 @@ class TestKillUserProcesses:
         assert firewall.kill_user_processes("nous-browser", tmp_path, fake_kill) == 3
         assert sorted(killed) == [10, 11, 12]
 
+    def test_a_pid_that_changed_owner_between_scan_and_kill_is_spared(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(firewall, "_uid_of", lambda user: 998)
+        for pid in (10, 11):
+            _write_proc(tmp_path, pid, "Uid:\t998\t998\t998\t998")
+            (tmp_path / str(pid) / "status").write_text(
+                f"Name:\tp{pid}\nState:\tS (sleeping)\nUid:\t998\t998\t998\t998\n"
+            )
+        killed: list[int] = []
+        scanned: set[str] = set()
+        real_owned_by = firewall._owned_by
+
+        def owned_by(status: str, uid: int) -> bool:
+            name = status.splitlines()[0]
+            if name in scanned and name == "Name:\tp10":  # the re-check before the kill: pid 10 was reused
+                status = status.replace("998", "1000")
+            scanned.add(name)
+            return real_owned_by(status, uid)
+
+        def fake_kill(pid: int, sig: int) -> None:
+            killed.append(pid)
+            (tmp_path / str(pid) / "status").unlink()
+
+        monkeypatch.setattr(firewall, "_owned_by", owned_by)
+        firewall.kill_user_processes("nous-browser", tmp_path, fake_kill)
+        assert killed == [11]
+
     def test_an_unknown_user_or_root_kills_nothing(self, tmp_path: Path, monkeypatch) -> None:
         _write_proc(tmp_path, 10, "Uid:\t0\t0\t0\t0")
         for uid in (None, 0):
@@ -210,7 +237,13 @@ class TestSessionWiring:
             async def start(self):
                 raise Stop
 
-        monkeypatch.setattr("playwright.async_api.async_playwright", lambda: FakePlaywright(), raising=False)
+        # Fake modules, so the test runs where the `agent` extra (Playwright) is not installed.
+        fake_pkg = types.ModuleType("playwright")
+        fake_mod = types.ModuleType("playwright.async_api")
+        fake_mod.async_playwright = lambda: FakePlaywright()  # type: ignore[attr-defined]
+        fake_pkg.async_api = fake_mod  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "playwright", fake_pkg)
+        monkeypatch.setitem(sys.modules, "playwright.async_api", fake_mod)
         self.Stop = Stop
         return calls
 
