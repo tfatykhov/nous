@@ -117,15 +117,29 @@ named like a run id are touched.
    - *Model layer.* The inner model must call the custom `request_confirmation` tool before logging in,
      entering credentials, paying, purchasing, booking, accepting terms, sending or posting messages,
      subscribing or deleting anything.
-   - *Executor layer.* This check runs before each call, because one turn can carry several. It covers a click,
-     drag or checkbox on an element whose label matches a narrow list of consequential words; submitting a
-     form that has password or payment fields; typing or `form_input` into a password or `cc-*` field; and
-     every key that activates the focused control (Enter, Space), checked chord by chord, so `Tab Enter`, a
-     newline inside `type` and `hold_key` are covered too. Coordinate targets and focus are resolved through
-     open shadow roots and same-origin frames; a cross-origin frame cannot be inspected, so acting inside one
-     stops the task. A text field's typed value is not part of its label, so a search for "send money" does not
-     trip it. The reason names only the matched word from the guard's own list, never the page's label text.
-     A trip ends the task. It is never returned to the model, so the model can't work around it.
+   - *Executor layer.* This check runs before each call, because one turn can carry several. It stops:
+     - a click, drag, drop, mouse release or checkbox on an element whose label matches a narrow list of
+       consequential words. The label is the element's own text plus its associated `<label>`s (`el.labels`),
+       `aria-labelledby` targets, `aria-label`, title and alt, and, for a ref target, the computed accessible name
+       from Playwright's AI snapshot;
+     - any click, Enter, Space (or typed space) or tap inside a `<form>` (or a form-associated control) that
+       contains a password or payment field, whatever the control's label or type, so `type=button` with
+       `requestSubmit()`, `div role=button` and label-less buttons are covered;
+     - typing or `form_input` into a password field or a payment field. A payment field has `autocomplete=cc-*`,
+       or a name, id, aria-label, placeholder or label that names a card, CVC/CVV/CSC, expiry, security code,
+       IBAN, routing or account number, or is `inputmode=numeric` with a `maxlength` of 12 to 19;
+     - a drag or mouse release onto such a target: the drop target is inspected before pressing and again
+       before releasing, and `left_mouse_up` inspects what is under the pointer;
+     - every key that activates the focused control (Enter, Space), checked chord by chord, so `Tab Enter`, a
+       newline inside `type` and `hold_key` are covered too.
+
+     Coordinate targets and focus are resolved through open shadow roots and same-origin frames; a cross-origin
+     frame cannot be inspected, so acting inside one stops the task. **Fail closed:** when the target of a
+     guarded action cannot be inspected at all, the action does not run and the task ends with
+     `needs_confirmation` and the fixed reason "could not inspect the target". A text field's typed value is
+     not part of its label, so a search for "send money" does not trip it. The reason names only the matched
+     guard word or that fixed reason, never the page's text. A trip ends the task. It is never returned to the
+     model, so the model can't work around it.
    - No credentials are ever passed to the inner loop. A re-run of the same goal stops at the same step. Once
      the owner has confirmed, carrying the step out is Phase 2 work, or done by hand.
 4. **Fresh, isolated browser, as an unprivileged user.** Each call launches its own Chromium with an empty
@@ -148,9 +162,7 @@ named like a run id are touched.
      user namespaces in prod's compose file.
    - *Fallback.* When Nous is not root (local development, tests) or the user, the wrapper or `setpriv` is
      missing, Chromium is launched directly as the current user, and a WARNING is logged once.
-5. **Policy class.** `browser_task` is `external` in `tool_classes.py`. It is outside every `internal_only`
-   (continuation) turn and the heartbeat outward floor, it is stripped by refuse-tier censors, and the
-   execution ledger records it.
+5. **Policy class.** `browser_task` is `external` in `tool_classes.py`. Who may call it follows the context policy table (`tool_policy.py`), the same as `send_email`: interactive and MCP turns, subtasks, DAG nodes, scheduled tasks and agent actions may; heartbeat triage, background-model calls and `internal_only` continuation turns (local levels only) may not. It is stripped by refuse-tier censors, and the execution ledger records it. Under `NOUS_STABLE_TOOL_SET_ENABLED` (the default) every non-initiation frame is offered the tool, so `FRAME_TOOLS["conversation"]` is nominal and the context policy, not the frame, decides.
 
 Known gaps for Phase 1:
 - **Chromium's sandbox is off** (Docker's default seccomp profile refuses user namespaces; see 4), so a
@@ -165,8 +177,11 @@ Known gaps for Phase 1:
 - NAT64 addresses (`64:ff9b::/96`) count as public; that matters only on a network with a NAT64 gateway.
 - A plain-http redirect to an off-list host renders the proxy's 403 text at that URL until the URL check
   blanks the tab; nothing reaches the host.
-- The executor guard is label-based, so a consequential button with a neutral label ("Continue") relies on
-  the model layer.
+- The executor guard still cannot see a consequential control that sits outside any form and carries a neutral
+  label and accessible name (a `div` with an `onclick` that posts), nor look inside a cross-origin frame (it
+  refuses to act there); those rely on the model layer.
+- **Screenshots are isolated by convention only.** The outer agent receives `screenshot_path` and has
+  `read_file`, so it can read the image. Nothing technical stops it; the rule is that it does not.
 
 ## Settings
 
@@ -179,7 +194,7 @@ Known gaps for Phase 1:
 
 **Enabling in prod.** Prod's compose file passes the environment to the container through an explicit
 `environment:` list, so setting these variables in `.env` alone does nothing: enabling the tool needs
-`NOUS_BROWSER_TASK_*` lines in that list as well.
+`NOUS_BROWSER_TASK_*` lines in that list as well. The repo `docker-compose.yml` now carries all four with real defaults (`NOUS_BROWSER_TASK_ENABLED=${NOUS_BROWSER_TASK_ENABLED:-false}`, model `claude-sonnet-5-5`, max steps `30`, timeout `110`); **prod's hand-edited compose needs the same four lines**. Never use an empty default (`${VAR:-}`): the bool and numeric settings reject an empty string.
 
 ## Phase 2 (future work)
 

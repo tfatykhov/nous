@@ -1770,12 +1770,38 @@ class TestRegistration:
         assert is_error
         assert "claude-haiku-4-5" in text and "NOUS_BROWSER_TASK_MODEL" in text
 
-    def test_offered_in_conversation_frame_and_classified_external(self) -> None:
+    def test_classified_external_and_listed_in_the_nominal_conversation_frame(self) -> None:
+        """FRAME_TOOLS["conversation"] is nominal while NOUS_STABLE_TOOL_SET_ENABLED is on (the default): every
+        non-initiation frame then gets the "task" superset. The list is pinned only so that turning the flag
+        off keeps the tool in the conversation frame; docs/reference/agent-tools.md says the same."""
         from nous.api.runner import FRAME_TOOLS
         from nous.api.tool_classes import TOOL_CLASSES
 
         assert "browser_task" in FRAME_TOOLS["conversation"]
         assert TOOL_CLASSES["browser_task"].side_effect == "external"
+
+    def test_every_non_initiation_frame_is_offered_it_under_the_stable_tool_set(self, tmp_path: Path) -> None:
+        from nous.api.tools import ToolDispatcher
+        from nous.browser.tools import register_browser_tools
+
+        dispatcher = ToolDispatcher(stable_tool_set_enabled=True)
+        register_browser_tools(dispatcher, _settings(tmp_path))
+        for frame in ("conversation", "question", "decision", "debug", "creative"):
+            assert "browser_task" in {d["name"] for d in dispatcher.available_tools(frame)}, frame
+
+    @pytest.mark.parametrize("kind", ["interactive", "mcp", "subtask", "dag_node", "scheduled", "agent_action"])
+    def test_the_context_policy_lets_work_contexts_call_it_like_send_email(self, kind: str) -> None:
+        from nous.api.execution_context import ExecutionContext
+        from nous.api.tool_policy import evaluate
+
+        assert evaluate(ExecutionContext(kind=kind), "browser_task", {}) is None
+
+    @pytest.mark.parametrize("kind", ["heartbeat_triage", "background"])
+    def test_the_context_policy_refuses_it_where_outward_calls_are_not_allowed(self, kind: str) -> None:
+        from nous.api.execution_context import ExecutionContext
+        from nous.api.tool_policy import evaluate
+
+        assert evaluate(ExecutionContext(kind=kind), "browser_task", {}) == "level:external"
 
 
 # ---------------------------------------------------------------------------
@@ -2064,3 +2090,16 @@ class TestApiCaller:
         )
         assert result.status == "error" and "Rate limited by the Anthropic API (429)" in result.summary
         assert pauses and all(p <= settings.browser_task_timeout_seconds - loop.RETRY_WINDOW_SECONDS for p in pauses)
+
+
+def test_compose_passes_the_four_browser_settings_with_real_defaults() -> None:
+    """The compose `environment:` list is explicit, so a setting missing from it never reaches the container.
+    The bool and numeric settings reject an empty string, so every default is a real value."""
+    text = (Path(__file__).resolve().parent.parent / "docker-compose.yml").read_text(encoding="utf-8")
+    for name, default in {
+        "NOUS_BROWSER_TASK_ENABLED": "false",
+        "NOUS_BROWSER_TASK_MODEL": "claude-sonnet-5-5",
+        "NOUS_BROWSER_TASK_MAX_STEPS": "30",
+        "NOUS_BROWSER_TASK_TIMEOUT_SECONDS": "110",
+    }.items():
+        assert f"      - {name}=${{{name}:-{default}}}\n" in text, name
