@@ -42,12 +42,14 @@ from nous.api.compaction import ConversationCompactor
 from nous.api.compensation import release_write_path_lock_after, write_path_lock, write_path_lock_is
 from nous.api.execution_context import ExecutionContext, resolve_context
 from nous.api.idempotency import idempotency_key
+from nous.api.model_caps import is_legacy_haiku
 from nous.api.models import (  # noqa: F401 — re-exported for backward compat
     ApiResponse,
     Attachment,
     Conversation,
     Message,
 )
+from nous.api.preamble import CLAUDE_CODE_PREAMBLE
 from nous.api.smart_compress import smart_compress
 from nous.api.tool_classes import refuse_denylist
 from nous.brain.brain import Brain
@@ -1922,7 +1924,7 @@ class AgentRunner:
             system_blocks.append(
                 {
                     "type": "text",
-                    "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+                    "text": CLAUDE_CODE_PREAMBLE,
                     "cache_control": {"type": "ephemeral"},
                 }
             )
@@ -1979,7 +1981,7 @@ class AgentRunner:
             system_blocks = [
                 {
                     "type": "text",
-                    "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+                    "text": CLAUDE_CODE_PREAMBLE,
                     "cache_control": {"type": "ephemeral"},
                 },
                 {
@@ -2011,8 +2013,9 @@ class AgentRunner:
         effective_model = payload["model"]
 
         # Extended thinking (skip for utility calls like reflection)
-        # Haiku 4.5 does NOT support thinking — only Sonnet 4.6+ and Opus 4.6+.
-        if not skip_thinking and "haiku" not in effective_model:
+        # Legacy Haiku (below 5, e.g. Haiku 4.5) does NOT support thinking; Haiku 5+,
+        # Sonnet 4.6+ and Opus 4.6+ do.
+        if not skip_thinking and not is_legacy_haiku(effective_model):
             if self._settings.thinking_mode == "adaptive":
                 payload["thinking"] = {"type": "adaptive"}
             elif self._settings.thinking_mode == "manual":
@@ -2022,8 +2025,8 @@ class AgentRunner:
                 }
 
         # Effort parameter ("high" is API default, so only send if different)
-        # Supported by Sonnet 4.6 and Opus 4.6. Haiku 4.5 does NOT support it.
-        if self._settings.effort != "high" and "haiku" not in effective_model:
+        # Supported by Sonnet 4.6, Opus 4.6 and Haiku 5+. Legacy Haiku (e.g. Haiku 4.5) does NOT support it.
+        if self._settings.effort != "high" and not is_legacy_haiku(effective_model):
             payload["output_config"] = {"effort": self._settings.effort}
 
         # F035.4: Log context metadata (entry_id stored locally, NOT in payload)
@@ -3235,11 +3238,12 @@ class AgentRunner:
 
         # F061: detect whether forced tool_choice is safe for this call. Forced
         # tool_choice is incompatible with extended thinking — Anthropic only
-        # allows {"type":"auto"|"none"} when thinking is enabled. Detect off
-        # via global thinking_mode OR the haiku-family check the rest of the
-        # runner uses.
+        # allows {"type":"auto"|"none"} when thinking is enabled. thinking_off
+        # means the runner sends no thinking param: global thinking_mode off, OR
+        # a legacy Haiku, which _build_api_payload never sends thinking to. Haiku 5+
+        # under adaptive/manual thinking gets thinking, so it is not forced.
         effective_model_for_force = (model_override or self._settings.model).lower()
-        thinking_off = self._settings.thinking_mode == "off" or "haiku" in effective_model_for_force
+        thinking_off = self._settings.thinking_mode == "off" or is_legacy_haiku(effective_model_for_force)
         force_enabled = bool(force_tool_on_penultimate) and thinking_off
         terminate_after_tool_results = False  # set when a terminal extra tool fires
         # F061 round 4 P2-I: cap the number of force_tool_on_penultimate

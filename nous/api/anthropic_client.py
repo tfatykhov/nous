@@ -19,6 +19,7 @@ from typing import Any, Protocol, runtime_checkable
 
 import httpx
 
+from nous.api.model_caps import with_default_thinking
 from nous.api.models import ApiResponse
 from nous.config import Settings
 
@@ -453,6 +454,7 @@ class HttpxAnthropicClient:
         if not self._http:
             raise RuntimeError("httpx client not initialized -- call start() first")
 
+        payload = with_default_thinking(payload)
         last_error: Exception | None = None
         for attempt in range(_MAX_RETRIES + 1):
             try:
@@ -540,7 +542,7 @@ class HttpxAnthropicClient:
             raise RuntimeError("httpx client not initialized -- call start() first")
 
         # Ensure stream flag is set
-        payload = {**payload, "stream": True}
+        payload = {**with_default_thinking(payload), "stream": True}
 
         # Only pass timeout= into httpx when the caller supplied one; otherwise
         # fall through to the client-wide default configured in start().
@@ -624,6 +626,7 @@ class HttpxAnthropicClient:
         if not self._http:
             raise RuntimeError("httpx client not initialized -- call start() first")
 
+        payload = with_default_thinking(payload)
         bg_timeout = httpx.Timeout(
             connect=self._settings.api_timeout_connect,
             read=self._settings.api_background_timeout_read,
@@ -903,7 +906,7 @@ class SdkAnthropicClient:
         if not self._client:
             raise RuntimeError("SDK client not initialized -- call start() first")
 
-        kwargs = self._payload_to_kwargs(payload)
+        kwargs = self._payload_to_kwargs(with_default_thinking(payload))
 
         try:
             message = await self._client.messages.create(**kwargs)
@@ -943,7 +946,7 @@ class SdkAnthropicClient:
         if not self._client:
             raise RuntimeError("SDK client not initialized -- call start() first")
 
-        kwargs = self._payload_to_kwargs(payload)
+        kwargs = self._payload_to_kwargs(with_default_thinking(payload))
         kwargs["stream"] = True
 
         try:
@@ -974,7 +977,7 @@ class SdkAnthropicClient:
         if not self._client:
             raise RuntimeError("SDK client not initialized -- call start() first")
 
-        kwargs = self._payload_to_kwargs(payload)
+        kwargs = self._payload_to_kwargs(with_default_thinking(payload))
         # messages.stream() does NOT accept the stream= kwarg that
         # _payload_to_kwargs may set; passing it would raise TypeError.
         kwargs.pop("stream", None)

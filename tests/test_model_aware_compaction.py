@@ -29,6 +29,11 @@ class TestModelContextWindows:
     def test_200k_models(self):
         assert MODEL_CONTEXT_WINDOWS["claude-sonnet-4-5"] == 200_000
 
+    def test_haiku_5_5_has_1m_and_haiku_4_5_keeps_200k(self, monkeypatch):
+        """Models API: claude-haiku-5-5 max_input_tokens 1,000,000; claude-haiku-4-5 200,000."""
+        assert _clean_settings(monkeypatch)._get_context_window("claude-haiku-5-5") == 1_000_000
+        assert _clean_settings(monkeypatch)._get_context_window("claude-haiku-4-5-20251001") == 200_000
+
 
 class TestEffectiveThresholds:
     def test_dynamic_threshold_1m_model(self, monkeypatch):

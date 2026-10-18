@@ -11,6 +11,7 @@ import logging
 import re
 from typing import Any, Protocol, runtime_checkable
 
+from nous.api.preamble import CLAUDE_CODE_PREAMBLE
 from nous.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -48,7 +49,7 @@ async def call_background_llm(
         "system": [
             {
                 "type": "text",
-                "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+                "text": CLAUDE_CODE_PREAMBLE,
                 "cache_control": {"type": "ephemeral"},
             },
             {
@@ -185,7 +186,7 @@ async def call_background_llm_structured(
         "system": [
             {
                 "type": "text",
-                "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+                "text": CLAUDE_CODE_PREAMBLE,
                 "cache_control": {"type": "ephemeral"},
             },
             {
