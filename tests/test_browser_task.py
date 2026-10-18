@@ -17,6 +17,7 @@ import http.server
 import ipaddress
 import logging
 import os
+import re
 import socket
 import struct
 import threading
@@ -709,6 +710,32 @@ class TestInnerLoop:
         assert "thinking" not in payload  # adaptive by default on the supported models
         assert "example.com" in payload["messages"][0]["content"][0]["text"]
 
+    async def test_every_request_opens_with_the_preamble(self, tmp_path: Path) -> None:
+        """Under an OAuth token every model but Haiku 4.5 answers 429 unless system block 0 is the Claude Code
+        preamble. The inner loop builds its requests itself, so each one is pinned, turn after turn."""
+        from nous.api.preamble import CLAUDE_CODE_PREAMBLE
+
+        api = FakeApi(
+            [
+                _response(_text("Looking."), _tool_use("screenshot", idx=1)),
+                _response(_tool_use("get_page_text", idx=2)),
+                _response(_tool_use("find", {"query": "price"}, idx=3)),
+                _response(_text("Done."), stop_reason="end_turn"),
+            ]
+        )
+        result = await run_browser_task(
+            "g",
+            ["example.com"],
+            settings=_settings(tmp_path),
+            call_api=api,
+            browser_factory=_fake_factory(FakeExecutor()),
+        )
+        assert result.status == "completed" and len(api.payloads) == 4
+        for payload in api.payloads:
+            block = dict(payload["system"][0])
+            block.pop("cache_control", None)
+            assert block == {"type": "text", "text": CLAUDE_CODE_PREAMBLE}
+
     async def test_results_echo_toolset_name_in_one_user_message_with_halt_rule(self, tmp_path: Path) -> None:
         executor = FakeExecutor({"left_click": BrowserActionError("Error: ref_3 is stale")})
         api = FakeApi(
@@ -893,6 +920,26 @@ class TestInnerLoop:
         assert result.status == "error"
         assert "max_tokens" in result.summary
 
+    @pytest.mark.parametrize("stop_reason", sorted(loop.CUT_OFF_STOP_REASONS))
+    async def test_a_cut_off_reply_runs_none_of_its_actions(self, tmp_path: Path, stop_reason: str) -> None:
+        executor = FakeExecutor()
+        api = FakeApi(
+            [
+                _response(
+                    _text("Opening the page"),
+                    _tool_use("navigate", {"url": "https://example.com/a"}, idx=1),
+                    _tool_use("left_click", {"target": {"type": "ref", "ref": "ref_4"}}, idx=2),
+                    stop_reason=stop_reason,
+                )
+            ]
+        )
+        result = await run_browser_task(
+            "g", ["example.com"], settings=_settings(tmp_path), call_api=api, browser_factory=_fake_factory(executor)
+        )
+        assert result.status == "error"
+        assert "cut off" in result.summary and stop_reason in result.summary
+        assert executor.calls == [] and len(api.payloads) == 1
+
     async def test_completed_summary_is_the_final_turn_only(self, tmp_path: Path) -> None:
         api = FakeApi(
             [
@@ -988,6 +1035,61 @@ DELAYED_HTML = (
     "<!doctype html><html><body><p>Wait</p><script>"
     "setTimeout(() => { location.href = 'http://localhost:{port}/second.html'; }, 400)</script></body></html>"
 )
+# Guard cases: names that come from associated labels, aria-labelledby or CSS; forms with a password or a
+# payment field; payment fields detected each by one attribute; and fields that are not payment fields.
+GUARD_HTML = """<!doctype html><html><head><title>Guard</title><style>
+body { margin: 8px; font: 14px sans-serif; } div, form { margin: 4px 0; } .del::before { content: "Delete"; }
+</style></head><body>
+<div><input type="checkbox" id="s"><label for="s">Subscribe and pay $9.99/month</label></div>
+<div><span id="dl">Delete my account</span>
+  <span role="button" aria-labelledby="dl" id="dlb" style="display:inline-block;width:40px;height:20px"></span></div>
+<div><button class="del" id="css" onclick="document.title = 'clicked'"></button></div>
+<form id="login" onsubmit="event.preventDefault(); document.title = 'submitted'">
+  <input type="text" id="usr" aria-label="Name"><input type="password" id="pw2" aria-label="Passcode">
+  <button type="button" id="cont" onclick="this.form.requestSubmit()">Continue</button>
+  <span role="button" id="divbtn" onclick="this.closest('form').requestSubmit()">Next step</span>
+  <a href="#" id="link" onclick="this.closest('form').requestSubmit(); return false">Go on</a>
+  <input type="image" id="imgbtn" alt="Proceed">
+  <button type="button" id="bare" style="width:30px;height:20px" onclick="this.form.requestSubmit()"></button>
+</form>
+<form id="pay" onsubmit="event.preventDefault(); document.title = 'submitted'">
+  <input name="cardnumber" id="cn"><button type="button" id="next" onclick="this.form.requestSubmit()">Next</button>
+</form>
+<div><input id="f-auto" autocomplete="shipping cc-number"><input id="f-name" name="cardnumber"><input id="cvc">
+  <input id="f-aria" aria-label="Security code"><input id="f-ph" placeholder="IBAN">
+  <input id="f-label"><label for="f-label">Routing number</label>
+  <input id="f-shape" inputmode="numeric" maxlength="16"></div>
+<div><input id="n-email" name="account_email"><input id="n-tos" name="accept_tos">
+  <input id="n-access" name="access-code">
+  <input id="n-discard" placeholder="Discard changes"><input id="n-zip" inputmode="numeric" maxlength="5"></div>
+</body></html>
+"""
+# Two drags. `item` follows the pointer and, once moved, covers the Delete bin; the Send zone appears only while
+# `item2` is being dragged over the drop area. `events` records presses and releases.
+DRAG_HTML = """<!doctype html><html><head><title>Drag</title></head><body>
+<div id="item" style="position:absolute;left:100px;top:100px;width:80px;height:40px;z-index:10">Report.pdf</div>
+<div id="bin" style="position:absolute;left:400px;top:100px;width:120px;height:60px">Delete</div>
+<div id="item2" style="position:absolute;left:100px;top:300px;width:80px;height:40px">Draft.txt</div>
+<div id="area" style="position:absolute;left:400px;top:300px;width:200px;height:100px">Drop area</div>
+<div id="zone" style="display:none;position:absolute;left:420px;top:320px;width:120px;height:50px;z-index:5"
+  >Send to everyone</div>
+<script>
+window.events = [];
+let held = null;
+item.addEventListener('mousedown', () => { held = item; events.push('down'); });
+item2.addEventListener('mousedown', () => { held = item2; events.push('down'); });
+document.addEventListener('mousemove', (e) => {
+  if (held === item) { item.style.left = (e.clientX - 40) + 'px'; item.style.top = (e.clientY - 20) + 'px'; }
+  if (held === item2) zone.style.display = 'block';
+});
+document.addEventListener('mouseup', () => { events.push('up'); held = null; });
+</script></body></html>
+"""
+# A page that blinds the guard: the element under any point is reported as nothing.
+BLIND_HTML = (
+    "<!doctype html><html><body><button id='b' onclick=\"document.title = 'clicked'\">Open</button>"
+    "<script>Document.prototype.elementFromPoint = function () { return null; };</script></body></html>"
+)
 _SEEN_HOSTS: list[str] = []  # Host header of every request the local server received
 
 
@@ -1003,6 +1105,9 @@ def site(tmp_path: Path):
     (root / "frame.html").write_text(FRAME_HTML)
     (root / "img.html").write_text(IMG_HTML)
     (root / "delayed.html").write_text(DELAYED_HTML.replace("{port}", str(port)))
+    (root / "guard.html").write_text(GUARD_HTML)
+    (root / "drag.html").write_text(DRAG_HTML)
+    (root / "blind.html").write_text(BLIND_HTML)
     _SEEN_HOSTS.clear()
     _QuietHandler.redirect_to = f"http://localhost:{port}/second.html"
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -1373,6 +1478,145 @@ class TestConfirmationGuard:
             await executor.execute("left_click", {"target": {"type": "coordinate", "x": 950, "y": 530}})
 
 
+async def _center(session: BrowserSession, selector: str) -> dict[str, Any]:
+    box = await session.active_page.locator(selector).bounding_box()
+    assert box, selector
+    return {"type": "coordinate", "x": int(box["x"] + box["width"] / 2), "y": int(box["y"] + box["height"] / 2)}
+
+
+async def _ref_of(executor: BrowserExecutor, needle: str) -> dict[str, Any]:
+    page = _texts(await executor.execute("read_page", {}))
+    line = next(line for line in page.splitlines() if needle in line)
+    return {"type": "ref", "ref": re.search(r"\[(ref_[A-Za-z0-9]+)\]", line).group(1)}
+
+
+@needs_chromium
+class TestGuardCoverage:
+    """Round 2 of the guard: names from labels, aria-labelledby and the accessible name; form context; payment
+    fields; drop targets; and targets it cannot inspect."""
+
+    async def _open(self, browser, site, page: str = "guard.html") -> tuple[BrowserExecutor, BrowserSession]:
+        executor, session = browser
+        base, _ = site
+        await executor.execute("navigate", {"url": f"{base}/{page}"})
+        return executor, session
+
+    async def test_a_checkbox_named_by_its_label_needs_confirmation_by_ref(self, browser, site) -> None:
+        executor, session = await self._open(browser, site)
+        target = await _ref_of(executor, 'checkbox "Subscribe')
+        with pytest.raises(ConfirmationRequired, match='"subscribe"'):
+            await executor.execute("left_click", {"target": target})
+        with pytest.raises(ConfirmationRequired, match='"subscribe"'):
+            await executor.execute("form_input", {"target": target, "value": True})
+        assert await session.active_page.evaluate("document.getElementById('s').checked") is False
+
+    async def test_a_checkbox_named_by_its_label_needs_confirmation_by_coordinate(self, browser, site) -> None:
+        executor, session = await self._open(browser, site)
+        with pytest.raises(ConfirmationRequired, match='"subscribe"'):
+            await executor.execute("left_click", {"target": await _center(session, "#s")})
+
+    async def test_aria_labelledby_names_the_control(self, browser, site) -> None:
+        executor, session = await self._open(browser, site)
+        with pytest.raises(ConfirmationRequired, match='"delete"'):
+            await executor.execute("left_click", {"target": await _center(session, "#dlb")})
+
+    async def test_the_accessible_name_counts_css_generated_text(self, browser, site) -> None:
+        executor, session = await self._open(browser, site)
+        target = await _ref_of(executor, 'button "Delete"')
+        with pytest.raises(ConfirmationRequired, match='"delete"') as caught:
+            await executor.execute("left_click", {"target": target})
+        assert "ref_" not in str(caught.value)
+        assert await session.active_page.title() == "Guard"
+
+    async def test_the_continue_button_of_a_password_form_needs_confirmation_by_ref(self, browser, site) -> None:
+        executor, session = await self._open(browser, site)
+        target = await _ref_of(executor, 'button "Continue"')
+        with pytest.raises(ConfirmationRequired, match="inside a form with password or payment fields"):
+            await executor.execute("left_click", {"target": target})
+        assert await session.active_page.title() == "Guard"
+
+    @pytest.mark.parametrize("selector", ["#cont", "#divbtn", "#link", "#imgbtn", "#bare", "#usr"])
+    async def test_any_click_in_a_password_form_needs_confirmation(self, browser, site, selector: str) -> None:
+        executor, session = await self._open(browser, site)
+        with pytest.raises(ConfirmationRequired, match="inside a form with password or payment fields"):
+            await executor.execute("left_click", {"target": await _center(session, selector)})
+        assert await session.active_page.title() == "Guard"
+
+    @pytest.mark.parametrize("key", ["Enter", "Space"])
+    async def test_enter_or_space_in_a_password_form_needs_confirmation(self, browser, site, key: str) -> None:
+        executor, session = await self._open(browser, site)
+        await session.active_page.focus("#usr")  # a plain text field of the login form
+        with pytest.raises(ConfirmationRequired, match="inside a form with password or payment fields"):
+            await executor.execute("key", {"text": key})
+
+    async def test_typing_a_space_on_a_focused_button_needs_confirmation(self, browser, site) -> None:
+        executor, session = await self._open(browser, site)
+        await session.active_page.focus("#cont")
+        with pytest.raises(ConfirmationRequired, match="typing a space"):
+            await executor.execute("type", {"text": "a b"})
+        assert await session.active_page.title() == "Guard"
+
+    async def test_a_click_in_a_payment_form_needs_confirmation(self, browser, site) -> None:
+        executor, session = await self._open(browser, site)
+        with pytest.raises(ConfirmationRequired, match="inside a form with password or payment fields"):
+            await executor.execute("left_click", {"target": await _center(session, "#next")})
+
+    @pytest.mark.parametrize(
+        "selector", ["#cn", "#f-auto", "#f-name", "#cvc", "#f-aria", "#f-ph", "#f-label", "#f-shape"]
+    )
+    async def test_typing_into_a_payment_field_needs_confirmation(self, browser, site, selector: str) -> None:
+        executor, session = await self._open(browser, site)
+        await session.active_page.focus(selector)
+        with pytest.raises(ConfirmationRequired, match="password or payment field"):
+            await executor.execute("type", {"text": "4242"})
+        assert await session.active_page.locator(selector).input_value() == ""
+
+    @pytest.mark.parametrize("selector", ["#n-email", "#n-tos", "#n-access", "#n-discard", "#n-zip"])
+    async def test_fields_that_are_not_payment_fields_take_text(self, browser, site, selector: str) -> None:
+        executor, session = await self._open(browser, site)
+        await session.active_page.focus(selector)
+        await executor.execute("type", {"text": "12345"})
+        assert await session.active_page.locator(selector).input_value() == "12345"
+
+    async def test_a_drop_onto_a_delete_bin_needs_confirmation(self, browser, site) -> None:
+        executor, session = await self._open(browser, site, "drag.html")
+        source, bin_ = await _center(session, "#item"), await _center(session, "#bin")
+        with pytest.raises(ConfirmationRequired, match='drop on a control labelled "delete"'):
+            await executor.execute("left_click_drag", {"from": source, "target": bin_})
+        assert await session.active_page.evaluate("events") == []  # never pressed
+
+    async def test_a_drop_zone_that_appears_during_the_drag_is_checked_before_release(self, browser, site) -> None:
+        executor, session = await self._open(browser, site, "drag.html")
+        source = await _center(session, "#item2")
+        with pytest.raises(ConfirmationRequired, match='drop on a control labelled "send"'):
+            await executor.execute("left_click_drag", {"from": source, "target": _ZONE_POINT})
+        assert await session.active_page.evaluate("events") == ["down"]  # pressed, never released
+
+    async def test_releasing_the_mouse_on_a_delete_bin_needs_confirmation(self, browser, site) -> None:
+        executor, session = await self._open(browser, site, "drag.html")
+        await executor.execute("left_mouse_down", {"target": await _center(session, "#item")})
+        with pytest.raises(ConfirmationRequired, match='mouse release on a control labelled "delete"'):
+            await executor.execute("left_mouse_up", {"target": await _center(session, "#bin")})
+        assert await session.active_page.evaluate("events") == ["down"]
+
+    async def test_releasing_the_mouse_where_a_drop_zone_appears_needs_confirmation(self, browser, site) -> None:
+        executor, session = await self._open(browser, site, "drag.html")
+        await executor.execute("left_mouse_down", {"target": await _center(session, "#item2")})
+        with pytest.raises(ConfirmationRequired, match='mouse release on a control labelled "send"'):
+            await executor.execute("left_mouse_up", {"target": _ZONE_POINT})
+        assert await session.active_page.evaluate("events") == ["down"]
+
+    async def test_a_target_that_cannot_be_inspected_is_not_clicked(self, browser, site) -> None:
+        executor, session = await self._open(browser, site, "blind.html")
+        with pytest.raises(ConfirmationRequired) as caught:
+            await executor.execute("left_click", {"target": await _center(session, "#b")})
+        assert str(caught.value) == "click: could not inspect the target"
+        assert await session.active_page.title() != "clicked"
+
+
+_ZONE_POINT = {"type": "coordinate", "x": 480, "y": 345}  # inside the drop area, where the Send zone appears
+
+
 @needs_chromium
 async def test_end_to_end_with_real_browser_and_fake_api(tmp_path: Path, site, loopback_allowed) -> None:
     base, _ = site
@@ -1545,7 +1789,8 @@ def _info(label: str = "", **kw: Any) -> dict:
         "label": label,
         "type": "",
         "autocomplete": "",
-        "submit": False,
+        "textEntry": False,
+        "payment": False,
         "sensitiveForm": False,
         **kw,
     }
@@ -1578,9 +1823,10 @@ class TestGuardRules:
     def test_ordinary_labels_pass(self, label: str) -> None:
         BrowserExecutor._guard(_info(label), "click")
 
-    def test_submit_in_a_sensitive_form_trips(self) -> None:
-        with pytest.raises(ConfirmationRequired, match="password or payment"):
-            BrowserExecutor._guard(_info("Continue", submit=True, sensitiveForm=True), "click")
+    @pytest.mark.parametrize("label", ["Continue", "", "Next step"])
+    def test_any_activation_in_a_sensitive_form_trips(self, label: str) -> None:
+        with pytest.raises(ConfirmationRequired, match="inside a form with password or payment fields"):
+            BrowserExecutor._guard(_info(label, sensitiveForm=True), "click")
 
     def test_frames_fail_closed(self) -> None:
         with pytest.raises(ConfirmationRequired, match="frame"):
@@ -1588,8 +1834,23 @@ class TestGuardRules:
         with pytest.raises(ConfirmationRequired, match="frame"):
             BrowserExecutor._guard_entry(_info(frame=True))
 
+    def test_a_target_that_cannot_be_inspected_fails_closed_with_a_fixed_reason(self) -> None:
+        with pytest.raises(ConfirmationRequired) as caught:
+            BrowserExecutor._guard(None, "click")
+        assert str(caught.value) == "click: could not inspect the target"
+        with pytest.raises(ConfirmationRequired) as caught:
+            BrowserExecutor._guard_entry(None)
+        assert str(caught.value) == "entering text: could not inspect the target"
+
     @pytest.mark.parametrize(
-        "kw", [{"type": "password"}, {"autocomplete": "cc-number"}, {"autocomplete": "current-password"}]
+        "kw",
+        [
+            {"type": "password"},
+            {"autocomplete": "cc-number"},
+            {"autocomplete": "shipping cc-number"},
+            {"autocomplete": "current-password"},
+            {"payment": True},
+        ],
     )
     def test_credential_and_payment_fields_trip_on_entry(self, kw: dict) -> None:
         with pytest.raises(ConfirmationRequired):
@@ -1606,8 +1867,24 @@ class TestGuardRules:
 # ---------------------------------------------------------------------------
 
 
+_RATE_LIMITED = {"error": {"type": "rate_limit_error", "message": "Number of requests exceeded"}}
+
+
+def _record_pauses(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Retry pauses are recorded instead of slept (the clock does not move)."""
+    pauses: list[float] = []
+
+    async def record(seconds: float) -> None:
+        pauses.append(seconds)
+
+    monkeypatch.setattr(loop, "_sleep", record)
+    return pauses
+
+
 class TestApiCaller:
-    async def _call(self, tmp_path: Path, handler: Callable, **settings: Any) -> tuple[list, Any]:
+    async def _call(
+        self, tmp_path: Path, handler: Callable, *, deadline: float | None = None, **settings: Any
+    ) -> tuple[list, Any]:
         import httpx
 
         from nous.browser.loop import make_api_caller
@@ -1619,14 +1896,16 @@ class TestApiCaller:
             return handler(request, len(seen))
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(record)) as http:
-            call = make_api_caller(_settings(tmp_path, **settings), http)
+            call = make_api_caller(_settings(tmp_path, **settings), http, deadline=deadline)
             try:
-                result = await call({"model": "m", "messages": [], "context_management": {"edits": []}})
+                result = await call(loop._payload("claude-sonnet-5-5", []))
             except Exception as e:  # noqa: BLE001 -- returned for the assertions
                 result = e
         return seen, result
 
     async def test_api_key_headers_and_payload_pass_through(self, tmp_path: Path) -> None:
+        import json
+
         import httpx
 
         seen, result = await self._call(tmp_path, lambda r, n: httpx.Response(200, json={"content": []}))
@@ -1635,8 +1914,47 @@ class TestApiCaller:
         assert str(request.url) == "https://api.anthropic.invalid/v1/messages"
         assert request.headers["x-api-key"] == "sk-ant-api-test"
         assert "authorization" not in request.headers
-        assert request.headers["anthropic-beta"] == "context-management-2025-06-27"
-        assert b"context_management" in request.content
+        assert request.headers["anthropic-beta"] == "claude-code-20250219,context-management-2025-06-27"
+        # Posted as is: nothing dropped, nothing added (the system blocks included).
+        assert json.loads(request.content) == loop._payload("claude-sonnet-5-5", [])
+
+    @pytest.mark.parametrize(
+        "credentials",
+        [
+            {"ANTHROPIC_API_KEY": "sk-ant-api03-test"},
+            {"ANTHROPIC_AUTH_TOKEN": "sk-ant-oat01-test"},
+            {"ANTHROPIC_API_KEY": "sk-ant-oat01-test"},
+            {"ANTHROPIC_AUTH_TOKEN": "plain-bearer-test"},
+            {},
+        ],
+        ids=["api key", "oat token", "oat in the api key", "other bearer token", "none"],
+    )
+    async def test_auth_headers_are_the_shared_httpx_clients(
+        self, credentials: dict[str, str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The inner loop's auth and beta headers are the shared httpx client's, plus the context-management
+        beta: whatever auth the rest of Nous sends, the browser loop sends the same."""
+        from nous.api.anthropic_client import HttpxAnthropicClient
+        from nous.config import Settings
+
+        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+            monkeypatch.delenv(name, raising=False)
+        settings = Settings(_env_file=None, **credentials)
+        client = HttpxAnthropicClient(settings)
+        await client.start()
+        try:
+            shared = client._http.headers
+            mine = loop._auth_headers(settings)
+            for name in (
+                "authorization",
+                "x-api-key",
+                "anthropic-dangerous-direct-browser-access",
+                "anthropic-version",
+            ):
+                assert mine.get(name) == shared.get(name), name
+            assert mine["anthropic-beta"] == f"{shared['anthropic-beta']},context-management-2025-06-27"
+        finally:
+            await client.close()
 
     async def test_oat_token_uses_bearer_auth_and_oauth_betas(self, tmp_path: Path) -> None:
         import httpx
@@ -1686,3 +2004,63 @@ class TestApiCaller:
         assert len(seen) == 1
         assert isinstance(result, BrowserApiError)
         assert "400" in str(result) and "invalid_request_error" in str(result) and "toolset_name" in str(result)
+
+    async def test_a_rate_limit_pause_is_cut_to_the_budget_and_logged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import httpx
+
+        from nous.browser.loop import BrowserApiError
+
+        pauses = _record_pauses(monkeypatch)
+        deadline = asyncio.get_running_loop().time() + 20
+        with caplog.at_level(logging.INFO, logger="nous.browser.loop"):
+            seen, result = await self._call(
+                tmp_path,
+                lambda r, n: httpx.Response(429, headers={"retry-after": "60"}, json=_RATE_LIMITED),
+                deadline=deadline,
+            )
+        assert len(seen) == 3
+        # retry-after asks for 60 s; each pause ends so the retry still starts RETRY_WINDOW_SECONDS before the end.
+        assert len(pauses) == 2 and all(0 < p <= 20 - loop.RETRY_WINDOW_SECONDS for p in pauses), pauses
+        assert isinstance(result, BrowserApiError)
+        assert "Rate limited by the Anthropic API (429)" in str(result)
+        retries = [r for r in caplog.records if "retrying in" in r.getMessage()]
+        assert [r.levelno for r in retries] == [logging.INFO, logging.INFO]
+        assert "answered 429 (attempt 1 of 3)" in retries[0].getMessage()
+        assert "answered 429 (attempt 2 of 3)" in retries[1].getMessage()
+        assert "sk-ant" not in caplog.text
+
+    async def test_a_rate_limit_with_no_budget_left_fails_at_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import httpx
+
+        pauses = _record_pauses(monkeypatch)
+        deadline = asyncio.get_running_loop().time() + loop.RETRY_WINDOW_SECONDS / 2
+        seen, result = await self._call(
+            tmp_path,
+            lambda r, n: httpx.Response(429, headers={"retry-after": "1"}, json=_RATE_LIMITED),
+            deadline=deadline,
+        )
+        assert len(seen) == 1 and pauses == []
+        assert "Rate limited" in str(result) and "no time left" in str(result)
+
+    async def test_a_rate_limited_task_says_so_instead_of_timing_out(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two 60 s retry-after pauses used to outlast the 110 s budget, so a rate limit surfaced as `timeout`."""
+        import httpx
+
+        pauses = _record_pauses(monkeypatch)
+        transport = httpx.MockTransport(
+            lambda r: httpx.Response(429, headers={"retry-after": "60"}, json=_RATE_LIMITED)
+        )
+        real = httpx.AsyncClient
+        monkeypatch.setattr(loop.httpx, "AsyncClient", lambda **kw: real(transport=transport, **kw))
+        settings = _settings(tmp_path)  # a 60 s budget
+        result = await run_browser_task(
+            "g", ["example.com"], settings=settings, browser_factory=_fake_factory(FakeExecutor())
+        )
+        assert result.status == "error" and "Rate limited by the Anthropic API (429)" in result.summary
+        assert pauses and all(p <= settings.browser_task_timeout_seconds - loop.RETRY_WINDOW_SECONDS for p in pauses)

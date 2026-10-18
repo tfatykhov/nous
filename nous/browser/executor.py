@@ -110,9 +110,55 @@ _KEY_ALIASES = {
 
 # Describes the element a call would act on, for the confirmation guard. `deepAt` and `deepActive` follow
 # open shadow roots and same-origin frames; a cross-origin frame is reported as `frame` (uninspectable).
+# The label joins the control's aria-label, its associated <label>s and aria-labelledby targets, its title,
+# alt, text and (for a non-text control) value; for a ref target the guard adds Playwright's accessible name.
+# A payment field is one whose autocomplete is cc-*, whose shape is a card number (inputmode=numeric with a
+# maxlength of 12 to 19), or whose name, id, aria-label, placeholder or label names a card, its number, CVC,
+# expiry or security code, an IBAN, a routing number or an account number. `sensitiveForm`: the control's form
+# (its form owner, or the <form> around it) has a password or payment field.
 _ELEMENT_INFO_JS = """
 const SEL = 'a,button,input,select,textarea,label,[role=button],[role=link],[role=menuitem],[role=checkbox],'
   + '[role=option],[role=switch],[role=tab]';
+const NOT_TEXT = ['submit', 'button', 'reset', 'image', 'checkbox', 'radio'];
+const NOT_FIELD = NOT_TEXT.concat(['hidden', 'file']);
+const PAYMENT = new RegExp('\\\\b(?:card(?: ?(?:number|num|no))?|cc(?: ?(?:number|num|no|exp|csc|cvc|cvv))?'
+  + '|cvc2?|cvv2?|csc|expiry|expiration(?: ?date)?|exp ?date|security ?code|iban|routing(?: ?number)?'
+  + '|account ?(?:number|num|no))\\\\b');
+function words(v) {
+  return String(v).replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[^A-Za-z0-9]+/g, ' ').toLowerCase();
+}
+function labelText(e) {
+  const out = [];
+  for (const l of (e.labels || [])) out.push(l.innerText || l.textContent);
+  const root = e.getRootNode();
+  for (const id of (e.getAttribute('aria-labelledby') || '').split(/\\s+/).filter(Boolean)) {
+    const r = (root && root.getElementById && root.getElementById(id)) || e.ownerDocument.getElementById(id);
+    if (r) out.push(r.innerText || r.textContent);
+  }
+  return out.join(' ');
+}
+function isField(e) {
+  if (e.tagName === 'INPUT') return !NOT_FIELD.includes((e.type || '').toLowerCase());
+  return e.tagName === 'SELECT' || e.tagName === 'TEXTAREA' || !!e.isContentEditable;
+}
+function isPassword(e) { return e.tagName === 'INPUT' && (e.type || '').toLowerCase() === 'password'; }
+function isPayment(e) {
+  if (!isField(e)) return false;
+  if (/(^|\\s)cc-/.test((e.getAttribute('autocomplete') || '').toLowerCase())) return true;
+  const max = parseInt(e.getAttribute('maxlength') || '', 10);
+  if ((e.getAttribute('inputmode') || '').toLowerCase() === 'numeric' && max >= 12 && max <= 19) return true;
+  return [e.getAttribute('name'), e.id, e.getAttribute('aria-label'), e.getAttribute('placeholder'), labelText(e)]
+    .some(v => v && PAYMENT.test(words(v)));
+}
+function closestDeep(e, sel) {
+  while (e) {
+    const hit = e.closest(sel);
+    if (hit) return hit;
+    const root = e.getRootNode();
+    e = root && root.host ? root.host : null;
+  }
+  return null;
+}
 function isFrame(e) { return e.tagName === 'IFRAME' || e.tagName === 'FRAME'; }
 function frameDoc(e) { try { return e.contentDocument; } catch (_) { return null; } }
 function deepAt(doc, x, y) {
@@ -146,22 +192,28 @@ function deepActive(doc) {
 }
 function info(el) {
   if (!el) return null;
-  if (isFrame(el)) return {frame: true, label: '', type: '', autocomplete: '', submit: false, sensitiveForm: false};
+  if (isFrame(el)) {
+    return {frame: true, label: '', type: '', autocomplete: '', textEntry: false, payment: false, sensitiveForm: false};
+  }
   const t = el.closest(SEL) || el;
-  const type = (t.getAttribute('type') || '').toLowerCase();
-  const textEntry = t.tagName === 'TEXTAREA' || t.isContentEditable
-    || (t.tagName === 'INPUT' && !['submit', 'button', 'reset', 'image', 'checkbox', 'radio'].includes(type));
+  // A label acts for its control: clicking it clicks the control.
+  const c = t.tagName === 'LABEL' && t.control ? t.control : t;
+  const type = (c.getAttribute('type') || '').toLowerCase();
+  const textEntry = c.tagName === 'TEXTAREA' || c.isContentEditable
+    || (c.tagName === 'INPUT' && !NOT_TEXT.includes(type));
+  const parts = [t.getAttribute('aria-label'), labelText(t), t.title, t.alt, t.innerText || t.textContent];
+  if (c !== t) parts.push(c.getAttribute('aria-label'), labelText(c), c.title);
   // A text field's value is what the model typed, not what the control does.
-  const parts = [t.getAttribute('aria-label'), t.title, t.alt, t.innerText || t.textContent];
-  if (!textEntry) parts.push(t.value);
-  const form = t.form || t.closest('form');
+  if (!textEntry) parts.push(c.value);
+  const form = c.form || closestDeep(t, 'form');
   return {
     frame: false,
     label: parts.filter(v => typeof v === 'string' && v).join(' ').slice(0, 500),
     type: type,
-    autocomplete: (t.getAttribute('autocomplete') || '').toLowerCase(),
-    submit: type === 'submit' || (t.tagName === 'BUTTON' && !type),
-    sensitiveForm: !!(form && form.querySelector('input[type=password], input[autocomplete^="cc-"]')),
+    autocomplete: (c.getAttribute('autocomplete') || '').toLowerCase(),
+    textEntry: !!textEntry,
+    payment: isPayment(c),
+    sensitiveForm: !!form && [...form.elements].some(e => isPassword(e) || isPayment(e)),
   };
 }
 """
@@ -170,6 +222,9 @@ _INFO_AT_POINT = "([x, y]) => {" + _ELEMENT_INFO_JS + "return info(deepAt(docume
 _INFO_OF_FOCUS = "() => {" + _ELEMENT_INFO_JS + "return info(deepActive(document)); }"
 # Keys that activate the focused control the way a click does.
 _ACTIVATING_KEYS = frozenset({"Enter", "NumpadEnter", "Space", " "})
+_CREDENTIAL_AUTOCOMPLETE = re.compile(r"(?:^|\s)(?:cc-|current-password)")
+# The guard's fixed reason when the target cannot be inspected; the action is not taken.
+UNINSPECTABLE = "could not inspect the target"
 
 
 class BrowserActionError(Exception):
@@ -341,18 +396,30 @@ class BrowserExecutor:
 
     async def _info_at(self, page: Any, target: dict[str, Any]) -> dict[str, Any] | None:
         if target.get("type") == "ref":
-            return await (await self._locator(page, target)).evaluate(_INFO_OF_ELEMENT)
+            return await self._info_of(await self._locator(page, target))
         return await page.evaluate(_INFO_AT_POINT, list(self._point(target)))
+
+    async def _info_of(self, locator: Any) -> dict[str, Any] | None:
+        """The element's description, its label extended with the computed accessible name from Playwright's
+        AI snapshot (the element's own line), which also counts names the page script cannot see, such as CSS
+        generated content."""
+        info = await locator.evaluate(_INFO_OF_ELEMENT)
+        if info and not info.get("frame"):
+            raw = await locator.aria_snapshot(mode="ai", depth=1, timeout=ACTION_TIMEOUT_MS)
+            own = next((line for line in raw.splitlines() if line.strip()), "")
+            info["label"] = f"{info.get('label', '')} {own[:500]}"
+        return info
 
     async def _focused_info(self, page: Any) -> dict[str, Any] | None:
         return await page.evaluate(_INFO_OF_FOCUS)
 
     @staticmethod
     def _guard(info: dict[str, Any] | None, action: str) -> None:
-        """Stop before acting on a consequential control. The reason names only our own vocabulary,
-        never the page's label text, because it reaches the outer agent."""
+        """Stop before acting on a consequential control, or on one it cannot inspect. Any activation inside a
+        form with a password or payment field counts, whatever the control's label or type. The reason names
+        only our own vocabulary, never the page's label text, because it reaches the outer agent."""
         if not info:
-            return
+            raise ConfirmationRequired(f"{action}: {UNINSPECTABLE}")
         if info.get("frame"):
             raise ConfirmationRequired(f"{action} inside an embedded frame that the guard cannot inspect")
         match = _CONSEQUENTIAL.search(" ".join(info.get("label", "").split()))
@@ -362,16 +429,20 @@ class BrowserExecutor:
                 f'{action} on a control labelled "{word}" looks like a consequential step '
                 "(login, payment, message, terms or deletion)"
             )
-        if info.get("submit") and info.get("sensitiveForm"):
-            raise ConfirmationRequired(f"{action} would submit a form with password or payment fields")
+        if info.get("sensitiveForm"):
+            raise ConfirmationRequired(f"{action} inside a form with password or payment fields")
 
     @staticmethod
     def _guard_entry(info: dict[str, Any] | None) -> None:
         if not info:
-            return
+            raise ConfirmationRequired(f"entering text: {UNINSPECTABLE}")
         if info.get("frame"):
             raise ConfirmationRequired("typing inside an embedded frame that the guard cannot inspect")
-        if info.get("type") == "password" or info.get("autocomplete", "").startswith(("cc-", "current-password")):
+        if (
+            info.get("type") == "password"
+            or info.get("payment")
+            or _CREDENTIAL_AUTOCOMPLETE.search(info.get("autocomplete", ""))
+        ):
             raise ConfirmationRequired(
                 "entering text into a password or payment field (credentials are never provided)"
             )
@@ -379,10 +450,7 @@ class BrowserExecutor:
     async def _press(self, page: Any, chord: str) -> None:
         """Press one chord, checking the focused control first when the key activates it."""
         if chord.split("+")[-1] in _ACTIVATING_KEYS:
-            info = await self._focused_info(page)
-            if info and info.get("sensitiveForm") and "Enter" in chord:
-                raise ConfirmationRequired("pressing Enter would submit a form with password or payment fields")
-            self._guard(info, f"pressing {chord}")
+            self._guard(await self._focused_info(page), f"pressing {chord}")
         await page.keyboard.press(chord)
 
     # -- navigation and capture ------------------------------------------------
@@ -496,9 +564,13 @@ class BrowserExecutor:
         source = kwargs.get("from") or {}
         start, end = self._point(source), self._point(target)
         self._guard(await self._info_at(page, source), "drag")
+        # The drop target, before pressing (a dragged item that follows the pointer can cover it later) ...
+        self._guard(await self._info_at(page, target), "drop")
         await page.mouse.move(*start)
         await page.mouse.down()
         await page.mouse.move(*end, steps=10)
+        # ... and again before releasing, because drop zones often appear only once a drag starts.
+        self._guard(await self._info_at(page, target), "drop")
         await page.mouse.up()
         return [_text(f"Dragged from {start} to {end}.")]
 
@@ -510,8 +582,12 @@ class BrowserExecutor:
         return [_text("Left button pressed.")]
 
     async def _m_left_mouse_up(self, target: dict, tab_id: str | None = None) -> list[dict]:
+        # A release completes a click or a drop on whatever is under it: checked like a drop target.
         page = self._page(tab_id)
-        await page.mouse.move(*self._point(target))
+        point = self._point(target)
+        self._guard(await self._info_at(page, target), "mouse release")
+        await page.mouse.move(*point)
+        self._guard(await self._info_at(page, target), "mouse release")
         await page.mouse.up()
         return [_text("Left button released.")]
 
@@ -546,7 +622,11 @@ class BrowserExecutor:
             if i % 2:
                 await self._press(page, "Tab" if chunk == "\t" else "Enter")
             elif chunk:
-                self._guard_entry(await self._focused_info(page))
+                info = await self._focused_info(page)
+                self._guard_entry(info)
+                if " " in chunk and not info.get("textEntry"):
+                    # A typed space presses a focused button, link or checkbox, like the Space key.
+                    self._guard(info, "typing a space")
                 await page.keyboard.type(chunk)
         return [_text("Typed the text.")]
 
@@ -562,10 +642,7 @@ class BrowserExecutor:
         page = self._page(tab_id)
         keys = [_key_name(k) for k in str(text).split("+") if k]
         if keys and keys[-1] in _ACTIVATING_KEYS:
-            info = await self._focused_info(page)
-            if info and info.get("sensitiveForm") and "Enter" in keys[-1]:
-                raise ConfirmationRequired("holding Enter would submit a form with password or payment fields")
-            self._guard(info, f"holding {keys[-1]}")
+            self._guard(await self._focused_info(page), f"holding {keys[-1]}")
         for k in keys:
             await page.keyboard.down(k)
         try:
@@ -639,7 +716,7 @@ class BrowserExecutor:
 
     async def _m_form_input(self, target: dict, value: str | float | bool, tab_id: str | None = None) -> list[dict]:
         locator = await self._locator(self._page(tab_id), target)
-        info = await locator.evaluate(_INFO_OF_ELEMENT)
+        info = await self._info_of(locator)
         self._guard_entry(info)
         tag = await locator.evaluate("el => el.tagName.toLowerCase()")
         if isinstance(value, bool) or info.get("type") in ("checkbox", "radio"):

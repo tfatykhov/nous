@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from nous.api.anthropic_client import _retry_delay, _should_retry
+from nous.api.preamble import CLAUDE_CODE_PREAMBLE
 from nous.browser.executor import BrowserActionError, BrowserExecutor, ConfirmationRequired
 from nous.browser.session import BrowserSession, DomainAllowlist, check_resolution, host_problem
 
@@ -60,12 +61,17 @@ SUPPORTED_MODELS = frozenset(
 TOOLSET_TYPE = "browser_toolset_20260801"
 HALT_TEXT = "Not executed: an earlier action in this turn failed."
 CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27"
-CLAUDE_CODE_PREAMBLE = "You are Claude Code, Anthropic's official CLI for Claude."
 MAX_TOKENS = 16_000
 SUMMARY_LIMIT = 4_000
 # The dispatcher cancels any tool at NOUS_TOOL_TIMEOUT; finishing first keeps our own result.
 # The margin also covers teardown (final screenshot, browser close) after our own timeout.
 TOOL_TIMEOUT_MARGIN_SECONDS = 10
+# An API retry is made only if it can start this long before the task's deadline; a retry-after pause is cut
+# to fit. Otherwise the call fails at once, naming the rate limit, instead of the task timing out.
+RETRY_WINDOW_SECONDS = 5.0
+_sleep = asyncio.sleep  # the retry pause; tests record it
+# Stop reasons of a reply the model did not finish: its tool calls may be half-written and are never run.
+CUT_OFF_STOP_REASONS = frozenset({"max_tokens", "model_context_window_exceeded"})
 
 SYSTEM_PROMPT = "\n".join(
     [
@@ -196,53 +202,95 @@ async def _real_browser(allowlist: DomainAllowlist, artifacts_dir: Path) -> Asyn
 
 
 def _auth_headers(settings: Any) -> dict[str, str]:
-    """Same auth rules as nous.api.anthropic_client; OAT tokens need Bearer auth and the oauth beta."""
+    """The auth and beta headers of nous.api.anthropic_client's httpx client (HttpxAnthropicClient.start), line
+    for line, plus the context-management beta; a test compares the two. OAT tokens need Bearer auth, the
+    oauth beta and the browser-access header."""
     api_key = settings.anthropic_api_key or ""
     auth_token = settings.anthropic_auth_token or ""
-    betas = [CONTEXT_MANAGEMENT_BETA]
     headers = {"anthropic-version": "2023-06-01", "content-type": "application/json"}
-    token = auth_token or (api_key if "sk-ant-oat" in api_key else "")
-    if token:
-        headers["authorization"] = f"Bearer {token}"
-        if "sk-ant-oat" in token:
-            betas += ["claude-code-20250219", "oauth-2025-04-20"]
+    is_oat = False
+    if auth_token:
+        headers["authorization"] = f"Bearer {auth_token}"
+        if "sk-ant-oat" in auth_token:
+            is_oat = True
             headers["anthropic-dangerous-direct-browser-access"] = "true"
+    elif api_key:
+        if "sk-ant-oat" in api_key:
+            is_oat = True
+            headers["authorization"] = f"Bearer {api_key}"
+            headers["anthropic-dangerous-direct-browser-access"] = "true"
+        else:
+            headers["x-api-key"] = api_key
     else:
-        headers["x-api-key"] = api_key
-    headers["anthropic-beta"] = ",".join(betas)
+        logger.warning("browser_task: neither ANTHROPIC_API_KEY nor ANTHROPIC_AUTH_TOKEN is set; API calls will fail")
+    betas = ["claude-code-20250219"]
+    if is_oat:
+        betas.append("oauth-2025-04-20")
+    headers["anthropic-beta"] = ",".join([*betas, CONTEXT_MANAGEMENT_BETA])
     return headers
 
 
-def make_api_caller(settings: Any, http: httpx.AsyncClient) -> ApiCaller:
-    """POST /v1/messages with the payload as is. The shared Nous client would drop
-    `toolset_name` and `context_management`, so the browser loop has its own."""
+def make_api_caller(settings: Any, http: httpx.AsyncClient, deadline: float | None = None) -> ApiCaller:
+    """POST /v1/messages with the payload as is. The shared client's SDK backend (prod's default) would drop
+    `toolset_name`, `context_management` and the top-level `cache_control`, so the browser loop has its own.
+    tests/test_fix_x_preamble_first.py lists this module as one that may talk to the API directly.
+
+    `deadline` is the task's end on the event loop's clock. A retry pause is capped so that the retry still
+    starts RETRY_WINDOW_SECONDS before it; with no time left the call fails at once, and a rate limit says so
+    instead of running into the task's timeout."""
     headers = _auth_headers(settings)
     url = f"{settings.api_base_url.rstrip('/')}/v1/messages"
     retries = 2
+
+    async def pause(attempt: int, response: httpx.Response | None, what: str) -> bool:
+        """Wait before retry `attempt + 1`; False when the budget has no room for another attempt."""
+        delay = _retry_delay(attempt, response)
+        if deadline is not None:
+            room = deadline - asyncio.get_running_loop().time() - RETRY_WINDOW_SECONDS
+            if room <= 0:
+                logger.info("browser_task: the Anthropic API %s (attempt %d); no time left to retry", what, attempt + 1)
+                return False
+            delay = min(delay, room)
+        logger.info(
+            "browser_task: the Anthropic API %s (attempt %d of %d); retrying in %.1fs",
+            what,
+            attempt + 1,
+            retries + 1,
+            delay,
+        )
+        await _sleep(delay)
+        return True
 
     async def call(payload: dict[str, Any]) -> dict[str, Any]:
         for attempt in range(retries + 1):
             try:
                 response = await http.post(url, json=payload, headers=headers)
             except httpx.HTTPError as e:
-                if attempt < retries and isinstance(e, httpx.TimeoutException):
-                    await asyncio.sleep(_retry_delay(attempt))
+                if (
+                    attempt < retries
+                    and isinstance(e, httpx.TimeoutException)
+                    and await pause(attempt, None, "timed out")
+                ):
                     continue
                 raise BrowserApiError(f"Anthropic API request failed: {type(e).__name__}") from e
-            if response.status_code == 200:
+            status = response.status_code
+            if status == 200:
                 try:
                     return response.json()
                 except ValueError as e:
                     raise BrowserApiError("Anthropic API returned a body that is not JSON") from e
-            if _should_retry(response.status_code, response.headers) and attempt < retries:
-                await asyncio.sleep(_retry_delay(attempt, response))
+            retry = _should_retry(status, response.headers) and attempt < retries
+            if retry and await pause(attempt, response, f"answered {status}"):
                 continue
             try:
                 error = response.json().get("error", {})
                 detail = f"{error.get('type', 'unknown')} - {error.get('message', '')}"
             except Exception:
                 detail = response.text[:300]
-            raise BrowserApiError(f"Anthropic API error ({response.status_code}): {detail}")
+            if status == 429:
+                why = "with no time left in the task's budget to wait" if retry else f"after {attempt + 1} attempts"
+                raise BrowserApiError(f"Rate limited by the Anthropic API (429) {why}; try again later: {detail}")
+            raise BrowserApiError(f"Anthropic API error ({status}): {detail}")
         raise BrowserApiError("Anthropic API call failed")
 
     return call
@@ -330,7 +378,7 @@ async def run_browser_task(
         factory = browser_factory or _real_browser
         state = BrowserTaskResult("timeout", "", run_id)
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as http:
-            api = call_api or make_api_caller(settings, http)
+            api = call_api or make_api_caller(settings, http, deadline=clock.time() + timeout)
             try:
                 await asyncio.wait_for(
                     _run(goal, allowlist, start_url, steps_cap, model, api, factory, runs_dir / run_id, state), timeout
@@ -444,6 +492,13 @@ async def _drive(
         stop_reason = response.get("stop_reason")
         if stop_reason == "refusal":
             state.status, state.summary = "error", "The browser model declined the task (refusal)."
+            return
+        if stop_reason in CUT_OFF_STOP_REASONS:  # before any tool call in it is read, let alone run
+            state.status = "error"
+            state.summary = (
+                f"The browser model's reply was cut off ({stop_reason}), so none of the actions in it were run. "
+                f"Last progress: {text or 'none'}"
+            )
             return
 
         tool_uses = [b for b in content if b.get("type") == "tool_use"]

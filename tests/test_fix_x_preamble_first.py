@@ -261,16 +261,24 @@ def test_every_request_site_is_reviewed_for_the_preamble():
     )
 
 
-def test_only_the_client_module_talks_to_the_messages_api_directly():
-    # The call-site guard above follows calls on an LLM client. A module could still reach the API without one:
-    # its own SDK client, or an HTTP post to the endpoint. Neither is reviewed for the preamble or for
-    # with_default_thinking, so both may appear only in nous/api/anthropic_client.py.
+# Modules under nous/ that may reach the Messages API without the shared client, each with the reason. Every
+# other module is an offender in the guard below, and an entry that no longer reaches the API fails it too.
+_DIRECT_API_MODULES: dict[str, str] = {
+    "api/anthropic_client.py": "the shared client itself",
+    "browser/loop.py": (
+        "F100's inner loop posts its payload as is: the SDK backend, which prod uses (api_backend defaults to "
+        "sdk), drops toolset_name, context_management and the top-level cache_control the browser toolset "
+        "needs. Its auth headers are the httpx client's (test_browser_task.py::TestApiCaller compares them), "
+        "and test_every_request_opens_with_the_preamble pins CLAUDE_CODE_PREAMBLE at system block 0 of every "
+        "request it builds. It leaves thinking at the model default on purpose (no with_default_thinking)."
+    ),
+}
+
+
+def _direct_api_modules() -> list[str]:
     root = Path(nous.__file__).resolve().parent
-    allowed = root / "api" / "anthropic_client.py"
-    offenders = []
+    direct = []
     for path in sorted(root.rglob("*.py")):
-        if path == allowed:
-            continue
         text = path.read_text(encoding="utf-8")
         tree = ast.parse(text)
         sdk = any(
@@ -279,5 +287,26 @@ def test_only_the_client_module_talks_to_the_messages_api_directly():
             for node in ast.walk(tree)
         )
         if sdk or "/v1/messages" in text:
-            offenders.append(str(path.relative_to(root)))
-    assert offenders == [], offenders
+            direct.append(path.relative_to(root).as_posix())
+    return direct
+
+
+def _unreviewed(direct: list[str], allowed: dict[str, str]) -> tuple[list[str], list[str]]:
+    return [m for m in direct if m not in allowed], [m for m in allowed if m not in direct]
+
+
+def test_only_the_client_module_talks_to_the_messages_api_directly():
+    # The call-site guard above follows calls on an LLM client. A module could still reach the API without one:
+    # its own SDK client, or an HTTP post to the endpoint. Neither is reviewed for the preamble or for
+    # with_default_thinking, so both may appear only in the modules listed, with a reason, in _DIRECT_API_MODULES.
+    offenders, stale = _unreviewed(_direct_api_modules(), _DIRECT_API_MODULES)
+    assert offenders == [] and stale == [], f"not reviewed: {offenders}; listed but no longer direct: {stale}"
+
+
+def test_the_direct_api_allowlist_still_fails_for_any_other_module():
+    # Mutation check: drop an entry and its module is an offender; list a module that is not direct and it is stale.
+    direct = _direct_api_modules()
+    assert "browser/loop.py" in direct
+    trimmed = {k: v for k, v in _DIRECT_API_MODULES.items() if k != "browser/loop.py"}
+    assert _unreviewed(direct, trimmed)[0] == ["browser/loop.py"]
+    assert _unreviewed(direct, {**_DIRECT_API_MODULES, "no_such.py": "x"})[1] == ["no_such.py"]
