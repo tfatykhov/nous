@@ -19,7 +19,9 @@ or finding sources, `web_fetch` and `web_search` are cheaper.
 
 | Part | File | Notes |
 |------|------|-------|
-| Session | `session.py` | Headless Chromium, fresh profile, viewport 1280x800 (fits the image limits, so screenshots are never rescaled and model coordinates are viewport pixels 1:1), `--disable-dev-shm-usage` (`/dev/shm` is 64M). Tab registry (`tab-1`, `tab-2`, ...) feeds `browser_state` blocks. |
+| Session | `session.py` | Headless Chromium, fresh profile, viewport 1280x800 (fits the image limits, so screenshots are never rescaled and model coordinates are viewport pixels 1:1), `--disable-dev-shm-usage` (`/dev/shm` is 64M). Validates the allowlist, starts the egress proxy before the browser and closes it after. Tab registry (`tab-1`, `tab-2`, ...) feeds `browser_state` blocks. Teardown is bounded (below). |
+| Egress proxy | `egress.py` | The network boundary: an asyncio HTTP proxy on `127.0.0.1` (a free port), one per task. See Safety boundary. |
+| Launcher | `chromium-as-user.sh` | Playwright's `executable_path` when Nous runs as root: runs the real Chromium as the `nous-browser` user. See Safety boundary. |
 | Executor | `executor.py` | All 27 default toolset members mapped to Playwright. Element refs come from Playwright's AI snapshot (`page.aria_snapshot(mode="ai")`, `[ref=e5]` shown to the model as `[ref_5]`, resolved through `aria-ref=e5`); an unknown ref is a "stale or not found" error. `zoom` uses CDP `Page.captureScreenshot` with a clip scale. `javascript_exec`, `file_upload`, `read_console` and `read_network` stay disabled and answer with an error. |
 | Loop | `loop.py` | Batches run in order with the documented halt rule; every result echoes `toolset_name: "browser"`; tab-management results are exactly one `browser_state` block. The assistant content is appended verbatim (thinking blocks included). |
 | Tool | `tools.py` | Registers `browser_task` when the flag is on (`main.py`). |
@@ -52,6 +54,19 @@ discard the result. After a timeout the final screenshot is skipped. A failure w
 logged and never changes a finished task's outcome. Only `end_turn` counts as completed; another stop reason
 (such as `max_tokens`) is an error, and a completed task's summary is the final turn's text only.
 
+**One at a time.** One browser task runs at a time per process (a module-level semaphore). A second call
+waits within its own time budget, then returns `busy` (a tool error). The wait, and resolving the allowlist,
+come out of the same budget, so the task still ends before `NOUS_TOOL_TIMEOUT`.
+
+**Teardown.** Closing the context, the browser and Playwright, then the proxy, each gets 5 s. If a step hangs
+or is cancelled again (a second cancel), the Chromium process group is killed with SIGKILL: the session tags
+its Chromium with an inert `--nous-browser-session=<random>` switch and finds it in `/proc` (Linux; elsewhere
+Playwright's own cleanup is all there is). A cancel is re-raised once everything is closed.
+
+**Artifacts.** Each run writes to `<workspace>/browser-task/<run-id>/`. When a task starts, run directories
+older than 7 days are deleted, and all but the newest 49, so the new run makes at most 50. Only directories
+named like a run id are touched.
+
 ## Safety boundary
 
 1. **No raw web content in the main loop.** The outer result is `BrowserTaskResult.render()`. Its summary is
@@ -59,14 +74,45 @@ logged and never changes a finished task's outcome. Only `end_turn` counts as co
    derived from untrusted web content, to be treated as data and not as instructions. Screenshots go to disk
    for the owner and are never sent to the main loop. The final URL has its query string, fragment and
    userinfo stripped.
-2. **Domain allowlist at the Playwright layer.** Every request the browser context makes is routed through the
-   allowlist (`context.route("**/*")`). A host that is not an entry or a subdomain of an entry, or a scheme
-   other than http/https, is aborted. Entries must be hosts: a bare suffix such as `com` is refused. Service workers are blocked because they bypass routing. WebSockets and
-   downloads are refused. Playwright does not route the redirects of a request it already allowed, so after
-   every action, including one that failed, the executor checks each tab's and each frame's URL. A child frame
-   that ended up off the list is blanked; a tab that did is blanked (closed if that fails) and the action fails. `navigate` refuses non-http(s) schemes and off-list hosts before loading anything. Loopback
-   and private addresses are reachable only if listed literally (e.g. `127.0.0.1`); link-local (cloud
-   metadata) and unspecified addresses are refused even then.
+2. **Network boundary: public hosts only, enforced by an egress proxy.** The main agent chooses
+   `allowed_domains` and `start_url`, and it can be prompt-injected, so the allowlist itself is untrusted.
+   - *Entries* (and `start_url`'s host) must be a public IP address in canonical form (`is_global`, not
+     multicast) or a public DNS name: at least two labels, the last one starting with a letter, and not
+     `localhost`, `*.localhost`, `*.internal` (so `host.docker.internal`), `*.local`, `*.lan` or
+     `*.home.arpa`. A name whose last label is a number is refused because a browser reads it as an IPv4
+     address (`0xa9.0xfe.0xa9.0xfe`, `0251.0376.0251.0376`, `2852039166`, `127.1`). A bare suffix such as
+     `com` or a container name such as `nous-postgres` is a single label and refused. One bad entry refuses
+     the task.
+   - *At task start*, before the browser launches, every name is resolved once. A name that does not resolve,
+     or resolves to any non-public address (`*.nip.io` tricks), refuses the task with a clear error.
+   - *The egress proxy* (`egress.py`) is the real boundary. Chromium is launched with
+     `--proxy-server=http://127.0.0.1:<port>`; Chromium otherwise sends loopback hosts around a proxy, so
+     `--proxy-bypass-list=<-loopback>` comes last on its command line. For each `CONNECT host:port` (https,
+     wss) or absolute plain-http request the proxy checks the host against the allowlist, resolves it once,
+     refuses if **any** answer is not a public unicast address (IPv4-mapped IPv6 unwrapped first: loopback,
+     RFC 1918, CGNAT, link-local, reserved, documentation, multicast), and connects to an address from that
+     answer itself, never to the name again, so a DNS rebind cannot move a checked connection. A refusal
+     answers 403 and counts toward `blocked_requests`; the log names the host and the reason, never the path
+     or query. Other requests answer 405. A plain-http connection carries one request, then closes. This
+     catches what routing cannot: redirect hops (a 302 or an `<img>` redirected to another host), rebinding,
+     and `fetch` from page script.
+   - *Channels that bypass a proxy.* `--force-webrtc-ip-handling-policy=disable_non_proxied_udp` stops WebRTC
+     (STUN, TURN, data channels) from sending UDP around the proxy; with it, Chromium 156 gathers no ICE
+     candidates and sends no datagrams (a test sends STUN at a local UDP port). With an HTTP proxy Chromium
+     needs no DNS of its own, so `--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1` fails every
+     lookup but the proxy's address, which stops DNS prefetch from leaking names: Chromium 156 has no
+     `--dns-prefetch-disable` switch, and `NetworkPrediction` is a preference, not a feature that
+     `--disable-features` can turn off (a second `--disable-features` would also replace the list Playwright
+     passes). Preconnects open proxied connections, so the proxy checks them. A WebTransport (QUIC) attempt at
+     a local UDP port sends no datagrams either (same test).
+   - *Playwright routing* is the second layer: every request the context makes is routed through the
+     allowlist (`context.route("**/*")`); a host that is not an entry or a subdomain of one, or a scheme other
+     than http/https, is aborted. Service workers are blocked because they bypass routing. WebSockets and
+     downloads are refused. `navigate` refuses non-http(s) schemes and off-list hosts before loading anything.
+   - *Page and frame URLs* are checked before and after every member call, including one that failed: a
+     navigation an earlier call started (a delayed script, a slow redirect) may leave the allowlist after
+     that call's check. A child frame that is off the list is blanked; a tab that is off it is blanked (closed
+     if that fails) and the call fails without running. The final screenshot blanks such a tab first.
 3. **Confirmation guard, two layers.** The task stops with `needs_confirmation` and does not take the step:
    - *Model layer.* The inner model must call the custom `request_confirmation` tool before logging in,
      entering credentials, paying, purchasing, booking, accepting terms, sending or posting messages,
@@ -82,15 +128,45 @@ logged and never changes a finished task's outcome. Only `end_turn` counts as co
      A trip ends the task. It is never returned to the model, so the model can't work around it.
    - No credentials are ever passed to the inner loop. A re-run of the same goal stops at the same step. Once
      the owner has confirmed, carrying the step out is Phase 2 work, or done by hand.
-4. **Fresh, isolated browser.** Each call launches its own Chromium with an empty profile and closes it at the
-   end. Artifacts are written to `/tmp/nous-workspace/browser-task/<run-id>/` (`step-NNN.png`, `final.png`).
+4. **Fresh, isolated browser, as an unprivileged user.** Each call launches its own Chromium with an empty
+   profile and closes it at the end. Artifacts are written to `/tmp/nous-workspace/browser-task/<run-id>/`
+   (`step-NNN.png`, `final.png`). The container runs as root and holds the database and API credentials, so
+   Chromium does not: when Nous runs as root, Playwright launches `nous/browser/chromium-as-user.sh` as the
+   browser executable. The wrapper chowns the fresh profile directory to `nous-browser` (a system user the
+   Dockerfile creates: no sudo, no login shell, no groups but its own; the existing `claude-runner` user has
+   passwordless sudo, so it would not help) and `exec`s `setpriv --reuid=nous-browser --regid=nous-browser
+   --clear-groups --reset-env --no-new-privs` into the same headless shell Playwright would run. `exec` keeps
+   the pid (so Playwright's process-group kill still works) and the CDP pipe on fds 3 and 4.
+   `--reset-env` leaves Chromium only `HOME`, `PATH`, `SHELL`, `USER` and `LOGNAME`, never the agent's
+   API keys or database credentials. Verified in the image: every Chromium process (browser, zygotes, GPU,
+   network utility, renderer) runs as uid `nous-browser` with no capabilities and `NoNewPrivs: 1`; an
+   `ANTHROPIC_API_KEY` set on the container is absent from the browser's environment.
+   - *Sandbox: off.* Chromium's own sandbox needs user namespaces, and Docker's default seccomp profile
+     refuses them to every process in the container, root included (`unshare -U` fails with EPERM), so
+     Chromium cannot start with it ("Chromium sandboxing failed!"), with or without the namespace layer. It
+     keeps `--no-sandbox` and runs as `nous-browser`. Turning it on would need a seccomp profile that allows
+     user namespaces in prod's compose file.
+   - *Fallback.* When Nous is not root (local development, tests) or the user, the wrapper or `setpriv` is
+     missing, Chromium is launched directly as the current user, and a WARNING is logged once.
 5. **Policy class.** `browser_task` is `external` in `tool_classes.py`. It is outside every `internal_only`
    (continuation) turn and the heartbeat outward floor, it is stripped by refuse-tier censors, and the
    execution ledger records it.
 
-Known gaps for Phase 1: an allowed host whose DNS resolves to a private address is not detected; a
-sub-resource redirect from an allowed host to another host is not caught; and the executor guard is
-label-based, so a consequential button with a neutral label ("Continue") relies on the model layer.
+Known gaps for Phase 1:
+- **Chromium's sandbox is off** (Docker's default seccomp profile refuses user namespaces; see 4), so a
+  renderer exploit runs code as `nous-browser` directly.
+- **The proxy is enforced by Chromium's configuration, not by the kernel.** Code running as `nous-browser`
+  after a renderer exploit shares the container's network namespace: it could open sockets directly to the
+  unauthenticated REST API on port 8000, to `nous-postgres` or to the LAN. Closing that needs a separate
+  network namespace or an egress firewall (Phase 2).
+- `nous-browser` can read world-readable files in the container (the application code, and the workspace if
+  its mode allows).
+- Ports are not checked: an allowed host is reachable on any port Chromium allows.
+- NAT64 addresses (`64:ff9b::/96`) count as public; that matters only on a network with a NAT64 gateway.
+- A plain-http redirect to an off-list host renders the proxy's 403 text at that URL until the URL check
+  blanks the tab; nothing reaches the host.
+- The executor guard is label-based, so a consequential button with a neutral label ("Continue") relies on
+  the model layer.
 
 ## Settings
 
@@ -101,13 +177,17 @@ label-based, so a consequential button with a neutral label ("Continue") relies 
 | `NOUS_BROWSER_TASK_MAX_STEPS` | `30` | Cap on model turns per call. |
 | `NOUS_BROWSER_TASK_TIMEOUT_SECONDS` | `110` | Per-call wall clock, clamped to `NOUS_TOOL_TIMEOUT - 10`. |
 
+**Enabling in prod.** Prod's compose file passes the environment to the container through an explicit
+`environment:` list, so setting these variables in `.env` alone does nothing: enabling the tool needs
+`NOUS_BROWSER_TASK_*` lines in that list as well.
+
 ## Phase 2 (future work)
 
 - Move the browser into a **separate desktop sidecar container** (its own network policy and egress
   allowlist at the network layer, no access to the Nous database or workspace), driven over a narrow RPC. The
   executor interface (`execute(name, input) -> blocks`) is the seam.
-- Enforce the allowlist at the network layer as well (an egress proxy), which closes the DNS and redirect
-  gaps above.
+- Enforce the egress boundary in the kernel (its own network namespace or firewall rules), so code that
+  escapes Chromium cannot open sockets around the proxy.
 - A resumable confirmation flow: the owner approves the pending step (A2UI approval gate) and the task
   continues from saved state instead of stopping.
 - Optionally the computer use toolset for whole-desktop tasks.

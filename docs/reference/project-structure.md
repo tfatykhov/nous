@@ -114,7 +114,9 @@ nous/
 │   │   ├── schemas.py          # DAGNodeSpec, DAG schemas
 │   │   └── _workspace.py       # F064.3 workspace containment
 │   ├── browser/                # F100 browser_task: isolated browser-use loop
-│   │   ├── session.py          # Playwright Chromium, tabs, domain allowlist routing
+│   │   ├── session.py          # Playwright Chromium, tabs, allowlist validation and routing, teardown
+│   │   ├── egress.py           # Egress proxy: allowlist + resolved-address check on every connection
+│   │   ├── chromium-as-user.sh # Runs Chromium as the unprivileged nous-browser user (setpriv)
 │   │   ├── executor.py         # browser_toolset member calls -> Playwright; confirmation guard
 │   │   ├── loop.py             # Inner agent loop, pinned model, own /v1/messages caller
 │   │   └── tools.py            # browser_task registration
