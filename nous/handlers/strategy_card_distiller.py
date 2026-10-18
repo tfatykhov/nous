@@ -323,7 +323,7 @@ class StrategyCardDistiller:
             f"Extract a strategy card for this {outcome} outcome."
         )
 
-        background_model = getattr(self._settings, "background_model", "claude-haiku-4-5-20251001")
+        background_model = getattr(self._settings, "background_model", "claude-haiku-5-5")
         card = await call_background_llm_structured(
             client=self._llm,
             model=background_model,

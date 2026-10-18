@@ -979,7 +979,7 @@ class Settings(BaseSettings):
     attachments_persist: bool = True  # save originals to disk + record fact reference
     attachments_ingest_text_files: bool = True  # chunk text/code bodies into episode_chunks
     attachments_ingest_pdfs: bool = True  # extract + chunk-ingest PDF text for recall
-    attachments_pdf_transcription_model: str = "claude-haiku-4-5-20251001"  # scanned-PDF fallback
+    attachments_pdf_transcription_model: str = "claude-haiku-5-5"  # scanned-PDF fallback
     attachments_pdf_max_transcription_tokens: int = 8000  # output cap for the fallback transcription
     attachments_default_prompt: str = "What can you tell me about this?"
 
@@ -1349,7 +1349,7 @@ class Settings(BaseSettings):
     # rule-based path.
     dag_fix_llm_dispatch_enabled: bool = False
     dag_fix_llm_model: str = Field(
-        default="claude-haiku-4-5-20251001",
+        default="claude-haiku-5-5",
         description="F066.1 Phase 1.5: model for fix-node LLM dispatch. Default Haiku — the action set is small (4 enum values) and the prompt is short.",
     )
     dag_fix_llm_timeout_seconds: float = Field(
@@ -1367,7 +1367,7 @@ class Settings(BaseSettings):
     # F022 Phase 3: Contradiction detection
     contradiction_detection: bool = True
     contradiction_similarity_threshold: float = 0.85
-    contradiction_model: str = "claude-haiku-4-5-20251001"
+    contradiction_model: str = "claude-haiku-5-5"
     contradiction_recheck_cooldown_days: int = Field(
         default=30,
         ge=0,
@@ -1642,7 +1642,7 @@ class Settings(BaseSettings):
 
     action_gating_enabled: bool = True
     action_gating_mode: Literal["shadow", "warn", "enforce"] = "enforce"
-    action_gating_model: str = "claude-haiku-4-5-20251001"
+    action_gating_model: str = "claude-haiku-5-5"
     action_gating_external_only: bool = False  # True = skip Tier 2, only gate external/irreversible
     action_gating_turn_window: int = 5  # Only block duplicates within this many turns
 
@@ -2135,12 +2135,12 @@ class Settings(BaseSettings):
     rubric_min_dimensions: int = 3
     rubric_max_dimensions: int = 7
     rubric_max_versions_per_week: int = 1
-    rubric_outcome_model: str = "claude-haiku-4-5-20251001"
+    rubric_outcome_model: str = "claude-haiku-5-5"
 
     # F047: Actionability classification
     actionability_enabled: bool = True
     actionability_llm_enabled: bool = True
-    actionability_model: str = "claude-haiku-4-5-20251001"
+    actionability_model: str = "claude-haiku-5-5"
     actionability_default: bool = False  # Fail-closed on uncertain facts
     actionability_backfill_on_startup: bool = True
     actionability_backfill_token_budget: int = 10_000  # rough Haiku daily cap
@@ -2202,7 +2202,7 @@ class Settings(BaseSettings):
         description="F050 master switch — expand recall queries via Haiku before hybrid_search.",
     )
     query_expansion_model: str = Field(
-        default="claude-haiku-4-5-20251001",
+        default="claude-haiku-5-5",
         description="F050 — Haiku model used for query expansion.",
     )
     query_expansion_timeout_seconds: float = Field(
@@ -2240,7 +2240,7 @@ class Settings(BaseSettings):
         ),
     )
     epistemic_gate_model: str = Field(
-        default="claude-haiku-4-5-20251001",
+        default="claude-haiku-5-5",
         description="§2 — Haiku model id for epistemic classification.",
     )
     epistemic_gate_timeout_seconds: float = Field(
@@ -2623,7 +2623,7 @@ class Settings(BaseSettings):
         "Off = byte-identical to today. Land-dark; flip after the A/B gate.",
     )
     date_leg_model: str = Field(
-        default="claude-haiku-4-5-20251001",
+        default="claude-haiku-5-5",
         description="F075 L3: Haiku model for parsing the query's date window.",
     )
     date_leg_k: int = Field(

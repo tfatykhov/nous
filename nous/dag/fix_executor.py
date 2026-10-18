@@ -34,6 +34,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from nous.api.preamble import CLAUDE_CODE_PREAMBLE
 from nous.handlers import UnusableToolReply, call_with_tool_choice
 
 logger = logging.getLogger(__name__)
@@ -249,10 +250,12 @@ async def choose_action_llm(
         "max_tokens": 512,
         # Codex P1 (2026-05-22): SdkAnthropicClient._payload_to_kwargs
         # at anthropic_client.py:1014 indexes payload["system"] (not .get),
-        # so an empty string is required to keep the SDK backend from
+        # so the key is required to keep the SDK backend from
         # KeyError-ing before the request ever reaches Anthropic. Mirrors
-        # nous_eval/handlers/summary.py:158.
-        "system": "",
+        # nous_eval/handlers/summary.py:158. Block 0 is the Claude Code
+        # preamble: under an OAuth token any model but Haiku 4.5 (Haiku 5.5
+        # included) answers 429 without it.
+        "system": [{"type": "text", "text": CLAUDE_CODE_PREAMBLE}],
         "tools": [tool],
         # Force the tool where the model allows it; call_with_tool_choice asks
         # for it in the prompt on a model that rejects a forced tool_choice.

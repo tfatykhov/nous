@@ -915,6 +915,44 @@ def test_payload_effort_included_for_opus():
     assert payload["output_config"] == {"effort": "medium"}
 
 
+@pytest.mark.parametrize(
+    ("thinking_mode", "expected"),
+    [("adaptive", {"type": "adaptive"}), ("manual", {"type": "enabled", "budget_tokens": 8000})],
+)
+def test_payload_thinking_and_effort_sent_to_haiku_5(thinking_mode, expected):
+    """Haiku 5.5 accepts thinking and effort (measured 200; Haiku 4.5 answers 400), so it gets both like Sonnet."""
+    s = Settings(
+        ANTHROPIC_API_KEY="test-key",
+        thinking_mode=thinking_mode,
+        thinking_budget=8000,
+        max_tokens=16000,
+        effort="low",
+        model="claude-haiku-5-5",
+    )
+    r = AgentRunner(MockCognitiveLayer(), MockBrain(), MockHeart(), s)
+    payload = r._build_api_payload("system", [{"role": "user", "content": "hi"}])
+    assert payload["thinking"] == expected
+    assert payload["output_config"] == {"effort": "low"}
+
+
+def test_payload_thinking_and_effort_sent_to_haiku_5_model_override():
+    """The subtask worker path: a Haiku 5.5 model_override gets thinking and effort too."""
+    s = Settings(ANTHROPIC_API_KEY="test-key", thinking_mode="adaptive", effort="medium", model="claude-opus-4-6")
+    r = AgentRunner(MockCognitiveLayer(), MockBrain(), MockHeart(), s)
+    payload = r._build_api_payload("system", [{"role": "user", "content": "hi"}], model_override="claude-haiku-5-5")
+    assert payload["thinking"] == {"type": "adaptive"}
+    assert payload["output_config"] == {"effort": "medium"}
+
+
+@pytest.mark.parametrize("model", ["claude-haiku-4-5-20251001", "claude-haiku-4-5"])
+def test_payload_legacy_haiku_still_gets_neither_thinking_nor_effort(model):
+    s = Settings(ANTHROPIC_API_KEY="test-key", thinking_mode="adaptive", effort="low", model=model)
+    r = AgentRunner(MockCognitiveLayer(), MockBrain(), MockHeart(), s)
+    payload = r._build_api_payload("system", [{"role": "user", "content": "hi"}])
+    assert "thinking" not in payload
+    assert "output_config" not in payload
+
+
 # ---------------------------------------------------------------------------
 # 007: SSE parser tests
 # ---------------------------------------------------------------------------

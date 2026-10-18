@@ -14,6 +14,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from nous.api.preamble import CLAUDE_CODE_PREAMBLE
 from nous.heart.schemas import FactInput
 
 logger = logging.getLogger(__name__)
@@ -169,7 +170,7 @@ class AdmissionLLMClient:
             "system": [
                 {
                     "type": "text",
-                    "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+                    "text": CLAUDE_CODE_PREAMBLE,
                     "cache_control": {"type": "ephemeral"},
                 },
                 {

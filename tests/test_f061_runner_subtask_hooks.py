@@ -263,6 +263,57 @@ async def test_force_tool_thinking_on_does_not_force_tool_choice():
         )
 
 
+@pytest.mark.parametrize(
+    ("model", "thinking_mode", "forced"),
+    [
+        ("claude-haiku-4-5-20251001", "off", True),
+        ("claude-haiku-4-5-20251001", "adaptive", True),
+        ("claude-haiku-5-5", "off", True),
+        ("claude-haiku-5-5", "adaptive", False),
+    ],
+    ids=["haiku-4.5 off", "haiku-4.5 adaptive", "haiku-5.5 off", "haiku-5.5 adaptive"],
+)
+@pytest.mark.asyncio
+async def test_force_tool_only_where_the_runner_sends_no_thinking(model, thinking_mode, forced):
+    """The penultimate force needs a request without thinking. Legacy Haiku never gets thinking from the runner,
+    so it is forced under any thinking_mode; Haiku 5.5 gets adaptive thinking like Sonnet, so it is forced only
+    with thinking_mode=off."""
+    runner, _settings = _make_runner(thinking_mode=thinking_mode)
+    collector = SubtaskReportCollector()
+    extra = {
+        "submit_final_report": (
+            SUBMIT_FINAL_REPORT_SCHEMA,
+            make_submit_final_report_executor(collector),
+        ),
+    }
+    runner._api.call = AsyncMock(side_effect=[
+        _api_response(content=[_tool_use("noop", {})], stop_reason="tool_use"),
+        _api_response(
+            content=[_tool_use("submit_final_report", {"summary": "x" * 60, "confidence": 0.5})],
+            stop_reason="tool_use",
+        ),
+    ])
+
+    await runner._tool_loop(
+        system_prompt="sys",
+        conversation=_make_conversation(),
+        frame_id="task",
+        is_subtask=True,
+        max_tool_calls=2,
+        model_override=model,
+        extra_tools=extra,
+        force_tool_on_penultimate="submit_final_report",
+    )
+
+    penultimate = runner._api.call.await_args_list[1].args[0]
+    if forced:
+        assert penultimate.get("tool_choice") == {"type": "tool", "name": "submit_final_report"}
+        assert "thinking" not in penultimate
+    else:
+        assert penultimate.get("tool_choice") is None
+        assert penultimate["thinking"] == {"type": "adaptive"}
+
+
 @pytest.mark.asyncio
 async def test_no_extra_tools_default_no_changes_no_leak():
     """extra_tools=None / force_tool_on_penultimate=None → no behavior change."""

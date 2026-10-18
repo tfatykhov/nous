@@ -90,7 +90,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_WORK_QUEUE_MAX_DAGS_PER_TICK` | `5` | F064.6 per-tick admission cap. Bounded at 5 to match `MAX_ACTIVE_DAGS`; excess items wait for the next tick. |
 | `NOUS_ACTIONABILITY_ENABLED` | `true` | Enable F047 actionability classification at fact learn time |
 | `NOUS_ACTIONABILITY_LLM_ENABLED` | `true` | Use Haiku LLM for ambiguous actionability cases (tier 2) |
-| `NOUS_ACTIONABILITY_MODEL` | `claude-haiku-4-5-20251001` | LLM model for F047 actionability tier-2 classification |
+| `NOUS_ACTIONABILITY_MODEL` | `claude-haiku-5-5` | LLM model for F047 actionability tier-2 classification |
 | `NOUS_ACTIONABILITY_DEFAULT` | `false` | Fallback verdict when classifier can't decide (false = fail-closed, don't page user) |
 | `NOUS_ACTIONABILITY_BACKFILL_ON_STARTUP` | `true` | Run F047 backfill automatically on startup for NULL rows |
 | `NOUS_ACTIONABILITY_BACKFILL_TOKEN_BUDGET` | `10000` | Rough Haiku daily token cap for backfill |
@@ -257,7 +257,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_CROSS_TYPE_LINKING_ENABLED` | `true` | Enable cross-type auto-linking |
 | `NOUS_CROSS_TYPE_THRESHOLD` | `0.80` | Cross-type similarity threshold |
 | `NOUS_CONTRADICTION_DETECTION` | `true` | Enable LLM contradiction detection |
-| `NOUS_CONTRADICTION_MODEL` | `claude-haiku-4-5-20251001` | Model for contradiction classification |
+| `NOUS_CONTRADICTION_MODEL` | `claude-haiku-5-5` | Model for contradiction classification |
 | `NOUS_CONFIDENCE_CALIBRATION_FACTOR` | `1.0` | F058: multiplicative scale applied to agent-recorded decision confidence at write time. Default derived empirically from `reports/calibration_eval.md` (401 reviewed prod decisions: mean conf 0.834 vs strict accuracy 0.636, Brier 0.252 at random baseline). Set to `1.0` to disable scaling. Pre-calibration value preserved in `brain.decisions.confidence_raw`. |
 | `NOUS_DECISION_OUTCOME_SCORE_FACTORS` | `{"superseded": 0.3, "noise": 0.1}` | 2026-07-27: per-outcome multiplicative demotion applied to decision retrieval scores in `Brain._query`, followed by a stable re-sort (the re-sort is load-bearing — `_query` returns rows in merged-search order and NOTHING downstream re-sorts, so a multiplier alone is inert AND desyncs `_apply_relevance_filter`'s monotonic walk). Measured: superseded decisions were ranking #1/#2 above the current one in the "Related Decisions" prompt section. Demotion (not exclusion) so a superseded decision whose successor was never linked still renders, labeled, instead of leaving an empty section. Skipped entirely when a caller passes an explicit `outcome=`. Values must be in `(0, 1]`. `{}` = kill switch (no multiply, no re-sort, byte-identical to pre-2026-07-27). Graph-path re-entry uses a FILTER instead (the resolver carries no score to demote). |
 | `NOUS_CROSS_TYPE_LINK_MIN_CONTENT_CHARS` | `40` | F022 audit fix (2026-04-30): minimum content length (after strip) for the live event-bus linker to fire. Mirrors F054's `NOUS_CE_BACKFILL_MIN_DECISION_CHARS` for the backfill path. Empty/near-empty source or target content was the dominant cause of NO/WEAK edge verdicts on `informed_by` and `evidence_for` (precision 0.70). Set to `0` to disable. Filters both source side (in Python before embed) and target side (SQL `length` clause). |
@@ -287,7 +287,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_CLAIM_VERIFICATION_REPORTS_ENABLED` | `true` | F099 gate hardening B: check a subtask's final report and a continuation turn's note against the calls their work recorded (`ClaimVerifier.verify_report`, deterministic, no model call). Beside the first-person claims above it reads the verdict and passive forms a report uses: "Email sent", "PR #4 merged", "Opened PR #12", "tests passed", "I cancelled the subtask", "the cancel did not take effect" (a verdict on an action needs only a recorded try of it). Denied, planned, asked, quoted and someone else's actions are not claims. Evidence: the durable `execution_ledger` rows of the root's continuation thread and of its subtasks and DAGs, plus the turn's own calls; a result row is checked against its own subtask's or DAG's rows only; an owner's cancel of the lineage backs a cancel claim; a hashed shell command is names-only (plausible). Follows `NOUS_CLAIM_VERIFICATION_MODE`: `shadow` logs, `warn` lists unbacked result claims in the turn's prompt and appends an `[Unverified claims]` line to the arrival note (and its report), `enforce` also withholds the arrival's progress credit, so it counts in the Intentions dashboard's `claimed_not_credited`. Never blocks delivery. Off when `NOUS_CLAIM_VERIFICATION_ENABLED` or the durable ledger (`NOUS_EXECUTION_LEDGER_ENABLED`, `NOUS_EXECUTION_LEDGER_PERSIST_ENABLED`) is off. |
 | `NOUS_ACTION_GATING_ENABLED` | `true` | Enable action gating (F026) |
 | `NOUS_ACTION_GATING_MODE` | `enforce` | Action gating mode (shadow/warn/enforce) |
-| `NOUS_ACTION_GATING_MODEL` | `claude-haiku-4-5-20251001` | Model for Tier 3 LLM gate |
+| `NOUS_ACTION_GATING_MODEL` | `claude-haiku-5-5` | Model for Tier 3 LLM gate |
 | `NOUS_ACTION_GATING_EXTERNAL_ONLY` | `false` | Skip Tier 2, only gate external/irreversible |
 | `NOUS_ACTION_GATING_TURN_WINDOW` | `5` | Only block duplicates within this many turns |
 | `NOUS_PROCEDURE_SCORE_FLOOR` | `0.40` | Minimum score for procedures when embeddings enabled (F038). With `NOUS_STRATEGY_CARDS_RETRIEVAL_ENABLED=true` it is also the minimum cosine to the query of every strategy card served, whether the graph or the cosine probe offered it. |
@@ -296,7 +296,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_MMR_SKIP_AFTER_CE` | `true` | F030.1: skip MMR when CE rerank just reordered the head. F051 harness measured +30% MRR (0.372 -> 0.484, +190% on jargon-drift) when MMR is gated this way. Set `false` to restore pre-F030.1 chained CE-then-MMR behavior. |
 | `NOUS_CROSS_ENCODER_ENABLED` | `false` | Enable F042 cross-encoder reranking in recall_deep (requires sentence-transformers) |
 | `NOUS_QUERY_EXPANSION_ENABLED` | `false` | F050 master flag — enable Haiku-driven multi-query expansion at recall time (Phase 1 lands dark; flip after harness gate) |
-| `NOUS_QUERY_EXPANSION_MODEL` | `claude-haiku-4-5-20251001` | F050 model used for the expansion call (forced tool use, ~256 tok output) |
+| `NOUS_QUERY_EXPANSION_MODEL` | `claude-haiku-5-5` | F050 model used for the expansion call (forced tool use, ~256 tok output; Haiku 5.5 accepts the forced tool_choice, as Haiku 4.5 did, and does not think on it) |
 | `NOUS_QUERY_EXPANSION_TIMEOUT_SECONDS` | `2.0` | F050 per-call timeout (seconds); on timeout, expand() fails open to [query] |
 | `NOUS_QUERY_EXPANSION_MAX_VARIANTS` | `3` | F050 max variants returned including the original query |
 | `NOUS_QUERY_EXPANSION_MIN_WORDS` | `3` | F050 gate threshold — queries shorter than this skip expansion |
@@ -331,7 +331,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_RUBRIC_MIN_DIMENSIONS` | `3` | Floor for dimension count |
 | `NOUS_RUBRIC_MAX_DIMENSIONS` | `7` | Ceiling for dimension count |
 | `NOUS_RUBRIC_MAX_VERSIONS_PER_WEEK` | `1` | Rate limit on rubric evolution |
-| `NOUS_RUBRIC_OUTCOME_MODEL` | `claude-haiku-4-5-20251001` | Model for outcome classification |
+| `NOUS_RUBRIC_OUTCOME_MODEL` | `claude-haiku-5-5` | Model for outcome classification |
 | `NOUS_HEARTBEAT_ENABLED` | `true` | Enable heartbeat proactive monitoring |
 | `NOUS_HEARTBEAT_TICK_INTERVAL` | `30` | Seconds between heartbeat tick loop iterations |
 | `NOUS_HEARTBEAT_QUIET_START` | `23` | Quiet hours start (hour, user timezone) |
@@ -401,7 +401,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_ATTACHMENTS_PERSIST` | `true` | F024 save originals to disk + record a Heart fact reference. |
 | `NOUS_ATTACHMENTS_INGEST_TEXT_FILES` | `true` | F024 chunk text/code file bodies into episode_chunks for recall. |
 | `NOUS_ATTACHMENTS_INGEST_PDFS` | `true` | F024.1 extract + chunk-ingest PDF text into episode_chunks for recall (pypdf, with a Claude transcription fallback for scanned PDFs). |
-| `NOUS_ATTACHMENTS_PDF_TRANSCRIPTION_MODEL` | `claude-haiku-4-5-20251001` | F024.1 model for the scanned-PDF transcription fallback. |
+| `NOUS_ATTACHMENTS_PDF_TRANSCRIPTION_MODEL` | `claude-haiku-5-5` | F024.1 model for the scanned-PDF transcription fallback. |
 | `NOUS_ATTACHMENTS_PDF_MAX_TRANSCRIPTION_TOKENS` | `8000` | F024.1 output cap for the transcription fallback (long scanned PDFs truncate; paging deferred). |
 | `NOUS_ATTACHMENTS_DEFAULT_PROMPT` | `What can you tell me about this?` | F024 prompt used when an attachment arrives with no caption. |
 | `NOUS_RECALL_EXCLUDE_CONTEXT_IDS` | `false` | F071 master switch. When true, `recall_deep` filters out results whose IDs are already loaded into the current turn's system prompt (`recalled_fact_ids`, `recalled_decision_ids`, `recalled_episode_ids`, `recalled_procedure_ids` on `TurnContext`). Wire is forward-compatible — F072 adds a `chunk` key without changing this contract. Land dark; flip in dev for measurement via `PipelineStats.excluded_in_context`. |
@@ -431,7 +431,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_DATE_AWARE_BOOST_FACTOR` | `1.20` | F075 Layer 3: multiplier applied to in-window facts. 1.0 = no boost. |
 | `NOUS_DATE_AWARE_BOOST_WINDOW_PAD_DAYS` | `30` | F075 Layer 3: pad days around the inferred query date window. |
 | `NOUS_EPISTEMIC_GATE_ENABLED` | `false` | §2 master switch — Haiku three-way epistemic routing (grounded / world_knowledge / abstain). When true, an `EpistemicClassifier` tags each turn in `pre_turn` and `ContextEngine.build` injects an Epistemic Routing instruction sibling to the anti-hallucination block. Fail-open: timeout/error/budget => softened abstain prose that PERMITS base-model knowledge. Default OFF (dark-launch). NOT BEAM-measurable (BEAM bypasses intent/layer/context). |
-| `NOUS_EPISTEMIC_GATE_MODEL` | `claude-haiku-4-5-20251001` | §2 — Haiku model id for epistemic classification. |
+| `NOUS_EPISTEMIC_GATE_MODEL` | `claude-haiku-5-5` | §2 — Haiku model id for epistemic classification. |
 | `NOUS_EPISTEMIC_GATE_TIMEOUT_SECONDS` | `2.0` | §2 — per-call Haiku timeout (`asyncio.wait_for`). Blown timeout fails open to softened prose. |
 | `NOUS_EPISTEMIC_GATE_MAX_PER_HOUR` | `500` | §2 — in-process sliding-window budget cap on Haiku calls (asyncio.Lock-serialized counter, mirrors F050). Breach => fail open + WARN-once. |
 | `NOUS_RECENCY_RESOLVER_ENABLED` | `false` | §1 — event_date-only recency conflict resolver. After retrieval (in `run_recall_pipeline`, after `_attach_contradictions`), same-subject facts that conflict on a value AND both carry a non-null, DIFFERING `event_date` are resolved: newer => `[current YYYY-MM]`, older => `[superseded YYYY-MM]` + down-ranked `*0.3` (never deleted). Inert until `NOUS_TEMPORAL_EXTRACTION_ENABLED` populates `event_date`. Default OFF. |
