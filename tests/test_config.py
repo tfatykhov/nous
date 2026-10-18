@@ -106,7 +106,7 @@ def test_date_leg_settings_defaults():
     from nous.config import Settings
     s = Settings()
     assert s.date_leg_enabled is False
-    assert s.date_leg_model == "claude-haiku-4-5-20251001"
+    assert s.date_leg_model == "claude-haiku-5-5"
     assert s.date_leg_k == 15
     assert s.date_leg_pad_days == 2
     assert s.date_leg_timeout_seconds == 2.0

@@ -191,7 +191,7 @@ class FactManager:
         self._admission_controller = admission_controller
         # F027: LLM client for write-time supersession classifier
         self._llm: LLMClient | None = None
-        self._llm_model: str = "claude-haiku-4-5-20251001"
+        self._llm_model: str = "claude-haiku-5-5"
         # F047: Actionability classifier for write-time verdict
         self._actionability_classifier = actionability_classifier
         # F056 #377: Settings injected so _find_duplicate can read

@@ -141,7 +141,7 @@ class ActionabilityClassifier:
     def __init__(
         self,
         llm: LLMClient | None = None,
-        model: str = "claude-haiku-4-5-20251001",
+        model: str = "claude-haiku-5-5",
         budget_check: Callable[[], bool] | None = None,
         default_when_unknown: bool = False,
     ) -> None:

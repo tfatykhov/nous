@@ -131,7 +131,7 @@ class QueryExpander:
         llm: "AnthropicClient | None",
         settings: "Settings",
         db: "Database | None" = None,
-        model: str = "claude-haiku-4-5-20251001",
+        model: str = "claude-haiku-5-5",
         budget_check: Callable[[], bool] | None = None,
     ) -> None:
         self._llm = llm

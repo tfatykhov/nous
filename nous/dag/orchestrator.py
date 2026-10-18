@@ -2915,7 +2915,7 @@ class DAGOrchestrator:
                         llm_client=self._llm_client,
                         model=getattr(
                             self._settings, "dag_fix_llm_model",
-                            "claude-haiku-4-5-20251001",
+                            "claude-haiku-5-5",
                         ),
                         timeout_seconds=getattr(
                             self._settings, "dag_fix_llm_timeout_seconds", 10.0,
