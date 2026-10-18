@@ -47,21 +47,24 @@ thinking is left at the model default (adaptive).
 
 **Budget.** The limits are `NOUS_BROWSER_TASK_MAX_STEPS` model turns, which the `max_steps` argument can only
 lower, and `NOUS_BROWSER_TASK_TIMEOUT_SECONDS`. The timeout is clamped below `NOUS_TOOL_TIMEOUT` (default
-120 s), because the runner cancels any tool at that point and would discard the result.
+120 s) with 10 s left to close the browser, because the runner cancels any tool at that point and would
+discard the result. After a timeout the final screenshot is skipped. A failure while closing the browser is
+logged and never changes a finished task's outcome. Only `end_turn` counts as completed; another stop reason
+(such as `max_tokens`) is an error, and a completed task's summary is the final turn's text only.
 
 ## Safety boundary
 
 1. **No raw web content in the main loop.** The outer result is `BrowserTaskResult.render()`. Its summary is
-   the inner model's own text, with control characters stripped and a 4,000-character cap. It is labelled as
+   the inner model's own text, with control characters and markup tags stripped and a 4,000-character cap. It is labelled as
    derived from untrusted web content, to be treated as data and not as instructions. Screenshots go to disk
    for the owner and are never sent to the main loop. The final URL has its query string, fragment and
    userinfo stripped.
 2. **Domain allowlist at the Playwright layer.** Every request the browser context makes is routed through the
    allowlist (`context.route("**/*")`). A host that is not an entry or a subdomain of an entry, or a scheme
-   other than http/https, is aborted. Service workers are blocked because they bypass routing. WebSockets and
+   other than http/https, is aborted. Entries must be hosts: a bare suffix such as `com` is refused. Service workers are blocked because they bypass routing. WebSockets and
    downloads are refused. Playwright does not route the redirects of a request it already allowed, so after
-   every action the executor checks each tab's URL, and a tab that ended up off the list is blanked and the
-   action fails. `navigate` refuses non-http(s) schemes and off-list hosts before loading anything. Loopback
+   every action, including one that failed, the executor checks each tab's and each frame's URL. A child frame
+   that ended up off the list is blanked; a tab that did is blanked (closed if that fails) and the action fails. `navigate` refuses non-http(s) schemes and off-list hosts before loading anything. Loopback
    and private addresses are reachable only if listed literally (e.g. `127.0.0.1`).
 3. **Confirmation guard, two layers.** The task stops with `needs_confirmation` and does not take the step:
    - *Model layer.* The inner model must call the custom `request_confirmation` tool before logging in,
@@ -70,8 +73,12 @@ lower, and `NOUS_BROWSER_TASK_TIMEOUT_SECONDS`. The timeout is clamped below `NO
    - *Executor layer.* This check runs before each call, because one turn can carry several. It covers a click,
      drag or checkbox on an element whose label matches a narrow list of consequential words; submitting a
      form that has password or payment fields; typing or `form_input` into a password or `cc-*` field; and
-     Enter inside such a form. Coordinate targets are resolved with `elementFromPoint`. A trip ends the task.
-     It is never returned to the model, so the model can't work around it.
+     every key that activates the focused control (Enter, Space), checked chord by chord, so `Tab Enter`, a
+     newline inside `type` and `hold_key` are covered too. Coordinate targets and focus are resolved through
+     open shadow roots and same-origin frames; a cross-origin frame cannot be inspected, so acting inside one
+     stops the task. A text field's typed value is not part of its label, so a search for "send money" does not
+     trip it. The reason names only the matched word from the guard's own list, never the page's label text.
+     A trip ends the task. It is never returned to the model, so the model can't work around it.
    - No credentials are ever passed to the inner loop. A re-run of the same goal stops at the same step. Once
      the owner has confirmed, carrying the step out is Phase 2 work, or done by hand.
 4. **Fresh, isolated browser.** Each call launches its own Chromium with an empty profile and closes it at the
@@ -91,7 +98,7 @@ label-based, so a consequential button with a neutral label ("Continue") relies 
 | `NOUS_BROWSER_TASK_ENABLED` | `false` | Register the tool. |
 | `NOUS_BROWSER_TASK_MODEL` | `claude-sonnet-5-5` | Inner model; must be in `SUPPORTED_MODELS`. |
 | `NOUS_BROWSER_TASK_MAX_STEPS` | `30` | Cap on model turns per call. |
-| `NOUS_BROWSER_TASK_TIMEOUT_SECONDS` | `110` | Per-call wall clock, clamped to `NOUS_TOOL_TIMEOUT - 5`. |
+| `NOUS_BROWSER_TASK_TIMEOUT_SECONDS` | `110` | Per-call wall clock, clamped to `NOUS_TOOL_TIMEOUT - 10`. |
 
 ## Phase 2 (future work)
 

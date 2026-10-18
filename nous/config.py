@@ -3141,7 +3141,7 @@ class Settings(BaseSettings):
     browser_task_timeout_seconds: float = Field(
         default=110,
         gt=0,
-        description="F100: wall-clock limit per call; clamped to NOUS_TOOL_TIMEOUT minus 5s, which cancels any tool.",
+        description="F100: wall-clock limit per call; clamped to NOUS_TOOL_TIMEOUT minus 10s (teardown room), which cancels any tool.",
     )
     a2ui_push_max_installations: int = Field(
         default=10,

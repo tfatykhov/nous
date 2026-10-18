@@ -53,7 +53,8 @@ CLAUDE_CODE_PREAMBLE = "You are Claude Code, Anthropic's official CLI for Claude
 MAX_TOKENS = 16_000
 SUMMARY_LIMIT = 4_000
 # The dispatcher cancels any tool at NOUS_TOOL_TIMEOUT; finishing first keeps our own result.
-TOOL_TIMEOUT_MARGIN_SECONDS = 5
+# The margin also covers teardown (final screenshot, browser close) after our own timeout.
+TOOL_TIMEOUT_MARGIN_SECONDS = 10
 
 SYSTEM_PROMPT = "\n".join(
     [
@@ -90,7 +91,8 @@ REQUEST_CONFIRMATION_TOOL: dict[str, Any] = {
     },
 }
 
-_UNSAFE_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f  ]")
+_UNSAFE_CHARS = re.compile("[\x00-\x08\x0b-\x1f\x7f\u2028\u2029]")
+_MARKUP = re.compile(r"<[^<>]{0,500}>")
 
 
 class UnsupportedModelError(ValueError):
@@ -158,7 +160,7 @@ class BrowserTaskResult:
 
 
 def _clean_summary(text: str) -> str:
-    text = _UNSAFE_CHARS.sub("", text or "").strip()
+    text = _MARKUP.sub("", _UNSAFE_CHARS.sub("", text or "")).strip()
     if len(text) > SUMMARY_LIMIT:
         text = text[:SUMMARY_LIMIT] + " [truncated]"
     return text
@@ -168,11 +170,12 @@ def _bare_url(url: str) -> str:
     """Scheme, host and path only: query strings and fragments can carry tokens."""
     try:
         parts = urlsplit(url)
+        port = parts.port
     except ValueError:
         return ""
     if parts.scheme not in ("http", "https"):
         return ""
-    return f"{parts.scheme}://{parts.hostname or ''}{f':{parts.port}' if parts.port else ''}{parts.path}"
+    return f"{parts.scheme}://{parts.hostname or ''}{f':{port}' if port else ''}{parts.path}"
 
 
 @asynccontextmanager
@@ -216,7 +219,10 @@ def make_api_caller(settings: Any, http: httpx.AsyncClient) -> ApiCaller:
                     continue
                 raise BrowserApiError(f"Anthropic API request failed: {type(e).__name__}") from e
             if response.status_code == 200:
-                return response.json()
+                try:
+                    return response.json()
+                except ValueError as e:
+                    raise BrowserApiError("Anthropic API returned a body that is not JSON") from e
             if _should_retry(response.status_code, response.headers) and attempt < retries:
                 await asyncio.sleep(_retry_delay(attempt, response))
                 continue
@@ -278,7 +284,7 @@ async def run_browser_task(
     model = settings.browser_task_model
     try:
         validate_model(model)
-        allowlist = DomainAllowlist(list(allowed_domains or []))
+        allowlist = DomainAllowlist(allowed_domains or [])
     except ValueError as e:
         return BrowserTaskResult("error", str(e), run_id)
     if start_url and not allowlist.allows(start_url if "://" in start_url else f"https://{start_url}"):
@@ -300,6 +306,7 @@ async def run_browser_task(
             state.status = "timeout"
             state.summary = f"Stopped after {timeout:g}s. Last progress: {state.summary or 'none'}"
         except BrowserApiError as e:
+            logger.warning("browser_task %s: %s", run_id, e)
             state.status, state.summary = "error", str(e)
         except Exception as e:  # Playwright failed to start, or an executor bug
             logger.exception("browser_task %s failed", run_id)
@@ -319,14 +326,24 @@ async def _run(
     artifacts_dir: Path,
     state: BrowserTaskResult,
 ) -> None:
-    """Fill `state` in place, so a timeout keeps the progress made so far."""
-    async with factory(allowlist, artifacts_dir) as executor:
-        try:
-            await _drive(goal, allowlist, start_url, max_steps, model, call_api, executor, state)
-        finally:
-            state.blocked_requests = executor.blocked_requests
-            state.final_url = _bare_url(executor.current_url())
-            state.screenshot_path = await executor.final_screenshot(artifacts_dir / "final.png")
+    """Fill `state` in place, so a timeout keeps the progress made so far. A failure while closing the
+    browser after the task finished is logged and does not change its outcome."""
+    finished = False
+    try:
+        async with factory(allowlist, artifacts_dir) as executor:
+            try:
+                await _drive(goal, allowlist, start_url, max_steps, model, call_api, executor, state)
+                finished = True
+            finally:
+                state.blocked_requests = executor.blocked_requests
+                state.final_url = _bare_url(executor.current_url())
+                task = asyncio.current_task()
+                if not (task and task.cancelling()):  # after a timeout, close fast instead
+                    state.screenshot_path = await executor.final_screenshot(artifacts_dir / "final.png")
+    except Exception:
+        if not finished:
+            raise
+        logger.warning("browser_task %s: closing the browser failed", state.run_id, exc_info=True)
 
 
 async def _drive(
@@ -354,9 +371,9 @@ async def _drive(
         response = await call_api(_payload(model, messages))
         content = response.get("content") or []
         messages.append({"role": "assistant", "content": content})
-        texts = [b.get("text", "") for b in content if b.get("type") == "text"]
-        if texts:
-            state.summary = "\n".join(texts)
+        text = "\n".join(b.get("text", "") for b in content if b.get("type") == "text")
+        if text:
+            state.summary = text  # progress so far, reported on max_steps or timeout
         stop_reason = response.get("stop_reason")
         if stop_reason == "refusal":
             state.status, state.summary = "error", "The browser model declined the task (refusal)."
@@ -372,29 +389,32 @@ async def _drive(
         if not tool_uses:
             if stop_reason == "pause_turn":
                 continue
-            state.status = "completed"
+            if stop_reason not in ("end_turn", "stop_sequence"):
+                state.status = "error"
+                state.summary = f"The browser model stopped early ({stop_reason}). Last progress: {text or 'none'}"
+                return
+            state.status, state.summary = "completed", text  # the final answer only
             return
 
         results: list[dict[str, Any]] = []
         failed = False
         for block in tool_uses:
-            result: dict[str, Any] = {"type": "tool_result", "tool_use_id": block["id"]}
+            base = {"type": "tool_result", "tool_use_id": block["id"]}
             if block.get("toolset_name") != "browser":
-                results.append({**result, "content": f"Error: unknown tool {block.get('name')}", "is_error": True})
+                results.append({**base, "content": f"Error: unknown tool {block.get('name')}", "is_error": True})
                 continue
-            result["toolset_name"] = "browser"
+            base["toolset_name"] = "browser"
             if failed:
-                results.append({**result, "content": HALT_TEXT, "is_error": True})
+                results.append({**base, "content": HALT_TEXT, "is_error": True})
                 continue
             try:
-                result["content"] = await executor.execute(block["name"], block.get("input") or {})
+                results.append({**base, "content": await executor.execute(block["name"], block.get("input") or {})})
             except ConfirmationRequired as e:
                 state.status, state.summary = "needs_confirmation", f"Confirmation needed: {e}."
                 return
             except BrowserActionError as e:
                 failed = True
-                result.update(content=str(e), is_error=True)
-            results.append(result)
+                results.append({**base, "content": str(e), "is_error": True})
         messages.append({"role": "user", "content": results})
 
     state.status = "max_steps"

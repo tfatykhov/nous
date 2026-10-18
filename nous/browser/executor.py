@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -23,14 +24,19 @@ from urllib.parse import urlsplit
 
 from nous.browser.session import VIEWPORT, BrowserSession
 
+logger = logging.getLogger(__name__)
+
 # Off by default in the toolset; this executor never implements them.
 DISABLED_MEMBERS = frozenset({"javascript_exec", "file_upload", "read_console", "read_network"})
-TAB_MEMBERS = frozenset({"new_tab", "list_tabs", "switch_tab", "close_tab"})
+# Results that carry no appended browser_state: tab members return exactly one, zoom renders none.
+NO_STATE_MEMBERS = frozenset({"new_tab", "list_tabs", "switch_tab", "close_tab", "zoom"})
 
 READ_PAGE_LIMIT = 50_000
 PAGE_TEXT_LIMIT = 50_000
 FIND_LIMIT = 20
+_FIND_FIELD_WORDS = frozenset({"search", "box", "field", "input"})
 ACTION_TIMEOUT_MS = 10_000
+FINAL_SCREENSHOT_TIMEOUT_MS = 3_000
 NAV_TIMEOUT_MS = 30_000
 SCROLL_NOTCH_PX = 100
 
@@ -101,24 +107,68 @@ _KEY_ALIASES = {
     "win": "Meta",
 }
 
-# Describes the element a call would act on, for the confirmation guard.
-_ELEMENT_INFO_JS = """(el) => {
+# Describes the element a call would act on, for the confirmation guard. `deepAt` and `deepActive` follow
+# open shadow roots and same-origin frames; a cross-origin frame is reported as `frame` (uninspectable).
+_ELEMENT_INFO_JS = """
+const SEL = 'a,button,input,select,textarea,label,[role=button],[role=link],[role=menuitem],[role=checkbox],'
+  + '[role=option],[role=switch],[role=tab]';
+function isFrame(e) { return e.tagName === 'IFRAME' || e.tagName === 'FRAME'; }
+function frameDoc(e) { try { return e.contentDocument; } catch (_) { return null; } }
+function deepAt(doc, x, y) {
+  let e = doc.elementFromPoint(x, y);
+  while (e) {
+    if (e.shadowRoot) {
+      const inner = e.shadowRoot.elementFromPoint(x, y);
+      if (inner && inner !== e) { e = inner; continue; }
+    }
+    if (isFrame(e)) {
+      const d = frameDoc(e);
+      if (!d) return e;
+      const r = e.getBoundingClientRect();
+      x -= r.left + e.clientLeft; y -= r.top + e.clientTop;
+      const inner = d.elementFromPoint(x, y);
+      if (!inner) return e;
+      e = inner; continue;
+    }
+    return e;
+  }
+  return e;
+}
+function deepActive(doc) {
+  let e = doc.activeElement;
+  while (e) {
+    if (e.shadowRoot && e.shadowRoot.activeElement) { e = e.shadowRoot.activeElement; continue; }
+    if (isFrame(e)) { const d = frameDoc(e); if (!d) return e; e = d.activeElement; continue; }
+    return e;
+  }
+  return e;
+}
+function info(el) {
   if (!el) return null;
-  const t = el.closest(
-    'a,button,input,select,textarea,label,[role=button],[role=link],[role=menuitem],[role=checkbox],[role=option]'
-  ) || el;
-  const label = [t.innerText, t.value, t.getAttribute('aria-label'), t.title, t.alt]
-    .filter(v => typeof v === 'string' && v).join(' ').slice(0, 200);
-  const form = t.form || t.closest('form');
+  if (isFrame(el)) return {frame: true, label: '', type: '', autocomplete: '', submit: false, sensitiveForm: false};
+  const t = el.closest(SEL) || el;
   const type = (t.getAttribute('type') || '').toLowerCase();
+  const textEntry = t.tagName === 'TEXTAREA' || t.isContentEditable
+    || (t.tagName === 'INPUT' && !['submit', 'button', 'reset', 'image', 'checkbox', 'radio'].includes(type));
+  // A text field's value is what the model typed, not what the control does.
+  const parts = [t.getAttribute('aria-label'), t.title, t.alt, t.innerText || t.textContent];
+  if (!textEntry) parts.push(t.value);
+  const form = t.form || t.closest('form');
   return {
-    label: label,
+    frame: false,
+    label: parts.filter(v => typeof v === 'string' && v).join(' ').slice(0, 500),
     type: type,
     autocomplete: (t.getAttribute('autocomplete') || '').toLowerCase(),
     submit: type === 'submit' || (t.tagName === 'BUTTON' && !type),
     sensitiveForm: !!(form && form.querySelector('input[type=password], input[autocomplete^="cc-"]')),
   };
-}"""
+}
+"""
+_INFO_OF_ELEMENT = "(el) => {" + _ELEMENT_INFO_JS + "return info(el); }"
+_INFO_AT_POINT = "([x, y]) => {" + _ELEMENT_INFO_JS + "return info(deepAt(document, x, y)); }"
+_INFO_OF_FOCUS = "() => {" + _ELEMENT_INFO_JS + "return info(deepActive(document)); }"
+# Keys that activate the focused control the way a click does.
+_ACTIVATING_KEYS = frozenset({"Enter", "NumpadEnter", "Space", " "})
 
 
 class BrowserActionError(Exception):
@@ -161,11 +211,12 @@ def _modifier_list(modifiers: str | None) -> list[str]:
     return [_key_name(m) for m in (modifiers or "").split("+") if m.strip()]
 
 
-def _image(data: bytes) -> dict[str, Any]:
-    return {
-        "type": "image",
-        "source": {"type": "base64", "media_type": "image/png", "data": base64.b64encode(data).decode()},
-    }
+def _image(b64: str) -> dict[str, Any]:
+    return {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}}
+
+
+def _seconds(duration: float) -> float:
+    return max(0.0, min(30.0, float(duration)))
 
 
 def _text(text: str) -> dict[str, Any]:
@@ -192,8 +243,9 @@ class BrowserExecutor:
     async def final_screenshot(self, path: Path) -> str | None:
         """Save the active tab's viewport for the owner; never sent to any model."""
         try:
-            await self.session.active_page.screenshot(path=str(path), type="png", timeout=ACTION_TIMEOUT_MS)
-        except Exception:
+            await self.session.active_page.screenshot(path=str(path), type="png", timeout=FINAL_SCREENSHOT_TIMEOUT_MS)
+        except Exception as e:
+            logger.warning("browser_task: final screenshot failed: %s", e)
             return None
         return str(path)
 
@@ -204,16 +256,22 @@ class BrowserExecutor:
         if handler is None:
             raise BrowserActionError(f"Error: {name} is not implemented by this executor.")
         self.session.opened_during_call = []
+        error: BrowserActionError | None = None
         try:
             blocks = await handler(**(input_ or {}))
-        except (BrowserActionError, ConfirmationRequired):
-            raise
-        except TypeError as e:
-            raise BrowserActionError(f"Error: invalid input for {name}: {e}") from e
-        except Exception as e:  # Playwright timeouts, detached nodes, closed pages
-            raise BrowserActionError(f"Error: {name} failed: {str(e).splitlines()[0][:300]}") from e
+        except ConfirmationRequired:
+            raise  # raised before the step, so nothing to re-check
+        except BrowserActionError as e:
+            error = e
+        except Exception as e:  # Playwright timeouts, detached nodes, closed pages, bad input
+            logger.warning("browser_task: %s failed", name, exc_info=True)
+            first_line = (str(e).splitlines() or [type(e).__name__])[0]
+            error = BrowserActionError(f"Error: {name} failed: {first_line[:300]}")
+        # Also after a failure: a navigation that timed out may still have left the allowlist.
         await self._enforce_allowlist()
-        if name in TAB_MEMBERS or name == "zoom":
+        if error is not None:
+            raise error
+        if name in NO_STATE_MEMBERS:
             return blocks
         return [*blocks, await self.session.browser_state()]
 
@@ -224,15 +282,30 @@ class BrowserExecutor:
             raise BrowserActionError(f"Error: tab {tab_id} does not exist. Call list_tabs.") from None
 
     async def _enforce_allowlist(self) -> None:
-        """Routing misses redirects of a request it let through; a tab that ended off the list is blanked."""
-        off = self.session.off_allowlist_tabs()
-        for tab_id in off:
-            await self.session.tabs[tab_id].goto("about:blank")
-        if off:
-            self.session.blocked_requests += len(off)
+        """Routing misses redirects of a request it let through. A child frame that ended off the list is
+        blanked; a tab that did is blanked (closed if that fails) and the call fails."""
+        blocks = self.session.blocks
+        left = False
+        for page in list(self.session.tabs.values()):
+            off_tab = blocks(page.url)
+            for frame in page.frames:
+                if frame is not page.main_frame and blocks(frame.url) and not off_tab:
+                    self.session.blocked_requests += 1
+                    try:
+                        await frame.goto("about:blank", timeout=ACTION_TIMEOUT_MS)
+                    except Exception:
+                        off_tab = True
+            if off_tab:
+                left = True
+                self.session.blocked_requests += 1
+                try:
+                    await page.goto("about:blank", timeout=ACTION_TIMEOUT_MS)
+                except Exception:
+                    logger.warning("browser_task: could not blank an off-allowlist tab; closing it", exc_info=True)
+                    await page.close()
+        if left:
             raise BrowserActionError(
-                "Error: the page left the domain allowlist (a redirect) and was blocked. "
-                "Only the allowed domains can be visited."
+                "Error: the page left the domain allowlist and was blocked. Only the allowed domains can be visited."
             )
 
     # -- targets and the guard ------------------------------------------------
@@ -260,33 +333,49 @@ class BrowserExecutor:
 
     async def _info_at(self, page: Any, target: dict[str, Any]) -> dict[str, Any] | None:
         if target.get("type") == "ref":
-            return await (await self._locator(page, target)).evaluate(_ELEMENT_INFO_JS)
-        x, y = self._point(target)
-        return await page.evaluate(f"([x, y]) => ({_ELEMENT_INFO_JS})(document.elementFromPoint(x, y))", [x, y])
+            return await (await self._locator(page, target)).evaluate(_INFO_OF_ELEMENT)
+        return await page.evaluate(_INFO_AT_POINT, list(self._point(target)))
+
+    async def _focused_info(self, page: Any) -> dict[str, Any] | None:
+        return await page.evaluate(_INFO_OF_FOCUS)
 
     @staticmethod
     def _guard(info: dict[str, Any] | None, action: str) -> None:
+        """Stop before acting on a consequential control. The reason names only our own vocabulary,
+        never the page's label text, because it reaches the outer agent."""
         if not info:
             return
-        label = " ".join(info.get("label", "").split())[:120]
-        if _CONSEQUENTIAL.search(label):
+        if info.get("frame"):
+            raise ConfirmationRequired(f"{action} inside an embedded frame that the guard cannot inspect")
+        match = _CONSEQUENTIAL.search(" ".join(info.get("label", "").split()))
+        if match:
+            word = " ".join(match.group(0).lower().split())
             raise ConfirmationRequired(
-                f'{action} on "{label}" looks like a consequential step (login, payment, message, terms or deletion)'
+                f'{action} on a control labelled "{word}" looks like a consequential step '
+                "(login, payment, message, terms or deletion)"
             )
         if info.get("submit") and info.get("sensitiveForm"):
-            raise ConfirmationRequired(f'{action} on "{label}" would submit a form with password or payment fields')
+            raise ConfirmationRequired(f"{action} would submit a form with password or payment fields")
 
     @staticmethod
     def _guard_entry(info: dict[str, Any] | None) -> None:
-        if info and (
-            info.get("type") == "password" or info.get("autocomplete", "").startswith(("cc-", "current-password"))
-        ):
+        if not info:
+            return
+        if info.get("frame"):
+            raise ConfirmationRequired("typing inside an embedded frame that the guard cannot inspect")
+        if info.get("type") == "password" or info.get("autocomplete", "").startswith(("cc-", "current-password")):
             raise ConfirmationRequired(
                 "entering text into a password or payment field (credentials are never provided)"
             )
 
-    async def _focused_info(self, page: Any) -> dict[str, Any] | None:
-        return await page.evaluate(f"() => ({_ELEMENT_INFO_JS})(document.activeElement)")
+    async def _press(self, page: Any, chord: str) -> None:
+        """Press one chord, checking the focused control first when the key activates it."""
+        if chord.split("+")[-1] in _ACTIVATING_KEYS:
+            info = await self._focused_info(page)
+            if info and info.get("sensitiveForm") and "Enter" in chord:
+                raise ConfirmationRequired("pressing Enter would submit a form with password or payment fields")
+            self._guard(info, f"pressing {chord}")
+        await page.keyboard.press(chord)
 
     # -- navigation and capture ------------------------------------------------
 
@@ -318,7 +407,7 @@ class BrowserExecutor:
         self.screenshot_count += 1
         path = self.session.artifacts_dir / f"step-{self.screenshot_count:03d}.png"
         data = await self._page(tab_id).screenshot(type="png", path=str(path), timeout=ACTION_TIMEOUT_MS)
-        return [_image(data), _text("Screenshot captured.")]
+        return [_image(base64.b64encode(data).decode()), _text("Screenshot captured.")]
 
     async def _m_zoom(self, region: list[int], tab_id: str | None = None) -> list[dict[str, Any]]:
         try:
@@ -340,7 +429,7 @@ class BrowserExecutor:
             )
         finally:
             await cdp.detach()
-        return [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": shot["data"]}}]
+        return [_image(shot["data"])]
 
     # -- pointer ------------------------------------------------------------------
 
@@ -396,8 +485,9 @@ class BrowserExecutor:
 
     async def _m_left_click_drag(self, target: dict, tab_id: str | None = None, **kwargs: Any) -> list[dict]:
         page = self._page(tab_id)
-        start, end = self._point(kwargs.get("from") or {}), self._point(target)
-        self._guard(await self._info_at(page, kwargs["from"]), "drag")
+        source = kwargs.get("from") or {}
+        start, end = self._point(source), self._point(target)
+        self._guard(await self._info_at(page, source), "drag")
         await page.mouse.move(*start)
         await page.mouse.down()
         await page.mouse.move(*end, steps=10)
@@ -426,11 +516,10 @@ class BrowserExecutor:
     ) -> list[dict]:
         page = self._page(tab_id)
         notches = max(1, min(10, int(scroll_amount))) * SCROLL_NOTCH_PX
-        dx, dy = {"up": (0, -notches), "down": (0, notches), "left": (-notches, 0), "right": (notches, 0)}.get(
-            scroll_direction, (None, None)
-        )
-        if dx is None:
+        offsets = {"up": (0, -notches), "down": (0, notches), "left": (-notches, 0), "right": (notches, 0)}
+        if scroll_direction not in offsets:
             raise BrowserActionError("Error: scroll_direction must be up, down, left or right.")
+        dx, dy = offsets[scroll_direction]
         await page.mouse.move(*self._point(target))
         await page.mouse.wheel(dx, dy)
         await asyncio.sleep(0.2)  # let smooth scrolling settle before the next observation
@@ -444,37 +533,42 @@ class BrowserExecutor:
 
     async def _m_type(self, text: str, tab_id: str | None = None) -> list[dict]:
         page = self._page(tab_id)
-        self._guard_entry(await self._focused_info(page))
-        await page.keyboard.type(str(text))
+        # Typed newlines and tabs are key presses (Enter submits, Tab moves focus): send them through _press.
+        for i, chunk in enumerate(re.split(r"(\r\n|[\r\n\t])", str(text))):
+            if i % 2:
+                await self._press(page, "Tab" if chunk == "\t" else "Enter")
+            elif chunk:
+                self._guard_entry(await self._focused_info(page))
+                await page.keyboard.type(chunk)
         return [_text("Typed the text.")]
 
     async def _m_key(self, text: str, repeat: int = 1, tab_id: str | None = None) -> list[dict]:
         page = self._page(tab_id)
         chords = [_chord(part) for part in str(text).split()]
-        if any(c.split("+")[-1] == "Enter" for c in chords):
-            info = await self._focused_info(page)
-            if info and info.get("sensitiveForm"):
-                raise ConfirmationRequired("pressing Enter would submit a form with password or payment fields")
-            self._guard(info, "Enter")
         for _ in range(max(1, min(100, int(repeat)))):
             for chord in chords:
-                await page.keyboard.press(chord)
+                await self._press(page, chord)
         return [_text(f"Pressed {text}.")]
 
     async def _m_hold_key(self, text: str, duration: float, tab_id: str | None = None) -> list[dict]:
         page = self._page(tab_id)
         keys = [_key_name(k) for k in str(text).split("+") if k]
+        if keys and keys[-1] in _ACTIVATING_KEYS:
+            info = await self._focused_info(page)
+            if info and info.get("sensitiveForm") and "Enter" in keys[-1]:
+                raise ConfirmationRequired("holding Enter would submit a form with password or payment fields")
+            self._guard(info, f"holding {keys[-1]}")
         for k in keys:
             await page.keyboard.down(k)
         try:
-            await asyncio.sleep(max(0.0, min(30.0, float(duration))))
+            await asyncio.sleep(_seconds(duration))
         finally:
             for k in reversed(keys):
                 await page.keyboard.up(k)
         return [_text(f"Held {text}.")]
 
     async def _m_wait(self, duration: float, tab_id: str | None = None) -> list[dict]:
-        await asyncio.sleep(max(0.0, min(30.0, float(duration))))
+        await asyncio.sleep(_seconds(duration))
         return [_text(f"Waited {duration} seconds.")]
 
     # -- page reading ---------------------------------------------------------------
@@ -513,11 +607,12 @@ class BrowserExecutor:
             if "[ref_" in line
         ]
         scored = []
+        field_words = len(words & _FIND_FIELD_WORDS)
         for i, line in enumerate(lines):
-            low = line.lower()
-            score = sum(w in low for w in words) + (_line_role(line) in _INTERACTIVE_ROLES) * 0.5
-            synonyms = {"search": "textbox", "box": "textbox", "field": "textbox", "input": "textbox"}
-            score += sum(0.5 for w, role in synonyms.items() if w in words and _line_role(line) in (role, "searchbox"))
+            role = _line_role(line)
+            score = sum(w in line.lower() for w in words) + (role in _INTERACTIVE_ROLES) * 0.5
+            if role in ("textbox", "searchbox"):
+                score += 0.5 * field_words
             if score >= 1:
                 scored.append((-score, i, line))
         matches = [line for _, _, line in sorted(scored)[:FIND_LIMIT]]
@@ -536,7 +631,7 @@ class BrowserExecutor:
 
     async def _m_form_input(self, target: dict, value: str | float | bool, tab_id: str | None = None) -> list[dict]:
         locator = await self._locator(self._page(tab_id), target)
-        info = await locator.evaluate(_ELEMENT_INFO_JS)
+        info = await locator.evaluate(_INFO_OF_ELEMENT)
         self._guard_entry(info)
         tag = await locator.evaluate("el => el.tagName.toLowerCase()")
         if isinstance(value, bool) or info.get("type") in ("checkbox", "radio"):
@@ -544,10 +639,9 @@ class BrowserExecutor:
                 self._guard(info, "checking")
             await locator.set_checked(bool(value), timeout=ACTION_TIMEOUT_MS)
         elif tag == "select":
-            try:
-                await locator.select_option(value=str(value), timeout=2000)
-            except Exception:
-                await locator.select_option(label=str(value), timeout=ACTION_TIMEOUT_MS)
+            values = await locator.evaluate("el => [...el.options].map(o => o.value)")
+            option = {"value": str(value)} if str(value) in values else {"label": str(value)}
+            await locator.select_option(**option, timeout=ACTION_TIMEOUT_MS)
         else:
             await locator.fill(str(value), timeout=ACTION_TIMEOUT_MS)
         return [_text(f"Set {target.get('ref')}.")]

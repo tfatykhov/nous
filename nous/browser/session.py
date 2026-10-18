@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from types import TracebackType
 from typing import Any
@@ -17,7 +19,7 @@ VIEWPORT = {"width": 1280, "height": 800}
 # /dev/shm is 64M in the container; Chromium crashes on big pages without this.
 CHROMIUM_ARGS = ["--disable-dev-shm-usage"]
 
-_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f  ]")
+_CONTROL_CHARS = re.compile("[\x00-\x1f\x7f\u2028\u2029]")
 
 
 def clean_text(value: str, limit: int) -> str:
@@ -32,6 +34,9 @@ class DomainAllowlist:
         hosts = {h for h in (self._normalize(d) for d in domains) if h}
         if not hosts:
             raise ValueError("allowed_domains must name at least one host")
+        bare = sorted(h for h in hosts if "." not in h and h != "localhost" and not _is_ip(h))
+        if bare:
+            raise ValueError(f"allowed_domains entries must be hosts, not bare suffixes: {', '.join(bare)}")
         self.hosts = frozenset(hosts)
 
     @staticmethod
@@ -53,13 +58,28 @@ class DomainAllowlist:
         return any(host == h or host.endswith("." + h) for h in self.hosts)
 
 
+def _is_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return False
+    return True
+
+
+async def _quietly(close: Callable[[], Awaitable[Any]]) -> None:
+    try:
+        await close()
+    except Exception:
+        logger.warning("browser_task: browser teardown step failed", exc_info=True)
+
+
 class BrowserSession:
     """Headless Chromium with a fresh profile, a tab registry and allowlist routing.
 
     Every request the context makes goes through `_route`: anything off the
     allowlist is aborted. Playwright does not route the redirects of a request
-    it already let through, so callers re-check page URLs after each action
-    (`off_allowlist_tabs`). Service workers (which bypass routing) and
+    it already let through, so callers re-check page and frame URLs after each
+    action (`blocks`). Service workers (which bypass routing) and
     WebSockets are blocked; downloads are refused.
     """
 
@@ -103,15 +123,19 @@ class BrowserSession:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        for closer in (self._context, self._browser):
-            if closer is not None:
-                try:
-                    await closer.close()
-                except Exception:
-                    logger.debug("browser_task: close failed", exc_info=True)
-        if self._playwright is not None:
-            await self._playwright.stop()
+        # Each step runs even if an earlier one failed or was cancelled, so Chromium is never orphaned.
+        context, browser, playwright = self._context, self._browser, self._playwright
         self._context = self._browser = self._playwright = None
+        try:
+            if context is not None:
+                await _quietly(context.close)
+        finally:
+            try:
+                if browser is not None:
+                    await _quietly(browser.close)
+            finally:
+                if playwright is not None:
+                    await _quietly(playwright.stop)
 
     async def _route(self, route: Any) -> None:
         if self.allowlist.allows(route.request.url):
@@ -148,11 +172,7 @@ class BrowserSession:
         return self.tabs[self.active_tab]
 
     def page(self, tab_id: str | None) -> Any:
-        if tab_id is None:
-            return self.active_page
-        if tab_id not in self.tabs:
-            raise KeyError(tab_id)
-        return self.tabs[tab_id]
+        return self.active_page if tab_id is None else self.tabs[tab_id]
 
     async def new_tab(self) -> str:
         page = await self._context.new_page()
@@ -160,8 +180,9 @@ class BrowserSession:
         self.active_tab = tab_id
         return tab_id
 
-    def off_allowlist_tabs(self) -> list[str]:
-        return [t for t, p in self.tabs.items() if p.url != "about:blank" and not self.allowlist.allows(p.url)]
+    def blocks(self, url: str) -> bool:
+        """A web URL off the allowlist. about:, data: and error pages are not web documents."""
+        return urlsplit(url).scheme in ("http", "https") and not self.allowlist.allows(url)
 
     async def browser_state(self, *, with_changes: bool = True) -> dict[str, Any]:
         """The full tab inventory as a browser_state block; page-supplied text is cleaned."""
