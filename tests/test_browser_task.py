@@ -12,6 +12,7 @@ Playwright or its browser is not installed.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import http.server
 import ipaddress
@@ -1111,6 +1112,7 @@ def site(tmp_path: Path):
     (root / "guard.html").write_text(GUARD_HTML)
     (root / "drag.html").write_text(DRAG_HTML)
     (root / "blind.html").write_text(BLIND_HTML)
+    (root / "nav.html").write_text(_NAV_PAGE)
     _SEEN_HOSTS.clear()
     _QuietHandler.redirect_to = f"http://localhost:{port}/second.html"
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -1122,9 +1124,16 @@ def site(tmp_path: Path):
 
 class _QuietHandler(http.server.SimpleHTTPRequestHandler):
     redirect_to = ""
+    paths: list[str] = []
 
     def do_GET(self) -> None:
         _SEEN_HOSTS.append(self.headers.get("Host", ""))
+        type(self).paths.append(self.path)
+        if self.path == "/continue":  # an allowed link that redirects to an allowed action URL
+            self.send_response(302)
+            self.send_header("Location", "/unsubscribe?token=abc")
+            self.end_headers()
+            return
         if self.path == "/redir":  # an allowed host that redirects off the allowlist
             self.send_response(302)
             self.send_header("Location", self.redirect_to)
@@ -2433,3 +2442,167 @@ class TestTeardownReserve:
             browser_factory=_fake_factory(FakeExecutor()),
         )
         assert seen["timeout"] == pytest.approx(expected, abs=1.0)
+
+
+_NAV_PAGE = """<!doctype html><html><head><title>t</title></head><body>
+<a id="next" href="/continue">Next</a>
+<button id="jump" onclick="location = '/unsubscribe?token=abc'">Next step</button>
+<input type="checkbox" id="keep" checked aria-label="Subscribe to the newsletter"
+  onchange="document.title = 'handler-ran'">
+</body></html>"""
+
+
+@needs_chromium
+class TestNavigationTimeGuard:
+    """A redirect hop or a script navigation to a consequential URL is aborted before the server sees it."""
+
+    async def _open(self, browser, site) -> tuple[BrowserExecutor, BrowserSession]:
+        executor, session = browser
+        base, _ = site
+        _QuietHandler.paths = []
+        await executor.execute("navigate", {"url": f"{base}/nav.html"})
+        return executor, session
+
+    async def test_a_redirect_to_an_action_url_needs_confirmation_and_never_reaches_the_server(
+        self, browser, site
+    ) -> None:
+        executor, session = await self._open(browser, site)
+        with pytest.raises(ConfirmationRequired, match='"unsubscribe"') as caught:
+            await executor.execute("left_click", {"target": await _center(session, "#next")})
+        assert "abc" not in str(caught.value)
+        assert not any("/unsubscribe" in p for p in _QuietHandler.paths)
+
+    async def test_a_script_navigation_to_an_action_url_needs_confirmation(self, browser, site) -> None:
+        executor, session = await self._open(browser, site)
+        with pytest.raises(ConfirmationRequired, match='"unsubscribe"'):
+            await executor.execute("left_click", {"target": await _center(session, "#jump")})
+            await executor.execute("get_page_text", {})  # the navigation may land just after the click returns
+        assert not any("/unsubscribe" in p for p in _QuietHandler.paths)
+
+    async def test_unchecking_a_subscription_box_needs_confirmation_and_runs_no_handler(self, browser, site) -> None:
+        executor, session = await self._open(browser, site)
+        target = await _ref_of(executor, "Subscribe to the newsletter")
+        with pytest.raises(ConfirmationRequired, match='"subscri'):
+            await executor.execute("form_input", {"target": target, "value": False})
+        assert await session.active_page.title() == "t"
+        assert await session.active_page.evaluate("document.getElementById('keep').checked") is True
+
+
+class TestFinalizationUnderCancel:
+    async def test_a_deadline_during_finalization_does_not_wait_for_the_final_url(self, tmp_path: Path) -> None:
+        asked = asyncio.Event()
+        slow_calls: list[str] = []
+
+        class Slow(FakeExecutor):
+            async def checked_final_url(self) -> str | None:
+                slow_calls.append("final")
+                await asyncio.sleep(30)
+                return None
+
+        async def stall(payload: dict) -> dict:
+            asked.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        result = await run_browser_task(
+            "g",
+            ["example.com"],
+            settings=_settings(tmp_path, browser_task_timeout_seconds=1),
+            call_api=stall,
+            browser_factory=_fake_factory(Slow()),
+        )
+        assert result.status == "timeout" and slow_calls == []
+        assert loop.time() - started < 10
+
+
+@needs_chromium
+class TestNavigationFetchUsesTheProxy:
+    """`_route_navigation` fetches in the Playwright driver process, which is outside the kernel filter and uses
+    its own DNS. These prove, against a real Chromium, that the fetch goes through the egress proxy and is
+    refused by its resolve-and-check rule like any other request."""
+
+    @pytest.fixture
+    async def opened(self, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        """Every URL the egress proxy was asked to open."""
+        seen: list[str] = []
+        real = egress.EgressProxy._open
+
+        async def spy(self, host: str, port: int, url: str):
+            seen.append(url)
+            return await real(self, host, port, url)
+
+        monkeypatch.setattr(egress.EgressProxy, "_open", spy)
+        return seen
+
+    @pytest.fixture
+    async def both(self, tmp_path: Path, site, loopback_allowed, dns: FakeDns):
+        dns.answers["internal.example"] = [["127.0.0.1"]]
+        # 127.0.0.1 counts as public (test-only override); "internal.example" resolves to the same address but does not.
+        _QuietHandler.paths = []
+        async with BrowserSession(
+            DomainAllowlist(["127.0.0.1", "internal.example"]), tmp_path / "artifacts"
+        ) as session:
+            yield BrowserExecutor(session), session
+
+    async def test_the_fetch_of_a_navigation_is_seen_by_the_proxy(self, both, site, opened) -> None:
+        executor, session = both
+        base, port = site
+        await executor.execute("navigate", {"url": f"{base}/second.html"})
+        # The fetched response is fulfilled to the browser, which makes no second request of its own, so a
+        # proxy entry for the document can only come from the driver's fetch.
+        assert any(f"127.0.0.1:{port}" in url for url in opened)
+        assert _QuietHandler.paths.count("/second.html") == 1
+        assert "Second page body" in await session.active_page.inner_text("body")
+
+    async def test_the_proxy_can_refuse_a_navigation_fetch_and_the_server_gets_nothing(
+        self, both, site, opened
+    ) -> None:
+        executor, session = both
+        _, port = site
+        with contextlib.suppress(BrowserActionError):
+            await executor.execute("navigate", {"url": f"http://internal.example:{port}/second.html"})
+        assert any(f"internal.example:{port}" in url for url in opened)
+        assert session._proxy.refused >= 1
+        assert _QuietHandler.paths == []  # neither the fetch nor the browser reached the server
+
+    async def test_a_redirect_hop_to_a_refused_address_is_refused_too(self, both, site, opened) -> None:
+        executor, session = both
+        base, port = site
+        _QuietHandler.redirect_to = f"http://internal.example:{port}/second.html"
+        with contextlib.suppress(BrowserActionError):
+            await executor.execute("navigate", {"url": f"{base}/redir"})
+        assert _QuietHandler.paths == ["/redir"]  # the first hop only
+        assert any(f"internal.example:{port}" in url for url in opened) and session._proxy.refused >= 1
+
+
+@needs_chromium
+class TestNavigationFetchResolvesOnlyThroughTheProxy:
+    """Discriminates the driver's `route.fetch` from a fetch that bypasses the proxy: the name below resolves
+    only in the proxy's resolver (the driver's own DNS cannot resolve a .example name), so the page loads and
+    the server is hit only if the fetch went through the proxy."""
+
+    async def test_a_name_only_the_proxy_resolves_loads_through_the_navigation_fetch(
+        self, tmp_path: Path, site, dns: FakeDns, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        base, port = site
+        host = "only-proxy.example"
+        dns.answers[host] = [["127.0.0.1"]]
+        real = egress._permitted_address
+        monkeypatch.setattr(egress, "_permitted_address", lambda h, a: real(h, a) or h == host)
+        opened: list[str] = []
+        real_open = egress.EgressProxy._open
+
+        async def spy(self, h: str, p: int, url: str):
+            opened.append(h)
+            return await real_open(self, h, p, url)
+
+        monkeypatch.setattr(egress.EgressProxy, "_open", spy)
+        _QuietHandler.paths = []
+        async with BrowserSession(DomainAllowlist([host]), tmp_path / "artifacts") as session:
+            executor = BrowserExecutor(session)
+            await executor.execute("navigate", {"url": f"http://{host}:{port}/second.html"})
+            assert "Second page body" in await session.active_page.inner_text("body")
+        assert _QuietHandler.paths.count("/second.html") == 1
+        assert host in opened

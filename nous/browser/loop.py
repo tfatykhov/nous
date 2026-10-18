@@ -482,11 +482,11 @@ async def _run(
                 finished = True
             finally:
                 state.blocked_requests = executor.blocked_requests
-                final = await executor.checked_final_url()  # enforces the allowlist before the URL is read
-                state.left_allowlist = final is None
-                state.final_url = _bare_url(final) if final else ""
                 task = asyncio.current_task()
-                if not (task and task.cancelling()):  # after a timeout, close fast instead
+                if not (task and task.cancelling()):  # after a timeout: no final URL, no screenshot, close fast
+                    final = await executor.checked_final_url()  # enforces the allowlist before the URL is read
+                    state.left_allowlist = final is None
+                    state.final_url = _bare_url(final) if final else ""
                     state.screenshot_path = await executor.final_screenshot(artifacts_dir / "final.png")
     except Exception:
         if not finished:

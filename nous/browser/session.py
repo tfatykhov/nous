@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ipaddress
 import logging
 import os
@@ -12,7 +13,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from types import TracebackType
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from nous.browser import egress, firewall
 
@@ -228,6 +229,10 @@ def _kill_chromium(marker: str) -> None:
         logger.warning("browser_task: killed Chromium (pid %d) after a teardown step hung", pid)
 
 
+NAVIGATION_SETTLE_SECONDS = 5.0
+NAVIGATION_GRACE_SECONDS = 0.2
+
+
 class BrowserSession:
     """Headless Chromium with a fresh profile, a tab registry, an egress proxy and allowlist routing.
 
@@ -256,6 +261,12 @@ class BrowserSession:
         self.tabs: dict[str, Any] = {}  # tab_id -> playwright Page, in opening order
         self.active_tab: str | None = None
         self.opened_during_call: list[str] = []
+        # Set by `_route` when a navigation (first request or a redirect hop) was aborted for a consequential
+        # URL: the matched word only. The executor turns it into ConfirmationRequired after the current action.
+        self.pending_confirmation: str | None = None
+        self._navigations_in_flight = 0
+        self._navigations_idle = asyncio.Event()
+        self._navigations_idle.set()
         self._next_tab = 1
         self._proxy: egress.EgressProxy | None = None
         self._playwright: Any = None
@@ -348,12 +359,60 @@ class BrowserSession:
         self.blocked_requests += 1
 
     async def _route(self, route: Any) -> None:
-        if self.allowlist.allows(route.request.url):
+        request = route.request
+        if self.allowlist.allows(request.url):
+            if request.is_navigation_request():
+                self._navigations_in_flight += 1
+                self._navigations_idle.clear()
+                try:
+                    await self._route_navigation(route)
+                finally:
+                    self._navigations_in_flight -= 1
+                    if not self._navigations_in_flight:
+                        self._navigations_idle.set()
+                return
             await route.continue_()
             return
         self.blocked_requests += 1
         logger.info("browser_task: blocked request to %s", urlsplit(route.request.url).hostname)
         await route.abort("blockedbyclient")
+
+    async def settle_navigations(self, grace: float = 0.0) -> None:
+        """Wait for navigation requests being checked, so that a verdict on one is not missed. `grace` first
+        gives a navigation the action just started time to reach the route handler."""
+        if grace:
+            await asyncio.sleep(grace)
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._navigations_idle.wait(), NAVIGATION_SETTLE_SECONDS)
+
+    async def _route_navigation(self, route: Any) -> None:
+        """A navigation (main frame or subframe) is checked for a consequential URL on the first request and on
+        every redirect hop: a redirect or a script can reach a state-changing GET that no click guard saw.
+        Playwright does not route a hop the browser follows by itself after `continue_`, so the response is
+        fetched here (through the same egress proxy) without following redirects, the Location is checked,
+        and the response is handed to the browser, which requests the next hop and so routes it again.
+        Subresources (images, scripts, XHR) are not checked: too noisy, and not navigations."""
+        from nous.browser.executor import consequential_url  # the executor imports this module
+
+        request = route.request
+        word = consequential_url(request.url)
+        response = None
+        if not word:
+            try:
+                response = await route.fetch(max_redirects=0)
+            except Exception:
+                logger.info("browser_task: a navigation request failed", exc_info=True)
+                await route.abort("failed")
+                return
+            location = response.headers.get("location")
+            if 300 <= response.status < 400 and location:
+                word = consequential_url(urljoin(request.url, location))
+        if word:
+            self.pending_confirmation = self.pending_confirmation or word
+            logger.info("browser_task: aborted a navigation to a consequential URL (%s)", word)
+            await route.abort("blockedbyclient")
+            return
+        await route.fulfill(response=response)
 
     async def _block_websocket(self, ws: Any) -> None:
         self.blocked_requests += 1

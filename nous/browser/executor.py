@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, unquote, urlsplit
 
-from nous.browser.session import VIEWPORT, BrowserSession
+from nous.browser.session import NAVIGATION_GRACE_SECONDS, VIEWPORT, BrowserSession
 
 logger = logging.getLogger(__name__)
 
@@ -413,6 +413,7 @@ class BrowserExecutor:
         # A navigation an earlier call started (a delayed script, a slow redirect) may have left the allowlist
         # after that call's check: never read, capture or act on such a page. It is blanked and the call fails.
         await self._enforce_allowlist()
+        await self._raise_pending_navigation()
         error: BrowserActionError | None = None
         try:
             blocks = await handler(**(input_ or {}))
@@ -426,11 +427,23 @@ class BrowserExecutor:
             error = BrowserActionError(f"Error: {name} failed: {first_line[:300]}")
         # Also after a failure: a navigation that timed out may still have left the allowlist.
         await self._enforce_allowlist()
+        await self._raise_pending_navigation(
+            NAVIGATION_GRACE_SECONDS
+        )  # takes precedence over the failure the aborted navigation caused
         if error is not None:
             raise error
         if name in NO_STATE_MEMBERS:
             return blocks
         return [*blocks, await self.session.browser_state()]
+
+    async def _raise_pending_navigation(self, grace: float = 0.0) -> None:
+        """A navigation (redirect hop or script) to a consequential URL was aborted by the route handler."""
+        await self.session.settle_navigations(grace)
+        word, self.session.pending_confirmation = self.session.pending_confirmation, None
+        if word:
+            raise ConfirmationRequired(
+                f'a page navigation to a URL containing "{word}" looks like a consequential step'
+            )
 
     def _page(self, tab_id: str | None) -> Any:
         try:
@@ -842,8 +855,10 @@ class BrowserExecutor:
         self._guard_entry(info)
         tag = await locator.evaluate("el => el.tagName.toLowerCase()")
         if isinstance(value, bool) or info.get("type") in ("checkbox", "radio"):
-            if value:
-                self._guard(info, "checking")
+            # Checking and unchecking both fire change handlers: guard every real state change.
+            current = await locator.evaluate("el => el.checked")
+            if bool(value) != bool(current):
+                self._guard(info, "checking" if value else "unchecking")
             await locator.set_checked(bool(value), timeout=ACTION_TIMEOUT_MS)
         elif tag == "select":
             values = await locator.evaluate("el => [...el.options].map(o => o.value)")
