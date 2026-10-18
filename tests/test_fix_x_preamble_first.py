@@ -259,3 +259,25 @@ def test_every_request_site_is_reviewed_for_the_preamble():
         f"request sites changed; put the preamble at system block 0 and review _REVIEWED_SITES. "
         f"unreviewed or changed: {new}; reviewed but not found: {gone}"
     )
+
+
+def test_only_the_client_module_talks_to_the_messages_api_directly():
+    # The call-site guard above follows calls on an LLM client. A module could still reach the API without one:
+    # its own SDK client, or an HTTP post to the endpoint. Neither is reviewed for the preamble or for
+    # with_default_thinking, so both may appear only in nous/api/anthropic_client.py.
+    root = Path(nous.__file__).resolve().parent
+    allowed = root / "api" / "anthropic_client.py"
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        if path == allowed:
+            continue
+        text = path.read_text(encoding="utf-8")
+        tree = ast.parse(text)
+        sdk = any(
+            (isinstance(node, ast.Import) and any(a.name.split(".")[0] == "anthropic" for a in node.names))
+            or (isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "anthropic")
+            for node in ast.walk(tree)
+        )
+        if sdk or "/v1/messages" in text:
+            offenders.append(str(path.relative_to(root)))
+    assert offenders == [], offenders
