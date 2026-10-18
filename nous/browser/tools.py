@@ -53,7 +53,7 @@ def register_browser_tools(dispatcher: ToolDispatcher, settings: Any) -> None:
     ) -> dict[str, Any]:
         result = await run_browser_task(goal, allowed_domains, start_url, max_steps, settings=settings)
         text = result.render()
-        if result.status in ("error", "timeout"):
+        if result.status in ("error", "timeout", "busy"):
             return _tool_error(text)
         return {"content": [{"type": "text", "text": text}]}
 

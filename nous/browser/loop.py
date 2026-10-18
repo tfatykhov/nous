@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import shutil
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
@@ -25,9 +27,17 @@ import httpx
 
 from nous.api.anthropic_client import _retry_delay, _should_retry
 from nous.browser.executor import BrowserActionError, BrowserExecutor, ConfirmationRequired
-from nous.browser.session import BrowserSession, DomainAllowlist
+from nous.browser.session import BrowserSession, DomainAllowlist, check_resolution, host_problem
 
 logger = logging.getLogger(__name__)
+
+# One browser task at a time in this process: each is a full Chromium. A second call waits within its own
+# time budget, then returns `busy`.
+_BROWSER_SLOT = asyncio.Semaphore(1)
+# Run directories under <workspace>/browser-task/: older ones are pruned when a task starts.
+KEEP_RUNS = 50
+KEEP_RUN_DAYS = 7
+_RUN_DIR = re.compile(r"[0-9a-f]{12}")
 
 # The models the browser toolset accepts (browser-use tool docs, Compatibility).
 # The background model (default claude-sonnet-4-6, which the heartbeat falls back to) and the
@@ -131,7 +141,7 @@ def validate_model(model: str) -> None:
 class BrowserTaskResult:
     """What the outer agent gets back. `summary` is model-written text, never raw page content."""
 
-    status: str  # completed | needs_confirmation | max_steps | timeout | error
+    status: str  # completed | needs_confirmation | max_steps | timeout | busy | error
     summary: str
     run_id: str
     steps: int = 0
@@ -283,13 +293,17 @@ async def run_browser_task(
     """Run one browser task to a BrowserTaskResult. Never raises for task failures."""
     run_id = uuid.uuid4().hex[:12]
     model = settings.browser_task_model
+    clock = asyncio.get_running_loop()
+    started = clock.time()
     try:
         validate_model(model)
         allowlist = DomainAllowlist(allowed_domains or [])
+        hosts = set(allowlist.hosts)
+        if start_url:
+            hosts.add(_start_host(allowlist, start_url))
+        await check_resolution(hosts)
     except ValueError as e:
         return BrowserTaskResult("error", str(e), run_id)
-    if start_url and not allowlist.allows(start_url if "://" in start_url else f"https://{start_url}"):
-        return BrowserTaskResult("error", f"start_url {start_url!r} is not on the allowed domains.", run_id)
 
     try:
         requested = int(max_steps or settings.browser_task_max_steps)
@@ -300,27 +314,72 @@ async def run_browser_task(
     if budget < settings.browser_task_timeout_seconds:
         logger.warning("browser_task: timeout clamped to %ss by NOUS_TOOL_TIMEOUT", max(1, budget))
     timeout = max(1.0, min(float(settings.browser_task_timeout_seconds), budget))
-    artifacts_dir = Path(settings.workspace_dir) / "browser-task" / run_id
-    factory = browser_factory or _real_browser
-    state = BrowserTaskResult("timeout", "", run_id)
-
-    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as http:
-        api = call_api or make_api_caller(settings, http)
-        try:
-            await asyncio.wait_for(
-                _run(goal, allowlist, start_url, steps_cap, model, api, factory, artifacts_dir, state), timeout
-            )
-        except TimeoutError:
-            state.status = "timeout"
-            state.summary = f"Stopped after {timeout:g}s. Last progress: {state.summary or 'none'}"
-        except BrowserApiError as e:
-            logger.warning("browser_task %s: %s", run_id, e)
-            state.status, state.summary = "error", str(e)
-        except Exception as e:  # Playwright failed to start, or an executor bug
-            logger.exception("browser_task %s failed", run_id)
-            state.status, state.summary = "error", f"browser_task failed: {type(e).__name__}: {str(e)[:300]}"
+    try:
+        await asyncio.wait_for(_BROWSER_SLOT.acquire(), max(0.0, timeout - (clock.time() - started)))
+    except TimeoutError:
+        return BrowserTaskResult(
+            "busy",
+            f"Another browser_task was still running after {timeout:g}s; only one runs at a time. Try again later.",
+            run_id,
+        )
+    try:
+        # Resolving and waiting come out of the same budget, so the task still ends before NOUS_TOOL_TIMEOUT.
+        timeout = max(1.0, timeout - (clock.time() - started))
+        runs_dir = Path(settings.workspace_dir) / "browser-task"
+        await asyncio.to_thread(prune_runs, runs_dir)
+        factory = browser_factory or _real_browser
+        state = BrowserTaskResult("timeout", "", run_id)
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as http:
+            api = call_api or make_api_caller(settings, http)
+            try:
+                await asyncio.wait_for(
+                    _run(goal, allowlist, start_url, steps_cap, model, api, factory, runs_dir / run_id, state), timeout
+                )
+            except TimeoutError:
+                state.status = "timeout"
+                state.summary = f"Stopped after {timeout:g}s. Last progress: {state.summary or 'none'}"
+            except BrowserApiError as e:
+                logger.warning("browser_task %s: %s", run_id, e)
+                state.status, state.summary = "error", str(e)
+            except Exception as e:  # Playwright failed to start, or an executor bug
+                logger.exception("browser_task %s failed", run_id)
+                state.status, state.summary = "error", f"browser_task failed: {type(e).__name__}: {str(e)[:300]}"
+    finally:
+        _BROWSER_SLOT.release()
     logger.info("browser_task %s finished: %s after %d steps", run_id, state.status, state.steps)
     return state
+
+
+def _start_host(allowlist: DomainAllowlist, start_url: str) -> str:
+    """start_url's host, checked like an allowlist entry; raises ValueError."""
+    url = start_url if "://" in start_url else f"https://{start_url}"
+    if not allowlist.allows(url):
+        raise ValueError(f"start_url {start_url!r} is not on the allowed domains.")
+    host = (urlsplit(url).hostname or "").rstrip(".")
+    if why := host_problem(host):
+        raise ValueError(f"start_url {start_url!r} refused: {host!r} {why}.")
+    return host
+
+
+def prune_runs(runs_dir: Path) -> None:
+    """Delete run directories older than KEEP_RUN_DAYS, and all but the newest KEEP_RUNS - 1 (the run about
+    to start makes KEEP_RUNS). Only directories named like a run id are touched."""
+    try:
+        runs = [p for p in runs_dir.iterdir() if _RUN_DIR.fullmatch(p.name) and p.is_dir() and not p.is_symlink()]
+    except OSError:  # no runs yet
+        return
+    runs.sort(key=_mtime, reverse=True)
+    cutoff = time.time() - KEEP_RUN_DAYS * 86_400
+    for i, run in enumerate(runs):
+        if i >= KEEP_RUNS - 1 or _mtime(run) < cutoff:
+            shutil.rmtree(run, ignore_errors=True)
+
+
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 async def _run(

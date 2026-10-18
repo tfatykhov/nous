@@ -88,6 +88,13 @@ RUN useradd --create-home --shell /bin/bash claude-runner \
     && chmod -R a+rX "$(npm root -g)" \
     && echo "claude-runner ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 
+# browser_task (F100) runs Chromium as nous-browser: a system user with no sudo, no login shell and no
+# groups beyond its own, so a renderer exploit does not get root in the container that holds the
+# database and API credentials. nous/browser/chromium-as-user.sh drops to it with setpriv; its home only
+# holds Chromium's caches.
+RUN useradd --system --create-home --home-dir /home/nous-browser --shell /usr/sbin/nologin nous-browser \
+    && chmod 0755 /app/nous/browser/chromium-as-user.sh
+
 HEALTHCHECK --interval=30s --timeout=10s \
   CMD curl -f http://localhost:8000/health || exit 1
 

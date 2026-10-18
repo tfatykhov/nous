@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import logging
 import re
 from pathlib import Path
@@ -241,8 +242,11 @@ class BrowserExecutor:
             return ""
 
     async def final_screenshot(self, path: Path) -> str | None:
-        """Save the active tab's viewport for the owner; never sent to any model."""
+        """Save the active tab's viewport for the owner; never sent to any model. A tab that left the
+        allowlist since the last call is blanked first."""
         try:
+            with contextlib.suppress(BrowserActionError):
+                await self._enforce_allowlist()
             await self.session.active_page.screenshot(path=str(path), type="png", timeout=FINAL_SCREENSHOT_TIMEOUT_MS)
         except Exception as e:
             logger.warning("browser_task: final screenshot failed: %s", e)
@@ -256,6 +260,9 @@ class BrowserExecutor:
         if handler is None:
             raise BrowserActionError(f"Error: {name} is not implemented by this executor.")
         self.session.opened_during_call = []
+        # A navigation an earlier call started (a delayed script, a slow redirect) may have left the allowlist
+        # after that call's check: never read, capture or act on such a page. It is blanked and the call fails.
+        await self._enforce_allowlist()
         error: BrowserActionError | None = None
         try:
             blocks = await handler(**(input_ or {}))
@@ -282,8 +289,9 @@ class BrowserExecutor:
             raise BrowserActionError(f"Error: tab {tab_id} does not exist. Call list_tabs.") from None
 
     async def _enforce_allowlist(self) -> None:
-        """Routing misses redirects of a request it let through. A child frame that ended off the list is
-        blanked; a tab that did is blanked (closed if that fails) and the call fails."""
+        """Runs before and after every call, behind the egress proxy and routing (which misses redirects of a
+        request it let through). A child frame off the list is blanked; a tab that is off it is blanked
+        (closed if that fails) and the call fails."""
         blocks = self.session.blocks
         left = False
         for page in list(self.session.tabs.values()):
