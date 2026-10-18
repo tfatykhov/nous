@@ -2,6 +2,10 @@ services:
   nous:
     build: .
     container_name: nous-agent
+    # F100 browser_task: the egress filter (iptables owner match on the nous-browser user) needs NET_ADMIN.
+    # Without it the browser task refuses to start.
+    cap_add:
+      - NET_ADMIN
     ports:
       - "${NOUS_PORT:-8000}:8000"
     environment:
@@ -118,6 +122,14 @@ services:
       - NOUS_STALENESS_PENALTY_ENABLED=${NOUS_STALENESS_PENALTY_ENABLED:-true}
       - NOUS_STALENESS_HALF_LIFE_DAYS=${NOUS_STALENESS_HALF_LIFE_DAYS:-14}
       - NOUS_TOOL_TIMEOUT=${NOUS_TOOL_TIMEOUT:-120}
+      # F100: browser_task (off by default; acts on live websites). No empty defaults here: the bool and
+      # numeric settings reject an empty string.
+      - NOUS_BROWSER_TASK_ENABLED=${NOUS_BROWSER_TASK_ENABLED:-false}
+      - NOUS_BROWSER_TASK_MODEL=${NOUS_BROWSER_TASK_MODEL:-claude-sonnet-5-5}
+      - NOUS_BROWSER_TASK_MAX_STEPS=${NOUS_BROWSER_TASK_MAX_STEPS:-30}
+      - NOUS_BROWSER_TASK_TIMEOUT_SECONDS=${NOUS_BROWSER_TASK_TIMEOUT_SECONDS:-110}
+      - NOUS_BROWSER_TASK_PROXY_PORT=${NOUS_BROWSER_TASK_PROXY_PORT:-18181}
+      - NOUS_BROWSER_TASK_REQUIRE_EGRESS_FIREWALL=${NOUS_BROWSER_TASK_REQUIRE_EGRESS_FIREWALL:-true}
       - NOUS_KEEPALIVE_INTERVAL=${NOUS_KEEPALIVE_INTERVAL:-10}
       # Event-loop watchdog: dump every thread's stack and exit on a stall
       - NOUS_EVENT_LOOP_WATCHDOG_ENABLED=${NOUS_EVENT_LOOP_WATCHDOG_ENABLED:-true}

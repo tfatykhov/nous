@@ -55,6 +55,7 @@ TOOL_CLASSES: Mapping[str, ToolClass] = MappingProxyType({
     "heartbeat_check_create": _SPAWN, "dag_create": _SPAWN,
     # leave the host — NOT compensable (cannot unsend)
     "send_file": _EXTERNAL, "send_email": _EXTERNAL,
+    "browser_task": _EXTERNAL,  # F100: acts on live websites
 })
 
 # Python that opens a connection to another host: a network module imported

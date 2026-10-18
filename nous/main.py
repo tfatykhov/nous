@@ -900,6 +900,13 @@ async def create_components(settings: Settings) -> dict:
         register_email_tools(dispatcher, settings)
         logger.info("Guarded email tool registered (send_email)")
 
+    # F100: isolated browser-use loop (ships off)
+    if settings.browser_task_enabled:
+        from nous.browser.tools import register_browser_tools
+
+        register_browser_tools(dispatcher, settings)
+        logger.info("Browser task tool registered (browser_task, model %s)", settings.browser_task_model)
+
     # F020: Register cache_retrieve tool
     from nous.api.tools import register_cache_retrieve_tool
 

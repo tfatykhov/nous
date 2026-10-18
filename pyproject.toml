@@ -60,6 +60,10 @@ dev = [
 # COPY nous/ nous/ does NOT include this sibling package.
 include = ["nous*", "nous_eval*"]
 
+[tool.setuptools.package-data]
+# browser_task's Chromium launcher (F100), run as Playwright's executable_path.
+"nous.browser" = ["*.sh"]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 asyncio_mode = "auto"

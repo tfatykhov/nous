@@ -251,8 +251,9 @@ class TestClassifySideEffectSets:
     """Verify that EXTERNAL_TOOLS and IRREVERSIBLE_TOOLS sets are respected."""
 
     def test_external_tools_set(self):
-        # send_file (Telegram) and send_email (SMTP) are external; IRREVERSIBLE is still empty
-        assert EXTERNAL_TOOLS == {"send_file", "send_email"}
+        # send_file (Telegram), send_email (SMTP) and browser_task (F100, live websites) are external;
+        # IRREVERSIBLE is still empty
+        assert EXTERNAL_TOOLS == {"send_file", "send_email", "browser_task"}
         assert len(IRREVERSIBLE_TOOLS) == 0
 
     def test_monkey_patch_external_tool(self, monkeypatch):
