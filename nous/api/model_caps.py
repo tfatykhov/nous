@@ -18,6 +18,8 @@ from typing import Any
 _FAMILY_FIRST = re.compile(r"claude-haiku-(\d+)")
 # claude-3-5-haiku-20241022, claude-3-haiku-20240307
 _VERSION_FIRST = re.compile(r"claude-(\d+)(?:-\d+)?-haiku")
+# Effort levels Haiku 5.5 refuses with thinking disabled ("Use effort 'high' or below, or enable thinking").
+_EFFORT_ABOVE_HIGH = frozenset({"xhigh", "max"})
 
 
 def _haiku_major(model: str) -> int | None:
@@ -61,7 +63,13 @@ def with_default_thinking(payload: dict[str, Any]) -> dict[str, Any]:
     A payload that already has a ``thinking`` key is returned unchanged, so an
     explicit choice (adaptive, enabled, disabled) always stands. So is a payload
     for any model other than Haiku 5 and later: those requests stay byte-identical.
+    So is one asking for effort above ``high``: Haiku 5.5 answers 400 to thinking
+    disabled at ``xhigh`` or ``max`` effort, and accepts the request without a
+    ``thinking`` field (measured 2026-10-18).
     """
     if "thinking" in payload or not disables_thinking_by_default(payload.get("model") or ""):
+        return payload
+    effort = (payload.get("output_config") or {}).get("effort")
+    if effort in _EFFORT_ABOVE_HIGH:
         return payload
     return {**payload, "thinking": {"type": "disabled"}}

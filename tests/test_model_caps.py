@@ -70,3 +70,19 @@ def test_a_payload_without_a_model_is_returned_as_is():
     payload = {"max_tokens": 512}
 
     assert with_default_thinking(payload) is payload
+
+
+@pytest.mark.parametrize("effort", ["xhigh", "max"])
+def test_effort_above_high_keeps_thinking_unset(effort):
+    # Haiku 5.5 answers 400 to thinking disabled at xhigh or max effort, and accepts the request without a
+    # thinking field (measured 2026-10-18).
+    payload = {"model": "claude-haiku-5-5", "max_tokens": 512, "output_config": {"effort": effort}}
+
+    assert with_default_thinking(payload) is payload
+
+
+@pytest.mark.parametrize("effort", ["low", "medium", "high"])
+def test_effort_up_to_high_still_gets_thinking_disabled(effort):
+    payload = {"model": "claude-haiku-5-5", "max_tokens": 512, "output_config": {"effort": effort}}
+
+    assert with_default_thinking(payload)["thinking"] == {"type": "disabled"}
