@@ -216,6 +216,7 @@ FRAME_TOOLS: dict[str, list[str]] = {
         "write_file",
         "web_search",
         "web_fetch",
+        "browser_task",  # F100; registered only when NOUS_BROWSER_TASK_ENABLED
         "cache_retrieve",
         "spawn_task",
         "spawn_sync",

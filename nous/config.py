@@ -3124,6 +3124,25 @@ class Settings(BaseSettings):
             "installations. One unreachable phone must not hold the others."
         ),
     )
+    browser_task_enabled: bool = Field(
+        default=False,
+        description="F100: register the browser_task tool (isolated browser-use loop on headless Chromium).",
+    )
+    browser_task_model: str = Field(
+        default="claude-sonnet-5-5",
+        description=(
+            "F100: the browser loop's own model, never the caller's. Must support browser_toolset_20260801 "
+            "(nous/browser/loop.py SUPPORTED_MODELS); any other value makes every call fail with that message."
+        ),
+    )
+    browser_task_max_steps: int = Field(
+        default=30, ge=1, description="F100: cap on model turns per browser_task call."
+    )
+    browser_task_timeout_seconds: float = Field(
+        default=110,
+        gt=0,
+        description="F100: wall-clock limit per call; clamped to NOUS_TOOL_TIMEOUT minus 5s, which cancels any tool.",
+    )
     a2ui_push_max_installations: int = Field(
         default=10,
         ge=1,

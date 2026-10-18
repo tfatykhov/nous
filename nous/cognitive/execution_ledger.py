@@ -60,6 +60,7 @@ _KEY_ARGS: dict[str, list[str]] = {
     "cancel_task": ["task_id", "id"],
     "web_search": ["query", "q"],
     "web_fetch": ["url"],
+    "browser_task": ["goal", "allowed_domains", "start_url"],
     "run_python": [],  # Too large to summarize — spec says skip
     "get_procedure": ["name", "procedure_name"],
     "heartbeat_check_manage": ["action", "name"],
