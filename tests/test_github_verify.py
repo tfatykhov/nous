@@ -281,7 +281,8 @@ async def test_a_pr_an_earlier_leaf_could_not_decide_is_held_for_the_later_one()
 
     early, late = leaf("early", node_id="a"), leaf("late", dag_at=DAG_AT + timedelta(hours=1), node_id="b")
     out = {s.task_id: s for s in await decide([late, early], FailOnce([pr(opened=DAG_AT + timedelta(hours=2))]))}
-    assert out["early"].v2_hold and out["late"].v2_hold  # the later leaf may not take the PR the earlier one named
+    # The reader remembers the failure for the pass: the later leaf may not take the PR the earlier one named.
+    assert out["early"].v2_hold and out["late"].v2_hold
     assert not out["late"].v2_verified
 
 

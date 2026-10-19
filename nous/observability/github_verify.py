@@ -16,8 +16,9 @@ One PR credits at most one leaf, ever:
 - then the earliest leaf of the pass, by (DAG created_at, node id).
 
 When the PR cannot be decided yet (still open, GitHub unreachable or rate-limited, the pass's call cap reached),
-``v2_hold`` keeps the row provisional for a bounded time (``task_scoring.V2_HOLD_EXTRA_DAYS``), and no later leaf of
-the pass may take that PR. Anything else earns nothing and says why in the evidence. Nothing here writes: the job
+``v2_hold`` keeps the row provisional for a bounded time (``task_scoring.V2_HOLD_EXTRA_DAYS``). The reader remembers
+failures as well as answers for the pass, so a later leaf naming the same PR is held too and cannot take it from the
+earlier one. Anything else earns nothing and says why in the evidence. Nothing here writes: the job
 scores what this returns.
 """
 
@@ -193,15 +194,12 @@ class PrVerifier:
         if not checked or not self._agents or not self._mergers:
             return list(leaves)
         taken = dict(stored.credited)
-        undecided: set[str] = set()  # PRs an earlier leaf of this pass could not decide: no later leaf may take one
         decided: dict[str, TaskSignals] = {}
         for signals in sorted(checked, key=lambda s: (s.dag_created_at or _LATE, s.node_id or "", s.task_id)):
-            decided[signals.task_id] = await self._decide(signals, stored, taken, undecided)
+            decided[signals.task_id] = await self._decide(signals, stored, taken)
         return [decided.get(s.task_id, s) for s in leaves]
 
-    async def _decide(
-        self, signals: TaskSignals, stored: StoredPrEvidence, taken: dict[str, str], undecided: set[str]
-    ) -> TaskSignals:
+    async def _decide(self, signals: TaskSignals, stored: StoredPrEvidence, taken: dict[str, str]) -> TaskSignals:
         check = signals.pr_check
         assert check is not None
         evidence = {key: list(ids) for key, ids in signals.evidence.items()}
@@ -226,8 +224,6 @@ class PrVerifier:
                 return credit(key)  # an earlier pass verified it: a merge is final, so GitHub is not asked again
             if holder is not None:
                 return outcome("v2_pr_duplicate", holder)  # another leaf took it for good: no call needed
-            if key in undecided:
-                return outcome("v2_unavailable", "an earlier leaf naming this PR is undecided", v2_hold=True)
         try:
             if number is None:  # --head: resolve once; the pin keeps a newer PR on the branch from replacing it
                 number = await self._reader.newest_pull_number(check.repo, check.head or "")
@@ -237,8 +233,6 @@ class PrVerifier:
             key = f"{check.repo}#{number}"
             pull = await self._reader.pull(check.repo, number)
         except GitHubUnavailable as exc:
-            if number is not None:
-                undecided.add(f"{check.repo}#{number}")
             return outcome("v2_unavailable", str(exc), v2_hold=True)
         if pull is None:
             return outcome("v2_rejected", "no such PR")
@@ -251,7 +245,6 @@ class PrVerifier:
             return outcome("v2_rejected", "opened before the DAG")
         if not pull.get("merged_at"):
             if pull.get("state") == "open":
-                undecided.add(key)
                 return outcome("v2_pending", "open", v2_hold=True)
             return outcome("v2_rejected", "closed without a merge")
         merger = _login(pull.get("merged_by"))
