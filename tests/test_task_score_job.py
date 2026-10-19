@@ -1046,8 +1046,13 @@ async def test_a_pass_issues_only_selects_and_the_scores_upsert(db, agent):
             continue
         assert head in ("SELECT", "INSERT"), statement
         assert not _FORBIDDEN.search(statement), statement  # no DDL, no temp table, no advisory lock, no delete
-        # table names with the schema stripped: the SQLite lane maps every schema to "main"
-        reads |= {name.split(".")[-1] for name in re.findall(r"\b(?:FROM|JOIN)\s+([\w.]+)", statement, re.I)}
+        # table names with the schema stripped: the SQLite lane maps every schema to "main". The system catalogs
+        # (pg_*) are readable by every role and need no grant: the stale-constraint read selects from one.
+        reads |= {
+            name.split(".")[-1]
+            for name in re.findall(r"\b(?:FROM|JOIN)\s+([\w.]+)", statement, re.I)
+            if not name.split(".")[-1].startswith("pg_")
+        }
         if head == "INSERT":  # the only writes are the scores upsert and the heartbeat upsert
             writes |= {name.split(".")[-1] for name in re.findall(r"\bINSERT\s+INTO\s+([\w.]+)", statement, re.I)}
 
