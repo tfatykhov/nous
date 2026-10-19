@@ -10,6 +10,7 @@ import pytest_asyncio
 from sqlalchemy import event
 
 from nous.cognitive.claim_verifier import UNVERIFIED_MARKER
+from nous.dag.approval import as_utc
 from nous.observability import task_score_gatherer as gatherer
 from nous.observability.task_scoring import score_leaf, score_rollup
 from nous.storage.models import (
@@ -336,7 +337,9 @@ async def test_a_retried_nodes_earlier_attempt_is_not_credited_by_the_dags_check
 
     assert leaves[str(first.id)].dag_checked and leaves[str(retry.id)].dag_checked
     assert score_leaf(leaves[str(first.id)], NOW).outcome == "partial"
-    assert score_leaf(leaves[str(retry.id)], NOW).outcome == "done_verified"
+    # v4: the DAG's check node is Nous-written, so it verifies neither attempt; it is evidence on both
+    assert score_leaf(leaves[str(retry.id)], NOW).outcome == "done_self"
+    assert leaves[str(retry.id)].evidence["dag_check_passed"] == [str(dag.id)]
 
 
 async def test_an_earlier_attempt_is_judged_by_the_nodes_archive_of_how_it_ended(db, agent):
@@ -404,9 +407,12 @@ async def test_an_earlier_attempt_is_judged_by_the_nodes_archive_of_how_it_ended
         "archived_passed": "partial",
         "not_archived": "partial",
     }
-    assert leaves[str(attempts["check_failed"].id)].evidence == {"node_check_failed": [str(work.id)]}
+    assert leaves[str(attempts["check_failed"].id)].evidence == {
+        "node_check_failed": [str(work.id)],
+        "dag_check_passed": [str(dag.id)],  # v4: recorded, but it credits nothing
+    }
     assert leaves[str(current.id)].node_check == "passed"
-    assert score_leaf(leaves[str(current.id)], NOW).outcome == "done_verified"  # the DAG's check confirms the retry
+    assert score_leaf(leaves[str(current.id)], NOW).outcome == "done_self"  # v4: a DAG check node is evidence only
 
 
 async def test_a_dag_keeps_only_its_own_calls_and_names_its_subtasks(db, agent):
@@ -785,3 +791,44 @@ async def test_an_archived_attempt_the_node_still_names_is_judged_by_its_archive
 
     assert leaves[str(sub.id)].node_check == "failed"
     assert score_leaf(leaves[str(sub.id)], NOW).outcome == "failed"
+
+
+async def test_a_passed_pr_check_of_the_current_attempt_is_handed_to_the_verifier(db, agent):
+    from nous.observability.task_scoring import PrCheck
+
+    dag_at = NOW - timedelta(days=1)
+    dag = ExecutionDAG(
+        id=uuid.uuid4(), agent_id=agent, name="d", status="completed", created_at=dag_at, completed_at=NOW
+    )
+    await add(db, dag)
+    canonical = "python -m nous.dag.typed_checks pr tfatykhov/nous --head fix/thing"
+
+    async def node_for(command, status="completed", error=None):
+        sub = subtask(agent)
+        node = DAGNode(
+            id=uuid.uuid4(),
+            dag_id=dag.id,
+            name=f"n-{sub.id.hex[:6]}",
+            node_type="subtask",
+            status=status,
+            error=error,
+            completion_check=command,
+            check_attempts=1,
+            last_check_at=NOW,
+            subtask_id=sub.id,
+        )
+        sub.dag_node_id = node.id
+        await add(db, node, sub)
+        return sub, node
+
+    passed, passed_node = await node_for(canonical)
+    failed, _ = await node_for(canonical, "failed", "Completion check failed: PR #5 was closed without a merge")
+    wrapped, _ = await node_for(canonical + " || true")  # not the check any more: an ordinary Nous-written one
+
+    leaves, _, _ = await gather(db, agent)
+
+    got = leaves[str(passed.id)]
+    assert got.pr_check == PrCheck("tfatykhov/nous", None, "fix/thing")
+    assert (got.node_id, got.dag_created_at) == (str(passed_node.id), as_utc(dag_at))
+    assert leaves[str(failed.id)].pr_check is None and leaves[str(failed.id)].node_check == "failed"
+    assert leaves[str(wrapped.id)].pr_check is None and leaves[str(wrapped.id)].node_check == "passed"

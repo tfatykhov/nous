@@ -34,12 +34,13 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from sqlalchemy import func, select
+from sqlalchemy import Text, cast, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.dag.approval import as_utc
 from nous.log_redaction import configure_logging
+from nous.observability.github_verify import GitHubReader, PrVerifier, StoredPrEvidence, stored_pr_evidence
 from nous.observability.task_score_gatherer import chunked, gather_signals
 from nous.observability.task_scoring import (
     LEAF_KIND,
@@ -222,14 +223,36 @@ async def _provisional_rows(
     return as_utc(oldest[0]), beyond[0], as_utc(beyond[1])
 
 
+async def _stored_pr_evidence(session: AsyncSession, agent_id: str) -> StoredPrEvidence:
+    """The PR pins and credits earlier passes recorded, any scorer version from 4 on and settled or not: one PR
+    credits one leaf for good, even after that leaf's row has left the window."""
+    result = await session.execute(
+        select(TaskScoreRow.task_id, TaskScoreRow.evidence)
+        .where(
+            TaskScoreRow.agent_id == agent_id,
+            TaskScoreRow.task_kind == LEAF_KIND,
+            TaskScoreRow.scorer_version >= 4,
+            cast(TaskScoreRow.evidence, Text).like("%v2_pr%"),
+        )
+        .order_by(TaskScoreRow.first_scored_at, TaskScoreRow.task_id)
+    )
+    return stored_pr_evidence((r.task_id, r.evidence) for r in result)
+
+
 async def run_scoring_pass(
-    database: Database, agent_id: str, *, window_days: int = SCORING_WINDOW_DAYS, now: datetime | None = None
+    database: Database,
+    agent_id: str,
+    *,
+    window_days: int = SCORING_WINDOW_DAYS,
+    now: datetime | None = None,
+    pr_verifier: PrVerifier | None = None,
 ) -> int:
     """Score every task of ``agent_id`` finished in the window and upsert the rows in one transaction.
 
     The window reaches back further when a row is still provisional although its task finished before the window
     start: it is re-scored and settled with fresh signals. It never reaches back more than ``MAX_REACHBACK_DAYS``. The
     leaves are scored first: the roll-ups read their scores. Returns the number of rows submitted to the upsert.
+    ``pr_verifier`` decides the leaves whose node passed the PR check (scorer v4); without it they stay unverified.
     """
     now = now or datetime.now(UTC)
     since = now - timedelta(days=window_days)
@@ -257,7 +280,10 @@ async def run_scoring_pass(
                 agent_id,
             )
         gathered = await gather_signals(session, agent_id, since=since)
-        leaves = [row for sig in gathered.leaves if (row := score_leaf(sig, now)) is not None]
+        leaf_signals = gathered.leaves
+        if pr_verifier is not None and any(sig.pr_check is not None for sig in leaf_signals):
+            leaf_signals = await pr_verifier.verify(leaf_signals, await _stored_pr_evidence(session, agent_id))
+        leaves = [row for sig in leaf_signals if (row := score_leaf(sig, now)) is not None]
         leaf_scores = {row.task_id: row.score for row in leaves}
         missing = sorted({c for sig in (*gathered.dags, *gathered.chains) for c in sig.child_ids} - leaf_scores.keys())
         if missing:  # children that finished before the window: their stored scores, the fresh ones winning
@@ -308,16 +334,29 @@ async def _run(agent_id: str | None, window_days: int) -> int:
     # No database.connect(): its schema probe reads information_schema for the three app schemas, which the
     # scoring role does not need to see. The engine connects on the first query.
     database = _open_database(settings)
+    reader: GitHubReader | None = None
+    verifier: PrVerifier | None = None
+    logins = [login for login in settings.scorer_agent_logins.split(",") if login.strip()]
+    if logins:
+        reader = GitHubReader(settings.scorer_github_token or None)
+        verifier = PrVerifier(reader, logins)
+    else:
+        logger.info("Task scores: NOUS_SCORER_AGENT_LOGINS is empty, so PR checks are not verified")
     try:
         if agent_id is None:
             agent_id = settings.agent_id
         now = datetime.now(UTC)
         try:
-            await run_scoring_pass(database, agent_id, window_days=window_days, now=now)
+            await run_scoring_pass(database, agent_id, window_days=window_days, now=now, pr_verifier=verifier)
         except Exception as exc:
             await _record_failed_pass(database, agent_id, exc)
             raise
     finally:
+        if reader is not None:
+            try:
+                await reader.aclose()
+            except Exception:
+                logger.warning("Task scores: closing the GitHub client failed after the pass", exc_info=True)
         try:
             await database.disconnect()
         except Exception:

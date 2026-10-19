@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, NamedTuple
 from uuid import UUID
@@ -378,11 +378,13 @@ async def _leaf_signals(session: AsyncSession, agent_id: str, since: datetime, r
         evidence[session_task[sess]]["unverified_claims"].append(event_id)
     dag_of: dict[UUID, UUID] = {}
     node_check: dict[UUID, str] = {}
+    pr_of: dict[UUID, tuple[ts.PrCheck, str, datetime | None]] = {}  # v4: (check, node id, DAG created_at)
     for chunk in chunked(ids):
         result = await session.execute(
             select(
                 Subtask.id,
                 DAGNode.dag_id,
+                ExecutionDAG.created_at.label("dag_created_at"),
                 DAGNode.id.label("node_id"),
                 DAGNode.subtask_id.label("node_subtask_id"),
                 DAGNode.status.label("node_status"),
@@ -393,6 +395,7 @@ async def _leaf_signals(session: AsyncSession, agent_id: str, since: datetime, r
                 DAGNode.attempt_history,
             )
             .join(DAGNode, Subtask.dag_node_id == DAGNode.id)
+            .join(ExecutionDAG, ExecutionDAG.id == DAGNode.dag_id)
             .where(Subtask.agent_id == agent_id, Subtask.id.in_(chunk))
         )
         for r in result:
@@ -426,6 +429,9 @@ async def _leaf_signals(session: AsyncSession, agent_id: str, since: datetime, r
             if state is not None:
                 node_check[r.id] = state
                 evidence[str(r.id)][f"node_check_{state}"].append(str(r.node_id))
+            # v4: a passed PR check of the current attempt goes to github_verify, which decides the credit.
+            if state == "passed" and (pr := ts.parse_pr_check(r.completion_check)) is not None:
+                pr_of[r.id] = (pr, str(r.node_id), as_utc(r.dag_created_at) if r.dag_created_at else None)
     checked = await run.checked(list(set(dag_of.values())))
     origin = await _origin_decisions(session, agent_id, "subtask", [str(i) for i in ids])
     graded = await _owner_grades(session, agent_id, [d for ds in origin.values() for d in ds])
@@ -433,20 +439,25 @@ async def _leaf_signals(session: AsyncSession, agent_id: str, since: datetime, r
     for r in rows:
         task = str(r.id)
         grade = _apply_grades(origin.get(task, []), graded, evidence[task])
-        out.append(
-            _signals(
-                "subtask",
-                task,
-                r.completed_at,
-                r.status,
-                r.final_outcome,
-                evidence[task],
-                tokens=(r.tokens_in or 0) + (r.tokens_out or 0),
-                grade=grade,
-                dag_checked=dag_of.get(r.id) in checked,
-                node_check=node_check.get(r.id),
-            )
+        dag_checked = dag_of.get(r.id) in checked
+        if dag_checked:  # v4: a Nous-written check node, so evidence only
+            evidence[task]["dag_check_passed"].append(str(dag_of[r.id]))
+        pr = pr_of.get(r.id)
+        signals = _signals(
+            "subtask",
+            task,
+            r.completed_at,
+            r.status,
+            r.final_outcome,
+            evidence[task],
+            tokens=(r.tokens_in or 0) + (r.tokens_out or 0),
+            grade=grade,
+            dag_checked=dag_checked,
+            node_check=node_check.get(r.id),
         )
+        if pr is not None:
+            signals = replace(signals, pr_check=pr[0], node_id=pr[1], dag_created_at=pr[2])
+        out.append(signals)
     return out
 
 

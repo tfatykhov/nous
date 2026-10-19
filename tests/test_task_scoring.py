@@ -27,7 +27,12 @@ def sig(kind="subtask", status="completed", detail=None, finished=None, **kw) ->
 
 def test_the_scorer_version_and_every_constant_are_pinned():
     # Bump SCORER_VERSION in the same commit as any constant or mapping below, then update this pin.
-    assert ts.SCORER_VERSION == 3  # v3: an earlier attempt is judged by the node's archive of how it ended
+    assert ts.SCORER_VERSION == 4  # v4: a PR merged by another login verifies; a DAG check node no longer does
+    assert ts.V2_HOLD_EXTRA_DAYS == 7
+    assert ts.PR_CHECK_RE.pattern == (
+        r"python -m nous\.dag\.typed_checks pr ([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+) "
+        r"(?:--pr ([1-9][0-9]{0,8})|--head ([A-Za-z0-9._/-]{1,200}))"
+    )
     assert ts.OUTCOME_BASE == {"done_verified": 1.0, "done_self": 0.0, "partial": 0.0, "failed": -0.5}
     assert ts.NODE_CHECK_FAILED_PREFIX == "Completion check failed"
     assert ts.NODE_CHECK_UNCONFIRMED_PREFIXES == (
@@ -134,7 +139,9 @@ def test_final_outcome(raw, verified, expected):
     [
         (sig(), "done_self", 0.0),  # Nous says it is done: that earns nothing
         (sig(owner_grade="success"), "done_verified", 1.0),  # the owner graded the decision a success
-        (sig(dag_checked=True), "done_verified", 1.0),  # a completed check node in a completed DAG
+        (sig(dag_checked=True), "done_self", 0.0),  # v4: a DAG check node is Nous-written, so evidence only
+        (sig(v2_verified=True), "done_verified", 1.0),  # v4: a PR Nous opened, merged by another login
+        (sig(v2_verified=True, node_check="failed"), "done_verified", 1.0),  # outranks its own check, as a grade
         (sig(node_check="passed"), "done_self", 0.0),  # Nous wrote its own node's check: a pass confirms nothing
         (sig(node_check="failed"), "failed", -0.5),  # the orchestrator ran that check and it exited 1
         (sig(node_check="unconfirmed"), "partial", 0.0),  # the check never said yes before the node's deadline
@@ -154,17 +161,17 @@ def test_final_outcome(raw, verified, expected):
         (sig(status="failed", detail="errored"), "failed", -0.5),
         (sig(status="failed", detail="validation_failed"), "failed", -0.5),
         (sig(status="failed", detail="errored", owner_grade="success"), "failed", -0.5),
-        (sig(dag_checked=True, owner_overrides=1), "done_verified", 0.0),  # one override cancels a verified success
+        (sig(v2_verified=True, owner_overrides=1), "done_verified", 0.0),  # one override cancels a verified success
         (sig(owner_grade="success", owner_overrides=2), "done_verified", -1.0),  # floor
-        (sig(dag_checked=True, unverified_claims=1), "done_verified", 0.5),
-        (sig(dag_checked=True, unverified_claims=3), "done_verified", -0.5),
-        (sig(dag_checked=True, harness_errors=1), "done_verified", 0.9),
-        (sig(dag_checked=True, harness_errors=5), "done_verified", 0.5),  # at the cap
-        (sig(dag_checked=True, harness_errors=50), "done_verified", 0.5),  # capped: -0.5 at most
-        (sig(dag_checked=True, refusals=1), "done_verified", 0.75),
-        (sig(dag_checked=True, refusals=2), "done_verified", 0.5),
-        (sig(dag_checked=True, refusals=40), "done_verified", 0.5),  # capped: -0.5 at most
-        (sig(dag_checked=True, harness_errors=50, refusals=40), "done_verified", 0.0),  # both caps stack
+        (sig(v2_verified=True, unverified_claims=1), "done_verified", 0.5),
+        (sig(v2_verified=True, unverified_claims=3), "done_verified", -0.5),
+        (sig(v2_verified=True, harness_errors=1), "done_verified", 0.9),
+        (sig(v2_verified=True, harness_errors=5), "done_verified", 0.5),  # at the cap
+        (sig(v2_verified=True, harness_errors=50), "done_verified", 0.5),  # capped: -0.5 at most
+        (sig(v2_verified=True, refusals=1), "done_verified", 0.75),
+        (sig(v2_verified=True, refusals=2), "done_verified", 0.5),
+        (sig(v2_verified=True, refusals=40), "done_verified", 0.5),  # capped: -0.5 at most
+        (sig(v2_verified=True, harness_errors=50, refusals=40), "done_verified", 0.0),  # both caps stack
         (sig(status="failed", detail="errored", unverified_claims=1), "failed", -1.0),  # -0.5 - 0.5
         (sig(status="failed", detail="errored", owner_overrides=5, unverified_claims=5), "failed", -1.0),  # floor
         (sig(detail="incomplete_blocked", harness_errors=3, refusals=1), "partial", -0.55),
@@ -202,7 +209,7 @@ def test_a_rollup_has_counts_and_never_a_score():
     signals = sig(
         kind="dag",
         status="completed",
-        dag_checked=True,
+        dag_checked=True,  # v4: evidence only, so the roll-up is done_self
         harness_errors=2,
         refusals=1,
         owner_overrides=1,
@@ -210,7 +217,7 @@ def test_a_rollup_has_counts_and_never_a_score():
     )
     row = score_rollup(signals, {"a": 1.0, "b": -0.5, "c": None}, NOW)  # c is not scored, gone was not in this pass
     assert row.score is None
-    assert (row.outcome, row.children_scored, row.children_mean_score) == ("done_verified", 2, 0.25)
+    assert (row.outcome, row.children_scored, row.children_mean_score) == ("done_self", 2, 0.25)
     assert (row.harness_errors, row.refusals, row.owner_overrides) == (2, 1, 1)
 
 

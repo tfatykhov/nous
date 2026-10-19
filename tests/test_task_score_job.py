@@ -261,7 +261,9 @@ async def test_a_pass_writes_leaves_with_scores_and_rollups_without(db, agent):
     by_task = {r.task_id: r for r in await rows(db, agent)}
     assert set(by_task) == {str(ok.id), str(blocked.id), str(cancelled.id), str(dag.id)}
     leaf = by_task[str(ok.id)]
-    assert (leaf.outcome, leaf.score, leaf.tokens, leaf.refusals, leaf.settled) == ("done_verified", 0.75, 15, 1, False)
+    # v4: the DAG's check node is Nous-written, so it is evidence and the leaf stays done_self (0.0 - 0.25)
+    assert (leaf.outcome, leaf.score, leaf.tokens, leaf.refusals, leaf.settled) == ("done_self", -0.25, 15, 1, False)
+    assert leaf.evidence["dag_check_passed"] == [str(dag.id)]
     assert (by_task[str(blocked.id)].outcome, by_task[str(blocked.id)].score, by_task[str(blocked.id)].settled) == (
         "partial",
         0.0,
@@ -271,12 +273,12 @@ async def test_a_pass_writes_leaves_with_scores_and_rollups_without(db, agent):
     assert (gone.outcome, gone.not_scored_reason, gone.score) == ("not_scored", "cancelled", None)
     d = by_task[str(dag.id)]
     assert (d.outcome, d.score, d.harness_errors, d.refusals) == (
-        "done_verified",
+        "done_self",
         None,
         1,
         0,
     )  # the DAG's own call only
-    assert (d.children_scored, d.children_mean_score) == (1, 0.75)
+    assert (d.children_scored, d.children_mean_score) == (1, -0.25)
     assert all(r.scorer_version == SCORER_VERSION for r in by_task.values())
     assert sum(r.refusals for r in by_task.values()) == 1  # the one refusal, counted on one row
 
@@ -666,6 +668,8 @@ async def test_the_command_builds_its_settings_once_and_scores_their_agent(db, a
     class OneSettings:
         def __init__(self):
             self.agent_id = agent
+            self.scorer_agent_logins = ""  # PR verification off
+            self.scorer_github_token = ""
             made.append(self)
 
     def database(settings):
@@ -1132,3 +1136,102 @@ async def test_without_the_heartbeat_grant_a_pass_fails_and_its_scores_do_not_co
             await job.run_scoring_pass(as_role, agent)
     assert await rows(db, agent) == []  # the scores and the heartbeat are one transaction
     assert await heartbeats(db, agent) == []
+
+
+# ---- scorer v4: a PR check verified against GitHub by the job ---------------------------------------------------
+
+
+async def _pr_checked_subtask(db, agent, dag_at, *, command="python -m nous.dag.typed_checks pr tfatykhov/nous --pr 5"):
+    """A subtask whose DAG node passed the PR check (the orchestrator saw the PR exist)."""
+    dag = ExecutionDAG(
+        id=uuid.uuid4(), agent_id=agent, name="d", status="completed", created_at=dag_at, completed_at=NOW
+    )
+    sub = Subtask(
+        id=uuid.uuid4(),
+        agent_id=agent,
+        task="open the PR",
+        status="completed",
+        final_outcome="completed",
+        completed_at=NOW - timedelta(hours=1),
+    )
+    node = DAGNode(
+        id=uuid.uuid4(),
+        dag_id=dag.id,
+        name="n",
+        node_type="subtask",
+        status="completed",
+        completion_check=command,
+        check_attempts=1,
+        last_check_at=NOW - timedelta(hours=1),
+        subtask_id=sub.id,
+    )
+    sub.dag_node_id = node.id
+    async with db.session() as s:
+        s.add(dag)
+        await s.flush()
+        s.add_all([node, sub])
+        await s.commit()
+    return sub
+
+
+def _github(merged_by="tfatykhov"):
+    import httpx
+
+    opened = (NOW - timedelta(days=1)).isoformat()
+
+    def handle(request):
+        return httpx.Response(
+            200,
+            json={
+                "number": 5,
+                "state": "closed",
+                "user": {"login": "cognition-engines-nous-agent"},
+                "created_at": opened,
+                "merged_at": (NOW - timedelta(hours=2)).isoformat(),
+                "merged_by": {"login": merged_by},
+            },
+        )
+
+    return httpx.MockTransport(handle)
+
+
+async def test_a_pass_verifies_a_pr_check_against_github_and_one_pr_credits_one_leaf(db, agent):
+    from nous.observability.github_verify import GitHubReader, PrVerifier
+
+    first = await _pr_checked_subtask(db, agent, NOW - timedelta(days=2))
+    second = await _pr_checked_subtask(db, agent, NOW - timedelta(days=1, hours=12))  # a later DAG, same PR
+    reader = GitHubReader(transport=_github())
+    try:
+        verifier = PrVerifier(reader, ["cognition-engines-nous-agent"])
+        await job.run_scoring_pass(db, agent, now=NOW, pr_verifier=verifier)
+        await job.run_scoring_pass(db, agent, now=NOW + timedelta(minutes=15), pr_verifier=verifier)
+    finally:
+        await reader.aclose()
+
+    by_task = {r.task_id: r for r in await rows(db, agent) if r.task_kind == "subtask"}
+    one, two = by_task[str(first.id)], by_task[str(second.id)]
+    assert (one.outcome, one.score) == ("done_verified", 1.0)
+    assert one.evidence["v2_pr_merged"] == ["tfatykhov/nous#5"]
+    # The second pass read the stored credit: the later leaf naming the same PR earns nothing, on both passes.
+    assert (two.outcome, two.score) == ("done_self", 0.0)
+    assert two.evidence["v2_pr_duplicate"] == [str(first.id)]
+
+
+async def test_without_a_verifier_a_pr_check_earns_nothing(db, agent):
+    sub = await _pr_checked_subtask(db, agent, NOW - timedelta(days=2))
+    await job.run_scoring_pass(db, agent, now=NOW)
+    [row] = [r for r in await rows(db, agent) if r.task_id == str(sub.id)]
+    assert row.outcome == "done_self" and "v2_pr_merged" not in row.evidence
+
+
+async def test_a_pr_merged_by_the_agent_itself_earns_nothing(db, agent):
+    from nous.observability.github_verify import GitHubReader, PrVerifier
+
+    sub = await _pr_checked_subtask(db, agent, NOW - timedelta(days=2))
+    reader = GitHubReader(transport=_github(merged_by="cognition-engines-nous-agent"))
+    try:
+        await job.run_scoring_pass(db, agent, now=NOW, pr_verifier=PrVerifier(reader, ["cognition-engines-nous-agent"]))
+    finally:
+        await reader.aclose()
+    [row] = [r for r in await rows(db, agent) if r.task_id == str(sub.id)]
+    assert row.outcome == "done_self" and row.evidence["v2_rejected"] == ["merged by the agent"]
