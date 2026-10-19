@@ -258,3 +258,13 @@ def test_only_the_owner_creates_in_the_application_schemas():
         assert f"NOT has_schema_privilege(''nous_scorer'', ''{schema}'', ''CREATE'')" in VERIFY, schema
     public_create = "('PUBLIC holds no CREATE on brain, heart, nous_system, scoring or public', 'nous_admin',"
     assert public_create in VERIFY
+
+
+def test_verify_checks_that_the_outcome_constraint_admits_every_outcome_the_scorer_writes():
+    from nous.observability.task_scoring import OUTCOMES
+
+    assert "done_checked" in OUTCOMES
+    check = next(line for line in VERIFY.splitlines() if "ck_task_scores_outcome" in line)
+    assert "pg_get_constraintdef" in check and "done_checked" in check
+    # the script that repairs it checks the same constraint by the same name
+    assert "ck_task_scores_outcome" in ROLES and "'done_checked'" in ROLES

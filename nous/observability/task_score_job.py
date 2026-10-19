@@ -36,7 +36,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Text, cast, func, select
+from sqlalchemy import Text, cast, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -47,6 +47,7 @@ from nous.observability.github_verify import GitHubReader, PrVerifier, StoredPrE
 from nous.observability.task_score_gatherer import audits_without_action_row, chunked, gather_signals
 from nous.observability.task_scoring import (
     LEAF_KIND,
+    OUTCOMES,
     SCORER_VERSION,
     SCORING_WINDOW_DAYS,
     TaskScore,
@@ -250,6 +251,48 @@ async def _stored_pr_evidence(session: AsyncSession, agent_id: str) -> StoredPrE
     return stored_pr_evidence((r.task_id, r.evidence) for r in result)
 
 
+OUTCOME_CONSTRAINT = "ck_task_scores_outcome"
+
+
+def outcomes_missing_from(constraint_def: str | None) -> list[str]:
+    """The scorer's outcomes the stored CHECK definition does not admit (empty for a definition it cannot read)."""
+    if not constraint_def:
+        return []
+    return [outcome for outcome in OUTCOMES if f"'{outcome}'" not in constraint_def]
+
+
+async def warn_if_outcome_constraint_is_stale(session: AsyncSession, agent_id: str) -> list[str]:
+    """Postgres only: read the outcome CHECK of ``scoring.task_scores`` once and log an ERROR naming what it lacks. A
+    scorer newer than the database's constraint (a deploy that skipped ``scripts/ops/db_roles.sql``, which widens it:
+    the app role cannot alter the scoring tables) fails its whole pass on the first row of a new outcome. This only
+    says so early; it changes no score and never fails the pass. SQLite has no such constraint to read."""
+    if session.sync_session.get_bind().dialect.name != "postgresql":
+        return []
+    try:
+        async with session.begin_nested():
+            found = await session.execute(
+                text(
+                    "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                    "WHERE conrelid = 'scoring.task_scores'::regclass AND conname = :name"
+                ),
+                {"name": OUTCOME_CONSTRAINT},
+            )
+            definition = found.scalar_one_or_none()
+    except Exception:
+        logger.warning("Task scores: could not read %s (agent=%s)", OUTCOME_CONSTRAINT, agent_id, exc_info=True)
+        return []
+    missing = outcomes_missing_from(definition)
+    if missing:
+        logger.error(
+            "Task scores: %s does not admit outcome(s) %s, so rows of those outcomes will be refused and the pass "
+            "will fail: re-run scripts/ops/db_roles.sql (agent=%s)",
+            OUTCOME_CONSTRAINT,
+            ", ".join(missing),
+            agent_id,
+        )
+    return missing
+
+
 async def run_scoring_pass(
     database: Database,
     agent_id: str,
@@ -301,6 +344,7 @@ async def run_scoring_pass(
                 AUDIT_VERDICT_ACTION,
                 agent_id,
             )
+        await warn_if_outcome_constraint_is_stale(session, agent_id)
         leaf_signals = gathered.leaves
         if pr_verifier is not None and any(sig.pr_check is not None for sig in leaf_signals):
             leaf_signals = await pr_verifier.verify(leaf_signals, await _stored_pr_evidence(session, agent_id))
