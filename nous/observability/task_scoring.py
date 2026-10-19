@@ -1,4 +1,4 @@
-"""Task scoring v1: the pure part.
+"""Task scoring v2: the pure part.
 
 No database and no clock here (the caller passes ``now``). ``task_score_gatherer`` collects a
 ``TaskSignals`` record per finished task, ``score_leaf`` and ``score_rollup`` turn it into the row
@@ -13,7 +13,15 @@ rule that decides which unit a piece of evidence belongs to.
 Trust tiers. A report that a task is done is Nous's own claim, so ``done_self`` earns nothing.
 ``done_verified`` needs a confirmation from outside the model: the owner's success grade on a
 decision linked to the task, or, for a subtask in a DAG, a completed DAG that has a completed
-check node. Nothing else confirms in v1.
+check node. Nothing else confirms.
+
+v2: a subtask's own DAG node check can only take a "done" away. Nous writes every ``completion_check``
+itself, so one that passes confirms nothing and earns nothing (it is kept in the evidence, under
+``node_check_passed``, for audits). One that the orchestrator ran and that said no is the harness
+contradicting the model's report: a definite failure (exit 1) makes the subtask ``failed``, and a check
+that never said yes before its timeout or attempt limit makes it ``partial``. So does being an earlier
+attempt of a node that was retried (a node is retried only after it failed). The owner's success grade
+outranks all of these.
 """
 
 from __future__ import annotations
@@ -23,7 +31,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-SCORER_VERSION = 1
+SCORER_VERSION = 2
 
 LEAF_KIND = "subtask"
 ROLLUP_KINDS: tuple[str, ...] = ("dag", "intention")
@@ -50,6 +58,18 @@ SCORING_WINDOW_DAYS = SETTLE_DAYS + 1
 GRADE_ORDER: tuple[str, ...] = ("failure", "partial", "success")
 EVIDENCE_IDS_CAP = 20  # ids kept per evidence list; the integer columns keep the full counts
 
+# v2: how a DAG node's own completion_check ended, read from the error the orchestrator wrote when it failed the
+# node (dag/orchestrator.py, _poll_awaiting_checks). "failed" is exit code 1; "unconfirmed" is a check that kept
+# answering "still running" until the node's timeout or max_check_attempts. Any other node error is not a check.
+NODE_CHECK_FAILED_PREFIX = "Completion check failed"
+NODE_CHECK_UNCONFIRMED_PREFIXES: tuple[str, ...] = (
+    "Completion check timed out after",
+    "Completion check exceeded max attempts",
+)
+# "superseded": the subtask is an earlier attempt of a node that was retried. A node is retried only after it failed,
+# and the reset erases how, so the attempt's "done" was never confirmed (the gatherer decides this, not the node row).
+NODE_CHECK_STATES: tuple[str, ...] = ("passed", "failed", "unconfirmed", "superseded")
+
 _EXIT_CODE = re.compile(r"(?:^|; )exit code (-?\d+)")
 
 
@@ -68,6 +88,7 @@ class TaskSignals:
     status: str | None
     detail: str | None = None
     dag_checked: bool = False  # its DAG completed and has a completed check node
+    node_check: str | None = None  # v2: how its own DAG node's completion_check ended (NODE_CHECK_STATES), or None
     owner_grade: str | None = None  # the worst a2ui grade among the decisions that belong to this unit
     owner_overrides: int = 0  # rejected proposals, undone ledger rows, decisions the owner graded failure
     unverified_claims: int = 0
@@ -202,15 +223,52 @@ def _row(signals: TaskSignals, outcome: str, reason: str | None, now: datetime, 
     return TaskScore(**fields)  # type: ignore[arg-type]
 
 
+def node_check_state(
+    completion_check: str | None,
+    check_attempts: int | None,
+    last_check_at: datetime | None,
+    node_status: str | None,
+    node_error: str | None,
+) -> str | None:
+    """How a DAG node's own completion_check ended: ``passed``, ``failed``, ``unconfirmed``, or None.
+
+    None unless the node carries a non-empty check that the orchestrator ran at least once, so a node whose check
+    never got a poll (the worker never ran) says nothing either way. ``passed`` is a node that completed through its
+    check; ``failed`` and ``unconfirmed`` come from the error it was failed with (``NODE_CHECK_FAILED_PREFIX``,
+    ``NODE_CHECK_UNCONFIRMED_PREFIXES``), also once a fix node has skipped it: the skip keeps the error. Any other
+    status or error is None. The ``failed`` text goes on with the check's own stderr, so nothing after the prefix is
+    trusted to tell one kind of failure from another.
+    """
+    if not (completion_check or "").strip() or (check_attempts or 0) < 1 or last_check_at is None:
+        return None
+    if node_status == "completed":
+        return "passed"
+    if node_status not in ("failed", "skipped"):
+        return None
+    error = node_error or ""
+    if error.startswith(NODE_CHECK_FAILED_PREFIX):
+        return "failed"
+    if error.startswith(NODE_CHECK_UNCONFIRMED_PREFIXES):
+        return "unconfirmed"
+    return None
+
+
 def _outcome_of(signals: TaskSignals) -> tuple[str, str | None] | None:
     raw = raw_outcome(signals.task_kind, signals.status, signals.detail)
     if raw is None:
         return None
-    return final_outcome(raw, verified=signals.dag_checked or signals.owner_grade == "success")
+    owner_confirmed = signals.owner_grade == "success"
+    if raw == "done" and not owner_confirmed:
+        # The orchestrator ran the subtask's own check and it did not say yes: the model's "done" does not stand.
+        if signals.node_check == "failed":
+            raw = "failed"
+        elif signals.node_check in ("unconfirmed", "superseded"):
+            raw = "partial"
+    return final_outcome(raw, verified=signals.dag_checked or owner_confirmed)
 
 
 def score_leaf(signals: TaskSignals, now: datetime) -> TaskScore | None:
-    """The v1 composite for a subtask, or None for a task that has not finished.
+    """The composite for a subtask, or None for a task that has not finished.
 
     A cancelled subtask gets a ``not_scored`` row (score NULL), so coverage can tell it from a missed one.
     """

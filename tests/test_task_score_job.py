@@ -229,6 +229,7 @@ async def test_a_pass_writes_leaves_with_scores_and_rollups_without(db, agent):
         s.add_all([node, check])
         await s.commit()
         ok.dag_node_id = node.id
+        node.subtask_id = ok.id  # the orchestrator records the subtask it launched on the node
         s.add_all([ok, blocked, stale, cancelled])
         s.add(
             ExecutionLedgerEntry(

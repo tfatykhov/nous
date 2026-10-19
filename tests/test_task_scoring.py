@@ -1,11 +1,13 @@
-"""Task scoring v1: the pure scorer. No database."""
+"""Task scoring v2: the pure scorer. No database."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
+import nous.dag.orchestrator as orchestrator
 from nous.observability import task_scoring as ts
 from nous.observability.task_scoring import TaskSignals, score_leaf, score_rollup
 
@@ -25,14 +27,57 @@ def sig(kind="subtask", status="completed", detail=None, finished=None, **kw) ->
 
 def test_the_scorer_version_and_every_constant_are_pinned():
     # Bump SCORER_VERSION in the same commit as any constant or mapping below, then update this pin.
-    assert ts.SCORER_VERSION == 1
+    assert ts.SCORER_VERSION == 2  # v2: a subtask's own node check can take a "done" away, never confirm one
     assert ts.OUTCOME_BASE == {"done_verified": 1.0, "done_self": 0.0, "partial": 0.0, "failed": -0.5}
+    assert ts.NODE_CHECK_FAILED_PREFIX == "Completion check failed"
+    assert ts.NODE_CHECK_UNCONFIRMED_PREFIXES == (
+        "Completion check timed out after",
+        "Completion check exceeded max attempts",
+    )
+    assert ts.NODE_CHECK_STATES == ("passed", "failed", "unconfirmed", "superseded")
     assert (ts.OVERRIDE_PENALTY, ts.UNVERIFIED_CLAIM_PENALTY) == (1.0, 0.5)
     assert (ts.HARNESS_ERROR_PENALTY, ts.HARNESS_ERROR_CAP) == (0.1, 0.5)
     assert (ts.REFUSAL_PENALTY, ts.REFUSAL_CAP, ts.SCORE_FLOOR) == (0.25, 0.5, -1.0)
     assert (ts.SETTLE_DAYS, ts.SCORING_WINDOW_DAYS) == (14, 15)
     assert ts.OUTCOMES == ("done_self", "done_verified", "partial", "failed", "not_scored")
     assert score_leaf(sig(), NOW).scorer_version == ts.SCORER_VERSION
+
+
+@pytest.mark.parametrize(
+    ("check", "attempts", "polled", "status", "error", "state"),
+    [
+        ("test -f done", 2, True, "completed", None, "passed"),
+        ("test -f done", 1, True, "failed", "Completion check failed: no such file", "failed"),
+        ("test -f done", 1, True, "failed", "Completion check failed (exit code 1)", "failed"),
+        ("test -f done", 5, True, "failed", "Completion check timed out after 600s (5 attempts)", "unconfirmed"),
+        ("test -f done", 40, True, "failed", "Completion check exceeded max attempts (40)", "unconfirmed"),
+        # A fix node's skip_and_continue keeps the error: the failure must not disappear with it.
+        ("test -f done", 1, True, "skipped", "Completion check failed: no such file", "failed"),
+        ("test -f done", 5, True, "skipped", "Completion check timed out after 600s (5 attempts)", "unconfirmed"),
+        ("test -f done", 1, True, "skipped", None, None),
+        ("test -f done", 1, True, "failed", "Check disabled itself but its final run failed", None),  # not the check
+        ("test -f done", 1, True, "failed", None, None),
+        ("test -f done", 1, True, "cancelled", None, None),
+        ("test -f done", 1, True, "awaiting_check", None, None),  # not finished
+        ("test -f done", 0, False, "failed", "Completion check timed out after 600s (0 attempts)", None),  # never ran
+        ("test -f done", 1, False, "completed", None, None),
+        ("test -f done", 0, True, "completed", None, None),
+        (None, 0, False, "completed", None, None),  # no check: the subtask completed the node
+        ("   ", 3, True, "completed", None, None),
+    ],
+)
+def test_node_check_state(check, attempts, polled, status, error, state):
+    assert ts.node_check_state(check, attempts, NOW if polled else None, status, error) == state
+
+
+def test_the_orchestrator_still_writes_the_node_errors_the_scorer_reads():
+    # node_check_state parses these prefixes out of the error the orchestrator fails a node with. A reworded
+    # message would silently turn every failed own check back into a self-reported "done".
+    source = Path(orchestrator.__file__).read_text(encoding="utf-8")
+    assert f'f"{ts.NODE_CHECK_FAILED_PREFIX}: ' in source  # exit 1 with stderr
+    assert f'"{ts.NODE_CHECK_FAILED_PREFIX} (exit code 1)"' in source  # exit 1 without
+    for prefix in ts.NODE_CHECK_UNCONFIRMED_PREFIXES:
+        assert f'error=f"{prefix} ' in source
 
 
 @pytest.mark.parametrize(
@@ -90,6 +135,18 @@ def test_final_outcome(raw, verified, expected):
         (sig(), "done_self", 0.0),  # Nous says it is done: that earns nothing
         (sig(owner_grade="success"), "done_verified", 1.0),  # the owner graded the decision a success
         (sig(dag_checked=True), "done_verified", 1.0),  # a completed check node in a completed DAG
+        (sig(node_check="passed"), "done_self", 0.0),  # Nous wrote its own node's check: a pass confirms nothing
+        (sig(node_check="failed"), "failed", -0.5),  # the orchestrator ran that check and it exited 1
+        (sig(node_check="unconfirmed"), "partial", 0.0),  # the check never said yes before the node's deadline
+        (sig(node_check="failed", owner_grade="success"), "done_verified", 1.0),  # the owner's grade outranks it
+        (sig(node_check="unconfirmed", owner_grade="success"), "done_verified", 1.0),
+        (sig(node_check="failed", dag_checked=True), "failed", -0.5),  # its own failed check beats a DAG check node
+        (sig(node_check="unconfirmed", dag_checked=True), "partial", 0.0),
+        (sig(node_check="superseded"), "partial", 0.0),  # an earlier attempt of a node that failed and was retried
+        (sig(node_check="superseded", dag_checked=True), "partial", 0.0),  # the retry's DAG check does not credit it
+        (sig(node_check="superseded", owner_grade="success"), "done_verified", 1.0),
+        (sig(detail="incomplete_blocked", node_check="failed"), "partial", 0.0),  # only a "done" is taken away
+        (sig(status="failed", detail="errored", node_check="unconfirmed"), "failed", -0.5),
         (sig(owner_grade="partial"), "done_self", 0.0),  # only a success grade confirms
         (sig(owner_grade="failure", owner_overrides=1), "done_self", -1.0),  # graded failure is an override
         (sig(detail="incomplete_blocked"), "partial", 0.0),

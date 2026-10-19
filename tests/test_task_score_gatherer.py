@@ -1,4 +1,4 @@
-"""Task scoring v1: the gatherer reads the signals each finished task earned."""
+"""Task scoring v2: the gatherer reads the signals each finished task earned."""
 
 from __future__ import annotations
 
@@ -238,6 +238,105 @@ async def test_a_subtask_is_checked_only_by_a_completed_check_node_in_a_complete
         leaves[str(x.id)].dag_checked for x in (ok, unchecked, check_failed, dag_failed, no_check, blank_check, plain)
     ] == [True, False, False, False, False, False, False]
     assert dags[str(ok_dag.id)].dag_checked is True and dags[str(ok_dag.id)].child_ids == (str(ok.id),)
+
+
+async def test_a_subtask_takes_its_own_node_check_for_the_nodes_current_attempt_only(db, agent):
+    dag = ExecutionDAG(id=uuid.uuid4(), agent_id=agent, name="d", status="failed", completed_at=NOW)
+    await add(db, dag)
+
+    async def node_for(status, error=None, *, check="test -f /tmp/done", attempts=1, polled=True, current=True):
+        """A subtask that reported completed, and the node it ran in; ``current=False`` is an earlier attempt."""
+        sub = subtask(agent)
+        node = DAGNode(
+            id=uuid.uuid4(),
+            dag_id=dag.id,
+            name=f"n-{sub.id.hex[:6]}",
+            node_type="subtask",
+            status=status,
+            error=error,
+            completion_check=check,
+            check_attempts=attempts,
+            last_check_at=NOW if polled else None,
+            subtask_id=sub.id if current else uuid.uuid4(),
+        )
+        sub.dag_node_id = node.id
+        await add(db, node, sub)
+        return sub, node
+
+    passed, passed_node = await node_for("completed", attempts=2)
+    failed, failed_node = await node_for("failed", "Completion check failed: exit code 1")
+    timed_out, timed_out_node = await node_for(
+        "failed", "Completion check timed out after 600s (5 attempts)", attempts=5
+    )
+    never_polled, _ = await node_for(
+        "failed", "Completion check timed out after 600s (0 attempts)", attempts=0, polled=False
+    )
+    other_failure, _ = await node_for("failed", "Check disabled itself but its final run failed")
+    no_check, _ = await node_for("completed", check=None, attempts=0, polled=False)
+    skipped, skipped_node = await node_for("skipped", "Completion check failed: exit code 1")  # a fix node skipped it
+    earlier_attempt, earlier_node = await node_for("completed", attempts=2, current=False)  # retried after it
+
+    leaves, _, _ = await gather(db, agent)
+
+    def node_check(sub):
+        return leaves[str(sub.id)].node_check
+
+    assert [
+        node_check(x)
+        for x in (passed, failed, timed_out, never_polled, other_failure, no_check, skipped, earlier_attempt)
+    ] == [
+        "passed",
+        "failed",
+        "unconfirmed",
+        None,
+        None,
+        None,
+        "failed",
+        "superseded",
+    ]
+    assert leaves[str(passed.id)].evidence == {"node_check_passed": [str(passed_node.id)]}
+    assert leaves[str(failed.id)].evidence == {"node_check_failed": [str(failed_node.id)]}
+    assert leaves[str(timed_out.id)].evidence == {"node_check_unconfirmed": [str(timed_out_node.id)]}
+    assert leaves[str(skipped.id)].evidence == {"node_check_failed": [str(skipped_node.id)]}
+    assert leaves[str(earlier_attempt.id)].evidence == {"node_check_superseded": [str(earlier_node.id)]}
+    outcomes = {
+        name: score_leaf(leaves[str(sub.id)], NOW).outcome
+        for name, sub in (
+            ("passed", passed),
+            ("failed", failed),
+            ("timed_out", timed_out),
+            ("skipped", skipped),
+            ("earlier", earlier_attempt),
+        )
+    }
+    assert outcomes == {
+        "passed": "done_self",
+        "failed": "failed",
+        "timed_out": "partial",
+        "skipped": "failed",
+        "earlier": "partial",
+    }
+
+
+async def test_a_retried_nodes_earlier_attempt_is_not_credited_by_the_dags_check_node(db, agent):
+    # The first attempt reported done, its node failed and was retried; the retry passed and the DAG completed with a
+    # passing check node. The DAG's check confirms the retry's work, not the attempt the node failed after.
+    dag = ExecutionDAG(id=uuid.uuid4(), agent_id=agent, name="d", status="completed", completed_at=NOW)
+    await add(db, dag)
+    first, retry = subtask(agent), subtask(agent)
+    work = DAGNode(id=uuid.uuid4(), dag_id=dag.id, name="work", node_type="subtask", status="completed")
+    work.subtask_id = retry.id
+    first.dag_node_id = retry.dag_node_id = work.id
+    check = DAGNode(
+        id=uuid.uuid4(), dag_id=dag.id, name="check", node_type="check", status="completed", completion_check="true"
+    )
+    await add(db, work, check, first, retry)
+
+    leaves, _, _ = await gather(db, agent)
+
+    assert leaves[str(first.id)].dag_checked and leaves[str(retry.id)].dag_checked
+    assert score_leaf(leaves[str(first.id)], NOW).outcome == "partial"
+    assert score_leaf(leaves[str(retry.id)], NOW).outcome == "done_verified"
 
 
 async def test_a_dag_keeps_only_its_own_calls_and_names_its_subtasks(db, agent):

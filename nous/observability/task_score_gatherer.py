@@ -1,4 +1,4 @@
-"""Task scoring v1: the signal gatherer.
+"""Task scoring v2: the signal gatherer.
 
 Read-only. For one agent and a window it collects a ``TaskSignals`` per finished subtask (the scored
 leaf), DAG run and intention root (the roll-ups), in a number of queries that depends on the size of
@@ -18,6 +18,8 @@ so a failing subtask inside a DAG inside a chain is penalised once:
   a proposal the owner rejected                             -> the chain
 - a decision linked to a subtask or DAG by the DEPTH-0 intention row that spawned it -> that unit; a decision
   an arrival recorded, or the one behind a schedule-spawned root -> the chain
+- how a DAG node's own completion_check ended (``node_check_<state>``) -> the subtask the node records as its
+  current attempt; every earlier attempt of that node gets ``node_check_superseded``
 
 A DEPTH-0 row only: the continuation runner stamps the root's ``origin_decision_id`` on every child it spawns
 (a continuation turn and an approved proposal's call both pass it on as the spawn's ``decision_id``), so reading the
@@ -126,7 +128,8 @@ class _Pass:
 
     async def checked(self, dag_ids: Sequence[UUID]) -> set[UUID]:
         """The DAGs that completed AND have a check node that completed AND carries a check (a non-empty
-        ``completion_check``): the one outside confirmation, besides the owner's grade, that v1 accepts for "done".
+        ``completion_check``): the one outside confirmation, besides the owner's grade, that the scorer accepts for
+        "done".
         A check node without a ``completion_check`` completes when the heartbeat's model disables it, which is the
         model's own say-so."""
         missing = [d for d in dict.fromkeys(dag_ids) if d not in self._checked]
@@ -309,6 +312,7 @@ def _signals(
     tokens: int | None,
     grade: str | None,
     dag_checked: bool = False,
+    node_check: str | None = None,
     child_ids: Sequence[str] = (),
 ) -> ts.TaskSignals:
     return ts.TaskSignals(
@@ -318,6 +322,7 @@ def _signals(
         status=status,
         detail=detail,
         dag_checked=dag_checked,
+        node_check=node_check,
         owner_grade=grade,
         owner_overrides=sum(len(evidence.get(k, [])) for k in ("undone", "proposals_rejected", "failure_graded")),
         unverified_claims=len(evidence.get("unverified_claims", [])),
@@ -360,13 +365,38 @@ async def _leaf_signals(session: AsyncSession, agent_id: str, since: datetime, r
     for sess, event_id in await _unverified_claim_events(session, agent_id, list(session_task)):
         evidence[session_task[sess]]["unverified_claims"].append(event_id)
     dag_of: dict[UUID, UUID] = {}
+    node_check: dict[UUID, str] = {}
     for chunk in chunked(ids):
         result = await session.execute(
-            select(Subtask.id, DAGNode.dag_id)
+            select(
+                Subtask.id,
+                DAGNode.dag_id,
+                DAGNode.id.label("node_id"),
+                DAGNode.subtask_id.label("node_subtask_id"),
+                DAGNode.status.label("node_status"),
+                DAGNode.error.label("node_error"),
+                DAGNode.completion_check,
+                DAGNode.check_attempts,
+                DAGNode.last_check_at,
+            )
             .join(DAGNode, Subtask.dag_node_id == DAGNode.id)
             .where(Subtask.agent_id == agent_id, Subtask.id.in_(chunk))
         )
-        dag_of.update({r.id: r.dag_id for r in result})
+        for r in result:
+            dag_of[r.id] = r.dag_id
+            # The node row describes its current attempt only (dag_nodes.subtask_id). An earlier attempt linked to
+            # the same node is "superseded": the node was retried, which happens only after it failed, and the reset
+            # erased how. The fix stage's retry does not reset check_attempts, so a never-polled check of the new
+            # attempt can read as "unconfirmed" rather than None; both leave a "done" at 0.0.
+            if r.node_subtask_id != r.id:
+                state: str | None = "superseded"
+            else:
+                state = ts.node_check_state(
+                    r.completion_check, r.check_attempts, r.last_check_at, r.node_status, r.node_error
+                )
+            if state is not None:
+                node_check[r.id] = state
+                evidence[str(r.id)][f"node_check_{state}"].append(str(r.node_id))
     checked = await run.checked(list(set(dag_of.values())))
     origin = await _origin_decisions(session, agent_id, "subtask", [str(i) for i in ids])
     graded = await _owner_grades(session, agent_id, [d for ds in origin.values() for d in ds])
@@ -385,6 +415,7 @@ async def _leaf_signals(session: AsyncSession, agent_id: str, since: datetime, r
                 tokens=(r.tokens_in or 0) + (r.tokens_out or 0),
                 grade=grade,
                 dag_checked=dag_of.get(r.id) in checked,
+                node_check=node_check.get(r.id),
             )
         )
     return out
