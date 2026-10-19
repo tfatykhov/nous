@@ -110,6 +110,7 @@ nous/
 │   │   ├── store.py            # DAGStore (conditional status writes)
 │   │   ├── delivery.py         # F087 at-least-once terminal delivery (3 legs)
 │   │   ├── approval.py         # Harness Phase 3 park-and-resume nodes
+│   │   ├── attempts.py         # The attempt a node reset discards, archived in `dag_nodes.attempt_history` (migration 089) for the task scorer
 │   │   ├── fix_executor.py     # LLM fix dispatch
 │   │   ├── schemas.py          # DAGNodeSpec, DAG schemas
 │   │   └── _workspace.py       # F064.3 workspace containment

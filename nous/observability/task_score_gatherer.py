@@ -19,7 +19,8 @@ so a failing subtask inside a DAG inside a chain is penalised once:
 - a decision linked to a subtask or DAG by the DEPTH-0 intention row that spawned it -> that unit; a decision
   an arrival recorded, or the one behind a schedule-spawned root -> the chain
 - how a DAG node's own completion_check ended (``node_check_<state>``) -> the subtask the node records as its
-  current attempt; every earlier attempt of that node gets ``node_check_superseded``
+  current attempt; an earlier attempt of that node gets the state of its ``attempt_history`` entry, or
+  ``node_check_superseded``
 
 A DEPTH-0 row only: the continuation runner stamps the root's ``origin_decision_id`` on every child it spawns
 (a continuation turn and an approved proposal's call both pass it on as the spawn's ``decision_id``), so reading the
@@ -95,6 +96,17 @@ def chunked(values: Sequence[Any], size: int = CHUNK) -> Iterator[Sequence[Any]]
 
 def _new_evidence() -> Evidence:
     return defaultdict(lambda: defaultdict(list))
+
+
+def _archived_attempt(history: Any, subtask_id: UUID) -> dict[str, Any] | None:
+    """The ``attempt_history`` entry a node reset wrote for this subtask (nous/dag/attempts.py), or None."""
+    if not isinstance(history, list):
+        return None
+    wanted = str(subtask_id)
+    for entry in history:
+        if isinstance(entry, dict) and entry.get("subtask_id") == wanted:
+            return entry
+    return None
 
 
 def _plain(evidence: dict[str, list[str]] | None) -> dict[str, list[str]]:
@@ -378,6 +390,7 @@ async def _leaf_signals(session: AsyncSession, agent_id: str, since: datetime, r
                 DAGNode.completion_check,
                 DAGNode.check_attempts,
                 DAGNode.last_check_at,
+                DAGNode.attempt_history,
             )
             .join(DAGNode, Subtask.dag_node_id == DAGNode.id)
             .where(Subtask.agent_id == agent_id, Subtask.id.in_(chunk))
@@ -385,11 +398,27 @@ async def _leaf_signals(session: AsyncSession, agent_id: str, since: datetime, r
         for r in result:
             dag_of[r.id] = r.dag_id
             # The node row describes its current attempt only (dag_nodes.subtask_id). An earlier attempt linked to
-            # the same node is "superseded": the node was retried, which happens only after it failed, and the reset
-            # erased how. The fix stage's retry does not reset check_attempts, so a never-polled check of the new
-            # attempt can read as "unconfirmed" rather than None; both leave a "done" at 0.0.
-            if r.node_subtask_id != r.id:
-                state: str | None = "superseded"
+            # the same node was discarded by a reset, which archived it in attempt_history (migration 089): its entry
+            # can only take the "done" away (failed, unconfirmed). Anything else, or no entry (resets from before 089),
+            # is "superseded". A node is reset only after it failed, so an archive that reads "passed" was not written
+            # by a reset and earns nothing. The fix stage's retry does not reset check_attempts, so a never-polled
+            # check of the new attempt can read as "unconfirmed" rather than None; both leave a "done" at 0.0.
+            # The fix stage's retry also keeps subtask_id until the relaunch, so a subtask with an archive entry is a
+            # discarded attempt even while the node still names it: the archive decides.
+            entry = _archived_attempt(r.attempt_history, r.id)
+            if entry is not None or r.node_subtask_id != r.id:
+                archived = (
+                    ts.node_check_state(
+                        r.completion_check,
+                        entry.get("check_attempts"),
+                        entry.get("last_check_at"),
+                        entry.get("status"),
+                        entry.get("error"),
+                    )
+                    if entry is not None
+                    else None
+                )
+                state: str | None = archived if archived in ("failed", "unconfirmed") else "superseded"
             else:
                 state = ts.node_check_state(
                     r.completion_check, r.check_attempts, r.last_check_at, r.node_status, r.node_error

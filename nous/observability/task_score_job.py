@@ -183,21 +183,26 @@ async def upsert_heartbeat(
 
 
 async def _stored_leaf_scores(session: AsyncSession, agent_id: str, task_ids: Sequence[str]) -> dict[str, float | None]:
-    """task id -> the stored score of each of these subtasks under this ``SCORER_VERSION`` that has a row.
+    """task id -> the stored score of each of these subtasks: its row under this ``SCORER_VERSION``, or else its row
+    under the newest earlier version.
 
     A roll-up settles at ``SETTLE_DAYS`` but the window is one day longer, so a child that finished more than a day
-    before its DAG or chain closed is out of the window when the parent settles. Its stored row stands in for it. A
-    child never scored has no row and stays uncounted; a stored ``not_scored`` row has score NULL and is not counted.
+    before its DAG or chain closed is out of the window when the parent settles. Its stored row stands in for it. Right
+    after a version bump such a child has rows of earlier versions only (a pass gathers the window, not the child), so
+    the newest of those stands in rather than the child going uncounted for good once the parent settles. A child never
+    scored has no row and stays uncounted; a stored ``not_scored`` row has score NULL and is not counted.
     """
     found: dict[str, float | None] = {}
     for chunk in chunked(list(task_ids)):
         result = await session.execute(
-            select(TaskScoreRow.task_id, TaskScoreRow.score).where(
+            select(TaskScoreRow.task_id, TaskScoreRow.score)
+            .where(
                 TaskScoreRow.agent_id == agent_id,
                 TaskScoreRow.task_kind == LEAF_KIND,
-                TaskScoreRow.scorer_version == SCORER_VERSION,
+                TaskScoreRow.scorer_version <= SCORER_VERSION,
                 TaskScoreRow.task_id.in_(chunk),
             )
+            .order_by(TaskScoreRow.scorer_version)  # ascending, so the newest version's row is the one kept
         )
         found.update({r.task_id: r.score for r in result})
     return found

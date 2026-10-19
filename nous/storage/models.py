@@ -1509,6 +1509,8 @@ class DAGNode(Base):
     answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     answer_source: Mapped[str | None] = mapped_column(Text)
     answer_history: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # Migration 089: one entry per attempt a reset discarded (nous/dag/attempts.py).
+    attempt_history: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     dag: Mapped["ExecutionDAG"] = relationship("ExecutionDAG", back_populates="nodes")
 

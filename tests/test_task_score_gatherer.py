@@ -339,6 +339,76 @@ async def test_a_retried_nodes_earlier_attempt_is_not_credited_by_the_dags_check
     assert score_leaf(leaves[str(retry.id)], NOW).outcome == "done_verified"
 
 
+async def test_an_earlier_attempt_is_judged_by_the_nodes_archive_of_how_it_ended(db, agent):
+    # Each attempt below reported done and then lost its node to a reset, which archived how it ended (089).
+    dag = ExecutionDAG(id=uuid.uuid4(), agent_id=agent, name="d", status="completed", completed_at=NOW)
+    await add(db, dag)
+    names = ("check_failed", "timed_out", "cancelled", "archived_passed", "not_archived")
+    attempts = {name: subtask(agent) for name in names}
+    current = subtask(agent)
+
+    def archived(sub, status, error, check_attempts=1):
+        return {
+            "subtask_id": str(sub.id),
+            "status": status,
+            "error": error,
+            "check_attempts": check_attempts,
+            "last_check_at": NOW.isoformat() if check_attempts else None,
+            "completed_at": NOW.isoformat(),
+            "archived_at": NOW.isoformat(),
+            "reason": "retry",
+        }
+
+    work = DAGNode(
+        id=uuid.uuid4(),
+        dag_id=dag.id,
+        name="work",
+        node_type="subtask",
+        status="completed",
+        completion_check="test -f /tmp/done",
+        check_attempts=1,
+        last_check_at=NOW,
+        subtask_id=current.id,
+        attempt_history=[
+            archived(attempts["check_failed"], "failed", "Completion check failed: no such file"),
+            archived(attempts["timed_out"], "failed", "Completion check timed out after 600s (4 attempts)", 4),
+            archived(attempts["cancelled"], "cancelled", None, 0),
+            # No reset archives a completed attempt (they all start from failed, blocked or cancelled), so an entry
+            # like this was written by something else: it must not credit the attempt.
+            archived(attempts["archived_passed"], "completed", None, 2),
+        ],
+    )
+    # A passing check node in the completed DAG: anything left at "done" would be done_verified.
+    check = DAGNode(
+        id=uuid.uuid4(), dag_id=dag.id, name="check", node_type="check", status="completed", completion_check="true"
+    )
+    for sub in (*attempts.values(), current):
+        sub.dag_node_id = work.id
+    await add(db, work, check, *attempts.values(), current)
+
+    leaves, _, _ = await gather(db, agent)
+
+    states = {name: leaves[str(sub.id)].node_check for name, sub in attempts.items()}
+    assert states == {
+        "check_failed": "failed",
+        "timed_out": "unconfirmed",
+        "cancelled": "superseded",
+        "archived_passed": "superseded",
+        "not_archived": "superseded",  # a reset from before 089 left no entry
+    }
+    outcomes = {name: score_leaf(leaves[str(sub.id)], NOW).outcome for name, sub in attempts.items()}
+    assert outcomes == {
+        "check_failed": "failed",
+        "timed_out": "partial",
+        "cancelled": "partial",
+        "archived_passed": "partial",
+        "not_archived": "partial",
+    }
+    assert leaves[str(attempts["check_failed"].id)].evidence == {"node_check_failed": [str(work.id)]}
+    assert leaves[str(current.id)].node_check == "passed"
+    assert score_leaf(leaves[str(current.id)], NOW).outcome == "done_verified"  # the DAG's check confirms the retry
+
+
 async def test_a_dag_keeps_only_its_own_calls_and_names_its_subtasks(db, agent):
     dag = ExecutionDAG(
         id=uuid.uuid4(), agent_id=agent, name="d", status="completed", completed_at=NOW, tokens_consumed=900
@@ -677,3 +747,41 @@ async def test_a_dag_subtask_lookup_is_scoped_to_the_agent(db, agent):
     mine, foreign = subtask(agent, dag_node_id=node.id), subtask("someone-else", dag_node_id=node.id)
     await add(db, mine, foreign)
     assert (await gather(db, agent))[1][str(dag.id)].child_ids == (str(mine.id),)
+
+
+async def test_an_archived_attempt_the_node_still_names_is_judged_by_its_archive(db, agent):
+    # A fix stage's retry archived the failed attempt but keeps subtask_id until the relaunch (queue full, DAG held,
+    # process stopped): the node still names the discarded subtask, and its archive must decide.
+    dag = ExecutionDAG(id=uuid.uuid4(), agent_id=agent, name="d", status="running")
+    await add(db, dag)
+    sub = subtask(agent)
+    node = DAGNode(
+        id=uuid.uuid4(),
+        dag_id=dag.id,
+        name="work",
+        node_type="subtask",
+        status="pending",  # reset, waiting for its relaunch
+        completion_check="test -f /tmp/done",
+        check_attempts=1,
+        last_check_at=NOW,
+        subtask_id=sub.id,
+        attempt_history=[
+            {
+                "subtask_id": str(sub.id),
+                "status": "failed",
+                "error": "Completion check failed: no such file",
+                "check_attempts": 1,
+                "last_check_at": NOW.isoformat(),
+                "completed_at": NOW.isoformat(),
+                "archived_at": NOW.isoformat(),
+                "reason": "fix_retry",
+            }
+        ],
+    )
+    sub.dag_node_id = node.id
+    await add(db, node, sub)
+
+    leaves, _, _ = await gather(db, agent)
+
+    assert leaves[str(sub.id)].node_check == "failed"
+    assert score_leaf(leaves[str(sub.id)], NOW).outcome == "failed"

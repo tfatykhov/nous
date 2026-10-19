@@ -84,6 +84,7 @@ from nous.dag.approval import (
     stopped_at_approval,
     stopped_summary,
 )
+from nous.dag.attempts import archived_attempts
 from nous.dag.schemas import PREDECESSOR_EDGE_TYPES, WAIT_EDGE_TYPES, DAGNodeStatus
 from nous.dag.store import (
     _TERMINAL_DAG_STATUSES,
@@ -398,7 +399,7 @@ class DAGOrchestrator:
             if await self._store.transition_node(
                 node.id, from_statuses={"ready", "pending"}, status="failed", error=error
             ):
-                node.status = "failed"
+                node.status, node.error = "failed", error
             logger.warning(
                 "DAG %s node %s FAILED after %d deferrals: %s",
                 dag.id, node.name, count, reason,
@@ -469,6 +470,10 @@ class DAGOrchestrator:
             node.id, from_statuses=_DISPATCHABLE, status=status, **values
         ):
             node.status = status
+            # Mirror the rest of the write too: later steps read the in-memory node.
+            for column in ("error", "result", "completed_at"):
+                if column in values:
+                    setattr(node, column, values[column])
             return True
         return False
 
@@ -1044,6 +1049,9 @@ class DAGOrchestrator:
             # under-reporting tokens_consumed and letting later waves
             # run past an enforced budget.
             "tokens_counted": False,
+            # Migration 089: the columns above are the only record of how
+            # the discarded attempt ended, so it is archived in this write.
+            "attempt_history": archived_attempts(node, "retry", datetime.now(UTC)),
         }
         if node.node_type == "approval":
             # Harness Phase 3 §3.10: archive and clear the answer HERE, so a
@@ -1125,9 +1133,12 @@ class DAGOrchestrator:
                     # the direct retry does — _recover_stale_ready_nodes only
                     # takes `ready` nodes with started_at IS NULL, so a kept
                     # timestamp strands a node a crash leaves `ready`.
+                    # A cancelled node may have run a subtask (cancel_cascade):
+                    # archive that attempt before its error is cleared.
                     (n.id, {"status": "pending", "error": None,
                             "tokens_counted": False,
-                            "started_at": None, "completed_at": None},
+                            "started_at": None, "completed_at": None,
+                            "attempt_history": archived_attempts(n, "unblock", datetime.now(UTC))},
                      frozenset({"blocked", "cancelled"}))
                 )
 
@@ -1400,13 +1411,16 @@ class DAGOrchestrator:
         subtask = await self._subtask_mgr.get(node.subtask_id)
         if subtask is None:
             # Subtask was deleted — treat as failure
+            failed_at = datetime.now(UTC)
             await self._store.update_node(
                 node.id,
                 status="failed",
                 error="Underlying subtask was deleted",
-                completed_at=datetime.now(UTC),
+                completed_at=failed_at,
             )
-            node.status = "failed"
+            # Mirror what was written: later steps of this tick (the fix stage,
+            # a reset's attempt archive) read the in-memory node.
+            node.status, node.error, node.completed_at = "failed", "Underlying subtask was deleted", failed_at
             return
 
         # F087: roll the subtask's token usage into the DAG total. Keyed on
@@ -1438,16 +1452,18 @@ class DAGOrchestrator:
                 f"subtask {final}: "
                 f"{subtask.error or blocked_reason or 'no reason'}"
             )
+            failed_at = datetime.now(UTC)
             await self._store.update_node(
                 node.id,
                 status="failed",
                 error=error_msg,
                 result=subtask.result,
-                completed_at=datetime.now(UTC),
+                completed_at=failed_at,
             )
             node.status = "failed"
             node.error = error_msg
             node.result = subtask.result
+            node.completed_at = failed_at
             return
 
         if subtask.status == "completed":
@@ -1463,22 +1479,26 @@ class DAGOrchestrator:
                 node.status = "awaiting_check"
                 node.result = subtask.result
             else:
+                done_at = datetime.now(UTC)
                 await self._store.update_node(
                     node.id,
                     status="completed",
                     result=subtask.result,
-                    completed_at=datetime.now(UTC),
+                    completed_at=done_at,
                 )
                 node.status = "completed"
                 node.result = subtask.result
+                node.completed_at = done_at
         elif subtask.status == "failed":
+            failed_at = datetime.now(UTC)
+            error = subtask.error or "Subtask failed"
             await self._store.update_node(
                 node.id,
                 status="failed",
-                error=subtask.error or "Subtask failed",
-                completed_at=datetime.now(UTC),
+                error=error,
+                completed_at=failed_at,
             )
-            node.status = "failed"
+            node.status, node.error, node.completed_at = "failed", error, failed_at
 
     async def _count_node_tokens(
         self, node: DAGNode, subtask: object, dag: ExecutionDAG
@@ -1590,13 +1610,16 @@ class DAGOrchestrator:
             registry,
             node.check_name,
         ):
+            failed_at = datetime.now(UTC)
             await self._store.update_node(
                 node.id,
                 status="failed",
                 error="Check disabled itself but its final run failed",
-                completed_at=datetime.now(UTC),
+                completed_at=failed_at,
             )
-            node.status = "failed"
+            node.status, node.error, node.completed_at = (
+                "failed", "Check disabled itself but its final run failed", failed_at,
+            )
             # Consumed only after the failure is persisted, so a failed write
             # re-reads it next tick; consuming keeps the registry from
             # retaining one entry per finished DAG check forever.
@@ -1606,13 +1629,14 @@ class DAGOrchestrator:
             # Check was unregistered — for DAG-managed checks this means
             # self-disable completed (DynamicCheckLoader unregisters on disable).
             result = await self._final_run_result(node.check_name, "Check completed (self-disabled)")
+            done_at = datetime.now(UTC)
             await self._store.update_node(
                 node.id,
                 status="completed",
                 result=result,
-                completed_at=datetime.now(UTC),
+                completed_at=done_at,
             )
-            node.status = "completed"
+            node.status, node.result, node.completed_at = "completed", result, done_at
             # No failure to consume, but still unprotect the check.
             _registry_unprotect_from_eviction(registry, node.check_name)
             return
@@ -1620,13 +1644,14 @@ class DAGOrchestrator:
         # Use check.active to detect disabled checks (review fix)
         if not check.active:
             result = await self._final_run_result(node.check_name, "Check completed (disabled itself)")
+            done_at = datetime.now(UTC)
             await self._store.update_node(
                 node.id,
                 status="completed",
                 result=result,
-                completed_at=datetime.now(UTC),
+                completed_at=done_at,
             )
-            node.status = "completed"
+            node.status, node.result, node.completed_at = "completed", result, done_at
             # No failure to consume, but still unprotect the check.
             _registry_unprotect_from_eviction(registry, node.check_name)
 
@@ -1639,10 +1664,11 @@ class DAGOrchestrator:
             cmd = node.completion_check
             if not cmd or not cmd.strip():
                 # No valid check command — mark completed
+                done_at = datetime.now(UTC)
                 await self._store.update_node(
-                    node.id, status="completed", completed_at=datetime.now(UTC),
+                    node.id, status="completed", completed_at=done_at,
                 )
-                node.status = "completed"
+                node.status, node.completed_at = "completed", done_at
                 self._release_check(node)
                 continue
 
@@ -2077,6 +2103,11 @@ class DAGOrchestrator:
                 end_finalization(node.check_name)
             raise
         node.status = status
+        node.completed_at = completed_at
+        if error is not None:
+            # Later steps of this tick read the in-memory node: the fix stage
+            # decides on parent.error, and its retry archives this attempt.
+            node.error = error
         if result is not None:
             node.result = result
         if check_attempts is not None:
@@ -3011,10 +3042,14 @@ class DAGOrchestrator:
                 # retry_node (@codex P2 on b3c78c3) — the fix-stage retry is
                 # the automatic sibling of that manual path and was losing the
                 # retry's token usage identically.
+                # Migration 089: archive the failed attempt before its error is
+                # cleared (this reset keeps subtask_id until the relaunch).
+                history = archived_attempts(parent, "fix_retry", datetime.now(UTC))
                 update_kwargs: dict[str, object] = {
                     "status": "pending",
                     "error": None,
                     "tokens_counted": False,
+                    "attempt_history": history,
                 }
                 # F066.1 Phase 1.5: when LLM dispatch returns an amended
                 # prompt, replace the parent's instructions so the next
@@ -3029,6 +3064,7 @@ class DAGOrchestrator:
                     update_kwargs["instructions"] = outcome.amended_prompt
                 parent.status = "pending"
                 parent.error = None
+                parent.attempt_history = history
                 await self._store.update_node(parent.id, **update_kwargs)
             elif outcome.action == "skip_and_continue":
                 parent.status = "skipped"
@@ -3430,12 +3466,12 @@ class DAGOrchestrator:
         return built, notify_text(title, node.instructions or "", deadline, default_label)
 
     async def _fail_parked(self, node: DAGNode, error: str) -> None:
+        failed_at = datetime.now(UTC)
         if await self._store.transition_node(
             node.id, from_statuses={"awaiting_input"}, status="failed", error=error,
-            completed_at=datetime.now(UTC),
+            completed_at=failed_at,
         ):
-            node.status = "failed"
-            node.error = error
+            node.status, node.error, node.completed_at = "failed", error, failed_at
 
     async def _close_card(self, surface_id: str | None, *, node_id: UUID | None = None) -> None:
         """Best-effort card close (§3.7); the leaked-card sweep retries."""

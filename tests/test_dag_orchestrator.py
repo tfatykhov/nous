@@ -648,6 +648,7 @@ class TestDAGCompletionCheck:
         fetched = await store.get_dag(dag.id)
         node = next(n for n in fetched.nodes if n.name == "retryable")
         assert node.status == "failed"
+        failed_attempt = node.subtask_id
 
         # Retry
         await orchestrator.retry_node(dag.id, "retryable")
@@ -658,6 +659,13 @@ class TestDAGCompletionCheck:
         assert node.check_attempts == 0
         assert node.last_check_at is None
         assert node.awaiting_check_at is None
+        # Migration 089: the reset archived how the discarded attempt ended.
+        [entry] = node.attempt_history
+        assert (entry["subtask_id"], entry["status"], entry["check_attempts"], entry["reason"]) == (
+            str(failed_attempt), "failed", 2, "retry",
+        )
+        assert entry["error"].startswith("Completion check exceeded max attempts")
+        assert entry["last_check_at"] is not None
 
     @pytest.mark.asyncio
     async def test_concurrent_ticks_no_double_poll(self, store, orchestrator, subtask_mgr):
@@ -923,10 +931,21 @@ class TestDAGCancelCascade:
         await orchestrator.tick()
 
         fetched = await store.get_dag(dag.id)
-        assert next(n for n in fetched.nodes if n.name == "b").status == "cancelled"
+        cancelled_b = next(n for n in fetched.nodes if n.name == "b")
+        assert cancelled_b.status == "cancelled"
 
         # Retry A — B should be requeued from cancelled to pending
         await orchestrator.retry_node(dag.id, "a")
+
+        # Migration 089: both resets archived the attempt they discarded.
+        fetched = await store.get_dag(dag.id)
+        by_name = {n.name: n for n in fetched.nodes}
+        assert [(e["subtask_id"], e["status"], e["reason"]) for e in by_name["b"].attempt_history] == [
+            (str(cancelled_b.subtask_id), "cancelled", "unblock")
+        ]
+        assert [(e["subtask_id"], e["status"], e["reason"]) for e in by_name["a"].attempt_history] == [
+            (str(node_a.subtask_id), "failed", "retry")
+        ]
 
         fetched = await store.get_dag(dag.id)
         assert next(n for n in fetched.nodes if n.name == "b").status == "pending"

@@ -27,7 +27,7 @@ def sig(kind="subtask", status="completed", detail=None, finished=None, **kw) ->
 
 def test_the_scorer_version_and_every_constant_are_pinned():
     # Bump SCORER_VERSION in the same commit as any constant or mapping below, then update this pin.
-    assert ts.SCORER_VERSION == 2  # v2: a subtask's own node check can take a "done" away, never confirm one
+    assert ts.SCORER_VERSION == 3  # v3: an earlier attempt is judged by the node's archive of how it ended
     assert ts.OUTCOME_BASE == {"done_verified": 1.0, "done_self": 0.0, "partial": 0.0, "failed": -0.5}
     assert ts.NODE_CHECK_FAILED_PREFIX == "Completion check failed"
     assert ts.NODE_CHECK_UNCONFIRMED_PREFIXES == (
