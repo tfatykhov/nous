@@ -281,3 +281,111 @@ def test_the_fixture_checks_are_the_kinds_they_are_named_for():
     from nous.observability.task_scoring import check_kind
 
     assert {name: check_kind(cmd) for name, cmd in CHECKS.items()} == {name: name for name in CHECKS}
+
+
+# ---- review fixes -----------------------------------------------------------------------------------------------
+
+
+async def test_an_attempt_the_nodes_archive_discarded_is_not_sampled_even_while_the_node_names_it(db, settings, agent):
+    sub = await finished(db, agent, CHECKS["file_exists"])
+    async with db.session() as s:
+        node = (await s.execute(select(DAGNode).where(DAGNode.subtask_id == sub.id))).scalar_one()
+        node.attempt_history = [
+            {
+                "subtask_id": str(sub.id),
+                "status": "completed",
+                "error": None,
+                "check_attempts": 1,
+                "last_check_at": MONDAY_10H.isoformat(),
+            }
+        ]
+        await s.commit()
+    surfaces = FakeSurfaces()
+    assert await make(db, settings, agent, surfaces).tick() == 0
+    assert await audit_rows(db, agent) == []
+
+
+async def test_the_step_three_update_is_retried_and_the_rows_end_up_naming_their_card(db, settings, agent, monkeypatch):
+    from nous.audits import check_audit as module
+
+    async def no_wait(_):
+        return None
+
+    monkeypatch.setattr(module.asyncio, "sleep", no_wait)
+    await finished(db, agent, CHECKS["file_exists"])
+    sampler = make(db, settings, agent, FakeSurfaces())
+    real_session, calls = db.session, []
+
+    class FlakyOnce:
+        def __init__(self):
+            self._cm = real_session()
+
+        async def __aenter__(self):
+            calls.append(1)
+            if len(calls) == 4:  # done-this-week, eligibility, rows, then the first UPDATE attempt
+                raise RuntimeError("connection lost")
+            return await self._cm.__aenter__()
+
+        async def __aexit__(self, *a):
+            return await self._cm.__aexit__(*a)
+
+    monkeypatch.setattr(db, "session", lambda: FlakyOnce())
+    assert await sampler.tick() == 1
+    (row,) = await audit_rows(db, agent)
+    assert row.surface_id == "surface-1"
+
+
+async def test_if_every_update_attempt_fails_it_logs_an_error_naming_the_card(db, settings, agent, monkeypatch, caplog):
+    from nous.audits import check_audit as module
+
+    async def no_wait(_):
+        return None
+
+    monkeypatch.setattr(module.asyncio, "sleep", no_wait)
+    sampler = make(db, settings, agent, FakeSurfaces())
+
+    def broken():
+        raise RuntimeError("connection lost")
+
+    monkeypatch.setattr(db, "session", broken)
+    with caplog.at_level("ERROR"):
+        await sampler._name_the_card([uuid.uuid4()], "surface-9")
+    assert any("surface-9" in r.getMessage() and r.levelname == "ERROR" for r in caplog.records)
+
+
+def test_the_real_push_built_takes_the_keywords_the_sampler_passes():
+    import inspect
+
+    from nous.a2ui.service import SurfaceService
+
+    params = inspect.signature(SurfaceService.push_built).parameters
+    assert {"notify", "notify_text"} <= set(params)
+    # and nothing the sampler passes is a keyword the real signature lacks: bind a call exactly as tick() makes it
+    inspect.signature(SurfaceService.push_built).bind(None, object(), notify=True, notify_text="x")
+
+
+def test_the_card_expires_inside_the_scorers_hold():
+    from nous.a2ui.builders.check_audit import EXPIRES_IN
+    from nous.audits.check_audit import LOOKBACK
+    from nous.observability import task_scoring as ts
+
+    # pushed at most LOOKBACK after the task finished; the hold ends SETTLE_DAYS + V2_HOLD_EXTRA_DAYS after it
+    assert LOOKBACK + EXPIRES_IN <= timedelta(days=ts.SETTLE_DAYS + ts.V2_HOLD_EXTRA_DAYS)
+
+
+def test_main_starts_the_sampler_only_when_the_flag_is_on_after_the_surface_service_and_cancels_it():
+    """PIN (by source, as test_f099_phase2b_wiring does for the continuation wiring)."""
+    import inspect
+
+    from nous import main
+
+    src = inspect.getsource(main.create_components)
+    made = src.index("surface_service = SurfaceService(")
+    gate = src.index("if settings.check_audit_enabled:")
+    start = src.index("CheckAuditSampler(database, settings.agent_id, surface_service, settings).run()")
+    assert made < gate < start
+    assert src.index("if settings.a2ui_enabled:") < gate  # it needs the companion
+    assert '"check_audit_task": check_audit_task' in src
+    assert "check_audit_task = None" in src  # off: nothing is created
+    down = inspect.getsource(main.shutdown_components)
+    assert 'components.get("check_audit_task")' in down and "check_audit_task.cancel()" in down

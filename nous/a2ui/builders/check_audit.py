@@ -24,7 +24,9 @@ from .intention_cards import fence
 
 KIND = "check_audit"
 ORIGIN = "audit"
-EXPIRES_IN = timedelta(days=7)
+# 14 days: a card is pushed at most 7 days after its task finished and expires at most 21 days after, which is how long
+# the scorer holds an unanswered row (SETTLE_DAYS 14 + V2_HOLD_EXTRA_DAYS 7), so an answer still lands inside the hold.
+EXPIRES_IN = timedelta(days=14)
 # What the card shows of each model-authored string, in UTF-16 units.
 TASK_CHARS = 600
 CHECK_CHARS = 300

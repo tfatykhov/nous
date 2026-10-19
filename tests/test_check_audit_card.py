@@ -50,7 +50,7 @@ def test_the_card_offers_right_and_wrong_per_item_and_nothing_else():
     built = check_audit(items)
     built.validate()
     assert (built.kind, built.priority, built.allowed_actions) == ("check_audit", 1, ["audit.verdict"])
-    assert built.expires_in.days == 7
+    assert built.expires_in.days == 14  # an answer can land within the scorer's hold on an unanswered card
     assert built.data_model == {"items": {item["audit_id"]: "pending" for item in items}}
     contexts = [c["action"]["event"]["context"] for c in built.components if c["component"] == "Button"]
     assert contexts == [
