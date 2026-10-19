@@ -297,3 +297,26 @@ async def test_a_rate_limit_stops_the_pass_from_asking_again():
 def test_a_path_segment_is_not_a_repository():
     assert ts.parse_pr_check("python -m nous.dag.typed_checks pr ../.. --pr 5") is None
     assert ts.parse_pr_check("python -m nous.dag.typed_checks pr tfatykhov/.. --pr 5") is None
+
+
+async def test_two_spellings_of_one_repository_are_one_pr():
+    # GitHub matches owner and repository names case-insensitively: both checks name the same PR, which credits once.
+    def pull_with_base():
+        p = pr(opened=DAG_AT + timedelta(hours=2))
+        p["base"] = {"repo": {"full_name": "tfatykhov/nous"}}
+        return p
+
+    first = leaf("first", node_id="a")
+    other = leaf("other", node_id="b", dag_at=DAG_AT + timedelta(hours=1))
+    other = TaskSignals(**{**other.__dict__, "pr_check": PrCheck(repo="TfAtykhov/NOUS", number=5)})
+    out = {s.task_id: s for s in await decide([first, other], FakeGitHub([pull_with_base()]))}
+    assert out["first"].v2_verified and out["first"].evidence["v2_pr_merged"] == ["tfatykhov/nous#5"]
+    assert not out["other"].v2_verified and out["other"].evidence["v2_pr_duplicate"] == ["first"]
+
+
+async def test_a_stored_credit_matches_whatever_the_spelling():
+    other = leaf()
+    other = TaskSignals(**{**other.__dict__, "pr_check": PrCheck(repo="TFATYKHOV/nous", number=5)})
+    github = FakeGitHub([pr()])
+    [out] = await decide([other], github, stored=stored_pr_evidence([("x", {"v2_pr_merged": ["tfatykhov/nous#5"]})]))
+    assert out.evidence["v2_pr_duplicate"] == ["x"] and github.requests == []

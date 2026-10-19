@@ -8,7 +8,9 @@ not a loop inside the app and has no setting: it is meant to run on a timer as a
 database role, which keeps the writer of the scores outside the agent's process.
 The job needs only SELECT on the source tables and SELECT, INSERT and UPDATE on ``scoring.task_scores`` (it reads
 the oldest provisional row and the stored scores of roll-up children there too) and on ``scoring.scorer_heartbeat``:
-no DDL, no temp table, no advisory lock, no delete.
+no DDL, no temp table, no advisory lock, no delete. A pass row-locks the agent's heartbeat row first
+(``SELECT ... FOR UPDATE``, which UPDATE on that table allows), so two passes for one agent (the timer and a manual
+backfill) take turns: the second reads the PR credits the first committed (one PR credits one leaf).
 Every pass upserts the agent's row in ``scoring.scorer_heartbeat``: ``ok`` in the same transaction as the scores, or
 ``error`` with the exception's class name in a transaction of its own (best effort: it never hides the pass's error).
 That row is the liveness signal, shown as ``scorer`` by ``GET /dashboard/autonomy``: a ``last_run_at`` much older than
@@ -223,6 +225,12 @@ async def _provisional_rows(
     return as_utc(oldest[0]), beyond[0], as_utc(beyond[1])
 
 
+def pass_lock(agent_id: str):
+    """The statement that serialises the passes of one agent: a row lock on its heartbeat row, held until the pass's
+    transaction ends. No row yet (the agent's very first pass) locks nothing, which only a first pass can race."""
+    return select(ScorerHeartbeatRow.agent_id).where(ScorerHeartbeatRow.agent_id == agent_id).with_for_update()
+
+
 async def _stored_pr_evidence(session: AsyncSession, agent_id: str) -> StoredPrEvidence:
     """The PR pins and credits earlier passes recorded, any scorer version from 4 on and settled or not: one PR
     credits one leaf for good, even after that leaf's row has left the window."""
@@ -258,6 +266,7 @@ async def run_scoring_pass(
     since = now - timedelta(days=window_days)
     floor = min(since, now - timedelta(days=MAX_REACHBACK_DAYS))
     async with database.session() as session:
+        await session.execute(pass_lock(agent_id))  # before any read: a concurrent pass for this agent waits here
         # A row settles on the first pass after its task is SETTLE_DAYS old, and the window is only a day longer. With
         # no pass in that day the task leaves the window and its row would stay provisional for good, so the window
         # reaches back to the oldest such row, but not past the floor: a row whose task can no longer be gathered

@@ -1047,8 +1047,9 @@ async def test_a_pass_issues_only_selects_and_the_scores_upsert(db, agent):
             writes |= {name.split(".")[-1] for name in re.findall(r"\bINSERT\s+INTO\s+([\w.]+)", statement, re.I)}
 
     # The privilege contract is derived, not copied: the tables the pass reads are exactly SOURCE_TABLES plus
-    # SCORE_TABLE (the oldest provisional row, the stored scores of children that finished before the window), and the
-    # only tables it writes are SCORE_TABLE and HEARTBEAT_TABLE (an upsert with no FROM or JOIN, so not a read here).
+    # SCORE_TABLE (the oldest provisional row, the stored scores of children that finished before the window) and
+    # HEARTBEAT_TABLE (the row lock that makes two passes of one agent take turns), and the only tables it writes are
+    # SCORE_TABLE and HEARTBEAT_TABLE (an upsert with no FROM or JOIN, so not a read here).
     # Dropping a table from SOURCE_TABLES, granting one the pass never reads, or pointing SCORE_TABLE or
     # HEARTBEAT_TABLE elsewhere fails here on the SQLite lane as well as on Postgres.
     models_say: dict[str, set[str]] = {}
@@ -1058,7 +1059,7 @@ async def test_a_pass_issues_only_selects_and_the_scores_upsert(db, agent):
     write_tables = {fullname for name in writes for fullname in models_say[name]}
     assert write_tables == {job.SCORE_TABLE, job.HEARTBEAT_TABLE}, write_tables
     read_tables = {fullname for name in reads for fullname in models_say[name]}
-    granted = set(job.SOURCE_TABLES) | {job.SCORE_TABLE}
+    granted = set(job.SOURCE_TABLES) | {job.SCORE_TABLE, job.HEARTBEAT_TABLE}
     assert read_tables == granted, (
         f"read but not granted: {sorted(read_tables - granted)}; granted but not read: {sorted(granted - read_tables)}"
     )
@@ -1269,3 +1270,13 @@ async def test_an_open_pr_holds_its_row_past_the_window_and_settles_at_the_bound
     assert later.settled is False and later.evidence["v2_pending"] == ["open"]
     last = await score_at(NOW + timedelta(days=V2_HOLD_EXTRA_DAYS + 1))  # 22 days old: past the bound
     assert last.settled is True and last.outcome == "done_self"
+
+
+def test_a_pass_locks_its_agents_heartbeat_row_first():
+    # Two passes for one agent (the timer and a manual backfill) must take turns, or both could read the stored PR
+    # credits before either commits and credit one PR to two leaves. The lock is a row lock on the agent's heartbeat
+    # row (UPDATE on that table allows SELECT ... FOR UPDATE), taken before anything else is read.
+    from sqlalchemy.dialects import postgresql
+
+    sql = str(job.pass_lock("a1").compile(dialect=postgresql.dialect()))
+    assert "FROM scoring.scorer_heartbeat" in sql and sql.rstrip().endswith("FOR UPDATE"), sql
