@@ -3143,6 +3143,29 @@ class Settings(BaseSettings):
         gt=0,
         description="F100: wall-clock limit per call; clamped to NOUS_TOOL_TIMEOUT minus 25s (teardown room: 4 close steps of 5s, plus 5s), which cancels any tool.",
     )
+    # Task scoring v4 (read by the scoring job, python -m nous.observability.task_score_job, not by the agent)
+    scorer_agent_logins: str = Field(
+        default="",
+        description=(
+            "Comma-separated GitHub logins the agent opens pull requests as. The scoring job verifies a node's PR "
+            "check against GitHub: credit needs a PR opened by one of these logins and merged by one of "
+            "NOUS_SCORER_MERGER_LOGINS. Empty turns that verification off."
+        ),
+    )
+    scorer_merger_logins: str = Field(
+        default="",
+        description=(
+            "Comma-separated GitHub logins whose merge confirms the agent's pull request (the owner). An allowlist: "
+            "a merge by the agent, by any [bot] login or by anyone else earns nothing. Empty turns PR verification off."
+        ),
+    )
+    scorer_github_token: str = Field(
+        default="",
+        description=(
+            "Optional read-only GitHub token for the scoring job's PR verification (higher rate limit). Empty reads "
+            "anonymously, which works for public repositories. Give it to the scorer service only, never the agent."
+        ),
+    )
     browser_task_proxy_port: int = Field(
         default=18181,
         gt=1024,

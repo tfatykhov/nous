@@ -15,11 +15,13 @@
 /nous/observability/task_scoring.py @tfatykhov
 /nous/observability/task_score_gatherer.py @tfatykhov
 /nous/observability/task_score_job.py @tfatykhov
+/nous/observability/github_verify.py @tfatykhov
 /nous/storage/models.py @tfatykhov
 /nous/api/autonomy_dashboard.py @tfatykhov
 /nous/observability/autonomy_inventory.py @tfatykhov
 /sql/migrations/** @tfatykhov
 /tests/test_task_scor*.py @tfatykhov
+/tests/test_github_verify.py @tfatykhov
 /tests/test_scorer_heartbeat_migration.py @tfatykhov
 
 # The evidence the scorer and the autonomy inventory read: the harness ledger, the verifier that marks claims

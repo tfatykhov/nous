@@ -8,7 +8,9 @@ not a loop inside the app and has no setting: it is meant to run on a timer as a
 database role, which keeps the writer of the scores outside the agent's process.
 The job needs only SELECT on the source tables and SELECT, INSERT and UPDATE on ``scoring.task_scores`` (it reads
 the oldest provisional row and the stored scores of roll-up children there too) and on ``scoring.scorer_heartbeat``:
-no DDL, no temp table, no advisory lock, no delete.
+no DDL, no temp table, no advisory lock, no delete. A pass row-locks the agent's heartbeat row first
+(``SELECT ... FOR UPDATE``, which UPDATE on that table allows), so two passes for one agent (the timer and a manual
+backfill) take turns: the second reads the PR credits the first committed (one PR credits one leaf).
 Every pass upserts the agent's row in ``scoring.scorer_heartbeat``: ``ok`` in the same transaction as the scores, or
 ``error`` with the exception's class name in a transaction of its own (best effort: it never hides the pass's error).
 That row is the liveness signal, shown as ``scorer`` by ``GET /dashboard/autonomy``: a ``last_run_at`` much older than
@@ -34,12 +36,13 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from sqlalchemy import func, select
+from sqlalchemy import Text, cast, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.dag.approval import as_utc
 from nous.log_redaction import configure_logging
+from nous.observability.github_verify import GitHubReader, PrVerifier, StoredPrEvidence, stored_pr_evidence
 from nous.observability.task_score_gatherer import chunked, gather_signals
 from nous.observability.task_scoring import (
     LEAF_KIND,
@@ -222,19 +225,48 @@ async def _provisional_rows(
     return as_utc(oldest[0]), beyond[0], as_utc(beyond[1])
 
 
+def pass_lock(agent_id: str):
+    """The statement that serialises the passes of one agent: a row lock on its heartbeat row, held until the pass's
+    transaction ends. No row yet (the agent's very first pass) locks nothing, which only a first pass can race."""
+    return select(ScorerHeartbeatRow.agent_id).where(ScorerHeartbeatRow.agent_id == agent_id).with_for_update()
+
+
+async def _stored_pr_evidence(session: AsyncSession, agent_id: str) -> StoredPrEvidence:
+    """The PR pins and credits earlier passes recorded, any scorer version from 4 on and settled or not: one PR
+    credits one leaf for good, even after that leaf's row has left the window."""
+    result = await session.execute(
+        select(TaskScoreRow.task_id, TaskScoreRow.evidence)
+        .where(
+            TaskScoreRow.agent_id == agent_id,
+            TaskScoreRow.task_kind == LEAF_KIND,
+            TaskScoreRow.scorer_version >= 4,
+            cast(TaskScoreRow.evidence, Text).like("%v2_pr%"),
+        )
+        .order_by(TaskScoreRow.first_scored_at, TaskScoreRow.task_id)
+    )
+    return stored_pr_evidence((r.task_id, r.evidence) for r in result)
+
+
 async def run_scoring_pass(
-    database: Database, agent_id: str, *, window_days: int = SCORING_WINDOW_DAYS, now: datetime | None = None
+    database: Database,
+    agent_id: str,
+    *,
+    window_days: int = SCORING_WINDOW_DAYS,
+    now: datetime | None = None,
+    pr_verifier: PrVerifier | None = None,
 ) -> int:
     """Score every task of ``agent_id`` finished in the window and upsert the rows in one transaction.
 
     The window reaches back further when a row is still provisional although its task finished before the window
     start: it is re-scored and settled with fresh signals. It never reaches back more than ``MAX_REACHBACK_DAYS``. The
     leaves are scored first: the roll-ups read their scores. Returns the number of rows submitted to the upsert.
+    ``pr_verifier`` decides the leaves whose node passed the PR check (scorer v4); without it they stay unverified.
     """
     now = now or datetime.now(UTC)
     since = now - timedelta(days=window_days)
     floor = min(since, now - timedelta(days=MAX_REACHBACK_DAYS))
     async with database.session() as session:
+        await session.execute(pass_lock(agent_id))  # before any read: a concurrent pass for this agent waits here
         # A row settles on the first pass after its task is SETTLE_DAYS old, and the window is only a day longer. With
         # no pass in that day the task leaves the window and its row would stay provisional for good, so the window
         # reaches back to the oldest such row, but not past the floor: a row whose task can no longer be gathered
@@ -257,15 +289,19 @@ async def run_scoring_pass(
                 agent_id,
             )
         gathered = await gather_signals(session, agent_id, since=since)
-        leaves = [row for sig in gathered.leaves if (row := score_leaf(sig, now)) is not None]
+        leaf_signals = gathered.leaves
+        if pr_verifier is not None and any(sig.pr_check is not None for sig in leaf_signals):
+            leaf_signals = await pr_verifier.verify(leaf_signals, await _stored_pr_evidence(session, agent_id))
+        leaves = [row for sig in leaf_signals if (row := score_leaf(sig, now)) is not None]
         leaf_scores = {row.task_id: row.score for row in leaves}
+        provisional = frozenset(row.task_id for row in leaves if not row.settled)  # a held child holds its parent
         missing = sorted({c for sig in (*gathered.dags, *gathered.chains) for c in sig.child_ids} - leaf_scores.keys())
         if missing:  # children that finished before the window: their stored scores, the fresh ones winning
             leaf_scores = {**await _stored_leaf_scores(session, agent_id, missing), **leaf_scores}
         rollups = [
             row
             for sig in (*gathered.dags, *gathered.chains)
-            if (row := score_rollup(sig, leaf_scores, now)) is not None
+            if (row := score_rollup(sig, leaf_scores, now, provisional)) is not None
         ]
         submitted = await upsert_scores(session, agent_id, [*leaves, *rollups], scored_at=now)
         # In the scores' transaction: the heartbeat says ok if and only if the scores committed.
@@ -308,16 +344,33 @@ async def _run(agent_id: str | None, window_days: int) -> int:
     # No database.connect(): its schema probe reads information_schema for the three app schemas, which the
     # scoring role does not need to see. The engine connects on the first query.
     database = _open_database(settings)
+    reader: GitHubReader | None = None
+    verifier: PrVerifier | None = None
     try:
+        agents = [login for login in settings.scorer_agent_logins.split(",") if login.strip()]
+        mergers = [login for login in settings.scorer_merger_logins.split(",") if login.strip()]
+        if agents and mergers:
+            reader = GitHubReader(settings.scorer_github_token or None)
+            verifier = PrVerifier(reader, agents, mergers)
+        else:
+            logger.info(
+                "Task scores: NOUS_SCORER_AGENT_LOGINS or NOUS_SCORER_MERGER_LOGINS is empty, so PR checks are not "
+                "verified"
+            )
         if agent_id is None:
             agent_id = settings.agent_id
         now = datetime.now(UTC)
         try:
-            await run_scoring_pass(database, agent_id, window_days=window_days, now=now)
+            await run_scoring_pass(database, agent_id, window_days=window_days, now=now, pr_verifier=verifier)
         except Exception as exc:
             await _record_failed_pass(database, agent_id, exc)
             raise
     finally:
+        if reader is not None:
+            try:
+                await reader.aclose()
+            except Exception:
+                logger.warning("Task scores: closing the GitHub client failed after the pass", exc_info=True)
         try:
             await database.disconnect()
         except Exception:

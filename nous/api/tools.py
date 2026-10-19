@@ -6102,7 +6102,11 @@ def register_dag_tools(
                             "completion_check": {
                                 "type": "string",
                                 "description": (
-                                    "Shell command polled each tick. Exit 0 = success, 1 = failed, 2 = still running."
+                                    "Shell command polled each tick. Exit 0 = success, 1 = failed, 2 = still running. "
+                                    "For work that ends in a pull request, use the built-in check "
+                                    "'python -m nous.dag.typed_checks pr <owner/repo> --head <branch>' (or --pr <n>), "
+                                    "exactly as written: it passes once that PR exists and fails if it is closed "
+                                    "without a merge. Give it a completion_check_interval of 300 or more."
                                 ),
                             },
                             "completion_check_interval": {

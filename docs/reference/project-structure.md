@@ -101,6 +101,7 @@ nous/
 │   │   ├── process_recorder.py # #653 nous_system.process_run_log writer (fail-open)
 │   │   ├── task_scoring.py     # Task scores: the pure task scorer; holds every constant and SCORER_VERSION
 │   │   ├── task_score_gatherer.py # Task scores: reads a scoring pass's signals in a bounded number of queries
+│   │   ├── github_verify.py    # Task scores v4: reads a node's PR check from GitHub (author is the agent, opened after the DAG, merged by another login); one PR credits one leaf
 │   │   ├── task_score_job.py   # Task scores: the one-shot scoring pass (`python -m nous.observability.task_score_job`), the only writer of `scoring.task_scores` and `scoring.scorer_heartbeat` (migration 088, its one-row-per-agent liveness record)
 │   │   ├── autonomy_inventory.py # Autonomy inventory: per tool, successes by who was in the loop (owner present, approved, autonomous), and censor activity
 │   │   ├── drift.py            # Drift detection
@@ -112,6 +113,7 @@ nous/
 │   │   ├── approval.py         # Harness Phase 3 park-and-resume nodes
 │   │   ├── attempts.py         # The attempt a node reset discards, archived in `dag_nodes.attempt_history` (migration 089) for the task scorer
 │   │   ├── fix_executor.py     # LLM fix dispatch
+│   │   ├── typed_checks.py     # Built-in completion checks (`python -m nous.dag.typed_checks pr <repo> --head <branch>`): passes once the PR exists
 │   │   ├── schemas.py          # DAGNodeSpec, DAG schemas
 │   │   └── _workspace.py       # F064.3 workspace containment
 │   ├── browser/                # F100 browser_task: isolated browser-use loop

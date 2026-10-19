@@ -261,7 +261,9 @@ async def test_a_pass_writes_leaves_with_scores_and_rollups_without(db, agent):
     by_task = {r.task_id: r for r in await rows(db, agent)}
     assert set(by_task) == {str(ok.id), str(blocked.id), str(cancelled.id), str(dag.id)}
     leaf = by_task[str(ok.id)]
-    assert (leaf.outcome, leaf.score, leaf.tokens, leaf.refusals, leaf.settled) == ("done_verified", 0.75, 15, 1, False)
+    # v4: the DAG's check node is Nous-written, so it is evidence and the leaf stays done_self (0.0 - 0.25)
+    assert (leaf.outcome, leaf.score, leaf.tokens, leaf.refusals, leaf.settled) == ("done_self", -0.25, 15, 1, False)
+    assert leaf.evidence["dag_check_passed"] == [str(dag.id)]
     assert (by_task[str(blocked.id)].outcome, by_task[str(blocked.id)].score, by_task[str(blocked.id)].settled) == (
         "partial",
         0.0,
@@ -271,12 +273,12 @@ async def test_a_pass_writes_leaves_with_scores_and_rollups_without(db, agent):
     assert (gone.outcome, gone.not_scored_reason, gone.score) == ("not_scored", "cancelled", None)
     d = by_task[str(dag.id)]
     assert (d.outcome, d.score, d.harness_errors, d.refusals) == (
-        "done_verified",
+        "done_self",
         None,
         1,
         0,
     )  # the DAG's own call only
-    assert (d.children_scored, d.children_mean_score) == (1, 0.75)
+    assert (d.children_scored, d.children_mean_score) == (1, -0.25)
     assert all(r.scorer_version == SCORER_VERSION for r in by_task.values())
     assert sum(r.refusals for r in by_task.values()) == 1  # the one refusal, counted on one row
 
@@ -666,6 +668,9 @@ async def test_the_command_builds_its_settings_once_and_scores_their_agent(db, a
     class OneSettings:
         def __init__(self):
             self.agent_id = agent
+            self.scorer_agent_logins = ""  # PR verification off
+            self.scorer_merger_logins = ""
+            self.scorer_github_token = ""
             made.append(self)
 
     def database(settings):
@@ -696,8 +701,8 @@ async def test_the_log_counts_the_rows_submitted_by_kind(db, agent, monkeypatch,
         await s.commit()
     real = job.score_rollup
 
-    def no_dag_rollup(signals, leaf_scores, now):  # a roll-up the scorer declines (score_rollup returns None)
-        return None if signals.task_kind == "dag" else real(signals, leaf_scores, now)
+    def no_dag_rollup(signals, leaf_scores, now, *rest):  # a roll-up the scorer declines (score_rollup returns None)
+        return None if signals.task_kind == "dag" else real(signals, leaf_scores, now, *rest)
 
     monkeypatch.setattr(job, "score_rollup", no_dag_rollup)
     with caplog.at_level(logging.INFO, logger=job.__name__):
@@ -1042,8 +1047,9 @@ async def test_a_pass_issues_only_selects_and_the_scores_upsert(db, agent):
             writes |= {name.split(".")[-1] for name in re.findall(r"\bINSERT\s+INTO\s+([\w.]+)", statement, re.I)}
 
     # The privilege contract is derived, not copied: the tables the pass reads are exactly SOURCE_TABLES plus
-    # SCORE_TABLE (the oldest provisional row, the stored scores of children that finished before the window), and the
-    # only tables it writes are SCORE_TABLE and HEARTBEAT_TABLE (an upsert with no FROM or JOIN, so not a read here).
+    # SCORE_TABLE (the oldest provisional row, the stored scores of children that finished before the window) and
+    # HEARTBEAT_TABLE (the row lock that makes two passes of one agent take turns), and the only tables it writes are
+    # SCORE_TABLE and HEARTBEAT_TABLE (an upsert with no FROM or JOIN, so not a read here).
     # Dropping a table from SOURCE_TABLES, granting one the pass never reads, or pointing SCORE_TABLE or
     # HEARTBEAT_TABLE elsewhere fails here on the SQLite lane as well as on Postgres.
     models_say: dict[str, set[str]] = {}
@@ -1053,7 +1059,7 @@ async def test_a_pass_issues_only_selects_and_the_scores_upsert(db, agent):
     write_tables = {fullname for name in writes for fullname in models_say[name]}
     assert write_tables == {job.SCORE_TABLE, job.HEARTBEAT_TABLE}, write_tables
     read_tables = {fullname for name in reads for fullname in models_say[name]}
-    granted = set(job.SOURCE_TABLES) | {job.SCORE_TABLE}
+    granted = set(job.SOURCE_TABLES) | {job.SCORE_TABLE, job.HEARTBEAT_TABLE}
     assert read_tables == granted, (
         f"read but not granted: {sorted(read_tables - granted)}; granted but not read: {sorted(granted - read_tables)}"
     )
@@ -1132,3 +1138,145 @@ async def test_without_the_heartbeat_grant_a_pass_fails_and_its_scores_do_not_co
             await job.run_scoring_pass(as_role, agent)
     assert await rows(db, agent) == []  # the scores and the heartbeat are one transaction
     assert await heartbeats(db, agent) == []
+
+
+# ---- scorer v4: a PR check verified against GitHub by the job ---------------------------------------------------
+
+
+async def _pr_checked_subtask(
+    db, agent, dag_at, *, command="python -m nous.dag.typed_checks pr tfatykhov/nous --pr 5", finished=None
+):
+    """A subtask whose DAG node passed the PR check (the orchestrator saw the PR exist)."""
+    dag = ExecutionDAG(
+        id=uuid.uuid4(), agent_id=agent, name="d", status="completed", created_at=dag_at, completed_at=NOW
+    )
+    sub = Subtask(
+        id=uuid.uuid4(),
+        agent_id=agent,
+        task="open the PR",
+        status="completed",
+        final_outcome="completed",
+        completed_at=finished or NOW - timedelta(hours=1),
+    )
+    node = DAGNode(
+        id=uuid.uuid4(),
+        dag_id=dag.id,
+        name="n",
+        node_type="subtask",
+        status="completed",
+        completion_check=command,
+        check_attempts=1,
+        last_check_at=NOW - timedelta(hours=1),
+        subtask_id=sub.id,
+    )
+    sub.dag_node_id = node.id
+    async with db.session() as s:
+        s.add(dag)
+        await s.flush()
+        s.add_all([node, sub])
+        await s.commit()
+    return sub
+
+
+def _github(merged_by="tfatykhov"):
+    import httpx
+
+    opened = (NOW - timedelta(days=1)).isoformat()
+
+    def handle(request):
+        return httpx.Response(
+            200,
+            json={
+                "number": 5,
+                "state": "closed",
+                "user": {"login": "cognition-engines-nous-agent"},
+                "created_at": opened,
+                "merged_at": (NOW - timedelta(hours=2)).isoformat(),
+                "merged_by": {"login": merged_by},
+            },
+        )
+
+    return httpx.MockTransport(handle)
+
+
+async def test_a_pass_verifies_a_pr_check_against_github_and_one_pr_credits_one_leaf(db, agent):
+    from nous.observability.github_verify import GitHubReader, PrVerifier
+
+    first = await _pr_checked_subtask(db, agent, NOW - timedelta(days=2))
+    second = await _pr_checked_subtask(db, agent, NOW - timedelta(days=1, hours=12))  # a later DAG, same PR
+    reader = GitHubReader(transport=_github())
+    try:
+        verifier = PrVerifier(reader, ["cognition-engines-nous-agent"], ["tfatykhov"])
+        await job.run_scoring_pass(db, agent, now=NOW, pr_verifier=verifier)
+        await job.run_scoring_pass(db, agent, now=NOW + timedelta(minutes=15), pr_verifier=verifier)
+    finally:
+        await reader.aclose()
+
+    by_task = {r.task_id: r for r in await rows(db, agent) if r.task_kind == "subtask"}
+    one, two = by_task[str(first.id)], by_task[str(second.id)]
+    assert (one.outcome, one.score) == ("done_verified", 1.0)
+    assert one.evidence["v2_pr_merged"] == ["tfatykhov/nous#5"]
+    # The second pass read the stored credit: the later leaf naming the same PR earns nothing, on both passes.
+    assert (two.outcome, two.score) == ("done_self", 0.0)
+    assert two.evidence["v2_pr_duplicate"] == [str(first.id)]
+
+
+async def test_without_a_verifier_a_pr_check_earns_nothing(db, agent):
+    sub = await _pr_checked_subtask(db, agent, NOW - timedelta(days=2))
+    await job.run_scoring_pass(db, agent, now=NOW)
+    [row] = [r for r in await rows(db, agent) if r.task_id == str(sub.id)]
+    assert row.outcome == "done_self" and "v2_pr_merged" not in row.evidence
+
+
+async def test_a_pr_merged_by_the_agent_itself_earns_nothing(db, agent):
+    from nous.observability.github_verify import GitHubReader, PrVerifier
+
+    sub = await _pr_checked_subtask(db, agent, NOW - timedelta(days=2))
+    reader = GitHubReader(transport=_github(merged_by="cognition-engines-nous-agent"))
+    try:
+        await job.run_scoring_pass(
+            db, agent, now=NOW, pr_verifier=PrVerifier(reader, ["cognition-engines-nous-agent"], ["tfatykhov"])
+        )
+    finally:
+        await reader.aclose()
+    [row] = [r for r in await rows(db, agent) if r.task_id == str(sub.id)]
+    assert row.outcome == "done_self" and row.evidence["v2_rejected"] == ["merged by the agent"]
+
+
+async def test_an_open_pr_holds_its_row_past_the_window_and_settles_at_the_bound(db, agent):
+    import httpx
+
+    from nous.observability.github_verify import GitHubReader, PrVerifier
+    from nous.observability.task_scoring import SETTLE_DAYS, V2_HOLD_EXTRA_DAYS
+
+    finished = NOW - timedelta(days=SETTLE_DAYS)  # just inside the 15-day window at NOW
+    sub = await _pr_checked_subtask(db, agent, finished - timedelta(days=1), finished=finished)
+    opened = (finished - timedelta(hours=12)).isoformat()
+    open_pr = {"number": 5, "state": "open", "user": {"login": "cognition-engines-nous-agent"}, "created_at": opened}
+
+    async def score_at(now):
+        reader = GitHubReader(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=open_pr)))
+        try:
+            await job.run_scoring_pass(
+                db, agent, now=now, pr_verifier=PrVerifier(reader, ["cognition-engines-nous-agent"], ["tfatykhov"])
+            )
+        finally:
+            await reader.aclose()
+        [row] = [r for r in await rows(db, agent) if r.task_id == str(sub.id)]
+        return row
+
+    assert (await score_at(NOW)).settled is False  # 14 days old, the PR still open: held
+    later = await score_at(NOW + timedelta(days=3))  # 17 days old: out of the window, reached through its row
+    assert later.settled is False and later.evidence["v2_pending"] == ["open"]
+    last = await score_at(NOW + timedelta(days=V2_HOLD_EXTRA_DAYS + 1))  # 22 days old: past the bound
+    assert last.settled is True and last.outcome == "done_self"
+
+
+def test_a_pass_locks_its_agents_heartbeat_row_first():
+    # Two passes for one agent (the timer and a manual backfill) must take turns, or both could read the stored PR
+    # credits before either commits and credit one PR to two leaves. The lock is a row lock on the agent's heartbeat
+    # row (UPDATE on that table allows SELECT ... FOR UPDATE), taken before anything else is read.
+    from sqlalchemy.dialects import postgresql
+
+    sql = str(job.pass_lock("a1").compile(dialect=postgresql.dialect()))
+    assert "FROM scoring.scorer_heartbeat" in sql and sql.rstrip().endswith("FOR UPDATE"), sql
