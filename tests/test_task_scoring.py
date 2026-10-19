@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -27,13 +28,29 @@ def sig(kind="subtask", status="completed", detail=None, finished=None, **kw) ->
 
 def test_the_scorer_version_and_every_constant_are_pinned():
     # Bump SCORER_VERSION in the same commit as any constant or mapping below, then update this pin.
-    assert ts.SCORER_VERSION == 4  # v4: a PR merged by another login verifies; a DAG check node no longer does
+    assert ts.SCORER_VERSION == 5  # v5: sampled owner audits; a trusted check kind earns done_checked
     assert ts.V2_HOLD_EXTRA_DAYS == 7
     assert ts.PR_CHECK_RE.pattern == (
         r"python -m nous\.dag\.typed_checks pr ([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+) "
         r"(?:--pr ([1-9][0-9]{0,8})|--head ([A-Za-z0-9._/-]{1,200}))"
     )
-    assert ts.OUTCOME_BASE == {"done_verified": 1.0, "done_self": 0.0, "partial": 0.0, "failed": -0.5}
+    assert ts.OUTCOME_BASE == {
+        "done_verified": 1.0,
+        "done_checked": 0.25,
+        "done_self": 0.0,
+        "partial": 0.0,
+        "failed": -0.5,
+    }
+    assert (ts.CHECK_KIND_PR, ts.CHECK_KIND_OTHER) == ("pr", "other")
+    assert [(kind, pattern.pattern) for kind, pattern in ts.CHECK_KIND_PATTERNS] == [
+        ("job_status", r"claude-jobs|JOB_?ID"),
+        ("pr_state", r"\bgh pr\b|check_pr"),
+        ("file_exists", r"\btest -[efs]\b|\[ -[efs] |ALL_DONE"),
+        ("script", r"^\s*(bash|sh|python3?)\s+\S+\.(sh|py)\b"),
+    ]
+    assert ts.CHECK_KINDS == ("pr", "job_status", "pr_state", "file_exists", "script", "other")
+    assert ts.AUDIT_VERDICTS == ("right", "wrong")
+    assert ts.AUDIT_TRUST_WINDOW == 5
     assert ts.NODE_CHECK_FAILED_PREFIX == "Completion check failed"
     assert ts.NODE_CHECK_UNCONFIRMED_PREFIXES == (
         "Completion check timed out after",
@@ -44,7 +61,8 @@ def test_the_scorer_version_and_every_constant_are_pinned():
     assert (ts.HARNESS_ERROR_PENALTY, ts.HARNESS_ERROR_CAP) == (0.1, 0.5)
     assert (ts.REFUSAL_PENALTY, ts.REFUSAL_CAP, ts.SCORE_FLOOR) == (0.25, 0.5, -1.0)
     assert (ts.SETTLE_DAYS, ts.SCORING_WINDOW_DAYS) == (14, 15)
-    assert ts.OUTCOMES == ("done_self", "done_verified", "partial", "failed", "not_scored")
+    assert ts.OUTCOMES == ("done_self", "done_verified", "done_checked", "partial", "failed", "not_scored")
+    assert set(ts.OUTCOME_BASE) == set(ts.OUTCOMES) - {"not_scored"}
     assert score_leaf(sig(), NOW).scorer_version == ts.SCORER_VERSION
 
 
@@ -120,18 +138,20 @@ def test_raw_outcome_mapping(kind, status, detail, raw):
 
 
 @pytest.mark.parametrize(
-    ("raw", "verified", "expected"),
+    ("raw", "verified", "checked", "expected"),
     [
-        ("done", False, ("done_self", None)),
-        ("done", True, ("done_verified", None)),
-        ("partial", True, ("partial", None)),  # a confirmation does not turn a partial into a success
-        ("failed", True, ("failed", None)),
-        ("cancelled", True, ("not_scored", "cancelled")),
-        ("legacy", False, ("not_scored", "legacy")),
+        ("done", False, False, ("done_self", None)),
+        ("done", True, False, ("done_verified", None)),
+        ("done", False, True, ("done_checked", None)),  # v5
+        ("done", True, True, ("done_verified", None)),  # verified outranks checked
+        ("partial", True, True, ("partial", None)),  # a confirmation does not turn a partial into a success
+        ("failed", True, True, ("failed", None)),
+        ("cancelled", True, True, ("not_scored", "cancelled")),
+        ("legacy", False, False, ("not_scored", "legacy")),
     ],
 )
-def test_final_outcome(raw, verified, expected):
-    assert ts.final_outcome(raw, verified=verified) == expected
+def test_final_outcome(raw, verified, checked, expected):
+    assert ts.final_outcome(raw, verified=verified, checked=checked) == expected
 
 
 @pytest.mark.parametrize(
@@ -301,3 +321,127 @@ def test_a_rollup_stays_provisional_while_a_child_it_counts_is():
     assert score_rollup(old, {"a": 0.0, "b": 1.0}, NOW).settled is True
     assert score_rollup(old, {"a": 0.0, "b": 1.0}, NOW, frozenset({"b"})).settled is False
     assert score_rollup(old, {"a": 0.0, "b": 1.0}, NOW, frozenset({"other"})).settled is True
+
+
+# v5: check kinds, the owner's audits, done_checked
+
+
+@pytest.mark.parametrize(
+    ("command", "kind"),
+    [
+        ("python -m nous.dag.typed_checks pr tfatykhov/nous --pr 12", "pr"),
+        ("  python -m nous.dag.typed_checks pr tfatykhov/nous --head fix/x  ", "pr"),  # surrounding blanks aside
+        ("python -m nous.dag.typed_checks pr tfatykhov/nous --pr 12 || true", "other"),  # not the PR check any more
+        ("cat /tmp/claude-jobs/abc/status | grep done", "job_status"),
+        ('test -n "$JOB_ID"', "job_status"),
+        ("echo $JOBID", "job_status"),
+        ("gh pr view 12 --json state", "pr_state"),
+        ("python check_pr.py 12", "pr_state"),  # check_pr comes before the script pattern
+        ("test -f /tmp/report.md", "file_exists"),
+        ("test -s out.json", "file_exists"),
+        ("[ -e /tmp/done ] && echo ok", "file_exists"),
+        ("grep -q ALL_DONE log.txt", "file_exists"),
+        ("bash scripts/verify.sh", "script"),
+        ("  python3 tools/check.py --strict", "script"),
+        ("sh run.sh", "script"),
+        ("test -f /tmp/claude-jobs/x/done", "job_status"),  # first match wins: job_status before file_exists
+        ("gh pr checks 12 && test -f done", "pr_state"),  # pr_state before file_exists
+        ("bash check_pr.sh", "pr_state"),  # pr_state before script
+        ("pytest -q tests/test_x.py", "other"),
+        ("testing -f x", "other"),  # \btest -f\b only
+        ("", "other"),
+        (None, "other"),
+    ],
+)
+def test_check_kind(command, kind):
+    assert ts.check_kind(command) == kind
+    assert kind in ts.CHECK_KINDS
+
+
+def _answers(kind: str, verdicts: str, start: int = 0) -> list[tuple[str, str, datetime, str]]:
+    """``verdicts`` oldest first, one letter each (r right, w wrong), an hour apart."""
+    names = {"r": "right", "w": "wrong"}
+    return [
+        (kind, names[v], NOW - timedelta(days=30) + timedelta(hours=start + i), f"{kind}-{start + i:03d}")
+        for i, v in enumerate(verdicts)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("verdicts", "trusted"),
+    [
+        ("rrrrr", True),  # exactly five, all right
+        ("rrrr", False),  # four is not enough
+        ("", False),  # nobody answered: absence is not a verdict
+        ("wrrrrr", True),  # the wrong is older than the latest five
+        ("rrrrrw", False),  # one wrong among the latest five takes the trust away
+        ("rrwrrrr", False),  # still among the latest five
+        ("rrwrrrrr", True),  # five consecutive rights restore it
+        ("rrrrrrrrrrrr", True),
+    ],
+)
+def test_a_kind_is_trusted_only_when_its_latest_five_answers_are_all_right(verdicts, trusted):
+    assert (ts.trusted_kinds(_answers("file_exists", verdicts)) == {"file_exists"}) is trusted
+
+
+def test_trust_is_by_answered_at_per_kind_not_by_input_order():
+    rows = _answers("script", "wrrrrr") + _answers("other", "rrrrrw")
+    rows.reverse()  # newest first in, and kinds interleaved: the order the rows arrive in does not matter
+    assert ts.trusted_kinds(rows) == {"script"}
+    # the same answered_at: the audit id breaks the tie, so the result does not depend on the database's row order
+    tied = [("job_status", v, NOW, f"id-{i}") for i, v in enumerate(["wrong", *["right"] * 5])]
+    assert ts.trusted_kinds(tied) == {"job_status"}
+    assert ts.trusted_kinds(list(reversed(tied))) == {"job_status"}
+
+
+CHECKED = dict(node_check="passed", check_kind="file_exists", kind_trusted=True)
+
+
+@pytest.mark.parametrize(
+    ("signals", "outcome", "score"),
+    [
+        (sig(**CHECKED), "done_checked", 0.25),  # raw done, its own check passed, the kind is trusted
+        (sig(**{**CHECKED, "kind_trusted": False}), "done_self", 0.0),  # an untrusted kind earns nothing
+        (sig(**{**CHECKED, "check_kind": "pr"}), "done_self", 0.0),  # a PR check is V2: never done_checked
+        (sig(**{**CHECKED, "check_kind": None}), "done_self", 0.0),
+        (sig(**{**CHECKED, "node_check": None}), "done_self", 0.0),  # no check ran
+        (sig(**{**CHECKED, "node_check": "failed"}), "failed", -0.5),  # its check said no
+        (sig(**{**CHECKED, "node_check": "superseded"}), "partial", 0.0),
+        (sig(**CHECKED, detail="incomplete_blocked"), "partial", 0.0),  # only a "done" is credited
+        (sig(**CHECKED, status="failed", detail="errored"), "failed", -0.5),
+        (sig(**CHECKED, owner_grade="success"), "done_verified", 1.0),  # verified outranks checked
+        (sig(**CHECKED, harness_errors=1), "done_checked", 0.15),  # the usual penalties apply
+        # the owner's "right" on this leaf's audit is a success grade: verified, over a failed check of its own too
+        (sig(audit_verdict="right"), "done_verified", 1.0),
+        (sig(audit_verdict="right", node_check="failed"), "done_verified", 1.0),
+        (sig(audit_verdict="right", node_check="unconfirmed"), "done_verified", 1.0),
+        (sig(**CHECKED, audit_verdict="right"), "done_verified", 1.0),
+        # "wrong" is a failure grade: the gatherer counts it as an override, and it is never done_checked
+        (sig(**CHECKED, audit_verdict="wrong", owner_overrides=1), "done_self", -1.0),
+        (sig(audit_verdict="wrong", owner_overrides=1), "done_self", -1.0),
+        (sig(audit_verdict="wrong", owner_overrides=1, node_check="failed"), "failed", -1.0),  # floor
+        (sig(**CHECKED, audit_pending=True), "done_checked", 0.25),  # unanswered: no verdict yet
+    ],
+)
+def test_v5_leaf_outcomes(signals, outcome, score):
+    row = score_leaf(signals, NOW)
+    assert (row.outcome, row.score) == (outcome, pytest.approx(score))
+
+
+def test_a_pending_audit_holds_the_row_provisional_within_the_bound_and_then_it_settles():
+    bound = timedelta(days=ts.SETTLE_DAYS + ts.V2_HOLD_EXTRA_DAYS)
+    held = sig(audit_pending=True, finished=NOW - bound + timedelta(minutes=1))
+    assert score_leaf(held, NOW).settled is False  # older than SETTLE_DAYS, still waiting for the owner
+    assert score_leaf(replace(held, audit_pending=False), NOW).settled is True
+    late = sig(audit_pending=True, finished=NOW - bound)
+    assert score_leaf(late, NOW).settled is True  # the bound passed: it settles with what it has
+    young = sig(audit_pending=True, finished=NOW - timedelta(days=1))
+    assert score_leaf(young, NOW).settled is False
+    # one bound for both waits: an undecided PR is held exactly as long
+    assert score_leaf(replace(held, audit_pending=False, v2_hold=True), NOW).settled is False
+
+
+def test_a_rollup_mean_counts_the_done_checked_leaves():
+    leaf = score_leaf(sig(**CHECKED), NOW)
+    row = score_rollup(sig(kind="dag", status="completed", child_ids=("a", "b")), {"a": leaf.score, "b": 0.0}, NOW)
+    assert (row.children_scored, row.children_mean_score) == (2, 0.125)

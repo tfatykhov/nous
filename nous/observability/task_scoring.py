@@ -34,6 +34,13 @@ it is evidence (``dag_check_passed``) and nothing more. A node whose check is th
 PR and sets ``v2_verified`` when its author is the agent, it was opened after the DAG, and a non-agent
 login merged it. While that cannot be decided yet (the PR is still open, or GitHub is unreachable) the
 row is held provisional, for at most ``V2_HOLD_EXTRA_DAYS`` past the usual settle age.
+
+v5: the owner spot-checks a weekly sample of leaves whose own node check passed (``nous_system.check_audits``,
+written by ``nous/audits/check_audit.py`` and the ``audit.verdict`` action). Each check command has a kind
+(``check_kind``). A verdict on a leaf counts as the owner's grade on it: ``right`` verifies it, ``wrong`` is an
+override. A kind whose latest ``AUDIT_TRUST_WINDOW`` verdicts are all ``right`` is trusted, and a "done" leaf whose
+check of a trusted kind passed earns ``done_checked``, a small credit. A ``pr`` check is never sampled and never
+earns it. A leaf whose card is out and unanswered is held provisional, within the same bound as an undecided PR.
 """
 
 from __future__ import annotations
@@ -43,17 +50,23 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
-SCORER_VERSION = 4
+SCORER_VERSION = 5
 
 LEAF_KIND = "subtask"
 ROLLUP_KINDS: tuple[str, ...] = ("dag", "intention")
 TASK_KINDS: tuple[str, ...] = (LEAF_KIND, *ROLLUP_KINDS)
-OUTCOMES: tuple[str, ...] = ("done_self", "done_verified", "partial", "failed", "not_scored")
+OUTCOMES: tuple[str, ...] = ("done_self", "done_verified", "done_checked", "partial", "failed", "not_scored")
 
 # Base credit by outcome. Only a confirmed success earns anything; a failure the harness decided
 # (timed out, errored, failed validation, no terminal report, a failed DAG, a failed report, an
-# expired chain) costs.
-OUTCOME_BASE: dict[str, float] = {"done_verified": 1.0, "done_self": 0.0, "partial": 0.0, "failed": -0.5}
+# expired chain) costs. v5: a "done" whose check is of a kind the owner's audits trust earns a little.
+OUTCOME_BASE: dict[str, float] = {
+    "done_verified": 1.0,
+    "done_checked": 0.25,
+    "done_self": 0.0,
+    "partial": 0.0,
+    "failed": -0.5,
+}
 OVERRIDE_PENALTY = 1.0  # per owner override: one cancels a full verified success
 UNVERIFIED_CLAIM_PENALTY = 0.5  # per unverified claim
 HARNESS_ERROR_PENALTY = 0.1  # per harness error ...
@@ -90,8 +103,24 @@ PR_CHECK_RE = re.compile(
     r"(?:--pr ([1-9][0-9]{0,8})|--head ([A-Za-z0-9._/-]{1,200}))"
 )
 # A row whose PR cannot be decided yet (still open, GitHub unreachable) stays provisional this many days past
-# SETTLE_DAYS, then settles with what it has.
+# SETTLE_DAYS, then settles with what it has. v5: so does a row whose audit card is out and unanswered.
 V2_HOLD_EXTRA_DAYS = 7
+
+# v5: the kind of a completion_check, which is what the owner's audits trust or not. The first match wins: the PR check
+# (PR_CHECK_RE, exactly), then these patterns in order (re.search), else "other". The pr kind is V2 (github_verify
+# decides it): it is never sampled and never earns done_checked.
+CHECK_KIND_PR = "pr"
+CHECK_KIND_OTHER = "other"
+CHECK_KIND_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("job_status", re.compile(r"claude-jobs|JOB_?ID")),
+    ("pr_state", re.compile(r"\bgh pr\b|check_pr")),
+    ("file_exists", re.compile(r"\btest -[efs]\b|\[ -[efs] |ALL_DONE")),
+    ("script", re.compile(r"^\s*(bash|sh|python3?)\s+\S+\.(sh|py)\b")),
+)
+CHECK_KINDS: tuple[str, ...] = (CHECK_KIND_PR, *(kind for kind, _ in CHECK_KIND_PATTERNS), CHECK_KIND_OTHER)
+AUDIT_VERDICTS: tuple[str, ...] = ("right", "wrong")
+# A kind is trusted iff its latest this-many answered audits (by answered_at) are all "right". Fewer is not trust.
+AUDIT_TRUST_WINDOW = 5
 
 _EXIT_CODE = re.compile(r"(?:^|; )exit code (-?\d+)")
 
@@ -116,6 +145,36 @@ def parse_pr_check(completion_check: str | None) -> PrCheck | None:
     return PrCheck(repo=repo, number=int(number) if number else None, head=head)
 
 
+def check_kind(completion_check: str | None) -> str:
+    """The kind of a ``completion_check`` (``CHECK_KINDS``): the first of ``pr``, ``CHECK_KIND_PATTERNS``, ``other``."""
+    if parse_pr_check(completion_check) is not None:
+        return CHECK_KIND_PR
+    command = completion_check or ""
+    for kind, pattern in CHECK_KIND_PATTERNS:
+        if pattern.search(command):
+            return kind
+    return CHECK_KIND_OTHER
+
+
+def trusted_kinds(answered: Iterable[tuple[str, str, datetime, str]]) -> set[str]:
+    """The check kinds the owner's audits trust, from the answered audits as (kind, verdict, answered_at, audit id).
+
+    Per kind, the latest ``AUDIT_TRUST_WINDOW`` by ``answered_at`` (the id breaks a tie) must number exactly that many
+    and all be ``right``: one ``wrong`` among them takes the trust away until that many newer ``right`` follow. A kind
+    nobody answered for is not trusted: absence is not a verdict.
+    """
+    latest: dict[str, list[str]] = {}
+    for kind, verdict, _, _ in sorted(answered, key=lambda row: (row[2], row[3]), reverse=True):
+        verdicts = latest.setdefault(kind, [])
+        if len(verdicts) < AUDIT_TRUST_WINDOW:
+            verdicts.append(verdict)
+    return {
+        kind
+        for kind, verdicts in latest.items()
+        if len(verdicts) == AUDIT_TRUST_WINDOW and all(v == "right" for v in verdicts)
+    }
+
+
 @dataclass(frozen=True)
 class TaskSignals:
     """Everything the scorer reads about one finished task. ``status`` and ``detail`` are kind-specific.
@@ -138,6 +197,10 @@ class TaskSignals:
     node_completed_at: datetime | None = None  # v4: when the node's PR check passed, bounding which PR it saw
     v2_verified: bool = False  # v4: github_verify found the PR merged by a non-agent login
     v2_hold: bool = False  # v4: the PR cannot be decided yet; keep the row provisional (bounded)
+    audit_verdict: str | None = None  # v5: the owner's verdict on this leaf's audit (AUDIT_VERDICTS), or None
+    audit_pending: bool = False  # v5: its audit card is out and unanswered; keep the row provisional (bounded)
+    check_kind: str | None = None  # v5: the kind of its node's completion_check (current attempt), or None
+    kind_trusted: bool = False  # v5: the owner's audits trust that kind (trusted_kinds)
     owner_grade: str | None = None  # the worst a2ui grade among the decisions that belong to this unit
     owner_overrides: int = 0  # rejected proposals, undone ledger rows, decisions the owner graded failure
     unverified_claims: int = 0
@@ -202,13 +265,16 @@ def raw_outcome(task_kind: str, status: str | None, detail: str | None = None) -
     return None
 
 
-def final_outcome(raw: str, *, verified: bool) -> tuple[str, str | None]:
-    """(outcome, not_scored_reason). A cancel is never scored, whoever cancelled: "plans changed" cannot be told
-    apart from "wrong", and nothing but result_summary text could attribute it, and that is not evidence."""
+def final_outcome(raw: str, *, verified: bool, checked: bool) -> tuple[str, str | None]:
+    """(outcome, not_scored_reason). A "done" is ``done_verified``, else ``done_checked``, else ``done_self``; nothing
+    else changes. A cancel is never scored, whoever cancelled: "plans changed" cannot be told apart from "wrong", and
+    nothing but result_summary text could attribute it, and that is not evidence."""
     if raw in ("cancelled", "legacy"):
         return "not_scored", raw
     if raw == "done":
-        return ("done_verified" if verified else "done_self"), None
+        if verified:
+            return "done_verified", None
+        return ("done_checked" if checked else "done_self"), None
     return raw, None
 
 
@@ -249,8 +315,10 @@ def _settled(finished_at: datetime, now: datetime) -> bool:
 
 
 def _held(signals: TaskSignals, now: datetime) -> bool:
-    """A row whose PR cannot be decided yet stays provisional, until V2_HOLD_EXTRA_DAYS past the settle age."""
-    return signals.v2_hold and now < signals.finished_at + timedelta(days=SETTLE_DAYS + V2_HOLD_EXTRA_DAYS)
+    """A row whose PR cannot be decided yet (v4), or whose audit card is out and unanswered (v5), stays provisional,
+    until V2_HOLD_EXTRA_DAYS past the settle age. A verdict that lands within that still counts."""
+    waiting = signals.v2_hold or signals.audit_pending
+    return waiting and now < signals.finished_at + timedelta(days=SETTLE_DAYS + V2_HOLD_EXTRA_DAYS)
 
 
 def _row(signals: TaskSignals, outcome: str, reason: str | None, now: datetime, **over: object) -> TaskScore:
@@ -312,14 +380,23 @@ def _outcome_of(signals: TaskSignals) -> tuple[str, str | None] | None:
     if raw is None:
         return None
     # v4: only sources the model cannot control confirm. A DAG check node (dag_checked) is Nous-written: evidence only.
-    confirmed = signals.owner_grade == "success" or signals.v2_verified
+    # v5: the owner's "right" on this leaf's audit is a success grade. Their "wrong" is a failure grade: it is counted
+    # in owner_overrides by the gatherer, and the outcome follows from the rest, but it is never done_checked.
+    confirmed = signals.owner_grade == "success" or signals.v2_verified or signals.audit_verdict == "right"
     if raw == "done" and not confirmed:
         # The orchestrator ran the subtask's own check and it did not say yes: the model's "done" does not stand.
         if signals.node_check == "failed":
             raw = "failed"
         elif signals.node_check in ("unconfirmed", "superseded"):
             raw = "partial"
-    return final_outcome(raw, verified=confirmed)
+    # v5: a check that passed earns a little only when the owner's audits trust its kind, and never a PR check (V2).
+    checked = (
+        signals.audit_verdict is None
+        and signals.node_check == "passed"
+        and signals.kind_trusted
+        and signals.check_kind not in (None, CHECK_KIND_PR)
+    )
+    return final_outcome(raw, verified=confirmed, checked=checked)
 
 
 def score_leaf(signals: TaskSignals, now: datetime) -> TaskScore | None:
