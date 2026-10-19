@@ -85,3 +85,25 @@ async def test_the_migration_is_idempotent(db):
         for _ in range(2):  # the second run is what a restart after a partly applied deploy does
             for statement in _split_sql_statements(_sql()):
                 await conn.execute(text(statement))
+
+
+def _outcomes_listed(sql: str) -> set[str]:
+    match = re.search(r"outcome IN \(([^)]*)\)", sql)
+    assert match, sql
+    return set(re.findall(r"'(\w+)'", match.group(1)))
+
+
+def test_every_copy_of_the_outcome_list_is_the_scorers():
+    # Scorer v5 added done_checked. A row the scorer writes with an outcome the constraint does not list fails the
+    # whole pass, so the copies must agree: 087 (a new database), the ORM model (the SQLite lane) and the step of
+    # scripts/ops/db_roles.sql that replaces the constraint on a database created before v5.
+    from nous.observability.task_scoring import OUTCOMES
+
+    assert _outcomes_listed(_code()) == set(OUTCOMES)
+    (orm,) = [c for c in TaskScore.__table__.constraints if c.name == "ck_task_scores_outcome"]
+    assert _outcomes_listed(str(orm.sqltext)) == set(OUTCOMES)
+    roles = (ROOT / "scripts" / "ops" / "db_roles.sql").read_text(encoding="utf-8")
+    step = roles.split("DO $outcomes$", 1)[1].split("$outcomes$;", 1)[0]
+    assert _outcomes_listed(step) == set(OUTCOMES)
+    guard = step.split("ALTER TABLE", 1)[0]
+    assert "'scoring.task_scores'::regclass" in guard and "''done_checked''" in guard, guard

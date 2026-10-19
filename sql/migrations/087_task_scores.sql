@@ -29,6 +29,10 @@
 -- (a success grade) or a completed check node in the DAG. not_scored is a cancelled
 -- task or a legacy close, with the reason in not_scored_reason.
 -- task_id is TEXT because it holds a subtask, DAG or intention root UUID as a string.
+--
+-- done_checked (scorer v5) was added to ck_task_scores_outcome after this migration first ran.
+-- The migrator never runs a migration twice, so a database created before that keeps the old
+-- list until scripts/ops/db_roles.sql replaces the constraint (the administrator owns scoring).
 
 CREATE SCHEMA IF NOT EXISTS scoring;
 
@@ -59,7 +63,7 @@ CREATE TABLE IF NOT EXISTS scoring.task_scores (
     CONSTRAINT ck_task_scores_kind
         CHECK (task_kind IN ('subtask', 'dag', 'intention')),
     CONSTRAINT ck_task_scores_outcome
-        CHECK (outcome IN ('done_self', 'done_verified', 'partial', 'failed', 'not_scored')),
+        CHECK (outcome IN ('done_self', 'done_verified', 'done_checked', 'partial', 'failed', 'not_scored')),
     CONSTRAINT ck_task_scores_leaf_only
         CHECK (score IS NULL OR task_kind = 'subtask'),
     CONSTRAINT ck_task_scores_not_scored

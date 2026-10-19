@@ -1915,8 +1915,10 @@ class TaskScore(Base):
     __table_args__ = (
         UniqueConstraint("agent_id", "task_kind", "task_id", "scorer_version", name="uq_task_scores_task"),
         CheckConstraint("task_kind IN ('subtask', 'dag', 'intention')", name="ck_task_scores_kind"),
+        # task_scoring.OUTCOMES. A database created before scorer v5 is brought to this list by
+        # scripts/ops/db_roles.sql (the scoring schema is the administrator's, not a migration's).
         CheckConstraint(
-            "outcome IN ('done_self', 'done_verified', 'partial', 'failed', 'not_scored')",
+            "outcome IN ('done_self', 'done_verified', 'done_checked', 'partial', 'failed', 'not_scored')",
             name="ck_task_scores_outcome",
         ),
         CheckConstraint("score IS NULL OR task_kind = 'subtask'", name="ck_task_scores_leaf_only"),
@@ -1975,3 +1977,34 @@ class ScorerHeartbeat(Base):
     last_error: Mapped[str | None] = mapped_column(String(120), nullable=True)
     last_ok_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     rows_submitted: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class CheckAudit(Base):
+    """Migration 090: the owner's spot check of one sampled subtask whose own DAG node check passed.
+
+    Written by the app: ``nous.audits.check_audit`` inserts the row (``surface_id`` NULL), pushes the weekly card, then
+    sets ``surface_id``; the ``audit.verdict`` action sets ``verdict``, ``actor`` and ``answered_at`` once, on a row
+    whose ``surface_id`` is the card's own. Read by the task scorer (``task_score_gatherer``), exposed to no agent tool.
+    ``check_kind`` is ``task_scoring.check_kind`` of the node's ``completion_check``.
+    """
+
+    __tablename__ = "check_audits"
+    __table_args__ = (
+        UniqueConstraint("agent_id", "task_id", name="uq_check_audits_task"),
+        CheckConstraint("verdict IN ('right', 'wrong')", name="ck_check_audits_verdict"),
+        Index("idx_check_audits_agent_kind_answered", "agent_id", "check_kind", "answered_at"),
+        {"schema": "nous_system"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, server_default=func.gen_random_uuid()
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    node_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    check_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    sampled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    surface_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    verdict: Mapped[str | None] = mapped_column(Text, nullable=True)
+    actor: Mapped[str | None] = mapped_column(Text, nullable=True)
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

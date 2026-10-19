@@ -344,6 +344,22 @@ $defacl$;
 ALTER DEFAULT PRIVILEGES FOR ROLE nous_admin IN SCHEMA scoring REVOKE ALL ON TABLES FROM PUBLIC, nous_app, nous_scorer;
 ALTER DEFAULT PRIVILEGES FOR ROLE nous_admin IN SCHEMA scoring GRANT SELECT ON TABLES TO nous_app;
 
+-- 4b. The scores table admits every outcome the scorer writes (task_scoring.OUTCOMES). Migration 087 created the
+--     constraint, and a database created before scorer v5 still has the list without done_checked. A migration
+--     cannot change it (the application role does not own scoring), so this script does. Only a constraint that
+--     lacks done_checked is replaced, so a second run changes nothing.
+DO $outcomes$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                    WHERE conrelid = 'scoring.task_scores'::regclass AND conname = 'ck_task_scores_outcome'
+                      AND pg_get_constraintdef(oid) LIKE '%''done_checked''%') THEN
+        ALTER TABLE scoring.task_scores DROP CONSTRAINT IF EXISTS ck_task_scores_outcome;
+        ALTER TABLE scoring.task_scores ADD CONSTRAINT ck_task_scores_outcome
+            CHECK (outcome IN ('done_self', 'done_verified', 'done_checked', 'partial', 'failed', 'not_scored'));
+    END IF;
+END
+$outcomes$;
+
 -- 5. The scorer reads exactly the tables that task_score_job.SOURCE_TABLES names (a test compares this
 --    list with that constant), and nothing else in the application schemas.
 REVOKE ALL ON ALL TABLES IN SCHEMA brain, heart, nous_system FROM nous_scorer CASCADE;
