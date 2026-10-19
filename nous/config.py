@@ -3166,6 +3166,20 @@ class Settings(BaseSettings):
             "anonymously, which works for public repositories. Give it to the scorer service only, never the agent."
         ),
     )
+    # The owner's weekly spot check of completion checks (nous/audits/check_audit.py)
+    check_audit_enabled: bool = Field(
+        default=False,
+        description=(
+            "Push one companion card a week (Mondays, from 09:00 UTC) listing a random sample of subtasks finished "
+            "in the last 7 days whose own DAG node check passed, for the owner to mark Right or Wrong. Needs the "
+            "companion (NOUS_A2UI_ENABLED)."
+        ),
+    )
+    check_audit_size: int = Field(
+        default=5,
+        ge=1,
+        description="Most items on the weekly spot-check card; fewer when fewer subtasks qualify.",
+    )
     browser_task_proxy_port: int = Field(
         default=18181,
         gt=1024,
