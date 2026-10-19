@@ -106,6 +106,8 @@ nous/
 │   │   ├── autonomy_inventory.py # Autonomy inventory: per tool, successes by who was in the loop (owner present, approved, autonomous), and censor activity
 │   │   ├── drift.py            # Drift detection
 │   │   └── snapshots.py        # Graph hub snapshots
+│   ├── audits/                 # Scorer v5: the owner's sampled audits of completion checks
+│   │   └── check_audit.py      # CheckAuditSampler (weekly loop started from main.py, off unless NOUS_CHECK_AUDIT_ENABLED); `__init__.py` holds the shared `AUDIT_VERDICT_ACTION`
 │   ├── dag/                    # F038/F087 DAG orchestration
 │   │   ├── orchestrator.py     # Tick loop, dispatch, reaper, completion
 │   │   ├── store.py            # DAGStore (conditional status writes)
@@ -133,7 +135,7 @@ nous/
 │   │   ├── actions.py          # Action gate: allowlist → nonce → rate → censor
 │   │   ├── push.py             # F097 FCM leg (data-only messages)
 │   │   ├── intention_keys.py   # F099 Phase 3a: the reserved intention: dedup keys (leaf)
-│   │   ├── dsl.py / builders/  # Template-first surface construction
+│   │   ├── dsl.py / builders/  # Template-first surface construction (`builders/check_audit.py`: the owner's weekly spot-check card, built by the server only and not in `TEMPLATES`)
 │   │   └── catalogs/           # A2UI v1.0 vendored @ pinned commit d9086fb
 │   ├── security/
 │   │   └── secrets.py          # scan_secrets: shared by send_email (refuse) and the F098 result memory writer (skip)
