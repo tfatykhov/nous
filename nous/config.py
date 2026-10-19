@@ -1732,6 +1732,9 @@ class Settings(BaseSettings):
     heartbeat_tick_interval: int = 30
     heartbeat_quiet_start: int = 23
     heartbeat_quiet_end: int = 8
+    # F099: an owner-facing push is not held for the quiet hours while the owner has written on its channel
+    # within this many minutes (0: always held until the quiet hours end).
+    f099_quiet_hours_active_grace_minutes: int = Field(default=60, ge=0)
     heartbeat_daily_token_budget: int = 50_000
     heartbeat_email_enabled: bool = False  # disabled by default — needs IMAP creds
     heartbeat_email_interval: int = 180

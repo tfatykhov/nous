@@ -32,6 +32,7 @@ from sqlalchemy.orm import aliased
 from nous.brain import intentions
 from nous.brain.schemas import ReasonInput, RecordInput
 from nous.storage.models import (
+    ChannelSession,
     Decision,
     ExecutionDAG,
     Intention,
@@ -888,6 +889,44 @@ def push_after_for(settings: Any, now: datetime | None = None) -> datetime:
     return quiet_hours_end(settings, now or datetime.now(UTC))
 
 
+async def owner_push_after(
+    session: AsyncSession,
+    agent_id: str,
+    settings: Any,
+    *,
+    channel: str,
+    root_id: UUID | None = None,
+    now: datetime | None = None,
+) -> datetime:
+    """``push_after_for``, except that quiet hours do not hold a row while the owner is chatting on ``channel``:
+    when the owner's last message there (``channel_sessions.last_active``, which only an interactive turn
+    touches) is at most ``f099_quiet_hours_active_grace_minutes`` old, the row goes out ``now``. 0 turns it off."""
+    now = now or datetime.now(UTC)
+    push_after = push_after_for(settings, now)
+    grace = int(getattr(settings, "f099_quiet_hours_active_grace_minutes", 0) or 0)
+    if push_after == now or grace <= 0:
+        return push_after
+    last_active = (
+        await session.execute(
+            select(ChannelSession.last_active).where(
+                ChannelSession.agent_id == agent_id, ChannelSession.channel == channel
+            )
+        )
+    ).scalar_one_or_none()
+    if last_active is None:
+        return push_after
+    idle = now - last_active
+    if idle > timedelta(minutes=grace):
+        return push_after
+    logger.info(
+        "F099: root %s pushed to %s now, not at the end of the quiet hours: the owner wrote there %.0f minutes ago",
+        root_id,
+        channel,
+        max(0.0, idle.total_seconds() / 60),
+    )
+    return now
+
+
 def _close_reason(outcome: str) -> str:
     if outcome == OUTCOME_FALLBACK:
         return CLOSE_FALLBACK_REPORT
@@ -1314,7 +1353,9 @@ async def _commit_arrival(
                     intention_id=deepest.id,
                     root_id=root_id,
                     arrival_id=arrival_id,
-                    push_after=push_after_for(settings, now),
+                    push_after=await owner_push_after(
+                        session, agent_id, settings, channel=channel, root_id=root_id, now=now
+                    ),
                 )
             )
 
@@ -1348,7 +1389,7 @@ async def _commit_arrival(
     if publishing:
         # The approval window starts when the owner can see the proposal: a push deferred to the end of the quiet
         # hours moves the deadline with it, and the push's "Expires" line shows this same deadline.
-        push_after = push_after_for(settings, now)
+        push_after = await owner_push_after(session, agent_id, settings, channel=channel, root_id=root_id, now=now)
         published = await publish_staged(
             session,
             agent_id,
@@ -1748,7 +1789,9 @@ async def _settle_stranded_rows(session: AsyncSession, agent_id: str, *, setting
                 channel=channel,
                 intention_id=root_id,
                 root_id=root_id,
-                push_after=push_after_for(settings, now),
+                push_after=await owner_push_after(
+                    session, agent_id, settings, channel=channel, root_id=root_id, now=now
+                ),
             )
         settled += len(rows)
     if settled:
@@ -1892,7 +1935,9 @@ async def _expire_root(
                 channel=channel,
                 intention_id=root_id,
                 root_id=root_id,
-                push_after=push_after_for(settings, now),
+                push_after=await owner_push_after(
+                    session, agent_id, settings, channel=channel, root_id=root_id, now=now
+                ),
             )
     return True
 
@@ -2352,7 +2397,9 @@ async def record_result(
             intention_id=intention_id,
             root_id=root_id,
             arrival_id=arrival_id,
-            push_after=push_after_for(settings, now),  # F099 2c: pushed to Telegram too (R2), at the end of quiet hours
+            push_after=await owner_push_after(  # F099 2c: pushed to Telegram too (R2)
+                session, agent_id, settings, channel=channel, root_id=root_id, now=now
+            ),
         )
         wrote = report_row is not None
         return ResultRecorded(report_row, wrote, state, False, wrote, intention_id, root_id)
@@ -4350,7 +4397,7 @@ async def end_hanging_root(
         channel=channel,
         intention_id=root_id,
         root_id=root_id,
-        push_after=push_after_for(settings, now),
+        push_after=await owner_push_after(session, agent_id, settings, channel=channel, root_id=root_id, now=now),
         report_id=uuid.uuid5(_HANGING_NAMESPACE, str(root_id)),
     )
     logger.info("F099: root %s was left with nothing running; it was closed and reported", root_id)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import dataclasses
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
@@ -30,10 +30,11 @@ from sqlalchemy import select, text
 from nous.brain import continuation
 from nous.brain.continuation import Resolution
 from nous.heartbeat.quiet_hours import in_quiet_hours, quiet_hours_end
-from nous.storage.models import Decision, DecisionTag, IntentionArrival
+from nous.storage.models import ChannelSession, Decision, DecisionTag, IntentionArrival
 
 DAY = datetime(2026, 10, 6, 12, 0, tzinfo=UTC)  # outside the default quiet hours (23 to 8)
 NIGHT = datetime(2026, 10, 6, 2, 0, tzinfo=UTC)
+QUIET_END = datetime(2026, 10, 6, 8, 0, tzinfo=UTC)  # the end of NIGHT's quiet hours
 
 
 def _settings(start: int, end: int):
@@ -302,6 +303,48 @@ async def test_quiet_hours_defer_only_the_push(env_factory):  # noqa: F811
     await _commit(env, got, _r("report", "News."), now=NIGHT)
     (report,) = await _owner_rows(env)  # written at once: chat sees it at night
     assert report.push_after == datetime(2026, 10, 6, 8, 0, tzinfo=UTC) and report.pushed_at is None
+
+
+async def _owner_wrote(env, channel: str, at: datetime) -> None:
+    """The owner's last message on ``channel`` was at ``at`` (what an interactive turn's pre_turn records)."""
+    async with env.db.session() as s:
+        s.add(ChannelSession(agent_id=env.agent, channel=channel, session_id="owner-chat", last_active=at))
+        await s.commit()
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize(
+    ("last_message", "channel", "grace", "expected"),
+    [
+        (NIGHT - timedelta(minutes=5), CHAN, 60, NIGHT),  # the owner is chatting: the report goes out now
+        (NIGHT - timedelta(hours=3), CHAN, 60, QUIET_END),  # asleep since
+        (NIGHT - timedelta(minutes=5), "telegram:9999", 60, QUIET_END),  # elsewhere
+        (NIGHT - timedelta(minutes=5), CHAN, 0, QUIET_END),  # 0 turns it off
+        (None, CHAN, 60, QUIET_END),  # no message on record
+    ],
+)
+async def test_quiet_hours_do_not_hold_a_report_while_the_owner_is_chatting(
+    env_factory,  # noqa: F811
+    last_message,
+    channel,
+    grace,
+    expected,
+):
+    env = await env_factory(**CONT, f099_quiet_hours_active_grace_minutes=grace)
+    if last_message is not None:
+        await _owner_wrote(env, channel, last_message)
+    _, got = await _claimed(env)
+    await _commit(env, got, _r("report", "News."), now=NIGHT)
+    (report,) = await _owner_rows(env)
+    assert report.push_after == expected
+
+
+@pytest.mark.postgres_only
+async def test_an_owner_push_by_day_is_now_whatever_the_owner_did(env_factory):  # noqa: F811
+    env = await env_factory(**CONT)
+    await _owner_wrote(env, CHAN, DAY - timedelta(hours=5))
+    async with env.db.session() as s:
+        assert await continuation.owner_push_after(s, env.agent, env.settings, channel=CHAN, now=DAY) == DAY
 
 
 @pytest.mark.postgres_only
