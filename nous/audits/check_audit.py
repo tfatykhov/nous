@@ -34,6 +34,8 @@ AUDIT_WEEKDAY = 0  # Monday (datetime.weekday())
 AUDIT_HOUR_UTC = 9  # the card goes out from this UTC hour on that day
 LOOP_INTERVAL_SECONDS = 3600
 LOOKBACK = timedelta(days=7)  # a subtask is sampled only if it finished within this long
+SURFACE_UPDATE_TRIES = 3
+SURFACE_UPDATE_BACKOFF_SECONDS = 0.5
 NOTIFY_TEXT = "Weekly spot check: a few finished tasks to look over"
 
 Clock = Callable[[], datetime]
@@ -104,15 +106,38 @@ class CheckAuditSampler:
         surface_id = await self._surfaces.push_built(  # 2. the card; a failure leaves the rows unpushed
             check_audit(items), notify=True, notify_text=NOTIFY_TEXT
         )
-        async with self._db.session() as session:  # 3. the rows now name their card
-            await session.execute(
-                update(CheckAudit)
-                .where(CheckAudit.agent_id == self._agent_id, CheckAudit.id.in_(list(ids.values())))
-                .values(surface_id=surface_id)
-            )
-            await session.commit()
+        await self._name_the_card(list(ids.values()), surface_id)  # 3. the rows now name their card
         logger.info("Check audits: pushed a card of %d item(s)", len(items))
         return len(items)
+
+    async def _name_the_card(self, audit_ids: list[UUID], surface_id: str) -> None:
+        """Set ``surface_id`` on the pushed rows, retrying: the card is already out, and until its rows name it a tap
+        on it is refused. The UPDATE is idempotent (only rows still without a card). Gives up with an ERROR."""
+        for attempt in range(1, SURFACE_UPDATE_TRIES + 1):
+            try:
+                async with self._db.session() as session:
+                    await session.execute(
+                        update(CheckAudit)
+                        .where(
+                            CheckAudit.agent_id == self._agent_id,
+                            CheckAudit.id.in_(audit_ids),
+                            CheckAudit.surface_id.is_(None),
+                        )
+                        .values(surface_id=surface_id)
+                    )
+                    await session.commit()
+                return
+            except Exception:
+                if attempt == SURFACE_UPDATE_TRIES:
+                    logger.error(
+                        "Check audits: card %s is out but its %d row(s) could not be marked with it; taps on it "
+                        "will be refused and the next pass pushes the rows again",
+                        surface_id,
+                        len(audit_ids),
+                        exc_info=True,
+                    )
+                    return
+                await asyncio.sleep(SURFACE_UPDATE_BACKOFF_SECONDS * attempt)
 
     async def _done_this_week(self, now: datetime) -> bool:
         async with self._db.session() as session:
@@ -144,11 +169,12 @@ class CheckAuditSampler:
                     DAGNode.completion_check,
                     DAGNode.check_attempts,
                     DAGNode.last_check_at,
+                    DAGNode.subtask_id.label("node_subtask_id"),
+                    DAGNode.attempt_history,
                 )
                 .join(DAGNode, Subtask.dag_node_id == DAGNode.id)
                 .where(
                     Subtask.agent_id == self._agent_id,
-                    DAGNode.subtask_id == Subtask.id,
                     Subtask.completed_at >= now - LOOKBACK,
                 )
                 .order_by(Subtask.completed_at, Subtask.id)
@@ -165,11 +191,18 @@ class CheckAuditSampler:
         for r in rows:
             if r.id in offered or ts.raw_outcome("subtask", r.status, r.final_outcome) != "done":
                 continue
-            state = ts.node_check_state(
-                r.completion_check, r.check_attempts, r.last_check_at, r.node_status, r.node_error
+            attempt = ts.attempt_check_state(  # the scorer's own rule: an archived or replaced attempt is not sampled
+                r.id,
+                node_subtask_id=r.node_subtask_id,
+                completion_check=r.completion_check,
+                check_attempts=r.check_attempts,
+                last_check_at=r.last_check_at,
+                node_status=r.node_status,
+                node_error=r.node_error,
+                attempt_history=r.attempt_history,
             )
             kind = ts.check_kind(r.completion_check)
-            if state != "passed" or kind == "pr":
+            if not attempt.current or attempt.state != "passed" or kind == "pr":
                 continue
             out.append(
                 {

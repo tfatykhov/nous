@@ -421,6 +421,11 @@ CHECKED = dict(node_check="passed", check_kind="file_exists", kind_trusted=True)
         (sig(audit_verdict="wrong", owner_overrides=1), "done_self", -1.0),
         (sig(audit_verdict="wrong", owner_overrides=1, node_check="failed"), "failed", -1.0),  # floor
         (sig(**CHECKED, audit_pending=True), "done_checked", 0.25),  # unanswered: no verdict yet
+        # "wrong" outranks the other confirmations: the owner's success grade and a verified PR do not keep it verified
+        (sig(owner_grade="success", audit_verdict="wrong", owner_overrides=1), "done_self", -1.0),
+        (sig(v2_verified=True, audit_verdict="wrong", owner_overrides=1), "done_self", -1.0),
+        (sig(owner_grade="success", audit_verdict="wrong", owner_overrides=1, node_check="failed"), "failed", -1.0),
+        (sig(v2_verified=True, audit_verdict="wrong", owner_overrides=1, node_check="unconfirmed"), "partial", -1.0),
     ],
 )
 def test_v5_leaf_outcomes(signals, outcome, score):
@@ -445,3 +450,50 @@ def test_a_rollup_mean_counts_the_done_checked_leaves():
     leaf = score_leaf(sig(**CHECKED), NOW)
     row = score_rollup(sig(kind="dag", status="completed", child_ids=("a", "b")), {"a": leaf.score, "b": 0.0}, NOW)
     assert (row.children_scored, row.children_mean_score) == (2, 0.125)
+
+
+# ---- one rule for how a node's check reads for one of its subtasks ------------------------------------------------
+
+NODE = dict(
+    node_subtask_id="sub-1",
+    completion_check="test -f /tmp/report.md",
+    check_attempts=1,
+    last_check_at=NOW,
+    node_status="completed",
+    node_error=None,
+    attempt_history=None,
+)
+
+
+def test_the_current_attempt_reads_the_nodes_own_check():
+    assert ts.attempt_check_state("sub-1", **NODE) == ("passed", True)
+    assert ts.attempt_check_state("sub-1", **{**NODE, "node_status": "pending"}) == (None, True)
+    assert ts.attempt_check_state("sub-1", **{**NODE, "completion_check": None}) == (None, True)
+
+
+def test_an_attempt_the_node_no_longer_names_is_superseded_unless_its_archive_says_it_failed():
+    other = {**NODE, "node_subtask_id": "sub-2"}
+    assert ts.attempt_check_state("sub-1", **other) == ("superseded", False)
+    failed = {
+        "subtask_id": "sub-1",
+        "status": "failed",
+        "error": "Completion check failed: exit code 1",
+        "check_attempts": 1,
+        "last_check_at": "2026-10-01T00:00:00+00:00",
+    }
+    assert ts.attempt_check_state("sub-1", **{**other, "attempt_history": [failed]}) == ("failed", False)
+    passed = {**failed, "status": "completed", "error": None}
+    assert ts.attempt_check_state("sub-1", **{**other, "attempt_history": [passed]}) == ("superseded", False)
+
+
+def test_an_archive_entry_makes_a_discarded_attempt_even_while_the_node_still_names_it():
+    entry = {
+        "subtask_id": "sub-1",
+        "status": "completed",
+        "error": None,
+        "check_attempts": 1,
+        "last_check_at": "2026-10-01T00:00:00+00:00",
+    }
+    got = ts.attempt_check_state("sub-1", **{**NODE, "attempt_history": [entry]})
+    assert got == ("superseded", False)  # not "passed", and not current: it is never sampled or credited
+    assert ts.attempt_check_state("sub-1", **{**NODE, "attempt_history": [{"subtask_id": "sub-9"}]}) == ("passed", True)

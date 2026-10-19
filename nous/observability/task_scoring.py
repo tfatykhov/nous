@@ -49,6 +49,7 @@ import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
+from typing import Any, NamedTuple
 
 SCORER_VERSION = 5
 
@@ -375,6 +376,66 @@ def node_check_state(
     return None
 
 
+class AttemptCheck(NamedTuple):
+    """How one subtask's node check ended (``state``, see ``attempt_check_state``) and whether the subtask is the
+    node's current attempt (``current``): only a current attempt's own check can be sampled or earn a kind's credit."""
+
+    state: str | None
+    current: bool
+
+
+def archived_attempt(history: Any, subtask_id: object) -> dict[str, Any] | None:
+    """The ``attempt_history`` entry a node reset wrote for this subtask (nous/dag/attempts.py), or None."""
+    if not isinstance(history, list):
+        return None
+    wanted = str(subtask_id)
+    for entry in history:
+        if isinstance(entry, dict) and entry.get("subtask_id") == wanted:
+            return entry
+    return None
+
+
+def attempt_check_state(
+    subtask_id: object,
+    *,
+    node_subtask_id: object,
+    completion_check: str | None,
+    check_attempts: int | None,
+    last_check_at: datetime | str | None,
+    node_status: str | None,
+    node_error: str | None,
+    attempt_history: Any,
+) -> AttemptCheck:
+    """The one rule for how a DAG node's check reads for one of its subtasks, used by the gatherer and the sampler.
+
+    The node row describes its current attempt only (``dag_nodes.subtask_id``). An earlier attempt linked to the same
+    node was discarded by a reset, which archived it in ``attempt_history`` (migration 089): its entry can only take
+    the "done" away (``failed``, ``unconfirmed``). Anything else, or no entry (resets from before 089), is
+    ``superseded``. A node is reset only after it failed, so an archive that reads "passed" was not written by a reset
+    and earns nothing. The fix stage's retry also keeps ``subtask_id`` until the relaunch, so a subtask with an archive
+    entry is a discarded attempt even while the node still names it: the archive decides. The fix stage's retry does
+    not reset ``check_attempts``, so a never-polled check of the new attempt can read ``unconfirmed`` rather than None;
+    both leave a "done" at 0.0.
+    """
+    entry = archived_attempt(attempt_history, subtask_id)
+    if entry is not None or node_subtask_id != subtask_id:
+        archived = (
+            node_check_state(
+                completion_check,
+                entry.get("check_attempts"),
+                entry.get("last_check_at"),
+                entry.get("status"),
+                entry.get("error"),
+            )
+            if entry is not None
+            else None
+        )
+        return AttemptCheck(archived if archived in ("failed", "unconfirmed") else "superseded", False)
+    return AttemptCheck(
+        node_check_state(completion_check, check_attempts, last_check_at, node_status, node_error), True
+    )
+
+
 def _outcome_of(signals: TaskSignals) -> tuple[str, str | None] | None:
     raw = raw_outcome(signals.task_kind, signals.status, signals.detail)
     if raw is None:
@@ -382,7 +443,11 @@ def _outcome_of(signals: TaskSignals) -> tuple[str, str | None] | None:
     # v4: only sources the model cannot control confirm. A DAG check node (dag_checked) is Nous-written: evidence only.
     # v5: the owner's "right" on this leaf's audit is a success grade. Their "wrong" is a failure grade: it is counted
     # in owner_overrides by the gatherer, and the outcome follows from the rest, but it is never done_checked.
-    confirmed = signals.owner_grade == "success" or signals.v2_verified or signals.audit_verdict == "right"
+    # The owner's "wrong" outranks every other confirmation (their success grade, a verified PR): it is the later and
+    # more specific word about this very task, and it is counted as an override by the gatherer.
+    confirmed = (
+        signals.owner_grade == "success" or signals.v2_verified or signals.audit_verdict == "right"
+    ) and signals.audit_verdict != "wrong"
     if raw == "done" and not confirmed:
         # The orchestrator ran the subtask's own check and it did not say yes: the model's "done" does not stand.
         if signals.node_check == "failed":

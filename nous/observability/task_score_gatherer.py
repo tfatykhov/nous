@@ -106,17 +106,6 @@ def _new_evidence() -> Evidence:
     return defaultdict(lambda: defaultdict(list))
 
 
-def _archived_attempt(history: Any, subtask_id: UUID) -> dict[str, Any] | None:
-    """The ``attempt_history`` entry a node reset wrote for this subtask (nous/dag/attempts.py), or None."""
-    if not isinstance(history, list):
-        return None
-    wanted = str(subtask_id)
-    for entry in history:
-        if isinstance(entry, dict) and entry.get("subtask_id") == wanted:
-            return entry
-    return None
-
-
 def _plain(evidence: dict[str, list[str]] | None) -> dict[str, list[str]]:
     """A plain dict without the empty lists the defaultdict created by being read."""
     return {key: list(ids) for key, ids in (evidence or {}).items() if ids}
@@ -299,33 +288,51 @@ async def _audits(session: AsyncSession, agent_id: str) -> tuple[dict[str, _Audi
     by_task: dict[str, _Audit] = {}
     answered: list[tuple[str, str, datetime, str]] = []
     for r in result:
-        verdict = r.verdict if r.verdict in ts.AUDIT_VERDICTS else None
+        # One rule for verification and trust alike: a verdict counts only with its answer time. The handler writes
+        # both together, so a verdict without one was written some other way and says nothing.
+        verdict = r.verdict if r.verdict in ts.AUDIT_VERDICTS and r.answered_at is not None else None
         by_task[str(r.task_id)] = _Audit(r.id, r.surface_id, verdict)
-        if verdict is not None and r.answered_at is not None:
+        if verdict is not None:
             answered.append((r.check_kind, verdict, as_utc(r.answered_at), str(r.id)))
     return by_task, ts.trusted_kinds(answered)
 
 
+def _uuid_text(value: object) -> str | None:
+    """A UUID in one canonical text form, whatever the database spelled it as (None for anything else)."""
+    try:
+        return str(UUID(str(value)))
+    except ValueError:
+        return None
+
+
 async def audits_without_action_row(session: AsyncSession, agent_id: str) -> int:
-    """v5 tripwire: the agent's answered audits whose card has no completed ``audit.verdict`` action recorded. The
-    action router writes that row for every verdict the owner taps, so a verdict without one was written some other
-    way. It cannot tell a careful forgery, and it does not change a score: the job logs the count."""
-    tapped = (
-        select(A2uiAction.id)
+    """v5 tripwire: the agent's answered audits that have no completed ``audit.verdict`` action recorded for that exact
+    audit: same card (``surface_id``), same ``auditId`` in the action's context, same verdict. The action router writes
+    that row for every verdict the owner taps, so a verdict without one was written some other way. It cannot tell a
+    careful forgery, and it does not change a score: the job logs the count and the scoreboard shows it. Compared in
+    Python: the text form of a UUID differs between SQLite and Postgres."""
+    answered = (
+        await session.execute(
+            select(CheckAudit.id, CheckAudit.surface_id, CheckAudit.verdict)
+            .where(CheckAudit.agent_id == agent_id, CheckAudit.verdict.is_not(None))
+            .limit(AUDIT_ROWS_CAP)
+        )
+    ).all()
+    taps: set[tuple[str, str | None, object]] = set()
+    result = await session.execute(  # the agent's audit taps are few: one query, matched in Python below
+        select(A2uiAction.surface_id, A2uiAction.context)
         .where(
             A2uiAction.agent_id == agent_id,
-            A2uiAction.surface_id == CheckAudit.surface_id,
             A2uiAction.action_name == AUDIT_VERDICT_ACTION,
             A2uiAction.status == "completed",
         )
-        .exists()
+        .order_by(A2uiAction.created_at.desc())
+        .limit(AUDIT_ROWS_CAP)
     )
-    result = await session.execute(
-        select(func.count())
-        .select_from(CheckAudit)
-        .where(CheckAudit.agent_id == agent_id, CheckAudit.verdict.is_not(None), ~tapped)
-    )
-    return int(result.scalar_one())
+    for tap in result:
+        context = tap.context if isinstance(tap.context, dict) else {}
+        taps.add((tap.surface_id, _uuid_text(context.get("auditId")), context.get("verdict")))
+    return sum(1 for r in answered if (r.surface_id, _uuid_text(r.id), r.verdict) not in taps)
 
 
 def _age_key(row: Any) -> tuple[datetime, str]:
@@ -467,34 +474,20 @@ async def _leaf_signals(session: AsyncSession, agent_id: str, since: datetime, r
         )
         for r in result:
             dag_of[r.id] = r.dag_id
-            # The node row describes its current attempt only (dag_nodes.subtask_id). An earlier attempt linked to
-            # the same node was discarded by a reset, which archived it in attempt_history (migration 089): its entry
-            # can only take the "done" away (failed, unconfirmed). Anything else, or no entry (resets from before 089),
-            # is "superseded". A node is reset only after it failed, so an archive that reads "passed" was not written
-            # by a reset and earns nothing. The fix stage's retry does not reset check_attempts, so a never-polled
-            # check of the new attempt can read as "unconfirmed" rather than None; both leave a "done" at 0.0.
-            # The fix stage's retry also keeps subtask_id until the relaunch, so a subtask with an archive entry is a
-            # discarded attempt even while the node still names it: the archive decides.
-            entry = _archived_attempt(r.attempt_history, r.id)
-            if entry is not None or r.node_subtask_id != r.id:
-                archived = (
-                    ts.node_check_state(
-                        r.completion_check,
-                        entry.get("check_attempts"),
-                        entry.get("last_check_at"),
-                        entry.get("status"),
-                        entry.get("error"),
-                    )
-                    if entry is not None
-                    else None
-                )
-                state: str | None = archived if archived in ("failed", "unconfirmed") else "superseded"
-            else:
-                state = ts.node_check_state(
-                    r.completion_check, r.check_attempts, r.last_check_at, r.node_status, r.node_error
-                )
-                if (r.completion_check or "").strip():
-                    kind_of[r.id] = ts.check_kind(r.completion_check)
+            # How the node's check reads for this subtask, by the rule shared with the sampler (task_scoring).
+            attempt = ts.attempt_check_state(
+                r.id,
+                node_subtask_id=r.node_subtask_id,
+                completion_check=r.completion_check,
+                check_attempts=r.check_attempts,
+                last_check_at=r.last_check_at,
+                node_status=r.node_status,
+                node_error=r.node_error,
+                attempt_history=r.attempt_history,
+            )
+            state = attempt.state
+            if attempt.current and (r.completion_check or "").strip():
+                kind_of[r.id] = ts.check_kind(r.completion_check)
             if state is not None:
                 node_check[r.id] = state
                 evidence[str(r.id)][f"node_check_{state}"].append(str(r.node_id))

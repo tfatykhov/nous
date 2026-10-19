@@ -982,22 +982,59 @@ async def test_the_audit_read_is_one_query_whatever_the_number_of_leaves(db, age
     assert await audit_queries(2) == await audit_queries(9) == 1
 
 
-async def test_the_tripwire_counts_answered_audits_with_no_completed_tap_on_their_card(db, agent):
-    def tap(surface, *, status="completed", name="audit.verdict", who=agent):
-        return A2uiAction(agent_id=who, surface_id=surface, action_name=name, status=status, context={})
+async def test_the_tripwire_counts_answered_audits_with_no_completed_tap_for_that_audit(db, agent):
+    def tap(row, *, status="completed", name="audit.verdict", who=agent, surface=None, audit_id=None, verdict=None):
+        context = {"auditId": audit_id or str(row.id), "verdict": verdict or row.verdict}
+        return A2uiAction(
+            agent_id=who, surface_id=surface or row.surface_id, action_name=name, status=status, context=context
+        )
 
+    tapped = audit_row(agent, uuid.uuid4(), verdict="right", surface="s-tapped")
+    shouted = audit_row(agent, uuid.uuid4(), verdict="right", surface="s-spelling")
+    rejected = audit_row(agent, uuid.uuid4(), verdict="wrong", surface="s-rejected")
+    other_action = audit_row(agent, uuid.uuid4(), verdict="right", surface="s-other-action")
+    other_agent = audit_row(agent, uuid.uuid4(), verdict="right", surface="s-other-agent")
+    never_pushed = audit_row(agent, uuid.uuid4(), verdict="right", surface=None)
+    sibling = audit_row(agent, uuid.uuid4(), verdict="right", surface="s-card")  # a tap for ANOTHER item of its card
+    sibling_tapped = audit_row(agent, uuid.uuid4(), verdict="right", surface="s-card")
+    other_verdict = audit_row(agent, uuid.uuid4(), verdict="right", surface="s-verdict")
     await add(
         db,
-        audit_row(agent, uuid.uuid4(), verdict="right", surface="s-tapped"),
-        audit_row(agent, uuid.uuid4(), verdict="wrong", surface="s-rejected"),
-        audit_row(agent, uuid.uuid4(), verdict="right", surface="s-other-action"),
-        audit_row(agent, uuid.uuid4(), verdict="right", surface="s-other-agent"),
-        audit_row(agent, uuid.uuid4(), verdict="right", surface=None),
+        tapped,
+        shouted,
+        rejected,
+        other_action,
+        other_agent,
+        never_pushed,
+        sibling,
+        sibling_tapped,
+        other_verdict,
         audit_row(agent, uuid.uuid4(), surface="s-unanswered"),  # no verdict: nothing to match
-        tap("s-tapped"),
-        tap("s-rejected", status="rejected"),
-        tap("s-other-action", name="decision.resolve"),
-        tap("s-other-agent", who=f"{agent}-b"),
+        tap(tapped),
+        tap(shouted, audit_id=str(shouted.id).upper()),  # the same id spelled differently still matches
+        tap(rejected, status="rejected"),
+        tap(other_action, name="decision.resolve"),
+        tap(other_agent, who=f"{agent}-b"),
+        tap(sibling_tapped),
+        tap(other_verdict, verdict="wrong"),  # the tap said wrong, the row says right
     )
     async with db.session() as s:
-        assert await gatherer.audits_without_action_row(s, agent) == 4
+        # rejected, other_action, other_agent, never_pushed, sibling, other_verdict
+        assert await gatherer.audits_without_action_row(s, agent) == 6
+
+
+async def test_a_verdict_counts_only_with_its_answer_time_for_verification_and_trust_alike(db, agent):
+    leaf = await _checked_leaf(db, agent)
+    half = audit_row(agent, leaf.id, verdict="right")
+    half.answered_at = None  # a verdict written some other way: the handler always sets both
+    stray = [audit_row(agent, uuid.uuid4(), kind="script", verdict="right", ago=i + 1) for i in range(5)]
+    stray[0].answered_at = None  # only four of the five "right" answers carry an answer time
+    await add(db, half, *stray)
+
+    got = (await gather(db, agent))[0][str(leaf.id)]
+    assert (got.audit_verdict, got.audit_pending) == (None, True)  # not verified; its card is simply unanswered
+    assert score_leaf(got, NOW).outcome == "done_self"
+
+    other = await _checked_leaf(db, agent, "bash check_report.sh")
+    got = (await gather(db, agent))[0][str(other.id)]
+    assert (got.check_kind, got.kind_trusted) == ("script", False)  # four answered rights are not five
