@@ -27,11 +27,13 @@ from uuid import UUID, uuid4
 from sqlalchemy import select, update
 
 from nous.a2ui.intention_keys import KIND_ACTIVE, KIND_PROPOSAL, KIND_QUESTION, parse_key
+from nous.audits import AUDIT_VERDICT_ACTION
 from nous.brain import continuation, intentions
 from nous.brain.intentions import IntentionSpec
 from nous.dag.approval import node_id_from_dedup_key, refusal_message
+from nous.observability.task_scoring import AUDIT_VERDICTS
 from nous.owner_actions import ANSWER_REFUSALS, CANCEL_REFUSALS, DECISION_REFUSALS, clean_actor
-from nous.storage.models import A2uiAction, A2uiSurface
+from nous.storage.models import A2uiAction, A2uiSurface, CheckAudit
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +151,7 @@ class ActionRouter:
         _register_default_handlers(self)
         _register_phase2_handlers(self)
         _register_intention_handlers(self)
+        _register_audit_handlers(self)
         _register_default_functions(self)
         _register_micro_app_handlers(self)
         _register_micro_app_functions(self)
@@ -996,6 +999,58 @@ def _register_intention_handlers(router: ActionRouter) -> None:
     router.register("intention.reject", reject, mutating=True)
     router.register("intention.answer", answer, mutating=True)
     router.register("intention.cancel", cancel, mutating=True, irreversible=True)
+
+
+def _register_audit_handlers(router: ActionRouter) -> None:
+    """The owner's Right or Wrong on the weekly check-audit card (``builders/check_audit.py``). No agent tool reaches
+    it. Like ``decision.resolve``, both inputs are checked against server truth: the item must be a key of the card's
+    own ``/items`` and the verdict one of ``AUDIT_VERDICTS``; and the ``check_audits`` row must name this card's
+    surface, so a verdict tapped on any other card, or with an id that card never offered, writes nothing. A verdict is
+    set once: the same answer again is a no-op, a different one is refused."""
+    not_this_card = "that item is not on this card"
+
+    async def audit_verdict(ctx: ActionContext) -> ActionResult:
+        context = ctx.context if isinstance(ctx.context, dict) else {}
+        raw_id = context.get("auditId")
+        verdict = context.get("verdict")
+        offered = (ctx.surface.data_model or {}).get("items")
+        if not isinstance(raw_id, str) or not isinstance(offered, dict) or raw_id not in offered:
+            return ActionResult(ok=False, message=not_this_card)
+        if verdict not in AUDIT_VERDICTS:
+            return ActionResult(ok=False, message=f"verdict must be one of {list(AUDIT_VERDICTS)}")
+        try:
+            audit_id = UUID(raw_id)
+        except ValueError:
+            return ActionResult(ok=False, message=not_this_card)
+        mine = (
+            CheckAudit.id == audit_id,
+            CheckAudit.agent_id == router._settings.agent_id,
+            CheckAudit.surface_id == ctx.surface.surface_id,
+        )
+        actor = clean_actor(f"companion:{ctx.actor}", default="companion")
+        async with router._db.session() as session:
+            written = await session.execute(
+                update(CheckAudit)
+                .where(*mine, CheckAudit.verdict.is_(None))
+                .values(verdict=verdict, actor=actor, answered_at=datetime.now(UTC))
+            )
+            await session.commit()
+            current = verdict
+            if written.rowcount == 0:
+                found = (await session.execute(select(CheckAudit.verdict).where(*mine))).one_or_none()
+                if found is None:  # no such row, or it went out on another card
+                    return ActionResult(ok=False, message=not_this_card)
+                current = found.verdict
+        if current != verdict:
+            return ActionResult(ok=False, message=f"already answered {current}")
+        remaining = sum(1 for key, status in offered.items() if key != raw_id and status == "pending")
+        return ActionResult(
+            message=f"{verdict} recorded" if written.rowcount else f"already {verdict}",
+            data_patches=[(f"/items/{_escape_pointer(raw_id)}", verdict)],
+            resolve_surface=remaining == 0,
+        )
+
+    router.register(AUDIT_VERDICT_ACTION, audit_verdict, mutating=True)
 
 
 def _register_default_functions(router: ActionRouter) -> None:
