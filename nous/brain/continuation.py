@@ -913,13 +913,16 @@ async def owner_push_after(
             )
         )
     ).scalar_one_or_none()
-    if last_active is None or now - last_active > timedelta(minutes=grace):
+    if last_active is None:
+        return push_after
+    idle = now - last_active
+    if idle > timedelta(minutes=grace):
         return push_after
     logger.info(
         "F099: root %s pushed to %s now, not at the end of the quiet hours: the owner wrote there %.0f minutes ago",
         root_id,
         channel,
-        max(0.0, (now - last_active).total_seconds() / 60),
+        max(0.0, idle.total_seconds() / 60),
     )
     return now
 

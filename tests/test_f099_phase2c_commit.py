@@ -34,6 +34,7 @@ from nous.storage.models import ChannelSession, Decision, DecisionTag, Intention
 
 DAY = datetime(2026, 10, 6, 12, 0, tzinfo=UTC)  # outside the default quiet hours (23 to 8)
 NIGHT = datetime(2026, 10, 6, 2, 0, tzinfo=UTC)
+QUIET_END = datetime(2026, 10, 6, 8, 0, tzinfo=UTC)  # the end of NIGHT's quiet hours
 
 
 def _settings(start: int, end: int):
@@ -316,10 +317,10 @@ async def _owner_wrote(env, channel: str, at: datetime) -> None:
     ("last_message", "channel", "grace", "expected"),
     [
         (NIGHT - timedelta(minutes=5), CHAN, 60, NIGHT),  # the owner is chatting: the report goes out now
-        (NIGHT - timedelta(hours=3), CHAN, 60, datetime(2026, 10, 6, 8, 0, tzinfo=UTC)),  # asleep since
-        (NIGHT - timedelta(minutes=5), "telegram:9999", 60, datetime(2026, 10, 6, 8, 0, tzinfo=UTC)),  # elsewhere
-        (NIGHT - timedelta(minutes=5), CHAN, 0, datetime(2026, 10, 6, 8, 0, tzinfo=UTC)),  # 0 turns it off
-        (None, CHAN, 60, datetime(2026, 10, 6, 8, 0, tzinfo=UTC)),  # no message on record
+        (NIGHT - timedelta(hours=3), CHAN, 60, QUIET_END),  # asleep since
+        (NIGHT - timedelta(minutes=5), "telegram:9999", 60, QUIET_END),  # elsewhere
+        (NIGHT - timedelta(minutes=5), CHAN, 0, QUIET_END),  # 0 turns it off
+        (None, CHAN, 60, QUIET_END),  # no message on record
     ],
 )
 async def test_quiet_hours_do_not_hold_a_report_while_the_owner_is_chatting(
