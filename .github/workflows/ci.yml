@@ -129,14 +129,15 @@ jobs:
           psql -f sql/init.sql
           psql -f sql/seed.sql
 
-      - name: Apply the migrations up to 088 (as the superuser, with the application's migrator)
+      - name: Apply the migrations up to 090 (as the superuser, with the application's migrator)
         env:
           DB_HOST: localhost
           DB_PORT: "5432"
           DB_USER: nous
           DB_PASSWORD: nous_dev_password
           DB_NAME: nous
-        run: python scripts/ci/apply_migrations.py --max-version 88
+        # db_roles.sql needs the tables the scorer reads: 087 and 088 (scoring), 090 (nous_system.check_audits)
+        run: python scripts/ci/apply_migrations.py --max-version 90
 
       - name: Create the database roles and check them
         env:

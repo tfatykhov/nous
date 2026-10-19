@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.dag.approval import as_utc
 from nous.observability.autonomy_inventory import INVENTORY_DAYS, get_autonomy_inventory, get_censor_activity
+from nous.observability.task_score_gatherer import audits_without_action_row
 from nous.observability.task_scoring import LEAF_KIND, OUTCOMES, ROLLUP_KINDS, SCORER_VERSION
 from nous.storage.models import (
     A2uiAction,
@@ -193,6 +194,8 @@ async def _task_scores(session: AsyncSession, agent_id: str, since: datetime) ->
         "first_scored_at": as_utc(first).isoformat() if first is not None else None,
         "last_scored_at": as_utc(last).isoformat() if last is not None else None,
         "scorer": _scorer(beat),
+        # v5 tripwire: answered check audits with no completed audit.verdict action for that exact audit. Normally 0.
+        "audits_without_action_row": await audits_without_action_row(session, agent_id),
         # The three numbers to read first, side by side. A subtask's score alone does not see the owner's overrides:
         # a rejected proposal, an undone chain call, an unverified-claim note and a DAG-level error all sit on
         # roll-ups, which are in no score sum. So the overrides and the penalties are counted over ALL units.

@@ -10,7 +10,7 @@ const stats = (over: Record<string, unknown> = {}) => ({
 });
 const none = { count: 0, mean: null, p10: null, p50: null, p90: null, overrides: 0 };
 const outcomes = (over: Record<string, number> = {}) => ({
-  done_self: 0, done_verified: 0, partial: 0, failed: 0, not_scored: 0, ...over,
+  done_self: 0, done_verified: 0, done_checked: 0, partial: 0, failed: 0, not_scored: 0, ...over,
 });
 const penalties = { harness_errors: 1, refusals: 2, unverified_claims: 0, owner_overrides: 1 };
 
@@ -24,6 +24,7 @@ const FULL = () => ({
     scorer_version: 1,
     first_scored_at: new Date(Date.now() - 60 * 60000).toISOString(),
     last_scored_at: new Date(Date.now() - 5 * 60000).toISOString(),
+    audits_without_action_row: 0,
     scorer: {
       scorer_version: 1, last_run_at: new Date(Date.now() - 5 * 60000).toISOString(), last_status: 'ok',
       last_error: null, last_ok_at: new Date(Date.now() - 5 * 60000).toISOString(), rows_submitted: 1614,
@@ -98,11 +99,11 @@ describe('Autonomy view', () => {
     expect(valueOf('Harness errors')).toBe('7');
     expect(valueOf('Refusals')).toBe('4');
     expect(valueOf('Unverified claims')).toBe('1');
-    // DAG runs row: count, outcomes in display order (verified, self-reported, partial, failed, not scored),
+    // DAG runs row: count, outcomes in display order (verified, checked, self-reported, partial, failed, not scored),
     // then its own harness errors, refusals, unverified claims and overrides
     const dagRow = screen.getByText('DAG runs').closest('tr')!;
     expect(Array.from(dagRow.querySelectorAll('td')).map((td) => td.textContent)).toEqual(
-      ['9', '6', '0', '0', '3', '0', '1', '2', '0', '1']);
+      ['9', '6', '0', '0', '0', '3', '0', '1', '2', '0', '1']);
     expect(screen.getByText('no successful run')).toBeTruthy(); // L0 with zero successes is not "always with you"
     expect(screen.getByText('DAG runs')).toBeTruthy();
     expect(screen.getByText('Intention roots')).toBeTruthy();
@@ -178,6 +179,17 @@ describe('Autonomy view', () => {
     render(Autonomy);
     expect(await screen.findByText('Last pass failed')).toBeTruthy();
     expect(screen.getByText(/InsufficientPrivilege/)).toBeTruthy();
+  });
+
+  it('says nothing about spot-check answers when none lack their tap, and one plain line when some do', async () => {
+    const full = FULL();
+    render(Autonomy);
+    expect(await screen.findByText('Done, verified', { selector: 'h2' })).toBeTruthy();
+    expect(screen.queryByText(/spot-check answer/)).toBeNull();
+    cleanup();
+    body = { ...full, task_scores: { ...full.task_scores, audits_without_action_row: 2 } };
+    render(Autonomy);
+    expect(await screen.findByText(/2 spot-check answers on file with no matching tap/)).toBeTruthy();
   });
 
   it('flags a scorer on another version than the endpoint reads', async () => {

@@ -88,10 +88,11 @@ export function coverageFrom(firstScoredAt: string | null, windowDays: number, n
 }
 
 /** task_scoring.OUTCOMES, in display order (verified first); every lookup is by key. */
-export const OUTCOMES = ['done_verified', 'done_self', 'partial', 'failed', 'not_scored'] as const;
+export const OUTCOMES = ['done_verified', 'done_checked', 'done_self', 'partial', 'failed', 'not_scored'] as const;
 
 export const OUTCOME_LABEL: Record<string, string> = {
   done_verified: 'Done, verified',
+  done_checked: 'Done, checked',
   done_self: 'Done, self-reported',
   partial: 'Partial',
   failed: 'Failed',

@@ -14,8 +14,10 @@
 -- The first run changes the owner of every application table, which takes an ACCESS EXCLUSIVE lock on each:
 -- stop the application first, or expect the run to wait for the application's open transactions.
 --
--- Run it after the application has applied migrations 087 and 088: it refuses to run without scoring.task_scores
--- and scoring.scorer_heartbeat. Every refusal raises an error: psql prints "ERROR:  <reason>" and exits 3.
+-- Run it after the application has applied migrations 087, 088 and 090: it refuses to run without scoring.task_scores,
+-- scoring.scorer_heartbeat and nous_system.check_audits (a table the scorer reads). Run it again after a deploy that
+-- adds a table to task_score_job.SOURCE_TABLES. Every refusal raises an error: psql prints "ERROR:  <reason>" and
+-- exits 3.
 --
 -- Roles after this script:
 --   nous_admin   superuser, no password: reachable only through docker exec on the database host.
@@ -50,7 +52,8 @@ SELECT current_database() AS dbname \gset
 SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nous_app') AS app_exists,
        EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nous_scorer') AS scorer_exists,
        (to_regclass('scoring.task_scores') IS NOT NULL
-        AND to_regclass('scoring.scorer_heartbeat') IS NOT NULL) AS scoring_exists \gset
+        AND to_regclass('scoring.scorer_heartbeat') IS NOT NULL) AS scoring_exists,
+       to_regclass('nous_system.check_audits') IS NOT NULL AS sources_exist \gset
 
 -- The passwords are tested in psql's own shell, so that no query but ALTER ROLE carries them.
 \set app_password `printenv NOUS_APP_DB_PASSWORD`
@@ -63,6 +66,10 @@ SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nous_app') AS app_exists,
 \if :scoring_exists
 \else
     DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: scoring.task_scores or scoring.scorer_heartbeat does not exist. Start the application first (it applies migrations 087 and 088), then run this script.'; END $$;
+\endif
+\if :sources_exist
+\else
+    DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: nous_system.check_audits does not exist. Start the application first (it applies migration 090), then run this script.'; END $$;
 \endif
 \if :app_pw_ok
 \else
@@ -344,6 +351,22 @@ $defacl$;
 ALTER DEFAULT PRIVILEGES FOR ROLE nous_admin IN SCHEMA scoring REVOKE ALL ON TABLES FROM PUBLIC, nous_app, nous_scorer;
 ALTER DEFAULT PRIVILEGES FOR ROLE nous_admin IN SCHEMA scoring GRANT SELECT ON TABLES TO nous_app;
 
+-- 4b. The scores table admits every outcome the scorer writes (task_scoring.OUTCOMES). Migration 087 created the
+--     constraint, and a database created before scorer v5 still has the list without done_checked. A migration
+--     cannot change it (the application role does not own scoring), so this script does. Only a constraint that
+--     lacks done_checked is replaced, so a second run changes nothing.
+DO $outcomes$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                    WHERE conrelid = 'scoring.task_scores'::regclass AND conname = 'ck_task_scores_outcome'
+                      AND pg_get_constraintdef(oid) LIKE '%''done_checked''%') THEN
+        ALTER TABLE scoring.task_scores DROP CONSTRAINT IF EXISTS ck_task_scores_outcome;
+        ALTER TABLE scoring.task_scores ADD CONSTRAINT ck_task_scores_outcome
+            CHECK (outcome IN ('done_self', 'done_verified', 'done_checked', 'partial', 'failed', 'not_scored'));
+    END IF;
+END
+$outcomes$;
+
 -- 5. The scorer reads exactly the tables that task_score_job.SOURCE_TABLES names (a test compares this
 --    list with that constant), and nothing else in the application schemas.
 REVOKE ALL ON ALL TABLES IN SCHEMA brain, heart, nous_system FROM nous_scorer CASCADE;
@@ -388,6 +411,8 @@ GRANT SELECT ON brain.intention_arrivals TO nous_scorer;
 GRANT SELECT ON brain.intention_proposals TO nous_scorer;
 GRANT SELECT ON brain.intentions TO nous_scorer;
 GRANT SELECT ON heart.subtasks TO nous_scorer;
+GRANT SELECT ON nous_system.a2ui_actions TO nous_scorer;
+GRANT SELECT ON nous_system.check_audits TO nous_scorer;
 GRANT SELECT ON nous_system.compensation_snapshots TO nous_scorer;
 GRANT SELECT ON nous_system.dag_nodes TO nous_scorer;
 GRANT SELECT ON nous_system.events TO nous_scorer;

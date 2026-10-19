@@ -23,6 +23,11 @@
 /tests/test_task_scor*.py @tfatykhov
 /tests/test_github_verify.py @tfatykhov
 /tests/test_scorer_heartbeat_migration.py @tfatykhov
+# Scorer v5: the sampler that picks which checks the owner audits, the card they answer, and their tests
+/nous/audits/** @tfatykhov
+/nous/a2ui/builders/check_audit.py @tfatykhov
+/tests/test_check_audit*.py @tfatykhov
+/tests/test_autonomy_outcomes_contract.py @tfatykhov
 
 # The evidence the scorer and the autonomy inventory read: the harness ledger, the verifier that marks claims
 # unverified, and which run kinds count as the owner being present

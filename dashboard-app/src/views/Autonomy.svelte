@@ -28,7 +28,7 @@
   });
 
   const OUTCOME_COLOR: Record<string, string> = {
-    done_verified: 'var(--green)', done_self: '#60a5fa', partial: '#f59e0b', failed: 'var(--red)', not_scored: 'var(--muted)',
+    done_verified: 'var(--green)', done_checked: '#34d399', done_self: '#60a5fa', partial: '#f59e0b', failed: 'var(--red)', not_scored: 'var(--muted)',
   };
   const CONTEXT_COLOR: Record<string, string> = { owner_present: '#60a5fa', approved: '#34d399', autonomous: '#fb923c' };
   const CONTEXTS = ['owner_present', 'approved', 'autonomous'] as const;
@@ -95,6 +95,12 @@
       <div><dt>Latest score write</dt><dd>{fmtWhen(ts.last_scored_at)}</dd></div>
     </dl>
   </section>
+
+  {#if ts.audits_without_action_row > 0}
+    <p class="small" role="status">
+      {ts.audits_without_action_row} spot-check answer{ts.audits_without_action_row === 1 ? '' : 's'} on file with no matching tap recorded on its card.
+    </p>
+  {/if}
 
   <div class="cards">
     <section class="card" aria-labelledby="h-verified">

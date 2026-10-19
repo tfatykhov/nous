@@ -1648,6 +1648,8 @@ export interface AutonomyData {
       last_ok_at: string | null;
       rows_submitted: number | null;
     } | null;
+    /** Answered check audits with no completed audit.verdict action for that audit; normally 0. */
+    audits_without_action_row: number;
     headline: {
       verified_share: { provisional: VerifiedShare; settled: VerifiedShare };
       owner_overrides: { total: number; subtasks: number; rollups: number };

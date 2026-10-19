@@ -1406,6 +1406,7 @@ async def create_components(settings: Settings) -> dict:
     # orchestrator, so they stay in the A2UI block below.
     surface_service = None
     push_service = None
+    check_audit_task = None
     if settings.a2ui_enabled:
         from nous.a2ui.push import PushService
         from nous.a2ui.service import SurfaceService
@@ -1421,6 +1422,15 @@ async def create_components(settings: Settings) -> dict:
             # F099 Phase 3a: the owner's cards. The runner (and its publisher) were built earlier and need the service
             # only for the card leg; a deployment without the companion never binds one, and every card step is a no-op.
             continuation_runner.set_surface_service(surface_service)
+        if settings.check_audit_enabled:
+            # Scorer v5: the owner's weekly spot check of completion checks. Its own loop, started here because it
+            # needs the service; cancelled in shutdown_components.
+            from nous.audits.check_audit import CheckAuditSampler
+
+            check_audit_task = asyncio.create_task(
+                CheckAuditSampler(database, settings.agent_id, surface_service, settings).run()
+            )
+            logger.info("Check audits: the weekly sampler is on")
 
     # F038: DAG Orchestration
     dag_orchestrator = None
@@ -1670,6 +1680,7 @@ async def create_components(settings: Settings) -> dict:
         "push_service": push_service,
         "action_router": action_router,
         "a2ui_sweep_task": a2ui_sweep_task,
+        "check_audit_task": check_audit_task,
     }
 
 
@@ -1711,6 +1722,15 @@ async def shutdown_components(components: dict) -> None:
         a2ui_sweep.cancel()
         try:
             await a2ui_sweep
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    # Scorer v5: stop the weekly check-audit sampler
+    check_audit_task = components.get("check_audit_task")
+    if check_audit_task:
+        check_audit_task.cancel()
+        try:
+            await check_audit_task
         except (asyncio.CancelledError, Exception):
             pass
 
