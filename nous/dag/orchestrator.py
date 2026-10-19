@@ -1407,13 +1407,16 @@ class DAGOrchestrator:
         subtask = await self._subtask_mgr.get(node.subtask_id)
         if subtask is None:
             # Subtask was deleted — treat as failure
+            failed_at = datetime.now(UTC)
             await self._store.update_node(
                 node.id,
                 status="failed",
                 error="Underlying subtask was deleted",
-                completed_at=datetime.now(UTC),
+                completed_at=failed_at,
             )
-            node.status = "failed"
+            # Mirror what was written: later steps of this tick (the fix stage,
+            # a reset's attempt archive) read the in-memory node.
+            node.status, node.error, node.completed_at = "failed", "Underlying subtask was deleted", failed_at
             return
 
         # F087: roll the subtask's token usage into the DAG total. Keyed on
@@ -1479,13 +1482,15 @@ class DAGOrchestrator:
                 node.status = "completed"
                 node.result = subtask.result
         elif subtask.status == "failed":
+            failed_at = datetime.now(UTC)
+            error = subtask.error or "Subtask failed"
             await self._store.update_node(
                 node.id,
                 status="failed",
-                error=subtask.error or "Subtask failed",
-                completed_at=datetime.now(UTC),
+                error=error,
+                completed_at=failed_at,
             )
-            node.status = "failed"
+            node.status, node.error, node.completed_at = "failed", error, failed_at
 
     async def _count_node_tokens(
         self, node: DAGNode, subtask: object, dag: ExecutionDAG
@@ -1597,13 +1602,16 @@ class DAGOrchestrator:
             registry,
             node.check_name,
         ):
+            failed_at = datetime.now(UTC)
             await self._store.update_node(
                 node.id,
                 status="failed",
                 error="Check disabled itself but its final run failed",
-                completed_at=datetime.now(UTC),
+                completed_at=failed_at,
             )
-            node.status = "failed"
+            node.status, node.error, node.completed_at = (
+                "failed", "Check disabled itself but its final run failed", failed_at,
+            )
             # Consumed only after the failure is persisted, so a failed write
             # re-reads it next tick; consuming keeps the registry from
             # retaining one entry per finished DAG check forever.
@@ -2084,6 +2092,11 @@ class DAGOrchestrator:
                 end_finalization(node.check_name)
             raise
         node.status = status
+        node.completed_at = completed_at
+        if error is not None:
+            # Later steps of this tick read the in-memory node: the fix stage
+            # decides on parent.error, and its retry archives this attempt.
+            node.error = error
         if result is not None:
             node.result = result
         if check_attempts is not None:

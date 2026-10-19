@@ -398,14 +398,14 @@ async def _leaf_signals(session: AsyncSession, agent_id: str, since: datetime, r
         for r in result:
             dag_of[r.id] = r.dag_id
             # The node row describes its current attempt only (dag_nodes.subtask_id). An earlier attempt linked to
-            # the same node was discarded by a reset, which archived it in attempt_history (migration 089): it is
-            # judged by that entry, and is "superseded" when the entry does not show it ending through its check (or
-            # there is none, as for resets from before 089). A node is reset only after it failed. The fix stage's
-            # retry does not reset check_attempts, so a never-polled check of the new attempt can read as
-            # "unconfirmed" rather than None; both leave a "done" at 0.0.
+            # the same node was discarded by a reset, which archived it in attempt_history (migration 089): its entry
+            # can only take the "done" away (failed, unconfirmed). Anything else, or no entry (resets from before 089),
+            # is "superseded". A node is reset only after it failed, so an archive that reads "passed" was not written
+            # by a reset and earns nothing. The fix stage's retry does not reset check_attempts, so a never-polled
+            # check of the new attempt can read as "unconfirmed" rather than None; both leave a "done" at 0.0.
             if r.node_subtask_id != r.id:
                 entry = _archived_attempt(r.attempt_history, r.id)
-                state: str | None = (
+                archived = (
                     ts.node_check_state(
                         r.completion_check,
                         entry.get("check_attempts"),
@@ -415,7 +415,8 @@ async def _leaf_signals(session: AsyncSession, agent_id: str, since: datetime, r
                     )
                     if entry is not None
                     else None
-                ) or "superseded"
+                )
+                state: str | None = archived if archived in ("failed", "unconfirmed") else "superseded"
             else:
                 state = ts.node_check_state(
                     r.completion_check, r.check_attempts, r.last_check_at, r.node_status, r.node_error

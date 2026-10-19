@@ -459,3 +459,50 @@ class TestOrchestratorFixApplication:
         parent = next(n for n in fetched.nodes if n.name == "parent")
         # Budget exhausted — fix does not re-fire; parent stays failed.
         assert parent.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_a_same_tick_fix_retry_sees_and_archives_the_check_failure(store, orchestrator, subtask_mgr, monkeypatch):
+    """The check fails and the fix stage retries in one tick: both read the in-memory parent, so it must carry
+    the error the check failure wrote (migration 089 archives it; the fix decision is made on it)."""
+    import nous.dag.fix_executor as fx
+    from nous.dag.orchestrator import CheckResult
+
+    seen: list[str | None] = []
+
+    def retry_on_anything(**kw):
+        seen.append(kw["parent_error"])
+        return FixActionResult(action="retry_as_is", rationale="test")
+
+    monkeypatch.setattr(fx, "choose_action", retry_on_anything)  # the LLM dispatcher (on in prod) may do this
+    dag = await store.create(
+        DAGCreateRequest(
+            name="same-tick",
+            nodes=[
+                DAGNodeSpec(
+                    name="parent", type=DAGNodeType.subtask, instructions="do", completion_check="test -f /tmp/done"
+                ),
+                DAGNodeSpec(
+                    name="fix-parent",
+                    type=DAGNodeType.fix,
+                    parent_node="parent",
+                    fix_actions=["retry_as_is"],
+                    instructions="recover",
+                ),
+            ],
+            edges=[DAGEdgeSpec(from_node="parent", to_node="fix-parent", edge_type="on_failure")],
+        )
+    )
+    await orchestrator.start_dag(dag.id)
+    parent = next(n for n in (await store.get_dag(dag.id)).nodes if n.name == "parent")
+    first_attempt = parent.subtask_id
+    subtask_mgr.get.return_value = SimpleNamespace(id=first_attempt, status="completed", result="r", error=None)
+    orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("failed", "exit code 1"))
+
+    await orchestrator.tick()  # awaiting_check -> the check fails -> the fix stage retries, all in one tick
+
+    parent = next(n for n in (await store.get_dag(dag.id)).nodes if n.name == "parent")
+    assert seen and seen[0].startswith("Completion check failed")
+    [entry] = parent.attempt_history
+    assert (entry["subtask_id"], entry["status"], entry["reason"]) == (str(first_attempt), "failed", "fix_retry")
+    assert entry["error"].startswith("Completion check failed") and entry["completed_at"] is not None

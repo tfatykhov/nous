@@ -343,7 +343,8 @@ async def test_an_earlier_attempt_is_judged_by_the_nodes_archive_of_how_it_ended
     # Each attempt below reported done and then lost its node to a reset, which archived how it ended (089).
     dag = ExecutionDAG(id=uuid.uuid4(), agent_id=agent, name="d", status="completed", completed_at=NOW)
     await add(db, dag)
-    attempts = {name: subtask(agent) for name in ("check_failed", "timed_out", "cancelled", "not_archived")}
+    names = ("check_failed", "timed_out", "cancelled", "archived_passed", "not_archived")
+    attempts = {name: subtask(agent) for name in names}
     current = subtask(agent)
 
     def archived(sub, status, error, check_attempts=1):
@@ -372,11 +373,18 @@ async def test_an_earlier_attempt_is_judged_by_the_nodes_archive_of_how_it_ended
             archived(attempts["check_failed"], "failed", "Completion check failed: no such file"),
             archived(attempts["timed_out"], "failed", "Completion check timed out after 600s (4 attempts)", 4),
             archived(attempts["cancelled"], "cancelled", None, 0),
+            # No reset archives a completed attempt (they all start from failed, blocked or cancelled), so an entry
+            # like this was written by something else: it must not credit the attempt.
+            archived(attempts["archived_passed"], "completed", None, 2),
         ],
+    )
+    # A passing check node in the completed DAG: anything left at "done" would be done_verified.
+    check = DAGNode(
+        id=uuid.uuid4(), dag_id=dag.id, name="check", node_type="check", status="completed", completion_check="true"
     )
     for sub in (*attempts.values(), current):
         sub.dag_node_id = work.id
-    await add(db, work, *attempts.values(), current)
+    await add(db, work, check, *attempts.values(), current)
 
     leaves, _, _ = await gather(db, agent)
 
@@ -385,6 +393,7 @@ async def test_an_earlier_attempt_is_judged_by_the_nodes_archive_of_how_it_ended
         "check_failed": "failed",
         "timed_out": "unconfirmed",
         "cancelled": "superseded",
+        "archived_passed": "superseded",
         "not_archived": "superseded",  # a reset from before 089 left no entry
     }
     outcomes = {name: score_leaf(leaves[str(sub.id)], NOW).outcome for name, sub in attempts.items()}
@@ -392,10 +401,12 @@ async def test_an_earlier_attempt_is_judged_by_the_nodes_archive_of_how_it_ended
         "check_failed": "failed",
         "timed_out": "partial",
         "cancelled": "partial",
+        "archived_passed": "partial",
         "not_archived": "partial",
     }
     assert leaves[str(attempts["check_failed"].id)].evidence == {"node_check_failed": [str(work.id)]}
     assert leaves[str(current.id)].node_check == "passed"
+    assert score_leaf(leaves[str(current.id)], NOW).outcome == "done_verified"  # the DAG's check confirms the retry
 
 
 async def test_a_dag_keeps_only_its_own_calls_and_names_its_subtasks(db, agent):

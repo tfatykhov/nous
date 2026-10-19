@@ -2,7 +2,7 @@
 
 retry_node, a fix stage's retry and the unblock of a cancelled node all overwrite the node's
 subtask_id, status, error and check columns. Those columns are the only record of how the attempt
-ended, so each reset appends an entry here first, in the same conditional write. The task scorer
+ended, so each reset appends an entry here first, in the write that resets the node. The task scorer
 reads the entry of a superseded attempt (``observability/task_score_gatherer.py``).
 """
 

@@ -231,7 +231,7 @@ def _row(signals: TaskSignals, outcome: str, reason: str | None, now: datetime, 
 def node_check_state(
     completion_check: str | None,
     check_attempts: int | None,
-    last_check_at: datetime | None,
+    last_check_at: datetime | str | None,  # an archived attempt carries it as an ISO string
     node_status: str | None,
     node_error: str | None,
 ) -> str | None:
