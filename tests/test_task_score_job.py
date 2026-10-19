@@ -1039,6 +1039,11 @@ async def test_a_pass_issues_only_selects_and_the_scores_upsert(db, agent):
     writes: set[str] = set()
     for statement in statements:
         head = statement.lstrip().split(None, 1)[0].upper()
+        if head in ("SAVEPOINT", "RELEASE", "ROLLBACK"):
+            # Transaction control, no privilege: on Postgres the stale-constraint read runs inside a savepoint so a
+            # failed read cannot poison the pass. Only ROLLBACK TO SAVEPOINT may appear, never a full ROLLBACK.
+            assert head != "ROLLBACK" or "SAVEPOINT" in statement.upper(), statement
+            continue
         assert head in ("SELECT", "INSERT"), statement
         assert not _FORBIDDEN.search(statement), statement  # no DDL, no temp table, no advisory lock, no delete
         # table names with the schema stripped: the SQLite lane maps every schema to "main"
