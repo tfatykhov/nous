@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -2189,6 +2190,11 @@ class DAGOrchestrator:
             assert_inside_root(workspace, root)
             workspace.mkdir(parents=True, exist_ok=True)
             cwd_arg = str(workspace)
+            # The built-in PR check (nous/dag/typed_checks.py) ignores PRs opened before the DAG, so a branch name
+            # reused from an older PR cannot settle the node before this DAG's PR exists.
+            check_env = {**os.environ}
+            if dag.created_at is not None:
+                check_env["NOUS_DAG_CREATED_AT"] = dag.created_at.isoformat()
         except (ValueError, OSError) as e:
             logger.warning(
                 "F064.3: completion_check workspace setup failed for node %s — %s; "
@@ -2206,6 +2212,7 @@ class DAGOrchestrator:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd_arg,
+                env=check_env,
                 # Own process group, so that a timeout stops the whole
                 # command and not only the /bin/sh that started it.
                 start_new_session=True,

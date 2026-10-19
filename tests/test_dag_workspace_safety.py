@@ -327,3 +327,30 @@ class TestOrchestratorReadContainment:
         assert isinstance(result, CheckResult)
         assert result.status == "failed"
         assert "workspace" in result.detail.lower()
+
+
+@pytest.mark.asyncio
+async def test_a_completion_check_learns_when_its_dag_was_created(store, subtask_mgr, dynamic_loader, tmp_path: Path, db):
+    """The built-in PR check ignores PRs opened before its DAG, so the orchestrator passes the DAG's creation time to
+    every completion check as NOUS_DAG_CREATED_AT (the rest of the environment is inherited as before)."""
+    import shlex
+    import sys
+
+    settings = Settings(dag_workspace_root=tmp_path)
+    s = DAGStore(db, store._agent_id, settings)
+    orch = DAGOrchestrator(store=s, subtask_mgr=subtask_mgr, dynamic_loader=dynamic_loader, settings=settings)
+    probe = (
+        "import os, sys; v = os.environ.get('NOUS_DAG_CREATED_AT', ''); "
+        "sys.exit(0 if v and os.environ.get('PATH') else 1)"
+    )
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(probe)}" if sys.platform != "win32" else (
+        f'"{sys.executable}" -c "{probe}"'
+    )
+    dag = await s.create(
+        DAGCreateRequest(
+            name="env-dag",
+            nodes=[DAGNodeSpec(name="step", type=DAGNodeType.subtask, completion_check=command)],
+        )
+    )
+    result = await orch._run_completion_check(dag.nodes[0])
+    assert result.status == "success", result

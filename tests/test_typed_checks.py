@@ -98,3 +98,29 @@ def test_a_path_segment_is_not_a_repository():
 
     mock, _ = transport(unexpected)
     assert typed_checks.main(["pr", "../..", "--pr", "5"], transport=mock) == 1
+
+
+@pytest.mark.parametrize(
+    ("opened", "state", "merged_at", "code"),
+    [
+        ("2026-10-18T00:00:00Z", "open", None, 2),  # an older PR on a reused branch name: not this DAG's PR yet
+        ("2026-10-18T00:00:00Z", "closed", None, 2),  # an older PR closed unmerged must not fail this node either
+        ("2026-10-19T13:00:00Z", "open", None, 0),  # opened after the DAG: this DAG's PR
+    ],
+)
+def test_head_ignores_prs_opened_before_the_dag(opened, state, merged_at, code, monkeypatch):
+    monkeypatch.setenv("NOUS_DAG_CREATED_AT", "2026-10-19T12:00:00+00:00")
+    body = [{"number": 9, "state": state, "merged_at": merged_at, "created_at": opened}]
+    mock, _ = transport(lambda request: httpx.Response(200, json=body))
+    assert typed_checks.main(["pr", "tfatykhov/nous", "--head", "fix/thing"], transport=mock) == code
+
+
+def test_a_renamed_repository_is_followed():
+    def handle(request):
+        if request.url.path == "/repos/old-owner/old-name/pulls/5":
+            return httpx.Response(301, headers={"Location": "https://api.github.com/repositories/42/pulls/5"})
+        return httpx.Response(200, json=pull())
+
+    mock, seen = transport(handle)
+    assert typed_checks.main(["pr", "old-owner/old-name", "--pr", "5"], transport=mock) == 0
+    assert [r.url.path for r in seen] == ["/repos/old-owner/old-name/pulls/5", "/repositories/42/pulls/5"]

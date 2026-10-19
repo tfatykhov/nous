@@ -320,3 +320,17 @@ async def test_a_stored_credit_matches_whatever_the_spelling():
     github = FakeGitHub([pr()])
     [out] = await decide([other], github, stored=stored_pr_evidence([("x", {"v2_pr_merged": ["tfatykhov/nous#5"]})]))
     assert out.evidence["v2_pr_duplicate"] == ["x"] and github.requests == []
+
+
+async def test_the_scorer_follows_a_renamed_repository():
+    def handle(request):
+        if request.url.path == "/repos/tfatykhov/nous/pulls/5":
+            return httpx.Response(301, headers={"Location": "https://api.github.com/repositories/42/pulls/5"})
+        return httpx.Response(200, json={**pr(), "base": {"repo": {"full_name": "tfatykhov/nous-renamed"}}})
+
+    reader = GitHubReader(transport=httpx.MockTransport(handle))
+    try:
+        [out] = await PrVerifier(reader, [AGENT], [OWNER]).verify([leaf()], StoredPrEvidence())
+    finally:
+        await reader.aclose()
+    assert out.v2_verified and out.evidence["v2_pr_merged"] == ["tfatykhov/nous-renamed#5"]  # the canonical name

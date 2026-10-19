@@ -3,7 +3,9 @@
     python -m nous.dag.typed_checks pr <owner/repo> (--pr <n> | --head <branch>)
 
 ``pr`` passes once the pull request exists, open or merged, because a merge can take longer than a node may wait.
-``--head`` names it by its head branch, for a node created before the PR is: the newest PR on ``<owner>:<branch>``.
+``--head`` names it by its head branch, for a node created before the PR is: the newest PR on ``<owner>:<branch>``,
+and only one opened since the node's DAG was created (the orchestrator passes ``NOUS_DAG_CREATED_AT``), so a
+branch name an older PR used cannot settle the node first.
 Exit codes follow the completion_check contract:
 - 0: the PR exists;
 - 1: it was closed without a merge, or the arguments are wrong (both are final);
@@ -20,6 +22,7 @@ import os
 import re
 import sys
 from collections.abc import Sequence
+from datetime import UTC, datetime
 
 import httpx
 
@@ -56,7 +59,30 @@ def _client(transport: httpx.BaseTransport | None) -> httpx.Client:
     token = os.environ.get("GITHUB_TOKEN", "").strip()
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    return httpx.Client(base_url=GITHUB_API, headers=headers, timeout=REQUEST_TIMEOUT, transport=transport)
+    # A renamed or transferred repository answers its old name with a redirect.
+    return httpx.Client(
+        base_url=GITHUB_API, headers=headers, timeout=REQUEST_TIMEOUT, transport=transport, follow_redirects=True
+    )
+
+
+def _dag_created_at() -> datetime | None:
+    """When this node's DAG was created: the orchestrator passes it to every completion check."""
+    value = os.environ.get("NOUS_DAG_CREATED_AT", "").strip()
+    try:
+        parsed = datetime.fromisoformat(value) if value else None
+    except ValueError:
+        return None
+    if parsed is not None and parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
+
+
+def _opened(pull: dict) -> datetime | None:
+    value = pull.get("created_at")
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")) if isinstance(value, str) else None
+    except ValueError:
+        return None
 
 
 def _state(pull: dict) -> tuple[int, str]:
@@ -95,6 +121,10 @@ def check_pr(
             pulls = response.json()
             if not pulls:
                 return PENDING, f"no PR from {owner}:{head} in {repo} yet"
+            since, opened = _dag_created_at(), _opened(pulls[0])
+            if since is not None and (opened is None or opened < since):
+                # The branch name was used by an older PR: this DAG's own PR is not there yet.
+                return PENDING, f"no PR from {owner}:{head} in {repo} opened since this DAG started"
             return _state(pulls[0])
     except (httpx.HTTPError, ValueError) as exc:
         return PENDING, f"GitHub did not answer ({type(exc).__name__}); will retry"

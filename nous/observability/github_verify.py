@@ -69,8 +69,8 @@ class GitHubReader:
         }
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        self._client = httpx.AsyncClient(
-            base_url=GITHUB_API, headers=headers, timeout=REQUEST_TIMEOUT, transport=transport
+        self._client = httpx.AsyncClient(  # follow_redirects: a renamed repository redirects its old name
+            base_url=GITHUB_API, headers=headers, timeout=REQUEST_TIMEOUT, transport=transport, follow_redirects=True
         )
         self._call_cap = call_cap
         self.calls = 0
