@@ -21,6 +21,8 @@ so a failing subtask inside a DAG inside a chain is penalised once:
 - how a DAG node's own completion_check ended (``node_check_<state>``) -> the subtask the node records as its
   current attempt; an earlier attempt of that node gets the state of its ``attempt_history`` entry, or
   ``node_check_superseded``
+- the owner's audit of a subtask (``nous_system.check_audits``, v5: ``audit_right``, ``audit_wrong``, or
+  ``audit_pending`` for a card that is out and unanswered) -> that subtask
 
 A DEPTH-0 row only: the continuation runner stamps the root's ``origin_decision_id`` on every child it spawns
 (a continuation turn and an approved proposal's call both pass it on as the spawn's ``decision_id``), so reading the
@@ -41,10 +43,13 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nous.audits import AUDIT_VERDICT_ACTION
 from nous.cognitive.claim_verifier import UNVERIFIED_MARKER
 from nous.dag.approval import as_utc
 from nous.observability import task_scoring as ts
 from nous.storage.models import (
+    A2uiAction,
+    CheckAudit,
     CompensationSnapshot,
     DAGNode,
     Decision,
@@ -64,6 +69,9 @@ OWNER_GRADE_REVIEWER = "a2ui"  # brain.review(reviewer="a2ui") is the owner's ta
 # is indexed, with agent_id). A task's calls were made before it finished: a call older than this window before the
 # scoring window is not counted. Ledger retention is 90 days, so the bound is the tighter limit.
 LEDGER_LOOKBACK = timedelta(days=30)
+# v5: the agent's audit rows are read in one query, newest sampled first and at most this many. The weekly card
+# holds a handful, so this is years of audits: the window's leaves and every kind's latest answers are inside it.
+AUDIT_ROWS_CAP = 2000
 
 Evidence = dict[str, dict[str, list[str]]]  # task_id -> {"ledger_errors": [ledger ids], ...}
 
@@ -265,6 +273,61 @@ def _apply_grades(decision_ids: Sequence[UUID], graded: dict[UUID, str], evidenc
     return ts.worst_grade(graded[d] for d in mine)
 
 
+class _Audit(NamedTuple):
+    id: UUID
+    surface_id: str | None
+    verdict: str | None
+
+
+async def _audits(session: AsyncSession, agent_id: str) -> tuple[dict[str, _Audit], set[str]]:
+    """v5, one query: subtask id -> its audit row, and the check kinds the owner's answers trust
+    (``task_scoring.trusted_kinds``). Only ``right`` and ``wrong`` are verdicts; a row is read as answered only with
+    both a verdict and an answer time."""
+    result = await session.execute(
+        select(
+            CheckAudit.id,
+            CheckAudit.task_id,
+            CheckAudit.check_kind,
+            CheckAudit.surface_id,
+            CheckAudit.verdict,
+            CheckAudit.answered_at,
+        )
+        .where(CheckAudit.agent_id == agent_id)
+        .order_by(CheckAudit.sampled_at.desc(), CheckAudit.id)
+        .limit(AUDIT_ROWS_CAP)
+    )
+    by_task: dict[str, _Audit] = {}
+    answered: list[tuple[str, str, datetime, str]] = []
+    for r in result:
+        verdict = r.verdict if r.verdict in ts.AUDIT_VERDICTS else None
+        by_task[str(r.task_id)] = _Audit(r.id, r.surface_id, verdict)
+        if verdict is not None and r.answered_at is not None:
+            answered.append((r.check_kind, verdict, as_utc(r.answered_at), str(r.id)))
+    return by_task, ts.trusted_kinds(answered)
+
+
+async def audits_without_action_row(session: AsyncSession, agent_id: str) -> int:
+    """v5 tripwire: the agent's answered audits whose card has no completed ``audit.verdict`` action recorded. The
+    action router writes that row for every verdict the owner taps, so a verdict without one was written some other
+    way. It cannot tell a careful forgery, and it does not change a score: the job logs the count."""
+    tapped = (
+        select(A2uiAction.id)
+        .where(
+            A2uiAction.agent_id == agent_id,
+            A2uiAction.surface_id == CheckAudit.surface_id,
+            A2uiAction.action_name == AUDIT_VERDICT_ACTION,
+            A2uiAction.status == "completed",
+        )
+        .exists()
+    )
+    result = await session.execute(
+        select(func.count())
+        .select_from(CheckAudit)
+        .where(CheckAudit.agent_id == agent_id, CheckAudit.verdict.is_not(None), ~tapped)
+    )
+    return int(result.scalar_one())
+
+
 def _age_key(row: Any) -> tuple[datetime, str]:
     created = as_utc(row.created_at) or datetime.max.replace(tzinfo=UTC)
     return created, str(row.id)
@@ -336,7 +399,9 @@ def _signals(
         dag_checked=dag_checked,
         node_check=node_check,
         owner_grade=grade,
-        owner_overrides=sum(len(evidence.get(k, [])) for k in ("undone", "proposals_rejected", "failure_graded")),
+        owner_overrides=sum(
+            len(evidence.get(k, [])) for k in ("undone", "proposals_rejected", "failure_graded", "audit_wrong")
+        ),
         unverified_claims=len(evidence.get("unverified_claims", [])),
         harness_errors=sum(len(evidence.get(k, [])) for k in ("ledger_errors", "bash_exits")),
         refusals=len(evidence.get("refusals", [])),
@@ -379,6 +444,7 @@ async def _leaf_signals(session: AsyncSession, agent_id: str, since: datetime, r
     dag_of: dict[UUID, UUID] = {}
     node_check: dict[UUID, str] = {}
     pr_of: dict[UUID, tuple[ts.PrCheck, str, datetime | None, datetime | None]] = {}  # v4: (check, node, DAG, done)
+    kind_of: dict[UUID, str] = {}  # v5: the kind of the node's own check, for the node's current attempt
     for chunk in chunked(ids):
         result = await session.execute(
             select(
@@ -427,6 +493,8 @@ async def _leaf_signals(session: AsyncSession, agent_id: str, since: datetime, r
                 state = ts.node_check_state(
                     r.completion_check, r.check_attempts, r.last_check_at, r.node_status, r.node_error
                 )
+                if (r.completion_check or "").strip():
+                    kind_of[r.id] = ts.check_kind(r.completion_check)
             if state is not None:
                 node_check[r.id] = state
                 evidence[str(r.id)][f"node_check_{state}"].append(str(r.node_id))
@@ -441,6 +509,7 @@ async def _leaf_signals(session: AsyncSession, agent_id: str, since: datetime, r
     checked = await run.checked(list(set(dag_of.values())))
     origin = await _origin_decisions(session, agent_id, "subtask", [str(i) for i in ids])
     graded = await _owner_grades(session, agent_id, [d for ds in origin.values() for d in ds])
+    audit_of, trusted = await _audits(session, agent_id)
     out = []
     for r in rows:
         task = str(r.id)
@@ -448,6 +517,13 @@ async def _leaf_signals(session: AsyncSession, agent_id: str, since: datetime, r
         dag_checked = dag_of.get(r.id) in checked
         if dag_checked:  # v4: a Nous-written check node, so evidence only
             evidence[task]["dag_check_passed"].append(str(dag_of[r.id]))
+        # v5: the owner's verdict on this subtask's audit. "wrong" is counted in owner_overrides through the evidence;
+        # a row whose card never went out (surface_id NULL) says nothing.
+        audit = audit_of.get(task)
+        if audit is not None and audit.verdict is not None:
+            evidence[task][f"audit_{audit.verdict}"].append(str(audit.id))
+        elif audit is not None and audit.surface_id is not None:
+            evidence[task]["audit_pending"].append(str(audit.id))
         pr = pr_of.get(r.id)
         signals = _signals(
             "subtask",
@@ -463,6 +539,14 @@ async def _leaf_signals(session: AsyncSession, agent_id: str, since: datetime, r
         )
         if pr is not None:
             signals = replace(signals, pr_check=pr[0], node_id=pr[1], dag_created_at=pr[2], node_completed_at=pr[3])
+        kind = kind_of.get(r.id)
+        signals = replace(
+            signals,
+            audit_verdict=audit.verdict if audit is not None else None,
+            audit_pending=audit is not None and audit.verdict is None and audit.surface_id is not None,
+            check_kind=kind,
+            kind_trusted=kind is not None and kind in trusted,
+        )
         out.append(signals)
     return out
 

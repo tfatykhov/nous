@@ -14,6 +14,8 @@ from nous.dag.approval import as_utc
 from nous.observability import task_score_gatherer as gatherer
 from nous.observability.task_scoring import score_leaf, score_rollup
 from nous.storage.models import (
+    A2uiAction,
+    CheckAudit,
     CompensationSnapshot,
     DAGNode,
     Decision,
@@ -832,3 +834,170 @@ async def test_a_passed_pr_check_of_the_current_attempt_is_handed_to_the_verifie
     assert (got.node_id, got.dag_created_at) == (str(passed_node.id), as_utc(dag_at))
     assert leaves[str(failed.id)].pr_check is None and leaves[str(failed.id)].node_check == "failed"
     assert leaves[str(wrapped.id)].pr_check is None and leaves[str(wrapped.id)].node_check == "passed"
+
+
+# ---- v5: the owner's audits ---------------------------------------------------------------------------------------
+
+
+async def _checked_leaf(db, agent, command="test -f /tmp/report.md", *, status="completed", error=None, current=True):
+    """A subtask that reported done, whose own node check ran and ended ``status`` (completed: it passed)."""
+    dag = ExecutionDAG(id=uuid.uuid4(), agent_id=agent, name="d", status="completed", completed_at=NOW)
+    sub = subtask(agent, task="summarise the weekly report", result="The summary is in /tmp/report.md.")
+    node = DAGNode(
+        id=uuid.uuid4(),
+        dag_id=dag.id,
+        name=f"n-{sub.id.hex[:6]}",
+        node_type="subtask",
+        status=status,
+        error=error,
+        completion_check=command,
+        check_attempts=1,
+        last_check_at=NOW,
+        subtask_id=sub.id if current else uuid.uuid4(),
+    )
+    sub.dag_node_id = node.id
+    await add(db, dag)
+    await add(db, node, sub)
+    return sub
+
+
+def audit_row(agent, task_id, *, kind="file_exists", verdict=None, surface="nous:audit:check_audit:abc", ago=1.0):
+    """One audit; ``ago`` days since it was answered (when ``verdict`` is set)."""
+    return CheckAudit(
+        id=uuid.uuid4(),
+        agent_id=agent,
+        task_id=task_id,
+        node_id=uuid.uuid4(),
+        check_kind=kind,
+        sampled_at=NOW - timedelta(days=ago + 1),
+        surface_id=surface,
+        verdict=verdict,
+        actor="companion:unattributed" if verdict else None,
+        answered_at=NOW - timedelta(days=ago) if verdict else None,
+    )
+
+
+def answers(agent, kind, verdicts: str, *, newest_ago=1.0):
+    """Answered audits of other subtasks, oldest first (r right, w wrong), a day apart, the newest ``newest_ago``
+    days old."""
+    names = {"r": "right", "w": "wrong"}
+    last = len(verdicts) - 1
+    return [
+        audit_row(agent, uuid.uuid4(), kind=kind, verdict=names[v], ago=newest_ago + (last - i))
+        for i, v in enumerate(verdicts)
+    ]
+
+
+async def test_a_verdict_on_a_leafs_audit_reaches_its_signals_and_wrong_is_an_override(db, agent):
+    subs = {name: await _checked_leaf(db, agent) for name in ("right", "wrong", "pending", "unpushed")}
+    rows = {
+        "right": audit_row(agent, subs["right"].id, verdict="right"),
+        "wrong": audit_row(agent, subs["wrong"].id, verdict="wrong"),
+        "pending": audit_row(agent, subs["pending"].id),
+        "unpushed": audit_row(agent, subs["unpushed"].id, surface=None),  # its card never went out: says nothing
+    }
+    await add(db, *rows.values())
+
+    leaves, _, _ = await gather(db, agent)
+
+    got = {name: leaves[str(sub.id)] for name, sub in subs.items()}
+    assert [(g.audit_verdict, g.audit_pending, g.owner_overrides) for g in got.values()] == [
+        ("right", False, 0),
+        ("wrong", False, 1),  # a failure grade: counted as an override
+        (None, True, 0),
+        (None, False, 0),
+    ]
+    assert got["right"].evidence["audit_right"] == [str(rows["right"].id)]
+    assert got["wrong"].evidence["audit_wrong"] == [str(rows["wrong"].id)]
+    assert got["pending"].evidence["audit_pending"] == [str(rows["pending"].id)]
+    assert not [key for key in got["unpushed"].evidence if key.startswith("audit_")]
+    assert [(score_leaf(g, NOW).outcome, score_leaf(g, NOW).score) for g in got.values()] == [
+        ("done_verified", 1.0),
+        ("done_self", -1.0),
+        ("done_self", 0.0),
+        ("done_self", 0.0),
+    ]
+    assert score_leaf(got["pending"], NOW + timedelta(days=15)).settled is False  # held while the card is out
+
+
+async def test_a_trusted_kind_earns_done_checked_and_one_wrong_among_the_latest_five_takes_it_away(db, agent):
+    leaf = await _checked_leaf(db, agent)
+    await add(db, *answers(agent, "file_exists", "rrrr"))
+    got = (await gather(db, agent))[0][str(leaf.id)]
+    assert (got.check_kind, got.kind_trusted, score_leaf(got, NOW).outcome) == ("file_exists", False, "done_self")
+
+    await add(db, *answers(agent, "file_exists", "r", newest_ago=0.5))  # the fifth right
+    got = (await gather(db, agent))[0][str(leaf.id)]
+    assert (got.kind_trusted, score_leaf(got, NOW).outcome, score_leaf(got, NOW).score) == (True, "done_checked", 0.25)
+
+    await add(db, *answers(agent, "file_exists", "w", newest_ago=0.25))  # the newest answer is wrong
+    got = (await gather(db, agent))[0][str(leaf.id)]
+    assert (got.kind_trusted, score_leaf(got, NOW).outcome) == (False, "done_self")
+
+
+async def test_done_checked_needs_the_leafs_own_passed_check_of_a_trusted_kind_other_than_pr(db, agent):
+    await add(db, *answers(agent, "file_exists", "rrrrr"), *answers(agent, "pr", "rrrrr"))
+    subs = {
+        "passed": await _checked_leaf(db, agent),
+        "other_kind": await _checked_leaf(db, agent, "pytest -q tests"),  # "other" has no answers
+        "failed": await _checked_leaf(db, agent, status="failed", error="Completion check failed: exit code 1"),
+        "earlier": await _checked_leaf(db, agent, current=False),  # an earlier attempt of its node
+        "pr": await _checked_leaf(db, agent, "python -m nous.dag.typed_checks pr tfatykhov/nous --pr 7"),
+    }
+    other_agent = await _checked_leaf(db, f"{agent}-b")
+
+    leaves, _, _ = await gather(db, agent)
+
+    assert {name: score_leaf(leaves[str(sub.id)], NOW).outcome for name, sub in subs.items()} == {
+        "passed": "done_checked",
+        "other_kind": "done_self",
+        "failed": "failed",  # its check said no
+        "earlier": "partial",  # superseded
+        "pr": "done_self",  # even with "right" rows for pr: a PR check is V2, never done_checked
+    }
+    assert (leaves[str(subs["pr"].id)].check_kind, leaves[str(subs["pr"].id)].kind_trusted) == ("pr", True)
+    assert leaves[str(subs["earlier"].id)].check_kind is None
+    other = (await gather(db, f"{agent}-b"))[0][str(other_agent.id)]  # another agent's answers trust nothing here
+    assert (other.check_kind, other.kind_trusted) == ("file_exists", False)
+
+
+async def test_the_audit_read_is_one_query_whatever_the_number_of_leaves(db, agent):
+    async def audit_queries(n: int) -> int:
+        a = f"{agent}-{n}"
+        for _ in range(n):
+            sub = await _checked_leaf(db, a)
+            await add(db, audit_row(a, sub.id, verdict="right"))
+        statements: list[str] = []
+
+        def record(conn, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+
+        event.listen(db.engine.sync_engine, "before_cursor_execute", record)
+        try:
+            assert len((await gather(db, a))[0]) == n
+        finally:
+            event.remove(db.engine.sync_engine, "before_cursor_execute", record)
+        return sum("check_audits" in s for s in statements)
+
+    assert await audit_queries(2) == await audit_queries(9) == 1
+
+
+async def test_the_tripwire_counts_answered_audits_with_no_completed_tap_on_their_card(db, agent):
+    def tap(surface, *, status="completed", name="audit.verdict", who=agent):
+        return A2uiAction(agent_id=who, surface_id=surface, action_name=name, status=status, context={})
+
+    await add(
+        db,
+        audit_row(agent, uuid.uuid4(), verdict="right", surface="s-tapped"),
+        audit_row(agent, uuid.uuid4(), verdict="wrong", surface="s-rejected"),
+        audit_row(agent, uuid.uuid4(), verdict="right", surface="s-other-action"),
+        audit_row(agent, uuid.uuid4(), verdict="right", surface="s-other-agent"),
+        audit_row(agent, uuid.uuid4(), verdict="right", surface=None),
+        audit_row(agent, uuid.uuid4(), surface="s-unanswered"),  # no verdict: nothing to match
+        tap("s-tapped"),
+        tap("s-rejected", status="rejected"),
+        tap("s-other-action", name="decision.resolve"),
+        tap("s-other-agent", who=f"{agent}-b"),
+    )
+    async with db.session() as s:
+        assert await gatherer.audits_without_action_row(s, agent) == 4

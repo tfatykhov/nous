@@ -40,10 +40,11 @@ from sqlalchemy import Text, cast, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nous.audits import AUDIT_VERDICT_ACTION
 from nous.dag.approval import as_utc
 from nous.log_redaction import configure_logging
 from nous.observability.github_verify import GitHubReader, PrVerifier, StoredPrEvidence, stored_pr_evidence
-from nous.observability.task_score_gatherer import chunked, gather_signals
+from nous.observability.task_score_gatherer import audits_without_action_row, chunked, gather_signals
 from nous.observability.task_scoring import (
     LEAF_KIND,
     SCORER_VERSION,
@@ -80,6 +81,8 @@ SOURCE_TABLES = (
     "brain.intention_proposals",
     "brain.intentions",
     "heart.subtasks",
+    "nous_system.a2ui_actions",  # v5: the tripwire, audits_without_action_row
+    "nous_system.check_audits",  # v5: the owner's audits (migration 090)
     "nous_system.compensation_snapshots",
     "nous_system.dag_nodes",
     "nous_system.events",
@@ -289,6 +292,15 @@ async def run_scoring_pass(
                 agent_id,
             )
         gathered = await gather_signals(session, agent_id, since=since)
+        # v5 tripwire: a verdict with no recorded tap was written some other way. Logged, never scored.
+        unmatched = await audits_without_action_row(session, agent_id)
+        if unmatched:
+            logger.warning(
+                "Task scores: %d answered check audit(s) have no completed %s action on their card (agent=%s)",
+                unmatched,
+                AUDIT_VERDICT_ACTION,
+                agent_id,
+            )
         leaf_signals = gathered.leaves
         if pr_verifier is not None and any(sig.pr_check is not None for sig in leaf_signals):
             leaf_signals = await pr_verifier.verify(leaf_signals, await _stored_pr_evidence(session, agent_id))

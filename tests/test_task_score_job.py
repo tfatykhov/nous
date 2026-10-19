@@ -1280,3 +1280,114 @@ def test_a_pass_locks_its_agents_heartbeat_row_first():
 
     sql = str(job.pass_lock("a1").compile(dialect=postgresql.dialect()))
     assert "FROM scoring.scorer_heartbeat" in sql and sql.rstrip().endswith("FOR UPDATE"), sql
+
+
+# ---- scorer v5: the owner's audits -------------------------------------------------------------------------------
+
+
+async def _audited_dag(db, agent, n_leaves=2):
+    """A completed DAG of ``n_leaves`` subtasks that reported done, each through a passed ``test -f`` check."""
+    dag = ExecutionDAG(id=uuid.uuid4(), agent_id=agent, name="d", status="completed", completed_at=NOW)
+    async with db.session() as s:
+        s.add(dag)
+        await s.flush()
+        subs = []
+        for i in range(n_leaves):
+            sub = Subtask(
+                id=uuid.uuid4(),
+                agent_id=agent,
+                task="summarise the weekly report",
+                status="completed",
+                final_outcome="completed",
+                completed_at=NOW - timedelta(hours=1),
+            )
+            node = DAGNode(
+                id=uuid.uuid4(),
+                dag_id=dag.id,
+                name=f"n{i}",
+                node_type="subtask",
+                status="completed",
+                completion_check="test -f /tmp/report.md",
+                check_attempts=1,
+                last_check_at=NOW - timedelta(hours=1),
+                subtask_id=sub.id,
+            )
+            sub.dag_node_id = node.id
+            s.add_all([node, sub])
+            subs.append(sub)
+        await s.commit()
+    return dag, subs
+
+
+def _answer(agent, verdict, *, ago_hours, task_id=None, surface="nous:audit:check_audit:x"):
+    from nous.storage.models import CheckAudit
+
+    return CheckAudit(
+        agent_id=agent,
+        task_id=task_id or uuid.uuid4(),
+        node_id=uuid.uuid4(),
+        check_kind="file_exists",
+        sampled_at=NOW - timedelta(days=3),
+        surface_id=surface,
+        verdict=verdict,
+        answered_at=NOW - timedelta(hours=ago_hours) if verdict else None,
+    )
+
+
+async def _add(db, *items):
+    async with db.session() as s:
+        s.add_all(items)
+        await s.commit()
+
+
+async def test_a_trusted_kind_writes_done_checked_rows_and_the_rollup_mean_counts_them(db, agent):
+    dag, subs = await _audited_dag(db, agent)
+    # five "right" answers on other subtasks trust the kind; the second leaf's own audit is "wrong"
+    await _add(db, *[_answer(agent, "right", ago_hours=10 + i) for i in range(5)])
+    await _add(db, _answer(agent, "wrong", ago_hours=30, task_id=subs[1].id))
+    assert await job.run_scoring_pass(db, agent, now=NOW) == 3
+
+    got = {r.task_id: r for r in await rows(db, agent)}
+    first, second = got[str(subs[0].id)], got[str(subs[1].id)]
+    assert (first.outcome, first.score, first.settled) == ("done_checked", 0.25, False)  # the constraint admits it
+    # its own wrong answer is a failure grade (the latest five of the kind are still right): an override, no credit
+    assert (second.outcome, second.score, second.owner_overrides) == ("done_self", -1.0, 1)
+    assert second.evidence["audit_wrong"]
+    rollup = got[str(dag.id)]
+    assert (rollup.children_scored, rollup.children_mean_score) == (2, -0.375)
+
+
+async def test_a_kind_that_loses_trust_takes_done_checked_back_on_the_next_pass(db, agent):
+    _, subs = await _audited_dag(db, agent, n_leaves=1)
+    await _add(db, *[_answer(agent, "right", ago_hours=10 + i) for i in range(5)])
+    await job.run_scoring_pass(db, agent, now=NOW)
+    assert [(r.outcome, r.score) for r in await rows(db, agent) if r.task_id == str(subs[0].id)] == [
+        ("done_checked", 0.25)
+    ]
+
+    await _add(db, _answer(agent, "wrong", ago_hours=1))  # a newer answer on another subtask of the kind
+    await job.run_scoring_pass(db, agent, now=NOW + timedelta(hours=1))
+    assert [(r.outcome, r.score) for r in await rows(db, agent) if r.task_id == str(subs[0].id)] == [("done_self", 0.0)]
+
+
+async def test_a_pass_logs_the_answered_audits_that_have_no_recorded_tap(db, agent, caplog):
+    from nous.storage.models import A2uiAction
+
+    await _add(
+        db,
+        _answer(agent, "right", ago_hours=2, surface="s-tapped"),
+        _answer(agent, "right", ago_hours=2, surface="s-untapped"),
+        _answer(agent, "right", ago_hours=2, surface="s-untapped"),
+        A2uiAction(agent_id=agent, surface_id="s-tapped", action_name="audit.verdict", status="completed", context={}),
+    )
+    with caplog.at_level(logging.WARNING, logger=job.__name__):
+        await job.run_scoring_pass(db, agent, now=NOW)
+    warned = [r.getMessage() for r in caplog.records if "check audit" in r.getMessage()]
+    assert warned == [
+        f"Task scores: 2 answered check audit(s) have no completed audit.verdict action on their card (agent={agent})"
+    ]
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=job.__name__):
+        await job.run_scoring_pass(db, f"{agent}-quiet", now=NOW)
+    assert not [r for r in caplog.records if "check audit" in r.getMessage()]
