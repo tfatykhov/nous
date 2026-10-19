@@ -334,3 +334,15 @@ async def test_the_scorer_follows_a_renamed_repository():
     finally:
         await reader.aclose()
     assert out.v2_verified and out.evidence["v2_pr_merged"] == ["tfatykhov/nous-renamed#5"]  # the canonical name
+
+
+async def test_a_pin_survives_a_renamed_repository():
+    # The first pass followed the old name to the renamed repository and pinned the PR under its canonical name. A
+    # later pass uses that pin although the command still spells the old name: no re-resolution of the branch.
+    github = FakeGitHub()
+    github.pulls = {7: pr(7)}
+    old = leaf(head="fix/thing")
+    old = TaskSignals(**{**old.__dict__, "pr_check": PrCheck(repo="tfatykhov/old-name", head="fix/thing")})
+    [out] = await decide([old], github, stored=StoredPrEvidence(pins={"t1": "tfatykhov/nous#7"}))
+    assert out.v2_verified
+    assert [r.url.path for r in github.requests] == ["/repos/tfatykhov/nous/pulls/7"]

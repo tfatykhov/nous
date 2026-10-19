@@ -16,6 +16,9 @@ services:
       - DB_USER=${NOUS_APP_DB_USER:-nous}
       - DB_PASSWORD=${NOUS_APP_DB_PASSWORD:-${DB_PASSWORD:-nous_dev_password}}
       - DB_NAME=nous
+      # The agent's GitHub token: gh and git in the agent, and the built-in PR completion check
+      # (python -m nous.dag.typed_checks), which needs it for a private repository.
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}

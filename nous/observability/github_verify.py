@@ -176,12 +176,17 @@ def _pr_key(repo: str, number: Any) -> str:
     return f"{repo.lower()}#{number}"
 
 
-def _known_number(check: PrCheck, task_id: str, stored: StoredPrEvidence) -> int | None:
-    """The PR number without asking GitHub: ``--pr``, or the number an earlier pass pinned for ``--head``."""
+def _known_pr(check: PrCheck, task_id: str, stored: StoredPrEvidence) -> tuple[str, int] | None:
+    """(repository, number) without asking GitHub: ``--pr``, or what an earlier pass pinned for ``--head``.
+
+    A pin belongs to this task (only the scorer writes it, and a node's check does not change), and it names the
+    repository GitHub answered for, so it is used whatever spelling the command has: a renamed repository's old
+    name would otherwise re-resolve the branch every pass and let a newer PR on it replace the pinned one.
+    """
     if check.number is not None:
-        return check.number
+        return check.repo, check.number
     repo, _, pinned = stored.pins.get(task_id, "").rpartition("#")
-    return int(pinned) if repo == check.repo.lower() and pinned.isdigit() else None
+    return (repo, int(pinned)) if repo and pinned.isdigit() else None
 
 
 class PrVerifier:
@@ -220,9 +225,10 @@ class PrVerifier:
 
         if signals.dag_created_at is None:
             return outcome("v2_rejected", "no DAG creation time")
-        number = _known_number(check, signals.task_id, stored)
+        known = _known_pr(check, signals.task_id, stored)
+        repo, number = known if known is not None else (check.repo, None)
         if number is not None:
-            key = _pr_key(check.repo, number)
+            key = _pr_key(repo, number)
             evidence["v2_pr"] = [key]
             holder = stored.credited.get(key)
             if holder == signals.task_id:
@@ -235,7 +241,7 @@ class PrVerifier:
                 if number is None:
                     return outcome("v2_rejected", "no such PR")
                 evidence["v2_pr"] = [_pr_key(check.repo, number)]
-            pull = await self._reader.pull(check.repo, number)
+            pull = await self._reader.pull(repo, number)
         except GitHubUnavailable as exc:
             return outcome("v2_unavailable", str(exc), v2_hold=True)
         if pull is None:
@@ -244,7 +250,7 @@ class PrVerifier:
         # that redirects) are one PR.
         base = pull.get("base")
         canonical = (base.get("repo") or {}).get("full_name") if isinstance(base, dict) else None
-        key = _pr_key(canonical if isinstance(canonical, str) else check.repo, pull.get("number", number))
+        key = _pr_key(canonical if isinstance(canonical, str) else repo, pull.get("number", number))
         evidence["v2_pr"] = [key]
         if _login(pull.get("user")) not in self._agents:
             return outcome("v2_rejected", "not opened by the agent")
