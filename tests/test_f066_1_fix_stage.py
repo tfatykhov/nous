@@ -506,3 +506,22 @@ async def test_a_same_tick_fix_retry_sees_and_archives_the_check_failure(store, 
     [entry] = parent.attempt_history
     assert (entry["subtask_id"], entry["status"], entry["reason"]) == (str(first_attempt), "failed", "fix_retry")
     assert entry["error"].startswith("Completion check failed") and entry["completed_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_a_same_tick_fix_retry_archives_the_failed_attempts_completion_time(store, orchestrator, subtask_mgr):
+    """A subtask that ends incomplete fails its node, and the fix stage retries it in the same tick: the archive
+    must carry the completion time the failure wrote, not the in-memory node's stale None."""
+    dag = await store.create(_parent_with_fix_request(["retry_as_is"]))
+    await orchestrator.start_dag(dag.id)
+    parent = next(n for n in (await store.get_dag(dag.id)).nodes if n.name == "parent")
+    subtask_mgr.get.return_value = SimpleNamespace(
+        id=parent.subtask_id, status="completed", result="r", error=None, final_outcome="validation_failed"
+    )
+
+    await orchestrator.tick()  # the subtask's outcome fails the node -> the fix stage retries it, in one tick
+
+    parent = next(n for n in (await store.get_dag(dag.id)).nodes if n.name == "parent")
+    [entry] = parent.attempt_history
+    assert entry["error"].startswith("subtask validation_failed") and entry["reason"] == "fix_retry"
+    assert entry["completed_at"] is not None

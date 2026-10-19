@@ -1452,16 +1452,18 @@ class DAGOrchestrator:
                 f"subtask {final}: "
                 f"{subtask.error or blocked_reason or 'no reason'}"
             )
+            failed_at = datetime.now(UTC)
             await self._store.update_node(
                 node.id,
                 status="failed",
                 error=error_msg,
                 result=subtask.result,
-                completed_at=datetime.now(UTC),
+                completed_at=failed_at,
             )
             node.status = "failed"
             node.error = error_msg
             node.result = subtask.result
+            node.completed_at = failed_at
             return
 
         if subtask.status == "completed":
@@ -1477,14 +1479,16 @@ class DAGOrchestrator:
                 node.status = "awaiting_check"
                 node.result = subtask.result
             else:
+                done_at = datetime.now(UTC)
                 await self._store.update_node(
                     node.id,
                     status="completed",
                     result=subtask.result,
-                    completed_at=datetime.now(UTC),
+                    completed_at=done_at,
                 )
                 node.status = "completed"
                 node.result = subtask.result
+                node.completed_at = done_at
         elif subtask.status == "failed":
             failed_at = datetime.now(UTC)
             error = subtask.error or "Subtask failed"
@@ -1625,13 +1629,14 @@ class DAGOrchestrator:
             # Check was unregistered — for DAG-managed checks this means
             # self-disable completed (DynamicCheckLoader unregisters on disable).
             result = await self._final_run_result(node.check_name, "Check completed (self-disabled)")
+            done_at = datetime.now(UTC)
             await self._store.update_node(
                 node.id,
                 status="completed",
                 result=result,
-                completed_at=datetime.now(UTC),
+                completed_at=done_at,
             )
-            node.status = "completed"
+            node.status, node.result, node.completed_at = "completed", result, done_at
             # No failure to consume, but still unprotect the check.
             _registry_unprotect_from_eviction(registry, node.check_name)
             return
@@ -1639,13 +1644,14 @@ class DAGOrchestrator:
         # Use check.active to detect disabled checks (review fix)
         if not check.active:
             result = await self._final_run_result(node.check_name, "Check completed (disabled itself)")
+            done_at = datetime.now(UTC)
             await self._store.update_node(
                 node.id,
                 status="completed",
                 result=result,
-                completed_at=datetime.now(UTC),
+                completed_at=done_at,
             )
-            node.status = "completed"
+            node.status, node.result, node.completed_at = "completed", result, done_at
             # No failure to consume, but still unprotect the check.
             _registry_unprotect_from_eviction(registry, node.check_name)
 
@@ -1658,10 +1664,11 @@ class DAGOrchestrator:
             cmd = node.completion_check
             if not cmd or not cmd.strip():
                 # No valid check command — mark completed
+                done_at = datetime.now(UTC)
                 await self._store.update_node(
-                    node.id, status="completed", completed_at=datetime.now(UTC),
+                    node.id, status="completed", completed_at=done_at,
                 )
-                node.status = "completed"
+                node.status, node.completed_at = "completed", done_at
                 self._release_check(node)
                 continue
 
@@ -3459,12 +3466,12 @@ class DAGOrchestrator:
         return built, notify_text(title, node.instructions or "", deadline, default_label)
 
     async def _fail_parked(self, node: DAGNode, error: str) -> None:
+        failed_at = datetime.now(UTC)
         if await self._store.transition_node(
             node.id, from_statuses={"awaiting_input"}, status="failed", error=error,
-            completed_at=datetime.now(UTC),
+            completed_at=failed_at,
         ):
-            node.status = "failed"
-            node.error = error
+            node.status, node.error, node.completed_at = "failed", error, failed_at
 
     async def _close_card(self, surface_id: str | None, *, node_id: UUID | None = None) -> None:
         """Best-effort card close (§3.7); the leaked-card sweep retries."""
