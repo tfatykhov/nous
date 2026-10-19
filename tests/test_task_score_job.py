@@ -440,6 +440,46 @@ async def test_a_settling_rollup_still_counts_a_child_that_finished_before_the_w
     assert (control.settled, control.children_scored, control.children_mean_score) == (True, 0, None)
 
 
+async def test_after_a_version_bump_a_rollup_counts_an_out_of_window_child_by_its_older_row(db, agent):
+    # The first pass of a new SCORER_VERSION gathers the window only. A chain that closed inside it can name a child
+    # that finished before it: that child has rows of earlier versions only, and the newest stands in for it.
+    child = Subtask(
+        id=uuid.uuid4(),
+        agent_id=agent,
+        task="t",
+        status="completed",
+        final_outcome="completed",
+        completed_at=NOW - timedelta(days=17),
+    )
+    rid = uuid.uuid4()
+    async with db.session() as s:
+        s.add(child)
+        s.add(
+            Intention(
+                id=rid,
+                agent_id=agent,
+                root_id=rid,
+                source_kind="subtask",
+                source_id=str(child.id),
+                intent="i",
+                origin_kind="interactive",
+                wake_policy="continue",
+                state="closed",
+                close_reason="delivered",
+                closed_at=NOW - timedelta(days=1),
+            )
+        )
+        await s.commit()
+    older = SCORER_VERSION - 1
+    await upsert(db, agent, [score(str(child.id), version=older - 1, value=0.5, settled=True)])
+    await upsert(db, agent, [score(str(child.id), version=older, value=-0.1, settled=True)])
+
+    await job.run_scoring_pass(db, agent, now=NOW)
+
+    [root] = [r for r in await rows(db, agent) if r.task_id == str(rid) and r.scorer_version == SCORER_VERSION]
+    assert (root.children_scored, root.children_mean_score) == (1, -0.1)  # the newest earlier version's score
+
+
 def _errored_subtask(agent, finished: datetime) -> tuple[Subtask, ExecutionLedgerEntry]:
     """A completed subtask with one harness error, so its fresh score is -0.1."""
     sub = Subtask(
