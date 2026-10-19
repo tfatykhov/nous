@@ -399,7 +399,7 @@ class DAGOrchestrator:
             if await self._store.transition_node(
                 node.id, from_statuses={"ready", "pending"}, status="failed", error=error
             ):
-                node.status = "failed"
+                node.status, node.error = "failed", error
             logger.warning(
                 "DAG %s node %s FAILED after %d deferrals: %s",
                 dag.id, node.name, count, reason,
@@ -470,6 +470,10 @@ class DAGOrchestrator:
             node.id, from_statuses=_DISPATCHABLE, status=status, **values
         ):
             node.status = status
+            # Mirror the rest of the write too: later steps read the in-memory node.
+            for column in ("error", "result", "completed_at"):
+                if column in values:
+                    setattr(node, column, values[column])
             return True
         return False
 
