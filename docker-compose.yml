@@ -203,9 +203,10 @@ services:
       DB_PASSWORD: ${NOUS_SCORER_DB_PASSWORD:-${NOUS_APP_DB_PASSWORD:-${DB_PASSWORD:-nous_dev_password}}}
       DB_NAME: nous
       NOUS_AGENT_ID: ${NOUS_AGENT_ID:-nous-default}
-      # Scorer v4: the GitHub logins the agent opens PRs as (empty: PR checks are not verified), and an optional
-      # read-only token for the scorer only.
+      # Scorer v4: the GitHub logins the agent opens PRs as, the logins whose merge confirms them (the owner),
+      # both needed for PR checks to be verified, and an optional read-only token for the scorer only.
       NOUS_SCORER_AGENT_LOGINS: ${NOUS_SCORER_AGENT_LOGINS:-}
+      NOUS_SCORER_MERGER_LOGINS: ${NOUS_SCORER_MERGER_LOGINS:-}
       NOUS_SCORER_GITHUB_TOKEN: ${NOUS_SCORER_GITHUB_TOKEN:-}
     depends_on:
       postgres:

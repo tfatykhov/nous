@@ -489,6 +489,8 @@ async def _dag_signals(session: AsyncSession, agent_id: str, since: datetime, ru
     for r in rows:
         task = str(r.id)
         grade = _apply_grades(origin.get(task, []), graded, evidence[task])
+        if r.id in checked:  # v4: evidence only, as on its leaves
+            evidence[task]["dag_check_passed"].append(task)
         out.append(
             _signals(
                 "dag",

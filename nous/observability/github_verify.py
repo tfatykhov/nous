@@ -6,17 +6,19 @@ scoring job reading the PR from GitHub. The orchestrator's pass is Nous's own ha
 something Nous could write; the PR on GitHub is not.
 
 ``v2_verified`` iff all of:
-- the PR's author is one of the agent's logins;
+- the PR's author is one of the agent's logins (``agent_logins``);
 - it was opened at or after the DAG was created;
-- it is merged, by a login that is not the agent's.
+- it is merged, by one of the accepted mergers (``merger_logins``, the owner). The list is an allowlist: a merge by
+  the agent, by any ``[bot]`` login, or by anyone else confirms nothing.
 
 One PR credits at most one leaf, ever:
-- the stored rows decide first (a credit already given stands);
+- the stored rows decide first. A credit already given stands, and is not read from GitHub again: a merge is final.
 - then the earliest leaf of the pass, by (DAG created_at, node id).
 
-When the PR cannot be decided yet (still open, GitHub unreachable, or the pass's call cap reached), ``v2_hold`` keeps
-the row provisional for a bounded time (``task_scoring.V2_HOLD_EXTRA_DAYS``). Anything else earns nothing and says why
-in the evidence. Nothing here writes: the job scores what this returns.
+When the PR cannot be decided yet (still open, GitHub unreachable or rate-limited, the pass's call cap reached),
+``v2_hold`` keeps the row provisional for a bounded time (``task_scoring.V2_HOLD_EXTRA_DAYS``), and no later leaf of
+the pass may take that PR. Anything else earns nothing and says why in the evidence. Nothing here writes: the job
+scores what this returns.
 """
 
 from __future__ import annotations
@@ -30,13 +32,14 @@ from urllib.parse import urlencode
 
 import httpx
 
-from nous.observability.task_scoring import TaskSignals
+from nous.observability.task_scoring import PrCheck, TaskSignals
 
 logger = logging.getLogger(__name__)
 
 GITHUB_API = "https://api.github.com"
 GITHUB_CALL_CAP = 60  # requests per scoring pass; past it, the remaining PRs are held, not decided
 REQUEST_TIMEOUT = 10.0
+_RATE_LIMITED = frozenset({403, 429})  # GitHub's answer to a spent rate limit: stop asking for this pass
 _LATE = datetime.max.replace(tzinfo=UTC)
 
 
@@ -45,7 +48,11 @@ class GitHubUnavailable(Exception):
 
 
 class GitHubReader:
-    """Read-only GitHub REST client for one pass, with a call cap and a memo. An empty token reads anonymously."""
+    """Read-only GitHub REST client for one pass, with a call cap and a memo. An empty token reads anonymously.
+
+    Failures are remembered as well as answers, so every leaf of a pass that asks the same question gets the same
+    result. A rate-limit answer (403 or 429) ends the pass's asking altogether.
+    """
 
     def __init__(
         self,
@@ -67,6 +74,8 @@ class GitHubReader:
         self._call_cap = call_cap
         self.calls = 0
         self._memo: dict[str, Any] = {}
+        self._failed: dict[str, str] = {}
+        self._stopped: str | None = None
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -75,17 +84,27 @@ class GitHubReader:
         key = f"{path}?{urlencode(sorted((params or {}).items()))}"
         if key in self._memo:
             return self._memo[key]
+        if key in self._failed:
+            raise GitHubUnavailable(self._failed[key])
+        if self._stopped is not None:
+            raise GitHubUnavailable(self._stopped)
         if self.calls >= self._call_cap:
             raise GitHubUnavailable("call cap reached")
         self.calls += 1
         try:
             response = await self._client.get(path, params=dict(params or {}))
         except httpx.HTTPError as exc:
-            raise GitHubUnavailable(type(exc).__name__) from exc
+            self._failed[key] = type(exc).__name__
+            raise GitHubUnavailable(self._failed[key]) from exc
         if response.status_code == 404:
             value = None
         elif response.status_code != 200:
-            raise GitHubUnavailable(f"HTTP {response.status_code}")
+            self._failed[key] = f"HTTP {response.status_code}"
+            if response.status_code in _RATE_LIMITED:
+                self._stopped = self._failed[key]
+            elif response.status_code == 401:
+                logger.warning("Task scores: GitHub refused NOUS_SCORER_GITHUB_TOKEN (HTTP 401)")
+            raise GitHubUnavailable(self._failed[key])
         else:
             value = response.json()
         self._memo[key] = value
@@ -110,7 +129,7 @@ class GitHubReader:
 
 @dataclass(frozen=True)
 class StoredPrEvidence:
-    """What earlier passes recorded (scoring.task_scores, scorer v4 and later)."""
+    """What earlier passes recorded (scoring.task_scores, scorer v4 and later). Only the scorer writes that schema."""
 
     pins: Mapping[str, str] = field(default_factory=dict)  # task id -> "owner/repo#N" its --head resolved to
     credited: Mapping[str, str] = field(default_factory=dict)  # "owner/repo#N" -> the task id it credited
@@ -147,25 +166,42 @@ def _login(user: Any) -> str | None:
     return login.lower() if isinstance(login, str) else None
 
 
-class PrVerifier:
-    """Decides the PR checks of one pass. ``agent_logins`` are the GitHub logins Nous opens PRs as."""
+def _logins(values: Iterable[str]) -> frozenset[str]:
+    return frozenset(login.strip().lower() for login in values if login.strip())
 
-    def __init__(self, reader: GitHubReader, agent_logins: Iterable[str]) -> None:
+
+def _known_number(check: PrCheck, task_id: str, stored: StoredPrEvidence) -> int | None:
+    """The PR number without asking GitHub: ``--pr``, or the number an earlier pass pinned for ``--head``."""
+    if check.number is not None:
+        return check.number
+    repo, _, pinned = stored.pins.get(task_id, "").rpartition("#")
+    return int(pinned) if repo == check.repo and pinned.isdigit() else None
+
+
+class PrVerifier:
+    """Decides the PR checks of one pass. ``agent_logins`` are the GitHub logins Nous opens PRs as; ``merger_logins``
+    the logins whose merge confirms the work (the owner). Both empty or either empty: nothing is verified."""
+
+    def __init__(self, reader: GitHubReader, agent_logins: Iterable[str], merger_logins: Iterable[str]) -> None:
         self._reader = reader
-        self._agents = frozenset(login.strip().lower() for login in agent_logins if login.strip())
+        self._agents = _logins(agent_logins)
+        self._mergers = _logins(merger_logins) - self._agents
 
     async def verify(self, leaves: Sequence[TaskSignals], stored: StoredPrEvidence) -> list[TaskSignals]:
         """``leaves`` with every PR check decided; the rest unchanged, in the same order."""
         checked = [s for s in leaves if s.pr_check is not None]
-        if not checked or not self._agents:
+        if not checked or not self._agents or not self._mergers:
             return list(leaves)
         taken = dict(stored.credited)
+        undecided: set[str] = set()  # PRs an earlier leaf of this pass could not decide: no later leaf may take one
         decided: dict[str, TaskSignals] = {}
         for signals in sorted(checked, key=lambda s: (s.dag_created_at or _LATE, s.node_id or "", s.task_id)):
-            decided[signals.task_id] = await self._decide(signals, stored, taken)
+            decided[signals.task_id] = await self._decide(signals, stored, taken, undecided)
         return [decided.get(s.task_id, s) for s in leaves]
 
-    async def _decide(self, signals: TaskSignals, stored: StoredPrEvidence, taken: dict[str, str]) -> TaskSignals:
+    async def _decide(
+        self, signals: TaskSignals, stored: StoredPrEvidence, taken: dict[str, str], undecided: set[str]
+    ) -> TaskSignals:
         check = signals.pr_check
         assert check is not None
         evidence = {key: list(ids) for key, ids in signals.evidence.items()}
@@ -174,39 +210,58 @@ class PrVerifier:
             evidence[reason_key] = [reason]
             return replace(signals, evidence=evidence, **flags)
 
+        def credit(key: str) -> TaskSignals:
+            taken[key] = signals.task_id
+            evidence["v2_pr_merged"] = [key]
+            return replace(signals, evidence=evidence, v2_verified=True)
+
+        if signals.dag_created_at is None:
+            return outcome("v2_rejected", "no DAG creation time")
+        number = _known_number(check, signals.task_id, stored)
+        if number is not None:
+            key = f"{check.repo}#{number}"
+            evidence["v2_pr"] = [key]
+            holder = stored.credited.get(key)
+            if holder == signals.task_id:
+                return credit(key)  # an earlier pass verified it: a merge is final, so GitHub is not asked again
+            if holder is not None:
+                return outcome("v2_pr_duplicate", holder)  # another leaf took it for good: no call needed
+            if key in undecided:
+                return outcome("v2_unavailable", "an earlier leaf naming this PR is undecided", v2_hold=True)
         try:
-            number = check.number
-            if number is None:  # --head: resolved once, then pinned so a newer PR on the branch cannot replace it
-                pin = stored.pins.get(signals.task_id, "")
-                repo, _, pinned = pin.rpartition("#")
-                if repo == check.repo and pinned.isdigit():
-                    number = int(pinned)
-                else:
-                    number = await self._reader.newest_pull_number(check.repo, check.head or "")
-            pull = await self._reader.pull(check.repo, number) if number is not None else None
+            if number is None:  # --head: resolve once; the pin keeps a newer PR on the branch from replacing it
+                number = await self._reader.newest_pull_number(check.repo, check.head or "")
+                if number is None:
+                    return outcome("v2_rejected", "no such PR")
+                evidence["v2_pr"] = [f"{check.repo}#{number}"]
+            key = f"{check.repo}#{number}"
+            pull = await self._reader.pull(check.repo, number)
         except GitHubUnavailable as exc:
+            if number is not None:
+                undecided.add(f"{check.repo}#{number}")
             return outcome("v2_unavailable", str(exc), v2_hold=True)
         if pull is None:
             return outcome("v2_rejected", "no such PR")
-        key = f"{check.repo}#{pull.get('number', number)}"
-        evidence["v2_pr"] = [key]
         if _login(pull.get("user")) not in self._agents:
             return outcome("v2_rejected", "not opened by the agent")
         opened = _when(pull.get("created_at"))
         if opened is None:
             return outcome("v2_rejected", "no opening time")
-        if signals.dag_created_at is not None and opened < signals.dag_created_at:
+        if opened < signals.dag_created_at:
             return outcome("v2_rejected", "opened before the DAG")
         if not pull.get("merged_at"):
             if pull.get("state") == "open":
+                undecided.add(key)
                 return outcome("v2_pending", "open", v2_hold=True)
             return outcome("v2_rejected", "closed without a merge")
         merger = _login(pull.get("merged_by"))
-        if merger is None or merger in self._agents:
+        if merger is None:
+            return outcome("v2_rejected", "no merger")
+        if merger in self._agents:
             return outcome("v2_rejected", "merged by the agent")
+        if merger.endswith("[bot]") or merger not in self._mergers:
+            return outcome("v2_rejected", "not merged by an accepted login")
         holder = taken.get(key)
         if holder is not None and holder != signals.task_id:
             return outcome("v2_pr_duplicate", holder)
-        taken[key] = signals.task_id
-        evidence["v2_pr_merged"] = [key]
-        return replace(signals, evidence=evidence, v2_verified=True)
+        return credit(key)

@@ -103,7 +103,7 @@ def check_pr(
 def main(argv: Sequence[str] | None = None, *, transport: httpx.BaseTransport | None = None) -> int:
     try:
         args = _parser().parse_args(argv)
-        if not _REPO.fullmatch(args.repo):
+        if not _REPO.fullmatch(args.repo) or any(part in (".", "..") for part in args.repo.split("/")):
             raise _UsageError(f"repo must be owner/name, got {args.repo!r}")
         if args.pr is not None and args.pr < 1:
             raise _UsageError("--pr must be a positive number")

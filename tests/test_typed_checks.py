@@ -90,3 +90,11 @@ def test_wrong_arguments_fail_the_check_and_never_call_github(argv):
 
     mock, _ = transport(unexpected)
     assert typed_checks.main(argv, transport=mock) == 1
+
+
+def test_a_path_segment_is_not_a_repository():
+    def unexpected(request):
+        raise AssertionError("GitHub must not be called")
+
+    mock, _ = transport(unexpected)
+    assert typed_checks.main(["pr", "../..", "--pr", "5"], transport=mock) == 1

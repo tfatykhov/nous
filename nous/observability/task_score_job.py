@@ -336,13 +336,17 @@ async def _run(agent_id: str | None, window_days: int) -> int:
     database = _open_database(settings)
     reader: GitHubReader | None = None
     verifier: PrVerifier | None = None
-    logins = [login for login in settings.scorer_agent_logins.split(",") if login.strip()]
-    if logins:
-        reader = GitHubReader(settings.scorer_github_token or None)
-        verifier = PrVerifier(reader, logins)
-    else:
-        logger.info("Task scores: NOUS_SCORER_AGENT_LOGINS is empty, so PR checks are not verified")
     try:
+        agents = [login for login in settings.scorer_agent_logins.split(",") if login.strip()]
+        mergers = [login for login in settings.scorer_merger_logins.split(",") if login.strip()]
+        if agents and mergers:
+            reader = GitHubReader(settings.scorer_github_token or None)
+            verifier = PrVerifier(reader, agents, mergers)
+        else:
+            logger.info(
+                "Task scores: NOUS_SCORER_AGENT_LOGINS or NOUS_SCORER_MERGER_LOGINS is empty, so PR checks are not "
+                "verified"
+            )
         if agent_id is None:
             agent_id = settings.agent_id
         now = datetime.now(UTC)

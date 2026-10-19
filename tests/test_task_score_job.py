@@ -669,6 +669,7 @@ async def test_the_command_builds_its_settings_once_and_scores_their_agent(db, a
         def __init__(self):
             self.agent_id = agent
             self.scorer_agent_logins = ""  # PR verification off
+            self.scorer_merger_logins = ""
             self.scorer_github_token = ""
             made.append(self)
 
@@ -1141,7 +1142,9 @@ async def test_without_the_heartbeat_grant_a_pass_fails_and_its_scores_do_not_co
 # ---- scorer v4: a PR check verified against GitHub by the job ---------------------------------------------------
 
 
-async def _pr_checked_subtask(db, agent, dag_at, *, command="python -m nous.dag.typed_checks pr tfatykhov/nous --pr 5"):
+async def _pr_checked_subtask(
+    db, agent, dag_at, *, command="python -m nous.dag.typed_checks pr tfatykhov/nous --pr 5", finished=None
+):
     """A subtask whose DAG node passed the PR check (the orchestrator saw the PR exist)."""
     dag = ExecutionDAG(
         id=uuid.uuid4(), agent_id=agent, name="d", status="completed", created_at=dag_at, completed_at=NOW
@@ -1152,7 +1155,7 @@ async def _pr_checked_subtask(db, agent, dag_at, *, command="python -m nous.dag.
         task="open the PR",
         status="completed",
         final_outcome="completed",
-        completed_at=NOW - timedelta(hours=1),
+        completed_at=finished or NOW - timedelta(hours=1),
     )
     node = DAGNode(
         id=uuid.uuid4(),
@@ -1202,7 +1205,7 @@ async def test_a_pass_verifies_a_pr_check_against_github_and_one_pr_credits_one_
     second = await _pr_checked_subtask(db, agent, NOW - timedelta(days=1, hours=12))  # a later DAG, same PR
     reader = GitHubReader(transport=_github())
     try:
-        verifier = PrVerifier(reader, ["cognition-engines-nous-agent"])
+        verifier = PrVerifier(reader, ["cognition-engines-nous-agent"], ["tfatykhov"])
         await job.run_scoring_pass(db, agent, now=NOW, pr_verifier=verifier)
         await job.run_scoring_pass(db, agent, now=NOW + timedelta(minutes=15), pr_verifier=verifier)
     finally:
@@ -1230,8 +1233,39 @@ async def test_a_pr_merged_by_the_agent_itself_earns_nothing(db, agent):
     sub = await _pr_checked_subtask(db, agent, NOW - timedelta(days=2))
     reader = GitHubReader(transport=_github(merged_by="cognition-engines-nous-agent"))
     try:
-        await job.run_scoring_pass(db, agent, now=NOW, pr_verifier=PrVerifier(reader, ["cognition-engines-nous-agent"]))
+        await job.run_scoring_pass(
+            db, agent, now=NOW, pr_verifier=PrVerifier(reader, ["cognition-engines-nous-agent"], ["tfatykhov"])
+        )
     finally:
         await reader.aclose()
     [row] = [r for r in await rows(db, agent) if r.task_id == str(sub.id)]
     assert row.outcome == "done_self" and row.evidence["v2_rejected"] == ["merged by the agent"]
+
+
+async def test_an_open_pr_holds_its_row_past_the_window_and_settles_at_the_bound(db, agent):
+    import httpx
+
+    from nous.observability.github_verify import GitHubReader, PrVerifier
+    from nous.observability.task_scoring import SETTLE_DAYS, V2_HOLD_EXTRA_DAYS
+
+    finished = NOW - timedelta(days=SETTLE_DAYS)  # just inside the 15-day window at NOW
+    sub = await _pr_checked_subtask(db, agent, finished - timedelta(days=1), finished=finished)
+    opened = (finished - timedelta(hours=12)).isoformat()
+    open_pr = {"number": 5, "state": "open", "user": {"login": "cognition-engines-nous-agent"}, "created_at": opened}
+
+    async def score_at(now):
+        reader = GitHubReader(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=open_pr)))
+        try:
+            await job.run_scoring_pass(
+                db, agent, now=now, pr_verifier=PrVerifier(reader, ["cognition-engines-nous-agent"], ["tfatykhov"])
+            )
+        finally:
+            await reader.aclose()
+        [row] = [r for r in await rows(db, agent) if r.task_id == str(sub.id)]
+        return row
+
+    assert (await score_at(NOW)).settled is False  # 14 days old, the PR still open: held
+    later = await score_at(NOW + timedelta(days=3))  # 17 days old: out of the window, reached through its row
+    assert later.settled is False and later.evidence["v2_pending"] == ["open"]
+    last = await score_at(NOW + timedelta(days=V2_HOLD_EXTRA_DAYS + 1))  # 22 days old: past the bound
+    assert last.settled is True and last.outcome == "done_self"

@@ -67,10 +67,13 @@ class FakeGitHub:
         return httpx.Response(200, json=found) if found else httpx.Response(404, json={})
 
 
-async def decide(leaves, github, *, stored=StoredPrEvidence(), logins=(AGENT,), cap=60):
+OWNER = "tfatykhov"
+
+
+async def decide(leaves, github, *, stored=StoredPrEvidence(), logins=(AGENT,), mergers=(OWNER,), cap=60):
     reader = GitHubReader(transport=httpx.MockTransport(github), call_cap=cap)
     try:
-        return await PrVerifier(reader, logins).verify(leaves, stored)
+        return await PrVerifier(reader, logins, mergers).verify(leaves, stored)
     finally:
         await reader.aclose()
 
@@ -203,3 +206,93 @@ def test_stored_evidence_keeps_the_first_credit_and_the_pins():
 )
 def test_only_the_exact_pr_check_is_one(command, parsed):
     assert ts.parse_pr_check(command) == parsed
+
+
+# ---- review round 1: what must not credit, and what must survive an outage ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("merger", "reason"),
+    [
+        ("github-actions[bot]", "not merged by an accepted login"),  # a workflow merge is not the owner
+        ("some-maintainer", "not merged by an accepted login"),  # an allowlist, not "anyone but the agent"
+    ],
+)
+async def test_only_an_accepted_merger_confirms(merger, reason):
+    [out] = await decide([leaf()], FakeGitHub([pr(merged_by=merger)]))
+    assert not out.v2_verified and out.evidence["v2_rejected"] == [reason]
+
+
+async def test_an_accepted_bot_login_still_confirms_nothing():
+    [out] = await decide([leaf()], FakeGitHub([pr(merged_by="owner-tool[bot]")]), mergers=("owner-tool[bot]",))
+    assert not out.v2_verified and out.evidence["v2_rejected"] == ["not merged by an accepted login"]
+
+
+async def test_a_merge_with_no_merger_is_said_so():
+    pull = pr()
+    pull["merged_by"] = None  # a deleted account
+    [out] = await decide([leaf()], FakeGitHub([pull]))
+    assert out.evidence["v2_rejected"] == ["no merger"]
+
+
+async def test_no_mergers_configured_verifies_nothing_and_asks_nothing():
+    github = FakeGitHub([pr()])
+    [out] = await decide([leaf()], github, mergers=())
+    assert not out.v2_verified and github.requests == []
+
+
+async def test_a_stored_credit_stands_without_asking_github_even_when_it_is_down():
+    github = FakeGitHub([pr()], status=503)
+    [out] = await decide([leaf()], github, stored=StoredPrEvidence(credited={"tfatykhov/nous#5": "t1"}))
+    assert out.v2_verified and not out.v2_hold and out.evidence["v2_pr_merged"] == ["tfatykhov/nous#5"]
+    assert github.requests == []
+
+
+async def test_a_pr_another_leaf_took_for_good_is_a_duplicate_without_a_call():
+    github = FakeGitHub([pr()])
+    [out] = await decide([leaf()], github, stored=StoredPrEvidence(credited={"tfatykhov/nous#5": "other"}))
+    assert out.evidence["v2_pr_duplicate"] == ["other"] and github.requests == []
+
+
+async def test_a_leaf_with_no_dag_creation_time_is_rejected():
+    [out] = await decide([leaf(dag_at=None)], FakeGitHub([pr()]))
+    assert not out.v2_verified and out.evidence["v2_rejected"] == ["no DAG creation time"]
+
+
+async def test_a_resolved_head_is_pinned_even_when_the_pr_read_fails():
+    class ListThenFail(FakeGitHub):
+        def __call__(self, request):
+            self.requests.append(request)
+            if request.url.path.endswith("/pulls"):
+                return httpx.Response(200, json=[{"number": 7}])
+            return httpx.Response(502, json={})
+
+    [out] = await decide([leaf(head="fix/thing")], ListThenFail())
+    assert out.v2_hold and out.evidence["v2_pr"] == ["tfatykhov/nous#7"]  # the next pass reads this pin
+
+
+async def test_a_pr_an_earlier_leaf_could_not_decide_is_held_for_the_later_one():
+    class FailOnce(FakeGitHub):
+        def __call__(self, request):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                return httpx.Response(503, json={})
+            return httpx.Response(200, json=self.pulls[5])
+
+    early, late = leaf("early", node_id="a"), leaf("late", dag_at=DAG_AT + timedelta(hours=1), node_id="b")
+    out = {s.task_id: s for s in await decide([late, early], FailOnce([pr(opened=DAG_AT + timedelta(hours=2))]))}
+    assert out["early"].v2_hold and out["late"].v2_hold  # the later leaf may not take the PR the earlier one named
+    assert not out["late"].v2_verified
+
+
+async def test_a_rate_limit_stops_the_pass_from_asking_again():
+    leaves = [leaf("t1", number=1, node_id="a"), leaf("t2", number=2, node_id="b")]
+    github = FakeGitHub([pr(1), pr(2)], status=403)
+    first, second = await decide(leaves, github)
+    assert first.v2_hold and second.v2_hold and second.evidence["v2_unavailable"] == ["HTTP 403"]
+    assert len(github.requests) == 1
+
+
+def test_a_path_segment_is_not_a_repository():
+    assert ts.parse_pr_check("python -m nous.dag.typed_checks pr ../.. --pr 5") is None
+    assert ts.parse_pr_check("python -m nous.dag.typed_checks pr tfatykhov/.. --pr 5") is None

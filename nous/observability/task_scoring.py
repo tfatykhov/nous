@@ -111,6 +111,8 @@ def parse_pr_check(completion_check: str | None) -> PrCheck | None:
     if match is None:
         return None
     repo, number, head = match.groups()
+    if any(part in (".", "..") for part in repo.split("/")):  # a path segment, not a repository
+        return None
     return PrCheck(repo=repo, number=int(number) if number else None, head=head)
 
 
