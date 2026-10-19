@@ -403,8 +403,10 @@ async def _leaf_signals(session: AsyncSession, agent_id: str, since: datetime, r
             # is "superseded". A node is reset only after it failed, so an archive that reads "passed" was not written
             # by a reset and earns nothing. The fix stage's retry does not reset check_attempts, so a never-polled
             # check of the new attempt can read as "unconfirmed" rather than None; both leave a "done" at 0.0.
-            if r.node_subtask_id != r.id:
-                entry = _archived_attempt(r.attempt_history, r.id)
+            # The fix stage's retry also keeps subtask_id until the relaunch, so a subtask with an archive entry is a
+            # discarded attempt even while the node still names it: the archive decides.
+            entry = _archived_attempt(r.attempt_history, r.id)
+            if entry is not None or r.node_subtask_id != r.id:
                 archived = (
                     ts.node_check_state(
                         r.completion_check,

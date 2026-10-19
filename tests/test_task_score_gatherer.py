@@ -747,3 +747,41 @@ async def test_a_dag_subtask_lookup_is_scoped_to_the_agent(db, agent):
     mine, foreign = subtask(agent, dag_node_id=node.id), subtask("someone-else", dag_node_id=node.id)
     await add(db, mine, foreign)
     assert (await gather(db, agent))[1][str(dag.id)].child_ids == (str(mine.id),)
+
+
+async def test_an_archived_attempt_the_node_still_names_is_judged_by_its_archive(db, agent):
+    # A fix stage's retry archived the failed attempt but keeps subtask_id until the relaunch (queue full, DAG held,
+    # process stopped): the node still names the discarded subtask, and its archive must decide.
+    dag = ExecutionDAG(id=uuid.uuid4(), agent_id=agent, name="d", status="running")
+    await add(db, dag)
+    sub = subtask(agent)
+    node = DAGNode(
+        id=uuid.uuid4(),
+        dag_id=dag.id,
+        name="work",
+        node_type="subtask",
+        status="pending",  # reset, waiting for its relaunch
+        completion_check="test -f /tmp/done",
+        check_attempts=1,
+        last_check_at=NOW,
+        subtask_id=sub.id,
+        attempt_history=[
+            {
+                "subtask_id": str(sub.id),
+                "status": "failed",
+                "error": "Completion check failed: no such file",
+                "check_attempts": 1,
+                "last_check_at": NOW.isoformat(),
+                "completed_at": NOW.isoformat(),
+                "archived_at": NOW.isoformat(),
+                "reason": "fix_retry",
+            }
+        ],
+    )
+    sub.dag_node_id = node.id
+    await add(db, node, sub)
+
+    leaves, _, _ = await gather(db, agent)
+
+    assert leaves[str(sub.id)].node_check == "failed"
+    assert score_leaf(leaves[str(sub.id)], NOW).outcome == "failed"
