@@ -84,6 +84,7 @@ from nous.dag.approval import (
     stopped_at_approval,
     stopped_summary,
 )
+from nous.dag.attempts import archived_attempts
 from nous.dag.schemas import PREDECESSOR_EDGE_TYPES, WAIT_EDGE_TYPES, DAGNodeStatus
 from nous.dag.store import (
     _TERMINAL_DAG_STATUSES,
@@ -1044,6 +1045,9 @@ class DAGOrchestrator:
             # under-reporting tokens_consumed and letting later waves
             # run past an enforced budget.
             "tokens_counted": False,
+            # Migration 089: the columns above are the only record of how
+            # the discarded attempt ended, so it is archived in this write.
+            "attempt_history": archived_attempts(node, "retry", datetime.now(UTC)),
         }
         if node.node_type == "approval":
             # Harness Phase 3 §3.10: archive and clear the answer HERE, so a
@@ -1125,9 +1129,12 @@ class DAGOrchestrator:
                     # the direct retry does — _recover_stale_ready_nodes only
                     # takes `ready` nodes with started_at IS NULL, so a kept
                     # timestamp strands a node a crash leaves `ready`.
+                    # A cancelled node may have run a subtask (cancel_cascade):
+                    # archive that attempt before its error is cleared.
                     (n.id, {"status": "pending", "error": None,
                             "tokens_counted": False,
-                            "started_at": None, "completed_at": None},
+                            "started_at": None, "completed_at": None,
+                            "attempt_history": archived_attempts(n, "unblock", datetime.now(UTC))},
                      frozenset({"blocked", "cancelled"}))
                 )
 
@@ -3011,10 +3018,14 @@ class DAGOrchestrator:
                 # retry_node (@codex P2 on b3c78c3) — the fix-stage retry is
                 # the automatic sibling of that manual path and was losing the
                 # retry's token usage identically.
+                # Migration 089: archive the failed attempt before its error is
+                # cleared (this reset keeps subtask_id until the relaunch).
+                history = archived_attempts(parent, "fix_retry", datetime.now(UTC))
                 update_kwargs: dict[str, object] = {
                     "status": "pending",
                     "error": None,
                     "tokens_counted": False,
+                    "attempt_history": history,
                 }
                 # F066.1 Phase 1.5: when LLM dispatch returns an amended
                 # prompt, replace the parent's instructions so the next
@@ -3029,6 +3040,7 @@ class DAGOrchestrator:
                     update_kwargs["instructions"] = outcome.amended_prompt
                 parent.status = "pending"
                 parent.error = None
+                parent.attempt_history = history
                 await self._store.update_node(parent.id, **update_kwargs)
             elif outcome.action == "skip_and_continue":
                 parent.status = "skipped"

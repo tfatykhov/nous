@@ -382,6 +382,9 @@ class TestOrchestratorFixApplication:
         assert parent.status in ("pending", "ready", "running")
         # Fix attempts consumed.
         assert fix_node.fix_attempts_used == 1
+        # Migration 089: the failed attempt is archived before its error is cleared.
+        [entry] = parent.attempt_history
+        assert (entry["status"], entry["error"], entry["reason"]) == ("failed", "validation_failed: payload", "fix_retry")
         # Error cleared on retry.
         assert parent.error is None or parent.error == ""
 

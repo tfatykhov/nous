@@ -22,6 +22,10 @@ contradicting the model's report: a definite failure (exit 1) makes the subtask 
 that never said yes before its timeout or attempt limit makes it ``partial``. So does being an earlier
 attempt of a node that was retried (a node is retried only after it failed). The owner's success grade
 outranks all of these.
+
+v3: a reset archives the attempt it discards on the node (``dag_nodes.attempt_history``, migration 089),
+so an earlier attempt is judged by how its own check ended, as the current attempt is. ``superseded``
+remains for an attempt the archive does not show ending through its check.
 """
 
 from __future__ import annotations
@@ -31,7 +35,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-SCORER_VERSION = 2
+SCORER_VERSION = 3
 
 LEAF_KIND = "subtask"
 ROLLUP_KINDS: tuple[str, ...] = ("dag", "intention")
@@ -66,8 +70,9 @@ NODE_CHECK_UNCONFIRMED_PREFIXES: tuple[str, ...] = (
     "Completion check timed out after",
     "Completion check exceeded max attempts",
 )
-# "superseded": the subtask is an earlier attempt of a node that was retried. A node is retried only after it failed,
-# and the reset erases how, so the attempt's "done" was never confirmed (the gatherer decides this, not the node row).
+# "superseded": the subtask is an earlier attempt of a node that was retried, and the node's attempt_history does not
+# show it ending through its check. A node is retried only after it failed, so the attempt's "done" was never
+# confirmed (the gatherer decides this, not the node row).
 NODE_CHECK_STATES: tuple[str, ...] = ("passed", "failed", "unconfirmed", "superseded")
 
 _EXIT_CODE = re.compile(r"(?:^|; )exit code (-?\d+)")
