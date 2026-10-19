@@ -106,6 +106,12 @@ def check_pr(
                     return PENDING, f"no PR #{number} in {repo} yet"
                 response.raise_for_status()
                 return _state(response.json())
+            # A transferred repository's branches are under its new owner: filter on the repository as it is now.
+            found = client.get(f"/repos/{repo}")
+            if found.status_code == 404:
+                return PENDING, f"no repository {repo} visible yet"
+            found.raise_for_status()
+            repo = found.json().get("full_name") or repo
             owner = repo.split("/", 1)[0]
             response = client.get(
                 f"/repos/{repo}/pulls",

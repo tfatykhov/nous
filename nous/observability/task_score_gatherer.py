@@ -378,7 +378,7 @@ async def _leaf_signals(session: AsyncSession, agent_id: str, since: datetime, r
         evidence[session_task[sess]]["unverified_claims"].append(event_id)
     dag_of: dict[UUID, UUID] = {}
     node_check: dict[UUID, str] = {}
-    pr_of: dict[UUID, tuple[ts.PrCheck, str, datetime | None]] = {}  # v4: (check, node id, DAG created_at)
+    pr_of: dict[UUID, tuple[ts.PrCheck, str, datetime | None, datetime | None]] = {}  # v4: (check, node, DAG, done)
     for chunk in chunked(ids):
         result = await session.execute(
             select(
@@ -386,6 +386,7 @@ async def _leaf_signals(session: AsyncSession, agent_id: str, since: datetime, r
                 DAGNode.dag_id,
                 ExecutionDAG.created_at.label("dag_created_at"),
                 DAGNode.id.label("node_id"),
+                DAGNode.completed_at.label("node_completed_at"),
                 DAGNode.subtask_id.label("node_subtask_id"),
                 DAGNode.status.label("node_status"),
                 DAGNode.error.label("node_error"),
@@ -431,7 +432,12 @@ async def _leaf_signals(session: AsyncSession, agent_id: str, since: datetime, r
                 evidence[str(r.id)][f"node_check_{state}"].append(str(r.node_id))
             # v4: a passed PR check of the current attempt goes to github_verify, which decides the credit.
             if state == "passed" and (pr := ts.parse_pr_check(r.completion_check)) is not None:
-                pr_of[r.id] = (pr, str(r.node_id), as_utc(r.dag_created_at) if r.dag_created_at else None)
+                pr_of[r.id] = (
+                    pr,
+                    str(r.node_id),
+                    as_utc(r.dag_created_at) if r.dag_created_at else None,
+                    as_utc(r.node_completed_at) if r.node_completed_at else None,
+                )
     checked = await run.checked(list(set(dag_of.values())))
     origin = await _origin_decisions(session, agent_id, "subtask", [str(i) for i in ids])
     graded = await _owner_grades(session, agent_id, [d for ds in origin.values() for d in ds])
@@ -456,7 +462,7 @@ async def _leaf_signals(session: AsyncSession, agent_id: str, since: datetime, r
             node_check=node_check.get(r.id),
         )
         if pr is not None:
-            signals = replace(signals, pr_check=pr[0], node_id=pr[1], dag_created_at=pr[2])
+            signals = replace(signals, pr_check=pr[0], node_id=pr[1], dag_created_at=pr[2], node_completed_at=pr[3])
         out.append(signals)
     return out
 

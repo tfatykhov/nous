@@ -49,11 +49,22 @@ def test_a_transport_error_is_pending():
     assert typed_checks.main(["pr", "tfatykhov/nous", "--pr", "5"], transport=mock) == 2
 
 
+def _repo_then(listing, full_name="tfatykhov/nous"):
+    """GitHub for a --head check: the repository lookup, then the branch's PR listing."""
+
+    def handle(request):
+        if request.url.path.count("/") == 3:
+            return httpx.Response(200, json={"full_name": full_name})
+        return listing(request)
+
+    return handle
+
+
 def test_pr_by_head_branch_takes_the_newest_pr_on_it(monkeypatch):
     monkeypatch.setenv("GITHUB_TOKEN", "t0ken")
-    mock, seen = transport(lambda request: httpx.Response(200, json=[pull(number=9)]))
+    mock, seen = transport(_repo_then(lambda request: httpx.Response(200, json=[pull(number=9)])))
     assert typed_checks.main(["pr", "tfatykhov/nous", "--head", "fix/thing"], transport=mock) == 0
-    request = seen[0]
+    request = seen[1]
     assert request.url.path == "/repos/tfatykhov/nous/pulls"
     assert dict(request.url.params) == {
         "state": "all",
@@ -66,7 +77,7 @@ def test_pr_by_head_branch_takes_the_newest_pr_on_it(monkeypatch):
 
 
 def test_no_pr_on_the_branch_yet_is_pending():
-    mock, _ = transport(lambda request: httpx.Response(200, json=[]))
+    mock, _ = transport(_repo_then(lambda request: httpx.Response(200, json=[])))
     assert typed_checks.main(["pr", "tfatykhov/nous", "--head", "fix/thing"], transport=mock) == 2
 
 
@@ -111,7 +122,7 @@ def test_a_path_segment_is_not_a_repository():
 def test_head_ignores_prs_opened_before_the_dag(opened, state, merged_at, code, monkeypatch):
     monkeypatch.setenv("NOUS_DAG_CREATED_AT", "2026-10-19T12:00:00+00:00")
     body = [{"number": 9, "state": state, "merged_at": merged_at, "created_at": opened}]
-    mock, _ = transport(lambda request: httpx.Response(200, json=body))
+    mock, _ = transport(_repo_then(lambda request: httpx.Response(200, json=body)))
     assert typed_checks.main(["pr", "tfatykhov/nous", "--head", "fix/thing"], transport=mock) == code
 
 
@@ -124,3 +135,10 @@ def test_a_renamed_repository_is_followed():
     mock, seen = transport(handle)
     assert typed_checks.main(["pr", "old-owner/old-name", "--pr", "5"], transport=mock) == 0
     assert [r.url.path for r in seen] == ["/repos/old-owner/old-name/pulls/5", "/repositories/42/pulls/5"]
+
+
+def test_head_on_a_transferred_repository_filters_on_its_new_owner():
+    mock, seen = transport(_repo_then(lambda request: httpx.Response(200, json=[pull(number=9)]), "new-owner/nous"))
+    assert typed_checks.main(["pr", "old-owner/nous", "--head", "fix/thing"], transport=mock) == 0
+    assert seen[1].url.path == "/repos/new-owner/nous/pulls"
+    assert dict(seen[1].url.params)["head"] == "new-owner:fix/thing"

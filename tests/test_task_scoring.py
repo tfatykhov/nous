@@ -293,3 +293,11 @@ def test_worst_grade():
     assert ts.worst_grade(["success", "noise", "superseded", "pending"]) == "success"
     assert ts.worst_grade(["noise", "pending"]) is None
     assert ts.worst_grade([]) is None
+
+
+def test_a_rollup_stays_provisional_while_a_child_it_counts_is():
+    # A DAG old enough to settle, whose child is held (its PR still open): the roll-up's mean would go stale.
+    old = sig(kind="dag", status="completed", finished=NOW - timedelta(days=ts.SETTLE_DAYS + 1), child_ids=("a", "b"))
+    assert score_rollup(old, {"a": 0.0, "b": 1.0}, NOW).settled is True
+    assert score_rollup(old, {"a": 0.0, "b": 1.0}, NOW, frozenset({"b"})).settled is False
+    assert score_rollup(old, {"a": 0.0, "b": 1.0}, NOW, frozenset({"other"})).settled is True

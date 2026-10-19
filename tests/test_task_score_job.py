@@ -701,8 +701,8 @@ async def test_the_log_counts_the_rows_submitted_by_kind(db, agent, monkeypatch,
         await s.commit()
     real = job.score_rollup
 
-    def no_dag_rollup(signals, leaf_scores, now):  # a roll-up the scorer declines (score_rollup returns None)
-        return None if signals.task_kind == "dag" else real(signals, leaf_scores, now)
+    def no_dag_rollup(signals, leaf_scores, now, *rest):  # a roll-up the scorer declines (score_rollup returns None)
+        return None if signals.task_kind == "dag" else real(signals, leaf_scores, now, *rest)
 
     monkeypatch.setattr(job, "score_rollup", no_dag_rollup)
     with caplog.at_level(logging.INFO, logger=job.__name__):

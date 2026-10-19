@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
 SCORER_VERSION = 4
@@ -135,6 +135,7 @@ class TaskSignals:
     pr_check: PrCheck | None = None  # v4: its node's check is the PR check and it passed (current attempt)
     node_id: str | None = None  # v4: its DAG node, and the DAG's creation time: the order "one PR, one leaf" uses
     dag_created_at: datetime | None = None
+    node_completed_at: datetime | None = None  # v4: when the node's PR check passed, bounding which PR it saw
     v2_verified: bool = False  # v4: github_verify found the PR merged by a non-agent login
     v2_hold: bool = False  # v4: the PR cannot be decided yet; keep the row provisional (bounded)
     owner_grade: str | None = None  # the worst a2ui grade among the decisions that belong to this unit
@@ -342,17 +343,28 @@ def score_leaf(signals: TaskSignals, now: datetime) -> TaskScore | None:
     return _row(signals, name, reason, now, score=round(max(SCORE_FLOOR, raw), 4))
 
 
-def score_rollup(signals: TaskSignals, leaf_scores: Mapping[str, float | None], now: datetime) -> TaskScore | None:
+def score_rollup(
+    signals: TaskSignals,
+    leaf_scores: Mapping[str, float | None],
+    now: datetime,
+    provisional_children: frozenset[str] = frozenset(),
+) -> TaskScore | None:
     """The roll-up row of a DAG run or an intention root: counts only, score NULL.
 
     ``signals`` holds the penalties that belong to the unit itself (a DAG-only ledger row, an arrival note,
     a rejected proposal). The children's own penalties stay on the children. ``leaf_scores`` maps subtask id
     to its score: this pass's leaves, plus the stored rows of children that finished before the window (the job
     reads those). A child absent from both (never scored) or not scored is not counted.
+
+    A roll-up stays provisional while a child it counts is (``provisional_children``: a PR still held, say), so its
+    mean is rewritten when that child is decided; a settled row is never rewritten.
     """
     outcome = _outcome_of(signals)
     if outcome is None:
         return None
     scores = [leaf_scores[c] for c in signals.child_ids if leaf_scores.get(c) is not None]
     mean = round(sum(scores) / len(scores), 4) if scores else None
-    return _row(signals, outcome[0], outcome[1], now, children_scored=len(scores), children_mean_score=mean)
+    row = _row(signals, outcome[0], outcome[1], now, children_scored=len(scores), children_mean_score=mean)
+    if row.settled and provisional_children.intersection(signals.child_ids):
+        return replace(row, settled=False)
+    return row

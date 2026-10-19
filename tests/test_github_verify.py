@@ -50,10 +50,11 @@ def pr(number=5, *, author=AGENT, merged_by="tfatykhov", state="closed", opened=
 
 
 class FakeGitHub:
-    def __init__(self, pulls=(), *, status=200, branch=None):
+    def __init__(self, pulls=(), *, status=200, branch=None, renamed_to=None):
         self.pulls = {p["number"]: p for p in pulls}
         self.status = status
         self.branch = branch or []
+        self.renamed_to = renamed_to  # the repository's current owner/name, when it was transferred
         self.requests: list[httpx.Request] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
@@ -61,6 +62,8 @@ class FakeGitHub:
         if self.status != 200:
             return httpx.Response(self.status, json={})
         path = request.url.path
+        if path.count("/") == 3:  # /repos/<owner>/<name>: the repository itself
+            return httpx.Response(200, json={"full_name": self.renamed_to or path.split("/", 2)[2]})
         if path.endswith("/pulls"):
             return httpx.Response(200, json=self.branch)
         number = int(path.rsplit("/", 1)[1])
@@ -161,7 +164,11 @@ async def test_a_head_branch_resolves_once_and_is_pinned():
     github = FakeGitHub([pr(7)], branch=[{"number": 7, "created_at": SINCE_DAG}])
     [out] = await decide([leaf(head="fix/thing")], github)
     assert out.v2_verified and out.evidence["v2_pr"] == ["tfatykhov/nous#7"]
-    assert [r.url.path for r in github.requests] == ["/repos/tfatykhov/nous/pulls", "/repos/tfatykhov/nous/pulls/7"]
+    assert [r.url.path for r in github.requests] == [
+        "/repos/tfatykhov/nous",  # the repository as it is now
+        "/repos/tfatykhov/nous/pulls",
+        "/repos/tfatykhov/nous/pulls/7",
+    ]
     # A later pass reads the pin: a newer PR on the same branch cannot take its place.
     github = FakeGitHub([pr(7), pr(8)], branch=[{"number": 8, "created_at": SINCE_DAG}])
     [again] = await decide([leaf(head="fix/thing")], github, stored=StoredPrEvidence(pins={"t1": "tfatykhov/nous#7"}))
@@ -264,6 +271,8 @@ async def test_a_resolved_head_is_pinned_even_when_the_pr_read_fails():
     class ListThenFail(FakeGitHub):
         def __call__(self, request):
             self.requests.append(request)
+            if request.url.path.count("/") == 3:
+                return httpx.Response(200, json={"full_name": "tfatykhov/nous"})
             if request.url.path.endswith("/pulls"):
                 return httpx.Response(200, json=[{"number": 7, "created_at": SINCE_DAG}])
             return httpx.Response(502, json={})
@@ -349,17 +358,31 @@ async def test_a_pin_survives_a_renamed_repository():
     assert [r.url.path for r in github.requests] == ["/repos/tfatykhov/nous/pulls/7"]
 
 
-async def test_a_head_check_resolves_to_the_first_pr_since_its_dag_not_the_newest():
-    # The branch is reused: an older PR from before this DAG, this DAG's PR (#7), then a later DAG's replacement (#8).
-    branch = [
-        {"number": 3, "created_at": (DAG_AT - timedelta(days=3)).isoformat()},
-        {"number": 7, "created_at": SINCE_DAG},
+async def test_a_head_check_resolves_to_the_pr_its_node_passed_on():
+    # The branch is reused: a PR from before this DAG (#3), a first PR of this DAG closed unmerged (#6), the
+    # replacement the node passed on (#7), then a later DAG's PR (#8), opened after this node completed.
+    done = DAG_AT + timedelta(hours=5)
+    branch = [  # GitHub's order: newest first
         {"number": 8, "created_at": (DAG_AT + timedelta(days=2)).isoformat()},
+        {"number": 7, "created_at": (DAG_AT + timedelta(hours=4)).isoformat()},
+        {"number": 6, "created_at": SINCE_DAG},
+        {"number": 3, "created_at": (DAG_AT - timedelta(days=3)).isoformat()},
     ]
-    github = FakeGitHub([pr(7), pr(8)], branch=branch)
-    [out] = await decide([leaf(head="fix/thing")], github)
+    github = FakeGitHub([pr(6, merged_by=None), pr(7), pr(8)], branch=branch)
+    [out] = await decide([leaf(head="fix/thing", node_completed_at=done)], github)
     assert out.v2_verified and out.evidence["v2_pr_merged"] == ["tfatykhov/nous#7"]
-    assert dict(github.requests[0].url.params)["direction"] == "asc"
+    listing = next(r for r in github.requests if r.url.path.endswith("/pulls"))
+    assert dict(listing.url.params)["direction"] == "desc"
+
+
+async def test_a_head_check_on_a_transferred_repository_filters_on_its_new_owner():
+    branch = [{"number": 7, "created_at": SINCE_DAG}]
+    github = FakeGitHub([pr(7)], branch=branch, renamed_to="new-owner/nous")
+    [out] = await decide([leaf(head="fix/thing")], github)
+    listing = next(r for r in github.requests if r.url.path.endswith("/pulls"))
+    assert listing.url.path == "/repos/new-owner/nous/pulls"
+    assert dict(listing.url.params)["head"] == "new-owner:fix/thing"
+    assert out.evidence["v2_pr"][0].endswith("#7")
 
 
 async def test_a_numbered_check_uses_the_tasks_canonical_pin():

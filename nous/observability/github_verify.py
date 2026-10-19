@@ -120,20 +120,31 @@ class GitHubReader:
         value = await self._get(f"/repos/{repo}/pulls/{number}")
         return value if isinstance(value, dict) else None
 
-    async def first_pull_number_since(self, repo: str, head: str, since: datetime) -> int | None:
-        """The number of the first PR whose head is ``<owner>:<head>`` opened at or after ``since``, or None.
+    async def canonical_repo(self, repo: str) -> str:
+        """The repository's current ``owner/name``: a transferred repository's branches are under its new owner."""
+        value = await self._get(f"/repos/{repo}")
+        name = value.get("full_name") if isinstance(value, dict) else None
+        return name if isinstance(name, str) else repo
 
-        The first, not the newest: a branch name a later DAG reuses gets a newer PR, and that one is the later task's
-        work. The PR that settled this node was the first one on the branch after its DAG began.
+    async def pull_number_for_head(self, repo: str, head: str, since: datetime, until: datetime | None) -> int | None:
+        """The PR the node's check passed on: the newest whose head is ``<owner>:<head>`` (owner of the repository as
+        it is now) opened in [``since``, ``until``], the DAG's start and the node's completion, or None.
+
+        The check itself takes the newest PR on the branch opened since its DAG began, and the node completes on the
+        poll that sees it, so the same rule bounded by the node's completion finds the same PR. A branch name a later
+        DAG reuses gets a PR opened after that, which is the later task's.
         """
-        owner = repo.split("/", 1)[0]
+        canonical = await self.canonical_repo(repo)
+        owner = canonical.split("/", 1)[0]
         value = await self._get(
-            f"/repos/{repo}/pulls",
-            {"state": "all", "head": f"{owner}:{head}", "sort": "created", "direction": "asc", "per_page": 100},
+            f"/repos/{canonical}/pulls",
+            {"state": "all", "head": f"{owner}:{head}", "sort": "created", "direction": "desc", "per_page": 100},
         )
         for item in value if isinstance(value, list) else ():
             opened = _when(item.get("created_at")) if isinstance(item, dict) else None
-            if opened is not None and opened >= since and isinstance(item.get("number"), int):
+            if opened is None or not isinstance(item.get("number"), int) or opened < since:
+                continue
+            if until is None or opened <= until:
                 return item["number"]
         return None
 
@@ -249,8 +260,8 @@ class PrVerifier:
                 return outcome("v2_pr_duplicate", holder)  # another leaf took it for good: no call needed
         try:
             if number is None:  # --head: resolve once; the pin keeps a newer PR on the branch from replacing it
-                number = await self._reader.first_pull_number_since(
-                    check.repo, check.head or "", signals.dag_created_at
+                number = await self._reader.pull_number_for_head(
+                    check.repo, check.head or "", signals.dag_created_at, signals.node_completed_at
                 )
                 if number is None:
                     return outcome("v2_rejected", "no such PR")

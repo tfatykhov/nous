@@ -294,13 +294,14 @@ async def run_scoring_pass(
             leaf_signals = await pr_verifier.verify(leaf_signals, await _stored_pr_evidence(session, agent_id))
         leaves = [row for sig in leaf_signals if (row := score_leaf(sig, now)) is not None]
         leaf_scores = {row.task_id: row.score for row in leaves}
+        provisional = frozenset(row.task_id for row in leaves if not row.settled)  # a held child holds its parent
         missing = sorted({c for sig in (*gathered.dags, *gathered.chains) for c in sig.child_ids} - leaf_scores.keys())
         if missing:  # children that finished before the window: their stored scores, the fresh ones winning
             leaf_scores = {**await _stored_leaf_scores(session, agent_id, missing), **leaf_scores}
         rollups = [
             row
             for sig in (*gathered.dags, *gathered.chains)
-            if (row := score_rollup(sig, leaf_scores, now)) is not None
+            if (row := score_rollup(sig, leaf_scores, now, provisional)) is not None
         ]
         submitted = await upsert_scores(session, agent_id, [*leaves, *rollups], scored_at=now)
         # In the scores' transaction: the heartbeat says ok if and only if the scores committed.
