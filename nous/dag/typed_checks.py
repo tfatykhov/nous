@@ -132,8 +132,10 @@ def check_pr(
                 # The branch name was used by an older PR: this DAG's own PR is not there yet.
                 return PENDING, f"no PR from {owner}:{head} in {repo} opened since this DAG started"
             return _state(pulls[0])
-    except (httpx.HTTPError, ValueError) as exc:
-        return PENDING, f"GitHub did not answer ({type(exc).__name__}); will retry"
+    except Exception as exc:  # noqa: BLE001 - anything unexpected is "ask again", never a definite failure
+        # An outage, a non-JSON body, JSON of an unexpected shape: only a PR closed without a merge (or bad
+        # arguments) may fail the node, so everything else reads as "not decided yet".
+        return PENDING, f"GitHub did not answer as expected ({type(exc).__name__}); will retry"
 
 
 def main(argv: Sequence[str] | None = None, *, transport: httpx.BaseTransport | None = None) -> int:

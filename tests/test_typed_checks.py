@@ -142,3 +142,16 @@ def test_head_on_a_transferred_repository_filters_on_its_new_owner():
     assert typed_checks.main(["pr", "old-owner/nous", "--head", "fix/thing"], transport=mock) == 0
     assert seen[1].url.path == "/repos/new-owner/nous/pulls"
     assert dict(seen[1].url.params)["head"] == "new-owner:fix/thing"
+
+
+@pytest.mark.parametrize(
+    ("argv", "body"),
+    [
+        (["pr", "tfatykhov/nous", "--pr", "5"], [1, 2, 3]),  # a list where a PR object belongs
+        (["pr", "tfatykhov/nous", "--pr", "5"], "a string"),
+        (["pr", "tfatykhov/nous", "--head", "fix/thing"], ["not", "an", "object"]),  # the repository lookup
+    ],
+)
+def test_an_unexpected_answer_is_pending_never_a_failure(argv, body):
+    mock, _ = transport(lambda request: httpx.Response(200, json=body))
+    assert typed_checks.main(argv, transport=mock) == 2
