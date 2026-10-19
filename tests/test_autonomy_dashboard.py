@@ -428,6 +428,7 @@ async def test_the_shape_with_nothing_recorded(db, agent):
         "first_scored_at",
         "last_scored_at",
         "scorer",
+        "audits_without_action_row",
         "headline",
         "subtasks",
         "rollups",
@@ -459,3 +460,32 @@ async def test_the_headline_with_nothing_scored(db, agent):
     h = (await data(db, agent))["task_scores"]["headline"]
     assert h["verified_share"]["provisional"] == {"scored": 0, "verified": 0, "share": None}
     assert h["owner_overrides"] == {"total": 0, "subtasks": 0, "rollups": 0}
+
+
+async def test_the_scoreboard_carries_the_audit_tripwire_count(db, agent):
+    from nous.storage.models import CheckAudit
+
+    assert (await data(db, agent))["task_scores"]["audits_without_action_row"] == 0
+    row = CheckAudit(
+        agent_id=agent,
+        task_id=uuid.uuid4(),
+        node_id=uuid.uuid4(),
+        check_kind="script",
+        surface_id="s-card",
+        verdict="right",
+        actor="companion:x",
+        answered_at=NOW,
+    )
+    await add(db, row)
+    assert (await data(db, agent))["task_scores"]["audits_without_action_row"] == 1
+    await add(
+        db,
+        A2uiAction(
+            agent_id=agent,
+            surface_id="s-card",
+            action_name="audit.verdict",
+            status="completed",
+            context={"auditId": str(row.id), "verdict": "right"},
+        ),
+    )
+    assert (await data(db, agent))["task_scores"]["audits_without_action_row"] == 0

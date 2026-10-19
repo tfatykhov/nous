@@ -1323,6 +1323,7 @@ def _answer(agent, verdict, *, ago_hours, task_id=None, surface="nous:audit:chec
     from nous.storage.models import CheckAudit
 
     return CheckAudit(
+        id=uuid.uuid4(),
         agent_id=agent,
         task_id=task_id or uuid.uuid4(),
         node_id=uuid.uuid4(),
@@ -1373,12 +1374,19 @@ async def test_a_kind_that_loses_trust_takes_done_checked_back_on_the_next_pass(
 async def test_a_pass_logs_the_answered_audits_that_have_no_recorded_tap(db, agent, caplog):
     from nous.storage.models import A2uiAction
 
+    tapped = _answer(agent, "right", ago_hours=2, surface="s-tapped")
     await _add(
         db,
-        _answer(agent, "right", ago_hours=2, surface="s-tapped"),
+        tapped,
         _answer(agent, "right", ago_hours=2, surface="s-untapped"),
         _answer(agent, "right", ago_hours=2, surface="s-untapped"),
-        A2uiAction(agent_id=agent, surface_id="s-tapped", action_name="audit.verdict", status="completed", context={}),
+        A2uiAction(
+            agent_id=agent,
+            surface_id="s-tapped",
+            action_name="audit.verdict",
+            status="completed",
+            context={"auditId": str(tapped.id), "verdict": "right"},
+        ),
     )
     with caplog.at_level(logging.WARNING, logger=job.__name__):
         await job.run_scoring_pass(db, agent, now=NOW)
@@ -1391,3 +1399,84 @@ async def test_a_pass_logs_the_answered_audits_that_have_no_recorded_tap(db, age
     with caplog.at_level(logging.WARNING, logger=job.__name__):
         await job.run_scoring_pass(db, f"{agent}-quiet", now=NOW)
     assert not [r for r in caplog.records if "check audit" in r.getMessage()]
+
+
+# ---- the outcome CHECK net: a scorer newer than the database's constraint says so early ---------------------------
+
+
+def test_outcomes_missing_from_a_stored_constraint_definition():
+    from nous.observability.task_scoring import OUTCOMES
+
+    old = (
+        "CHECK ((outcome = ANY (ARRAY['done_self'::text, 'done_verified'::text, 'partial'::text, "
+        "'failed'::text, 'not_scored'::text])))"
+    )
+    assert job.outcomes_missing_from(old) == ["done_checked"]
+    assert job.outcomes_missing_from(old.replace("'done_self'", "'done_self'::text, 'done_checked'")) == []
+    assert job.outcomes_missing_from("".join(f"'{o}'" for o in OUTCOMES)) == []
+    assert job.outcomes_missing_from(None) == [] and job.outcomes_missing_from("") == []
+
+
+class _FakeBind:
+    def __init__(self, name):
+        self.dialect = type("D", (), {"name": name})()
+
+
+class _FakeSession:
+    """Just enough of an AsyncSession for the constraint read: a dialect name, begin_nested and one scalar."""
+
+    def __init__(self, dialect, definition):
+        self.sync_session = type("S", (), {"get_bind": lambda _self: _FakeBind(dialect)})()
+        self.definition, self.executed = definition, 0
+
+    def begin_nested(self):
+        @asynccontextmanager
+        async def cm():
+            yield
+
+        return cm()
+
+    async def execute(self, *_a, **_k):
+        self.executed += 1
+        return type("R", (), {"scalar_one_or_none": lambda _self: self.definition})()
+
+
+OLD_CONSTRAINT = "CHECK ((outcome = ANY (ARRAY['done_self'::text, 'done_verified'::text, 'partial'::text])))"
+
+
+async def test_a_stale_outcome_constraint_logs_an_error_that_says_to_rerun_db_roles(caplog):
+    session = _FakeSession("postgresql", OLD_CONSTRAINT)
+    with caplog.at_level(logging.ERROR, logger=job.__name__):
+        missing = await job.warn_if_outcome_constraint_is_stale(session, "a1")
+    assert "done_checked" in missing and session.executed == 1
+    [record] = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert "re-run scripts/ops/db_roles.sql" in record.getMessage() and "done_checked" in record.getMessage()
+
+
+async def test_a_current_constraint_logs_nothing_and_sqlite_is_not_read(caplog):
+    from nous.observability.task_scoring import OUTCOMES
+
+    current = "".join(f"'{o}'" for o in OUTCOMES)
+    with caplog.at_level(logging.ERROR, logger=job.__name__):
+        assert await job.warn_if_outcome_constraint_is_stale(_FakeSession("postgresql", current), "a1") == []
+        sqlite = _FakeSession("sqlite", OLD_CONSTRAINT)
+        assert await job.warn_if_outcome_constraint_is_stale(sqlite, "a1") == []
+    assert sqlite.executed == 0 and not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+@pytest.mark.postgres_only
+async def test_the_real_constraint_admits_every_outcome(db):
+    async with db.session() as s:
+        assert await job.warn_if_outcome_constraint_is_stale(s, "any") == []
+
+
+async def test_a_pass_reads_the_constraint_once(db, agent, monkeypatch):
+    calls = []
+
+    async def spy(session, agent_id):
+        calls.append(agent_id)
+        return []
+
+    monkeypatch.setattr(job, "warn_if_outcome_constraint_is_stale", spy)
+    await job.run_scoring_pass(db, agent)
+    assert calls == [agent]

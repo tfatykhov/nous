@@ -24,6 +24,7 @@ const FULL = () => ({
     scorer_version: 1,
     first_scored_at: new Date(Date.now() - 60 * 60000).toISOString(),
     last_scored_at: new Date(Date.now() - 5 * 60000).toISOString(),
+    audits_without_action_row: 0,
     scorer: {
       scorer_version: 1, last_run_at: new Date(Date.now() - 5 * 60000).toISOString(), last_status: 'ok',
       last_error: null, last_ok_at: new Date(Date.now() - 5 * 60000).toISOString(), rows_submitted: 1614,
@@ -178,6 +179,17 @@ describe('Autonomy view', () => {
     render(Autonomy);
     expect(await screen.findByText('Last pass failed')).toBeTruthy();
     expect(screen.getByText(/InsufficientPrivilege/)).toBeTruthy();
+  });
+
+  it('says nothing about spot-check answers when none lack their tap, and one plain line when some do', async () => {
+    const full = FULL();
+    render(Autonomy);
+    expect(await screen.findByText('Done, verified', { selector: 'h2' })).toBeTruthy();
+    expect(screen.queryByText(/spot-check answer/)).toBeNull();
+    cleanup();
+    body = { ...full, task_scores: { ...full.task_scores, audits_without_action_row: 2 } };
+    render(Autonomy);
+    expect(await screen.findByText(/2 spot-check answers on file with no matching tap/)).toBeTruthy();
   });
 
   it('flags a scorer on another version than the endpoint reads', async () => {

@@ -96,6 +96,12 @@
     </dl>
   </section>
 
+  {#if ts.audits_without_action_row > 0}
+    <p class="small" role="status">
+      {ts.audits_without_action_row} spot-check answer{ts.audits_without_action_row === 1 ? '' : 's'} on file with no matching tap recorded on its card.
+    </p>
+  {/if}
+
   <div class="cards">
     <section class="card" aria-labelledby="h-verified">
       <h2 id="h-verified">Done, verified</h2>
