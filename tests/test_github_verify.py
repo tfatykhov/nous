@@ -19,6 +19,7 @@ from nous.observability.task_scoring import PrCheck, TaskSignals
 NOW = datetime(2026, 10, 19, 12, 0, tzinfo=UTC)
 DAG_AT = NOW - timedelta(days=2)
 AGENT = "cognition-engines-nous-agent"
+SINCE_DAG = (DAG_AT + timedelta(minutes=30)).isoformat()  # a branch PR opened after the DAG began
 
 
 def leaf(task_id="t1", *, number=5, head=None, dag_at=DAG_AT, node_id="n1", **kw) -> TaskSignals:
@@ -157,12 +158,12 @@ async def test_a_credit_stored_by_an_earlier_pass_stands():
 
 
 async def test_a_head_branch_resolves_once_and_is_pinned():
-    github = FakeGitHub([pr(7)], branch=[{"number": 7}])
+    github = FakeGitHub([pr(7)], branch=[{"number": 7, "created_at": SINCE_DAG}])
     [out] = await decide([leaf(head="fix/thing")], github)
     assert out.v2_verified and out.evidence["v2_pr"] == ["tfatykhov/nous#7"]
     assert [r.url.path for r in github.requests] == ["/repos/tfatykhov/nous/pulls", "/repos/tfatykhov/nous/pulls/7"]
     # A later pass reads the pin: a newer PR on the same branch cannot take its place.
-    github = FakeGitHub([pr(7), pr(8)], branch=[{"number": 8}])
+    github = FakeGitHub([pr(7), pr(8)], branch=[{"number": 8, "created_at": SINCE_DAG}])
     [again] = await decide([leaf(head="fix/thing")], github, stored=StoredPrEvidence(pins={"t1": "tfatykhov/nous#7"}))
     assert again.evidence["v2_pr"] == ["tfatykhov/nous#7"]
     assert [r.url.path for r in github.requests] == ["/repos/tfatykhov/nous/pulls/7"]
@@ -264,7 +265,7 @@ async def test_a_resolved_head_is_pinned_even_when_the_pr_read_fails():
         def __call__(self, request):
             self.requests.append(request)
             if request.url.path.endswith("/pulls"):
-                return httpx.Response(200, json=[{"number": 7}])
+                return httpx.Response(200, json=[{"number": 7, "created_at": SINCE_DAG}])
             return httpx.Response(502, json={})
 
     [out] = await decide([leaf(head="fix/thing")], ListThenFail())
@@ -346,3 +347,39 @@ async def test_a_pin_survives_a_renamed_repository():
     [out] = await decide([old], github, stored=StoredPrEvidence(pins={"t1": "tfatykhov/nous#7"}))
     assert out.v2_verified
     assert [r.url.path for r in github.requests] == ["/repos/tfatykhov/nous/pulls/7"]
+
+
+async def test_a_head_check_resolves_to_the_first_pr_since_its_dag_not_the_newest():
+    # The branch is reused: an older PR from before this DAG, this DAG's PR (#7), then a later DAG's replacement (#8).
+    branch = [
+        {"number": 3, "created_at": (DAG_AT - timedelta(days=3)).isoformat()},
+        {"number": 7, "created_at": SINCE_DAG},
+        {"number": 8, "created_at": (DAG_AT + timedelta(days=2)).isoformat()},
+    ]
+    github = FakeGitHub([pr(7), pr(8)], branch=branch)
+    [out] = await decide([leaf(head="fix/thing")], github)
+    assert out.v2_verified and out.evidence["v2_pr_merged"] == ["tfatykhov/nous#7"]
+    assert dict(github.requests[0].url.params)["direction"] == "asc"
+
+
+async def test_a_numbered_check_uses_the_tasks_canonical_pin():
+    # An earlier pass followed the renamed repository and pinned the PR under its canonical name: a later pass reads
+    # that pin (and its stored credit) even though the command spells the old name.
+    github = FakeGitHub([pr()], status=503)
+    old = leaf()
+    old = TaskSignals(**{**old.__dict__, "pr_check": PrCheck(repo="tfatykhov/old-name", number=5)})
+    stored = StoredPrEvidence(pins={"t1": "tfatykhov/nous#5"}, credited={"tfatykhov/nous#5": "t1"})
+    [out] = await decide([old], github, stored=stored)
+    assert out.v2_verified and github.requests == []  # the stored credit stood: GitHub being down changed nothing
+
+
+async def test_a_malformed_answer_holds_the_pr_instead_of_failing_the_pass():
+    def handle(request):
+        return httpx.Response(200, content=b"<html>proxy error</html>")
+
+    reader = GitHubReader(transport=httpx.MockTransport(handle))
+    try:
+        [out] = await PrVerifier(reader, [AGENT], [OWNER]).verify([leaf()], StoredPrEvidence())
+    finally:
+        await reader.aclose()
+    assert out.v2_hold and out.evidence["v2_unavailable"] == ["malformed response"]

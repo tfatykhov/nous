@@ -107,7 +107,11 @@ class GitHubReader:
                 logger.warning("Task scores: GitHub refused NOUS_SCORER_GITHUB_TOKEN (HTTP 401)")
             raise GitHubUnavailable(self._failed[key])
         else:
-            value = response.json()
+            try:
+                value = response.json()
+            except ValueError as exc:  # a 200 whose body is not JSON (a proxy page, a truncated answer)
+                self._failed[key] = "malformed response"
+                raise GitHubUnavailable(self._failed[key]) from exc
         self._memo[key] = value
         return value
 
@@ -116,15 +120,21 @@ class GitHubReader:
         value = await self._get(f"/repos/{repo}/pulls/{number}")
         return value if isinstance(value, dict) else None
 
-    async def newest_pull_number(self, repo: str, head: str) -> int | None:
-        """The number of the newest PR whose head is ``<owner>:<head>``, or None."""
+    async def first_pull_number_since(self, repo: str, head: str, since: datetime) -> int | None:
+        """The number of the first PR whose head is ``<owner>:<head>`` opened at or after ``since``, or None.
+
+        The first, not the newest: a branch name a later DAG reuses gets a newer PR, and that one is the later task's
+        work. The PR that settled this node was the first one on the branch after its DAG began.
+        """
         owner = repo.split("/", 1)[0]
         value = await self._get(
             f"/repos/{repo}/pulls",
-            {"state": "all", "head": f"{owner}:{head}", "sort": "created", "direction": "desc", "per_page": 1},
+            {"state": "all", "head": f"{owner}:{head}", "sort": "created", "direction": "asc", "per_page": 100},
         )
-        if isinstance(value, list) and value and isinstance(value[0], dict) and isinstance(value[0].get("number"), int):
-            return value[0]["number"]
+        for item in value if isinstance(value, list) else ():
+            opened = _when(item.get("created_at")) if isinstance(item, dict) else None
+            if opened is not None and opened >= since and isinstance(item.get("number"), int):
+                return item["number"]
         return None
 
 
@@ -177,16 +187,18 @@ def _pr_key(repo: str, number: Any) -> str:
 
 
 def _known_pr(check: PrCheck, task_id: str, stored: StoredPrEvidence) -> tuple[str, int] | None:
-    """(repository, number) without asking GitHub: ``--pr``, or what an earlier pass pinned for ``--head``.
+    """(repository, number) without asking GitHub: what an earlier pass pinned for this task, else ``--pr``.
 
     A pin belongs to this task (only the scorer writes it, and a node's check does not change), and it names the
     repository GitHub answered for, so it is used whatever spelling the command has: a renamed repository's old
     name would otherwise re-resolve the branch every pass and let a newer PR on it replace the pinned one.
     """
+    repo, _, pinned = stored.pins.get(task_id, "").rpartition("#")
+    if repo and pinned.isdigit() and (check.number is None or int(pinned) == check.number):
+        return repo, int(pinned)
     if check.number is not None:
         return check.repo, check.number
-    repo, _, pinned = stored.pins.get(task_id, "").rpartition("#")
-    return (repo, int(pinned)) if repo and pinned.isdigit() else None
+    return None
 
 
 class PrVerifier:
@@ -237,7 +249,9 @@ class PrVerifier:
                 return outcome("v2_pr_duplicate", holder)  # another leaf took it for good: no call needed
         try:
             if number is None:  # --head: resolve once; the pin keeps a newer PR on the branch from replacing it
-                number = await self._reader.newest_pull_number(check.repo, check.head or "")
+                number = await self._reader.first_pull_number_since(
+                    check.repo, check.head or "", signals.dag_created_at
+                )
                 if number is None:
                     return outcome("v2_rejected", "no such PR")
                 evidence["v2_pr"] = [_pr_key(check.repo, number)]
