@@ -115,15 +115,22 @@ class GitHubReader:
         self._memo[key] = value
         return value
 
+    async def _shaped(self, path: str, params: Mapping[str, str | int] | None, kind: type) -> Any:
+        """``_get``, with the answer's shape checked: None is GitHub's 404; any other shape than ``kind`` (a proxy's
+        JSON, a changed API) is unavailable, so a row is held rather than decided on an answer that is not one."""
+        value = await self._get(path, params)
+        if value is None or isinstance(value, kind):
+            return value
+        raise GitHubUnavailable("unexpected response")
+
     async def pull(self, repo: str, number: int) -> dict[str, Any] | None:
         """The PR, or None when there is no such PR."""
-        value = await self._get(f"/repos/{repo}/pulls/{number}")
-        return value if isinstance(value, dict) else None
+        return await self._shaped(f"/repos/{repo}/pulls/{number}", None, dict)
 
     async def canonical_repo(self, repo: str) -> str:
         """The repository's current ``owner/name``: a transferred repository's branches are under its new owner."""
-        value = await self._get(f"/repos/{repo}")
-        name = value.get("full_name") if isinstance(value, dict) else None
+        value = await self._shaped(f"/repos/{repo}", None, dict)
+        name = value.get("full_name") if value is not None else None
         return name if isinstance(name, str) else repo
 
     async def pull_number_for_head(self, repo: str, head: str, since: datetime, until: datetime | None) -> int | None:
@@ -136,11 +143,12 @@ class GitHubReader:
         """
         canonical = await self.canonical_repo(repo)
         owner = canonical.split("/", 1)[0]
-        value = await self._get(
+        value = await self._shaped(
             f"/repos/{canonical}/pulls",
             {"state": "all", "head": f"{owner}:{head}", "sort": "created", "direction": "desc", "per_page": 100},
+            list,
         )
-        for item in value if isinstance(value, list) else ():
+        for item in value or ():
             opened = _when(item.get("created_at")) if isinstance(item, dict) else None
             if opened is None or not isinstance(item.get("number"), int) or opened < since:
                 continue

@@ -406,3 +406,21 @@ async def test_a_malformed_answer_holds_the_pr_instead_of_failing_the_pass():
     finally:
         await reader.aclose()
     assert out.v2_hold and out.evidence["v2_unavailable"] == ["malformed response"]
+
+
+@pytest.mark.parametrize(
+    ("head", "body"),
+    [
+        (None, [1, 2, 3]),  # a list where the PR object belongs
+        (None, "a string"),
+        ("fix/thing", ["not a repository object"]),  # the repository lookup of a --head check
+    ],
+)
+async def test_an_answer_of_the_wrong_shape_holds_the_pr_never_rejects_it(head, body):
+    reader = GitHubReader(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body)))
+    try:
+        [out] = await PrVerifier(reader, [AGENT], [OWNER]).verify([leaf(head=head)], StoredPrEvidence())
+    finally:
+        await reader.aclose()
+    assert out.v2_hold and out.evidence["v2_unavailable"] == ["unexpected response"]
+    assert "v2_rejected" not in out.evidence
