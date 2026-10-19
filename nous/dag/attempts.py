@@ -8,10 +8,25 @@ reads the entry of a superseded attempt (``observability/task_score_gatherer.py`
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
-ATTEMPT_HISTORY_CAP = 20  # entries kept per node, newest last
+# An entry is kept while the scorer may still read it: the scoring job re-scores a task until it settles, at most 21
+# days after it finished, and never reaches back more than 30 (MAX_REACHBACK_DAYS in observability/task_score_job.py).
+# An attempt is archived after it finished, so 35 days from the archive covers both. The cap only bounds a node retried
+# hundreds of times inside that span; nothing in the harness retries that often.
+ATTEMPT_HISTORY_KEEP_DAYS = 35
+ATTEMPT_HISTORY_CAP = 200
+
+
+def _archived_at(entry: Any) -> datetime | None:
+    value = entry.get("archived_at") if isinstance(entry, dict) else None
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 def archived_attempts(node: Any, reason: str, now: datetime) -> list[dict[str, Any]] | None:
@@ -37,4 +52,7 @@ def archived_attempts(node: Any, reason: str, now: datetime) -> list[dict[str, A
         "archived_at": now.isoformat(),
         "reason": reason,
     }
-    return [*history, entry][-ATTEMPT_HISTORY_CAP:]
+    horizon = now - timedelta(days=ATTEMPT_HISTORY_KEEP_DAYS)
+    # Drop only what is provably older than the scorer can still read; an entry without a readable time is kept.
+    kept = [e for e in history if (at := _archived_at(e)) is None or at.tzinfo is None or at >= horizon]
+    return [*kept, entry][-ATTEMPT_HISTORY_CAP:]

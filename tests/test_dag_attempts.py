@@ -55,10 +55,26 @@ def test_an_attempt_is_archived_once():
     assert archived_attempts(again, "fix_retry", NOW) is first
 
 
-def test_the_history_keeps_the_newest_entries_up_to_the_cap():
-    history = [{"subtask_id": f"s{i}"} for i in range(ATTEMPT_HISTORY_CAP)]
+def test_entries_are_kept_while_the_scorer_can_still_read_them():
+    from datetime import timedelta
+
+    from nous.dag.attempts import ATTEMPT_HISTORY_KEEP_DAYS
+
+    recent = [{"subtask_id": f"r{i}", "archived_at": (NOW - timedelta(days=1)).isoformat()} for i in range(30)]
+    old = {"subtask_id": "old", "archived_at": (NOW - timedelta(days=ATTEMPT_HISTORY_KEEP_DAYS + 1)).isoformat()}
+    undated = {"subtask_id": "undated"}
+    history = [old, undated, *recent]
     n = node(attempt_history=history)
     out = archived_attempts(n, "retry", NOW)
+    # More than 20 retries inside the window keep every recent entry (the scorer may still read them); only the entry
+    # provably older than its reach goes, and one without a readable time is kept.
+    assert [e["subtask_id"] for e in out] == ["undated", *(f"r{i}" for i in range(30)), str(n.subtask_id)]
+    assert history[0] is old and len(history) == 32  # not mutated
+
+
+def test_the_hard_cap_keeps_the_newest():
+    recent = [{"subtask_id": f"s{i}", "archived_at": NOW.isoformat()} for i in range(ATTEMPT_HISTORY_CAP)]
+    n = node(attempt_history=recent)
+    out = archived_attempts(n, "retry", NOW)
     assert len(out) == ATTEMPT_HISTORY_CAP
-    assert out[0] == {"subtask_id": "s1"} and out[-1]["subtask_id"] == str(n.subtask_id)
-    assert history == [{"subtask_id": f"s{i}"} for i in range(ATTEMPT_HISTORY_CAP)]  # not mutated
+    assert out[0]["subtask_id"] == "s1" and out[-1]["subtask_id"] == str(n.subtask_id)
