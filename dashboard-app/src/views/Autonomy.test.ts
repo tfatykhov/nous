@@ -10,7 +10,7 @@ const stats = (over: Record<string, unknown> = {}) => ({
 });
 const none = { count: 0, mean: null, p10: null, p50: null, p90: null, overrides: 0 };
 const outcomes = (over: Record<string, number> = {}) => ({
-  done_self: 0, done_verified: 0, partial: 0, failed: 0, not_scored: 0, ...over,
+  done_self: 0, done_verified: 0, done_checked: 0, partial: 0, failed: 0, not_scored: 0, ...over,
 });
 const penalties = { harness_errors: 1, refusals: 2, unverified_claims: 0, owner_overrides: 1 };
 
@@ -98,11 +98,11 @@ describe('Autonomy view', () => {
     expect(valueOf('Harness errors')).toBe('7');
     expect(valueOf('Refusals')).toBe('4');
     expect(valueOf('Unverified claims')).toBe('1');
-    // DAG runs row: count, outcomes in display order (verified, self-reported, partial, failed, not scored),
+    // DAG runs row: count, outcomes in display order (verified, checked, self-reported, partial, failed, not scored),
     // then its own harness errors, refusals, unverified claims and overrides
     const dagRow = screen.getByText('DAG runs').closest('tr')!;
     expect(Array.from(dagRow.querySelectorAll('td')).map((td) => td.textContent)).toEqual(
-      ['9', '6', '0', '0', '3', '0', '1', '2', '0', '1']);
+      ['9', '6', '0', '0', '0', '3', '0', '1', '2', '0', '1']);
     expect(screen.getByText('no successful run')).toBeTruthy(); // L0 with zero successes is not "always with you"
     expect(screen.getByText('DAG runs')).toBeTruthy();
     expect(screen.getByText('Intention roots')).toBeTruthy();

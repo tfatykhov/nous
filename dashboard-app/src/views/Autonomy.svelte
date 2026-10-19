@@ -28,7 +28,7 @@
   });
 
   const OUTCOME_COLOR: Record<string, string> = {
-    done_verified: 'var(--green)', done_self: '#60a5fa', partial: '#f59e0b', failed: 'var(--red)', not_scored: 'var(--muted)',
+    done_verified: 'var(--green)', done_checked: '#34d399', done_self: '#60a5fa', partial: '#f59e0b', failed: 'var(--red)', not_scored: 'var(--muted)',
   };
   const CONTEXT_COLOR: Record<string, string> = { owner_present: '#60a5fa', approved: '#34d399', autonomous: '#fb923c' };
   const CONTEXTS = ['owner_present', 'approved', 'autonomous'] as const;
