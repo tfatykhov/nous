@@ -2193,8 +2193,9 @@ class DAGOrchestrator:
             # The built-in PR check (nous/dag/typed_checks.py) ignores PRs opened before the DAG, so a branch name
             # reused from an older PR cannot settle the node before this DAG's PR exists.
             check_env = {**os.environ}
-            if dag.created_at is not None:
-                check_env["NOUS_DAG_CREATED_AT"] = dag.created_at.isoformat()
+            dag_created_at = getattr(dag, "created_at", None)
+            if dag_created_at is not None:
+                check_env["NOUS_DAG_CREATED_AT"] = dag_created_at.isoformat()
         except (ValueError, OSError) as e:
             logger.warning(
                 "F064.3: completion_check workspace setup failed for node %s — %s; "
