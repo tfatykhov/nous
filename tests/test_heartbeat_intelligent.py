@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from nous.heart import result_memory
 from nous.heartbeat.checks import DriveCheck, EmailCheck, HealthCheck, SelfInitiatedCheck
 from nous.heartbeat.registry import BaseCheck
 from nous.heartbeat.schemas import CheckResult, Finding, TunableParam
@@ -349,7 +350,7 @@ class TestSelfInitiatedPromiseTracking:
 
         mock_episode = MagicMock()
         mock_episode.id = "ep-old"
-        mock_episode.outcome = "partial"  # not ongoing — age path only
+        mock_episode.outcome = None  # not ongoing or closed — age path only
         mock_episode.started_at = datetime.now(UTC) - timedelta(days=20)
         mock_episode.summary = "I'll draft the migration plan"
 
@@ -375,7 +376,7 @@ class TestSelfInitiatedPromiseTracking:
 
         mock_episode = MagicMock()
         mock_episode.id = "ep-mid"
-        mock_episode.outcome = "partial"  # not ongoing — age path only
+        mock_episode.outcome = None  # not ongoing or closed — age path only
         mock_episode.started_at = datetime.now(UTC) - timedelta(hours=72)
         mock_episode.summary = "I'll draft the migration plan"
 
@@ -390,6 +391,53 @@ class TestSelfInitiatedPromiseTracking:
             f for f in result.findings if f.raw_data.get("detection") == "promise_scan"
         ]
         assert len(promise_findings) >= 1
+
+    async def _promise_findings(self, episode):
+        heart = MagicMock()
+        heart.facts.search = AsyncMock(return_value=[])
+        heart.search_episodes = AsyncMock(return_value=[episode])
+        heart.schedules.get_due = AsyncMock(return_value=[])
+        check = SelfInitiatedCheck(heart, MagicMock(), _mock_settings(), embeddings=None)
+        result = await check.run()
+        return [f for f in result.findings if f.raw_data.get("detection") == "promise_scan"]
+
+    @staticmethod
+    def _episode(summary, outcome, age_hours):
+        ep = MagicMock()
+        ep.id = "ep-x"
+        ep.outcome = outcome
+        ep.started_at = datetime.now(UTC) - timedelta(hours=age_hours)
+        ep.summary = summary
+        return ep
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "header", [result_memory.HEADER, result_memory.CHUNK_MARKER], ids=["header", "chunk_marker"]
+    )
+    async def test_subtask_result_envelope_not_flagged(self, header):
+        """A background-subtask result episode reports finished work; its
+        envelope header matched the promise queries for three days running."""
+        summary = f"{header}\nTask: I'll look into the deploy logs\nStatus: completed"
+        ep = self._episode(summary, None, 60)
+        assert await self._promise_findings(ep) == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("outcome", ["success", "partial", "failure", "abandoned"])
+    async def test_closed_episode_in_stale_window_not_flagged(self, outcome):
+        """An episode with a terminal outcome is not an unresolved commitment,
+        however old it is inside the 48h..max_stale_age_hours window."""
+        ep = self._episode("I'll draft the report for Tim", outcome, 60)
+        assert await self._promise_findings(ep) == []
+
+    @pytest.mark.asyncio
+    async def test_open_commitment_in_stale_window_still_flagged(self):
+        ep = self._episode("I'll draft the report for Tim", None, 60)
+        assert len(await self._promise_findings(ep)) == 1
+
+    @pytest.mark.asyncio
+    async def test_ongoing_episode_without_envelope_still_flagged(self):
+        ep = self._episode("I'll draft the report for Tim", "ongoing", 2)
+        assert len(await self._promise_findings(ep)) == 1
 
     @pytest.mark.asyncio
     async def test_old_ongoing_episode_still_flagged(self):

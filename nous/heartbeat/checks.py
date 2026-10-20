@@ -14,12 +14,15 @@ import logging
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, get_args
 
 from nous.brain import Brain, continuation
 from nous.brain.embeddings import EmbeddingProvider
 from nous.config import Settings
 from nous.heart import Heart
+from nous.heart.result_memory import CHUNK_MARKER
+from nous.heart.result_memory import HEADER as SUBTASK_RESULT_HEADER
+from nous.heart.schemas import EpisodeOutcome
 from nous.heartbeat.registry import BaseCheck
 from nous.heartbeat.schemas import CheckResult, Finding, TunableParam
 from nous.observability.snapshots import (
@@ -207,6 +210,23 @@ def _is_question_form(text: str) -> bool:
     return bool(_INTERROGATIVE_PREFIX.match(stripped))
 
 
+# Background-subtask result episodes (F098) open with a system envelope header.
+# They report finished work, but the promise queries match the envelope text,
+# so _promise_scan skips them. Matching on the bracketed lead ("[Background
+# subtask result", "[subtask result") keeps working if the rest of the
+# header's wording changes.
+_ENVELOPE_PREFIXES = tuple(m.split(" — ", 1)[0] for m in (SUBTASK_RESULT_HEADER, CHUNK_MARKER))
+
+# A closed episode is not an unresolved commitment. "partial" counts as closed:
+# a blocked subtask result is stored as partial and surfaced elsewhere.
+_TERMINAL_OUTCOMES = frozenset(get_args(EpisodeOutcome)) - {"ongoing"}
+
+
+def _is_system_envelope(text: str) -> bool:
+    """True if an episode summary starts with a system envelope header."""
+    return text.lstrip().startswith(_ENVELOPE_PREFIXES)
+
+
 class SelfInitiatedCheck(BaseCheck):
     """Check for pending actions and due schedules (permanent).
 
@@ -369,10 +389,13 @@ class SelfInitiatedCheck(BaseCheck):
                     # #369: the age-based heuristic is bounded above — beyond
                     # max_stale_age_hours it's too old to be actionable.
                     # outcome=ongoing is an explicit state and is NOT capped.
-                    is_ongoing = getattr(ep, "outcome", None) == "ongoing"
+                    # A terminal outcome closes the episode, so only open
+                    # ones (None or unrecognized) go through the age path.
+                    outcome = getattr(ep, "outcome", None)
+                    is_ongoing = outcome == "ongoing"
                     started = getattr(ep, "started_at", None)
                     is_stale = False
-                    if started:
+                    if started and outcome not in _TERMINAL_OUTCOMES:
                         age_hours = (datetime.now(UTC) - started).total_seconds() / 3600
                         is_stale = 48 < age_hours <= max_stale_hours
 
@@ -380,7 +403,7 @@ class SelfInitiatedCheck(BaseCheck):
                         summary_text = getattr(ep, "summary", None) or getattr(ep, "title", "")
                         # #369: questions / conversational openers are not
                         # commitments — skip before flagging.
-                        if _is_question_form(summary_text):
+                        if _is_question_form(summary_text) or _is_system_envelope(summary_text):
                             continue
                         findings.append(
                             Finding(
@@ -391,7 +414,7 @@ class SelfInitiatedCheck(BaseCheck):
                                 raw_data={
                                     "episode_id": eid,
                                     "detection": "promise_scan",
-                                    "outcome": getattr(ep, "outcome", None),
+                                    "outcome": outcome,
                                 },
                             )
                         )
