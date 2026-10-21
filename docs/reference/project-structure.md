@@ -66,7 +66,7 @@ nous/
 │   │   └── schemas.py          # TurnContext, TurnResult, etc.
 │   ├── handlers/               # Event bus handlers
 │   │   ├── episode_summarizer.py  # Episode summary generation
-│   │   ├── job_lessons.py         # nous/handlers/job_lessons.py, job lessons: JobLessonLearner, the sleep pathway that learns from bad runs of recurring jobs (NOUS_JOB_LESSONS_ENABLED)
+│   │   ├── job_lessons.py         # JobLessonLearner: lessons from bad runs of recurring jobs
 │   │   ├── fact_extractor.py      # Fact extraction from conversations
 │   │   ├── knowledge_extractor.py # Pre-prune fact extraction
 │   │   ├── decision_reviewer.py   # Automated decision review

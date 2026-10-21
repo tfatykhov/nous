@@ -1,4 +1,4 @@
-"""Tests for the job-lesson pathway: render, prompt, learn. Fully mocked (no database)."""
+"""Tests for the job-lesson pathway: render, prompt, learn, judge (the retire rule). Fully mocked (no database)."""
 
 from __future__ import annotations
 

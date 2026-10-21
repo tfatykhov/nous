@@ -42,5 +42,6 @@ def test_the_docs_have_the_rows():
     assert "| `NOUS_JOB_LESSONS_ENABLED` | `false` |" in doc
     assert "| `NOUS_JOB_LESSONS_PER_SLEEP` | `2` |" in doc
     structure = (ROOT / "docs" / "reference" / "project-structure.md").read_text(encoding="utf-8")
-    assert "nous/handlers/job_lessons.py" in structure
+    assert "job_lessons.py" in structure
+    assert "JobLessonLearner" in structure
     assert "Job lessons" in (ROOT / "docs" / "features" / "F012-kline-learning.md").read_text(encoding="utf-8")

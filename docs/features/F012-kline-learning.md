@@ -6,7 +6,7 @@
 
 ## Summary
 
-Auto-creates procedures (K-lines with Minsky's level-bands) from repeated patterns in the agent's own experience. Three learning pathways detect patterns and crystallize them into reusable procedures.
+Auto-creates procedures (K-lines with Minsky's level-bands) from repeated patterns in the agent's own experience. Four learning pathways detect patterns and crystallize them into reusable procedures.
 
 ## Pathways
 
@@ -36,7 +36,7 @@ Behind `NOUS_JOB_LESSONS_ENABLED` (off by default). For a recurring background j
 
 Not built yet. The next design starts from these constraints, so it does not re-decide them. A checker (possibly an LLM agent) verifies background runs so that more of them earn an outcome that is not the agent's own word. It runs as its own process under its own database role, reads its sources and writes only its own table, which the app role can only read. It uses a pinned model and prompt stored outside any path the agent can write, and the agent never sees its prompt, rubric or verdicts (a validator run by Nous would be Nous grading itself). It earns credit the way the scorer's checks do: its verdicts are sampled against owner audits, trusted per kind after consecutive right verdicts, one wrong verdict revokes the trust, and until then its verdicts can only take credit away. It feeds the scorer through a new scorer version, never by rewriting old rows. Once it exists, job lessons compare against validated good runs, and the retire rule and check-and-fix judge on validated outcomes.
 
-### Lesson gate (F012.1, all three pathways)
+### Lesson gate (F012.1, all four pathways)
 
 Each input item is shown to the LLM on one line with an ID: the decision or episode UUID with its recorded outcome, or `r-<hash>` for a monitor error→recovery pair (a hash of the tool, the error and the recovery tools, so the same observation has the same ID in every session). The LLM answers either `{"verdict": "NO_ENTRY", "reason": ...}` or a procedure with:
 
@@ -89,10 +89,10 @@ The gate checks that the evidence is a real input item, not that the recorded ou
 | `nous/handlers/job_lessons.py` | JobLessonLearner (pathway 4: review, gate, store, retire rule) |
 | `nous/heart/job_runs.py` | A job's runs from `heart.subtasks` and the execution ledger |
 | `nous/cognitive/monitor.py` | Pathway 3 (error→recovery tracking) |
-| `nous/handlers/sleep_handler.py` | Generalize phase delegation |
+| `nous/handlers/sleep_handler.py` | Generalize phase delegation, and the job lessons phase |
 | `nous/cognitive/layer.py` | Procedure reinforcement in post_turn |
-| `nous/main.py` | Wiring ProcedureLearner into sleep + monitor |
-| `nous/config.py` | 10 configuration fields |
+| `nous/main.py` | Wiring ProcedureLearner and JobLessonLearner into sleep + monitor |
+| `nous/config.py` | 12 configuration fields |
 
 ## Minsky Connection
 
