@@ -210,7 +210,7 @@ def _passes_lesson_gate(data: dict[str, Any], citable: dict[str, str], source: s
     dropped = len(data["evidence"]) - len(verified)
     if dropped > 0:
         logger.info(
-            "Lesson gate dropped %d %s evidence item(s) that cite no input item or lack an outcome",
+            "Lesson gate dropped %d %s evidence item(s): no input item cited, no outcome, or a repeat",
             dropped, source,
         )
     return True

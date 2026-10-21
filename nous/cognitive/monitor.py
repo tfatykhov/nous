@@ -273,11 +273,10 @@ class MonitorEngine:
             _passes_lesson_gate,
         )
 
-        shown = pairs[:5]
         citable: dict[str, str] = {}
-        error_lines = []
-        recovery_lines = []
-        for n, p in enumerate(shown, start=1):
+        error_lines: list[str] = []
+        recovery_lines: list[str] = []
+        for n, p in enumerate(pairs[:5], start=1):
             label = f"pair-{n}"
             signature = f"{p['error']['tool']}: {p['error']['error'][:50]}"
             citable[label] = signature
