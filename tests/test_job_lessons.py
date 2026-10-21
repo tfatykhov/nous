@@ -248,13 +248,13 @@ async def test_every_reviewed_case_is_marked_with_the_bad_runs_finish_time():
     )
 
 
-async def test_the_cap_counts_reviewed_cases_only():
+async def test_the_cap_counts_every_case_sent_to_the_review_and_not_the_skipped_ones():
     cases = [_run(h, bad=True) for h in (1, 2, 3, 4)]
     goods = [[_run(40)], [_run(40), _run(50)], [_run(40), _run(50)], [_run(40), _run(50)]]  # first: one comparison
     env = _env(cases, goods, per_sleep=2)
-    env.llm.call.return_value = _mock_llm_response(_no_entry())
+    env.llm.call.side_effect = RuntimeError("down")  # a failed call counts
     stats = await env.jl.run_sleep()
-    assert env.llm.call.await_count == 2 and stats["no_entry"] == 2
+    assert env.llm.call.await_count == 2 and stats["llm_failed"] == 2
     env.heart.job_runs.lesson_cases.assert_awaited_once()
     assert env.heart.job_runs.lesson_cases.await_args.kwargs["limit"] == 10  # cap * 5
 

@@ -105,7 +105,7 @@ class JobLessonLearner:
 
     async def run_sleep(self) -> dict[str, int]:
         """Run one sleep; counts under learned, covered, no_entry, gate_rejected, llm_failed, retired and kept."""
-        counts = {"no_entry": 0, "gate_rejected": 0, "covered": 0, "llm_failed": 0, "retired": 0, "kept": 0}
+        counts = {"no_entry": 0, "gate_rejected": 0, "covered": 0, "llm_failed": 0, "retired": 0, "kept": 0, "sent": 0}
         learned = await self._learn(counts)
         await self._judge(counts)
         return {
@@ -166,7 +166,9 @@ class JobLessonLearner:
                 logger.warning("Job lessons: judging lesson %s failed", lesson.id, exc_info=True)
 
     async def _learn(self, c: dict[str, int]) -> int:
-        """Review bad runs, newest first, until the per-sleep cap of reviewed cases; the lessons stored."""
+        """Review bad runs, newest first, until the per-sleep cap of cases sent to the review (a failed call counts).
+
+        Returns the number of lessons stored."""
         cap = self._settings.job_lessons_per_sleep
         if cap <= 0:
             return 0
@@ -178,7 +180,7 @@ class JobLessonLearner:
             return 0
         learned = 0
         for case in cases:
-            if learned + c["covered"] + c["no_entry"] + c["gate_rejected"] >= cap:
+            if c["sent"] >= cap:
                 break
             try:
                 learned += await self._review(case, c)
@@ -211,6 +213,7 @@ class JobLessonLearner:
         if len(good) < MIN_GOOD_RUNS:
             return 0
         calls = await heart.job_runs.ledger_calls([case.subtask_id, *(r.subtask_id for r in good)])
+        c["sent"] += 1
         data = await learner._call_llm(build_case_prompt(schedule.task, case, good, calls), counts=c)
         if data is None:
             await self._after_llm_failure(schedule, case)

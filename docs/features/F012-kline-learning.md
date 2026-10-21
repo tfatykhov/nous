@@ -62,7 +62,7 @@ The gate checks that the evidence is a real input item, not that the recorded ou
 
 - Max 3 procedures per sleep cycle (pathways 1+2 combined)
 - Max 1 procedure per session (pathway 3)
-- Max `NOUS_JOB_LESSONS_PER_SLEEP` (2) reviewed job cases per sleep cycle (pathway 4), outside the 3 above. `0` stops learning but not the retire rule
+- Max `NOUS_JOB_LESSONS_PER_SLEEP` (2) job cases sent to the review per sleep cycle (a failed call counts) (pathway 4), outside the 3 above. `0` stops learning but not the retire rule
 
 ## Configuration
 
@@ -79,7 +79,7 @@ The gate checks that the evidence is a real input item, not that the recorded ou
 | `NOUS_PROCEDURE_STALENESS_DAYS` | `30` | Days inactive before review |
 | `NOUS_PROCEDURE_WEAKNESS_THRESHOLD` | `0.30` | Effectiveness below which triggers review |
 | `NOUS_JOB_LESSONS_ENABLED` | `false` | Job lessons pathway (needs `NOUS_PROCEDURE_LEARNING_ENABLED`) |
-| `NOUS_JOB_LESSONS_PER_SLEEP` | `2` | Reviewed job cases per sleep, outside `NOUS_PROCEDURE_MAX_PER_SLEEP` |
+| `NOUS_JOB_LESSONS_PER_SLEEP` | `2` | Job cases sent to the review per sleep (a failed call counts), outside `NOUS_PROCEDURE_MAX_PER_SLEEP` |
 
 ## Files
 
