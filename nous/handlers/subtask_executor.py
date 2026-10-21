@@ -201,6 +201,11 @@ async def execute_hardened(
         hardening_enabled=True,
         payload_schema=payload_schema_for_prompt,
     )
+    from nous.handlers.job_lessons import job_lessons_block
+
+    block = await job_lessons_block(heart, settings, subtask)
+    if block:
+        system_prefix += "\n\n" + block
 
     user_message = subtask.task
     last_payload: dict[str, Any] | None = None

@@ -255,3 +255,36 @@ class JobLessonLearner:
         else:
             value = {"reviewed_until": case.finished_at.isoformat()}
         await self._heart.schedules.set_metadata(schedule.id, LESSONS_KEY, value)
+
+
+def _one_line(text: str) -> str:
+    """``text`` with every run of whitespace, line breaks included, collapsed to one space."""
+    return " ".join(text.split())
+
+
+async def job_lessons_block(heart: Heart, settings: Any, subtask: Any) -> str | None:
+    """The lessons of a scheduled run's job, as a block for the run's system prefix, or ``None``.
+
+    Shown only when ``job_lessons_enabled`` is on and the subtask was created by the scheduler. At most
+    SHOWN_LESSONS, newest first. Shown lessons are not recalled, activated or given outcomes. A failed read
+    never stops the run: it logs a warning and shows no block.
+    """
+    try:
+        if getattr(settings, "job_lessons_enabled", False) is not True:
+            return None
+        from nous.api.execution_context import ExecutionContext
+
+        if ExecutionContext.for_subtask(subtask, "").kind != "scheduled":
+            return None
+        meta = getattr(subtask, "metadata_", None) or {}
+        lessons = (await heart.list_job_lessons(meta["schedule_id"], active=True))[:SHOWN_LESSONS]
+        if not lessons:
+            return None
+        lines = ["# Lessons from earlier runs of this job"]
+        for lesson in lessons:
+            lines.append(f"- When: {_one_line(lesson.cue)}")
+            lines.append(f"  Do: {_one_line(lesson.lesson)}")
+        return "\n".join(lines)
+    except Exception:
+        logger.warning("Job lessons block failed; the run proceeds without it", exc_info=True)
+        return None

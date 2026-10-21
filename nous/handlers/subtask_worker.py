@@ -375,6 +375,11 @@ class SubtaskWorkerPool:
         from nous.api.tools import build_subtask_prefix
 
         system_prefix = build_subtask_prefix(subtask.task, subtask.frame_type)
+        from nous.handlers.job_lessons import job_lessons_block
+
+        block = await job_lessons_block(self._heart, self._settings, subtask)
+        if block:
+            system_prefix += "\n\n" + block
 
         # F064.1: surface dag_node_id (populated by F061 PR-3 from
         # orchestrator._launch_subtask_node) so the runner can fire activity
