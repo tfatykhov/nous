@@ -39,8 +39,15 @@ async def _row(env, procedure_id: UUID) -> Procedure:
 
 def _row_fields(row: Procedure) -> dict:
     names = (
-        "name", "description", "goals", "core_patterns", "core_tools", "core_concepts",
-        "implementation_notes", "tags", "runtime_metadata",
+        "name",
+        "description",
+        "goals",
+        "core_patterns",
+        "core_tools",
+        "core_concepts",
+        "implementation_notes",
+        "tags",
+        "runtime_metadata",
     )
     return {n: getattr(row, n, None) for n in names}
 
@@ -50,21 +57,38 @@ async def test_no_scorer_output_reaches_a_prompt_a_stored_lesson_or_the_block(jo
     schedule = await make_schedule(env, task="Check the pre-market report")
     sentinel = {"note": "SENTINEL-EVIDENCE-7f3a"}
     bad = await make_run(
-        env, schedule, outcome="partial", age_hours=3, final_outcome="incomplete_blocked",
-        blocked_reason="the shell refused the script", evidence=sentinel, score=0.123456, ledger=[("bash", "blocked")],
+        env,
+        schedule,
+        outcome="partial",
+        age_hours=3,
+        final_outcome="incomplete_blocked",
+        blocked_reason="the shell refused the script",
+        evidence=sentinel,
+        score=0.123456,
+        ledger=[("bash", "blocked")],
     )
     good = [
         await make_run(
-            env, schedule, outcome=o, age_hours=h, evidence=sentinel, score=0.123456,
+            env,
+            schedule,
+            outcome=o,
+            age_hours=h,
+            evidence=sentinel,
+            score=0.123456,
             ledger=[("write_file", "success")],
         )
         for o, h in (("done_self", 30), ("done_verified", 50), ("done_checked", 70))
     ]
-    llm = _CapturingLLM(answer={
-        "cue": "The script is refused by the shell", "lesson": "Report the refusal instead of retrying the script",
-        "evidence": [{"id": str(bad.id), "outcome": "refused"}, {"id": str(good[0].id), "outcome": "ran"}],
-        "name": "Shell refusal", "domain": "ops", "description": "Handle a refused script",
-    })
+    llm = _CapturingLLM(
+        answer={
+            "cue": "The script is refused by the shell",
+            "lesson": "Report the refusal instead of retrying the script",
+            "evidence": [{"id": str(bad.id), "outcome": "refused"}, {"id": str(good[0].id), "outcome": "ran"}],
+            "name": "Shell refusal",
+            "domain": "ops",
+            "description": "Handle a refused script",
+        }
+    )
     learner = ProcedureLearner(AsyncMock(), env.heart, AsyncMock(), env.settings, llm)
     stats = await JobLessonLearner(learner, env.heart, env.settings).run_sleep()
     assert stats["learned"] == 1  # the pathway really ran

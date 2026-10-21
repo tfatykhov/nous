@@ -27,8 +27,14 @@ off = SimpleNamespace(job_lessons_enabled=False)
 
 def _sub(meta: dict) -> SimpleNamespace:
     return SimpleNamespace(
-        id=uuid4(), task="t", frame_type=None, model=None, notify=False, output_format=None,
-        success_criteria=None, metadata_=meta,
+        id=uuid4(),
+        task="t",
+        frame_type=None,
+        model=None,
+        notify=False,
+        output_format=None,
+        success_criteria=None,
+        metadata_=meta,
     )
 
 
@@ -37,8 +43,16 @@ sub = _sub({"schedule_id": HEX})
 
 def _lesson(i: int) -> JobLesson:
     return JobLesson(
-        id=uuid4(), schedule_id=HEX, name=f"n{i}", cue=f"cue {i}", lesson=f"do {i}",
-        learned_from_run=None, baseline=None, retired=None, active=True, created_at=datetime.now(UTC),
+        id=uuid4(),
+        schedule_id=HEX,
+        name=f"n{i}",
+        cue=f"cue {i}",
+        lesson=f"do {i}",
+        learned_from_run=None,
+        baseline=None,
+        retired=None,
+        active=True,
+        created_at=datetime.now(UTC),
     )
 
 
@@ -101,8 +115,14 @@ async def test_the_legacy_prefix_ends_with_the_block_and_is_unchanged_without_on
     runner = AsyncMock()
     runner.run_turn = AsyncMock(return_value=("text", MagicMock(), {"input_tokens": 1, "output_tokens": 1}))
     subtask = SimpleNamespace(
-        id=uuid4(), task="legacy task", frame_type=None, model=None, notify=False, output_format=None,
-        success_criteria=None, metadata_={"schedule_id": HEX},
+        id=uuid4(),
+        task="legacy task",
+        frame_type=None,
+        model=None,
+        notify=False,
+        output_format=None,
+        success_criteria=None,
+        metadata_={"schedule_id": HEX},
     )
     pool = SubtaskWorkerPool(
         runner=runner, heart=_make_heart_mock(), settings=_make_routing_settings(hardening_enabled=False)
