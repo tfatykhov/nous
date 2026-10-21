@@ -201,22 +201,38 @@ def _passes_lesson_gate(data: dict[str, Any], citable: dict[str, str], source: s
     if not data.get("evidence"):
         logger.info("Lesson gate rejected %s procedure: no evidence", source)
         return False
-    if not _verified_evidence(data, citable):
+    verified = _verified_evidence(data, citable)
+    if not verified:
         logger.info(
             "Lesson gate rejected %s procedure: evidence cites no input item", source
         )
         return False
+    dropped = len(data["evidence"]) - len(verified)
+    if dropped > 0:
+        logger.info(
+            "Lesson gate dropped %d %s evidence item(s) that cite no input item or lack an outcome",
+            dropped, source,
+        )
     return True
+
+
+def _str_list(value: Any) -> list[str]:
+    """A model-written list field: a lone string is one entry, anything else not a list is none."""
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str) and item.strip()]
 
 
 def _lesson_fields(data: dict[str, Any], citable: dict[str, str]) -> dict[str, list[str]]:
     """``goals`` and ``implementation_notes`` with the gate's cue, lesson and evidence."""
     return {
-        "goals": [str(data["cue"]).strip(), *data.get("goals", [])],
+        "goals": [str(data["cue"]).strip(), *_str_list(data.get("goals"))],
         "implementation_notes": [
             f"lesson: {str(data['lesson']).strip()}",
             *_verified_evidence(data, citable),
-            *data.get("implementation_notes", []),
+            *_str_list(data.get("implementation_notes")),
         ],
     }
 

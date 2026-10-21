@@ -946,3 +946,63 @@ def test_weak_review_prompt_offers_confounded():
 
     assert '"confounded"' in _WEAK_REVIEW_PROMPT
     assert "{implementation_notes}" in _WEAK_REVIEW_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_lesson_gate_persists_only_verified_citations():
+    """Mixed evidence: stored, but only the citation of a real input item is kept."""
+    learner, brain, heart, embeddings, _ = _build_learner()
+
+    def data(s):
+        d = _llm_procedure_data(cited_id=s[0].id)
+        d["evidence"].append({"id": str(uuid4()), "outcome": "invented"})
+        d["evidence"].append({"id": str(s[1].id), "outcome": ""})
+        return d
+
+    summaries = _decision_cluster(learner, brain, embeddings, heart, data)
+
+    stats = await learner.run_sleep_learning()
+
+    assert stats["decisions_learned"] == 1
+    notes = heart.store_procedure.call_args[0][0].implementation_notes
+    evidence = [n for n in notes if n.startswith("evidence:")]
+    assert evidence == [f"evidence: {summaries[0].id} — Async calls kept the loop responsive"]
+
+
+@pytest.mark.asyncio
+async def test_lesson_gate_rejects_cited_id_without_outcome():
+    learner, brain, heart, embeddings, _ = _build_learner()
+
+    def data(s):
+        d = _llm_procedure_data(cited_id=s[0].id)
+        d["evidence"][0]["outcome"] = " "
+        return d
+
+    _decision_cluster(learner, brain, embeddings, heart, data)
+
+    stats = await learner.run_sleep_learning()
+
+    assert stats["gate_rejected"] == 1
+    heart.store_procedure.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_lesson_fields_tolerate_non_list_goals_and_notes():
+    """A string goals is one goal (not one per character); a null notes is no notes."""
+    learner, brain, heart, embeddings, _ = _build_learner()
+
+    def data(s):
+        d = _llm_procedure_data(cited_id=s[0].id)
+        d["goals"] = "Keep the event loop free"
+        d["implementation_notes"] = None
+        return d
+
+    _decision_cluster(learner, brain, embeddings, heart, data)
+
+    stats = await learner.run_sleep_learning()
+
+    assert stats["decisions_learned"] == 1
+    stored = heart.store_procedure.call_args[0][0]
+    assert stored.goals == ["Writing a new database call", "Keep the event loop free"]
+    assert stored.implementation_notes[0] == "lesson: Use async/await for every query"
+    assert len(stored.implementation_notes) == 2
