@@ -76,7 +76,7 @@ def test_render_run_shows_only_the_runs_own_record():
     assert "blocked: shell refused bash" in lines
     assert next(ln for ln in lines if ln.startswith("error: ")) == "error: " + "E" * 300 + "..."
     assert lines[-1] == "tool calls: bash (error)" and not any(ln.startswith("result: ") for ln in lines)
-    assert "bad" not in "\n".join(lines).lower() and "score" not in "\n".join(lines).lower()
+    assert not re.search(r"\b(bad|score)\b", "\n".join(lines).lower())  # a uuid hex may contain "bad"
 
 
 def test_render_run_prints_the_time_in_utc_for_any_tz_aware_input():
