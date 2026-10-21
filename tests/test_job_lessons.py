@@ -7,13 +7,14 @@ import json
 import re
 from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
 
 from nous.handlers.job_lessons import JobLessonLearner, build_case_prompt, job_lesson_name, render_run
 from nous.heart.job_runs import JobRun
+from nous.heart.schemas import JobLesson
 from tests.test_procedure_learner import (
     _build_learner,
     _make_procedure_detail,
@@ -284,3 +285,97 @@ async def test_one_failing_case_does_not_stop_the_rest():
     env.heart.schedules.get.side_effect = [RuntimeError("db"), env.schedule]
     stats = await env.jl.run_sleep()
     assert stats["no_entry"] == 1 and env.llm.call.await_count == 1
+
+
+W = "2026-10-01T00:00:00+00:00"
+_DEFAULT = object()
+
+
+def _lesson(baseline=_DEFAULT, created_at=None) -> JobLesson:
+    return JobLesson.model_construct(  # model_construct: a malformed baseline must be representable
+        id=uuid4(), schedule_id=HEX, name="Shell refusal", cue="The job needs a shell command",
+        lesson="Use the file tools instead of bash", learned_from_run=None,
+        baseline={"bad": 2, "scored": 10, "window_end": W} if baseline is _DEFAULT else baseline,
+        retired=None, active=True, created_at=created_at or NOW - timedelta(days=1),
+    )
+
+
+def _judge_env(lessons, runs_per_call):
+    env = _env([], [])
+    env.heart.list_job_lessons = AsyncMock(return_value=lessons)
+    env.heart.job_runs.scored_runs = AsyncMock(side_effect=runs_per_call)
+    env.heart.retire_procedure = AsyncMock()
+    return env
+
+
+def _runs(n: int, bad: int) -> list[JobRun]:
+    return [_run(i + 1, bad=i < bad) for i in range(n)]
+
+
+async def test_a_lesson_with_fewer_than_five_runs_since_it_was_stored_is_left_alone():
+    lesson = _lesson()
+    env = _judge_env([lesson], [_runs(4, 4)])
+    stats = await env.jl.run_sleep()
+    env.heart.retire_procedure.assert_not_called()
+    assert (stats["retired"], stats["kept"]) == (0, 0)
+    env.heart.job_runs.scored_runs.assert_awaited_with(lesson.schedule_id, after=lesson.created_at, limit=20)
+
+
+async def test_an_equal_bad_rate_retires_the_lesson_with_its_reason():
+    lesson = _lesson()
+    env = _judge_env([lesson], [_runs(5, 1)])  # 0.2 against a baseline of 0.2
+    stats = await env.jl.run_sleep()
+    env.heart.retire_procedure.assert_awaited_once_with(
+        lesson.id,
+        reason={
+            "reason": "no_improvement", "at": ANY, "after": {"bad": 1, "scored": 5},
+            "baseline": {"bad": 2, "scored": 10, "window_end": W},
+        },
+    )
+    assert stats["retired"] == 1
+    assert datetime.fromisoformat(env.heart.retire_procedure.await_args.kwargs["reason"]["at"]).tzinfo is not None
+
+
+async def test_a_lower_bad_rate_keeps_the_lesson_and_a_higher_one_retires_it():
+    env = _judge_env([_lesson()], [_runs(5, 0)])
+    stats = await env.jl.run_sleep()
+    assert (stats["kept"], stats["retired"]) == (1, 0) and env.heart.retire_procedure.await_count == 0
+    env = _judge_env([_lesson()], [_runs(5, 3)])
+    stats = await env.jl.run_sleep()
+    assert (stats["kept"], stats["retired"]) == (0, 1) and env.heart.retire_procedure.await_count == 1
+
+
+@pytest.mark.parametrize("baseline", [
+    None, "garbage", {"bad": 0, "scored": 0, "window_end": W}, {"bad": "x", "scored": 5}, {"scored": 5},
+])
+async def test_a_lesson_without_a_usable_baseline_is_skipped(baseline):
+    env = _judge_env([_lesson(baseline=baseline)], [_runs(5, 5)])
+    stats = await env.jl.run_sleep()
+    assert (stats["kept"], stats["retired"]) == (0, 0) and env.heart.retire_procedure.await_count == 0
+
+
+async def test_a_failing_lesson_does_not_stop_the_rest():
+    first, second = _lesson(), _lesson()
+    env = _judge_env([first, second], [RuntimeError("db"), _runs(5, 3)])
+    stats = await env.jl.run_sleep()
+    env.heart.retire_procedure.assert_awaited_once_with(second.id, reason=ANY)
+    assert stats["retired"] == 1
+
+
+async def test_the_judge_runs_even_when_the_learn_cap_is_zero():
+    lesson = _lesson()
+    env = _judge_env([lesson], [_runs(5, 3)])
+    env.learner._settings.job_lessons_per_sleep = 0
+    stats = await env.jl.run_sleep()
+    env.heart.job_runs.lesson_cases.assert_not_called()
+    env.heart.list_job_lessons.assert_awaited_once_with(active=True)
+    assert stats["retired"] == 1
+
+
+async def test_a_failing_case_read_ends_the_learn_half_and_the_judge_still_runs():
+    lesson = _lesson()
+    env = _judge_env([lesson], [_runs(5, 3)])
+    env.heart.job_runs.lesson_cases.side_effect = RuntimeError("db")
+    stats = await env.jl.run_sleep()
+    env.heart.list_job_lessons.assert_awaited_once_with(active=True)
+    assert stats["retired"] == 1 and stats["learned"] == 0

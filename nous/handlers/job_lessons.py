@@ -105,17 +105,65 @@ class JobLessonLearner:
 
     async def run_sleep(self) -> dict[str, int]:
         """Run one sleep; counts under learned, covered, no_entry, gate_rejected, llm_failed, retired and kept."""
-        counts = {"no_entry": 0, "gate_rejected": 0, "covered": 0, "llm_failed": 0}
+        counts = {"no_entry": 0, "gate_rejected": 0, "covered": 0, "llm_failed": 0, "retired": 0, "kept": 0}
         learned = await self._learn(counts)
+        await self._judge(counts)
         return {
             "learned": learned,
             "covered": counts["covered"],
             "no_entry": counts["no_entry"],
             "gate_rejected": counts["gate_rejected"],
             "llm_failed": counts["llm_failed"],
-            "retired": 0,
-            "kept": 0,
+            "retired": counts["retired"],
+            "kept": counts["kept"],
         }
+
+    async def _judge(self, c: dict[str, int]) -> None:
+        """Retire each active lesson whose job does not fail less than before it; count the others as kept.
+
+        A lesson is judged once its job has JUDGE_AFTER_RUNS scored runs since it was stored. The rule only
+        ever retires: it never promotes or widens a lesson.
+        """
+        try:
+            lessons = await self._heart.list_job_lessons(active=True)
+        except Exception:
+            logger.warning("Job lessons: reading the lessons to judge failed", exc_info=True)
+            return
+        for lesson in lessons:
+            try:
+                runs = await self._heart.job_runs.scored_runs(
+                    lesson.schedule_id, after=lesson.created_at, limit=BASELINE_RUNS
+                )
+                if len(runs) < JUDGE_AFTER_RUNS:
+                    continue
+                base = lesson.baseline
+                if not isinstance(base, dict):
+                    continue
+                base_bad, base_scored = base.get("bad"), base.get("scored")
+                if (
+                    isinstance(base_bad, bool)
+                    or isinstance(base_scored, bool)
+                    or not isinstance(base_bad, int)
+                    or not isinstance(base_scored, int)
+                    or base_scored <= 0
+                ):
+                    continue
+                bad = sum(1 for run in runs if run.bad)
+                if bad / len(runs) >= base_bad / base_scored:
+                    await self._heart.retire_procedure(
+                        lesson.id,
+                        reason={
+                            "reason": "no_improvement",
+                            "at": datetime.now(UTC).isoformat(),
+                            "after": {"bad": bad, "scored": len(runs)},
+                            "baseline": base,
+                        },
+                    )
+                    c["retired"] += 1
+                else:
+                    c["kept"] += 1
+            except Exception:
+                logger.warning("Job lessons: judging lesson %s failed", lesson.id, exc_info=True)
 
     async def _learn(self, c: dict[str, int]) -> int:
         """Review bad runs, newest first, until the per-sleep cap of reviewed cases; the lessons stored."""
