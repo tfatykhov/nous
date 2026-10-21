@@ -1134,6 +1134,7 @@ async def test_weak_review_revise_with_a_malformed_answer_keeps_the_procedure():
     heart.retire_procedure.assert_called_once_with(second.id)
     heart.store_procedure.assert_not_called()
     assert stats["weak_reviewed"] == 1
+    assert stats["llm_failed"] == 1
 
 
 @pytest.mark.asyncio

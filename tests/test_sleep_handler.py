@@ -619,10 +619,28 @@ class TestProcedureStatsCountBothPathways:
         await handler._run_sleep(_make_event("sleep_started"))
 
         emitted = bus.emit.call_args[0][0]
-        assert emitted.data["procedures_no_entry"] == 2
-        assert emitted.data["procedures_gate_rejected"] == 3
-        assert emitted.data["procedures_confounded"] == 1
-        assert emitted.data["procedures_llm_failed"] == 4
+        assert emitted.data["procedure_gate"] == {
+            "no_entry": 2,
+            "gate_rejected": 3,
+            "confounded": 1,
+            "llm_failed": 4,
+        }
+
+    @pytest.mark.asyncio
+    async def test_lesson_gate_counts_are_not_summed_as_attempted_mutations(self):
+        """The consolidation audit sums every int in sleep_stats; the gate counts must not be ints there."""
+        from nous.handlers.consolidation_audit import _sum_totals
+
+        handler, brain, heart, bus, _ = _make_sleep_handler()
+        handler._procedure_learner = AsyncMock()
+        handler._procedure_learner.run_sleep_learning = AsyncMock(
+            return_value={"decisions_learned": 1, "episodes_learned": 0, "gate_rejected": 3, "llm_failed": 4}
+        )
+        sleep_stats = {"procedures_created": 0}
+
+        await handler._phase_generalize(sleep_stats)
+
+        assert _sum_totals(sleep_stats) == 1
 
 
 # ===========================================================================

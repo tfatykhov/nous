@@ -40,7 +40,7 @@ A procedure is stored only if the cue and lesson are non-empty and at least one 
 
 The gate checks that the evidence is a real input item, not that the recorded outcome is true. Decision outcomes come from reviews, and conversation episodes are closed as `success`.
 
-`run_sleep_learning()` returns `no_entry`, `gate_rejected`, `confounded` (weak review) and `llm_failed` (no answer, or one that isn't a JSON object) for each sleep. The `sleep_completed` event carries them as `procedures_no_entry`, `procedures_gate_rejected`, `procedures_confounded` and `procedures_llm_failed`. If `procedures_created` stays at 0 while `procedures_gate_rejected` or `procedures_llm_failed` is high, the gate or the model's answers are blocking learning.
+`run_sleep_learning()` returns `no_entry`, `gate_rejected`, `confounded` (weak review) and `llm_failed` (no answer, an answer that isn't a JSON object, or a weak-review revision with fields of the wrong type) for each sleep. The `sleep_completed` event and the generalize log line carry them, the event as one `procedure_gate` object. They are kept out of the consolidation audit's attempted-mutation total. If `procedures_created` stays at 0 while `gate_rejected` or `llm_failed` is high, the gate or the model's answers are blocking learning.
 
 ## Lifecycle
 

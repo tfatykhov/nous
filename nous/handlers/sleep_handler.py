@@ -2571,18 +2571,18 @@ class SleepHandler:
                 sleep_stats["procedures_created"] += stats.get("decisions_learned", 0) + stats.get(
                     "episodes_learned", 0
                 )
-                # Lesson-gate outcomes: a gate that rejects every extraction shows up here
-                # (diagnostic counters, so not in the audited count_keys).
-                gate_keys = ("no_entry", "gate_rejected", "confounded", "llm_failed")
-                for key in gate_keys:
-                    sleep_stats[f"procedures_{key}"] = stats.get(key, 0)
+                # Lesson-gate outcomes: a gate that rejects every extraction shows up here.
+                # Nested in one dict, not flat ints: the consolidation audit sums every
+                # int in sleep_stats as an attempted mutation, and these are diagnostics.
+                gate = {key: stats.get(key, 0) for key in ("no_entry", "gate_rejected", "confounded", "llm_failed")}
+                sleep_stats["procedure_gate"] = gate
                 logger.info(
                     "Sleep generalize: %d decisions, %d episodes, %d reviewed; "
                     "%d no_entry, %d gate_rejected, %d confounded, %d llm_failed",
                     stats.get("decisions_learned", 0),
                     stats.get("episodes_learned", 0),
                     stats.get("weak_reviewed", 0),
-                    *(stats.get(key, 0) for key in gate_keys),
+                    *gate.values(),
                 )
                 return True
             except Exception:

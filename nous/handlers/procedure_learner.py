@@ -617,6 +617,7 @@ class ProcedureLearner:
                             tags=proc_detail.tags,
                         )
                     except ValidationError as exc:
+                        self._gate_counts["llm_failed"] += 1
                         logger.info("Weak procedure revise skipped, malformed answer: %s (%s)", proc_detail.name, exc)
                         continue
                     await self._heart.retire_procedure(proc_detail.id)
