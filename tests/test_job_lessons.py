@@ -49,6 +49,7 @@ def _env(cases, goods, *, per_sleep: int = 2, scored=None, meta=None):
     heart.schedules.get = AsyncMock(return_value=schedule)
     heart.schedules.set_metadata = AsyncMock()
     heart.find_similar_job_lessons = AsyncMock(return_value=[])
+    heart.list_job_lessons = AsyncMock(return_value=[])
     return SimpleNamespace(
         jl=JobLessonLearner(learner, heart, learner._settings), learner=learner, heart=heart, llm=llm,
         schedule=schedule,
@@ -379,3 +380,43 @@ async def test_a_failing_case_read_ends_the_learn_half_and_the_judge_still_runs(
     stats = await env.jl.run_sleep()
     env.heart.list_job_lessons.assert_awaited_once_with(active=True)
     assert stats["retired"] == 1 and stats["learned"] == 0
+
+
+def _stored_lessons(env, lessons):
+    """The learn half sees ``lessons`` (it asks for every lesson, active=None); the judge sees none."""
+    async def fake(schedule_id=None, *, active=True, **_):
+        return lessons if active is None else []
+
+    env.heart.list_job_lessons = AsyncMock(side_effect=fake)
+
+
+@pytest.mark.parametrize("active", [True, False])
+async def test_a_run_that_already_has_a_lesson_is_marked_and_not_reviewed_again(active):
+    bad = _run(3, bad=True)
+    env = _env([bad], [[_run(30), _run(50)]])
+    _stored_lessons(env, [SimpleNamespace(learned_from_run=str(bad.subtask_id), active=active)])
+    stats = await env.jl.run_sleep()
+    env.heart.list_job_lessons.assert_any_await(HEX, active=None)
+    env.llm.call.assert_not_called()
+    env.heart.schedules.set_metadata.assert_awaited_once_with(
+        UUID(HEX), "job_lessons", {"reviewed_until": bad.finished_at.isoformat()}
+    )
+    assert all(stats[k] == 0 for k in ("learned", "covered", "no_entry", "gate_rejected", "llm_failed"))
+
+
+async def test_a_lesson_from_another_run_does_not_skip_the_case():
+    bad = _run(3, bad=True)
+    env = _env([bad], [[_run(30), _run(50)]])
+    _stored_lessons(env, [SimpleNamespace(learned_from_run=str(uuid4()), active=True)])
+    env.llm.call.return_value = _mock_llm_response(_no_entry())
+    stats = await env.jl.run_sleep()
+    assert env.llm.call.await_count == 1 and stats["no_entry"] == 1
+
+
+async def test_a_run_with_a_lesson_does_not_count_against_the_cap():
+    done, fresh = _run(1, bad=True), _run(2, bad=True)
+    env = _env([done, fresh], [[_run(40), _run(50)]], per_sleep=1)
+    _stored_lessons(env, [SimpleNamespace(learned_from_run=str(done.subtask_id))])
+    env.llm.call.return_value = _mock_llm_response(_no_entry())
+    await env.jl.run_sleep()
+    assert env.llm.call.await_count == 1

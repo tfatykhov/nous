@@ -194,6 +194,14 @@ class JobLessonLearner:
         schedule = await heart.schedules.get(UUID(sid))
         if schedule is None or not schedule.active or schedule.schedule_type != "recurring":
             return 0
+        # Idempotent per run: a lesson already stored from this run (active or retired) means the earlier
+        # review stored it but did not get to mark the case, so only the mark is missing.
+        if any(
+            lesson.learned_from_run == str(case.subtask_id)
+            for lesson in await heart.list_job_lessons(sid, active=None)
+        ):
+            await self._mark_reviewed(schedule, case)
+            return 0
         good = await heart.job_runs.good_runs(
             sid,
             before=case.finished_at,
@@ -236,8 +244,14 @@ class JobLessonLearner:
                 find_neighbours=lambda q: heart.find_similar_job_lessons(q, sid, limit=SHOWN_LESSONS),
                 counts=c,
             )
-        await heart.schedules.set_metadata(schedule.id, LESSONS_KEY, {"reviewed_until": case.finished_at.isoformat()})
+        await self._mark_reviewed(schedule, case)
         return int(stored)
+
+    async def _mark_reviewed(self, schedule: Any, case: JobRun) -> None:
+        """Move the job's review cursor to the finish time of ``case``."""
+        await self._heart.schedules.set_metadata(
+            schedule.id, LESSONS_KEY, {"reviewed_until": case.finished_at.isoformat()}
+        )
 
     async def _after_llm_failure(self, schedule: Any, case: JobRun) -> None:
         """Record a retry for the run, or mark it reviewed once MAX_LLM_RETRIES failures are reached."""
@@ -252,9 +266,9 @@ class JobLessonLearner:
             if "reviewed_until" in meta:
                 value["reviewed_until"] = meta["reviewed_until"]
             value["retry"] = {"run": str(case.subtask_id), "n": n + 1}
+            await self._heart.schedules.set_metadata(schedule.id, LESSONS_KEY, value)
         else:
-            value = {"reviewed_until": case.finished_at.isoformat()}
-        await self._heart.schedules.set_metadata(schedule.id, LESSONS_KEY, value)
+            await self._mark_reviewed(schedule, case)
 
 
 def _one_line(text: str) -> str:
