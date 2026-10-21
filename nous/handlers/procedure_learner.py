@@ -19,8 +19,8 @@ from __future__ import annotations
 import json
 import logging
 import math
-from datetime import UTC, datetime, timedelta
 from collections.abc import Awaitable, Callable, Collection
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
