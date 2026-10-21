@@ -694,10 +694,14 @@ class Heart:
         schedule_id: str | None = None,
         *,
         active: bool | None = True,
+        limit: int | None = None,
         session: AsyncSession | None = None,
     ) -> list[JobLesson]:
-        """This agent's job lessons, newest first: one job's with ``schedule_id``; active ones by default."""
-        return await self.procedures.list_job_lessons(schedule_id, active=active, session=session)
+        """This agent's job lessons, newest first: one job's with ``schedule_id``; active ones by default.
+
+        ``limit`` keeps the newest N.
+        """
+        return await self.procedures.list_job_lessons(schedule_id, active=active, limit=limit, session=session)
 
     async def find_similar_job_lessons(
         self,

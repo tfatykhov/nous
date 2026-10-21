@@ -13,6 +13,7 @@ from uuid import UUID
 
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from nous.brain.embeddings import EmbeddingProvider
 from nous.heart.schemas import (
@@ -702,27 +703,37 @@ class ProcedureManager:
         schedule_id: str | None = None,
         *,
         active: bool | None = True,
+        limit: int | None = None,
         session: AsyncSession | None = None,
     ) -> list[JobLesson]:
         """This agent's job lessons, newest first.
 
         One job's with ``schedule_id``, every job's without. ``active`` keeps the
-        active (True) or the retired (False) ones; None keeps both.
+        active (True) or the retired (False) ones; None keeps both. ``limit`` keeps
+        the newest N (applied in SQL); None keeps all.
         """
         if session is None:
             async with self.db.session() as session:
-                return await self._list_job_lessons(schedule_id, active, session)
-        return await self._list_job_lessons(schedule_id, active, session)
+                return await self._list_job_lessons(schedule_id, active, limit, session)
+        return await self._list_job_lessons(schedule_id, active, limit, session)
 
     async def _list_job_lessons(
-        self, schedule_id: str | None, active: bool | None, session: AsyncSession
+        self, schedule_id: str | None, active: bool | None, limit: int | None, session: AsyncSession
     ) -> list[JobLesson]:
-        query = select(Procedure).where(Procedure.agent_id == self.agent_id).where(Procedure.kind == JOB_LESSON_KIND)
+        query = (
+            select(Procedure)
+            .options(defer(Procedure.embedding))
+            .where(Procedure.agent_id == self.agent_id)
+            .where(Procedure.kind == JOB_LESSON_KIND)
+        )
         if schedule_id is not None:
             query = query.where(Procedure.runtime_metadata["job"]["schedule_id"].astext == schedule_id)
         if active is not None:
             query = query.where(Procedure.active == active)
-        result = await session.execute(query.order_by(Procedure.created_at.desc(), Procedure.id))
+        query = query.order_by(Procedure.created_at.desc(), Procedure.id)
+        if limit is not None:
+            query = query.limit(limit)
+        result = await session.execute(query)
         return [lesson for row in result.scalars().all() if (lesson := self._to_job_lesson(row)) is not None]
 
     async def find_similar_job_lessons(

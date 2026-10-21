@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 from nous.api.tools import build_subtask_prefix
-from nous.handlers.job_lessons import job_lessons_block
+from nous.handlers.job_lessons import SHOWN_LESSONS, job_lessons_block
 from nous.handlers.subtask_executor import execute_hardened
 from nous.handlers.subtask_worker import SubtaskWorkerPool
 from nous.heart.schemas import JobLesson
@@ -73,12 +73,13 @@ async def test_the_block_is_none_unless_the_flag_is_on_and_the_run_is_scheduled(
 
 async def test_the_block_lists_at_most_three_lessons_newest_first_in_the_pinned_shape():
     heart = _heart()
-    heart.list_job_lessons.return_value = [_lesson(i) for i in range(5)]
+    every = [_lesson(i) for i in range(5)]
+    heart.list_job_lessons.side_effect = lambda _sid, active, limit: every[:limit]
     assert await job_lessons_block(heart, on, sub) == (
         "# Lessons from earlier runs of this job\n"
         "- When: cue 0\n  Do: do 0\n- When: cue 1\n  Do: do 1\n- When: cue 2\n  Do: do 2"
     )
-    heart.list_job_lessons.assert_awaited_once_with(HEX, active=True)
+    heart.list_job_lessons.assert_awaited_once_with(HEX, active=True, limit=SHOWN_LESSONS)
 
 
 async def test_no_lessons_is_none():

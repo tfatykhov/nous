@@ -168,3 +168,17 @@ async def test_a_malformed_job_record_is_skipped_and_does_not_break_the_list(les
     broken.runtime_metadata = {"job": "not a dict"}
     await h.store_procedure(broken, session)
     assert [x.id for x in await h.list_job_lessons(session=session)] == [good.id]
+
+
+async def test_list_job_lessons_limit_keeps_the_newest_in_sql(lesson_heart, session):  # noqa: F811
+    h = lesson_heart
+    stored = [await h.store_procedure(lesson_input(HEX_A, f"[job a] lesson {i}"), session) for i in range(4)]
+    for age, row in enumerate(stored):  # stored[0] is the oldest
+        await session.execute(
+            update(Procedure)
+            .where(Procedure.id == row.id)
+            .values(created_at=datetime.now(UTC) - timedelta(days=4 - age))
+        )
+    newest_first = [row.id for row in reversed(stored)]
+    assert [x.id for x in await h.list_job_lessons(HEX_A, limit=2, session=session)] == newest_first[:2]
+    assert [x.id for x in await h.list_job_lessons(HEX_A, session=session)] == newest_first

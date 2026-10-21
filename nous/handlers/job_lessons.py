@@ -294,7 +294,7 @@ async def job_lessons_block(heart: Heart, settings: Any, subtask: Any) -> str | 
         if ExecutionContext.for_subtask(subtask, "").kind != "scheduled":
             return None
         meta = getattr(subtask, "metadata_", None) or {}
-        lessons = (await heart.list_job_lessons(meta["schedule_id"], active=True))[:SHOWN_LESSONS]
+        lessons = await heart.list_job_lessons(meta["schedule_id"], active=True, limit=SHOWN_LESSONS)
         if not lessons:
             return None
         lines = ["# Lessons from earlier runs of this job"]
