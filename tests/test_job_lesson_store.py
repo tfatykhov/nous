@@ -159,3 +159,12 @@ async def test_a_job_lesson_never_renames_a_strategy_card(lesson_heart):  # noqa
         await h.store_procedure(lesson_input(HEX_A, "Shell refusal"))
     kept = await h.procedures.get(card.id)
     assert kept.name == "Shell refusal" and kept.active
+
+
+async def test_a_malformed_job_record_is_skipped_and_does_not_break_the_list(lesson_heart, session):  # noqa: F811
+    h = lesson_heart
+    good = await h.store_procedure(lesson_input(HEX_A, "[job a] fine"), session)
+    broken = lesson_input(HEX_A, "[job a] broken")
+    broken.runtime_metadata = {"job": "not a dict"}
+    await h.store_procedure(broken, session)
+    assert [x.id for x in await h.list_job_lessons(session=session)] == [good.id]

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
-from job_support import assert_no_scorer_text, job_env, make_run, make_schedule  # noqa: F401
+from job_support import NOW, assert_no_scorer_text, job_env, lesson_input, make_run, make_schedule  # noqa: F401
+from sqlalchemy import update
 
 from nous.handlers.job_lessons import JobLessonLearner, job_lessons_block
 from nous.handlers.procedure_learner import ProcedureLearner
@@ -105,3 +107,46 @@ def test_the_guard_catches_a_leak_and_only_a_whole_word_partial():
         with pytest.raises(AssertionError):
             assert_no_scorer_text(leak)
     assert_no_scorer_text("partially blocked")  # the \bpartial\b boundary is deliberate
+
+
+async def _store_aged_lesson(env, schedule) -> Procedure:
+    """A real job lesson (baseline 1 bad of 10 scored runs) stored ten days before the test runs' clock."""
+    item = lesson_input(schedule.id.hex, "[job] lesson")
+    item.runtime_metadata["job"]["baseline"] = {"bad": 1, "scored": 10, "window_end": NOW.isoformat()}
+    stored = await env.heart.store_procedure(item)
+    async with env.db.session() as s:
+        await s.execute(update(Procedure).where(Procedure.id == stored.id).values(created_at=NOW - timedelta(days=10)))
+        await s.commit()
+    return await _row(env, stored.id)
+
+
+async def _judge_only(env) -> dict[str, int]:
+    settings = env.settings.model_copy(update={"job_lessons_per_sleep": 0})
+    learner = ProcedureLearner(AsyncMock(), env.heart, AsyncMock(), settings, _CapturingLLM({}))
+    return await JobLessonLearner(learner, env.heart, settings).run_sleep()
+
+
+async def test_the_retire_rule_retires_a_lesson_whose_job_did_not_improve(job_env):  # noqa: F811
+    env = await job_env(job_lessons_enabled=True)
+    schedule = await make_schedule(env)
+    lesson = await _store_aged_lesson(env, schedule)
+    for hours in range(1, 6):
+        await make_run(env, schedule, outcome="failed", age_hours=hours, final_outcome="failed", status="failed")
+    stats = await _judge_only(env)
+    assert (stats["retired"], stats["kept"]) == (1, 0)
+    row = await _row(env, lesson.id)
+    assert row.active is False
+    assert row.runtime_metadata["retired"]["reason"] == "no_improvement"
+    assert row.runtime_metadata["job"]["schedule_id"] == schedule.id.hex  # the job record survives
+
+
+async def test_the_retire_rule_keeps_a_lesson_whose_job_improved(job_env):  # noqa: F811
+    env = await job_env(job_lessons_enabled=True)
+    schedule = await make_schedule(env)
+    lesson = await _store_aged_lesson(env, schedule)
+    for hours in range(1, 6):
+        await make_run(env, schedule, outcome="done_verified", age_hours=hours)
+    stats = await _judge_only(env)
+    assert (stats["retired"], stats["kept"]) == (0, 1)
+    row = await _row(env, lesson.id)
+    assert row.active is True and "retired" not in (row.runtime_metadata or {})

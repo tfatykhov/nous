@@ -1409,11 +1409,15 @@ class ProcedureManager:
         )
 
     def _to_job_lesson(self, procedure: Procedure) -> JobLesson | None:
-        """Convert a job-lesson ORM row to a JobLesson; None for a row without created_at."""
+        """Convert a job-lesson ORM row to a JobLesson; None for a row without created_at or a malformed job record."""
         if procedure.created_at is None:
             return None
-        metadata = procedure.runtime_metadata or {}
-        job = metadata.get("job") or {}
+        metadata = procedure.runtime_metadata
+        if not isinstance(metadata, dict):
+            return None
+        job = metadata.get("job")
+        if not isinstance(job, dict):
+            return None
         prefix = "lesson: "
         notes = procedure.implementation_notes or []
         lesson = next((n.removeprefix(prefix) for n in notes if n.startswith(prefix)), "")
