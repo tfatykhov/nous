@@ -7,6 +7,7 @@ never see each other's rows.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -150,3 +151,17 @@ async def make_run(
         await s.commit()
         sub_id = sub.id
     return SimpleNamespace(id=sub_id, finished_at=finished_at)
+
+
+SCORER_TEXT = (
+    "SENTINEL-EVIDENCE-7f3a", "0.123456", "done_self", "done_verified", "done_checked", "not_scored",
+)
+_PARTIAL = re.compile(r"\bpartial\b")
+
+
+def assert_no_scorer_text(*texts: str) -> None:
+    """Fail when any text carries scorer output: sentinel evidence or score, an outcome label, or the word partial."""
+    for text in texts:
+        for needle in SCORER_TEXT:
+            assert needle not in text, f"scorer text {needle!r} leaked into: {text[:300]!r}"
+        assert not _PARTIAL.search(text), f"scorer outcome 'partial' leaked into: {text[:300]!r}"
