@@ -24,6 +24,7 @@ The [Feature Index](../features/INDEX.md) is the complete list of features and t
 | 011.2 | Subtask Result Delivery (F009) | — |
 | 014.1 | Context Quality Engine (F016+F017) | #122 |
 | F012 | K-Line Procedure Learning (auto-create procedures from decision clusters, monitor reinforcement) | #134 |
+| F012.1 | Evidence-gated procedure learning (Harness² lesson gate: an auto procedure needs a cue, a lesson and evidence citing an input decision/episode ID or a monitor error→recovery pair ID `r-<hash>`, or the model answers `NO_ENTRY`; weak review may answer `confounded` and sees the stored lesson/evidence; cue goes in `goals`, lesson/evidence in `implementation_notes`, no migration) | #787 |
 | F011 | Skill Discovery v2 (learn_skill tool, SkillParser, bootstrap, auto-activation via RECALL) | — |
 | F022 | Graph-Augmented Recall (polymorphic edges, cross-type linking, contradiction bridge, spreading activation) | — |
 | F023 | Memory Admission Control (5-dimension scoring, shadow mode) | — |

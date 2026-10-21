@@ -1039,3 +1039,42 @@ async def test_dedup_probes_the_sanitized_procedure_not_the_raw_answer():
     assert stats["decisions_learned"] == 1
     query = heart.find_similar_procedures.call_args[0][0]
     assert query.endswith("step one")
+
+
+# ---------------------------------------------------------------------------
+# Folded in from the alternative implementation (#788)
+# ---------------------------------------------------------------------------
+
+
+def test_cited_evidence_accepts_a_unique_shortened_uuid_and_drops_repeats():
+    from nous.handlers.procedure_learner import _cited_evidence
+
+    a = "11111111-aaaa-4bbb-8ccc-000000000001"
+    b = "22222222-aaaa-4bbb-8ccc-000000000002"
+    allowed = {a: "success", b: "success"}
+    cited = _cited_evidence(
+        [
+            {"id": "11111111", "outcome": "worked"},
+            {"id": "[11111111-AAAA]", "outcome": "worked"},
+            {"id": a, "outcome": "worked"},
+        ],
+        allowed,
+    )
+    assert cited == [(a, "success", "worked")]
+
+
+def test_cited_evidence_rejects_short_or_ambiguous_prefixes():
+    from nous.handlers.procedure_learner import _cited_evidence
+
+    allowed = {
+        "33333333-aaaa-4bbb-8ccc-000000000001": "success",
+        "33333333-aaaa-4bbb-8ccc-000000000002": "success",
+    }
+    assert _cited_evidence([{"id": "3333333", "outcome": "x"}], allowed) == []
+    assert _cited_evidence([{"id": "33333333-aaaa", "outcome": "x"}], allowed) == []
+
+
+def test_weak_review_prompt_shows_the_stored_lesson_and_evidence():
+    from nous.handlers.procedure_learner import _WEAK_REVIEW_PROMPT
+
+    assert "{implementation_notes}" in _WEAK_REVIEW_PROMPT

@@ -95,6 +95,7 @@ Domain: {domain}
 Description: {description}
 Goals: {goals}
 Core patterns: {core_patterns}
+Implementation notes: {implementation_notes}
 Effectiveness: {effectiveness}
 Last activated: {last_activated}
 Activation count: {activation_count}
@@ -140,16 +141,31 @@ def _cited_evidence(evidence: object, allowed_ids: dict[str, str]) -> list[tuple
     """
     if not isinstance(evidence, list):
         return []
-    by_lower = {item_id.lower(): (item_id, recorded) for item_id, recorded in allowed_ids.items()}
-    cited = []
+    cited: list[tuple[str, str, str]] = []
     for item in evidence:
         if not isinstance(item, dict):
             continue
-        match = by_lower.get(str(item.get("id") or "").strip().strip("[]").strip().lower())
+        match = _resolve_citation(str(item.get("id") or ""), allowed_ids)
         observed = _one_line(item.get("outcome") or "")
-        if match and observed:
+        if match and observed and (*match, observed) not in cited:
             cited.append((*match, observed))
     return cited
+
+
+def _resolve_citation(ref: str, allowed_ids: dict[str, str]) -> tuple[str, str] | None:
+    """(input ID, recorded outcome) for a cited ID, or None if it was not in the input.
+
+    Case-insensitive exact match after stripping brackets, or a unique prefix of 8+ characters
+    of a UUID-shaped input ID (models often shorten UUIDs).
+    """
+    ref = ref.strip().strip("[]").strip().lower()
+    by_lower = {item_id.lower(): (item_id, recorded) for item_id, recorded in allowed_ids.items()}
+    if ref in by_lower:
+        return by_lower[ref]
+    if len(ref) < 8:
+        return None
+    matches = [key for key in by_lower if len(key) == 36 and key.startswith(ref)]
+    return by_lower[matches[0]] if len(matches) == 1 else None
 
 
 def _passes_lesson_gate(data: dict[str, Any], allowed_ids: dict[str, str]) -> tuple[bool, str]:
@@ -569,6 +585,7 @@ class ProcedureLearner:
                         description=proc_detail.description or "",
                         goals=", ".join(proc_detail.goals),
                         core_patterns=", ".join(proc_detail.core_patterns),
+                        implementation_notes="; ".join(proc_detail.implementation_notes or []),
                         effectiveness=proc_detail.effectiveness,
                         last_activated=proc_detail.last_activated,
                         activation_count=proc_detail.activation_count,
