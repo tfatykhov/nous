@@ -4,7 +4,11 @@ All tests use real Postgres via the SAVEPOINT fixture from conftest.py.
 Heart methods receive the test session via the session parameter (P1-1).
 """
 
+import asyncio
+from uuid import uuid4
+
 import pytest
+import pytest_asyncio
 
 from nous.heart import (
     ProcedureDetail,
@@ -394,3 +398,142 @@ async def test_get_low_effectiveness_ignores_malformed_skip_until_scored(heart, 
     ids = {p.id for p in low}
     assert other.id in ids, "One malformed row must not hide another procedure's finding"
     assert bad.id in ids, "A malformed value is ignored, so the procedure is still reported"
+
+
+# ---------------------------------------------------------------------------
+# append_notes: evidence for a lesson the procedure already teaches
+# ---------------------------------------------------------------------------
+
+
+def _append_once(line: str):
+    """A pick that appends ``line`` unless the notes already cite its ID (the second word)."""
+    cited = line.split(" ")[1]
+    return lambda notes: [] if any(note.split(" ")[1:2] == [cited] for note in notes) else [line]
+
+
+@pytest_asyncio.fixture
+async def committed_heart(db, mock_embeddings):
+    """A Heart whose writes commit for real, under an agent ID of its own; its rows are deleted after."""
+    from sqlalchemy import delete
+
+    from nous.config import Settings
+    from nous.heart import Heart
+    from nous.storage.models import Event
+
+    agent_id = f"append-notes-{uuid4().hex[:8]}"
+    h = Heart(db, Settings().model_copy(update={"agent_id": agent_id}), embedding_provider=mock_embeddings)
+    yield h
+    await h.close()
+    async with db.session() as s:
+        for model in (Event, Procedure):
+            await s.execute(delete(model).where(model.agent_id == agent_id))
+        await s.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only  # array columns
+async def test_append_notes_keeps_the_body_stats_and_runtime_metadata(heart, session):
+    """Only implementation_notes change: a hand-set skip_until_scored and the stats survive."""
+    from sqlalchemy import text
+
+    detail = await heart.store_procedure(_procedure_input(name="Covered lesson procedure"), session=session)
+    await heart.record_procedure_outcome(detail.id, "success", session=session)
+    await _set_runtime_metadata(session, detail.id, {"skip_until_scored": 10})
+    shown: list[list[str]] = []
+
+    def pick(notes: list[str]) -> list[str]:
+        shown.append(notes)
+        return ["evidence: e-1 (success) — it worked"]
+
+    added = await heart.append_procedure_notes(detail.id, pick, session=session)
+
+    assert shown == [["Always run tests before committing"]]
+    assert added == ["evidence: e-1 (success) — it worked"]
+    updated = await heart.get_procedure(detail.id, session=session)
+    assert updated.implementation_notes == ["Always run tests before committing", "evidence: e-1 (success) — it worked"]
+    assert updated.success_count == 1
+    assert (updated.description, updated.goals, updated.tags) == (detail.description, detail.goals, detail.tags)
+    row = (
+        await session.execute(
+            text("SELECT implementation_notes, runtime_metadata FROM heart.procedures WHERE id = :id"),
+            {"id": detail.id},
+        )
+    ).one()
+    assert row.implementation_notes == updated.implementation_notes
+    assert row.runtime_metadata == {"skip_until_scored": 10}
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only  # array columns
+async def test_append_notes_with_nothing_picked_leaves_the_procedure_as_it_was(heart, session):
+    from sqlalchemy import text
+
+    detail = await heart.store_procedure(_procedure_input(name="Nothing to add"), session=session)
+    query = text("SELECT implementation_notes, updated_at FROM heart.procedures WHERE id = :id")
+    before = (await session.execute(query, {"id": detail.id})).one()
+
+    assert await heart.append_procedure_notes(detail.id, lambda notes: [], session=session) == []
+
+    assert (await session.execute(query, {"id": detail.id})).one() == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only  # array columns
+async def test_append_notes_refuses_a_strategy_card(heart, session):
+    from nous.heart.schemas import STRATEGY_CARD_KIND
+
+    card = await heart.store_procedure(
+        _procedure_input(name="A strategy card", kind=STRATEGY_CARD_KIND), session=session
+    )
+
+    with pytest.raises(ValueError, match="strategy card"):
+        await heart.append_procedure_notes(
+            card.id, _append_once("evidence: e-1 (success) — it worked"), session=session
+        )
+
+    assert (await heart.get_procedure(card.id, session=session)).implementation_notes == [
+        "Always run tests before committing"
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only  # a row lock between two sessions
+async def test_an_append_that_waits_for_another_picks_from_the_notes_the_other_committed(db, committed_heart):
+    """Sleep and monitor learning can cover one procedure at once: the later append sees the earlier one."""
+    heart = committed_heart
+    detail = await heart.store_procedure(_procedure_input(name="Raced procedure"))
+
+    async with db.session() as first:
+        await heart.append_procedure_notes(detail.id, _append_once("evidence: e-1 (success) — first"), session=first)
+        second = asyncio.create_task(
+            heart.append_procedure_notes(detail.id, _append_once("evidence: e-1 (success) — second"))
+        )
+        await asyncio.sleep(0.5)  # the second append reads the row by now, or waits for it
+        await first.commit()
+    added = await asyncio.wait_for(second, 10)
+
+    assert added == []
+    assert (await heart.get_procedure(detail.id)).implementation_notes == [
+        "Always run tests before committing",
+        "evidence: e-1 (success) — first",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only  # two sessions on committed rows
+async def test_an_append_through_a_session_that_holds_the_row_picks_from_the_notes_added_since(db, committed_heart):
+    heart = committed_heart
+    detail = await heart.store_procedure(_procedure_input(name="Read earlier"))
+
+    async with db.session() as caller:
+        held = await caller.get(Procedure, detail.id)  # the caller's session keeps its copy of the row
+        await heart.append_procedure_notes(detail.id, _append_once("evidence: e-1 (success) — meanwhile"))
+        added = await heart.append_procedure_notes(
+            detail.id, _append_once("evidence: e-1 (success) — caller"), session=caller
+        )
+        await caller.commit()
+
+    assert added == []
+    expected = ["Always run tests before committing", "evidence: e-1 (success) — meanwhile"]
+    assert held.implementation_notes == expected
+    assert (await heart.get_procedure(detail.id)).implementation_notes == expected
