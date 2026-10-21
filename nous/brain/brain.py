@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, case, delete, exists, func, or_, select, text, update
+from sqlalchemy import ColumnElement, and_, case, delete, exists, func, or_, select, text, update
 from sqlalchemy import event as sa_event
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1665,9 +1665,12 @@ class Brain:
         # neighbours. An explicit `relation=` does not lift it (the F080 filter
         # has no such override either). Imported here like nous.heart.search in
         # _query: nous.brain does not load nous.heart.
-        from nous.heart.schemas import STRATEGY_CARD_KIND
+        # Job lessons (kind='job_lesson') are never a neighbour of any caller: they
+        # belong to their own job's runs, so they are left out the same way.
+        from nous.heart.schemas import JOB_LESSON_KIND, STRATEGY_CARD_KIND
 
         _cards = select(Procedure.id).where(Procedure.kind == STRATEGY_CARD_KIND)
+        _jobs = select(Procedure.id).where(Procedure.kind == JOB_LESSON_KIND)
         if cards_only:
             # The agent's own active cards. Another agent's card would take a
             # row of the window and then be dropped by the agent-scoped resolver.
@@ -1686,11 +1689,11 @@ class Brain:
             # before the LIMIT.
             source_q = source_q.where(
                 or_(GraphEdge.target_type != "procedure",
-                    GraphEdge.target_id.notin_(_cards))
+                    and_(GraphEdge.target_id.notin_(_cards), GraphEdge.target_id.notin_(_jobs)))
             )
             target_q = target_q.where(
                 or_(GraphEdge.source_type != "procedure",
-                    GraphEdge.source_id.notin_(_cards))
+                    and_(GraphEdge.source_id.notin_(_cards), GraphEdge.source_id.notin_(_jobs)))
             )
 
         # codex #577 r3/r5: pushdown for demoted decision outcomes, applied
@@ -1988,6 +1991,10 @@ class Brain:
                 .where(Procedure.active == True)  # noqa: E712
                 .where(Procedure.agent_id == self.agent_id)
             )
+            # A job lesson is absent whatever the caller asks for.
+            from nous.heart.schemas import JOB_LESSON_KIND
+
+            proc_stmt = proc_stmt.where(Procedure.kind.is_distinct_from(JOB_LESSON_KIND))
             if not include_strategy_cards:
                 # Absent unless asked for, like an inactive procedure: this is
                 # what keeps a card out of the spreading-activation results.
@@ -2133,15 +2140,16 @@ class Brain:
 
         proc_ids = [_as_uuid(h.node_id) for h in hubs if h.node_type == "procedure"]
         if proc_ids:
-            from nous.heart.schemas import STRATEGY_CARD_KIND
+            from nous.heart.schemas import JOB_LESSON_KIND, STRATEGY_CARD_KIND
             from nous.storage.models import Procedure
-            # A strategy card that is a hub is listed without its name (it falls
-            # back to "[procedure] <id>" below): these labels go into the
+            # A strategy card or job lesson that is a hub is listed without its name (it
+            # falls back to "[procedure] <id>" below): these labels go into the
             # recall_hubs tool result and the hub-shift notice in the system prompt.
             proc_result = await session.execute(
                 select(Procedure.id, Procedure.name)
                 .where(Procedure.id.in_(proc_ids))
                 .where(Procedure.kind.is_distinct_from(STRATEGY_CARD_KIND))
+                .where(Procedure.kind.is_distinct_from(JOB_LESSON_KIND))
             )
             for p in proc_result.all():
                 labels[p.id] = p.name or f"[procedure] {p.id}"

@@ -10,7 +10,7 @@ Documented tools the agent can call, and the cognitive frames each is offered in
 | `learn_fact` | conversation, question, creative, task | Store a new fact |
 | `learn_skill` | conversation, question, task | Register a skill from URL, local path, or inline markdown |
 | `ingest_document` | conversation, question, task, debug | F069: chunk & persist a full document body (arxiv, PDF/.docx text, long markdown) to heart.episode_chunks with source_kind='document'. Use after extracting text yourself via run_python / web_fetch. |
-| `get_procedure` | all | Retrieve a specific procedure by ID |
+| `get_procedure` | all | Retrieve a specific procedure by ID (a job-lesson id reads as not found) |
 | `create_censor` | all | Create a guardrail censor |
 | `cache_retrieve` | all | Retrieve original content from SmartCompressed results |
 | `bash` | task, debug, conversation, question | Execute shell commands. `timeout` is clamped to 1..300 s; omitted, it is 30 s in a short turn (`ExecutionContext.is_short_turn`: a chat or MCP turn, a companion action, a heartbeat check, a DAG summary, and a subtask, scheduled or DAG-node turn whose row's `timeout_seconds` is 120 s or less, such as an inline `spawn_sync`), and 120 s in every other background turn. With the default `NOUS_TOOL_TIMEOUT` of 120 s the runner's per-tool timeout ends such a call at the same moment and its generic error replaces the retry hint (prod runs 2000 s). A timed-out call says what to retry with (double the timeout, at most 300); at 300 it says to run the command detached and poll its output, or split it |

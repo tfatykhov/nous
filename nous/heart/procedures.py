@@ -468,8 +468,12 @@ class ProcedureManager:
         # Reasoning Maps L1: a strategy card is a lesson, not a how-to
         # procedure, so no search-driven read returns one (passive Track B, the
         # recall tool's procedure scope, the K-line learner's "auto:" sweep).
-        extra_where = " AND t.active = true AND t.kind IS DISTINCT FROM :strategy_kind"
-        extra_params: dict = {"strategy_kind": STRATEGY_CARD_KIND}
+        # A job lesson is shown only on its own job's runs, so no search returns one.
+        extra_where = (
+            " AND t.active = true AND t.kind IS DISTINCT FROM :strategy_kind"
+            " AND t.kind IS DISTINCT FROM :job_lesson_kind"
+        )
+        extra_params: dict = {"strategy_kind": STRATEGY_CARD_KIND, "job_lesson_kind": JOB_LESSON_KIND}
         if domain:
             extra_where += " AND t.domain = :domain"
             extra_params["domain"] = domain
@@ -612,8 +616,8 @@ class ProcedureManager:
     ) -> list[ProcedureSummary]:
         return await self._nearest_summaries(
             query,
-            "(kind IS NOT DISTINCT FROM :strategy_kind) = :cards_only",
-            {"strategy_kind": STRATEGY_CARD_KIND, "cards_only": cards_only},
+            "(kind IS NOT DISTINCT FROM :strategy_kind) = :cards_only AND kind IS DISTINCT FROM :job_lesson_kind",
+            {"strategy_kind": STRATEGY_CARD_KIND, "cards_only": cards_only, "job_lesson_kind": JOB_LESSON_KIND},
             limit,
             session,
             probe="procedure selection probe",
@@ -819,6 +823,7 @@ class ProcedureManager:
             select(Procedure)
             .where(Procedure.agent_id == self.agent_id)
             .where(Procedure.active == True)  # noqa: E712
+            .where(Procedure.kind.is_distinct_from(JOB_LESSON_KIND))
         )
         procedures = list(result.scalars().all())
 
@@ -901,30 +906,37 @@ class ProcedureManager:
         session: AsyncSession | None = None,
         *,
         include_strategy_cards: bool = False,
+        include_job_lessons: bool = False,
     ) -> tuple[list[ProcedureSummary], int]:
         """Paginated procedure list with filters (F021).
 
         Strategy cards (Reasoning Maps L1) are left out of both the rows and the
         total unless ``include_strategy_cards``: the Procedure Catalog and the
         Critic's skill menu list how-to procedures, and a card must never use up
-        their row windows. Only the dashboard browse asks for both.
+        their row windows. Job lessons are left out the same way unless
+        ``include_job_lessons``. Only the dashboard browse asks for all of them.
         """
         if session is None:
             async with self.db.session() as session:
                 return await self._list_all(
-                    limit, offset, domain, active_only, min_activations, session, include_strategy_cards,
+                    limit, offset, domain, active_only, min_activations, session,
+                    include_strategy_cards, include_job_lessons,
                 )
         return await self._list_all(
-            limit, offset, domain, active_only, min_activations, session, include_strategy_cards,
+            limit, offset, domain, active_only, min_activations, session,
+            include_strategy_cards, include_job_lessons,
         )
 
     async def _list_all(
         self, limit, offset, domain, active_only, min_activations, session, include_strategy_cards=False,
+        include_job_lessons=False,
     ):
         from sqlalchemy import func as sa_func
         conditions = [Procedure.agent_id == self.agent_id]
         if not include_strategy_cards:
             conditions.append(Procedure.kind.is_distinct_from(STRATEGY_CARD_KIND))
+        if not include_job_lessons:
+            conditions.append(Procedure.kind.is_distinct_from(JOB_LESSON_KIND))
         if active_only:
             conditions.append(Procedure.active == True)  # noqa: E712
         if domain:
@@ -1215,6 +1227,7 @@ class ProcedureManager:
             .where(Procedure.agent_id == self.agent_id)
             .where(Procedure.superseded_by.isnot(None))
             .where(Procedure.kind.is_distinct_from(STRATEGY_CARD_KIND))
+            .where(Procedure.kind.is_distinct_from(JOB_LESSON_KIND))
             .limit(1)
         )
         return result.scalars().first() is not None
@@ -1243,6 +1256,7 @@ class ProcedureManager:
             .where(Procedure.active == True)  # noqa: E712
             # Every caller means a skill: a strategy card with this name is not one.
             .where(Procedure.kind.is_distinct_from(STRATEGY_CARD_KIND))
+            .where(Procedure.kind.is_distinct_from(JOB_LESSON_KIND))
             .order_by(Procedure.created_at.desc(), Procedure.id)
             .limit(1)
         )

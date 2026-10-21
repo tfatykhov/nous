@@ -20,7 +20,7 @@ Documented routes served by `nous/api/rest.py`, which is the full list. Part of 
 | POST | `/facts/{fact_id}/core` | Toggle the `profile_core` curation tag on a Tier-1 fact (`{"core": true|false}`) |
 | GET | `/censors` | Active censors |
 | PUT | `/censors/{id}` | Update censor fields (trigger_action, action_instruction, unblock_pattern) |
-| GET | `/procedures` | List procedures |
+| GET | `/procedures` | List procedures (also lists strategy cards and job lessons, which every other read leaves out) |
 | GET | `/frames` | Available cognitive frames |
 | GET | `/calibration` | Calibration report |
 | GET | `/identity` | Get agent identity |

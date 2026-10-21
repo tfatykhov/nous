@@ -956,7 +956,7 @@ def create_app(
             # alongside how-to procedures (it is how an operator inspects them).
             procs, total = await heart.list_procedures(
                 limit=limit, offset=offset, domain=domain, active_only=active_only,
-                include_strategy_cards=True,
+                include_strategy_cards=True, include_job_lessons=True,
             )
             return JSONResponse({"procedures": [p.model_dump(mode="json") for p in procs], "total": total, "limit": limit, "offset": offset})
         except Exception as e:

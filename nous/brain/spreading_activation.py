@@ -184,13 +184,15 @@ async def spreading_activation_search(
     # uses a row of the result window. The traversal is unchanged: activation
     # still spreads through a card to its other neighbours. Imported here like
     # in Brain._neighbors: nous.brain does not load nous.heart.
-    from nous.heart.schemas import STRATEGY_CARD_KIND
+    from nous.heart.schemas import JOB_LESSON_KIND, STRATEGY_CARD_KIND
 
     params["strategy_kind"] = STRATEGY_CARD_KIND
+    # Job lessons are left out the same way: they belong to their own job's runs.
+    params["job_lesson_kind"] = JOB_LESSON_KIND
     conditions.append(
         "NOT (act.node_type = 'procedure' AND EXISTS ("
         "  SELECT 1 FROM heart.procedures p"
-        "  WHERE p.id = act.id AND p.kind = :strategy_kind"
+        "  WHERE p.id = act.id AND p.kind IN (:strategy_kind, :job_lesson_kind)"
         "))"
     )
 

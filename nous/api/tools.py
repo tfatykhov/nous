@@ -50,6 +50,7 @@ from nous.heart.schemas import (
     FactInput,
     FactRejected,
     FactSummary,
+    is_job_lesson,
 )
 from nous.heart.subtasks import INLINE_WORKER_ID
 from nous.observability.retrieval_logger import get_active as get_active_retrieval_logger
@@ -2046,6 +2047,10 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     detail = await heart.get_procedure(pid)
                 except ValueError:
                     detail = None  # well-formed UUID but no such row
+                if detail is not None and is_job_lesson(detail):
+                    # A job lesson is shown only on its own job's runs. A Python check:
+                    # ProcedureManager.get stays unfiltered for the learner and the job pathway.
+                    detail = None
                 if detail is None:
                     # The id missed — but a procedure's NAME can itself be a UUID string
                     # (catalog lists names), so retry the exact input as a name.

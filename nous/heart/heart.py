@@ -664,10 +664,11 @@ class Heart:
         session: AsyncSession | None = None,
         *,
         include_strategy_cards: bool = False,
+        include_job_lessons: bool = False,
     ) -> tuple[list[ProcedureSummary], int]:
         """List procedures with pagination and filters (F021).
 
-        How-to procedures only, unless ``include_strategy_cards``.
+        How-to procedures only, unless ``include_strategy_cards`` / ``include_job_lessons``.
         """
         return await self.procedures.list_all(
             limit,
@@ -677,6 +678,7 @@ class Heart:
             min_activations,
             session,
             include_strategy_cards=include_strategy_cards,
+            include_job_lessons=include_job_lessons,
         )
 
     async def retire_procedure(
