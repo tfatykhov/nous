@@ -51,12 +51,11 @@ def _recovery_pair_id(pair: dict) -> str:
     """Citable ID of one error→recovery pair for the procedure lesson gate.
 
     The pairs live only in memory and have no database ID, so the ID is a short hash of
-    what was observed: the same observation gets the same ID in every session, and the
-    evidence notes stored with a procedure stay meaningful after the session ends.
+    what was observed (tool, error and recovery tools, not the reply text, which differs every
+    time): the same observation gets the same ID in every session, and the evidence notes
+    stored with a procedure stay meaningful after the session ends.
     """
-    observed = "|".join(
-        [pair["error"]["tool"], pair["error"]["error"], ",".join(pair["recovery"]), pair.get("context", "")]
-    )
+    observed = "|".join([pair["error"]["tool"], pair["error"]["error"], ",".join(pair["recovery"])])
     return "r-" + hashlib.sha256(observed.encode()).hexdigest()[:10]
 
 
@@ -280,18 +279,23 @@ class MonitorEngine:
         """
         from nous.handlers.procedure_learner import _MONITOR_RECOVERY_PROMPT, _one_line
 
-        shown = pairs[:5]
+        # Up to 5 distinct observations; a repeat of the same one is shown once, with its first reply.
+        shown: dict[str, dict] = {}
+        for pair in pairs:
+            if len(shown) == 5:
+                break
+            shown.setdefault(_recovery_pair_id(pair), pair)
         pairs_text = "\n".join(
-            f"- [{_recovery_pair_id(pair)}] {pair['error']['tool']}: {_one_line(pair['error']['error'][:50])}"
+            f"- [{pair_id}] {pair['error']['tool']}: {_one_line(pair['error']['error'][:50])}"
             f" → {','.join(pair['recovery'])} | {_one_line(pair.get('context', ''))}"
-            for pair in shown
+            for pair_id, pair in shown.items()
         )
 
         result = await self._procedure_learner._call_llm(_MONITOR_RECOVERY_PROMPT.format(pairs=pairs_text))
         if not result:
             return  # the call failed: keep the pairs for the next recovery turn
         proc_input = self._procedure_learner._gated_procedure_input(
-            result, dict.fromkeys(map(_recovery_pair_id, shown), "recovered"), "auto:monitor_recovery"
+            result, dict.fromkeys(shown, "recovered"), "auto:monitor_recovery"
         )
         if proc_input is None or await self._procedure_learner._is_duplicate(proc_input.model_dump()):
             # Nothing stored: start over, so the next attempt waits for new pairs

@@ -606,6 +606,7 @@ async def test_disabled_learning_returns_empty():
     assert stats["decisions_learned"] == 0
     assert stats["episodes_learned"] == 0
     assert stats["weak_reviewed"] == 0
+    assert stats["llm_failed"] == 0
     brain.list_decisions.assert_not_called()
     heart.list_episodes.assert_not_called()
 
@@ -1078,3 +1079,144 @@ def test_weak_review_prompt_shows_the_stored_lesson_and_evidence():
     from nous.handlers.procedure_learner import _WEAK_REVIEW_PROMPT
 
     assert "{implementation_notes}" in _WEAK_REVIEW_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# Counted failures, safe revise, pinned citation rules, stable pair IDs
+# ---------------------------------------------------------------------------
+
+
+def _mock_llm_text(text: str) -> MagicMock:
+    response = MagicMock()
+    response.content = [{"type": "text", "text": text}]
+    return response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["not json", "api error"])
+async def test_an_unusable_llm_answer_is_counted_as_llm_failed(failure):
+    parts = _build_learner()
+    learner, _brain, heart, _emb, llm_client = parts
+    _decision_cluster(parts)
+    if failure == "not json":
+        llm_client.call.return_value = _mock_llm_text("not json at all")
+    else:
+        llm_client.call.side_effect = RuntimeError("API down")
+
+    stats = await learner.run_sleep_learning()
+
+    assert stats["llm_failed"] == 1
+    assert stats["gate_rejected"] == 0
+    heart.store_procedure.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_weak_review_revise_with_a_malformed_answer_keeps_the_procedure():
+    """The revision is built before the old procedure is retired, and one bad answer
+    does not stop the review of the next procedure."""
+    learner, brain, heart, _emb, llm_client = _build_learner()
+    brain.list_decisions.side_effect = [([], 0), ([], 0)]
+    heart.list_episodes.return_value = []
+    first = _make_procedure_detail(name="Weak one", effectiveness=0.20)
+    second = _make_procedure_detail(name="Weak two", effectiveness=0.20)
+    heart.search_procedures.return_value = [
+        _make_procedure_summary(name="Weak one"),
+        _make_procedure_summary(name="Weak two"),
+    ]
+    heart.get_procedure.side_effect = [first, second]
+    llm_client.call.side_effect = [
+        _mock_llm_response({"action": "revise", "reason": "vague", "revised_description": ["not", "a", "string"]}),
+        _mock_llm_response({"action": "retire", "reason": "unreliable"}),
+    ]
+
+    stats = await learner.run_sleep_learning()
+
+    heart.retire_procedure.assert_called_once_with(second.id)
+    heart.store_procedure.assert_not_called()
+    assert stats["weak_reviewed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_weak_review_revise_keeps_a_lone_string_pattern_whole():
+    learner, brain, heart, _emb, llm_client = _build_learner()
+    brain.list_decisions.side_effect = [([], 0), ([], 0)]
+    heart.list_episodes.return_value = []
+    weak = _make_procedure_detail(name="Weak proc", effectiveness=0.20)
+    heart.search_procedures.return_value = [_make_procedure_summary(name="Weak proc")]
+    heart.get_procedure.return_value = weak
+    llm_client.call.return_value = _mock_llm_response(
+        {
+            "action": "revise",
+            "reason": "too vague",
+            "revised_description": "Sharper description",
+            "revised_patterns": "check the exit code",
+        }
+    )
+
+    await learner.run_sleep_learning()
+
+    heart.retire_procedure.assert_called_once_with(weak.id)
+    revised = heart.store_procedure.call_args[0][0]
+    assert revised.core_patterns == ["check the exit code"]
+    assert revised.description == "Sharper description"
+    assert revised.implementation_notes == weak.implementation_notes
+
+
+def test_a_bare_string_naming_an_input_id_is_not_a_citation():
+    from nous.handlers.procedure_learner import _passes_lesson_gate
+
+    ok, _reason = _passes_lesson_gate({"cue": "c", "lesson": "l", "evidence": ["abc"]}, {"abc": "success"})
+    assert not ok
+
+
+def test_a_shortened_id_matches_only_a_uuid_shaped_input_id():
+    from nous.handlers.procedure_learner import _cited_evidence
+
+    allowed = {"r-0123456789": "recovered"}
+    assert _cited_evidence([{"id": "r-01234567", "outcome": "x"}], allowed) == []
+    assert _cited_evidence([{"id": "r-0123456789", "outcome": "x"}], allowed) == [("r-0123456789", "recovered", "x")]
+
+
+@pytest.mark.asyncio
+async def test_decision_prompt_shows_each_decisions_recorded_outcome():
+    parts = _build_learner()
+    learner, _brain, _heart, _emb, llm_client = parts
+    summaries = _decision_cluster(parts)
+    llm_client.call.return_value = _mock_llm_response({"verdict": "NO_ENTRY", "reason": "none"})
+
+    await learner.run_sleep_learning()
+
+    prompt = _prompt_sent(llm_client)
+    for s in summaries:
+        assert f"- [{s.id}] {s.description} (outcome: success)" in prompt
+
+
+@pytest.mark.asyncio
+async def test_monitor_pair_id_ignores_the_reply_text_and_each_id_is_shown_once():
+    """The same error recovered the same way is one observation, whatever the reply said."""
+    from nous.cognitive.monitor import _recovery_pair_id
+
+    monitor, _heart, llm_client, _pairs = _monitor_with_learner({"verdict": "NO_ENTRY", "reason": "one-off"})
+    same = {"error": {"tool": "bash", "error": "exit 1"}, "recovery": ["read_file"]}
+    pairs = [{**same, "context": reply} for reply in ("first reply", "second reply", "third reply")]
+    pair_id = _recovery_pair_id(pairs[0])
+
+    await monitor._try_create_recovery_procedure("s1", pairs)
+
+    assert _recovery_pair_id(pairs[1]) == pair_id
+    assert _prompt_sent(llm_client).count(f"[{pair_id}]") == 1
+
+
+@pytest.mark.asyncio
+async def test_dedup_query_has_no_literal_none_when_the_description_is_missing():
+    parts = _build_learner()
+    learner, _brain, heart, _emb, llm_client = parts
+    summaries = _decision_cluster(parts)
+    llm_client.call.return_value = _mock_llm_response(
+        {**_llm_procedure_data(cited_ids=[summaries[0].id]), "description": None}
+    )
+
+    await learner.run_sleep_learning()
+
+    query = heart.find_similar_procedures.call_args[0][0]
+    assert "None" not in query.split()

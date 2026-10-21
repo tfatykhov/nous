@@ -255,9 +255,10 @@ class ProcedureLearner:
         self._embeddings = embeddings
         self._settings = settings
         self._llm = llm_client
-        # Lesson-gate outcomes of the current run_sleep_learning() call (reset at its start, so
-        # the monitor's recovery-path rejections between sleeps are logged but not reported).
-        self._gate_counts = {"no_entry": 0, "gate_rejected": 0, "confounded": 0}
+        # Lesson-gate outcomes and unusable LLM answers of the current run_sleep_learning() call
+        # (reset at its start, so the monitor's recovery-path ones between sleeps are logged but
+        # not reported).
+        self._gate_counts = {"no_entry": 0, "gate_rejected": 0, "confounded": 0, "llm_failed": 0}
 
     # ==================================================================
     # Public entry point
@@ -277,6 +278,7 @@ class ProcedureLearner:
                 "no_entry": 0,
                 "gate_rejected": 0,
                 "confounded": 0,
+                "llm_failed": 0,
             }
 
         max_total = self._settings.procedure_max_per_sleep
@@ -600,21 +602,24 @@ class ProcedureLearner:
                     logger.info("Retired weak procedure: %s (%s)", proc_detail.name, review_data.get("reason"))
                 elif action == "revise":
                     # Update description and patterns if provided
-                    # For now, retire and re-create with updated content
-                    revised_desc = review_data.get("revised_description") or proc_detail.description
-                    revised_patterns = review_data.get("revised_patterns") or proc_detail.core_patterns
+                    # For now, retire and re-create with updated content. The revision is
+                    # built first: a malformed answer leaves the procedure as it is.
+                    try:
+                        revised_input = ProcedureInput(
+                            name=proc_detail.name,
+                            domain=proc_detail.domain,
+                            description=review_data.get("revised_description") or proc_detail.description,
+                            goals=proc_detail.goals,
+                            core_patterns=_str_list(review_data.get("revised_patterns")) or proc_detail.core_patterns,
+                            core_tools=proc_detail.core_tools,
+                            core_concepts=proc_detail.core_concepts,
+                            implementation_notes=proc_detail.implementation_notes,
+                            tags=proc_detail.tags,
+                        )
+                    except ValidationError as exc:
+                        logger.info("Weak procedure revise skipped, malformed answer: %s (%s)", proc_detail.name, exc)
+                        continue
                     await self._heart.retire_procedure(proc_detail.id)
-                    revised_input = ProcedureInput(
-                        name=proc_detail.name,
-                        domain=proc_detail.domain,
-                        description=revised_desc,
-                        goals=proc_detail.goals,
-                        core_patterns=revised_patterns,
-                        core_tools=proc_detail.core_tools,
-                        core_concepts=proc_detail.core_concepts,
-                        implementation_notes=proc_detail.implementation_notes,
-                        tags=proc_detail.tags,
-                    )
                     await self._heart.store_procedure(revised_input)
                     logger.info("Revised weak procedure: %s (%s)", proc_detail.name, review_data.get("reason"))
                 elif action == "confounded":
@@ -692,9 +697,9 @@ class ProcedureLearner:
         prod "K-line = 0"). ``find_similar_procedures`` returns actual cosine
         similarity, against which a 0.85 near-duplicate floor is meaningful.
         """
-        name = procedure_data.get("name", "")
-        description = procedure_data.get("description", "")
-        patterns = " ".join(procedure_data.get("core_patterns", []))
+        name = procedure_data.get("name") or ""
+        description = procedure_data.get("description") or ""
+        patterns = " ".join(procedure_data.get("core_patterns") or [])
         query_text = f"{name} {description} {patterns}".strip()
 
         if not query_text:
@@ -720,13 +725,15 @@ class ProcedureLearner:
         )
 
         if not text:
+            self._gate_counts["llm_failed"] += 1
             return None
 
         try:
             result = parse_llm_json(text)
-            if isinstance(result, dict):
-                return result
-            return None
         except json.JSONDecodeError:
             logger.warning("LLM call returned invalid JSON")
-            return None
+            result = None
+        if isinstance(result, dict):
+            return result
+        self._gate_counts["llm_failed"] += 1
+        return None

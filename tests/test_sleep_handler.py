@@ -594,6 +594,36 @@ class TestProcedureStatsCountBothPathways:
         # Must be 2 + 3 = 5, not just 2
         assert emitted.data["procedures_created"] == 5
 
+    @pytest.mark.asyncio
+    async def test_lesson_gate_counts_reach_the_sleep_completed_event(self):
+        """A gate that rejects every extraction must be visible, not just logged."""
+        handler, brain, heart, bus, _ = _make_sleep_handler()
+        handler._phase_review_decisions = AsyncMock(return_value=True)
+        handler._phase_prune = AsyncMock(return_value=True)
+        handler._phase_compress = AsyncMock(return_value=True)
+        handler._phase_reflect = AsyncMock(return_value=True)
+
+        handler._procedure_learner = AsyncMock()
+        handler._procedure_learner.run_sleep_learning = AsyncMock(
+            return_value={
+                "decisions_learned": 0,
+                "episodes_learned": 0,
+                "weak_reviewed": 1,
+                "no_entry": 2,
+                "gate_rejected": 3,
+                "confounded": 1,
+                "llm_failed": 4,
+            }
+        )
+
+        await handler._run_sleep(_make_event("sleep_started"))
+
+        emitted = bus.emit.call_args[0][0]
+        assert emitted.data["procedures_no_entry"] == 2
+        assert emitted.data["procedures_gate_rejected"] == 3
+        assert emitted.data["procedures_confounded"] == 1
+        assert emitted.data["procedures_llm_failed"] == 4
+
 
 # ===========================================================================
 # TestStructuredReflection (Issue #233)
