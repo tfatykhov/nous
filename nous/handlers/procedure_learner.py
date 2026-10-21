@@ -21,6 +21,7 @@ import logging
 import math
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import UUID
 
 from pydantic import ValidationError
 
@@ -169,7 +170,8 @@ def _cited_evidence(evidence: object, allowed_ids: dict[str, str]) -> list[tuple
     """(input ID, its recorded outcome, observed outcome) for each evidence item citing an input ID.
 
     ``allowed_ids`` maps each input item ID to the outcome recorded for it. Only dict items with
-    a non-empty outcome count: a bare string is not a citation even if it names an ID.
+    a non-empty outcome count: a bare string is not a citation even if it names an ID. Each input
+    ID is kept once, with its first observed outcome.
     """
     if not isinstance(evidence, list):
         return []
@@ -179,7 +181,7 @@ def _cited_evidence(evidence: object, allowed_ids: dict[str, str]) -> list[tuple
             continue
         match = _resolve_citation(str(item.get("id") or ""), allowed_ids)
         observed = _one_line(item.get("outcome") or "")
-        if match and observed and (*match, observed) not in cited:
+        if match and observed and match[0] not in {item_id for item_id, _recorded, _observed in cited}:
             cited.append((*match, observed))
     return cited
 
@@ -753,7 +755,7 @@ class ProcedureLearner:
         if not neighbours:
             covering = None
         elif (closest := max(neighbours, key=lambda n: n.score)).score > _COVERED_COSINE:
-            covering = await self._heart.get_procedure(closest.id)
+            covering = await self._procedure_or_none(closest.id)
         else:
             covering = await self._covering_procedure(proc_input, neighbours)
         if covering is None:
@@ -782,7 +784,9 @@ class ProcedureLearner:
         self, proc_input: ProcedureInput, neighbours: list[ProcedureSummary]
     ) -> ProcedureDetail | None:
         """The neighbour the model says already teaches this lesson, or None (NEW, or no usable answer)."""
-        details = {str(n.id): await self._heart.get_procedure(n.id) for n in neighbours}
+        details = {str(n.id): d for n in neighbours if (d := await self._procedure_or_none(n.id))}
+        if not details:
+            return None
         existing = "\n".join(
             f"- [{pid}] {_one_line(d.name)}: {_one_line(d.description or '')}"
             f" | cue: {_one_line(d.goals[0] if d.goals else '')}"
@@ -806,6 +810,13 @@ class ProcedureLearner:
             logger.info("Covered check named %r, not a shown procedure: stored as new", answer.get("id"))
             return None
         return details[match[0]]
+
+    async def _procedure_or_none(self, procedure_id: UUID) -> ProcedureDetail | None:
+        """The procedure, or None if it can no longer be read (gone between the probe and the read)."""
+        try:
+            return await self._heart.get_procedure(procedure_id)
+        except ValueError:
+            return None
 
     async def _call_llm(self, prompt: str) -> dict[str, Any] | None:
         """Call Anthropic API and parse JSON response."""

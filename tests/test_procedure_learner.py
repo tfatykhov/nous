@@ -1488,3 +1488,60 @@ async def test_a_cluster_of_several_episodes_needs_two_of_them_cited():
     stats = await learner.run_sleep_learning()
 
     assert (stats["episodes_learned"], stats["gate_rejected"]) == (0, 1)
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: one line per cited ID, a vanished neighbour, a failed check
+# ---------------------------------------------------------------------------
+
+
+def test_cited_evidence_keeps_one_line_per_input_id_even_with_different_outcomes():
+    from nous.handlers.procedure_learner import _cited_evidence
+
+    a = "11111111-aaaa-4bbb-8ccc-000000000001"
+    cited = _cited_evidence(
+        [{"id": a, "outcome": "worked"}, {"id": a[:8], "outcome": "worked again"}], {a: "success"}
+    )
+    assert cited == [(a, "success", "worked")]
+
+
+@pytest.mark.asyncio
+async def test_an_id_cited_twice_takes_one_evidence_slot_of_a_covering_procedure():
+    learner, heart, llm_client, summaries, detail, extraction = _covered_setup(0.9, ["auto:decision_cluster"])
+    eight = [f"evidence: old-{i} (success) — seen" for i in range(8)]
+    heart.get_procedure.return_value = detail.model_copy(update={"implementation_notes": ["lesson: await it", *eight]})
+    first, second = summaries[0].id, summaries[1].id
+    extraction["evidence"] = [
+        {"id": str(first), "outcome": "a"},
+        {"id": str(first)[:8], "outcome": "b"},
+        {"id": str(second), "outcome": "c"},
+    ]
+    llm_client.call.return_value = _mock_llm_response(extraction)
+
+    await learner.run_sleep_learning()
+
+    lines = heart.append_procedure_notes.call_args[0][1]
+    assert [line.split(" ")[1] for line in lines] == [str(first), str(second)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("score", [0.9, 0.6])
+async def test_a_neighbour_gone_before_it_is_read_lets_the_procedure_be_stored(score):
+    learner, heart, llm_client, _summaries, _detail, extraction = _covered_setup(score, ["auto:decision_cluster"])
+    heart.get_procedure.side_effect = ValueError("Procedure not found")
+    llm_client.call.return_value = _mock_llm_response(extraction)
+
+    stats = await learner.run_sleep_learning()
+
+    assert (stats["decisions_learned"], stats["covered"]) == (1, 0)
+    assert llm_client.call.call_count == 1  # no check call without a neighbour to show
+
+
+@pytest.mark.asyncio
+async def test_a_failed_covered_check_counts_as_llm_failed_and_stores_the_procedure():
+    learner, heart, llm_client, _summaries, _detail, extraction = _covered_setup(0.6, ["auto:decision_cluster"])
+    _llm_answers(llm_client, extraction, "not json")
+
+    stats = await learner.run_sleep_learning()
+
+    assert (stats["decisions_learned"], stats["llm_failed"]) == (1, 1)
