@@ -10,7 +10,7 @@ transaction injection (P1-1).
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -586,10 +586,16 @@ class Heart:
         return result
 
     async def append_procedure_notes(
-        self, procedure_id: UUID, notes: list[str], session: AsyncSession | None = None
-    ) -> ProcedureDetail:
-        """Append implementation notes to a procedure; its other fields and stats are kept."""
-        return await self.procedures.append_notes(procedure_id, notes, session)
+        self,
+        procedure_id: UUID,
+        pick: Callable[[list[str]], list[str]],
+        session: AsyncSession | None = None,
+    ) -> list[str]:
+        """Append the notes ``pick`` chooses from the procedure's current ones; returns them.
+
+        Its other fields and stats are kept. ``pick`` sees the notes under a row lock.
+        """
+        return await self.procedures.append_notes(procedure_id, pick, session)
 
     async def activate_procedure(self, procedure_id: UUID, session: AsyncSession | None = None) -> ProcedureDetail:
         """Mark a procedure as activated."""

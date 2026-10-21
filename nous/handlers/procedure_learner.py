@@ -766,18 +766,20 @@ class ProcedureLearner:
         if not any(tag.startswith("auto:") for tag in covering.tags):
             logger.info("Lesson %r covered by %r, not auto-learned: nothing stored", proc_input.name, covering.name)
             return False
-        # Each cited input item once per procedure, up to the cap; the line's second word is its ID.
-        evidence = [note for note in covering.implementation_notes if note.startswith("evidence: ")]
-        cited = {note.split(" ")[1] for note in evidence}
-        new_lines = [
-            note for note in proc_input.implementation_notes
-            if note.startswith("evidence: ") and note.split(" ")[1] not in cited
-        ][: max(0, _MAX_EVIDENCE_NOTES - len(evidence))]
-        if new_lines:
-            await self._heart.append_procedure_notes(covering.id, new_lines)
-        logger.info(
-            "Lesson %r covered by %r: %d evidence line(s) added", proc_input.name, covering.name, len(new_lines)
-        )
+
+        def new_evidence(notes: list[str]) -> list[str]:
+            # Each cited input item once per procedure, up to the cap; the line's second word is its ID.
+            evidence = [note for note in notes if note.startswith("evidence: ")]
+            cited = {note.split(" ")[1] for note in evidence}
+            return [
+                note for note in proc_input.implementation_notes
+                if note.startswith("evidence: ") and note.split(" ")[1] not in cited
+            ][: max(0, _MAX_EVIDENCE_NOTES - len(evidence))]
+
+        # Picked from the notes under a row lock, not from `covering`: another pathway may be
+        # adding evidence to the same procedure.
+        added = await self._heart.append_procedure_notes(covering.id, new_evidence)
+        logger.info("Lesson %r covered by %r: %d evidence line(s) added", proc_input.name, covering.name, len(added))
         return False
 
     async def _covering_procedure(

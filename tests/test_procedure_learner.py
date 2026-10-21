@@ -1251,6 +1251,12 @@ def _llm_answers(llm_client, *answers) -> None:
     ]
 
 
+def _appended(heart, notes: list[str]) -> list[str]:
+    """What the learner appends to a procedure whose notes, read under the row lock, are ``notes``."""
+    _procedure_id, pick = heart.append_procedure_notes.call_args[0]
+    return pick(notes)
+
+
 def _covered_setup(score: float, tags: list[str]):
     """A 3-decision cluster whose extraction cites two decisions, and one probe hit at ``score``."""
     parts = _build_learner()
@@ -1280,9 +1286,24 @@ async def test_a_covering_auto_procedure_takes_only_evidence_it_does_not_cite_ye
     assert (stats["decisions_learned"], stats["covered"]) == (0, 1)
     assert llm_client.call.call_count == 1  # above 0.85: no check call
     heart.store_procedure.assert_not_called()
-    proc_id, lines = heart.append_procedure_notes.call_args[0]
-    assert proc_id == detail.id
+    assert heart.append_procedure_notes.call_args[0][0] == detail.id
+    lines = _appended(heart, ["lesson: await it", already])
     assert [line.split(" ")[1] for line in lines] == [str(summaries[1].id)]
+
+
+@pytest.mark.asyncio
+async def test_the_evidence_is_picked_from_the_locked_notes_not_the_earlier_read():
+    """Evidence another pathway added after the covering procedure was read takes its slots."""
+    learner, heart, llm_client, summaries, _detail, extraction = _covered_setup(0.9, ["auto:episode_lesson"])
+    llm_client.call.return_value = _mock_llm_response(extraction)
+
+    await learner.run_sleep_learning()
+
+    meanwhile = [f"evidence: {summaries[0].id} (success) — added meanwhile"]
+    meanwhile += [f"evidence: old-{i} (success) — seen" for i in range(8)]
+    lines = _appended(heart, ["lesson: await it", *meanwhile])
+    assert [line.split(" ")[1] for line in lines] == [str(summaries[1].id)]
+    assert _appended(heart, ["lesson: await it", *meanwhile, "evidence: old-8 (success) — seen"]) == []
 
 
 @pytest.mark.asyncio
@@ -1337,7 +1358,7 @@ async def test_a_covering_procedure_collects_at_most_ten_evidence_lines():
 
     await learner.run_sleep_learning()
 
-    assert len(heart.append_procedure_notes.call_args[0][1]) == 1
+    assert len(_appended(heart, ["lesson: await it", *nine])) == 1
 
 
 @pytest.mark.asyncio
@@ -1368,7 +1389,7 @@ async def test_a_covered_monitor_lesson_stores_nothing_and_resets_the_pairs():
     await monitor._try_create_recovery_procedure("s1", pairs)
 
     heart.store_procedure.assert_not_called()
-    assert heart.append_procedure_notes.call_args[0][1][0].startswith(f"evidence: {cited} (recovered)")
+    assert _appended(heart, detail.implementation_notes)[0].startswith(f"evidence: {cited} (recovered)")
     assert monitor._error_recovery_pairs["s1"] == []
     assert "s1" not in monitor._session_procedure_counts
 
@@ -1384,7 +1405,7 @@ async def test_a_model_note_cannot_pass_as_checked_evidence():
 
     await learner.run_sleep_learning()
 
-    lines = heart.append_procedure_notes.call_args[0][1]
+    lines = _appended(heart, ["lesson: await it"])
     assert [line.split(" ")[1] for line in lines] == [str(summaries[0].id), str(summaries[1].id)]
 
 
@@ -1520,7 +1541,7 @@ async def test_an_id_cited_twice_takes_one_evidence_slot_of_a_covering_procedure
 
     await learner.run_sleep_learning()
 
-    lines = heart.append_procedure_notes.call_args[0][1]
+    lines = _appended(heart, ["lesson: await it", *eight])
     assert [line.split(" ")[1] for line in lines] == [str(first), str(second)]
 
 

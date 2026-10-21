@@ -7,6 +7,7 @@ All methods follow Brain's session injection pattern (P1-1).
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -255,33 +256,50 @@ class ProcedureManager:
     # ------------------------------------------------------------------
 
     async def append_notes(
-        self, procedure_id: UUID, notes: list[str], session: AsyncSession | None = None
-    ) -> ProcedureDetail:
-        """Append implementation notes, leaving every other field and the stats as they are.
+        self,
+        procedure_id: UUID,
+        pick: Callable[[list[str]], list[str]],
+        session: AsyncSession | None = None,
+    ) -> list[str]:
+        """Append the notes ``pick`` chooses, leaving every other field and the stats as they are.
 
-        Unlike update_body, nothing is taken from an input model, so runtime_metadata (a
-        hand-set skip_until_scored, for one) and kind survive. The embedding is not
-        recomputed: the notes add evidence for the lesson, not a new lesson. Raises
-        ValueError for a strategy card.
+        ``pick`` gets the procedure's current notes, read under a row lock, and returns the
+        notes to append, so a choice that depends on them (an ID cited once, a cap) still holds
+        when two callers append to one procedure at once. Unlike update_body, nothing is taken
+        from an input model, so runtime_metadata (a hand-set skip_until_scored, for one) and
+        kind survive. The embedding is not recomputed: the notes add evidence for the lesson,
+        not a new lesson. Returns the notes appended. Raises ValueError for a strategy card.
         """
         if session is None:
             async with self.db.session() as session:
-                result = await self._append_notes(procedure_id, notes, session)
+                result = await self._append_notes(procedure_id, pick, session)
                 await session.commit()
                 return result
-        return await self._append_notes(procedure_id, notes, session)
+        return await self._append_notes(procedure_id, pick, session)
 
-    async def _append_notes(self, procedure_id: UUID, notes: list[str], session: AsyncSession) -> ProcedureDetail:
-        procedure = await self._get_procedure_orm(procedure_id, session)
+    async def _append_notes(
+        self, procedure_id: UUID, pick: Callable[[list[str]], list[str]], session: AsyncSession
+    ) -> list[str]:
+        # Locked and read fresh, not the session's copy of the row: pick() decides on these notes.
+        result = await session.execute(
+            select(Procedure)
+            .where(Procedure.id == procedure_id)
+            .where(Procedure.agent_id == self.agent_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        procedure = result.scalars().first()
         if procedure is None:
             raise ValueError(f"Procedure {procedure_id} not found")
         if is_strategy_card(procedure):
             raise ValueError(f"Procedure {procedure_id} is a strategy card: notes are not appended to it")
-        # A new list, not an in-place append: the ARRAY column only sees reassignment.
-        procedure.implementation_notes = [*(procedure.implementation_notes or []), *notes]
-        procedure.updated_at = datetime.now(UTC)
-        await session.flush()
-        return self._to_detail(procedure)
+        notes = pick(list(procedure.implementation_notes or []))
+        if notes:
+            # A new list, not an in-place append: the ARRAY column only sees reassignment.
+            procedure.implementation_notes = [*(procedure.implementation_notes or []), *notes]
+            procedure.updated_at = datetime.now(UTC)
+            await session.flush()
+        return notes
 
     # ------------------------------------------------------------------
     # activate()
