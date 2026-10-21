@@ -65,6 +65,9 @@ _PROCEDURE_JSON = """{{
   "implementation_notes": ["<edge cases, caveats>"]
 }}"""
 
+# Shared tail of every extraction prompt: the gate rules, then the two allowed answers.
+_GATED_OUTPUT = _LESSON_RULES + "\n\nOutput ONLY valid JSON, either the NO_ENTRY object or:\n" + _PROCEDURE_JSON
+
 _DECISION_CLUSTER_PROMPT = (
     """You are analyzing a cluster of similar reviewed decisions to extract a reusable procedure.
 
@@ -72,12 +75,7 @@ Decisions in this cluster, one per line as [ID] description (recorded outcome):
 {decisions}
 
 """
-    + _LESSON_RULES
-    + """
-
-Output ONLY valid JSON, either the NO_ENTRY object or:
-"""
-    + _PROCEDURE_JSON
+    + _GATED_OUTPUT
 )
 
 _EPISODE_LESSON_PROMPT = (
@@ -87,12 +85,7 @@ Lessons in this cluster, one per line as [episode ID] lesson (episode outcome):
 {lessons}
 
 """
-    + _LESSON_RULES
-    + """
-
-Output ONLY valid JSON, either the NO_ENTRY object or:
-"""
-    + _PROCEDURE_JSON
+    + _GATED_OUTPUT
 )
 
 _WEAK_REVIEW_PROMPT = """You are reviewing an auto-learned procedure that is underperforming.
@@ -123,12 +116,7 @@ Error→recovery pairs, one per line as [ID] error → recovery tools | response
 {pairs}
 
 """
-    + _LESSON_RULES
-    + """
-
-Output ONLY valid JSON, either the NO_ENTRY object or:
-"""
-    + _PROCEDURE_JSON
+    + _GATED_OUTPUT
 )
 
 

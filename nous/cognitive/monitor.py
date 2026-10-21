@@ -281,14 +281,13 @@ class MonitorEngine:
         from nous.handlers.procedure_learner import _MONITOR_RECOVERY_PROMPT, _one_line
 
         shown = pairs[:5]
-        lines = []
-        for pair in shown:
-            lines.append(
-                f"- [{_recovery_pair_id(pair)}] {pair['error']['tool']}: {_one_line(pair['error']['error'][:50])}"
-                f" → {','.join(pair['recovery'])} | {_one_line(pair.get('context', ''))}"
-            )
+        pairs_text = "\n".join(
+            f"- [{_recovery_pair_id(pair)}] {pair['error']['tool']}: {_one_line(pair['error']['error'][:50])}"
+            f" → {','.join(pair['recovery'])} | {_one_line(pair.get('context', ''))}"
+            for pair in shown
+        )
 
-        result = await self._procedure_learner._call_llm(_MONITOR_RECOVERY_PROMPT.format(pairs="\n".join(lines)))
+        result = await self._procedure_learner._call_llm(_MONITOR_RECOVERY_PROMPT.format(pairs=pairs_text))
         proc_input = result and self._procedure_learner._gated_procedure_input(
             result, dict.fromkeys(map(_recovery_pair_id, shown), "recovered"), "auto:monitor_recovery"
         )
