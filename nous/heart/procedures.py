@@ -16,8 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain.embeddings import EmbeddingProvider
 from nous.heart.schemas import (
+    JOB_LESSON_KIND,
     STRATEGY_CARD_KIND,
     EvolutionCandidate,
+    JobLesson,
     ProcedureDetail,
     ProcedureInput,
     ProcedureOutcome,
@@ -660,6 +662,110 @@ class ProcedureManager:
             if (p := procedures.get(pid)) is not None
         ]
 
+    # ------------------------------------------------------------------
+    # Job lessons — read per job (runtime_metadata.job.schedule_id)
+    # ------------------------------------------------------------------
+
+    async def list_job_lessons(
+        self,
+        schedule_id: str | None = None,
+        *,
+        active: bool | None = True,
+        session: AsyncSession | None = None,
+    ) -> list[JobLesson]:
+        """This agent's job lessons, newest first.
+
+        One job's with ``schedule_id``, every job's without. ``active`` keeps the
+        active (True) or the retired (False) ones; None keeps both.
+        """
+        if session is None:
+            async with self.db.session() as session:
+                return await self._list_job_lessons(schedule_id, active, session)
+        return await self._list_job_lessons(schedule_id, active, session)
+
+    async def _list_job_lessons(
+        self, schedule_id: str | None, active: bool | None, session: AsyncSession
+    ) -> list[JobLesson]:
+        query = select(Procedure).where(Procedure.agent_id == self.agent_id).where(Procedure.kind == JOB_LESSON_KIND)
+        if schedule_id is not None:
+            query = query.where(Procedure.runtime_metadata["job"]["schedule_id"].astext == schedule_id)
+        if active is not None:
+            query = query.where(Procedure.active == active)
+        result = await session.execute(query.order_by(Procedure.created_at.desc(), Procedure.id))
+        return [lesson for row in result.scalars().all() if (lesson := self._to_job_lesson(row)) is not None]
+
+    async def find_similar_job_lessons(
+        self,
+        query: str,
+        schedule_id: str,
+        limit: int = 3,
+        session: AsyncSession | None = None,
+    ) -> list[ProcedureSummary]:
+        """Raw-cosine nearest active job lessons of one job (``schedule_id``) to ``query``.
+
+        Scored as find_similar_for_selection scores (``score`` = raw cosine), over
+        that job's lessons alone, so neither another job's lessons nor how-to
+        procedures use up the LIMIT window. Returns [] when embeddings are
+        unavailable or the embed fails.
+        """
+        if session is None:
+            async with self.db.session() as session:
+                return await self._find_similar_job_lessons(query, schedule_id, limit, session)
+        return await self._find_similar_job_lessons(query, schedule_id, limit, session)
+
+    async def _find_similar_job_lessons(
+        self, query: str, schedule_id: str, limit: int, session: AsyncSession
+    ) -> list[ProcedureSummary]:
+        if not self.embeddings:
+            return []
+        try:
+            embedding = await self.embeddings.embed(query)
+        except Exception:
+            logger.warning("Embedding generation failed for the job lesson probe")
+            return []
+
+        embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
+        # As in _find_similar_for_selection: the filters are post-applied to the approximate walk.
+        from nous.heart.search import set_local_ef_search
+        await set_local_ef_search(session, 100)
+        rows = (await session.execute(text("""
+            SELECT id, 1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
+            FROM heart.procedures
+            WHERE agent_id = :agent_id AND active = true AND embedding IS NOT NULL
+              AND kind = :job_lesson_kind AND runtime_metadata->'job'->>'schedule_id' = :schedule_id
+            ORDER BY embedding <=> CAST(:embedding AS vector) LIMIT :limit
+        """), {
+            "embedding": embedding_str,
+            "agent_id": self.agent_id,
+            "job_lesson_kind": JOB_LESSON_KIND,
+            "schedule_id": schedule_id,
+            "limit": limit,
+        })).all()
+        if not rows:
+            return []
+
+        ids = [r.id for r in rows]
+        sims = {r.id: float(r.similarity) for r in rows}
+        proc_result = await session.execute(select(Procedure).where(Procedure.id.in_(ids)))
+        procedures = {p.id: p for p in proc_result.scalars().all()}
+
+        return [
+            ProcedureSummary(
+                id=p.id,
+                name=p.name,
+                domain=p.domain,
+                description=p.description,
+                activation_count=p.activation_count or 0,
+                effectiveness=self._compute_effectiveness(p),
+                score=sims.get(p.id),
+                kind=p.kind,
+                core_patterns=list(p.core_patterns or []),
+                implementation_notes=list(p.implementation_notes or []),
+            )
+            for pid in ids
+            if (p := procedures.get(pid)) is not None
+        ]
+
     async def similarities(
         self,
         query: str,
@@ -944,20 +1050,41 @@ class ProcedureManager:
     # retire()
     # ------------------------------------------------------------------
 
-    async def retire(self, procedure_id: UUID, session: AsyncSession | None = None) -> None:
-        """Retire a procedure (set active=false)."""
+    async def retire(
+        self, procedure_id: UUID, session: AsyncSession | None = None, *, reason: dict | None = None
+    ) -> None:
+        """Retire a procedure (set active=false).
+
+        With ``reason``, it is kept as ``runtime_metadata["retired"]``, beside the
+        row's other runtime metadata (a job lesson's job record, for one).
+        """
         if session is None:
             async with self.db.session() as session:
-                await self._retire(procedure_id, session)
+                await self._retire(procedure_id, session, reason)
                 await session.commit()
                 return
-        await self._retire(procedure_id, session)
+        await self._retire(procedure_id, session, reason)
 
-    async def _retire(self, procedure_id: UUID, session: AsyncSession) -> None:
-        procedure = await self._get_procedure_orm(procedure_id, session)
+    async def _retire(self, procedure_id: UUID, session: AsyncSession, reason: dict | None = None) -> None:
+        if reason is None:
+            procedure = await self._get_procedure_orm(procedure_id, session)
+        else:
+            # Locked and read fresh, not the session's copy of the row: the reason is
+            # added to the runtime_metadata the row holds now.
+            result = await session.execute(
+                select(Procedure)
+                .where(Procedure.id == procedure_id)
+                .where(Procedure.agent_id == self.agent_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            procedure = result.scalars().first()
         if procedure is None:
             raise ValueError(f"Procedure {procedure_id} not found")
         procedure.active = False
+        if reason is not None:
+            # A new dict, not an in-place update: the JSONB column only sees reassignment.
+            procedure.runtime_metadata = {**(procedure.runtime_metadata or {}), "retired": reason}
         await session.flush()
 
     # ------------------------------------------------------------------
@@ -1279,4 +1406,25 @@ class ProcedureManager:
             active=procedure.active if procedure.active is not None else True,
             created_at=procedure.created_at,
             kind=procedure.kind,
+        )
+
+    def _to_job_lesson(self, procedure: Procedure) -> JobLesson | None:
+        """Convert a job-lesson ORM row to a JobLesson; None for a row without created_at."""
+        if procedure.created_at is None:
+            return None
+        metadata = procedure.runtime_metadata or {}
+        job = metadata.get("job") or {}
+        prefix = "lesson: "
+        lesson = next((n.removeprefix(prefix) for n in procedure.implementation_notes or [] if n.startswith(prefix)), "")
+        return JobLesson(
+            id=procedure.id,
+            schedule_id=job.get("schedule_id") or "",
+            name=procedure.name,
+            cue=(procedure.goals or [""])[0],
+            lesson=lesson,
+            learned_from_run=job.get("learned_from_run"),
+            baseline=job.get("baseline"),
+            retired=metadata.get("retired"),
+            active=procedure.active if procedure.active is not None else True,
+            created_at=procedure.created_at,
         )
