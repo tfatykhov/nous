@@ -612,6 +612,7 @@ class TestProcedureStatsCountBothPathways:
                 "no_entry": 2,
                 "gate_rejected": 3,
                 "confounded": 1,
+                "covered": 5,
                 "llm_failed": 4,
             }
         )
@@ -623,6 +624,7 @@ class TestProcedureStatsCountBothPathways:
             "no_entry": 2,
             "gate_rejected": 3,
             "confounded": 1,
+            "covered": 5,
             "llm_failed": 4,
         }
 

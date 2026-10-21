@@ -394,3 +394,50 @@ async def test_get_low_effectiveness_ignores_malformed_skip_until_scored(heart, 
     ids = {p.id for p in low}
     assert other.id in ids, "One malformed row must not hide another procedure's finding"
     assert bad.id in ids, "A malformed value is ignored, so the procedure is still reported"
+
+
+# ---------------------------------------------------------------------------
+# append_notes: evidence for a lesson the procedure already teaches
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only  # array columns
+async def test_append_notes_keeps_the_body_stats_and_runtime_metadata(heart, session):
+    """Only implementation_notes change: a hand-set skip_until_scored and the stats survive."""
+    from sqlalchemy import text
+
+    detail = await heart.store_procedure(_procedure_input(name="Covered lesson procedure"), session=session)
+    await heart.record_procedure_outcome(detail.id, "success", session=session)
+    await _set_runtime_metadata(session, detail.id, {"skip_until_scored": 10})
+
+    updated = await heart.append_procedure_notes(detail.id, ["evidence: e-1 (success) — it worked"], session=session)
+
+    assert updated.implementation_notes == ["Always run tests before committing", "evidence: e-1 (success) — it worked"]
+    assert updated.success_count == 1
+    assert (updated.description, updated.goals, updated.tags) == (detail.description, detail.goals, detail.tags)
+    row = (
+        await session.execute(
+            text("SELECT implementation_notes, runtime_metadata FROM heart.procedures WHERE id = :id"),
+            {"id": detail.id},
+        )
+    ).one()
+    assert row.implementation_notes == updated.implementation_notes
+    assert row.runtime_metadata == {"skip_until_scored": 10}
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only  # array columns
+async def test_append_notes_refuses_a_strategy_card(heart, session):
+    from nous.heart.schemas import STRATEGY_CARD_KIND
+
+    card = await heart.store_procedure(
+        _procedure_input(name="A strategy card", kind=STRATEGY_CARD_KIND), session=session
+    )
+
+    with pytest.raises(ValueError, match="strategy card"):
+        await heart.append_procedure_notes(card.id, ["evidence: e-1 (success) — it worked"], session=session)
+
+    assert (await heart.get_procedure(card.id, session=session)).implementation_notes == [
+        "Always run tests before committing"
+    ]

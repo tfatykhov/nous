@@ -40,13 +40,13 @@ A procedure is stored only if the cue and lesson are non-empty and at least one 
 
 The gate checks that the evidence is a real input item, not that the recorded outcome is true. Decision outcomes come from reviews, and conversation episodes are closed as `success`.
 
-`run_sleep_learning()` returns `no_entry`, `gate_rejected`, `confounded` (weak review) and `llm_failed` (no answer, an answer that isn't a JSON object, or a weak-review revision with fields of the wrong type) for each sleep. The `sleep_completed` event and the generalize log line carry them, the event as one `procedure_gate` object. They are kept out of the consolidation audit's attempted-mutation total. If `procedures_created` stays at 0 while `gate_rejected` or `llm_failed` is high, the gate or the model's answers are blocking learning.
+`run_sleep_learning()` returns `no_entry`, `gate_rejected`, `confounded` (weak review), `covered` (see below) and `llm_failed` (no answer, an answer that isn't a JSON object, or a weak-review revision with fields of the wrong type) for each sleep. The `sleep_completed` event and the generalize log line carry them, the event as one `procedure_gate` object. They are kept out of the consolidation audit's attempted-mutation total. If `procedures_created` stays at 0 while `gate_rejected` or `llm_failed` is high, the gate or the model's answers are blocking learning; while `covered` is high, the lessons are already stored.
 
 ## Lifecycle
 
 - **Reinforcement:** Procedures in context get `activate()` + `record_outcome()` in post_turn based on turn success/failure
 - **Weak review:** During sleep, procedures with effectiveness < 0.30 or inactive 30+ days get LLM review → keep/revise/retire/confounded. `confounded` (the effectiveness can't be attributed to the procedure) keeps it as is. `revise` retires the procedure and stores the revision; a malformed revision leaves the procedure unchanged.
-- **Dedup:** Before creating any procedure, search existing at >0.85 similarity on the gated procedure's name, description and patterns. Skip if match found.
+- **Already covered:** Before storing a gated procedure (any pathway), probe the 3 closest active how-to procedures by cosine, on the text a stored row embeds (all body fields), so the cosines compare with stored rows. A closest one above 0.85 covers it without an LLM call. Neighbours from 0.5 are shown to the LLM (`[ID] name: description | cue | lesson`), which answers `{"verdict": "COVERED", "id": ...}` or `{"verdict": "NEW"}`; NEW, an ID it wasn't shown or no usable answer stores the new procedure. A covered lesson is counted as `covered` and stores nothing new. If the covering procedure is auto-learned (an `auto:` tag), its new evidence lines are appended to it (each input ID once, at most 10 evidence lines per procedure; nothing else changes, not even the embedding). A skill or hand-written procedure is left as it is.
 
 ## Caps
 

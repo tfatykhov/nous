@@ -585,6 +585,12 @@ class Heart:
             )
         return result
 
+    async def append_procedure_notes(
+        self, procedure_id: UUID, notes: list[str], session: AsyncSession | None = None
+    ) -> ProcedureDetail:
+        """Append implementation notes to a procedure; its other fields and stats are kept."""
+        return await self.procedures.append_notes(procedure_id, notes, session)
+
     async def activate_procedure(self, procedure_id: UUID, session: AsyncSession | None = None) -> ProcedureDetail:
         """Mark a procedure as activated."""
         return await self.procedures.activate(procedure_id, session)

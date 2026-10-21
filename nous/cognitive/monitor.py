@@ -297,12 +297,12 @@ class MonitorEngine:
         proc_input = self._procedure_learner._gated_procedure_input(
             result, dict.fromkeys(shown, "recovered"), "auto:monitor_recovery"
         )
-        if proc_input is None or await self._procedure_learner._is_duplicate(proc_input.model_dump()):
-            # Nothing stored: start over, so the next attempt waits for new pairs
-            # instead of asking again about the same ones on every recovery turn.
+        if proc_input is None or not await self._procedure_learner._store_unless_covered(proc_input):
+            # Nothing stored (declined, rejected or covered by an existing procedure): start
+            # over, so the next attempt waits for new pairs instead of asking again about the
+            # same ones on every recovery turn.
             self._error_recovery_pairs[session_id] = []
             return
-        await self._procedure_learner._heart.store_procedure(proc_input)
         count = self._session_procedure_counts.get(session_id, 0)
         self._session_procedure_counts[session_id] = count + 1
         logger.info("Created recovery procedure from %d error→recovery pairs", len(pairs))

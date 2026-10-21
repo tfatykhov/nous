@@ -251,6 +251,39 @@ class ProcedureManager:
         return self._to_detail(procedure)
 
     # ------------------------------------------------------------------
+    # append_notes() — evidence for a lesson the procedure already teaches
+    # ------------------------------------------------------------------
+
+    async def append_notes(
+        self, procedure_id: UUID, notes: list[str], session: AsyncSession | None = None
+    ) -> ProcedureDetail:
+        """Append implementation notes, leaving every other field and the stats as they are.
+
+        Unlike update_body, nothing is taken from an input model, so runtime_metadata (a
+        hand-set skip_until_scored, for one) and kind survive. The embedding is not
+        recomputed: the notes add evidence for the lesson, not a new lesson. Raises
+        ValueError for a strategy card.
+        """
+        if session is None:
+            async with self.db.session() as session:
+                result = await self._append_notes(procedure_id, notes, session)
+                await session.commit()
+                return result
+        return await self._append_notes(procedure_id, notes, session)
+
+    async def _append_notes(self, procedure_id: UUID, notes: list[str], session: AsyncSession) -> ProcedureDetail:
+        procedure = await self._get_procedure_orm(procedure_id, session)
+        if procedure is None:
+            raise ValueError(f"Procedure {procedure_id} not found")
+        if is_strategy_card(procedure):
+            raise ValueError(f"Procedure {procedure_id} is a strategy card: notes are not appended to it")
+        # A new list, not an in-place append: the ARRAY column only sees reassignment.
+        procedure.implementation_notes = [*(procedure.implementation_notes or []), *notes]
+        procedure.updated_at = datetime.now(UTC)
+        await session.flush()
+        return self._to_detail(procedure)
+
+    # ------------------------------------------------------------------
     # activate()
     # ------------------------------------------------------------------
 
