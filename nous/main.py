@@ -786,6 +786,16 @@ async def create_components(settings: Settings) -> dict:
             except ImportError:
                 logger.debug("ProcedureLearner not available yet")
 
+        # Job lessons: learn from the bad runs of recurring background jobs (needs the learner and sleep)
+        if settings.job_lessons_enabled:
+            if procedure_learner is not None and sleep_handler is not None:
+                from nous.handlers.job_lessons import JobLessonLearner
+
+                sleep_handler._job_lessons = JobLessonLearner(learner=procedure_learner, heart=heart, settings=settings)
+                logger.info("Job lessons: JobLessonLearner wired into sleep handler")
+            else:
+                logger.warning("NOUS_JOB_LESSONS_ENABLED needs procedure learning and sleep: job lessons stay off")
+
         try:
             from nous.handlers.decision_reviewer import DecisionReviewer
 

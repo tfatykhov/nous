@@ -1572,3 +1572,72 @@ class TestRunPhaseRecordsErrorOnFalse:
         finish_calls = [c for c in recorder.finish.call_args_list if c[0][0] == 77]
         assert error_calls, "recorder.error must be called for stale_scan returning False"
         assert not finish_calls, "recorder.finish must NOT be called for stale_scan returning False"
+
+
+class TestJobLessonsPhase:
+    """The optional job lesson phase: a no-op without a learner, audited through procedures_created."""
+
+    @pytest.mark.asyncio
+    async def test_no_job_lessons_learner_is_a_no_op_true(self):
+        handler, *_ = _make_sleep_handler()
+        handler._job_lessons = None
+        stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        assert await handler._phase_job_lessons(stats) is True
+        assert stats == {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+
+    @pytest.mark.asyncio
+    async def test_the_phase_sums_learned_into_procedures_created_and_nests_the_counts(self):
+        handler, *_ = _make_sleep_handler()
+        handler._job_lessons = AsyncMock()
+        handler._job_lessons.run_sleep = AsyncMock(
+            return_value={
+                "learned": 2,
+                "covered": 1,
+                "no_entry": 0,
+                "gate_rejected": 0,
+                "llm_failed": 0,
+                "retired": 1,
+                "kept": 0,
+            }
+        )
+        stats = {"facts_created": 0, "procedures_created": 1, "censors_retired": 0}
+        assert await handler._phase_job_lessons(stats) is True
+        assert stats["procedures_created"] == 3 and stats["job_lessons"]["retired"] == 1
+        ints = {k for k, v in stats.items() if isinstance(v, int)}
+        assert ints == {"facts_created", "procedures_created", "censors_retired"}
+
+    @pytest.mark.asyncio
+    async def test_a_failing_learner_returns_false_and_leaves_the_counts(self):
+        handler, *_ = _make_sleep_handler()
+        handler._job_lessons = AsyncMock()
+        handler._job_lessons.run_sleep = AsyncMock(side_effect=RuntimeError("boom"))
+        stats = {"facts_created": 0, "procedures_created": 4, "censors_retired": 0}
+        assert await handler._phase_job_lessons(stats) is False
+        assert stats["procedures_created"] == 4 and "job_lessons" not in stats
+
+    @pytest.mark.asyncio
+    async def test_the_phase_runs_right_after_generalize_only_when_configured(self):
+        for learner, expected in ((AsyncMock(), True), (None, False)):
+            handler, brain, heart, bus, _ = _make_sleep_handler()
+            for name in (
+                "review_decisions",
+                "prune",
+                "compress",
+                "reflect",
+                "resolve_contradictions",
+                "sweep_key_conflicts",
+                "graph_densification",
+                "recover_abandoned_episodes",
+                "generalize",
+                "evolve_rubric",
+                "prune_hub_snapshots",
+            ):
+                setattr(handler, f"_phase_{name}", AsyncMock(return_value=True))
+            handler._job_lessons = learner
+            if learner is not None:
+                learner.run_sleep = AsyncMock(return_value={"learned": 0})
+            await handler._run_sleep(_make_event("sleep_started"))
+            done = bus.emit.call_args[0][0].data["phases_completed"]
+            assert ("job_lessons" in done) is expected
+            if expected:
+                assert done.index("job_lessons") == done.index("generalize") + 1

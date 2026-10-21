@@ -1592,6 +1592,10 @@ class Settings(BaseSettings):
     # blocking.
     procedure_recency_days: int = 30
 
+    # Job lessons: learn from the bad runs of recurring background jobs (lands dark)
+    job_lessons_enabled: bool = False
+    job_lessons_per_sleep: int = Field(default=2, ge=0)
+
     # F037: Utility-Boosted Procedure Retrieval
     procedure_utility_boost: bool = True
     procedure_utility_alpha: float = 0.15

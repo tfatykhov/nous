@@ -358,6 +358,7 @@ class SleepHandler:
         # cleans up after completion. Standard asyncio idiom.
         self._pending_emits: set[asyncio.Task] = set()
         self._procedure_learner = None  # F012: Set externally if enabled
+        self._job_lessons = None  # Job lessons: set externally if enabled
         self._rubric_evolver = None  # F024-3b: Set externally if enabled
         self._graph_densifier = None  # F040: Set externally if enabled
         self._episode_summarizer = None  # F060: Set externally if enabled
@@ -710,6 +711,21 @@ class SleepHandler:
                 )
                 if success:
                     phases_completed.append("generalize")
+
+            # Optional: registered only when the job lesson learner is wired (flag off = no phase at all).
+            if not self._interrupted and self._job_lessons is not None:
+                success = await self._run_phase(
+                    "job_lessons",
+                    lambda: self._run_audited_phase(
+                        "job_lessons",
+                        "create_proc",
+                        lambda: self._phase_job_lessons(sleep_stats),
+                        sleep_stats,
+                        ("procedures_created",),
+                    ),
+                )
+                if success:
+                    phases_completed.append("job_lessons")
 
             if not self._interrupted:
                 success = await self._run_phase(
@@ -2592,6 +2608,28 @@ class SleepHandler:
         else:
             logger.debug("Sleep phase: generalize (no procedure learner configured)")
             return True
+
+    async def _phase_job_lessons(self, sleep_stats: dict) -> bool:
+        """Learn lessons from the bad runs of recurring background jobs; retire lessons that did not help."""
+        if self._job_lessons is None:
+            logger.debug("Sleep phase: job_lessons (no learner configured)")
+            return True
+        try:
+            stats = await self._job_lessons.run_sleep()
+            sleep_stats["procedures_created"] += stats.get("learned", 0)
+            # Nested, not flat ints: the consolidation audit sums every top-level int.
+            keys = ("learned", "covered", "no_entry", "gate_rejected", "llm_failed", "retired", "kept")
+            counts = {key: stats.get(key, 0) for key in keys}
+            sleep_stats["job_lessons"] = counts
+            logger.info(
+                "Sleep job lessons: %d learned, %d covered, %d no_entry, %d gate_rejected, "
+                "%d llm_failed, %d retired, %d kept",
+                *counts.values(),
+            )
+            return True
+        except Exception:
+            logger.warning("Job lessons phase failed", exc_info=True)
+            return False
 
     async def _phase_evolve_rubric(self, sleep_stats: dict) -> bool:
         """Phase 6: Rubric evolution — adjust weights based on outcome correlations."""
