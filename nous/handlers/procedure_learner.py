@@ -83,6 +83,8 @@ _DECISION_CLUSTER_PROMPT = (
 Decisions in this cluster, one per line as [ID] description (recorded outcome):
 {decisions}
 
+Cite each decision that shows the lesson. A lesson that only one decision shows is a one-off: answer NO_ENTRY.
+
 """
     + _GATED_OUTPUT
 )
@@ -92,6 +94,8 @@ _EPISODE_LESSON_PROMPT = (
 
 Lessons in this cluster, one per line as [episode ID] lesson (episode outcome):
 {lessons}
+
+Cite each episode that shows the lesson. A lesson that only one episode shows is a one-off: answer NO_ENTRY.
 
 """
     + _GATED_OUTPUT
@@ -196,11 +200,14 @@ def _resolve_citation(ref: str, allowed_ids: dict[str, str]) -> tuple[str, str] 
     return by_lower[matches[0]] if len(matches) == 1 else None
 
 
-def _passes_lesson_gate(data: dict[str, Any], allowed_ids: dict[str, str]) -> tuple[bool, str]:
+def _passes_lesson_gate(
+    data: dict[str, Any], allowed_ids: dict[str, str], min_sources: int = 1
+) -> tuple[bool, str]:
     """Hard gate on an extracted procedure: (passes, reason when it does not).
 
     Rejects an entry whose cue or lesson is empty, whose evidence is empty, or whose
-    evidence cites no ID that was actually in the input (fabricated evidence).
+    evidence cites fewer than ``min_sources`` distinct IDs that were actually in the input
+    (fabricated evidence, or a one-off). Two spellings of one ID are one source.
     """
     for field in ("cue", "lesson"):
         value = data.get(field)
@@ -208,8 +215,12 @@ def _passes_lesson_gate(data: dict[str, Any], allowed_ids: dict[str, str]) -> tu
             return False, f"empty {field}"
     if not isinstance(data.get("evidence"), list) or not data["evidence"]:
         return False, "empty evidence"
-    if not _cited_evidence(data["evidence"], allowed_ids):
+    cited = _cited_evidence(data["evidence"], allowed_ids)
+    if not cited:
         return False, "evidence cites no input item ID with an observed outcome"
+    sources = len({item_id for item_id, _recorded, _observed in cited})
+    if sources < min_sources:
+        return False, f"evidence cites {sources} input item(s), {min_sources} needed"
     return True, ""
 
 
@@ -434,7 +445,10 @@ class ProcedureLearner:
                 if not procedure_data:
                     continue
 
-                proc_input = self._gated_procedure_input(procedure_data, allowed_ids, "auto:decision_cluster")
+                # A lesson seen in one decision is a one-off: cite two when there are two.
+                proc_input = self._gated_procedure_input(
+                    procedure_data, allowed_ids, "auto:decision_cluster", min_sources=min(2, len(allowed_ids))
+                )
                 if proc_input is None:
                     continue
 
@@ -555,7 +569,10 @@ class ProcedureLearner:
                 if not procedure_data:
                     continue
 
-                proc_input = self._gated_procedure_input(procedure_data, allowed_ids, "auto:episode_lesson")
+                # Lessons of one episode are one source; cite two episodes when there are two.
+                proc_input = self._gated_procedure_input(
+                    procedure_data, allowed_ids, "auto:episode_lesson", min_sources=min(2, len(allowed_ids))
+                )
                 if proc_input is None:
                     continue
 
@@ -665,11 +682,12 @@ class ProcedureLearner:
     # ==================================================================
 
     def _gated_procedure_input(
-        self, data: dict[str, Any], allowed_ids: dict[str, str], source_tag: str
+        self, data: dict[str, Any], allowed_ids: dict[str, str], source_tag: str, min_sources: int = 1
     ) -> ProcedureInput | None:
         """Apply the lesson gate to an extracted procedure; the input to store, or None.
 
-        ``allowed_ids`` maps each input item ID shown to the model to its recorded outcome.
+        ``allowed_ids`` maps each input item ID shown to the model to its recorded outcome, and
+        the evidence must cite ``min_sources`` of them.
         NO_ENTRY and gate rejections are logged and counted. The cue leads the goals, and the
         lesson and the cited evidence (fabricated citations dropped) lead the implementation notes.
         """
@@ -677,7 +695,7 @@ class ProcedureLearner:
             self._gate_counts["no_entry"] += 1
             logger.info("Lesson gate (%s): NO_ENTRY, %s", source_tag, data.get("reason"))
             return None
-        passed, reason = _passes_lesson_gate(data, allowed_ids)
+        passed, reason = _passes_lesson_gate(data, allowed_ids, min_sources)
         if not passed:
             self._gate_counts["gate_rejected"] += 1
             logger.info("Lesson gate (%s): rejected %r, %s", source_tag, data.get("name"), reason)

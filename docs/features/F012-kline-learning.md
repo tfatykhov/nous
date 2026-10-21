@@ -36,7 +36,7 @@ Each input item is shown to the LLM on one line with an ID: the decision or epis
 - `lesson`: the change in behaviour (stored in `implementation_notes` as `lesson: …`);
 - `evidence`: a list of `{"id", "outcome"}` citing input IDs (stored as `evidence: <id> (<recorded outcome>) — <observed outcome>` lines).
 
-A procedure is stored only if the cue and lesson are non-empty and at least one evidence item cites an ID from the same prompt (exactly, or a unique 8+ character prefix of a UUID). Citations of other IDs are dropped. `NO_ENTRY` stores nothing and is preferred over an invented lesson.
+A procedure is stored only if the cue and lesson are non-empty and at least one evidence item cites an ID from the same prompt (exactly, or a unique 8+ character prefix of a UUID). Citations of other IDs are dropped. A decision or episode cluster with two or more distinct IDs needs evidence citing two of them (lessons of one episode share its ID, and two spellings of one ID count once): a lesson only one item shows is a one-off. A monitor entry needs one. `NO_ENTRY` stores nothing and is preferred over an invented lesson.
 
 The gate checks that the evidence is a real input item, not that the recorded outcome is true. Decision outcomes come from reviews, and conversation episodes are closed as `success`.
 
