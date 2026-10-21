@@ -215,9 +215,13 @@ def _mock_llm_response(data: dict) -> MagicMock:
     return response
 
 
-def _llm_procedure_data(name: str = "Async DB Pattern") -> dict:
+def _llm_procedure_data(name: str = "Async DB Pattern", cited_id: object = None) -> dict:
+    """A complete lesson-gate entry; ``cited_id`` is the input item its evidence cites."""
     return {
         "name": name,
+        "cue": "Writing a new database call",
+        "lesson": "Use async/await for every query",
+        "evidence": [{"id": str(cited_id), "outcome": "Async calls kept the loop responsive"}],
         "domain": "architecture",
         "description": "Use async/await for all database operations",
         "goals": ["Ensure non-blocking DB access"],
@@ -320,7 +324,9 @@ async def test_decision_cluster_creates_procedure():
     ]
 
     # LLM returns procedure data
-    llm_client.call.return_value = _mock_llm_response(_llm_procedure_data())
+    llm_client.call.return_value = _mock_llm_response(
+        _llm_procedure_data(cited_id=summaries[0].id)
+    )
 
     # No duplicate
     heart.search_procedures.return_value = []
@@ -454,7 +460,9 @@ async def test_episode_lesson_clustering():
     ]
 
     # LLM returns procedure
-    llm_client.call.return_value = _mock_llm_response(_llm_procedure_data("Episode Lesson"))
+    llm_client.call.return_value = _mock_llm_response(
+        _llm_procedure_data("Episode Lesson", cited_id=ep_summaries[0].id)
+    )
 
     # No duplicate
     heart.search_procedures.return_value = []
@@ -537,7 +545,9 @@ async def test_dedup_uses_cosine_probe_not_rrf():
         _similar_embedding(base, 0.005),
         _similar_embedding(base, 0.01),
     ]
-    llm_client.call.return_value = _mock_llm_response(_llm_procedure_data())
+    llm_client.call.return_value = _mock_llm_response(
+        _llm_procedure_data(cited_id=summaries[0].id)
+    )
 
     # RRF rank score is high (it always is) but cosine probe finds no dup.
     heart.search_procedures.return_value = [_make_procedure_summary(score=0.97)]
@@ -720,3 +730,219 @@ async def test_episode_pathway_logs_diagnostics(caplog):
 
     assert "Episode pathway" in caplog.text
     assert "episodes fetched" in caplog.text or "lessons collected" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Lesson gate (Harness² has_experience): cue + lesson + cited evidence
+# ---------------------------------------------------------------------------
+
+
+def _sent_prompt(llm_client) -> str:
+    """The user message of the last background LLM call."""
+    payload = llm_client.call.call_args[0][0]
+    return payload["messages"][0]["content"][0]["text"]
+
+
+def _decision_cluster(learner, brain, embeddings, heart, llm_data_for) -> list[DecisionSummary]:
+    """Wire 3 similar recent decisions; ``llm_data_for(summaries)`` builds the LLM reply."""
+    summaries = [_make_decision_summary() for _ in range(3)]
+    brain.list_decisions.side_effect = [(summaries, 3), ([], 0)]
+    brain.get.side_effect = [_make_decision_detail(s) for s in summaries]
+    base = _make_embedding(1.0)
+    embeddings.embed_batch.return_value = [
+        base,
+        _similar_embedding(base, 0.005),
+        _similar_embedding(base, 0.01),
+    ]
+    heart.list_episodes.return_value = []
+    heart.search_procedures.return_value = []
+    learner._llm.call.return_value = _mock_llm_response(llm_data_for(summaries))
+    return summaries
+
+
+@pytest.mark.asyncio
+async def test_lesson_gate_stores_complete_entry_with_cited_id():
+    """A complete entry citing an input decision is stored, cue and evidence persisted."""
+    learner, brain, heart, embeddings, _ = _build_learner()
+    summaries = _decision_cluster(
+        learner, brain, embeddings, heart,
+        lambda s: _llm_procedure_data(cited_id=s[1].id),
+    )
+
+    stats = await learner.run_sleep_learning()
+
+    assert stats["decisions_learned"] == 1
+    assert stats["gate_rejected"] == 0
+    stored = heart.store_procedure.call_args[0][0]
+    assert stored.goals[0] == "Writing a new database call"
+    assert "lesson: Use async/await for every query" in stored.implementation_notes
+    assert (
+        f"evidence: {summaries[1].id} — Async calls kept the loop responsive"
+        in stored.implementation_notes
+    )
+
+
+@pytest.mark.asyncio
+async def test_decision_prompt_carries_item_ids():
+    """The cluster items in the prompt carry their IDs so evidence can cite them."""
+    learner, brain, heart, embeddings, llm_client = _build_learner()
+    summaries = _decision_cluster(
+        learner, brain, embeddings, heart,
+        lambda s: _llm_procedure_data(cited_id=s[0].id),
+    )
+
+    await learner.run_sleep_learning()
+
+    prompt = _sent_prompt(llm_client)
+    for s in summaries:
+        assert f"[{s.id}]" in prompt
+    assert "NO_ENTRY" in prompt
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda d: d.pop("evidence"),
+        lambda d: d.update(evidence=[]),
+        lambda d: d.update(evidence="see decisions above"),
+        lambda d: d.update(cue=""),
+        lambda d: d.pop("lesson"),
+    ],
+    ids=["no-evidence", "empty-evidence", "non-list-evidence", "empty-cue", "no-lesson"],
+)
+@pytest.mark.asyncio
+async def test_lesson_gate_rejects_incomplete_entry(mutate):
+    """Missing evidence, empty cue or missing lesson: rejected, nothing stored."""
+    learner, brain, heart, embeddings, _ = _build_learner()
+
+    def data(s):
+        d = _llm_procedure_data(cited_id=s[0].id)
+        mutate(d)
+        return d
+
+    _decision_cluster(learner, brain, embeddings, heart, data)
+
+    stats = await learner.run_sleep_learning()
+
+    assert stats["decisions_learned"] == 0
+    assert stats["gate_rejected"] == 1
+    heart.store_procedure.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_lesson_gate_rejects_fabricated_citation():
+    """Evidence citing only IDs that are not in the cluster is rejected."""
+    learner, brain, heart, embeddings, _ = _build_learner()
+    _decision_cluster(
+        learner, brain, embeddings, heart,
+        lambda s: _llm_procedure_data(cited_id=uuid4()),
+    )
+
+    stats = await learner.run_sleep_learning()
+
+    assert stats["decisions_learned"] == 0
+    assert stats["gate_rejected"] == 1
+    heart.store_procedure.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_no_entry_is_skipped_and_counted(caplog):
+    """NO_ENTRY: nothing stored, counted separately from gate rejections, logged."""
+    import logging
+
+    learner, brain, heart, embeddings, _ = _build_learner()
+    _decision_cluster(
+        learner, brain, embeddings, heart,
+        lambda s: {"verdict": "NO_ENTRY", "reason": "decisions share wording, not a lesson"},
+    )
+
+    with caplog.at_level(logging.INFO, logger="nous.handlers.procedure_learner"):
+        stats = await learner.run_sleep_learning()
+
+    assert stats["no_entry"] == 1
+    assert stats["gate_rejected"] == 0
+    assert stats["decisions_learned"] == 0
+    heart.store_procedure.assert_not_called()
+    assert "decisions share wording, not a lesson" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_episode_lesson_gate_cites_episode_ids():
+    """Episode lessons carry their episode ID; a citation of an unseen episode is rejected."""
+    learner, brain, heart, embeddings, llm_client = _build_learner()
+    brain.list_decisions.side_effect = [([], 0), ([], 0)]
+    ep_summaries = [_make_episode_summary() for _ in range(3)]
+    heart.list_episodes.return_value = ep_summaries
+    heart.get_episode.side_effect = [
+        _make_episode_detail(s, lessons=["Use async context managers for DB"])
+        for s in ep_summaries
+    ]
+    base = _make_embedding(2.0)
+    embeddings.embed_batch.return_value = [
+        base,
+        _similar_embedding(base, 0.005),
+        _similar_embedding(base, 0.01),
+    ]
+    heart.search_procedures.return_value = []
+    llm_client.call.return_value = _mock_llm_response(
+        _llm_procedure_data("Episode Lesson", cited_id=uuid4())
+    )
+
+    stats = await learner.run_sleep_learning()
+
+    prompt = _sent_prompt(llm_client)
+    for s in ep_summaries:
+        assert f"[{s.id}]" in prompt
+    assert stats["episodes_learned"] == 0
+    assert stats["gate_rejected"] == 1
+    heart.store_procedure.assert_not_called()
+
+
+def test_verified_evidence_matches_unique_uuid_prefix_only():
+    """A citation may shorten a UUID to a unique 8+ char prefix; short labels match exactly."""
+    from nous.handlers.procedure_learner import _verified_evidence
+
+    a = "3f2b9c1e-0000-4000-8000-000000000001"
+    b = "3f2b9c1e-0000-4000-8000-000000000002"
+    c = "7a7a7a7a-0000-4000-8000-000000000003"
+    citable = {a: a, b: b, c: c, "pair-1": "tool: boom", "pair-10": "tool: bang"}
+
+    def cite(ref: str) -> list[str]:
+        return _verified_evidence({"evidence": [{"id": ref, "outcome": "ok"}]}, citable)
+
+    assert cite(f"[{c}]") == [f"evidence: {c} — ok"]
+    assert cite("7a7a7a7a") == [f"evidence: {c} — ok"]
+    assert cite("3f2b9c1e") == []  # ambiguous prefix
+    assert cite("7a7a") == []  # too short
+    assert cite("pair-1") == ["evidence: tool: boom — ok"]
+    assert cite("pair") == []
+
+
+@pytest.mark.asyncio
+async def test_weak_review_confounded_keeps_procedure():
+    """confounded: procedure left unchanged, counted separately from keep/revise/retire."""
+    learner, brain, heart, embeddings, llm_client = _build_learner()
+    brain.list_decisions.side_effect = [([], 0), ([], 0)]
+    heart.list_episodes.return_value = []
+    heart.search_procedures.return_value = [_make_procedure_summary(name="Weak proc")]
+    heart.get_procedure.return_value = _make_procedure_detail(
+        name="Weak proc", effectiveness=0.20, last_activated=_RECENT
+    )
+    llm_client.call.return_value = _mock_llm_response({
+        "action": "confounded",
+        "reason": "3 activations across unrelated tasks",
+    })
+
+    stats = await learner.run_sleep_learning()
+
+    assert stats["confounded"] == 1
+    assert stats["weak_reviewed"] == 1
+    heart.retire_procedure.assert_not_called()
+    heart.store_procedure.assert_not_called()
+
+
+def test_weak_review_prompt_offers_confounded():
+    from nous.handlers.procedure_learner import _WEAK_REVIEW_PROMPT
+
+    assert '"confounded"' in _WEAK_REVIEW_PROMPT
+    assert "{implementation_notes}" in _WEAK_REVIEW_PROMPT

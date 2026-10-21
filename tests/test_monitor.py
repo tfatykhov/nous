@@ -424,3 +424,70 @@ async def test_correction_min_principle_chars_from_settings(heart, brain, monkey
         f"Expected {len(PRINCIPLE_15)}-char principle to be dropped at min=20, but got a result — "
         "correction_min_principle_chars was NOT wired"
     )
+
+
+# ---------------------------------------------------------------------------
+# 11. F012 recovery procedures pass the lesson gate
+# ---------------------------------------------------------------------------
+
+
+def _recovery_engine(llm_reply: dict):
+    """MonitorEngine with a mocked procedure learner whose LLM returns ``llm_reply``."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    engine = MonitorEngine(MagicMock(), MagicMock(), Settings())
+    learner = MagicMock()
+    learner._call_llm = AsyncMock(return_value=llm_reply)
+    learner._is_duplicate = AsyncMock(return_value=False)
+    learner._heart.store_procedure = AsyncMock()
+    engine._procedure_learner = learner
+    return engine, learner
+
+
+_PAIRS = [
+    {"error": {"tool": "bash", "error": f"exit {n}: no such file"}, "recovery": ["read_file"], "context": "ok"}
+    for n in range(3)
+]
+
+
+def _recovery_reply(cited_id: str) -> dict:
+    return {
+        "name": "Check the path before running bash",
+        "cue": "bash fails with no such file",
+        "lesson": "Read the directory before retrying",
+        "evidence": [{"id": cited_id, "outcome": "read_file then succeeded"}],
+        "core_patterns": ["read_file", "retry"],
+    }
+
+
+async def test_recovery_procedure_stored_with_cited_pair():
+    """A cited pair label is persisted as that pair's error signature."""
+    engine, learner = _recovery_engine(_recovery_reply("pair-2"))
+
+    await engine._try_create_recovery_procedure("s1", _PAIRS)
+
+    prompt = learner._call_llm.call_args[0][0]
+    assert "[pair-1] bash: exit 0: no such file" in prompt
+    stored = learner._heart.store_procedure.call_args[0][0]
+    assert stored.goals[0] == "bash fails with no such file"
+    assert "evidence: bash: exit 1: no such file — read_file then succeeded" in stored.implementation_notes
+    assert engine._session_procedure_counts["s1"] == 1
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        _recovery_reply("pair-9"),
+        {**_recovery_reply("pair-1"), "evidence": []},
+        {"verdict": "NO_ENTRY", "reason": "three unrelated errors"},
+    ],
+    ids=["unseen-pair", "no-evidence", "no-entry"],
+)
+async def test_recovery_procedure_gate_blocks(reply):
+    """Fabricated citation, missing evidence or NO_ENTRY: nothing stored."""
+    engine, learner = _recovery_engine(reply)
+
+    await engine._try_create_recovery_procedure("s1", _PAIRS)
+
+    learner._heart.store_procedure.assert_not_called()
+    assert "s1" not in engine._session_procedure_counts

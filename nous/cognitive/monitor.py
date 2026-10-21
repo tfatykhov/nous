@@ -259,24 +259,41 @@ class MonitorEngine:
     async def _try_create_recovery_procedure(
         self, session_id: str, pairs: list[dict]
     ) -> None:
-        """F012: Create a recovery procedure from error→recovery pairs."""
-        from nous.handlers.procedure_learner import _MONITOR_RECOVERY_PROMPT
+        """F012: Create a recovery procedure from error→recovery pairs.
 
-        error_summary = "; ".join(
-            f"{p['error']['tool']}:{p['error']['error'][:50]}" for p in pairs[:5]
+        The pairs live only in memory and have no stored IDs, so each pair shown
+        in the prompt is labelled ``pair-N``; those labels are what the lesson
+        gate's evidence may cite, and a cited label is persisted as the pair's
+        error signature so the stored evidence still means something later.
+        """
+        from nous.handlers.procedure_learner import (
+            _MONITOR_RECOVERY_PROMPT,
+            _is_no_entry,
+            _lesson_fields,
+            _passes_lesson_gate,
         )
-        recovery_summary = "; ".join(
-            f"{','.join(p['recovery'])}" for p in pairs[:5]
-        )
+
+        shown = pairs[:5]
+        citable: dict[str, str] = {}
+        error_lines = []
+        recovery_lines = []
+        for n, p in enumerate(shown, start=1):
+            label = f"pair-{n}"
+            signature = f"{p['error']['tool']}: {p['error']['error'][:50]}"
+            citable[label] = signature
+            error_lines.append(f"- [{label}] {signature}")
+            recovery_lines.append(f"- [{label}] {','.join(p['recovery'])}")
 
         result = await self._procedure_learner._call_llm(
             _MONITOR_RECOVERY_PROMPT.format(
-                error_pattern=error_summary,
-                recovery_actions=recovery_summary,
+                error_pattern="\n".join(error_lines),
+                recovery_actions="\n".join(recovery_lines),
                 context=pairs[-1].get("context", ""),
             )
         )
-        if result:
+        if result and _is_no_entry(result):
+            logger.info("No recovery lesson: NO_ENTRY (%s)", result.get("reason"))
+        elif result and _passes_lesson_gate(result, citable, "monitor recovery"):
             stored = await self._procedure_learner._is_duplicate(result)
             if not stored:
                 from nous.heart.schemas import ProcedureInput
@@ -286,12 +303,11 @@ class MonitorEngine:
                     name=result.get("name", "Recovery procedure"),
                     domain=result.get("domain"),
                     description=result.get("description"),
-                    goals=result.get("goals", []),
                     core_patterns=result.get("core_patterns", []),
                     core_tools=result.get("core_tools", []),
                     core_concepts=result.get("core_concepts", []),
-                    implementation_notes=result.get("implementation_notes", []),
                     tags=tags,
+                    **_lesson_fields(result, citable),
                 )
                 await self._procedure_learner._heart.store_procedure(proc_input)
                 count = self._session_procedure_counts.get(session_id, 0)
