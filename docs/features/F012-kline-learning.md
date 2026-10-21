@@ -28,11 +28,25 @@ Tracks error→recovery pairs in `MonitorEngine.learn()`. When the same error pa
 
 **Tag:** `auto:monitor_recovery`
 
+### Lesson gate (F012.1, all three pathways)
+
+Each input item is shown to the LLM on one line with an ID: the decision or episode UUID with its recorded outcome, or `r-<hash>` for a monitor error→recovery pair (a hash of the tool, the error and the recovery tools, so the same observation has the same ID in every session). The LLM answers either `{"verdict": "NO_ENTRY", "reason": ...}` or a procedure with:
+
+- `cue`: when the lesson applies (stored as the first entry of `goals`);
+- `lesson`: the change in behaviour (stored in `implementation_notes` as `lesson: …`);
+- `evidence`: a list of `{"id", "outcome"}` citing input IDs (stored as `evidence: <id> (<recorded outcome>) — <observed outcome>` lines).
+
+A procedure is stored only if the cue and lesson are non-empty and at least one evidence item cites an ID from the same prompt (exactly, or a unique 8+ character prefix of a UUID). Citations of other IDs are dropped. `NO_ENTRY` stores nothing and is preferred over an invented lesson.
+
+The gate checks that the evidence is a real input item, not that the recorded outcome is true. Decision outcomes come from reviews, and conversation episodes are closed as `success`.
+
+`run_sleep_learning()` returns `no_entry`, `gate_rejected`, `confounded` (weak review) and `llm_failed` (no answer, an answer that isn't a JSON object, or a weak-review revision with fields of the wrong type) for each sleep. The `sleep_completed` event and the generalize log line carry them, the event as one `procedure_gate` object. They are kept out of the consolidation audit's attempted-mutation total. If `procedures_created` stays at 0 while `gate_rejected` or `llm_failed` is high, the gate or the model's answers are blocking learning.
+
 ## Lifecycle
 
 - **Reinforcement:** Procedures in context get `activate()` + `record_outcome()` in post_turn based on turn success/failure
-- **Weak review:** During sleep, procedures with effectiveness < 0.30 or inactive 30+ days get LLM review → keep/revise/retire
-- **Dedup:** Before creating any procedure, search existing at >0.85 similarity. Skip if match found.
+- **Weak review:** During sleep, procedures with effectiveness < 0.30 or inactive 30+ days get LLM review → keep/revise/retire/confounded. `confounded` (the effectiveness can't be attributed to the procedure) keeps it as is. `revise` retires the procedure and stores the revision; a malformed revision leaves the procedure unchanged.
+- **Dedup:** Before creating any procedure, search existing at >0.85 similarity on the gated procedure's name, description and patterns. Skip if match found.
 
 ## Caps
 
