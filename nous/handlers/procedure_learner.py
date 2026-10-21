@@ -391,8 +391,8 @@ class ProcedureLearner:
                 if proc_input is None:
                     continue
 
-                # Dedup check
-                if await self._is_duplicate(procedure_data):
+                # Dedup check, on the sanitized fields
+                if await self._is_duplicate(proc_input.model_dump()):
                     continue
 
                 await self._heart.store_procedure(proc_input)
@@ -515,8 +515,8 @@ class ProcedureLearner:
                 if proc_input is None:
                     continue
 
-                # Dedup check
-                if await self._is_duplicate(procedure_data):
+                # Dedup check, on the sanitized fields
+                if await self._is_duplicate(proc_input.model_dump()):
                     continue
 
                 await self._heart.store_procedure(proc_input)

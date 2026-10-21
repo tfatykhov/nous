@@ -1013,3 +1013,29 @@ async def test_monitor_does_not_re_ask_on_the_same_pairs_after_no_entry():
     await monitor._try_create_recovery_procedure("s1", pairs)
 
     assert monitor._error_recovery_pairs["s1"] == []
+
+
+@pytest.mark.asyncio
+async def test_monitor_keeps_its_pairs_when_the_llm_call_fails():
+    monitor, heart, llm_client, pairs = _monitor_with_learner({})
+    llm_client.call.side_effect = RuntimeError("API down")
+    monitor._error_recovery_pairs["s1"] = pairs
+
+    await monitor._try_create_recovery_procedure("s1", pairs)
+
+    assert monitor._error_recovery_pairs["s1"] == pairs
+
+
+@pytest.mark.asyncio
+async def test_dedup_probes_the_sanitized_procedure_not_the_raw_answer():
+    parts = _build_learner()
+    learner, _brain, heart, _emb, llm_client = parts
+    summaries = _decision_cluster(parts)
+    data = {**_llm_procedure_data(cited_ids=[summaries[0].id]), "core_patterns": ["step one", 7]}
+    llm_client.call.return_value = _mock_llm_response(data)
+
+    stats = await learner.run_sleep_learning()
+
+    assert stats["decisions_learned"] == 1
+    query = heart.find_similar_procedures.call_args[0][0]
+    assert query.endswith("step one")

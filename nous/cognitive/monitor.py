@@ -288,10 +288,12 @@ class MonitorEngine:
         )
 
         result = await self._procedure_learner._call_llm(_MONITOR_RECOVERY_PROMPT.format(pairs=pairs_text))
-        proc_input = result and self._procedure_learner._gated_procedure_input(
+        if not result:
+            return  # the call failed: keep the pairs for the next recovery turn
+        proc_input = self._procedure_learner._gated_procedure_input(
             result, dict.fromkeys(map(_recovery_pair_id, shown), "recovered"), "auto:monitor_recovery"
         )
-        if not proc_input or await self._procedure_learner._is_duplicate(result):
+        if proc_input is None or await self._procedure_learner._is_duplicate(proc_input.model_dump()):
             # Nothing stored: start over, so the next attempt waits for new pairs
             # instead of asking again about the same ones on every recovery turn.
             self._error_recovery_pairs[session_id] = []
