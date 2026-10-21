@@ -7,6 +7,7 @@ After each turn:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from uuid import UUID
 
@@ -44,6 +45,19 @@ _TRANSIENT_PATTERNS = [
 
 # Max auto-created censors per session (P2-4 circuit breaker)
 _MAX_CENSORS_PER_SESSION = 3
+
+
+def _recovery_pair_id(pair: dict) -> str:
+    """Citable ID of one error→recovery pair for the procedure lesson gate.
+
+    The pairs live only in memory and have no database ID, so the ID is a short hash of
+    what was observed: the same observation gets the same ID in every session, and the
+    evidence notes stored with a procedure stay meaningful after the session ends.
+    """
+    observed = "|".join(
+        [pair["error"]["tool"], pair["error"]["error"], ",".join(pair["recovery"]), pair.get("context", "")]
+    )
+    return "r-" + hashlib.sha256(observed.encode()).hexdigest()[:10]
 
 
 class MonitorEngine:
@@ -259,44 +273,33 @@ class MonitorEngine:
     async def _try_create_recovery_procedure(
         self, session_id: str, pairs: list[dict]
     ) -> None:
-        """F012: Create a recovery procedure from error→recovery pairs."""
-        from nous.handlers.procedure_learner import _MONITOR_RECOVERY_PROMPT
+        """F012: Create a recovery procedure from error→recovery pairs.
 
-        error_summary = "; ".join(
-            f"{p['error']['tool']}:{p['error']['error'][:50]}" for p in pairs[:5]
-        )
-        recovery_summary = "; ".join(
-            f"{','.join(p['recovery'])}" for p in pairs[:5]
-        )
+        The extraction goes through the same lesson gate as the sleep-time pathways: the
+        evidence must cite a pair by its ID (see _recovery_pair_id), and NO_ENTRY stores nothing.
+        """
+        from nous.handlers.procedure_learner import _MONITOR_RECOVERY_PROMPT, _one_line
 
-        result = await self._procedure_learner._call_llm(
-            _MONITOR_RECOVERY_PROMPT.format(
-                error_pattern=error_summary,
-                recovery_actions=recovery_summary,
-                context=pairs[-1].get("context", ""),
+        shown = pairs[:5]
+        lines = []
+        for pair in shown:
+            lines.append(
+                f"- [{_recovery_pair_id(pair)}] {pair['error']['tool']}: {_one_line(pair['error']['error'][:50])}"
+                f" → {','.join(pair['recovery'])} | {_one_line(pair.get('context', ''))}"
             )
+
+        result = await self._procedure_learner._call_llm(_MONITOR_RECOVERY_PROMPT.format(pairs="\n".join(lines)))
+        if not result:
+            return
+        proc_input = self._procedure_learner._gated_procedure_input(
+            result, dict.fromkeys(map(_recovery_pair_id, shown), "recovered"), "auto:monitor_recovery"
         )
-        if result:
-            stored = await self._procedure_learner._is_duplicate(result)
-            if not stored:
-                from nous.heart.schemas import ProcedureInput
-                tags = result.get("tags", [])
-                tags.append("auto:monitor_recovery")
-                proc_input = ProcedureInput(
-                    name=result.get("name", "Recovery procedure"),
-                    domain=result.get("domain"),
-                    description=result.get("description"),
-                    goals=result.get("goals", []),
-                    core_patterns=result.get("core_patterns", []),
-                    core_tools=result.get("core_tools", []),
-                    core_concepts=result.get("core_concepts", []),
-                    implementation_notes=result.get("implementation_notes", []),
-                    tags=tags,
-                )
-                await self._procedure_learner._heart.store_procedure(proc_input)
-                count = self._session_procedure_counts.get(session_id, 0)
-                self._session_procedure_counts[session_id] = count + 1
-                logger.info("Created recovery procedure from %d error→recovery pairs", len(pairs))
+        if proc_input is None or await self._procedure_learner._is_duplicate(result):
+            return
+        await self._procedure_learner._heart.store_procedure(proc_input)
+        count = self._session_procedure_counts.get(session_id, 0)
+        self._session_procedure_counts[session_id] = count + 1
+        logger.info("Created recovery procedure from %d error→recovery pairs", len(pairs))
 
     async def detect_and_extract_correction(
         self,
