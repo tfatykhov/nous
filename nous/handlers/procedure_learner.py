@@ -20,6 +20,8 @@ import math
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from pydantic import ValidationError
+
 from nous.brain import continuation
 from nous.brain.brain import Brain
 from nous.brain.embeddings import EmbeddingProvider
@@ -135,6 +137,13 @@ def _one_line(text: object) -> str:
     return " ".join(str(text).split())
 
 
+def _str_list(value: object) -> list[str]:
+    """A model-written list field as a list of strings; a lone string is one item, not its letters."""
+    if isinstance(value, str):
+        return [value]
+    return [v for v in value if isinstance(v, str)] if isinstance(value, list) else []
+
+
 def _cited_evidence(evidence: object, allowed_ids: dict[str, str]) -> list[tuple[str, str, str]]:
     """(input ID, its recorded outcome, observed outcome) for each evidence item citing an input ID.
 
@@ -242,7 +251,8 @@ class ProcedureLearner:
         self._embeddings = embeddings
         self._settings = settings
         self._llm = llm_client
-        # Lesson-gate outcomes of the current run_sleep_learning() call.
+        # Lesson-gate outcomes of the current run_sleep_learning() call (reset at its start, so
+        # the monitor's recovery-path rejections between sleeps are logged but not reported).
         self._gate_counts = {"no_entry": 0, "gate_rejected": 0, "confounded": 0}
 
     # ==================================================================
@@ -644,21 +654,27 @@ class ProcedureLearner:
             f"evidence: {item_id} ({recorded}) — {observed}"
             for item_id, recorded, observed in _cited_evidence(data["evidence"], allowed_ids)
         ]
-        return ProcedureInput(
-            name=data.get("name", "Unnamed procedure"),
-            domain=data.get("domain"),
-            description=data.get("description"),
-            goals=[cue, *(g for g in data.get("goals") or [] if g != cue)],
-            core_patterns=data.get("core_patterns", []),
-            core_tools=data.get("core_tools", []),
-            core_concepts=data.get("core_concepts", []),
-            implementation_notes=[
-                f"lesson: {data['lesson'].strip()}",
-                *evidence_notes,
-                *(data.get("implementation_notes") or []),
-            ],
-            tags=[*(data.get("tags") or []), source_tag],
-        )
+        try:
+            return ProcedureInput(
+                name=data.get("name") or "Unnamed procedure",
+                domain=data.get("domain"),
+                description=data.get("description"),
+                goals=[cue, *(g for g in _str_list(data.get("goals")) if g != cue)],
+                core_patterns=_str_list(data.get("core_patterns")),
+                core_tools=_str_list(data.get("core_tools")),
+                core_concepts=_str_list(data.get("core_concepts")),
+                implementation_notes=[
+                    f"lesson: {data['lesson'].strip()}",
+                    *evidence_notes,
+                    *_str_list(data.get("implementation_notes")),
+                ],
+                tags=[*_str_list(data.get("tags")), source_tag],
+            )
+        except ValidationError as exc:
+            # One malformed answer skips its cluster, not the rest of the pathway.
+            self._gate_counts["gate_rejected"] += 1
+            logger.info("Lesson gate (%s): rejected %r, malformed field: %s", source_tag, data.get("name"), exc)
+            return None
 
     async def _is_duplicate(self, procedure_data: dict[str, Any]) -> bool:
         """Check if a similar procedure already exists (>0.85 cosine similarity).
