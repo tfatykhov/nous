@@ -24,6 +24,7 @@ from nous.heart.schemas import (
     ProcedureInput,
     ProcedureOutcome,
     ProcedureSummary,
+    is_job_lesson,
     is_strategy_card,
 )
 from nous.heart.search import cosine_similarity, hybrid_search, hybrid_search_multi
@@ -167,7 +168,8 @@ class ProcedureManager:
             # Reasoning Maps L1 (migration 079)
             kind=input.kind,
         )
-        if procedure.active and not is_strategy_card(procedure):
+        # A job lesson never makes a card give its name up: the unique index refuses it instead.
+        if procedure.active and not is_strategy_card(procedure) and not is_job_lesson(procedure):
             await self._take_name_from_card(procedure.name, session)
         session.add(procedure)
         await session.flush()
@@ -608,33 +610,58 @@ class ProcedureManager:
         session: AsyncSession,
         cards_only: bool = False,
     ) -> list[ProcedureSummary]:
+        return await self._nearest_summaries(
+            query,
+            "(kind IS NOT DISTINCT FROM :strategy_kind) = :cards_only",
+            {"strategy_kind": STRATEGY_CARD_KIND, "cards_only": cards_only},
+            limit,
+            session,
+            probe="procedure selection probe",
+        )
+
+    async def _nearest_summaries(
+        self,
+        query: str,
+        where: str,
+        params: dict,
+        limit: int,
+        session: AsyncSession,
+        *,
+        probe: str,
+    ) -> list[ProcedureSummary]:
+        """Raw-cosine nearest active procedures of this agent to ``query`` that also match ``where``.
+
+        The one cosine probe both find_similar_for_selection and find_similar_job_lessons
+        run: ``where`` is the caller's fixed SQL condition (code, never input) with its
+        binds in ``params``; ``score`` is the raw cosine. Returns [] when embeddings are
+        unavailable or the embed fails (logged as a failure of ``probe``).
+        """
         if not self.embeddings:
             return []
         try:
             embedding = await self.embeddings.embed(query)
         except Exception:
-            logger.warning("Embedding generation failed for procedure selection probe")
+            logger.warning("Embedding generation failed for %s", probe)
             return []
 
         embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
         # Same filtered-ANN horizon widening as the fact probes (codex P2):
-        # agent_id/active are post-applied to the approximate walk.
+        # agent_id/active and ``where`` are post-applied to the approximate walk.
         from nous.heart.search import set_local_ef_search
         await set_local_ef_search(session, 100)
-        rows = (await session.execute(text("""
+        rows = (await session.execute(text(f"""
             SELECT id, 1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
             FROM heart.procedures
             WHERE agent_id = :agent_id
               AND active = true
               AND embedding IS NOT NULL
-              AND (kind IS NOT DISTINCT FROM :strategy_kind) = :cards_only
+              AND {where}
             ORDER BY embedding <=> CAST(:embedding AS vector)
             LIMIT :limit
         """), {
+            **params,
             "embedding": embedding_str,
             "agent_id": self.agent_id,
-            "strategy_kind": STRATEGY_CARD_KIND,
-            "cards_only": cards_only,
             "limit": limit,
         })).all()
         if not rows:
@@ -716,55 +743,14 @@ class ProcedureManager:
     async def _find_similar_job_lessons(
         self, query: str, schedule_id: str, limit: int, session: AsyncSession
     ) -> list[ProcedureSummary]:
-        if not self.embeddings:
-            return []
-        try:
-            embedding = await self.embeddings.embed(query)
-        except Exception:
-            logger.warning("Embedding generation failed for the job lesson probe")
-            return []
-
-        embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
-        # As in _find_similar_for_selection: the filters are post-applied to the approximate walk.
-        from nous.heart.search import set_local_ef_search
-        await set_local_ef_search(session, 100)
-        rows = (await session.execute(text("""
-            SELECT id, 1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
-            FROM heart.procedures
-            WHERE agent_id = :agent_id AND active = true AND embedding IS NOT NULL
-              AND kind = :job_lesson_kind AND runtime_metadata->'job'->>'schedule_id' = :schedule_id
-            ORDER BY embedding <=> CAST(:embedding AS vector) LIMIT :limit
-        """), {
-            "embedding": embedding_str,
-            "agent_id": self.agent_id,
-            "job_lesson_kind": JOB_LESSON_KIND,
-            "schedule_id": schedule_id,
-            "limit": limit,
-        })).all()
-        if not rows:
-            return []
-
-        ids = [r.id for r in rows]
-        sims = {r.id: float(r.similarity) for r in rows}
-        proc_result = await session.execute(select(Procedure).where(Procedure.id.in_(ids)))
-        procedures = {p.id: p for p in proc_result.scalars().all()}
-
-        return [
-            ProcedureSummary(
-                id=p.id,
-                name=p.name,
-                domain=p.domain,
-                description=p.description,
-                activation_count=p.activation_count or 0,
-                effectiveness=self._compute_effectiveness(p),
-                score=sims.get(p.id),
-                kind=p.kind,
-                core_patterns=list(p.core_patterns or []),
-                implementation_notes=list(p.implementation_notes or []),
-            )
-            for pid in ids
-            if (p := procedures.get(pid)) is not None
-        ]
+        return await self._nearest_summaries(
+            query,
+            "kind = :job_lesson_kind AND runtime_metadata->'job'->>'schedule_id' = :schedule_id",
+            {"job_lesson_kind": JOB_LESSON_KIND, "schedule_id": schedule_id},
+            limit,
+            session,
+            probe="job lesson probe",
+        )
 
     async def similarities(
         self,
@@ -1415,7 +1401,8 @@ class ProcedureManager:
         metadata = procedure.runtime_metadata or {}
         job = metadata.get("job") or {}
         prefix = "lesson: "
-        lesson = next((n.removeprefix(prefix) for n in procedure.implementation_notes or [] if n.startswith(prefix)), "")
+        notes = procedure.implementation_notes or []
+        lesson = next((n.removeprefix(prefix) for n in notes if n.startswith(prefix)), "")
         return JobLesson(
             id=procedure.id,
             schedule_id=job.get("schedule_id") or "",

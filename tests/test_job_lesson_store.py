@@ -51,7 +51,10 @@ def test_is_job_lesson_reads_the_kind():
     assert is_job_lesson(ProcedureInput(name="x")) is False
 
 
-async def test_list_job_lessons_filters_by_schedule_and_active_and_orders_newest_first(lesson_heart, session):  # noqa: F811
+async def test_list_job_lessons_filters_by_schedule_and_active_and_orders_newest_first(
+    lesson_heart,  # noqa: F811
+    session,
+):
     h = lesson_heart
     old = await h.store_procedure(lesson_input(HEX_A, "[job a] old"), session)
     new = await h.store_procedure(lesson_input(HEX_A, "[job a] new"), session)
@@ -147,3 +150,12 @@ async def test_a_job_lesson_stores_beside_an_active_procedure_with_the_model_cho
     assert {x.id for x in await h.list_job_lessons(HEX_A)} == {first.id, second.id}
     with pytest.raises(IntegrityError):  # the same name twice is what the suffix prevents
         await h.store_procedure(lesson_input(HEX_A, first.name))
+
+
+async def test_a_job_lesson_never_renames_a_strategy_card(lesson_heart):  # noqa: F811
+    h = lesson_heart  # committed rows: the rejected insert rolls back its own session only
+    card = await h.store_procedure(ProcedureInput(name="Shell refusal", kind="strategy"))
+    with pytest.raises(IntegrityError):  # the card keeps the name, so the unique index refuses the lesson
+        await h.store_procedure(lesson_input(HEX_A, "Shell refusal"))
+    kept = await h.procedures.get(card.id)
+    assert kept.name == "Shell refusal" and kept.active
