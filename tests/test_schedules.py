@@ -1,6 +1,8 @@
 """Tests for schedule management and task scheduler (011.1)."""
 
+import asyncio
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
@@ -396,3 +398,28 @@ class TestSchedulerModelPassthrough:
         create_kwargs = mock_heart.subtasks.create.call_args.kwargs
         assert create_kwargs["model"] == "claude-haiku-4-5-20251001"
         assert create_kwargs["frame_type"] == "research"
+
+
+class TestScheduleMetadata:
+    @pytest.mark.postgres_only
+    async def test_set_metadata_keeps_other_keys_and_sets_the_task_atomically(self, schedule_mgr: ScheduleManager):
+        s = await schedule_mgr.create(
+            task="old text", schedule_type="recurring", interval_seconds=3600, metadata={"keep": 1}
+        )
+        await schedule_mgr.set_metadata(s.id, "job_fix", {"state": "running"}, task="new text")
+        got = await schedule_mgr.get(s.id)
+        assert got.metadata_ == {"keep": 1, "job_fix": {"state": "running"}} and got.task == "new text"
+        await schedule_mgr.set_metadata(s.id, "job_fix", {"state": "kept"})
+        assert (await schedule_mgr.get(s.id)).task == "new text"  # task=None leaves it alone
+
+    @pytest.mark.postgres_only
+    async def test_two_concurrent_set_metadata_calls_on_different_keys_both_survive(
+        self, schedule_mgr: ScheduleManager
+    ):
+        s = await schedule_mgr.create(task="t", schedule_type="recurring", interval_seconds=3600)
+        await asyncio.gather(*(schedule_mgr.set_metadata(s.id, f"k{i}", {"i": i}) for i in range(8)))
+        assert set((await schedule_mgr.get(s.id)).metadata_) == {f"k{i}" for i in range(8)}
+
+    async def test_set_metadata_on_a_missing_schedule_raises(self, schedule_mgr: ScheduleManager):
+        with pytest.raises(ValueError):
+            await schedule_mgr.set_metadata(uuid4(), "k", {})

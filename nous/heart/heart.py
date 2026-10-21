@@ -31,6 +31,7 @@ from nous.heart.admission import AdmissionConfig, AdmissionController
 from nous.heart.censors import CensorManager
 from nous.heart.episodes import EpisodeManager
 from nous.heart.facts import FactManager
+from nous.heart.job_runs import JobRunReader
 from nous.heart.procedures import ProcedureManager
 from nous.heart.reranker import CROSS_ENCODER_AVAILABLE, cross_encoder_rerank
 from nous.heart.result_inbox import ResultInboxStore
@@ -134,6 +135,7 @@ class Heart:
         self.intentions = IntentionStore(database, settings.agent_id)  # F099
         self.result_memory = ResultMemoryWriter(self)  # F098 Phase C
         self.schedules = ScheduleManager(database, settings.agent_id)
+        self.job_runs = JobRunReader(database, settings.agent_id)
 
         # F022 Phase 2: Optional EventBus for fact_learned emission.
         # Injected post-construction in main.py (not a constructor param
