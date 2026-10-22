@@ -71,7 +71,7 @@ Procedures (Minsky's K-lines) are learned from clusters of successful decisions,
 <td valign="top">
 
 ### 🧾 Honest execution
-Every side-effecting tool call lands in a durable execution ledger. Risky actions are gated by tier, and after each turn the agent's claims are checked against what actually ran.
+Side-effecting tool calls are recorded in a durable execution ledger. Risky actions are gated by tier, and after each turn the agent's claims are checked against what actually ran.
 
 </td>
 </tr>
@@ -85,7 +85,7 @@ A heartbeat runs scheduled checks (health, Drive, email, or any check described 
 <td valign="top">
 
 ### 📏 Measured, not self-graded
-Each finished background task gets a deterministic score from a separate scorer job, built to run under its own database role so the agent can read its scores but not change them.
+Finished background subtasks get a deterministic score from a separate scorer job, built to run under its own database role so the agent can read its scores but not change them.
 
 </td>
 </tr>
@@ -119,7 +119,7 @@ Capabilities that change behavior sit behind documented flags. Items marked *opt
 - **Censors** — "don't do this" rules that block a matching action, created when the agent finds a failure mode.
 - **Documents and attachments** — `ingest_document` chunks and stores whole documents; images, PDFs and text files arrive through Telegram and REST.
 - **Working memory** — the state of the current task, with a timed cleanup.
-- **Safe extraction** — conversation text is treated as data, never as instructions to the extractor.
+- **Safe extraction** — conversation text reaches the extractor fenced off as data, not as instructions.
 - **Dense documents** *(opt-in)* — enumerative extraction into atomic keyed facts, exact-key retrieval and exemplar-based recall for classification-style questions.
 
 </details>
@@ -128,7 +128,7 @@ Capabilities that change behavior sit behind documented flags. Items marked *opt
 <summary><b>🔍 Recall and context</b></summary>
 
 - **Hybrid search** — full-text and vector results fused by Reciprocal Rank Fusion, with a relevance floor and a staleness penalty.
-- **Graph-augmented recall** — spreading activation across facts, decisions, episodes, procedures and chunks, with contradictions surfaced at recall time.
+- **Graph-augmented recall** — spreading activation across facts, decisions, episodes and procedures, with contradictions surfaced at recall time.
 - **Re-ranking** *(opt-in)* — MMR diversity and a cross-encoder in `recall_deep`, plus multi-query expansion.
 - **Context engine** — frame-adaptive, token-budgeted context assembly with deduplication and an anti-hallucination prompt.
 - **Long sessions** — tool output compressed at ingestion with the full text one `cache_retrieve` away, four-tier pruning of old tool results, and history compaction with a hallucination guard.
@@ -139,7 +139,7 @@ Capabilities that change behavior sit behind documented flags. Items marked *opt
 <details>
 <summary><b>🕸️ Knowledge graph and sleep</b></summary>
 
-- **Cross-type graph** — typed edges between every kind of memory, created at write time and densified later.
+- **Cross-type graph** — typed edges between facts, decisions, episodes and procedures, created at write time and densified later. Linking transcript chunks into the graph is *opt-in*.
 - **Sleep cycle** — consolidates and links memories, backfills orphans, re-links episodes, resolves contradictions, recovers abandoned conversations and cleans up dead edges.
 - **Consolidation audit** *(opt-in)* — a reviewable changelog of what each sleep cycle changed.
 
@@ -168,11 +168,11 @@ Capabilities that change behavior sit behind documented flags. Items marked *opt
 <details>
 <summary><b>🧾 Execution integrity</b></summary>
 
-- **Execution ledger** — a durable record of every side-effecting tool call; it can also keep each call's redacted command and output *(opt-in)*.
+- **Execution ledger** — a durable record of side-effecting tool calls. A background send refuses to run without its record; other calls go ahead with a logged warning if the ledger write fails. It can also keep each call's redacted command and output *(opt-in)*.
 - **Action gating** — tools are classed by side effect, and write, external and irreversible actions pass tiered checks first.
 - **Claim verification** — after each turn, what the agent says it did is checked against the ledger.
 - **Censor middleware** — censors can run read-only checks before an action proceeds and unblock it when the check passes.
-- **Guarded sends** — a background send that gets retried is never sent twice, and `send_email` works only toward an allowlist.
+- **Guarded sends** — background sends are keyed, so a retry does not send a second copy, and `send_email` works only toward an allowlist.
 - **Undo journal** — before-state snapshots of the files, schedules and checks the agent changes.
 - **Approvals** *(opt-in)* — a plan step can wait for the owner's answer; a waiting plan is parked and resumes when the answer arrives.
 
@@ -194,9 +194,9 @@ Capabilities that change behavior sit behind documented flags. Items marked *opt
 <details>
 <summary><b>📏 Measurement and evaluation</b></summary>
 
-- **Task scores** — one deterministic score per finished background task from a separate scorer job, with an autonomy scoreboard on the dashboard.
+- **Task scores** — one deterministic score per finished background subtask from a separate scorer job (cancelled ones are recorded as not scored; DAG runs and intention chains get count-only roll-ups), with an autonomy scoreboard on the dashboard.
 - **Retrieval eval harness** — per-source relevance labels, paired A/B configurations and a persistent eval database.
-- **Retrieval telemetry** — every recall logged with drop attribution: what was found, and where each candidate was lost.
+- **Retrieval telemetry** — recalls are logged with drop attribution: what was found, and where each candidate was lost.
 
 </details>
 
@@ -205,7 +205,7 @@ Capabilities that change behavior sit behind documented flags. Items marked *opt
 
 - **Memory** — `record_decision`, `recall_deep`, `recall_recent`, `learn_fact`, `learn_skill`, `ingest_document`, `get_procedure`, `create_censor`, `cache_retrieve`.
 - **Work** — `bash`, `read_file`, `write_file`, `run_python`, `send_file`.
-- **Web** — `web_search` (Tavily, then Exa, then Brave), `web_fetch`, and `browser_task` *(opt-in)*, an isolated agent loop on headless Chromium.
+- **Web** — `web_search` (routed by query type across Tavily, Exa and Brave), `web_fetch`, and `browser_task` *(opt-in)*, an isolated agent loop on headless Chromium.
 - **Delegation** — `spawn_task`, `spawn_sync`, `schedule_task`, `dag_create`, `list_tasks`, `cancel_task`, `heartbeat_check_create`, `heartbeat_check_manage`.
 - **Companion** — `push_surface` and `propose_action`.
 
@@ -237,7 +237,7 @@ flowchart LR
 - **Frame**: decide what kind of situation this is. The frame sets which memories, tools and models matter.
 - **Recall**: rebuild the context this kind of work needs, within a token budget.
 - **Deliberate**: check guardrails, recall similar past decisions, and record intent before acting.
-- **Act**: call tools in a direct Anthropic API loop; every side effect is recorded.
+- **Act**: call tools in a direct Anthropic API loop; side effects go into the execution ledger.
 - **Monitor**: compare what was claimed with what actually ran.
 - **Learn**: record outcomes, update calibration, extract facts and lessons.
 
