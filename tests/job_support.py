@@ -7,6 +7,7 @@ never see each other's rows.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
@@ -165,3 +166,24 @@ def assert_no_scorer_text(*texts: str) -> None:
         for needle in SCORER_TEXT:
             assert needle not in text, f"scorer text {needle!r} leaked into: {text[:300]!r}"
         assert not _PARTIAL.search(text), f"scorer outcome 'partial' leaked into: {text[:300]!r}"
+
+
+def _fence(obj: object) -> str:
+    """A fenced json block holding ``obj``."""
+    return "```json\n" + json.dumps(obj) + "\n```"
+
+
+VALID = {
+    "changed_job": {
+        "verdict": "changed_job",
+        "new_instructions": "Run the check and report.",
+        "why": "the old text asked for a missing file",
+    },
+    "fixed_elsewhere": {"verdict": "fixed_elsewhere", "what_changed": "restored the helper script in the workspace"},
+    "needs_owner": {
+        "verdict": "needs_owner",
+        "diagnosis": "the shell refuses the script",
+        "owner_action": "run it under owner authority or drop it",
+    },
+    "no_fault_found": {"verdict": "no_fault_found", "checked": "the last five runs and the script"},
+}
