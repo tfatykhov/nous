@@ -5,15 +5,18 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
-from uuid import UUID, uuid4
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pytest
-from job_support import VALID, _fence, assert_no_scorer_text
+from job_support import NOW, VALID, _fence, assert_no_scorer_text
 
+from nous.brain import continuation
+from nous.config import Settings
 from nous.handlers.job_fixes import (
     _CHANGE_REVIEW_PROMPT,
     _CHANGE_REVIEW_SYSTEM,
+    JobFixer,
     fails_often,
     parse_verdict,
     render_fix_brief,
@@ -21,7 +24,7 @@ from nous.handlers.job_fixes import (
     render_owner_title,
     review_change,
 )
-from nous.heart.job_runs import JobRun
+from nous.heart.job_runs import FIX_KEY, JobRun
 from nous.heart.schemas import JobLesson
 
 # Words the brief and the owner message must never use, on top of job_support's scorer sentinels.
@@ -243,3 +246,370 @@ def test_an_unreadable_report_message_has_no_verdict_sentence():
     record = {"stop_reason": "unreadable_report", "verdict": None, "detail": {}, "old_task": "Run it"}
     msg = render_owner_message(_schedule(), RUNS[:1], {}, record)
     assert "could not be read" in msg and "None" not in msg and "verdict" not in msg
+
+
+# --- JobFixer: the state machine, with a mocked heart, reader, LLM and fire helper ---
+
+KEYS = ("started", "start_failed", "applied", "refused", "kept", "closed", "stopped", "waiting", "skipped")
+NEEDS = _fence(VALID["needs_owner"])
+CHANGED = _fence(VALID["changed_job"])
+NO_FAULT = _fence(VALID["no_fault_found"])
+FIX_RUN = uuid4()
+HEX = uuid4().hex
+_CONTAINER = SimpleNamespace(id=uuid4(), root_id=uuid4(), intent="Check the report", origin_channel=None)
+
+
+@pytest.fixture(autouse=True)
+def _stop_patches():
+    yield
+    patch.stopall()
+
+
+def _days_ago(n: float) -> datetime:
+    return NOW - timedelta(days=n)
+
+
+def _record(state: str, **kw) -> dict:
+    record = {
+        "state": state, "trigger": "fails_often", "fix_run": str(FIX_RUN), "started_at": NOW,
+        "baseline": {"bad": 2, "scored": 10, "window_end": NOW.isoformat()}, "verdict": None, "detail": {},
+        "old_task": None, "applied_at": NOW, "settled_at": NOW, "stop_reason": None, "report_id": None,
+    }
+    record.update(kw)
+    return {k: v.isoformat() if isinstance(v, datetime) else v for k, v in record.items()}
+
+
+def _runs(n: int = 5, bad: int = 0) -> list[JobRun]:
+    return [_run(bad=i < bad, n=i) for i in range(n)]
+
+
+def _retired_lesson(hex_id: str, at: str | None = None) -> JobLesson:
+    return JobLesson(
+        id=uuid4(), schedule_id=hex_id, name="n", cue="the job meets a refusal", lesson="ask first",
+        learned_from_run=None, baseline=None, active=False, created_at=NOW,
+        retired={"reason": "no_improvement", "at": at or NOW.isoformat()},
+    )
+
+
+def _heart() -> MagicMock:
+    heart = MagicMock()
+    heart.agent_id = "agent"
+    for owner, names in {
+        "schedules": ("list_with_metadata_key", "set_metadata", "deactivate", "get"),
+        "subtasks": ("get", "cancel"),
+        "job_runs": ("scored_runs", "ledger_calls", "schedules_with_bad_runs"),
+        "intentions": ("get_for_source",),
+    }.items():
+        for name in names:
+            setattr(getattr(heart, owner), name, AsyncMock())
+    heart.job_runs.scored_runs.return_value = []
+    heart.job_runs.ledger_calls.return_value = {}
+    heart.job_runs.schedules_with_bad_runs.return_value = []
+    heart.list_job_lessons = AsyncMock(return_value=[])
+    heart.intentions.get_for_source.return_value = _CONTAINER
+    heart.schedules.list_with_metadata_key.return_value = []
+    return heart
+
+
+def _fixer(heart: MagicMock | None = None, **over) -> tuple[JobFixer, MagicMock, list[str]]:
+    llm = over.pop("llm", AsyncMock())
+    settings = Settings(
+        _env_file=None,
+        **{
+            "result_inbox_enabled": True, "intentions_enabled": True, "continuation_enabled": True,
+            "telegram_chat_id": "8080", "job_fixes_enabled": True, **over,
+        },
+    )
+    heart = heart or _heart()
+    order: list[str] = []
+    heart.writes = []
+
+    async def set_metadata(_sid, _key, value, *, task=None):
+        order.append("set_metadata")
+        heart.writes.append((value, task))
+
+    async def deactivate(_sid):
+        order.append("deactivate")
+
+    async def write_report(_schedule, _record):
+        order.append("_write_owner_report")
+        return uuid4()
+
+    heart.schedules.set_metadata.side_effect = set_metadata
+    heart.schedules.deactivate.side_effect = deactivate
+    fixer = JobFixer(heart, settings, llm, clock=lambda: NOW)
+    fixer._write_owner_report = AsyncMock(side_effect=write_report)
+    return fixer, heart, order
+
+
+async def _step(record, *, active=True, fix=None, runs=(), review=None, task="Old text", heart=None):
+    fixer, heart, order = _fixer(heart)
+    schedule = SimpleNamespace(id=uuid4(), metadata_={FIX_KEY: record}, active=active, task=task)
+    heart.schedules.list_with_metadata_key.return_value = [schedule]
+    heart.subtasks.get.return_value = fix
+    heart.job_runs.scored_runs.return_value = list(runs)
+    with patch("nous.handlers.job_fixes.review_change", AsyncMock(return_value=review or (True, None))):
+        stats = await fixer.run_sleep()
+    return stats, order, heart.writes
+
+
+def _start_env(*, recent, baseline=None, retired=(), schedules=1, with_record=0, container=_CONTAINER):
+    fixer, heart, _order = _fixer()
+    made = [
+        SimpleNamespace(
+            id=UUID(HEX) if i == 0 else uuid4(), active=True, schedule_type="recurring", task="Check the report",
+            metadata_={FIX_KEY: {"state": "kept"}} if i < with_record else {}, timeout_seconds=120,
+        )
+        for i in range(schedules)
+    ]
+    by_id = {s.id: s for s in made}
+    baseline = baseline if baseline is not None else recent
+
+    async def scored_runs(_hex, **kw):
+        return list(baseline if kw.get("until") is not None else recent)
+
+    heart.schedules.get.side_effect = lambda sid: by_id.get(sid)
+    heart.schedules.get.return_value = made[0]
+    heart.job_runs.scored_runs.side_effect = scored_runs
+    heart.job_runs.schedules_with_bad_runs.return_value = [s.id.hex for s in made]
+    heart.list_job_lessons.return_value = list(retired)
+    heart.intentions.get_for_source.return_value = container
+    create_fire = AsyncMock(return_value=SimpleNamespace(id=uuid4()))
+    patch("nous.handlers.job_fixes.create_fire", create_fire).start()
+    return fixer, heart, create_fire
+
+
+@pytest.mark.parametrize(
+    "over", [{"intentions_enabled": False}, {"continuation_enabled": False}, {"telegram_chat_id": ""}, {"llm": None}]
+)
+async def test_missing_preconditions_skip_once_with_a_warning(over, caplog):
+    fixer, heart, _order = _fixer(**over)
+    assert await fixer.run_sleep() == {**dict.fromkeys(KEYS, 0), "skipped": 1}
+    heart.schedules.list_with_metadata_key.assert_not_called()
+    heart.job_runs.schedules_with_bad_runs.assert_not_called()
+    await fixer.run_sleep()
+    assert caplog.text.count("check-and-fix is skipped") == 1
+
+
+@pytest.mark.parametrize(
+    ("record", "fix", "runs", "review", "state", "stat", "stopped_for"),
+    [
+        (_record("running"), SimpleNamespace(status="running", result=None), (), None, None, "waiting", None),
+        (_record("running"), None, (), None, "stopped", "stopped", "unreadable_report"),
+        (_record("running", fix_run="garbage"), None, (), None, "stopped", "stopped", "unreadable_report"),
+        (_record("running", started_at=_days_ago(3)), SimpleNamespace(status="pending", result=None), (), None,
+         "stopped", "stopped", "unreadable_report"),
+        (_record("running"), SimpleNamespace(status="completed", result=CHANGED), (), (True, None),
+         "judging", "applied", None),
+        (_record("running"), SimpleNamespace(status="completed", result=CHANGED), (), (False, "widens scope"),
+         "stopped", "refused", "change_refused"),
+        (_record("running"), SimpleNamespace(status="completed", result=_fence(VALID["fixed_elsewhere"])), (), None,
+         "judging", "applied", None),
+        (_record("running"), SimpleNamespace(status="completed", result=NEEDS), (), None,
+         "stopped", "stopped", "needs_owner"),
+        (_record("running"), SimpleNamespace(status="completed", result=NO_FAULT), _runs(bad=1), None,
+         "closed", "closed", None),
+        (_record("running"), SimpleNamespace(status="completed", result=NO_FAULT), _runs(bad=3), None,
+         "stopped", "stopped", "no_fault_found"),
+        (_record("running"), SimpleNamespace(status="completed", result="no block"), (), None,
+         "stopped", "stopped", "unreadable_report"),
+        (_record("running"), SimpleNamespace(status="failed", result=None), (), None,
+         "stopped", "stopped", "unreadable_report"),
+        (_record("running"), SimpleNamespace(status="completed", result=NEEDS + "\n" + _fence({"quoted": 1})), (),
+         None, "stopped", "stopped", "unreadable_report"),
+        (_record("judging"), None, _runs(n=4), None, None, "waiting", None),
+        (_record("judging"), None, _runs(n=5, bad=0), None, "kept", "kept", None),
+        (_record("judging"), None, _runs(n=5, bad=1), None, "stopped", "stopped", "did_not_help"),
+        (_record("kept"), None, _runs(n=5, bad=3), None, "stopped", "stopped", "fails_again"),
+        (_record("closed"), None, _runs(n=5, bad=2), None, None, None, None),
+    ],
+)
+async def test_each_transition_of_the_state_table(record, fix, runs, review, state, stat, stopped_for):
+    heart = _heart()
+    stats, order, writes = await _step(record, fix=fix, runs=runs, review=review, heart=heart)
+    if stat:
+        assert stats[stat] == 1
+    if state is None:
+        assert writes == []
+    else:
+        assert writes[-1][0]["state"] == state
+    if stopped_for:
+        assert writes[-1][0]["stop_reason"] == stopped_for and stats["stopped"] == 1
+        assert order[-3:] == ["_write_owner_report", "deactivate", "set_metadata"]
+    else:
+        assert "deactivate" not in order and "_write_owner_report" not in order
+    assert all(c.kwargs["settled_only"] is False for c in heart.job_runs.scored_runs.await_args_list)
+
+
+async def test_an_accepted_change_replaces_the_task_and_keeps_the_old_one():
+    stats, _order, writes = await _step(
+        _record("running"), fix=SimpleNamespace(status="completed", result=CHANGED), review=(True, None)
+    )
+    record, task = writes[-1]
+    assert task == "Run the check and report."
+    assert (record["state"], record["old_task"], record["verdict"]) == ("judging", "Old text", "changed_job")
+    assert record["applied_at"] and stats["applied"] == 1
+
+
+async def test_a_fix_outside_the_job_leaves_the_task_alone():
+    _stats, _order, writes = await _step(
+        _record("running"), fix=SimpleNamespace(status="completed", result=_fence(VALID["fixed_elsewhere"]))
+    )
+    assert writes[-1][1] is None and writes[-1][0]["old_task"] is None
+
+
+async def test_a_failed_judging_restores_the_old_instructions_before_the_message():
+    _stats, order, writes = await _step(_record("judging", old_task="Old text"), runs=_runs(n=5, bad=1))
+    assert order == ["set_metadata", "_write_owner_report", "deactivate", "set_metadata"]
+    assert writes[0][1] == "Old text" and writes[0][0]["state"] == "stopping"
+    assert writes[-1][0]["state"] == "stopped" and writes[-1][1] is None
+
+
+async def test_a_stopping_record_resumes_with_only_the_remaining_steps():
+    stats, order, writes = await _step(_record("stopping", stop_reason="needs_owner", old_task=None))
+    assert order == ["_write_owner_report", "deactivate", "set_metadata"]
+    assert writes[-1][0]["state"] == "stopped" and stats["stopped"] == 1
+
+
+async def test_a_refused_change_keeps_the_proposal_and_the_reason_in_the_detail():
+    _stats, _order, writes = await _step(
+        _record("running"), fix=SimpleNamespace(status="completed", result=CHANGED), review=(False, "widens scope")
+    )
+    record = writes[0][0]
+    assert record["verdict"] == "changed_job"
+    assert record["detail"]["new_instructions"] == "Run the check and report."
+    assert record["detail"]["reason"] == "widens scope"
+
+
+async def test_a_stuck_fix_run_is_cancelled_when_it_is_given_up_on():
+    heart = _heart()
+    await _step(
+        _record("running", started_at=_days_ago(3)), fix=SimpleNamespace(status="pending", result=None), heart=heart
+    )
+    heart.subtasks.cancel.assert_awaited_once_with(FIX_RUN)
+    young = await _step(
+        _record("running", started_at=_days_ago(1)), fix=SimpleNamespace(status="pending", result=None)
+    )
+    assert young[0]["waiting"] == 1 and young[2] == []
+
+
+async def test_the_owner_stopping_the_job_mid_fix_ends_in_stopped_inactive_with_no_message():
+    for state in ("running", "judging", "kept", "closed"):
+        heart = _heart()
+        _stats, order, writes = await _step(_record(state), active=False, heart=heart)
+        assert (writes[-1][0]["state"], writes[-1][0]["stop_reason"]) == ("stopped", "inactive")
+        assert "_write_owner_report" not in order and "deactivate" not in order and writes[-1][1] is None
+        if state == "running":
+            heart.subtasks.cancel.assert_awaited_once_with(FIX_RUN)
+        else:
+            heart.subtasks.cancel.assert_not_awaited()
+    _stats, order, writes = await _step(_record("judging", old_task="Old text"), active=False)
+    assert writes[-1][1] == "Old text" and writes[-1][0]["stop_reason"] == "inactive"
+    assert "_write_owner_report" not in order
+
+
+@pytest.mark.parametrize("baseline", [None, "garbage", {"bad": 1}, {"bad": 1, "scored": 0}, {"bad": "x", "scored": 5}])
+async def test_a_judging_record_with_an_unusable_baseline_is_ignored_not_divided(baseline):
+    stats, order, writes = await _step(_record("judging", baseline=baseline), runs=_runs(n=5, bad=0))
+    assert writes == [] and order == [] and stats == dict.fromkeys(KEYS, 0)
+
+
+@pytest.mark.parametrize("bad_record", ["garbage", {"state": "weird"}, {"state": "stopped"}, None, ["x"]])
+async def test_a_stopped_or_malformed_record_is_ignored(bad_record):
+    stats, order, writes = await _step(bad_record)
+    assert writes == [] and order == [] and stats == dict.fromkeys(KEYS, 0)
+
+
+async def test_three_bad_of_the_latest_five_starts_a_fix_run_with_the_pinned_arguments():
+    fixer, heart, create_fire = _start_env(recent=_runs(n=5, bad=3), baseline=_runs(n=20, bad=6))
+    stats = await fixer.run_sleep()
+    assert stats["started"] == 1
+    kwargs = create_fire.await_args.kwargs
+    assert kwargs["metadata"] == {"job_fix": True, "max_attempts": 1}
+    assert kwargs["notify"] is False and kwargs["timeout"] == 600
+    assert "Job instructions:" in kwargs["task"]
+    assert kwargs["intent"] == "Check a background job that keeps going wrong: Check the report"
+    record = heart.schedules.set_metadata.await_args.args[2]
+    assert (record["state"], record["trigger"]) == ("running", "fails_often")
+    assert record["fix_run"] == str(create_fire.return_value.id)
+    assert record["baseline"]["bad"] == 6 and record["baseline"]["scored"] == 20
+    assert record["baseline"]["window_end"] == NOW.isoformat() and record["started_at"] == NOW.isoformat()
+    assert all(c.kwargs["settled_only"] is False for c in heart.job_runs.scored_runs.await_args_list)
+    assert_no_scorer_text(kwargs["task"], kwargs["intent"])
+
+
+async def test_a_retired_lesson_with_one_bad_run_triggers_but_two_bad_runs_alone_do_not():
+    fixer, heart, _fire = _start_env(recent=_runs(n=5, bad=1), retired=[_retired_lesson(HEX)])
+    assert (await fixer.run_sleep())["started"] == 1
+    assert heart.schedules.set_metadata.await_args.args[2]["trigger"] == "lesson_retired"
+    fixer, heart, create_fire = _start_env(recent=_runs(n=5, bad=2))
+    assert (await fixer.run_sleep())["started"] == 0 and create_fire.await_count == 0
+    old = _retired_lesson(HEX, at=_days_ago(40).isoformat())
+    fixer, heart, create_fire = _start_env(recent=_runs(n=5, bad=1), retired=[old])
+    assert (await fixer.run_sleep())["started"] == 0 and create_fire.await_count == 0
+    fixer, heart, create_fire = _start_env(recent=_runs(n=5, bad=1), retired=[_retired_lesson(HEX, at="soon")])
+    assert (await fixer.run_sleep())["started"] == 0
+
+
+async def test_one_attempt_starts_per_sleep_and_a_schedule_with_a_record_is_not_restarted():
+    fixer, heart, create_fire = _start_env(recent=_runs(n=5, bad=3), schedules=3, with_record=1)
+    assert (await fixer.run_sleep())["started"] == 1 and create_fire.await_count == 1
+
+
+async def test_a_failed_fire_is_start_failed_and_leaves_no_record():
+    fixer, heart, create_fire = _start_env(recent=_runs(n=5, bad=3))
+    create_fire.side_effect = ValueError("pending subtask limit (5) reached")
+    stats = await fixer.run_sleep()
+    assert (stats["start_failed"], stats["started"]) == (1, 0) and heart.schedules.set_metadata.await_count == 0
+
+
+async def test_a_job_without_a_container_is_counted_skipped_and_never_fired():
+    fixer, heart, create_fire = _start_env(recent=_runs(n=5, bad=3), container=None)
+    stats = await fixer.run_sleep()
+    assert (stats["skipped"], stats["started"]) == (1, 0) and create_fire.await_count == 0
+
+
+class _Session:
+    def __init__(self) -> None:
+        self.session = AsyncMock()
+
+    async def __aenter__(self):
+        return self.session
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+async def test_the_owner_report_is_a_report_row_with_a_stable_id_and_shows_what_was_tried():
+    fixer, heart, _order = _fixer()
+    session = _Session()
+    heart.db.session = MagicMock(return_value=session)
+    heart.job_runs.scored_runs.return_value = _runs(n=5, bad=1)
+    schedule = SimpleNamespace(id=uuid4(), metadata_={}, active=True, task="Old text")
+    record = _record("judging", old_task="Old text", verdict="changed_job", detail=dict(VALID["changed_job"]))
+    insert = AsyncMock(return_value=uuid4())
+    push = AsyncMock(return_value=NOW)
+    with patch.object(continuation, "insert_report", insert), patch.object(continuation, "owner_push_after", push):
+        fixer._write_owner_report = JobFixer._write_owner_report.__get__(fixer)
+        await fixer._stop_and_ask(schedule, record, "did_not_help", {}, dict.fromkeys(KEYS, 0))
+    kwargs = insert.await_args.kwargs
+    assert kwargs["kind"] == continuation.MSG_REPORT and kwargs["channel"] == "telegram:8080"
+    assert kwargs["report_id"] == uuid5(NAMESPACE_URL, f"nous-job-fix:{schedule.id}")
+    assert (kwargs["intention_id"], kwargs["root_id"]) == (_CONTAINER.id, _CONTAINER.root_id)
+    assert "Run the check and report." in kwargs["body"]
+    assert "The old instructions were restored." in kwargs["body"]
+    assert_no_scorer_text(kwargs["body"], kwargs["title"])
+    session.session.commit.assert_awaited()
+    assert heart.job_runs.scored_runs.await_args.kwargs["settled_only"] is False
+    assert heart.writes[-1][0]["state"] == "stopped" and heart.writes[-1][0]["report_id"] == str(insert.return_value)
+
+
+async def test_without_a_container_no_report_is_written_and_the_job_is_still_stopped():
+    fixer, heart, _order = _fixer()
+    heart.intentions.get_for_source.return_value = None
+    fixer._write_owner_report = JobFixer._write_owner_report.__get__(fixer)
+    schedule = SimpleNamespace(id=uuid4(), metadata_={}, active=True, task="t")
+    verdict = dict(VALID["needs_owner"])
+    await fixer._stop_and_ask(schedule, _record("running"), "needs_owner", verdict, dict.fromkeys(KEYS, 0))
+    assert heart.writes[-1][0]["state"] == "stopped" and heart.writes[-1][0]["report_id"] is None
+    heart.schedules.deactivate.assert_awaited_once()

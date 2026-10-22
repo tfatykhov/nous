@@ -8,11 +8,14 @@ or the schedule's task, never from a score; the scorer only chooses which job an
 from __future__ import annotations
 
 import json
+import logging
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
+from nous.brain import continuation, intentions
 from nous.brain.continuation import INBOX_TITLE_MAX
 from nous.handlers import LLMClient, call_background_llm, parse_llm_json
 from nous.handlers.job_lessons import (  # noqa: F401  (re-exported: one definition of each)
@@ -21,11 +24,16 @@ from nous.handlers.job_lessons import (  # noqa: F401  (re-exported: one definit
     record_head,
     render_run,
 )
-from nous.heart.job_runs import JobRun
+from nous.handlers.task_scheduler import create_fire
+from nous.heart.job_runs import FIX_KEY, JobRun
 from nous.heart.schemas import JobLesson
 
 if TYPE_CHECKING:
+    from nous.config import Settings
+    from nous.heart import Heart
     from nous.storage.models import Schedule
+
+logger = logging.getLogger(__name__)
 
 FAILS_OFTEN_BAD = 3  # bad runs ...
 FAILS_OFTEN_OF = 5  # ... among this many latest runs make a job "fail often"
@@ -224,3 +232,340 @@ def render_owner_message(
 def render_owner_title(intent: str) -> str:
     """The inbox title for a stopped job: one line, at most INBOX_TITLE_MAX characters."""
     return " ".join(f"Stopped a background job that keeps going wrong: {intent}".split())[:INBOX_TITLE_MAX]
+
+
+_STATES = ("running", "judging", "kept", "closed", "stopping", "stopped")
+_STAT_KEYS = ("started", "start_failed", "applied", "refused", "kept", "closed", "stopped", "waiting", "skipped")
+_CANDIDATE_DAYS = 30
+
+
+def _parse_time(value: object) -> datetime | None:
+    """An ISO time string as an aware datetime, or None for anything else."""
+    if not isinstance(value, str):
+        return None
+    try:
+        when = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=UTC)
+
+
+def _baseline_ok(baseline: object) -> bool:
+    """True for a baseline with a positive int ``scored`` and an int ``bad``."""
+    if not isinstance(baseline, dict):
+        return False
+    bad, scored = baseline.get("bad"), baseline.get("scored")
+    return all(isinstance(v, int) and not isinstance(v, bool) for v in (bad, scored)) and scored > 0
+
+
+class JobFixer:
+    """Runs the check-and-fix state machine for recurring jobs, one step per job each sleep.
+
+    State lives in ``schedule.metadata_["job_fix"]`` and is written only through ``set_metadata``. Scores choose
+    which jobs and runs to look at; no text written here, shown to a model or sent to the owner carries them.
+    """
+
+    def __init__(
+        self,
+        heart: Heart,
+        settings: Settings,
+        llm_client: LLMClient | None,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._heart = heart
+        self._settings = settings
+        self._llm = llm_client
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._warned_skip = False
+        self._ignored: set[str] = set()
+
+    def _ready(self) -> bool:
+        """True when a fix can run and the owner can be told."""
+        return (
+            intentions.enabled(self._settings)
+            and continuation.enabled(self._settings)
+            and continuation.owner_channel(self._settings, None) is not None
+            and self._llm is not None
+        )
+
+    async def run_sleep(self) -> dict[str, int]:
+        """Advance every job's record, then start at most FIXES_PER_SLEEP new attempts. Returns the nine counts."""
+        stats = dict.fromkeys(_STAT_KEYS, 0)
+        if not self._ready():
+            if not self._warned_skip:
+                self._warned_skip = True
+                logger.warning(
+                    "Job fixes: check-and-fix is skipped (needs intentions, continuation, an owner chat and an LLM)"
+                )
+            stats["skipped"] = 1
+            return stats
+        for schedule in await self._heart.schedules.list_with_metadata_key(FIX_KEY, state_not="stopped"):
+            try:
+                await self._advance(schedule, stats)
+            except Exception:
+                logger.warning("Job fixes: advancing schedule %s failed", schedule.id, exc_info=True)
+        try:
+            await self._start_new(stats)
+        except Exception:
+            logger.warning("Job fixes: starting new attempts failed", exc_info=True)
+        return stats
+
+    def _ignore(self, schedule: Schedule, why: str) -> None:
+        """Log once per schedule and reason that its record is left alone."""
+        key = f"{schedule.id}:{why}"
+        if key not in self._ignored:
+            self._ignored.add(key)
+            logger.warning("Job fixes: the record of schedule %s is %s and is ignored", schedule.id, why)
+
+    async def _runs(self, schedule: Schedule, **kw: Any) -> list[JobRun]:
+        """Scored runs of the job, fresh scores on purpose: the fixer acts on provisional ones too."""
+        return await self._heart.job_runs.scored_runs(schedule.id.hex, settled_only=False, **kw)
+
+    async def _write(self, schedule: Schedule, record: dict, *, task: str | None = None) -> None:
+        await self._heart.schedules.set_metadata(schedule.id, FIX_KEY, record, task=task)
+
+    async def _advance(self, schedule: Schedule, stats: dict[str, int]) -> None:
+        """Take one step of the state table for one job."""
+        record = (schedule.metadata_ or {}).get(FIX_KEY)
+        if not isinstance(record, dict) or record.get("state") not in _STATES:
+            self._ignore(schedule, "malformed")
+            return
+        state = record["state"]
+        if state == "stopped":
+            return
+        if state == "stopping":
+            await self._finish_stop(schedule, record, stats)
+            return
+        now = self._clock()
+        if not schedule.active:
+            if state == "running":
+                await self._cancel_fix(record)
+            old_task = record.get("old_task") if isinstance(record.get("old_task"), str) else None
+            await self._write(
+                schedule,
+                {**record, "state": "stopped", "stop_reason": "inactive", "settled_at": now.isoformat()},
+                task=old_task,
+            )
+            return
+        if state == "running":
+            await self._advance_running(schedule, record, now, stats)
+        elif state == "judging":
+            await self._advance_judging(schedule, record, now, stats)
+        else:  # kept or closed
+            settled = _parse_time(record.get("settled_at"))
+            if settled is None:
+                self._ignore(schedule, "missing its settled time")
+                return
+            if fails_often(await self._runs(schedule, after=settled, limit=FAILS_OFTEN_OF)):
+                await self._stop_and_ask(schedule, record, "fails_again", {}, stats)
+
+    async def _cancel_fix(self, record: dict) -> None:
+        """Cancel the fix run of a record when its id is a UUID; the returned flag is not needed."""
+        try:
+            fix_run = UUID(str(record.get("fix_run")))
+        except ValueError:
+            return
+        await self._heart.subtasks.cancel(fix_run)
+
+    async def _advance_running(self, schedule: Schedule, record: dict, now: datetime, stats: dict[str, int]) -> None:
+        unreadable = "unreadable_report"
+        try:
+            fix_run = UUID(str(record.get("fix_run")))
+        except ValueError:
+            await self._stop_and_ask(schedule, record, unreadable, {}, stats)
+            return
+        sub = await self._heart.subtasks.get(fix_run)
+        if sub is None:
+            await self._stop_and_ask(schedule, record, unreadable, {}, stats)
+            return
+        if sub.status in ("pending", "running"):
+            started = _parse_time(record.get("started_at"))
+            if started is not None and now - started < timedelta(days=FIX_WAIT_DAYS):
+                stats["waiting"] += 1
+                return
+            # A stuck fix run must not hold the job's next regular fire through the scheduler's debounce.
+            await self._heart.subtasks.cancel(fix_run)
+            await self._stop_and_ask(schedule, record, unreadable, {}, stats)
+            return
+        verdict = parse_verdict(sub.result) if sub.status == "completed" else None
+        if verdict is None:
+            await self._stop_and_ask(schedule, record, unreadable, {}, stats)
+            return
+        kind = verdict["verdict"]
+        if kind == "changed_job":
+            new = verdict["new_instructions"]
+            accepted, reason = await review_change(self._llm, self._settings.background_model, schedule.task, new)
+            if not accepted:
+                stats["refused"] += 1
+                await self._stop_and_ask(schedule, record, "change_refused", {**verdict, "reason": reason}, stats)
+                return
+            await self._write(
+                schedule,
+                {
+                    **record,
+                    "state": "judging",
+                    "verdict": kind,
+                    "detail": verdict,
+                    "old_task": schedule.task,
+                    "applied_at": now.isoformat(),
+                },
+                task=new,
+            )
+            stats["applied"] += 1
+        elif kind == "fixed_elsewhere":
+            await self._write(
+                schedule,
+                {**record, "state": "judging", "verdict": kind, "detail": verdict, "applied_at": now.isoformat()},
+            )
+            stats["applied"] += 1
+        elif kind == "needs_owner":
+            await self._stop_and_ask(schedule, record, "needs_owner", verdict, stats)
+        elif fails_often(await self._runs(schedule, limit=FAILS_OFTEN_OF)):  # no_fault_found
+            await self._stop_and_ask(schedule, record, "no_fault_found", verdict, stats)
+        else:
+            await self._write(
+                schedule,
+                {**record, "state": "closed", "verdict": kind, "detail": verdict, "settled_at": now.isoformat()},
+            )
+            stats["closed"] += 1
+
+    async def _advance_judging(self, schedule: Schedule, record: dict, now: datetime, stats: dict[str, int]) -> None:
+        baseline = record.get("baseline")
+        if not _baseline_ok(baseline):
+            self._ignore(schedule, "missing a usable baseline")
+            return
+        applied = _parse_time(record.get("applied_at"))
+        if applied is None:
+            self._ignore(schedule, "missing its applied time")
+            return
+        runs = await self._runs(schedule, after=applied, limit=BASELINE_RUNS)
+        if len(runs) < JUDGE_AFTER_RUNS:
+            stats["waiting"] += 1
+            return
+        bad = sum(1 for r in runs if r.bad)
+        if bad * baseline["scored"] < baseline["bad"] * len(runs):  # strictly below the baseline rate
+            await self._write(schedule, {**record, "state": "kept", "settled_at": now.isoformat()})
+            stats["kept"] += 1
+        else:
+            await self._stop_and_ask(schedule, record, "did_not_help", {}, stats)
+
+    async def _stop_and_ask(
+        self, schedule: Schedule, record: dict, stop_reason: str, detail: dict, stats: dict[str, int]
+    ) -> None:
+        """Restore the old instructions and note the stop, tell the owner, stop the job, then record it."""
+        old_task = record.get("old_task") if isinstance(record.get("old_task"), str) else None
+        stored = record.get("detail") if isinstance(record.get("detail"), dict) else {}
+        stopping = {**record, "state": "stopping", "stop_reason": stop_reason, "detail": {**stored, **detail}}
+        if isinstance(detail.get("verdict"), str):
+            stopping["verdict"] = detail["verdict"]
+        await self._write(schedule, stopping, task=old_task)
+        await self._finish_stop(schedule, stopping, stats)
+
+    async def _finish_stop(self, schedule: Schedule, record: dict, stats: dict[str, int]) -> None:
+        """The steps after the restore; each is repeatable, so a record left in `stopping` is finished next sleep."""
+        # If insert_report raises, the record stays `stopping` and the next sleep retries these steps.
+        report_id = await self._write_owner_report(schedule, record)
+        await self._heart.schedules.deactivate(schedule.id)
+        await self._write(schedule, {**record, "state": "stopped", "report_id": str(report_id) if report_id else None})
+        stats["stopped"] += 1
+
+    async def _write_owner_report(self, schedule: Schedule, record: dict) -> UUID | None:
+        """Write the REPORT row for the stopped job under its still-open container; None without a container."""
+        heart = self._heart
+        container = await heart.intentions.get_for_source("schedule", schedule.id)
+        if container is None:
+            logger.warning("Job fixes: schedule %s has no container, the owner is not told", schedule.id)
+            return None
+        runs = await self._runs(schedule, limit=BRIEF_RUNS)
+        calls = await heart.job_runs.ledger_calls([r.subtask_id for r in runs])
+        channel = continuation.owner_channel(self._settings, container.origin_channel)
+        async with heart.db.session() as session:
+            report_id = await continuation.insert_report(
+                session,
+                heart.agent_id,
+                kind=continuation.MSG_REPORT,
+                title=render_owner_title(container.intent),
+                body=render_owner_message(schedule, runs, calls, record),
+                channel=channel,
+                intention_id=container.id,
+                root_id=container.root_id,
+                push_after=await continuation.owner_push_after(
+                    session, heart.agent_id, self._settings, channel=channel, root_id=container.root_id
+                ),
+                report_id=uuid5(NAMESPACE_URL, f"nous-job-fix:{schedule.id}"),
+            )
+            await session.commit()
+        return report_id
+
+    async def _start_new(self, stats: dict[str, int]) -> None:
+        """Start up to FIXES_PER_SLEEP fix attempts for jobs that keep failing."""
+        heart, now = self._heart, self._clock()
+        cutoff = now - timedelta(days=TRIGGER_WINDOW_DAYS)
+        retired_lessons: dict[str, list[JobLesson]] = {}
+        just_retired: set[str] = set()
+        for lesson in await heart.list_job_lessons(active=False):
+            retired = lesson.retired
+            if not isinstance(retired, dict) or retired.get("reason") != "no_improvement":
+                continue
+            retired_lessons.setdefault(lesson.schedule_id, []).append(lesson)
+            at = _parse_time(retired.get("at"))
+            if at is not None and at >= cutoff:
+                just_retired.add(lesson.schedule_id)
+        bad_ids = await heart.job_runs.schedules_with_bad_runs(since=cutoff)
+        attempts = 0
+        for hex_id in dict.fromkeys([*bad_ids, *sorted(just_retired)]):
+            if attempts >= FIXES_PER_SLEEP:
+                break
+            try:
+                schedule = await heart.schedules.get(UUID(hex_id))
+            except ValueError:
+                continue
+            if (
+                schedule is None
+                or not schedule.active
+                or schedule.schedule_type != "recurring"
+                or FIX_KEY in (schedule.metadata_ or {})
+            ):
+                continue
+            recent = await self._runs(schedule, limit=FAILS_OFTEN_OF)
+            if fails_often(recent):
+                trigger = "fails_often"
+            elif hex_id in just_retired and any(r.bad for r in recent):
+                trigger = "lesson_retired"
+            else:
+                continue
+            if await heart.intentions.get_for_source("schedule", schedule.id) is None:
+                stats["skipped"] += 1  # the owner could not be told
+                continue
+            attempts += 1
+            calls = await heart.job_runs.ledger_calls([r.subtask_id for r in recent])
+            brief = render_fix_brief(schedule, recent, calls, retired_lessons.get(hex_id, []))
+            window = await self._runs(schedule, until=now, limit=BASELINE_RUNS)
+            baseline = {"bad": sum(1 for r in window if r.bad), "scored": len(window), "window_end": now.isoformat()}
+            try:
+                sub = await create_fire(
+                    heart,
+                    self._settings,
+                    schedule,
+                    task=brief,
+                    intent=f"Check a background job that keeps going wrong: {schedule.task}",
+                    metadata={FIX_KEY: True, "max_attempts": 1},
+                    notify=False,
+                    timeout=max(schedule.timeout_seconds, FIX_TIMEOUT_FLOOR),  # a resource, not authority
+                )
+            except ValueError:
+                logger.warning("Job fixes: could not start a check for schedule %s", schedule.id, exc_info=True)
+                stats["start_failed"] += 1
+                continue
+            await self._write(
+                schedule,
+                {
+                    "state": "running",
+                    "trigger": trigger,
+                    "fix_run": str(sub.id),
+                    "started_at": now.isoformat(),
+                    "baseline": baseline,
+                },
+            )
+            stats["started"] += 1
