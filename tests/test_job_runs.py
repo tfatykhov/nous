@@ -149,6 +149,7 @@ async def test_lesson_reads_ignore_provisional_scores(job_env):  # noqa: F811
     assert await r.lesson_cases(since=since, limit=10) == []
     assert await r.good_runs(s.id.hex, before=NOW, since=since) == []
     assert await r.scored_runs(s.id.hex) == []
+    assert {x.subtask_id for x in await r.scored_runs(s.id.hex, settled_only=False)} == {bad.id, good.id}
     assert await r.schedules_with_bad_runs(since=since) == [s.id.hex]
     t = await make_schedule(env)
     bad_t = await make_run(env, t, outcome="failed", age_hours=5)
@@ -169,6 +170,19 @@ async def test_schedules_with_bad_runs(job_env):  # noqa: F811
     await make_run(env, c, outcome="failed", age_hours=2)
     assert await r.schedules_with_bad_runs(since=NOW - timedelta(days=1)) == [a.id.hex]
     assert await r.schedules_with_bad_runs(since=NOW - timedelta(hours=1)) == []
+
+
+async def test_schedules_with_bad_runs_come_newest_bad_run_first(job_env):  # noqa: F811
+    env = await job_env()
+    r = env.heart.job_runs
+    # The newer job gets the larger hex, so an ascending-hex order (the old behaviour) is the wrong answer.
+    older, newer = sorted([await make_schedule(env), await make_schedule(env)], key=lambda x: x.id.hex)
+    await make_run(env, older, outcome="failed", age_hours=3)
+    await make_run(env, older, outcome="failed", age_hours=30)
+    await make_run(env, newer, outcome="failed", age_hours=1)
+    await make_run(env, newer, outcome="done_self", age_hours=0.5)  # a later good run does not move it
+    got = await r.schedules_with_bad_runs(since=NOW - timedelta(days=3))
+    assert got == [newer.id.hex, older.id.hex]
 
 
 async def test_ledger_calls_order_cap_and_agent_scope(job_env):  # noqa: F811

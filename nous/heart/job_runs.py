@@ -7,7 +7,8 @@ A job is a recurring ``heart.schedules`` row. Each fire is a ``heart.subtasks`` 
 The score only decides *which* runs come back (``JobRun.bad``). Every other field of a
 :class:`JobRun` is the run's own record, so a caller can render a run without rendering a score.
 Runs of a fix attempt (subtask metadata flag :data:`FIX_KEY`) are never returned.
-Lesson reads (``lesson_cases``, ``good_runs``, ``scored_runs``) use settled scores only.
+Lesson reads (``lesson_cases``, ``good_runs``, ``scored_runs``) use settled scores only, unless ``scored_runs`` is
+called with ``settled_only=False``.
 """
 
 from __future__ import annotations
@@ -152,10 +153,14 @@ class JobRunReader:
         after: datetime | None = None,
         until: datetime | None = None,
         limit: int = 20,
+        settled_only: bool = True,
     ) -> list[JobRun]:
-        """Scored runs of one job (``not_scored`` left out), newest first; ``after`` exclusive, ``until`` inclusive."""
+        """Scored runs of one job (``not_scored`` left out), newest first; ``after`` exclusive, ``until`` inclusive.
+
+        Lesson reads use settled scores only; pass ``settled_only=False`` to include provisional ones.
+        """
         sql = (
-            _SELECT + _FROM + _SETTLED
+            _SELECT + _FROM + (_SETTLED if settled_only else "")
             + " AND s.metadata->>'schedule_id' = :schedule_id AND ts.outcome <> 'not_scored'"
             + " AND (CAST(:after AS timestamptz) IS NULL OR ts.finished_at > CAST(:after AS timestamptz))"
             + " AND (CAST(:until AS timestamptz) IS NULL OR ts.finished_at <= CAST(:until AS timestamptz))"
@@ -190,10 +195,26 @@ class JobRunReader:
         return out
 
     async def schedules_with_bad_runs(self, *, since: datetime) -> list[str]:
-        """Hex ids of active recurring jobs with at least one bad run since ``since`` (provisional scores count too)."""
+        """Hex ids of active recurring jobs with a bad run since ``since``, newest bad run first.
+
+        Provisional scores count too; the order is each job's newest bad run, newest first.
+        """
         sql = (
-            "SELECT DISTINCT replace(CAST(sch.id AS text), '-', '') AS schedule_id" + _FROM + _ACTIVE_BAD
-            + " AND ts.finished_at >= :since ORDER BY 1"
+            "SELECT replace(CAST(sch.id AS text), '-', '') AS schedule_id" + _FROM + _ACTIVE_BAD
+            + " AND ts.finished_at >= :since GROUP BY sch.id ORDER BY max(ts.finished_at) DESC, sch.id"
         )
         rows = await self._rows(sql, self._params(since=since))
         return [r["schedule_id"] for r in rows]
+
+    async def fix_run_for(self, schedule_id: str) -> tuple[UUID, datetime] | None:
+        """The id and creation time of the newest fix run of a job (any status), or None.
+
+        A start that crashed before its record was written leaves such a run behind; it is adopted, not repeated.
+        """
+        sql = (
+            "SELECT id, created_at FROM heart.subtasks WHERE agent_id = :agent_id "
+            "AND metadata->>'schedule_id' = :schedule_id AND (metadata -> CAST(:fix_key AS text)) IS NOT NULL "
+            "ORDER BY created_at DESC LIMIT 1"
+        )
+        rows = await self._rows(sql, self._params(schedule_id=schedule_id))
+        return (rows[0]["id"], rows[0]["created_at"]) if rows else None

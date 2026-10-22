@@ -50,6 +50,16 @@ The gate checks that the evidence is a real input item, not that the recorded ou
 
 `run_sleep_learning()` returns `no_entry`, `gate_rejected`, `confounded` (weak review), `covered` (see below) and `llm_failed` (no answer, an answer that isn't a JSON object, or a weak-review revision with fields of the wrong type; a failed covered check counts too, and the procedure is then stored as new) for each sleep. The `sleep_completed` event and the generalize log line carry them, the event as one `procedure_gate` object. They are kept out of the consolidation audit's attempted-mutation total. If `procedures_created` stays at 0 while `gate_rejected` or `llm_failed` is high, the gate or the model's answers are blocking learning; while `covered` is high, the lessons are already stored.
 
+## Check-and-fix for a job that keeps failing
+
+Behind `NOUS_JOB_FIXES_ENABLED` (off by default; needs intentions, continuation, an owner chat and an LLM client, otherwise the sleep phase logs once that it is skipped). A recurring job is a candidate when three of its latest five scored runs are bad, or when one of its job lessons was retired as not helping and a bad run is among its latest five. The scorer only chooses the job and the runs. The check reads fresh (provisional) scores on purpose: waiting until a score settles would leave a failing job running for two weeks.
+
+- **One attempt, one run.** At most one fix run starts per sleep cycle and a job gets one attempt in its lifetime (its record is kept on the schedule row). The fix run is a fire under the job's own container, with that container's authority and never more. Its brief is built from the job's own records (the runs' `heart.subtasks` rows and ledger rows and the job's text), never from a score, outcome label or evidence.
+- **Verdict.** The fix run ends its report with a fenced JSON block holding one of four verdicts: `changed_job` (new instructions and why), `fixed_elsewhere` (what was changed outside the job's text), `needs_owner` (a diagnosis and what the owner must do), `no_fault_found` (what was checked). Parsing fails closed: a missing, malformed, unknown or incomplete verdict counts as an unreadable report.
+- **Review of a change.** New instructions pass a fresh-context review first (one stateless call with a pinned prompt that sees the old and new text only). Only an explicit accept applies them; the old text is kept in the record.
+- **Judging.** After five scored runs of the job since the change, the bad rate is compared with the baseline stored when the attempt started. Strictly lower keeps the change.
+- **When it cannot fix.** The old text is restored, the owner gets one report in the chat the job came from (the default chat when it has none) and the job is stopped. Stopping is one-way: to restart the job, recreate it. The report is written before the job is deactivated because it hangs on the job's still-open container. A stuck fix run is cancelled after two days and counts as an unreadable report. A job stopped by the owner during an attempt has its fix run cancelled and gets no message.
+
 ## Lifecycle
 
 - **Reinforcement:** Procedures in context get `activate()` + `record_outcome()` in post_turn based on turn success/failure
@@ -80,6 +90,7 @@ The gate checks that the evidence is a real input item, not that the recorded ou
 | `NOUS_PROCEDURE_WEAKNESS_THRESHOLD` | `0.30` | Effectiveness below which triggers review |
 | `NOUS_JOB_LESSONS_ENABLED` | `false` | Job lessons pathway (needs `NOUS_PROCEDURE_LEARNING_ENABLED`) |
 | `NOUS_JOB_LESSONS_PER_SLEEP` | `2` | Job cases sent to the review per sleep (a failed call counts), outside `NOUS_PROCEDURE_MAX_PER_SLEEP` |
+| `NOUS_JOB_FIXES_ENABLED` | `false` | Check-and-fix for a job that keeps failing (needs intentions, continuation, an owner chat) |
 
 ## Files
 
@@ -87,12 +98,13 @@ The gate checks that the evidence is a real input item, not that the recorded ou
 |------|------|
 | `nous/handlers/procedure_learner.py` | ProcedureLearner (pathways 1+2, weak review, LLM calls) |
 | `nous/handlers/job_lessons.py` | JobLessonLearner (pathway 4: review, gate, store, retire rule) |
+| `nous/handlers/job_fixes.py` | JobFixer (check-and-fix: trigger, verdict parsing, change review, judging, stop and ask) |
 | `nous/heart/job_runs.py` | A job's runs from `heart.subtasks` and the execution ledger |
 | `nous/cognitive/monitor.py` | Pathway 3 (error→recovery tracking) |
-| `nous/handlers/sleep_handler.py` | Generalize phase delegation, and the job lessons phase |
+| `nous/handlers/sleep_handler.py` | Generalize phase delegation, and the job lessons and job fixes phases |
 | `nous/cognitive/layer.py` | Procedure reinforcement in post_turn |
-| `nous/main.py` | Wiring ProcedureLearner and JobLessonLearner into sleep + monitor |
-| `nous/config.py` | 12 configuration fields |
+| `nous/main.py` | Wiring ProcedureLearner, JobLessonLearner and JobFixer into sleep + monitor |
+| `nous/config.py` | 13 configuration fields |
 
 ## Minsky Connection
 

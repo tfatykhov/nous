@@ -7,6 +7,7 @@ never see each other's rows.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
@@ -32,7 +33,7 @@ from nous.storage.models import (
     TaskScore,
 )
 
-NOW = datetime(2026, 10, 20, 12, 0, tzinfo=UTC)
+NOW = datetime.now(UTC).replace(microsecond=0)
 
 
 @pytest_asyncio.fixture
@@ -85,7 +86,9 @@ async def job_env(db, mock_embeddings):
 
     async def make(**over) -> SimpleNamespace:
         agent = f"job-{uuid4().hex[:8]}"
-        settings = Settings(_env_file=None, agent_id=agent, telegram_bot_token="", telegram_chat_id="", **over)
+        settings = Settings(
+            _env_file=None, **{"agent_id": agent, "telegram_bot_token": "", "telegram_chat_id": "", **over}
+        )
         heart = Heart(db, settings, embedding_provider=mock_embeddings)
         env = SimpleNamespace(agent=agent, settings=settings, heart=heart, db=db, scored=False)
         envs.append(env)
@@ -165,3 +168,24 @@ def assert_no_scorer_text(*texts: str) -> None:
         for needle in SCORER_TEXT:
             assert needle not in text, f"scorer text {needle!r} leaked into: {text[:300]!r}"
         assert not _PARTIAL.search(text), f"scorer outcome 'partial' leaked into: {text[:300]!r}"
+
+
+def _fence(obj: object) -> str:
+    """A fenced json block holding ``obj``."""
+    return "```json\n" + json.dumps(obj) + "\n```"
+
+
+VALID = {
+    "changed_job": {
+        "verdict": "changed_job",
+        "new_instructions": "Run the check and report.",
+        "why": "the old text asked for a missing file",
+    },
+    "fixed_elsewhere": {"verdict": "fixed_elsewhere", "what_changed": "restored the helper script in the workspace"},
+    "needs_owner": {
+        "verdict": "needs_owner",
+        "diagnosis": "the shell refuses the script",
+        "owner_action": "run it under owner authority or drop it",
+    },
+    "no_fault_found": {"verdict": "no_fault_found", "checked": "the last five runs and the script"},
+}

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import threading
 import uuid
@@ -363,6 +364,21 @@ class TestScheduleKind:
         assert await _row(db, Schedule, sched.id) == original
         pre = await journal.get(result.pre_restore_id)
         assert undo_journal.decode_row(pre["before"])["active"] is False
+
+    async def test_deactivate_snapshot_leaves_out_the_check_and_fix_record(self, db, schedules, journal):
+        sched = await schedules.create(task="Water plants", schedule_type="recurring", interval_seconds=3600)
+        record = {"state": "running", "baseline": {"bad": 7919, "scored": 7927}}
+        await schedules.set_metadata(sched.id, "job_fix", record)
+        await schedules.set_metadata(sched.id, "other_key", {"keep": "me"})
+        await schedules.deactivate(sched.id)
+        entry = await journal.get((await _only(journal, "schedule", "deactivate"))["id"])
+        text = json.dumps(entry)
+        assert "job_fix" not in text and "7919" not in text and "7927" not in text
+        assert undo_journal.decode_row(entry["before"])["metadata"] == {
+            "other_key": {"keep": "me"}
+        }
+        live = await schedules.get(sched.id)
+        assert live.metadata_["job_fix"] == record  # the stored row is untouched
 
     async def test_restore_keeps_fires_committed_after_the_snapshot(self, db, schedules, journal):
         # Codex P1 on #712: a restore never rewinds fire_count, last_fired_at

@@ -36,6 +36,7 @@ from uuid import UUID
 from sqlalchemy import and_, exists, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from nous.heart.job_runs import FIX_KEY
 from nous.heart.result_inbox import _aware, _percentile, is_dag_node_subtask
 from nous.heart.schemas import EpisodeInput
 from nous.heart.subtasks import INLINE_WORKER_ID
@@ -138,6 +139,9 @@ def classify_for_memory(subtask: Any, settings: Settings) -> MemoryDecision:
     """
     if is_dag_node_subtask(subtask):
         return _skip("dag_node")  # its DAG's F087 summary episode is the memory
+    meta = getattr(subtask, "metadata_", None)
+    if isinstance(meta, dict) and FIX_KEY in meta:
+        return _skip("job_fix")  # a check-and-fix run may hold an unreviewed proposal; the stop report tells the owner
     origin = has_conversation_origin(subtask)
     if getattr(subtask, "worker_id", None) == INLINE_WORKER_ID and not origin:
         return _skip("inline")

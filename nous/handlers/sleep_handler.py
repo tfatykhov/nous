@@ -359,6 +359,7 @@ class SleepHandler:
         self._pending_emits: set[asyncio.Task] = set()
         self._procedure_learner = None  # F012: Set externally if enabled
         self._job_lessons = None  # Job lessons: set externally if enabled
+        self._job_fixer = None  # Job fixes: set externally if enabled
         self._rubric_evolver = None  # F024-3b: Set externally if enabled
         self._graph_densifier = None  # F040: Set externally if enabled
         self._episode_summarizer = None  # F060: Set externally if enabled
@@ -726,6 +727,13 @@ class SleepHandler:
                 )
                 if success:
                     phases_completed.append("job_lessons")
+
+            # Optional, after the job lessons so a lesson retired in this sleep is seen. Not audited: it changes
+            # no memory count.
+            if not self._interrupted and self._job_fixer is not None:
+                success = await self._run_phase("job_fixes", lambda: self._phase_job_fixes(sleep_stats))
+                if success:
+                    phases_completed.append("job_fixes")
 
             if not self._interrupted:
                 success = await self._run_phase(
@@ -2629,6 +2637,27 @@ class SleepHandler:
             return True
         except Exception:
             logger.warning("Job lessons phase failed", exc_info=True)
+            return False
+
+    async def _phase_job_fixes(self, sleep_stats: dict) -> bool:
+        """Start, advance and settle the fix attempts for recurring jobs that keep failing."""
+        if self._job_fixer is None:
+            logger.debug("Sleep phase: job_fixes (no fixer configured)")
+            return True
+        try:
+            stats = await self._job_fixer.run_sleep()
+            keys = ("started", "start_failed", "applied", "refused", "kept", "closed", "stopped", "waiting", "skipped")
+            counts = {key: stats.get(key, 0) for key in keys}
+            # Nested, not flat ints: the consolidation audit sums every top-level int.
+            sleep_stats["job_fixes"] = counts
+            logger.info(
+                "Sleep job fixes: %d started, %d start_failed, %d applied, %d refused, %d kept, %d closed, "
+                "%d stopped, %d waiting, %d skipped",
+                *counts.values(),
+            )
+            return True
+        except Exception:
+            logger.warning("Job fixes phase failed", exc_info=True)
             return False
 
     async def _phase_evolve_rubric(self, sleep_stats: dict) -> bool:

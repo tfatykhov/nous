@@ -70,6 +70,7 @@ _CASES = [
     ("conversation failure written", {"status": "failed", "result": "", "error": "E" * 300}, {}, ("write", "tier1")),
     ("dag node by column", {"dag_node_id": uuid.uuid4()}, {}, ("skip", "dag_node")),
     ("dag node by metadata", {"metadata_": {"dag_id": "d"}}, {}, ("skip", "dag_node")),
+    ("check-and-fix run", {"metadata_": {"schedule_id": "ab", "job_fix": True}}, {}, ("skip", "job_fix")),
     ("inline with origin", {"worker_id": INLINE_WORKER_ID}, {}, ("write", "tier1")),
     (
         "inline without origin",

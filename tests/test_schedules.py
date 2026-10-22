@@ -423,3 +423,21 @@ class TestScheduleMetadata:
     async def test_set_metadata_on_a_missing_schedule_raises(self, schedule_mgr: ScheduleManager):
         with pytest.raises(ValueError):
             await schedule_mgr.set_metadata(uuid4(), "k", {})
+
+    @pytest.mark.postgres_only
+    async def test_list_with_metadata_key_is_agent_scoped_and_filters_state_in_sql(
+        self, schedule_mgr: ScheduleManager, db
+    ):
+        a = await schedule_mgr.create(task="a", schedule_type="recurring", interval_seconds=3600)
+        b = await schedule_mgr.create(task="b", schedule_type="recurring", interval_seconds=3600)
+        c = await schedule_mgr.create(task="c", schedule_type="recurring", interval_seconds=3600)
+        await schedule_mgr.create(task="d", schedule_type="recurring", interval_seconds=3600)  # no key
+        other = ScheduleManager(db, f"test-sched-{uuid4().hex[:8]}")
+        foreign = await other.create(task="f", schedule_type="recurring", interval_seconds=3600)
+        await schedule_mgr.set_metadata(a.id, "job_fix", {"state": "running"})
+        await schedule_mgr.set_metadata(b.id, "job_fix", {"state": "stopped"})
+        await schedule_mgr.deactivate(b.id)  # inactive and stopped
+        await schedule_mgr.set_metadata(c.id, "job_fix", "garbage")  # malformed stays visible, so the fixer can log it
+        await other.set_metadata(foreign.id, "job_fix", {"state": "running"})
+        assert {s.id for s in await schedule_mgr.list_with_metadata_key("job_fix")} == {a.id, b.id, c.id}
+        assert {s.id for s in await schedule_mgr.list_with_metadata_key("job_fix", state_not="stopped")} == {a.id, c.id}

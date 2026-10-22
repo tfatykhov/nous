@@ -21,9 +21,54 @@ from nous.brain.intentions import IntentionSpec
 from nous.cancellation import cancel_requested
 from nous.config import Settings
 from nous.heart.heart import Heart
-from nous.storage.models import Subtask
+from nous.storage.models import Schedule, Subtask
 
 logger = logging.getLogger(__name__)
+
+
+async def create_fire(
+    heart: Heart,
+    settings: Settings,
+    schedule: Schedule,
+    *,
+    task: str | None = None,
+    intent: str | None = None,
+    metadata: dict | None = None,
+    notify: bool | None = None,
+    timeout: int | None = None,
+) -> Subtask:
+    """Enqueue one run of ``schedule`` as a new root under the schedule's container intention.
+
+    Defaults come from the schedule (``task``, ``notify``, ``timeout_seconds``). ``intent`` is the
+    intention's one-line description and falls back to the run's text. The run's metadata carries
+    ``schedule_id`` plus ``metadata``. ``SubtaskQueueFull`` and ``IntentionRootClosed`` (a schedule
+    stopped since it was loaded) propagate; both are ``ValueError``.
+    """
+    text = schedule.task if task is None else task
+    notify = schedule.notify if notify is None else notify
+    timeout = schedule.timeout_seconds if timeout is None else timeout
+    fire_intention = None
+    if intentions.enabled(settings):
+        fire_intention = intentions.with_bounds(
+            IntentionSpec(
+                intent=intent or text,
+                origin_kind=intentions.ORIGIN_SCHEDULER,
+                wake_policy=intentions.WAKE_REMEMBER if notify else intentions.WAKE_NONE,
+                parent_source=(intentions.SOURCE_SCHEDULE, str(schedule.id)),
+            ),
+            settings,
+        )
+    return await heart.subtasks.create(
+        task=text,
+        parent_session_id=schedule.created_by_session,
+        priority="normal",
+        timeout=timeout,
+        notify=notify,
+        model=schedule.model,
+        frame_type=schedule.frame_type,
+        metadata={"schedule_id": schedule.id.hex, **(metadata or {})},
+        **intentions.intention_kwargs(fire_intention),
+    )
 
 
 class TaskScheduler:
@@ -190,30 +235,9 @@ class TaskScheduler:
                 # A schedule stopped since get_due loaded it is refused inside
                 # create (IntentionRootClosed, a ValueError): the queue-full arm
                 # below logs it and skips the fire without advancing.
-                fire_intention = None
-                if intentions.enabled(self._settings):
-                    fire_intention = intentions.with_bounds(
-                        IntentionSpec(
-                            intent=schedule.task,
-                            origin_kind=intentions.ORIGIN_SCHEDULER,
-                            wake_policy=intentions.WAKE_REMEMBER if schedule.notify else intentions.WAKE_NONE,
-                            parent_source=(intentions.SOURCE_SCHEDULE, str(schedule.id)),
-                        ),
-                        self._settings,
-                    )
                 _enqueued = False
                 try:
-                    await self._heart.subtasks.create(
-                        task=schedule.task,
-                        parent_session_id=schedule.created_by_session,
-                        priority="normal",
-                        timeout=schedule.timeout_seconds,
-                        notify=schedule.notify,
-                        model=schedule.model,
-                        frame_type=schedule.frame_type,
-                        metadata=continuation_metadata,
-                        **intentions.intention_kwargs(fire_intention),
-                    )
+                    await create_fire(self._heart, self._settings, schedule, metadata=continuation_metadata)
                     _enqueued = True
                 except ValueError:
                     # Queue-full path: re-raise so the outer except logs

@@ -361,6 +361,14 @@ class TestSubtaskWriter:
         assert await record_subtask_result(store, _subtask(status="running"), s) is False
         assert await record_subtask_result(store, _subtask(), s) is True
 
+    async def test_a_check_and_fix_run_writes_no_inbox_row_but_a_normal_run_does(self, db):
+        store = ResultInboxStore(db, _agent())
+        s = _settings()
+        assert await record_subtask_result(store, _subtask(metadata_={"job_fix": True}), s) is False
+        assert await _claim(store, channel=CHAN, session_id="s1") == []
+        assert await record_subtask_result(store, _subtask(metadata_={"schedule_id": "a" * 32}), s) is True
+        assert len(await _claim(store, channel=CHAN, session_id="s1")) == 1
+
     async def test_flag_off_writes_nothing(self, db):
         store = ResultInboxStore(db, _agent())
         assert await record_subtask_result(store, _subtask(), _settings(result_inbox_enabled=False)) is False
