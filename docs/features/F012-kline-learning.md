@@ -104,7 +104,7 @@ Behind `NOUS_JOB_FIXES_ENABLED` (off by default; needs intentions, continuation,
 | `nous/handlers/sleep_handler.py` | Generalize phase delegation, and the job lessons and job fixes phases |
 | `nous/cognitive/layer.py` | Procedure reinforcement in post_turn |
 | `nous/main.py` | Wiring ProcedureLearner, JobLessonLearner and JobFixer into sleep + monitor |
-| `nous/config.py` | 12 configuration fields |
+| `nous/config.py` | 13 configuration fields |
 
 ## Minsky Connection
 

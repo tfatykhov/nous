@@ -87,7 +87,7 @@ async def test_a_needs_owner_verdict_stops_the_job_and_tells_the_owner_once(fix_
     assert row.source_kind == "intention_report" and row.msg_type == "REPORT" and row.channel == "telegram:8080"
     assert str(row.source_id) == str(uuid5(NAMESPACE_URL, f"nous-job-fix:{schedule.id}"))
     container = await env.heart.intentions.get_for_source("schedule", schedule.id)
-    # the row was written while the container was still open
+    # the report row is linked to the job's container, which the stop closed afterwards
     assert row.intention_id == container.id and container.state == "closed"
     got = await env.heart.schedules.get(schedule.id)
     assert got.active is False and got.metadata_["job_fix"]["state"] == "stopped"
