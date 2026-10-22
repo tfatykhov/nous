@@ -14,6 +14,7 @@ from sqlalchemy import update
 
 from nous.handlers.job_lessons import JobLessonLearner, job_lessons_block
 from nous.handlers.procedure_learner import ProcedureLearner
+from nous.observability.task_scoring import SCORER_VERSION
 from nous.storage.models import Procedure
 
 pytestmark = [pytest.mark.postgres_only, pytest.mark.scoring_writer]
@@ -198,7 +199,7 @@ async def test_no_scorer_output_reaches_the_fix_brief_the_change_review_or_the_o
                 task_kind="subtask",
                 task_id=str(fix_sub.id),
                 finished_at=NOW - timedelta(hours=1),
-                scorer_version=1,
+                scorer_version=SCORER_VERSION,
                 outcome="partial",
                 score=0.123456,
                 evidence=sentinel,

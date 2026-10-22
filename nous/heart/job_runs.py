@@ -205,3 +205,16 @@ class JobRunReader:
         )
         rows = await self._rows(sql, self._params(since=since))
         return [r["schedule_id"] for r in rows]
+
+    async def fix_run_for(self, schedule_id: str) -> tuple[UUID, datetime] | None:
+        """The id and creation time of the newest fix run of a job (any status), or None.
+
+        A start that crashed before its record was written leaves such a run behind; it is adopted, not repeated.
+        """
+        sql = (
+            "SELECT id, created_at FROM heart.subtasks WHERE agent_id = :agent_id "
+            "AND metadata->>'schedule_id' = :schedule_id AND (metadata -> CAST(:fix_key AS text)) IS NOT NULL "
+            "ORDER BY created_at DESC LIMIT 1"
+        )
+        rows = await self._rows(sql, self._params(schedule_id=schedule_id))
+        return (rows[0]["id"], rows[0]["created_at"]) if rows else None

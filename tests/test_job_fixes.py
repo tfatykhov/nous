@@ -136,6 +136,7 @@ def test_the_brief_has_the_rules_the_job_the_runs_and_the_shapes_and_no_scorer_w
     for shape in VALID.values():
         assert f'"verdict": "{shape["verdict"]}"' in brief
     assert "never work around a guard" in brief.lower() and "exactly one fenced json block" in brief
+    assert "Do not stop, cancel or recreate the job." in brief
     assert "submit_final_report" in brief and "tool calls: bash (completed)" in brief
     assert retired.cue in brief
     assert_no_scorer_text(brief)
@@ -161,6 +162,7 @@ async def test_the_change_review_is_fresh_context_and_fails_closed():
     assert "tools" not in payload and len(payload["messages"]) == 1
     assert payload["messages"][0]["content"][0]["text"] == _CHANGE_REVIEW_PROMPT.format(old="old text", new="new text")
     assert payload["system"][1]["text"] == _CHANGE_REVIEW_SYSTEM
+    assert "or works around a refusal, a guard, a protected path or a credential check" in _CHANGE_REVIEW_PROMPT
     assert _CHANGE_REVIEW_SYSTEM == "You review a proposed change to the instructions of a recurring background job."
     failing = AsyncMock()
     failing.call.side_effect = RuntimeError("down")
@@ -287,6 +289,11 @@ def _record(state: str, **kw) -> dict:
     return {k: v.isoformat() if isinstance(v, datetime) else v for k, v in record.items()}
 
 
+def _fix(status: str, result: str | None, error: str | None = None, outcome: str | None = None) -> SimpleNamespace:
+    """A fix-run row as the fixer reads it."""
+    return SimpleNamespace(status=status, result=result, error=error, final_outcome=outcome)
+
+
 def _runs(n: int = 5, bad: int = 0) -> list[JobRun]:
     return [_run(bad=i < bad, n=i) for i in range(n)]
 
@@ -305,7 +312,7 @@ def _heart() -> MagicMock:
     for owner, names in {
         "schedules": ("list_with_metadata_key", "set_metadata", "deactivate", "get"),
         "subtasks": ("get", "cancel"),
-        "job_runs": ("scored_runs", "ledger_calls", "schedules_with_bad_runs"),
+        "job_runs": ("scored_runs", "ledger_calls", "schedules_with_bad_runs", "fix_run_for"),
         "intentions": ("get_for_source",),
     }.items():
         for name in names:
@@ -313,6 +320,7 @@ def _heart() -> MagicMock:
     heart.job_runs.scored_runs.return_value = []
     heart.job_runs.ledger_calls.return_value = {}
     heart.job_runs.schedules_with_bad_runs.return_value = []
+    heart.job_runs.fix_run_for.return_value = None
     heart.list_job_lessons = AsyncMock(return_value=[])
     heart.intentions.get_for_source.return_value = _CONTAINER
     heart.schedules.list_with_metadata_key.return_value = []
@@ -404,32 +412,32 @@ async def test_missing_preconditions_skip_once_with_a_warning(over, caplog):
 @pytest.mark.parametrize(
     ("record", "fix", "runs", "review", "state", "stat", "stopped_for"),
     [
-        (_record("running"), SimpleNamespace(status="running", result=None), (), None, None, "waiting", None),
+        (_record("running"), _fix("running", None), (), None, None, "waiting", None),
         (_record("running"), None, (), None, "stopped", "stopped", "unreadable_report"),
         (_record("running", fix_run="garbage"), None, (), None, "stopped", "stopped", "unreadable_report"),
-        (_record("running", started_at=_days_ago(3)), SimpleNamespace(status="pending", result=None), (), None,
+        (_record("running", started_at=_days_ago(3)), _fix("pending", None), (), None,
          "stopped", "stopped", "unreadable_report"),
-        (_record("running", started_at="garbage"), SimpleNamespace(status="pending", result=None), (), None,
+        (_record("running", started_at="garbage"), _fix("pending", None), (), None,
          "stopped", "stopped", "unreadable_report"),
-        (_record("running"), SimpleNamespace(status="cancelled", result=None), (), None,
+        (_record("running"), _fix("cancelled", None), (), None,
          "stopped", "stopped", "unreadable_report"),
-        (_record("running"), SimpleNamespace(status="completed", result=CHANGED), (), (True, None),
+        (_record("running"), _fix("completed", CHANGED), (), (True, None),
          "judging", "applied", None),
-        (_record("running"), SimpleNamespace(status="completed", result=CHANGED), (), (False, "widens scope"),
+        (_record("running"), _fix("completed", CHANGED), (), (False, "widens scope"),
          "stopped", "refused", "change_refused"),
-        (_record("running"), SimpleNamespace(status="completed", result=_fence(VALID["fixed_elsewhere"])), (), None,
+        (_record("running"), _fix("completed", _fence(VALID["fixed_elsewhere"])), (), None,
          "judging", "applied", None),
-        (_record("running"), SimpleNamespace(status="completed", result=NEEDS), (), None,
+        (_record("running"), _fix("completed", NEEDS), (), None,
          "stopped", "stopped", "needs_owner"),
-        (_record("running"), SimpleNamespace(status="completed", result=NO_FAULT), _runs(bad=1), None,
+        (_record("running"), _fix("completed", NO_FAULT), _runs(bad=1), None,
          "closed", "closed", None),
-        (_record("running"), SimpleNamespace(status="completed", result=NO_FAULT), _runs(bad=3), None,
+        (_record("running"), _fix("completed", NO_FAULT), _runs(bad=3), None,
          "stopped", "stopped", "no_fault_found"),
-        (_record("running"), SimpleNamespace(status="completed", result="no block"), (), None,
+        (_record("running"), _fix("completed", "no block"), (), None,
          "stopped", "stopped", "unreadable_report"),
-        (_record("running"), SimpleNamespace(status="failed", result=None), (), None,
+        (_record("running"), _fix("failed", None), (), None,
          "stopped", "stopped", "unreadable_report"),
-        (_record("running"), SimpleNamespace(status="completed", result=NEEDS + "\n" + _fence({"quoted": 1})), (),
+        (_record("running"), _fix("completed", NEEDS + "\n" + _fence({"quoted": 1})), (),
          None, "stopped", "stopped", "unreadable_report"),
         (_record("judging"), None, _runs(n=4), None, None, "waiting", None),
         (_record("judging"), None, _runs(n=5, bad=0), None, "kept", "kept", None),
@@ -457,7 +465,7 @@ async def test_each_transition_of_the_state_table(record, fix, runs, review, sta
 
 async def test_an_accepted_change_replaces_the_task_and_keeps_the_old_one():
     stats, _order, writes = await _step(
-        _record("running"), fix=SimpleNamespace(status="completed", result=CHANGED), review=(True, None)
+        _record("running"), fix=_fix("completed", CHANGED), review=(True, None)
     )
     record, task = writes[-1]
     assert task == "Run the check and report."
@@ -467,7 +475,7 @@ async def test_an_accepted_change_replaces_the_task_and_keeps_the_old_one():
 
 async def test_a_fix_outside_the_job_leaves_the_task_alone():
     _stats, _order, writes = await _step(
-        _record("running"), fix=SimpleNamespace(status="completed", result=_fence(VALID["fixed_elsewhere"]))
+        _record("running"), fix=_fix("completed", _fence(VALID["fixed_elsewhere"]))
     )
     assert writes[-1][1] is None and writes[-1][0]["old_task"] is None
 
@@ -487,7 +495,7 @@ async def test_a_stopping_record_resumes_with_only_the_remaining_steps():
 
 async def test_a_refused_change_keeps_the_proposal_and_the_reason_in_the_detail():
     _stats, _order, writes = await _step(
-        _record("running"), fix=SimpleNamespace(status="completed", result=CHANGED), review=(False, "widens scope")
+        _record("running"), fix=_fix("completed", CHANGED), review=(False, "widens scope")
     )
     record = writes[0][0]
     assert record["verdict"] == "changed_job"
@@ -498,11 +506,11 @@ async def test_a_refused_change_keeps_the_proposal_and_the_reason_in_the_detail(
 async def test_a_stuck_fix_run_is_cancelled_when_it_is_given_up_on():
     heart = _heart()
     await _step(
-        _record("running", started_at=_days_ago(3)), fix=SimpleNamespace(status="pending", result=None), heart=heart
+        _record("running", started_at=_days_ago(3)), fix=_fix("pending", None), heart=heart
     )
     heart.subtasks.cancel.assert_awaited_once_with(FIX_RUN)
     young = await _step(
-        _record("running", started_at=_days_ago(1)), fix=SimpleNamespace(status="pending", result=None)
+        _record("running", started_at=_days_ago(1)), fix=_fix("pending", None)
     )
     assert young[0]["waiting"] == 1 and young[2] == []
 
@@ -632,7 +640,7 @@ async def test_without_a_container_no_report_is_written_and_the_job_is_still_sto
 async def test_a_pending_fix_run_with_an_unreadable_start_time_is_cancelled_and_given_up_on():
     heart = _heart()
     _stats, _order, writes = await _step(
-        _record("running", started_at="garbage"), fix=SimpleNamespace(status="pending", result=None), heart=heart
+        _record("running", started_at="garbage"), fix=_fix("pending", None), heart=heart
     )
     heart.subtasks.cancel.assert_awaited_once_with(FIX_RUN)
     assert writes[-1][0]["stop_reason"] == "unreadable_report"
@@ -693,3 +701,78 @@ async def test_a_malformed_record_is_logged_once_across_sleeps(caplog):
     await fixer.run_sleep()
     await fixer.run_sleep()
     assert caplog.text.count("is malformed and is ignored") == 1
+
+
+async def test_a_fix_run_left_by_a_crashed_start_is_adopted_not_fired_again():
+    fixer, heart, create_fire = _start_env(recent=_runs(n=5, bad=3), baseline=_runs(n=20, bad=6))
+    existing, created = uuid4(), NOW - timedelta(hours=30)
+    heart.job_runs.fix_run_for.return_value = (existing, created)
+    stats = await fixer.run_sleep()
+    assert stats["started"] == 1 and create_fire.await_count == 0
+    heart.job_runs.fix_run_for.assert_awaited_once_with(HEX)
+    record = heart.schedules.set_metadata.await_args.args[2]
+    assert (record["state"], record["trigger"]) == ("running", "fails_often")
+    assert record["fix_run"] == str(existing) and record["started_at"] == created.isoformat()
+    assert record["baseline"]["bad"] == 6 and record["baseline"]["scored"] == 20
+
+
+CHECK_CASES = [
+    (_fix("failed", None, error="boom ```x```", outcome="errored"),
+     "The check itself ended failed/errored: boom '''x'''"),
+    (_fix("cancelled", None), "The check itself ended cancelled"),
+    (_fix("completed", "no block here", outcome="incomplete_blocked"),
+     "The check itself ended completed/incomplete_blocked: no block here"),
+]
+
+
+@pytest.mark.parametrize(("fix", "line"), CHECK_CASES)
+async def test_an_unreadable_report_carries_what_the_check_itself_reported(fix, line):
+    _stats, _order, writes = await _step(_record("running"), fix=fix)
+    record = writes[-1][0]
+    assert record["stop_reason"] == "unreadable_report"
+    check = record["detail"]["check"]
+    assert check["status"] == fix.status and "```" not in str(check)
+    msg = render_owner_message(_schedule(), RUNS[:1], {}, record)
+    assert line in msg and "None" not in msg and "```" not in msg
+    assert_no_scorer_text(msg, str(record["detail"]))
+    assert not _SCORER_WORDS.search(msg)
+
+
+async def test_a_check_that_never_started_says_so():
+    _stats, _order, writes = await _step(
+        _record("running", started_at=_days_ago(3)), fix=_fix("pending", None)
+    )
+    record = writes[-1][0]
+    assert record["detail"] == {"check": {"status": "pending"}}
+    msg = render_owner_message(_schedule(), RUNS[:1], {}, record)
+    assert "the check never started" in msg and "could not be read" not in msg
+    assert_no_scorer_text(msg)
+    assert not _SCORER_WORDS.search(msg)
+
+
+async def test_a_missing_fix_run_has_no_check_line():
+    _stats, _order, writes = await _step(_record("running"), fix=None)
+    assert writes[-1][0]["detail"] == {}
+
+
+@pytest.mark.parametrize("kind", ["changed_job", "fixed_elsewhere"])
+async def test_a_blocked_check_is_not_applied(kind):
+    fix = _fix("completed", _fence(VALID[kind]), outcome="incomplete_blocked")
+    review = AsyncMock(return_value=(True, None))
+    heart = _heart()
+    fixer, heart, _order = _fixer(heart)
+    schedule = SimpleNamespace(id=uuid4(), metadata_={FIX_KEY: _record("running")}, active=True, task="Old text")
+    heart.schedules.list_with_metadata_key.return_value = [schedule]
+    heart.subtasks.get.return_value = fix
+    with patch("nous.handlers.job_fixes.review_change", review):
+        stats = await fixer.run_sleep()
+    assert stats["applied"] == 0 and stats["stopped"] == 1 and review.await_count == 0
+    value, task = heart.writes[0]
+    assert value["stop_reason"] == "unreadable_report" and task is None
+    assert value["detail"]["check"]["outcome"] == "incomplete_blocked"
+
+
+async def test_a_blocked_check_can_still_need_the_owner():
+    fix = _fix("completed", NEEDS, outcome="incomplete_blocked")
+    _stats, _order, writes = await _step(_record("running"), fix=fix)
+    assert writes[-1][0]["stop_reason"] == "needs_owner"

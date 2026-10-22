@@ -155,3 +155,24 @@ async def test_a_malformed_job_fix_record_does_not_stop_the_sleep(fix_env):
         await s.commit()
     stats = await fixer.run_sleep()
     assert stats["started"] == 1 and (await env.heart.schedules.get(odd.id)).metadata_ == {"job_fix": "garbage"}
+
+
+async def test_a_crash_before_the_record_is_written_does_not_start_a_second_fix_run(fix_env):
+    env, schedule, fixer = fix_env.env, fix_env.schedule, fix_env.fixer
+    assert (await fixer.run_sleep())["started"] == 1
+    first = await fix_subtask(env)
+    async with env.db.session() as s:  # the crash: the run is committed, its record is not
+        await s.execute(
+            update(Schedule)
+            .where(Schedule.id == schedule.id)
+            .values(metadata_=Schedule.metadata_.op("-")("job_fix"))
+        )
+        await s.commit()
+    assert "job_fix" not in ((await env.heart.schedules.get(schedule.id)).metadata_ or {})
+    assert (await fixer.run_sleep())["started"] == 1
+    async with env.db.session() as s:
+        rows = (await s.execute(select(Subtask).where(Subtask.agent_id == env.agent))).scalars().all()
+    assert len([r for r in rows if (r.metadata_ or {}).get("job_fix")]) == 1
+    record = (await env.heart.schedules.get(schedule.id)).metadata_["job_fix"]
+    assert record["fix_run"] == str(first.id) and record["state"] == "running"
+    assert record["started_at"] == first.created_at.isoformat()

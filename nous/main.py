@@ -808,6 +808,11 @@ async def create_components(settings: Settings) -> dict:
                         "NOUS_JOB_FIXES_ENABLED needs intentions, continuation and an owner chat: "
                         "check-and-fix is skipped until they are on"
                     )
+                elif not settings.telegram_bot_token:
+                    logger.warning(
+                        "NOUS_JOB_FIXES_ENABLED has no Telegram bot token: the owner report is written but never "
+                        "pushed"
+                    )
             else:
                 logger.warning("NOUS_JOB_FIXES_ENABLED needs sleep: job fixes stay off")
 
