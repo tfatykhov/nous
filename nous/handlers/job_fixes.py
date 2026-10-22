@@ -217,9 +217,11 @@ def render_owner_message(
         tried.append("It proposed these instructions: " + _one_line(new_instructions, OWNER_TASK_CHARS))
     if isinstance(record.get("old_task"), str):
         tried.append("The old instructions were restored.")
+    # The schedule row read before the restore still holds a changed text; the stored old text is what stands.
+    instructions = record["old_task"] if isinstance(record.get("old_task"), str) else schedule.task
     parts = [
         "A background job kept going wrong and was stopped.",
-        "Job instructions: " + _one_line(schedule.task, OWNER_TASK_CHARS),
+        "Job instructions: " + _one_line(instructions, OWNER_TASK_CHARS),
         "Latest runs:\n" + _render_runs(runs, calls),
         diagnosis,
         " ".join(tried),

@@ -248,6 +248,14 @@ def test_an_unreadable_report_message_has_no_verdict_sentence():
     assert "could not be read" in msg and "None" not in msg and "verdict" not in msg
 
 
+def test_the_owner_message_shows_the_restored_instructions_not_the_changed_ones():
+    changed = SimpleNamespace(task="Changed text")
+    record = {"stop_reason": "did_not_help", "old_task": "Original text", "detail": {}}
+    msg = render_owner_message(changed, RUNS[:1], {}, record)
+    assert "Job instructions: Original text" in msg and "Changed text" not in msg
+    assert "Job instructions: Changed text" in render_owner_message(changed, RUNS[:1], {}, {"stop_reason": "x"})
+
+
 # --- JobFixer: the state machine, with a mocked heart, reader, LLM and fire helper ---
 
 KEYS = ("started", "start_failed", "applied", "refused", "kept", "closed", "stopped", "waiting", "skipped")
