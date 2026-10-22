@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -22,6 +23,9 @@ from nous.handlers.job_fixes import (
 )
 from nous.heart.job_runs import JobRun
 from nous.heart.schemas import JobLesson
+
+# Words the brief and the owner message must never use, on top of job_support's scorer sentinels.
+_SCORER_WORDS = re.compile(r"(bad|good|partial|score|done_self|not_scored)", re.I)
 
 
 def _run(*, bad: bool = False, result: str | None = "all done", n: int = 0) -> JobRun:
@@ -132,6 +136,7 @@ def test_the_brief_has_the_rules_the_job_the_runs_and_the_shapes_and_no_scorer_w
     assert "submit_final_report" in brief and "tool calls: bash (completed)" in brief
     assert retired.cue in brief
     assert_no_scorer_text(brief)
+    assert not _SCORER_WORDS.search(brief)
     assert "Lessons already tried" not in render_fix_brief(_schedule(), RUNS[:2], {}, [])
 
 
@@ -178,6 +183,7 @@ def test_the_owner_message_names_the_job_the_runs_the_diagnosis_and_the_stop():
     assert all(s in msg for s in wanted)
     assert "result 0" in msg and msg.count("] finished ") == 5
     assert_no_scorer_text(msg)
+    assert not _SCORER_WORDS.search(msg)
     assert "7919" not in msg and "7927" not in msg
     sentences = {
         "change_refused": "widens scope",
@@ -197,6 +203,7 @@ def test_the_owner_message_names_the_job_the_runs_the_diagnosis_and_the_stop():
         text = render_owner_message(_schedule(task="Run the grid tick"), RUNS, CALLS, record)
         assert sentence in text and "Do the new thing." in text and "restored" in text
         assert_no_scorer_text(text)
+        assert not _SCORER_WORDS.search(text)
         assert "7919" not in text
 
 
