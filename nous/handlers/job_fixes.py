@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from nous.brain.continuation import INBOX_TITLE_MAX
@@ -23,6 +23,9 @@ from nous.handlers.job_lessons import (  # noqa: F401  (re-exported: one definit
 )
 from nous.heart.job_runs import JobRun
 from nous.heart.schemas import JobLesson
+
+if TYPE_CHECKING:
+    from nous.storage.models import Schedule
 
 FAILS_OFTEN_BAD = 3  # bad runs ...
 FAILS_OFTEN_OF = 5  # ... among this many latest runs make a job "fail often"
@@ -42,7 +45,7 @@ _REQUIRED: dict[str, tuple[str, ...]] = {
     "no_fault_found": ("checked",),
 }
 
-_FENCE = re.compile(r"^```([^\n`]*)\n(.*?)^```[ \t]*$", re.DOTALL | re.MULTILINE)
+_FENCE = re.compile(r"^```([^\n`]*)\n(.*?)^```[ \t\r]*$", re.DOTALL | re.MULTILINE)
 
 _CHANGE_REVIEW_SYSTEM = "You review a proposed change to the instructions of a recurring background job."
 _CHANGE_REVIEW_PROMPT = """A recurring background job has these instructions:
@@ -106,7 +109,7 @@ def parse_verdict(text: str | None) -> dict | None:
         return None
     try:
         obj = json.loads(blocks[0])
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     if not isinstance(obj, dict):
         return None
@@ -134,7 +137,7 @@ def _render_runs(runs: Sequence[JobRun], calls: Mapping[UUID, Sequence[tuple[str
 
 
 def render_fix_brief(
-    schedule: Any,
+    schedule: Schedule,
     runs: Sequence[JobRun],
     calls: Mapping[UUID, Sequence[tuple[str, str]]],
     retired_lessons: Sequence[JobLesson],
@@ -163,7 +166,7 @@ async def review_change(llm_client: LLMClient, model: str, old: str, new: str) -
         return unusable
     try:
         parsed = parse_llm_json(answer)
-    except ValueError:
+    except (ValueError, RecursionError):
         return unusable
     if not isinstance(parsed, dict) or not isinstance(parsed.get("verdict"), str):
         return unusable
@@ -182,7 +185,7 @@ def _one_line(text: str, limit: int) -> str:
 
 
 def render_owner_message(
-    schedule: Any,
+    schedule: Schedule,
     runs: Sequence[JobRun],
     calls: Mapping[UUID, Sequence[tuple[str, str]]],
     record: dict,
@@ -200,7 +203,7 @@ def render_owner_message(
         diagnosis = f"The check proposed new instructions and the review refused them: {why}"
     else:
         diagnosis = f"Diagnosis: {_STOP_SENTENCES.get(str(reason), 'the check did not settle the cause')}"
-    tried = [f"What was tried: the check ended with the verdict {record.get('verdict')}."]
+    tried = [f"What was tried: the check ended with the verdict {record['verdict']}."] if record.get("verdict") else []
     new_instructions = detail.get("new_instructions")
     if isinstance(new_instructions, str) and new_instructions.strip():
         tried.append("It proposed these instructions: " + _one_line(new_instructions, OWNER_TASK_CHARS))

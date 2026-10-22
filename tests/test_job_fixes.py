@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import re
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
-from job_support import VALID, _fence
+from job_support import VALID, _fence, assert_no_scorer_text
 
 from nous.handlers.job_fixes import (
     _CHANGE_REVIEW_PROMPT,
@@ -23,8 +22,6 @@ from nous.handlers.job_fixes import (
 )
 from nous.heart.job_runs import JobRun
 from nous.heart.schemas import JobLesson
-
-_SCORER_WORDS = re.compile(r"\b(bad|good|partial|score|done_self|not_scored)\b", re.I)
 
 
 def _run(*, bad: bool = False, result: str | None = "all done", n: int = 0) -> JobRun:
@@ -133,7 +130,8 @@ def test_the_brief_has_the_rules_the_job_the_runs_and_the_shapes_and_no_scorer_w
         assert f'"verdict": "{shape["verdict"]}"' in brief
     assert "never work around a guard" in brief.lower() and "exactly one fenced json block" in brief
     assert "submit_final_report" in brief and "tool calls: bash (completed)" in brief
-    assert retired.cue in brief and not _SCORER_WORDS.search(brief)
+    assert retired.cue in brief
+    assert_no_scorer_text(brief)
     assert "Lessons already tried" not in render_fix_brief(_schedule(), RUNS[:2], {}, [])
 
 
@@ -179,7 +177,8 @@ def test_the_owner_message_names_the_job_the_runs_the_diagnosis_and_the_stop():
     wanted = ("Run the grid tick", detail["diagnosis"], detail["owner_action"], "stopped", "recreate")
     assert all(s in msg for s in wanted)
     assert "result 0" in msg and msg.count("] finished ") == 5
-    assert not _SCORER_WORDS.search(msg) and "7919" not in msg and "7927" not in msg
+    assert_no_scorer_text(msg)
+    assert "7919" not in msg and "7927" not in msg
     sentences = {
         "change_refused": "widens scope",
         "did_not_help": "the fix did not stop the failures",
@@ -197,7 +196,8 @@ def test_the_owner_message_names_the_job_the_runs_the_diagnosis_and_the_stop():
         }
         text = render_owner_message(_schedule(task="Run the grid tick"), RUNS, CALLS, record)
         assert sentence in text and "Do the new thing." in text and "restored" in text
-        assert not _SCORER_WORDS.search(text) and "7919" not in text
+        assert_no_scorer_text(text)
+        assert "7919" not in text
 
 
 def test_the_owner_message_clips_the_task_to_one_line():
@@ -217,3 +217,22 @@ def test_fails_often_needs_three_bad_in_the_latest_five():
     assert fails_often([bad, bad, ok, ok, ok]) is False
     assert fails_often([ok, ok, ok, ok, ok, bad, bad, bad]) is False
     assert fails_often([]) is False
+
+
+def test_a_deeply_nested_block_is_unreadable_not_an_error():
+    assert parse_verdict("```json\n" + "[" * 100000 + "\n```") is None
+
+
+def test_a_crlf_report_with_text_after_the_fence_parses():
+    text = ("Summary.\n" + _fence(VALID["no_fault_found"]) + "\nThanks.").replace("\n", "\r\n")
+    assert parse_verdict(text) == VALID["no_fault_found"]
+
+
+async def test_a_deeply_nested_review_answer_is_a_refusal():
+    assert await review_change(_llm_returning("[" * 100000), "m", "old", "new") == (False, "no usable answer")
+
+
+def test_an_unreadable_report_message_has_no_verdict_sentence():
+    record = {"stop_reason": "unreadable_report", "verdict": None, "detail": {}, "old_task": "Run it"}
+    msg = render_owner_message(_schedule(), RUNS[:1], {}, record)
+    assert "could not be read" in msg and "None" not in msg and "verdict" not in msg
