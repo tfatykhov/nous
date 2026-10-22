@@ -7,7 +7,7 @@ from typing import Any
 from uuid import UUID
 
 from croniter import croniter
-from sqlalchemy import insert, select, update
+from sqlalchemy import insert, or_, select, update
 
 from nous import undo_journal
 from nous.brain import intentions
@@ -357,6 +357,19 @@ class ScheduleManager:
         """Get a schedule by ID."""
         async with self._db.session() as session:
             return await session.get(Schedule, schedule_id)
+
+    async def list_with_metadata_key(self, key: str, *, state_not: str | None = None) -> list[Schedule]:
+        """This agent's schedules (active or not) whose metadata has ``key``.
+
+        With ``state_not``, rows whose ``metadata[key]["state"]`` equals it are left out in SQL; a record
+        with no state, or one that is not a dict, stays in the result.
+        """
+        q = select(Schedule).where(Schedule.agent_id == self._agent_id, Schedule.metadata_.has_key(key))
+        if state_not is not None:
+            state = Schedule.metadata_[key]["state"].astext
+            q = q.where(or_(state.is_(None), state != state_not))
+        async with self._db.session() as session:
+            return list((await session.execute(q.order_by(Schedule.created_at))).scalars().all())
 
     async def list(self, active_only: bool = True, limit: int = 20) -> list[Schedule]:
         """List schedules, optionally filtered to active only."""

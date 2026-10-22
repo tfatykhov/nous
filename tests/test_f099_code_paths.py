@@ -22,7 +22,7 @@ from nous.api.tools import ToolDispatcher, register_subtask_tools
 from nous.brain import intentions
 from nous.brain.intentions import IntentionSpec
 from nous.config import Settings
-from nous.handlers.task_scheduler import TaskScheduler
+from nous.handlers.task_scheduler import TaskScheduler, create_fire
 from nous.storage.models import Intention, Schedule, Subtask
 
 ON = {"result_inbox_enabled": True, "intentions_enabled": True}
@@ -329,3 +329,46 @@ async def test_post_schedules_with_the_flag_off_records_nothing(sched_env):
     async with env.db.session() as s:
         assert len((await s.execute(select(Schedule).where(Schedule.agent_id == env.agent))).scalars().all()) == 1
         assert (await s.execute(select(Intention).where(Intention.agent_id == env.agent))).scalars().all() == []
+
+
+async def test_create_fire_is_a_scheduled_run_under_the_schedules_container_with_extra_metadata(sched_env):
+    env = await sched_env(**ON)
+    schedule = await _schedule(
+        env, {"task": "Check the snow report", "every": "30 minutes", "intent": "Keep the user posted"}
+    )
+    sub = await create_fire(
+        env.heart, env.settings, schedule, task="Look into it",
+        intent="Check a background job that keeps going wrong: Check the snow report",
+        metadata={"job_fix": True, "max_attempts": 1}, notify=False, timeout=600,
+    )
+    assert (sub.task, sub.timeout_seconds, sub.notify) == ("Look into it", 600, False)
+    assert sub.metadata_["schedule_id"] == schedule.id.hex
+    assert sub.metadata_["job_fix"] is True and sub.metadata_["max_attempts"] == 1
+    assert ExecutionContext.for_subtask(sub, "s").kind == "scheduled"
+    fire, container = await _of(env, "subtask", sub.id), await _of(env, "schedule", schedule.id)
+    assert (fire.parent_id, fire.root_id, fire.origin_kind, fire.wake_policy) == (
+        container.id, fire.id, "scheduler", "none",
+    )
+    assert sub.metadata_["intention"]["authority"] == "owner"
+    # the brief is not the intention's line
+    assert fire.intent == "Check a background job that keeps going wrong: Check the snow report"
+
+
+async def test_create_fire_defaults_come_from_the_schedule(sched_env):
+    env = await sched_env(**ON)
+    schedule = await _schedule(
+        env,
+        {"task": "Check the snow report", "every": "30 minutes", "intent": "Keep the user posted", "notify": True},
+    )
+    sub = await create_fire(env.heart, env.settings, schedule)
+    assert (sub.task, sub.timeout_seconds, sub.notify) == (schedule.task, schedule.timeout_seconds, schedule.notify)
+    fire = await _of(env, "subtask", sub.id)
+    assert fire.intent == schedule.task and fire.wake_policy == "remember"
+
+
+async def test_create_fire_on_a_stopped_schedule_raises_a_value_error(sched_env):
+    env = await sched_env(**ON)
+    schedule = await _schedule(env, {"task": "Check the snow report", "every": "30 minutes", "intent": "x"})
+    await env.heart.schedules.deactivate(schedule.id)
+    with pytest.raises(ValueError):
+        await create_fire(env.heart, env.settings, schedule)

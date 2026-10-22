@@ -149,6 +149,7 @@ async def test_lesson_reads_ignore_provisional_scores(job_env):  # noqa: F811
     assert await r.lesson_cases(since=since, limit=10) == []
     assert await r.good_runs(s.id.hex, before=NOW, since=since) == []
     assert await r.scored_runs(s.id.hex) == []
+    assert {x.subtask_id for x in await r.scored_runs(s.id.hex, settled_only=False)} == {bad.id, good.id}
     assert await r.schedules_with_bad_runs(since=since) == [s.id.hex]
     t = await make_schedule(env)
     bad_t = await make_run(env, t, outcome="failed", age_hours=5)

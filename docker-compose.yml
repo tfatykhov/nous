@@ -90,6 +90,8 @@ services:
       # Job lessons: learn from the bad runs of recurring background jobs (needs procedure learning). Lands dark.
       - NOUS_JOB_LESSONS_ENABLED=${NOUS_JOB_LESSONS_ENABLED:-false}
       - NOUS_JOB_LESSONS_PER_SLEEP=${NOUS_JOB_LESSONS_PER_SLEEP:-2}
+      # Job fixes: check and fix a recurring job that keeps failing (needs the result inbox, intentions and continuation). Lands dark.
+      - NOUS_JOB_FIXES_ENABLED=${NOUS_JOB_FIXES_ENABLED:-false}
       # A4 Step 2: any-word keyword fallback. Experiment, lands dark.
       - NOUS_HYBRID_KEYWORD_OR_FALLBACK_ENABLED=${NOUS_HYBRID_KEYWORD_OR_FALLBACK_ENABLED:-false}
       # Execution ledger: also keep the redacted call input and tool output (migration 086).

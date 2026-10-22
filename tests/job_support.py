@@ -32,7 +32,7 @@ from nous.storage.models import (
     TaskScore,
 )
 
-NOW = datetime(2026, 10, 20, 12, 0, tzinfo=UTC)
+NOW = datetime.now(UTC).replace(microsecond=0)
 
 
 @pytest_asyncio.fixture

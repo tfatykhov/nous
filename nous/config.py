@@ -1595,6 +1595,8 @@ class Settings(BaseSettings):
     # Job lessons: learn from the bad runs of recurring background jobs (lands dark)
     job_lessons_enabled: bool = False
     job_lessons_per_sleep: int = Field(default=2, ge=0)
+    # Check-and-fix for a recurring job that keeps failing (lands dark)
+    job_fixes_enabled: bool = False
 
     # F037: Utility-Boosted Procedure Retrieval
     procedure_utility_boost: bool = True
