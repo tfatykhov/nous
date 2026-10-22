@@ -647,7 +647,9 @@ async def test_candidates_keep_the_reader_order_then_newest_retirement_and_none_
     assert (await fixer.run_sleep())["started"] == 1
     assert create_fire.await_args.args[2].id == c and create_fire.await_count == 1  # one attempt, the first candidate
 
-    a, b, c = ids = [uuid4(), uuid4(), uuid4()]
+    # Newest retirement (b) has the largest hex and the oldest (c) the smallest, so an id-sorted order is wrong.
+    c, a, b = sorted([uuid4(), uuid4(), uuid4()], key=lambda x: x.hex)
+    ids = [a, b, c]  # the first two hold a record, so only c can start
     fixer, heart, create_fire = _start_env(
         recent=_runs(n=5, bad=3), schedules=3, with_record=2, ids=ids,
         retired=[

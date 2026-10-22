@@ -175,7 +175,8 @@ async def test_schedules_with_bad_runs(job_env):  # noqa: F811
 async def test_schedules_with_bad_runs_come_newest_bad_run_first(job_env):  # noqa: F811
     env = await job_env()
     r = env.heart.job_runs
-    older, newer = await make_schedule(env), await make_schedule(env)
+    # The newer job gets the larger hex, so an ascending-hex order (the old behaviour) is the wrong answer.
+    older, newer = sorted([await make_schedule(env), await make_schedule(env)], key=lambda x: x.id.hex)
     await make_run(env, older, outcome="failed", age_hours=3)
     await make_run(env, older, outcome="failed", age_hours=30)
     await make_run(env, newer, outcome="failed", age_hours=1)
