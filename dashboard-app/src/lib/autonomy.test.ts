@@ -88,7 +88,7 @@ describe('coverageFrom', () => {
 
 const fix = (over: Partial<JobFixRow> = {}): JobFixRow => ({
   schedule_id: 'ab'.repeat(16), job: 'Run the grid tick', active: true, state: 'running', trigger: 'fails_often',
-  verdict: null, stop_reason: null, started_at: minsAgo(60), applied_at: null, settled_at: null, fix_run: null,
+  verdict: null, stop_reason: null, started_at: minsAgo(60), applied_at: null, settled_at: null, stopped_at: null, fix_run: null,
   reported: false, baseline: null, since_change: null, detail: {}, old_task: null, task: null, ...over,
 });
 
@@ -100,7 +100,10 @@ describe('check and fix', () => {
     expect(fixState(fix({ state: 'closed' })).tone).toBe('muted');
     expect(fixState(fix({ state: 'stopped', stop_reason: 'did_not_help', reported: true })))
       .toEqual({ label: 'Stopped, you were told', tone: 'warn' });
-    expect(fixState(fix({ state: 'stopped', stop_reason: 'inactive' })).label).toBe('Stopped by you');
+    expect(fixState(fix({ state: 'stopped', stop_reason: 'inactive' })).label).toBe('Job stopped');
+    // no container: the stop wrote no report, which the owner needs to know
+    expect(fixState(fix({ state: 'stopped', stop_reason: 'needs_owner', reported: false })))
+      .toEqual({ label: 'Stopped, you were not told', tone: 'warn' });
     expect(fixState(fix({ state: null })).label).toBe('Unreadable record');
   });
 
@@ -108,6 +111,7 @@ describe('check and fix', () => {
     const judging = (scored: number) => fix({ state: 'judging', since_change: { scored, bad: 1, needed: 5 } });
     expect(fixOutcome(judging(2))).toBe('2 of 5 runs since the change, 1 went wrong');
     expect(fixOutcome(judging(5))).toBe('5 of 5 runs since the change, 1 went wrong; judged at the next sleep');
+    expect(fixOutcome(fix({ state: 'judging', verdict: 'changed_job' }))).toMatch(/^Never judged/);
   });
 
   it('names the stop reason, in the right tense', () => {
@@ -122,5 +126,6 @@ describe('check and fix', () => {
     expect(fixBaseline(fix({ baseline: { bad: 4, scored: 5 } }))).toBe('4 of 5 runs went wrong before');
     expect(fixLatest(fix({ applied_at: minsAgo(30), settled_at: null }))).toBe(minsAgo(30));
     expect(fixLatest(fix({ started_at: null }))).toBeNull();
+    expect(fixLatest(fix({ applied_at: minsAgo(30), stopped_at: minsAgo(5) }))).toBe(minsAgo(5));
   });
 });

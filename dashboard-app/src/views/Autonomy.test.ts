@@ -68,7 +68,7 @@ const FULL = () => ({
 const fixRow = (over: Record<string, unknown>) => ({
   schedule_id: 'ab'.repeat(16), job: 'Run the grid tick', active: true, state: 'running', trigger: 'fails_often',
   verdict: null, stop_reason: null, started_at: new Date(Date.now() - 3 * 86_400_000).toISOString(),
-  applied_at: null, settled_at: null, fix_run: '1f'.repeat(16), reported: false, baseline: null, since_change: null,
+  applied_at: null, settled_at: null, stopped_at: null, fix_run: '1f'.repeat(16), reported: false, baseline: null, since_change: null,
   detail: {}, old_task: null, task: null, ...over,
 });
 const JUDGING = () => fixRow({
@@ -79,7 +79,7 @@ const JUDGING = () => fixRow({
 });
 const STOPPED = () => fixRow({
   schedule_id: 'cd'.repeat(16), job: 'Post the digest', active: false, state: 'stopped', verdict: 'needs_owner',
-  stop_reason: 'needs_owner', reported: true, settled_at: new Date(Date.now() - 3600_000).toISOString(),
+  stop_reason: 'needs_owner', reported: true, stopped_at: new Date(Date.now() - 3600_000).toISOString(),
   detail: { diagnosis: 'the token <b>expired</b>', owner_action: 'renew the token', check: { status: 'completed', outcome: 'completed' } },
 });
 
@@ -242,6 +242,21 @@ describe('Autonomy view', () => {
     expect(screen.getByText('Instructions now')).toBeTruthy();
     expect(screen.getByText('the report path moved')).toBeTruthy();
     expect(screen.queryByText('Proposed instructions')).toBeNull(); // the applied text shows once, as "now"
+  });
+
+  it('calls a change that was applied and then undone by the stop "tried, then restored"', async () => {
+    const undone = fixRow({
+      schedule_id: 'ef'.repeat(16), job: 'Sync the files', state: 'stopped', verdict: 'changed_job',
+      stop_reason: 'did_not_help', reported: true, applied_at: new Date(Date.now() - 86_400_000).toISOString(),
+      detail: { new_instructions: 'Sync the files twice' },
+    });
+    body = { ...FULL(), job_fixes: { enabled: true, jobs: [undone] } };
+    render(Autonomy);
+    await screen.findByText('Check and fix');
+    await fireEvent.click(screen.getByRole('button', { name: 'Show details for Sync the files' }));
+    expect(screen.getByText('Instructions tried, then restored')).toBeTruthy();
+    expect(screen.getByText('Sync the files twice')).toBeTruthy();
+    expect(screen.queryByText('Proposed instructions')).toBeNull();
   });
 
   it('says check-and-fix is off rather than "no job needed a check"', async () => {

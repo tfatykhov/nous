@@ -137,7 +137,7 @@ export const FIX_STOP_LABEL: Record<string, string> = {
   no_fault_found: 'nothing found and it still fails',
   unreadable_report: "the check's report could not be read",
   fails_again: 'it started failing again',
-  inactive: 'you stopped the job',
+  inactive: 'the job was stopped outside the check',
 };
 
 export type FixTone = 'live' | 'ok' | 'muted' | 'warn';
@@ -151,8 +151,8 @@ export function fixState(row: JobFixRow): { label: string; tone: FixTone } {
     case 'kept': return { label: 'Fix kept', tone: 'ok' };
     case 'closed': return { label: 'Closed', tone: 'muted' };
     case 'stopped':
-      if (row.stop_reason === 'inactive') return { label: 'Stopped by you', tone: 'muted' };
-      return { label: row.reported ? 'Stopped, you were told' : 'Stopped', tone: 'warn' };
+      if (row.stop_reason === 'inactive') return { label: 'Job stopped', tone: 'muted' };
+      return { label: row.reported ? 'Stopped, you were told' : 'Stopped, you were not told', tone: 'warn' };
     default: return { label: 'Unreadable record', tone: 'muted' };
   }
 }
@@ -163,7 +163,7 @@ export function fixOutcome(row: JobFixRow): string {
   if (row.state === 'running') return 'Check run in progress';
   if (row.state === 'judging') {
     const s = row.since_change;
-    if (!s) return verdict ?? 'Judging';
+    if (!s) return 'Never judged: the record lacks its baseline or the time of the change';
     const runs = `${s.scored} of ${s.needed} runs since the change, ${s.bad} went wrong`;
     return s.scored >= s.needed ? `${runs}; judged at the next sleep` : runs;
   }
@@ -194,9 +194,9 @@ export function fixBaseline(row: JobFixRow): string | null {
   return b ? `${b.bad} of ${b.scored} runs went wrong before` : null;
 }
 
-/** The record's newest time: settled, else applied, else started. */
+/** The record's newest time: stopped, settled, applied or started. */
 export function fixLatest(row: JobFixRow): string | null {
-  const times = [row.settled_at, row.applied_at, row.started_at].filter((t): t is string => !!t);
+  const times = [row.stopped_at, row.settled_at, row.applied_at, row.started_at].filter((t): t is string => !!t);
   if (times.length === 0) return null;
   return times.reduce((a, b) => (new Date(b).getTime() > new Date(a).getTime() ? b : a));
 }

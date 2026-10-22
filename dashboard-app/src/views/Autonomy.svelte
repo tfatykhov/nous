@@ -346,6 +346,7 @@
             <div><dt>Check started</dt><dd>{fmtWhen(r.started_at)}</dd></div>
             {#if r.applied_at}<div><dt>Change made</dt><dd>{fmtWhen(r.applied_at)}</dd></div>{/if}
             {#if r.settled_at}<div><dt>Settled</dt><dd>{fmtWhen(r.settled_at)}</dd></div>{/if}
+            {#if r.stopped_at}<div><dt>Job stopped</dt><dd>{fmtWhen(r.stopped_at)}</dd></div>{/if}
             {#if r.verdict}<div><dt>Verdict of the check</dt><dd>{FIX_VERDICT_LABEL[r.verdict] ?? r.verdict}</dd></div>{/if}
             {#if r.fix_run}<div><dt>Check run</dt><dd class="mono">{r.fix_run}</dd></div>{/if}
             <div><dt>Job id</dt><dd class="mono">{r.schedule_id}{r.active ? '' : ' (stopped)'}</dd></div>
@@ -353,7 +354,9 @@
           <!-- Written by the check run: plain text interpolation only, never {@html}. -->
           {#each FIX_TEXTS as [key, label] (key)}
             {#if r.detail[key] && !(key === 'new_instructions' && r.task)}
-              <div class="fix-text"><div class="label">{label}</div><pre>{r.detail[key]}</pre></div>
+              {@const shown = key === 'new_instructions' && r.applied_at ? 'Instructions tried, then restored' : label}
+              <!-- An applied change that no longer stands was restored by the stop. -->
+              <div class="fix-text"><div class="label">{shown}</div><pre>{r.detail[key]}</pre></div>
             {/if}
           {/each}
           {#if r.detail.check}

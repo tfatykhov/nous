@@ -485,6 +485,7 @@ async def test_a_failed_judging_restores_the_old_instructions_before_the_message
     assert order == ["set_metadata", "_write_owner_report", "deactivate", "set_metadata"]
     assert writes[0][1] == "Old text" and writes[0][0]["state"] == "stopping"
     assert writes[-1][0]["state"] == "stopped" and writes[-1][1] is None
+    assert writes[0][0]["stopped_at"] == writes[-1][0]["stopped_at"] == NOW.isoformat()  # the time of the decision
 
 
 async def test_a_stopping_record_resumes_with_only_the_remaining_steps():
@@ -520,6 +521,7 @@ async def test_the_owner_stopping_the_job_mid_fix_ends_in_stopped_inactive_with_
         heart = _heart()
         _stats, order, writes = await _step(_record(state), active=False, heart=heart)
         assert (writes[-1][0]["state"], writes[-1][0]["stop_reason"]) == ("stopped", "inactive")
+        assert writes[-1][0]["stopped_at"] == NOW.isoformat()
         assert "_write_owner_report" not in order and "deactivate" not in order and writes[-1][1] is None
         if state == "running":
             heart.subtasks.cancel.assert_awaited_once_with(FIX_RUN)

@@ -67,7 +67,7 @@ async def _row(heart: Heart, schedule: Schedule, record: dict) -> dict[str, Any]
     baseline = {"bad": baseline["bad"], "scored": baseline["scored"]} if baseline_ok(baseline) else None
     applied = parse_time(record.get("applied_at"))
     since_change = None
-    if state == "judging" and applied is not None:
+    if state == "judging" and applied is not None and baseline is not None:  # the judge skips a record without them
         # The judge's own read (JobFixer._advance_judging): provisional scores too, after the change.
         runs = await heart.job_runs.scored_runs(schedule.id.hex, after=applied, limit=BASELINE_RUNS, settled_only=False)
         since_change = {"scored": len(runs), "bad": sum(1 for r in runs if r.bad), "needed": JUDGE_AFTER_RUNS}
@@ -82,6 +82,7 @@ async def _row(heart: Heart, schedule: Schedule, record: dict) -> dict[str, Any]
         "started_at": _when(record.get("started_at")),
         "applied_at": applied.isoformat() if applied is not None else None,
         "settled_at": _when(record.get("settled_at")),
+        "stopped_at": _when(record.get("stopped_at")),
         "fix_run": _str(record.get("fix_run")),
         "reported": _str(record.get("report_id")) is not None,
         "baseline": baseline,
@@ -99,7 +100,8 @@ _NEVER = datetime.min.replace(tzinfo=UTC)
 
 def _latest(row: dict[str, Any]) -> datetime:
     """The row's newest time."""
-    times = [datetime.fromisoformat(t) for t in (row["settled_at"], row["applied_at"], row["started_at"]) if t]
+    keys = ("stopped_at", "settled_at", "applied_at", "started_at")
+    times = [datetime.fromisoformat(row[k]) for k in keys if row[k]]
     return max(times, default=_NEVER)
 
 

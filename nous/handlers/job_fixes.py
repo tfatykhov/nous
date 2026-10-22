@@ -358,7 +358,13 @@ class JobFixer:
             old_task = record.get("old_task") if isinstance(record.get("old_task"), str) else None
             await self._write(
                 schedule,
-                {**record, "state": "stopped", "stop_reason": "inactive", "settled_at": now.isoformat()},
+                {
+                    **record,
+                    "state": "stopped",
+                    "stop_reason": "inactive",
+                    "settled_at": now.isoformat(),
+                    "stopped_at": now.isoformat(),
+                },
                 task=old_task,
             )
             return
@@ -487,7 +493,13 @@ class JobFixer:
         """Restore the old instructions and note the stop, tell the owner, stop the job, then record it."""
         old_task = record.get("old_task") if isinstance(record.get("old_task"), str) else None
         stored = record.get("detail") if isinstance(record.get("detail"), dict) else {}
-        stopping = {**record, "state": "stopping", "stop_reason": stop_reason, "detail": {**stored, **detail}}
+        stopping = {
+            **record,
+            "state": "stopping",
+            "stop_reason": stop_reason,
+            "detail": {**stored, **detail},
+            "stopped_at": self._clock().isoformat(),
+        }
         if isinstance(detail.get("verdict"), str):
             stopping["verdict"] = detail["verdict"]
         await self._write(schedule, stopping, task=old_task)

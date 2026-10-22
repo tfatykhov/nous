@@ -68,34 +68,53 @@ async def test_judging_counts_the_runs_the_judge_counts(job_env):  # noqa: F811
 async def test_a_stop_shows_the_check_text_and_whether_the_owner_was_told(job_env):  # noqa: F811
     env = await job_env()
     reported = {
-        "state": "stopped", "stop_reason": "needs_owner", "verdict": "needs_owner", "started_at": ago(9),
-        "report_id": "ab" * 16, "old_task": "Same text",
-        "detail": {"diagnosis": "the token expired", "owner_action": "renew it", "check": {"status": "completed"}},
+        "state": "stopped", "stop_reason": "did_not_help", "verdict": "changed_job", "started_at": ago(9),
+        "applied_at": ago(8), "stopped_at": ago(2), "report_id": "ab" * 16, "old_task": "Same text",
+        "detail": {"why": "the path moved", "new_instructions": "Other text", "check": {"status": "completed"}},
     }
     await make_schedule(env, task="Same text", active=False, metadata={FIX_KEY: reported})
-    await make_schedule(env, active=False, metadata={FIX_KEY: {"state": "stopped", "stop_reason": "inactive"}})
+    untold = {"state": "stopped", "stop_reason": "needs_owner", "stopped_at": ago(3), "report_id": None}
+    await make_schedule(env, task="No container", active=False, metadata={FIX_KEY: untold})
     rows = await jobs(env)
-    told = next(r for r in rows if r["stop_reason"] == "needs_owner")
-    assert told["reported"] is True and told["active"] is False
+    told = next(r for r in rows if r["stop_reason"] == "did_not_help")
+    assert told["reported"] is True and told["active"] is False and told["stopped_at"] == ago(2)
     assert told["detail"] == {
-        "diagnosis": "the token expired", "owner_action": "renew it", "check": {"status": "completed"},
+        "why": "the path moved", "new_instructions": "Other text", "check": {"status": "completed"},
     }
     assert (told["old_task"], told["task"]) == (None, None)  # restored: nothing changed stands
-    assert next(r for r in rows if r["stop_reason"] == "inactive")["reported"] is False
+    assert next(r for r in rows if r["stop_reason"] == "needs_owner")["reported"] is False
+
+
+async def test_old_and_new_instructions_show_only_while_a_changed_text_stands(job_env):  # noqa: F811
+    env = await job_env()
+    kept = {"state": "kept", "verdict": "changed_job", "old_task": "Old kept", "settled_at": ago(5)}
+    sched = await make_schedule(env, task="Old kept")
+    await env.heart.schedules.set_metadata(sched.id, FIX_KEY, kept, task="New kept")
+    elsewhere = {"state": "judging", "verdict": "fixed_elsewhere", "applied_at": ago(6), "old_task": None}
+    await make_schedule(env, task="Untouched", metadata={FIX_KEY: elsewhere})
+    stopping = {"state": "stopping", "stop_reason": "did_not_help", "old_task": "Restored", "stopped_at": ago(1)}
+    await make_schedule(env, task="Restored", metadata={FIX_KEY: stopping})
+    rows = {r["job"]: r for r in await jobs(env)}
+    assert (rows["Old kept"]["old_task"], rows["Old kept"]["task"]) == ("Old kept", "New kept")
+    assert (rows["Untouched"]["old_task"], rows["Untouched"]["task"]) == (None, None)
+    assert rows["Untouched"]["since_change"] is None  # no baseline: the judge skips the record, so no count either
+    assert (rows["Restored"]["old_task"], rows["Restored"]["task"]) == (None, None)
 
 
 async def test_live_records_come_first_then_the_newest(job_env):  # noqa: F811
     env = await job_env()
     for task, record in (
         ("kept old", {"state": "kept", "settled_at": ago(50)}),
-        ("stopped new", {"state": "stopped", "settled_at": ago(1)}),
+        # a stop the fixer made: no settled time, it sorts by when it stopped, not by when the check began
+        ("stopped new", {"state": "stopped", "started_at": ago(60), "stopped_at": ago(1)}),
         ("running old", {"state": "running", "started_at": ago(40)}),
         ("stopping new", {"state": "stopping", "started_at": ago(3)}),
         ("closed mid", {"state": "closed", "started_at": ago(30), "settled_at": ago(10)}),
+        ("stopped before stopped_at", {"state": "stopped", "started_at": ago(20)}),
     ):
         await make_schedule(env, task=task, metadata={FIX_KEY: record})
     assert [r["job"] for r in await jobs(env)] == [
-        "stopping new", "running old", "stopped new", "closed mid", "kept old",
+        "stopping new", "running old", "stopped new", "closed mid", "stopped before stopped_at", "kept old",
     ]
 
 

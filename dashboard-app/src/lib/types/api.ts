@@ -1697,8 +1697,10 @@ export interface JobFixRow {
   started_at: string | null;
   applied_at: string | null;
   settled_at: string | null;
+  /** When the job was stopped; records stopped before this field existed have none. */
+  stopped_at: string | null;
   fix_run: string | null;
-  /** The owner report was written (every stop except one the owner made). */
+  /** The owner report was written. A stop from outside the check writes none, nor does a job with no container. */
   reported: boolean;
   /** Runs before the check: how many of the scored ones went wrong. */
   baseline: { bad: number; scored: number } | null;
