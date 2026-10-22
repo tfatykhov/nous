@@ -79,7 +79,7 @@ Every side-effecting tool call lands in a durable execution ledger. Risky action
 <td valign="top">
 
 ### 🫀 Works without being asked
-A heartbeat runs health, email, Drive and self-defined checks and escalates what matters. Schedules, background subtasks and durable multi-node DAGs carry long work.
+A heartbeat runs scheduled checks (health, Drive, email, or any check described in plain words) and escalates what matters. Schedules, background subtasks and durable multi-node DAGs carry long work.
 
 </td>
 <td valign="top">
@@ -112,8 +112,8 @@ Capabilities that change behavior sit behind documented flags. Items marked *opt
 <details>
 <summary><b>🧠 Memory: what gets kept</b></summary>
 
-- **Episodes** — each conversation is summarized, and its verbatim transcript is kept in chunks next to the summary.
-- **Facts** — extracted from conversations, scored for admission, tagged as actionable or not, dated when they describe events, and superseded or retired when newer facts contradict them.
+- **Episodes** — each conversation is summarized; its verbatim transcript can also be kept in chunks next to the summary *(opt-in)*.
+- **Facts** — extracted from conversations, scored for admission, tagged as actionable or not, and superseded when newer facts contradict them. Date-anchored extraction for events is *opt-in*.
 - **Corrections** — when you correct the agent, the correction becomes a stored principle.
 - **Procedures and skills** — learned K-lines plus skills taught with `learn_skill` from a URL, a file or inline markdown, delivered in full when recalled.
 - **Censors** — "don't do this" rules that block a matching action, created when the agent finds a failure mode.
@@ -129,7 +129,7 @@ Capabilities that change behavior sit behind documented flags. Items marked *opt
 
 - **Hybrid search** — full-text and vector results fused by Reciprocal Rank Fusion, with a relevance floor and a staleness penalty.
 - **Graph-augmented recall** — spreading activation across facts, decisions, episodes, procedures and chunks, with contradictions surfaced at recall time.
-- **Re-ranking** — MMR diversity and an optional cross-encoder in `recall_deep`; multi-query expansion *(opt-in)*.
+- **Re-ranking** *(opt-in)* — MMR diversity and a cross-encoder in `recall_deep`, plus multi-query expansion.
 - **Context engine** — frame-adaptive, token-budgeted context assembly with deduplication and an anti-hallucination prompt.
 - **Long sessions** — tool output compressed at ingestion with the full text one `cache_retrieve` away, four-tier pruning of old tool results, and history compaction with a hallucination guard.
 - **Prompt caching** — a three-tier system prompt and a stable tool set keep most of each request cached.
@@ -141,7 +141,7 @@ Capabilities that change behavior sit behind documented flags. Items marked *opt
 
 - **Cross-type graph** — typed edges between every kind of memory, created at write time and densified later.
 - **Sleep cycle** — consolidates and links memories, backfills orphans, re-links episodes, resolves contradictions, recovers abandoned conversations and cleans up dead edges.
-- **Consolidation audit** — a reviewable changelog of what each sleep cycle changed.
+- **Consolidation audit** *(opt-in)* — a reviewable changelog of what each sleep cycle changed.
 
 </details>
 
@@ -152,7 +152,7 @@ Capabilities that change behavior sit behind documented flags. Items marked *opt
 - **Decision records** — confidence, category, stakes, several independent reasons and a live deliberation trace.
 - **Outcome review** — `resolve_decision` closes the loop; Brier scores and a calibration factor keep confidence honest.
 - **Guardrails** — CEL rules that block risky decisions.
-- **Critic** — a smart frame selector and diagnostic critics, plus a decision-quality rubric that evolves from outcome signals.
+- **Critic** — a smart frame selector and diagnostic critics, plus a decision-quality rubric fed by outcome signals (letting the rubric evolve itself is *opt-in*).
 
 </details>
 
@@ -161,7 +161,7 @@ Capabilities that change behavior sit behind documented flags. Items marked *opt
 
 - **K-line learning** — procedures from decision clusters, episode lessons and error recoveries, each passing a lesson gate that requires cited evidence and refuses a lesson an existing procedure already teaches.
 - **Procedure lifecycle** — procedures track how well they work; weak or stale ones are reviewed and revised or retired.
-- **Identity** — character, values and protocols stored in the database, with an initiation protocol and a user profile split into core facts and current intent.
+- **Identity** — character, values and protocols stored in the database, with an initiation protocol. A user profile split into core facts and current intent is *opt-in*.
 
 </details>
 
@@ -174,18 +174,18 @@ Capabilities that change behavior sit behind documented flags. Items marked *opt
 - **Censor middleware** — censors can run read-only checks before an action proceeds and unblock it when the check passes.
 - **Guarded sends** — a background send that gets retried is never sent twice, and `send_email` works only toward an allowlist.
 - **Undo journal** — before-state snapshots of the files, schedules and checks the agent changes.
-- **Approvals** — a plan step can wait for the owner's answer; a waiting plan is parked and resumes when the answer arrives.
+- **Approvals** *(opt-in)* — a plan step can wait for the owner's answer; a waiting plan is parked and resumes when the answer arrives.
 
 </details>
 
 <details>
 <summary><b>🫀 Autonomy and orchestration</b></summary>
 
-- **Heartbeat** — health, email, Google Drive and prompt-defined checks; findings are deduplicated, escalated and summed up in a daily digest, and check parameters tune themselves from outcomes.
+- **Heartbeat** — health, Google Drive, email *(opt-in)* and prompt-defined checks; findings are deduplicated, escalated and summed up in a daily digest. Self-tuning of check parameters from outcomes is *opt-in*.
 - **Known false positives** — a rules file closes recurring false alarms at ingest, each rule with an expiry date ([format](docs/reference/heartbeat-known-false-positives.md)).
 - **Fault detector** *(opt-in)* — flags faculties that fail silently: stalled sleep phases, collapsing change ratios, retrieval canaries.
 - **Subtasks and schedules** — a background worker pool, cron and one-shot schedules, and inline subtasks.
-- **DAG orchestration** — multi-node plans with at-least-once result delivery, node timeouts, stall detection, a wall-clock reaper, per-frame concurrency caps and token accounting.
+- **DAG orchestration** — multi-node plans with at-least-once result delivery, node timeouts, a wall-clock reaper and token accounting. Stall detection and per-frame concurrency caps are *opt-in*.
 - **Intentions and continuation** *(opt-in)* — every spawn records why it was started; when results arrive the agent follows up, and outward actions become proposals the owner approves.
 - **Coding jobs** *(opt-in)* — from a shell held to an allowlist, the agent can launch Claude Code jobs in their own worktrees and follow their pull requests.
 
