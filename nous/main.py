@@ -796,6 +796,21 @@ async def create_components(settings: Settings) -> dict:
             else:
                 logger.warning("NOUS_JOB_LESSONS_ENABLED needs procedure learning and sleep: job lessons stay off")
 
+        # Job fixes: start one fix attempt for a recurring job that keeps failing (needs sleep and an LLM client)
+        if settings.job_fixes_enabled:
+            if sleep_handler is not None:
+                from nous.handlers.job_fixes import JobFixer
+
+                sleep_handler._job_fixer = JobFixer(heart=heart, settings=settings, llm_client=api_client)
+                logger.info("Job fixes: JobFixer wired into sleep handler")
+                if not continuation.enabled(settings) or continuation.owner_channel(settings, None) is None:
+                    logger.warning(
+                        "NOUS_JOB_FIXES_ENABLED needs intentions, continuation and an owner chat: "
+                        "check-and-fix is skipped until they are on"
+                    )
+            else:
+                logger.warning("NOUS_JOB_FIXES_ENABLED needs sleep: job fixes stay off")
+
         try:
             from nous.handlers.decision_reviewer import DecisionReviewer
 

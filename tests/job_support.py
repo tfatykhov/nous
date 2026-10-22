@@ -86,7 +86,9 @@ async def job_env(db, mock_embeddings):
 
     async def make(**over) -> SimpleNamespace:
         agent = f"job-{uuid4().hex[:8]}"
-        settings = Settings(_env_file=None, agent_id=agent, telegram_bot_token="", telegram_chat_id="", **over)
+        settings = Settings(
+            _env_file=None, **{"agent_id": agent, "telegram_bot_token": "", "telegram_chat_id": "", **over}
+        )
         heart = Heart(db, settings, embedding_provider=mock_embeddings)
         env = SimpleNamespace(agent=agent, settings=settings, heart=heart, db=db, scored=False)
         envs.append(env)

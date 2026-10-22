@@ -67,6 +67,7 @@ nous/
 │   ├── handlers/               # Event bus handlers
 │   │   ├── episode_summarizer.py  # Episode summary generation
 │   │   ├── job_lessons.py         # JobLessonLearner: lessons from bad runs of recurring jobs
+│   │   ├── job_fixes.py           # JobFixer: check-and-fix for a recurring job that keeps failing
 │   │   ├── fact_extractor.py      # Fact extraction from conversations
 │   │   ├── knowledge_extractor.py # Pre-prune fact extraction
 │   │   ├── decision_reviewer.py   # Automated decision review

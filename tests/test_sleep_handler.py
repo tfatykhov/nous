@@ -1641,3 +1641,76 @@ class TestJobLessonsPhase:
             assert ("job_lessons" in done) is expected
             if expected:
                 assert done.index("job_lessons") == done.index("generalize") + 1
+
+
+_FIX_KEYS = ("started", "start_failed", "applied", "refused", "kept", "closed", "stopped", "waiting", "skipped")
+_ALL_OTHER_PHASES = (
+    "review_decisions",
+    "prune",
+    "compress",
+    "reflect",
+    "resolve_contradictions",
+    "sweep_key_conflicts",
+    "graph_densification",
+    "recover_abandoned_episodes",
+    "generalize",
+    "evolve_rubric",
+    "prune_hub_snapshots",
+)
+
+
+class TestJobFixesPhase:
+    """The job fixes phase: a plain phase after the job lessons, with nested counts."""
+
+    @pytest.mark.asyncio
+    async def test_no_fixer_is_a_no_op_true(self):
+        handler, *_ = _make_sleep_handler()
+        handler._job_fixer = None
+        stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        assert await handler._phase_job_fixes(stats) is True and "job_fixes" not in stats
+
+    @pytest.mark.asyncio
+    async def test_the_phase_nests_all_nine_keys_and_adds_no_top_level_int(self):
+        handler, *_ = _make_sleep_handler()
+        handler._job_fixer = AsyncMock()
+        handler._job_fixer.run_sleep = AsyncMock(return_value={k: 1 for k in _FIX_KEYS})
+        stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        assert await handler._phase_job_fixes(stats) is True
+        assert stats["job_fixes"] == {k: 1 for k in _FIX_KEYS}
+        assert {k for k, v in stats.items() if isinstance(v, int)} == {
+            "facts_created",
+            "procedures_created",
+            "censors_retired",
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_raising_fixer_returns_false(self):
+        handler, *_ = _make_sleep_handler()
+        handler._job_fixer = AsyncMock()
+        handler._job_fixer.run_sleep = AsyncMock(side_effect=RuntimeError("boom"))
+        stats = {"procedures_created": 0}
+        assert await handler._phase_job_fixes(stats) is False
+        assert "job_fixes" not in stats
+
+    @pytest.mark.asyncio
+    async def test_the_phases_run_in_order_when_both_are_configured(self):
+        handler, brain, heart, bus, _ = _make_sleep_handler()
+        for name in _ALL_OTHER_PHASES:
+            setattr(handler, f"_phase_{name}", AsyncMock(return_value=True))
+        handler._job_lessons = AsyncMock()
+        handler._job_lessons.run_sleep = AsyncMock(return_value={"learned": 0})
+        handler._job_fixer = AsyncMock()
+        handler._job_fixer.run_sleep = AsyncMock(return_value={})
+        await handler._run_sleep(_make_event("sleep_started"))
+        done = bus.emit.call_args[0][0].data["phases_completed"]
+        assert done.index("job_lessons") == done.index("generalize") + 1
+        assert done.index("job_fixes") == done.index("job_lessons") + 1
+
+    @pytest.mark.asyncio
+    async def test_the_phase_is_absent_without_a_fixer(self):
+        handler, brain, heart, bus, _ = _make_sleep_handler()
+        for name in _ALL_OTHER_PHASES:
+            setattr(handler, f"_phase_{name}", AsyncMock(return_value=True))
+        handler._job_fixer = None
+        await handler._run_sleep(_make_event("sleep_started"))
+        assert "job_fixes" not in bus.emit.call_args[0][0].data["phases_completed"]
