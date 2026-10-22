@@ -12,6 +12,7 @@ from sqlalchemy import insert, or_, select, update
 from nous import undo_journal
 from nous.brain import intentions
 from nous.brain.intentions import IntentionSpec
+from nous.heart.job_runs import FIX_KEY
 from nous.storage.database import Database
 from nous.storage.models import Schedule
 
@@ -329,11 +330,16 @@ class ScheduleManager:
         except Exception:
             logger.warning("Undo journal: could not read schedule %s before deactivate", schedule_id, exc_info=True)
             return
+        row = dict(prior)
+        meta = row.get("metadata")
+        if isinstance(meta, dict) and FIX_KEY in meta:
+            # The journal is a file the agent can read: a check-and-fix record holds score-derived counts.
+            row["metadata"] = {k: v for k, v in meta.items() if k != FIX_KEY}
         await snapshot.record(
             undo_journal.KIND_SCHEDULE,
             "deactivate",
             str(schedule_id),
-            undo_journal.encode_row(prior),
+            undo_journal.encode_row(row),
             label=prior["task"][:80],
             restorable=container is None,
             note="its F099 container intention is closed by this deactivate" if container else None,
