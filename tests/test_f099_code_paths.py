@@ -337,9 +337,14 @@ async def test_create_fire_is_a_scheduled_run_under_the_schedules_container_with
         env, {"task": "Check the snow report", "every": "30 minutes", "intent": "Keep the user posted"}
     )
     sub = await create_fire(
-        env.heart, env.settings, schedule, task="Look into it",
+        env.heart,
+        env.settings,
+        schedule,
+        task="Look into it",
         intent="Check a background job that keeps going wrong: Check the snow report",
-        metadata={"job_fix": True, "max_attempts": 1}, notify=False, timeout=600,
+        metadata={"job_fix": True, "max_attempts": 1},
+        notify=False,
+        timeout=600,
     )
     assert (sub.task, sub.timeout_seconds, sub.notify) == ("Look into it", 600, False)
     assert sub.metadata_["schedule_id"] == schedule.id.hex
@@ -347,7 +352,10 @@ async def test_create_fire_is_a_scheduled_run_under_the_schedules_container_with
     assert ExecutionContext.for_subtask(sub, "s").kind == "scheduled"
     fire, container = await _of(env, "subtask", sub.id), await _of(env, "schedule", schedule.id)
     assert (fire.parent_id, fire.root_id, fire.origin_kind, fire.wake_policy) == (
-        container.id, fire.id, "scheduler", "none",
+        container.id,
+        fire.id,
+        "scheduler",
+        "none",
     )
     assert sub.metadata_["intention"]["authority"] == "owner"
     # the brief is not the intention's line
