@@ -117,8 +117,8 @@ class JobRunReader:
             result = await session.execute(text(sql), params)
             return list(result.mappings().all())
 
-    async def lesson_cases(self, *, since: datetime, limit: int) -> list[JobRun]:
-        """The newest bad run of each active recurring job since ``since``, newest first, at most ``limit``.
+    async def lesson_cases(self, *, since: datetime, limit: int | None = None) -> list[JobRun]:
+        """The newest bad run of each active recurring job since ``since``, newest first, at most ``limit`` (None: all).
 
         A job whose ``job_lessons.reviewed_until`` is at or after that run's finish is skipped.
         """
@@ -129,7 +129,7 @@ class JobRunReader:
         rows = await self._rows(sql, self._params(since=since))
         kept = [r for r in rows if not _reviewed(r["sch_meta"], r["finished_at"])]
         kept.sort(key=lambda r: r["finished_at"], reverse=True)
-        return [_run(r) for r in kept[:limit]]
+        return [_run(r) for r in (kept if limit is None else kept[:limit])]
 
     async def good_runs(self, schedule_id: str, *, before: datetime, since: datetime, limit: int = 3) -> list[JobRun]:
         """Good runs of one job in ``[since, before)``, newest first."""

@@ -256,7 +256,16 @@ async def test_the_cap_counts_every_case_sent_to_the_review_and_not_the_skipped_
     stats = await env.jl.run_sleep()
     assert env.llm.call.await_count == 2 and stats["llm_failed"] == 2
     env.heart.job_runs.lesson_cases.assert_awaited_once()
-    assert env.heart.job_runs.lesson_cases.await_args.kwargs["limit"] == 10  # cap * 5
+    assert env.heart.job_runs.lesson_cases.await_args.kwargs.get("limit") is None  # every candidate is read
+
+
+async def test_ineligible_cases_cannot_starve_an_eligible_one_beyond_them():
+    cases = [_run(h, bad=True) for h in range(1, 13)]
+    goods = [[_run(40)] for _ in range(11)] + [[_run(40), _run(50)]]  # the first 11 lack comparison runs
+    env = _env(cases, goods, per_sleep=2)
+    env.llm.call.return_value = _mock_llm_response(_no_entry())
+    stats = await env.jl.run_sleep()
+    assert env.llm.call.await_count == 1 and stats["no_entry"] == 1
 
 
 async def test_a_zero_cap_reads_no_cases():

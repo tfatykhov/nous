@@ -36,6 +36,9 @@ async def test_lesson_cases_are_the_newest_bad_run_of_each_active_recurring_sche
     assert [c.subtask_id for c in cases] == [a_new.id, b_bad.id] and all(c.bad for c in cases)
     assert [c.subtask_id for c in await r.lesson_cases(since=NOW - timedelta(days=30), limit=1)] == [a_new.id]
     assert await r.lesson_cases(since=NOW - timedelta(hours=1), limit=10) == []
+    assert [c.subtask_id for c in await r.lesson_cases(since=NOW - timedelta(days=30), limit=None)] == [
+        a_new.id, b_bad.id
+    ]
 
 
 async def test_lesson_cases_respect_reviewed_until(job_env):  # noqa: F811

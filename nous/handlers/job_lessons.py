@@ -174,7 +174,7 @@ class JobLessonLearner:
             return 0
         since = datetime.now(UTC) - timedelta(days=CASE_WINDOW_DAYS)
         try:
-            cases = await self._heart.job_runs.lesson_cases(since=since, limit=cap * 5)
+            cases = await self._heart.job_runs.lesson_cases(since=since)
         except Exception:
             logger.warning("Job lessons: reading the cases failed", exc_info=True)
             return 0
