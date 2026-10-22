@@ -27,6 +27,7 @@ from sqlalchemy import and_, func, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from nous.brain import continuation, intentions
+from nous.heart.job_runs import FIX_KEY
 from nous.storage.database import Database
 from nous.storage.models import ChannelSession, Intention, ResultInbox, ResultInboxState, Subtask
 
@@ -631,6 +632,12 @@ async def record_subtask_result(store: ResultInboxStore, subtask: Any, settings:
         return False
     try:
         if subtask.status not in ("completed", "failed") or is_dag_node_subtask(subtask):
+            return False
+        meta = getattr(subtask, "metadata_", None)
+        if isinstance(meta, dict) and FIX_KEY in meta:
+            # A check-and-fix run: the owner hears of it only through the fixer's stop report. Its own
+            # intention still closes, with no inbox row.
+            await close_intention_quietly(store, settings, SOURCE_SUBTASK, subtask.id)
             return False
         if continuation.enabled(settings):
             return await route_result(
