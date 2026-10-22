@@ -625,7 +625,9 @@ async def record_subtask_result(store: ResultInboxStore, subtask: Any, settings:
     """Write a terminal subtask's result to the inbox. Never raises.
 
     Skipped when the flag is off, for DAG-node subtasks (their DAG reports),
-    for rows with no routing key, and for rows with nothing to say. With
+    for check-and-fix runs (the fixer's stop report tells the owner; the run's
+    intention is still closed), for rows with no routing key, and for rows
+    with nothing to say. With
     NOUS_CONTINUATION_ENABLED on, ``route_result`` routes it by its intention.
     """
     if not settings.result_inbox_enabled or subtask is None:
