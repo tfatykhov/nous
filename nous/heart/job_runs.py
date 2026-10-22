@@ -7,6 +7,7 @@ A job is a recurring ``heart.schedules`` row. Each fire is a ``heart.subtasks`` 
 The score only decides *which* runs come back (``JobRun.bad``). Every other field of a
 :class:`JobRun` is the run's own record, so a caller can render a run without rendering a score.
 Runs of a fix attempt (subtask metadata flag :data:`FIX_KEY`) are never returned.
+Lesson reads (``lesson_cases``, ``good_runs``, ``scored_runs``) use settled scores only.
 """
 
 from __future__ import annotations
@@ -49,6 +50,9 @@ JOIN heart.schedules sch ON s.metadata->>'schedule_id' = replace(CAST(sch.id AS 
 WHERE ts.agent_id = :agent_id AND ts.task_kind = 'subtask' AND ts.scorer_version = :v
   AND (s.metadata -> CAST(:fix_key AS text)) IS NULL
 """
+
+# Lesson reads rest on final labels: a provisional (unsettled) score may still be rewritten by the scorer.
+_SETTLED = " AND ts.settled"
 
 _ACTIVE_BAD = f" AND sch.active AND sch.schedule_type = 'recurring' AND ts.outcome IN ({_BAD_SQL})"
 
@@ -120,10 +124,10 @@ class JobRunReader:
     async def lesson_cases(self, *, since: datetime, limit: int | None = None) -> list[JobRun]:
         """The newest bad run of each active recurring job since ``since``, newest first, at most ``limit`` (None: all).
 
-        A job whose ``job_lessons.reviewed_until`` is at or after that run's finish is skipped.
+        A job whose ``job_lessons.reviewed_until`` is at or after that run's finish is skipped. Settled scores only.
         """
         sql = (
-            "SELECT DISTINCT ON (sch.id)" + _COLUMNS + ", sch.metadata AS sch_meta" + _FROM + _ACTIVE_BAD
+            "SELECT DISTINCT ON (sch.id)" + _COLUMNS + ", sch.metadata AS sch_meta" + _FROM + _SETTLED + _ACTIVE_BAD
             + " AND ts.finished_at >= :since ORDER BY sch.id, ts.finished_at DESC"
         )
         rows = await self._rows(sql, self._params(since=since))
@@ -134,7 +138,7 @@ class JobRunReader:
     async def good_runs(self, schedule_id: str, *, before: datetime, since: datetime, limit: int = 3) -> list[JobRun]:
         """Good runs of one job in ``[since, before)``, newest first."""
         sql = (
-            _SELECT + _FROM
+            _SELECT + _FROM + _SETTLED
             + f" AND s.metadata->>'schedule_id' = :schedule_id AND ts.outcome IN ({_GOOD_SQL})"
             + " AND ts.finished_at >= :since AND ts.finished_at < :before ORDER BY ts.finished_at DESC LIMIT :limit"
         )
@@ -151,7 +155,7 @@ class JobRunReader:
     ) -> list[JobRun]:
         """Scored runs of one job (``not_scored`` left out), newest first; ``after`` exclusive, ``until`` inclusive."""
         sql = (
-            _SELECT + _FROM
+            _SELECT + _FROM + _SETTLED
             + " AND s.metadata->>'schedule_id' = :schedule_id AND ts.outcome <> 'not_scored'"
             + " AND (CAST(:after AS timestamptz) IS NULL OR ts.finished_at > CAST(:after AS timestamptz))"
             + " AND (CAST(:until AS timestamptz) IS NULL OR ts.finished_at <= CAST(:until AS timestamptz))"
@@ -186,7 +190,7 @@ class JobRunReader:
         return out
 
     async def schedules_with_bad_runs(self, *, since: datetime) -> list[str]:
-        """Hex ids of active recurring jobs with at least one bad run since ``since``."""
+        """Hex ids of active recurring jobs with at least one bad run since ``since`` (provisional scores count too)."""
         sql = (
             "SELECT DISTINCT replace(CAST(sch.id AS text), '-', '') AS schedule_id" + _FROM + _ACTIVE_BAD
             + " AND ts.finished_at >= :since ORDER BY 1"

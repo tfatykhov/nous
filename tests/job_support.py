@@ -126,7 +126,7 @@ async def make_run(
     final_outcome: str | None = "completed", result: str | None = "done", error: str | None = None,
     blocked_reason: str | None = None, evidence: dict | None = None, score: float | None = None,
     fix: bool = False, ledger: Sequence[tuple[str, str]] = (), metadata: dict | None = None,
-    version: int = SCORER_VERSION,
+    version: int = SCORER_VERSION, settled: bool = True,
 ) -> SimpleNamespace:
     """Insert one finished run of ``schedule`` with its score row and ledger entries (oldest first)."""
     finished_at = NOW - timedelta(hours=age_hours)
@@ -140,7 +140,7 @@ async def make_run(
         await s.flush()
         s.add(TaskScore(
             agent_id=env.agent, task_kind="subtask", task_id=str(sub.id), finished_at=finished_at,
-            scorer_version=version, outcome=outcome, score=score, evidence=evidence or {},
+            scorer_version=version, outcome=outcome, score=score, evidence=evidence or {}, settled=settled,
         ))
         env.scored = True
         for i, (tool, st) in enumerate(ledger):
