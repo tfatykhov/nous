@@ -25,7 +25,7 @@ from nous.heart.job_runs import JobRun
 from nous.heart.schemas import JobLesson
 
 # Words the brief and the owner message must never use, on top of job_support's scorer sentinels.
-_SCORER_WORDS = re.compile(r"(bad|good|partial|score|done_self|not_scored)", re.I)
+_SCORER_WORDS = re.compile(r"\b(bad|good|partial|score|done_self|not_scored)\b", re.I)
 
 
 def _run(*, bad: bool = False, result: str | None = "all done", n: int = 0) -> JobRun:
