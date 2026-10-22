@@ -195,10 +195,13 @@ class JobRunReader:
         return out
 
     async def schedules_with_bad_runs(self, *, since: datetime) -> list[str]:
-        """Hex ids of active recurring jobs with at least one bad run since ``since`` (provisional scores count too)."""
+        """Hex ids of active recurring jobs with a bad run since ``since``, newest bad run first.
+
+        Provisional scores count too; the order is each job's newest bad run, newest first.
+        """
         sql = (
-            "SELECT DISTINCT replace(CAST(sch.id AS text), '-', '') AS schedule_id" + _FROM + _ACTIVE_BAD
-            + " AND ts.finished_at >= :since ORDER BY 1"
+            "SELECT replace(CAST(sch.id AS text), '-', '') AS schedule_id" + _FROM + _ACTIVE_BAD
+            + " AND ts.finished_at >= :since GROUP BY sch.id ORDER BY max(ts.finished_at) DESC, sch.id"
         )
         rows = await self._rows(sql, self._params(since=since))
         return [r["schedule_id"] for r in rows]

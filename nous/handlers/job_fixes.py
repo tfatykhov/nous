@@ -236,7 +236,6 @@ def render_owner_title(intent: str) -> str:
 
 _STATES = ("running", "judging", "kept", "closed", "stopping", "stopped")
 _STAT_KEYS = ("started", "start_failed", "applied", "refused", "kept", "closed", "stopped", "waiting", "skipped")
-_CANDIDATE_DAYS = 30
 
 
 def _parse_time(value: object) -> datetime | None:
@@ -471,7 +470,11 @@ class JobFixer:
         stats["stopped"] += 1
 
     async def _write_owner_report(self, schedule: Schedule, record: dict) -> UUID | None:
-        """Write the REPORT row for the stopped job under its still-open container; None without a container."""
+        """Write the REPORT row for the stopped job under its container; None without a container.
+
+        The container is still open on the first try. After a crash past ``deactivate`` it is closed; it is read
+        without a state filter and the row id is fixed, so a repeat finds it and writes no second row.
+        """
         heart = self._heart
         container = await heart.intentions.get_for_source("schedule", schedule.id)
         if container is None:
@@ -503,7 +506,7 @@ class JobFixer:
         heart, now = self._heart, self._clock()
         cutoff = now - timedelta(days=TRIGGER_WINDOW_DAYS)
         retired_lessons: dict[str, list[JobLesson]] = {}
-        just_retired: set[str] = set()
+        just_retired: dict[str, datetime] = {}  # schedule hex -> its newest retirement inside the window
         for lesson in await heart.list_job_lessons(active=False):
             retired = lesson.retired
             if not isinstance(retired, dict) or retired.get("reason") != "no_improvement":
@@ -511,10 +514,11 @@ class JobFixer:
             retired_lessons.setdefault(lesson.schedule_id, []).append(lesson)
             at = _parse_time(retired.get("at"))
             if at is not None and at >= cutoff:
-                just_retired.add(lesson.schedule_id)
+                just_retired[lesson.schedule_id] = max(at, just_retired.get(lesson.schedule_id, at))
         bad_ids = await heart.job_runs.schedules_with_bad_runs(since=cutoff)
         attempts = 0
-        for hex_id in dict.fromkeys([*bad_ids, *sorted(just_retired)]):
+        by_retirement = sorted(just_retired, key=just_retired.__getitem__, reverse=True)  # newest first
+        for hex_id in dict.fromkeys([*bad_ids, *by_retirement]):
             if attempts >= FIXES_PER_SLEEP:
                 break
             try:

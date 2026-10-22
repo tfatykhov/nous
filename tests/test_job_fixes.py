@@ -353,12 +353,13 @@ async def _step(record, *, active=True, fix=None, runs=(), review=None, task="Ol
     return stats, order, heart.writes
 
 
-def _start_env(*, recent, baseline=None, retired=(), schedules=1, with_record=0, container=_CONTAINER):
+def _start_env(*, recent, baseline=None, retired=(), schedules=1, with_record=0, container=_CONTAINER, ids=None):
     fixer, heart, _order = _fixer()
     made = [
         SimpleNamespace(
-            id=UUID(HEX) if i == 0 else uuid4(), active=True, schedule_type="recurring", task="Check the report",
-            metadata_={FIX_KEY: {"state": "kept"}} if i < with_record else {}, timeout_seconds=120,
+            id=ids[i] if ids else (UUID(HEX) if i == 0 else uuid4()), active=True, schedule_type="recurring",
+            task="Check the report", timeout_seconds=120,
+            metadata_={FIX_KEY: {"state": "kept"}} if i < with_record else {},
         )
         for i in range(schedules)
     ]
@@ -374,6 +375,7 @@ def _start_env(*, recent, baseline=None, retired=(), schedules=1, with_record=0,
     heart.job_runs.schedules_with_bad_runs.return_value = [s.id.hex for s in made]
     heart.list_job_lessons.return_value = list(retired)
     heart.intentions.get_for_source.return_value = container
+    heart.made = made
     create_fire = AsyncMock(return_value=SimpleNamespace(id=uuid4()))
     patch("nous.handlers.job_fixes.create_fire", create_fire).start()
     return fixer, heart, create_fire
@@ -398,6 +400,10 @@ async def test_missing_preconditions_skip_once_with_a_warning(over, caplog):
         (_record("running"), None, (), None, "stopped", "stopped", "unreadable_report"),
         (_record("running", fix_run="garbage"), None, (), None, "stopped", "stopped", "unreadable_report"),
         (_record("running", started_at=_days_ago(3)), SimpleNamespace(status="pending", result=None), (), None,
+         "stopped", "stopped", "unreadable_report"),
+        (_record("running", started_at="garbage"), SimpleNamespace(status="pending", result=None), (), None,
+         "stopped", "stopped", "unreadable_report"),
+        (_record("running"), SimpleNamespace(status="cancelled", result=None), (), None,
          "stopped", "stopped", "unreadable_report"),
         (_record("running"), SimpleNamespace(status="completed", result=CHANGED), (), (True, None),
          "judging", "applied", None),
@@ -613,3 +619,67 @@ async def test_without_a_container_no_report_is_written_and_the_job_is_still_sto
     await fixer._stop_and_ask(schedule, _record("running"), "needs_owner", verdict, dict.fromkeys(KEYS, 0))
     assert heart.writes[-1][0]["state"] == "stopped" and heart.writes[-1][0]["report_id"] is None
     heart.schedules.deactivate.assert_awaited_once()
+
+
+async def test_a_pending_fix_run_with_an_unreadable_start_time_is_cancelled_and_given_up_on():
+    heart = _heart()
+    _stats, _order, writes = await _step(
+        _record("running", started_at="garbage"), fix=SimpleNamespace(status="pending", result=None), heart=heart
+    )
+    heart.subtasks.cancel.assert_awaited_once_with(FIX_RUN)
+    assert writes[-1][0]["stop_reason"] == "unreadable_report"
+
+
+async def test_judging_reads_runs_after_the_change_and_settled_records_after_they_settled():
+    heart = _heart()
+    await _step(_record("judging", applied_at=_days_ago(2)), runs=_runs(n=5), heart=heart)
+    assert heart.job_runs.scored_runs.await_args.kwargs["after"] == _days_ago(2)
+    for state in ("kept", "closed"):
+        heart = _heart()
+        await _step(_record(state, settled_at=_days_ago(1)), runs=_runs(n=5), heart=heart)
+        assert heart.job_runs.scored_runs.await_args.kwargs["after"] == _days_ago(1)
+
+
+async def test_candidates_keep_the_reader_order_then_newest_retirement_and_none_is_tried_twice():
+    fixer, heart, create_fire = _start_env(recent=_runs(n=5, bad=3), schedules=3)
+    a, b, c = (s.id for s in heart.made)
+    heart.job_runs.schedules_with_bad_runs.return_value = [c.hex, a.hex]  # newest bad run first
+    assert (await fixer.run_sleep())["started"] == 1
+    assert create_fire.await_args.args[2].id == c and create_fire.await_count == 1  # one attempt, the first candidate
+
+    a, b, c = ids = [uuid4(), uuid4(), uuid4()]
+    fixer, heart, create_fire = _start_env(
+        recent=_runs(n=5, bad=3), schedules=3, with_record=2, ids=ids,
+        retired=[
+            _retired_lesson(c.hex, at=(NOW - timedelta(days=5)).isoformat()),
+            _retired_lesson(b.hex, at=(NOW - timedelta(days=1)).isoformat()),
+            _retired_lesson(a.hex, at=(NOW - timedelta(days=2)).isoformat()),
+        ],
+    )
+    heart.job_runs.schedules_with_bad_runs.return_value = [a.hex]
+    assert (await fixer.run_sleep())["started"] == 1
+    assert [call.args[0] for call in heart.schedules.get.await_args_list] == [a, b, c]
+
+
+async def test_the_report_goes_to_the_containers_origin_channel_when_it_has_one():
+    container = SimpleNamespace(id=uuid4(), root_id=uuid4(), intent="Check the report", origin_channel="telegram:1")
+    fixer, heart, _order = _fixer()
+    heart.db.session = MagicMock(return_value=_Session())
+    heart.intentions.get_for_source.return_value = container
+    fixer._write_owner_report = JobFixer._write_owner_report.__get__(fixer)
+    insert, push = AsyncMock(return_value=uuid4()), AsyncMock(return_value=NOW)
+    schedule = SimpleNamespace(id=uuid4(), metadata_={}, active=True, task="t")
+    with patch.object(continuation, "insert_report", insert), patch.object(continuation, "owner_push_after", push):
+        await fixer._stop_and_ask(
+            schedule, _record("running"), "needs_owner", dict(VALID["needs_owner"]), dict.fromkeys(KEYS, 0)
+        )
+    assert insert.await_args.kwargs["channel"] == "telegram:1" and push.await_args.kwargs["channel"] == "telegram:1"
+
+
+async def test_a_malformed_record_is_logged_once_across_sleeps(caplog):
+    fixer, heart, _order = _fixer()
+    schedule = SimpleNamespace(id=uuid4(), metadata_={FIX_KEY: "garbage"}, active=True, task="t")
+    heart.schedules.list_with_metadata_key.return_value = [schedule]
+    await fixer.run_sleep()
+    await fixer.run_sleep()
+    assert caplog.text.count("is malformed and is ignored") == 1

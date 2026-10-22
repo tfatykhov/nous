@@ -172,6 +172,18 @@ async def test_schedules_with_bad_runs(job_env):  # noqa: F811
     assert await r.schedules_with_bad_runs(since=NOW - timedelta(hours=1)) == []
 
 
+async def test_schedules_with_bad_runs_come_newest_bad_run_first(job_env):  # noqa: F811
+    env = await job_env()
+    r = env.heart.job_runs
+    older, newer = await make_schedule(env), await make_schedule(env)
+    await make_run(env, older, outcome="failed", age_hours=3)
+    await make_run(env, older, outcome="failed", age_hours=30)
+    await make_run(env, newer, outcome="failed", age_hours=1)
+    await make_run(env, newer, outcome="done_self", age_hours=0.5)  # a later good run does not move it
+    got = await r.schedules_with_bad_runs(since=NOW - timedelta(days=3))
+    assert got == [newer.id.hex, older.id.hex]
+
+
 async def test_ledger_calls_order_cap_and_agent_scope(job_env):  # noqa: F811
     env = await job_env()
     other_env = await job_env()
