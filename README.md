@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version 1.0.0" src="https://img.shields.io/badge/version-1.0.0-7c3aed">
+  <img alt="Version 1.1.0" src="https://img.shields.io/badge/version-1.1.0-7c3aed">
   <img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-3776ab">
   <img alt="PostgreSQL 17 + pgvector" src="https://img.shields.io/badge/PostgreSQL%2017-pgvector-336791">
   <img alt="License Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-2ea44f">
