@@ -20,7 +20,7 @@ from nous.cognitive.schemas import BuildResult, ContextBudget, ContextSection, F
 from nous.cognitive.usage_tracker import UsageTracker
 from nous.config import Settings
 from nous.heart.heart import Heart
-from nous.heart.schemas import is_strategy_card
+from nous.heart.schemas import is_job_lesson, is_strategy_card
 from nous.heart.search import (
     _wrap_with_score,
     apply_frame_boost,
@@ -2311,6 +2311,12 @@ class ContextEngine:
                 if trace is not None:
                     trace.drop(pid, "procedure", FILTER_DROPPED, "procedure_inactive")
                 continue  # archived/superseded → never surface
+            if is_job_lesson(detail):
+                # Defence in depth: the SQL already hides a job lesson from every read
+                # that feeds this ladder; it is shown only on its own job's runs.
+                if trace is not None:
+                    trace.drop(pid, "procedure", FILTER_DROPPED, "job_lesson_scope")
+                continue
             if is_strategy_card(detail):
                 # A card never takes a how-to slot: it goes to its own allowance
                 # or is dropped (always dropped while retrieval is off).
@@ -2386,7 +2392,7 @@ class ContextEngine:
                     detail = await self._heart.get_procedure(summ.id, session=session)
                 except Exception:
                     continue
-                if detail is not None and getattr(detail, "active", False):
+                if detail is not None and getattr(detail, "active", False) and not is_job_lesson(detail):
                     if trace is not None:
                         trace.add(detail.id, "procedure", "context_procedures_cosine_fallback",
                                   score=summ.score)

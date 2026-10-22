@@ -31,6 +31,7 @@ from nous.heart.admission import AdmissionConfig, AdmissionController
 from nous.heart.censors import CensorManager
 from nous.heart.episodes import EpisodeManager
 from nous.heart.facts import FactManager
+from nous.heart.job_runs import JobRunReader
 from nous.heart.procedures import ProcedureManager
 from nous.heart.reranker import CROSS_ENCODER_AVAILABLE, cross_encoder_rerank
 from nous.heart.result_inbox import ResultInboxStore
@@ -47,6 +48,7 @@ from nous.heart.schemas import (
     FactInput,
     FactRejected,
     FactSummary,
+    JobLesson,
     OpenThread,
     ProcedureDetail,
     ProcedureInput,
@@ -55,6 +57,7 @@ from nous.heart.schemas import (
     RecallResult,
     WorkingMemoryItem,
     WorkingMemoryState,
+    is_job_lesson,
 )
 from nous.heart.search import batch_fetch_embeddings, mmr_rerank
 from nous.heart.subtasks import SubtaskManager
@@ -132,6 +135,7 @@ class Heart:
         self.intentions = IntentionStore(database, settings.agent_id)  # F099
         self.result_memory = ResultMemoryWriter(self)  # F098 Phase C
         self.schedules = ScheduleManager(database, settings.agent_id)
+        self.job_runs = JobRunReader(database, settings.agent_id)
 
         # F022 Phase 2: Optional EventBus for fact_learned emission.
         # Injected post-construction in main.py (not a constructor param
@@ -545,7 +549,8 @@ class Heart:
 
         # F040: Emit on in-process EventBus for procedure graph linking.
         # The DB audit event (via _emit_event) does NOT reach the bus.
-        if self._bus is not None:
+        # A job lesson gets no graph edges, so it is not emitted.
+        if self._bus is not None and not is_job_lesson(input):
             await self._bus.emit(
                 Event(
                     type="procedure_stored",
@@ -568,8 +573,8 @@ class Heart:
         """Refresh a procedure's body in place, preserving learned stats (audit bug 9)."""
         result = await self.procedures.update_body(procedure_id, input, session)
 
-        # Mirror store_procedure: re-link the refreshed body in the graph.
-        if self._bus is not None:
+        # Mirror store_procedure: re-link the refreshed body in the graph (not a job lesson's).
+        if self._bus is not None and not is_job_lesson(input):
             await self._bus.emit(
                 Event(
                     type="procedure_stored",
@@ -661,10 +666,11 @@ class Heart:
         session: AsyncSession | None = None,
         *,
         include_strategy_cards: bool = False,
+        include_job_lessons: bool = False,
     ) -> tuple[list[ProcedureSummary], int]:
         """List procedures with pagination and filters (F021).
 
-        How-to procedures only, unless ``include_strategy_cards``.
+        How-to procedures only, unless ``include_strategy_cards`` / ``include_job_lessons``.
         """
         return await self.procedures.list_all(
             limit,
@@ -674,11 +680,38 @@ class Heart:
             min_activations,
             session,
             include_strategy_cards=include_strategy_cards,
+            include_job_lessons=include_job_lessons,
         )
 
-    async def retire_procedure(self, procedure_id: UUID, session: AsyncSession | None = None) -> None:
-        """Retire a procedure."""
-        await self.procedures.retire(procedure_id, session)
+    async def retire_procedure(
+        self, procedure_id: UUID, session: AsyncSession | None = None, *, reason: dict | None = None
+    ) -> None:
+        """Retire a procedure; a ``reason`` is kept as its ``runtime_metadata["retired"]``."""
+        await self.procedures.retire(procedure_id, session, reason=reason)
+
+    async def list_job_lessons(
+        self,
+        schedule_id: str | None = None,
+        *,
+        active: bool | None = True,
+        limit: int | None = None,
+        session: AsyncSession | None = None,
+    ) -> list[JobLesson]:
+        """This agent's job lessons, newest first: one job's with ``schedule_id``; active ones by default.
+
+        ``limit`` keeps the newest N.
+        """
+        return await self.procedures.list_job_lessons(schedule_id, active=active, limit=limit, session=session)
+
+    async def find_similar_job_lessons(
+        self,
+        query: str,
+        schedule_id: str,
+        limit: int = 3,
+        session: AsyncSession | None = None,
+    ) -> list[ProcedureSummary]:
+        """Raw-cosine nearest active job lessons of one job to ``query`` ([] without embeddings)."""
+        return await self.procedures.find_similar_job_lessons(query, schedule_id, limit, session)
 
     async def get_procedure_by_name(self, name: str, session: AsyncSession | None = None) -> ProcedureDetail | None:
         """Fetch the active how-to procedure with this name (never a strategy card)."""

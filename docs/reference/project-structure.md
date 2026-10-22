@@ -43,6 +43,7 @@ nous/
 │   │   ├── episodes.py         # Episodic memory
 │   │   ├── facts.py            # Semantic memory
 │   │   ├── procedures.py       # Procedural memory
+│   │   ├── job_runs.py         # Job lessons: a recurring job's runs from heart.subtasks and the execution ledger (own record only)
 │   │   ├── censors.py          # Guardrail censors
 │   │   ├── censor_actions.py   # F031: Censor action executor (read-only tools)
 │   │   ├── working_memory.py   # Short-term scratch space
@@ -65,6 +66,7 @@ nous/
 │   │   └── schemas.py          # TurnContext, TurnResult, etc.
 │   ├── handlers/               # Event bus handlers
 │   │   ├── episode_summarizer.py  # Episode summary generation
+│   │   ├── job_lessons.py         # JobLessonLearner: lessons from bad runs of recurring jobs
 │   │   ├── fact_extractor.py      # Fact extraction from conversations
 │   │   ├── knowledge_extractor.py # Pre-prune fact extraction
 │   │   ├── decision_reviewer.py   # Automated decision review

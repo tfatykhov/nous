@@ -76,7 +76,9 @@ class TestEpisodeOrphanEligibility:
 
     def test_entity_config_fact_and_procedure_unchanged(self):
         assert _ENTITY_CONFIG["fact"][3] == "t.active = true"
-        assert _ENTITY_CONFIG["procedure"][3] == "t.active = true"
+        procedure_where = _ENTITY_CONFIG["procedure"][3]
+        assert procedure_where.startswith("t.active = true")
+        assert "t.kind IS DISTINCT FROM 'job_lesson'" in procedure_where
 
 
 class TestGetRelation:

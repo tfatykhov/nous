@@ -293,6 +293,18 @@ def is_strategy_card(procedure: object) -> bool:
     return getattr(procedure, "kind", None) == STRATEGY_CARD_KIND
 
 
+# The ``kind`` that marks a job lesson: a lesson learned from the bad runs of one
+# recurring background job, named by ``runtime_metadata["job"]["schedule_id"]`` and
+# meant for that job's runs only. ONE definition shared by the learner (write),
+# ProcedureManager (per-job reads) and every read path that has to tell them apart.
+JOB_LESSON_KIND = "job_lesson"
+
+
+def is_job_lesson(procedure: object) -> bool:
+    """True for a procedure row, DTO or input whose kind marks a job lesson."""
+    return getattr(procedure, "kind", None) == JOB_LESSON_KIND
+
+
 class ProcedureInput(BaseModel):
     """Input for storing a new procedure."""
 
@@ -359,6 +371,21 @@ class ProcedureSummary(BaseModel):
     # sites (list_all etc.) are unaffected.
     core_patterns: list[str] = []
     implementation_notes: list[str] = []
+
+
+class JobLesson(BaseModel):
+    """A job lesson (a procedure row of kind ``job_lesson``) read for its job."""
+
+    id: UUID
+    schedule_id: str
+    name: str
+    cue: str  # when it applies: the procedure's first goal
+    lesson: str  # what to do: the "lesson: " implementation note, prefix removed
+    learned_from_run: str | None
+    baseline: dict | None  # the job's runs when it was learned
+    retired: dict | None  # runtime_metadata["retired"]: why it was retired
+    active: bool
+    created_at: datetime
 
 
 class EvolutionCandidate(BaseModel):

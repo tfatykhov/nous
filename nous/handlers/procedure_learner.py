@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+from collections.abc import Awaitable, Callable, Collection
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -684,7 +685,16 @@ class ProcedureLearner:
     # ==================================================================
 
     def _gated_procedure_input(
-        self, data: dict[str, Any], allowed_ids: dict[str, str], source_tag: str, min_sources: int = 1
+        self,
+        data: dict[str, Any],
+        allowed_ids: dict[str, str],
+        source_tag: str,
+        min_sources: int = 1,
+        *,
+        kind: str | None = None,
+        runtime_metadata: dict | None = None,
+        required_ids: Collection[str] = (),
+        counts: dict[str, int] | None = None,
     ) -> ProcedureInput | None:
         """Apply the lesson gate to an extracted procedure; the input to store, or None.
 
@@ -692,15 +702,26 @@ class ProcedureLearner:
         the evidence must cite ``min_sources`` of them.
         NO_ENTRY and gate rejections are logged and counted. The cue leads the goals, and the
         lesson and the cited evidence (fabricated citations dropped) lead the implementation notes.
+        ``required_ids`` must all be cited. ``kind`` and ``runtime_metadata`` go onto the input.
+        ``counts`` is the caller's own tally; None means the learner's.
         """
+        counts = counts if counts is not None else self._gate_counts
         if str(data.get("verdict") or "").strip().upper() == "NO_ENTRY":
-            self._gate_counts["no_entry"] += 1
+            counts["no_entry"] += 1
             logger.info("Lesson gate (%s): NO_ENTRY, %s", source_tag, data.get("reason"))
             return None
         passed, reason = _passes_lesson_gate(data, allowed_ids, min_sources)
         if not passed:
-            self._gate_counts["gate_rejected"] += 1
+            counts["gate_rejected"] += 1
             logger.info("Lesson gate (%s): rejected %r, %s", source_tag, data.get("name"), reason)
+            return None
+        cited = {item_id for item_id, _r, _o in _cited_evidence(data["evidence"], allowed_ids)}
+        missing = next((i for i in required_ids if i not in cited), None)
+        if missing is not None:
+            counts["gate_rejected"] += 1
+            logger.info(
+                "Lesson gate (%s): rejected %r, evidence does not cite %s", source_tag, data.get("name"), missing
+            )
             return None
 
         cue = data["cue"].strip()
@@ -727,14 +748,22 @@ class ProcedureLearner:
                     ),
                 ],
                 tags=[*_str_list(data.get("tags")), source_tag],
+                kind=kind,
+                runtime_metadata=runtime_metadata,
             )
         except ValidationError as exc:
             # One malformed answer skips its cluster, not the rest of the pathway.
-            self._gate_counts["gate_rejected"] += 1
+            counts["gate_rejected"] += 1
             logger.info("Lesson gate (%s): rejected %r, malformed field: %s", source_tag, data.get("name"), exc)
             return None
 
-    async def _store_unless_covered(self, proc_input: ProcedureInput) -> bool:
+    async def _store_unless_covered(
+        self,
+        proc_input: ProcedureInput,
+        *,
+        find_neighbours: Callable[[str], Awaitable[list[ProcedureSummary]]] | None = None,
+        counts: dict[str, int] | None = None,
+    ) -> bool:
         """Store a gated procedure unless an existing one already teaches its lesson; True if stored.
 
         The probe embeds the text a stored row embeds, so its cosines compare with stored rows.
@@ -743,13 +772,19 @@ class ProcedureLearner:
         above _COVERED_COSINE covers the lesson outright; neighbours above _COVER_CHECK_FLOOR
         are shown to the model, which may answer COVERED. A covering auto-learned procedure
         takes the new evidence; a skill or hand-written one is left as it is.
+        ``find_neighbours`` replaces the global probe; ``counts`` is the caller's own tally (None: the learner's).
         """
+        counts = counts if counts is not None else self._gate_counts
+        if find_neighbours is None:
+            async def find_neighbours(query: str) -> list[ProcedureSummary]:
+                return await self._heart.find_similar_procedures(query, limit=3)
+
         query_text = _build_embed_text(
             proc_input.name, proc_input.description, proc_input.core_patterns, proc_input.goals,
             proc_input.core_tools, proc_input.core_concepts, proc_input.implementation_notes,
         )
         neighbours = [
-            n for n in await self._heart.find_similar_procedures(query_text, limit=3)
+            n for n in await find_neighbours(query_text)
             if n.score is not None and n.score >= _COVER_CHECK_FLOOR
         ]
         if not neighbours:
@@ -757,12 +792,12 @@ class ProcedureLearner:
         elif (closest := max(neighbours, key=lambda n: n.score)).score > _COVERED_COSINE:
             covering = await self._procedure_or_none(closest.id)
         else:
-            covering = await self._covering_procedure(proc_input, neighbours)
+            covering = await self._covering_procedure(proc_input, neighbours, counts=counts)
         if covering is None:
             await self._heart.store_procedure(proc_input)
             return True
 
-        self._gate_counts["covered"] += 1
+        counts["covered"] += 1
         if not any(tag.startswith("auto:") for tag in covering.tags):
             logger.info("Lesson %r covered by %r, not auto-learned: nothing stored", proc_input.name, covering.name)
             return False
@@ -783,7 +818,7 @@ class ProcedureLearner:
         return False
 
     async def _covering_procedure(
-        self, proc_input: ProcedureInput, neighbours: list[ProcedureSummary]
+        self, proc_input: ProcedureInput, neighbours: list[ProcedureSummary], *, counts: dict[str, int] | None = None
     ) -> ProcedureDetail | None:
         """The neighbour the model says already teaches this lesson, or None (NEW, or no usable answer)."""
         details = {str(n.id): d for n in neighbours if (d := await self._procedure_or_none(n.id))}
@@ -803,7 +838,8 @@ class ProcedureLearner:
                 name=_one_line(proc_input.name),
                 description=_one_line(proc_input.description or ""),
                 existing=existing,
-            )
+            ),
+            counts=counts,
         )
         if not answer or str(answer.get("verdict") or "").strip().upper() != "COVERED":
             return None
@@ -820,8 +856,9 @@ class ProcedureLearner:
         except ValueError:
             return None
 
-    async def _call_llm(self, prompt: str) -> dict[str, Any] | None:
-        """Call Anthropic API and parse JSON response."""
+    async def _call_llm(self, prompt: str, *, counts: dict[str, int] | None = None) -> dict[str, Any] | None:
+        """Call Anthropic API and parse JSON response; failures count in ``counts`` (None: the learner's)."""
+        counts = counts if counts is not None else self._gate_counts
         if not self._llm:
             return None
 
@@ -834,7 +871,7 @@ class ProcedureLearner:
         )
 
         if not text:
-            self._gate_counts["llm_failed"] += 1
+            counts["llm_failed"] += 1
             return None
 
         try:
@@ -844,5 +881,5 @@ class ProcedureLearner:
             result = None
         if isinstance(result, dict):
             return result
-        self._gate_counts["llm_failed"] += 1
+        counts["llm_failed"] += 1
         return None

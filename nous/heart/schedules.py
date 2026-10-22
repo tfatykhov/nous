@@ -158,6 +158,28 @@ class ScheduleManager:
             )
             await session.commit()
 
+    async def set_metadata(self, schedule_id: UUID, key: str, value: dict, *, task: str | None = None) -> None:
+        """Set one key of the schedule's metadata under a row lock, optionally replacing the task text.
+
+        Other keys are kept, and concurrent writers of different keys do not lose each other's write.
+        Raises ``ValueError`` when the schedule does not exist for this agent. Not recorded in the undo journal.
+        """
+        async with self._db.session() as session:
+            schedule = (
+                await session.execute(
+                    select(Schedule)
+                    .where(Schedule.id == schedule_id, Schedule.agent_id == self._agent_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one_or_none()
+            if schedule is None:
+                raise ValueError(f"Schedule {schedule_id} not found")
+            schedule.metadata_ = {**(schedule.metadata_ or {}), key: value}
+            if task is not None:
+                schedule.task = task
+            await session.commit()
+
     async def advance(self, schedule_id: UUID, fired_at: datetime) -> None:
         """Advance a recurring schedule after firing."""
         async with self._db.session() as session:

@@ -38,7 +38,8 @@ _ENTITY_CONFIG: dict[str, tuple[str, str, str, str]] = {
         # heal. Liveness predicate mirrors HT-1's search fix.
         episode_live_sql("t."),
     ),
-    "procedure": ("heart.procedures", "procedure", "t.description", "t.active = true"),
+    "procedure": ("heart.procedures", "procedure", "t.description",
+                  "t.active = true AND t.kind IS DISTINCT FROM 'job_lesson'"),
     # F070 (2026-05-25): chunk node type. heart.episode_chunks has no `active`
     # column (deferred to F070.1), so the extra_where is the always-true
     # placeholder. content_col is `t.content` (raw transcript fragment).

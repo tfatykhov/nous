@@ -53,6 +53,8 @@ def _make_settings(**overrides) -> MagicMock:
         # 7 days, bumped to configurable default 30. Mock must supply
         # an int because timedelta(days=MagicMock()) crashes.
         procedure_recency_days=30,
+        job_lessons_enabled=True,
+        job_lessons_per_sleep=2,
         background_model="claude-test",
         api_base_url="https://api.anthropic.com",
         anthropic_api_key="sk-ant-test-key",
@@ -1566,3 +1568,61 @@ async def test_a_failed_covered_check_counts_as_llm_failed_and_stores_the_proced
     stats = await learner.run_sleep_learning()
 
     assert (stats["decisions_learned"], stats["llm_failed"]) == (1, 1)
+
+
+@pytest.mark.asyncio
+async def test_gated_input_passes_kind_and_runtime_metadata_through():
+    learner, *_ = _build_learner()
+    ids = {str(uuid4()): "completed", str(uuid4()): "completed"}
+    data = _llm_procedure_data(cited_ids=list(ids))
+    meta = {"job": {"schedule_id": "ab" * 16}}
+    proc = learner._gated_procedure_input(
+        data, ids, "auto:job_lesson", min_sources=2, kind="job_lesson", runtime_metadata=meta
+    )
+    assert (proc.kind, proc.runtime_metadata, proc.tags[-1]) == ("job_lesson", meta, "auto:job_lesson")
+    plain = learner._gated_procedure_input(data, ids, "auto:x", min_sources=2)
+    assert (plain.kind, plain.runtime_metadata) == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_required_ids_must_all_be_cited():
+    learner, *_ = _build_learner()
+    first, second = str(uuid4()), str(uuid4())
+    data = _llm_procedure_data(cited_ids=[second])
+    counts = {"no_entry": 0, "gate_rejected": 0, "covered": 0, "llm_failed": 0}
+    assert learner._gated_procedure_input(
+        data, {first: "a", second: "b"}, "auto:t", required_ids=[first], counts=counts
+    ) is None
+    assert counts["gate_rejected"] == 1 and learner._gate_counts["gate_rejected"] == 0
+    both = _llm_procedure_data(cited_ids=[first, second])
+    assert learner._gated_procedure_input(both, {first: "a", second: "b"}, "auto:t", required_ids=[first]) is not None
+
+
+@pytest.mark.asyncio
+async def test_counts_go_to_the_given_dict_not_the_learners():
+    learner, _b, _h, _e, llm_client = _build_learner()
+    llm_client.call.side_effect = RuntimeError("API down")
+    counts = {"llm_failed": 0}
+    assert await learner._call_llm("p", counts=counts) is None
+    assert counts["llm_failed"] == 1 and learner._gate_counts["llm_failed"] == 0
+    assert await learner._call_llm("p") is None and learner._gate_counts["llm_failed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_custom_finder_replaces_the_global_probe_and_covered_goes_to_counts():
+    learner, heart, llm_client, summaries, detail, extraction = _covered_setup(0.9, ["auto:job_lesson"])
+    proc_input = learner._gated_procedure_input(
+        extraction, {str(s.id): "success" for s in summaries[:2]}, "auto:job_lesson", min_sources=2
+    )
+    assert proc_input is not None
+    seen: list[str] = []
+
+    async def finder(query: str):
+        seen.append(query)
+        return [_make_procedure_summary(score=0.9).model_copy(update={"id": detail.id})]
+
+    counts = {"covered": 0, "llm_failed": 0}
+    assert await learner._store_unless_covered(proc_input, find_neighbours=finder, counts=counts) is False
+    assert len(seen) == 1 and counts["covered"] == 1 and learner._gate_counts["covered"] == 0
+    heart.find_similar_procedures.assert_not_called()
+    heart.append_procedure_notes.assert_awaited_once()
