@@ -2,13 +2,14 @@
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
-  import type { AutonomyData, InventoryTool, ScoreStats, VerifiedShare } from '../lib/types/api';
+  import type { AutonomyData, InventoryTool, JobFixRow, ScoreStats, VerifiedShare } from '../lib/types/api';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import FilterBar from '../lib/ui/FilterBar.svelte';
   import DataTable from '../lib/ui/DataTable.svelte';
   import { fmtWhen, FLAG_GLOSS } from '../lib/harness';
   import {
     bars, count, coverageFrom, pct, score, scorerHealth, OUTCOMES, OUTCOME_LABEL, ROLLUP_LABEL, CONTEXT_LABEL, LEVEL_LABEL,
+    fixBaseline, fixLatest, fixOutcome, fixState, FIX_TEXTS, FIX_TRIGGER_LABEL, FIX_VERDICT_LABEL,
   } from '../lib/autonomy';
 
   // GET /dashboard/autonomy: how tasks score, where the owner's attention goes,
@@ -54,6 +55,13 @@
     { key: 'who', label: 'Who was there' },
     { key: 'level', label: 'Level' },
     { key: 'undo', label: 'Undoable' },
+  ];
+  const fixCols = [
+    { key: 'job', label: 'Job' },
+    { key: 'state', label: 'State' },
+    { key: 'why', label: 'Why it was checked' },
+    { key: 'outcome', label: 'Where it stands' },
+    { key: 'when', label: 'Latest' },
   ];
   const warnCols = [
     { key: 'context', label: 'Context' },
@@ -302,6 +310,68 @@
     </table>
   </section>
 
+  <section class="panel" aria-labelledby="fix-title">
+    <div class="panel-head">
+      <h2 id="fix-title">Check and fix</h2>
+      <span class="small muted">Recurring jobs that kept going wrong · every one so far, whatever the window</span>
+    </div>
+    {#if !d.job_fixes.enabled}
+      <p class="small muted" role="status">Off (<code>NOUS_JOB_FIXES_ENABLED=false</code>): no check starts and no record below moves.</p>
+    {/if}
+    {#if d.job_fixes.jobs.length === 0}
+      {#if d.job_fixes.enabled}
+        <p class="empty">No job has needed a check. One starts when 3 of a recurring job's latest 5 scored runs went wrong.</p>
+      {/if}
+    {:else}
+      <DataTable columns={fixCols} rows={d.job_fixes.jobs} mode="cards"
+        rowKey={(r: JobFixRow) => r.schedule_id} rowLabel={(r: JobFixRow) => r.job}>
+        {#snippet cell(r: JobFixRow, c: { key: string })}
+          {#if c.key === 'job'}
+            <span class="job" title={r.job}>{r.job}</span>
+          {:else if c.key === 'state'}
+            {@const s = fixState(r)}
+            <span class="pill fix-{s.tone}">{s.label}</span>
+          {:else if c.key === 'why'}
+            {@const before = fixBaseline(r)}
+            <span class="small">{r.trigger ? FIX_TRIGGER_LABEL[r.trigger] ?? r.trigger : '—'}</span>
+            {#if before}<div class="small muted">{before}</div>{/if}
+          {:else if c.key === 'outcome'}
+            <span class="small">{fixOutcome(r)}</span>
+          {:else if c.key === 'when'}
+            <span class="small muted">{fmtWhen(fixLatest(r))}</span>
+          {/if}
+        {/snippet}
+        {#snippet detail(r: JobFixRow)}
+          <dl class="detail">
+            <div><dt>Check started</dt><dd>{fmtWhen(r.started_at)}</dd></div>
+            {#if r.applied_at}<div><dt>Change made</dt><dd>{fmtWhen(r.applied_at)}</dd></div>{/if}
+            {#if r.settled_at}<div><dt>Settled</dt><dd>{fmtWhen(r.settled_at)}</dd></div>{/if}
+            {#if r.verdict}<div><dt>Verdict of the check</dt><dd>{FIX_VERDICT_LABEL[r.verdict] ?? r.verdict}</dd></div>{/if}
+            {#if r.fix_run}<div><dt>Check run</dt><dd class="mono">{r.fix_run}</dd></div>{/if}
+            <div><dt>Job id</dt><dd class="mono">{r.schedule_id}{r.active ? '' : ' (stopped)'}</dd></div>
+          </dl>
+          <!-- Written by the check run: plain text interpolation only, never {@html}. -->
+          {#each FIX_TEXTS as [key, label] (key)}
+            {#if r.detail[key] && !(key === 'new_instructions' && r.task)}
+              <div class="fix-text"><div class="label">{label}</div><pre>{r.detail[key]}</pre></div>
+            {/if}
+          {/each}
+          {#if r.detail.check}
+            {@const ch = r.detail.check}
+            <div class="fix-text">
+              <div class="label">How the check run ended</div>
+              <pre>{[ch.status, ch.outcome].filter(Boolean).join(' / ')}{ch.head ? `: ${ch.head}` : ''}</pre>
+            </div>
+          {/if}
+          {#if r.old_task && r.task}
+            <div class="fix-text"><div class="label">Instructions before</div><pre>{r.old_task}</pre></div>
+            <div class="fix-text"><div class="label">Instructions now</div><pre>{r.task}</pre></div>
+          {/if}
+        {/snippet}
+      </DataTable>
+    {/if}
+  </section>
+
   <section class="panel" aria-labelledby="warn-title">
     <div class="panel-head">
       <h2 id="warn-title">Tool-policy flags</h2>
@@ -389,6 +459,15 @@
   .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 0.6875rem; font-weight: 600;
     border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
   .pill-warn { color: #fb923c; border-color: rgba(251, 146, 60, 0.5); }
+  .fix-live { color: var(--accent); border-color: var(--accent); }
+  .fix-ok { color: #10b981; border-color: rgba(16, 185, 129, 0.5); }
+  .fix-warn { color: #fb923c; border-color: rgba(251, 146, 60, 0.5); }
+  /* Two lines at most. It wraps anywhere, because an unbreakable line would widen the page on a phone (min-content). */
+  .job { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden;
+    overflow-wrap: anywhere; max-width: 28rem; font-size: 0.8125rem; }
+  .fix-text { margin-top: 0.5rem; min-width: 0; }
+  .fix-text pre { margin: 0.25rem 0 0; font-family: var(--font-mono); font-size: 0.75rem; white-space: pre-wrap;
+    overflow-wrap: anywhere; max-height: 16rem; overflow-y: auto; }
   .detail { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 0.5rem 1.5rem; margin: 0; padding: 0.5rem 0; }
   .detail dd { margin: 0.125rem 0 0; font-size: 0.8125rem; overflow-wrap: anywhere; }
   .mono, code { font-family: var(--font-mono); font-size: 0.75rem; }

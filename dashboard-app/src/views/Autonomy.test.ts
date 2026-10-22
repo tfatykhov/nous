@@ -62,6 +62,25 @@ const FULL = () => ({
   },
   events_persisted: true,
   warn_classes: [{ mode: 'warn', context_kind: 'heartbeat_triage', violation: 'level:external', tool_name: 'bash', count: 138 }],
+  job_fixes: { enabled: true, jobs: [JUDGING(), STOPPED()] },
+});
+
+const fixRow = (over: Record<string, unknown>) => ({
+  schedule_id: 'ab'.repeat(16), job: 'Run the grid tick', active: true, state: 'running', trigger: 'fails_often',
+  verdict: null, stop_reason: null, started_at: new Date(Date.now() - 3 * 86_400_000).toISOString(),
+  applied_at: null, settled_at: null, fix_run: '1f'.repeat(16), reported: false, baseline: null, since_change: null,
+  detail: {}, old_task: null, task: null, ...over,
+});
+const JUDGING = () => fixRow({
+  state: 'judging', verdict: 'changed_job', applied_at: new Date(Date.now() - 86_400_000).toISOString(),
+  baseline: { bad: 4, scored: 5 }, since_change: { scored: 2, bad: 1, needed: 5 },
+  detail: { why: 'the report path moved', new_instructions: 'Check /new/path' },
+  job: 'Check /old/path', old_task: 'Check /old/path', task: 'Check /new/path',
+});
+const STOPPED = () => fixRow({
+  schedule_id: 'cd'.repeat(16), job: 'Post the digest', active: false, state: 'stopped', verdict: 'needs_owner',
+  stop_reason: 'needs_owner', reported: true, settled_at: new Date(Date.now() - 3600_000).toISOString(),
+  detail: { diagnosis: 'the token <b>expired</b>', owner_action: 'renew the token', check: { status: 'completed', outcome: 'completed' } },
 });
 
 let body: Record<string, unknown> = FULL();
@@ -197,6 +216,43 @@ describe('Autonomy view', () => {
     body = { ...full, task_scores: { ...full.task_scores, scorer_version: 2 } };
     render(Autonomy);
     expect(await screen.findByText('Scorer version differs')).toBeTruthy();
+  });
+
+  it('lists every check-and-fix record with its state and where it stands', async () => {
+    const { container } = render(Autonomy);
+    expect(await screen.findByText('Check and fix')).toBeTruthy();
+    const text = container.textContent ?? '';
+    expect(screen.getByText('Judging the change')).toBeTruthy();
+    expect(text).toContain('2 of 5 runs since the change, 1 went wrong');
+    expect(text).toContain('4 of 5 runs went wrong before');
+    expect(screen.getByText('Stopped, you were told')).toBeTruthy();
+    expect(text).toContain('Stopped: the check needs you');
+    expect(text).not.toContain('Off (');
+  });
+
+  it("shows the check's own words as plain text, and the instructions before and after a change", async () => {
+    const { container } = render(Autonomy);
+    await screen.findByText('Check and fix');
+    await fireEvent.click(screen.getByRole('button', { name: 'Show details for Post the digest' }));
+    expect(screen.getByText('the token <b>expired</b>')).toBeTruthy(); // escaped, not markup
+    expect(container.querySelector('.fix-text b')).toBeNull();
+    expect(screen.getByText('renew the token')).toBeTruthy();
+    expect(screen.getByText('completed / completed')).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Show details for Check /old/path' }));
+    expect(screen.getByText('Instructions now')).toBeTruthy();
+    expect(screen.getByText('the report path moved')).toBeTruthy();
+    expect(screen.queryByText('Proposed instructions')).toBeNull(); // the applied text shows once, as "now"
+  });
+
+  it('says check-and-fix is off rather than "no job needed a check"', async () => {
+    body = { ...FULL(), job_fixes: { enabled: false, jobs: [] } };
+    const { container } = render(Autonomy);
+    expect(await screen.findByText(/no check starts and no record below moves/)).toBeTruthy();
+    expect(container.textContent).not.toContain('No job has needed a check.');
+    cleanup();
+    body = { ...FULL(), job_fixes: { enabled: true, jobs: [] } };
+    render(Autonomy);
+    expect(await screen.findByText(/No job has needed a check\./)).toBeTruthy();
   });
 
   it('says so when the endpoint fails', async () => {

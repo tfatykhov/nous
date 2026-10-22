@@ -2112,6 +2112,7 @@ def create_app(
     async def dashboard_autonomy(request: Request) -> JSONResponse:
         """GET /dashboard/autonomy — the autonomy scoreboard. Read-only; ``days`` 1 to 90, default 7."""
         from nous.api.autonomy_dashboard import get_autonomy_data, parse_days
+        from nous.api.job_fix_dashboard import get_job_fix_data
 
         try:
             days = parse_days(request.query_params.get("days"))
@@ -2122,6 +2123,7 @@ def create_app(
                 data = await get_autonomy_data(
                     session, settings.agent_id, days=days, events_persisted=settings.f026_persistence_enabled
                 )
+            data["job_fixes"] = await get_job_fix_data(heart, enabled=settings.job_fixes_enabled)
             return JSONResponse(data)
         except Exception as e:
             logger.error("Dashboard autonomy error: %s", e)

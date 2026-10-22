@@ -3,7 +3,7 @@
  * No DOM, no fetch — unit-tested in autonomy.test.ts.
  */
 import { fmtWhen, type Verdict } from './harness';
-import type { AutonomyData } from './types/api';
+import type { AutonomyData, JobFixRow } from './types/api';
 
 /** The nous-scorer service starts a pass every 15 minutes (docker-compose.yml). */
 export const SCORER_INTERVAL_MIN = 15;
@@ -112,3 +112,91 @@ export const LEVEL_LABEL: Record<string, string> = {
   L0: 'Always with you',
   acts_without_asking: 'Acts without asking',
 };
+
+// ── Check and fix (job_fixes): nous/handlers/job_fixes.py's states, triggers, verdicts and stop reasons ──
+
+/** The fixer still has a step to take: it is checking, judging a change, or finishing a stop. */
+export const FIX_LIVE = ['running', 'judging', 'stopping'];
+
+export const FIX_TRIGGER_LABEL: Record<string, string> = {
+  fails_often: 'Failed often',
+  lesson_retired: 'A lesson did not help',
+};
+
+export const FIX_VERDICT_LABEL: Record<string, string> = {
+  changed_job: 'Changed the instructions',
+  fixed_elsewhere: 'Fixed outside the job',
+  needs_owner: 'Needs you',
+  no_fault_found: 'Found nothing wrong',
+};
+
+export const FIX_STOP_LABEL: Record<string, string> = {
+  needs_owner: 'the check needs you',
+  change_refused: 'the review refused the change',
+  did_not_help: 'the change did not help',
+  no_fault_found: 'nothing found and it still fails',
+  unreadable_report: "the check's report could not be read",
+  fails_again: 'it started failing again',
+  inactive: 'you stopped the job',
+};
+
+export type FixTone = 'live' | 'ok' | 'muted' | 'warn';
+
+/** The state as the owner reads it; a stop says who stopped the job and whether the owner was told. */
+export function fixState(row: JobFixRow): { label: string; tone: FixTone } {
+  switch (row.state) {
+    case 'running': return { label: 'Checking', tone: 'live' };
+    case 'judging': return { label: 'Judging the change', tone: 'live' };
+    case 'stopping': return { label: 'Stopping', tone: 'live' };
+    case 'kept': return { label: 'Fix kept', tone: 'ok' };
+    case 'closed': return { label: 'Closed', tone: 'muted' };
+    case 'stopped':
+      if (row.stop_reason === 'inactive') return { label: 'Stopped by you', tone: 'muted' };
+      return { label: row.reported ? 'Stopped, you were told' : 'Stopped', tone: 'warn' };
+    default: return { label: 'Unreadable record', tone: 'muted' };
+  }
+}
+
+/** One line on where the attempt stands or how it ended. */
+export function fixOutcome(row: JobFixRow): string {
+  const verdict = row.verdict ? FIX_VERDICT_LABEL[row.verdict] ?? row.verdict : null;
+  if (row.state === 'running') return 'Check run in progress';
+  if (row.state === 'judging') {
+    const s = row.since_change;
+    if (!s) return verdict ?? 'Judging';
+    const runs = `${s.scored} of ${s.needed} runs since the change, ${s.bad} went wrong`;
+    return s.scored >= s.needed ? `${runs}; judged at the next sleep` : runs;
+  }
+  if (row.state === 'stopping' || row.state === 'stopped') {
+    const why = row.stop_reason ? FIX_STOP_LABEL[row.stop_reason] ?? row.stop_reason : null;
+    const head = row.state === 'stopping' ? 'Stopping' : 'Stopped';
+    return why ? `${head}: ${why}` : head;
+  }
+  if (row.state === 'kept') return verdict ? `${verdict}; later runs fail less` : 'Later runs fail less';
+  if (row.state === 'closed') return 'Found nothing wrong; the job no longer failed often';
+  return '—';
+}
+
+/** The check's own words, in reading order. ``new_instructions`` shows only when no changed text stands. */
+export const FIX_TEXTS: [keyof Omit<JobFixRow['detail'], 'check'>, string][] = [
+  ['why', 'What was wrong'],
+  ['what_changed', 'What it fixed outside the job'],
+  ['diagnosis', 'Diagnosis'],
+  ['owner_action', 'What it asks of you'],
+  ['checked', 'What it checked'],
+  ['reason', 'Why the review refused the change'],
+  ['new_instructions', 'Proposed instructions'],
+];
+
+/** "4 of 5 runs went wrong" before the check; null without a usable baseline. */
+export function fixBaseline(row: JobFixRow): string | null {
+  const b = row.baseline;
+  return b ? `${b.bad} of ${b.scored} runs went wrong before` : null;
+}
+
+/** The record's newest time: settled, else applied, else started. */
+export function fixLatest(row: JobFixRow): string | null {
+  const times = [row.settled_at, row.applied_at, row.started_at].filter((t): t is string => !!t);
+  if (times.length === 0) return null;
+  return times.reduce((a, b) => (new Date(b).getTime() > new Date(a).getTime() ? b : a));
+}

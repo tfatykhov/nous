@@ -253,7 +253,7 @@ _STATES = ("running", "judging", "kept", "closed", "stopping", "stopped")
 _STAT_KEYS = ("started", "start_failed", "applied", "refused", "kept", "closed", "stopped", "waiting", "skipped")
 
 
-def _parse_time(value: object) -> datetime | None:
+def parse_time(value: object) -> datetime | None:
     """An ISO time string as an aware datetime, or None for anything else."""
     if not isinstance(value, str):
         return None
@@ -264,7 +264,7 @@ def _parse_time(value: object) -> datetime | None:
     return when if when.tzinfo else when.replace(tzinfo=UTC)
 
 
-def _baseline_ok(baseline: object) -> bool:
+def baseline_ok(baseline: object) -> bool:
     """True for a baseline with a positive int ``scored`` and an int ``bad``."""
     if not isinstance(baseline, dict):
         return False
@@ -367,7 +367,7 @@ class JobFixer:
         elif state == "judging":
             await self._advance_judging(schedule, record, now, stats)
         else:  # kept or closed
-            settled = _parse_time(record.get("settled_at"))
+            settled = parse_time(record.get("settled_at"))
             if settled is None:
                 self._ignore(schedule, "missing its settled time")
                 return
@@ -408,7 +408,7 @@ class JobFixer:
             await self._unreadable(schedule, record, None, stats)
             return
         if sub.status in ("pending", "running"):
-            started = _parse_time(record.get("started_at"))
+            started = parse_time(record.get("started_at"))
             if started is not None and now - started < timedelta(days=FIX_WAIT_DAYS):
                 stats["waiting"] += 1
                 return
@@ -463,10 +463,10 @@ class JobFixer:
 
     async def _advance_judging(self, schedule: Schedule, record: dict, now: datetime, stats: dict[str, int]) -> None:
         baseline = record.get("baseline")
-        if not _baseline_ok(baseline):
+        if not baseline_ok(baseline):
             self._ignore(schedule, "missing a usable baseline")
             return
-        applied = _parse_time(record.get("applied_at"))
+        applied = parse_time(record.get("applied_at"))
         if applied is None:
             self._ignore(schedule, "missing its applied time")
             return
@@ -544,7 +544,7 @@ class JobFixer:
             if not isinstance(retired, dict) or retired.get("reason") != "no_improvement":
                 continue
             retired_lessons.setdefault(lesson.schedule_id, []).append(lesson)
-            at = _parse_time(retired.get("at"))
+            at = parse_time(retired.get("at"))
             if at is not None and at >= cutoff:
                 just_retired[lesson.schedule_id] = max(at, just_retired.get(lesson.schedule_id, at))
         bad_ids = await heart.job_runs.schedules_with_bad_runs(since=cutoff)
