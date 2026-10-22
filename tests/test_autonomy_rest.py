@@ -55,6 +55,7 @@ async def test_bad_input_is_a_400_not_a_500(app, path):
     assert "days must be a whole number from 1 to 90" in resp.json()["error"]
 
 
+@pytest.mark.postgres_only  # the job_fixes section reads a JSONB key
 async def test_the_route_answers_with_the_scoreboard_shape(app):
     resp = await _get(app, "/dashboard/autonomy")
     assert resp.status_code == 200
@@ -69,11 +70,14 @@ async def test_the_route_answers_with_the_scoreboard_shape(app):
         "inventory",
         "events_persisted",
         "warn_classes",
+        "job_fixes",
     }
+    assert body["job_fixes"]["enabled"] is False and isinstance(body["job_fixes"]["jobs"], list)
     assert body["window_days"] == 7
     assert (await _get(app, "/dashboard/autonomy?days=30")).json()["window_days"] == 30
 
 
+@pytest.mark.postgres_only
 async def test_the_route_reads_this_agents_rows_only(app, db, agent):
     now = datetime.now(UTC)
     async with db.session() as s:

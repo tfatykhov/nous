@@ -1679,4 +1679,39 @@ export interface AutonomyData {
   events_persisted: boolean;
   /** Empty when events_persisted is false: not measured, not "no warnings". At most 50. */
   warn_classes: { mode: string; context_kind: string; violation: string; tool_name: string; count: number }[];
+  /** Every check-and-fix record, whatever `window_days` is (nous/api/job_fix_dashboard.py). */
+  job_fixes: { enabled: boolean; jobs: JobFixRow[] };
+}
+
+/** One recurring job check-and-fix has a record for. Texts are written by the check run: plain text only. */
+export interface JobFixRow {
+  schedule_id: string;
+  /** The job's instructions as one clipped line (the old ones while a changed text stands). */
+  job: string;
+  active: boolean;
+  /** running, judging, kept, closed, stopping, stopped; null for an unreadable record. */
+  state: string | null;
+  trigger: string | null;
+  verdict: string | null;
+  stop_reason: string | null;
+  started_at: string | null;
+  applied_at: string | null;
+  settled_at: string | null;
+  /** When the job was stopped; records stopped before this field existed have none. */
+  stopped_at: string | null;
+  fix_run: string | null;
+  /** The owner report was written. A stop from outside the check writes none, nor does a job with no container. */
+  reported: boolean;
+  /** Runs before the check: how many of the scored ones went wrong. */
+  baseline: { bad: number; scored: number } | null;
+  /** Judging only: scored runs since the change, as the judge counts them. */
+  since_change: { scored: number; bad: number; needed: number } | null;
+  detail: {
+    why?: string; what_changed?: string; diagnosis?: string; owner_action?: string; checked?: string;
+    reason?: string; new_instructions?: string;
+    check?: { status?: string; outcome?: string; head?: string };
+  };
+  /** Only while a changed text stands: the instructions before and now. */
+  old_task: string | null;
+  task: string | null;
 }
