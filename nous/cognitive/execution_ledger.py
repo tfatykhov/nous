@@ -173,7 +173,7 @@ def observed_status(result: str | None) -> str | None:
     so whether the call WAS a runner read is the verifier's question (claim_verifier, from the command's
     invocations)."""
     line = _RUNNER_STATUS_LINE.search((result or "")[:_RUNNER_STATUS_HEAD_CHARS])  # the FIRST status line
-    match = _RUNNER_STATUS.fullmatch(line.group(1)) if line else None
+    match = _RUNNER_STATUS.fullmatch(line.group(1).rstrip("\r")) if line else None
     return match.group(1) if match else None
 
 

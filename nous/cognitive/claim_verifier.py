@@ -14,6 +14,7 @@ from bisect import bisect_left, bisect_right
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import cached_property
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from nous.cognitive.bash_side_effect import (
@@ -248,8 +249,13 @@ _QUOTED = re.compile(r"```.*?(?:```|\Z)|^[ \t]*>[^\n]*|\"[^\"\n]{0,300}\"|“[^�
 
 
 def _blank(match: re.Match[str]) -> str:
-    """Same length, newlines kept: offsets and sentence ends stay put."""
-    return re.sub(r"[^\n]", " ", match.group(0))
+    """Same length, newlines kept: offsets and sentence ends stay put.
+
+    A quoted work id (`job "job-…"`) is the agent naming it, not a quotation: it is kept, in backticks."""
+    quoted = match.group(0)
+    if _QUOTED_ID.fullmatch(quoted[1:-1]):
+        return f"`{quoted[1:-1]}`"
+    return re.sub(r"[^\n]", " ", quoted)
 
 # The signal an argument must carry for a capable tool to count as evidence.
 # Every pattern is linear: this turn's evidence is untruncated and is scanned
@@ -1618,12 +1624,13 @@ def _report_run_level(claim: Claim, ev: Evidence) -> str:
 _PR = r"(?:PR|pull\s+request)(?:\s*#\d+)?"
 _PASSIVE = r"\s+(?:(?:was|were|has\s+been|have\s+been|got|is|is\s+now)\s+)?"
 _CANCELLABLE = r"(?:task|subtask|run|job|dag|schedule|intention|work|chain)"
-# The work item a cancel claim names: a runner job id, or a hex id (a UUID or its prefix, with a digit and
-# a letter, so "decade" and a date are no id), each a whole token ("facade-1" is none). A DAG's NAME is
+# The work item a cancel claim names: a runner job id, or a hex id (a whole UUID, or a prefix with a digit
+# and a letter, so "decade" and a date are no id), each a whole token ("facade-1234" is none). A DAG's NAME is
 # not read as one: no recorded cancel carries it (dag_manage cancels by dag_id), so it could neither
 # confirm nor refute the claim, and "the DAG mid-run" would read as a name.
 _JOB_ID = r"job-\d{8}-\d{6}-[0-9a-f]{6,}(?![\w-])"
-_HEX_ID = r"(?=[0-9a-f-]*\d)(?=[0-9a-f-]*[a-f])[0-9a-f]{6,}(?:-[0-9a-f]{4,12}){0,4}(?![\w-])"
+_HEX_ID = (r"(?:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{6,})"
+           r"(?![\w-])")
 # after the noun: "task 8f10c3ba", "job (job-...)", "DAG: 5e6f7a8b", "task `8f10c3ba`"
 _WORK_ID = rf"(?:\s+|\s*[(:#]\s*)`?(?:{_JOB_ID}|{_HEX_ID})`?"
 # (pattern, kind, attempt_only). Active forms need the first person or a
@@ -1680,12 +1687,18 @@ def _reported_before(reported: list[int], scope_starts: list[int], start: int) -
 
 _JOB_ID_RE = re.compile(rf"(?<![\w-]){_JOB_ID}", re.IGNORECASE)
 _HEX_ID_RE = re.compile(rf"(?<![\w-]){_HEX_ID}", re.IGNORECASE)
+_QUOTED_ID = re.compile(rf"{_JOB_ID}|{_HEX_ID}", re.IGNORECASE)  # kept by _blank
+# a hex id is read where a claim names its work item, after the noun: in "the cafe2024 job" it is a name
+_NAMED_HEX_ID_RE = re.compile(rf"\b{_CANCELLABLE}\b(?!-)(?:\s+|\s*[(:#]\s*)`?(?P<id>{_HEX_ID})", re.IGNORECASE)
 
 
 def _claimed_work_id(text: str) -> str | None:
-    """The work item a cancel claim names (a job id or a hex id), lowercased; None if none."""
-    found = _JOB_ID_RE.search(text) or _HEX_ID_RE.search(text)
-    return found.group(0).lower() if found else None
+    """The work item a cancel claim names (a job id, or a hex id after the noun), lowercased; None if none."""
+    job = _JOB_ID_RE.search(text)
+    if job:
+        return job.group(0).lower()
+    hex_id = _NAMED_HEX_ID_RE.search(text)
+    return hex_id.group("id").lower() if hex_id else None
 
 
 def _id_shape(value: str) -> str:
@@ -1718,7 +1731,7 @@ def _work_level(claimed: str | None, values: list[str]) -> str:
     return "exact" if hit else "none"
 
 
-def _runner_cancel_level(claim: Claim, ev: Evidence, claimed: str | None) -> str:
+def _runner_cancel_level(claim: Claim, ev: Evidence, claimed: str | None, runner: str | None) -> str:
     """What a bash call of the job runner tells about a cancel claim.
 
     `runner.sh cancel <id>` that exited 0 backs a cancel of that job (it exits 0 for a job already
@@ -1727,16 +1740,19 @@ def _runner_cancel_level(claim: Claim, ev: Evidence, claimed: str | None) -> str
     (``observed_status``) backs only the passive "job <id> was cancelled", never "I cancelled job <id>".
     A cancel counts wherever it is in the command when it certainly ran and succeeded; a status read
     counts only when the command runs the runner alone (after a `cd`): a second command's output could
-    be the status line. A row that kept no command backs nothing: it could be any command."""
-    runs = ev.runs or ()
+    be the status line. A row that kept no command backs nothing: it could be any command; an unreadable
+    command cannot disprove anything."""
+    runs = ev.runs
+    if runs is None:
+        return "plausible"
     levels = ["none"]
     for prog, args, certain in runs:
-        pos = _runner_args(prog, args)
+        pos = _runner_args(prog, args, runner)
         if certain and pos is not None and len(pos) >= 2 and pos[0] == "cancel":
             levels.append(_work_level(claimed, [pos[1]]))
     calls = [(prog, args) for prog, args, _ in runs if _base(prog) != "cd"]
-    pos = _runner_args(*calls[0]) if len(calls) == 1 else None
-    if pos is not None and len(pos) >= 2 and pos[0] in ("status", "result") and ev.observed_status == "cancelled" \
+    pos = _runner_args(*calls[0], runner) if len(calls) == 1 else None
+    if pos is not None and len(pos) == 2 and pos[0] in ("status", "result") and ev.observed_status == "cancelled" \
             and re.search(r"cancel+ed$", claim.text, re.IGNORECASE):
         levels.append(_work_level(claimed, [pos[1]]))
     return _best(levels)
@@ -1745,26 +1761,35 @@ def _runner_cancel_level(claim: Claim, ev: Evidence, claimed: str | None) -> str
 _TRACE_OPTIONS = re.compile(r"-[xveu]+|--")
 
 
-def _runner_args(prog: str, args: tuple[str, ...]) -> list[str] | None:
-    """The positional arguments of a `runner.sh` invocation (`bash [opts] runner.sh ...` too); None if not one.
+def runner_path(workspace_dir: str) -> str:
+    """The job runner of a workspace, by the path tool_policy lets a lineage run it."""
+    return str(Path(workspace_dir) / "claude-jobs" / "runner.sh")
+
+
+def _runner_args(prog: str, args: tuple[str, ...], runner: str | None) -> list[str] | None:
+    """The positional arguments of an invocation of ``runner`` (`bash [opts] <runner> ...` too); None if not one.
+
+    ``runner`` is the workspace's `claude-jobs/runner.sh` by its absolute path, as tool_policy allows it: a
+    relative `runner.sh` or another directory's could be any script. None: no call is a runner call.
 
     Only the options that change how a script runs, not what runs, may come before it (`bash -x runner.sh`):
-    `-c` runs its string and `-s` its stdin, so the next word is not what ran."""
+    `-c` runs its string and `-s` its stdin, so the next word is not what ran; any other word there must be the
+    runner's exact path (so a `-c` string, an option value or a word with spaces is none)."""
     if _base(prog) in ("bash", "sh"):
         i = 0
         while i < len(args) and _TRACE_OPTIONS.fullmatch(args[i]):
             i += 1
-        if i == len(args) or args[i].startswith(("-", "+")) or any(c.isspace() for c in args[i]):
+        if i == len(args):
             return None
         prog, args = args[i], args[i + 1:]
-    return _positional(args) if prog.rpartition("/")[2] == "runner.sh" else None
+    return _positional(args) if runner is not None and prog == runner else None
 
 
-def _cancel_level(claim: Claim, ev: Evidence) -> str:
+def _cancel_level(claim: Claim, ev: Evidence, runner: str | None) -> str:
     """How well one recorded call backs a cancel claim: it must be a cancel, of the work item named."""
     claimed = _claimed_work_id(claim.text)
     if ev.tool_name == "bash":
-        return _runner_cancel_level(claim, ev, claimed)
+        return _runner_cancel_level(claim, ev, claimed, runner)
     action = ev.args.get("action")
     if ev.tool_name != "cancel_task":
         if action is None:
@@ -1792,8 +1817,10 @@ UNVERIFIED_MARKER = "[Unverified claims]"
 _UNVERIFIED_SHOWN = 5
 
 
-def report_level(claim: Claim, ev: Evidence) -> str:
+def report_level(claim: Claim, ev: Evidence, runner: str | None = None) -> str:
     """How well one recorded call supports one report claim: exact, plausible or none.
+
+    ``runner`` is the job runner's path (``runner_path``); without it no bash call backs a cancel claim.
 
     A failed or blocked call backs only a verdict on the action (``attempt_only``):
     "the cancel did not take effect" says a cancel was issued, not that it worked.
@@ -1808,7 +1835,7 @@ def report_level(claim: Claim, ev: Evidence) -> str:
     if ev.tool_name not in kind.capable_tools:
         return "none"
     if claim.kind == "cancel":
-        return _cancel_level(claim, ev)
+        return _cancel_level(claim, ev, runner)
     outcome = _test_outcome(claim)
     if outcome is not None and (ev.exit_code is None or (ev.exit_code == 0) != (outcome == "pass")):
         return "none"  # a pass needs exit 0 and a failure a non-zero exit; an unknown exit backs neither
@@ -1855,7 +1882,8 @@ def unverified_note(violations: list[ClaimViolation]) -> str:
 class ClaimVerifier:
     """Verifies that action claims in assistant responses are grounded in actual tool use."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, runner_path: str | None = None) -> None:
+        self._runner_path = runner_path  # the job runner a report's cancel claim may be backed by; None: none
         self._compiled: list[tuple[re.Pattern[str], str]] = [
             (re.compile(pattern, re.IGNORECASE), kind) for pattern, kind in _CLAIM_PATTERNS
         ]
@@ -1951,7 +1979,8 @@ class ClaimVerifier:
         forms a report uses (``_REPORT_PATTERNS``). ``evidence`` is every
         recorded call of the work, failed ones marked ``ok=False``;
         ``cancelled`` is true when the work was cancelled outside any tool call
-        (the owner's cancel), which backs a claim about a cancel.
+        (the owner's cancel), which backs a claim about a cancel that names no
+        runner job id.
         A completion claim needs ``exact`` evidence; a ``plausible`` one is a
         violation marked ``evidence="plausible"`` (not confirmed), except for
         the kinds ``_backed_by_plausible`` lets through.
@@ -1964,10 +1993,11 @@ class ClaimVerifier:
         checks: list[ClaimCheck] = []
         violations: list[ClaimViolation] = []
         for claim in claims:
-            if claim.kind == "cancel" and cancelled:
+            # the owner cancels the root's own work, never a runner job
+            if claim.kind == "cancel" and cancelled and not _JOB_ID_RE.search(claim.text):
                 level = "exact"
             else:
-                level = _best(["none", *(report_level(claim, ev) for ev in evidence)])
+                level = _best(["none", *(report_level(claim, ev, self._runner_path) for ev in evidence)])
             checks.append(ClaimCheck(claim.kind, claim.text, level))
             if level == "none" or (level == "plausible" and not _backed_by_plausible(claim)):
                 kind = CLAIM_KINDS.get(claim.kind) or REPORT_KINDS[claim.kind]

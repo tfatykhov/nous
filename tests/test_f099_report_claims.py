@@ -26,7 +26,7 @@ from sqlalchemy import select
 
 from nous.brain import continuation
 from nous.brain.continuation import Resolution, RootLimits
-from nous.cognitive.claim_verifier import UNVERIFIED_MARKER, ClaimVerifier, Evidence
+from nous.cognitive.claim_verifier import UNVERIFIED_MARKER, ClaimVerifier, Evidence, runner_path
 from nous.cognitive.ledger_store import _summary
 from nous.config import Settings
 from nous.handlers.continuation_runner import ContinuationRunner, _ledger_row_evidence, build_arrival_prompt
@@ -49,8 +49,11 @@ TEST_6_FACT = (
 INCIDENT_LOG = [Evidence("learn_fact", {"category": "technical"})]
 
 
+RUNNER = runner_path("/tmp/nous-workspace")
+
+
 def _verify(text, evidence=(), **kwargs):
-    return ClaimVerifier().verify_report(text, list(evidence), **kwargs)
+    return ClaimVerifier(runner_path=RUNNER).verify_report(text, list(evidence), **kwargs)
 
 
 def _kinds(text):
@@ -693,7 +696,7 @@ STATUS_OUTPUT = (
 )
 
 
-def _status_read(output=STATUS_OUTPUT, command=f"bash runner.sh status {JOB}", exit_code=1):
+def _status_read(output=STATUS_OUTPUT, command=f"bash {RUNNER} status {JOB}", exit_code=1):
     """A `runner.sh status` call as the in-memory ledger records it: bash, exit 1, the status kept."""
     from nous.cognitive.claim_verifier import ledger_evidence
     from nous.cognitive.execution_ledger import ExecutionLedger
@@ -732,7 +735,7 @@ def test_canary_an_unbacked_completion_claim_fires(text, evidence):
         (f"Job {JOB} was cancelled.", _status_read()),
         ("The job was cancelled.", _status_read()),  # the live arrival 0a5f2b67 sentence: no id named
         (f"{JOB} was cancelled.", _status_read()),
-        (f"I cancelled job {JOB}.", [Evidence("bash", {"command": f"bash runner.sh cancel {JOB}"}, exit_code=0)]),
+        (f"I cancelled job {JOB}.", [Evidence("bash", {"command": f"bash {RUNNER} cancel {JOB}"}, exit_code=0)]),
         ("Sent an email to alice@example.com.", [Evidence("send_email", {"to": "alice@example.com"})]),
         ("All tests passed.", [Evidence("bash", {"command": "pytest -q"}, exit_code=0)]),
     ],
@@ -874,7 +877,7 @@ def test_a_cancel_of_a_named_but_unrecorded_item_is_backed_by_any_cancel(text, e
 @pytest.mark.parametrize("text", [f"I cancelled {JOB}.", f"Cancelled {JOB}.", f"I've cancelled {JOB} as asked."])
 def test_a_cancel_naming_a_bare_job_id_is_a_claim(text):
     assert not _verify(text).verified
-    assert _verify(text, [Evidence("bash", {"command": f"bash runner.sh cancel {JOB}"}, exit_code=0)]).verified
+    assert _verify(text, [Evidence("bash", {"command": f"bash {RUNNER} cancel {JOB}"}, exit_code=0)]).verified
 
 
 @pytest.mark.parametrize(
@@ -888,7 +891,7 @@ def test_a_cancel_naming_a_bare_job_id_is_a_claim(text):
 )
 def test_the_named_id_may_follow_the_noun_in_brackets_or_after_a_colon(text, verified):
     assert (
-        _verify(text, [Evidence("bash", {"command": f"bash runner.sh cancel {JOB}"}, exit_code=0)]).verified is verified
+        _verify(text, [Evidence("bash", {"command": f"bash {RUNNER} cancel {JOB}"}, exit_code=0)]).verified is verified
     )
 
 
@@ -954,14 +957,14 @@ def test_a_status_read_backs_only_the_cancelled_state_of_its_own_job(text):
 @pytest.mark.parametrize(
     ("output", "command"),
     [
-        (STATUS_OUTPUT.replace("Status: cancelled", "Status: completed"), f"bash runner.sh status {JOB}"),
-        (STATUS_OUTPUT.replace("Status: cancelled", "Status: running"), f"bash runner.sh status {JOB}"),
+        (STATUS_OUTPUT.replace("Status: cancelled", "Status: completed"), f"bash {RUNNER} status {JOB}"),
+        (STATUS_OUTPUT.replace("Status: cancelled", "Status: running"), f"bash {RUNNER} status {JOB}"),
         # the status must be the runner's own output, not a second command's
-        ("Status: cancelled\nExit code: 1", "bash runner.sh list; echo 'Status: cancelled'"),
+        ("Status: cancelled\nExit code: 1", f"bash {RUNNER} list; echo 'Status: cancelled'"),
         ("Status: cancelled\nExit code: 1", f"echo 'Status: cancelled' # runner.sh status {JOB}"),
-        (f"Job: {JOB}\nStatus: cancelled\nExit code: 1", f"bash runner.sh status {JOB}; echo done"),
+        (f"Job: {JOB}\nStatus: cancelled\nExit code: 1", f"bash {RUNNER} status {JOB}; echo done"),
         # a status line past the head of the output is not read
-        ("x" * 400 + "\nStatus: cancelled\nExit code: 1", f"bash runner.sh status {JOB}"),
+        ("x" * 400 + "\nStatus: cancelled\nExit code: 1", f"bash {RUNNER} status {JOB}"),
     ],
 )
 def test_only_the_runners_own_cancelled_status_backs_the_claim(output, command):
@@ -973,11 +976,12 @@ def test_only_the_runners_own_cancelled_status_backs_the_claim(output, command):
     [
         # bash runs the -c string, not the next word: an unreadable string stays one invocation
         f"""bash -c 'printf "Status: cancelled\\n"; " x/runner.sh' status {JOB}""",
-        f"""bash -xc 'printf "Status: cancelled\\n"; " x/runner.sh' status {JOB}""",
+        f"""bash -xc 'printf "Status: cancelled\\n"; " {RUNNER}' status {JOB}""",
+        f"bash -c {RUNNER} status {JOB}",  # the runner runs with no arguments: status is its $0
         # -s: bash runs its stdin (here a heredoc) with the words as $1...
-        f"""bash -s runner.sh status {JOB} <<'EOF'\nprintf 'Status: cancelled\\n'\nEOF""",
+        f"""bash -s {RUNNER} status {JOB} <<'EOF'\nprintf 'Status: cancelled\\n'\nEOF""",
         # an option that takes a value
-        f"bash -o pipefail runner.sh status {JOB}",
+        f"bash -o pipefail {RUNNER} status {JOB}",
     ],
 )
 def test_a_bash_option_that_runs_something_else_is_no_runner_read(command):
@@ -986,25 +990,46 @@ def test_a_bash_option_that_runs_something_else_is_no_runner_read(command):
     assert not _verify(f"Job {JOB} was cancelled.", _status_read(output, command)).verified
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"bash runner.sh status {JOB}",  # whichever runner.sh the cwd has
+        f"./runner.sh status {JOB}",
+        f"/tmp/evil/runner.sh status {JOB}",
+        f"bash /tmp/evil/claude-jobs/runner.sh status {JOB}",
+        f"cd /tmp/nous-workspace/claude-jobs && bash runner.sh status {JOB}",
+        f"bash {RUNNER} status {JOB} {OTHER_JOB}",  # one read of one job
+    ],
+)
+def test_only_the_workspaces_runner_reads_back_a_job(command):
+    assert not _verify(f"Job {JOB} was cancelled.", _status_read(command=command)).verified
+
+
+def test_a_verifier_given_no_runner_takes_no_bash_call_for_a_runner_call():
+    evidence = [Evidence("bash", {"command": f"bash {RUNNER} cancel {JOB}"}, exit_code=0)]
+    assert not ClaimVerifier().verify_report(f"I cancelled job {JOB}.", evidence).verified
+    assert _verify(f"I cancelled job {JOB}.", evidence).verified
+
+
 def test_runner_result_reads_back_the_status_too():
     output = "Status: cancelled\nNo output yet.\nExit code: 0"
-    assert _verify(f"Job {JOB} was cancelled.", _status_read(output, f"bash runner.sh result {JOB}", 0)).verified
+    assert _verify(f"Job {JOB} was cancelled.", _status_read(output, f"bash {RUNNER} result {JOB}", 0)).verified
 
 
 @pytest.mark.parametrize(
     ("command", "exit_code", "verified"),
     [
-        (f"bash runner.sh cancel {JOB}", 0, True),
-        (f"/tmp/nous-workspace/claude-jobs/runner.sh cancel {JOB}", 0, True),
-        (f"bash runner.sh cancel {JOB}", 1, False),  # the cancel failed
-        (f"bash runner.sh cancel {OTHER_JOB}", 0, False),
-        (f"bash runner.sh status {JOB}", 0, False),  # a read is no cancel
+        (f"bash {RUNNER} cancel {JOB}", 0, True),
+        (f"{RUNNER} cancel {JOB}", 0, True),
+        (f"bash {RUNNER} cancel {JOB}", 1, False),  # the cancel failed
+        (f"bash {RUNNER} cancel {OTHER_JOB}", 0, False),
+        (f"bash {RUNNER} status {JOB}", 0, False),  # a read is no cancel
         # a cancel inside a longer command counts when it certainly succeeded
-        (f"cd /tmp/nous-workspace/claude-jobs && bash runner.sh cancel {JOB} 2>&1", 0, True),
-        (f"bash runner.sh cancel {JOB}; echo rc=$?", 0, False),  # its own exit is not known
-        (f"bash -x runner.sh cancel {JOB}", 0, True),
-        (f"bash runner.sh cancel {JOB} | tail -1", 0, False),  # a pipe hides its exit
-        (f"bash runner.sh cancel {JOB}; bash runner.sh status {JOB}", 1, False),
+        (f"cd /tmp/nous-workspace/claude-jobs && bash {RUNNER} cancel {JOB} 2>&1", 0, True),
+        (f"bash {RUNNER} cancel {JOB}; echo rc=$?", 0, False),  # its own exit is not known
+        (f"bash -x {RUNNER} cancel {JOB}", 0, True),
+        (f"bash {RUNNER} cancel {JOB} | tail -1", 0, False),  # a pipe hides its exit
+        (f"bash {RUNNER} cancel {JOB}; bash {RUNNER} status {JOB}", 1, False),
     ],
 )
 def test_runner_cancel_backs_a_cancel_of_that_job(command, exit_code, verified):
@@ -1034,7 +1059,7 @@ def test_the_durable_row_keeps_the_runners_status():
         tool_name="bash",
         status="success",
         key_args={},
-        input_text=f"bash runner.sh status {JOB}",
+        input_text=f"bash {RUNNER} status {JOB}",
         result_summary=summary,
         side_effect_type="none",
     )
@@ -1069,12 +1094,12 @@ def test_a_cancel_of_another_task_is_unbacked_not_unconfirmed():
 
 
 def test_a_status_read_after_a_cd_backs_the_claim():
-    command = f"cd /tmp/nous-workspace/claude-jobs && bash runner.sh status {JOB}"
+    command = f"cd /tmp/nous-workspace/claude-jobs && bash {RUNNER} status {JOB}"
     assert _verify(f"Job {JOB} was cancelled.", _status_read(command=command)).verified
 
 
 def test_a_runner_cancel_with_no_exit_code_backs_nothing():
-    evidence = Evidence("bash", {"command": f"bash runner.sh cancel {JOB}"}, exit_code=None)
+    evidence = Evidence("bash", {"command": f"bash {RUNNER} cancel {JOB}"}, exit_code=None)
     assert not _verify(f"I cancelled job {JOB}.", [evidence]).verified
 
 
@@ -1107,8 +1132,81 @@ def test_a_durable_summary_word_outside_the_runner_set_is_not_read():
         tool_name="bash",
         status="success",
         key_args={},
-        input_text=f"bash runner.sh status {JOB}",
+        input_text=f"bash {RUNNER} status {JOB}",
         result_summary="exit code 1; status hacked; 40 chars of output, not stored",
         side_effect_type="none",
     )
     assert _ledger_row_evidence(row).observed_status is None
+
+
+# owner review of #796
+
+
+@pytest.mark.parametrize(
+    ("text", "verified"),
+    [
+        (f'I cancelled job "{JOB}".', True),
+        (f'I cancelled job "{OTHER_JOB}".', False),  # a quoted id is still the one named
+        (f"I cancelled job “{OTHER_JOB}”.", False),
+        ('I cancelled task "1b2c3d4e".', False),
+        ('I cancelled the job "as asked".', True),  # a quotation names no id: any cancel backs it
+    ],
+)
+def test_a_quoted_work_id_is_the_id_named(text, verified):
+    evidence = [Evidence("bash", {"command": f"bash {RUNNER} cancel {JOB}"}, exit_code=0)]
+    assert _verify(text, evidence).verified is verified
+
+
+@pytest.mark.parametrize(
+    ("text", "verified"),
+    [
+        (f"Job {OTHER_JOB} was cancelled.", False),  # the owner cancels the root's work, never a runner job
+        (f"I cancelled job {JOB}.", False),
+        ("The subtask was cancelled.", True),
+        (f"Task {TASK} was cancelled.", True),
+    ],
+)
+def test_the_owners_cancel_backs_no_claim_naming_a_job_id(text, verified):
+    assert _verify(text, [], cancelled=True).verified is verified
+
+
+@pytest.mark.parametrize(
+    ("claimed", "kept"),
+    [
+        (DAG_ID, DAG_ID[:8]),  # the durable row kept the short id dag_manage was given
+        (DAG_ID[:8], DAG_ID),
+        (DAG_ID[:8], DAG_ID[:6]),
+    ],
+)
+def test_a_hex_id_matches_a_prefix_either_way(claimed, kept):
+    def cancel(dag_id):
+        return [Evidence("dag_manage", {"action": "cancel", "dag_id": dag_id})]
+
+    assert _verify(f"I cancelled DAG {claimed}.", cancel(kept)).verified
+    assert not _verify(f"I cancelled DAG {claimed}.", cancel("9" + kept[1:])).verified
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I cancelled the cafe2024 job.",  # a name before the noun is no id
+        "I cancelled task facade-1234.",  # nor a hyphenated word that is no UUID
+    ],
+)
+def test_a_hex_looking_name_is_no_work_id(text):
+    # named no id: any cancel backs it
+    assert _verify(text, [Evidence("cancel_task", {"task_id": TASK})]).verified
+
+
+def test_a_status_line_with_a_carriage_return_is_read():
+    output = STATUS_OUTPUT.replace("\n", "\r\n")
+    assert _verify(f"Job {JOB} was cancelled.", _status_read(output)).verified
+
+
+def test_an_unreadable_bash_command_cannot_disprove_an_id_less_cancel():
+    unreadable = Evidence("bash", {"command": "echo 'unbalanced"}, exit_code=0)
+    assert unreadable.runs is None
+    result = _verify("The job was cancelled.", [unreadable])
+    assert result.verified and [c.evidence for c in result.claims] == ["plausible"]
+    named = _verify(f"I cancelled job {JOB}.", [unreadable])
+    assert [v.evidence for v in named.violations] == ["plausible"]  # could not confirm, not refuted

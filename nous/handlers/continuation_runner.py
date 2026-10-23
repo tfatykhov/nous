@@ -31,7 +31,7 @@ from nous.brain import continuation, intention_calibration
 from nous.brain.continuation import INTENT_SESSION_PREFIX, Resolution
 from nous.brain.intentions import AUTHORITY_INTERNAL
 from nous.cancellation import cancel_requested
-from nous.cognitive.claim_verifier import ClaimVerifier, ClaimViolation, Evidence, unverified_note
+from nous.cognitive.claim_verifier import ClaimVerifier, ClaimViolation, Evidence, runner_path, unverified_note
 from nous.cognitive.execution_ledger import RUNNER_STATUSES, bash_exit_code, bash_masked_failure
 from nous.events import Event
 from nous.heart.result_inbox import format_inbox_messages, neutralize_delimiters
@@ -1439,7 +1439,7 @@ class ContinuationRunner:
     ) -> list[tuple[Any, list[ClaimViolation]]]:
         """Each result row of a subtask or DAG, checked against the calls that work alone recorded: a subtask's
         final report is backed by its own tool log, not by a sibling's."""
-        verifier = ClaimVerifier()
+        verifier = ClaimVerifier(runner_path=runner_path(self._settings.workspace_dir))
         flagged: list[tuple[Any, list[ClaimViolation]]] = []
         for row in claim.inbox_rows:
             if row.source_kind not in ("subtask", "dag"):
@@ -1470,7 +1470,8 @@ class ContinuationRunner:
         unverified-claims line appended in warn and enforce) and whether a claim was unbacked. Never blocks."""
         if mode is None:
             return note, False
-        result = ClaimVerifier().verify_report(note, [*lineage.calls, *turn_calls], cancelled=lineage.cancelled)
+        verifier = ClaimVerifier(runner_path=runner_path(self._settings.workspace_dir))
+        result = verifier.verify_report(note, [*lineage.calls, *turn_calls], cancelled=lineage.cancelled)
         if result.verified:
             return note, False
         logger.warning(
