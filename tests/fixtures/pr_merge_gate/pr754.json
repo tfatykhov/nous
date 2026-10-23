@@ -1,0 +1,596 @@
+{
+ "source": "gh api read-only, tfatykhov/nous PR #754, fetched 2026-10-23; bodies cut to their first characters",
+ "head_sha": "cd81af328946a33a514d74ff5ba1c726d0c5fdc8",
+ "reviews": [
+  {
+   "id": 5525649064,
+   "commit_id": "ba11a788d127152b1e226131c258dde3270684fd",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-14T22:33:47Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "\n### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `ba11a788d1`\n    \n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comm"
+  },
+  {
+   "id": 5526529534,
+   "commit_id": "876b35c53247a0a837441fe6e195831a21714d27",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-15T00:38:58Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": ""
+  },
+  {
+   "id": 5526529639,
+   "commit_id": "876b35c53247a0a837441fe6e195831a21714d27",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-15T00:38:59Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": ""
+  },
+  {
+   "id": 5526544618,
+   "commit_id": "876b35c53247a0a837441fe6e195831a21714d27",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-15T00:41:33Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "\n### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `876b35c532`\n    \n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comm"
+  },
+  {
+   "id": 5526795949,
+   "commit_id": "5fbf1c53369aeab4233287f513ad2340a1d6b394",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-15T01:10:52Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": ""
+  },
+  {
+   "id": 5526796080,
+   "commit_id": "5fbf1c53369aeab4233287f513ad2340a1d6b394",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-15T01:10:54Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": ""
+  },
+  {
+   "id": 5526796180,
+   "commit_id": "5fbf1c53369aeab4233287f513ad2340a1d6b394",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-15T01:10:55Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": ""
+  },
+  {
+   "id": 5526815924,
+   "commit_id": "5fbf1c53369aeab4233287f513ad2340a1d6b394",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-15T01:14:19Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "\n### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `5fbf1c5336`\n    \n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comm"
+  },
+  {
+   "id": 5526999928,
+   "commit_id": "7ef7a02ea6850db28335c759cebeb8eb29babf05",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-15T01:40:13Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": ""
+  },
+  {
+   "id": 5527000048,
+   "commit_id": "7ef7a02ea6850db28335c759cebeb8eb29babf05",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-15T01:40:14Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": ""
+  },
+  {
+   "id": 5527000172,
+   "commit_id": "7ef7a02ea6850db28335c759cebeb8eb29babf05",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-15T01:40:16Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": ""
+  },
+  {
+   "id": 5527000272,
+   "commit_id": "7ef7a02ea6850db28335c759cebeb8eb29babf05",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-15T01:40:17Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": ""
+  },
+  {
+   "id": 5527018828,
+   "commit_id": "7ef7a02ea6850db28335c759cebeb8eb29babf05",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-15T01:43:41Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "\n### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `7ef7a02ea6`\n    \n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comm"
+  },
+  {
+   "id": 5527519042,
+   "commit_id": "cd81af328946a33a514d74ff5ba1c726d0c5fdc8",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-15T02:58:24Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "\n### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `cd81af3289`\n    \n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comm"
+  }
+ ],
+ "inline_comments": [
+  {
+   "id": 4277007352,
+   "commit_id": "ba11a788d127152b1e226131c258dde3270684fd",
+   "original_commit_id": "ba11a788d127152b1e226131c258dde3270684fd",
+   "path": "nous/cognitive/claim_verifier.py",
+   "line": null,
+   "original_line": 1505,
+   "in_reply_to_id": null,
+   "created_at": "2026-10-14T22:33:47Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Parse commands before accepting report evidence**\n\nWhen evidence comes from the current continuation turn or durable detail capture, this searches the raw command text rather than the commands actually executed. Consequently, `cat pytest.log` verifies “All tests passed,” `echo merge` verifies “PR #4 merged,” an"
+  },
+  {
+   "id": 4277007358,
+   "commit_id": "cd81af328946a33a514d74ff5ba1c726d0c5fdc8",
+   "original_commit_id": "ba11a788d127152b1e226131c258dde3270684fd",
+   "path": "nous/cognitive/claim_verifier.py",
+   "line": 1621,
+   "original_line": 1451,
+   "in_reply_to_id": null,
+   "created_at": "2026-10-14T22:33:48Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Exclude reported speech from action claims**\n\nWhen a continuation attributes a statement without quotation marks, such as “The subtask said the email was sent, but I could not confirm it,” this pattern extracts the embedded “email was sent” as the continuation agent's own claim. `_NOT_BY` only handles a trailin"
+  },
+  {
+   "id": 4277784319,
+   "commit_id": "ba11a788d127152b1e226131c258dde3270684fd",
+   "original_commit_id": "ba11a788d127152b1e226131c258dde3270684fd",
+   "path": "nous/cognitive/claim_verifier.py",
+   "line": null,
+   "original_line": 1505,
+   "in_reply_to_id": 4277007352,
+   "created_at": "2026-10-15T00:38:58Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": "Fixed in 876b35c"
+  },
+  {
+   "id": 4277784405,
+   "commit_id": "cd81af328946a33a514d74ff5ba1c726d0c5fdc8",
+   "original_commit_id": "ba11a788d127152b1e226131c258dde3270684fd",
+   "path": "nous/cognitive/claim_verifier.py",
+   "line": 1621,
+   "original_line": 1451,
+   "in_reply_to_id": 4277007358,
+   "created_at": "2026-10-15T00:38:59Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": "Fixed in 876b35c"
+  },
+  {
+   "id": 4277798002,
+   "commit_id": "cd81af328946a33a514d74ff5ba1c726d0c5fdc8",
+   "original_commit_id": "876b35c53247a0a837441fe6e195831a21714d27",
+   "path": "nous/cognitive/claim_verifier.py",
+   "line": 1701,
+   "original_line": 1593,
+   "in_reply_to_id": null,
+   "created_at": "2026-10-15T00:41:33Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Match test-result claims to the exit status**\n\nWhen a recognized test command exits nonzero, this exception still treats the invocation as evidence for every test claim, so `pytest -q` with exit code 1 verifies both “The tests failed” and “All tests passed.” Conversely, an exit-0 run also verifies a failure cla"
+  },
+  {
+   "id": 4277798012,
+   "commit_id": "876b35c53247a0a837441fe6e195831a21714d27",
+   "original_commit_id": "876b35c53247a0a837441fe6e195831a21714d27",
+   "path": "nous/cognitive/claim_verifier.py",
+   "line": null,
+   "original_line": 1469,
+   "in_reply_to_id": null,
+   "created_at": "2026-10-15T00:41:33Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Require PUT before accepting a REST merge**\n\nFresh evidence after the parser fix is that `gh api repos/o/r/pulls/4/merge` still verifies “PR #4 merged”: the endpoint matches and no argument equals the literal `GET`, even though `gh help api` states, “The default HTTP request method is `GET` normally and `POST` "
+  },
+  {
+   "id": 4277798021,
+   "commit_id": "876b35c53247a0a837441fe6e195831a21714d27",
+   "original_commit_id": "876b35c53247a0a837441fe6e195831a21714d27",
+   "path": "nous/cognitive/claim_verifier.py",
+   "line": null,
+   "original_line": 1561,
+   "in_reply_to_id": null,
+   "created_at": "2026-10-15T00:41:33Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Limit reported-speech suppression to its clause**\n\nFresh evidence after the reported-speech fix is an independent first-person clause such as “The build reported a warning, but I pushed the changes.” `_reported_before` scopes the reporting verb to the whole sentence rather than the clause, so the later `I pushe"
+  },
+  {
+   "id": 4277955463,
+   "commit_id": "cd81af328946a33a514d74ff5ba1c726d0c5fdc8",
+   "original_commit_id": "876b35c53247a0a837441fe6e195831a21714d27",
+   "path": "nous/cognitive/claim_verifier.py",
+   "line": 1701,
+   "original_line": 1593,
+   "in_reply_to_id": 4277798002,
+   "created_at": "2026-10-15T01:10:52Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": "Fixed in 5fbf1c53. A pass/fail test claim now needs a test run as the last command with an agreeing exit status (pass = 0, failure = non-zero); an unknown exit (durable row, run_python) backs neither, and \"I ran the tests\" stays outcome-free."
+  },
+  {
+   "id": 4277955581,
+   "commit_id": "876b35c53247a0a837441fe6e195831a21714d27",
+   "original_commit_id": "876b35c53247a0a837441fe6e195831a21714d27",
+   "path": "nous/cognitive/claim_verifier.py",
+   "line": null,
+   "original_line": 1469,
+   "in_reply_to_id": 4277798012,
+   "created_at": "2026-10-15T01:10:54Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": "Fixed in 5fbf1c53. `gh api` evidence now uses the effective method (explicit -X/--method, else POST with fields, else GET): pulls/N/merge needs PUT, and the same fix applies to /merges and /pulls (create), which need POST."
+  },
+  {
+   "id": 4277955662,
+   "commit_id": "876b35c53247a0a837441fe6e195831a21714d27",
+   "original_commit_id": "876b35c53247a0a837441fe6e195831a21714d27",
+   "path": "nous/cognitive/claim_verifier.py",
+   "line": null,
+   "original_line": 1561,
+   "in_reply_to_id": 4277798021,
+   "created_at": "2026-10-15T01:10:55Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": "Fixed in 5fbf1c53. A reporting word now suppresses claims only up to the next clause boundary (sentence end, ;, but/yet/however/whereas, ', so/while/though', 'and I/we'), so '..., but I pushed the changes' is extracted; the round-1 reported-speech cases stay suppressed."
+  },
+  {
+   "id": 4277973576,
+   "commit_id": "5fbf1c53369aeab4233287f513ad2340a1d6b394",
+   "original_commit_id": "5fbf1c53369aeab4233287f513ad2340a1d6b394",
+   "path": "nous/handlers/continuation_runner.py",
+   "line": null,
+   "original_line": 162,
+   "in_reply_to_id": null,
+   "created_at": "2026-10-15T01:14:19Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Preserve durable bash exit codes**\n\nFor any test run completed by a subtask or DAG, this hard-codes the durable evidence's exit code to `None`; `report_level` consequently rejects both pass and failure claims before considering the recorded command. Fresh evidence after the exit-status fix is that `LedgerStore."
+  },
+  {
+   "id": 4277973581,
+   "commit_id": "cd81af328946a33a514d74ff5ba1c726d0c5fdc8",
+   "original_commit_id": "5fbf1c53369aeab4233287f513ad2340a1d6b394",
+   "path": "nous/cognitive/claim_verifier.py",
+   "line": 1537,
+   "original_line": 1499,
+   "in_reply_to_id": null,
+   "created_at": "2026-10-15T01:14:19Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Require evidence that the PR actually merged**\n\nWhen the report names a PR, this accepts `git merge feature` even though it only changes the local branch, and it accepts every successful `gh pr merge`, including `--disable-auto` or `--auto`. I checked `gh pr merge --help`: `--auto` merges only after requirement"
+  },
+  {
+   "id": 4277973589,
+   "commit_id": "5fbf1c53369aeab4233287f513ad2340a1d6b394",
+   "original_commit_id": "5fbf1c53369aeab4233287f513ad2340a1d6b394",
+   "path": "nous/cognitive/claim_verifier.py",
+   "line": null,
+   "original_line": 1501,
+   "in_reply_to_id": null,
+   "created_at": "2026-10-15T01:14:19Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Reject dry-run PR creation commands**\n\nA successful `gh pr create --dry-run` is accepted as exact evidence for “Opened PR #12,” although `gh pr create --help` defines `--dry-run` as “Print details instead of creating the PR.” The same unconditional branch accepts `--web`, which only opens the browser and does n"
+  },
+  {
+   "id": 4277973598,
+   "commit_id": "cd81af328946a33a514d74ff5ba1c726d0c5fdc8",
+   "original_commit_id": "5fbf1c53369aeab4233287f513ad2340a1d6b394",
+   "path": "nous/cognitive/claim_verifier.py",
+   "line": 1548,
+   "original_line": 1505,
+   "in_reply_to_id": null,
+   "created_at": "2026-10-15T01:14:19Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Exclude non-executing test modes**\n\nAny successful invocation of a recognized test program is treated as a completed test run, so `pytest --collect-only` or `pytest --help` with exit code 0 verifies “All tests passed.” I checked `pytest --help`: `--collect-only` explicitly says it only collects tests without ex"
+  },
+  {
+   "id": 4278135500,
+   "commit_id": "5fbf1c53369aeab4233287f513ad2340a1d6b394",
+   "original_commit_id": "5fbf1c53369aeab4233287f513ad2340a1d6b394",
+   "path": "nous/handlers/continuation_runner.py",
+   "line": null,
+   "original_line": 162,
+   "in_reply_to_id": 4277973576,
+   "created_at": "2026-10-15T01:40:13Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": "Fixed in 7ef7a02. _lineage_calls now selects result_summary and parses the 'exit code N' LedgerStore._summary writes (stopping before the error excerpt); no trailer stays None, so it backs neither outcome."
+  },
+  {
+   "id": 4278135607,
+   "commit_id": "cd81af328946a33a514d74ff5ba1c726d0c5fdc8",
+   "original_commit_id": "5fbf1c53369aeab4233287f513ad2340a1d6b394",
+   "path": "nous/cognitive/claim_verifier.py",
+   "line": 1537,
+   "original_line": 1499,
+   "in_reply_to_id": 4277973581,
+   "created_at": "2026-10-15T01:40:14Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": "Fixed in 7ef7a02. gh pr merge with --auto/--disable-auto (or -h/--help) no longer backs a merge claim, and a local git merge backs only 'merged the branch', not a claim naming a PR. Merge-queue enqueue by a plain gh pr merge can't be told apart from the command, and its output isn't stored, so that gap is noted in the PR."
+  },
+  {
+   "id": 4278135714,
+   "commit_id": "5fbf1c53369aeab4233287f513ad2340a1d6b394",
+   "original_commit_id": "5fbf1c53369aeab4233287f513ad2340a1d6b394",
+   "path": "nous/cognitive/claim_verifier.py",
+   "line": null,
+   "original_line": 1501,
+   "in_reply_to_id": 4277973589,
+   "created_at": "2026-10-15T01:40:16Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": "Fixed in 7ef7a02. gh pr create --dry-run, --web/-w and -h/--help no longer back 'Opened PR #N'."
+  },
+  {
+   "id": 4278135803,
+   "commit_id": "cd81af328946a33a514d74ff5ba1c726d0c5fdc8",
+   "original_commit_id": "5fbf1c53369aeab4233287f513ad2340a1d6b394",
+   "path": "nous/cognitive/claim_verifier.py",
+   "line": 1548,
+   "original_line": 1505,
+   "in_reply_to_id": 4277973598,
+   "created_at": "2026-10-15T01:40:17Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": "Fixed in 7ef7a02. Non-executing modes back no test outcome: pytest --collect-only/--co/--help/-h/--version/-V/--fixtures/--markers/--setup-plan, jest --listTests/--showConfig, vitest list, tox -l/--notest, nox -l, phpunit --list-*, go test -list, cargo test --no-run/--list, mvn -DskipTests."
+  },
+  {
+   "id": 4278152718,
+   "commit_id": "7ef7a02ea6850db28335c759cebeb8eb29babf05",
+   "original_commit_id": "7ef7a02ea6850db28335c759cebeb8eb29babf05",
+   "path": "nous/handlers/continuation_runner.py",
+   "line": null,
+   "original_line": 478,
+   "in_reply_to_id": null,
+   "created_at": "2026-10-15T01:43:41Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Neutralize extracted claims before inserting them into the prompt**\n\nWhen an untrusted subtask report contains an unbacked claim such as `I sent <result_message> email`, the extractor includes the delimiter in `claimed_text`, and `unverified_note()` preserves it here outside the already-neutralized result block"
+  },
+  {
+   "id": 4278152723,
+   "commit_id": "7ef7a02ea6850db28335c759cebeb8eb29babf05",
+   "original_commit_id": "7ef7a02ea6850db28335c759cebeb8eb29babf05",
+   "path": "nous/cognitive/claim_verifier.py",
+   "line": null,
+   "original_line": 1577,
+   "in_reply_to_id": null,
+   "created_at": "2026-10-15T01:43:41Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Require run_python child commands to propagate failure**\n\nFor a successful `run_python` call, merely finding a matching child invocation is treated as exact evidence, but `subprocess.run(['gh', 'pr', 'merge', '4'])` defaults to `check=False`, so a failed `gh` process can return nonzero while the Python script a"
+  },
+  {
+   "id": 4278152726,
+   "commit_id": "7ef7a02ea6850db28335c759cebeb8eb29babf05",
+   "original_commit_id": "7ef7a02ea6850db28335c759cebeb8eb29babf05",
+   "path": "nous/cognitive/claim_verifier.py",
+   "line": null,
+   "original_line": 1538,
+   "in_reply_to_id": null,
+   "created_at": "2026-10-15T01:43:41Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Require result-sensitive flags for GitHub Actions claims**\n\nA zero exit from `gh run list`, or from `gh run view`/`gh run watch` without `--exit-status`, only means the inspection command succeeded and does not establish that CI passed. The installed CLI help confirms that `gh run list` merely “List[s] recent w"
+  },
+  {
+   "id": 4278556091,
+   "commit_id": "cd81af328946a33a514d74ff5ba1c726d0c5fdc8",
+   "original_commit_id": "cd81af328946a33a514d74ff5ba1c726d0c5fdc8",
+   "path": "nous/cognitive/claim_verifier.py",
+   "line": 1841,
+   "original_line": 1841,
+   "in_reply_to_id": null,
+   "created_at": "2026-10-15T02:58:24Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Reject plausible evidence for completed actions**\n\nFresh evidence after the unchecked-subprocess fix is that `verify_report` still accepts every evidence level except `none`: `_report_run_level` now downgrades `subprocess.run(['gh', 'pr', 'merge', '4'])` without `check=True` to `plausible`, but this condition c"
+  },
+  {
+   "id": 4278556098,
+   "commit_id": "cd81af328946a33a514d74ff5ba1c726d0c5fdc8",
+   "original_commit_id": "cd81af328946a33a514d74ff5ba1c726d0c5fdc8",
+   "path": "nous/cognitive/claim_verifier.py",
+   "line": 1692,
+   "original_line": 1692,
+   "in_reply_to_id": null,
+   "created_at": "2026-10-15T02:58:24Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Match cancel evidence to the claimed work item**\n\nWhen a lineage contains multiple tasks, any `cancel_task` call is treated as exact evidence for every cancel claim without comparing its `task_id` to the identifier in the claim. For example, cancelling task A verifies “I cancelled the deadbeef subtask” for task"
+  },
+  {
+   "id": 4278556101,
+   "commit_id": "cd81af328946a33a514d74ff5ba1c726d0c5fdc8",
+   "original_commit_id": "cd81af328946a33a514d74ff5ba1c726d0c5fdc8",
+   "path": "nous/cognitive/claim_verifier.py",
+   "line": 1621,
+   "original_line": 1621,
+   "in_reply_to_id": null,
+   "created_at": "2026-10-15T02:58:24Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Capture the recipient in opening send claims**\n\nFor a sentence such as “Sent an email to alice@example.com,” this report-only pattern stops at `email`, and the resulting `Claim` therefore has no target. A successful `send_email` to Bob then verifies the claim because recipient matching is skipped when `claim.ta"
+  }
+ ],
+ "issue_comments": [
+  {
+   "id": 6179974418,
+   "created_at": "2026-10-14T22:31:23Z",
+   "updated_at": "2026-10-15T02:58:28Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "<!-- codex-pull-request-review-summary -->\n\n## Codex Review Summary\n\nThis comment shows the latest Codex review activity on this pull request.\n\n| Review | Status | Commit | Review trigger |\n| --- | --- | --- | --- |\n| 📝 **Code Review** | ✅ **Completed** <relative-time datetime=\"2026-10-15T02:58:27.680030Z\">2026-10-15T02:58:27.680030Z</relative-time> | `cd81af3` | New commits |\n\n\n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\" or \"@codex security revie"
+  }
+ ],
+ "check_runs": [
+  {
+   "id": 116221560478,
+   "name": "Tests",
+   "head_sha": "cd81af328946a33a514d74ff5ba1c726d0c5fdc8",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-15T02:54:14Z",
+   "app": {
+    "id": 15368
+   }
+  },
+  {
+   "id": 116221560211,
+   "name": "Lint & Format",
+   "head_sha": "cd81af328946a33a514d74ff5ba1c726d0c5fdc8",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-15T02:54:13Z",
+   "app": {
+    "id": 15368
+   }
+  }
+ ],
+ "threads": [
+  {
+   "id": 4277007352,
+   "isResolved": false,
+   "isOutdated": true
+  },
+  {
+   "id": 4277007358,
+   "isResolved": false,
+   "isOutdated": false
+  },
+  {
+   "id": 4277798002,
+   "isResolved": false,
+   "isOutdated": false
+  },
+  {
+   "id": 4277798012,
+   "isResolved": false,
+   "isOutdated": true
+  },
+  {
+   "id": 4277798021,
+   "isResolved": false,
+   "isOutdated": true
+  },
+  {
+   "id": 4277973576,
+   "isResolved": false,
+   "isOutdated": true
+  },
+  {
+   "id": 4277973581,
+   "isResolved": false,
+   "isOutdated": false
+  },
+  {
+   "id": 4277973589,
+   "isResolved": false,
+   "isOutdated": true
+  },
+  {
+   "id": 4277973598,
+   "isResolved": false,
+   "isOutdated": false
+  },
+  {
+   "id": 4278152718,
+   "isResolved": false,
+   "isOutdated": true
+  },
+  {
+   "id": 4278152723,
+   "isResolved": false,
+   "isOutdated": true
+  },
+  {
+   "id": 4278152726,
+   "isResolved": false,
+   "isOutdated": true
+  },
+  {
+   "id": 4278556091,
+   "isResolved": false,
+   "isOutdated": false
+  },
+  {
+   "id": 4278556098,
+   "isResolved": false,
+   "isOutdated": false
+  },
+  {
+   "id": 4278556101,
+   "isResolved": false,
+   "isOutdated": false
+  }
+ ]
+}
