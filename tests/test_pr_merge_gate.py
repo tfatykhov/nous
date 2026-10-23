@@ -22,6 +22,8 @@ spec.loader.exec_module(gate)
 CODEX = "chatgpt-codex-connector[bot]"
 HEAD = "h" * 40
 OLD = "a" * 40
+AUTHOR = "cognition-engines-nous-agent"  # the PR author, also an agent login
+OWNER = {"login": "tfatykhov"}  # a resolvedBy that counts
 P1 = "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Fix the thing"
 P2 = "**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Tidy the thing"
 
@@ -178,7 +180,7 @@ def test_older_p1_still_anchored_on_head_fails_until_its_thread_is_resolved():
     assert not unresolved.passed
     assert "still anchored on head" in unresolved.line()
     resolved = gate.evaluate_gate(
-        [review()], comments, HEAD, GREEN, threads={10: {"isResolved": True, "isOutdated": False}}
+        [review()], comments, HEAD, GREEN, threads={10: {"isResolved": True, "isOutdated": False, "resolvedBy": OWNER}}
     )
     assert resolved.passed, resolved.line()
 
@@ -275,9 +277,12 @@ def test_only_the_latest_run_of_a_check_counts():
 
 
 def test_check_runs_of_another_commit_are_ignored():
-    runs = [run(head_sha=OLD)]
-    verdict = gate.evaluate_gate([review()], [], HEAD, runs, threads={})
+    """A failing Tests run on another commit, listed last, neither fails nor replaces the head's run."""
+    runs = GREEN + [run(conclusion="failure", rid=9, head_sha=OLD)]
+    assert gate.evaluate_gate([review()], [], HEAD, runs, threads={}).passed
+    verdict = gate.evaluate_gate([review()], [], HEAD, GREEN[1:] + [run(rid=9, head_sha=OLD)], threads={})
     assert not verdict.passed
+    assert verdict.reasons == ["no Tests check run on head"]
 
 
 # (5) P2 only
@@ -298,7 +303,9 @@ def test_inline_p1_from_a_human_is_not_a_codex_finding():
 
 
 def test_resolving_the_thread_of_a_p1_posted_on_head_does_not_clear_it():
-    verdict = gate.evaluate_gate([review()], [inline(10)], HEAD, GREEN, threads={10: {"isResolved": True}})
+    verdict = gate.evaluate_gate(
+        [review()], [inline(10)], HEAD, GREEN, threads={10: {"isResolved": True, "resolvedBy": OWNER}}
+    )
     assert not verdict.passed
 
 
@@ -366,8 +373,9 @@ def test_an_unknown_change_set_counts_as_unchanged():
 
 
 def test_a_skipped_tests_run_fails():
-    verdict = gate.evaluate_gate([review()], [], HEAD, [run(conclusion="skipped")], threads={})
+    verdict = gate.evaluate_gate([review()], [], HEAD, [run(conclusion="skipped")] + GREEN[1:], threads={})
     assert not verdict.passed
+    assert verdict.reasons == ["check Tests skipped"]
 
 
 def test_a_failing_commit_status_fails():
@@ -388,7 +396,7 @@ def test_touched_since_is_unknown_once_the_commit_is_not_an_ancestor_of_head():
 # The CLI, with gh replaced by the fixture data
 
 
-def fake_gh(n, compare_files):
+def fake_gh(n, compare_files, author="tfatykhov"):
     data, _ = load(n)
     graphql = [
         {"isResolved": t["isResolved"], "isOutdated": t["isOutdated"], "comments": {"nodes": [{"databaseId": t["id"]}]}}
@@ -411,15 +419,19 @@ def fake_gh(n, compare_files):
         ]:
             if suffix in path:
                 return value
+        if path.endswith("/actions/variables/NOUS_PR_LOGINS"):
+            return [AUTHOR]
         assert path.endswith(f"/pulls/{n}"), path
-        return [data["head_sha"]]
+        return [{"head": data["head_sha"], "author": author}]
 
     return gh_lines
 
 
 def test_the_cli_fails_pr753_on_the_head_p1_alone_once_older_p1s_were_fixed(monkeypatch, capsys):
+    """The older P1s' replies are tfatykhov's, which count once tfatykhov is not the PR author."""
     paths = {c["path"] for c in load(753)[0]["inline_comments"]}
-    monkeypatch.setattr(gate, "_gh_lines", fake_gh(753, paths))
+    monkeypatch.delenv("NOUS_PR_LOGINS", raising=False)
+    monkeypatch.setattr(gate, "_gh_lines", fake_gh(753, paths, author=AUTHOR))
     assert gate.main(["753"]) == 1
     out = capsys.readouterr().out.strip()
     assert out.startswith("GATE: FAIL head=75943279323d10d0b7df569b9e0027692048824b ")
@@ -470,7 +482,11 @@ def test_a_rerun_in_progress_on_head_waits_even_after_a_review_of_head():
 
 def test_a_badgeless_codex_comment_on_head_fails_even_when_resolved():
     verdict = gate.evaluate_gate(
-        [review()], [inline(10, body="Something looks off")], HEAD, GREEN, threads={10: {"isResolved": True}}
+        [review()],
+        [inline(10, body="Something looks off")],
+        HEAD,
+        GREEN,
+        threads={10: {"isResolved": True, "resolvedBy": OWNER}},
     )
     assert not verdict.passed
 
@@ -492,3 +508,122 @@ def test_an_old_quota_notice_followed_by_a_review_state_is_not_the_fallback():
     verdict = gate.evaluate_gate([], [], HEAD, GREEN, threads={}, issue_comments=[quota, summary])
     assert not verdict.passed
     assert "quota" not in verdict.line()
+
+
+# Evidence the PR author or an agent produces itself does not clear a P1 (owner review of #795)
+
+
+def test_a_thread_the_author_resolved_still_anchored_on_head_fails():
+    """Codex flags A; the author pushes an unrelated B, Codex finds nothing new, the author resolves the thread."""
+    comments = [inline(10, commit_id=HEAD, original=OLD)]
+    threads = {10: {"isResolved": True, "isOutdated": False, "resolvedBy": {"login": AUTHOR}}}
+    verdict = gate.evaluate_gate([review()], comments, HEAD, GREEN, threads=threads, untrusted_logins={AUTHOR})
+    assert not verdict.passed
+    assert "still anchored on head, thread unresolved" in verdict.line()
+
+
+def test_an_outdated_p1_with_only_the_authors_reply_and_a_touched_file_fails():
+    """B makes a trivial edit to the flagged lines, which outdates the thread, and the author replies."""
+    comments = [
+        inline(10, commit_id=OLD, original=OLD, line=None),
+        inline(11, body="Fixed in hhhh", login=AUTHOR, reply_to=10, commit_id=OLD, original=OLD, line=None),
+    ]
+    verdict = gate.evaluate_gate(
+        [review()],
+        comments,
+        HEAD,
+        GREEN,
+        threads={10: {"isResolved": False, "isOutdated": True}},
+        touched_paths={OLD: {"nous/x.py"}},
+        untrusted_logins={AUTHOR},
+    )
+    assert not verdict.passed
+    assert "outdated, no reply" in verdict.line()
+
+
+def test_a_thread_resolved_or_replied_to_by_someone_else_passes():
+    anchored = [inline(10, commit_id=HEAD, original=OLD)]
+    threads = {10: {"isResolved": True, "isOutdated": False, "resolvedBy": OWNER}}
+    resolved = gate.evaluate_gate([review()], anchored, HEAD, GREEN, threads=threads, untrusted_logins={AUTHOR})
+    assert resolved.passed, resolved.line()
+    outdated = [
+        inline(10, commit_id=OLD, original=OLD, line=None),
+        inline(11, body="Fixed in hhhh", login="tfatykhov", reply_to=10, commit_id=OLD, original=OLD, line=None),
+    ]
+    replied = gate.evaluate_gate(
+        [review()],
+        outdated,
+        HEAD,
+        GREEN,
+        threads={10: {"isResolved": False, "isOutdated": True}},
+        touched_paths={OLD: {"nous/x.py"}},
+        untrusted_logins={AUTHOR},
+    )
+    assert replied.passed, replied.line()
+
+
+def test_a_resolution_by_an_unknown_login_does_not_count():
+    """GraphQL gives resolvedBy null for a deleted account: unknown counts as untrusted."""
+    comments = [inline(10, commit_id=HEAD, original=OLD)]
+    for thread in ({"isResolved": True, "isOutdated": False}, {"isResolved": True, "resolvedBy": None}):
+        assert not gate.evaluate_gate([review()], comments, HEAD, GREEN, threads={10: thread}).passed
+
+
+# Forged or failed reviews do not count as a review of the head
+
+
+def summary_comment(state, login=CODEX, updated_at="2026-10-22T12:48:54Z"):
+    body = f"<!-- codex-review-state:v1 {json.dumps({'code_review': state})} -->"
+    return {"id": 5, "user": {"login": login}, "updated_at": updated_at, "body": body}
+
+
+def test_a_failed_review_state_on_head_is_not_a_review():
+    """#792's marker reads status "failed": Codex did not finish the review."""
+    failed = summary_comment({"commit_sha": HEAD, "status": "failed"})
+    verdict = gate.evaluate_gate([], [], HEAD, GREEN, threads={}, issue_comments=[failed])
+    assert not verdict.passed
+    assert "has not reviewed head" in verdict.line()
+
+
+def test_a_review_state_marker_posted_by_someone_else_is_ignored():
+    forged = summary_comment({"commit_sha": HEAD, "status": "completed"}, login=AUTHOR)
+    verdict = gate.evaluate_gate([], [], HEAD, GREEN, threads={}, issue_comments=[forged])
+    assert not verdict.passed
+    assert "has not reviewed head" in verdict.line()
+
+
+def test_thread_outdatedness_comes_from_graphql_over_the_rest_fields():
+    """REST says the comment is off the head; GraphQL says the thread is not outdated, so it is anchored."""
+    comments = [
+        inline(10, commit_id=OLD, original=OLD, line=None),
+        inline(11, body="Fixed", login="tfatykhov", reply_to=10, commit_id=OLD, original=OLD, line=None),
+    ]
+    verdict = gate.evaluate_gate(
+        [review()],
+        comments,
+        HEAD,
+        GREEN,
+        threads={10: {"isResolved": False, "isOutdated": False}},
+        touched_paths={OLD: {"nous/x.py"}},
+    )
+    assert not verdict.passed
+    assert "still anchored on head" in verdict.line()
+
+
+def test_codex_comments_are_read_in_time_order_not_list_order():
+    quota = {"id": 6, "user": {"login": CODEX}, "updated_at": "2026-10-22T04:00:00Z", "body": gate._QUOTA}
+    later = summary_comment({"commit_sha": OLD, "status": "completed"}, updated_at="2026-10-22T05:00:00Z")
+    verdict = gate.evaluate_gate([], [], HEAD, GREEN, threads={}, issue_comments=[later, quota])
+    assert not verdict.passed
+    assert "quota" not in verdict.line()
+
+
+def test_the_cli_does_not_count_the_pr_authors_own_replies(monkeypatch, capsys):
+    """#753's author is tfatykhov, who also wrote the replies on its older P1s."""
+    paths = {c["path"] for c in load(753)[0]["inline_comments"]}
+    monkeypatch.delenv("NOUS_PR_LOGINS", raising=False)
+    monkeypatch.setattr(gate, "_gh_lines", fake_gh(753, paths))
+    assert gate.main(["753"]) == 1
+    out = capsys.readouterr().out
+    assert "P1 posted on head nous/cognitive/execution_ledger.py:179" in out
+    assert "outdated, no reply" in out

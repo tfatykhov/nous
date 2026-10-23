@@ -28,11 +28,15 @@ Rules (all on the PR's current head sha):
      lines are unchanged, so GitHub moved its ``commit_id`` to the head): fails until the thread is
      resolved. A "Fixed in ..." reply is not evidence when the anchored code did not change.
   4. posted on an earlier commit, thread outdated: passes only if someone other than Codex replied AND the
-     comment's file
-     changed between the commit it was posted on and the head. That is known only while that commit is
-     an ancestor of the head: after a rebase the file counts as unchanged, and so does a renamed file. A
-     merge of the base branch into the PR can make a file look changed by the base's own commits; that is
-     an accepted limit.
+     comment's file changed between the commit it was posted on and the head. That is known only while
+     that commit is an ancestor of the head: after a rebase the file counts as unchanged, and so does a
+     renamed file. A merge of the base branch into the PR can make a file look changed by the base's own
+     commits; that is an accepted limit.
+
+  The PR author's pushes move the head past rule 1, so its own word must not also clear a finding: a
+  thread resolved by the PR author, by an agent login (``NOUS_PR_LOGINS``) or by a login the gate cannot
+  read counts as unresolved, and replies by the author or an agent login are not replies. A fixed P1 still
+  anchored on the head therefore waits for the owner to resolve its thread.
 
   Thread state (resolved / outdated) comes from GraphQL. Without it every thread counts as unresolved and
   outdatedness falls back to the REST fields (``commit_id`` is the head and ``line`` is set means anchored).
@@ -47,10 +51,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 
 CODEX_LOGIN = "chatgpt-codex-connector[bot]"
@@ -89,8 +94,12 @@ class Verdict:
         return f"GATE: {word} head={self.head_sha} " + ("; ".join(parts) or "CI green, Codex reviewed head, no P1")
 
 
+def _login(item: Mapping) -> str | None:
+    return (item.get("user") or {}).get("login")
+
+
 def _is_codex(item: Mapping) -> bool:
-    return (item.get("user") or {}).get("login") == CODEX_LOGIN
+    return _login(item) == CODEX_LOGIN
 
 
 def _title(body: str) -> str:
@@ -152,9 +161,14 @@ def _check_inline(
     inline_comments: list[Mapping],
     threads: Mapping[int, Mapping] | None,
     touched_paths: Mapping[str, set[str]],
+    untrusted_logins: Collection[str],
     verdict: Verdict,
 ) -> None:
-    replied = {c["in_reply_to_id"] for c in inline_comments if c.get("in_reply_to_id") and not _is_codex(c)}
+    replied = {
+        c["in_reply_to_id"]
+        for c in inline_comments
+        if c.get("in_reply_to_id") and not _is_codex(c) and _login(c) not in untrusted_logins
+    }
     roots = [c for c in inline_comments if _is_codex(c) and not c.get("in_reply_to_id")]
     if threads is None and roots:
         verdict.notes.append("thread data unavailable, every thread counted as unresolved")
@@ -163,7 +177,8 @@ def _check_inline(
     for c in roots:
         body = c.get("body") or ""
         thread = thread_map.get(c["id"]) or {}
-        resolved = bool(thread.get("isResolved"))
+        resolver = (thread.get("resolvedBy") or {}).get("login")
+        resolved = bool(thread.get("isResolved")) and resolver is not None and resolver not in untrusted_logins
         badges = set(_BADGE.findall(body))
         if badges and not badges & _BLOCKING:
             open_minor += not resolved
@@ -200,18 +215,20 @@ def evaluate_gate(
     threads: Mapping[int, Mapping] | None = None,
     issue_comments: Iterable[Mapping] = (),
     touched_paths: Mapping[str, set[str]] | None = None,
+    untrusted_logins: Collection[str] = (),
 ) -> Verdict:
     """Apply the module docstring's rules to the PR data and return the verdict.
 
     ``reviews``, ``inline_comments``, ``issue_comments`` and ``check_runs`` are the GitHub REST objects.
-    ``threads`` maps a thread's first comment id to its GraphQL ``isResolved`` / ``isOutdated``; ``None``
-    means the thread data could not be read. ``touched_paths`` maps a commit sha to the files changed
-    between it and the head; a missing sha means unknown, which counts as unchanged.
+    ``threads`` maps a thread's first comment id to its GraphQL ``isResolved`` / ``isOutdated`` /
+    ``resolvedBy``; ``None`` means the thread data could not be read. ``touched_paths`` maps a commit sha
+    to the files changed between it and the head; a missing sha means unknown, which counts as unchanged.
+    ``untrusted_logins`` (the PR author and the agent logins) neither resolve threads nor reply to them.
     """
     verdict = Verdict(head_sha)
     _check_ci(head_sha, check_runs, verdict)
     _check_codex_review(head_sha, reviews, issue_comments, verdict)
-    _check_inline(head_sha, list(inline_comments), threads, touched_paths or {}, verdict)
+    _check_inline(head_sha, list(inline_comments), threads, touched_paths or {}, untrusted_logins, verdict)
     return verdict
 
 
@@ -254,7 +271,7 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       reviewThreads(first: 100, after: $endCursor) {
-        nodes { isResolved isOutdated comments(first: 1) { nodes { databaseId } } }
+        nodes { isResolved isOutdated resolvedBy { login } comments(first: 1) { nodes { databaseId } } }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -272,10 +289,22 @@ def _gh_lines(*args: str) -> list:
     return [json.loads(line) for line in out.splitlines() if line.strip()]
 
 
+def _agent_logins(repo: str) -> list[str] | None:
+    """The agent logins: ``NOUS_PR_LOGINS`` from the environment, else the repository variable; ``None`` if unread."""
+    value = os.environ.get("NOUS_PR_LOGINS", "")
+    if not value.strip():
+        try:
+            (value,) = _gh_lines(f"repos/{repo}/actions/variables/NOUS_PR_LOGINS", "--jq", ".value | tojson")
+        except (subprocess.CalledProcessError, ValueError):
+            return None
+    return [login.strip() for login in value.split(",") if login.strip()]
+
+
 def fetch_and_evaluate(repo: str, number: int) -> Verdict:
     """Read the PR's data from GitHub with ``gh api`` (GETs and one GraphQL query) and evaluate it."""
     base = f"repos/{repo}"
-    (head_sha,) = _gh_lines(f"{base}/pulls/{number}", "--jq", ".head.sha | tojson")
+    (pr,) = _gh_lines(f"{base}/pulls/{number}", "--jq", "{head: .head.sha, author: .user.login} | tojson")
+    head_sha = pr["head"]
     reviews = _gh_lines("--paginate", f"{base}/pulls/{number}/reviews?per_page=100", "--jq", ".[]")
     inline = _gh_lines("--paginate", f"{base}/pulls/{number}/comments?per_page=100", "--jq", ".[]")
     issue = _gh_lines("--paginate", f"{base}/issues/{number}/comments?per_page=100", "--jq", ".[]")
@@ -302,7 +331,20 @@ def fetch_and_evaluate(repo: str, number: int) -> Verdict:
         files = touched_since(compare, sha)
         if files is not None:
             touched[sha] = files
-    return evaluate_gate(reviews, inline, head_sha, runs, threads=threads, issue_comments=issue, touched_paths=touched)
+    agents = _agent_logins(repo)
+    verdict = evaluate_gate(
+        reviews,
+        inline,
+        head_sha,
+        runs,
+        threads=threads,
+        issue_comments=issue,
+        touched_paths=touched,
+        untrusted_logins={pr["author"], *(agents or ())},
+    )
+    if agents is None:
+        verdict.notes.append("NOUS_PR_LOGINS unreadable, only the PR author's resolutions and replies discounted")
+    return verdict
 
 
 def main(argv: list[str] | None = None) -> int:
