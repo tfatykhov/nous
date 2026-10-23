@@ -771,3 +771,251 @@ async def test_a_bash_call_outside_a_lineage_keeps_the_full_environment(tmp_path
     d = _bash_dispatcher(tmp_path)
     text, _ = await d.dispatch("bash", {"command": "printenv NOUS_TEST_PLANTED_SECRET"}, context=ctx)
     assert "planted-s3cret" in text
+
+
+# -- Globs as file operands of the lineage read commands --------------------------
+
+
+def _glob_ws(tmp_path):
+    """A workspace with the files the glob tests expand over."""
+    for name in (
+        "claude-jobs/job-20261023-000001-aaaaaaaa/prompt.md",
+        "claude-jobs/job-20261023-000002-bbbbbbbb/prompt.md",
+        "dir/a.md",
+        "dir/b.md",
+        "dir/f1.txt",
+        "dir/f2.txt",
+        "dir/a.log",
+        "dir/b.log",
+        "dir/c.log",
+        "dir/x.json",
+        "hid/.hidden/x",
+        "dash/-x",
+        "dash/y",
+    ):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n")
+    return tmp_path
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # the command that was refused in DAG 82f8b2ea, with the fixture's workspace for /tmp/nous-workspace
+        "grep -l X {W}/claude-jobs/job-*/prompt.md",
+        "cat dir/*.md",
+        "ls dir/*",
+        "head -n 5 dir/f?.txt",
+        "wc -l dir/[ab]*.log",
+        "jq . dir/*.json",
+        "tail dir/*",
+        "cat {W}/dir/*.md",
+        "grep 'foo*' dir/*.md",
+        "grep -e 'a*b' dir/*.md",
+        "cat -- dir/*.md",
+        "cat dir/* | wc -l",
+        "cat dir/*.md && ls dir/f?.txt",
+        "cat dash/-*",  # the word cat gets is dash/-x, not an option
+    ],
+)
+def test_the_lineage_shell_allows_a_glob_file_operand_of_a_read_command(command, tmp_path):
+    ws = _glob_ws(tmp_path)
+    assert _shell(command.format(W=ws), ws) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # outside the workspace, or at its top level
+        "cat /etc/*",
+        "cat ../*",
+        "cat {W}/../*",
+        "cat dir/../*",
+        "cat {W}/*",
+        "ls *",
+        "cd dir && cat *",
+        # a pattern or a match that is an option
+        "ls -- -*",
+        # hidden: a pattern component with a leading dot, a prefix with a hidden component, or no visible match
+        "cat dir/.*",
+        "cat hid/.hidden/*",
+        "cat hid/*/x",
+        # no match: the shell would pass the pattern itself
+        "cat dir/*.nothing",
+        # bracket classes other than plain letters and digits, and **
+        "cat dir/[!a]*.log",
+        "cat dir/[^a]*.log",
+        "cat dir/[a-c].log",
+        "cat dir/[[:alpha:]].log",
+        "cat dir/[a.log",
+        "cat dir/**",
+        # a glob in a word that is also quoted or escaped
+        "cat dir/'a'*",
+        'cat "dir"/*.md',
+        "cat dir/\\a*",
+        # a glob that is not a file operand of a read command
+        "rm *",
+        "rm dir/*",
+        "echo dir/*",
+        "pwd dir/*",
+        "sleep dir/*",
+        "true dir/*",
+        "cd dir/*",
+        "printf %s dir/*",
+        "grep dir/*.md dir/a.md",
+        "grep -e a dir/*.md -f dir/*.md",
+        "grep -f dir/*.md dir/a.md",
+        "grep --file=dir/*.md dir/a.md",
+        "grep -m dir/* x dir/a.md",
+        "jq dir/* dir/x.json",
+        "jq --rawfile v dir/*.json . dir/x.json",
+        "head -n dir/* dir/a.md",
+        "c*t dir/a.md",
+        "dir/* dir/a.md",
+        # redirections
+        "cat dir/a.md > {W}/intentions/{RID}/out*",
+        "echo x > *",
+        "cat < dir/*.md",
+        # gh, runner.sh, git and the build commands
+        "{R} status job-*",
+        "gh pr view *",
+        "gh pr view dir/*",
+        "git log *",
+        "pytest tests/*.py",
+        "ruff check *",
+        "make dir/*",
+        # expansions that stay refused with and without a glob
+        "cat $HOME/*",
+        "cat $X",
+        "cat `ls`/*",
+        "cat `ls`",
+        "cat dir/{{a,b}}.md",
+        "cat dir/{{a,b}}*",
+        "cat ~/*",
+        "cat ~/x",
+        # wrappers: the lineage shell runs no shell
+        "bash -c 'cat dir/*'",
+        "bash -c 'rm *'",
+        "bash -c 'gh pr merge *'",
+        "sh -c 'cat dir/*.md'",
+        # a chain that reaches a refused command
+        "cat dir/*; rm x",
+        "cat dir/* | sh",
+    ],
+)
+def test_the_lineage_shell_refuses_every_other_glob(command, tmp_path):
+    ws = _glob_ws(tmp_path)
+    command = command.format(R=_runner_sh(ws), W=ws, RID=RID)
+    assert _shell(command, ws) == "external"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "{R} status job-*",
+        "gh pr view *",
+        "git log *",
+        "pytest tests/*.py",
+        "ruff check *",
+        "cd dir/*",
+        "echo *",
+        "cat a > out*",
+    ],
+)
+def test_a_glob_stays_refused_with_the_build_commands_on(command, tmp_path):
+    ws = _glob_ws(tmp_path)
+    command = command.format(R=_runner_sh(ws))
+    assert not lineage_bash_allowed(_internal(), command, workspace_dir=str(ws), build_commands=True)
+    assert not lineage_bash_allowed(_internal(), f"cd dir && {command}", workspace_dir=str(ws), build_commands=True)
+
+
+def test_a_quoted_glob_is_a_literal_path_as_before(tmp_path):
+    ws = _glob_ws(tmp_path)
+    assert _shell("cat 'dir/*'", ws) is None
+    assert _shell('cat "dir/*.md"', ws) is None
+    assert _shell("cat 'dir/../../*'", ws) == "external"
+
+
+def test_a_glob_may_expand_to_200_files_and_no_more(tmp_path):
+    many = tmp_path / "many"
+    many.mkdir()
+    for n in range(200):
+        (many / f"f{n:03}").write_text("x")
+    assert _shell("wc -l many/*", tmp_path) is None
+    (many / "f200").write_text("x")
+    assert _shell("wc -l many/*", tmp_path) == "external"
+    assert _shell("wc -l many/f1*", tmp_path) is None  # one pattern's matches are counted, not the directory
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs symlinks")
+def test_a_glob_match_that_is_a_symlink_out_of_the_workspace_is_refused(tmp_path):
+    ws = _glob_ws(tmp_path / "ws")
+    (tmp_path / "secret").write_text("s")
+    (ws / "dir" / "z.md").symlink_to(tmp_path / "secret")
+    assert _shell("cat dir/*.md", ws) == "external"
+    assert _shell("cat dir/a*.md", ws) is None
+    (ws / "out").symlink_to(tmp_path)
+    assert _shell("cat out/*", ws) == "external"
+    (ws / "dir" / "z.md").unlink()
+    (ws / "dir" / "z.md").symlink_to(tmp_path / "missing")  # dangling: matched by sh and glob alike
+    assert _shell("cat dir/*.md", ws) == "external"
+    (ws / "dir" / "z.md").unlink()
+    (ws / "dir" / "z.md").symlink_to(ws / "missing")
+    assert _shell("cat dir/*.md", ws) is None
+
+
+def test_a_glob_that_matches_by_characters_and_by_bytes_differently_is_refused(tmp_path):
+    """dash matches bytes, bash in a UTF-8 locale and Python's str glob characters: an é is one or two."""
+    from nous.api.tool_policy import _glob_matches
+
+    ws = _glob_ws(tmp_path).resolve()
+    (ws / "dir" / "\u00e9.log").write_text("x")
+    assert _glob_matches("dir/?.log", [ws], ws) is None
+    assert _glob_matches("dir/??.log", [ws], ws) is None
+    assert _glob_matches("dir/*.log", [ws], ws) is not None  # both read the name the same way
+
+
+def test_a_glob_match_that_starts_with_a_dash_is_refused(tmp_path):
+    """From the workspace's top level a relative glob is refused anyway; the match rule is checked on its own."""
+    from nous.api.tool_policy import _glob_matches
+
+    ws = _glob_ws(tmp_path).resolve()
+    assert _glob_matches("*", [ws / "dash"], ws) is None
+    assert _glob_matches("y*", [ws / "dash"], ws) == [ws / "dash" / "y"]
+    assert _glob_matches("-*", [ws / "dash"], ws) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX shell")
+@pytest.mark.parametrize(
+    "pattern",
+    ["dir/*", "dir/*.md", "dir/f?.txt", "dir/[ab]*.log", "dir/*/x", "hid/*", "hid/*/x", "dir/a*", "dash/y*"],
+)
+def test_a_glob_expands_to_what_sh_expands_it_to(pattern, tmp_path):
+    """Parity with the shell that runs the command (asyncio's create_subprocess_shell: /bin/sh). Dotfiles are
+    matched by neither (hid/ holds only .hidden), and a pattern that matches nothing is refused here and passed
+    as itself by sh."""
+    import subprocess
+
+    from nous.api.tool_policy import _glob_matches
+
+    ws = _glob_ws(tmp_path).resolve()
+    for name in (".dot.md", "sp ace.md", "st*r.md"):
+        (ws / "dir" / name).write_text("x")
+    out = subprocess.run(["/bin/sh", "-c", f"printf '%s\\n' {pattern}"], cwd=ws, capture_output=True)
+    shell = sorted(out.stdout.decode().splitlines())
+    ours = _glob_matches(pattern, [ws], ws)
+    if shell == [pattern]:
+        assert ours is None
+    else:
+        assert ours is not None and sorted(str(p.relative_to(ws)) for p in ours) == shell
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX shell")
+def test_a_negated_class_is_refused_because_sh_reads_it(tmp_path):
+    import subprocess
+
+    ws = _glob_ws(tmp_path)
+    out = subprocess.run(["/bin/sh", "-c", "printf '%s\\n' dir/[!a]*.log"], cwd=ws, capture_output=True, text=True)
+    assert out.stdout.split() == ["dir/b.log", "dir/c.log"]  # sh negates the class; it is refused, not misread
+    assert _shell("cat dir/[!a]*.log", ws) == "external"
