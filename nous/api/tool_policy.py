@@ -7,11 +7,14 @@ are the INTENDED policy; in `warn` mode a deviation is logged and persisted as
 
 from __future__ import annotations
 
+import glob
+import os
 import re
 import shlex
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -19,7 +22,13 @@ from typing import Any
 from nous.api.execution_context import FOREGROUND_KINDS, ExecutionContext
 from nous.api.tool_classes import is_compensable_call, tool_class
 from nous.brain.intentions import AUTHORITY_INTERNAL
-from nous.cognitive.bash_side_effect import classify_bash_command, command_invocations, command_string, simple_commands
+from nous.cognitive.bash_side_effect import (
+    GlobWord,
+    classify_bash_command,
+    command_invocations,
+    command_string,
+    simple_commands,
+)
 from nous.cognitive.execution_ledger import classify_side_effect
 
 _ALL = frozenset({"none", "write", "external", "irreversible"})
@@ -177,6 +186,9 @@ _READ_ARG_ROLES: Mapping[str, _ArgRoles] = MappingProxyType(
 # A jq filter that reads the environment (GITHUB_TOKEN is left in it) or imports a module or data file.
 _JQ_REFUSED = re.compile(r"\$ENV|\benv\b|\bimport\b|\binclude\b")
 _MAX_LINEAGE_CWDS = 16  # directories a chain of cd could have left the shell in; more is refused
+_MAX_GLOB_MATCHES = 200  # files one glob operand may expand to, from one directory; more is refused
+_GLOB_CHAR = re.compile(r"[*?\[]")
+_GLOB_CLASS = re.compile(r"\[[A-Za-z0-9_]+\]")  # the one bracket form allowed: a plain set, no !, ^, range or class
 # Read-only gh subcommands; `gh api` is checked on its own (_gh_api_get).
 LINEAGE_GH_READS: Mapping[str, frozenset[str]] = MappingProxyType(
     {
@@ -391,6 +403,56 @@ def _readable(path: str, cwds: list[Path], workspace: Path) -> list[Path] | None
     return None
 
 
+def _glob_matches(pattern: str, cwds: list[Path], workspace: Path) -> list[Path] | None:
+    """Where an unquoted glob file operand of a read command resolves (``_readable``) once expanded from each of
+    ``cwds``, or None when the shell's expansion could differ from this one or reach a file ``_readable`` refuses.
+
+    The command string is run as checked (asyncio's create_subprocess_shell, /bin/sh: dash in the image), so the
+    shell expands the pattern again; this expansion has to be the one it makes. Python's ``glob`` (not recursive)
+    and dash agree on ``*`` and ``?`` within one component, on a plain ``[abc]`` set, on following symlinked
+    directories, and on a leading dot: a name starting with ``.`` is matched by neither unless the pattern's own
+    component starts with ``.``, which is refused (as are ``..`` and ``.``). Refused because the two may not agree:
+    ``**`` (bash's globstar), ``//``, a bracket that is not a plain set of letters, digits and ``_`` (``[!a]``,
+    ``[^a]``, ranges, which follow the locale, ``[:alpha:]``, an unmatched ``[`` or ``]``), and a name the pattern
+    matches as characters but not as bytes, or the other way (dash matches bytes, bash in a UTF-8 locale
+    characters): both are expanded and must give the same names. No match is refused, since the shell would pass
+    the pattern itself, and so are more than _MAX_GLOB_MATCHES, a pattern or a match that starts with ``-`` (an
+    option), and a pattern whose literal prefix (the components before the first glob) is not strictly below
+    ``workspace``: ``ls *`` at its top level stays refused. Every match must pass ``_readable``. The shell expands
+    after this check, so a file created between the two is not checked; the window is bounded by what a lineage
+    may write (its own directories, ``lineage_write_dirs``)."""
+    parts = pattern.split("/")
+    if (
+        pattern.startswith("-")
+        or "**" in pattern
+        or "//" in pattern
+        or any(p.startswith(".") for p in parts)
+        or re.search(r"[\[\]]", _GLOB_CLASS.sub("", pattern))
+    ):
+        return None
+    first = next(i for i, p in enumerate(parts) if _GLOB_CHAR.search(p))
+    prefix = "/".join(parts[:first]) or "."
+    targets: list[Path] = []
+    for cwd in cwds[:1] if pattern.startswith("/") else cwds:
+        base = _readable(prefix, [cwd], workspace)
+        if base is None or base[0] == workspace:
+            return None
+        try:
+            names = set(islice(glob.iglob(pattern, root_dir=cwd), _MAX_GLOB_MATCHES + 1))
+            raw = islice(glob.iglob(os.fsencode(pattern), root_dir=os.fsencode(cwd)), _MAX_GLOB_MATCHES + 1)
+            same = names == {os.fsdecode(name) for name in raw}
+        except (OSError, ValueError):
+            return None
+        if not names or len(names) > _MAX_GLOB_MATCHES or not same:
+            return None
+        for name in names:
+            reached = None if name.startswith("-") else _readable(name, [cwd], workspace)
+            if reached is None:
+                return None
+            targets += reached
+    return targets
+
+
 def _split_read_args(args: list[str], roles: _ArgRoles) -> tuple[list[str], list[str], list[tuple[str, str]]] | None:
     """``(operands, file values, (option, value) pairs)`` of a read command's arguments, or None when an option
     is refused, unknown to a closed ``roles``, or missing its value."""
@@ -448,16 +510,16 @@ def _split_read_args(args: list[str], roles: _ArgRoles) -> tuple[list[str], list
     return operands, files, values
 
 
-def _read_paths(prog: str, args: list[str]) -> list[str] | None:
-    """The arguments of a read command that name a file (for ``cd``, its directory), or None when the call is
-    refused whatever its paths name."""
+def _read_paths(prog: str, args: list[str]) -> tuple[list[str], list[str]] | None:
+    """The arguments of a read command that name a file, as ``(option values, operands)`` (for ``cd``, its
+    directory is the operand), or None when the call is refused whatever its paths name."""
     if prog == "cd":
         # Bare `cd` goes to $HOME, `cd -` to $OLDPWD; no option (-L, -P) either. No `..` component: cd resolves
         # it LOGICALLY (`l/..` is where the link l sits), _readable physically (the link target's parent), so
         # after a link `cd l/../..` leaves the workspace while _readable sees it stay. A read argument's `..` is
         # resolved by the kernel, physically, and needs no such rule.
         ok = len(args) == 1 and not args[0].startswith("-") and ".." not in args[0].split("/")
-        return args if ok else None
+        return ([], args) if ok else None
     split = _split_read_args(args, _READ_ARG_ROLES[prog])
     if split is None:
         return None
@@ -471,7 +533,7 @@ def _read_paths(prog: str, args: list[str]) -> list[str] | None:
         if operands and not _jq_filter_allowed(operands[0]):
             return None
         operands = operands[1:]  # the filter
-    return files + [o for o in operands if o != "-"]
+    return files, [o for o in operands if o != "-"]
 
 
 def _jq_filter_allowed(text: str) -> bool:
@@ -702,8 +764,12 @@ def lineage_bash_allowed(
     ``gh`` call, or ``<workspace_dir>/claude-jobs/runner.sh`` (the owner's Claude Code delegation path), joined
     by ``; && || |`` or newlines only. An output redirection may target ``/dev/null`` or a file under the
     root's own ``<workspace_dir>/intentions/<root_id>/`` or ``<workspace_dir>/claude-jobs/prompts/``.
-    Anything the reader cannot see exactly (``$``, a backtick, a glob, an unquoted heredoc that expands, an
-    unbalanced quote) is refused, so a chain or substitution that reaches a refused command is refused.
+    Anything the reader cannot see exactly (``$``, a backtick, a brace, ``~``, an unquoted heredoc that expands,
+    an unbalanced quote) is refused, so a chain or substitution that reaches a refused command is refused. A glob
+    (``*``, ``?``, ``[abc]``) is refused too, except unquoted as a whole word that is a file operand of a read
+    command that takes files (``_READ_ARG_ROLES``: not a grep pattern, a jq filter or any option's value, which
+    a glob expanding to more than one word would shift), expanded here as the shell will (``_glob_matches``);
+    quoted, it is a literal path, as in the shell.
 
     Reads are confined too: a file a read command or an input redirection names, and a ``cd`` target, must
     resolve under ``<workspace_dir>`` with no hidden component (``_readable``), from the workspace (the shell's
@@ -717,7 +783,7 @@ def lineage_bash_allowed(
     command runs the whole command without the GitHub token (``lineage_runs_build``), so it may not be joined with
     ``gh`` or ``runner.sh``, which need the token.
     """
-    commands = simple_commands(command)
+    commands = simple_commands(command, globs=True)
     if commands is None or not any(words for words, _, _, _ in commands):
         return False
     builds = needs_token = False
@@ -744,10 +810,18 @@ def lineage_bash_allowed(
         if not all(s in _LINEAGE_SINKS or _readable(s, cwds, root) is not None for s in sources):
             return False
         prog, args = words[0], words[1:]
+        globbed = [w for w in words if isinstance(w, GlobWord)]
+        if globbed and prog not in _READ_ARG_ROLES:
+            return False
         if prog in _READ_ARG_ROLES or prog == "cd":
-            paths = _read_paths(prog, args)
-            reached = None if paths is None else [_readable(p, cwds, root) for p in paths]
-            if reached is None or None in reached:
+            split = _read_paths(prog, args)
+            if split is None or not all(any(w is o for o in split[1]) for w in globbed):
+                return False  # a glob that is not a file operand: compared by identity, a quoted '*' is equal
+            reached = [
+                _glob_matches(p, cwds, root) if isinstance(p, GlobWord) else _readable(p, cwds, root)
+                for p in split[0] + split[1]
+            ]
+            if None in reached:
                 return False
             if prog == "cd":
                 cwds = list(dict.fromkeys([*cwds, *reached[0]]))

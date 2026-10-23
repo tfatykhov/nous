@@ -210,10 +210,16 @@ _HEREDOC_OPEN = re.compile(r"(?<!<)<<(?!<)")
 # Outside single quotes these expand to something this reader cannot see. In
 # a double-quoted word only `$` and a backtick do.
 _BARE_EXPANSION = re.compile(r"[$`*?\[{~]")
+_BARE_NOT_GLOB = re.compile(r"[$`{~]")
 _DQ_EXPANSION = re.compile(r"[$`]")
 
 
-def simple_commands(command: str) -> list[tuple[list[str], list[str], list[str], str]] | None:
+class GlobWord(str):
+    """A word of ``simple_commands(..., globs=True)`` with an unquoted glob character (``*``, ``?``, ``[``): the
+    pattern the shell expands, written with no quote or escape, so its text is the pattern itself."""
+
+
+def simple_commands(command: str, *, globs: bool = False) -> list[tuple[list[str], list[str], list[str], str]] | None:
     """Every simple command in ``command`` as ``(words, output targets, input
     files, the operator after it)``, or None when it cannot be read exactly.
 
@@ -223,7 +229,10 @@ def simple_commands(command: str) -> list[tuple[list[str], list[str], list[str],
     dash backgrounds the command), a redirect in either direction that names a
     ``/dev/tcp`` or ``/dev/udp`` socket, or a word that expands -- ``$`` or a backtick
     outside single quotes, an unquoted glob, brace or tilde, or ``$`` or a
-    backtick in the body of a heredoc whose delimiter is unquoted. Words are
+    backtick in the body of a heredoc whose delimiter is unquoted. With
+    ``globs``, an unquoted glob (``*``, ``?``, ``[``) is read instead of refused
+    when its whole word is bare (no quote or escape in it) and is not a
+    redirection's: that word is a ``GlobWord``, unexpanded. Words are
     de-quoted; a file a ``<`` or ``<&`` redirection reads is an input file,
     a heredoc delimiter, herestring or body is not; an fd duplication
     (``2>&1``, ``<&0``) is no target; the operator after the last command is
@@ -238,15 +247,21 @@ def simple_commands(command: str) -> list[tuple[list[str], list[str], list[str],
                 delim = _HEREDOC_DELIM.match(kept, m.end())
                 if delim is None or delim.group(4) is not None:
                     return None
+        glob_chunks = 0
         for m in _LEX.finditer(kept):
             kind = m.lastgroup
-            if (kind == "bare" and _BARE_EXPANSION.search(m.group(kind))) or (
+            if kind == "bare" and globs and not _BARE_NOT_GLOB.search(m.group(kind)):
+                glob_chunks += _GLOB.search(m.group(kind)) is not None
+            elif (kind == "bare" and _BARE_EXPANSION.search(m.group(kind))) or (
                 kind == "dq" and _DQ_EXPANSION.search(m.group(kind))
             ):
                 return None
-        tokens = _lex(kept)
+        plain_words: list[bool] = []
+        tokens = _lex(kept, plain_words)
         if tokens is None:
             return None
+        plain = iter(plain_words)
+        glob_words = 0
         commands: list[tuple[list[str], list[str], list[str], str]] = []
         words: list[str] = []
         targets: list[str] = []
@@ -254,6 +269,10 @@ def simple_commands(command: str) -> list[tuple[list[str], list[str], list[str],
         expect: str | None = None
         for tok, is_operator in tokens:
             if not is_operator:
+                if next(plain) and globs and _GLOB.search(tok):
+                    if expect is not None:
+                        return None  # a redirection's word: bash expands it, dash does not
+                    tok, glob_words = GlobWord(tok), glob_words + 1
                 if expect is not None and any(dev in tok for dev in _NETWORK_REDIRECT):
                     return None  # `cat < /dev/tcp/host/80` connects: an input redirect is not just a read
                 if expect == "out" or (expect == "dup" and not (tok.isdigit() or tok == "-")):
@@ -280,8 +299,8 @@ def simple_commands(command: str) -> list[tuple[list[str], list[str], list[str],
                 else:
                     commands.append((words, targets, sources, op))
                     words, targets, sources = [], [], []
-        if expect is not None:
-            return None
+        if expect is not None or glob_words != glob_chunks:
+            return None  # a glob in a word that is quoted or escaped too (`'a'*`), or in a heredoc delimiter
         commands.append((words, targets, sources, ""))
         return commands
     except Exception:
@@ -811,8 +830,9 @@ def exec_target(words: list[str]) -> tuple[str, list[str]] | None:
     return None if i is None else (_program(words[i]), words[i + 1:])
 
 
-def _lex(command: str) -> list[tuple[str, bool]] | None:
-    """``(text, is_operator)`` tokens with bash quoting; None if unbalanced."""
+def _lex(command: str, plain_words: list[bool] | None = None) -> list[tuple[str, bool]] | None:
+    """``(text, is_operator)`` tokens with bash quoting; None if unbalanced. ``plain_words`` gets, per word
+    token, whether the word is bare (no quote, no escape)."""
     tokens: list[tuple[str, bool]] = []
     word: list[str] = []
     in_word = plain = False  # plain: the word so far is bare (no quote, no escape)
@@ -827,6 +847,8 @@ def _lex(command: str) -> list[tuple[str, bool]] | None:
                 # the file descriptor it redirects, not a word
                 if not (kind == "op" and m.group("op")[0] in "<>" and plain and text.isdigit() and len(text) < 3):
                     tokens.append((text, False))
+                    if plain_words is not None:
+                        plain_words.append(plain)
                 word, in_word = [], False
             if kind == "op":
                 tokens.append((m.group("op"), True))
@@ -843,6 +865,8 @@ def _lex(command: str) -> list[tuple[str, bool]] | None:
             in_word = True
     if in_word:
         tokens.append(("".join(word), False))
+        if plain_words is not None:
+            plain_words.append(plain)
     return tokens
 
 
