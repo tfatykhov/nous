@@ -86,6 +86,7 @@ _TERMINAL = frozenset(s for s in LEDGER_STATUSES if s != "pending")
 _WORD, _UUID, _EMAILS, _CHAT, _PATH, _SOURCE, _HASH = (
     "word", "uuid", "emails", "chat", "path", "source", "hash",
 )
+_DAG_ID = "dag_id"  # a UUID, or the short hex id `dag_manage list` prints and dag_manage accepts
 _DURABLE_ARGS: dict[str, dict[str, str]] = {
     # A bash command is code: hashed like run_python's, never kept.
     "bash": {"command": _HASH},
@@ -104,7 +105,7 @@ _DURABLE_ARGS: dict[str, dict[str, str]] = {
     "heartbeat_check_create": {"name": _HASH, "prompt": _HASH},
     "heartbeat_check_manage": {"action": _WORD, "name": _HASH},
     "dag_create": {"name": _HASH, "nodes": _HASH},
-    "dag_manage": {"action": _WORD, "dag_id": _UUID, "node_name": _HASH},
+    "dag_manage": {"action": _WORD, "dag_id": _DAG_ID, "node_name": _HASH},
     "push_surface": {"template": _WORD, "dedup_key": _HASH, "params": _HASH},
     "compose_surface": {"archetype": _WORD, "dedup_key": _HASH, "intent": _HASH, "data_sources": _HASH},
     "resolve_decision": {
@@ -141,9 +142,9 @@ def _shaped(kind: str, value: Any) -> str | None:
     text = str(value)
     if kind == _WORD:
         return text if _WORD_SHAPE.fullmatch(text) else None
-    if kind == _UUID:
-        if _ID_PREFIX_SHAPE.fullmatch(text):  # the short id `list` prints and the tools accept
-            return text.lower()
+    if kind == _DAG_ID and _ID_PREFIX_SHAPE.fullmatch(text):
+        return text.lower()
+    if kind in (_UUID, _DAG_ID):
         try:
             return str(UUID(text))
         except ValueError:
@@ -337,7 +338,8 @@ def _summary(
                 body = body[timeout.end():]
             if (exit_code := bash_exit_code(text)) is not None:
                 parts.append(f"exit code {exit_code}")
-            # a word of runner.sh's own status set, read by a fixed pattern: never output text
+            # one word of runner.sh's status set, read by a fixed pattern (from whatever command
+            # printed it; the verifier decides whether it was a runner read): never output text
             if (status_word := observed_status(body)) is not None:
                 parts.append(f"status {status_word}")
         excerpt = ""

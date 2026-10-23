@@ -90,6 +90,8 @@ _EVIDENCE_ARGS: dict[str, tuple[str, ...]] = {
 }
 # The job status `runner.sh status|result` prints in the head of its output. Only this code-authored
 # pattern reads it, and only a word of the runner's own set is kept: the durable ledger may store it.
+# It is read from ANY bash call's output (an `echo "Status: cancelled"` too); only the verifier's check
+# that the call was a lone `runner.sh status|result` makes it evidence.
 RUNNER_STATUSES = r"running|completed|failed|cancelled|unknown"
 _RUNNER_STATUS_LINE = re.compile(r"^Status: (.*)$", re.MULTILINE)
 _RUNNER_STATUS = re.compile(rf"({RUNNER_STATUSES})(?: \(process died\))?")
@@ -167,8 +169,9 @@ def bash_invocations(
 def observed_status(result: str | None) -> str | None:
     """The job status a `runner.sh status|result` output states in its head; None when it states none.
 
-    Read from the real output, never from model text; whether the call WAS such a read is the verifier's
-    question (claim_verifier, from the command's invocations)."""
+    Read from the tool's real output, not from the model's reply; but any command can print such a line,
+    so whether the call WAS a runner read is the verifier's question (claim_verifier, from the command's
+    invocations)."""
     line = _RUNNER_STATUS_LINE.search((result or "")[:_RUNNER_STATUS_HEAD_CHARS])  # the FIRST status line
     match = _RUNNER_STATUS.fullmatch(line.group(1)) if line else None
     return match.group(1) if match else None
