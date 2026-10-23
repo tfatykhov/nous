@@ -23,6 +23,7 @@ from nous.cognitive.bash_side_effect import (
     command_string,
     git_subcommand,
     program_name,
+    simple_commands,
 )
 from nous.cognitive.execution_ledger import EVIDENCE_TRUNCATED, Invocation, bash_invocations
 
@@ -1427,8 +1428,10 @@ def evidence_level(claim: Claim, ev: Evidence) -> str:
     # send carries none the verifier uses) or never given
     if ev.tool_name in _PRODUCERS:  # writes to memory or the companion: no destination
         return "none" if claim.target else "plausible"
-    if ev.tool_name == "send_file":  # a Telegram send cannot have reached a named address
-        return "none" if claim.target else "plausible"
+    if ev.tool_name == "send_file":  # a Telegram send: no named address, and no e-mail
+        if claim.target:
+            return "none"
+        return "plausible" if re.search(r"e-?mail", claim.text, re.IGNORECASE) else "exact"
     if not ev.args:  # names-only evidence from a legacy caller
         return "plausible"
     if ev.tool_name == "bash":
@@ -1755,12 +1758,18 @@ def _runner_cancel_level(claim: Claim, ev: Evidence, claimed: str | None, runner
     if runs is None:
         return "plausible"
     levels = ["none"]
+    dirs = _cd_dirs(ev.args.get("command") or ev.args.get("cmd") or "", runs)
+
+    def runner_args(prog: str, args: tuple[str, ...]) -> list[str] | None:
+        word, cwd = dirs.get((prog, *args), (prog, None))
+        return _runner_args(word, args, runner, cwd)
+
     for prog, args, certain in runs:
-        pos = _runner_args(prog, args, runner)
+        pos = runner_args(prog, args)
         if certain and pos is not None and len(pos) >= 2 and pos[0] == "cancel":
             levels.append(_work_level(claimed, [pos[1]]))
     calls = [(prog, args) for prog, args, _ in runs if _base(prog) != "cd"]
-    pos = _runner_args(*calls[0], runner) if len(calls) == 1 else None
+    pos = runner_args(*calls[0]) if len(calls) == 1 else None
     if pos is not None and len(pos) == 2 and pos[0] in ("status", "result") and ev.observed_status == "cancelled" \
             and re.search(r"cancel+ed$", claim.text, re.IGNORECASE):
         levels.append(_work_level(claimed, [pos[1]]))
@@ -1775,11 +1784,40 @@ def runner_path(workspace_dir: str) -> str:
     return str(Path(workspace_dir) / "claude-jobs" / "runner.sh")
 
 
-def _runner_args(prog: str, args: tuple[str, ...], runner: str | None) -> list[str] | None:
+def _cd_dirs(command: str, runs: tuple) -> dict[tuple[str, ...], tuple[str, str]]:
+    """For each call an absolute `cd <dir> &&` certainly ran just before: its program word as written, and <dir>.
+
+    Read from the command text, not ``runs``: an invocation's certainty is unknown whenever the exit is not 0
+    (a status read exits with the job's state), ``runs`` unwraps `bash -c 'cd x'` and `(cd x)`, whose cd
+    moves a child shell only, and it keeps a relative program as `./<name>`. The cd must be a simple command
+    of its own, joined to the call by `&&`, and not after `||` or `|` (where it may be skipped or run in a
+    subshell). Keyed by the call as ``runs`` has it, and only for a call that occurs once in the text and
+    once in ``runs``."""
+    commands = simple_commands(command)
+    if commands is None:
+        return {}
+    texts = [tuple(words) for words, _, _, _ in commands]
+    found: dict[tuple[str, ...], tuple[str, str]] = {}
+    for i in range(1, len(commands)):
+        cd, call = commands[i - 1][0], texts[i]
+        before = commands[i - 2][3] if i >= 2 else ""
+        if not (len(cd) == 2 and cd[0] == "cd" and posixpath.isabs(cd[1]) and commands[i - 1][3] == "&&"
+                and before not in ("||", "|") and call and texts.count(call) == 1):
+            continue
+        key = (program_name(call[0]), *call[1:])
+        if sum((prog, *args) == key for prog, args, _ in runs) == 1:
+            found[key] = (call[0], cd[1])
+    return found
+
+
+def _runner_args(prog: str, args: tuple[str, ...], runner: str | None, cwd: str | None = None) -> list[str] | None:
     """The positional arguments of an invocation of ``runner`` (`bash [opts] <runner> ...` too); None if not one.
 
     ``runner`` is the workspace's `claude-jobs/runner.sh` by its absolute path, as tool_policy allows it: a
-    relative `runner.sh` or another directory's could be any script. None: no call is a runner call.
+    relative `runner.sh` or another directory's could be any script. None: no call is a runner call. A
+    relative script is resolved against ``cwd``, the absolute directory a `cd` certainly moved to
+    (``_cd_dirs``): `./runner.sh`, `claude-jobs/runner.sh`, `bash runner.sh`; never a bare name run
+    directly (PATH finds it, not the cwd) nor one through `..` (the kernel resolves it past a symlink).
 
     Only the options that change how a script runs, not what runs, may come before it (`bash -x runner.sh`):
     `-c` runs its string and `-s` its stdin, so the next word is not what ran; any other word there must be the
@@ -1793,6 +1831,10 @@ def _runner_args(prog: str, args: tuple[str, ...], runner: str | None) -> list[s
         if i == len(args):
             return None
         prog, args = args[i], args[i + 1:]
+    elif "/" not in prog:
+        cwd = None
+    if cwd is not None and not posixpath.isabs(prog) and ".." not in prog.split("/"):
+        prog = posixpath.normpath(posixpath.join(cwd, prog))
     return _positional(args) if runner is not None and prog == runner else None
 
 

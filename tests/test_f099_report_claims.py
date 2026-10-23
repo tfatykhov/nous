@@ -997,12 +997,75 @@ def test_a_bash_option_that_runs_something_else_is_no_runner_read(command):
         f"./runner.sh status {JOB}",
         f"/tmp/evil/runner.sh status {JOB}",
         f"bash /tmp/evil/claude-jobs/runner.sh status {JOB}",
-        f"cd /tmp/nous-workspace/claude-jobs && bash runner.sh status {JOB}",
         f"bash {RUNNER} status {JOB} {OTHER_JOB}",  # one read of one job
     ],
 )
 def test_only_the_workspaces_runner_reads_back_a_job(command):
     assert not _verify(f"Job {JOB} was cancelled.", _status_read(command=command)).verified
+
+
+JOBS_DIR = "/tmp/nous-workspace/claude-jobs"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"cd {JOBS_DIR} && ./runner.sh status {JOB}",
+        f"cd {JOBS_DIR} && bash runner.sh status {JOB}",
+        f"cd {JOBS_DIR}/ && ./runner.sh status {JOB}",  # a trailing slash on the cd
+        f"cd /tmp/nous-workspace && claude-jobs/runner.sh status {JOB}",
+    ],
+)
+def test_a_relative_runner_after_an_absolute_cd_reads_back_a_job(command):
+    assert _verify(f"Job {JOB} was cancelled.", _status_read(command=command)).verified
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"cd /tmp/x && ./runner.sh status {JOB}",  # another directory's runner.sh
+        f"cd {JOBS_DIR}; ./runner.sh status {JOB}",  # the cd may have failed
+        f"cd claude-jobs && ./runner.sh status {JOB}",  # a relative cd: from wherever the cwd was
+        f"cd {JOBS_DIR} && runner.sh status {JOB}",  # a bare name is looked up in PATH, not the cwd
+        f"cd {JOBS_DIR} && R=./runner.sh && $R status {JOB}",  # a variable stays unreadable
+        f"false || cd {JOBS_DIR} && ./runner.sh status {JOB}",  # the cd is skipped when the first succeeds
+        f"(cd {JOBS_DIR}) && ./runner.sh status {JOB}",  # the cd ran in a subshell
+        f"bash -c 'cd {JOBS_DIR}' && ./runner.sh status {JOB}",  # ... or in a child shell
+        f"cd {JOBS_DIR} && ./sub/../runner.sh status {JOB}",  # `..` resolves past a symlink
+    ],
+)
+def test_a_relative_runner_without_a_certain_absolute_cd_reads_back_nothing(command):
+    assert not _verify(f"Job {JOB} was cancelled.", _status_read(command=command)).verified
+
+
+@pytest.mark.parametrize(
+    ("command", "exit_code", "verified"),
+    [
+        (f"cd {JOBS_DIR} && ./runner.sh cancel {JOB}", 0, True),
+        (f"cd {JOBS_DIR} && bash runner.sh cancel {JOB}", 0, True),
+        (f"cd {JOBS_DIR} && ./runner.sh cancel {JOB}", 1, False),  # the cancel failed
+        (f"cd {JOBS_DIR}; ./runner.sh cancel {JOB}", 0, False),
+        (f"cd /tmp/x && ./runner.sh cancel {JOB}", 0, False),
+        # the same call twice: the cd is before one of them only
+        (f"./runner.sh cancel {JOB}; cd {JOBS_DIR} && ./runner.sh cancel {JOB}", 0, False),
+    ],
+)
+def test_a_relative_runner_cancel_after_an_absolute_cd(command, exit_code, verified):
+    evidence = [Evidence("bash", {"command": command}, exit_code=exit_code)]
+    assert _verify(f"I cancelled job {JOB}.", evidence).verified is verified
+
+
+@pytest.mark.parametrize("text", ["I sent the report via Telegram.", "Message sent."])
+@pytest.mark.parametrize("args", [{"file_path": "/tmp/r.pdf"}, {"file_path": "/tmp/r.pdf", "chat_id": "42"}])
+def test_a_telegram_send_backs_an_untargeted_send_claim(text, args):
+    result = _verify(text, [Evidence("send_file", args)])
+    assert result.verified and result.claims[0].evidence == "exact"
+
+
+@pytest.mark.parametrize("text", ["Email sent to alice@example.com.", "I emailed the report to alice@example.com."])
+def test_a_telegram_send_backs_no_addressed_email_claim(text):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert not result.verified and result.claims[0].evidence == "none"
 
 
 def test_a_verifier_given_no_runner_takes_no_bash_call_for_a_runner_call():
