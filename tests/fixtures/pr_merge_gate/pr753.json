@@ -1,0 +1,433 @@
+{
+ "source": "gh api read-only, tfatykhov/nous PR #753, fetched 2026-10-23; bodies cut to their first characters",
+ "head_sha": "75943279323d10d0b7df569b9e0027692048824b",
+ "reviews": [
+  {
+   "id": 5525547833,
+   "commit_id": "957bf6b0e8d5edc77754d9673dd61a36b44c1bfa",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-14T22:24:07Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "\n### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `957bf6b0e8`\n    \n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comm"
+  },
+  {
+   "id": 5525767178,
+   "commit_id": "cf63d7b3abf33d655ee8eafb7a329074f03acd90",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-14T22:49:17Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": ""
+  },
+  {
+   "id": 5525785055,
+   "commit_id": "cf63d7b3abf33d655ee8eafb7a329074f03acd90",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-14T22:51:45Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "\n### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `cf63d7b3ab`\n    \n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comm"
+  },
+  {
+   "id": 5526054502,
+   "commit_id": "84c0830d0fedc9b7f370213e7b7741bf86149529",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-14T23:28:43Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": ""
+  },
+  {
+   "id": 5526054661,
+   "commit_id": "84c0830d0fedc9b7f370213e7b7741bf86149529",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-14T23:28:45Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": ""
+  },
+  {
+   "id": 5526070701,
+   "commit_id": "84c0830d0fedc9b7f370213e7b7741bf86149529",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-14T23:31:13Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "\n### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `84c0830d0f`\n    \n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comm"
+  },
+  {
+   "id": 5526413553,
+   "commit_id": "84c0830d0fedc9b7f370213e7b7741bf86149529",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-15T00:20:59Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": ""
+  },
+  {
+   "id": 5526413679,
+   "commit_id": "45806ae0ea51befbe14d35a634acefe71be6eca7",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-15T00:21:00Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": ""
+  },
+  {
+   "id": 5526433534,
+   "commit_id": "45806ae0ea51befbe14d35a634acefe71be6eca7",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-15T00:24:09Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "\n### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `45806ae0ea`\n    \n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comm"
+  },
+  {
+   "id": 5526707500,
+   "commit_id": "75943279323d10d0b7df569b9e0027692048824b",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-15T01:00:50Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": ""
+  },
+  {
+   "id": 5526707737,
+   "commit_id": "75943279323d10d0b7df569b9e0027692048824b",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-15T01:00:51Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": ""
+  },
+  {
+   "id": 5526730732,
+   "commit_id": "75943279323d10d0b7df569b9e0027692048824b",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-15T01:03:24Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "\n### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `7594327932`\n    \n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comm"
+  },
+  {
+   "id": 5526901754,
+   "commit_id": "75943279323d10d0b7df569b9e0027692048824b",
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-15T01:25:38Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": ""
+  }
+ ],
+ "inline_comments": [
+  {
+   "id": 4276925742,
+   "commit_id": "957bf6b0e8d5edc77754d9673dd61a36b44c1bfa",
+   "original_commit_id": "957bf6b0e8d5edc77754d9673dd61a36b44c1bfa",
+   "path": "nous/cognitive/execution_ledger.py",
+   "line": null,
+   "original_line": 176,
+   "in_reply_to_id": null,
+   "created_at": "2026-10-14T22:24:07Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Preserve success for pure AND-chained commands**\n\nWhen an approved command contains a harmless prefix such as `cd /repo && cat build.log`, this count exceeds one and enables the failure-line heuristic even though an overall exit code of 0 proves every command in the `&&` chain succeeded. If the successful comma"
+  },
+  {
+   "id": 4277113430,
+   "commit_id": "957bf6b0e8d5edc77754d9673dd61a36b44c1bfa",
+   "original_commit_id": "957bf6b0e8d5edc77754d9673dd61a36b44c1bfa",
+   "path": "nous/cognitive/execution_ledger.py",
+   "line": null,
+   "original_line": 176,
+   "in_reply_to_id": 4276925742,
+   "created_at": "2026-10-14T22:49:17Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": "Fixed in cf63d7b3. `bash_masked_failure` now trusts exit 0 when the command is a single command or a pure `&&` chain. Every word-bearing simple command must end in `&&` (or be the last one) and must not start with `!`, and a newline is only allowed as a continuation after `&&`. The heuristic stays on for `;`, `||`, pipes, `&`, subshells and `!`, since each of those can mask an earlier failure. New"
+  },
+  {
+   "id": 4277129344,
+   "commit_id": "cf63d7b3abf33d655ee8eafb7a329074f03acd90",
+   "original_commit_id": "cf63d7b3abf33d655ee8eafb7a329074f03acd90",
+   "path": "nous/api/tool_policy.py",
+   "line": null,
+   "original_line": 620,
+   "in_reply_to_id": null,
+   "created_at": "2026-10-14T22:51:45Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Recognize bundled shell command flags**\n\nWhen a triage turn wraps the operation as `bash -lc 'gh pr merge 721'` or `sh -ec 'git push'`, the side-effect classifier recognizes the nested command as external, but this walker requires `-c` to be a separate argument. Because `simple_commands` parses the wrapper succ"
+  },
+  {
+   "id": 4277129354,
+   "commit_id": "cf63d7b3abf33d655ee8eafb7a329074f03acd90",
+   "original_commit_id": "cf63d7b3abf33d655ee8eafb7a329074f03acd90",
+   "path": "nous/api/tool_policy.py",
+   "line": null,
+   "original_line": 617,
+   "in_reply_to_id": null,
+   "created_at": "2026-10-14T22:51:45Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Block outward writes made through non-gh clients**\n\nWhen heartbeat triage performs an external write such as `curl -d body https://service/operation`, `classify_side_effect` correctly rates the bash call external, but this walk returns true only for `gh` writes and `git push`, so the new mode-independent floor "
+  },
+  {
+   "id": 4277366510,
+   "commit_id": "cf63d7b3abf33d655ee8eafb7a329074f03acd90",
+   "original_commit_id": "cf63d7b3abf33d655ee8eafb7a329074f03acd90",
+   "path": "nous/api/tool_policy.py",
+   "line": null,
+   "original_line": 620,
+   "in_reply_to_id": 4277129344,
+   "created_at": "2026-10-14T23:28:43Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": "Fixed in 84c0830d. The shell walk now uses `command_invocations` (the side-effect classifier's reader), so any short-flag cluster containing `c` (`-lc`, `-ec`, `-xc`, `-cl`), `--login -c`, `/bin/bash`, `env`/`sudo` wrappers, nested `sh -c`, `eval` and `;`/`&&`/`||`/`|` chains inside the string are unwrapped and each inner command judged. A program name that is a `$` expansion is refused. Tests add"
+  },
+  {
+   "id": 4277366634,
+   "commit_id": "cf63d7b3abf33d655ee8eafb7a329074f03acd90",
+   "original_commit_id": "cf63d7b3abf33d655ee8eafb7a329074f03acd90",
+   "path": "nous/api/tool_policy.py",
+   "line": null,
+   "original_line": 617,
+   "in_reply_to_id": 4277129354,
+   "created_at": "2026-10-14T23:28:44Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": "Fixed in 84c0830d. Every invocation is now also run through the existing `classify_bash_command` and refused when rated external (ssh, scp, nc, aws, mail ...), so there is no second list to drift. The classifier rates every curl/wget/httpie call external, a plain GET included, so for those three only, a data/method check lets reads through: blocked are `-d/--data*`, `-F/--form`, `-T`, `--json`, `-"
+  },
+  {
+   "id": 4277381268,
+   "commit_id": "45806ae0ea51befbe14d35a634acefe71be6eca7",
+   "original_commit_id": "84c0830d0fedc9b7f370213e7b7741bf86149529",
+   "path": "nous/cognitive/execution_ledger.py",
+   "line": null,
+   "original_line": 181,
+   "in_reply_to_id": null,
+   "created_at": "2026-10-14T23:31:13Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Scan negated single commands for masked failures**\n\nWhen an approved command is `! git push ...` or `! psql ...`, `simple_commands` returns one word-bearing command with no `&` or parentheses, so this first arm returns without scanning the output. An exit code of 0 for `! command` actually means the inner comma"
+  },
+  {
+   "id": 4277381274,
+   "commit_id": "84c0830d0fedc9b7f370213e7b7741bf86149529",
+   "original_commit_id": "84c0830d0fedc9b7f370213e7b7741bf86149529",
+   "path": "nous/api/tool_policy.py",
+   "line": null,
+   "original_line": 667,
+   "in_reply_to_id": null,
+   "created_at": "2026-10-14T23:31:14Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Block direct Git remote-update commands**\n\nA heartbeat can still update remote refs with `git send-pack origin refs/heads/main`: this branch allows every Git invocation whose arguments do not contain the exact word `push`. The local `git send-pack -h` confirms that the command can “push all refs” and “force upd"
+  },
+  {
+   "id": 4277684873,
+   "commit_id": "45806ae0ea51befbe14d35a634acefe71be6eca7",
+   "original_commit_id": "84c0830d0fedc9b7f370213e7b7741bf86149529",
+   "path": "nous/cognitive/execution_ledger.py",
+   "line": null,
+   "original_line": 181,
+   "in_reply_to_id": 4277381268,
+   "created_at": "2026-10-15T00:20:59Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": "Fixed in 45806ae0: a leading `!` now disables the single-command exit-0 trust, so `fatal:`/`psql: error:` lines are scanned."
+  },
+  {
+   "id": 4277684974,
+   "commit_id": "84c0830d0fedc9b7f370213e7b7741bf86149529",
+   "original_commit_id": "84c0830d0fedc9b7f370213e7b7741bf86149529",
+   "path": "nous/api/tool_policy.py",
+   "line": null,
+   "original_line": 667,
+   "in_reply_to_id": 4277381274,
+   "created_at": "2026-10-15T00:21:00Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": "Fixed in 45806ae0: git is now judged by an allowlist of read-only/local subcommands (global -C/-c skipped); send-pack, http-push, svn dcommit, remote writes etc. are refused."
+  },
+  {
+   "id": 4277702427,
+   "commit_id": "45806ae0ea51befbe14d35a634acefe71be6eca7",
+   "original_commit_id": "45806ae0ea51befbe14d35a634acefe71be6eca7",
+   "path": "nous/api/tool_policy.py",
+   "line": null,
+   "original_line": 645,
+   "in_reply_to_id": null,
+   "created_at": "2026-10-15T00:24:09Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Treat HTTPie raw bodies as outward writes**\n\nWhen heartbeat triage issues `http --raw '{\"action\":\"merge\"}' https://service/operation`, this branch does not recognize `--raw`, so `_http_client_writes` returns false and the mode-independent floor dispatches the request. HTTPie's official documentation states that"
+  },
+  {
+   "id": 4277702434,
+   "commit_id": "45806ae0ea51befbe14d35a634acefe71be6eca7",
+   "original_commit_id": "45806ae0ea51befbe14d35a634acefe71be6eca7",
+   "path": "nous/cognitive/execution_ledger.py",
+   "line": null,
+   "original_line": 182,
+   "in_reply_to_id": null,
+   "created_at": "2026-10-15T00:24:09Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Trust a single foreground subshell's exit status**\n\nFor an approved command such as `(cat build.log)`, the foreground subshell's exit status is exactly the status of `cat`, but the parentheses here force the failure-line heuristic to scan its output. If the successfully read log starts with `error:`, the propos"
+  },
+  {
+   "id": 4277904861,
+   "commit_id": "45806ae0ea51befbe14d35a634acefe71be6eca7",
+   "original_commit_id": "45806ae0ea51befbe14d35a634acefe71be6eca7",
+   "path": "nous/api/tool_policy.py",
+   "line": null,
+   "original_line": 645,
+   "in_reply_to_id": 4277702427,
+   "created_at": "2026-10-15T01:00:50Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": "Fixed in 7594327: curl, wget and httpie (http/https/xh/xhs) are now default-deny: a call is a write unless every flag is on a small read-only allowlist, the method is GET/HEAD, httpie items are only headers/queries, and no stdin feeds the client (any `<` or a pipe into it), so --raw, @file, field=@file, --form and piped bodies are all writes."
+  },
+  {
+   "id": 4277904992,
+   "commit_id": "45806ae0ea51befbe14d35a634acefe71be6eca7",
+   "original_commit_id": "45806ae0ea51befbe14d35a634acefe71be6eca7",
+   "path": "nous/cognitive/execution_ledger.py",
+   "line": null,
+   "original_line": 182,
+   "in_reply_to_id": 4277702434,
+   "created_at": "2026-10-15T01:00:51Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": "Fixed in 7594327: parentheses alone no longer force the failure-line scan, so `(cat build.log)` is trusted; a subshell with `;`, `||`, a pipe, `&` or `!` (e.g. `(false; true)`) is still scanned, and `! git push` keeps its round-3 behavior."
+  },
+  {
+   "id": 4277917833,
+   "commit_id": "75943279323d10d0b7df569b9e0027692048824b",
+   "original_commit_id": "75943279323d10d0b7df569b9e0027692048824b",
+   "path": "nous/cognitive/execution_ledger.py",
+   "line": 179,
+   "original_line": 179,
+   "in_reply_to_id": null,
+   "created_at": "2026-10-15T01:03:24Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Inspect nested command strings before trusting exit 0**\n\nWhen an approved command is `bash -c 'psql ...; cat output'` (or the equivalent through `sh -c`/`eval`), `_simple_commands` sees only one foreground outer command, so this branch returns without scanning a leading `psql: error:` line. The wrapper still ex"
+  },
+  {
+   "id": 4278054109,
+   "commit_id": "75943279323d10d0b7df569b9e0027692048824b",
+   "original_commit_id": "75943279323d10d0b7df569b9e0027692048824b",
+   "path": "nous/cognitive/execution_ledger.py",
+   "line": 179,
+   "original_line": 179,
+   "in_reply_to_id": 4277917833,
+   "created_at": "2026-10-15T01:25:38Z",
+   "user": {
+    "login": "tfatykhov"
+   },
+   "body": "Fixed in 4d662566 (follow-up PR #755, since #753 was already merged): exit 0 is now trusted only fail-closed — `-c`/`eval` strings are re-read by the same rules after unwrapping wrappers, and any other runner, unreadable string, or argument with shell control syntax or a shell name gets the failure-line scan."
+  }
+ ],
+ "issue_comments": [
+  {
+   "id": 6179792297,
+   "created_at": "2026-10-14T22:21:06Z",
+   "updated_at": "2026-10-15T01:03:27Z",
+   "user": {
+    "login": "chatgpt-codex-connector[bot]"
+   },
+   "body": "<!-- codex-pull-request-review-summary -->\n\n## Codex Review Summary\n\nThis comment shows the latest Codex review activity on this pull request.\n\n| Review | Status | Commit | Review trigger |\n| --- | --- | --- | --- |\n| 📝 **Code Review** | ✅ **Completed** <relative-time datetime=\"2026-10-15T01:03:26.956729Z\">2026-10-15T01:03:26.956729Z</relative-time> | `7594327` | Manual request |\n\n\n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\" or \"@codex security re"
+  }
+ ],
+ "check_runs": [
+  {
+   "id": 116189252684,
+   "name": "Tests",
+   "head_sha": "75943279323d10d0b7df569b9e0027692048824b",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-15T01:00:51Z"
+  },
+  {
+   "id": 116189252442,
+   "name": "Lint & Format",
+   "head_sha": "75943279323d10d0b7df569b9e0027692048824b",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-15T01:00:51Z"
+  }
+ ],
+ "threads": [
+  {
+   "id": 4276925742,
+   "isResolved": false,
+   "isOutdated": true
+  },
+  {
+   "id": 4277129344,
+   "isResolved": false,
+   "isOutdated": true
+  },
+  {
+   "id": 4277129354,
+   "isResolved": false,
+   "isOutdated": true
+  },
+  {
+   "id": 4277381268,
+   "isResolved": false,
+   "isOutdated": true
+  },
+  {
+   "id": 4277381274,
+   "isResolved": false,
+   "isOutdated": true
+  },
+  {
+   "id": 4277702427,
+   "isResolved": false,
+   "isOutdated": true
+  },
+  {
+   "id": 4277702434,
+   "isResolved": false,
+   "isOutdated": true
+  },
+  {
+   "id": 4277917833,
+   "isResolved": false,
+   "isOutdated": false
+  }
+ ]
+}
