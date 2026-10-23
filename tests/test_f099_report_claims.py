@@ -1005,6 +1005,7 @@ def test_only_the_workspaces_runner_reads_back_a_job(command):
 
 
 JOBS_DIR = "/tmp/nous-workspace/claude-jobs"
+CANCEL_ELSEWHERE = f"cd /tmp/x && bash -c './runner.sh cancel {JOB}'"
 
 
 @pytest.mark.parametrize(
@@ -1046,8 +1047,12 @@ def test_a_relative_runner_without_a_certain_absolute_cd_reads_back_nothing(comm
         (f"cd {JOBS_DIR} && ./runner.sh cancel {JOB}", 1, False),  # the cancel failed
         (f"cd {JOBS_DIR}; ./runner.sh cancel {JOB}", 0, False),
         (f"cd /tmp/x && ./runner.sh cancel {JOB}", 0, False),
-        # the same call twice: the cd is before one of them only
-        (f"./runner.sh cancel {JOB}; cd {JOBS_DIR} && ./runner.sh cancel {JOB}", 0, False),
+        # the same call twice: the second ran in the jobs dir and certainly succeeded
+        (f"./runner.sh cancel {JOB}; cd {JOBS_DIR} && ./runner.sh cancel {JOB}", 0, True),
+        (f"cd {JOBS_DIR} && ./runner.sh cancel {JOB}; cd /tmp/x && ./runner.sh cancel {JOB}", 0, False),
+        # the cd into the jobs dir never runs, and the cancel that does is another directory's runner.sh
+        (f"false && cd {JOBS_DIR} && ./runner.sh cancel {JOB}; {CANCEL_ELSEWHERE}", 0, False),
+        (f"case x in y) cd {JOBS_DIR} && ./runner.sh cancel {JOB};; esac; {CANCEL_ELSEWHERE}", 0, False),
     ],
 )
 def test_a_relative_runner_cancel_after_an_absolute_cd(command, exit_code, verified):
@@ -1060,6 +1065,14 @@ def test_a_relative_runner_cancel_after_an_absolute_cd(command, exit_code, verif
 def test_a_telegram_send_backs_an_untargeted_send_claim(text, args):
     result = _verify(text, [Evidence("send_file", args)])
     assert result.verified and result.claims[0].evidence == "exact"
+
+
+@pytest.mark.parametrize(
+    "text", ["Email sent.", "I emailed the report.", "I mailed the report.", "I sent the report via email."]
+)
+def test_a_telegram_send_only_could_have_backed_an_email_claim(text):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert not result.verified and result.claims[0].evidence == "plausible"
 
 
 @pytest.mark.parametrize("text", ["Email sent to alice@example.com.", "I emailed the report to alice@example.com."])

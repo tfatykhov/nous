@@ -117,6 +117,7 @@ class Claim:
     target: str | None = None  # a path or recipient the claim names
     span: tuple[int, int] = field(default=(0, 0), compare=False)
     attempt_only: bool = False  # a verdict on an action: any recorded try of it backs the claim
+    clause: str = field(default="", compare=False)  # the clause the claim is in ("I sent it by email")
 
 
 # First person: "I", "I've", "I have", "I just", "I also" ... The "I" is
@@ -1431,7 +1432,7 @@ def evidence_level(claim: Claim, ev: Evidence) -> str:
     if ev.tool_name == "send_file":  # a Telegram send: no named address, and no e-mail
         if claim.target:
             return "none"
-        return "plausible" if re.search(r"e-?mail", claim.text, re.IGNORECASE) else "exact"
+        return "plausible" if re.search(r"mail", claim.clause or claim.text, re.IGNORECASE) else "exact"
     if not ev.args:  # names-only evidence from a legacy caller
         return "plausible"
     if ev.tool_name == "bash":
@@ -1759,17 +1760,15 @@ def _runner_cancel_level(claim: Claim, ev: Evidence, claimed: str | None, runner
         return "plausible"
     levels = ["none"]
     dirs = _cd_dirs(ev.args.get("command") or ev.args.get("cmd") or "", runs)
-
-    def runner_args(prog: str, args: tuple[str, ...]) -> list[str] | None:
-        word, cwd = dirs.get((prog, *args), (prog, None))
-        return _runner_args(word, args, runner, cwd)
-
-    for prog, args, certain in runs:
-        pos = runner_args(prog, args)
+    found = []  # per call: its program, whether it certainly ran, its runner arguments
+    for (prog, args, certain), cd in zip(runs, dirs):
+        word, cwd = cd or (prog, None)
+        found.append((prog, certain, _runner_args(word, args, runner, cwd)))
+    for _, certain, pos in found:
         if certain and pos is not None and len(pos) >= 2 and pos[0] == "cancel":
             levels.append(_work_level(claimed, [pos[1]]))
-    calls = [(prog, args) for prog, args, _ in runs if _base(prog) != "cd"]
-    pos = runner_args(*calls[0]) if len(calls) == 1 else None
+    calls = [pos for prog, _, pos in found if _base(prog) != "cd"]
+    pos = calls[0] if len(calls) == 1 else None
     if pos is not None and len(pos) == 2 and pos[0] in ("status", "result") and ev.observed_status == "cancelled" \
             and re.search(r"cancel+ed$", claim.text, re.IGNORECASE):
         levels.append(_work_level(claimed, [pos[1]]))
@@ -1784,29 +1783,30 @@ def runner_path(workspace_dir: str) -> str:
     return str(Path(workspace_dir) / "claude-jobs" / "runner.sh")
 
 
-def _cd_dirs(command: str, runs: tuple) -> dict[tuple[str, ...], tuple[str, str]]:
-    """For each call an absolute `cd <dir> &&` certainly ran just before: its program word as written, and <dir>.
+def _cd_dirs(command: str, runs: tuple) -> list[tuple[str, str] | None]:
+    """Per call of ``runs``: its program word as written and the directory an absolute `cd <dir> &&` just
+    before it certainly moved to; None for a call with no such cd.
 
     Read from the command text, not ``runs``: an invocation's certainty is unknown whenever the exit is not 0
     (a status read exits with the job's state), ``runs`` unwraps `bash -c 'cd x'` and `(cd x)`, whose cd
-    moves a child shell only, and it keeps a relative program as `./<name>`. The cd must be a simple command
+    moves a child shell only, and it keeps a relative program as `./<name>`. So the text's simple commands
+    must be ``runs`` one to one (no branch dropped, no string unwrapped); the cd must be a simple command
     of its own, joined to the call by `&&`, and not after `||` or `|` (where it may be skipped or run in a
-    subshell). Keyed by the call as ``runs`` has it, and only for a call that occurs once in the text and
-    once in ``runs``."""
+    subshell)."""
+    found: list[tuple[str, str] | None] = [None] * len(runs)
     commands = simple_commands(command)
     if commands is None:
-        return {}
-    texts = [tuple(words) for words, _, _, _ in commands]
-    found: dict[tuple[str, ...], tuple[str, str]] = {}
-    for i in range(1, len(commands)):
-        cd, call = commands[i - 1][0], texts[i]
-        before = commands[i - 2][3] if i >= 2 else ""
-        if not (len(cd) == 2 and cd[0] == "cd" and posixpath.isabs(cd[1]) and commands[i - 1][3] == "&&"
-                and before not in ("||", "|") and call and texts.count(call) == 1):
-            continue
-        key = (program_name(call[0]), *call[1:])
-        if sum((prog, *args) == key for prog, args, _ in runs) == 1:
-            found[key] = (call[0], cd[1])
+        return found
+    calls = [i for i, (words, _, _, _) in enumerate(commands) if words]
+    if len(calls) != len(runs) or any(
+            (program_name(commands[i][0][0]), *commands[i][0][1:]) != (prog, *args)
+            for i, (prog, args, _) in zip(calls, runs)):
+        return found
+    for k, i in enumerate(calls):
+        cd = commands[i - 1][0] if i >= 1 else []
+        if len(cd) == 2 and cd[0] == "cd" and posixpath.isabs(cd[1]) and commands[i - 1][3] == "&&" \
+                and (i < 2 or commands[i - 2][3] not in ("||", "|")):
+            found[k] = (commands[i][0][0], cd[1])
     return found
 
 
@@ -2097,8 +2097,9 @@ class ClaimVerifier:
                     continue
                 taken.add((kind, (start, end)))
                 target = match.groupdict().get("target")
+                clause = text[clause_starts[c] if c >= 0 else 0:clause_ends[k] if k < len(clause_ends) else len(text)]
                 found.append(Claim(kind=kind, text=match.group(0).strip(), span=(start, end),
-                                   target=target.lower() if target else None, attempt_only=attempt))
+                                   target=target.lower() if target else None, attempt_only=attempt, clause=clause))
         found.sort(key=lambda claim: claim.span[0])
         return found
 
@@ -2124,6 +2125,7 @@ class ClaimVerifier:
                 k = bisect_left(clause_ends, end)
                 if k < len(clause_ends) and text[clause_ends[k]] == "?":
                     continue  # "Was the email sent to x?" asks; it does not claim
+                clause_end = clause_ends[k] if k < len(clause_ends) else len(text)
                 c = bisect_right(clause_starts, start) - 1
                 clause = clause_starts[c] if c >= 0 else 0
                 i = bisect_left(conditions, clause)
@@ -2150,7 +2152,7 @@ class ClaimVerifier:
                     if "@" in target:
                         target = target.lower()
                 found.append((start, Claim(kind=kind, text=match.group(0).strip(), target=target,
-                                           span=(start, end))))
+                                           span=(start, end), clause=text[clause:clause_end])))
         found.sort(key=lambda item: item[0])
         return [claim for _, claim in found]
 
