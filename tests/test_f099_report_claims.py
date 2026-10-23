@@ -968,6 +968,24 @@ def test_only_the_runners_own_cancelled_status_backs_the_claim(output, command):
     assert not _verify(f"Job {JOB} was cancelled.", _status_read(output, command)).verified
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        # bash runs the -c string, not the next word: an unreadable string stays one invocation
+        f"""bash -c 'printf "Status: cancelled\\n"; " x/runner.sh' status {JOB}""",
+        f"""bash -xc 'printf "Status: cancelled\\n"; " x/runner.sh' status {JOB}""",
+        # -s: bash runs its stdin (here a heredoc) with the words as $1...
+        f"""bash -s runner.sh status {JOB} <<'EOF'\nprintf 'Status: cancelled\\n'\nEOF""",
+        # an option that takes a value
+        f"bash -o pipefail runner.sh status {JOB}",
+    ],
+)
+def test_a_bash_option_that_runs_something_else_is_no_runner_read(command):
+    output = f"Job: {JOB}\nStatus: cancelled\nExit code: 1"
+    assert _status_read(output, command)[0].runs is not None  # read, not unreadable
+    assert not _verify(f"Job {JOB} was cancelled.", _status_read(output, command)).verified
+
+
 def test_runner_result_reads_back_the_status_too():
     output = "Status: cancelled\nNo output yet.\nExit code: 0"
     assert _verify(f"Job {JOB} was cancelled.", _status_read(output, f"bash runner.sh result {JOB}", 0)).verified

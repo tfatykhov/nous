@@ -1742,13 +1742,21 @@ def _runner_cancel_level(claim: Claim, ev: Evidence, claimed: str | None) -> str
     return _best(levels)
 
 
+_TRACE_OPTIONS = re.compile(r"-[xveu]+|--")
+
+
 def _runner_args(prog: str, args: tuple[str, ...]) -> list[str] | None:
-    """The positional arguments of a `runner.sh` invocation (`bash [opts] runner.sh ...` too); None if not one."""
+    """The positional arguments of a `runner.sh` invocation (`bash [opts] runner.sh ...` too); None if not one.
+
+    Only the options that change how a script runs, not what runs, may come before it (`bash -x runner.sh`):
+    `-c` runs its string and `-s` its stdin, so the next word is not what ran."""
     if _base(prog) in ("bash", "sh"):
-        rest = [a for a in args if not a.startswith("-")]  # `bash -x runner.sh`
-        if not rest:
+        i = 0
+        while i < len(args) and _TRACE_OPTIONS.fullmatch(args[i]):
+            i += 1
+        if i == len(args) or args[i].startswith(("-", "+")) or any(c.isspace() for c in args[i]):
             return None
-        prog, args = rest[0], args[args.index(rest[0]) + 1:]
+        prog, args = args[i], args[i + 1:]
     return _positional(args) if prog.rpartition("/")[2] == "runner.sh" else None
 
 
