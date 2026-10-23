@@ -826,19 +826,8 @@ DAG_ID = "5e6f7a8b-1111-4222-8333-444455556666"
         ("I cancelled the 8f10c3ba subtask.", Evidence("cancel_task", {"task_id": TASK}), True),
         ("I cancelled DAG 5e6f7a8b.", Evidence("dag_manage", {"action": "cancel", "dag_id": DAG_ID}), True),
         ("I cancelled DAG 7c7c7c7c.", Evidence("dag_manage", {"action": "cancel", "dag_id": DAG_ID}), False),
-        (
-            "I cancelled DAG nightly-build.",
-            Evidence("dag_manage", {"action": "cancel", "node_name": "nightly-build"}),
-            True,
-        ),
-        (
-            "I cancelled DAG nightly-build.",
-            Evidence("dag_manage", {"action": "cancel", "node_name": "other-dag"}),
-            False,
-        ),
-        # a slug cannot be compared with a UUID: not confirmed, not refuted
-        ("I cancelled DAG nightly-build.", Evidence("dag_manage", {"action": "cancel", "dag_id": DAG_ID}), False),
-        ("I cancelled DAG nightly-build.", Evidence("dag_manage", {"action": "status", "dag_id": DAG_ID}), False),
+        # a status read of the DAG is no cancel of it
+        ("I cancelled DAG 5e6f7a8b.", Evidence("dag_manage", {"action": "status", "dag_id": DAG_ID}), False),
         # "the DAG because ..." names no DAG
         ("I cancelled the DAG because it hung.", Evidence("dag_manage", {"action": "cancel", "dag_id": DAG_ID}), True),
     ],
@@ -847,9 +836,80 @@ def test_a_cancel_backs_only_the_named_work_item(text, evidence, verified):
     assert _verify(text, [evidence]).verified is verified
 
 
-def test_an_incomparable_id_is_unconfirmed_not_refuted():
-    result = _verify("I cancelled DAG nightly-build.", [Evidence("dag_manage", {"action": "cancel", "dag_id": DAG_ID})])
-    assert [c.evidence for c in result.claims] == ["plausible"]
+@pytest.mark.parametrize(
+    ("text", "evidence"),
+    [
+        # a job id and a UUID cannot be compared: not confirmed
+        (f"I cancelled job {JOB}.", Evidence("cancel_task", {"task_id": TASK})),
+        # a hex id the call did not keep (a names-only row)
+        ("I cancelled DAG 5e6f7a8b.", Evidence("dag_manage", {"action": "cancel"})),
+    ],
+)
+def test_a_named_work_item_the_call_cannot_show_is_unconfirmed(text, evidence):
+    result = _verify(text, [evidence])
+    assert [c.evidence for c in result.claims] == ["plausible"] and not result.verified
+
+
+@pytest.mark.parametrize(
+    ("text", "evidence"),
+    [
+        # a DAG or task NAME: no cancel records one, so the claim reads as naming no id, like "the DAG"
+        ("I cancelled DAG nightly-sync.", Evidence("dag_manage", {"action": "cancel", "dag_id": DAG_ID})),
+        (
+            "I cancelled the DAG mid-run because it hung.",
+            Evidence("dag_manage", {"action": "cancel", "dag_id": DAG_ID}),
+        ),
+        ("I cancelled task facade-1.", Evidence("cancel_task", {"task_id": TASK})),  # no hex id
+        # a DAG cancel cancels the DAG: a node name it was given is not what it cancelled
+        (
+            "I cancelled DAG 5e6f7a8b.",
+            Evidence("dag_manage", {"action": "cancel", "dag_id": DAG_ID, "node_name": "7c7c7c7c"}),
+        ),
+    ],
+)
+def test_a_cancel_of_a_named_but_unrecorded_item_is_backed_by_any_cancel(text, evidence):
+    assert _verify(text, [evidence]).verified
+
+
+@pytest.mark.parametrize("text", [f"I cancelled {JOB}.", f"Cancelled {JOB}.", f"I've cancelled {JOB} as asked."])
+def test_a_cancel_naming_a_bare_job_id_is_a_claim(text):
+    assert not _verify(text).verified
+    assert _verify(text, [Evidence("bash", {"command": f"bash runner.sh cancel {JOB}"}, exit_code=0)]).verified
+
+
+@pytest.mark.parametrize(
+    ("text", "verified"),
+    [
+        (f"I cancelled the job ({JOB}).", True),
+        (f"I cancelled the job: {JOB}.", True),
+        (f"I cancelled the job ({OTHER_JOB}).", False),
+        ("I cancelled the 20261021 job.", True),  # a date is no id
+    ],
+)
+def test_the_named_id_may_follow_the_noun_in_brackets_or_after_a_colon(text, verified):
+    assert (
+        _verify(text, [Evidence("bash", {"command": f"bash runner.sh cancel {JOB}"}, exit_code=0)]).verified is verified
+    )
+
+
+def test_a_durable_dag_cancel_keeps_the_short_id_it_was_given():
+    """`dag_manage list` prints 8-character ids and the tool takes them; a hex prefix holds no free text."""
+    from nous.cognitive.ledger_store import durable_key_args
+
+    kept = durable_key_args("dag_manage", {"action": "cancel", "dag_id": "5E6F7A8B"})
+    assert kept == {"action": "cancel", "dag_id": "5e6f7a8b"}
+    row = SimpleNamespace(
+        tool_name="dag_manage",
+        status="success",
+        key_args=kept,
+        input_text=None,
+        result_summary=None,
+        side_effect_type="write",
+    )
+    assert _verify("I cancelled DAG 5e6f7a8b.", [_ledger_row_evidence(row)]).verified
+    assert not _verify("I cancelled DAG 7c7c7c7c.", [_ledger_row_evidence(row)]).verified
+    # anything else that is no UUID is still hashed, not kept
+    assert "dag_id" not in durable_key_args("dag_manage", {"action": "cancel", "dag_id": "nightly-sync"})
 
 
 def test_the_in_memory_ledger_keeps_the_cancelled_id():
@@ -919,6 +979,12 @@ def test_runner_result_reads_back_the_status_too():
         (f"bash runner.sh cancel {JOB}", 1, False),  # the cancel failed
         (f"bash runner.sh cancel {OTHER_JOB}", 0, False),
         (f"bash runner.sh status {JOB}", 0, False),  # a read is no cancel
+        # a cancel inside a longer command counts when it certainly succeeded
+        (f"cd /tmp/nous-workspace/claude-jobs && bash runner.sh cancel {JOB} 2>&1", 0, True),
+        (f"bash runner.sh cancel {JOB}; echo rc=$?", 0, False),  # its own exit is not known
+        (f"bash -x runner.sh cancel {JOB}", 0, True),
+        (f"bash runner.sh cancel {JOB} | tail -1", 0, False),  # a pipe hides its exit
+        (f"bash runner.sh cancel {JOB}; bash runner.sh status {JOB}", 1, False),
     ],
 )
 def test_runner_cancel_backs_a_cancel_of_that_job(command, exit_code, verified):
@@ -926,6 +992,19 @@ def test_runner_cancel_backs_a_cancel_of_that_job(command, exit_code, verified):
         _verify(f"I cancelled job {JOB}.", [Evidence("bash", {"command": command}, exit_code=exit_code)]).verified
         is verified
     )
+
+
+def test_a_durable_row_that_kept_no_command_backs_no_job_claim():
+    """Without the command nothing shows the call was a runner read: any bash call could carry the status."""
+    row = SimpleNamespace(
+        tool_name="bash",
+        status="success",
+        key_args={},
+        input_text=None,
+        result_summary="exit code 1; status cancelled; 109 chars of output, not stored",
+        side_effect_type="none",
+    )
+    assert not _verify(f"Job {JOB} was cancelled.", [_ledger_row_evidence(row)]).verified
 
 
 def test_the_durable_row_keeps_the_runners_status():
@@ -950,8 +1029,66 @@ def test_the_durable_row_keeps_the_runners_status():
         "Status: hacked; token=abc\nExit code: 0",  # never a word outside the runner's set
         "x" * 400 + "\nStatus: cancelled\nExit code: 0",
         "no status here\nExit code: 0",
+        # only the first status line is the runner's; a later one is job output
+        "Status: timed_out\n--- OUTPUT ---\nStatus: cancelled\nExit code: 0",
     ],
 )
 def test_the_durable_row_keeps_no_status_it_cannot_vouch_for(output):
     summary = _summary(output, "bash", "success")
     assert "status " not in summary and "hacked" not in summary
+
+
+# mutation-killing pins (the review's surviving mutations)
+
+
+def test_a_cancel_of_another_task_is_unbacked_not_unconfirmed():
+    result = _verify(
+        "I cancelled task 8f10c3ba.", [Evidence("cancel_task", {"task_id": "1b2c3d4e-0000-4000-8000-000000000000"})]
+    )
+    assert [v.evidence for v in result.violations] == ["none"]
+
+
+def test_a_status_read_after_a_cd_backs_the_claim():
+    command = f"cd /tmp/nous-workspace/claude-jobs && bash runner.sh status {JOB}"
+    assert _verify(f"Job {JOB} was cancelled.", _status_read(command=command)).verified
+
+
+def test_a_runner_cancel_with_no_exit_code_backs_nothing():
+    evidence = Evidence("bash", {"command": f"bash runner.sh cancel {JOB}"}, exit_code=None)
+    assert not _verify(f"I cancelled job {JOB}.", [evidence]).verified
+
+
+def test_a_verdict_naming_an_id_is_backed_by_an_unconfirmed_try():
+    assert _verify("The cancellation failed for task 8f10c3ba.", [Evidence("dag_manage", {})]).verified
+
+
+def test_a_hex_id_matches_a_job_ids_tail():
+    assert _verify("Job 2b31b663 was cancelled.", _status_read()).verified
+
+
+def test_a_dag_call_whose_action_was_not_kept_cannot_confirm_a_named_cancel():
+    result = _verify("I cancelled task 8f10c3ba.", [Evidence("dag_manage", {"dag_id": DAG_ID})])
+    assert [c.evidence for c in result.claims] == ["plausible"] and not result.verified
+
+
+@pytest.mark.parametrize("word", ["decade", "facade", "20261021"])
+def test_an_english_word_or_a_date_is_no_work_id(word):
+    # named no id: any cancel backs it
+    assert _verify(f"I cancelled the {word} task.", [Evidence("cancel_task", {"task_id": TASK})]).verified
+
+
+@pytest.mark.parametrize("output", ["Status: hacked\nExit code: 0", "Status: sk_live_abc123\nExit code: 0"])
+def test_only_a_runner_status_word_is_ever_kept(output):
+    assert "status " not in _summary(output, "bash", "success")
+
+
+def test_a_durable_summary_word_outside_the_runner_set_is_not_read():
+    row = SimpleNamespace(
+        tool_name="bash",
+        status="success",
+        key_args={},
+        input_text=f"bash runner.sh status {JOB}",
+        result_summary="exit code 1; status hacked; 40 chars of output, not stored",
+        side_effect_type="none",
+    )
+    assert _ledger_row_evidence(row).observed_status is None

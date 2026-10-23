@@ -32,7 +32,7 @@ from nous.brain.continuation import INTENT_SESSION_PREFIX, Resolution
 from nous.brain.intentions import AUTHORITY_INTERNAL
 from nous.cancellation import cancel_requested
 from nous.cognitive.claim_verifier import ClaimVerifier, ClaimViolation, Evidence, unverified_note
-from nous.cognitive.execution_ledger import bash_exit_code, bash_masked_failure
+from nous.cognitive.execution_ledger import RUNNER_STATUSES, bash_exit_code, bash_masked_failure
 from nous.events import Event
 from nous.heart.result_inbox import format_inbox_messages, neutralize_delimiters
 from nous.storage.models import (
@@ -167,7 +167,7 @@ def _summary_exit_code(summary: str | None) -> int | None:
 def _summary_status(summary: str | None) -> str | None:
     """The runner job status a durable bash summary keeps (``status <word>``, before the output's length)."""
     for part in (summary or "").split("; "):
-        if m := re.fullmatch(r"status (running|completed|failed|cancelled|unknown)", part):
+        if m := re.fullmatch(rf"status ({RUNNER_STATUSES})", part):
             return m.group(1)
         if re.match(r"\d+ chars of output", part):
             break

@@ -119,6 +119,7 @@ _WORD_SHAPE = re.compile(r"[a-z][a-z_]{0,31}")
 _MAX_ARG_NAMES = 16
 _EMAIL_SHAPE = re.compile(r"[^@\s,;<>\"']+@[^@\s,;<>\"']+\.[A-Za-z]{2,}")
 _CHAT_SHAPE = re.compile(r"-?\d{1,20}")
+_ID_PREFIX_SHAPE = re.compile(r"[0-9a-fA-F]{6,12}")
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -141,6 +142,8 @@ def _shaped(kind: str, value: Any) -> str | None:
     if kind == _WORD:
         return text if _WORD_SHAPE.fullmatch(text) else None
     if kind == _UUID:
+        if _ID_PREFIX_SHAPE.fullmatch(text):  # the short id `list` prints and the tools accept
+            return text.lower()
         try:
             return str(UUID(text))
         except ValueError:

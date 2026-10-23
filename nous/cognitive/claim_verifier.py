@@ -1618,12 +1618,14 @@ def _report_run_level(claim: Claim, ev: Evidence) -> str:
 _PR = r"(?:PR|pull\s+request)(?:\s*#\d+)?"
 _PASSIVE = r"\s+(?:(?:was|were|has\s+been|have\s+been|got|is|is\s+now)\s+)?"
 _CANCELLABLE = r"(?:task|subtask|run|job|dag|schedule|intention|work|chain)"
-# The work item a cancel claim names: a runner job id, a hex id (a UUID or its prefix, with a digit, so
-# "decade" is no id), or a slug (a DAG name, only read as one after "DAG").
-_JOB_ID = r"job-\d{8}-\d{6}-[0-9a-f]{6,}"
-_HEX_ID = r"(?=[0-9a-f-]*\d)[0-9a-f]{6,}(?:-[0-9a-f]{4,12}){0,4}"
-_SLUG = r"(?=[\w.]{0,80}[-_])[a-z0-9][\w.-]{0,80}[a-z0-9]"
-_WORK_ID = rf"`?(?:{_JOB_ID}|{_HEX_ID}|{_SLUG})\b`?"
+# The work item a cancel claim names: a runner job id, or a hex id (a UUID or its prefix, with a digit and
+# a letter, so "decade" and a date are no id), each a whole token ("facade-1" is none). A DAG's NAME is
+# not read as one: no recorded cancel carries it (dag_manage cancels by dag_id), so it could neither
+# confirm nor refute the claim, and "the DAG mid-run" would read as a name.
+_JOB_ID = r"job-\d{8}-\d{6}-[0-9a-f]{6,}(?![\w-])"
+_HEX_ID = r"(?=[0-9a-f-]*\d)(?=[0-9a-f-]*[a-f])[0-9a-f]{6,}(?:-[0-9a-f]{4,12}){0,4}(?![\w-])"
+# after the noun: "task 8f10c3ba", "job (job-...)", "DAG: 5e6f7a8b", "task `8f10c3ba`"
+_WORK_ID = rf"(?:\s+|\s*[(:#]\s*)`?(?:{_JOB_ID}|{_HEX_ID})`?"
 # (pattern, kind, attempt_only). Active forms need the first person or a
 # sentence opening ("Merged PR #4."): "Tim merged PR #4" is not the agent's.
 _REPORT_PATTERNS: list[tuple[str, str, bool]] = [
@@ -1634,9 +1636,9 @@ _REPORT_PATTERNS: list[tuple[str, str, bool]] = [
     (rf"\b{_PR}{_PASSIVE}(?:opened|created|raised|filed)\b{_NOT_BY}", "pr_create", False),
     (rf"(?:{_FIRST}|{_OPENING})(?:opened|created|raised|filed)\s+(?:a\s+|the\s+)?(?:new\s+|draft\s+)?{_PR}",
      "pr_create", False),
-    (rf"(?:{_FIRST}|{_OPENING})cancel+ed\s+(?:the\s+|that\s+|this\s+)?(?:[\w-]+\s+)?{_CANCELLABLE}\b(?!-)"
-     rf"(?:\s+{_WORK_ID})?", "cancel", False),
-    (rf"\b(?:{_CANCELLABLE}\b(?!-)(?:\s+{_WORK_ID})?|{_JOB_ID}){_PASSIVE}cancel+ed\b{_NOT_BY}", "cancel", False),
+    (rf"(?:{_FIRST}|{_OPENING})cancel+ed\s+(?:the\s+|that\s+|this\s+)?"
+     rf"(?:(?:[\w-]+\s+)?{_CANCELLABLE}\b(?!-)(?:{_WORK_ID})?|`?{_JOB_ID}`?)", "cancel", False),
+    (rf"\b(?:{_CANCELLABLE}\b(?!-)(?:{_WORK_ID})?|{_JOB_ID}){_PASSIVE}cancel+ed\b{_NOT_BY}", "cancel", False),
     # a verdict on a cancel says one was issued, whatever it did
     (r"\bcancel(?:l?ation)?\s+(?:did\s+not|didn['’]t|failed|worked|succeeded|took\s+effect|was\s+ignored)"
      r"(?:\s+[\w-]+){0,3}", "cancel", True),
@@ -1676,39 +1678,36 @@ def _reported_before(reported: list[int], scope_starts: list[int], start: int) -
     return i < len(reported) and reported[i] < start
 
 
-_JOB_ID_RE = re.compile(rf"\b{_JOB_ID}\b", re.IGNORECASE)
-_HEX_ID_RE = re.compile(rf"\b{_HEX_ID}\b", re.IGNORECASE)
-_DAG_SLUG_RE = re.compile(rf"\bdag\s+`?({_SLUG})\b", re.IGNORECASE)
+_JOB_ID_RE = re.compile(rf"(?<![\w-]){_JOB_ID}", re.IGNORECASE)
+_HEX_ID_RE = re.compile(rf"(?<![\w-]){_HEX_ID}", re.IGNORECASE)
 
 
 def _claimed_work_id(text: str) -> str | None:
-    """The work item a cancel claim names (a job id, a hex id, or a DAG's name), lowercased; None if none."""
-    for found in (_JOB_ID_RE.search(text), _HEX_ID_RE.search(text)):
-        if found:
-            return found.group(0).lower()
-    found = _DAG_SLUG_RE.search(text)
-    return found.group(1).lower() if found else None
+    """The work item a cancel claim names (a job id or a hex id), lowercased; None if none."""
+    found = _JOB_ID_RE.search(text) or _HEX_ID_RE.search(text)
+    return found.group(0).lower() if found else None
 
 
 def _id_shape(value: str) -> str:
     if _JOB_ID_RE.fullmatch(value):
         return "job"
-    return "hex" if _HEX_ID_RE.fullmatch(value) else "slug"
+    return "hex" if _HEX_ID_RE.fullmatch(value) else "other"
 
 
 def _work_level(claimed: str | None, values: list[str]) -> str:
     """Whether a call on ``values`` (the ids it was given) was on the work item a claim names.
 
     Only ids of one shape are compared -- a hex prefix with a UUID (or a job id's hex tail), a job id with
-    a job id, a DAG name with a node name: a name and a UUID neither confirm nor refute each other."""
+    a job id: a job id and a UUID neither confirm nor refute each other."""
     if claimed is None:
         return "plausible"  # the claim names no work item: any cancel could be it
     shape = _id_shape(claimed)
     comparable: list[str] = []
     for value in (v.lower() for v in values if v):
-        if _id_shape(value) == shape:
+        value_shape = _id_shape(value)
+        if value_shape == shape:
             comparable.append(value)
-        elif shape == "hex" and _id_shape(value) == "job":
+        elif shape == "hex" and value_shape == "job":
             comparable.append(value.rsplit("-", 1)[-1])
     if not comparable:
         return "plausible"
@@ -1726,24 +1725,31 @@ def _runner_cancel_level(claim: Claim, ev: Evidence, claimed: str | None) -> str
     finished too, which it then marks cancelled). `runner.sh status|result <id>` is a read: its exit code
     is the job's state, not the read's, so it is ignored, and the job status the output stated
     (``observed_status``) backs only the passive "job <id> was cancelled", never "I cancelled job <id>".
-    Only a command that runs the runner alone (after a `cd`) counts: a second command's output could be
-    the status line."""
-    runs = ev.runs
-    calls = [(prog, args) for prog, args, _ in runs or () if _base(prog) != "cd"]
-    if len(calls) != 1:
-        return "none"
-    prog, args = calls[0]
-    if _base(prog) in ("bash", "sh") and args and not args[0].startswith("-"):
-        prog, args = args[0], args[1:]
-    pos = _positional(args)
-    if prog.rpartition("/")[2] != "runner.sh" or len(pos) < 2:
-        return "none"
-    if pos[0] == "cancel":
-        return _work_level(claimed, [pos[1]]) if ev.exit_code == 0 else "none"
-    if pos[0] in ("status", "result") and ev.observed_status == "cancelled" \
+    A cancel counts wherever it is in the command when it certainly ran and succeeded; a status read
+    counts only when the command runs the runner alone (after a `cd`): a second command's output could
+    be the status line. A row that kept no command backs nothing: it could be any command."""
+    runs = ev.runs or ()
+    levels = ["none"]
+    for prog, args, certain in runs:
+        pos = _runner_args(prog, args)
+        if certain and pos is not None and len(pos) >= 2 and pos[0] == "cancel":
+            levels.append(_work_level(claimed, [pos[1]]))
+    calls = [(prog, args) for prog, args, _ in runs if _base(prog) != "cd"]
+    pos = _runner_args(*calls[0]) if len(calls) == 1 else None
+    if pos is not None and len(pos) >= 2 and pos[0] in ("status", "result") and ev.observed_status == "cancelled" \
             and re.search(r"cancel+ed$", claim.text, re.IGNORECASE):
-        return _work_level(claimed, [pos[1]])
-    return "none"
+        levels.append(_work_level(claimed, [pos[1]]))
+    return _best(levels)
+
+
+def _runner_args(prog: str, args: tuple[str, ...]) -> list[str] | None:
+    """The positional arguments of a `runner.sh` invocation (`bash [opts] runner.sh ...` too); None if not one."""
+    if _base(prog) in ("bash", "sh"):
+        rest = [a for a in args if not a.startswith("-")]  # `bash -x runner.sh`
+        if not rest:
+            return None
+        prog, args = rest[0], args[args.index(rest[0]) + 1:]
+    return _positional(args) if prog.rpartition("/")[2] == "runner.sh" else None
 
 
 def _cancel_level(claim: Claim, ev: Evidence) -> str:
@@ -1757,7 +1763,9 @@ def _cancel_level(claim: Claim, ev: Evidence) -> str:
             return "plausible"  # names only: a cancel cannot be told from a status read
         if action != "cancel":
             return "none"
-    return _work_level(claimed, [ev.args.get(k, "") for k in ("task_id", "id", "dag_id", "node_name")])
+    # a DAG cancel cancels the DAG (dag_id); a node_name it was given is not what it cancelled
+    keys = ("task_id", "id") if ev.tool_name == "cancel_task" else ("dag_id",)
+    return _work_level(claimed, [ev.args.get(k, "") for k in keys])
 
 
 # Kinds a "plausible" level still backs in a report: a write to a computed path and a deploy have no
@@ -1827,13 +1835,13 @@ def unverified_note(violations: list[ClaimViolation]) -> str:
 
     unbacked = [v for v in shown if v.evidence != "plausible"]
     unconfirmed = [v for v in shown if v.evidence == "plausible"]
-    parts = []
+    parts: list[str] = []
     if unbacked:
-        parts.append(f"No recorded tool call of this work backs: {quoted(unbacked)}.")
+        parts.append(f"No recorded tool call of this work backs: {quoted(unbacked)}")
     if unconfirmed:
-        parts.append(f"Could not confirm from the recorded calls: {quoted(unconfirmed)}.")
+        parts.append(f"Could not confirm from the recorded calls: {quoted(unconfirmed)}")
     more = f" (and {len(violations) - _UNVERIFIED_SHOWN} more)" if len(violations) > _UNVERIFIED_SHOWN else ""
-    return f"{UNVERIFIED_MARKER} {' '.join(parts)}{more} Treat these as not observed."
+    return f"{UNVERIFIED_MARKER} {'. '.join(parts)}{more}. Treat these as not observed."
 
 
 class ClaimVerifier:
