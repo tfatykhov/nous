@@ -1060,7 +1060,9 @@ def test_a_relative_runner_cancel_after_an_absolute_cd(command, exit_code, verif
     assert _verify(f"I cancelled job {JOB}.", evidence).verified is verified
 
 
-@pytest.mark.parametrize("text", ["I sent the report via Telegram.", "Message sent."])
+@pytest.mark.parametrize(
+    "text", ["I sent the report via Telegram.", "Message sent.", "I sent you the report on Telegram."]
+)
 @pytest.mark.parametrize("args", [{"file_path": "/tmp/r.pdf"}, {"file_path": "/tmp/r.pdf", "chat_id": "42"}])
 def test_a_telegram_send_backs_an_untargeted_send_claim(text, args):
     result = _verify(text, [Evidence("send_file", args)])
@@ -1068,9 +1070,20 @@ def test_a_telegram_send_backs_an_untargeted_send_claim(text, args):
 
 
 @pytest.mark.parametrize(
-    "text", ["Email sent.", "I emailed the report.", "I mailed the report.", "I sent the report via email."]
+    "text",
+    [
+        "Email sent.",
+        "I emailed the report.",
+        "I mailed the report.",
+        "I sent the report via email.",
+        # a recipient or channel a Telegram send reaches only through a chat id it was given
+        "I sent the report to Bob.",
+        "Message sent to Bob.",
+        "I sent the report via Slack.",
+        "I sent the report to Tim via WhatsApp.",
+    ],
 )
-def test_a_telegram_send_only_could_have_backed_an_email_claim(text):
+def test_a_telegram_send_only_could_have_backed_a_send_elsewhere(text):
     result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
     assert not result.verified and result.claims[0].evidence == "plausible"
 

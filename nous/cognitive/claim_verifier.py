@@ -1419,6 +1419,12 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
     return _best(levels)
 
 
+# A send claim whose clause names mail, or a recipient or channel other than the owner's Telegram ("to Bob",
+# "via Slack"): a send_file could have reached it only through a chat id it was given, never certainly.
+_ELSEWHERE = re.compile(r"mail|\b(?:to|via|by|on|through|over|into|with)\s+(?!(?:telegram|you|your)\b)\w",
+                        re.IGNORECASE)
+
+
 def evidence_level(claim: Claim, ev: Evidence) -> str:
     """How well one successful call supports one claim: exact, plausible or none."""
     kind = CLAIM_KINDS[claim.kind]
@@ -1432,7 +1438,7 @@ def evidence_level(claim: Claim, ev: Evidence) -> str:
     if ev.tool_name == "send_file":  # a Telegram send: no named address, and no e-mail
         if claim.target:
             return "none"
-        return "plausible" if re.search(r"mail", claim.clause or claim.text, re.IGNORECASE) else "exact"
+        return "plausible" if _ELSEWHERE.search(claim.clause or claim.text) else "exact"
     if not ev.args:  # names-only evidence from a legacy caller
         return "plausible"
     if ev.tool_name == "bash":
