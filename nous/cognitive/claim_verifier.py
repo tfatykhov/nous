@@ -40,6 +40,8 @@ class ClaimViolation:
     found_in_turn: bool
     found_in_ledger: bool
     capable_tools: tuple[str, ...] = ()  # every tool that could have grounded it
+    # "plausible": a call could have done it but does not show it did (verify_report: not confirmed)
+    evidence: str = "none"
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,8 @@ class Evidence:
     # False: the call failed or was blocked -- evidence only that it was TRIED
     # (a report's verdict on an action, verify_report)
     ok: bool = True
+    # bash: the job status a `runner.sh status|result` output stated (execution_ledger.observed_status)
+    observed_status: str | None = None
 
     @cached_property
     def runs(self) -> tuple[Invocation, ...] | None:
@@ -1441,7 +1445,7 @@ REPORT_KINDS: dict[str, ClaimKind] = {
     "merge": ClaimKind("bash", frozenset({"bash", "run_python"})),
     "pr_create": ClaimKind("bash", frozenset({"bash", "run_python"})),
     "test_run": ClaimKind("bash", frozenset({"bash", "run_python"})),
-    "cancel": ClaimKind("cancel_task", frozenset({"cancel_task", "dag", "dag_manage"})),
+    "cancel": ClaimKind("cancel_task", frozenset({"cancel_task", "dag", "dag_manage", "bash"})),
 }
 # What a command must RUN to back the claim: read from the parsed invocations
 # (the shell wrappers -- `bash -lc`, `env`, `cd x &&` -- already unwrapped), never
@@ -1614,19 +1618,25 @@ def _report_run_level(claim: Claim, ev: Evidence) -> str:
 _PR = r"(?:PR|pull\s+request)(?:\s*#\d+)?"
 _PASSIVE = r"\s+(?:(?:was|were|has\s+been|have\s+been|got|is|is\s+now)\s+)?"
 _CANCELLABLE = r"(?:task|subtask|run|job|dag|schedule|intention|work|chain)"
+# The work item a cancel claim names: a runner job id, a hex id (a UUID or its prefix, with a digit, so
+# "decade" is no id), or a slug (a DAG name, only read as one after "DAG").
+_JOB_ID = r"job-\d{8}-\d{6}-[0-9a-f]{6,}"
+_HEX_ID = r"(?=[0-9a-f-]*\d)[0-9a-f]{6,}(?:-[0-9a-f]{4,12}){0,4}"
+_SLUG = r"(?=[\w.]{0,80}[-_])[a-z0-9][\w.-]{0,80}[a-z0-9]"
+_WORK_ID = rf"`?(?:{_JOB_ID}|{_HEX_ID}|{_SLUG})\b`?"
 # (pattern, kind, attempt_only). Active forms need the first person or a
 # sentence opening ("Merged PR #4."): "Tim merged PR #4" is not the agent's.
 _REPORT_PATTERNS: list[tuple[str, str, bool]] = [
     (rf"\b(?:e-?mails?|messages?){_PASSIVE}sent\b{_NOT_BY}", "email", False),
-    (rf"{_OPENING}(?:sent|e-?mailed)\s+(?:the\s+|an\s+)?e-?mail\b", "email", False),
+    (rf"{_OPENING}(?:sent|e-?mailed)\s+(?:the\s+|an\s+)?e-?mail\b(?:\s+to\s+{_ADDRESS})?", "email", False),
     (rf"\b{_PR}{_PASSIVE}merged\b{_NOT_BY}", "merge", False),
     (rf"(?:{_FIRST}|{_OPENING})merged\s+(?:the\s+)?(?:{_PR}|#\d+|branch)", "merge", False),
     (rf"\b{_PR}{_PASSIVE}(?:opened|created|raised|filed)\b{_NOT_BY}", "pr_create", False),
     (rf"(?:{_FIRST}|{_OPENING})(?:opened|created|raised|filed)\s+(?:a\s+|the\s+)?(?:new\s+|draft\s+)?{_PR}",
      "pr_create", False),
-    (rf"(?:{_FIRST}|{_OPENING})cancel+ed\s+(?:the\s+|that\s+|this\s+)?(?:[\w-]+\s+)?{_CANCELLABLE}\b",
-     "cancel", False),
-    (rf"\b{_CANCELLABLE}(?:\s+[0-9a-f]{{6,}})?{_PASSIVE}cancel+ed\b{_NOT_BY}", "cancel", False),
+    (rf"(?:{_FIRST}|{_OPENING})cancel+ed\s+(?:the\s+|that\s+|this\s+)?(?:[\w-]+\s+)?{_CANCELLABLE}\b(?!-)"
+     rf"(?:\s+{_WORK_ID})?", "cancel", False),
+    (rf"\b(?:{_CANCELLABLE}\b(?!-)(?:\s+{_WORK_ID})?|{_JOB_ID}){_PASSIVE}cancel+ed\b{_NOT_BY}", "cancel", False),
     # a verdict on a cancel says one was issued, whatever it did
     (r"\bcancel(?:l?ation)?\s+(?:did\s+not|didn['’]t|failed|worked|succeeded|took\s+effect|was\s+ignored)"
      r"(?:\s+[\w-]+){0,3}", "cancel", True),
@@ -1666,6 +1676,102 @@ def _reported_before(reported: list[int], scope_starts: list[int], start: int) -
     return i < len(reported) and reported[i] < start
 
 
+_JOB_ID_RE = re.compile(rf"\b{_JOB_ID}\b", re.IGNORECASE)
+_HEX_ID_RE = re.compile(rf"\b{_HEX_ID}\b", re.IGNORECASE)
+_DAG_SLUG_RE = re.compile(rf"\bdag\s+`?({_SLUG})\b", re.IGNORECASE)
+
+
+def _claimed_work_id(text: str) -> str | None:
+    """The work item a cancel claim names (a job id, a hex id, or a DAG's name), lowercased; None if none."""
+    for found in (_JOB_ID_RE.search(text), _HEX_ID_RE.search(text)):
+        if found:
+            return found.group(0).lower()
+    found = _DAG_SLUG_RE.search(text)
+    return found.group(1).lower() if found else None
+
+
+def _id_shape(value: str) -> str:
+    if _JOB_ID_RE.fullmatch(value):
+        return "job"
+    return "hex" if _HEX_ID_RE.fullmatch(value) else "slug"
+
+
+def _work_level(claimed: str | None, values: list[str]) -> str:
+    """Whether a call on ``values`` (the ids it was given) was on the work item a claim names.
+
+    Only ids of one shape are compared -- a hex prefix with a UUID (or a job id's hex tail), a job id with
+    a job id, a DAG name with a node name: a name and a UUID neither confirm nor refute each other."""
+    if claimed is None:
+        return "plausible"  # the claim names no work item: any cancel could be it
+    shape = _id_shape(claimed)
+    comparable: list[str] = []
+    for value in (v.lower() for v in values if v):
+        if _id_shape(value) == shape:
+            comparable.append(value)
+        elif shape == "hex" and _id_shape(value) == "job":
+            comparable.append(value.rsplit("-", 1)[-1])
+    if not comparable:
+        return "plausible"
+    if shape == "hex":
+        hit = any(v.startswith(claimed) or claimed.startswith(v) for v in comparable)
+    else:
+        hit = claimed in comparable
+    return "exact" if hit else "none"
+
+
+def _runner_cancel_level(claim: Claim, ev: Evidence, claimed: str | None) -> str:
+    """What a bash call of the job runner tells about a cancel claim.
+
+    `runner.sh cancel <id>` that exited 0 backs a cancel of that job (it exits 0 for a job already
+    finished too, which it then marks cancelled). `runner.sh status|result <id>` is a read: its exit code
+    is the job's state, not the read's, so it is ignored, and the job status the output stated
+    (``observed_status``) backs only the passive "job <id> was cancelled", never "I cancelled job <id>".
+    Only a command that runs the runner alone (after a `cd`) counts: a second command's output could be
+    the status line."""
+    runs = ev.runs
+    calls = [(prog, args) for prog, args, _ in runs or () if _base(prog) != "cd"]
+    if len(calls) != 1:
+        return "none"
+    prog, args = calls[0]
+    if _base(prog) in ("bash", "sh") and args and not args[0].startswith("-"):
+        prog, args = args[0], args[1:]
+    pos = _positional(args)
+    if prog.rpartition("/")[2] != "runner.sh" or len(pos) < 2:
+        return "none"
+    if pos[0] == "cancel":
+        return _work_level(claimed, [pos[1]]) if ev.exit_code == 0 else "none"
+    if pos[0] in ("status", "result") and ev.observed_status == "cancelled" \
+            and re.search(r"cancel+ed$", claim.text, re.IGNORECASE):
+        return _work_level(claimed, [pos[1]])
+    return "none"
+
+
+def _cancel_level(claim: Claim, ev: Evidence) -> str:
+    """How well one recorded call backs a cancel claim: it must be a cancel, of the work item named."""
+    claimed = _claimed_work_id(claim.text)
+    if ev.tool_name == "bash":
+        return _runner_cancel_level(claim, ev, claimed)
+    action = ev.args.get("action")
+    if ev.tool_name != "cancel_task":
+        if action is None:
+            return "plausible"  # names only: a cancel cannot be told from a status read
+        if action != "cancel":
+            return "none"
+    return _work_level(claimed, [ev.args.get(k, "") for k in ("task_id", "id", "dag_id", "node_name")])
+
+
+# Kinds a "plausible" level still backs in a report: a write to a computed path and a deploy have no
+# exact form, a test claim's exit code is already checked, a verdict says only that something was tried,
+# and a cancel that names no work item is backed by any cancel. Every other completion claim (sent,
+# merged, pushed, committed, opened a PR, cancelled <id>) needs a call that shows it happened.
+_PLAUSIBLE_BACKS = frozenset({"file_write", "deploy", "test_run"})
+
+
+def _backed_by_plausible(claim: Claim) -> bool:
+    return (claim.kind in _PLAUSIBLE_BACKS or claim.attempt_only
+            or (claim.kind == "cancel" and _claimed_work_id(claim.text) is None))
+
+
 UNVERIFIED_MARKER = "[Unverified claims]"
 _UNVERIFIED_SHOWN = 5
 
@@ -1686,10 +1792,7 @@ def report_level(claim: Claim, ev: Evidence) -> str:
     if ev.tool_name not in kind.capable_tools:
         return "none"
     if claim.kind == "cancel":
-        action = ev.args.get("action")
-        if ev.tool_name != "cancel_task" and action is not None:
-            return "exact" if action == "cancel" else "none"
-        return "exact" if ev.tool_name == "cancel_task" else "plausible"
+        return _cancel_level(claim, ev)
     outcome = _test_outcome(claim)
     if outcome is not None and (ev.exit_code is None or (ev.exit_code == 0) != (outcome == "pass")):
         return "none"  # a pass needs exit 0 and a failure a non-zero exit; an unknown exit backs neither
@@ -1706,7 +1809,8 @@ def ledger_evidence(actions: Any) -> list[Evidence]:
     """Every call of an in-memory ledger as evidence, the failed ones marked."""
     return [
         Evidence(a.tool_name, a.evidence_args, a.exit_code, a.side_effect_type,
-                 a.invocations if a.tool_name == "bash" else _UNREAD, ok=a.status == "success")
+                 a.invocations if a.tool_name == "bash" else _UNREAD, ok=a.status == "success",
+                 observed_status=a.observed_status)
         for a in actions
     ]
 
@@ -1714,14 +1818,22 @@ def ledger_evidence(actions: Any) -> list[Evidence]:
 def unverified_note(violations: list[ClaimViolation]) -> str:
     """The line a report or arrival note carries for its unbacked claims.
 
-    The claims are quoted, so reading the note again extracts none of them."""
-    quoted = "; ".join(
-        '"' + " ".join(v.claimed_text.replace('"', "'").split())[:120] + '"'
-        for v in violations[:_UNVERIFIED_SHOWN]
-    )
+    The claims are quoted, so reading the note again extracts none of them. A claim some call could
+    have done (``evidence == "plausible"``) is worded apart: it is not confirmed, not refuted."""
+    shown = violations[:_UNVERIFIED_SHOWN]
+
+    def quoted(group: list[ClaimViolation]) -> str:
+        return "; ".join('"' + " ".join(v.claimed_text.replace('"', "'").split())[:120] + '"' for v in group)
+
+    unbacked = [v for v in shown if v.evidence != "plausible"]
+    unconfirmed = [v for v in shown if v.evidence == "plausible"]
+    parts = []
+    if unbacked:
+        parts.append(f"No recorded tool call of this work backs: {quoted(unbacked)}.")
+    if unconfirmed:
+        parts.append(f"Could not confirm from the recorded calls: {quoted(unconfirmed)}.")
     more = f" (and {len(violations) - _UNVERIFIED_SHOWN} more)" if len(violations) > _UNVERIFIED_SHOWN else ""
-    return (f"{UNVERIFIED_MARKER} No recorded tool call of this work backs: {quoted}{more}. "
-            "Treat these as not observed.")
+    return f"{UNVERIFIED_MARKER} {' '.join(parts)}{more} Treat these as not observed."
 
 
 class ClaimVerifier:
@@ -1824,6 +1936,9 @@ class ClaimVerifier:
         recorded call of the work, failed ones marked ``ok=False``;
         ``cancelled`` is true when the work was cancelled outside any tool call
         (the owner's cancel), which backs a claim about a cancel.
+        A completion claim needs ``exact`` evidence; a ``plausible`` one is a
+        violation marked ``evidence="plausible"`` (not confirmed), except for
+        the kinds ``_backed_by_plausible`` lets through.
         Deterministic and model-free; it never blocks anything.
         """
         first = self._extract_claims(text)
@@ -1838,7 +1953,7 @@ class ClaimVerifier:
             else:
                 level = _best(["none", *(report_level(claim, ev) for ev in evidence)])
             checks.append(ClaimCheck(claim.kind, claim.text, level))
-            if level == "none":
+            if level == "none" or (level == "plausible" and not _backed_by_plausible(claim)):
                 kind = CLAIM_KINDS.get(claim.kind) or REPORT_KINDS[claim.kind]
                 violations.append(ClaimViolation(
                     claimed_text=claim.text,
@@ -1846,6 +1961,7 @@ class ClaimVerifier:
                     found_in_turn=False,
                     found_in_ledger=False,
                     capable_tools=tuple(sorted(kind.capable_tools)),
+                    evidence=level,
                 ))
         if not violations:
             return VerificationResult(verified=True, claims=checks)
@@ -1881,8 +1997,9 @@ class ClaimVerifier:
                 if any(k2 == kind and s < end and start < e for k2, (s, e) in taken):
                     continue
                 taken.add((kind, (start, end)))
+                target = match.groupdict().get("target")
                 found.append(Claim(kind=kind, text=match.group(0).strip(), span=(start, end),
-                                   attempt_only=attempt))
+                                   target=target.lower() if target else None, attempt_only=attempt))
         found.sort(key=lambda claim: claim.span[0])
         return found
 

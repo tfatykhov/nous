@@ -164,16 +164,31 @@ def _summary_exit_code(summary: str | None) -> int | None:
     return None
 
 
+def _summary_status(summary: str | None) -> str | None:
+    """The runner job status a durable bash summary keeps (``status <word>``, before the output's length)."""
+    for part in (summary or "").split("; "):
+        if m := re.fullmatch(r"status (running|completed|failed|cancelled|unknown)", part):
+            return m.group(1)
+        if re.match(r"\d+ chars of output", part):
+            break
+    return None
+
+
 def _ledger_row_evidence(row: Any) -> Evidence:
     """A durable ledger row as claim evidence. The row keeps a hash of a command or a script, never the text, so
-    those are names-only evidence unless detail capture kept the redacted input. A bash row keeps its exit code."""
+    those are names-only evidence unless detail capture kept the redacted input. A bash row keeps its exit code
+    and the runner job status it read."""
     if row.tool_name in ("bash", "run_python"):
         key = "command" if row.tool_name == "bash" else "code"
         args = {key: row.input_text} if row.input_text else {}
     else:
         args = {str(k): str(v) for k, v in (row.key_args or {}).items()}
-    exit_code = _summary_exit_code(row.result_summary) if row.tool_name == "bash" else None
-    return Evidence(row.tool_name, args, exit_code, row.side_effect_type, ok=row.status == "success")
+    bash = row.tool_name == "bash"
+    exit_code = _summary_exit_code(row.result_summary) if bash else None
+    status = _summary_status(row.result_summary) if bash else None
+    return Evidence(
+        row.tool_name, args, exit_code, row.side_effect_type, ok=row.status == "success", observed_status=status
+    )
 
 
 def make_resolve_intention_executor(

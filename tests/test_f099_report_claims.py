@@ -146,7 +146,7 @@ def test_report_evidence_is_the_executed_program_not_the_command_text(text, comm
 
 
 def test_run_python_backs_a_report_only_by_what_it_runs():
-    ran = "import subprocess\nsubprocess.run(['gh', 'pr', 'merge', '4'])"
+    ran = "import subprocess\nsubprocess.run(['gh', 'pr', 'merge', '4'], check=True)"
     assert _verify("PR #4 merged.", [Evidence("run_python", {"code": ran})]).verified
     assert not _verify("PR #4 merged.", [Evidence("run_python", {"code": "print('gh pr merge 4')"})]).verified
 
@@ -248,8 +248,11 @@ def test_a_merge_that_exited_non_zero_does_not_back_merged():
 
 
 def test_a_durable_row_keeps_no_command_so_any_shell_call_is_plausible():
-    """The durable ledger hashes a command: names-only evidence, never a false flag."""
-    assert _verify("PR #4 merged.", [Evidence("bash", {})]).verified
+    """The durable ledger hashes a command: names-only evidence, which cannot confirm a merge (round 3) and
+    is worded as unconfirmed, not as refuted."""
+    result = _verify("PR #4 merged.", [Evidence("bash", {})])
+    assert [c.evidence for c in result.claims] == ["plausible"]
+    assert not result.verified and "could not confirm" in result.correction.lower()
 
 
 @pytest.mark.parametrize(
@@ -678,3 +681,277 @@ def test_gh_run_requires_exit_status_for_ci_claims(command, should_back):
         assert result.verified, f"{command!r} should back the CI claim but didn't"
     else:
         assert not result.verified, f"{command!r} should NOT back the CI claim but did"
+
+
+# ---- F099 round 3: the #754 inline P1s, the runner.sh status false positive, canaries C1-C7 ----
+
+JOB = "job-20261021-010336-2b31b663"
+OTHER_JOB = "job-20261022-000000-aaaa1111"
+STATUS_OUTPUT = (
+    f"Job: {JOB}\nStatus: cancelled\nPID: 4242 (alive: no)\nStarted: 2026-10-21T01:03:36Z\n"
+    "Finished: 2026-10-21T01:05:15Z\nConfig:\n{}\nExit code: 1"
+)
+
+
+def _status_read(output=STATUS_OUTPUT, command=f"bash runner.sh status {JOB}", exit_code=1):
+    """A `runner.sh status` call as the in-memory ledger records it: bash, exit 1, the status kept."""
+    from nous.cognitive.claim_verifier import ledger_evidence
+    from nous.cognitive.execution_ledger import ExecutionLedger
+
+    ledger = ExecutionLedger(session_id="s")
+    ledger.record("bash", {"command": command}, output.replace("Exit code: 1", f"Exit code: {exit_code}"), "success")
+    return ledger_evidence(ledger.actions)
+
+
+@pytest.mark.parametrize(
+    ("text", "evidence"),
+    [
+        ("Email sent to x@example.com.", INCIDENT_LOG),  # C1: no send at all
+        (TEST_6_NOTE, INCIDENT_LOG),  # C2: the test-6 verdict, no cancel issued
+        ("Sent an email to alice@example.com.", [Evidence("send_email", {"to": "bob@example.com"})]),  # C3
+        (
+            "I cancelled task 8f10c3ba.",  # C4: the cancel was of another task
+            [Evidence("cancel_task", {"task_id": "1b2c3d4e-0000-4000-8000-000000000000"})],
+        ),
+        (
+            "PR #4 merged.",  # C5: an unchecked subprocess.run can fail and exit 0
+            [Evidence("run_python", {"code": "import subprocess\nsubprocess.run(['gh', 'pr', 'merge', '4'])"})],
+        ),
+    ],
+    ids=["C1-email-no-send", "C2-test-6", "C3-wrong-recipient", "C4-wrong-task", "C5-unchecked-merge"],
+)
+def test_canary_an_unbacked_completion_claim_fires(text, evidence):
+    result = _verify(text, evidence)
+    assert not result.verified
+    assert result.correction.startswith(UNVERIFIED_MARKER)
+
+
+@pytest.mark.parametrize(
+    ("text", "evidence"),
+    [
+        (f"Job {JOB} was cancelled.", _status_read()),
+        ("The job was cancelled.", _status_read()),  # the live arrival 0a5f2b67 sentence: no id named
+        (f"{JOB} was cancelled.", _status_read()),
+        (f"I cancelled job {JOB}.", [Evidence("bash", {"command": f"bash runner.sh cancel {JOB}"}, exit_code=0)]),
+        ("Sent an email to alice@example.com.", [Evidence("send_email", {"to": "alice@example.com"})]),
+        ("All tests passed.", [Evidence("bash", {"command": "pytest -q"}, exit_code=0)]),
+    ],
+    ids=[
+        "C6-status-read",
+        "C6-status-read-no-id",
+        "C6-status-read-bare-id",
+        "C6-runner-cancel",
+        "C6-right-recipient",
+        "C6-pytest",
+    ],
+)
+def test_canary_a_backed_claim_does_not_fire(text, evidence):
+    assert _verify(text, evidence).verified
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The subtask said the email was sent, but I could not confirm it.",
+        "The subtask reported that job 8f10c3ba was cancelled.",
+    ],
+)
+def test_canary_reported_speech_does_not_fire(text):  # C7
+    assert _verify(text).verified and _verify(text).claims == []
+
+
+# P1 :1841 -- plausible evidence no longer verifies a completion claim
+
+
+@pytest.mark.parametrize(
+    ("text", "evidence"),
+    [
+        ("PR #4 merged.", [Evidence("bash", {})]),  # a durable row that kept no command
+        ("Email sent.", [Evidence("send_email", {})]),  # names only
+        ("Opened PR #12.", [Evidence("bash", {"command": "./ship.sh"}, exit_code=0)]),  # a script may have
+    ],
+)
+def test_plausible_evidence_is_a_soft_violation_for_a_completion_claim(text, evidence):
+    result = _verify(text, evidence)
+    assert not result.verified
+    assert [v.evidence for v in result.violations] == ["plausible"]
+    assert "could not confirm" in result.correction.lower()
+    assert "no recorded tool call" not in result.correction.lower()
+
+
+def test_a_checked_subprocess_merge_still_verifies():
+    code = "import subprocess\nsubprocess.run(['gh', 'pr', 'merge', '4'], check=True)"
+    assert _verify("PR #4 merged.", [Evidence("run_python", {"code": code})]).verified
+
+
+def test_the_note_words_unbacked_and_unconfirmed_claims_apart():
+    unchecked = "import subprocess\nsubprocess.run(['gh', 'pr', 'merge', '4'])"
+    result = _verify("Email sent to x@example.com. PR #4 merged.", [Evidence("run_python", {"code": unchecked})])
+    assert [v.evidence for v in result.violations] == ["none", "plausible"]
+    note = result.correction
+    assert "No recorded tool call of this work backs" in note and "Could not confirm" in note
+
+
+@pytest.mark.parametrize(
+    ("text", "evidence"),
+    [
+        # kinds with no exact form, or that claim no completed outward action, keep plausible
+        ("Saved to /tmp/report.md.", [Evidence("bash", {"command": "./build.sh"}, exit_code=0)]),
+        ("All tests passed.", [Evidence("bash", {"command": "./ci.sh"}, exit_code=0)]),
+        ("The cancel did not take effect.", [Evidence("dag_manage", {})]),
+        ("I cancelled the task.", [Evidence("dag_manage", {})]),  # no id named: any cancel backs it
+    ],
+)
+def test_plausible_still_backs_a_kind_without_an_exact_form(text, evidence):
+    assert _verify(text, evidence).verified
+
+
+# P1 :1692 -- a cancel backs only a claim about the work item it cancelled
+
+TASK = "8f10c3ba-1111-4222-8333-444455556666"
+DAG_ID = "5e6f7a8b-1111-4222-8333-444455556666"
+
+
+@pytest.mark.parametrize(
+    ("text", "evidence", "verified"),
+    [
+        ("I cancelled task 8f10c3ba.", Evidence("cancel_task", {"task_id": TASK}), True),
+        (f"Task {TASK} was cancelled.", Evidence("cancel_task", {"task_id": TASK}), True),
+        (
+            "Task 8f10c3ba was cancelled.",
+            Evidence("cancel_task", {"task_id": "9a9a9a9a-0000-4000-8000-000000000000"}),
+            False,
+        ),
+        ("I cancelled the task.", Evidence("cancel_task", {"task_id": TASK}), True),
+        ("I cancelled the 8f10c3ba subtask.", Evidence("cancel_task", {"task_id": TASK}), True),
+        ("I cancelled DAG 5e6f7a8b.", Evidence("dag_manage", {"action": "cancel", "dag_id": DAG_ID}), True),
+        ("I cancelled DAG 7c7c7c7c.", Evidence("dag_manage", {"action": "cancel", "dag_id": DAG_ID}), False),
+        (
+            "I cancelled DAG nightly-build.",
+            Evidence("dag_manage", {"action": "cancel", "node_name": "nightly-build"}),
+            True,
+        ),
+        (
+            "I cancelled DAG nightly-build.",
+            Evidence("dag_manage", {"action": "cancel", "node_name": "other-dag"}),
+            False,
+        ),
+        # a slug cannot be compared with a UUID: not confirmed, not refuted
+        ("I cancelled DAG nightly-build.", Evidence("dag_manage", {"action": "cancel", "dag_id": DAG_ID}), False),
+        ("I cancelled DAG nightly-build.", Evidence("dag_manage", {"action": "status", "dag_id": DAG_ID}), False),
+        # "the DAG because ..." names no DAG
+        ("I cancelled the DAG because it hung.", Evidence("dag_manage", {"action": "cancel", "dag_id": DAG_ID}), True),
+    ],
+)
+def test_a_cancel_backs_only_the_named_work_item(text, evidence, verified):
+    assert _verify(text, [evidence]).verified is verified
+
+
+def test_an_incomparable_id_is_unconfirmed_not_refuted():
+    result = _verify("I cancelled DAG nightly-build.", [Evidence("dag_manage", {"action": "cancel", "dag_id": DAG_ID})])
+    assert [c.evidence for c in result.claims] == ["plausible"]
+
+
+def test_the_in_memory_ledger_keeps_the_cancelled_id():
+    from nous.cognitive.execution_ledger import evidence_args
+
+    assert evidence_args("cancel_task", {"task_id": TASK, "reason": "x"}) == {"task_id": TASK}
+    assert evidence_args("dag_manage", {"action": "cancel", "dag_id": DAG_ID}) == {"action": "cancel", "dag_id": DAG_ID}
+
+
+# P1 :1621 -- an opening "Sent an email to <addr>" names its recipient
+
+
+def test_an_opening_send_claim_carries_its_recipient():
+    result = _verify("Sent an email to Alice@Example.com.", [Evidence("send_email", {"to": "bob@example.com"})])
+    assert not result.verified
+    assert _verify(
+        "Sent an email to Alice@Example.com.", [Evidence("send_email", {"to": "alice@example.com"})]
+    ).verified
+    assert _verify("Sent the email.", [Evidence("send_email", {"to": "bob@example.com"})]).verified
+
+
+# the runner.sh status false positive
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"Job {OTHER_JOB} was cancelled.",  # another job
+        f"{OTHER_JOB} was cancelled.",
+        "Job aaaa1111 was cancelled.",  # another job's hex tail
+        f"I cancelled job {JOB}.",  # a status read shows the state, not that this work cancelled it
+        "PR #4 merged.",
+        "All tests passed.",
+    ],
+)
+def test_a_status_read_backs_only_the_cancelled_state_of_its_own_job(text):
+    assert not _verify(text, _status_read()).verified
+
+
+@pytest.mark.parametrize(
+    ("output", "command"),
+    [
+        (STATUS_OUTPUT.replace("Status: cancelled", "Status: completed"), f"bash runner.sh status {JOB}"),
+        (STATUS_OUTPUT.replace("Status: cancelled", "Status: running"), f"bash runner.sh status {JOB}"),
+        # the status must be the runner's own output, not a second command's
+        ("Status: cancelled\nExit code: 1", "bash runner.sh list; echo 'Status: cancelled'"),
+        ("Status: cancelled\nExit code: 1", f"echo 'Status: cancelled' # runner.sh status {JOB}"),
+        (f"Job: {JOB}\nStatus: cancelled\nExit code: 1", f"bash runner.sh status {JOB}; echo done"),
+        # a status line past the head of the output is not read
+        ("x" * 400 + "\nStatus: cancelled\nExit code: 1", f"bash runner.sh status {JOB}"),
+    ],
+)
+def test_only_the_runners_own_cancelled_status_backs_the_claim(output, command):
+    assert not _verify(f"Job {JOB} was cancelled.", _status_read(output, command)).verified
+
+
+def test_runner_result_reads_back_the_status_too():
+    output = "Status: cancelled\nNo output yet.\nExit code: 0"
+    assert _verify(f"Job {JOB} was cancelled.", _status_read(output, f"bash runner.sh result {JOB}", 0)).verified
+
+
+@pytest.mark.parametrize(
+    ("command", "exit_code", "verified"),
+    [
+        (f"bash runner.sh cancel {JOB}", 0, True),
+        (f"/tmp/nous-workspace/claude-jobs/runner.sh cancel {JOB}", 0, True),
+        (f"bash runner.sh cancel {JOB}", 1, False),  # the cancel failed
+        (f"bash runner.sh cancel {OTHER_JOB}", 0, False),
+        (f"bash runner.sh status {JOB}", 0, False),  # a read is no cancel
+    ],
+)
+def test_runner_cancel_backs_a_cancel_of_that_job(command, exit_code, verified):
+    assert (
+        _verify(f"I cancelled job {JOB}.", [Evidence("bash", {"command": command}, exit_code=exit_code)]).verified
+        is verified
+    )
+
+
+def test_the_durable_row_keeps_the_runners_status():
+    summary = _summary(STATUS_OUTPUT, "bash", "success")
+    assert "status cancelled" in summary and JOB not in summary
+    row = SimpleNamespace(
+        tool_name="bash",
+        status="success",
+        key_args={},
+        input_text=f"bash runner.sh status {JOB}",
+        result_summary=summary,
+        side_effect_type="none",
+    )
+    evidence = _ledger_row_evidence(row)
+    assert (evidence.exit_code, evidence.observed_status) == (1, "cancelled")
+    assert _verify(f"Job {JOB} was cancelled.", [evidence]).verified
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "Status: hacked; token=abc\nExit code: 0",  # never a word outside the runner's set
+        "x" * 400 + "\nStatus: cancelled\nExit code: 0",
+        "no status here\nExit code: 0",
+    ],
+)
+def test_the_durable_row_keeps_no_status_it_cannot_vouch_for(output):
+    summary = _summary(output, "bash", "success")
+    assert "status " not in summary and "hacked" not in summary

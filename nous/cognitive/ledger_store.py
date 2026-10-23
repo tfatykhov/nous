@@ -43,6 +43,7 @@ from nous.api.execution_context import ExecutionContext
 from nous.cognitive.execution_ledger import (
     bash_exit_code,
     classify_side_effect,
+    observed_status,
     redact_error_text,
     redact_text,
 )
@@ -309,7 +310,8 @@ def _summary(
     print whatever the code prints (`cat .env; touch x` is a write whose
     output is a secrets file). None of that is vettable by pattern redaction,
     and the arguments are already hashed in key_args. The shape is its length,
-    plus bash's authoritative exit-code trailer and timeout line. The one
+    plus bash's authoritative exit-code trailer and timeout line, and the job
+    status a `runner.sh status` prints (one word of a fixed set). The one
     exception is a call that closed ``error``: its first ERROR_EXCERPT_CHARS
     characters are kept after ``redact_error_text``, so a diagnostics job can
     see why it failed. That redaction cannot recognize an unlabeled value, so
@@ -332,6 +334,9 @@ def _summary(
                 body = body[timeout.end():]
             if (exit_code := bash_exit_code(text)) is not None:
                 parts.append(f"exit code {exit_code}")
+            # a word of runner.sh's own status set, read by a fixed pattern: never output text
+            if (status_word := observed_status(body)) is not None:
+                parts.append(f"status {status_word}")
         excerpt = ""
         if status == "error":
             # Redact the whole scan window, then cut: a secret across the cut stays masked.
