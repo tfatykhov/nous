@@ -640,15 +640,31 @@ def test_the_cli_does_not_count_the_pr_authors_own_replies(monkeypatch, capsys):
 
 
 def test_findings_flagged_on_head_without_a_visible_inline_comment_fail():
-    flagged = summary_comment({"commit_sha": HEAD, "status": "completed", "has_any_findings": True})
+    flagged = summary_comment({"commit_sha": HEAD, "status": "completed", "has_unresolved_findings": True})
     verdict = gate.evaluate_gate([review()], [], HEAD, GREEN, threads={}, issue_comments=[flagged])
     assert not verdict.passed
     assert "no Codex inline comment on head" in verdict.line()
-    unresolved = summary_comment({"commit_sha": HEAD, "status": "completed", "has_unresolved_findings": True})
-    assert not gate.evaluate_gate([review()], [], HEAD, GREEN, threads={}, issue_comments=[unresolved]).passed
     older = [inline(10, body=P2, commit_id=OLD, original=OLD, line=None)]
     verdict = gate.evaluate_gate([review()], older, HEAD, GREEN, threads={}, issue_comments=[flagged])
     assert "no Codex inline comment on head" in verdict.line()
+    any_only = summary_comment({"commit_sha": HEAD, "status": "completed", "has_any_findings": True})
+    verdict = gate.evaluate_gate([review()], [], HEAD, GREEN, threads={}, issue_comments=[any_only])
+    assert verdict.passed, verdict.line()
+
+
+def test_a_clean_review_whose_findings_are_all_resolved_passes():
+    """#782: any=true, unresolved=false, no inline comment or review on head, earlier threads resolved."""
+    state = {"commit_sha": HEAD, "status": "completed", "has_any_findings": True, "has_unresolved_findings": False}
+    older = [inline(10, body=P1, commit_id=OLD, original=OLD, line=None)]
+    verdict = gate.evaluate_gate(
+        [],
+        older,
+        HEAD,
+        GREEN,
+        threads={10: {"isResolved": True, "isOutdated": True, "resolvedBy": OWNER}},
+        issue_comments=[summary_comment(state)],
+    )
+    assert verdict.passed, verdict.line()
 
 
 def test_findings_flagged_on_head_with_only_a_p2_inline_comment_on_head_pass():

@@ -16,12 +16,14 @@ Rules (all on the PR's current head sha):
   that it hit its usage limit, the
   documented fallback (procedure "Gate PR merges on Codex review with no P1 findings (with quota-exhaustion
   fallback)") is to stop and get the owner's explicit approval to merge without Codex. The gate says so and
-  fails; it never passes on that fallback by itself.
+  fails; it never passes on that fallback by itself. A quota notice after a completed review of the same
+  head is ignored: the fallback is for a head Codex has not reviewed, and a new push needs a new review.
 * A P0 or P1 badge in the body of a Codex review of the head fails.
-* The head's ``codex-review-state`` marker reports findings (``has_any_findings`` or
-  ``has_unresolved_findings``) while no Codex inline comment was posted on the head: fails, since a deleted
-  inline comment is otherwise invisible. The flags carry no severity, so when inline comments on the head
-  are visible their badges decide.
+* The head's ``codex-review-state`` marker reports unresolved findings (``has_unresolved_findings``) while
+  no Codex inline comment was posted on the head: fails, since a deleted inline comment is otherwise
+  invisible. ``has_any_findings`` alone does not fail: it stays true once earlier findings are resolved
+  (#782). The flag carries no severity, so when inline comments on the head are visible their badges
+  decide.
 * Inline Codex P1 comments (thread roots by the Codex bot whose body carries a P0 or P1 badge, or no
   severity badge at all, so a change to the badge markup fails rather than hiding every finding):
 
@@ -169,7 +171,7 @@ def _check_codex_review(
         elif _QUOTA in (c.get("body") or ""):
             quota = True
     head_state = state if state.get("commit_sha") == head_sha else {}
-    if (head_state.get("has_any_findings") or head_state.get("has_unresolved_findings")) and not any(
+    if head_state.get("has_unresolved_findings") and not any(
         _is_codex_root(c) and c.get("original_commit_id") == head_sha for c in inline_comments
     ):
         verdict.reasons.append("Codex reports findings on head but no Codex inline comment on head is visible")
