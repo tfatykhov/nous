@@ -7,15 +7,17 @@ the Codex review bodies, and those never carry the findings. This gate reads the
 Rules (all on the PR's current head sha):
 
 * CI: the latest run of every check on the head (check runs, plus commit statuses) is completed with
-  conclusion success, neutral or skipped, and the ``Tests`` run is among them with conclusion success.
-  Pending or missing checks fail.
+  conclusion success, neutral or skipped; every check the default-branch ruleset requires
+  (``scripts/ops/main-ruleset.json``) is among them, and ``Tests`` concluded success. Pending or missing
+  required checks fail.
 * Codex has reviewed the head: a Codex review whose ``commit_id`` is the head, or the Codex summary comment
   whose ``codex-review-state`` marker says the code review of the head completed (a clean review posts no
-  review object). A review still running on the head fails ("wait"). If Codex hit its usage limit, the
+  review object). A review still running on the head fails ("wait"). If Codex's latest word on the PR is
+  that it hit its usage limit, the
   documented fallback (procedure "Gate PR merges on Codex review with no P1 findings (with quota-exhaustion
   fallback)") is to stop and get the owner's explicit approval to merge without Codex. The gate says so and
   fails; it never passes on that fallback by itself.
-* A P1 badge in the body of a Codex review of the head fails.
+* A P0 or P1 badge in the body of a Codex review of the head fails.
 * Inline Codex P1 comments (thread roots by the Codex bot whose body carries a P0 or P1 badge, or no
   severity badge at all, so a change to the badge markup fails rather than hiding every finding):
 
@@ -25,7 +27,8 @@ Rules (all on the PR's current head sha):
   3. posted on an earlier commit and still anchored on the head (thread not outdated, i.e. the anchored
      lines are unchanged, so GitHub moved its ``commit_id`` to the head): fails until the thread is
      resolved. A "Fixed in ..." reply is not evidence when the anchored code did not change.
-  4. posted on an earlier commit, thread outdated: passes only if someone replied AND the comment's file
+  4. posted on an earlier commit, thread outdated: passes only if someone other than Codex replied AND the
+     comment's file
      changed between the commit it was posted on and the head. That is known only while that commit is
      an ancestor of the head: after a rebase the file counts as unchanged, and so does a renamed file. A
      merge of the base branch into the PR can make a file look changed by the base's own commits; that is
@@ -52,6 +55,8 @@ from dataclasses import dataclass, field
 
 CODEX_LOGIN = "chatgpt-codex-connector[bot]"
 TESTS_CHECK = "Tests"
+# The checks the default-branch ruleset requires (scripts/ops/main-ruleset.json; a test keeps them in sync)
+REQUIRED_CHECKS = (TESTS_CHECK, "DB roles", "Protected paths")
 OK_CONCLUSIONS = {"success", "neutral", "skipped"}
 _BADGE = re.compile(r"!\[(P\d) Badge\]")
 _BLOCKING = {"P0", "P1"}
@@ -74,6 +79,7 @@ class Verdict:
 
     @property
     def passed(self) -> bool:
+        """True when no rule failed."""
         return not self.reasons
 
     def line(self) -> str:
@@ -101,8 +107,9 @@ def _check_ci(head_sha: str, check_runs: Iterable[Mapping], verdict: Verdict) ->
         name = run["name"]
         if name not in latest or run["id"] > latest[name]["id"]:
             latest[name] = run
-    if TESTS_CHECK not in latest:
-        verdict.reasons.append(f"no {TESTS_CHECK} check run on head")
+    for name in REQUIRED_CHECKS:
+        if name not in latest:
+            verdict.reasons.append(f"no {name} check run on head")
     for name, run in sorted(latest.items()):
         if run.get("status") != "completed":
             verdict.reasons.append(f"check {name} pending ({run.get('status')})")
@@ -121,16 +128,20 @@ def _check_codex_review(
         (c for c in issue_comments if _is_codex(c)), key=lambda c: c.get("updated_at") or c.get("created_at") or ""
     )
     state: Mapping = {}
+    quota = False  # Codex's latest word on the PR is that it hit its usage limit
     for c in codex_comments:
         m = _STATE.search(c.get("body") or "")
         if m:
             state = json.loads(m.group(1)).get("code_review") or {}
+            quota = False
+        elif _QUOTA in (c.get("body") or ""):
+            quota = True
     status = state.get("status") if state.get("commit_sha") == head_sha else None
-    if head_reviews or status == "completed":
-        return
     if status in {"in_progress", "queued", "pending", "running"}:
         verdict.reasons.append(f"Codex review of head in progress ({status}); wait")
-    elif any(_QUOTA in (c.get("body") or "") for c in codex_comments):
+    elif head_reviews or status == "completed":
+        return
+    elif quota:
         verdict.reasons.append(f"Codex has not reviewed head: {QUOTA_FALLBACK}")
     else:
         verdict.reasons.append("Codex has not reviewed head")
@@ -157,14 +168,11 @@ def _check_inline(
         if badges and not badges & _BLOCKING:
             open_minor += not resolved
             continue
+        kind = "P1" if badges else "Codex comment without a severity badge"
         where = f"{c.get('path')}:{c.get('line') or c.get('original_line')} (comment {c['id']}): {_title(body)}"
         original = c.get("original_commit_id")
-        if not badges:
-            if not resolved:
-                verdict.reasons.append(f"Codex inline comment without a severity badge {where}")
-            continue
         if original == head_sha:
-            verdict.reasons.append(f"P1 posted on head {where}")
+            verdict.reasons.append(f"{kind} posted on head {where}")
             continue
         if resolved:
             continue
@@ -172,7 +180,7 @@ def _check_inline(
             anchored = not thread["isOutdated"]
         else:
             anchored = c.get("commit_id") == head_sha and c.get("line") is not None
-        since = f"P1 from {str(original)[:8]}"
+        since = f"{kind} from {str(original)[:8]}"
         if anchored:
             verdict.reasons.append(f"{since} still anchored on head, thread unresolved {where}")
         elif c["id"] not in replied:
@@ -208,14 +216,16 @@ def evaluate_gate(
 
 
 def statuses_as_check_runs(statuses: Iterable[Mapping], head_sha: str) -> list[dict]:
-    """Commit statuses (``commits/<sha>/status``) in the shape of check runs, so ``_check_ci`` reads both."""
+    """Commit statuses (``commits/<sha>/status``) in the shape of check runs, so ``_check_ci`` reads both.
+
+    A status is named ``status:<context>``, so it neither satisfies nor hides a required check run."""
     runs = []
     for s in statuses:
         state = s.get("state")
         runs.append(
             {
                 "id": s.get("id", 0),
-                "name": s.get("context"),
+                "name": f"status:{s.get('context')}",  # its own name space: never shadows a check run
                 "head_sha": head_sha,
                 "status": "in_progress" if state == "pending" else "completed",
                 "conclusion": {"success": "success", "pending": None}.get(state, "failure"),
@@ -228,7 +238,7 @@ def touched_since(compare: Mapping, sha: str) -> set[str] | None:
     """The files changed from ``sha`` to the head, from a ``compare/<sha>...<head>`` payload, or ``None``.
 
     The three-dot compare diffs from the merge base, which is ``sha`` only while ``sha`` is an ancestor of
-    the head. After a rebase it is the old fork point, and the list would hold every file the PR touches, so
+    the head. After a rebase it is the old fork point, and the list would hold at least every file the PR touches, so
     that case is unknown. So is a list that may have been cut at GitHub's cap.
     """
     files = compare.get("files") or []
@@ -296,6 +306,7 @@ def fetch_and_evaluate(repo: str, number: int) -> Verdict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Print the verdict line for one PR; return 0 for PASS, 1 for FAIL (including unreadable data)."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("pr", type=int, help="pull request number")
     parser.add_argument("--repo", default="tfatykhov/nous", help="owner/name (default: %(default)s)")

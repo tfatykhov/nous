@@ -48,7 +48,9 @@ def run(name="Tests", conclusion="success", status="completed", rid=1, head_sha=
     return {"id": rid, "name": name, "head_sha": head_sha, "status": status, "conclusion": conclusion}
 
 
-GREEN = [run(), run("Lint & Format", rid=2)]
+GREEN = [run(), run("Lint & Format", rid=2), run("DB roles", rid=3), run("Protected paths", rid=4)]
+# PRs #753/#754 predate the DB roles and Protected paths checks (#770), so their heads lack them
+LATER_CHECKS = {"no DB roles check run on head", "no Protected paths check run on head"}
 
 
 def load(n):
@@ -98,7 +100,7 @@ def test_the_old_body_only_gate_would_have_passed_both_prs():
             r for r in data["reviews"] if r["user"]["login"] == CODEX and r["commit_id"] == data["head_sha"]
         ]
         assert head_reviews and not any("P1" in r["body"] for r in head_reviews)
-        reasons = evaluate_fixture(n).reasons
+        reasons = [r for r in evaluate_fixture(n).reasons if r not in LATER_CHECKS]
         assert reasons and all("P1" in r for r in reasons)
 
 
@@ -268,7 +270,7 @@ def test_missing_tests_check_fails():
 
 
 def test_only_the_latest_run_of_a_check_counts():
-    runs = [run(conclusion="failure", rid=1), run(conclusion="success", rid=7)]
+    runs = [run(conclusion="failure", rid=1), run(conclusion="success", rid=7)] + GREEN[1:]
     assert gate.evaluate_gate([review()], [], HEAD, runs, threads={}).passed
 
 
@@ -420,7 +422,8 @@ def test_the_cli_fails_pr753_on_the_head_p1_alone_once_older_p1s_were_fixed(monk
     monkeypatch.setattr(gate, "_gh_lines", fake_gh(753, paths))
     assert gate.main(["753"]) == 1
     out = capsys.readouterr().out.strip()
-    assert out.startswith("GATE: FAIL head=75943279323d10d0b7df569b9e0027692048824b P1 posted on head ")
+    assert out.startswith("GATE: FAIL head=75943279323d10d0b7df569b9e0027692048824b ")
+    assert "P1 posted on head nous/cognitive/execution_ledger.py:179" in out
     assert out.count("P1 ") == 1
 
 
@@ -431,3 +434,61 @@ def test_the_cli_prints_fail_when_it_cannot_read_the_pr(monkeypatch, capsys):
     monkeypatch.setattr(gate, "_gh_lines", broken)
     assert gate.main(["753"]) == 1
     assert capsys.readouterr().out.startswith("GATE: FAIL head=unknown could not read PR #753: FileNotFoundError")
+
+
+def test_the_required_checks_are_the_rulesets():
+    ruleset = json.loads((ROOT / "scripts" / "ops" / "main-ruleset.json").read_text())
+    required = [
+        c["context"]
+        for rule in ruleset["rules"]
+        if rule["type"] == "required_status_checks"
+        for c in rule["parameters"]["required_status_checks"]
+    ]
+    assert sorted(gate.REQUIRED_CHECKS) == sorted(required)
+
+
+def test_a_missing_required_check_fails():
+    verdict = gate.evaluate_gate([review()], [], HEAD, GREEN[:3], threads={})
+    assert not verdict.passed
+    assert "no Protected paths check run on head" in verdict.line()
+
+
+def test_a_commit_status_cannot_stand_in_for_a_check_run():
+    statuses = gate.statuses_as_check_runs([{"id": 99, "context": "Tests", "state": "success"}], HEAD)
+    verdict = gate.evaluate_gate([review()], [], HEAD, [run(conclusion="failure")] + GREEN[1:] + statuses, threads={})
+    assert not verdict.passed
+    assert "check Tests failure" in verdict.line()
+
+
+def test_a_rerun_in_progress_on_head_waits_even_after_a_review_of_head():
+    state = {"code_review": {"commit_sha": HEAD, "status": "in_progress"}}
+    summary = {"id": 5, "user": {"login": CODEX}, "body": f"<!-- codex-review-state:v1 {json.dumps(state)} -->"}
+    verdict = gate.evaluate_gate([review()], [], HEAD, GREEN, threads={}, issue_comments=[summary])
+    assert not verdict.passed
+    assert "in progress" in verdict.line()
+
+
+def test_a_badgeless_codex_comment_on_head_fails_even_when_resolved():
+    verdict = gate.evaluate_gate(
+        [review()], [inline(10, body="Something looks off")], HEAD, GREEN, threads={10: {"isResolved": True}}
+    )
+    assert not verdict.passed
+
+
+def test_an_old_quota_notice_followed_by_a_review_state_is_not_the_fallback():
+    quota = {
+        "id": 6,
+        "user": {"login": CODEX},
+        "updated_at": "2026-10-22T04:00:00Z",
+        "body": "You have reached your Codex usage limits",
+    }
+    state = {"code_review": {"commit_sha": OLD, "status": "completed"}}
+    summary = {
+        "id": 5,
+        "user": {"login": CODEX},
+        "updated_at": "2026-10-22T05:00:00Z",
+        "body": f"<!-- codex-review-state:v1 {json.dumps(state)} -->",
+    }
+    verdict = gate.evaluate_gate([], [], HEAD, GREEN, threads={}, issue_comments=[quota, summary])
+    assert not verdict.passed
+    assert "quota" not in verdict.line()
