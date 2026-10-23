@@ -1430,9 +1430,10 @@ def evidence_level(claim: Claim, ev: Evidence) -> str:
     kind = CLAIM_KINDS[claim.kind]
     if ev.tool_name not in kind.capable_tools:
         return "none"
-    # a rule that reads no arguments is judged by the target alone, whether
-    # the arguments were kept ({} from the runner: a producer or a Telegram
-    # send carries none the verifier uses) or never given
+    # a rule that reads no arguments is judged by the claim alone (its target;
+    # for a Telegram send its clause too), whether the arguments were kept ({}
+    # from the runner: a producer or a Telegram send carries none the verifier
+    # uses) or never given
     if ev.tool_name in _PRODUCERS:  # writes to memory or the companion: no destination
         return "none" if claim.target else "plausible"
     if ev.tool_name == "send_file":  # a Telegram send: no named address, and no e-mail
