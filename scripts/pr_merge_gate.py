@@ -40,7 +40,9 @@ Rules (all on the PR's current head sha):
   The PR author's pushes move the head past rule 1, so its own word must not also clear a finding: a
   thread resolved by the PR author, by an agent login (``NOUS_PR_LOGINS``) or by a login the gate cannot
   read counts as unresolved, and replies by the author or an agent login are not replies. A fixed P1 still
-  anchored on the head therefore waits for the owner to resolve its thread.
+  anchored on the head therefore waits for the owner to resolve its thread. Logins compare
+  case-insensitively; the CLI reads ``NOUS_PR_LOGINS`` from the environment, else from the repository
+  variable, and fails when it can read neither.
 
   Thread state (resolved / outdated) comes from GraphQL. Without it every thread counts as unresolved and
   outdatedness falls back to the REST fields (``commit_id`` is the head and ``line`` is set means anchored).
@@ -187,10 +189,11 @@ def _check_inline(
     untrusted_logins: Collection[str],
     verdict: Verdict,
 ) -> None:
+    untrusted = {login.casefold() for login in untrusted_logins}  # GitHub logins are case-insensitive
     replied = {
         c["in_reply_to_id"]
         for c in inline_comments
-        if c.get("in_reply_to_id") and not _is_codex(c) and _login(c) not in untrusted_logins
+        if c.get("in_reply_to_id") and not _is_codex(c) and (_login(c) or "").casefold() not in untrusted
     }
     roots = [c for c in inline_comments if _is_codex(c) and not c.get("in_reply_to_id")]
     if threads is None and roots:
@@ -201,7 +204,7 @@ def _check_inline(
         body = c.get("body") or ""
         thread = thread_map.get(c["id"]) or {}
         resolver = (thread.get("resolvedBy") or {}).get("login")
-        resolved = bool(thread.get("isResolved")) and resolver is not None and resolver not in untrusted_logins
+        resolved = bool(thread.get("isResolved")) and resolver is not None and resolver.casefold() not in untrusted
         badges = set(_BADGE.findall(body))
         if badges and not badges & _BLOCKING:
             open_minor += not resolved
@@ -370,7 +373,7 @@ def fetch_and_evaluate(repo: str, number: int) -> Verdict:
     )
     verdict.repo, verdict.base = repo, pr["base"]
     if agents is None:
-        verdict.notes.append("NOUS_PR_LOGINS unreadable, only the PR author's resolutions and replies discounted")
+        verdict.reasons.append("NOUS_PR_LOGINS unreadable, so an agent's own resolutions and replies would count")
     return verdict
 
 

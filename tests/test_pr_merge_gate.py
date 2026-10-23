@@ -729,3 +729,35 @@ def test_the_cli_reads_the_agent_logins_from_the_repository_variable(monkeypatch
     monkeypatch.setattr(gate, "_gh_lines", fake_gh(753, paths, author="someone", data=agent_replies))
     assert gate.main(["753"]) == 1
     assert "outdated, no reply" in capsys.readouterr().out
+
+
+def test_logins_match_case_insensitively():
+    """GitHub logins are case-insensitive, as scripts/ci/protected_paths.py treats NOUS_PR_LOGINS."""
+    anchored = [inline(10, commit_id=HEAD, original=OLD)]
+    threads = {10: {"isResolved": True, "isOutdated": False, "resolvedBy": {"login": AUTHOR}}}
+    untrusted = {AUTHOR.upper()}
+    assert not gate.evaluate_gate([review()], anchored, HEAD, GREEN, threads=threads, untrusted_logins=untrusted).passed
+    outdated = [
+        inline(10, commit_id=OLD, original=OLD, line=None),
+        inline(11, body="Fixed", login=AUTHOR.title(), reply_to=10, commit_id=OLD, original=OLD, line=None),
+    ]
+    verdict = gate.evaluate_gate(
+        [review()],
+        outdated,
+        HEAD,
+        GREEN,
+        threads={10: {"isResolved": False, "isOutdated": True}},
+        touched_paths={OLD: {"nous/x.py"}},
+        untrusted_logins={AUTHOR},
+    )
+    assert "outdated, no reply" in verdict.line()
+
+
+def test_the_cli_fails_when_the_agent_logins_cannot_be_read(monkeypatch, capsys):
+    """Without them an agent's own resolution would count, so the gate fails closed."""
+    monkeypatch.delenv("NOUS_PR_LOGINS", raising=False)
+    monkeypatch.setattr(gate, "_gh_lines", fake_gh(753, set(), failing="/actions/variables/"))
+    assert gate.main(["753"]) == 1
+    out = capsys.readouterr().out
+    assert "NOUS_PR_LOGINS unreadable" in out
+    assert "note: NOUS_PR_LOGINS" not in out
