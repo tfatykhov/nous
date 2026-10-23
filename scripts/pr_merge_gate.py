@@ -8,8 +8,8 @@ Rules (all on the PR's current head sha):
 
 * CI: the latest run of every check on the head (check runs, plus commit statuses) is completed with
   conclusion success, neutral or skipped; every check the default-branch ruleset requires
-  (``scripts/ops/main-ruleset.json``) is among them, and ``Tests`` concluded success. Pending or missing
-  required checks fail.
+  (``scripts/ops/main-ruleset.json``) is among them, run by the GitHub Actions app the ruleset pins them
+  to, and ``Tests`` concluded success. Pending or missing required checks fail.
 * Codex has reviewed the head: a Codex review whose ``commit_id`` is the head, or the Codex summary comment
   whose ``codex-review-state`` marker says the code review of the head completed (a clean review posts no
   review object). A review still running on the head fails ("wait"). If Codex's latest word on the PR is
@@ -18,6 +18,10 @@ Rules (all on the PR's current head sha):
   fallback)") is to stop and get the owner's explicit approval to merge without Codex. The gate says so and
   fails; it never passes on that fallback by itself.
 * A P0 or P1 badge in the body of a Codex review of the head fails.
+* The head's ``codex-review-state`` marker reports findings (``has_any_findings`` or
+  ``has_unresolved_findings``) while no Codex inline comment was posted on the head: fails, since a deleted
+  inline comment is otherwise invisible. The flags carry no severity, so when inline comments on the head
+  are visible their badges decide.
 * Inline Codex P1 comments (thread roots by the Codex bot whose body carries a P0 or P1 badge, or no
   severity badge at all, so a change to the badge markup fails rather than hiding every finding):
 
@@ -42,9 +46,9 @@ Rules (all on the PR's current head sha):
   outdatedness falls back to the REST fields (``commit_id`` is the head and ``line`` is set means anchored).
 * Open Codex P2 and P3 comments never fail the gate; they are counted in a note.
 
-Output: one line ``GATE: PASS|FAIL head=<sha> <reasons>``; exit status 0 for PASS, 1 for FAIL. The CLI only
-reads from GitHub (``gh api`` GETs and a GraphQL query). Merge with ``gh pr merge --match-head-commit <sha>``
-using the printed sha, so a push after the gate ran cannot slip in.
+Output: one line ``GATE: PASS|FAIL head=<sha> repo=<owner/name> base=<branch> <reasons>``; exit status 0
+for PASS, 1 for FAIL. The CLI only reads from GitHub (``gh api`` GETs and a GraphQL query). Merge with
+``gh pr merge --match-head-commit <sha>`` using the printed sha, so a push after the gate ran cannot slip in.
 """
 
 from __future__ import annotations
@@ -60,11 +64,13 @@ from dataclasses import dataclass, field
 
 CODEX_LOGIN = "chatgpt-codex-connector[bot]"
 TESTS_CHECK = "Tests"
+ACTIONS_APP_ID = 15368  # GitHub Actions: the integration_id the ruleset pins its required checks to
 # The checks the default-branch ruleset requires (scripts/ops/main-ruleset.json; a test keeps them in sync)
 REQUIRED_CHECKS = (TESTS_CHECK, "DB roles", "Protected paths")
 OK_CONCLUSIONS = {"success", "neutral", "skipped"}
 _BADGE = re.compile(r"!\[(P\d) Badge\]")
 _BLOCKING = {"P0", "P1"}
+_REPO = re.compile(r"[\w.-]+/[\w.-]+")
 _STATE = re.compile(r"<!-- codex-review-state:v1 (\{.*?\}) -->", re.S)
 _QUOTA = "reached your Codex usage limits"
 _COMPARE_FILE_CAP = 300  # GitHub's compare endpoint lists at most this many files
@@ -81,6 +87,8 @@ class Verdict:
     head_sha: str
     reasons: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    repo: str = ""
+    base: str = ""
 
     @property
     def passed(self) -> bool:
@@ -91,7 +99,9 @@ class Verdict:
         """The single verdict line the CLI prints."""
         parts = self.reasons + [f"note: {n}" for n in self.notes]
         word = "PASS" if self.passed else "FAIL"
-        return f"GATE: {word} head={self.head_sha} " + ("; ".join(parts) or "CI green, Codex reviewed head, no P1")
+        where = "".join(f" {k}={v}" for k, v in (("repo", self.repo), ("base", self.base)) if v)
+        summary = "; ".join(parts) or "CI green, Codex reviewed head, no P1"
+        return f"GATE: {word} head={self.head_sha}{where} {summary}"
 
 
 def _login(item: Mapping) -> str | None:
@@ -114,6 +124,9 @@ def _check_ci(head_sha: str, check_runs: Iterable[Mapping], verdict: Verdict) ->
         if run.get("head_sha") != head_sha:
             continue
         name = run["name"]
+        app_id = (run.get("app") or {}).get("id")
+        if name in REQUIRED_CHECKS and app_id != ACTIONS_APP_ID:
+            name = f"{name} (app {app_id})"  # cannot satisfy the required check, still has to be green
         if name not in latest or run["id"] > latest[name]["id"]:
             latest[name] = run
     for name in REQUIRED_CHECKS:
@@ -127,7 +140,11 @@ def _check_ci(head_sha: str, check_runs: Iterable[Mapping], verdict: Verdict) ->
 
 
 def _check_codex_review(
-    head_sha: str, reviews: Iterable[Mapping], issue_comments: Iterable[Mapping], verdict: Verdict
+    head_sha: str,
+    reviews: Iterable[Mapping],
+    issue_comments: Iterable[Mapping],
+    inline_comments: list[Mapping],
+    verdict: Verdict,
 ) -> None:
     head_reviews = [r for r in reviews if _is_codex(r) and r.get("commit_id") == head_sha]
     for r in head_reviews:
@@ -145,7 +162,13 @@ def _check_codex_review(
             quota = False
         elif _QUOTA in (c.get("body") or ""):
             quota = True
-    status = state.get("status") if state.get("commit_sha") == head_sha else None
+    head_state = state if state.get("commit_sha") == head_sha else {}
+    if (head_state.get("has_any_findings") or head_state.get("has_unresolved_findings")) and not any(
+        _is_codex(c) and not c.get("in_reply_to_id") and c.get("original_commit_id") == head_sha
+        for c in inline_comments
+    ):
+        verdict.reasons.append("Codex reports findings on head but no Codex inline comment on head is visible")
+    status = head_state.get("status")
     if status in {"in_progress", "queued", "pending", "running"}:
         verdict.reasons.append(f"Codex review of head in progress ({status}); wait")
     elif head_reviews or status == "completed":
@@ -227,8 +250,9 @@ def evaluate_gate(
     """
     verdict = Verdict(head_sha)
     _check_ci(head_sha, check_runs, verdict)
-    _check_codex_review(head_sha, reviews, issue_comments, verdict)
-    _check_inline(head_sha, list(inline_comments), threads, touched_paths or {}, untrusted_logins, verdict)
+    inline_comments = list(inline_comments)
+    _check_codex_review(head_sha, reviews, issue_comments, inline_comments, verdict)
+    _check_inline(head_sha, inline_comments, threads, touched_paths or {}, untrusted_logins, verdict)
     return verdict
 
 
@@ -303,7 +327,9 @@ def _agent_logins(repo: str) -> list[str] | None:
 def fetch_and_evaluate(repo: str, number: int) -> Verdict:
     """Read the PR's data from GitHub with ``gh api`` (GETs and one GraphQL query) and evaluate it."""
     base = f"repos/{repo}"
-    (pr,) = _gh_lines(f"{base}/pulls/{number}", "--jq", "{head: .head.sha, author: .user.login} | tojson")
+    (pr,) = _gh_lines(
+        f"{base}/pulls/{number}", "--jq", "{head: .head.sha, author: .user.login, base: .base.ref} | tojson"
+    )
     head_sha = pr["head"]
     reviews = _gh_lines("--paginate", f"{base}/pulls/{number}/reviews?per_page=100", "--jq", ".[]")
     inline = _gh_lines("--paginate", f"{base}/pulls/{number}/comments?per_page=100", "--jq", ".[]")
@@ -342,6 +368,7 @@ def fetch_and_evaluate(repo: str, number: int) -> Verdict:
         touched_paths=touched,
         untrusted_logins={pr["author"], *(agents or ())},
     )
+    verdict.repo, verdict.base = repo, pr["base"]
     if agents is None:
         verdict.notes.append("NOUS_PR_LOGINS unreadable, only the PR author's resolutions and replies discounted")
     return verdict
@@ -353,6 +380,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("pr", type=int, help="pull request number")
     parser.add_argument("--repo", default="tfatykhov/nous", help="owner/name (default: %(default)s)")
     args = parser.parse_args(argv)
+    if not _REPO.fullmatch(args.repo) or {".", ".."} & set(args.repo.split("/")):
+        print(f"GATE: FAIL head=unknown repo={args.repo} invalid --repo, expected owner/name")
+        return 1
     try:
         verdict = fetch_and_evaluate(args.repo, args.pr)
     except Exception as exc:  # any failure to read or parse the PR must print FAIL, never a traceback

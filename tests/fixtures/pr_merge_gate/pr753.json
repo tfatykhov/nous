@@ -377,7 +377,10 @@
    "head_sha": "75943279323d10d0b7df569b9e0027692048824b",
    "status": "completed",
    "conclusion": "success",
-   "started_at": "2026-10-15T01:00:51Z"
+   "started_at": "2026-10-15T01:00:51Z",
+   "app": {
+    "id": 15368
+   }
   },
   {
    "id": 116189252442,
@@ -385,7 +388,10 @@
    "head_sha": "75943279323d10d0b7df569b9e0027692048824b",
    "status": "completed",
    "conclusion": "success",
-   "started_at": "2026-10-15T01:00:51Z"
+   "started_at": "2026-10-15T01:00:51Z",
+   "app": {
+    "id": 15368
+   }
   }
  ],
  "threads": [

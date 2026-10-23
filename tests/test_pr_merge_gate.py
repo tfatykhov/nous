@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -47,7 +48,8 @@ def inline(cid, body=P1, commit_id=HEAD, original=HEAD, path="nous/x.py", line=1
 
 
 def run(name="Tests", conclusion="success", status="completed", rid=1, head_sha=HEAD):
-    return {"id": rid, "name": name, "head_sha": head_sha, "status": status, "conclusion": conclusion}
+    app = {"id": gate.ACTIONS_APP_ID}
+    return {"id": rid, "name": name, "head_sha": head_sha, "status": status, "conclusion": conclusion, "app": app}
 
 
 GREEN = [run(), run("Lint & Format", rid=2), run("DB roles", rid=3), run("Protected paths", rid=4)]
@@ -56,7 +58,7 @@ LATER_CHECKS = {"no DB roles check run on head", "no Protected paths check run o
 
 
 def load(n):
-    data = json.loads((FIXTURES / f"pr{n}.json").read_text())
+    data = json.loads((FIXTURES / f"pr{n}.json").read_text(encoding="utf-8"))
     threads = {t["id"]: t for t in data["threads"]}
     return data, threads
 
@@ -396,8 +398,9 @@ def test_touched_since_is_unknown_once_the_commit_is_not_an_ancestor_of_head():
 # The CLI, with gh replaced by the fixture data
 
 
-def fake_gh(n, compare_files, author="tfatykhov"):
-    data, _ = load(n)
+def fake_gh(n, compare_files, author="tfatykhov", failing=None, data=None):
+    """``gh api`` replaced by fixture ``n`` (or ``data``); a call whose path contains ``failing`` fails."""
+    data = data or load(n)[0]
     graphql = [
         {"isResolved": t["isResolved"], "isOutdated": t["isOutdated"], "comments": {"nodes": [{"databaseId": t["id"]}]}}
         for t in data["threads"]
@@ -405,6 +408,8 @@ def fake_gh(n, compare_files, author="tfatykhov"):
 
     def gh_lines(*args):
         path = next(a for a in args if a.startswith("repos/") or a == "graphql")
+        if failing and failing in path:
+            raise subprocess.CalledProcessError(1, ["gh", "api", path], stderr="HTTP 404")
         if path == "graphql":
             return graphql
         if "/compare/" in path:
@@ -422,7 +427,7 @@ def fake_gh(n, compare_files, author="tfatykhov"):
         if path.endswith("/actions/variables/NOUS_PR_LOGINS"):
             return [AUTHOR]
         assert path.endswith(f"/pulls/{n}"), path
-        return [{"head": data["head_sha"], "author": author}]
+        return [{"head": data["head_sha"], "author": author, "base": "main"}]
 
     return gh_lines
 
@@ -449,14 +454,15 @@ def test_the_cli_prints_fail_when_it_cannot_read_the_pr(monkeypatch, capsys):
 
 
 def test_the_required_checks_are_the_rulesets():
-    ruleset = json.loads((ROOT / "scripts" / "ops" / "main-ruleset.json").read_text())
+    ruleset = json.loads((ROOT / "scripts" / "ops" / "main-ruleset.json").read_text(encoding="utf-8"))
     required = [
-        c["context"]
+        c
         for rule in ruleset["rules"]
         if rule["type"] == "required_status_checks"
         for c in rule["parameters"]["required_status_checks"]
     ]
-    assert sorted(gate.REQUIRED_CHECKS) == sorted(required)
+    assert sorted(gate.REQUIRED_CHECKS) == sorted(c["context"] for c in required)
+    assert {c["integration_id"] for c in required} == {gate.ACTIONS_APP_ID}
 
 
 def test_a_missing_required_check_fails():
@@ -627,3 +633,99 @@ def test_the_cli_does_not_count_the_pr_authors_own_replies(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "P1 posted on head nous/cognitive/execution_ledger.py:179" in out
     assert "outdated, no reply" in out
+
+
+# Codex's own finding flags, a second source for findings whose inline comment is gone
+
+
+def test_findings_flagged_on_head_without_a_visible_inline_comment_fail():
+    flagged = summary_comment({"commit_sha": HEAD, "status": "completed", "has_any_findings": True})
+    verdict = gate.evaluate_gate([review()], [], HEAD, GREEN, threads={}, issue_comments=[flagged])
+    assert not verdict.passed
+    assert "no Codex inline comment on head" in verdict.line()
+    unresolved = summary_comment({"commit_sha": HEAD, "status": "completed", "has_unresolved_findings": True})
+    assert not gate.evaluate_gate([review()], [], HEAD, GREEN, threads={}, issue_comments=[unresolved]).passed
+    older = [inline(10, body=P2, commit_id=OLD, original=OLD, line=None)]
+    verdict = gate.evaluate_gate([review()], older, HEAD, GREEN, threads={}, issue_comments=[flagged])
+    assert "no Codex inline comment on head" in verdict.line()
+
+
+def test_findings_flagged_on_head_with_only_a_p2_inline_comment_on_head_pass():
+    """#768 and #790: the flags carry no severity, so a visible P2 on head explains them."""
+    state = {"commit_sha": HEAD, "status": "completed", "has_any_findings": True, "has_unresolved_findings": True}
+    verdict = gate.evaluate_gate(
+        [review()], [inline(10, body=P2)], HEAD, GREEN, threads={}, issue_comments=[summary_comment(state)]
+    )
+    assert verdict.passed, verdict.line()
+
+
+def test_findings_flagged_on_an_older_commit_do_not_fail():
+    flagged = summary_comment({"commit_sha": OLD, "status": "completed", "has_any_findings": True})
+    assert gate.evaluate_gate([review()], [], HEAD, GREEN, threads={}, issue_comments=[flagged]).passed
+
+
+# Required checks come from GitHub Actions, as the ruleset pins them
+
+
+def test_a_required_check_from_another_app_does_not_count():
+    forged = dict(run(rid=9), app={"id": 1})
+    verdict = gate.evaluate_gate([review()], [], HEAD, [forged] + GREEN[1:], threads={})
+    assert not verdict.passed
+    assert "no Tests check run on head" in verdict.line()
+    assert gate.evaluate_gate([review()], [], HEAD, GREEN + [forged], threads={}).passed
+
+
+# The CLI
+
+
+def test_the_cli_prints_repo_and_base(monkeypatch, capsys):
+    paths = {c["path"] for c in load(753)[0]["inline_comments"]}
+    monkeypatch.setenv("NOUS_PR_LOGINS", AUTHOR)
+    monkeypatch.setattr(gate, "_gh_lines", fake_gh(753, paths, author=AUTHOR))
+    gate.main(["753"])
+    out = capsys.readouterr().out
+    assert out.startswith("GATE: FAIL head=75943279323d10d0b7df569b9e0027692048824b repo=tfatykhov/nous base=main ")
+
+
+def test_the_cli_rejects_a_malformed_repo(monkeypatch, capsys):
+    def never(*args):
+        raise AssertionError(args)
+
+    monkeypatch.setattr(gate, "_gh_lines", never)
+    for repo in ("tfatykhov/nous/../x", "../nous", "tfatykhov", "a/b?x=1", "./.."):
+        assert gate.main(["753", "--repo", repo]) == 1
+        assert capsys.readouterr().out.startswith(f"GATE: FAIL head=unknown repo={repo} invalid --repo")
+
+
+def test_the_cli_counts_a_file_unchanged_when_compare_fails(monkeypatch, capsys):
+    """A compare that 404s (the commit is gone) is unknown, which counts as unchanged."""
+    paths = {c["path"] for c in load(753)[0]["inline_comments"]}
+    monkeypatch.setenv("NOUS_PR_LOGINS", AUTHOR)
+    fake = fake_gh(753, paths, author=AUTHOR, failing="/compare/")
+    monkeypatch.setattr(gate, "_gh_lines", fake)
+    assert gate.main(["753"]) == 1
+    assert "outdated, file unchanged since" in capsys.readouterr().out
+
+
+def test_the_cli_fails_closed_when_graphql_fails(monkeypatch, capsys):
+    paths = {c["path"] for c in load(753)[0]["inline_comments"]}
+    monkeypatch.setenv("NOUS_PR_LOGINS", AUTHOR)
+    monkeypatch.setattr(gate, "_gh_lines", fake_gh(753, paths, author=AUTHOR, failing="graphql"))
+    assert gate.main(["753"]) == 1
+    assert "thread data unavailable" in capsys.readouterr().out
+
+
+def test_the_cli_reads_the_agent_logins_from_the_repository_variable(monkeypatch, capsys):
+    """Without NOUS_PR_LOGINS in the environment the variable is read; replies by its login do not count."""
+    data, _ = load(753)
+    agent_replies = dict(
+        data,
+        inline_comments=[
+            dict(c, user={"login": AUTHOR}) if c.get("in_reply_to_id") else c for c in data["inline_comments"]
+        ],
+    )
+    paths = {c["path"] for c in data["inline_comments"]}
+    monkeypatch.delenv("NOUS_PR_LOGINS", raising=False)
+    monkeypatch.setattr(gate, "_gh_lines", fake_gh(753, paths, author="someone", data=agent_replies))
+    assert gate.main(["753"]) == 1
+    assert "outdated, no reply" in capsys.readouterr().out
