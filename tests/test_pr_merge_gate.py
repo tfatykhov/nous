@@ -63,6 +63,9 @@ def load(n):
     return data, threads
 
 
+PR753_PATHS = {c["path"] for c in load(753)[0]["inline_comments"]}
+
+
 def evaluate_fixture(n):
     data, threads = load(n)
     return gate.evaluate_gate(
@@ -434,9 +437,8 @@ def fake_gh(n, compare_files, author="tfatykhov", failing=None, data=None):
 
 def test_the_cli_fails_pr753_on_the_head_p1_alone_once_older_p1s_were_fixed(monkeypatch, capsys):
     """The older P1s' replies are tfatykhov's, which count once tfatykhov is not the PR author."""
-    paths = {c["path"] for c in load(753)[0]["inline_comments"]}
     monkeypatch.delenv("NOUS_PR_LOGINS", raising=False)
-    monkeypatch.setattr(gate, "_gh_lines", fake_gh(753, paths, author=AUTHOR))
+    monkeypatch.setattr(gate, "_gh_lines", fake_gh(753, PR753_PATHS, author=AUTHOR))
     assert gate.main(["753"]) == 1
     out = capsys.readouterr().out.strip()
     assert out.startswith("GATE: FAIL head=75943279323d10d0b7df569b9e0027692048824b ")
@@ -626,9 +628,8 @@ def test_codex_comments_are_read_in_time_order_not_list_order():
 
 def test_the_cli_does_not_count_the_pr_authors_own_replies(monkeypatch, capsys):
     """#753's author is tfatykhov, who also wrote the replies on its older P1s."""
-    paths = {c["path"] for c in load(753)[0]["inline_comments"]}
     monkeypatch.delenv("NOUS_PR_LOGINS", raising=False)
-    monkeypatch.setattr(gate, "_gh_lines", fake_gh(753, paths))
+    monkeypatch.setattr(gate, "_gh_lines", fake_gh(753, PR753_PATHS))
     assert gate.main(["753"]) == 1
     out = capsys.readouterr().out
     assert "P1 posted on head nous/cognitive/execution_ledger.py:179" in out
@@ -679,9 +680,8 @@ def test_a_required_check_from_another_app_does_not_count():
 
 
 def test_the_cli_prints_repo_and_base(monkeypatch, capsys):
-    paths = {c["path"] for c in load(753)[0]["inline_comments"]}
     monkeypatch.setenv("NOUS_PR_LOGINS", AUTHOR)
-    monkeypatch.setattr(gate, "_gh_lines", fake_gh(753, paths, author=AUTHOR))
+    monkeypatch.setattr(gate, "_gh_lines", fake_gh(753, PR753_PATHS, author=AUTHOR))
     gate.main(["753"])
     out = capsys.readouterr().out
     assert out.startswith("GATE: FAIL head=75943279323d10d0b7df569b9e0027692048824b repo=tfatykhov/nous base=main ")
@@ -699,18 +699,16 @@ def test_the_cli_rejects_a_malformed_repo(monkeypatch, capsys):
 
 def test_the_cli_counts_a_file_unchanged_when_compare_fails(monkeypatch, capsys):
     """A compare that 404s (the commit is gone) is unknown, which counts as unchanged."""
-    paths = {c["path"] for c in load(753)[0]["inline_comments"]}
     monkeypatch.setenv("NOUS_PR_LOGINS", AUTHOR)
-    fake = fake_gh(753, paths, author=AUTHOR, failing="/compare/")
+    fake = fake_gh(753, PR753_PATHS, author=AUTHOR, failing="/compare/")
     monkeypatch.setattr(gate, "_gh_lines", fake)
     assert gate.main(["753"]) == 1
     assert "outdated, file unchanged since" in capsys.readouterr().out
 
 
 def test_the_cli_fails_closed_when_graphql_fails(monkeypatch, capsys):
-    paths = {c["path"] for c in load(753)[0]["inline_comments"]}
     monkeypatch.setenv("NOUS_PR_LOGINS", AUTHOR)
-    monkeypatch.setattr(gate, "_gh_lines", fake_gh(753, paths, author=AUTHOR, failing="graphql"))
+    monkeypatch.setattr(gate, "_gh_lines", fake_gh(753, PR753_PATHS, author=AUTHOR, failing="graphql"))
     assert gate.main(["753"]) == 1
     assert "thread data unavailable" in capsys.readouterr().out
 
@@ -724,9 +722,8 @@ def test_the_cli_reads_the_agent_logins_from_the_repository_variable(monkeypatch
             dict(c, user={"login": AUTHOR}) if c.get("in_reply_to_id") else c for c in data["inline_comments"]
         ],
     )
-    paths = {c["path"] for c in data["inline_comments"]}
     monkeypatch.delenv("NOUS_PR_LOGINS", raising=False)
-    monkeypatch.setattr(gate, "_gh_lines", fake_gh(753, paths, author="someone", data=agent_replies))
+    monkeypatch.setattr(gate, "_gh_lines", fake_gh(753, PR753_PATHS, author="someone", data=agent_replies))
     assert gate.main(["753"]) == 1
     assert "outdated, no reply" in capsys.readouterr().out
 
@@ -761,3 +758,19 @@ def test_the_cli_fails_when_the_agent_logins_cannot_be_read(monkeypatch, capsys)
     out = capsys.readouterr().out
     assert "NOUS_PR_LOGINS unreadable" in out
     assert "note: NOUS_PR_LOGINS" not in out
+
+
+def test_a_reply_by_a_deleted_account_is_not_a_reply():
+    comments = [
+        inline(10, commit_id=OLD, original=OLD, line=None),
+        dict(inline(11, body="Fixed", reply_to=10, commit_id=OLD, original=OLD, line=None), user=None),
+    ]
+    verdict = gate.evaluate_gate(
+        [review()],
+        comments,
+        HEAD,
+        GREEN,
+        threads={10: {"isResolved": False, "isOutdated": True}},
+        touched_paths={OLD: {"nous/x.py"}},
+    )
+    assert "outdated, no reply" in verdict.line()

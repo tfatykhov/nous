@@ -114,6 +114,10 @@ def _is_codex(item: Mapping) -> bool:
     return _login(item) == CODEX_LOGIN
 
 
+def _is_codex_root(item: Mapping) -> bool:
+    return _is_codex(item) and not item.get("in_reply_to_id")
+
+
 def _title(body: str) -> str:
     """The finding's headline: the badge's line with the badge markup removed."""
     first = body.strip().splitlines()[0] if body.strip() else ""
@@ -166,8 +170,7 @@ def _check_codex_review(
             quota = True
     head_state = state if state.get("commit_sha") == head_sha else {}
     if (head_state.get("has_any_findings") or head_state.get("has_unresolved_findings")) and not any(
-        _is_codex(c) and not c.get("in_reply_to_id") and c.get("original_commit_id") == head_sha
-        for c in inline_comments
+        _is_codex_root(c) and c.get("original_commit_id") == head_sha for c in inline_comments
     ):
         verdict.reasons.append("Codex reports findings on head but no Codex inline comment on head is visible")
     status = head_state.get("status")
@@ -193,9 +196,9 @@ def _check_inline(
     replied = {
         c["in_reply_to_id"]
         for c in inline_comments
-        if c.get("in_reply_to_id") and not _is_codex(c) and (_login(c) or "").casefold() not in untrusted
+        if c.get("in_reply_to_id") and _login(c) and not _is_codex(c) and _login(c).casefold() not in untrusted
     }
-    roots = [c for c in inline_comments if _is_codex(c) and not c.get("in_reply_to_id")]
+    roots = [c for c in inline_comments if _is_codex_root(c)]
     if threads is None and roots:
         verdict.notes.append("thread data unavailable, every thread counted as unresolved")
     thread_map = threads or {}
@@ -351,7 +354,7 @@ def fetch_and_evaluate(repo: str, number: int) -> Verdict:
     except subprocess.CalledProcessError:
         threads = None
     touched: dict[str, set[str]] = {}
-    shas = {c["original_commit_id"] for c in inline if _is_codex(c) and not c.get("in_reply_to_id")}
+    shas = {c["original_commit_id"] for c in inline if _is_codex_root(c)}
     for sha in shas - {head_sha}:
         try:
             (compare,) = _gh_lines(f"{base}/compare/{sha}...{head_sha}", "--jq", _COMPARE_JQ)
