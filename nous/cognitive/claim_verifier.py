@@ -253,8 +253,9 @@ def _blank(match: re.Match[str]) -> str:
 
     A quoted work id (`job "job-…"`) is the agent naming it, not a quotation: it is kept, in backticks."""
     quoted = match.group(0)
-    if _QUOTED_ID.fullmatch(quoted[1:-1]):
-        return f"`{quoted[1:-1]}`"
+    inner = quoted[1:-1]
+    if quoted[0] in "\"“" and _QUOTED_ID.fullmatch(inner):
+        return f"`{inner}`"
     return re.sub(r"[^\n]", " ", quoted)
 
 # The signal an argument must carry for a capable tool to count as evidence.
@@ -1701,6 +1702,12 @@ def _claimed_work_id(text: str) -> str | None:
     return hex_id.group("id").lower() if hex_id else None
 
 
+def _names_a_job(text: str) -> bool:
+    """Whether a cancel claim names a runner job: a job id, or a hex id after "job" (its hex tail)."""
+    hex_id = _NAMED_HEX_ID_RE.search(text)
+    return bool(_JOB_ID_RE.search(text) or (hex_id and hex_id.group(0)[:3].lower() == "job"))
+
+
 def _id_shape(value: str) -> str:
     if _JOB_ID_RE.fullmatch(value):
         return "job"
@@ -1743,6 +1750,8 @@ def _runner_cancel_level(claim: Claim, ev: Evidence, claimed: str | None, runner
     be the status line. A row that kept no command backs nothing: it could be any command; an unreadable
     command cannot disprove anything."""
     runs = ev.runs
+    if runner is None:
+        return "none"
     if runs is None:
         return "plausible"
     levels = ["none"]
@@ -1758,7 +1767,7 @@ def _runner_cancel_level(claim: Claim, ev: Evidence, claimed: str | None, runner
     return _best(levels)
 
 
-_TRACE_OPTIONS = re.compile(r"-[xveu]+|--")
+_TRACE_OPTIONS = re.compile(r"-[xveu]+")
 
 
 def runner_path(workspace_dir: str) -> str:
@@ -1778,6 +1787,8 @@ def _runner_args(prog: str, args: tuple[str, ...], runner: str | None) -> list[s
     if _base(prog) in ("bash", "sh"):
         i = 0
         while i < len(args) and _TRACE_OPTIONS.fullmatch(args[i]):
+            i += 1
+        if i < len(args) and args[i] == "--":  # the options end: the next word is the script
             i += 1
         if i == len(args):
             return None
@@ -1994,7 +2005,7 @@ class ClaimVerifier:
         violations: list[ClaimViolation] = []
         for claim in claims:
             # the owner cancels the root's own work, never a runner job
-            if claim.kind == "cancel" and cancelled and not _JOB_ID_RE.search(claim.text):
+            if claim.kind == "cancel" and cancelled and not _names_a_job(claim.text):
                 level = "exact"
             else:
                 level = _best(["none", *(report_level(claim, ev, self._runner_path) for ev in evidence)])

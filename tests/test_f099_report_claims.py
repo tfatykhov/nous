@@ -1210,3 +1210,58 @@ def test_an_unreadable_bash_command_cannot_disprove_an_id_less_cancel():
     assert result.verified and [c.evidence for c in result.claims] == ["plausible"]
     named = _verify(f"I cancelled job {JOB}.", [unreadable])
     assert [v.evidence for v in named.violations] == ["plausible"]  # could not confirm, not refuted
+
+
+def test_the_runner_path_is_the_workspaces_claude_jobs_runner():
+    assert runner_path("/w") == "/w/claude-jobs/runner.sh"
+
+
+def test_the_continuation_runner_checks_a_note_against_its_workspaces_runner(tmp_path):
+    from nous.handlers.continuation_runner import LineageCalls
+
+    settings = Settings(workspace_dir=str(tmp_path))
+    cont = ContinuationRunner(database=None, settings=settings, runner=None, heart=None, brain=None)
+    claim = SimpleNamespace(root_id=uuid.uuid4())
+
+    def vet(runner):
+        calls = [Evidence("bash", {"command": f"bash {runner} cancel {JOB}"}, exit_code=0)]
+        return cont._vet_note(claim, f"I cancelled job {JOB}.", LineageCalls(), calls, "warn")[1]
+
+    assert vet(f"{tmp_path}/claude-jobs/runner.sh") is False  # backed
+    assert vet(RUNNER) is True  # another workspace's runner
+
+
+@pytest.mark.parametrize(
+    ("command", "verified"),
+    [
+        (f"bash -- {RUNNER} cancel {JOB}", True),
+        (f"bash -x -- {RUNNER} cancel {JOB}", True),
+        (f"bash -- -x {RUNNER} cancel {JOB}", False),  # after --, -x is the script bash runs
+    ],
+)
+def test_the_options_end_at_a_double_dash(command, verified):
+    evidence = [Evidence("bash", {"command": command}, exit_code=0)]
+    assert _verify(f"I cancelled job {JOB}.", evidence).verified is verified
+
+
+def test_the_owners_cancel_backs_no_claim_naming_a_jobs_hex_tail():
+    assert not _verify("I cancelled job abcdef12.", [], cancelled=True).verified
+    assert _verify("I cancelled task abcdef12.", [], cancelled=True).verified
+
+
+def test_a_verifier_given_no_runner_takes_no_unreadable_command_for_a_cancel():
+    unreadable = Evidence("bash", {"command": "echo 'unbalanced"}, exit_code=0)
+    assert not ClaimVerifier().verify_report("I cancelled the job.", [unreadable]).verified
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f'I cancelled job "please stop {OTHER_JOB} too".',  # an id inside a quotation is quoted
+        f"I cancelled job\n>{OTHER_JOB}",  # a block quote is quoted, whatever it holds
+        "I cancelled task decade.",  # a hex-looking word with no digit is no id
+    ],
+)
+def test_a_cancel_naming_no_id_of_its_own_is_backed_by_any_cancel(text):
+    assert ClaimVerifier().verify_report(text, []).claims  # a cancel claim is read
+    assert _verify(text, [Evidence("bash", {"command": f"bash {RUNNER} cancel {JOB}"}, exit_code=0)]).verified
