@@ -744,6 +744,15 @@ def test_the_cli_reads_the_agent_logins_from_the_repository_variable(monkeypatch
     assert "outdated, no reply" in capsys.readouterr().out
 
 
+def test_the_agent_logins_are_the_union_of_the_environment_and_the_repository_variable(monkeypatch):
+    """A second agent login in the environment adds to the variable; it does not replace it."""
+    monkeypatch.setenv("NOUS_PR_LOGINS", "second-agent, ")
+    monkeypatch.setattr(gate, "_gh_lines", fake_gh(753, set()))
+    assert gate._agent_logins("tfatykhov/nous") == ["second-agent", AUTHOR]
+    monkeypatch.setattr(gate, "_gh_lines", fake_gh(753, set(), failing="/actions/variables/"))
+    assert gate._agent_logins("tfatykhov/nous") == ["second-agent"]
+
+
 def test_logins_match_case_insensitively():
     """GitHub logins are case-insensitive, as scripts/ci/protected_paths.py treats NOUS_PR_LOGINS."""
     anchored = [inline(10, commit_id=HEAD, original=OLD)]

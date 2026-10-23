@@ -43,7 +43,7 @@ Rules (all on the PR's current head sha):
   thread resolved by the PR author, by an agent login (``NOUS_PR_LOGINS``) or by a login the gate cannot
   read counts as unresolved, and replies by the author or an agent login are not replies. A fixed P1 still
   anchored on the head therefore waits for the owner to resolve its thread. Logins compare
-  case-insensitively; the CLI reads ``NOUS_PR_LOGINS`` from the environment, else from the repository
+  case-insensitively; the CLI takes the union of ``NOUS_PR_LOGINS`` in the environment and the repository
   variable, and fails when it can read neither.
 
   Thread state (resolved / outdated) comes from GraphQL. Without it every thread counts as unresolved and
@@ -317,19 +317,20 @@ _COMPARE_JQ = "{merge_base_commit: {sha: .merge_base_commit.sha}, files: [.files
 
 def _gh_lines(*args: str) -> list:
     """Run ``gh api`` and parse its one-JSON-value-per-line output (from a ``--jq`` filter)."""
-    out = subprocess.run(["gh", "api", *args], check=True, capture_output=True, text=True).stdout
-    return [json.loads(line) for line in out.splitlines() if line.strip()]
+    run = subprocess.run(["gh", "api", *args], check=True, capture_output=True, encoding="utf-8", errors="replace")
+    return [json.loads(line) for line in run.stdout.splitlines() if line.strip()]
 
 
 def _agent_logins(repo: str) -> list[str] | None:
-    """The agent logins: ``NOUS_PR_LOGINS`` from the environment, else the repository variable; ``None`` if unread."""
-    value = os.environ.get("NOUS_PR_LOGINS", "")
-    if not value.strip():
-        try:
-            (value,) = _gh_lines(f"repos/{repo}/actions/variables/NOUS_PR_LOGINS", "--jq", ".value | tojson")
-        except (subprocess.CalledProcessError, ValueError):
+    """The agent logins: ``NOUS_PR_LOGINS`` from the environment plus the repository variable; ``None`` if neither."""
+    values = [os.environ.get("NOUS_PR_LOGINS", "")]
+    try:
+        values += _gh_lines(f"repos/{repo}/actions/variables/NOUS_PR_LOGINS", "--jq", ".value | tojson")
+    except (subprocess.CalledProcessError, ValueError):
+        if not values[0].strip():
             return None
-    return [login.strip() for login in value.split(",") if login.strip()]
+    logins = [login.strip() for value in values for login in value.split(",") if login.strip()]
+    return list(dict.fromkeys(logins))
 
 
 def fetch_and_evaluate(repo: str, number: int) -> Verdict:
