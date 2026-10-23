@@ -290,3 +290,144 @@ def test_p2_only_inline_passes_with_a_note():
 def test_inline_p1_from_a_human_is_not_a_codex_finding():
     verdict = gate.evaluate_gate([review()], [inline(10, login="someone")], HEAD, GREEN, threads={})
     assert verdict.passed, verdict.line()
+
+
+# Rules a refactor could break without the tests above noticing
+
+
+def test_resolving_the_thread_of_a_p1_posted_on_head_does_not_clear_it():
+    verdict = gate.evaluate_gate([review()], [inline(10)], HEAD, GREEN, threads={10: {"isResolved": True}})
+    assert not verdict.passed
+
+
+def test_a_p0_inline_blocks_like_a_p1():
+    p0 = P1.replace("P1 Badge", "P0 Badge")
+    assert not gate.evaluate_gate([review()], [inline(10, body=p0)], HEAD, GREEN, threads={}).passed
+
+
+def test_a_codex_inline_comment_without_a_severity_badge_fails():
+    verdict = gate.evaluate_gate([review()], [inline(10, body="Something looks off")], HEAD, GREEN, threads={})
+    assert not verdict.passed
+    assert "without a severity badge" in verdict.line()
+
+
+def test_a_completed_summary_state_for_an_older_commit_is_not_a_review_of_head():
+    state = {"code_review": {"commit_sha": OLD, "status": "completed"}}
+    summary = {"id": 5, "user": {"login": CODEX}, "body": f"<!-- codex-review-state:v1 {json.dumps(state)} -->"}
+    verdict = gate.evaluate_gate([], [], HEAD, GREEN, threads={}, issue_comments=[summary])
+    assert not verdict.passed
+    assert "has not reviewed head" in verdict.line()
+
+
+def test_a_review_of_head_by_someone_else_is_not_a_codex_review():
+    other = dict(review(), user={"login": "tfatykhov"})
+    assert not gate.evaluate_gate([other], [], HEAD, GREEN, threads={}).passed
+
+
+def test_without_thread_data_a_p1_still_on_head_is_anchored_from_the_rest_fields():
+    comments = [
+        inline(10, commit_id=HEAD, original=OLD),
+        inline(11, body="Fixed", login="tfatykhov", reply_to=10, commit_id=HEAD, original=OLD),
+    ]
+    verdict = gate.evaluate_gate([review()], comments, HEAD, GREEN, threads=None, touched_paths={OLD: {"nous/x.py"}})
+    assert not verdict.passed
+    assert "still anchored on head" in verdict.line()
+
+
+def test_a_reply_by_codex_itself_is_not_a_reply():
+    comments = [
+        inline(10, commit_id=OLD, original=OLD, line=None),
+        inline(11, body="More detail", reply_to=10, commit_id=OLD, original=OLD, line=None),
+    ]
+    verdict = gate.evaluate_gate(
+        [review()],
+        comments,
+        HEAD,
+        GREEN,
+        threads={10: {"isResolved": False, "isOutdated": True}},
+        touched_paths={OLD: {"nous/x.py"}},
+    )
+    assert not verdict.passed
+    assert "no reply" in verdict.line()
+
+
+def test_an_unknown_change_set_counts_as_unchanged():
+    comments = [
+        inline(10, commit_id=OLD, original=OLD, line=None),
+        inline(11, body="Fixed", login="tfatykhov", reply_to=10, commit_id=OLD, original=OLD, line=None),
+    ]
+    verdict = gate.evaluate_gate(
+        [review()], comments, HEAD, GREEN, threads={10: {"isResolved": False, "isOutdated": True}}, touched_paths={}
+    )
+    assert not verdict.passed
+    assert "file unchanged since" in verdict.line()
+
+
+def test_a_skipped_tests_run_fails():
+    verdict = gate.evaluate_gate([review()], [], HEAD, [run(conclusion="skipped")], threads={})
+    assert not verdict.passed
+
+
+def test_a_failing_commit_status_fails():
+    statuses = gate.statuses_as_check_runs([{"id": 3, "context": "ci/legacy", "state": "failure"}], HEAD)
+    verdict = gate.evaluate_gate([review()], [], HEAD, GREEN + statuses, threads={})
+    assert not verdict.passed
+    assert "ci/legacy failure" in verdict.line()
+
+
+def test_touched_since_is_unknown_once_the_commit_is_not_an_ancestor_of_head():
+    files = [{"filename": "nous/x.py"}]
+    assert gate.touched_since({"merge_base_commit": {"sha": OLD}, "files": files}, OLD) == {"nous/x.py"}
+    assert gate.touched_since({"merge_base_commit": {"sha": "b" * 40}, "files": files}, OLD) is None
+    capped = [{"filename": f"f{i}"} for i in range(300)]
+    assert gate.touched_since({"merge_base_commit": {"sha": OLD}, "files": capped}, OLD) is None
+
+
+# The CLI, with gh replaced by the fixture data
+
+
+def fake_gh(n, compare_files):
+    data, _ = load(n)
+    graphql = [
+        {"isResolved": t["isResolved"], "isOutdated": t["isOutdated"], "comments": {"nodes": [{"databaseId": t["id"]}]}}
+        for t in data["threads"]
+    ]
+
+    def gh_lines(*args):
+        path = next(a for a in args if a.startswith("repos/") or a == "graphql")
+        if path == "graphql":
+            return graphql
+        if "/compare/" in path:
+            sha = path.split("/compare/")[1].split("...")[0]
+            return [{"merge_base_commit": {"sha": sha}, "files": [{"filename": f} for f in compare_files]}]
+        for suffix, value in [
+            ("/reviews?", data["reviews"]),
+            (f"/pulls/{n}/comments?", data["inline_comments"]),
+            ("/issues/", data["issue_comments"]),
+            ("/check-runs?", data["check_runs"]),
+            ("/status?", []),
+        ]:
+            if suffix in path:
+                return value
+        assert path.endswith(f"/pulls/{n}"), path
+        return [data["head_sha"]]
+
+    return gh_lines
+
+
+def test_the_cli_fails_pr753_on_the_head_p1_alone_once_older_p1s_were_fixed(monkeypatch, capsys):
+    paths = {c["path"] for c in load(753)[0]["inline_comments"]}
+    monkeypatch.setattr(gate, "_gh_lines", fake_gh(753, paths))
+    assert gate.main(["753"]) == 1
+    out = capsys.readouterr().out.strip()
+    assert out.startswith("GATE: FAIL head=75943279323d10d0b7df569b9e0027692048824b P1 posted on head ")
+    assert out.count("P1 ") == 1
+
+
+def test_the_cli_prints_fail_when_it_cannot_read_the_pr(monkeypatch, capsys):
+    def broken(*args):
+        raise FileNotFoundError("gh")
+
+    monkeypatch.setattr(gate, "_gh_lines", broken)
+    assert gate.main(["753"]) == 1
+    assert capsys.readouterr().out.startswith("GATE: FAIL head=unknown could not read PR #753: FileNotFoundError")

@@ -6,8 +6,9 @@ the Codex review bodies, and those never carry the findings. This gate reads the
 
 Rules (all on the PR's current head sha):
 
-* CI: the latest run of every check on the head is completed with conclusion success, neutral or skipped,
-  and a ``Tests`` run is among them. Pending or missing checks fail.
+* CI: the latest run of every check on the head (check runs, plus commit statuses) is completed with
+  conclusion success, neutral or skipped, and the ``Tests`` run is among them with conclusion success.
+  Pending or missing checks fail.
 * Codex has reviewed the head: a Codex review whose ``commit_id`` is the head, or the Codex summary comment
   whose ``codex-review-state`` marker says the code review of the head completed (a clean review posts no
   review object). A review still running on the head fails ("wait"). If Codex hit its usage limit, the
@@ -15,7 +16,8 @@ Rules (all on the PR's current head sha):
   fallback)") is to stop and get the owner's explicit approval to merge without Codex. The gate says so and
   fails; it never passes on that fallback by itself.
 * A P1 badge in the body of a Codex review of the head fails.
-* Inline Codex P1 comments (thread roots by the Codex bot whose body carries the P1 badge):
+* Inline Codex P1 comments (thread roots by the Codex bot whose body carries a P0 or P1 badge, or no
+  severity badge at all, so a change to the badge markup fails rather than hiding every finding):
 
   1. posted on the head (``original_commit_id`` is the head): fails, whatever the replies say. Only a new
      commit can address it, and that commit moves the head.
@@ -24,11 +26,14 @@ Rules (all on the PR's current head sha):
      lines are unchanged, so GitHub moved its ``commit_id`` to the head): fails until the thread is
      resolved. A "Fixed in ..." reply is not evidence when the anchored code did not change.
   4. posted on an earlier commit, thread outdated: passes only if someone replied AND the comment's file
-     changed between the commit it was posted on and the head. A renamed file counts as unchanged.
+     changed between the commit it was posted on and the head. That is known only while that commit is
+     an ancestor of the head: after a rebase the file counts as unchanged, and so does a renamed file. A
+     merge of the base branch into the PR can make a file look changed by the base's own commits; that is
+     an accepted limit.
 
   Thread state (resolved / outdated) comes from GraphQL. Without it every thread counts as unresolved and
   outdatedness falls back to the REST fields (``commit_id`` is the head and ``line`` is set means anchored).
-* Open Codex P2 comments never fail the gate; they are counted in a note.
+* Open Codex P2 and P3 comments never fail the gate; they are counted in a note.
 
 Output: one line ``GATE: PASS|FAIL head=<sha> <reasons>``; exit status 0 for PASS, 1 for FAIL. The CLI only
 reads from GitHub (``gh api`` GETs and a GraphQL query). Merge with ``gh pr merge --match-head-commit <sha>``
@@ -48,8 +53,8 @@ from dataclasses import dataclass, field
 CODEX_LOGIN = "chatgpt-codex-connector[bot]"
 TESTS_CHECK = "Tests"
 OK_CONCLUSIONS = {"success", "neutral", "skipped"}
-_P1 = re.compile(r"!\[P1 Badge\]")
-_P2 = re.compile(r"!\[P2 Badge\]")
+_BADGE = re.compile(r"!\[(P\d) Badge\]")
+_BLOCKING = {"P0", "P1"}
 _STATE = re.compile(r"<!-- codex-review-state:v1 (\{.*?\}) -->", re.S)
 _QUOTA = "reached your Codex usage limits"
 _COMPARE_FILE_CAP = 300  # GitHub's compare endpoint lists at most this many files
@@ -91,7 +96,7 @@ def _title(body: str) -> str:
 def _check_ci(head_sha: str, check_runs: Iterable[Mapping], verdict: Verdict) -> None:
     latest: dict[str, Mapping] = {}
     for run in check_runs:
-        if run.get("head_sha", head_sha) != head_sha:
+        if run.get("head_sha") != head_sha:
             continue
         name = run["name"]
         if name not in latest or run["id"] > latest[name]["id"]:
@@ -101,7 +106,7 @@ def _check_ci(head_sha: str, check_runs: Iterable[Mapping], verdict: Verdict) ->
     for name, run in sorted(latest.items()):
         if run.get("status") != "completed":
             verdict.reasons.append(f"check {name} pending ({run.get('status')})")
-        elif run.get("conclusion") not in OK_CONCLUSIONS:
+        elif run.get("conclusion") not in (OK_CONCLUSIONS if name != TESTS_CHECK else {"success"}):
             verdict.reasons.append(f"check {name} {run.get('conclusion')}")
 
 
@@ -110,21 +115,21 @@ def _check_codex_review(
 ) -> None:
     head_reviews = [r for r in reviews if _is_codex(r) and r.get("commit_id") == head_sha]
     for r in head_reviews:
-        if _P1.search(r.get("body") or ""):
-            verdict.reasons.append(f"P1 in the body of Codex review {r.get('id')} of head")
+        if _BLOCKING & set(_BADGE.findall(r.get("body") or "")):
+            verdict.reasons.append(f"P0/P1 in the body of Codex review {r.get('id')} of head")
     codex_comments = sorted(
         (c for c in issue_comments if _is_codex(c)), key=lambda c: c.get("updated_at") or c.get("created_at") or ""
     )
-    state = None
+    state: Mapping = {}
     for c in codex_comments:
         m = _STATE.search(c.get("body") or "")
         if m:
             state = json.loads(m.group(1)).get("code_review") or {}
-    head_state = state if state and state.get("commit_sha") == head_sha else None
-    if head_reviews or (head_state and head_state.get("status") == "completed"):
+    status = state.get("status") if state.get("commit_sha") == head_sha else None
+    if head_reviews or status == "completed":
         return
-    if head_state and head_state.get("status") in {"in_progress", "queued", "pending", "running"}:
-        verdict.reasons.append(f"Codex review of head in progress ({head_state['status']}); wait")
+    if status in {"in_progress", "queued", "pending", "running"}:
+        verdict.reasons.append(f"Codex review of head in progress ({status}); wait")
     elif any(_QUOTA in (c.get("body") or "") for c in codex_comments):
         verdict.reasons.append(f"Codex has not reviewed head: {QUOTA_FALLBACK}")
     else:
@@ -142,17 +147,22 @@ def _check_inline(
     roots = [c for c in inline_comments if _is_codex(c) and not c.get("in_reply_to_id")]
     if threads is None and roots:
         verdict.notes.append("thread data unavailable, every thread counted as unresolved")
-    open_p2 = 0
+    thread_map = threads or {}
+    open_minor = 0
     for c in roots:
         body = c.get("body") or ""
-        thread = (threads or {}).get(c["id"]) or {}
+        thread = thread_map.get(c["id"]) or {}
         resolved = bool(thread.get("isResolved"))
-        if not _P1.search(body):
-            if _P2.search(body) and not resolved:
-                open_p2 += 1
+        badges = set(_BADGE.findall(body))
+        if badges and not badges & _BLOCKING:
+            open_minor += not resolved
             continue
         where = f"{c.get('path')}:{c.get('line') or c.get('original_line')} (comment {c['id']}): {_title(body)}"
         original = c.get("original_commit_id")
+        if not badges:
+            if not resolved:
+                verdict.reasons.append(f"Codex inline comment without a severity badge {where}")
+            continue
         if original == head_sha:
             verdict.reasons.append(f"P1 posted on head {where}")
             continue
@@ -169,8 +179,8 @@ def _check_inline(
             verdict.reasons.append(f"{since} outdated, no reply {where}")
         elif c.get("path") not in touched_paths.get(original, set()):
             verdict.reasons.append(f"{since} outdated, file unchanged since {where}")
-    if open_p2:
-        verdict.notes.append(f"{open_p2} open P2 inline comment(s), non-blocking")
+    if open_minor:
+        verdict.notes.append(f"{open_minor} open P2/P3 inline comment(s), non-blocking")
 
 
 def evaluate_gate(
@@ -192,9 +202,39 @@ def evaluate_gate(
     """
     verdict = Verdict(head_sha)
     _check_ci(head_sha, check_runs, verdict)
-    _check_codex_review(head_sha, list(reviews), list(issue_comments), verdict)
+    _check_codex_review(head_sha, reviews, issue_comments, verdict)
     _check_inline(head_sha, list(inline_comments), threads, touched_paths or {}, verdict)
     return verdict
+
+
+def statuses_as_check_runs(statuses: Iterable[Mapping], head_sha: str) -> list[dict]:
+    """Commit statuses (``commits/<sha>/status``) in the shape of check runs, so ``_check_ci`` reads both."""
+    runs = []
+    for s in statuses:
+        state = s.get("state")
+        runs.append(
+            {
+                "id": s.get("id", 0),
+                "name": s.get("context"),
+                "head_sha": head_sha,
+                "status": "in_progress" if state == "pending" else "completed",
+                "conclusion": {"success": "success", "pending": None}.get(state, "failure"),
+            }
+        )
+    return runs
+
+
+def touched_since(compare: Mapping, sha: str) -> set[str] | None:
+    """The files changed from ``sha`` to the head, from a ``compare/<sha>...<head>`` payload, or ``None``.
+
+    The three-dot compare diffs from the merge base, which is ``sha`` only while ``sha`` is an ancestor of
+    the head. After a rebase it is the old fork point, and the list would hold every file the PR touches, so
+    that case is unknown. So is a list that may have been cut at GitHub's cap.
+    """
+    files = compare.get("files") or []
+    if (compare.get("merge_base_commit") or {}).get("sha") != sha or len(files) >= _COMPARE_FILE_CAP:
+        return None
+    return {f["filename"] for f in files}
 
 
 # --- CLI: read-only GitHub reads -------------------------------------------------------------------------
@@ -213,6 +253,9 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
 """
 
 
+_COMPARE_JQ = "{merge_base_commit: {sha: .merge_base_commit.sha}, files: [.files[]? | {filename}]} | tojson"
+
+
 def _gh_lines(*args: str) -> list:
     """Run ``gh api`` and parse its one-JSON-value-per-line output (from a ``--jq`` filter)."""
     out = subprocess.run(["gh", "api", *args], check=True, capture_output=True, text=True).stdout
@@ -227,24 +270,28 @@ def fetch_and_evaluate(repo: str, number: int) -> Verdict:
     inline = _gh_lines("--paginate", f"{base}/pulls/{number}/comments?per_page=100", "--jq", ".[]")
     issue = _gh_lines("--paginate", f"{base}/issues/{number}/comments?per_page=100", "--jq", ".[]")
     runs = _gh_lines("--paginate", f"{base}/commits/{head_sha}/check-runs?per_page=100", "--jq", ".check_runs[]")
+    statuses = _gh_lines("--paginate", f"{base}/commits/{head_sha}/status?per_page=100", "--jq", ".statuses[]")
+    runs += statuses_as_check_runs(statuses, head_sha)
     owner, name = repo.split("/", 1)
     threads: dict[int, Mapping] | None
     try:
         nodes = _gh_lines(
-            "graphql", "--paginate", "-f", f"query={_THREADS_QUERY}", "-F", f"owner={owner}", "-F",
+            "graphql", "--paginate", "-f", f"query={_THREADS_QUERY}", "-f", f"owner={owner}", "-f",
             f"name={name}", "-F", f"number={number}", "--jq", ".data.repository.pullRequest.reviewThreads.nodes[]",
         )  # fmt: skip
         threads = {n["comments"]["nodes"][0]["databaseId"]: n for n in nodes if n["comments"]["nodes"]}
     except subprocess.CalledProcessError:
         threads = None
     touched: dict[str, set[str]] = {}
-    for sha in {c["original_commit_id"] for c in inline if _is_codex(c) and c["original_commit_id"] != head_sha}:
+    shas = {c["original_commit_id"] for c in inline if _is_codex(c) and not c.get("in_reply_to_id")}
+    for sha in shas - {head_sha}:
         try:
-            files = _gh_lines(f"{base}/compare/{sha}...{head_sha}", "--jq", ".files[].filename | tojson")
+            (compare,) = _gh_lines(f"{base}/compare/{sha}...{head_sha}", "--jq", _COMPARE_JQ)
         except subprocess.CalledProcessError:
-            continue  # unknown (e.g. the commit was force-pushed away) counts as unchanged
-        if len(files) < _COMPARE_FILE_CAP:
-            touched[sha] = set(files)
+            continue  # unknown (e.g. the commit is gone) counts as unchanged
+        files = touched_since(compare, sha)
+        if files is not None:
+            touched[sha] = files
     return evaluate_gate(reviews, inline, head_sha, runs, threads=threads, issue_comments=issue, touched_paths=touched)
 
 
@@ -255,9 +302,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         verdict = fetch_and_evaluate(args.repo, args.pr)
-    except (subprocess.CalledProcessError, ValueError, KeyError) as exc:
-        detail = getattr(exc, "stderr", "") or str(exc)
-        print(f"GATE: FAIL head=unknown could not read PR #{args.pr}: {detail.strip()[:300]}")
+    except Exception as exc:  # any failure to read or parse the PR must print FAIL, never a traceback
+        detail = (getattr(exc, "stderr", "") or str(exc)).strip()[:300]
+        print(f"GATE: FAIL head=unknown could not read PR #{args.pr}: {type(exc).__name__}: {detail}")
         return 1
     print(verdict.line())
     return 0 if verdict.passed else 1
