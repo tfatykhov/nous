@@ -185,10 +185,10 @@ class ProcedureManager:
 
         An ``idempotency_key`` already used returns the procedure that request wrote
         (ProcedureConflictError for the same key with a different request). With dedupe
-        enabled, an active how-to input that is not a skill is merged into an active
-        procedure, also not a skill, of the same normalized name; an auto-learned one is
-        also merged into the nearest auto-learned procedure at or above the cosine
-        threshold. A merge unions the list fields into the existing row as a new version
+        enabled, an active auto-learned input (an ``auto:*`` tag; never a skill, a strategy
+        card or a job lesson) is merged into the active auto-learned procedure of the same
+        normalized name, or else into the nearest one at or above the cosine threshold.
+        A merge unions the list fields into the existing row as a new version
         (change_source ``dedupe_merge``) and returns that row.
         """
         if session is None:

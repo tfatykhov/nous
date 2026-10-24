@@ -2,7 +2,7 @@
 --
 -- Every write that changes a procedure's body (create, update_body, append_notes, a
 -- create-time dedupe merge, a restore) bumps heart.procedures.version and records the
--- body it leaves as one heart.procedure_versions row. The table holds every version,
+-- body it writes as one heart.procedure_versions row. The table holds every version,
 -- the current one included, so restore(procedure_id, version) can bring back any of them.
 -- Existing rows are backfilled as version 1 (change_source 'backfill').
 --
