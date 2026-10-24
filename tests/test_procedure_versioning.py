@@ -927,3 +927,83 @@ async def test_update_body_with_the_same_body_still_repairs_a_null_embedding(hea
 
     await session.refresh(row)
     assert row.embedding is not None
+
+
+async def test_a_same_named_lesson_that_is_not_alike_is_stored_under_a_free_name(db, session):
+    """Not merged, and not refused by the unique name index either: the learner's batch goes on."""
+    embeddings = _AxisEmbeddings({"ALPHA": 0.0, "BRAVO": math.pi / 2})
+    manager = ProcedureManager(db, embeddings, "f102-free-name", dedupe_threshold=0.85)
+    first = await manager.store(_input(name="Debug flaky tests", description="ALPHA"), session=session)
+
+    second = await manager.store(_input(name="debug flaky tests", description="BRAVO"), session=session)
+    third = await manager.store(_input(name="Debug flaky tests", description="CHARLIE"), session=session)
+
+    assert len({first.id, second.id, third.id}) == 3
+    assert (second.name, third.name) == ("debug flaky tests (2)", "Debug flaky tests (3)")
+    assert (await manager.get(first.id, session=session)).name == "Debug flaky tests"
+
+
+async def test_a_hand_written_insert_under_a_held_name_still_fails(heart, session):
+    from sqlalchemy.exc import IntegrityError
+
+    await heart.store_procedure(_input(tags=["manual"]), session=session)
+    with pytest.raises(IntegrityError):
+        async with session.begin_nested():
+            await heart.store_procedure(_input(tags=["manual"], description="other"), session=session)
+
+
+async def test_the_name_lock_merges_into_a_same_named_row_without_a_vector(db, session):
+    embeddings = _AxisEmbeddings({"ALPHA": 0.0})
+    manager = ProcedureManager(db, embeddings, "f102-no-vector", dedupe_threshold=0.85)
+    first = await manager.store(_input(name="Deploy service", description="ALPHA"), session=session)
+    row = await session.get(Procedure, first.id)
+    row.embedding = None
+    await session.flush()
+
+    second = await manager.store(
+        _input(name="deploy-service", description="ALPHA", core_patterns=["new"]), session=session
+    )
+
+    assert (second.id, second.version) == (first.id, 2)
+
+
+async def test_the_weak_review_looks_again_once_the_revision_is_older_than_the_window(db):
+    from datetime import timedelta
+
+    agent = "f102-weak-revise-window"
+    heart, a, _b = await _weak_review_setup(db, agent)
+    try:
+        learner = _weak_review_learner(heart, _REVISE)
+        heart.search_procedures = _returns([a])
+        await learner._review_weak_procedures()
+        window = timedelta(days=heart.settings.procedure_staleness_days + 1)
+        async with db.session() as s:
+            await s.execute(
+                ProcedureVersion.__table__.update()
+                .where(ProcedureVersion.procedure_id == a.id)
+                .values(created_at=ProcedureVersion.created_at - window)
+            )
+            await s.commit()
+        learner._call_llm.reset_mock()
+        learner._call_llm.return_value = {"action": "keep", "reason": "fine now"}
+
+        assert await learner._review_weak_procedures() == 1
+        learner._call_llm.assert_awaited_once()
+    finally:
+        await _cleanup(db, agent)
+        await heart.close()
+
+
+async def test_another_body_write_does_not_hold_the_weak_review_off(db):
+    agent = "f102-weak-revise-other-write"
+    heart, a, _b = await _weak_review_setup(db, agent)
+    try:
+        await heart.update_procedure_body(a.id, _input(name="Sibling A", description="ALPHA", core_patterns=["x"]))
+        learner = _weak_review_learner(heart, {"action": "keep", "reason": "fine"})
+        heart.search_procedures = _returns([a])
+
+        assert await learner._review_weak_procedures() == 1
+        learner._call_llm.assert_awaited_once()
+    finally:
+        await _cleanup(db, agent)
+        await heart.close()

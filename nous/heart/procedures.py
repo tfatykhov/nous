@@ -285,7 +285,8 @@ class ProcedureManager:
 
         procedure = Procedure(
             agent_id=self.agent_id,
-            name=input.name,
+            # A learned lesson named like another but not alike is kept beside it, not refused by the name index.
+            name=await self._free_name(input.name, session) if dedupe else input.name,
             domain=input.domain,
             description=input.description,
             goals=input.goals or None,
@@ -315,7 +316,7 @@ class ProcedureManager:
         # F040: Emit procedure_stored event for graph linking
         await self._emit_event(session, "procedure_stored", {
             "procedure_id": str(procedure.id),
-            "name": input.name,
+            "name": procedure.name,
             "domain": input.domain or "",
             "description": input.description or "",
             "tags": input.tags or [],
@@ -372,14 +373,12 @@ class ProcedureManager:
             raise ValueError(f"Procedure {procedure_id} is a strategy card: a how-to body does not replace it")
 
         # The row's body already is the input's: no version, and no embedding call unless the row has none.
+        sets_metadata = "runtime_metadata" in input.model_fields_set
         unchanged = (
             (procedure.name, procedure.domain, procedure.description, procedure.kind)
             == (input.name, input.domain, input.description, input.kind)
             and all(list(getattr(procedure, field) or []) == getattr(input, field) for field in _LIST_FIELDS)
-            and (
-                "runtime_metadata" not in input.model_fields_set
-                or procedure.runtime_metadata == input.runtime_metadata
-            )
+            and (not sets_metadata or procedure.runtime_metadata == input.runtime_metadata)
         )
         embedding = procedure.embedding
         if self.embeddings and not (unchanged and embedding is not None):
@@ -407,7 +406,7 @@ class ProcedureManager:
         procedure.core_concepts = input.core_concepts or None
         procedure.implementation_notes = input.implementation_notes or None
         procedure.tags = input.tags or None
-        if "runtime_metadata" in input.model_fields_set:
+        if sets_metadata:
             procedure.runtime_metadata = input.runtime_metadata
         # Propagate kind from the input. (A how-to input over a card's row was
         # refused above: a card is not turned into a skill here.)
@@ -1695,22 +1694,25 @@ class ProcedureManager:
 
         The active auto-learned procedure of the same normalized name, if the semantic probe
         agrees (cosine at or above the threshold; with no embedding to compare, the name
-        alone); else the nearest one at or above the threshold. ``log`` off for a dry run.
+        alone, as for a same-named row without a vector); else the nearest one at or above
+        the threshold. ``log`` off for a dry run.
         """
         postgres = _is_postgres(session)
         if (same_name := await self._same_name_procedure(input.name, session)) is not None:
             if embedding is None or not postgres:
                 return same_name, "name lock: same normalized name"
-            agree = await self._nearest_summaries(
-                "", f"{LEARNED_WHERE} AND id = :target", {**LEARNED_PARAMS, "target": same_name}, 1, session,
-                probe="procedure dedupe name check", embedding=embedding,
-            )
-            score = agree[0].score if agree else None
-            if score is not None and score >= self._dedupe_threshold:
+            # That one row's cosine, computed directly (not through the approximate index walk).
+            score = (await session.execute(
+                text("SELECT 1 - (embedding <=> CAST(:embedding AS vector)) FROM heart.procedures WHERE id = :id"),
+                {"embedding": "[" + ",".join(str(float(v)) for v in embedding) + "]", "id": same_name},
+            )).scalar_one_or_none()
+            if score is None:
+                return same_name, "name lock: same normalized name, no vector to compare"
+            if score >= self._dedupe_threshold:
                 return same_name, f"name lock: same normalized name, cosine {score:.3f}"
             if log:
-                logger.info("Procedure dedupe: %r is named like %s but not alike (cosine %s)", input.name,
-                            same_name, f"{score:.3f}" if score is not None else "n/a")
+                logger.info("Procedure dedupe: %r is named like %s but not alike (cosine %.3f)", input.name,
+                            same_name, score)
         if not postgres:
             return None
         if embedding is None:
@@ -1753,14 +1755,12 @@ class ProcedureManager:
         Returns the target, the version the body was built from and its embedding: the merge
         under the lock uses the embedding only for that target at that version.
         """
-        if self.embeddings is None or embedding is None:
+        if embedding is None:  # store() embeds only with a provider
             return None
         target = await self._merge_target(input, embedding, session, log=False)
         if target is None:
             return None
-        procedure = (await session.execute(
-            select(Procedure).where(Procedure.id == target[0]).execution_options(populate_existing=True)
-        )).scalars().first()
+        procedure = await session.get(Procedure, target[0], populate_existing=True)
         if procedure is None or (body := self._merged_body(procedure, input)) is None:
             return None
         merged_embedding = await self._embed_with_retry(
@@ -1805,8 +1805,8 @@ class ProcedureManager:
             if prepared is not None and prepared[:2] == (procedure.id, procedure.version):
                 procedure.embedding = prepared[2]
             elif self.embeddings:
-                logger.info("Procedure dedupe: %s changed since its merged body was embedded; its vector is kept",
-                            procedure.id)
+                logger.info("Procedure dedupe: no embedding of the merged body for version %d of %s; its vector "
+                            "is kept (no embedding call under the create lock)", procedure.version, procedure.id)
         procedure.updated_at = datetime.now(UTC)
         lesson = next((note for note in input.implementation_notes if note.startswith("lesson: ")), None)
         reason = f"{rule}; incoming {input.name!r}: {(input.description or '')[:300]!r}"
@@ -1824,6 +1824,28 @@ class ProcedureManager:
             input.name, procedure.id, procedure.name, procedure.version, rule,
         )
         return self._to_detail(procedure)
+
+    async def _free_name(self, name: str, session: AsyncSession) -> str:
+        """``name``, or ``<name> (2)``, ``(3)`` and so on while an active row holds it.
+
+        Compared the way the (agent_id, lower(name)) WHERE active index compares. A strategy
+        card holding it does not count: it gives the name up (_take_name_from_card).
+        """
+        width = Procedure.name.type.length
+        n = 1
+        while True:
+            moved = name if n == 1 else name[: width - len(f" ({n})")].rstrip() + f" ({n})"
+            held = await session.execute(
+                select(Procedure.id)
+                .where(Procedure.agent_id == self.agent_id)
+                .where(Procedure.active == True)  # noqa: E712
+                .where(Procedure.kind.is_distinct_from(STRATEGY_CARD_KIND))
+                .where(func.lower(Procedure.name) == func.lower(moved))
+                .limit(1)
+            )
+            if held.scalars().first() is None:
+                return moved
+            n += 1
 
     async def _take_name_from_card(self, name: str, session: AsyncSession) -> None:
         """Make an active strategy card called ``name`` give the name up.

@@ -66,9 +66,11 @@ card or a job lesson), and only merge into an active auto-learned procedure (`LE
 
 2. **Name lock** (flag on). The target is the procedure whose normalized name matches (casefolded, `-`/`_`
    as spaces, whitespace collapsed), if the semantic probe agrees: its cosine to the input is at or above
-   the threshold. Only without an embedding to compare (an embed failure, SQLite) does the name alone
-   merge. A same-named row that is not alike is logged and left; the input goes on to step 3, and an
-   insert under a name the row already holds fails on the unique name index, as before F102. The learner
+   the threshold (computed for that row directly). Only without a vector to compare (an embed failure,
+   SQLite, a row stored without one) does the name alone merge. A same-named row that is not alike is
+   logged and left; the input goes on to step 3, and if it is inserted under a name an active row
+   holds, it takes the first free `<name> (2)`, `(3)`, ... instead of failing on the unique name index
+   (a hand-written input still fails there, as before F102). The learner
    names a lesson the model left unnamed after its cue (`Unnamed procedure: <cue>`), so unnamed lessons
    don't share a name.
 3. **Semantic near-duplicate** (flag on, Postgres). The input is probed through `_nearest_summaries` with
@@ -95,7 +97,9 @@ target the probe finds then. The merge uses that vector only if the row, locked,
 at the same version; otherwise it keeps the row's old vector (it matched a moment ago). Other creates
 take no lock.
 
-The learner counts a store that came back as a merge (version above 1) as covered, not created.
+The learner counts a store that came back as a merge (version above 1) as covered, not created. A merge
+that added nothing to a row still at version 1 cannot be told apart from a create that way, and is
+counted as created.
 
 **Why only auto-learned procedures.** `learn_skill` and the bootstrap look a skill up by name and
 *replace* its body (`update_body`), so a union would keep stale patterns. Distinct hand-authored skills

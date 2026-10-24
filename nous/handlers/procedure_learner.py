@@ -668,7 +668,7 @@ class ProcedureLearner:
                         logger.info("Weak procedure revise skipped, malformed answer: %s (%s)", proc_detail.name, exc)
                         continue
                     try:
-                        await self._heart.update_procedure_body(
+                        revised = await self._heart.update_procedure_body(
                             proc_detail.id,
                             revised_input,
                             expected_version=proc_detail.version,
@@ -678,7 +678,11 @@ class ProcedureLearner:
                         # The body changed while the model read it: the revision would drop that change.
                         logger.info("Weak procedure revise skipped, body changed: %s (%s)", proc_detail.name, exc)
                         continue
-                    logger.info("Revised weak procedure: %s (%s)", proc_detail.name, review_data.get("reason"))
+                    if revised.version == proc_detail.version:
+                        # The answer repeats the body: kept as is, and reviewed again next time, as a "keep".
+                        logger.info("Weak procedure revise changed nothing, kept: %s", proc_detail.name)
+                    else:
+                        logger.info("Revised weak procedure: %s (%s)", proc_detail.name, review_data.get("reason"))
                 elif action == "confounded":
                     # Kept as is: its effectiveness can't be attributed to it.
                     self._gate_counts["confounded"] += 1

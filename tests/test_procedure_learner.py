@@ -1210,8 +1210,9 @@ async def test_weak_review_revise_of_a_body_changed_meanwhile_is_skipped():
 
     stats = await learner.run_sleep_learning()
 
+    assert heart.update_procedure_body.await_args[0][0] == first.id
     heart.retire_procedure.assert_called_once_with(second.id)
-    assert stats["weak_reviewed"] == 1
+    assert (stats["weak_reviewed"], stats["llm_failed"]) == (1, 0)
 
 
 def test_a_bare_string_naming_an_input_id_is_not_a_citation():
