@@ -183,8 +183,9 @@ async def test_the_real_bot_against_the_real_routes_is_inert_under_prods_flags(e
 
 def test_2d_added_no_migration_and_no_setting():  # PIN: changes when a later PR adds one on purpose
     migrations = Path(__file__).resolve().parents[1] / "sql" / "migrations"
-    # 2e 085, ledger 086, task scores 087, scorer heartbeat 088, node attempt history 089, check audits 090; 2d none
-    assert sorted(migrations.glob("*.sql"))[-1].name.startswith("090_")
+    # 2e 085, ledger 086, task scores 087, scorer heartbeat 088, node attempt history 089, check audits 090,
+    # procedure versions 092 (F102); 2d none
+    assert sorted(migrations.glob("*.sql"))[-1].name.startswith("092_")
     named = {name for name in Settings.model_fields if "proposal" in name or "owner_action" in name}
     assert named == {"intention_proposal_ttl_hours"}
 

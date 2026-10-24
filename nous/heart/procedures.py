@@ -339,7 +339,7 @@ class ProcedureManager:
         return await self._update_body(procedure_id, input, session, expected_version)
 
     async def _update_body(
-        self, procedure_id: UUID, input: ProcedureInput, session: AsyncSession, expected_version: int | None
+        self, procedure_id: UUID, input: ProcedureInput, session: AsyncSession, expected_version: int | None = None
     ) -> ProcedureDetail:
         procedure = await self._locked_procedure(procedure_id, session)
         if procedure is None:
