@@ -1650,6 +1650,9 @@ export interface AutonomyData {
     } | null;
     /** Answered check audits with no completed audit.verdict action for that audit; normally 0. */
     audits_without_action_row: number;
+    /** The settled numbers' window: as long as the chosen one, ending 14 days ago (a score settles at 14 days).
+     *  `held` counts its subtasks still provisional (an undecided PR or an unanswered spot-check). */
+    settled_window: { from: string; to: string; held: number };
     headline: {
       verified_share: { provisional: VerifiedShare; settled: VerifiedShare };
       owner_overrides: { total: number; subtasks: number; rollups: number };

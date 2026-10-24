@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nous.dag.approval import as_utc
 from nous.observability.autonomy_inventory import INVENTORY_DAYS, get_autonomy_inventory, get_censor_activity
 from nous.observability.task_score_gatherer import audits_without_action_row
-from nous.observability.task_scoring import LEAF_KIND, OUTCOMES, ROLLUP_KINDS, SCORER_VERSION
+from nous.observability.task_scoring import LEAF_KIND, OUTCOMES, ROLLUP_KINDS, SCORER_VERSION, SETTLE_DAYS
 from nous.storage.models import (
     A2uiAction,
     A2uiSurface,
@@ -138,7 +138,7 @@ def _scorer(beat: ScorerHeartbeat | None) -> dict[str, Any] | None:
     }
 
 
-async def _task_scores(session: AsyncSession, agent_id: str, since: datetime) -> dict[str, Any]:
+async def _task_scores(session: AsyncSession, agent_id: str, since: datetime, now: datetime) -> dict[str, Any]:
     """Subtasks are the scored unit. DAG runs and intention roots are roll-ups: counted apart, never in a score sum.
 
     Coverage is measured only from the scorer's first run (``first_scored_at``): tasks that finished before it
@@ -147,6 +147,11 @@ async def _task_scores(session: AsyncSession, agent_id: str, since: datetime) ->
     to ``scoring``, and ``last_status`` says how the latest pass ended. It is None until the first pass.
     ``last_scored_at`` stays the time of the latest score write, which does not move while no task finished in the
     last 14 days.
+
+    A score settles once its task is ``SETTLE_DAYS`` old, so a window shorter than that would never hold a settled
+    one. The settled numbers therefore read a window of the same length that ends ``SETTLE_DAYS`` ago
+    (``settled_window``); ``held`` counts the subtasks in it that are still provisional (an undecided PR or an
+    unanswered spot-check keeps a row open for a while past settling).
     """
     T = TaskScore
     first, last = (
@@ -186,6 +191,20 @@ async def _task_scores(session: AsyncSession, agent_id: str, since: datetime) ->
         ).scalar_one()
         covered = sum(1 for r in leaves if as_utc(r.finished_at) >= floor)
     outcomes = Counter(r.outcome for r in leaves)
+    settled_to = now - timedelta(days=SETTLE_DAYS)
+    settled_from = settled_to - (now - since)
+    settled_window = (
+        await session.execute(
+            select(T.outcome, T.score, T.owner_overrides, T.settled).where(
+                T.agent_id == agent_id,
+                T.scorer_version == SCORER_VERSION,
+                T.task_kind == LEAF_KIND,
+                T.finished_at >= settled_from,
+                T.finished_at < settled_to,
+            )
+        )
+    ).all()
+    settled = [r for r in settled_window if r.settled]
     beat = (
         await session.execute(select(ScorerHeartbeat).where(ScorerHeartbeat.agent_id == agent_id))
     ).scalar_one_or_none()
@@ -196,13 +215,18 @@ async def _task_scores(session: AsyncSession, agent_id: str, since: datetime) ->
         "scorer": _scorer(beat),
         # v5 tripwire: answered check audits with no completed audit.verdict action for that exact audit. Normally 0.
         "audits_without_action_row": await audits_without_action_row(session, agent_id),
+        "settled_window": {
+            "from": settled_from.isoformat(),
+            "to": settled_to.isoformat(),
+            "held": len(settled_window) - len(settled),
+        },
         # The three numbers to read first, side by side. A subtask's score alone does not see the owner's overrides:
         # a rejected proposal, an undone chain call, an unverified-claim note and a DAG-level error all sit on
         # roll-ups, which are in no score sum. So the overrides and the penalties are counted over ALL units.
         "headline": {
             "verified_share": {
                 "provisional": _verified_share([r for r in leaves if not r.settled]),
-                "settled": _verified_share([r for r in leaves if r.settled]),
+                "settled": _verified_share(settled),
             },
             "owner_overrides": {
                 "total": sum(r.owner_overrides for r in rows),
@@ -221,7 +245,7 @@ async def _task_scores(session: AsyncSession, agent_id: str, since: datetime) ->
             "coverage": _round(covered / finished) if finished else None,
             "by_outcome": {o: outcomes.get(o, 0) for o in OUTCOMES},
             "provisional": _stats([r for r in leaves if not r.settled]),
-            "settled": _stats([r for r in leaves if r.settled]),
+            "settled": _stats(settled),
         },
         "rollups": {
             kind: {
@@ -271,8 +295,10 @@ async def get_autonomy_data(
     events_persisted: bool = True,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """GET /dashboard/autonomy. Read-only; every count is for the last ``days`` days except the inventory (30)."""
-    since = (now or datetime.now(UTC)) - timedelta(days=days)
+    """GET /dashboard/autonomy. Read-only; every count is for the last ``days`` days except the inventory (30) and
+    the settled task scores (the same length of window, ending ``SETTLE_DAYS`` ago)."""
+    current = now or datetime.now(UTC)
+    since = current - timedelta(days=days)
     taps, triage = await _taps(session, agent_id, since)
     cards = (
         await session.execute(
@@ -289,7 +315,7 @@ async def get_autonomy_data(
         "triage_taps": triage,
         "approval_cards_asked": cards,
         "decision_grades": await _decision_grades(session, agent_id, since),
-        "task_scores": await _task_scores(session, agent_id, since),
+        "task_scores": await _task_scores(session, agent_id, since, current),
         "inventory": {
             "days": INVENTORY_DAYS,
             "tools": await get_autonomy_inventory(session, agent_id, days=INVENTORY_DAYS, now=now),
