@@ -1419,10 +1419,20 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
     return _best(levels)
 
 
-# A send claim whose clause names mail, or a recipient or channel other than the owner's Telegram ("to Bob",
-# "via Slack"): a send_file could have reached it only through a chat id it was given, never certainly.
-_ELSEWHERE = re.compile(r"mail|\b(?:to|via|by|on|through|over|into|with)\s+(?!(?:telegram|you|your)\b)\w",
-                        re.IGNORECASE)
+# A send claim whose clause names another destination than the owner's Telegram: a send_file could have
+# reached it only through a chat id it was given, never certainly. A destination is mail as the verb or as
+# the thing sent ("emailed", "via email", "Email sent", never "the email summary"), a named channel ("on
+# WhatsApp", "via <anything but Telegram>") or a recipient after "to" that is a name, a handle or a noun
+# phrase other than you, the owner or the chat ("to Bob", "to the team"); a time or content word is none.
+_ELSEWHERE = re.compile(
+    r"\b(?:e-?)?mail(?:ed|ing)\b"
+    r"|\b(?:e-?)?mails?\b(?=\s*(?:[.,;:!?)]|$)|\s+(?:was|were|is|has|have|sent|to|via|by|with|on|at|for|about)\b)"
+    r"|\b(?:via|on|over|through|by|in|into|using)\s+(?:the\s+|a\s+)?(?:slack|whatsapp|signal|discord|sms"
+    r"|imessage|teams|messenger|wechat|gmail|outlook|linkedin|twitter|text\s+message)\b"
+    r"|\bvia\s+(?!(?:(?:the|a|your)\s+)?(?:telegram|bot|chat)\b)\w"
+    r"|\bto\s+(?:(?!telegram\b)(?-i:[A-Z])|[@#]\w"
+    r"|(?:the|a|an|my|our|his|her|their)\s+(?!(?:owner|chat|telegram|same)\b)\w)",
+    re.IGNORECASE)
 
 
 def evidence_level(claim: Claim, ev: Evidence) -> str:

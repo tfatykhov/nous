@@ -1061,7 +1061,23 @@ def test_a_relative_runner_cancel_after_an_absolute_cd(command, exit_code, verif
 
 
 @pytest.mark.parametrize(
-    "text", ["I sent the report via Telegram.", "Message sent.", "I sent you the report on Telegram."]
+    "text",
+    [
+        "I sent the report via Telegram.",
+        "Message sent.",
+        "I sent you the report on Telegram.",
+        # time and content words, and the owner, name no other destination
+        "I sent the report via Telegram with a summary.",
+        "I sent the report via Telegram on Monday.",
+        "I sent the report on time.",
+        "I sent the report at 7am.",
+        "I sent the report with the chart attached.",
+        "I sent the report as a .docx.",
+        "I sent the report to the owner.",
+        "I sent the report via the Telegram bot.",
+        "I sent you the report to review.",
+        "I sent the email summary via Telegram.",
+    ],
 )
 @pytest.mark.parametrize("args", [{"file_path": "/tmp/r.pdf"}, {"file_path": "/tmp/r.pdf", "chat_id": "42"}])
 def test_a_telegram_send_backs_an_untargeted_send_claim(text, args):
@@ -1081,6 +1097,10 @@ def test_a_telegram_send_backs_an_untargeted_send_claim(text, args):
         "Message sent to Bob.",
         "I sent the report via Slack.",
         "I sent the report to Tim via WhatsApp.",
+        "I sent the report on WhatsApp.",
+        "I sent the report to the team.",
+        "I sent the email.",
+        "I sent the report by e-mail on Monday.",
     ],
 )
 def test_a_telegram_send_only_could_have_backed_a_send_elsewhere(text):
