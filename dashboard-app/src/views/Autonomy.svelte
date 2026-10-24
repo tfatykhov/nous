@@ -8,7 +8,7 @@
   import DataTable from '../lib/ui/DataTable.svelte';
   import { fmtWhen, FLAG_GLOSS } from '../lib/harness';
   import {
-    bars, count, coverageFrom, pct, score, scorerHealth, OUTCOMES, OUTCOME_LABEL, ROLLUP_LABEL, CONTEXT_LABEL, LEVEL_LABEL,
+    bars, count, coverageFrom, pct, score, scorerHealth, settledSpan, OUTCOMES, OUTCOME_LABEL, ROLLUP_LABEL, CONTEXT_LABEL, LEVEL_LABEL,
     fixBaseline, fixLatest, fixOutcome, fixState, FIX_TEXTS, FIX_TRIGGER_LABEL, FIX_VERDICT_LABEL,
   } from '../lib/autonomy';
 
@@ -121,7 +121,7 @@
           </div>
         {/each}
       </div>
-      <p class="small muted">A subtask counts when the harness confirmed it or you graded it a success. Settled means finished more than 14 days ago, so a 7 d window has none.</p>
+      <p class="small muted">A subtask counts when the harness confirmed it or you graded it a success. A score is final 14 days after its task, so Settled reads subtasks that finished {settledSpan(ts.settled_window)}, a window as long as this one that ends 14 days ago.{#if ts.settled_window.held > 0} {ts.settled_window.held} of them {ts.settled_window.held === 1 ? 'is' : 'are'} not settled, so not counted as settled.{/if}</p>
     </section>
     <section class="card" aria-labelledby="h-overrides">
       <h2 id="h-overrides">Your overrides</h2>
@@ -164,7 +164,7 @@
       </div>
       <div class="table-wrap">
       <table class="stats">
-        <caption class="label">Scores (−1 to 1)</caption>
+        <caption class="label">Scores (−1 to 1) · settled: {settledSpan(ts.settled_window)}</caption>
         <thead><tr><th scope="col"></th><th scope="col">Count</th><th scope="col">Mean</th><th scope="col">p10</th><th scope="col">p50</th><th scope="col">p90</th><th scope="col">Overrides</th></tr></thead>
         <tbody>
           {#each statRows(d) as [label, s] (label)}

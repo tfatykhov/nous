@@ -25,6 +25,7 @@ const FULL = () => ({
     first_scored_at: new Date(Date.now() - 60 * 60000).toISOString(),
     last_scored_at: new Date(Date.now() - 5 * 60000).toISOString(),
     audits_without_action_row: 0,
+    settled_window: { from: '2026-10-02T21:00:00+00:00', to: '2026-10-09T21:00:00+00:00', held: 0 },
     scorer: {
       scorer_version: 1, last_run_at: new Date(Date.now() - 5 * 60000).toISOString(), last_status: 'ok',
       last_error: null, last_ok_at: new Date(Date.now() - 5 * 60000).toISOString(), rows_submitted: 1614,
@@ -134,6 +135,26 @@ describe('Autonomy view', () => {
     expect(text).toContain('level:external');
     expect(text).toContain('138');
     expect(text).not.toMatch(/NaN|undefined/);
+  });
+
+  it('names the settled window, which ends 14 days ago, and the subtasks still held in it', async () => {
+    const { container } = render(Autonomy);
+    await screen.findByText('Scorer running');
+    const text = container.textContent ?? '';
+    expect(text).toContain('Settled reads subtasks that finished Oct 2 – Oct 9, a window as long as this one that ends 14 days ago.');
+    expect(text).toContain('Scores (−1 to 1) · settled: Oct 2 – Oct 9');
+    expect(text).not.toContain('not settled');
+    for (const [held, line] of [
+      [1, '1 of them is not settled, so not counted as settled.'],
+      [2, '2 of them are not settled, so not counted as settled.'],
+    ] as const) {
+      cleanup();
+      const full = FULL();
+      body = { ...full, task_scores: { ...full.task_scores, settled_window: { ...full.task_scores.settled_window, held } } };
+      const again = render(Autonomy);
+      await screen.findByText('Scorer running');
+      expect(again.container.textContent).toContain(line);
+    }
   });
 
   it('fetches once on mount', async () => {

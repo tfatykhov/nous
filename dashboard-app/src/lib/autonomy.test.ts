@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { bars, count, coverageFrom, fixBaseline, fixLatest, fixOutcome, fixState, pct, score, scorerHealth, SCORER_STALE_MIN } from './autonomy';
+import { bars, count, coverageFrom, fixBaseline, fixLatest, fixOutcome, fixState, pct, score, scorerHealth, settledSpan, SCORER_STALE_MIN } from './autonomy';
 import type { JobFixRow } from './types/api';
 
 const NOW = Date.parse('2026-10-17T21:00:00Z');
@@ -83,6 +83,17 @@ describe('coverageFrom', () => {
   it('names the window once the first run is older than it', () => {
     expect(coverageFrom(minsAgo(20 * 24 * 60), 7, NOW)).toBe('In the last 7 d');
     expect(coverageFrom(minsAgo(20 * 24 * 60), 30, NOW)).toMatch(/^Since the scorer's first run/);
+  });
+});
+
+describe('settledSpan', () => {
+  it('names the window in UTC days', () => {
+    expect(settledSpan({ from: '2026-10-02T23:30:00+00:00', to: '2026-10-09T23:30:00+00:00' })).toBe('Oct 2 – Oct 9');
+  });
+
+  it('shows dashes, not "Invalid Date", without a window', () => {
+    expect(settledSpan(null)).toBe('— – —');
+    expect(settledSpan({ from: 'x', to: '' })).toBe('— – —');
   });
 });
 

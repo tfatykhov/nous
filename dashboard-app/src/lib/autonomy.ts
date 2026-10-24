@@ -87,6 +87,18 @@ export function coverageFrom(firstScoredAt: string | null, windowDays: number, n
   return `In the last ${windowDays} d`;
 }
 
+/**
+ * "Oct 3 – Oct 10": the settled numbers' window, in UTC days. The endpoint reads it as long as the chosen
+ * window and ending 14 days ago, because a score is final only then.
+ */
+export function settledSpan(win: { from: string; to: string } | null | undefined): string {
+  const day = (iso: string | undefined) => {
+    const d = new Date(iso ?? '');
+    return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+  };
+  return `${day(win?.from)} – ${day(win?.to)}`;
+}
+
 /** task_scoring.OUTCOMES, in display order (verified first); every lookup is by key. */
 export const OUTCOMES = ['done_verified', 'done_checked', 'done_self', 'partial', 'failed', 'not_scored'] as const;
 

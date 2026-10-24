@@ -222,7 +222,36 @@ async def test_subtask_scores_are_split_into_provisional_and_settled(db, agent):
     assert (s["provisional"]["p50"], s["provisional"]["p90"], s["provisional"]["overrides"]) == (0.5, 1.0, 2)
     assert s["settled"] == {"count": 1, "mean": -0.5, "p10": -0.5, "p50": -0.5, "p90": -0.5, "overrides": 0}
     assert s["by_outcome"]["failed"] == 1 and sum(s["by_outcome"].values()) == 6
-    assert (await data(db, agent, days=7))["task_scores"]["subtasks"]["settled"]["count"] == 0
+    # a 7-day window still shows it: the settled numbers read the 7 days that end SETTLE_DAYS ago
+    assert (await data(db, agent, days=7))["task_scores"]["subtasks"]["settled"]["count"] == 1
+
+
+async def test_settled_numbers_read_a_window_of_the_same_length_that_ends_settle_days_ago(db, agent):
+    """A score settles at SETTLE_DAYS (14), so a 7-day window of recent tasks never holds one."""
+    await add(
+        db,
+        score_row(agent, value=1.0, outcome="done_verified", settled=True, age_days=15),
+        score_row(agent, value=0.0, settled=True, age_days=20.5),
+        score_row(agent, value=0.0, settled=True, age_days=21),  # the window's first instant is in it
+        score_row(agent, value=1.0, outcome="done_verified", settled=True, age_days=14),  # its end is not
+        score_row(agent, value=-0.5, outcome="failed", settled=True, age_days=21.5),  # before the settled window
+        score_row(agent, value=0.0, age_days=16),  # in it, still provisional
+        score_row(agent, value=0.0, age_days=3),  # this window's: provisional
+        score_row(agent, "dag", None, age_days=15),  # a roll-up is never a leaf, settled or held
+        score_row(agent, value=1.0, outcome="done_verified", settled=True, age_days=15, version=SCORER_VERSION + 1),
+        score_row("someone-else", value=1.0, outcome="done_verified", settled=True, age_days=15),
+    )
+    ts = (await data(db, agent, days=7))["task_scores"]
+    assert ts["settled_window"] == {
+        "from": (NOW - timedelta(days=21)).isoformat(),
+        "to": (NOW - timedelta(days=14)).isoformat(),
+        "held": 1,
+    }
+    assert ts["headline"]["verified_share"]["settled"] == {"scored": 3, "verified": 1, "share": 0.3333}
+    assert ts["subtasks"]["settled"]["count"] == 3
+    assert ts["headline"]["verified_share"]["provisional"] == {"scored": 1, "verified": 0, "share": 0.0}
+    # a longer window reaches back as far: 30 days ending 14 days ago take the 21.5-day row too
+    assert (await data(db, agent, days=30))["task_scores"]["subtasks"]["settled"]["count"] == 4
 
 
 async def test_rollups_are_counted_apart_and_never_in_a_score_sum(db, agent):
@@ -429,6 +458,7 @@ async def test_the_shape_with_nothing_recorded(db, agent):
         "last_scored_at",
         "scorer",
         "audits_without_action_row",
+        "settled_window",
         "headline",
         "subtasks",
         "rollups",
@@ -443,7 +473,7 @@ async def test_the_headline_shows_verified_share_overrides_and_penalties_side_by
         score_row(agent, value=1.0, outcome="done_verified"),
         score_row(agent, value=0.0, outcome="done_self"),
         score_row(agent, value=0.0, outcome="done_self", overrides=1, harness_errors=2),
-        score_row(agent, value=1.0, outcome="done_verified", settled=True),
+        score_row(agent, value=1.0, outcome="done_verified", settled=True, age_days=16),
         score_row(agent, outcome="not_scored", value=None, not_scored_reason="cancelled"),  # not a scored leaf
         score_row(agent, "dag", None, outcome="done_self", harness_errors=3, refusals=1),
         score_row(agent, "intention", None, outcome="done_self", overrides=2, unverified_claims=1),
