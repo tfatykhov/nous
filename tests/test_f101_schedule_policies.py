@@ -769,6 +769,28 @@ async def test_catch_up_keeps_a_passed_slot_inside_the_last_check_interval(heart
     assert (await heart.schedules.get(schedule.id)).next_fire_at > datetime.now(UTC)
 
 
+async def test_catch_up_keeps_a_passed_cron_slot_inside_the_last_check_interval(heart):
+    settings = _settings(heart.agent_id, schedule_check_interval=3600)
+    schedule = await heart.schedules.create(
+        task="hourly",
+        schedule_type="recurring",
+        cron_expr="0 * * * *",
+        concurrency_policy="always_enqueue",
+        catch_up_policy="enqueue_missed_with_cap",
+        catch_up_cap=10,
+    )
+    top_of_hour = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    async with heart.db.session() as s:
+        await s.execute(
+            update(Schedule).where(Schedule.id == schedule.id).values(next_fire_at=top_of_hour - timedelta(hours=2))
+        )
+        await s.commit()
+
+    # -2h and -1h are missed; the top of this hour lies inside the last check interval.
+    assert await TaskScheduler(heart, settings)._fire_due_tasks() == 2
+    assert (await heart.schedules.get(schedule.id)).next_fire_at == top_of_hour
+
+
 async def test_skip_missed_still_advances_past_a_passed_slot_inside_the_last_check_interval(heart):
     settings = _settings(heart.agent_id, schedule_check_interval=60)
     schedule = await heart.schedules.create(task="t", schedule_type="recurring", interval_seconds=3600)

@@ -264,9 +264,7 @@ def _runs_due(schedule: Schedule, now: datetime, settings: Settings) -> tuple[in
             runs += 1
             counted = slot
     if schedule.max_fires:
-        allowed = max(1, min(runs, schedule.max_fires - schedule.fire_count))
-        if allowed < runs:
-            runs, advance_from = allowed, now
+        runs = max(1, min(runs, schedule.max_fires - schedule.fire_count))
     return runs, advance_from
 
 

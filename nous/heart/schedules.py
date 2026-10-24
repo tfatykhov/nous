@@ -214,7 +214,8 @@ class ScheduleManager:
         coalesced or skipped, more than 1 for a catch-up); the slot moves on either way.
         ``after`` (F101 catch-up): the time the next slot follows, when not ``fired_at``.
         """
-        after = after or fired_at
+        if after is None:
+            after = fired_at
         async with self._db.session() as session:
             schedule = await session.get(Schedule, schedule_id)
             if schedule is None:

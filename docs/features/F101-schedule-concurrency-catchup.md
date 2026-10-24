@@ -31,7 +31,7 @@ Both are columns of `heart.schedules` (migration 091, with CHECK constraints). E
 | `skip_if_active` | the same, recorded as `skipped` |
 | `always_enqueue` | starts another run |
 
-`always_enqueue` cannot be combined with `continuation_turns > 0` (F064.5): `ScheduleManager.create`, and with it `schedule_task`, refuses it with a `ValueError`. The runs of one continuation cycle share a session (`metadata.session_id`), and the runner serializes a session's turns on its lock. Two runs started side by side would therefore queue there while each worker's timeout keeps counting, so the second run could use up its timeout waiting.
+`always_enqueue` cannot be combined with `continuation_turns > 0` (F064.5): `ScheduleManager.create` refuses it with a `ValueError` (no agent tool or REST route sets `continuation_turns` today, so the check guards every way in). The runs of one continuation cycle share a session (`metadata.session_id`), and the runner serializes a session's turns on its lock. Two runs started side by side would therefore queue there while each worker's timeout keeps counting, so the second run could use up its timeout waiting.
 
 `coalesced` and `skipped` differ only in what is recorded, as in Paperclip. "Coalesced" means the active run serves this slot. "Skipped" means the slot was dropped.
 
@@ -44,7 +44,7 @@ Both are columns of `heart.schedules` (migration 091, with CHECK constraints). E
 
 **How catch-up and concurrency combine.** As in Paperclip, every catch-up run passes the concurrency gate. Under the default `coalesce_if_active`, the first run starts and the later missed slots are coalesced into it, each one recorded. Several catch-up runs therefore only start with `always_enqueue`. The `schedule_task` tool description says this.
 
-**Counting missed slots.** The scheduler walks the schedule's cron or interval from `next_fire_at`, at most `cap` steps. A slot counts as missed only when it is more than one check interval old, so a check that is only late cannot turn a short interval into a double fire. Such a passed slot is not used up: the schedule then advances from the last slot it counted, so `next_fire_at` is that passed slot, which is due at the next check and goes through the concurrency gate as usual. When the cap is reached, the schedule advances from now and the remaining slots are dropped. `max_fires` bounds the batch, and `fire_count` never passes it.
+**Counting missed slots.** The scheduler walks the schedule's cron or interval from `next_fire_at`, at most `cap` steps. A slot counts as missed only when it is more than one check interval old, so a check that is only late cannot turn a short interval into a double fire. Such a passed slot is not used up: the schedule then advances from the last slot it counted, so `next_fire_at` is that passed slot, which is due at the next check and goes through the concurrency gate as usual. When the cap is reached, the schedule advances from now and the remaining slots are dropped, a passed slot inside the last check interval included. A schedule whose slots are closer together than `NOUS_SCHEDULE_CHECK_INTERVAL` therefore gets one run per slot at each check (up to the cap), and its `next_fire_at` can lie up to one check interval in the past. `max_fires` bounds the batch, and `fire_count` never passes it.
 
 **`max_fires` counts runs started.** A fire that is coalesced or skipped does not raise `fire_count`. A `max_fires` schedule whose fires keep coalescing therefore stays active until that many runs have actually started.
 
