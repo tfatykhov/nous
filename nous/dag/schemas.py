@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from enum import Enum
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -316,6 +317,9 @@ class DAGCreateRequest(BaseModel):
     # conversation's result inbox. None for scheduler/heartbeat DAGs.
     origin_channel: str | None = None
     origin_session_id: str | None = None
+    # F101: the schedule whose run created the DAG (injected by ToolDispatcher on a
+    # scheduled turn, never the model's), so it counts as that schedule's active run.
+    schedule_id: UUID | None = None
 
     @model_validator(mode="after")
     def validate_dag(self) -> DAGCreateRequest:

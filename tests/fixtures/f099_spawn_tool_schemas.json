@@ -109,6 +109,29 @@
             "decision",
             "debug"
           ]
+        },
+        "concurrency_policy": {
+          "type": "string",
+          "description": "Recurring only: what a fire does while this schedule's previous run (its subtask, or a DAG it created) is still active. coalesce_if_active (default) and skip_if_active start nothing; always_enqueue starts another run.",
+          "enum": [
+            "coalesce_if_active",
+            "skip_if_active",
+            "always_enqueue"
+          ]
+        },
+        "catch_up_policy": {
+          "type": "string",
+          "description": "Recurring only: slots missed while Nous was down. skip_missed (default) runs once; enqueue_missed_with_cap runs once per missed slot up to catch_up_cap (each run still passes concurrency_policy, so the extra runs only start with always_enqueue).",
+          "enum": [
+            "skip_missed",
+            "enqueue_missed_with_cap"
+          ]
+        },
+        "catch_up_cap": {
+          "type": "integer",
+          "description": "Most runs enqueue_missed_with_cap starts at once (1-25; default 3).",
+          "minimum": 1,
+          "maximum": 25
         }
       },
       "required": [

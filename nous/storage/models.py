@@ -1190,6 +1190,18 @@ class Schedule(Base):
             "schedule_type IN ('once', 'recurring')",
             name="chk_schedule_type",
         ),
+        CheckConstraint(
+            "concurrency_policy IN ('coalesce_if_active', 'skip_if_active', 'always_enqueue')",
+            name="chk_schedule_concurrency_policy",
+        ),
+        CheckConstraint(
+            "catch_up_policy IN ('skip_missed', 'enqueue_missed_with_cap')",
+            name="chk_schedule_catch_up_policy",
+        ),
+        CheckConstraint(
+            "catch_up_cap IS NULL OR catch_up_cap BETWEEN 1 AND 25",
+            name="chk_schedule_catch_up_cap",
+        ),
         {"schema": "heart"},
     )
 
@@ -1225,6 +1237,15 @@ class Schedule(Base):
     continuation_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
+    # F101 (migration 091). Read only when NOUS_SCHEDULE_POLICIES_ENABLED is on.
+    concurrency_policy: Mapped[str] = mapped_column(
+        Text, nullable=False, default="coalesce_if_active", server_default="coalesce_if_active"
+    )
+    catch_up_policy: Mapped[str] = mapped_column(
+        Text, nullable=False, default="skip_missed", server_default="skip_missed"
+    )
+    # NULL: NOUS_SCHEDULE_CATCH_UP_CAP.
+    catch_up_cap: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class ToolCache(Base):
@@ -1365,6 +1386,9 @@ class ExecutionDAG(Base):
     # DAGs. The result inbox routes the DAG's outcome to origin_channel.
     origin_channel: Mapped[str | None] = mapped_column(Text, nullable=True)
     origin_session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # F101 (migration 091): the schedule whose run created this DAG, so the
+    # DAG counts as that schedule's active run. NULL for every other DAG.
+    schedule_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     nodes: Mapped[list["DAGNode"]] = relationship(
         "DAGNode",

@@ -1257,7 +1257,7 @@ async def create_components(settings: Settings) -> dict:
         try:
             from nous.handlers.task_scheduler import TaskScheduler
 
-            task_scheduler = TaskScheduler(heart, settings)
+            task_scheduler = TaskScheduler(heart, settings, bus=bus)
             await task_scheduler.start()
         except ImportError:
             logger.debug("TaskScheduler not available yet")

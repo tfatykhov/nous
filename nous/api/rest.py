@@ -22,6 +22,7 @@ Endpoints:
   GET  /schedules         - List schedules (Heart)
   POST /schedules         - Create a schedule externally
   DELETE /schedules/{id}  - Deactivate a schedule
+  POST /schedules/{id}/run - Start a run now (F101; the concurrency policy applies)
   GET  /health            - Health check (DB connectivity)
   GET  /procedures        - List procedures (Heart)
   GET  /dashboard/graph   - Graph data for D3 visualization (F021)
@@ -1337,6 +1338,39 @@ def create_app(
         except Exception as e:
             logger.error("Deactivate schedule error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def run_schedule(request: Request) -> JSONResponse:
+        """POST /schedules/{id}/run — F101: start a run now; the schedule's concurrency policy still applies.
+
+        202 ``started`` with the new run's id; 200 ``coalesced``/``skipped`` with the active run's id.
+        The schedule's next_fire_at and fire_count do not change.
+        """
+        from nous.brain.intentions import IntentionRootClosed
+        from nous.handlers.task_scheduler import ScheduleBusy, ScheduleNotFound, run_schedule_now
+        from nous.heart.subtasks import SubtaskQueueFull
+
+        try:
+            schedule_id = UUID(request.path_params["id"])
+        except ValueError:
+            return JSONResponse({"error": "Invalid schedule ID"}, status_code=400)
+        if not settings.schedule_policies_enabled:
+            return JSONResponse(
+                {"error": "Manual runs need NOUS_SCHEDULE_POLICIES_ENABLED (the concurrency policy gates them)"},
+                status_code=409,
+            )
+        try:
+            result = await run_schedule_now(heart, settings, schedule_id, bus=bus)
+        except ScheduleNotFound:
+            return JSONResponse({"error": "Active recurring schedule not found"}, status_code=404)
+        except (ScheduleBusy, SubtaskQueueFull, IntentionRootClosed) as e:
+            return JSONResponse({"error": str(e)}, status_code=409)
+        except Exception as e:
+            logger.exception("Run schedule error")
+            return JSONResponse({"error": str(e)}, status_code=500)
+        return JSONResponse(
+            {"status": result.outcome, "run_id": str(result.run_id), "schedule_id": str(schedule_id)},
+            status_code=202 if result.outcome == "started" else 200,
+        )
 
     # ------------------------------------------------------------------
     # Sleep trigger endpoint (#173)
@@ -3521,6 +3555,7 @@ def create_app(
         Route("/schedules", list_schedules),
         Route("/schedules", create_schedule, methods=["POST"]),
         Route("/schedules/{id}", deactivate_schedule, methods=["DELETE"]),
+        Route("/schedules/{id}/run", run_schedule, methods=["POST"]),
         Route("/health", health),
         # F092: A2UI companion — detail before list (Starlette top-down matching)
         Route("/a2ui/stream", a2ui_stream),
