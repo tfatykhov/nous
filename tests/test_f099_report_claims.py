@@ -1053,6 +1053,19 @@ def test_a_relative_runner_without_a_certain_absolute_cd_reads_back_nothing(comm
         # the cd into the jobs dir never runs, and the cancel that does is another directory's runner.sh
         (f"false && cd {JOBS_DIR} && ./runner.sh cancel {JOB}; {CANCEL_ELSEWHERE}", 0, False),
         (f"case x in y) cd {JOBS_DIR} && ./runner.sh cancel {JOB};; esac; {CANCEL_ELSEWHERE}", 0, False),
+        # an assignment before the cd runs nothing; a line break after `&&` continues the command
+        (f"X=1; cd {JOBS_DIR} && ./runner.sh cancel {JOB}", 0, True),
+        (f"cd {JOBS_DIR} &&\n./runner.sh cancel {JOB}", 0, True),
+        (f"cd {JOBS_DIR} && X=1; ./runner.sh cancel {JOB}", 0, False),
+        (f"cd {JOBS_DIR} && X=1 && ./runner.sh cancel {JOB}", 0, False),
+        (f"cd {JOBS_DIR}\n./runner.sh cancel {JOB}", 0, False),
+        (f"cd {JOBS_DIR} &&\n\n# then\n./runner.sh cancel {JOB}", 0, True),
+        # the cd never runs, however many blank or comment lines follow the `||`
+        (f"true ||\ncd {JOBS_DIR} && ./runner.sh cancel {JOB}", 0, False),
+        (f"true ||\n\ncd {JOBS_DIR} && ./runner.sh cancel {JOB}", 0, False),
+        (f"true ||\n# c\ncd {JOBS_DIR} && ./runner.sh cancel {JOB}", 0, False),
+        (f"true |\n\ncd {JOBS_DIR} && ./runner.sh cancel {JOB}", 0, False),
+        (f"X=$Y; cd {JOBS_DIR} && ./runner.sh cancel {JOB}", 0, False),
     ],
 )
 def test_a_relative_runner_cancel_after_an_absolute_cd(command, exit_code, verified):
@@ -1099,6 +1112,15 @@ def test_a_telegram_send_backs_an_untargeted_send_claim(text, args):
         "I sent the report to Tim via WhatsApp.",
         "I sent the report on WhatsApp.",
         "I sent the report to the team.",
+        "I sent the report to stakeholders.",
+        "I sent the report to everyone.",
+        "I sent the report to them.",
+        "I sent the report to bob.",
+        "I sent the report to your team.",
+        "I sent the report to the Telegram group.",
+        "I sent the report in the email thread.",
+        "I sent the report through the mail server.",
+        "I sent the report by text.",
         "I sent the email.",
         "I sent the report by e-mail on Monday.",
     ],

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from nous.cognitive.bash_side_effect import (
+    _ASSIGNMENT,
     READ_COMMANDS,
     command_invocations,
     command_string,
@@ -1420,18 +1421,20 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
 
 
 # A send claim whose clause names another destination than the owner's Telegram: a send_file could have
-# reached it only through a chat id it was given, never certainly. A destination is mail as the verb or as
-# the thing sent ("emailed", "via email", "Email sent", never "the email summary"), a named channel ("on
-# WhatsApp", "via <anything but Telegram>") or a recipient after "to" that is a name, a handle or a noun
-# phrase other than you, the owner or the chat ("to Bob", "to the team"); a time or content word is none.
+# reached it only through a chat id it was given, never certainly. A destination is mail as the verb, the
+# thing sent or the channel ("emailed", "Email sent", "via email", "in the email thread", never "the email
+# summary"), a named channel ("on WhatsApp", "via <anything but Telegram>") or whoever follows "to" but
+# you, the owner, the chat, Telegram or an infinitive ("to Bob", "to them", "to the Telegram group"). A
+# time or content word ("on Monday", "with a summary") is none.
 _ELSEWHERE = re.compile(
     r"\b(?:e-?)?mail(?:ed|ing)\b"
     r"|\b(?:e-?)?mails?\b(?=\s*(?:[.,;:!?)]|$)|\s+(?:was|were|is|has|have|sent|to|via|by|with|on|at|for|about)\b)"
-    r"|\b(?:via|on|over|through|by|in|into|using)\s+(?:the\s+|a\s+)?(?:slack|whatsapp|signal|discord|sms"
-    r"|imessage|teams|messenger|wechat|gmail|outlook|linkedin|twitter|text\s+message)\b"
+    r"|\b(?:in|into|over|through|by)\s+(?:(?:the|an?)\s+)?(?:e-?)?mail\b"
+    r"|\b(?:via|on|over|through|by|in|into|using)\s+(?:(?:the|a)\s+)?(?:slack|whatsapp|signal|discord|sms"
+    r"|imessage|teams|messenger|wechat|gmail|outlook|linkedin|twitter|text)\b"
     r"|\bvia\s+(?!(?:(?:the|a|your)\s+)?(?:telegram|bot|chat)\b)\w"
-    r"|\bto\s+(?:(?!telegram\b)(?-i:[A-Z])|[@#]\w"
-    r"|(?:the|a|an|my|our|his|her|their)\s+(?!(?:owner|chat|telegram|same)\b)\w)",
+    r"|\bto\s+(?!(?:you|yourself|me|(?:(?:the|your|my)\s+)?(?:owner|chat|dm|telegram(?!\s+(?:group|channel)\b)))\b)"
+    r"(?!(?:review|read|check|confirm|approve|see|look|keep|share|sign|use|be|date)\b)[\w@#]",
     re.IGNORECASE)
 
 
@@ -1807,14 +1810,20 @@ def _cd_dirs(command: str, runs: tuple) -> list[tuple[str, str] | None]:
     Read from the command text, not ``runs``: an invocation's certainty is unknown whenever the exit is not 0
     (a status read exits with the job's state), ``runs`` unwraps `bash -c 'cd x'` and `(cd x)`, whose cd
     moves a child shell only, and it keeps a relative program as `./<name>`. So the text's simple commands
-    must be ``runs`` one to one (no branch dropped, no string unwrapped); the cd must be a simple command
-    of its own, joined to the call by `&&`, and not after `||` or `|` (where it may be skipped or run in a
-    subshell)."""
+    must be ``runs`` one to one (no branch dropped, no string unwrapped; an assignment alone runs nothing);
+    the cd must be a simple command of its own, joined to the call by `&&` (blank or comment lines after it
+    continue the command), and not after `||` or `|` (where it may be skipped or run in a subshell)."""
     found: list[tuple[str, str] | None] = [None] * len(runs)
     commands = simple_commands(command)
     if commands is None:
         return found
-    calls = [i for i, (words, _, _, _) in enumerate(commands) if words]
+    kept: list[tuple[list[str], list[str], list[str], str]] = []
+    for c in commands:  # blank and comment lines after `&&`, `||` or `|` continue the command
+        if not (c == ([], [], [], "\n") and kept and kept[-1][3] in ("&&", "||", "|")):
+            kept.append(c)
+    commands = kept
+    calls = [i for i, (words, _, _, _) in enumerate(commands)
+             if words and not all(_ASSIGNMENT.match(w) for w in words)]
     if len(calls) != len(runs) or any(
             (program_name(commands[i][0][0]), *commands[i][0][1:]) != (prog, *args)
             for i, (prog, args, _) in zip(calls, runs)):
