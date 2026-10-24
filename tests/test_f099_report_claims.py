@@ -1338,6 +1338,22 @@ def test_a_send_to_an_address_is_never_a_telegram_send(claim):
     assert [c.evidence for c in result.claims] == ["none"]
 
 
+@pytest.mark.parametrize(
+    ("tail", "level"),
+    [
+        (" to the user's team", P),
+        (" to the owner’s team", P),
+        (" to your team", P),
+        (" to the user's chat", E),
+        (" to the user's DMs", E),
+        (" to the user's Telegram", E),
+    ],
+)
+def test_a_possessive_of_the_owner_is_self_only_for_their_chat(tail, level):
+    result = _verify(f"I sent the report{tail}.", [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [level]
+
+
 def test_a_verifier_given_no_runner_takes_no_bash_call_for_a_runner_call():
     evidence = [Evidence("bash", {"command": f"bash {RUNNER} cancel {JOB}"}, exit_code=0)]
     assert not ClaimVerifier().verify_report(f"I cancelled job {JOB}.", evidence).verified
