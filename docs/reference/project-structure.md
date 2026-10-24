@@ -118,7 +118,7 @@ nous/
 │   │   ├── approval.py         # Harness Phase 3 park-and-resume nodes
 │   │   ├── attempts.py         # The attempt a node reset discards, archived in `dag_nodes.attempt_history` (migration 089) for the task scorer
 │   │   ├── fix_executor.py     # LLM fix dispatch
-│   │   ├── typed_checks.py     # Built-in completion checks (`python -m nous.dag.typed_checks pr <repo> --head <branch>`): passes once the PR exists
+│   │   ├── typed_checks.py     # Built-in completion checks (`python -m nous.dag.typed_checks pr <repo> --head <branch> [--job-file <path>]`): passes once the PR exists; with a launched job's id file it waits for the job and fails once the job ended without the PR
 │   │   ├── schemas.py          # DAGNodeSpec, DAG schemas
 │   │   └── _workspace.py       # F064.3 workspace containment
 │   ├── browser/                # F100 browser_task: isolated browser-use loop
