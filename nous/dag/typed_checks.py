@@ -42,6 +42,7 @@ _BRANCH = re.compile(r"[A-Za-z0-9._/-]{1,200}")
 _JOB_FILE = re.compile(r"/[A-Za-z0-9._/-]{1,300}")  # the scorer reads the check with the same charset
 _JOB_ID = re.compile(r"job-\d{8}-\d{6}-[0-9a-f]{6,64}")  # runner.sh's job directory names
 _JOB_ENDED = frozenset({"completed", "failed", "cancelled"})  # runner.sh's final status words
+_PID = re.compile(r"[0-9]{1,10}")  # ASCII digits only: str.isdigit() also takes "²"
 # A job writes its status after its last step, so a PR it opened just before may not be listed yet: an ended job
 # fails the node only once its status is this old.
 JOB_ENDED_GRACE_SECONDS = 300
@@ -103,12 +104,13 @@ def _gone(job_dir: str) -> bool:
         return False
     for name in ("run_pid", "pid"):  # runner.sh status anchors on run.sh's pid, then the wrapper's
         word = _read_head(posixpath.join(job_dir, name), 32)
-        if word is not None and word.isdigit() and int(word) > 1:
+        # The job's own uid can write this file: only a plain pid a kernel can hold is probed.
+        if word is not None and _PID.fullmatch(word) and 1 < int(word) < 2**22:
             try:
                 os.kill(int(word), 0)
             except ProcessLookupError:
                 return True
-            except OSError:
+            except (OSError, OverflowError):
                 return False
             return False
     return False
@@ -117,15 +119,16 @@ def _gone(job_dir: str) -> bool:
 def job_state(job_file: str, *, now: float | None = None) -> tuple[str, float] | None:
     """(status word, seconds since it was written) of the job whose id ``job_file`` holds; None when not known.
 
-    The file may hold ``runner.sh launch``'s whole output (it ends with the id): the first job id in its head is the
-    job. Its status file ``<workspace>/claude-jobs/<id>/status`` must be readable, else None: a file the check cannot
-    read never ends the node. A "running" job whose worker is gone reads "gone": it will never write a final word.
+    The file may hold ``runner.sh launch``'s whole output (it ends with the id): the last job id in it is the job, so
+    a retry appended to the same file names the new job. Its status file ``<workspace>/claude-jobs/<id>/status`` must
+    be readable, else None: a file the check cannot read never ends the node. A "running" job whose worker is gone
+    reads "gone": it will never write a final word.
     """
-    head = _read_head(job_file, 4096)
-    found = _JOB_ID.search(head) if head is not None else None
-    if found is None:
+    text = _read_head(job_file, 65536)
+    found = _JOB_ID.findall(text) if text is not None else []
+    if not found:
         return None
-    job_dir = posixpath.join(_workspace(), "claude-jobs", found.group(0))
+    job_dir = posixpath.join(_workspace(), "claude-jobs", found[-1])
     status_path = posixpath.join(job_dir, "status")
     status = _read_head(status_path)
     try:
@@ -243,7 +246,10 @@ def main(argv: Sequence[str] | None = None, *, transport: httpx.BaseTransport | 
         print(f"typed_checks: {exc}", file=sys.stderr)
         return FAILED
     code, reason, answer = check_pr(args.repo, args.pr, args.head, transport=transport)
-    job = job_state(args.job_file) if args.job_file is not None else None
+    try:
+        job = job_state(args.job_file) if args.job_file is not None else None
+    except Exception:  # noqa: BLE001 - files the job can write must never turn into a crash, which exits 1
+        job = None
     if job is not None:
         status, age = job
         if answer == "open" and status == "running":  # a merged PR is never held

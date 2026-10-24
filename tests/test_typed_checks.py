@@ -191,7 +191,7 @@ JOB = "job-20261024-002210-009d4cf6"
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="job files are absolute POSIX paths")
 
 
-def _job(workspace, status, age_seconds=600, job_id=JOB, id_text=None, pid=None):
+def _job(workspace, status, age_seconds=600, job_id=JOB, id_text=None, pid=None, pid_file="run_pid"):
     """A launched job as runner.sh leaves it: its id in a file the DAG wrote, its status word (and the pid of the
     process that will write the final one) in its own dir."""
     id_file = workspace / "dag-1" / "job.id"
@@ -204,7 +204,7 @@ def _job(workspace, status, age_seconds=600, job_id=JOB, id_text=None, pid=None)
         written = time.time() - age_seconds
         os.utime(job_dir / "status", (written, written))
     if pid is not None:
-        (job_dir / "run_pid").write_text(f"{pid}\n")
+        (job_dir / pid_file).write_text(f"{pid}\n")
     return str(id_file)
 
 
@@ -315,3 +315,41 @@ def test_a_running_job_whose_worker_is_gone_holds_nothing(tmp_path, monkeypatch)
     assert _head_check(_job(tmp_path, "running", 600, pid=child.pid), OPEN) == 0
     assert _head_check(_job(tmp_path, "running", 600, pid=child.pid), NONE_YET) == 2
     assert _head_check(_job(tmp_path, "running", 600, pid=os.getpid()), OPEN) == 2  # alive: still working
+    # without run.sh's pid, the wrapper's (runner.sh's own fallback)
+    other = "job-20261024-003000-bbbb2222"
+    assert _head_check(_job(tmp_path, "running", 600, job_id=other, pid=child.pid, pid_file="pid"), OPEN) == 0
+
+
+@posix_only
+@pytest.mark.parametrize("pid", ["99999999999999999999", "²", "-5", "0x10", "1", "12 34"])
+@pytest.mark.parametrize(("listing", "code"), [(MERGED, 0), (OPEN, 2), (NONE_YET, 2)])
+def test_a_pid_file_the_job_wrote_never_crashes_the_check(pid, listing, code, tmp_path, monkeypatch):
+    """The job's uid writes its own directory: a pid file that is no plain pid is unknown, never an exit 1."""
+    monkeypatch.setenv("NOUS_WORKSPACE_DIR", str(tmp_path))
+    monkeypatch.delenv("NOUS_DAG_CREATED_AT", raising=False)
+    assert _head_check(_job(tmp_path, "running", 600, pid=pid), listing) == code
+
+
+@pytest.mark.parametrize(("listing", "code"), [(MERGED, 0), (NONE_YET, 2)])
+def test_a_job_lookup_that_raises_changes_nothing(listing, code, monkeypatch):
+    """Whatever the job's files hold, reading them never turns into a crash (Python would exit 1, a final failure)."""
+    monkeypatch.setenv("NOUS_WORKSPACE_DIR", "/tmp/nous-workspace")
+    monkeypatch.delenv("NOUS_DAG_CREATED_AT", raising=False)
+
+    def boom(job_file, **kw):
+        raise OverflowError("signed integer is greater than maximum")
+
+    monkeypatch.setattr(typed_checks, "job_state", boom)
+    assert _head_check("/tmp/nous-workspace/dag-1/job.id", listing) == code
+
+
+@posix_only
+def test_a_retry_appended_to_the_id_file_names_the_new_job(tmp_path, monkeypatch):
+    """`runner.sh launch ... >> job.id` twice: the last id is the job the node waits for."""
+    monkeypatch.setenv("NOUS_WORKSPACE_DIR", str(tmp_path))
+    monkeypatch.delenv("NOUS_DAG_CREATED_AT", raising=False)
+    retry = "job-20261024-012000-aaaa1111"
+    _job(tmp_path, "failed", 3600)  # the first launch ended an hour ago
+    job_file = _job(tmp_path, "running", 600, job_id=retry, id_text=f"{JOB}\n{retry}\n")
+    assert _head_check(job_file, NONE_YET) == 2  # the retry is still running: no failure from the old job
+    assert _head_check(job_file, OPEN) == 2
