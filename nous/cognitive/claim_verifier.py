@@ -1424,21 +1424,70 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
     return _best(levels)
 
 
-# A send claim whose clause names another destination than the owner's Telegram: a send_file could have
-# reached it only through a chat id it was given, never certainly. A destination is mail as the verb, the
-# thing sent or the channel ("emailed", "Email sent", "via email", "in the email thread", never "the email
-# summary"), a named channel ("on WhatsApp", "via <anything but Telegram>") or whoever follows "to" but
-# you, the owner, the chat, Telegram or an infinitive ("to Bob", "to them", "to the Telegram group"). A
-# time or content word ("on Monday", "with a summary") is none.
+# A send claim whose clause names another destination than the owner's Telegram chat: a send_file could have
+# reached it only through a chat id it was given, never certainly. THE RULE: a destination is named when the
+# clause has
+#   1. mail as the verb, the thing sent, the channel or the tool: "emailed", "mailed", "Email sent", "the
+#      email.", "via/by/over/through/in/using email", "the mail server", "send_email" (never "the email
+#      summary", "email-style");
+#   2. a named channel other than Telegram after via/on/over/through/by/in/into/using: Slack, WhatsApp,
+#      Signal, Discord, SMS, iMessage, Teams, Messenger, WeChat, Gmail, Outlook, LinkedIn, Twitter, and "text"
+#      after by/via/over (never "Gmail-style");
+#   3. a recipient after "to", "shared ... with" or "cc" ("a link to" and "to you and" take a name, a handle
+#      or a group): a name (a capital and a lowercase letter, "Bob", "Tim" -- the owner's name is not known
+#      here), a handle "@bob", a channel "#general" (also after in/on/into/via/over), or a person or group in
+#      lowercase ("them", "stakeholders", "bob", "the team", "your team", "the Telegram group").
+# Nothing else is: not you, the owner, the user, the chat, a DM, the bot or Telegram; not an infinitive ("to
+# review"), a format, language or acronym ("to PDF", "to pdf", "to Markdown", "to HTML", "to French"), a time
+# ("to Friday", "to 5pm", "to date", "to the end"), an idiom ("due to", "up to", "according to", "a link to
+# the report", "converted to"); not a time or content word ("on Monday", "by 5pm", "with a summary", "as a
+# .docx"); not a tool, a link or anything else after via/through/using ("via send_file", "via a link", "via DM").
+_NOT_A_RECIPIENT = (
+    # you, the owner, the user, the chat, the bot, Telegram (but its group or channel is another chat)
+    r"(?!(?:you|yourself|me|myself|here|(?:(?:the|your|my|our|this)\s+)?(?:owner|user|chat|dms?|bot"
+    r"|telegram(?!\s+(?:group|channel)\b)))\b)"
+    # an infinitive
+    r"(?!(?:review|read|check|confirm|approve|see|look|keep|share|sign|use|be|date|make|help|show|let|get"
+    r"|give|reply|respond|follow|discuss|decide|go|do|start|finish|test|verify|track|compare|print|download"
+    r"|open|view|save|edit|update|fix|run|ensure|avoid|prepare|answer|inform|notify|remind|explain"
+    r"|summari[sz]e|highlight|cover|include|mark|close|cancel|catch|meet|take|bring)\b)"
+    # a format or a language
+    r"(?!(?:pdf|html?|docx?|csv|tsv|json|ya?ml|xml|xlsx?|pptx?|odt|rtf|txt|text|plain\s+text|markdown|md|png"
+    r"|jpe?g|gif|svg|webp|zip|tar|epub|latex|tex|excel|word|powerpoint|english|french|german|spanish|russian"
+    r"|italian|portuguese|chinese|japanese|korean|arabic|dutch|ukrainian|hebrew)\b|\.\w)"
+    # a time
+    r"(?!(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may|june"
+    r"|july|august|september|october|november|december|today|tomorrow|tonight|noon|midnight|now|later|eod"
+    r"|cob|next\s+week|the\s+(?:end|top|bottom|start|beginning|latest|previous|same|next|last))\b)"
+    # a name (a capital and a lowercase letter: "PDF" is an acronym), a word in lowercase, a handle, a channel
+    r"(?:(?-i:[A-ZÀ-Þ][a-zß-ÿ]|[a-zß-ÿ])|[@#]\w)"
+)
 _ELSEWHERE = re.compile(
+    # 1. mail
     r"\b(?:e-?)?mail(?:ed|ing)\b"
-    r"|\b(?:e-?)?mails?\b(?=\s*(?:[.,;:!?)]|$)|\s+(?:was|were|is|has|have|sent|to|via|by|with|on|at|for|about)\b)"
-    r"|\b(?:in|into|over|through|by)\s+(?:(?:the|an?)\s+)?(?:e-?)?mail\b"
-    r"|\b(?:via|on|over|through|by|in|into|using)\s+(?:(?:the|a)\s+)?(?:slack|whatsapp|signal|discord|sms"
-    r"|imessage|teams|messenger|wechat|gmail|outlook|linkedin|twitter|text)\b"
-    r"|\bvia\s+(?!(?:(?:the|a|your)\s+)?(?:telegram|bot|chat)\b)\w"
-    r"|\bto\s+(?!(?:you|yourself|me|(?:(?:the|your|my)\s+)?(?:owner|chat|dm|telegram(?!\s+(?:group|channel)\b)))\b)"
-    r"(?!(?:review|read|check|confirm|approve|see|look|keep|share|sign|use|be|date)\b)[\w@#]",
+    r"|\b(?:e-?)?mails?\b(?=\s*(?:[.,;:!?)]|$)"
+    r"|\s+(?:was|were|is|has|have|sent|to|via|by|with|on|at|for|about|and|or)\b)"
+    r"|\b(?:via|using|in|into|over|through|by)\s+(?:(?:the|an?|your|my)\s+)?(?:e-?)?mail\b(?!-)"
+    r"|\bsend_e?mail\b"
+    # 2. a named channel
+    r"|\b(?:via|on|over|through|by|in|into|using)\s+(?:(?:the|a|your|my)\s+)?(?:slack|whatsapp|signal|discord"
+    r"|sms|imessage|teams|messenger|wechat|gmail|outlook|linkedin|twitter)\b(?!-)"
+    r"|\b(?:via|over|by)\s+(?:a\s+)?text\b(?!-)"
+    # 3. a recipient
+    r"|(?<!\bdue )(?<!\bprior )(?<!\bup )(?<!\bthanks )(?<!\baccording )(?<!\bcompared )(?<!\bnext )"
+    r"(?<!\baddition )(?<!\border )(?<!\bclose )(?<!\bsimilar )(?<!\brelative )(?<!\brespect )(?<!\bregard )"
+    r"(?<!\blink )(?<!\blinks )(?<!\bconvert )(?<!\bconverted )(?<!\bconverting )(?<!\bexported )"
+    r"(?<!\btranslated )(?<!\brendered )(?<!\bformatted )(?<!\bcompiled )(?<!\bchanged )(?<!\bswitched )"
+    rf"\bto\s+{_NOT_A_RECIPIENT}"
+    # "a link to Bob" is sent to Bob; "a link to the report" points at the report
+    rf"|\blinks?\s+to\s+(?=(?-i:[A-ZÀ-Þ][a-zß-ÿ])|[@#]\w){_NOT_A_RECIPIENT}"
+    # "to you and Bob", "to the owner and the team"
+    r"|\bto\s+(?:(?:the|your|my)\s+)?(?:you|me|owner|user|chat)\s+(?:and|&)\s+"
+    rf"(?=(?-i:[A-ZÀ-Þ][a-zß-ÿ])|[@#]\w|(?:the|your|my|our|his|her|their)\s|(?:them|him|her|everyone)\b)"
+    rf"{_NOT_A_RECIPIENT}"
+    rf"|\bshared\s+(?:\S+\s+){{0,4}}?with\s+{_NOT_A_RECIPIENT}"
+    r"|\bcc(?:['’]?e?d)?\s+(?:(?-i:[A-ZÀ-Þ][a-zß-ÿ])|@\w)"
+    r"|\b(?:in|on|into|via|over)\s+#\w",
     re.IGNORECASE)
 
 
