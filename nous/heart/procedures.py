@@ -7,6 +7,7 @@ All methods follow Brain's session injection pattern (P1-1).
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -100,8 +101,14 @@ _FINGERPRINT_FIELDS = {"name", "domain", "description", *_LIST_FIELDS, "active",
 
 
 def _fingerprint(input: ProcedureInput) -> str:
-    """The sha256 of a create request without its key: a replay must send the same request."""
-    return hashlib.sha256(input.model_dump_json(include=_FINGERPRINT_FIELDS).encode()).hexdigest()
+    """The sha256 of a create request without its key: a replay must send the same request.
+
+    Keys sorted, so a runtime_metadata dict built in another order is the same request.
+    """
+    request = json.dumps(
+        input.model_dump(mode="json", include=_FINGERPRINT_FIELDS), sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(request.encode()).hexdigest()
 
 
 def _build_embed_text(

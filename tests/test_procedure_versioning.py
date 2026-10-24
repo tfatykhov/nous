@@ -210,6 +210,16 @@ async def test_idempotency_key_reused_with_a_different_input_conflicts(heart, se
         )
 
 
+async def test_idempotency_replay_ignores_the_key_order_of_runtime_metadata(heart, session):
+    first = await heart.store_procedure(
+        _input(idempotency_key="ordered", runtime_metadata={"a": 1, "b": {"x": 1, "y": 2}}), session=session
+    )
+    replay = await heart.store_procedure(
+        _input(idempotency_key="ordered", runtime_metadata={"b": {"y": 2, "x": 1}, "a": 1}), session=session
+    )
+    assert replay.id == first.id
+
+
 async def test_idempotency_replay_works_with_dedupe_off(db, mock_embeddings, session):
     manager = ProcedureManager(db, mock_embeddings, "f102-flag-off", dedupe_enabled=False)
     first = await manager.store(_input(idempotency_key="k"), session=session)
