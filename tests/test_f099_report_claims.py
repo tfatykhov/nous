@@ -1317,6 +1317,97 @@ def test_a_hex_id_matches_a_prefix_either_way(claimed, kept):
     assert not _verify(f"I cancelled DAG {claimed}.", cancel("9" + kept[1:])).verified
 
 
+# Codex P2 4365228440: the digit-and-letter rule keeps a word ("decade") from reading as an id in a
+# claim's TEXT; a recorded argument is no prose, so any hex prefix of 6 or more, any hyphenated UUID
+# prefix and any spelling of a UUID is an id there.
+DIGITS_UUID = "12345678-abcd-4321-aaaa-0123456789ab"
+LETTERS_UUID = "abcdefab-1234-4321-aaaa-0123456789ab"
+ALL_DIGIT_UUID = "12345678-1234-4321-1111-012345678912"
+
+
+@pytest.mark.parametrize(
+    ("claimed", "dag_id", "level"),
+    [
+        # an all-digit prefix
+        (DIGITS_UUID, "12345678", "exact"),
+        (DIGITS_UUID, "1234567", "exact"),
+        (DIGITS_UUID, "123456", "exact"),
+        (DIGITS_UUID, "87654321", "none"),
+        (DIGITS_UUID, "12345", "plausible"),  # too short to be an id: it shows nothing
+        (ALL_DIGIT_UUID, "12345678", "exact"),
+        (ALL_DIGIT_UUID, "87654321", "none"),
+        # an all-letter prefix
+        (LETTERS_UUID, "abcdefab", "exact"),
+        (LETTERS_UUID, "abcdefa", "exact"),
+        (LETTERS_UUID, "abcdef", "exact"),
+        (LETTERS_UUID, "ABCDEFAB", "exact"),
+        (LETTERS_UUID, "abcdefac", "none"),
+        (LETTERS_UUID, "12345678", "none"),
+        (DIGITS_UUID, "abcdefab", "none"),
+        # a mixed prefix
+        (DIGITS_UUID, "1234567a", "none"),
+        ("1234ab5c", "1234ab", "exact"),
+        ("1234ab5c", "1234AB5C", "exact"),
+        ("1234ab5c", "1234ab5d", "none"),
+        ("1234ab5c", "12345678", "none"),
+        # a whole UUID, however it is spelled
+        (DIGITS_UUID, DIGITS_UUID, "exact"),
+        (DIGITS_UUID, DIGITS_UUID.upper(), "exact"),
+        (DIGITS_UUID, DIGITS_UUID.replace("-", ""), "exact"),
+        (DIGITS_UUID, "{" + DIGITS_UUID + "}", "exact"),
+        (DIGITS_UUID, LETTERS_UUID, "none"),
+        ("12345678", DIGITS_UUID, "plausible"),  # an all-digit id in the claim's text is no id: any cancel backs it
+        ("1234ab5c", "1234ab5c-0000-4000-8000-000000000000", "exact"),
+        ("1234ab5c", DIGITS_UUID, "none"),
+        # a hyphenated UUID prefix (dag_manage takes one)
+        (DIGITS_UUID, "12345678-abcd", "exact"),
+        (DIGITS_UUID, "12345678-ABCD-4321", "exact"),
+        (DIGITS_UUID, "12345678-ffff", "none"),
+        # a claim naming the UUID without its hyphens
+        (DIGITS_UUID.replace("-", ""), "12345678", "exact"),
+        (DIGITS_UUID.replace("-", ""), DIGITS_UUID, "exact"),
+        # no id
+        (DIGITS_UUID, "nightly-sync", "plausible"),
+        (DIGITS_UUID, "12345678-abcd-x", "plausible"),
+    ],
+)
+def test_a_recorded_dag_id_is_an_id_whatever_its_digits(claimed, dag_id, level):
+    result = _verify(f"I cancelled DAG {claimed}.", [Evidence("dag_manage", {"action": "cancel", "dag_id": dag_id})])
+    assert [c.evidence for c in result.claims] == [level]
+    # an id the claim names needs an exact match; a claim that names none is backed by any cancel
+    assert result.verified is (level == "exact" or claimed == "12345678")
+
+
+@pytest.mark.parametrize(
+    ("claimed", "task_id", "level"),
+    [
+        (DIGITS_UUID, DIGITS_UUID.upper(), "exact"),
+        (DIGITS_UUID, DIGITS_UUID.replace("-", ""), "exact"),
+        ("12345678-abcd", DIGITS_UUID, "plausible"),  # a hyphenated prefix in the claim's text is no id
+        (LETTERS_UUID, LETTERS_UUID, "exact"),
+        (LETTERS_UUID, DIGITS_UUID, "none"),
+    ],
+)
+def test_a_recorded_task_id_is_compared_in_any_uuid_spelling(claimed, task_id, level):
+    result = _verify(f"I cancelled task {claimed}.", [Evidence("cancel_task", {"task_id": task_id})])
+    assert [c.evidence for c in result.claims] == [level]
+
+
+@pytest.mark.parametrize(("dag_id", "verified"), [("12345678", True), ("abcdefab", False), ("87654321", False)])
+def test_a_durable_all_digit_dag_id_backs_the_full_uuid(dag_id, verified):
+    from nous.cognitive.ledger_store import durable_key_args
+
+    row = SimpleNamespace(
+        tool_name="dag_manage",
+        status="success",
+        key_args=durable_key_args("dag_manage", {"action": "cancel", "dag_id": dag_id}),
+        input_text=None,
+        result_summary=None,
+        side_effect_type="write",
+    )
+    assert _verify(f"I cancelled DAG {DIGITS_UUID}.", [_ledger_row_evidence(row)]).verified is verified
+
+
 @pytest.mark.parametrize(
     "text",
     [

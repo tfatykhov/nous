@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 from nous.cognitive.bash_side_effect import (
     _ASSIGNMENT,
@@ -1732,33 +1733,49 @@ def _names_a_job(text: str) -> bool:
     return bool(_JOB_ID_RE.search(text) or (hex_id and hex_id.group(0)[:3].lower() == "job"))
 
 
-def _id_shape(value: str) -> str:
-    if _JOB_ID_RE.fullmatch(value):
-        return "job"
-    return "hex" if _HEX_ID_RE.fullmatch(value) else "other"
+_UUID_FORM = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+
+
+def _arg_hex(value: str) -> str | None:
+    """The hex digits of an id a call was GIVEN (lowercase), or None if it is no hex id.
+
+    A recorded argument is no prose, so the claim text's digit-and-letter rule (``_HEX_ID``) is not used here:
+    any hex run of 6 or more is an id ("12345678", "abcdefab"), and so is a prefix of a hyphenated UUID and
+    any spelling of a UUID that ``uuid.UUID`` reads, as dag_manage and cancel_task do."""
+    try:
+        return UUID(value).hex
+    except ValueError:
+        pass
+    if re.fullmatch(r"[0-9a-f]{6,}", value):
+        return value
+    hyphens_fit = all(c == "-" if f == "-" else c in "0123456789abcdef" for c, f in zip(value, _UUID_FORM))
+    if 8 < len(value) <= len(_UUID_FORM) and hyphens_fit:
+        return value.replace("-", "")
+    return None
 
 
 def _work_level(claimed: str | None, values: list[str]) -> str:
     """Whether a call on ``values`` (the ids it was given) was on the work item a claim names.
 
     Only ids of one shape are compared -- a hex prefix with a UUID (or a job id's hex tail), a job id with
-    a job id: a job id and a UUID neither confirm nor refute each other."""
+    a job id: a job id and a UUID neither confirm nor refute each other. Hex ids are compared without their
+    hyphens, so a UUID matches however either side spells it."""
     if claimed is None:
         return "plausible"  # the claim names no work item: any cancel could be it
-    shape = _id_shape(claimed)
+    job = bool(_JOB_ID_RE.fullmatch(claimed))
     comparable: list[str] = []
     for value in (v.lower() for v in values if v):
-        value_shape = _id_shape(value)
-        if value_shape == shape:
-            comparable.append(value)
-        elif shape == "hex" and value_shape == "job":
-            comparable.append(value.rsplit("-", 1)[-1])
+        if _JOB_ID_RE.fullmatch(value):
+            comparable.append(value if job else value.rsplit("-", 1)[-1])
+        elif not job and (digits := _arg_hex(value)) is not None:
+            comparable.append(digits)
     if not comparable:
         return "plausible"
-    if shape == "hex":
-        hit = any(v.startswith(claimed) or claimed.startswith(v) for v in comparable)
-    else:
+    if job:
         hit = claimed in comparable
+    else:
+        claimed = claimed.replace("-", "")
+        hit = any(v.startswith(claimed) or claimed.startswith(v) for v in comparable)
     return "exact" if hit else "none"
 
 
