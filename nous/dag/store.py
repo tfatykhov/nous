@@ -293,6 +293,7 @@ class DAGStore:
                 max_concurrent_by_frame_type=request.max_concurrent_by_frame_type,
                 origin_channel=request.origin_channel,
                 origin_session_id=request.origin_session_id,
+                schedule_id=request.schedule_id,
             )
             session.add(dag)
             await session.flush()  # Get dag.id

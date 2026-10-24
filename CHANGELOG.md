@@ -4,6 +4,10 @@ All notable changes to Nous. Release notes for each version also live on the [Gi
 
 # Unreleased
 
+## ⏱️ Scheduling
+- **F101: schedule concurrency and catch-up policies** (inspired by Paperclip routines). Each recurring schedule has a `concurrency_policy`: `coalesce_if_active` (the default), `skip_if_active` or `always_enqueue`. It also has a `catch_up_policy`: `skip_missed` (the default) or `enqueue_missed_with_cap`. Behaviour changes with the defaults: a fire that comes due while the previous run is still active is now coalesced and recorded, where before it was deferred and fired late. The previous run can be the run's subtask or a DAG it created, and a run that is only *pending* counts too, so it now uses up the slot. A `max_fires` schedule counts only the runs that started. `always_enqueue` cannot be combined with `continuation_turns`. Stale runs never block a schedule. `schedule_task` takes the policies and `list_tasks` shows them. `POST /schedules/{id}/run` starts a manual run, which obeys the policy. Migration 091 adds the columns and `execution_dags.schedule_id`. The new behaviour sits behind `NOUS_SCHEDULE_POLICIES_ENABLED` (default on); set it to false for the old behaviour.
+
+## 📈 Learning From Experience
 - **Procedure versioning and create-time dedupe (F102).** Every procedure body write is a new version in `heart.procedures.version` and `heart.procedure_versions` (migration 092; existing rows backfilled as version 1). `update_body`, `append_notes` and the new `restore` take an optional `expected_version` and refuse a stale write with `ProcedureConflictError`. `store()` replays an `idempotency_key`, and with `NOUS_PROCEDURE_DEDUPE_ENABLED` (default on) merges an auto-learned procedure into a same-named or near-duplicate (cosine ≥ 0.85) auto-learned one instead of inserting a duplicate. A one-off dry-run report, `scripts/diag/procedure_dedupe_report.py`, lists the existing duplicate clusters. Adopted from paperclipai/paperclip's runner-created skills.
 
 # v1.1.0 — The Accountable Agent

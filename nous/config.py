@@ -2100,6 +2100,25 @@ class Settings(BaseSettings):
         description="Reserved for F064.5-v2 (LLM thread continuity). Not consumed in v1.",
     )
 
+    # F101: per-schedule concurrency_policy / catch_up_policy (migration 091).
+    # Off: the scheduler ignores both columns and keeps the F064.5 debounce
+    # (a fire with an active run waits, unadvanced, until the run ends).
+    schedule_policies_enabled: bool = True
+    schedule_catch_up_cap: int = Field(
+        3,
+        ge=1,
+        le=25,
+        description="Runs enqueue_missed_with_cap starts for missed slots when a schedule has no catch_up_cap.",
+    )
+    schedule_active_run_max_age_seconds: int = Field(
+        43200,
+        ge=60,
+        description=(
+            "A pending/running DAG a schedule's run created stops counting as that schedule's "
+            "active run this long after it was created (a stuck DAG cannot hold a schedule forever)."
+        ),
+    )
+
     # F064.6: work-queue ingress heartbeat check. Off by default. When true,
     # a WorkQueueCheck is registered that polls the configured adapter and
     # emits DAGs for new items, reconciling terminal-state items by cancel-

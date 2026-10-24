@@ -21,6 +21,11 @@ logger = logging.getLogger(__name__)
 # Intention states in which a schedule's container no longer accepts fires.
 _CLOSED_INTENTION_STATES = ("closed", "cancelled", "expired")
 
+# F101: the values of heart.schedules.concurrency_policy / catch_up_policy (migration 091 CHECKs).
+CONCURRENCY_POLICIES = ("coalesce_if_active", "skip_if_active", "always_enqueue")
+CATCH_UP_POLICIES = ("skip_missed", "enqueue_missed_with_cap")
+CATCH_UP_CAP_MAX = 25
+
 
 class ScheduleManager:
     """Manages scheduled tasks in heart.schedules."""
@@ -46,8 +51,24 @@ class ScheduleManager:
         continuation_turns: int = 0,
         continuation_prompt: str | None = None,
         intention: IntentionSpec | None = None,
+        concurrency_policy: str = "coalesce_if_active",
+        catch_up_policy: str = "skip_missed",
+        catch_up_cap: int | None = None,
     ) -> Schedule:
-        """Create a new schedule."""
+        """Create a new schedule.
+
+        Raises ``ValueError`` for an unknown F101 policy, a cap outside 1..25, or always_enqueue
+        together with continuation_turns.
+        """
+        if concurrency_policy not in CONCURRENCY_POLICIES:
+            raise ValueError(f"concurrency_policy must be one of {', '.join(CONCURRENCY_POLICIES)}")
+        if catch_up_policy not in CATCH_UP_POLICIES:
+            raise ValueError(f"catch_up_policy must be one of {', '.join(CATCH_UP_POLICIES)}")
+        if catch_up_cap is not None and not 1 <= catch_up_cap <= CATCH_UP_CAP_MAX:
+            raise ValueError(f"catch_up_cap must be between 1 and {CATCH_UP_CAP_MAX}")
+        if concurrency_policy == "always_enqueue" and continuation_turns > 0:
+            # The runs of one continuation cycle share a session, so they would queue on its lock.
+            raise ValueError("concurrency_policy always_enqueue cannot be combined with continuation_turns > 0")
         # Compute next_fire_at
         now = datetime.now(UTC)
         if schedule_type == "once":
@@ -84,6 +105,9 @@ class ScheduleManager:
                 frame_type=frame_type,
                 continuation_turns=continuation_turns,
                 continuation_prompt=continuation_prompt,
+                concurrency_policy=concurrency_policy,
+                catch_up_policy=catch_up_policy,
+                catch_up_cap=catch_up_cap,
             )
             session.add(schedule)
             await session.flush()
@@ -181,25 +205,35 @@ class ScheduleManager:
                 schedule.task = task
             await session.commit()
 
-    async def advance(self, schedule_id: UUID, fired_at: datetime) -> None:
-        """Advance a recurring schedule after firing."""
+    async def advance(
+        self, schedule_id: UUID, fired_at: datetime, fires: int = 1, *, after: datetime | None = None
+    ) -> None:
+        """Advance a recurring schedule after firing.
+
+        ``fires`` is how many runs this check started (F101: 0 when every one was
+        coalesced or skipped, more than 1 for a catch-up); the slot moves on either way.
+        ``after`` (F101 catch-up): the time the next slot follows, when not ``fired_at``.
+        """
+        if after is None:
+            after = fired_at
         async with self._db.session() as session:
             schedule = await session.get(Schedule, schedule_id)
             if schedule is None:
                 return
 
-            schedule.fire_count += 1
-            schedule.last_fired_at = fired_at
+            schedule.fire_count += fires
+            if fires:
+                schedule.last_fired_at = fired_at
 
             # Check max_fires
             if schedule.max_fires and schedule.fire_count >= schedule.max_fires:
                 schedule.active = False
                 schedule.next_fire_at = None
             elif schedule.cron_expr:
-                cron = croniter(schedule.cron_expr, fired_at)
+                cron = croniter(schedule.cron_expr, after)
                 schedule.next_fire_at = cron.get_next(datetime)
             elif schedule.interval_seconds:
-                schedule.next_fire_at = fired_at + timedelta(
+                schedule.next_fire_at = after + timedelta(
                     seconds=schedule.interval_seconds
                 )
             else:
