@@ -563,12 +563,16 @@ class Heart:
         session: AsyncSession | None = None,
         *,
         expected_version: int | None = None,
+        reason: str | None = None,
     ) -> ProcedureDetail:
         """Refresh a procedure's body in place, preserving learned stats (audit bug 9).
 
-        A new version (F102); a stale ``expected_version`` raises ProcedureConflictError.
+        A new version (F102), with ``reason`` kept on it; a stale ``expected_version``
+        raises ProcedureConflictError.
         """
-        result = await self.procedures.update_body(procedure_id, input, session, expected_version=expected_version)
+        result = await self.procedures.update_body(
+            procedure_id, input, session, expected_version=expected_version, reason=reason
+        )
         await self._emit_procedure_relink(result)
         return result
 

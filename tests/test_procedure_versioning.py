@@ -53,6 +53,9 @@ class _AxisEmbeddings:
         vec[2] = 1.0
         return vec
 
+    async def close(self) -> None:
+        pass
+
 
 def _angle_for(cosine: float) -> float:
     return math.acos(cosine)
@@ -574,3 +577,120 @@ async def test_a_merge_records_the_incoming_description(heart, session):
     )
     versions = await heart.procedures.list_versions(first.id, session=session)
     assert "Incoming wording" in versions[-1].reason
+
+
+# ---------------------------------------------------------------------------
+# The learner's weak review: "revise" rewrites the row in place
+# ---------------------------------------------------------------------------
+
+
+async def _weak_review_setup(db, agent: str):
+    """A committed heart for ``agent`` with siblings A and B at cosine 0.90; A is weak (0/5)."""
+    from nous.config import Settings
+    from nous.heart import Heart
+
+    embeddings = _AxisEmbeddings({"ALPHA": 0.0, "BRAVO": _angle_for(0.90), "REVISED": _angle_for(0.95)})
+    heart = Heart(db, Settings(agent_id=agent), embedding_provider=embeddings)
+    # Stored without dedupe: two learned siblings close enough for a create-time merge.
+    setup = ProcedureManager(db, embeddings, agent, dedupe_enabled=False)
+    a = await setup.store(_input(name="Sibling A", description="ALPHA", core_patterns=["a pattern"]))
+    b = await setup.store(_input(name="Sibling B", description="BRAVO", core_patterns=["b pattern"]))
+    async with db.session() as s:
+        row = await s.get(Procedure, a.id)
+        row.success_count, row.failure_count, row.activation_count = 0, 5, 5
+        await s.commit()
+    return heart, a, b
+
+
+def _weak_review_learner(heart, answer: dict):
+    from unittest.mock import AsyncMock
+
+    from nous.handlers.procedure_learner import ProcedureLearner
+
+    learner = ProcedureLearner(AsyncMock(), heart, None, heart.settings, AsyncMock())
+    learner._call_llm = AsyncMock(return_value=answer)
+    return learner
+
+
+async def _cleanup(db, agent: str) -> None:
+    from sqlalchemy import delete
+
+    async with db.session() as cleanup:
+        await cleanup.execute(delete(Procedure).where(Procedure.agent_id == agent))
+        await cleanup.commit()
+
+
+_REVISE = {
+    "action": "revise",
+    "reason": "too vague",
+    "revised_description": "REVISED: say accepted, never delivered",
+    "revised_patterns": ["quote the tool's status"],
+}
+
+
+async def test_a_weak_review_revise_rewrites_the_row_and_leaves_its_sibling_alone(db):
+    agent = "f102-weak-revise"
+    heart, a, b = await _weak_review_setup(db, agent)
+    try:
+        learner = _weak_review_learner(heart, _REVISE)
+        heart.search_procedures = _returns([a])
+
+        assert await learner._review_weak_procedures() == 1
+
+        revised = await heart.get_procedure(a.id)
+        assert revised.active is True
+        assert revised.description == "REVISED: say accepted, never delivered"
+        assert revised.core_patterns == ["quote the tool's status"]
+        assert revised.version == 2
+        assert (revised.success_count, revised.failure_count) == (0, 5)
+        sibling = await heart.get_procedure(b.id)
+        assert (sibling.version, sibling.description, sibling.core_patterns) == (1, "BRAVO", ["b pattern"])
+        versions = await heart.list_procedure_versions(a.id)
+        assert [v.change_source for v in versions] == ["create", "update_body"]
+        assert "too vague" in versions[-1].reason
+    finally:
+        await _cleanup(db, agent)
+        await heart.close()
+
+
+async def test_the_next_weak_review_leaves_a_freshly_revised_row_alone(db):
+    agent = "f102-weak-revise-grace"
+    heart, a, _b = await _weak_review_setup(db, agent)
+    try:
+        learner = _weak_review_learner(heart, _REVISE)
+        heart.search_procedures = _returns([a])
+        await learner._review_weak_procedures()
+        learner._call_llm.reset_mock()
+
+        # Still 0/5, so weak on its old score: the revision has not been tried yet.
+        assert await learner._review_weak_procedures() == 0
+        learner._call_llm.assert_not_called()
+        assert (await heart.get_procedure(a.id)).version == 2
+    finally:
+        await _cleanup(db, agent)
+        await heart.close()
+
+
+async def test_a_weak_review_revise_keeps_the_rows_runtime_metadata(db):
+    agent = "f102-weak-revise-metadata"
+    heart, a, _b = await _weak_review_setup(db, agent)
+    try:
+        async with db.session() as s:
+            (await s.get(Procedure, a.id)).runtime_metadata = {"skip_until_scored": 10}
+            await s.commit()
+        learner = _weak_review_learner(heart, _REVISE)
+        heart.search_procedures = _returns([a])
+
+        await learner._review_weak_procedures()
+
+        async with db.session() as s:
+            assert (await s.get(Procedure, a.id)).runtime_metadata == {"skip_until_scored": 10}
+    finally:
+        await _cleanup(db, agent)
+        await heart.close()
+
+
+def _returns(value):
+    from unittest.mock import AsyncMock
+
+    return AsyncMock(return_value=value)

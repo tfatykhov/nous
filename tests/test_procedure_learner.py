@@ -1150,6 +1150,7 @@ async def test_weak_review_revise_with_a_malformed_answer_keeps_the_procedure():
 
     heart.retire_procedure.assert_called_once_with(second.id)
     heart.store_procedure.assert_not_called()
+    heart.update_procedure_body.assert_not_called()
     assert stats["weak_reviewed"] == 1
     assert stats["llm_failed"] == 1
 
@@ -1173,11 +1174,42 @@ async def test_weak_review_revise_keeps_a_lone_string_pattern_whole():
 
     await learner.run_sleep_learning()
 
-    heart.retire_procedure.assert_called_once_with(weak.id)
-    revised = heart.store_procedure.call_args[0][0]
+    heart.retire_procedure.assert_not_called()
+    heart.store_procedure.assert_not_called()
+    procedure_id, revised = heart.update_procedure_body.call_args[0]
+    assert procedure_id == weak.id
     assert revised.core_patterns == ["check the exit code"]
     assert revised.description == "Sharper description"
     assert revised.implementation_notes == weak.implementation_notes
+    assert heart.update_procedure_body.call_args.kwargs["expected_version"] == weak.version
+    assert heart.update_procedure_body.call_args.kwargs["reason"] == "weak review: revise: too vague"
+
+
+@pytest.mark.asyncio
+async def test_weak_review_revise_of_a_body_changed_meanwhile_is_skipped():
+    """A stale expected_version: the revision would drop the change, so it is not written."""
+    from nous.heart import ProcedureConflictError
+
+    learner, brain, heart, _emb, llm_client = _build_learner()
+    brain.list_decisions.side_effect = [([], 0), ([], 0)]
+    heart.list_episodes.return_value = []
+    first = _make_procedure_detail(name="Weak one", effectiveness=0.20)
+    second = _make_procedure_detail(name="Weak two", effectiveness=0.20)
+    heart.search_procedures.return_value = [
+        _make_procedure_summary(name="Weak one"),
+        _make_procedure_summary(name="Weak two"),
+    ]
+    heart.get_procedure.side_effect = [first, second]
+    heart.update_procedure_body.side_effect = ProcedureConflictError("moved on")
+    llm_client.call.side_effect = [
+        _mock_llm_response({"action": "revise", "reason": "vague", "revised_description": "Sharper"}),
+        _mock_llm_response({"action": "retire", "reason": "unreliable"}),
+    ]
+
+    stats = await learner.run_sleep_learning()
+
+    heart.retire_procedure.assert_called_once_with(second.id)
+    assert stats["weak_reviewed"] == 1
 
 
 def test_a_bare_string_naming_an_input_id_is_not_a_citation():

@@ -320,6 +320,7 @@ class ProcedureManager:
         session: AsyncSession | None = None,
         *,
         expected_version: int | None = None,
+        reason: str | None = None,
     ) -> ProcedureDetail:
         """Refresh a procedure's body fields in place, preserving learned stats.
 
@@ -329,17 +330,23 @@ class ProcedureManager:
         Raises ValueError for a strategy card's row and a how-to input: a how-to
         body never replaces a card. The write is a new version (F102); with
         ``expected_version`` it is refused (ProcedureConflictError) unless the row
-        is still at that version.
+        is still at that version. ``reason`` is kept on the version. An input that
+        does not set runtime_metadata leaves the row's as it is.
         """
         if session is None:
             async with self.db.session() as session:
-                result = await self._update_body(procedure_id, input, session, expected_version)
+                result = await self._update_body(procedure_id, input, session, expected_version, reason)
                 await session.commit()
                 return result
-        return await self._update_body(procedure_id, input, session, expected_version)
+        return await self._update_body(procedure_id, input, session, expected_version, reason)
 
     async def _update_body(
-        self, procedure_id: UUID, input: ProcedureInput, session: AsyncSession, expected_version: int | None = None
+        self,
+        procedure_id: UUID,
+        input: ProcedureInput,
+        session: AsyncSession,
+        expected_version: int | None = None,
+        reason: str | None = None,
     ) -> ProcedureDetail:
         procedure = await self._locked_procedure(procedure_id, session)
         if procedure is None:
@@ -376,7 +383,8 @@ class ProcedureManager:
         procedure.core_concepts = input.core_concepts or None
         procedure.implementation_notes = input.implementation_notes or None
         procedure.tags = input.tags or None
-        procedure.runtime_metadata = input.runtime_metadata
+        if "runtime_metadata" in input.model_fields_set:
+            procedure.runtime_metadata = input.runtime_metadata
         # Propagate kind from the input. (A how-to input over a card's row was
         # refused above: a card is not turned into a skill here.)
         procedure.kind = input.kind
@@ -384,7 +392,7 @@ class ProcedureManager:
             procedure.active = input.active
         procedure.embedding = embedding
         procedure.updated_at = datetime.now(UTC)
-        await self._bump_version(procedure, session, "update_body")
+        await self._bump_version(procedure, session, "update_body", reason=reason)
         return self._to_detail(procedure)
 
     # ------------------------------------------------------------------

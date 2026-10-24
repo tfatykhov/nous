@@ -32,7 +32,7 @@ from nous.brain.embeddings import EmbeddingProvider
 from nous.config import Settings
 from nous.handlers import LLMClient, call_background_llm, parse_llm_json
 from nous.heart.heart import Heart
-from nous.heart.procedures import _build_embed_text
+from nous.heart.procedures import ProcedureConflictError, _build_embed_text
 from nous.heart.schemas import ProcedureDetail, ProcedureInput, ProcedureSummary
 
 logger = logging.getLogger(__name__)
@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 _COVERED_COSINE = 0.85  # above it the lesson is already stored: covered without an LLM call
 _COVER_CHECK_FLOOR = 0.5  # neighbours above it are shown to the model, which may answer COVERED
 _MAX_EVIDENCE_NOTES = 10  # evidence lines one procedure collects
+_REVISE_REASON = "weak review: revise"  # leads the reason of a weak review's revision version
 
 
 # ---------------------------------------------------------------------------
@@ -621,6 +622,9 @@ class ProcedureLearner:
 
                 if not is_weak:
                     continue
+                if await self._revised_since(proc_detail.id, staleness_cutoff):
+                    # Its score is the old body's: the revision gets a staleness window to earn its own.
+                    continue
 
                 # Ask LLM to evaluate
                 review_data = await self._call_llm(
@@ -644,9 +648,9 @@ class ProcedureLearner:
                     await self._heart.retire_procedure(proc_detail.id)
                     logger.info("Retired weak procedure: %s (%s)", proc_detail.name, review_data.get("reason"))
                 elif action == "revise":
-                    # Update description and patterns if provided
-                    # For now, retire and re-create with updated content. The revision is
-                    # built first: a malformed answer leaves the procedure as it is.
+                    # Rewritten in place, as a new version: a store of the revision would be
+                    # merged into a sibling by the create-time dedupe. The stats are kept. The
+                    # revision is built first: a malformed answer leaves the procedure as it is.
                     try:
                         revised_input = ProcedureInput(
                             name=proc_detail.name,
@@ -658,13 +662,23 @@ class ProcedureLearner:
                             core_concepts=proc_detail.core_concepts,
                             implementation_notes=proc_detail.implementation_notes,
                             tags=proc_detail.tags,
+                            kind=proc_detail.kind,
                         )
                     except ValidationError as exc:
                         self._gate_counts["llm_failed"] += 1
                         logger.info("Weak procedure revise skipped, malformed answer: %s (%s)", proc_detail.name, exc)
                         continue
-                    await self._heart.retire_procedure(proc_detail.id)
-                    await self._heart.store_procedure(revised_input)
+                    try:
+                        await self._heart.update_procedure_body(
+                            proc_detail.id,
+                            revised_input,
+                            expected_version=proc_detail.version,
+                            reason=f"{_REVISE_REASON}: {_one_line(review_data.get('reason') or '')[:300]}",
+                        )
+                    except ProcedureConflictError as exc:
+                        # The body changed while the model read it: the revision would drop that change.
+                        logger.info("Weak procedure revise skipped, body changed: %s (%s)", proc_detail.name, exc)
+                        continue
                     logger.info("Revised weak procedure: %s (%s)", proc_detail.name, review_data.get("reason"))
                 elif action == "confounded":
                     # Kept as is: its effectiveness can't be attributed to it.
@@ -679,6 +693,15 @@ class ProcedureLearner:
         except Exception:
             logger.exception("Weak procedure review failed")
             return 0
+
+    async def _revised_since(self, procedure_id: UUID, since: datetime) -> bool:
+        """True if a weak review revised the procedure after ``since``."""
+        return any(
+            version.change_source == "update_body"
+            and (version.reason or "").startswith(_REVISE_REASON)
+            and version.created_at >= since
+            for version in await self._heart.list_procedure_versions(procedure_id)
+        )
 
     # ==================================================================
     # Shared helpers
