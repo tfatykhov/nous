@@ -143,13 +143,18 @@ describe('Autonomy view', () => {
     const text = container.textContent ?? '';
     expect(text).toContain('Settled reads subtasks that finished Oct 2 – Oct 9, a window as long as this one that ends 14 days ago.');
     expect(text).toContain('Scores (−1 to 1) · settled: Oct 2 – Oct 9');
-    expect(text).not.toContain('still open');
-    cleanup();
-    const full = FULL();
-    body = { ...full, task_scores: { ...full.task_scores, settled_window: { ...full.task_scores.settled_window, held: 2 } } };
-    const again = render(Autonomy);
-    await screen.findByText('Scorer running');
-    expect(again.container.textContent).toContain('2 of them are still open (an undecided PR or an unanswered spot-check) and not counted yet.');
+    expect(text).not.toContain('not settled');
+    for (const [held, line] of [
+      [1, '1 of them is not settled, so not counted as settled.'],
+      [2, '2 of them are not settled, so not counted as settled.'],
+    ] as const) {
+      cleanup();
+      const full = FULL();
+      body = { ...full, task_scores: { ...full.task_scores, settled_window: { ...full.task_scores.settled_window, held } } };
+      const again = render(Autonomy);
+      await screen.findByText('Scorer running');
+      expect(again.container.textContent).toContain(line);
+    }
   });
 
   it('fetches once on mount', async () => {

@@ -150,8 +150,8 @@ async def _task_scores(session: AsyncSession, agent_id: str, since: datetime, no
 
     A score settles once its task is ``SETTLE_DAYS`` old, so a window shorter than that would never hold a settled
     one. The settled numbers therefore read a window of the same length that ends ``SETTLE_DAYS`` ago
-    (``settled_window``); ``held`` counts the subtasks in it that are still provisional (an undecided PR or an
-    unanswered spot-check keeps a row open for a while past settling).
+    (``settled_window``); ``held`` counts the subtasks in it that are not settled (an undecided PR or an unanswered
+    spot-check keeps a row open for a while past settling, and a row older than any pass reaches stays as it was).
     """
     T = TaskScore
     first, last = (

@@ -121,7 +121,7 @@
           </div>
         {/each}
       </div>
-      <p class="small muted">A subtask counts when the harness confirmed it or you graded it a success. A score is final 14 days after its task, so Settled reads subtasks that finished {settledSpan(ts.settled_window)}, a window as long as this one that ends 14 days ago.{#if ts.settled_window.held > 0} {ts.settled_window.held} of them {ts.settled_window.held === 1 ? 'is' : 'are'} still open (an undecided PR or an unanswered spot-check) and not counted yet.{/if}</p>
+      <p class="small muted">A subtask counts when the harness confirmed it or you graded it a success. A score is final 14 days after its task, so Settled reads subtasks that finished {settledSpan(ts.settled_window)}, a window as long as this one that ends 14 days ago.{#if ts.settled_window.held > 0} {ts.settled_window.held} of them {ts.settled_window.held === 1 ? 'is' : 'are'} not settled, so not counted as settled.{/if}</p>
     </section>
     <section class="card" aria-labelledby="h-overrides">
       <h2 id="h-overrides">Your overrides</h2>

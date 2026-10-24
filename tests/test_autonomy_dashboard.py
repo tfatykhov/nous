@@ -232,10 +232,13 @@ async def test_settled_numbers_read_a_window_of_the_same_length_that_ends_settle
         db,
         score_row(agent, value=1.0, outcome="done_verified", settled=True, age_days=15),
         score_row(agent, value=0.0, settled=True, age_days=20.5),
+        score_row(agent, value=0.0, settled=True, age_days=21),  # the window's first instant is in it
+        score_row(agent, value=1.0, outcome="done_verified", settled=True, age_days=14),  # its end is not
         score_row(agent, value=-0.5, outcome="failed", settled=True, age_days=21.5),  # before the settled window
-        score_row(agent, value=0.0, age_days=16),  # in it, still held (an undecided PR or spot-check)
+        score_row(agent, value=0.0, age_days=16),  # in it, still provisional
         score_row(agent, value=0.0, age_days=3),  # this window's: provisional
-        score_row(agent, "dag", None, settled=True, age_days=15),  # a roll-up is never a leaf
+        score_row(agent, "dag", None, age_days=15),  # a roll-up is never a leaf, settled or held
+        score_row(agent, value=1.0, outcome="done_verified", settled=True, age_days=15, version=SCORER_VERSION + 1),
         score_row("someone-else", value=1.0, outcome="done_verified", settled=True, age_days=15),
     )
     ts = (await data(db, agent, days=7))["task_scores"]
@@ -244,11 +247,11 @@ async def test_settled_numbers_read_a_window_of_the_same_length_that_ends_settle
         "to": (NOW - timedelta(days=14)).isoformat(),
         "held": 1,
     }
-    assert ts["headline"]["verified_share"]["settled"] == {"scored": 2, "verified": 1, "share": 0.5}
-    assert ts["subtasks"]["settled"]["count"] == 2
+    assert ts["headline"]["verified_share"]["settled"] == {"scored": 3, "verified": 1, "share": 0.3333}
+    assert ts["subtasks"]["settled"]["count"] == 3
     assert ts["headline"]["verified_share"]["provisional"] == {"scored": 1, "verified": 0, "share": 0.0}
     # a longer window reaches back as far: 30 days ending 14 days ago take the 21.5-day row too
-    assert (await data(db, agent, days=30))["task_scores"]["subtasks"]["settled"]["count"] == 3
+    assert (await data(db, agent, days=30))["task_scores"]["subtasks"]["settled"]["count"] == 4
 
 
 async def test_rollups_are_counted_apart_and_never_in_a_score_sum(db, agent):
