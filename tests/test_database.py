@@ -87,7 +87,7 @@ async def test_all_tables_exist(db):
         # F099 Phase 2b: arrivals and proposals (migration 084)
         ("brain", "intention_arrivals"),
         ("brain", "intention_proposals"),
-        # heart (19)
+        # heart (20)
         ("heart", "episodes"),
         # heart.episode_decisions dropped by migration 068 (no runtime writer;
         # episode <-> decision now derived from the shared session_id)
@@ -106,6 +106,8 @@ async def test_all_tables_exist(db):
         ("heart", "rubric_versions"),
         ("heart", "outcome_signals"),
         ("heart", "procedure_task_affinity"),
+        # F102: procedure version history (migration 092)
+        ("heart", "procedure_versions"),
         # F098: result inbox + channel identity (migration 081)
         ("heart", "result_inbox"),
         ("heart", "channel_sessions"),

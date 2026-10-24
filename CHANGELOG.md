@@ -2,6 +2,10 @@
 
 All notable changes to Nous. Release notes for each version also live on the [GitHub releases page](https://github.com/tfatykhov/nous/releases).
 
+# Unreleased
+
+- **Procedure versioning and create-time dedupe (F102).** Every procedure body write is a new version in `heart.procedures.version` and `heart.procedure_versions` (migration 092; existing rows backfilled as version 1). `update_body`, `append_notes` and the new `restore` take an optional `expected_version` and refuse a stale write with `ProcedureConflictError`. `store()` replays an `idempotency_key`, and with `NOUS_PROCEDURE_DEDUPE_ENABLED` (default on) merges an auto-learned procedure into a same-named or near-duplicate (cosine ≥ 0.85) auto-learned one instead of inserting a duplicate. A one-off dry-run report, `scripts/diag/procedure_dedupe_report.py`, lists the existing duplicate clusters. Adopted from paperclipai/paperclip's runner-created skills.
+
 # v1.1.0 — The Accountable Agent
 
 **129 commits, 129 pull requests, 685 files changed since v1.0.0** (September 5 → October 22, 2026)
