@@ -97,6 +97,9 @@ async def test_apply_retires_the_duplicates_with_a_reason(db, session):
         await session.refresh(row)
         assert row.active is False
         assert row.runtime_metadata["retired"]["survivor"] == str(stored["B"].id)
+        # Superseded, as a consolidation archives a row (migration 058): is_name_superseded sees it.
+        assert row.superseded_by == stored["B"].id
+        assert row.archived_at is not None
     for key in ("D", "S"):
         row = await session.get(Procedure, stored[key].id)
         await session.refresh(row)
@@ -123,3 +126,28 @@ async def test_the_cli_refuses_a_threshold_out_of_bounds_or_too_low_to_apply(arg
     with pytest.raises(SystemExit) as exit_info:
         await report.main(argv)
     assert exit_info.value.code == 2
+
+
+async def test_rows_stored_between_the_two_reads_do_not_break_the_clusters(db, session):
+    """The members and the pairs are two queries: rows committed between them are left for the next run."""
+    stored = await _seed(db, session)
+    execute = session.execute
+    calls = 0
+
+    async def _store_after_the_member_read(*args, **kwargs):
+        nonlocal calls
+        result = await execute(*args, **kwargs)
+        calls += 1
+        if calls == 1:
+            late = ProcedureManager(db, _AxisEmbeddings({"MARK_L": 1.0}), AGENT, dedupe_enabled=False)
+            for name in ("Late one", "Late two"):
+                await late.store(ProcedureInput(name=name, description="MARK_L", tags=["auto:x"]), session=session)
+        return result
+
+    session.execute = _store_after_the_member_read
+    try:
+        clusters = await report.find_clusters(session, AGENT, 0.85)
+    finally:
+        del session.execute
+
+    assert [c.survivor.id for c in clusters] == [stored["B"].id]

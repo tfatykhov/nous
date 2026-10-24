@@ -2,7 +2,8 @@
 
 DRY RUN BY DEFAULT: prints the clusters and writes nothing. With --apply, each cluster's
 duplicates are retired into its survivor through ProcedureManager.retire with a reason
-(active=false, runtime_metadata.retired); nothing is hard deleted and nothing is merged.
+(active=false, runtime_metadata.retired) and archived as superseded by it (superseded_by,
+archived_at, as a consolidation archives a row); nothing is hard deleted and nothing is merged.
 
 The population and the cosine are the create-time dedupe's (nous/heart/procedures.py):
 active auto-learned procedures (an ``auto:*`` tag), never a skill, a strategy card or a
@@ -99,6 +100,8 @@ async def find_clusters(session: AsyncSession, agent_id: str, threshold: float) 
 
     for pair in pairs:
         a, b = tuple(pair)
+        if a not in parent or b not in parent:
+            continue  # stored after the member read (main reads one snapshot; a caller's session may not)
         parent[root(a)] = root(b)
     components: dict[UUID, list[Member]] = {}
     for pid, member in members.items():
@@ -156,6 +159,11 @@ async def run(
                     "similarity": round(member.similarity or 0.0, 4),
                     "threshold": threshold,
                 })
+                await session.execute(
+                    text("UPDATE heart.procedures SET superseded_by = :survivor, archived_at = now()"
+                         " WHERE id = :id AND agent_id = :agent_id"),
+                    {"survivor": cluster.survivor.id, "id": member.id, "agent_id": manager.agent_id},
+                )
     return clusters, format_report(clusters, threshold, unembedded)
 
 
@@ -176,6 +184,8 @@ async def main(argv: list[str] | None = None) -> int:
     await db.connect()
     try:
         async with db.session() as session:
+            # One snapshot for every read: the members, the pairs and the unembedded count agree.
+            await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
             if not args.apply:
                 await session.execute(text("SET TRANSACTION READ ONLY"))
             manager = ProcedureManager(db, None, args.agent)
