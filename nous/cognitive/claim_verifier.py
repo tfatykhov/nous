@@ -1443,9 +1443,10 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
 # the report", "converted to"); not a time or content word ("on Monday", "by 5pm", "with a summary", "as a
 # .docx"); not a tool, a link or anything else after via/through/using ("via send_file", "via a link", "via DM").
 _NOT_A_RECIPIENT = (
-    # you, the owner, the user, the chat, the bot, Telegram (but its group or channel is another chat)
+    # you, the owner, the user, the chat, the bot, Telegram (but its group or channel is another chat, and
+    # "the user's team" is someone else)
     r"(?!(?:you|yourself|me|myself|here|(?:(?:the|your|my|our|this)\s+)?(?:owner|user|chat|dms?|bot"
-    r"|telegram(?!\s+(?:group|channel)\b)))\b)"
+    r"|telegram(?!\s+(?:group|channel)\b)))\b(?!['’]s\s+(?!(?:chat|dms?|telegram|inbox)\b)\w))"
     # an infinitive
     r"(?!(?:review|read|check|confirm|approve|see|look|keep|share|sign|use|be|date|make|help|show|let|get"
     r"|give|reply|respond|follow|discuss|decide|go|do|start|finish|test|verify|track|compare|print|download"
