@@ -30,9 +30,12 @@ def test_the_scorer_version_and_every_constant_are_pinned():
     # Bump SCORER_VERSION in the same commit as any constant or mapping below, then update this pin.
     assert ts.SCORER_VERSION == 5  # v5: sampled owner audits; a trusted check kind earns done_checked
     assert ts.V2_HOLD_EXTRA_DAYS == 7
+    # The optional --job-file came without a version bump: it only adds a form no stored row's check has (no node
+    # used it before), so no score under v5 changes; the PR is still decided from GitHub alone.
     assert ts.PR_CHECK_RE.pattern == (
         r"python -m nous\.dag\.typed_checks pr ([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+) "
         r"(?:--pr ([1-9][0-9]{0,8})|--head ([A-Za-z0-9._/-]{1,200}))"
+        r"(?: --job-file /[A-Za-z0-9._/-]{1,300})?"
     )
     assert ts.OUTCOME_BASE == {
         "done_verified": 1.0,
@@ -332,6 +335,11 @@ def test_a_rollup_stays_provisional_while_a_child_it_counts_is():
         ("python -m nous.dag.typed_checks pr tfatykhov/nous --pr 12", "pr"),
         ("  python -m nous.dag.typed_checks pr tfatykhov/nous --head fix/x  ", "pr"),  # surrounding blanks aside
         ("python -m nous.dag.typed_checks pr tfatykhov/nous --pr 12 || true", "other"),  # not the PR check any more
+        ("python -m nous.dag.typed_checks pr tfatykhov/nous --head fix/x --job-file /tmp/nous-workspace/j.id", "pr"),
+        # a job file with a shell metacharacter or a blank in it is no PR check
+        ("python -m nous.dag.typed_checks pr tfatykhov/nous --head fix/x --job-file /tmp/j.id;true", "other"),
+        ("python -m nous.dag.typed_checks pr tfatykhov/nous --head fix/x --job-file /tmp/a b", "other"),
+        ("python -m nous.dag.typed_checks pr tfatykhov/nous --head fix/x --job-file tmp/j.id", "other"),  # relative
         ("cat /tmp/claude-jobs/abc/status | grep done", "job_status"),
         ('test -n "$JOB_ID"', "job_status"),
         ("echo $JOBID", "job_status"),

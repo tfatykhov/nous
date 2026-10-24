@@ -102,6 +102,9 @@ NODE_CHECK_STATES: tuple[str, ...] = ("passed", "failed", "unconfirmed", "supers
 PR_CHECK_RE = re.compile(
     r"python -m nous\.dag\.typed_checks pr ([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+) "
     r"(?:--pr ([1-9][0-9]{0,8})|--head ([A-Za-z0-9._/-]{1,200}))"
+    # A launched job's id file only makes the node wait for the job, or fail once it ended with no PR: the PR
+    # itself is still read from GitHub by github_verify, so it changes nothing the scorer trusts.
+    r"(?: --job-file /[A-Za-z0-9._/-]{1,300})?"
 )
 # A row whose PR cannot be decided yet (still open, GitHub unreachable) stays provisional this many days past
 # SETTLE_DAYS, then settles with what it has. v5: so does a row whose audit card is out and unanswered.

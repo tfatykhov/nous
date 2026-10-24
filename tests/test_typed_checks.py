@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import sys
+import time
+
 import httpx
 import pytest
 
@@ -155,3 +159,97 @@ def test_head_on_a_transferred_repository_filters_on_its_new_owner():
 def test_an_unexpected_answer_is_pending_never_a_failure(argv, body):
     mock, _ = transport(lambda request: httpx.Response(200, json=body))
     assert typed_checks.main(argv, transport=mock) == 2
+
+
+# --job-file: a node that launches a Claude Code job whose work ends in the PR
+
+
+@pytest.mark.parametrize(
+    "job_file",
+    [
+        "job.id",  # relative
+        "/tmp/elsewhere/job.id",  # outside the workspace
+        "/tmp/nous-workspace/../etc/job.id",  # through '..'
+        "/tmp/nous-workspace/./job.id",  # not normalized
+        "/tmp/nous-workspace",  # the workspace itself
+        "/tmp/nous-workspace/a b.id",  # a blank: the scorer would not read it as the PR check
+        "/tmp/nous-workspace/$J",
+    ],
+)
+def test_a_job_file_must_be_an_absolute_path_under_the_workspace(job_file, monkeypatch):
+    monkeypatch.setenv("NOUS_WORKSPACE_DIR", "/tmp/nous-workspace")
+
+    def unexpected(request):
+        raise AssertionError("GitHub must not be called")
+
+    mock, _ = transport(unexpected)
+    argv = ["pr", "tfatykhov/nous", "--head", "fix/thing", "--job-file", job_file]
+    assert typed_checks.main(argv, transport=mock) == 1
+
+
+JOB = "job-20261024-002210-009d4cf6"
+posix_only = pytest.mark.skipif(sys.platform == "win32", reason="job files are absolute POSIX paths")
+
+
+def _job(workspace, status, age_seconds=600, job_id=JOB):
+    """A launched job as runner.sh leaves it: its id in a file the DAG wrote, its status word in its own dir."""
+    id_file = workspace / "dag-1" / "job.id"
+    id_file.parent.mkdir(parents=True, exist_ok=True)
+    id_file.write_text(job_id + "\n")
+    if status is not None:
+        status_file = workspace / "claude-jobs" / job_id / "status"
+        status_file.parent.mkdir(parents=True, exist_ok=True)
+        status_file.write_text(status + "\n")
+        written = time.time() - age_seconds
+        os.utime(status_file, (written, written))
+    return str(id_file)
+
+
+def _head_check(job_file, listing):
+    mock, _ = transport(_repo_then(listing))
+    return typed_checks.main(["pr", "tfatykhov/nous", "--head", "fix/thing", "--job-file", job_file], transport=mock)
+
+
+OPEN = lambda request: httpx.Response(200, json=[pull(number=9)])  # noqa: E731
+NONE_YET = lambda request: httpx.Response(200, json=[])  # noqa: E731
+CLOSED = lambda request: httpx.Response(200, json=[pull("closed", number=9)])  # noqa: E731
+DOWN = lambda request: httpx.Response(500, json={})  # noqa: E731
+
+
+@posix_only
+@pytest.mark.parametrize(
+    ("listing", "status", "age_seconds", "code"),
+    [
+        (OPEN, "running", 600, 2),  # the PR is there but its job is still working on it
+        (OPEN, "completed", 600, 0),
+        (OPEN, "failed", 5, 0),  # the PR exists: whether it was good work is the scorer's question
+        (OPEN, "unknown", 600, 0),  # only "running" holds a PR that exists
+        (NONE_YET, "completed", 600, 1),  # the job ended and opened no PR: final
+        (NONE_YET, "cancelled", 600, 1),
+        (NONE_YET, "failed", 60, 2),  # it ended a minute ago: GitHub may not list its PR yet
+        (NONE_YET, "running", 600, 2),
+        (DOWN, "completed", 600, 2),  # GitHub failing never fails the node, job or not
+        (CLOSED, "running", 600, 1),  # closed without a merge stays final
+    ],
+)
+def test_a_job_file_waits_for_the_job_and_fails_once_it_ended_with_no_pr(
+    listing, status, age_seconds, code, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("NOUS_WORKSPACE_DIR", str(tmp_path))
+    monkeypatch.delenv("NOUS_DAG_CREATED_AT", raising=False)
+    assert _head_check(_job(tmp_path, status, age_seconds), listing) == code
+
+
+@posix_only
+@pytest.mark.parametrize("case", ["no id file", "not a job id", "no status file"])
+@pytest.mark.parametrize(("listing", "code"), [(OPEN, 0), (NONE_YET, 2)])
+def test_a_job_file_the_check_cannot_read_changes_nothing(case, listing, code, tmp_path, monkeypatch):
+    monkeypatch.setenv("NOUS_WORKSPACE_DIR", str(tmp_path))
+    monkeypatch.delenv("NOUS_DAG_CREATED_AT", raising=False)
+    if case == "no id file":
+        job_file = str(tmp_path / "dag-1" / "job.id")
+    elif case == "not a job id":
+        job_file = _job(tmp_path, "completed", job_id="not-a-job")
+    else:
+        job_file = _job(tmp_path, None)
+    assert _head_check(job_file, listing) == code

@@ -204,6 +204,12 @@ def test_stored_evidence_keeps_the_first_credit_and_the_pins():
             "  python -m nous.dag.typed_checks pr tfatykhov/nous --head fix/a.b-c\n",
             PrCheck("tfatykhov/nous", None, "fix/a.b-c"),
         ),
+        (
+            "python -m nous.dag.typed_checks pr tfatykhov/nous --head fix/x --job-file /tmp/nous-workspace/f/job.id",
+            PrCheck("tfatykhov/nous", None, "fix/x"),  # the job file changes nothing the scorer reads
+        ),
+        ("python -m nous.dag.typed_checks pr tfatykhov/nous --pr 12 --job-file /tmp/j.id; exit 0", None),
+        ("python -m nous.dag.typed_checks pr tfatykhov/nous --pr 12 --job-file /tmp/$J", None),
         ("python -m nous.dag.typed_checks pr tfatykhov/nous --pr 12 || true", None),  # not the check any more
         ("python -m nous.dag.typed_checks pr tfatykhov/nous --pr 12; exit 0", None),
         ("python  -m nous.dag.typed_checks pr tfatykhov/nous --pr 12", None),

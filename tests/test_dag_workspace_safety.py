@@ -354,3 +354,31 @@ async def test_a_completion_check_learns_when_its_dag_was_created(store, subtask
     )
     result = await orch._run_completion_check(dag.nodes[0])
     assert result.status == "success", result
+
+
+@pytest.mark.asyncio
+async def test_a_completion_check_learns_the_workspace_its_job_files_are_under(
+    store, subtask_mgr, dynamic_loader, tmp_path: Path, db, monkeypatch
+):
+    """The PR check's --job-file must be under the workspace, so the check is told which one: the setting, not
+    whatever NOUS_WORKSPACE_DIR the process happened to start with."""
+    import shlex
+    import sys
+
+    monkeypatch.setenv("NOUS_WORKSPACE_DIR", "/somewhere/else")
+    workspace = str(tmp_path / "ws")
+    settings = Settings(dag_workspace_root=tmp_path, workspace_dir=workspace)
+    s = DAGStore(db, store._agent_id, settings)
+    orch = DAGOrchestrator(store=s, subtask_mgr=subtask_mgr, dynamic_loader=dynamic_loader, settings=settings)
+    probe = f"import os, sys; sys.exit(0 if os.environ.get('NOUS_WORKSPACE_DIR') == {workspace!r} else 1)"
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(probe)}" if sys.platform != "win32" else (
+        f'"{sys.executable}" -c "{probe}"'
+    )
+    dag = await s.create(
+        DAGCreateRequest(
+            name="ws-env-dag",
+            nodes=[DAGNodeSpec(name="step", type=DAGNodeType.subtask, completion_check=command)],
+        )
+    )
+    result = await orch._run_completion_check(dag.nodes[0])
+    assert result.status == "success", result

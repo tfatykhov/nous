@@ -6111,7 +6111,14 @@ def register_dag_tools(
                                     "For work that ends in a pull request, use the built-in check "
                                     "'python -m nous.dag.typed_checks pr <owner/repo> --head <branch>' (or --pr <n>), "
                                     "exactly as written: it passes once that PR exists and fails if it is closed "
-                                    "without a merge. Give it a completion_check_interval of 300 or more."
+                                    "without a merge. Give it a completion_check_interval of 300 or more. "
+                                    "When the node launches a Claude Code job (claude-jobs/runner.sh launch) that "
+                                    "opens the PR, have it write the job id to a file under the workspace and add "
+                                    "' --job-file <absolute path of that file>' to the same check instead of "
+                                    "checking the job's status yourself: the node then waits while the job runs and "
+                                    "fails when the job ends without the PR. Only this exact check counts as the PR "
+                                    "check: a merged PR it names is the outside confirmation your work is scored "
+                                    "on, and a job-status or gh check you write yourself earns nothing."
                                 ),
                             },
                             "completion_check_interval": {

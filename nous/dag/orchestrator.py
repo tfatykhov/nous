@@ -2193,6 +2193,10 @@ class DAGOrchestrator:
             # The built-in PR check (nous/dag/typed_checks.py) ignores PRs opened before the DAG, so a branch name
             # reused from an older PR cannot settle the node before this DAG's PR exists.
             check_env = {**os.environ}
+            # Its --job-file names a launched job's id file, read with the job's status under the workspace.
+            workspace_dir = getattr(self._settings, "workspace_dir", None)
+            if workspace_dir:
+                check_env["NOUS_WORKSPACE_DIR"] = str(workspace_dir)
             dag_created_at = getattr(dag, "created_at", None)
             if dag_created_at is not None:
                 check_env["NOUS_DAG_CREATED_AT"] = dag_created_at.isoformat()
