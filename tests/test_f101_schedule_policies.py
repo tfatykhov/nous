@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -429,12 +430,12 @@ async def test_manual_run_of_an_inactive_or_unknown_schedule_is_refused(heart, s
 async def test_catch_up_runs_carry_the_continuation_cycle_forward(heart):
     settings = _settings(heart.agent_id, schedule_continuation_enabled=True)
     schedule = await _due_schedule(
-        heart,
-        missed_slots=3,
-        concurrency_policy="always_enqueue",
-        catch_up_policy="enqueue_missed_with_cap",
-        continuation_turns=2,
+        heart, missed_slots=3, catch_up_policy="enqueue_missed_with_cap", continuation_turns=2
     )
+    # create refuses always_enqueue with continuation; a row written outside it still fires sanely.
+    async with heart.db.session() as s:
+        await s.execute(update(Schedule).where(Schedule.id == schedule.id).values(concurrency_policy="always_enqueue"))
+        await s.commit()
 
     assert await TaskScheduler(heart, settings)._fire_due_tasks() == 3
 
@@ -734,3 +735,137 @@ async def test_rest_run_with_a_full_queue_is_a_conflict(heart, settings):
         await heart.subtasks.create(task=f"filler {i}")
     async with _client(heart, settings) as client:
         assert (await client.post(f"/schedules/{schedule.id}/run")).status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# Owner review of 7d803827
+# ---------------------------------------------------------------------------
+
+
+async def test_catch_up_keeps_a_passed_slot_inside_the_last_check_interval(heart):
+    settings = _settings(heart.agent_id, schedule_check_interval=60)
+    schedule = await heart.schedules.create(
+        task="t",
+        schedule_type="recurring",
+        interval_seconds=3600,
+        concurrency_policy="always_enqueue",
+        catch_up_policy="enqueue_missed_with_cap",
+        catch_up_cap=5,
+    )
+    first = datetime.now(UTC) - timedelta(seconds=7210)
+    async with heart.db.session() as s:
+        await s.execute(update(Schedule).where(Schedule.id == schedule.id).values(next_fire_at=first))
+        await s.commit()
+
+    # Slots at -7210 s and -3610 s are missed; the -10 s one is only a late check.
+    assert await TaskScheduler(heart, settings)._fire_due_tasks() == 2
+    after = await heart.schedules.get(schedule.id)
+    assert after.next_fire_at == first + timedelta(seconds=7200)
+    assert after.fire_count == 2
+
+    # It is due at the next check and fires there.
+    assert await TaskScheduler(heart, settings)._fire_due_tasks() == 1
+    assert len(await _runs(heart, schedule)) == 3
+    assert (await heart.schedules.get(schedule.id)).next_fire_at > datetime.now(UTC)
+
+
+async def test_skip_missed_still_advances_past_a_passed_slot_inside_the_last_check_interval(heart):
+    settings = _settings(heart.agent_id, schedule_check_interval=60)
+    schedule = await heart.schedules.create(task="t", schedule_type="recurring", interval_seconds=3600)
+    async with heart.db.session() as s:
+        await s.execute(
+            update(Schedule)
+            .where(Schedule.id == schedule.id)
+            .values(next_fire_at=datetime.now(UTC) - timedelta(seconds=7210))
+        )
+        await s.commit()
+
+    assert await TaskScheduler(heart, settings)._fire_due_tasks() == 1
+    assert (await heart.schedules.get(schedule.id)).next_fire_at > datetime.now(UTC)
+
+
+def _deactivate_inside_the_lock(monkeypatch, heart):
+    """Deactivate the schedule after its fire lock is taken: another fire used it up in between."""
+    from nous.handlers import task_scheduler
+
+    real = task_scheduler._fire_lock
+
+    @asynccontextmanager
+    async def lock(h, schedule_id):
+        async with real(h, schedule_id) as taken:
+            await heart.schedules.deactivate(schedule_id)
+            yield taken
+
+    monkeypatch.setattr(task_scheduler, "_fire_lock", lock)
+
+
+async def test_manual_run_re_reads_the_schedule_inside_the_lock(heart, settings, monkeypatch):
+    from nous.handlers.task_scheduler import ScheduleNotFound
+
+    schedule = await heart.schedules.create(
+        task="t", schedule_type="recurring", interval_seconds=3600, concurrency_policy="always_enqueue"
+    )
+    _deactivate_inside_the_lock(monkeypatch, heart)
+
+    with pytest.raises(ScheduleNotFound):
+        await run_schedule_now(heart, settings, schedule.id)
+    assert await _runs(heart, schedule) == []
+
+
+async def test_the_check_re_reads_the_schedule_inside_the_lock(heart, settings, monkeypatch):
+    schedule = await _due_schedule(heart, concurrency_policy="always_enqueue")
+    _deactivate_inside_the_lock(monkeypatch, heart)
+
+    assert await TaskScheduler(heart, settings)._fire_due_tasks() == 0
+    assert await _runs(heart, schedule) == []
+
+
+def _probe_the_lock_at_spawn(monkeypatch, heart) -> list[bool]:
+    """Record, at each run's creation, whether another session could take the schedule's fire lock."""
+    from sqlalchemy import text
+
+    from nous.handlers import task_scheduler
+
+    real = task_scheduler.create_fire
+    probes: list[bool] = []
+
+    async def create_fire(h, s, schedule, **kw):
+        async with heart.db.session() as other:
+            probes.append(
+                await other.scalar(
+                    text("SELECT pg_try_advisory_xact_lock(hashtextextended(:k, 0))"),
+                    {"k": f"schedule_fire:{schedule.id.hex}"},
+                )
+            )
+        return await real(h, s, schedule, **kw)
+
+    monkeypatch.setattr(task_scheduler, "create_fire", create_fire)
+    return probes
+
+
+async def test_the_check_holds_the_fire_lock_until_the_run_is_created(heart, settings, monkeypatch):
+    await _due_schedule(heart, concurrency_policy="always_enqueue")
+    probes = _probe_the_lock_at_spawn(monkeypatch, heart)
+
+    assert await TaskScheduler(heart, settings)._fire_due_tasks() == 1
+    assert probes == [False]
+
+
+async def test_manual_run_holds_the_fire_lock_until_the_run_is_created(heart, settings, monkeypatch):
+    schedule = await heart.schedules.create(task="t", schedule_type="recurring", interval_seconds=3600)
+    probes = _probe_the_lock_at_spawn(monkeypatch, heart)
+
+    assert (await run_schedule_now(heart, settings, schedule.id)).outcome == "started"
+    assert probes == [False]
+
+
+async def test_always_enqueue_with_continuation_is_refused(heart, settings):
+    with pytest.raises(ValueError, match="always_enqueue"):
+        await heart.schedules.create(
+            task="t",
+            schedule_type="recurring",
+            interval_seconds=3600,
+            concurrency_policy="always_enqueue",
+            continuation_turns=3,
+        )
+    assert await heart.schedules.list() == []

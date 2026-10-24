@@ -31,6 +31,8 @@ Both are columns of `heart.schedules` (migration 091, with CHECK constraints). E
 | `skip_if_active` | the same, recorded as `skipped` |
 | `always_enqueue` | starts another run |
 
+`always_enqueue` cannot be combined with `continuation_turns > 0` (F064.5): `ScheduleManager.create`, and with it `schedule_task`, refuses it with a `ValueError`. The runs of one continuation cycle share a session (`metadata.session_id`), and the runner serializes a session's turns on its lock. Two runs started side by side would therefore queue there while each worker's timeout keeps counting, so the second run could use up its timeout waiting.
+
 `coalesced` and `skipped` differ only in what is recorded, as in Paperclip. "Coalesced" means the active run serves this slot. "Skipped" means the slot was dropped.
 
 ### `catch_up_policy`
@@ -42,7 +44,9 @@ Both are columns of `heart.schedules` (migration 091, with CHECK constraints). E
 
 **How catch-up and concurrency combine.** As in Paperclip, every catch-up run passes the concurrency gate. Under the default `coalesce_if_active`, the first run starts and the later missed slots are coalesced into it, each one recorded. Several catch-up runs therefore only start with `always_enqueue`. The `schedule_task` tool description says this.
 
-**Counting missed slots.** The scheduler walks the schedule's cron or interval from `next_fire_at`, at most `cap` steps. A slot counts as missed only when it is more than one check interval old, so a check that is only late cannot turn a short interval into a double fire. `max_fires` bounds the batch, and `fire_count` never passes it.
+**Counting missed slots.** The scheduler walks the schedule's cron or interval from `next_fire_at`, at most `cap` steps. A slot counts as missed only when it is more than one check interval old, so a check that is only late cannot turn a short interval into a double fire. Such a passed slot is not used up: the schedule then advances from the last slot it counted, so `next_fire_at` is that passed slot, which is due at the next check and goes through the concurrency gate as usual. When the cap is reached, the schedule advances from now and the remaining slots are dropped. `max_fires` bounds the batch, and `fire_count` never passes it.
+
+**`max_fires` counts runs started.** A fire that is coalesced or skipped does not raise `fire_count`. A `max_fires` schedule whose fires keep coalescing therefore stays active until that many runs have actually started.
 
 ### Scope
 
@@ -75,13 +79,13 @@ For each due recurring schedule, `_fire_with_policies`:
 1. Takes the schedule's **fire lock**, `pg_try_advisory_xact_lock(hashtextextended('schedule_fire:<hex>', 0))`, in a session of its own. If another fire holds it, nothing happens and the schedule is retried on the next check. A try-lock is used because a waiter would hold a pooled connection.
 2. Reads the schedule again under the lock and stops if it is no longer active or due.
 3. Works out the number of runs (above). For each run it calls the concurrency gate and then either records the suppressed fire or starts the run. Starting a run uses the F064.5 continuation bookkeeping, and the row is re-read between runs so that a continuation cycle carries forward.
-4. Advances the schedule once: `next_fire_at` is the next slot after now, `fire_count` grows by the runs started, and `last_fired_at` is set only if a run started. The slot advances even when every run was coalesced or skipped.
+4. Advances the schedule once: `next_fire_at` is the next slot after now (under `enqueue_missed_with_cap`, after the last counted slot when a passed slot lies inside the last check interval; see above), `fire_count` grows by the runs started, and `last_fired_at` is set only if a run started. The slot advances even when every run was coalesced or skipped.
 
 **Failures.** An error before the first run starts (queue full, closed container, database) propagates as before F101: the schedule is not advanced and is retried. An error after a run has started ends the catch-up there, and so does a cancellation. The runs already started are counted and the schedule advances, so the next check cannot start the same slots again.
 
 ## Manual run
 
-`POST /schedules/{id}/run` (REST) calls `run_schedule_now`. It takes the same fire lock and goes through the same concurrency gate, so a manual run obeys the policy (Paperclip: "Concurrency policy still applies"). It leaves `next_fire_at`, `fire_count` and the continuation cycle alone.
+`POST /schedules/{id}/run` (REST) calls `run_schedule_now`. It takes the same fire lock, reads the schedule again under it (404 if a fire in between used up its last `max_fires` run), and goes through the same concurrency gate, so a manual run obeys the policy (Paperclip: "Concurrency policy still applies"). It leaves `next_fire_at`, `fire_count` and the continuation cycle alone.
 
 | Response | When |
 |----------|------|

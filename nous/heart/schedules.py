@@ -55,13 +55,20 @@ class ScheduleManager:
         catch_up_policy: str = "skip_missed",
         catch_up_cap: int | None = None,
     ) -> Schedule:
-        """Create a new schedule. Raises ``ValueError`` for an unknown F101 policy or a cap outside 1..25."""
+        """Create a new schedule.
+
+        Raises ``ValueError`` for an unknown F101 policy, a cap outside 1..25, or always_enqueue
+        together with continuation_turns.
+        """
         if concurrency_policy not in CONCURRENCY_POLICIES:
             raise ValueError(f"concurrency_policy must be one of {', '.join(CONCURRENCY_POLICIES)}")
         if catch_up_policy not in CATCH_UP_POLICIES:
             raise ValueError(f"catch_up_policy must be one of {', '.join(CATCH_UP_POLICIES)}")
         if catch_up_cap is not None and not 1 <= catch_up_cap <= CATCH_UP_CAP_MAX:
             raise ValueError(f"catch_up_cap must be between 1 and {CATCH_UP_CAP_MAX}")
+        if concurrency_policy == "always_enqueue" and continuation_turns > 0:
+            # The runs of one continuation cycle share a session, so they would queue on its lock.
+            raise ValueError("concurrency_policy always_enqueue cannot be combined with continuation_turns > 0")
         # Compute next_fire_at
         now = datetime.now(UTC)
         if schedule_type == "once":
@@ -198,12 +205,16 @@ class ScheduleManager:
                 schedule.task = task
             await session.commit()
 
-    async def advance(self, schedule_id: UUID, fired_at: datetime, fires: int = 1) -> None:
+    async def advance(
+        self, schedule_id: UUID, fired_at: datetime, fires: int = 1, *, after: datetime | None = None
+    ) -> None:
         """Advance a recurring schedule after firing.
 
         ``fires`` is how many runs this check started (F101: 0 when every one was
         coalesced or skipped, more than 1 for a catch-up); the slot moves on either way.
+        ``after`` (F101 catch-up): the time the next slot follows, when not ``fired_at``.
         """
+        after = after or fired_at
         async with self._db.session() as session:
             schedule = await session.get(Schedule, schedule_id)
             if schedule is None:
@@ -218,10 +229,10 @@ class ScheduleManager:
                 schedule.active = False
                 schedule.next_fire_at = None
             elif schedule.cron_expr:
-                cron = croniter(schedule.cron_expr, fired_at)
+                cron = croniter(schedule.cron_expr, after)
                 schedule.next_fire_at = cron.get_next(datetime)
             elif schedule.interval_seconds:
-                schedule.next_fire_at = fired_at + timedelta(
+                schedule.next_fire_at = after + timedelta(
                     seconds=schedule.interval_seconds
                 )
             else:

@@ -223,6 +223,10 @@ async def run_schedule_now(heart: Heart, settings: Settings, schedule_id: UUID, 
     async with _fire_lock(heart, schedule_id) as taken:
         if not taken:
             raise ScheduleBusy(f"schedule {schedule_id} is being fired")
+        # Re-read under the lock: a fire in between may have used up its last max_fires run.
+        schedule = await heart.schedules.get(schedule_id)
+        if schedule is None or not schedule.active:
+            raise ScheduleNotFound(f"no active recurring schedule {schedule_id}")
         held = await _suppress_if_active(heart, settings, schedule, datetime.now(UTC), bus, "manual")
         if held is not None:
             return held
@@ -230,30 +234,40 @@ async def run_schedule_now(heart: Heart, settings: Settings, schedule_id: UUID, 
     return FireResult("started", run.id)
 
 
-def _runs_due(schedule: Schedule, now: datetime, settings: Settings) -> int:
-    """F101: how many runs a check starts for ``schedule``: 1, or one per missed slot up to the cap.
+def _runs_due(schedule: Schedule, now: datetime, settings: Settings) -> tuple[int, datetime]:
+    """F101: how many runs a check starts for ``schedule`` (1, or one per missed slot up to the cap),
+    and the time the schedule then advances from.
 
     A slot counts as missed only when it is older than one check interval: a check that is
-    merely late must not turn a short interval into a double fire. Never more than max_fires allows.
+    merely late must not turn a short interval into a double fire. Such a passed slot is not
+    used up either: the schedule advances from the last counted slot, so it is due at the next
+    check. Otherwise (skip_missed, or the cap reached) it advances from ``now``. Never more runs
+    than max_fires allows.
     """
     runs = 1
+    advance_from = now
     if schedule.catch_up_policy == "enqueue_missed_with_cap":
         cap = schedule.catch_up_cap or settings.schedule_catch_up_cap
         missed_before = now - timedelta(seconds=settings.schedule_check_interval)
-        slot = schedule.next_fire_at
+        counted = schedule.next_fire_at
         while runs < cap:
             if schedule.cron_expr:
-                slot = croniter(schedule.cron_expr, slot).get_next(datetime)
+                slot = croniter(schedule.cron_expr, counted).get_next(datetime)
             elif schedule.interval_seconds:
-                slot = slot + timedelta(seconds=schedule.interval_seconds)
+                slot = counted + timedelta(seconds=schedule.interval_seconds)
             else:
                 break
             if slot > missed_before:
+                if slot <= now:
+                    advance_from = counted
                 break
             runs += 1
+            counted = slot
     if schedule.max_fires:
-        runs = max(1, min(runs, schedule.max_fires - schedule.fire_count))
-    return runs
+        allowed = max(1, min(runs, schedule.max_fires - schedule.fire_count))
+        if allowed < runs:
+            runs, advance_from = allowed, now
+    return runs, advance_from
 
 
 class TaskScheduler:
@@ -304,7 +318,7 @@ class TaskScheduler:
                 await asyncio.sleep(self._settings.schedule_check_interval)
                 fired = await self._fire_due_tasks()
                 if fired:
-                    logger.info("Fired %d due schedule(s)", fired)
+                    logger.info("Started %d run(s) of due schedules", fired)
             except asyncio.CancelledError:
                 if cancel_requested():
                     break
@@ -434,7 +448,7 @@ class TaskScheduler:
             if schedule is None or not schedule.active or schedule.next_fire_at is None or schedule.next_fire_at > now:
                 return 0
             schedule_id = schedule.id
-            runs = _runs_due(schedule, now, self._settings)
+            runs, advance_from = _runs_due(schedule, now, self._settings)
             started = 0
             finished = False
             try:
@@ -456,7 +470,7 @@ class TaskScheduler:
                 )
             finally:
                 if finished or started:
-                    await self._heart.schedules.advance(schedule_id, now, fires=started)
+                    await self._heart.schedules.advance(schedule_id, now, fires=started, after=advance_from)
         return started
 
     async def _enqueue(self, schedule: Schedule, earlier_runs: int = 0) -> None:
