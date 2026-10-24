@@ -32,7 +32,7 @@ from nous.brain.embeddings import EmbeddingProvider
 from nous.config import Settings
 from nous.handlers import LLMClient, call_background_llm, parse_llm_json
 from nous.heart.heart import Heart
-from nous.heart.procedures import ProcedureConflictError, _build_embed_text
+from nous.heart.procedures import ProcedureConflictError, _build_embed_text, new_evidence_notes
 from nous.heart.schemas import ProcedureDetail, ProcedureInput, ProcedureSummary
 
 logger = logging.getLogger(__name__)
@@ -41,7 +41,6 @@ logger = logging.getLogger(__name__)
 # embeds, so they compare with stored-row cosines (same-lesson pairs measured 0.85-0.90).
 _COVERED_COSINE = 0.85  # above it the lesson is already stored: covered without an LLM call
 _COVER_CHECK_FLOOR = 0.5  # neighbours above it are shown to the model, which may answer COVERED
-_MAX_EVIDENCE_NOTES = 10  # evidence lines one procedure collects
 _REVISE_REASON = "weak review: revise"  # leads the reason of a weak review's revision version
 
 
@@ -754,7 +753,9 @@ class ProcedureLearner:
         ]
         try:
             return ProcedureInput(
-                name=data.get("name") or "Unnamed procedure",
+                # Named after its cue, not one fallback name for every unnamed lesson:
+                # the store's name lock compares names.
+                name=data.get("name") or f"Unnamed procedure: {_one_line(cue)[:200]}",
                 domain=data.get("domain"),
                 description=data.get("description"),
                 goals=[cue, *(g for g in _str_list(data.get("goals")) if g != cue)],
@@ -817,7 +818,11 @@ class ProcedureLearner:
         else:
             covering = await self._covering_procedure(proc_input, neighbours, counts=counts)
         if covering is None:
-            await self._heart.store_procedure(proc_input)
+            stored = await self._heart.store_procedure(proc_input)
+            if stored.version > 1:
+                # The create-time dedupe merged it into a procedure that teaches the lesson already.
+                counts["covered"] += 1
+                return False
             return True
 
         counts["covered"] += 1
@@ -825,18 +830,11 @@ class ProcedureLearner:
             logger.info("Lesson %r covered by %r, not auto-learned: nothing stored", proc_input.name, covering.name)
             return False
 
-        def new_evidence(notes: list[str]) -> list[str]:
-            # Each cited input item once per procedure, up to the cap; the line's second word is its ID.
-            evidence = [note for note in notes if note.startswith("evidence: ")]
-            cited = {note.split(" ")[1] for note in evidence}
-            return [
-                note for note in proc_input.implementation_notes
-                if note.startswith("evidence: ") and note.split(" ")[1] not in cited
-            ][: max(0, _MAX_EVIDENCE_NOTES - len(evidence))]
-
         # Picked from the notes under a row lock, not from `covering`: another pathway may be
         # adding evidence to the same procedure.
-        added = await self._heart.append_procedure_notes(covering.id, new_evidence)
+        added = await self._heart.append_procedure_notes(
+            covering.id, lambda notes: new_evidence_notes(notes, proc_input.implementation_notes)
+        )
         logger.info("Lesson %r covered by %r: %d evidence line(s) added", proc_input.name, covering.name, len(added))
         return False
 

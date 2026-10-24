@@ -73,6 +73,31 @@ def _is_learned(tags: list[str] | None) -> bool:
     return any(tag.startswith("auto:") for tag in tags or [])
 
 
+def _in_dedupe_population(procedure: object) -> bool:
+    """Auto-learned how-to (LEARNED_WHERE in Python), for a row or an input: never a skill, a card or a job lesson."""
+    tags = getattr(procedure, "tags", None)
+    if is_strategy_card(procedure) or is_job_lesson(procedure):
+        return False
+    return _is_learned(tags) and not _is_skill(tags)
+
+
+# Evidence lines one procedure collects (the K-line learner's covered path and a dedupe merge).
+MAX_EVIDENCE_NOTES = 10
+
+
+def new_evidence_notes(notes: list[str], incoming: list[str]) -> list[str]:
+    """The ``evidence:`` lines of ``incoming`` to append to ``notes``: each cited ID once, up to the cap.
+
+    The line's second word is the ID of the input item it cites.
+    """
+    evidence = [note for note in notes if note.startswith("evidence: ")]
+    cited = {note.split(" ")[1] for note in evidence}
+    return [
+        note for note in incoming
+        if note.startswith("evidence: ") and note.split(" ")[1] not in cited
+    ][: max(0, MAX_EVIDENCE_NOTES - len(evidence))]
+
+
 def _union(existing: list[str] | None, incoming: list[str]) -> list[str]:
     """``existing`` in its order, then each item of ``incoming`` it does not hold yet."""
     merged = list(existing or [])
@@ -194,9 +219,10 @@ class ProcedureManager:
         (ProcedureConflictError for the same key with a different request). With dedupe
         enabled, an active auto-learned input (an ``auto:*`` tag; never a skill, a strategy
         card or a job lesson) is merged into the active auto-learned procedure of the same
-        normalized name, or else into the nearest one at or above the cosine threshold.
-        A merge unions the list fields into the existing row as a new version
-        (change_source ``dedupe_merge``) and returns that row.
+        normalized name when their cosine is at or above the threshold too (the name alone
+        when there is no embedding to compare), or else into the nearest one at or above it.
+        A merge writes the existing row a new version (change_source ``dedupe_merge``, see
+        _merged_body) and returns that row.
         """
         if session is None:
             async with self.db.session() as session:
@@ -205,8 +231,14 @@ class ProcedureManager:
                 return result
         return await self._store(input, session)
 
-    async def _embed_with_retry(self, embed_text: str, *, attempts: int = 2) -> list[float] | None:
-        """Embed with one retry; on final failure log ERROR (not a quiet warning).
+    async def _embed_with_retry(
+        self,
+        embed_text: str,
+        *,
+        attempts: int = 2,
+        on_failure: str = "storing procedure with NULL embedding (invisible to vector search/dedup until reembed_all)",
+    ) -> list[float] | None:
+        """Embed with one retry; on final failure log ERROR (not a quiet warning), with ``on_failure``.
 
         A NULL embedding makes the row invisible to vector search and the dedup
         cosine gate (audit bug 8), so the failure must be loud, not swallowed.
@@ -218,11 +250,7 @@ class ProcedureManager:
                 return await self.embeddings.embed(embed_text)
             except Exception:
                 if attempt >= attempts:
-                    logger.error(
-                        "Embedding generation failed after %d attempts; storing procedure with "
-                        "NULL embedding (invisible to vector search/dedup until reembed_all)",
-                        attempts,
-                    )
+                    logger.error("Embedding generation failed after %d attempts; %s", attempts, on_failure)
                     return None
                 logger.warning("Embedding attempt %d/%d failed for procedure, retrying", attempt, attempts)
         return None
@@ -241,40 +269,19 @@ class ProcedureManager:
 
         # Only an auto-learned lesson is merged, and only into one: a hand-written or
         # skill body is never folded into another row, nor another row's tags into it.
-        dedupe = (
-            self._dedupe_enabled
-            and input.active is not False
-            and not is_strategy_card(input)
-            and not is_job_lesson(input)
-            and not _is_skill(input.tags)
-            and _is_learned(input.tags)
-        )
+        dedupe = self._dedupe_enabled and input.active is not False and _in_dedupe_population(input)
+        # The merged body is embedded before the create lock too; the merge uses it if the target is unchanged.
+        prepared = await self._prepare_merge(input, embedding, session) if dedupe else None
         if input.idempotency_key is not None or dedupe:
             await self._lock_creates(session)
         if input.idempotency_key is not None:
             replayed = await self._replay(input, session)
             if replayed is not None:
                 return replayed
-        if dedupe and (same_name := await self._same_name_procedure(input.name, session)) is not None:
-            merged = await self._merge(same_name, input, "name lock: same normalized name", session)
+        if dedupe and (target := await self._merge_target(input, embedding, session)) is not None:
+            merged = await self._merge(*target, input, session, prepared)
             if merged is not None:
                 return merged
-        if dedupe and _is_postgres(session):
-            if embedding is None:
-                logger.warning(
-                    "Procedure dedupe: no embedding for %r, so no near-duplicate check; stored as new", input.name
-                )
-            else:
-                nearest = await self._nearest_summaries(
-                    "", LEARNED_WHERE, LEARNED_PARAMS, 1, session, probe="procedure dedupe probe",
-                    embedding=embedding,
-                )
-                if nearest and nearest[0].score is not None and nearest[0].score >= self._dedupe_threshold:
-                    merged = await self._merge(
-                        nearest[0].id, input, f"semantic: cosine {nearest[0].score:.3f}", session
-                    )
-                    if merged is not None:
-                        return merged
 
         procedure = Procedure(
             agent_id=self.agent_id,
@@ -364,8 +371,18 @@ class ProcedureManager:
             # the decision's graph edge would start at a how-to row.
             raise ValueError(f"Procedure {procedure_id} is a strategy card: a how-to body does not replace it")
 
+        # The row's body already is the input's: no version, and no embedding call unless the row has none.
+        unchanged = (
+            (procedure.name, procedure.domain, procedure.description, procedure.kind)
+            == (input.name, input.domain, input.description, input.kind)
+            and all(list(getattr(procedure, field) or []) == getattr(input, field) for field in _LIST_FIELDS)
+            and (
+                "runtime_metadata" not in input.model_fields_set
+                or procedure.runtime_metadata == input.runtime_metadata
+            )
+        )
         embedding = procedure.embedding
-        if self.embeddings:
+        if self.embeddings and not (unchanged and embedding is not None):
             embed_text = _build_embed_text(
                 input.name, input.description, input.core_patterns,
                 input.goals, input.core_tools, input.core_concepts,
@@ -398,6 +415,9 @@ class ProcedureManager:
         if input.active is not None:
             procedure.active = input.active
         procedure.embedding = embedding
+        if unchanged:
+            await session.flush()
+            return self._to_detail(procedure)
         procedure.updated_at = datetime.now(UTC)
         await self._bump_version(procedure, session, "update_body", reason=reason)
         return self._to_detail(procedure)
@@ -1668,39 +1688,130 @@ class ProcedureManager:
             None,
         )
 
-    async def _merge(
-        self, procedure_id: UUID, input: ProcedureInput, rule: str, session: AsyncSession
-    ) -> ProcedureDetail | None:
-        """Union ``input``'s list fields into the procedure as a new version (``dedupe_merge``).
+    async def _merge_target(
+        self, input: ProcedureInput, embedding: list[float] | None, session: AsyncSession, *, log: bool = True
+    ) -> tuple[UUID, str] | None:
+        """The procedure a deduped input merges into, with the rule that chose it, or None.
 
-        The procedure keeps its name, description, domain, kind, runtime_metadata and stats;
-        the version's reason keeps the rule and the incoming name and description. Re-embedded
-        from the merged body (the old vector is kept if that fails: it matched a moment ago).
+        The active auto-learned procedure of the same normalized name, if the semantic probe
+        agrees (cosine at or above the threshold; with no embedding to compare, the name
+        alone); else the nearest one at or above the threshold. ``log`` off for a dry run.
+        """
+        postgres = _is_postgres(session)
+        if (same_name := await self._same_name_procedure(input.name, session)) is not None:
+            if embedding is None or not postgres:
+                return same_name, "name lock: same normalized name"
+            agree = await self._nearest_summaries(
+                "", f"{LEARNED_WHERE} AND id = :target", {**LEARNED_PARAMS, "target": same_name}, 1, session,
+                probe="procedure dedupe name check", embedding=embedding,
+            )
+            score = agree[0].score if agree else None
+            if score is not None and score >= self._dedupe_threshold:
+                return same_name, f"name lock: same normalized name, cosine {score:.3f}"
+            if log:
+                logger.info("Procedure dedupe: %r is named like %s but not alike (cosine %s)", input.name,
+                            same_name, f"{score:.3f}" if score is not None else "n/a")
+        if not postgres:
+            return None
+        if embedding is None:
+            if log:
+                logger.warning(
+                    "Procedure dedupe: no embedding for %r, so no near-duplicate check; stored as new", input.name
+                )
+            return None
+        nearest = await self._nearest_summaries(
+            "", LEARNED_WHERE, LEARNED_PARAMS, 1, session, probe="procedure dedupe probe", embedding=embedding,
+        )
+        if nearest and nearest[0].score is not None and nearest[0].score >= self._dedupe_threshold:
+            return nearest[0].id, f"semantic: cosine {nearest[0].score:.3f}"
+        return None
+
+    def _merged_body(self, procedure: Procedure, input: ProcedureInput) -> dict | None:
+        """The body fields a merge of ``input`` writes to ``procedure``; None when it adds nothing.
+
+        The list fields are unioned, except the notes: only evidence not cited yet is
+        appended, up to the cap (as the learner's covered path appends it). The incoming
+        description is taken only by a procedure without one.
+        """
+        notes = list(procedure.implementation_notes or [])
+        body: dict = {
+            field: _union(getattr(procedure, field), getattr(input, field))
+            for field in _LIST_FIELDS if field != "implementation_notes"
+        }
+        body["implementation_notes"] = [*notes, *new_evidence_notes(notes, input.implementation_notes)]
+        body["description"] = procedure.description or input.description
+        unchanged = body["description"] == procedure.description and all(
+            body[field] == list(getattr(procedure, field) or []) for field in _LIST_FIELDS
+        )
+        return None if unchanged else body
+
+    async def _prepare_merge(
+        self, input: ProcedureInput, embedding: list[float] | None, session: AsyncSession
+    ) -> tuple[UUID, int, list[float]] | None:
+        """Embed, before the create lock, the body a merge of ``input`` would write; None if there is none.
+
+        Returns the target, the version the body was built from and its embedding: the merge
+        under the lock uses the embedding only for that target at that version.
+        """
+        if self.embeddings is None or embedding is None:
+            return None
+        target = await self._merge_target(input, embedding, session, log=False)
+        if target is None:
+            return None
+        procedure = (await session.execute(
+            select(Procedure).where(Procedure.id == target[0]).execution_options(populate_existing=True)
+        )).scalars().first()
+        if procedure is None or (body := self._merged_body(procedure, input)) is None:
+            return None
+        merged_embedding = await self._embed_with_retry(
+            _build_embed_text(
+                procedure.name, body["description"], body["core_patterns"], body["goals"],
+                body["core_tools"], body["core_concepts"], body["implementation_notes"],
+            ),
+            on_failure="the merge keeps the procedure's previous embedding",
+        )
+        return (procedure.id, procedure.version, merged_embedding) if merged_embedding is not None else None
+
+    async def _merge(
+        self,
+        procedure_id: UUID,
+        rule: str,
+        input: ProcedureInput,
+        session: AsyncSession,
+        prepared: tuple[UUID, int, list[float]] | None = None,
+    ) -> ProcedureDetail | None:
+        """Merge ``input`` into the procedure as a new version (``dedupe_merge``); see _merged_body.
+
+        The procedure keeps its name, domain, kind, runtime_metadata and stats; the version's
+        reason keeps the rule, the incoming name, description and lesson. The embedding is
+        ``prepared``'s, made before the lock from this version of the row; for a row that has
+        moved on since, the old vector is kept (no embedding call while holding the lock).
         A merge that adds nothing writes nothing, unless it carries an idempotency key to keep.
-        None when the procedure stopped being active before the lock: the caller inserts.
+        None when the procedure, locked, is no longer an active auto-learned how-to: the caller inserts.
         """
         procedure = await self._locked_procedure(procedure_id, session)
-        if procedure is None or not procedure.active:
-            logger.info("Procedure dedupe: %s is no longer active, %r is stored as new", procedure_id, input.name)
+        if procedure is None or not procedure.active or not _in_dedupe_population(procedure):
+            logger.info("Procedure dedupe: %s is no longer an active learned procedure, %r is stored as new",
+                        procedure_id, input.name)
             return None
-        merged = {field: _union(getattr(procedure, field), getattr(input, field)) for field in _LIST_FIELDS}
-        if all(merged[field] == list(getattr(procedure, field) or []) for field in _LIST_FIELDS) and (
-            input.idempotency_key is None
-        ):
+        body = self._merged_body(procedure, input)
+        if body is None and input.idempotency_key is None:
             logger.info("Procedure dedupe: %r adds nothing to %s (%r) (%s)", input.name, procedure.id,
                         procedure.name, rule)
             return self._to_detail(procedure)
-        for field, value in merged.items():
-            setattr(procedure, field, value or None)
-        if self.embeddings:
-            embedding = await self._embed_with_retry(_build_embed_text(
-                procedure.name, procedure.description, procedure.core_patterns, procedure.goals,
-                procedure.core_tools, procedure.core_concepts, procedure.implementation_notes,
-            ))
-            if embedding is not None:
-                procedure.embedding = embedding
+        if body is not None:
+            for field, value in body.items():
+                setattr(procedure, field, value or None)
+            if prepared is not None and prepared[:2] == (procedure.id, procedure.version):
+                procedure.embedding = prepared[2]
+            elif self.embeddings:
+                logger.info("Procedure dedupe: %s changed since its merged body was embedded; its vector is kept",
+                            procedure.id)
         procedure.updated_at = datetime.now(UTC)
+        lesson = next((note for note in input.implementation_notes if note.startswith("lesson: ")), None)
         reason = f"{rule}; incoming {input.name!r}: {(input.description or '')[:300]!r}"
+        if lesson is not None:
+            reason += f"; {lesson[:300]!r}"
         await self._bump_version(procedure, session, "dedupe_merge", reason=reason, input=input)
         await self._emit_event(session, "procedure_merged", {
             "procedure_id": str(procedure.id),

@@ -61,6 +61,17 @@ def _angle_for(cosine: float) -> float:
     return math.acos(cosine)
 
 
+@pytest.fixture
+def heart(heart):
+    """The conftest heart, with one embedding for every text (cosine 1).
+
+    The name lock merges only when the semantic probe agrees; these tests are about the
+    merge itself, so every body agrees. Tests of disagreement embed by marker instead.
+    """
+    heart.procedures.embeddings = _AxisEmbeddings({})
+    return heart
+
+
 async def _versions(session, procedure_id) -> list[ProcedureVersion]:
     rows = await session.execute(
         select(ProcedureVersion).where(ProcedureVersion.procedure_id == procedure_id).order_by(ProcedureVersion.version)
@@ -319,6 +330,7 @@ async def test_semantic_near_duplicate_of_a_learned_procedure_is_merged(db, sess
         _input(
             name="Report email sends without overclaiming",
             description="BRAVO",
+            core_patterns=["quote the tool's status"],
             implementation_notes=["lesson: say accepted, not delivered"],
         ),
         session=session,
@@ -326,11 +338,13 @@ async def test_semantic_near_duplicate_of_a_learned_procedure_is_merged(db, sess
 
     assert merged.id == first.id
     assert merged.name == "Honest send reports"
-    assert merged.implementation_notes == ["lesson: report acceptance only", "lesson: say accepted, not delivered"]
+    # The incoming lesson is not appended: the row keeps its own, and the version's reason keeps the other.
+    assert merged.implementation_notes == ["lesson: report acceptance only"]
     versions = await manager.list_versions(first.id, session=session)
     assert versions[-1].change_source == "dedupe_merge"
     assert "cosine 0.900" in versions[-1].reason
     assert "Report email sends without overclaiming" in versions[-1].reason
+    assert "lesson: say accepted, not delivered" in versions[-1].reason
 
 
 async def test_semantic_neighbour_below_the_threshold_is_inserted(db, session):
@@ -526,14 +540,14 @@ async def test_restore_of_an_unknown_procedure_raises(heart, session):
         await heart.restore_procedure_version(uuid4(), 1, session=session)
 
 
-async def test_two_concurrent_stores_of_one_lesson_leave_one_row(db, mock_embeddings):
+async def test_two_concurrent_stores_of_one_lesson_leave_one_row(db):
     """Committed (no SAVEPOINT): the advisory lock orders the two creates, so the second merges."""
     import asyncio
 
     from sqlalchemy import delete
 
     agent = "f102-concurrent"
-    manager = ProcedureManager(db, mock_embeddings, agent)
+    manager = ProcedureManager(db, _AxisEmbeddings({}), agent)
     try:
         await asyncio.gather(
             manager.store(_input()),
@@ -704,3 +718,212 @@ def _returns(value):
     from unittest.mock import AsyncMock
 
     return AsyncMock(return_value=value)
+
+
+# ---------------------------------------------------------------------------
+# Review of 79a59082: the merge's rules
+# ---------------------------------------------------------------------------
+
+
+async def test_the_name_lock_needs_the_semantic_probe_to_agree(db, session):
+    embeddings = _AxisEmbeddings({"ALPHA": 0.0, "BRAVO": math.pi / 2})
+    manager = ProcedureManager(db, embeddings, "f102-name-lock", dedupe_threshold=0.85)
+    first = await manager.store(_input(name="Deploy service", description="ALPHA"), session=session)
+
+    second = await manager.store(_input(name="deploy-service", description="BRAVO"), session=session)
+
+    assert second.id != first.id
+    assert (await manager.get(first.id, session=session)).version == 1
+
+
+async def test_without_an_embedding_the_name_lock_merges_on_the_name(db, session):
+    manager = ProcedureManager(db, None, "f102-name-lock")
+    first = await manager.store(_input(name="Deploy service"), session=session)
+
+    second = await manager.store(
+        _input(name="deploy-service", implementation_notes=["evidence: e1 (success) — ok"]), session=session
+    )
+
+    assert (second.id, second.version) == (first.id, 2)
+
+
+async def test_the_name_lock_never_merges_into_a_job_lesson(heart, session):
+    lesson = await heart.store_procedure(
+        _input(name="Deploy service", kind="job_lesson", runtime_metadata={"job": {"schedule_id": "s1"}}),
+        session=session,
+    )
+    learned = await heart.store_procedure(_input(name="deploy-service"), session=session)
+    assert learned.id != lesson.id
+    assert (await heart.get_procedure(lesson.id, session=session)).version == 1
+
+
+async def test_an_input_tagged_skill_and_auto_is_never_merged(heart, session):
+    learned = await heart.store_procedure(_input(), session=session)
+    skill = await heart.store_procedure(
+        _input(name="report-send-results-honestly", core_patterns=["skill body"], tags=["skill", "auto:import"]),
+        session=session,
+    )
+    assert skill.id != learned.id
+    assert (await heart.get_procedure(learned.id, session=session)).version == 1
+
+
+async def test_the_threshold_itself_merges(db, session):
+    embeddings = _AxisEmbeddings({"ALPHA": 0.0, "BRAVO": _angle_for(0.85)})
+    probe = ProcedureManager(db, embeddings, "f102-threshold", dedupe_threshold=1.5)
+    first = await probe.store(_input(name="Honest send reports", description="ALPHA"), session=session)
+    incoming = _input(name="Report email sends", description="BRAVO", core_patterns=["new"])
+    vector = await embeddings.embed("BRAVO")
+    # The cosine as Postgres computes it (0.85 comes back as 0.8500000238): the threshold is set to exactly it.
+    [nearest] = await probe._nearest_summaries("", "true", {}, 1, session, probe="test", embedding=vector)
+
+    above = ProcedureManager(db, embeddings, "f102-threshold", dedupe_threshold=math.nextafter(nearest.score, 2.0))
+    assert (await above.store(incoming, session=session)).id != first.id
+    await session.execute(
+        Procedure.__table__.delete().where(Procedure.agent_id == "f102-threshold").where(Procedure.id != first.id)
+    )
+    at = ProcedureManager(db, embeddings, "f102-threshold", dedupe_threshold=nearest.score)
+    assert (await at.store(incoming, session=session)).id == first.id
+
+
+async def test_a_merge_appends_only_evidence_not_cited_yet_up_to_the_cap(heart, session):
+    first = await heart.store_procedure(
+        _input(implementation_notes=["lesson: report acceptance only", *(f"evidence: e{i} (success) — ok"
+                                                                          for i in range(9))]),
+        session=session,
+    )
+
+    merged = await heart.store_procedure(
+        _input(
+            name="report send results honestly",
+            implementation_notes=[
+                "lesson: another wording",
+                "evidence: e3 (success) — cited already",
+                "evidence: e20 (success) — new",
+                "evidence: e21 (success) — over the cap",
+                "a model note",
+            ],
+        ),
+        session=session,
+    )
+
+    assert merged.id == first.id
+    assert merged.implementation_notes[-1] == "evidence: e20 (success) — new"
+    assert len(merged.implementation_notes) == 11
+    assert "lesson: another wording" in (await heart.procedures.list_versions(first.id, session=session))[-1].reason
+
+
+async def test_a_merge_of_nothing_but_a_cited_lesson_writes_no_version(heart, session):
+    first = await heart.store_procedure(_input(), session=session)
+    again = await heart.store_procedure(
+        _input(name="report send results honestly", implementation_notes=["lesson: other words"]), session=session
+    )
+    assert (again.id, again.version) == (first.id, 1)
+
+
+async def test_a_merge_gives_a_target_without_a_description_the_incoming_one(heart, session):
+    first = await heart.store_procedure(_input(description=None), session=session)
+    merged = await heart.store_procedure(
+        _input(name="report send results honestly", description="Incoming wording"), session=session
+    )
+    assert (merged.id, merged.description) == (first.id, "Incoming wording")
+
+
+async def test_the_merge_embeds_before_the_create_lock(db):
+    """The provider is called with the per-agent create lock free: no other create waits on it.
+
+    Committed (no SAVEPOINT): the transaction-scoped lock would outlive the first store otherwise.
+    """
+    from sqlalchemy import text
+
+    agent = "f102-embed-outside"
+    held: list[bool] = []
+
+    class _Watching(_AxisEmbeddings):
+        async def embed(self, text_: str) -> list[float]:
+            async with db.engine.connect() as other:
+                row = (await other.execute(text(
+                    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted"
+                    " AND ((classid::bigint << 32) | objid::bigint) = hashtextextended(:k, 0)"
+                ), {"k": f"procedure_store:{agent}"})).scalar_one()
+            held.append(row > 0)
+            return await super().embed(text_)
+
+    manager = ProcedureManager(db, _Watching({"ALPHA": 0.0, "BRAVO": _angle_for(0.9)}), agent)
+    try:
+        await manager.store(_input(name="Honest send reports", description="ALPHA"))
+        merged = await manager.store(_input(name="Report email sends", description="BRAVO", core_patterns=["new"]))
+    finally:
+        await _cleanup(db, agent)
+
+    assert merged.version == 2
+    assert len(held) == 3  # each input, then the merged body
+    assert not any(held)
+
+
+async def test_a_target_changed_before_the_lock_keeps_its_vector(db, session):
+    embeddings = _AxisEmbeddings({"ALPHA": 0.0, "BRAVO": _angle_for(0.90)})
+    manager = ProcedureManager(db, embeddings, "f102-prepared", dedupe_threshold=0.85)
+    first = await manager.store(_input(name="Honest send reports", description="ALPHA"), session=session)
+    row = await session.get(Procedure, first.id)
+    row.embedding = [2.0] + [0.0] * 1535
+    await session.flush()
+    lock = manager._lock_creates
+
+    async def _append_then_lock(s):
+        # Another writer's version lands between the merge's embedding and the lock.
+        await manager.append_notes(first.id, lambda notes: ["evidence: e5 (success) — ok"], s)
+        await lock(s)
+
+    manager._lock_creates = _append_then_lock
+    merged = await manager.store(_input(name="Report email sends", description="BRAVO", core_patterns=["new"]),
+                                 session=session)
+
+    assert (merged.id, merged.version) == (first.id, 3)
+    await session.refresh(row)
+    assert list(row.embedding)[0] == pytest.approx(2.0)
+
+
+async def test_a_target_turned_into_a_skill_under_the_lock_is_not_merged(db, session):
+    embeddings = _AxisEmbeddings({"ALPHA": 0.0, "BRAVO": _angle_for(0.90)})
+    manager = ProcedureManager(db, embeddings, "f102-recheck", dedupe_threshold=0.85)
+    first = await manager.store(_input(name="Honest send reports", description="ALPHA"), session=session)
+    locked = manager._locked_procedure
+
+    async def _retag_then_lock(procedure_id, s):
+        # learn_skill's update_body lands between the probe and the row lock.
+        await s.execute(
+            Procedure.__table__.update().where(Procedure.id == procedure_id)
+            .values(tags=["skill", "local", "auto:episode_lesson"])
+        )
+        return await locked(procedure_id, s)
+
+    manager._locked_procedure = _retag_then_lock
+    stored = await manager.store(_input(name="Report email sends", description="BRAVO", core_patterns=["new"]),
+                                 session=session)
+
+    assert stored.id != first.id
+    after = await session.get(Procedure, first.id)
+    await session.refresh(after)
+    assert (after.version, after.core_patterns) == (1, ["accepted is not delivered"])
+
+
+async def test_update_body_with_the_same_body_writes_no_version(heart, session):
+    detail = await heart.store_procedure(_input(tags=["manual"]), session=session)
+
+    again = await heart.update_procedure_body(detail.id, _input(tags=["manual"], active=False), session=session)
+
+    assert again.version == 1
+    assert again.active is False
+    assert len(await heart.procedures.list_versions(detail.id, session=session)) == 1
+
+
+async def test_update_body_with_the_same_body_still_repairs_a_null_embedding(heart, session):
+    detail = await heart.store_procedure(_input(tags=["manual"]), session=session)
+    row = await session.get(Procedure, detail.id)
+    row.embedding = None
+    await session.flush()
+
+    await heart.update_procedure_body(detail.id, _input(tags=["manual"]), session=session)
+
+    await session.refresh(row)
+    assert row.embedding is not None
