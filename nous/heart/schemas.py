@@ -325,6 +325,9 @@ class ProcedureInput(BaseModel):
     runtime_metadata: dict | None = None
     # Reasoning Maps L1 (migration 079): 'strategy' marks distilled strategy cards.
     kind: str | None = None
+    # F102: a create request's key. A store() with a key already used returns that
+    # procedure; the same key with a different request is a ProcedureConflictError.
+    idempotency_key: str | None = None
 
 
 class ProcedureDetail(BaseModel):
@@ -353,6 +356,28 @@ class ProcedureDetail(BaseModel):
     created_at: datetime
     # Reasoning Maps L1 (migration 079): 'strategy' marks distilled strategy cards.
     kind: str | None = None
+    # F102: the body's version (1 at creation, +1 per body write).
+    version: int = 1
+
+
+class ProcedureVersionDetail(BaseModel):
+    """One recorded version of a procedure's body (F102)."""
+
+    procedure_id: UUID
+    version: int
+    name: str
+    domain: str | None
+    description: str | None
+    goals: list[str]
+    core_patterns: list[str]
+    core_tools: list[str]
+    core_concepts: list[str]
+    implementation_notes: list[str]
+    tags: list[str]
+    kind: str | None
+    change_source: str
+    reason: str | None
+    created_at: datetime | None
 
 
 class ProcedureSummary(BaseModel):

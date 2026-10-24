@@ -6,6 +6,7 @@ All methods follow Brain's session injection pattern (P1-1).
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -25,14 +26,67 @@ from nous.heart.schemas import (
     ProcedureInput,
     ProcedureOutcome,
     ProcedureSummary,
+    ProcedureVersionDetail,
     is_job_lesson,
     is_strategy_card,
 )
 from nous.heart.search import cosine_similarity, hybrid_search, hybrid_search_multi
 from nous.storage.database import Database
-from nous.storage.models import Event, Procedure, ProcedureTaskAffinity
+from nous.storage.models import Event, Procedure, ProcedureTaskAffinity, ProcedureVersion
 
 logger = logging.getLogger(__name__)
+
+# The list fields a version snapshot holds and a dedupe merge unions.
+_LIST_FIELDS = ("goals", "core_patterns", "core_tools", "core_concepts", "implementation_notes", "tags")
+
+
+class ProcedureConflictError(ValueError):
+    """A procedure write refused because the stored state is not what it assumed (F102).
+
+    Raised for a stale ``expected_version``, an idempotency key reused with a different
+    request, and a restore to a name another active procedure holds. Nothing is written.
+    """
+
+
+def _normalize_name(name: str) -> str:
+    """The name the create-time name lock compares: casefolded, '-'/'_' as spaces, whitespace collapsed."""
+    return " ".join(name.casefold().replace("-", " ").replace("_", " ").split())
+
+
+def _is_skill(tags: list[str] | None) -> bool:
+    return "skill" in (tags or [])
+
+
+def _is_learned(tags: list[str] | None) -> bool:
+    """Auto-learned by the K-line learner (an ``auto:*`` tag), not authored by hand."""
+    return any(tag.startswith("auto:") for tag in tags or [])
+
+
+def _union(existing: list[str] | None, incoming: list[str]) -> list[str]:
+    """``existing`` in its order, then each item of ``incoming`` it does not hold yet."""
+    merged = list(existing or [])
+    for item in incoming:
+        if item not in merged:
+            merged.append(item)
+    return merged
+
+
+def _check_version(procedure: Procedure, expected_version: int | None) -> None:
+    """Refuse a write that assumed a version the row has moved past (optimistic concurrency)."""
+    if expected_version is not None and procedure.version != expected_version:
+        raise ProcedureConflictError(
+            f"Procedure {procedure.id} is at version {procedure.version}, not the expected {expected_version}"
+        )
+
+
+def _is_postgres(session: AsyncSession) -> bool:
+    # pgvector and advisory locks are Postgres-only; the SQLite test backend runs serially.
+    return session.bind is not None and session.bind.dialect.name == "postgresql"
+
+
+def _fingerprint(input: ProcedureInput) -> str:
+    """The sha256 of a create request without its key: a replay must send the same request."""
+    return hashlib.sha256(input.model_dump_json(exclude={"idempotency_key"}).encode()).hexdigest()
 
 
 def _build_embed_text(
@@ -81,6 +135,8 @@ class ProcedureManager:
         utility_alpha: float = 0.15,
         affinity_beta: float = 0.10,
         min_activations_for_boost: int = 5,
+        dedupe_enabled: bool = True,
+        dedupe_threshold: float = 0.85,
     ) -> None:
         self.db = db
         self.embeddings = embeddings
@@ -89,6 +145,8 @@ class ProcedureManager:
         self._utility_alpha = utility_alpha
         self._affinity_beta = affinity_beta
         self._min_activations_for_boost = min_activations_for_boost
+        self._dedupe_enabled = dedupe_enabled
+        self._dedupe_threshold = dedupe_threshold
 
     # ------------------------------------------------------------------
     # Event helper
@@ -108,7 +166,16 @@ class ProcedureManager:
     # ------------------------------------------------------------------
 
     async def store(self, input: ProcedureInput, session: AsyncSession | None = None) -> ProcedureDetail:
-        """Store a new procedure."""
+        """Store a new procedure, or return the one it duplicates (F102).
+
+        An ``idempotency_key`` already used returns the procedure that request wrote
+        (ProcedureConflictError for the same key with a different request). With dedupe
+        enabled, an active how-to input that is not a skill is merged into an active
+        procedure, also not a skill, of the same normalized name; an auto-learned one is
+        also merged into the nearest auto-learned procedure at or above the cosine
+        threshold. A merge unions the list fields into the existing row as a new version
+        (change_source ``dedupe_merge``) and returns that row.
+        """
         if session is None:
             async with self.db.session() as session:
                 result = await self._store(input, session)
@@ -139,6 +206,22 @@ class ProcedureManager:
         return None
 
     async def _store(self, input: ProcedureInput, session: AsyncSession) -> ProcedureDetail:
+        dedupe = (
+            self._dedupe_enabled
+            and input.active is not False
+            and not is_strategy_card(input)
+            and not is_job_lesson(input)
+            and not _is_skill(input.tags)
+        )
+        if input.idempotency_key is not None or dedupe:
+            await self._lock_creates(session)
+        if input.idempotency_key is not None:
+            replayed = await self._replay(input, session)
+            if replayed is not None:
+                return replayed
+        if dedupe and (same_name := await self._same_name_procedure(input.name, session)) is not None:
+            return await self._merge(same_name, input, f"name lock: same normalized name as {input.name!r}", session)
+
         # Generate embedding from all body fields (issue #197)
         embedding = None
         if self.embeddings:
@@ -148,6 +231,22 @@ class ProcedureManager:
                 input.implementation_notes,
             )
             embedding = await self._embed_with_retry(embed_text)
+
+        if dedupe and embedding is not None and _is_learned(input.tags) and _is_postgres(session):
+            nearest = await self._nearest_summaries(
+                "",
+                "kind IS DISTINCT FROM :strategy_kind AND kind IS DISTINCT FROM :job_lesson_kind"
+                " AND EXISTS (SELECT 1 FROM unnest(tags) AS tag WHERE tag LIKE :learned_tag)",
+                {"strategy_kind": STRATEGY_CARD_KIND, "job_lesson_kind": JOB_LESSON_KIND, "learned_tag": "auto:%"},
+                1,
+                session,
+                probe="procedure dedupe probe",
+                embedding=embedding,
+            )
+            if nearest and nearest[0].score is not None and nearest[0].score >= self._dedupe_threshold:
+                return await self._merge(
+                    nearest[0].id, input, f"semantic: cosine {nearest[0].score:.3f} to {input.name!r}", session
+                )
 
         procedure = Procedure(
             agent_id=self.agent_id,
@@ -168,11 +267,14 @@ class ProcedureManager:
             runtime_metadata=input.runtime_metadata,
             # Reasoning Maps L1 (migration 079)
             kind=input.kind,
+            version=1,
         )
         # A job lesson never makes a card give its name up: the unique index refuses it instead.
         if procedure.active and not is_strategy_card(procedure) and not is_job_lesson(procedure):
             await self._take_name_from_card(procedure.name, session)
         session.add(procedure)
+        await session.flush()
+        self._record_version(procedure, session, "create", input=input)
         await session.flush()
 
         # F040: Emit procedure_stored event for graph linking
@@ -191,7 +293,12 @@ class ProcedureManager:
     # ------------------------------------------------------------------
 
     async def update_body(
-        self, procedure_id: UUID, input: ProcedureInput, session: AsyncSession | None = None
+        self,
+        procedure_id: UUID,
+        input: ProcedureInput,
+        session: AsyncSession | None = None,
+        *,
+        expected_version: int | None = None,
     ) -> ProcedureDetail:
         """Refresh a procedure's body fields in place, preserving learned stats.
 
@@ -199,21 +306,24 @@ class ProcedureManager:
         reset activation/success/failure counts and orphaned task affinity
         (audit bug 9). Counts, created_at, and supersession state are untouched.
         Raises ValueError for a strategy card's row and a how-to input: a how-to
-        body never replaces a card.
+        body never replaces a card. The write is a new version (F102); with
+        ``expected_version`` it is refused (ProcedureConflictError) unless the row
+        is still at that version.
         """
         if session is None:
             async with self.db.session() as session:
-                result = await self._update_body(procedure_id, input, session)
+                result = await self._update_body(procedure_id, input, session, expected_version)
                 await session.commit()
                 return result
-        return await self._update_body(procedure_id, input, session)
+        return await self._update_body(procedure_id, input, session, expected_version)
 
     async def _update_body(
-        self, procedure_id: UUID, input: ProcedureInput, session: AsyncSession
+        self, procedure_id: UUID, input: ProcedureInput, session: AsyncSession, expected_version: int | None = None
     ) -> ProcedureDetail:
-        procedure = await self._get_procedure_orm(procedure_id, session)
+        procedure = await self._locked_procedure(procedure_id, session)
         if procedure is None:
             raise ValueError(f"Procedure {procedure_id} not found")
+        _check_version(procedure, expected_version)
         if is_strategy_card(procedure) and not is_strategy_card(input):
             # The card's lesson and the link to its decision would be gone, and
             # the decision's graph edge would start at a how-to row.
@@ -253,7 +363,7 @@ class ProcedureManager:
             procedure.active = input.active
         procedure.embedding = embedding
         procedure.updated_at = datetime.now(UTC)
-        await session.flush()
+        await self._bump_version(procedure, session, "update_body")
         return self._to_detail(procedure)
 
     # ------------------------------------------------------------------
@@ -265,6 +375,8 @@ class ProcedureManager:
         procedure_id: UUID,
         pick: Callable[[list[str]], list[str]],
         session: AsyncSession | None = None,
+        *,
+        expected_version: int | None = None,
     ) -> list[str]:
         """Append the notes ``pick`` chooses, leaving every other field and the stats as they are.
 
@@ -274,28 +386,27 @@ class ProcedureManager:
         from an input model, so runtime_metadata (a hand-set skip_until_scored, for one) and
         kind survive. The embedding is not recomputed: the notes add evidence for the lesson,
         not a new lesson. Returns the notes appended. Raises ValueError for a strategy card.
+        Appended notes are a new version (F102); ``expected_version`` as for update_body.
         """
         if session is None:
             async with self.db.session() as session:
-                result = await self._append_notes(procedure_id, pick, session)
+                result = await self._append_notes(procedure_id, pick, session, expected_version)
                 await session.commit()
                 return result
-        return await self._append_notes(procedure_id, pick, session)
+        return await self._append_notes(procedure_id, pick, session, expected_version)
 
     async def _append_notes(
-        self, procedure_id: UUID, pick: Callable[[list[str]], list[str]], session: AsyncSession
+        self,
+        procedure_id: UUID,
+        pick: Callable[[list[str]], list[str]],
+        session: AsyncSession,
+        expected_version: int | None = None,
     ) -> list[str]:
         # Locked and read fresh, not the session's copy of the row: pick() decides on these notes.
-        result = await session.execute(
-            select(Procedure)
-            .where(Procedure.id == procedure_id)
-            .where(Procedure.agent_id == self.agent_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-        procedure = result.scalars().first()
+        procedure = await self._locked_procedure(procedure_id, session)
         if procedure is None:
             raise ValueError(f"Procedure {procedure_id} not found")
+        _check_version(procedure, expected_version)
         if is_strategy_card(procedure):
             raise ValueError(f"Procedure {procedure_id} is a strategy card: notes are not appended to it")
         notes = pick(list(procedure.implementation_notes or []))
@@ -303,8 +414,113 @@ class ProcedureManager:
             # A new list, not an in-place append: the ARRAY column only sees reassignment.
             procedure.implementation_notes = [*(procedure.implementation_notes or []), *notes]
             procedure.updated_at = datetime.now(UTC)
-            await session.flush()
+            await self._bump_version(procedure, session, "append_notes")
         return notes
+
+    # ------------------------------------------------------------------
+    # list_versions() / restore() — F102 version history
+    # ------------------------------------------------------------------
+
+    async def list_versions(
+        self, procedure_id: UUID, session: AsyncSession | None = None
+    ) -> list[ProcedureVersionDetail]:
+        """Every recorded version of this agent's procedure, oldest first ([] for none)."""
+        if session is None:
+            async with self.db.session() as session:
+                return await self._list_versions(procedure_id, session)
+        return await self._list_versions(procedure_id, session)
+
+    async def _list_versions(self, procedure_id: UUID, session: AsyncSession) -> list[ProcedureVersionDetail]:
+        result = await session.execute(
+            select(ProcedureVersion)
+            .where(ProcedureVersion.procedure_id == procedure_id)
+            .where(ProcedureVersion.agent_id == self.agent_id)
+            .order_by(ProcedureVersion.version)
+        )
+        return [
+            ProcedureVersionDetail(
+                procedure_id=row.procedure_id,
+                version=row.version,
+                name=row.name,
+                domain=row.domain,
+                description=row.description,
+                **{field: list(getattr(row, field) or []) for field in _LIST_FIELDS},
+                kind=row.kind,
+                change_source=row.change_source,
+                reason=row.reason,
+                created_at=row.created_at,
+            )
+            for row in result.scalars().all()
+        ]
+
+    async def restore(
+        self,
+        procedure_id: UUID,
+        version: int,
+        session: AsyncSession | None = None,
+        *,
+        expected_version: int | None = None,
+    ) -> ProcedureDetail:
+        """Bring back the body of ``version`` as a new version (change_source ``restore``).
+
+        Restores the name, domain, description and list fields, and re-embeds. Kind,
+        runtime_metadata, active and the stats stay as they are. Raises ValueError for an
+        unknown procedure or version, and ProcedureConflictError for a stale
+        ``expected_version`` or a name another active procedure holds now.
+        """
+        if session is None:
+            async with self.db.session() as session:
+                result = await self._restore(procedure_id, version, session, expected_version)
+                await session.commit()
+                return result
+        return await self._restore(procedure_id, version, session, expected_version)
+
+    async def _restore(
+        self, procedure_id: UUID, version: int, session: AsyncSession, expected_version: int | None
+    ) -> ProcedureDetail:
+        procedure = await self._locked_procedure(procedure_id, session)
+        if procedure is None:
+            raise ValueError(f"Procedure {procedure_id} not found")
+        _check_version(procedure, expected_version)
+        snapshot = (await session.execute(
+            select(ProcedureVersion)
+            .where(ProcedureVersion.procedure_id == procedure_id)
+            .where(ProcedureVersion.version == version)
+        )).scalars().first()
+        if snapshot is None:
+            raise ValueError(f"Procedure {procedure_id} has no version {version}")
+
+        if procedure.active and snapshot.name.lower() != procedure.name.lower():
+            # The (agent_id, lower(name)) WHERE active index: checked the way _reactivate checks it,
+            # so a strategy card gives the name up to a how-to row instead of blocking it.
+            clash = (
+                select(Procedure.id)
+                .where(func.lower(Procedure.name) == func.lower(snapshot.name))
+                .where(Procedure.agent_id == self.agent_id)
+                .where(Procedure.active == True)  # noqa: E712
+                .where(Procedure.id != procedure_id)
+            )
+            if not is_strategy_card(procedure):
+                clash = clash.where(Procedure.kind.is_distinct_from(STRATEGY_CARD_KIND))
+            if (await session.execute(clash.limit(1))).scalars().first() is not None:
+                raise ProcedureConflictError(
+                    f"Procedure {procedure_id}: an active procedure is named {snapshot.name!r}, so version "
+                    f"{version} is not restored"
+                )
+            if not is_strategy_card(procedure):
+                await self._take_name_from_card(snapshot.name, session)
+
+        procedure.name = snapshot.name
+        procedure.domain = snapshot.domain
+        procedure.description = snapshot.description
+        for field in _LIST_FIELDS:
+            setattr(procedure, field, list(getattr(snapshot, field)) if getattr(snapshot, field) else None)
+        await self._reembed(procedure)
+        procedure.updated_at = datetime.now(UTC)
+        await self._bump_version(procedure, session, "restore", reason=f"restored version {version}")
+        logger.info("Procedure %s restored to the body of version %d (now version %d)",
+                    procedure_id, version, procedure.version)
+        return self._to_detail(procedure)
 
     # ------------------------------------------------------------------
     # activate()
@@ -633,21 +849,24 @@ class ProcedureManager:
         session: AsyncSession,
         *,
         probe: str,
+        embedding: list[float] | None = None,
     ) -> list[ProcedureSummary]:
         """Raw-cosine nearest active procedures of this agent to ``query`` that also match ``where``.
 
-        The one cosine probe both find_similar_for_selection and find_similar_job_lessons
-        run: ``where`` is the caller's fixed SQL condition (code, never input) with its
-        binds in ``params``; ``score`` is the raw cosine. Returns [] when embeddings are
-        unavailable or the embed fails (logged as a failure of ``probe``).
+        The one cosine probe find_similar_for_selection, find_similar_job_lessons and the
+        create-time dedupe run: ``where`` is the caller's fixed SQL condition (code, never
+        input) with its binds in ``params``; ``score`` is the raw cosine. An ``embedding``
+        already computed is used instead of embedding ``query``. Returns [] when embeddings
+        are unavailable or the embed fails (logged as a failure of ``probe``).
         """
-        if not self.embeddings:
-            return []
-        try:
-            embedding = await self.embeddings.embed(query)
-        except Exception:
-            logger.warning("Embedding generation failed for %s", probe)
-            return []
+        if embedding is None:
+            if not self.embeddings:
+                return []
+            try:
+                embedding = await self.embeddings.embed(query)
+            except Exception:
+                logger.warning("Embedding generation failed for %s", probe)
+                return []
 
         embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
         # Same filtered-ANN horizon widening as the fact probes (codex P2):
@@ -1287,6 +1506,147 @@ class ProcedureManager:
         )
         return result.scalars().first()
 
+    async def _locked_procedure(self, procedure_id: UUID, session: AsyncSession) -> Procedure | None:
+        """This agent's procedure, row-locked and read fresh (not the session's copy), or None."""
+        result = await session.execute(
+            select(Procedure)
+            .where(Procedure.id == procedure_id)
+            .where(Procedure.agent_id == self.agent_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        return result.scalars().first()
+
+    def _record_version(
+        self,
+        procedure: Procedure,
+        session: AsyncSession,
+        change_source: str,
+        *,
+        reason: str | None = None,
+        input: ProcedureInput | None = None,
+    ) -> None:
+        """Add the body ``procedure`` holds now as its version ``procedure.version``.
+
+        ``input`` is the create request that wrote it, whose idempotency key is kept with it.
+        """
+        session.add(ProcedureVersion(
+            agent_id=self.agent_id,
+            procedure_id=procedure.id,
+            version=procedure.version,
+            name=procedure.name,
+            domain=procedure.domain,
+            description=procedure.description,
+            **{field: getattr(procedure, field) for field in _LIST_FIELDS},
+            kind=procedure.kind,
+            runtime_metadata=procedure.runtime_metadata,
+            change_source=change_source,
+            reason=reason,
+            idempotency_key=input.idempotency_key if input is not None else None,
+            request_fingerprint=_fingerprint(input) if input is not None and input.idempotency_key else None,
+        ))
+
+    async def _bump_version(
+        self,
+        procedure: Procedure,
+        session: AsyncSession,
+        change_source: str,
+        *,
+        reason: str | None = None,
+        input: ProcedureInput | None = None,
+    ) -> None:
+        """Make the body ``procedure`` holds now its next version, recorded; the row must be locked."""
+        procedure.version = (procedure.version or 1) + 1
+        await session.flush()
+        self._record_version(procedure, session, change_source, reason=reason, input=input)
+        await session.flush()
+
+    async def _reembed(self, procedure: Procedure) -> None:
+        """Re-embed the body ``procedure`` holds; NULL on failure, as _update_body stores it."""
+        if self.embeddings:
+            procedure.embedding = await self._embed_with_retry(_build_embed_text(
+                procedure.name, procedure.description, procedure.core_patterns,
+                procedure.goals, procedure.core_tools, procedure.core_concepts,
+                procedure.implementation_notes,
+            ))
+
+    async def _lock_creates(self, session: AsyncSession) -> None:
+        """Serialize this agent's deduped and keyed creates until the transaction ends.
+
+        Two learners storing the same lesson at once would both miss each other's row
+        and insert twice. Postgres-only; the lock timeout is lifted for the wait, as in
+        FactManager.learn, because the holder may be waiting on an embedding call.
+        """
+        if not _is_postgres(session):
+            return
+        lifted = bool(getattr(self.db, "lock_timeout_seconds", None))
+        if lifted:
+            await session.execute(text("SET LOCAL lock_timeout = 0"))
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+            {"k": f"procedure_store:{self.agent_id}"},
+        )
+        if lifted:
+            await session.execute(text("SET LOCAL lock_timeout = DEFAULT"))
+
+    async def _replay(self, input: ProcedureInput, session: AsyncSession) -> ProcedureDetail | None:
+        """The procedure an earlier request with this idempotency key wrote, or None for a new key."""
+        prior = (await session.execute(
+            select(ProcedureVersion)
+            .where(ProcedureVersion.agent_id == self.agent_id)
+            .where(ProcedureVersion.idempotency_key == input.idempotency_key)
+        )).scalars().first()
+        if prior is None:
+            return None
+        if prior.request_fingerprint != _fingerprint(input):
+            raise ProcedureConflictError(
+                f"Idempotency key {input.idempotency_key!r} was used for a different request "
+                f"(procedure {prior.procedure_id})"
+            )
+        procedure = await self._get_procedure_orm(prior.procedure_id, session)
+        if procedure is None:
+            raise ValueError(f"Procedure {prior.procedure_id} not found")
+        logger.info("Procedure store replayed idempotency key %r: procedure %s", input.idempotency_key, procedure.id)
+        return self._to_detail(procedure)
+
+    async def _same_name_procedure(self, name: str, session: AsyncSession) -> UUID | None:
+        """The active how-to procedure (not a skill) whose normalized name is ``name``'s, or None."""
+        result = await session.execute(
+            select(Procedure.id, Procedure.name, Procedure.tags)
+            .where(Procedure.agent_id == self.agent_id)
+            .where(Procedure.active == True)  # noqa: E712
+            .where(Procedure.kind.is_distinct_from(STRATEGY_CARD_KIND))
+            .where(Procedure.kind.is_distinct_from(JOB_LESSON_KIND))
+            .order_by(Procedure.created_at, Procedure.id)
+        )
+        wanted = _normalize_name(name)
+        return next(
+            (row.id for row in result.all() if not _is_skill(row.tags) and _normalize_name(row.name) == wanted),
+            None,
+        )
+
+    async def _merge(
+        self, procedure_id: UUID, input: ProcedureInput, reason: str, session: AsyncSession
+    ) -> ProcedureDetail:
+        """Union ``input``'s list fields into the procedure as a new version (``dedupe_merge``).
+
+        The procedure keeps its name, description, domain, kind, runtime_metadata and stats;
+        the incoming name is kept in the version's reason. Re-embedded from the merged body.
+        """
+        procedure = await self._locked_procedure(procedure_id, session)
+        if procedure is None:
+            raise ValueError(f"Procedure {procedure_id} not found")
+        for field in _LIST_FIELDS:
+            setattr(procedure, field, _union(getattr(procedure, field), getattr(input, field)) or None)
+        await self._reembed(procedure)
+        procedure.updated_at = datetime.now(UTC)
+        await self._bump_version(procedure, session, "dedupe_merge", reason=reason, input=input)
+        logger.info(
+            "Procedure dedupe: %r merged into %s (%r) as version %d (%s)",
+            input.name, procedure.id, procedure.name, procedure.version, reason,
+        )
+        return self._to_detail(procedure)
+
     async def _take_name_from_card(self, name: str, session: AsyncSession) -> None:
         """Make an active strategy card called ``name`` give the name up.
 
@@ -1417,6 +1777,7 @@ class ProcedureManager:
             active=procedure.active if procedure.active is not None else True,
             created_at=procedure.created_at,
             kind=procedure.kind,
+            version=procedure.version or 1,
         )
 
     def _to_job_lesson(self, procedure: Procedure) -> JobLesson | None:

@@ -54,6 +54,7 @@ from nous.heart.schemas import (
     ProcedureInput,
     ProcedureOutcome,
     ProcedureSummary,
+    ProcedureVersionDetail,
     RecallResult,
     WorkingMemoryItem,
     WorkingMemoryState,
@@ -127,6 +128,8 @@ class Heart:
             utility_alpha=settings.procedure_utility_alpha,
             affinity_beta=settings.procedure_affinity_beta,
             min_activations_for_boost=settings.procedure_min_activations_for_boost,
+            dedupe_enabled=settings.procedure_dedupe_enabled,
+            dedupe_threshold=settings.procedure_dedupe_threshold,
         )
         self.censors = CensorManager(database, embedding_provider, settings.agent_id)
         self.working_memory = WorkingMemoryManager(database, settings.agent_id)
@@ -568,39 +571,71 @@ class Heart:
         return result
 
     async def update_procedure_body(
-        self, procedure_id: UUID, input: ProcedureInput, session: AsyncSession | None = None
+        self,
+        procedure_id: UUID,
+        input: ProcedureInput,
+        session: AsyncSession | None = None,
+        *,
+        expected_version: int | None = None,
     ) -> ProcedureDetail:
-        """Refresh a procedure's body in place, preserving learned stats (audit bug 9)."""
-        result = await self.procedures.update_body(procedure_id, input, session)
+        """Refresh a procedure's body in place, preserving learned stats (audit bug 9).
 
-        # Mirror store_procedure: re-link the refreshed body in the graph (not a job lesson's).
-        if self._bus is not None and not is_job_lesson(input):
+        A new version (F102); a stale ``expected_version`` raises ProcedureConflictError.
+        """
+        result = await self.procedures.update_body(procedure_id, input, session, expected_version=expected_version)
+        await self._emit_procedure_relink(result)
+        return result
+
+    async def restore_procedure_version(
+        self,
+        procedure_id: UUID,
+        version: int,
+        session: AsyncSession | None = None,
+        *,
+        expected_version: int | None = None,
+    ) -> ProcedureDetail:
+        """Bring back an earlier version's body as a new version (F102)."""
+        result = await self.procedures.restore(procedure_id, version, session, expected_version=expected_version)
+        await self._emit_procedure_relink(result)
+        return result
+
+    async def list_procedure_versions(
+        self, procedure_id: UUID, session: AsyncSession | None = None
+    ) -> list[ProcedureVersionDetail]:
+        """Every recorded version of a procedure's body, oldest first (F102)."""
+        return await self.procedures.list_versions(procedure_id, session)
+
+    async def _emit_procedure_relink(self, result: ProcedureDetail) -> None:
+        """Mirror store_procedure: re-link a rewritten body in the graph (not a job lesson's)."""
+        if self._bus is not None and not is_job_lesson(result):
             await self._bus.emit(
                 Event(
                     type="procedure_stored",
                     agent_id=self.agent_id,
                     data={
                         "procedure_id": str(result.id),
-                        "name": input.name,
-                        "domain": input.domain or "",
-                        "description": input.description or "",
-                        "tags": input.tags or [],
+                        "name": result.name,
+                        "domain": result.domain or "",
+                        "description": result.description or "",
+                        "tags": result.tags or [],
                     },
                 )
             )
-        return result
 
     async def append_procedure_notes(
         self,
         procedure_id: UUID,
         pick: Callable[[list[str]], list[str]],
         session: AsyncSession | None = None,
+        *,
+        expected_version: int | None = None,
     ) -> list[str]:
         """Append the notes ``pick`` chooses from the procedure's current ones; returns them.
 
         Its other fields and stats are kept. ``pick`` sees the notes under a row lock.
+        Appended notes are a new version (F102); ``expected_version`` as for update_procedure_body.
         """
-        return await self.procedures.append_notes(procedure_id, pick, session)
+        return await self.procedures.append_notes(procedure_id, pick, session, expected_version=expected_version)
 
     async def activate_procedure(self, procedure_id: UUID, session: AsyncSession | None = None) -> ProcedureDetail:
         """Mark a procedure as activated."""

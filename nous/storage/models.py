@@ -823,6 +823,8 @@ class Procedure(Base):
     # constraint-free column keeps migration 057 splitter-safe for the auto-migrator.
     superseded_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # F102 (migration 092): the body's version; each body write bumps it and records a ProcedureVersion.
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -830,6 +832,42 @@ class Procedure(Base):
     task_affinities: Mapped[list["ProcedureTaskAffinity"]] = relationship(
         back_populates="procedure", cascade="all, delete-orphan"
     )
+
+
+class ProcedureVersion(Base):
+    """One version of a procedure's body (F102, migration 092); every version, the current one included."""
+
+    __tablename__ = "procedure_versions"
+    __table_args__ = (
+        UniqueConstraint("procedure_id", "version", name="uq_procedure_versions_version"),
+        {"schema": "heart"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    agent_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    procedure_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("heart.procedures.id", ondelete="CASCADE"), nullable=False
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    name: Mapped[str] = mapped_column(String(500), nullable=False)
+    domain: Mapped[str | None] = mapped_column(String(100))
+    description: Mapped[str | None] = mapped_column(Text)
+    goals = mapped_column(ARRAY(Text), nullable=True)
+    core_patterns = mapped_column(ARRAY(Text), nullable=True)
+    core_tools = mapped_column(ARRAY(Text), nullable=True)
+    core_concepts = mapped_column(ARRAY(Text), nullable=True)
+    implementation_notes = mapped_column(ARRAY(Text), nullable=True)
+    tags = mapped_column(ARRAY(Text), nullable=True)
+    kind: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    runtime_metadata = mapped_column(JSONB, nullable=True)
+    # create, update_body, append_notes, dedupe_merge, restore, or backfill (the migration's v1).
+    change_source: Mapped[str] = mapped_column(String(50), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text)
+    # The create request's key and its sha256, on the version that request wrote; the
+    # (agent_id, idempotency_key) partial unique index lives in migration 092.
+    idempotency_key: Mapped[str | None] = mapped_column(Text)
+    request_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class ProcedureTaskAffinity(Base):

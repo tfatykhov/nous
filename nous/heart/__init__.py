@@ -4,6 +4,7 @@ Public API: Heart class + all schema types from schemas.py.
 """
 
 from nous.heart.heart import Heart
+from nous.heart.procedures import ProcedureConflictError
 from nous.heart.schemas import (
     CensorAction,
     CensorDetail,
@@ -23,6 +24,7 @@ from nous.heart.schemas import (
     ProcedureInput,
     ProcedureOutcome,
     ProcedureSummary,
+    ProcedureVersionDetail,
     RecallResult,
     WorkingMemoryItem,
     WorkingMemoryState,
@@ -48,6 +50,8 @@ __all__ = [
     "ProcedureDetail",
     "ProcedureInput",
     "ProcedureSummary",
+    "ProcedureVersionDetail",
+    "ProcedureConflictError",
     # Censors
     "CensorDetail",
     "CensorInput",
