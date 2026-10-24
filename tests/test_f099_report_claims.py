@@ -1369,6 +1369,29 @@ SEND_TAILS = [
     (" and bcc'd legal", P),
     (" and copied in Bob", P),
     (" and copied the file", E),
+    (" to you and Will", P),  # a capitalised word is a name, not "will"
+    (" to the bot and Bob", P),
+    (" to your DMs and Bob", P),
+    (" to yourself and Bob", P),
+    (" to Telegram and Bob", P),
+    (" and copied README.md", E),
+    (" and copied PDF", E),
+    (" and copied Bob's notes", E),
+    # "on" or "over" a topic or a time is no destination
+    (" on the outage", E),
+    (" on Q3 revenue", P),  # a capitalised word after on/over reads as a place
+    (" on the project status", E),
+    (" on it", E),
+    (" on the 24th", E),
+    (" on Oct 24", E),
+    (" on startup", E),
+    (" on my end", E),
+    (" over lunch", E),
+    (" over the past hour", E),
+    (" on the website", P),
+    (" on the team channel", P),
+    (" on GitHub", P),
+    (" on @bob", P),
 ]
 SEND_CLAIMS = ["I sent the report{}.", "I forwarded the summary{}.", "Message sent{}.", "I sent the message{}."]
 
@@ -1428,6 +1451,8 @@ def test_a_possessive_of_the_owner_is_self_only_for_their_chat(tail, level):
         ("I sent the report with a link to it.", E),
         ("I sent the report with a link to https://x.io/r.", E),
         ("I sent the report with a link to report.pdf.", E),
+        ("I sent the report with a link to the summary and Bob.", P),
+        ("I sent the report with a link to the summary and archived the draft.", E),
     ],
 )
 def test_a_link_to_a_group_names_a_recipient(text, level):
@@ -1442,6 +1467,9 @@ def test_a_link_to_a_group_names_a_recipient(text, level):
         ("Message sent by post.", None),
         ("Message sent by hand.", None),
         ("Message sent by courier.", None),
+        # ... but the agent's own "by post" names a transport a send_file cannot be
+        ("I sent the report by post.", P),
+        ("I sent the report by courier.", P),
         # a channel after "by" names no other sender: the claim is checked
         ("Message sent by Telegram.", E),
         ("Message sent by DM.", E),

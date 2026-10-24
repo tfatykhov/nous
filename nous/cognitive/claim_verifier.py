@@ -1434,10 +1434,11 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
 #      summary", "email-style");
 #   2. a named channel other than Telegram after via/on/over/through/by/in/into/using: Slack, WhatsApp,
 #      Signal, Discord, SMS, iMessage, Teams, Messenger, WeChat, Gmail, Outlook, LinkedIn, Twitter, and "text"
-#      after by/via/over (never "Gmail-style"); after via/through/using/over/on, any other word too ("via
-#      SMTP", "via the API", "on the wiki") but Telegram, the bot, the chat, a DM, "here", a tool (a word with
-#      "_": "via send_file"), a link and a time ("on Monday", "on 24 October", "on time", "over the weekend",
-#      "on request");
+#      after by/via/over (never "Gmail-style"); after via/through/using, any other word too ("via SMTP", "via
+#      the API") but Telegram, the bot, the chat, a DM, "here", a tool (a word with "_": "via send_file"), a
+#      link and a time; after on/over, a place: a capitalised word, a handle or "the wiki/website/channel/..."
+#      (never a topic or a time: "a note on the outage", "on it", "on Monday", "on Oct 24", "over lunch");
+#      post, a courier, a hand or a fax after "by";
 #   3. a recipient after "to", "to you and", "shared ... with", "cc", "bcc" or "copied" (in): anything that
 #      is not on the lists below -- a name ("Bob", "Tim": the owner's name is not known here; "Mark", "O'Brien",
 #      "Иван"), an acronym ("HR", "S3"), a number ("3 people"), a handle "@bob", a channel "#general" (also
@@ -1449,10 +1450,12 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
 # review"; "to Mark" is a name), a format or language ("to PDF", "to pdf", "to Markdown", "to French"), a time
 # ("to Friday", "to 5pm", "to date", "to the end"; so "to May" is read as a time too), an idiom ("due to",
 # "up to", "according to", "converted to"); not a content word ("with a summary", "as a .docx"); after "to
-# you and", not a verb or a function word ("to you and archived the draft", "to you and on time").
+# you and", not a verb or a function word in lowercase ("to you and archived the draft", "to you and on time");
+# but "a link to the summary and Bob" names Bob.
 _A_TIME = (r"(?:(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may"
-           r"|june|july|august|september|october|november|december|today|tomorrow|tonight|noon|midnight|now|later"
-           r"|eod|cob|next\s+week|the\s+(?:end|top|bottom|start|beginning|latest|previous|same|next|last))\b"
+           r"|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec"
+           r"|today|tomorrow|tonight|noon|midnight|now|later|eod|cob|next\s+week"
+           r"|the\s+(?:end|top|bottom|start|beginning|latest|previous|same|next|last))\b"
            r"|\d{1,2}(?::\d\d)?\s*(?:am|pm)\b|\d{1,2}:\d\d\b)")
 _NOT_A_RECIPIENT = (
     # you, the owner, the user, the chat, the bot, Telegram (but its group or channel is another chat, and
@@ -1473,6 +1476,9 @@ _NOT_A_RECIPIENT = (
     # anything else: a name, an acronym, a number, a word in lowercase, a handle, a channel
     r"[\w@#]"
 )
+# After "to you and": not a verb or a function word ("to you and archived it", "to you and on time")
+_NOT_A_VERB = (r"(?!(?-i:then|also|now|later|again|so|on|in|at|by|with|as|for|from|via|over|through|i|it|we|will"
+               r"|would|can|could|should|have|has|had|is|was|am|[a-z]+ed)\b)")
 # What "a link to" points at rather than sends to: a sent thing, it, a URL, a path or a file name.
 _A_SENT_THING = (r"(?:(?:the|a|an|your|my|our|this|that|these|those)\s+(?:[\w.-]+\s+){0,3}?(?:report|summar(?:y|ies)"
                  r"|file|doc|document|page|dashboard|chart|sheet|spreadsheet|folder|draft|pr|pull\s+request|issue"
@@ -1480,6 +1486,11 @@ _A_SENT_THING = (r"(?:(?:the|a|an|your|my|our|this|that|these|those)\s+(?:[\w.-]
                  r"|ticket|thread|commit|branch|diff|log|image|photo|screenshot|form|invite|presentation"
                  r"|release|spec|plan|proposal|agenda|minutes|transcript|archive|attachment|copy|version|section)"
                  r"(?:e?s)?\b|(?-i:it|this|that)\b|https?\b|www\.|[/~]|[\w-]+\.\w)")
+# After via/through/using/on/over: Telegram, the bot, the chat, a DM, here, a link, a tool (a word with "_") or
+# a time word.
+_NOT_A_TRANSPORT = (r"(?!(?:the|a|an|your|my|our|this|telegram(?!\s+(?:group|channel)\b)|bot|chat|dms?|here"
+                    r"|(?:shared\s+)?links?|time|schedule|request|demand|completion|arrival|track|hold|weekend|morning"
+                    r"|afternoon|evening|night)\b|\w*_)")
 _ELSEWHERE = re.compile(
     # 1. mail
     r"\b(?:e-?)?mail(?:ed|ing)\b"
@@ -1491,11 +1502,14 @@ _ELSEWHERE = re.compile(
     r"|\b(?:via|on|over|through|by|in|into|using)\s+(?:(?:the|a|your|my)\s+)?(?:slack|whatsapp|signal|discord"
     r"|sms|imessage|teams|messenger|wechat|gmail|outlook|linkedin|twitter)\b(?!-)"
     r"|\b(?:via|over|by)\s+(?:a\s+)?text\b(?!-)"
-    # ... or any other transport than Telegram, a tool, a link or a time
-    rf"|\b(?:via|through|using|over|on)\s+(?!{_A_TIME}|(?<=\bon\s)\d)(?:(?:the|a|an|your|my|our|this)\s+)?"
-    r"(?!(?:the|a|an|your|my|our|this|telegram(?!\s+(?:group|channel)\b)|bot|chat|dms?|here|(?:shared\s+)?links?"
-    r"|time|schedule|request|demand|completion|arrival|track|hold|weekend|morning|afternoon|evening|night)\b"
-    r"|\w*_)[\w@#]"
+    r"|\bby\s+(?:post|courier|hand|fax)\b"
+    # ... or any other transport than Telegram, a tool, a link or a time after via/through/using, and a place
+    # after on/over (not a topic: "a note on the outage")
+    rf"|\b(?:via|through|using)\s+(?!{_A_TIME})(?:(?:the|a|an|your|my|our|this)\s+)?{_NOT_A_TRANSPORT}[\w@#]"
+    rf"|\b(?:on|over)\s+(?!{_A_TIME})"
+    rf"(?:{_NOT_A_TRANSPORT}(?-i:(?![a-zß-ÿ\d_])\w)|@\w|(?:the|a|an|your|my|our|this)\s+(?:[\w-]+\s+)?"
+    r"(?:wiki|website|site|page|board|forum|server|channel|group|platform|portal|feed|blog|intranet|drive|cloud"
+    r"|repo|repository|tracker)s?\b)"
     # 3. a recipient
     r"|(?<!\bdue )(?<!\bprior )(?<!\bup )(?<!\bthanks )(?<!\baccording )(?<!\bcompared )(?<!\bnext )"
     r"(?<!\baddition )(?<!\border )(?<!\bclose )(?<!\bsimilar )(?<!\brelative )(?<!\brespect )(?<!\bregard )"
@@ -1504,15 +1518,14 @@ _ELSEWHERE = re.compile(
     rf"\bto\s+{_NOT_A_RECIPIENT}"
     # "a link to the team" is sent to the team; "a link to the report" points at the report
     rf"|\blinks?\s+to\s+(?!{_A_SENT_THING}){_NOT_A_RECIPIENT}"
+    rf"|\blinks?\s+to\s+[^.,;:!?\n]{{0,60}}?\s(?:and|&)\s+{_NOT_A_VERB}{_NOT_A_RECIPIENT}"
     # "to you and Bob", "to the owner and the team" (not "to you and archived it", "to you and on time")
-    r"|\bto\s+(?:(?:the|your|my)\s+)?(?:you|me|owner|user|chat)\s+(?:and|&)\s+"
-    r"(?!(?-i:then|also|now|later|again|so|on|in|at|by|with|as|for|from|via|over|through|i|it|we|will|would"
-    r"|can|could|should|have|has|had|is|was|am|[a-z]+ed)\b)"
-    rf"{_NOT_A_RECIPIENT}"
+    r"|\bto\s+(?:(?:the|your|my)\s+)?(?:you|yourself|me|myself|owner|user|chat|dms?|bot|telegram)\s+(?:and|&)\s+"
+    rf"{_NOT_A_VERB}{_NOT_A_RECIPIENT}"
     rf"|\bshared\s+(?:\S+\s+){{0,4}}?with\s+{_NOT_A_RECIPIENT}"
     r"|\bb?cc(?:['’]?e?d)?\s+(?!(?:you|yourself|me|myself|(?:(?:the|your|my)\s+)?(?:owner|user|chat))\b)[\w@#]"
     # "copied (in) Bob", not "copied the file"
-    r"|\bcopied\s+(?:in\s+)?(?:(?-i:(?![a-zß-ÿ\d_])\w)|[@#]\w|[\w.+-]+@)"
+    r"|\bcopied\s+(?:in\s+)?(?:(?-i:(?![a-zß-ÿ\d_])\w[a-zß-ÿ]+)\b(?![.'’]\w)|[@#]\w|[\w.+-]+@)"
     r"|\b(?:in|on|into|via|over)\s+#\w",
     re.IGNORECASE)
 
