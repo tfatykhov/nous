@@ -31,7 +31,7 @@ consolidation paths had created them.
   | Writer | change_source | Note |
   |---|---|---|
   | `store()` insert | `create` | version 1 |
-  | `update_body()` | `update_body` | learn_skill's in-place refresh |
+  | `update_body()` | `update_body` | learn_skill's in-place refresh; the weak review's revise (reason `weak review: revise: ...`). The body the row already holds writes no version. An input that leaves runtime_metadata unset keeps the row's |
   | `append_notes()` | `append_notes` | only when notes are appended |
   | dedupe merge in `store()` | `dedupe_merge` | reason names the rule and the incoming name |
   | `restore()` | `restore` | reason `restored version N` |
@@ -58,30 +58,44 @@ In order:
 
 1. **Idempotency key** (always on). `ProcedureInput.idempotency_key` is kept on the version the request
    wrote (the v1 of a created row, or the version a merge wrote), with `request_fingerprint`, the sha256
-   of the request without its key. The same key and request returns that procedure. The same key with a
+   of the request without its key (keys sorted, so a dict built in another order is the same request).
+   The same key and request returns that procedure, even one retired since (logged at WARNING). The same key with a
    different request raises `ProcedureConflictError`. The key is unique per agent (partial unique index).
 Steps 2 and 3 apply only to an active **auto-learned** input (an `auto:*` tag; never a skill, a strategy
 card or a job lesson), and only merge into an active auto-learned procedure (`LEARNED_WHERE`).
 
 2. **Name lock** (flag on). The target is the procedure whose normalized name matches (casefolded, `-`/`_`
-   as spaces, whitespace collapsed). A hit is merged.
+   as spaces, whitespace collapsed), if the semantic probe agrees: its cosine to the input is at or above
+   the threshold. Only without an embedding to compare (an embed failure, SQLite) does the name alone
+   merge. A same-named row that is not alike is logged and left; the input goes on to step 3, and an
+   insert under a name the row already holds fails on the unique name index, as before F102. The learner
+   names a lesson the model left unnamed after its cue (`Unnamed procedure: <cue>`), so unnamed lessons
+   don't share a name.
 3. **Semantic near-duplicate** (flag on, Postgres). The input is probed through `_nearest_summaries` with
    the embedding `store()` already computed. The nearest procedure at or above
    `NOUS_PROCEDURE_DEDUPE_THRESHOLD` (0.85) is merged into. Without an embedding the check is skipped,
    with a WARNING.
 
-**Merge.** The incoming list fields are unioned into the existing row (existing order first, new items
-appended), and the row is re-embedded. If that fails, the old vector is kept: it matched a moment ago.
-The row's name, description, domain, kind, runtime_metadata and stats stay. The new version's reason
-records the rule (with the cosine) and the incoming name and description. Each merge is logged at INFO
-and writes a `procedure_merged` event. A merge that adds nothing writes nothing, unless it carries an
-idempotency key to keep. A target retired between the probe and the row lock is not merged into; the
+**Merge.** The incoming goals, core_patterns, core_tools, core_concepts and tags are unioned into the
+existing row (existing order first, new items appended). Of the incoming notes only `evidence:` lines
+whose input item is not cited yet are appended, up to 10 evidence lines, as the learner's covered path
+appends them (`new_evidence_notes`); the incoming `lesson:` line goes to the version's reason. A row
+without a description takes the incoming one. The row's name, domain, kind, runtime_metadata and stats
+stay. The new version's reason records the rule (with the cosine) and the incoming name, description and
+lesson. Each merge is logged at INFO and writes a `procedure_merged` event. A merge that adds nothing
+writes nothing, unless it carries an idempotency key to keep. A target that, under the row lock, is no
+longer an active auto-learned how-to (retired, or made a skill by `learn_skill`) is not merged into; the
 input is inserted instead. `Heart.store_procedure` emits `procedure_stored` from the returned row, so
 after a merge the graph links the surviving row's own text.
 
 Creates that dedupe or carry a key are serialized per agent with `pg_advisory_xact_lock`, so two learners
-storing the same lesson at once can't both miss each other's row. The input is embedded before the lock
-is taken. Other creates take no lock.
+storing the same lesson at once can't both miss each other's row. No embedding call is made while the
+lock is held: the input is embedded before the lock is taken, and so is the merged body, against the
+target the probe finds then. The merge uses that vector only if the row, locked, is still the same row
+at the same version; otherwise it keeps the row's old vector (it matched a moment ago). Other creates
+take no lock.
+
+The learner counts a store that came back as a merge (version above 1) as covered, not created.
 
 **Why only auto-learned procedures.** `learn_skill` and the bootstrap look a skill up by name and
 *replace* its body (`update_body`), so a union would keep stale patterns. Distinct hand-authored skills
@@ -101,14 +115,16 @@ With the flag off, `store()` is the legacy insert, apart from the version row an
 
 ## One-off report: `scripts/diag/procedure_dedupe_report.py`
 
-It is a dry run by default (read-only transaction, nothing written). `--threshold` must be within [0, 1],
+It is a dry run by default (read-only transaction, nothing written). Every read is one REPEATABLE READ
+snapshot. `--threshold` must be within [0, 1],
 and `--apply` below 0.80 needs `--force`. The report counts the learned procedures it could not
 compare because they have no embedding. It uses the same population and cosine
 as the semantic merge. Pairs at or above the threshold link procedures into clusters. The survivor is the
 best by Laplace effectiveness, then activations, then the oldest. Only members at or above the threshold
 *to the survivor* are listed as duplicates; a member linked in through another member is reported and
 kept. `--apply` retires each duplicate through `ProcedureManager.retire` with a reason
-(`runtime_metadata.retired`: survivor, similarity, threshold). Nothing is hard deleted or merged.
+(`runtime_metadata.retired`: survivor, similarity, threshold) and archives it as superseded by the
+survivor (`superseded_by`, `archived_at`), as a consolidation does. Nothing is hard deleted or merged.
 
 ```
 python -m scripts.diag.procedure_dedupe_report [--threshold 0.85] [--agent nous-default] [--apply]
