@@ -191,17 +191,20 @@ JOB = "job-20261024-002210-009d4cf6"
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="job files are absolute POSIX paths")
 
 
-def _job(workspace, status, age_seconds=600, job_id=JOB):
-    """A launched job as runner.sh leaves it: its id in a file the DAG wrote, its status word in its own dir."""
+def _job(workspace, status, age_seconds=600, job_id=JOB, id_text=None, pid=None):
+    """A launched job as runner.sh leaves it: its id in a file the DAG wrote, its status word (and the pid of the
+    process that will write the final one) in its own dir."""
     id_file = workspace / "dag-1" / "job.id"
     id_file.parent.mkdir(parents=True, exist_ok=True)
-    id_file.write_text(job_id + "\n")
+    id_file.write_text(id_text if id_text is not None else job_id + "\n")
+    job_dir = workspace / "claude-jobs" / job_id
     if status is not None:
-        status_file = workspace / "claude-jobs" / job_id / "status"
-        status_file.parent.mkdir(parents=True, exist_ok=True)
-        status_file.write_text(status + "\n")
+        job_dir.mkdir(parents=True, exist_ok=True)
+        (job_dir / "status").write_text(status + "\n")
         written = time.time() - age_seconds
-        os.utime(status_file, (written, written))
+        os.utime(job_dir / "status", (written, written))
+    if pid is not None:
+        (job_dir / "run_pid").write_text(f"{pid}\n")
     return str(id_file)
 
 
@@ -213,6 +216,7 @@ def _head_check(job_file, listing):
 OPEN = lambda request: httpx.Response(200, json=[pull(number=9)])  # noqa: E731
 NONE_YET = lambda request: httpx.Response(200, json=[])  # noqa: E731
 CLOSED = lambda request: httpx.Response(200, json=[pull("closed", number=9)])  # noqa: E731
+MERGED = lambda request: httpx.Response(200, json=[pull("closed", "2026-10-24T00:00:00Z", number=9)])  # noqa: E731
 DOWN = lambda request: httpx.Response(500, json={})  # noqa: E731
 
 
@@ -227,6 +231,9 @@ DOWN = lambda request: httpx.Response(500, json={})  # noqa: E731
         (NONE_YET, "completed", 600, 1),  # the job ended and opened no PR: final
         (NONE_YET, "cancelled", 600, 1),
         (NONE_YET, "failed", 60, 2),  # it ended a minute ago: GitHub may not list its PR yet
+        (NONE_YET, "completed", typed_checks.JOB_ENDED_GRACE_SECONDS - 5, 2),
+        (NONE_YET, "completed", typed_checks.JOB_ENDED_GRACE_SECONDS + 5, 1),
+        (MERGED, "running", 600, 0),  # a merged PR is done, whatever the job still does
         (NONE_YET, "running", 600, 2),
         (DOWN, "completed", 600, 2),  # GitHub failing never fails the node, job or not
         (CLOSED, "running", 600, 1),  # closed without a merge stays final
@@ -253,3 +260,58 @@ def test_a_job_file_the_check_cannot_read_changes_nothing(case, listing, code, t
     else:
         job_file = _job(tmp_path, None)
     assert _head_check(job_file, listing) == code
+
+
+@posix_only
+@pytest.mark.parametrize(
+    "argv_tail",
+    [
+        ["--head", "fix/thing"],  # the repository lookup 404s
+        ["--pr", "5"],  # the PR lookup 404s
+    ],
+)
+def test_a_404_never_ends_the_node_even_after_its_job_ended(argv_tail, tmp_path, monkeypatch):
+    """GitHub answers 404 for a repository or PR the token cannot see, too: that is no answer that the PR is absent."""
+    monkeypatch.setenv("NOUS_WORKSPACE_DIR", str(tmp_path))
+    mock, _ = transport(lambda request: httpx.Response(404, json={}))
+    argv = ["pr", "tfatykhov/nous", *argv_tail, "--job-file", _job(tmp_path, "completed", 3600)]
+    assert typed_checks.main(argv, transport=mock) == 2
+
+
+@posix_only
+def test_an_unreadable_pr_time_proves_no_absence(tmp_path, monkeypatch):
+    monkeypatch.setenv("NOUS_WORKSPACE_DIR", str(tmp_path))
+    monkeypatch.setenv("NOUS_DAG_CREATED_AT", "2026-10-19T12:00:00+00:00")
+    body = [{"number": 9, "state": "open", "merged_at": None, "created_at": "garbage"}]
+    assert _head_check(_job(tmp_path, "completed", 3600), lambda request: httpx.Response(200, json=body)) == 2
+    older = [{"number": 9, "state": "open", "merged_at": None, "created_at": "2026-10-18T00:00:00Z"}]
+    assert _head_check(_job(tmp_path, "completed", 3600), lambda request: httpx.Response(200, json=older)) == 1
+
+
+@posix_only
+def test_the_id_file_may_hold_the_launch_output(tmp_path, monkeypatch):
+    """`runner.sh launch ... > job.id` writes its log lines too; the id they name is the job."""
+    monkeypatch.setenv("NOUS_WORKSPACE_DIR", str(tmp_path))
+    monkeypatch.delenv("NOUS_DAG_CREATED_AT", raising=False)
+    output = (
+        f"[2026-10-24 00:22:10 UTC] Launching job {JOB} in worktree /tmp/w\n"
+        "[2026-10-24 00:22:10 UTC] Model: opus | Effort: high | Branch: fix/thing (base: main)\n"
+        f"[2026-10-24 00:22:12 UTC] Job {JOB} started (PID: 4242)\n{JOB}\n"
+    )
+    assert _head_check(_job(tmp_path, "completed", 600, id_text=output), NONE_YET) == 1
+    assert _head_check(_job(tmp_path, "running", 600, id_text=output), OPEN) == 2
+
+
+@posix_only
+def test_a_running_job_whose_worker_is_gone_holds_nothing(tmp_path, monkeypatch):
+    """A job killed with its runner (a container restart) says "running" for ever: an open PR it made is done, and
+    no PR waits for the node's own timeout, as before the job file."""
+    import subprocess
+
+    monkeypatch.setenv("NOUS_WORKSPACE_DIR", str(tmp_path))
+    monkeypatch.delenv("NOUS_DAG_CREATED_AT", raising=False)
+    child = subprocess.Popen(["true"])
+    child.wait()  # reaped: its pid names no process now
+    assert _head_check(_job(tmp_path, "running", 600, pid=child.pid), OPEN) == 0
+    assert _head_check(_job(tmp_path, "running", 600, pid=child.pid), NONE_YET) == 2
+    assert _head_check(_job(tmp_path, "running", 600, pid=os.getpid()), OPEN) == 2  # alive: still working
