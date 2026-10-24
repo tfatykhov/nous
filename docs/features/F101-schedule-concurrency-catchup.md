@@ -62,6 +62,8 @@ Both are columns of `heart.schedules` (migration 091, with CHECK constraints). E
 
 **Stale runs never block a schedule for good.** A worker enforces a subtask's timeout, so a row still `running` past it plus the grace belongs to a worker that died. A DAG has no timeout of its own, so a DAG, or a pending subtask in a wedged queue, stops counting after the max age (default 12 hours). The default is under a day, so a stuck DAG costs a daily job at most one slot. An hourly job can lose up to 12 slots to it, and each lost slot is recorded.
 
+**A parked DAG counts.** A DAG that waits on an owner's answer (an approval node) is still `running`, so it is the schedule's active run, even though `MAX_ACTIVE_DAGS` does not count it (`parked_clause()`). This is on purpose. A second run would usually ask the owner the same question, and while a schedule is held this way each held fire is recorded with the DAG's id. The max age bounds the wait.
+
 **The DAG link.** Migration 091 adds `nous_system.execution_dags.schedule_id`. The `ExecutionContext` of a scheduled turn already carries `schedule_id` (from the subtask's metadata). `ToolDispatcher` injects it into `dag_create` as the hidden `_schedule_id`, and `DAGStore.create` stores it. The dispatcher drops every `_`-prefixed argument the model sends, so a model cannot forge or remove the link. A DAG launched by another DAG's node is not linked, but its parent DAG is already the active run.
 
 **Errors.** A database error in the check propagates. The fire is logged ("Failed to fire schedule"), not advanced, and retried on the next check. Failing open would start the double run this feature exists to prevent, and the run's own insert would most likely fail on the same database anyway.

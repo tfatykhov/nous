@@ -528,7 +528,7 @@ class TaskScheduler:
         # @codex P2 on a167217: each continuation state write is
         # wrapped in its own try/except so a transient DB failure
         # in (e.g.) bump_continuation_count doesn't skip the
-        # schedule.advance() call below — that would leave the
+        # caller's schedule.advance() call — that would leave the
         # schedule with stale next_fire_at and cause infinite
         # re-fires. Continuation state is a soft observability
         # channel, the lifecycle advance is the hard correctness

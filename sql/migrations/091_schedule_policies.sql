@@ -2,11 +2,11 @@
 --
 -- What a schedule does when it comes due while its previous run is still active, and when the
 -- process was down across one or more of its slots (docs/features/F101-schedule-concurrency-catchup.md).
--- Read only when NOUS_SCHEDULE_POLICIES_ENABLED is on; with the flag off the scheduler ignores them.
+-- Read only when NOUS_SCHEDULE_POLICIES_ENABLED is on. With the flag off the scheduler ignores them.
 --
 -- concurrency_policy: coalesce_if_active (default) and skip_if_active spawn nothing while a run is
---   active and record the fire against that run; always_enqueue always spawns.
--- catch_up_policy: skip_missed (default) fires once for any number of missed slots;
+--   active, and log and emit an event naming that run. always_enqueue always spawns.
+-- catch_up_policy: skip_missed (default) fires once for any number of missed slots.
 --   enqueue_missed_with_cap fires once per missed slot, up to catch_up_cap (NULL: NOUS_SCHEDULE_CATCH_UP_CAP).
 -- Existing rows get the defaults.
 --
