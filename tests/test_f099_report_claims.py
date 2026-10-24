@@ -1136,6 +1136,27 @@ def test_a_telegram_send_backs_no_addressed_email_claim(text):
     assert not result.verified and result.claims[0].evidence == "none"
 
 
+@pytest.mark.parametrize("text", ["Message sent to alice@example.com.", "Messages were sent to alice@example.com."])
+def test_a_passive_send_names_its_recipient(text):
+    assert _verify(text, [Evidence("send_email", {"to": "alice@example.com"})]).verified
+    result = _verify(text, [Evidence("send_email", {"to": "bob@x.io"})])
+    assert [c.evidence for c in result.claims] == ["none"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Message sent by email.", "Message sent by text.", "Message sent by Friday.", "Message sent by this morning."],
+)
+def test_a_send_by_a_channel_or_a_time_is_still_the_agents_claim(text):
+    # "by" names a channel or a time here, not someone else who sent it
+    assert [c.kind for c in _verify(text).claims] == ["email"]
+    assert not _verify(text).verified
+
+
+def test_a_send_by_someone_else_is_not_the_agents_claim():
+    assert _verify("Message sent by the scheduler.").claims == []
+
+
 def test_a_verifier_given_no_runner_takes_no_bash_call_for_a_runner_call():
     evidence = [Evidence("bash", {"command": f"bash {RUNNER} cancel {JOB}"}, exit_code=0)]
     assert not ClaimVerifier().verify_report(f"I cancelled job {JOB}.", evidence).verified

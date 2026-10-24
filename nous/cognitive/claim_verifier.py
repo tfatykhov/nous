@@ -205,10 +205,13 @@ _DEPLOY_OBJECT = (rf"(?=\s+{_DET}(?:[\w-]+\s+){{0,2}}?(?:builds?|releases?|fix(?
 # Line- or sentence-initial: "Email sent to x", "Done. Saved to /tmp/x.md".
 _OPENING = r"(?:(?<![^\n])|(?<=[.!?]\s)|(?<=[✓✅]\s))"
 # "... by the scheduled task": someone else's completion, not the agent's;
-# "by 9am" and "by me" are not. Dots inside words pass, or the target would
-# shrink to `/srv/q3` to keep ".md by" out of reach.
+# "by 9am", "by Friday", "by me" and a channel ("by email", "by text") are not.
+# Dots inside words pass, or the target would shrink to `/srv/q3` to keep
+# ".md by" out of reach.
 _NOT_BY = (r"(?!(?:[^.\n;]|\.(?=\S)){0,60}?\bby\s+(?!me\b|myself\b|\d|noon\b|midnight\b|tonight\b"
-           r"|tomorrow\b|end\b|eod\b|eob\b|then\b|now\b|the\s+end\b)[\w$])")
+           r"|tomorrow\b|today\b|end\b|eod\b|eob\b|cob\b|then\b|now\b|the\s+end\b|next\b|lunch\b"
+           r"|this\s+(?:morning|afternoon|evening|week)\b|(?:mon|tues|wednes|thurs|fri|satur|sun)day\b"
+           r"|(?:e-?)?mail\b|text\b|sms\b|post\b|courier\b|hand\b)[\w$])")
 _MESSAGE = r"\b(?:e-?mail|message|report|note|reminder|summary|heads-up|invite|notification|alert|digest)\b"
 
 # (pattern, kind). Patterns that open with the subject group are claims only
@@ -1662,7 +1665,7 @@ _WORK_ID = rf"(?:\s+|\s*[(:#]\s*)`?(?:{_JOB_ID}|{_HEX_ID})`?"
 # (pattern, kind, attempt_only). Active forms need the first person or a
 # sentence opening ("Merged PR #4."): "Tim merged PR #4" is not the agent's.
 _REPORT_PATTERNS: list[tuple[str, str, bool]] = [
-    (rf"\b(?:e-?mails?|messages?){_PASSIVE}sent\b{_NOT_BY}", "email", False),
+    (rf"\b(?:e-?mails?|messages?){_PASSIVE}sent\b(?:\s+to\s+{_ADDRESS})?{_NOT_BY}", "email", False),
     (rf"{_OPENING}(?:sent|e-?mailed)\s+(?:the\s+|an\s+)?e-?mail\b(?:\s+to\s+{_ADDRESS})?", "email", False),
     (rf"\b{_PR}{_PASSIVE}merged\b{_NOT_BY}", "merge", False),
     (rf"(?:{_FIRST}|{_OPENING})merged\s+(?:the\s+)?(?:{_PR}|#\d+|branch)", "merge", False),
