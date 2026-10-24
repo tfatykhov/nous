@@ -1445,24 +1445,46 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
 #      after in/on/into/via/over), a person or group in lowercase ("them", "bob", "the team", "the Telegram
 #      group"), an address; and after "a link to" one that is no sent thing ("a link to the team", not "a link
 #      to the report", "to it", "to https://...", "to report.pdf").
-# Nothing else is: not you, the owner, the user, the chat, a DM, the bot or Telegram, nor the owner's chat
-# ("the user's DMs"; but "the user's team" or "inbox" is someone else's); not an infinitive in lowercase ("to
-# review"; "to Mark" is a name), a format or language ("to PDF", "to pdf", "to Markdown", "to French"), a time
-# ("to Friday", "to 5pm", "to date", "to the end"; so "to May" is read as a time too), an idiom ("due to",
-# "up to", "according to", "converted to"); not a content word ("with a summary", "as a .docx"); after "to
-# you and", not a verb or a function word in lowercase ("to you and archived the draft", "to you and on time");
-# but "a link to the summary and Bob" names Bob.
-_A_TIME = (r"(?:(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may"
-           r"|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec"
+# Nothing else is: not you, the owner, the user, the chat, a DM, the bot or Telegram, nor the owner's chat ("the user's
+# DMs"; but "the user's team" or "inbox" is someone else's); not an infinitive in lowercase ("to review"; "to Mark" is a
+# name), a format or language ("to PDF", "to pdf", "to Markdown", "to French"), a time ("to Friday", "to 5pm", "to
+# date", "to the end", "the next morning"; so "to May" is read as a time too), an idiom ("due to", "up to", "according
+# to", "converted to"); not a content word ("with a summary", "as a .docx"); after "to you and", not a verb or a
+# function word in lowercase ("to you and archived the draft", "to you and on time"); but "a link to the summary and
+# Bob" names Bob. A word on these lists counts only when it heads its phrase (_HEADS): "to the next reviewer", "to the
+# end user", "to the user group", "to French colleagues" name someone.
+# A word on the lists below is what a phrase names only when it heads the phrase: a punctuation mark, the end or a
+# function word follows it, not a word it modifies ("to the end" and "to the end of the day", not "to the end
+# user"; "to French", not "to French colleagues"; "to the user", not "to the user group"; not "today's").
+_HEADS = (r"(?=\s*(?:[.,;:!?)\]\"”—–]|$)|\s+(?:and|or|&|as|at|by|for|from|in|into|on|onto|of|over|via|through"
+          r"|using|with|without|to|before|after|until|till|since|so|then|too|also|again|instead|directly"
+          r"|immediately|first|already|only|here|now|later|today|yesterday|tonight|tomorrow|this|that|i|we|you"
+          r"|he|she|they|it)\b)")
+# A time: a day or month name (before a day number or a part of the day), a month abbreviation before a day
+# number ("Oct 24", not "Jan"), a clock time, a time adverb, "next week", "the latest/previous/same/next/last"
+# before a time noun ("the next morning", "the last hour", "the same time"), or "the end/top/bottom/start/
+# beginning/latest/previous/same/next/last" alone or before "of"; each one heading its phrase. Each is a
+# narrowing of an older, wider form, so no phrase is a time now that was not before. The time nouns: second, minute,
+# hour, day, night, morning, afternoon, evening, week, weekend, fortnight, month, quarter, year, sprint, run,
+# cycle, round, iteration, time, and a version or release ("the next release").
+_A_TIME = (r"(?:(?:(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may"
+           r"|june|july|august|september|october|november|december)"
+           r"(?:\s+(?:\d{1,2}(?:st|nd|rd|th)?|morning|afternoon|evening|night))?"
+           r"|(?:jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec)\.?\s+\d{1,2}(?:st|nd|rd|th)?"
            r"|today|tomorrow|tonight|noon|midnight|now|later|eod|cob|next\s+week"
-           r"|the\s+(?:end|top|bottom|start|beginning|latest|previous|same|next|last))\b"
-           r"|\d{1,2}(?::\d\d)?\s*(?:am|pm)\b)")
+           r"|the\s+(?:latest|previous|same|next|last)\s+(?:second|minute|hour|day"
+           r"|night|morning|afternoon|evening|week|weekend|fortnight|month|quarter|year|sprint|run|cycle|round"
+           r"|iteration|time|version|release)s?"
+           r"|the\s+(?:end|top|bottom|start|beginning|latest|previous|same|next|last)"
+           r"|\d{1,2}(?::\d\d)?\s*(?:am|pm))\b" + _HEADS + ")")
+# The owner's chat, as a noun: the owner, the user, the chat, a DM, the bot, Telegram, chained ("the Telegram
+# bot") or as the owner's chat, DMs or Telegram ("the user's DMs"); "the user group", "the Telegram channel",
+# "the user's team" and "the bot's owner" are someone else.
+_SELF = r"(?:owner|user|chat|dms?|bot|telegram)"
+_A_SELF = rf"(?:{_SELF}(?:\s+{_SELF})*(?:['’]s\s+(?:chat|dms?|telegram)(?:\s+{_SELF})*)?\b{_HEADS})"
 _NOT_A_RECIPIENT = (
-    # you, the owner, the user, the chat, the bot, Telegram (but its group or channel is another chat, and
-    # "the user's team" is someone else)
-    r"(?!(?:you|yourself|me|myself|here|(?:(?:the|your|my|our|this)\s+)?(?:owner|user|chat|dms?|bot"
-    r"|telegram(?!\s+(?:group|channel)\b)))\b"
-    r"(?!['’]s\s+(?!(?:chat|dms?|telegram(?!\s+(?:group|channel)\b))\b)\w))"
+    # you, me, here, or the owner's chat as a noun
+    rf"(?!(?:you|yourself|me|myself|here)\b|(?:(?:the|your|my|our|this)\s+)?{_A_SELF})"
     # an infinitive, in lowercase: "to Mark" is a name
     r"(?!(?-i:review|read|check|confirm|approve|see|look|keep|share|sign|use|be|date|make|help|show|let|get"
     r"|give|reply|respond|follow|discuss|decide|go|do|start|finish|test|verify|track|compare|print|download"
@@ -1471,7 +1493,7 @@ _NOT_A_RECIPIENT = (
     # a format or a language
     r"(?!(?:pdf|html?|docx?|csv|tsv|json|ya?ml|xml|xlsx?|pptx?|odt|rtf|txt|text|plain\s+text|markdown|md|png"
     r"|jpe?g|gif|svg|webp|zip|tar|epub|latex|tex|excel|word|powerpoint|english|french|german|spanish|russian"
-    r"|italian|portuguese|chinese|japanese|korean|arabic|dutch|ukrainian|hebrew)\b|\.\w)"
+    rf"|italian|portuguese|chinese|japanese|korean|arabic|dutch|ukrainian|hebrew)\b{_HEADS}|\.\w)"
     rf"(?!{_A_TIME})"
     # anything else: a name, an acronym, a number, a word in lowercase, a handle, a channel
     r"[\w@#]"
@@ -1485,12 +1507,12 @@ _A_SENT_THING = (r"(?:(?:the|a|an|your|my|our|this|that|these|those)\s+(?:[\w.'�
                  r"|repo|repository|article|post|site|website|video|recording|slide|deck|note|result|data|table"
                  r"|ticket|thread|commit|branch|diff|log|image|photo|screenshot|form|invite|presentation"
                  r"|release|spec|plan|proposal|agenda|minutes|transcript|archive|attachment|copy|version|section)"
-                 r"(?:e?s)?\b|(?-i:it|this|that)\b|https?\b|www\.|[/~]|[\w-]+\.\w)")
+                 rf"(?:e?s)?\b{_HEADS}|(?-i:it|this|that)\b|https?\b|www\.|[/~]|[\w-]+\.\w)")
 # After via/through/using/on/over: Telegram, the bot, the chat, a DM, here, a link, a tool (a word with "_") or
 # a time word.
-_NOT_A_TRANSPORT = (r"(?!(?:the|a|an|your|my|our|this|telegram(?!\s+(?:group|channel)\b)|bot|chat|dms?|here"
-                    r"|(?:shared\s+)?links?|time|schedule|request|demand|completion|arrival|track|hold|weekend|morning"
-                    r"|afternoon|evening|night)\b|\w*_)")
+_NOT_A_TRANSPORT = (r"(?!(?:the|a|an|your|my|our|this)\b|(?:telegram|bot|chat|dms?)(?:\s+(?:telegram|bot|chat|dms?))*\b"
+                    rf"{_HEADS}|(?:here|(?:shared\s+)?links?|time|schedule|request|demand|completion|arrival|track"
+                    rf"|hold|weekend|morning|afternoon|evening|night)\b{_HEADS}|\w*_)")
 _ELSEWHERE = re.compile(
     # 1. mail
     r"\b(?:e-?)?mail(?:ed|ing)\b"
@@ -1507,7 +1529,7 @@ _ELSEWHERE = re.compile(
     # after on/over (not a topic: "a note on the outage")
     rf"|\b(?:via|through|using)\s+(?!{_A_TIME})(?:(?:the|a|an|your|my|our|this)\s+)?{_NOT_A_TRANSPORT}"
     r"(?![\w.]*-style\b)[\w@#]"
-    rf"|\b(?:on|over)\s+(?!{_A_TIME})"
+    rf"|\b(?:on|over)\s+(?!{_A_TIME})(?!the\s+(?:same|next|previous|last)\s+page\b)"  # no place
     rf"(?:{_NOT_A_TRANSPORT}(?-i:(?![a-zß-ÿ\d_])\w)|@\w|(?:the|a|an|your|my|our|this)\s+(?:[\w-]+\s+)?"
     r"(?:wiki|website|site|page|board|forum|server|channel|group|platform|portal|feed|blog|intranet|drive|cloud"
     r"|repo|repository|tracker)s?\b)"
@@ -1524,7 +1546,8 @@ _ELSEWHERE = re.compile(
     r"|\bto\s+(?:(?:the|your|my)\s+)?(?:you|yourself|me|myself|owner|user|chat|dms?|bot|telegram)\s+(?:and|&)\s+"
     rf"{_NOT_A_VERB}{_NOT_A_RECIPIENT}"
     rf"|\bshared\s+(?:\S+\s+){{0,4}}?with\s+{_NOT_A_RECIPIENT}"
-    r"|\bb?cc(?:['’]?e?d)?\s+(?!(?:you|yourself|me|myself|(?:(?:the|your|my)\s+)?(?:owner|user|chat))\b)[\w@#]"
+    rf"|\bb?cc(?:['’]?e?d)?\s+(?!(?:you|yourself|me|myself)\b|(?:(?:the|your|my)\s+)?(?:owner|user|chat)\b{_HEADS})"
+    r"[\w@#]"
     # "copied in the team", "copied Bob", not "copied the file"
     rf"|\bcopied\s+in\s+{_NOT_A_RECIPIENT}"
     r"|\bcopied\s+(?:(?-i:(?![a-zß-ÿ\d_])\w[a-zß-ÿ]+)\b(?![.'’]\w)|[@#]\w|[\w.+-]+@)"

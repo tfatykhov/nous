@@ -1449,6 +1449,59 @@ def test_a_possessive_of_the_owner_is_self_only_for_their_chat(tail, level):
 
 
 @pytest.mark.parametrize(
+    ("tail", "level"),
+    [
+        # a listed word followed by the noun it modifies is no time, format, self or sent thing: the noun is
+        # the recipient
+        (" to the next reviewer", P),
+        (" to the last person", P),
+        (" to the end user", P),
+        (" to the end-user", P),
+        (" to the same team", P),
+        (" to the previous owner", P),
+        (" to the latest hire", P),
+        (" to the top reviewer", P),
+        (" to the following people", P),
+        (" to today's attendees", P),
+        (" to Friday's speakers", P),
+        (" to Jan", P),  # a month abbreviation is a time only before a day number
+        (" to French colleagues", P),
+        (" to the user group", P),
+        (" to the bot team", P),
+        (" to the bot's owner", P),
+        (" to the user's Telegram DMs", E),
+        (" via the chat admins", P),
+        (" to you and the user group", P),
+        (" and cc'd the owner team", P),
+        (" with a link to the report team", P),
+        # ... and alone, before a time noun, before "of" or before a function word, it still is
+        (" by the end of the day", E),
+        (" at the end of the week", E),
+        (" the next morning", E),
+        (" next week", E),
+        (" in the last hour", E),
+        (" over the last hour", E),
+        (" and moved the sync to the next day", E),
+        (" and moved the sync to the end of the month", E),
+        (" and moved the sync to next week", E),
+        (" and moved the sync to the same time", E),
+        (" and moved the sync to Monday morning", E),
+        (" and moved the sync to Oct 24", E),
+        (" and moved the sync to 5pm today", E),
+        (" to the end of the thread", E),
+        (" to you directly", E),
+        (" to the user as a PDF", E),
+        (" via the Telegram bot", E),
+        (" to your Telegram DMs", E),
+        (" so we are on the same page", E),
+    ],
+)
+def test_a_listed_word_excludes_only_the_phrase_it_heads(tail, level):
+    result = _verify(f"I sent the report{tail}.", [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [level]
+
+
+@pytest.mark.parametrize(
     ("text", "level"),
     [
         # "a link to" a group sends it to them; a link to a sent thing points at it
