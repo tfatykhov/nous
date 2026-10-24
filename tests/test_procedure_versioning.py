@@ -714,6 +714,25 @@ async def test_a_weak_review_revise_keeps_the_rows_runtime_metadata(db):
         await heart.close()
 
 
+async def test_a_weak_review_revise_keeps_the_rows_kind(db):
+    agent = "f102-weak-revise-kind"
+    heart, a, _b = await _weak_review_setup(db, agent)
+    try:
+        async with db.session() as s:
+            (await s.get(Procedure, a.id)).kind = "how_to"
+            await s.commit()
+        a = await heart.get_procedure(a.id)
+        learner = _weak_review_learner(heart, _REVISE)
+        heart.search_procedures = _returns([a])
+
+        assert await learner._review_weak_procedures() == 1
+
+        assert (await heart.get_procedure(a.id)).kind == "how_to"
+    finally:
+        await _cleanup(db, agent)
+        await heart.close()
+
+
 def _returns(value):
     from unittest.mock import AsyncMock
 
@@ -734,6 +753,28 @@ async def test_the_name_lock_needs_the_semantic_probe_to_agree(db, session):
 
     assert second.id != first.id
     assert (await manager.get(first.id, session=session)).version == 1
+
+
+async def test_the_name_lock_merges_a_pair_at_exactly_the_threshold(db, session):
+    from sqlalchemy import text
+
+    embeddings = _AxisEmbeddings({"ALPHA": 0.0, "BRAVO": _angle_for(0.90)})
+    manager = ProcedureManager(db, embeddings, "f102-name-lock-edge")
+    first = await manager.store(_input(name="Deploy service", description="ALPHA"), session=session)
+    vector = await embeddings.embed("BRAVO")
+    # The threshold is the stored cosine itself, so only ">=" lets the name lock take the pair.
+    manager._dedupe_threshold = (await session.execute(
+        text("SELECT 1 - (embedding <=> CAST(:embedding AS vector)) FROM heart.procedures WHERE id = :id"),
+        {"embedding": "[" + ",".join(str(float(v)) for v in vector) + "]", "id": first.id},
+    )).scalar_one()
+
+    second = await manager.store(
+        _input(name="deploy-service", description="BRAVO", core_patterns=["new"]), session=session
+    )
+
+    assert (second.id, second.version) == (first.id, 2)
+    versions = await manager.list_versions(first.id, session=session)
+    assert versions[-1].reason.startswith("name lock")
 
 
 async def test_without_an_embedding_the_name_lock_merges_on_the_name(db, session):
