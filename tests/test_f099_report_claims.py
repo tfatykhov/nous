@@ -1294,6 +1294,40 @@ SEND_TAILS = [
     (" to Google Drive", P),
     (" to the CEO", P),
     (" to Éric", P),
+    (" to HR", P),  # an acronym that is no format is a recipient
+    (" to IT", P),
+    (" to QA", P),
+    (" to ALICE", P),
+    (" to S3", P),
+    (" to 3 people", P),
+    (" to 12 stakeholders", P),
+    (" to Иван", P),
+    (" to Łukasz", P),
+    (" to O'Brien", P),
+    (" to _Bob_", P),
+    (" to Mark", P),  # a capitalised word is a name, not an infinitive
+    (" to mark the changes", E),
+    (" to May", E),  # accepted leftover: a month (May, June, April, August, March) is read as a time
+    (" moved to 5pm", E),
+    # any transport after via/through/using/over/on that is not Telegram, a tool, a link or a time
+    (" via SMTP", P),
+    (" via sendmail", P),
+    (" via msmtp", P),
+    (" via curl", P),
+    (" via the API", P),
+    (" via SendGrid", P),
+    (" via Mailgun", P),
+    (" via a webhook", P),
+    (" through Matrix", P),
+    (" using Google Chat", P),
+    (" over Zulip", P),
+    (" on Skype", P),
+    (" on the wiki", P),
+    (" over the weekend", E),
+    (" on 24 October", E),
+    (" via 3 people", P),
+    (" on request", E),
+    (" via the chat here", E),
     # combined
     (" via Telegram on Monday with a summary", E),
     (" as PDF to the owner", E),
@@ -1312,6 +1346,20 @@ SEND_TAILS = [
     (" to you and the team", P),
     (" to you and @bob", P),
     (" to you and on time", E),
+    (" to you and bob", P),
+    (" to you and stakeholders", P),
+    (" to you and cc'd the team", P),
+    (" to you and bcc'd Bob", P),
+    (" to you and bob@x.io", P),
+    (" to you and cc'd bob@x.io", P),
+    (" to the owner and alice@x.io", P),
+    (" to you and archived the draft", E),
+    (" to you and then archived it", E),
+    (" and cc'd the team", P),
+    (" and cc'd Bob", P),
+    (" and bcc'd legal", P),
+    (" and copied in Bob", P),
+    (" and copied the file", E),
 ]
 SEND_CLAIMS = ["I sent the report{}.", "I forwarded the summary{}.", "Message sent{}.", "I sent the message{}."]
 
@@ -1347,6 +1395,8 @@ def test_a_send_to_an_address_is_never_a_telegram_send(claim):
         (" to the user's chat", E),
         (" to the user's DMs", E),
         (" to the user's Telegram", E),
+        (" to the user's inbox", P),  # an inbox is mail: a send_file never lands in one
+        (" to your inbox", P),
         # a Telegram group or channel is another chat, possessive or not
         (" to the user's Telegram group", P),
         (" to the owner's Telegram channel", P),
@@ -1355,6 +1405,44 @@ def test_a_send_to_an_address_is_never_a_telegram_send(claim):
 def test_a_possessive_of_the_owner_is_self_only_for_their_chat(tail, level):
     result = _verify(f"I sent the report{tail}.", [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
     assert [c.evidence for c in result.claims] == [level]
+
+
+@pytest.mark.parametrize(
+    ("text", "level"),
+    [
+        # "a link to" a group sends it to them; a link to a sent thing points at it
+        ("I sent the report link to the team.", P),
+        ("I sent the report with links to the team.", P),
+        ("I sent the report with a link to Bob.", P),
+        ("I sent the report with a link to the Q3 report.", E),
+        ("I sent the summary with links to the files.", E),
+        ("I sent the report with a link to it.", E),
+        ("I sent the report with a link to https://x.io/r.", E),
+        ("I sent the report with a link to report.pdf.", E),
+    ],
+)
+def test_a_link_to_a_group_names_a_recipient(text, level):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [level]
+
+
+@pytest.mark.parametrize(
+    ("text", "level"),
+    [
+        # physical delivery is someone else's, not a claim (as on main)
+        ("Message sent by post.", None),
+        ("Message sent by hand.", None),
+        ("Message sent by courier.", None),
+        # a channel after "by" names no other sender: the claim is checked
+        ("Message sent by Telegram.", E),
+        ("Message sent by DM.", E),
+        ("Message sent by Slack.", P),
+        ("Message sent by WhatsApp.", P),
+    ],
+)
+def test_by_a_channel_is_the_agents_send_and_by_post_is_not(text, level):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == ([level] if level else [])
 
 
 def test_a_verifier_given_no_runner_takes_no_bash_call_for_a_runner_call():
