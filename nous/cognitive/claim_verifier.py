@@ -1456,7 +1456,7 @@ _A_TIME = (r"(?:(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|janu
            r"|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec"
            r"|today|tomorrow|tonight|noon|midnight|now|later|eod|cob|next\s+week"
            r"|the\s+(?:end|top|bottom|start|beginning|latest|previous|same|next|last))\b"
-           r"|\d{1,2}(?::\d\d)?\s*(?:am|pm)\b|\d{1,2}:\d\d\b)")
+           r"|\d{1,2}(?::\d\d)?\s*(?:am|pm)\b)")
 _NOT_A_RECIPIENT = (
     # you, the owner, the user, the chat, the bot, Telegram (but its group or channel is another chat, and
     # "the user's team" is someone else)
@@ -1480,7 +1480,7 @@ _NOT_A_RECIPIENT = (
 _NOT_A_VERB = (r"(?!(?-i:then|also|now|later|again|so|on|in|at|by|with|as|for|from|via|over|through|i|it|we|will"
                r"|would|can|could|should|have|has|had|is|was|am|[a-z]+ed)\b)")
 # What "a link to" points at rather than sends to: a sent thing, it, a URL, a path or a file name.
-_A_SENT_THING = (r"(?:(?:the|a|an|your|my|our|this|that|these|those)\s+(?:[\w.-]+\s+){0,3}?(?:report|summar(?:y|ies)"
+_A_SENT_THING = (r"(?:(?:the|a|an|your|my|our|this|that|these|those)\s+(?:[\w.'’-]+\s+){0,3}?(?:report|summar(?:y|ies)"
                  r"|file|doc|document|page|dashboard|chart|sheet|spreadsheet|folder|draft|pr|pull\s+request|issue"
                  r"|repo|repository|article|post|site|website|video|recording|slide|deck|note|result|data|table"
                  r"|ticket|thread|commit|branch|diff|log|image|photo|screenshot|form|invite|presentation"
@@ -1505,7 +1505,8 @@ _ELSEWHERE = re.compile(
     r"|\bby\s+(?:post|courier|hand|fax)\b"
     # ... or any other transport than Telegram, a tool, a link or a time after via/through/using, and a place
     # after on/over (not a topic: "a note on the outage")
-    rf"|\b(?:via|through|using)\s+(?!{_A_TIME})(?:(?:the|a|an|your|my|our|this)\s+)?{_NOT_A_TRANSPORT}[\w@#]"
+    rf"|\b(?:via|through|using)\s+(?!{_A_TIME})(?:(?:the|a|an|your|my|our|this)\s+)?{_NOT_A_TRANSPORT}"
+    r"(?![\w.]*-style\b)[\w@#]"
     rf"|\b(?:on|over)\s+(?!{_A_TIME})"
     rf"(?:{_NOT_A_TRANSPORT}(?-i:(?![a-zß-ÿ\d_])\w)|@\w|(?:the|a|an|your|my|our|this)\s+(?:[\w-]+\s+)?"
     r"(?:wiki|website|site|page|board|forum|server|channel|group|platform|portal|feed|blog|intranet|drive|cloud"
@@ -1524,8 +1525,9 @@ _ELSEWHERE = re.compile(
     rf"{_NOT_A_VERB}{_NOT_A_RECIPIENT}"
     rf"|\bshared\s+(?:\S+\s+){{0,4}}?with\s+{_NOT_A_RECIPIENT}"
     r"|\bb?cc(?:['’]?e?d)?\s+(?!(?:you|yourself|me|myself|(?:(?:the|your|my)\s+)?(?:owner|user|chat))\b)[\w@#]"
-    # "copied (in) Bob", not "copied the file"
-    r"|\bcopied\s+(?:in\s+)?(?:(?-i:(?![a-zß-ÿ\d_])\w[a-zß-ÿ]+)\b(?![.'’]\w)|[@#]\w|[\w.+-]+@)"
+    # "copied in the team", "copied Bob", not "copied the file"
+    rf"|\bcopied\s+in\s+{_NOT_A_RECIPIENT}"
+    r"|\bcopied\s+(?:(?-i:(?![a-zß-ÿ\d_])\w[a-zß-ÿ]+)\b(?![.'’]\w)|[@#]\w|[\w.+-]+@)"
     r"|\b(?:in|on|into|via|over)\s+#\w",
     re.IGNORECASE)
 

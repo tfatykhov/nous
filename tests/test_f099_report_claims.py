@@ -1392,6 +1392,15 @@ SEND_TAILS = [
     (" on the team channel", P),
     (" on GitHub", P),
     (" on @bob", P),
+    (" on schedule", E),
+    (" on hold", E),
+    (" via the Telegram group", P),
+    (" via Slack-style formatting", E),
+    (" and cc'd you", E),
+    (" and bcc'd the owner", E),
+    (" and copied bob@x.io", P),
+    (" and copied @bob", P),
+    (" and copied in the team", P),
 ]
 SEND_CLAIMS = ["I sent the report{}.", "I forwarded the summary{}.", "Message sent{}.", "I sent the message{}."]
 
@@ -1451,6 +1460,7 @@ def test_a_possessive_of_the_owner_is_self_only_for_their_chat(tail, level):
         ("I sent the report with a link to it.", E),
         ("I sent the report with a link to https://x.io/r.", E),
         ("I sent the report with a link to report.pdf.", E),
+        ("I sent the report with a link to the team's report.", E),
         ("I sent the report with a link to the summary and Bob.", P),
         ("I sent the report with a link to the summary and archived the draft.", E),
     ],
@@ -1475,6 +1485,17 @@ def test_a_link_to_a_group_names_a_recipient(text, level):
         ("Message sent by DM.", E),
         ("Message sent by Slack.", P),
         ("Message sent by WhatsApp.", P),
+        ("Message sent by Signal.", P),
+        ("Message sent by Discord.", P),
+        ("Message sent by iMessage.", P),
+        ("Message sent by Teams.", P),
+        ("Message sent by Messenger.", P),
+        ("Message sent by WeChat.", P),
+        ("Message sent by Gmail.", P),
+        ("Message sent by Outlook.", P),
+        ("Message sent by SMS.", P),
+        ("Message sent by text.", P),
+        ("Message sent by email.", P),
     ],
 )
 def test_by_a_channel_is_the_agents_send_and_by_post_is_not(text, level):
