@@ -1347,6 +1347,9 @@ def test_a_send_to_an_address_is_never_a_telegram_send(claim):
         (" to the user's chat", E),
         (" to the user's DMs", E),
         (" to the user's Telegram", E),
+        # a Telegram group or channel is another chat, possessive or not
+        (" to the user's Telegram group", P),
+        (" to the owner's Telegram channel", P),
     ],
 )
 def test_a_possessive_of_the_owner_is_self_only_for_their_chat(tail, level):
