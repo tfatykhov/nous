@@ -566,6 +566,9 @@ class ToolDispatcher:
                 # F098: the channel outlives the session, so the result can
                 # reach the conversation after the session has expired.
                 args = {**args, "_channel": ctx.channel}
+            if ctx.schedule_id and name == "dag_create":
+                # F101: a scheduled turn's DAG stays its schedule's active run after the turn ends.
+                args = {**args, "_schedule_id": ctx.schedule_id}
             if session_id is not None and name == "dag_create" and not ctx.is_background:
                 # Every foreground kind (interactive, MCP): an MCP turn has no
                 # channel, so its session is the DAG's only routing key.
@@ -3480,6 +3483,9 @@ def create_subtask_tools(
         notify: bool = False,
         model: str | None = None,
         frame_type: str | None = None,
+        concurrency_policy: str | None = None,
+        catch_up_policy: str | None = None,
+        catch_up_cap: int | None = None,
         intent: str | None = None,
         wake_policy: str | None = None,
         _decision_id: str | None = None,
@@ -3498,6 +3504,8 @@ def create_subtask_tools(
             when: One-shot time (e.g. "in 2 hours", ISO 8601)
             every: Recurring pattern (e.g. "daily at 8am", "30 minutes")
             notify: Whether to notify on each fire
+            concurrency_policy, catch_up_policy, catch_up_cap: F101; omitted means the
+                defaults (coalesce_if_active, skip_missed, NOUS_SCHEDULE_CATCH_UP_CAP)
 
         Returns:
             MCP-compliant response with schedule ID and next fire time
@@ -3529,6 +3537,16 @@ def create_subtask_tools(
 
             from nous.handlers.time_parser import parse_every, parse_when
 
+            # F101: validated by ScheduleManager.create (a ValueError names the bad one).
+            policies = {
+                k: v
+                for k, v in (
+                    ("concurrency_policy", concurrency_policy),
+                    ("catch_up_policy", catch_up_policy),
+                    ("catch_up_cap", catch_up_cap),
+                )
+                if v is not None
+            }
             if when:
                 fire_at = parse_when(when)
                 schedule = await heart.schedules.create(
@@ -3539,6 +3557,7 @@ def create_subtask_tools(
                     timeout=settings.subtask_default_timeout,
                     model=model,
                     frame_type=frame_type,
+                    **policies,
                     **intentions.intention_kwargs(spec),
                 )
             else:
@@ -3552,6 +3571,7 @@ def create_subtask_tools(
                     timeout=settings.subtask_default_timeout,
                     model=model,
                     frame_type=frame_type,
+                    **policies,
                     **intentions.intention_kwargs(spec),
                 )
 
@@ -3608,7 +3628,10 @@ def create_subtask_tools(
                 lines.append("\n=== Schedules ===")
                 for sc in schedules:
                     next_fire = sc.next_fire_at.strftime("%Y-%m-%d %H:%M UTC") if sc.next_fire_at else "N/A"
-                    lines.append(f"- [{sc.schedule_type}] {sc.id} | {sc.task[:80]} (next: {next_fire})")
+                    policies = f"concurrency: {sc.concurrency_policy}, catch-up: {sc.catch_up_policy}"
+                    if sc.catch_up_cap is not None:
+                        policies += f" (cap {sc.catch_up_cap})"
+                    lines.append(f"- [{sc.schedule_type}] {sc.id} | {sc.task[:80]} (next: {next_fire}; {policies})")
             else:
                 lines.append("\n=== Schedules ===\nNo active schedules.")
 
@@ -3962,6 +3985,30 @@ _SCHEDULE_TASK_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": "Cognitive frame for the task (e.g. 'research', 'task')",
             "enum": ["task", "research", "conversation", "decision", "debug"],
+        },
+        "concurrency_policy": {
+            "type": "string",
+            "description": (
+                "Recurring only: what a fire does while this schedule's previous run (its subtask, or a DAG it "
+                "created) is still active. coalesce_if_active (default) and skip_if_active start nothing; "
+                "always_enqueue starts another run."
+            ),
+            "enum": ["coalesce_if_active", "skip_if_active", "always_enqueue"],
+        },
+        "catch_up_policy": {
+            "type": "string",
+            "description": (
+                "Recurring only: slots missed while Nous was down. skip_missed (default) runs once; "
+                "enqueue_missed_with_cap runs once per missed slot up to catch_up_cap (each run still passes "
+                "concurrency_policy, so the extra runs only start with always_enqueue)."
+            ),
+            "enum": ["skip_missed", "enqueue_missed_with_cap"],
+        },
+        "catch_up_cap": {
+            "type": "integer",
+            "description": "Most runs enqueue_missed_with_cap starts at once (1-25; default 3).",
+            "minimum": 1,
+            "maximum": 25,
         },
     },
     "required": ["task"],
@@ -5721,6 +5768,8 @@ def register_dag_tools(
                         # F098: injected by ToolDispatcher on a conversation turn.
                         origin_channel=kwargs.get("_channel"),
                         origin_session_id=kwargs.get("_session_id"),
+                        # F101: injected by ToolDispatcher on a scheduled turn.
+                        schedule_id=kwargs.get("_schedule_id"),
                         # F099 Phase 0a: why the DAG exists. Before Phase 1 the only
                         # reason text a dag_create call carries is its description.
                         # F099: why the DAG exists. The model's own intent when it wrote

@@ -30,15 +30,19 @@ from nous.handlers.task_scheduler import TaskScheduler
 # ---------------------------------------------------------------------------
 
 
+# These mock-heart tests pin the flag-off path (F101 off): the policy path's
+# fire lock needs a real database, and tests/test_f101_schedule_policies.py
+# covers continuation under the policies.
 def _continuation_on(continuation_turns: int = 3) -> Settings:
     return Settings(
         schedule_continuation_enabled=True,
         schedule_max_continuation_turns=50,
+        schedule_policies_enabled=False,
     )
 
 
 def _continuation_off() -> Settings:
-    return Settings(schedule_continuation_enabled=False)
+    return Settings(schedule_continuation_enabled=False, schedule_policies_enabled=False)
 
 
 def _make_schedule(
@@ -166,6 +170,7 @@ class TestContinuationCycle:
         settings = Settings(
             schedule_continuation_enabled=True,
             schedule_max_continuation_turns=2,
+            schedule_policies_enabled=False,
         )
         scheduler = TaskScheduler(heart, settings)
         await scheduler._fire_due_tasks()
