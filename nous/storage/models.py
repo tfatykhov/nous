@@ -867,7 +867,7 @@ class ProcedureVersion(Base):
     # (agent_id, idempotency_key) partial unique index lives in migration 092.
     idempotency_key: Mapped[str | None] = mapped_column(Text)
     request_fingerprint: Mapped[str | None] = mapped_column(String(64))
-    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class ProcedureTaskAffinity(Base):

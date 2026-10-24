@@ -28,6 +28,8 @@ CensorAction = Literal["steer", "refuse", "abort"]  # F078 (was warn|block|absol
 CensorProvenance = Literal["auto", "agent", "human"]  # F078: caps max tier at create
 EpisodeOutcome = Literal["success", "partial", "failure", "ongoing", "abandoned"]
 ProcedureOutcome = Literal["success", "failure", "neutral"]
+# F102: how a procedure version came to be ("backfill" is migration 092's version 1).
+ProcedureChangeSource = Literal["create", "update_body", "append_notes", "dedupe_merge", "restore", "backfill"]
 
 
 # --- Episodes ---
@@ -327,7 +329,7 @@ class ProcedureInput(BaseModel):
     kind: str | None = None
     # F102: a create request's key. A store() with a key already used returns that
     # procedure; the same key with a different request is a ProcedureConflictError.
-    idempotency_key: str | None = None
+    idempotency_key: str | None = Field(default=None, min_length=1)
 
 
 class ProcedureDetail(BaseModel):
@@ -375,9 +377,9 @@ class ProcedureVersionDetail(BaseModel):
     implementation_notes: list[str]
     tags: list[str]
     kind: str | None
-    change_source: str
+    change_source: ProcedureChangeSource
     reason: str | None
-    created_at: datetime | None
+    created_at: datetime
 
 
 class ProcedureSummary(BaseModel):

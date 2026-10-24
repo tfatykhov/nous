@@ -42,7 +42,8 @@ async def _seed(db, session) -> dict[str, Procedure]:
     manager = ProcedureManager(db, embeddings, AGENT, dedupe_enabled=False)
     stored = {}
     for key, tags in (("A", ["auto:episode_lesson"]), ("B", ["auto:episode_lesson"]),
-                      ("C", ["auto:monitor_recovery"]), ("D", ["auto:episode_lesson"]), ("S", ["skill", "local"])):
+                      ("C", ["auto:monitor_recovery"]), ("D", ["auto:episode_lesson"]),
+                      ("S", ["skill", "local", "auto:x"])):
         detail = await manager.store(
             ProcedureInput(name=f"Procedure {key}", description=f"MARK_{key}" if key != "D" else "other", tags=tags),
             session=session,
@@ -67,7 +68,7 @@ async def test_dry_run_reports_the_cluster_and_writes_nothing(db, session):
     assert cluster.survivor.id == stored["B"].id
     assert {m.id for m in cluster.duplicates} == {stored["A"].id, stored["C"].id}
     assert "Procedure B" in text and "Duplicates to retire: 2" in text
-    assert "Procedure S" not in text  # a skill is never in the population
+    assert "Procedure S" not in text  # a skill is never in the population, even with an auto: tag
     rows = (await session.execute(select(Procedure.active).where(Procedure.agent_id == AGENT))).scalars().all()
     assert all(rows)
 
@@ -96,6 +97,29 @@ async def test_apply_retires_the_duplicates_with_a_reason(db, session):
         await session.refresh(row)
         assert row.active is False
         assert row.runtime_metadata["retired"]["survivor"] == str(stored["B"].id)
+    for key in ("D", "S"):
+        row = await session.get(Procedure, stored[key].id)
+        await session.refresh(row)
+        assert row.active is True
     survivor = await session.get(Procedure, stored["B"].id)
     await session.refresh(survivor)
     assert survivor.active is True
+
+
+async def test_the_report_counts_learned_procedures_it_could_not_compare(db, session):
+    await _seed(db, session)
+    unembedded = await ProcedureManager(db, None, AGENT, dedupe_enabled=False).store(
+        ProcedureInput(name="No vector", tags=["auto:episode_lesson"]), session=session
+    )
+    assert (await session.get(Procedure, unembedded.id)).embedding is None
+
+    _clusters, text = await report.run(session, ProcedureManager(db, None, AGENT), 0.85)
+
+    assert "Not compared: 1 auto-learned procedure(s) without an embedding" in text
+
+
+@pytest.mark.parametrize("argv", [["--threshold", "1.5"], ["--threshold", "0.7", "--apply"]])
+async def test_the_cli_refuses_a_threshold_out_of_bounds_or_too_low_to_apply(argv):
+    with pytest.raises(SystemExit) as exit_info:
+        await report.main(argv)
+    assert exit_info.value.code == 2

@@ -27,16 +27,16 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.config import Settings
-from nous.heart.procedures import ProcedureManager
-from nous.heart.schemas import JOB_LESSON_KIND, STRATEGY_CARD_KIND
+from nous.heart.procedures import LEARNED_PARAMS, LEARNED_WHERE, ProcedureManager
 from nous.storage.database import Database
 
-_LEARNED = """
-    agent_id = :agent_id AND active = true AND embedding IS NOT NULL
-    AND kind IS DISTINCT FROM :strategy_kind AND kind IS DISTINCT FROM :job_lesson_kind
-    AND EXISTS (SELECT 1 FROM unnest(tags) AS tag WHERE tag LIKE :learned_tag)
-    AND NOT ('skill' = ANY(coalesce(tags, '{}')))
-"""
+# The semantic dedupe's population (LEARNED_WHERE) among one agent's active rows.
+_ACTIVE_LEARNED = f"agent_id = :agent_id AND active = true AND {LEARNED_WHERE}"
+_LEARNED = f"{_ACTIVE_LEARNED} AND embedding IS NOT NULL"
+
+
+# Below it the live catalog's pairs stop being clear duplicates (F102 spec, "Why 0.85").
+_APPLY_FLOOR = 0.80
 
 
 @dataclass
@@ -56,7 +56,7 @@ class Cluster:
     kept: list[Member] = field(default_factory=list)  # linked in, but below the threshold to the survivor
 
 
-def _rank(member: Member) -> tuple:
+def _rank(member: Member) -> tuple[float, int, datetime, str]:
     # Best first: effectiveness (no outcomes yet ranks as the 0.5 prior), activations, oldest, id.
     effectiveness = member.effectiveness if member.effectiveness is not None else 0.5
     return (-effectiveness, -member.activation_count, member.created_at or datetime.max, str(member.id))
@@ -64,12 +64,7 @@ def _rank(member: Member) -> tuple:
 
 async def find_clusters(session: AsyncSession, agent_id: str, threshold: float) -> list[Cluster]:
     """This agent's near-duplicate clusters of auto-learned procedures at ``threshold``, largest first."""
-    params = {
-        "agent_id": agent_id,
-        "strategy_kind": STRATEGY_CARD_KIND,
-        "job_lesson_kind": JOB_LESSON_KIND,
-        "learned_tag": "auto:%",
-    }
+    params = {**LEARNED_PARAMS, "agent_id": agent_id}
     members = {
         row.id: Member(
             id=row.id,
@@ -119,11 +114,11 @@ async def find_clusters(session: AsyncSession, agent_id: str, threshold: float) 
             member.similarity = pairs.get(frozenset((survivor.id, member.id)))
             (cluster.duplicates if member.similarity is not None else cluster.kept).append(member)
         clusters.append(cluster)
-    clusters.sort(key=lambda c: (-len(c.duplicates) - len(c.kept), c.survivor.name))
+    clusters.sort(key=lambda c: (-(len(c.duplicates) + len(c.kept)), c.survivor.name))
     return clusters
 
 
-def format_report(clusters: list[Cluster], threshold: float) -> str:
+def format_report(clusters: list[Cluster], threshold: float, unembedded: int = 0) -> str:
     """The clusters as plain text, one block per cluster."""
     def line(m: Member) -> str:
         eff = f"{m.effectiveness:.2f}" if m.effectiveness is not None else "n/a"
@@ -138,6 +133,8 @@ def format_report(clusters: list[Cluster], threshold: float) -> str:
         out.extend(f"  kept       {line(m)}  (below the threshold to the survivor)" for m in cluster.kept)
     out.append("")
     out.append(f"Duplicates to retire: {sum(len(c.duplicates) for c in clusters)}")
+    if unembedded:
+        out.append(f"Not compared: {unembedded} auto-learned procedure(s) without an embedding (run reembed_all)")
     return "\n".join(out)
 
 
@@ -146,6 +143,10 @@ async def run(
 ) -> tuple[list[Cluster], str]:
     """Find the clusters of ``manager``'s agent; with ``apply``, retire each duplicate. The caller commits."""
     clusters = await find_clusters(session, manager.agent_id, threshold)
+    unembedded = (await session.execute(
+        text(f"SELECT count(*) FROM heart.procedures WHERE {_ACTIVE_LEARNED} AND embedding IS NULL"),
+        {**LEARNED_PARAMS, "agent_id": manager.agent_id},
+    )).scalar_one()
     if apply:
         for cluster in clusters:
             for member in cluster.duplicates:
@@ -155,7 +156,7 @@ async def run(
                     "similarity": round(member.similarity or 0.0, 4),
                     "threshold": threshold,
                 })
-    return clusters, format_report(clusters, threshold)
+    return clusters, format_report(clusters, threshold, unembedded)
 
 
 async def main(argv: list[str] | None = None) -> int:
@@ -164,7 +165,12 @@ async def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--threshold", type=float, default=settings.procedure_dedupe_threshold)
     parser.add_argument("--agent", default=settings.agent_id)
     parser.add_argument("--apply", action="store_true", help="retire the duplicates (default: report only)")
+    parser.add_argument("--force", action="store_true", help=f"allow --apply below {_APPLY_FLOOR}")
     args = parser.parse_args(argv)
+    if not 0.0 <= args.threshold <= 1.0:
+        parser.error("--threshold must be between 0 and 1")
+    if args.apply and args.threshold < _APPLY_FLOOR and not args.force:
+        parser.error(f"--apply below {_APPLY_FLOOR} retires procedures in the ambiguous band; add --force to mean it")
 
     db = Database(settings)
     await db.connect()
@@ -173,7 +179,7 @@ async def main(argv: list[str] | None = None) -> int:
             if not args.apply:
                 await session.execute(text("SET TRANSACTION READ ONLY"))
             manager = ProcedureManager(db, None, args.agent)
-            _clusters, report = await run(session, manager, args.threshold, apply=args.apply)
+            _, report = await run(session, manager, args.threshold, apply=args.apply)
             print(report)
             if args.apply:
                 await session.commit()

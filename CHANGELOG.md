@@ -4,7 +4,7 @@ All notable changes to Nous. Release notes for each version also live on the [Gi
 
 # Unreleased
 
-- **Procedure versioning and create-time dedupe (F102).** Every procedure body write is a new version in `heart.procedures.version` and `heart.procedure_versions` (migration 092; existing rows backfilled as version 1). `update_body`, `append_notes` and the new `restore` take an optional `expected_version` and refuse a stale write with `ProcedureConflictError`. `store()` replays an `idempotency_key`, and with `NOUS_PROCEDURE_DEDUPE_ENABLED` (default on) merges a learned procedure into a same-named one, or an auto-learned one into a neighbour at cosine ≥ 0.85, instead of inserting a duplicate. A one-off dry-run report, `scripts/diag/procedure_dedupe_report.py`, lists the existing duplicate clusters. Adopted from paperclipai/paperclip's runner-created skills.
+- **Procedure versioning and create-time dedupe (F102).** Every procedure body write is a new version in `heart.procedures.version` and `heart.procedure_versions` (migration 092; existing rows backfilled as version 1). `update_body`, `append_notes` and the new `restore` take an optional `expected_version` and refuse a stale write with `ProcedureConflictError`. `store()` replays an `idempotency_key`, and with `NOUS_PROCEDURE_DEDUPE_ENABLED` (default on) merges an auto-learned procedure into a same-named or near-duplicate (cosine ≥ 0.85) auto-learned one instead of inserting a duplicate. A one-off dry-run report, `scripts/diag/procedure_dedupe_report.py`, lists the existing duplicate clusters. Adopted from paperclipai/paperclip's runner-created skills.
 
 # v1.1.0 — The Accountable Agent
 

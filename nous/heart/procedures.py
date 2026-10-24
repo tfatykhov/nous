@@ -22,6 +22,7 @@ from nous.heart.schemas import (
     STRATEGY_CARD_KIND,
     EvolutionCandidate,
     JobLesson,
+    ProcedureChangeSource,
     ProcedureDetail,
     ProcedureInput,
     ProcedureOutcome,
@@ -38,6 +39,15 @@ logger = logging.getLogger(__name__)
 
 # The list fields a version snapshot holds and a dedupe merge unions.
 _LIST_FIELDS = ("goals", "core_patterns", "core_tools", "core_concepts", "implementation_notes", "tags")
+
+# The auto-learned how-to population of the semantic dedupe (scripts/diag/procedure_dedupe_report.py
+# reports on the same one): an ``auto:*`` tag, never a skill, a strategy card or a job lesson.
+LEARNED_WHERE = (
+    "kind IS DISTINCT FROM :strategy_kind AND kind IS DISTINCT FROM :job_lesson_kind"
+    " AND EXISTS (SELECT 1 FROM unnest(tags) AS tag WHERE tag LIKE :learned_tag)"
+    " AND NOT ('skill' = ANY(coalesce(tags, '{}')))"
+)
+LEARNED_PARAMS = {"strategy_kind": STRATEGY_CARD_KIND, "job_lesson_kind": JOB_LESSON_KIND, "learned_tag": "auto:%"}
 
 
 class ProcedureConflictError(ValueError):
@@ -84,9 +94,14 @@ def _is_postgres(session: AsyncSession) -> bool:
     return session.bind is not None and session.bind.dialect.name == "postgresql"
 
 
+# The request fields a replay must repeat: a fixed list, so a field added to ProcedureInput
+# later does not turn the retries in flight during a deploy into conflicts.
+_FINGERPRINT_FIELDS = {"name", "domain", "description", *_LIST_FIELDS, "active", "runtime_metadata", "kind"}
+
+
 def _fingerprint(input: ProcedureInput) -> str:
     """The sha256 of a create request without its key: a replay must send the same request."""
-    return hashlib.sha256(input.model_dump_json(exclude={"idempotency_key"}).encode()).hexdigest()
+    return hashlib.sha256(input.model_dump_json(include=_FINGERPRINT_FIELDS).encode()).hexdigest()
 
 
 def _build_embed_text(
@@ -206,23 +221,8 @@ class ProcedureManager:
         return None
 
     async def _store(self, input: ProcedureInput, session: AsyncSession) -> ProcedureDetail:
-        dedupe = (
-            self._dedupe_enabled
-            and input.active is not False
-            and not is_strategy_card(input)
-            and not is_job_lesson(input)
-            and not _is_skill(input.tags)
-        )
-        if input.idempotency_key is not None or dedupe:
-            await self._lock_creates(session)
-        if input.idempotency_key is not None:
-            replayed = await self._replay(input, session)
-            if replayed is not None:
-                return replayed
-        if dedupe and (same_name := await self._same_name_procedure(input.name, session)) is not None:
-            return await self._merge(same_name, input, f"name lock: same normalized name as {input.name!r}", session)
-
-        # Generate embedding from all body fields (issue #197)
+        # Generate embedding from all body fields (issue #197). Before the create lock: it
+        # depends on the input alone, and the lock's holder should not wait on the provider.
         embedding = None
         if self.embeddings:
             embed_text = _build_embed_text(
@@ -232,21 +232,42 @@ class ProcedureManager:
             )
             embedding = await self._embed_with_retry(embed_text)
 
-        if dedupe and embedding is not None and _is_learned(input.tags) and _is_postgres(session):
-            nearest = await self._nearest_summaries(
-                "",
-                "kind IS DISTINCT FROM :strategy_kind AND kind IS DISTINCT FROM :job_lesson_kind"
-                " AND EXISTS (SELECT 1 FROM unnest(tags) AS tag WHERE tag LIKE :learned_tag)",
-                {"strategy_kind": STRATEGY_CARD_KIND, "job_lesson_kind": JOB_LESSON_KIND, "learned_tag": "auto:%"},
-                1,
-                session,
-                probe="procedure dedupe probe",
-                embedding=embedding,
-            )
-            if nearest and nearest[0].score is not None and nearest[0].score >= self._dedupe_threshold:
-                return await self._merge(
-                    nearest[0].id, input, f"semantic: cosine {nearest[0].score:.3f} to {input.name!r}", session
+        # Only an auto-learned lesson is merged, and only into one: a hand-written or
+        # skill body is never folded into another row, nor another row's tags into it.
+        dedupe = (
+            self._dedupe_enabled
+            and input.active is not False
+            and not is_strategy_card(input)
+            and not is_job_lesson(input)
+            and not _is_skill(input.tags)
+            and _is_learned(input.tags)
+        )
+        if input.idempotency_key is not None or dedupe:
+            await self._lock_creates(session)
+        if input.idempotency_key is not None:
+            replayed = await self._replay(input, session)
+            if replayed is not None:
+                return replayed
+        if dedupe and (same_name := await self._same_name_procedure(input.name, session)) is not None:
+            merged = await self._merge(same_name, input, "name lock: same normalized name", session)
+            if merged is not None:
+                return merged
+        if dedupe and _is_postgres(session):
+            if embedding is None:
+                logger.warning(
+                    "Procedure dedupe: no embedding for %r, so no near-duplicate check; stored as new", input.name
                 )
+            else:
+                nearest = await self._nearest_summaries(
+                    "", LEARNED_WHERE, LEARNED_PARAMS, 1, session, probe="procedure dedupe probe",
+                    embedding=embedding,
+                )
+                if nearest and nearest[0].score is not None and nearest[0].score >= self._dedupe_threshold:
+                    merged = await self._merge(
+                        nearest[0].id, input, f"semantic: cosine {nearest[0].score:.3f}", session
+                    )
+                    if merged is not None:
+                        return merged
 
         procedure = Procedure(
             agent_id=self.agent_id,
@@ -318,7 +339,7 @@ class ProcedureManager:
         return await self._update_body(procedure_id, input, session, expected_version)
 
     async def _update_body(
-        self, procedure_id: UUID, input: ProcedureInput, session: AsyncSession, expected_version: int | None = None
+        self, procedure_id: UUID, input: ProcedureInput, session: AsyncSession, expected_version: int | None
     ) -> ProcedureDetail:
         procedure = await self._locked_procedure(procedure_id, session)
         if procedure is None:
@@ -400,7 +421,7 @@ class ProcedureManager:
         procedure_id: UUID,
         pick: Callable[[list[str]], list[str]],
         session: AsyncSession,
-        expected_version: int | None = None,
+        expected_version: int | None,
     ) -> list[str]:
         # Locked and read fresh, not the session's copy of the row: pick() decides on these notes.
         procedure = await self._locked_procedure(procedure_id, session)
@@ -514,7 +535,7 @@ class ProcedureManager:
         procedure.domain = snapshot.domain
         procedure.description = snapshot.description
         for field in _LIST_FIELDS:
-            setattr(procedure, field, list(getattr(snapshot, field)) if getattr(snapshot, field) else None)
+            setattr(procedure, field, list(getattr(snapshot, field) or []) or None)
         await self._reembed(procedure)
         procedure.updated_at = datetime.now(UTC)
         await self._bump_version(procedure, session, "restore", reason=f"restored version {version}")
@@ -1521,7 +1542,7 @@ class ProcedureManager:
         self,
         procedure: Procedure,
         session: AsyncSession,
-        change_source: str,
+        change_source: ProcedureChangeSource,
         *,
         reason: str | None = None,
         input: ProcedureInput | None = None,
@@ -1530,6 +1551,7 @@ class ProcedureManager:
 
         ``input`` is the create request that wrote it, whose idempotency key is kept with it.
         """
+        key = input.idempotency_key if input is not None else None
         session.add(ProcedureVersion(
             agent_id=self.agent_id,
             procedure_id=procedure.id,
@@ -1542,15 +1564,15 @@ class ProcedureManager:
             runtime_metadata=procedure.runtime_metadata,
             change_source=change_source,
             reason=reason,
-            idempotency_key=input.idempotency_key if input is not None else None,
-            request_fingerprint=_fingerprint(input) if input is not None and input.idempotency_key else None,
+            idempotency_key=key,
+            request_fingerprint=_fingerprint(input) if key is not None else None,
         ))
 
     async def _bump_version(
         self,
         procedure: Procedure,
         session: AsyncSession,
-        change_source: str,
+        change_source: ProcedureChangeSource,
         *,
         reason: str | None = None,
         input: ProcedureInput | None = None,
@@ -1562,7 +1584,7 @@ class ProcedureManager:
         await session.flush()
 
     async def _reembed(self, procedure: Procedure) -> None:
-        """Re-embed the body ``procedure`` holds; NULL on failure, as _update_body stores it."""
+        """Re-embed the restored body ``procedure`` holds; NULL on failure, as _update_body stores it."""
         if self.embeddings:
             procedure.embedding = await self._embed_with_retry(_build_embed_text(
                 procedure.name, procedure.description, procedure.core_patterns,
@@ -1579,7 +1601,7 @@ class ProcedureManager:
         """
         if not _is_postgres(session):
             return
-        lifted = bool(getattr(self.db, "lock_timeout_seconds", None))
+        lifted = bool(self.db.lock_timeout_seconds)
         if lifted:
             await session.execute(text("SET LOCAL lock_timeout = 0"))
         await session.execute(
@@ -1606,11 +1628,14 @@ class ProcedureManager:
         procedure = await self._get_procedure_orm(prior.procedure_id, session)
         if procedure is None:
             raise ValueError(f"Procedure {prior.procedure_id} not found")
+        if not procedure.active:
+            logger.warning("Procedure store replayed idempotency key %r to %s, which is retired",
+                           input.idempotency_key, procedure.id)
         logger.info("Procedure store replayed idempotency key %r: procedure %s", input.idempotency_key, procedure.id)
         return self._to_detail(procedure)
 
     async def _same_name_procedure(self, name: str, session: AsyncSession) -> UUID | None:
-        """The active how-to procedure (not a skill) whose normalized name is ``name``'s, or None."""
+        """The active auto-learned procedure (not a skill) whose normalized name is ``name``'s, or None."""
         result = await session.execute(
             select(Procedure.id, Procedure.name, Procedure.tags)
             .where(Procedure.agent_id == self.agent_id)
@@ -1621,29 +1646,56 @@ class ProcedureManager:
         )
         wanted = _normalize_name(name)
         return next(
-            (row.id for row in result.all() if not _is_skill(row.tags) and _normalize_name(row.name) == wanted),
+            (
+                row.id for row in result.all()
+                if _is_learned(row.tags) and not _is_skill(row.tags) and _normalize_name(row.name) == wanted
+            ),
             None,
         )
 
     async def _merge(
-        self, procedure_id: UUID, input: ProcedureInput, reason: str, session: AsyncSession
-    ) -> ProcedureDetail:
+        self, procedure_id: UUID, input: ProcedureInput, rule: str, session: AsyncSession
+    ) -> ProcedureDetail | None:
         """Union ``input``'s list fields into the procedure as a new version (``dedupe_merge``).
 
         The procedure keeps its name, description, domain, kind, runtime_metadata and stats;
-        the incoming name is kept in the version's reason. Re-embedded from the merged body.
+        the version's reason keeps the rule and the incoming name and description. Re-embedded
+        from the merged body (the old vector is kept if that fails: it matched a moment ago).
+        A merge that adds nothing writes nothing, unless it carries an idempotency key to keep.
+        None when the procedure stopped being active before the lock: the caller inserts.
         """
         procedure = await self._locked_procedure(procedure_id, session)
-        if procedure is None:
-            raise ValueError(f"Procedure {procedure_id} not found")
-        for field in _LIST_FIELDS:
-            setattr(procedure, field, _union(getattr(procedure, field), getattr(input, field)) or None)
-        await self._reembed(procedure)
+        if procedure is None or not procedure.active:
+            logger.info("Procedure dedupe: %s is no longer active, %r is stored as new", procedure_id, input.name)
+            return None
+        merged = {field: _union(getattr(procedure, field), getattr(input, field)) for field in _LIST_FIELDS}
+        if all(merged[field] == list(getattr(procedure, field) or []) for field in _LIST_FIELDS) and (
+            input.idempotency_key is None
+        ):
+            logger.info("Procedure dedupe: %r adds nothing to %s (%r) (%s)", input.name, procedure.id,
+                        procedure.name, rule)
+            return self._to_detail(procedure)
+        for field, value in merged.items():
+            setattr(procedure, field, value or None)
+        if self.embeddings:
+            embedding = await self._embed_with_retry(_build_embed_text(
+                procedure.name, procedure.description, procedure.core_patterns, procedure.goals,
+                procedure.core_tools, procedure.core_concepts, procedure.implementation_notes,
+            ))
+            if embedding is not None:
+                procedure.embedding = embedding
         procedure.updated_at = datetime.now(UTC)
+        reason = f"{rule}; incoming {input.name!r}: {(input.description or '')[:300]!r}"
         await self._bump_version(procedure, session, "dedupe_merge", reason=reason, input=input)
+        await self._emit_event(session, "procedure_merged", {
+            "procedure_id": str(procedure.id),
+            "incoming_name": input.name,
+            "reason": rule,
+            "version": procedure.version,
+        })
         logger.info(
             "Procedure dedupe: %r merged into %s (%r) as version %d (%s)",
-            input.name, procedure.id, procedure.name, procedure.version, reason,
+            input.name, procedure.id, procedure.name, procedure.version, rule,
         )
         return self._to_detail(procedure)
 

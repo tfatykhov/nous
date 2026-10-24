@@ -346,3 +346,231 @@ async def test_semantic_merge_is_off_with_the_flag(db, session):
     first = await manager.store(_input(name="Honest send reports", description="ALPHA"), session=session)
     second = await manager.store(_input(name="Report email sends", description="BRAVO"), session=session)
     assert second.id != first.id
+
+
+async def test_semantic_merge_needs_a_learned_target(db, session):
+    embeddings = _AxisEmbeddings({"ALPHA": 0.0, "BRAVO": _angle_for(0.95)})
+    manager = ProcedureManager(db, embeddings, "f102-semantic", dedupe_threshold=0.85)
+    hand_written = await manager.store(_input(name="Honest send reports", description="ALPHA", tags=["manual"]),
+                                       session=session)
+    learned = await manager.store(_input(name="Report email sends", description="BRAVO"), session=session)
+    assert learned.id != hand_written.id
+
+
+async def test_semantic_merge_needs_a_learned_input(db, session):
+    embeddings = _AxisEmbeddings({"ALPHA": 0.0, "BRAVO": _angle_for(0.95)})
+    manager = ProcedureManager(db, embeddings, "f102-semantic", dedupe_threshold=0.85)
+    learned = await manager.store(_input(name="Honest send reports", description="ALPHA"), session=session)
+    hand_written = await manager.store(_input(name="Report email sends", description="BRAVO", tags=["manual"]),
+                                       session=session)
+    assert hand_written.id != learned.id
+
+
+@pytest.mark.parametrize("kind", ["strategy", "job_lesson"])
+async def test_semantic_merge_never_targets_a_card_or_a_job_lesson(db, session, kind):
+    embeddings = _AxisEmbeddings({"ALPHA": 0.0, "BRAVO": _angle_for(0.95)})
+    manager = ProcedureManager(db, embeddings, "f102-semantic", dedupe_threshold=0.85)
+    other = await manager.store(
+        _input(name="A lesson of another kind", description="ALPHA", kind=kind,
+               runtime_metadata={"job": {"schedule_id": "s1"}} if kind == "job_lesson" else None),
+        session=session,
+    )
+    learned = await manager.store(_input(name="Report email sends", description="BRAVO"), session=session)
+    assert learned.id != other.id
+
+
+async def test_a_merge_keeps_the_stats_and_re_embeds(db, session):
+    embeddings = _AxisEmbeddings({"ALPHA": 0.0, "BRAVO": _angle_for(0.90)})
+    manager = ProcedureManager(db, embeddings, "f102-semantic", dedupe_threshold=0.85)
+    first = await manager.store(
+        _input(name="Honest send reports", description="ALPHA", runtime_metadata={"skip_until_scored": 10}),
+        session=session,
+    )
+    row = await session.get(Procedure, first.id)
+    row.success_count, row.activation_count = 7, 9
+    row.embedding = [2.0] + [0.0] * 1535  # same direction as ALPHA, other length: a merge re-embeds it
+    await session.flush()
+
+    merged = await manager.store(_input(name="Report email sends", description="BRAVO",
+                                        core_patterns=["a new pattern"]), session=session)
+
+    assert merged.id == first.id
+    await session.refresh(row)
+    assert (row.success_count, row.activation_count) == (7, 9)
+    assert row.runtime_metadata == {"skip_until_scored": 10}
+    assert list(row.embedding)[0] == pytest.approx(1.0)
+
+
+async def test_a_keyed_request_that_merged_replays_to_the_merged_row(heart, session):
+    first = await heart.store_procedure(_input(), session=session)
+    merged = await heart.store_procedure(_input(name="report send results honestly", idempotency_key="k1"),
+                                         session=session)
+    assert (merged.id, merged.version) == (first.id, 2)
+
+    replay = await heart.store_procedure(_input(name="report send results honestly", idempotency_key="k1"),
+                                         session=session)
+
+    assert (replay.id, replay.version) == (first.id, 2)
+    assert len(await heart.procedures.list_versions(first.id, session=session)) == 2
+    with pytest.raises(ProcedureConflictError):
+        await heart.store_procedure(_input(name="report send results honestly", description="other",
+                                           idempotency_key="k1"), session=session)
+
+
+async def test_an_empty_idempotency_key_is_refused():
+    with pytest.raises(ValueError):
+        _input(idempotency_key="")
+
+
+async def test_another_agent_neither_replays_nor_merges_nor_reads_history(db, mock_embeddings, session):
+    a = ProcedureManager(db, mock_embeddings, "f102-agent-a")
+    b = ProcedureManager(db, mock_embeddings, "f102-agent-b")
+    first = await a.store(_input(idempotency_key="shared"), session=session)
+
+    other = await b.store(_input(idempotency_key="shared"), session=session)
+
+    assert other.id != first.id
+    assert other.version == 1
+    assert await b.list_versions(first.id, session=session) == []
+    with pytest.raises(ValueError, match="not found"):
+        await b.restore(first.id, 1, session=session)
+
+
+async def test_the_heart_passes_the_dedupe_flag_on(db, mock_embeddings, session):
+    from nous.config import Settings
+    from nous.heart import Heart
+
+    heart = Heart(db, Settings(procedure_dedupe_enabled=False), embedding_provider=mock_embeddings)
+    try:
+        first = await heart.store_procedure(_input(), session=session)
+        second = await heart.store_procedure(_input(name="report send results  honestly"), session=session)
+    finally:
+        await heart.close()
+    assert second.id != first.id
+
+
+async def test_the_stored_event_after_a_merge_names_the_surviving_row(heart, session):
+    events = []
+
+    class _Bus:
+        async def emit(self, event):
+            events.append(event)
+
+    heart._bus = _Bus()
+    first = await heart.store_procedure(_input(), session=session)
+    await heart.store_procedure(_input(name="report send results  honestly", description="incoming"),
+                                session=session)
+
+    assert [e.data["procedure_id"] for e in events] == [str(first.id), str(first.id)]
+    assert events[-1].data["name"] == "Report send results honestly"
+    assert events[-1].data["description"] == "Say a send was accepted, not delivered"
+
+
+async def test_writers_that_do_not_change_the_body_keep_the_version(heart, session):
+    detail = await heart.store_procedure(_input(), session=session)
+    await heart.activate_procedure(detail.id, session=session)
+    await heart.record_procedure_outcome(detail.id, "success", session=session)
+    await heart.retire_procedure(detail.id, session=session)
+    await heart.procedures.reactivate(detail.id, session=session)
+
+    assert (await heart.get_procedure(detail.id, session=session)).version == 1
+    assert len(await heart.procedures.list_versions(detail.id, session=session)) == 1
+
+
+async def test_the_name_lock_never_merges_into_a_skill(heart, session):
+    skill = await heart.store_procedure(_input(name="deploy-service", tags=["skill", "local"]), session=session)
+    learned = await heart.store_procedure(_input(name="Deploy Service"), session=session)
+    lesson_named_like_it = await heart.store_procedure(_input(name="deploy_service", tags=["auto:x"]),
+                                                       session=session)
+    assert learned.id != skill.id
+    assert lesson_named_like_it.id != skill.id
+
+
+async def test_a_stale_conflict_writes_no_version(heart, session):
+    detail = await heart.store_procedure(_input(), session=session)
+    with pytest.raises(ProcedureConflictError):
+        await heart.update_procedure_body(detail.id, _input(description="x"), session=session, expected_version=5)
+    assert [v.version for v in await _versions(session, detail.id)] == [1]
+
+
+async def test_restore_takes_a_name_back_from_a_strategy_card(heart, session):
+    detail = await heart.store_procedure(_input(name="Old name", tags=["manual"]), session=session)
+    await heart.update_procedure_body(detail.id, _input(name="New name", tags=["manual"]), session=session)
+    card = await heart.store_procedure(_input(name="Old name", kind="strategy", tags=["ci"]), session=session)
+
+    restored = await heart.restore_procedure_version(detail.id, 1, session=session)
+
+    assert restored.name == "Old name"
+    assert restored.tags == ["manual"]
+    assert restored.implementation_notes == ["lesson: report acceptance only"]
+    assert (await heart.get_procedure(card.id, session=session)).name != "Old name"
+
+
+async def test_restore_of_an_unknown_procedure_raises(heart, session):
+    from uuid import uuid4
+
+    with pytest.raises(ValueError, match="not found"):
+        await heart.restore_procedure_version(uuid4(), 1, session=session)
+
+
+async def test_two_concurrent_stores_of_one_lesson_leave_one_row(db, mock_embeddings):
+    """Committed (no SAVEPOINT): the advisory lock orders the two creates, so the second merges."""
+    import asyncio
+
+    from sqlalchemy import delete
+
+    agent = "f102-concurrent"
+    manager = ProcedureManager(db, mock_embeddings, agent)
+    try:
+        await asyncio.gather(
+            manager.store(_input()),
+            manager.store(_input(name="report send results honestly", implementation_notes=["evidence: e2"])),
+        )
+        async with db.session() as check:
+            rows = (await check.execute(
+                select(Procedure).where(Procedure.agent_id == agent).where(Procedure.active == True)  # noqa: E712
+            )).scalars().all()
+            assert len(rows) == 1
+            assert rows[0].version == 2
+            assert [v.change_source for v in await manager.list_versions(rows[0].id, session=check)] == [
+                "create", "dedupe_merge"
+            ]
+    finally:
+        async with db.session() as cleanup:
+            await cleanup.execute(delete(Procedure).where(Procedure.agent_id == agent))
+            await cleanup.commit()
+
+
+async def test_a_hand_written_input_is_never_merged(heart, session):
+    """MCP teach stores name + description only: a same-named second teach is its own row."""
+    learned = await heart.store_procedure(_input(), session=session)
+    taught = await heart.store_procedure(
+        ProcedureInput(name="report send results-honestly", domain=_DOMAIN, description="other content"),
+        session=session,
+    )
+    assert taught.id != learned.id
+    assert taught.description == "other content"
+
+
+async def test_a_learned_input_never_merges_into_a_hand_written_row(heart, session):
+    hand_written = await heart.store_procedure(_input(tags=["manual"]), session=session)
+    learned = await heart.store_procedure(_input(name="report send results-honestly"), session=session)
+    assert learned.id != hand_written.id
+    assert (await heart.get_procedure(hand_written.id, session=session)).tags == ["manual"]
+
+
+async def test_a_merge_that_adds_nothing_writes_no_version(heart, session):
+    first = await heart.store_procedure(_input(), session=session)
+    again = await heart.store_procedure(_input(name="report send results honestly"), session=session)
+    assert (again.id, again.version) == (first.id, 1)
+    assert len(await heart.procedures.list_versions(first.id, session=session)) == 1
+
+
+async def test_a_merge_records_the_incoming_description(heart, session):
+    first = await heart.store_procedure(_input(), session=session)
+    await heart.store_procedure(
+        _input(name="report send results honestly", description="Incoming wording", core_patterns=["new"]),
+        session=session,
+    )
+    versions = await heart.procedures.list_versions(first.id, session=session)
+    assert "Incoming wording" in versions[-1].reason

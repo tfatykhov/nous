@@ -547,27 +547,13 @@ class Heart:
     # ==================================================================
 
     async def store_procedure(self, input: ProcedureInput, session: AsyncSession | None = None) -> ProcedureDetail:
-        """Store a new procedure."""
+        """Store a new procedure, or return the one it duplicates (F102, ProcedureManager.store)."""
         result = await self.procedures.store(input, session)
 
         # F040: Emit on in-process EventBus for procedure graph linking.
         # The DB audit event (via _emit_event) does NOT reach the bus.
-        # A job lesson gets no graph edges, so it is not emitted.
-        if self._bus is not None and not is_job_lesson(input):
-            await self._bus.emit(
-                Event(
-                    type="procedure_stored",
-                    agent_id=self.agent_id,
-                    data={
-                        "procedure_id": str(result.id),
-                        "name": input.name,
-                        "domain": input.domain or "",
-                        "description": input.description or "",
-                        "tags": input.tags or [],
-                    },
-                )
-            )
-
+        # Built from the stored row, not the input: a dedupe merge returns the row it merged into.
+        await self._emit_procedure_relink(result)
         return result
 
     async def update_procedure_body(
@@ -606,7 +592,7 @@ class Heart:
         return await self.procedures.list_versions(procedure_id, session)
 
     async def _emit_procedure_relink(self, result: ProcedureDetail) -> None:
-        """Mirror store_procedure: re-link a rewritten body in the graph (not a job lesson's)."""
+        """Emit procedure_stored for a stored or rewritten body, for graph linking (a job lesson gets no edges)."""
         if self._bus is not None and not is_job_lesson(result):
             await self._bus.emit(
                 Event(

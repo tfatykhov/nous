@@ -47,7 +47,8 @@ consolidation paths had created them.
   (`restore_procedure_version`, `list_procedure_versions`). No REST or tool surface: REST has only the
   list endpoint, so there is no obvious per-procedure place for one.
 - **Not versioned:** retire, reactivate and activation and outcome counts don't change the body. A strategy
-  card renamed by `_take_name_from_card` is bookkeeping, not an edit. The diag scripts' raw SQL
+  card renamed by `_take_name_from_card` is bookkeeping, not an edit, so a card's latest snapshot can hold
+  its old name. The diag scripts' raw SQL
   (`scripts/diag/proc_consolidate.py`, `backfill_proc_descriptions.py`) writes bodies without a
   version; they are one-off operator tools.
 
@@ -59,27 +60,35 @@ In order:
    wrote (the v1 of a created row, or the version a merge wrote), with `request_fingerprint`, the sha256
    of the request without its key. The same key and request returns that procedure. The same key with a
    different request raises `ProcedureConflictError`. The key is unique per agent (partial unique index).
-2. **Name lock** (flag on). An active how-to input that is not a skill, compared with active how-to
-   procedures that are not skills. Strategy cards and job lessons are never compared. A same-named
-   procedure is the one whose normalized name (casefolded, `-`/`_` as spaces, whitespace collapsed)
-   matches. A hit is merged.
-3. **Semantic near-duplicate** (flag on, Postgres). An auto-learned input (`auto:*` tag) is probed with
-   the embedding `store()` already computed, through `_nearest_summaries`, against active auto-learned
-   procedures. The nearest at or above `NOUS_PROCEDURE_DEDUPE_THRESHOLD` (0.85) is merged into.
+Steps 2 and 3 apply only to an active **auto-learned** input (an `auto:*` tag; never a skill, a strategy
+card or a job lesson), and only merge into an active auto-learned procedure (`LEARNED_WHERE`).
+
+2. **Name lock** (flag on). The target is the procedure whose normalized name matches (casefolded, `-`/`_`
+   as spaces, whitespace collapsed). A hit is merged.
+3. **Semantic near-duplicate** (flag on, Postgres). The input is probed through `_nearest_summaries` with
+   the embedding `store()` already computed. The nearest procedure at or above
+   `NOUS_PROCEDURE_DEDUPE_THRESHOLD` (0.85) is merged into. Without an embedding the check is skipped,
+   with a WARNING.
 
 **Merge.** The incoming list fields are unioned into the existing row (existing order first, new items
-appended), and the row is re-embedded. Its name, description, domain, kind, runtime_metadata and stats
-stay. The new version's reason records the rule, the cosine and the incoming name, and every merge is
-logged at INFO.
+appended), and the row is re-embedded. If that fails, the old vector is kept: it matched a moment ago.
+The row's name, description, domain, kind, runtime_metadata and stats stay. The new version's reason
+records the rule (with the cosine) and the incoming name and description. Each merge is logged at INFO
+and writes a `procedure_merged` event. A merge that adds nothing writes nothing, unless it carries an
+idempotency key to keep. A target retired between the probe and the row lock is not merged into; the
+input is inserted instead. `Heart.store_procedure` emits `procedure_stored` from the returned row, so
+after a merge the graph links the surviving row's own text.
 
 Creates that dedupe or carry a key are serialized per agent with `pg_advisory_xact_lock`, so two learners
-storing the same lesson at once can't both miss each other's row. Strategy-card and job-lesson creates
-take no lock.
+storing the same lesson at once can't both miss each other's row. The input is embedded before the lock
+is taken. Other creates take no lock.
 
-**Why skills are left out.** `learn_skill` and the bootstrap look a skill up by name and *replace* its body
-(`update_body`). A union would keep stale patterns. Distinct hand-authored skills also sit close together:
-`evolution-gate` and `algorithm-evolution` are at cosine 0.907. So skills are left out by population, not by
-threshold.
+**Why only auto-learned procedures.** `learn_skill` and the bootstrap look a skill up by name and
+*replace* its body (`update_body`), so a union would keep stale patterns. Distinct hand-authored skills
+also sit close together: `evolution-gate` and `algorithm-evolution` are at cosine 0.907. A hand-written
+input (MCP `teach` stores only a name and a description) would lose its description in a merge. And a
+hand-written target that took an `auto:*` tag would turn into a learned row: the learner would append
+evidence to it, and the report could retire it. So these are left out by population, not by threshold.
 
 **Why 0.85.** It is the procedure learner's `_COVERED_COSINE`, already trusted in production to call a
 lesson covered without an LLM check. On the live catalog every auto-learned pair at or above 0.85 is a
@@ -92,7 +101,9 @@ With the flag off, `store()` is the legacy insert, apart from the version row an
 
 ## One-off report: `scripts/diag/procedure_dedupe_report.py`
 
-It is a dry run by default (read-only transaction, nothing written). It uses the same population and cosine
+It is a dry run by default (read-only transaction, nothing written). `--threshold` must be within [0, 1],
+and `--apply` below 0.80 needs `--force`. The report counts the learned procedures it could not
+compare because they have no embedding. It uses the same population and cosine
 as the semantic merge. Pairs at or above the threshold link procedures into clusters. The survivor is the
 best by Laplace effectiveness, then activations, then the oldest. Only members at or above the threshold
 *to the survivor* are listed as duplicates; a member linked in through another member is reported and
