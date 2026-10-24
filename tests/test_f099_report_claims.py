@@ -224,6 +224,29 @@ def test_a_rest_merge_needs_put(command, verified):
 
 
 @pytest.mark.parametrize(
+    ("command", "level"),
+    [
+        # an option's value is text, not the PR the command acts on
+        ("gh pr merge 12 --body 'see https://github.com/o/r/pull/99'", "none"),
+        ("gh pr merge 12 -b 'closes #99' --squash", "none"),
+        ("gh pr merge 12 --subject 99", "none"),
+        ("gh pr merge 12 -t 99", "none"),
+        ("gh api -X PUT repos/o/r/pulls/12/merge -f commit_title='Merge /pull/99'", "none"),
+        ("gh api -X PUT repos/o/r/pulls/12/merge -f commit_title=repos/o/r/pulls/99/merge", "none"),
+        ("gh pr merge 99 --subject 12", "exact"),
+        ("gh pr merge https://github.com/o/r/pull/99 --body 'replaces #12'", "exact"),
+        ("gh api -X PUT repos/o/r/pulls/99/merge -f commit_title='Merge #12'", "exact"),
+        # a global option before the subcommand
+        ("gh -R o/r pr merge 99", "exact"),
+        ("gh --repo o/r pr merge 12", "none"),
+    ],
+)
+def test_a_merge_names_its_pr_by_an_operand_not_an_option_value(command, level):
+    result = _verify("PR #99 merged.", [Evidence("bash", {"command": command}, exit_code=0)])
+    assert [c.evidence for c in result.claims] == [level]
+
+
+@pytest.mark.parametrize(
     ("command", "verified"),
     [
         ("gh api repos/o/r/pulls", False),  # a list

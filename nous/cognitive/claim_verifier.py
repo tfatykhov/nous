@@ -1576,6 +1576,29 @@ def _gh_api_method(args: tuple[str, ...]) -> str:
     return "POST" if fields else "GET"
 
 
+# gh options that take a value (`gh help api`, `gh help pr merge`, the global `-R`): the value is text -- a
+# title, a body, a field -- never the command's operand, so `--body 'see /pull/99'` names no PR 99.
+_GH_VALUE_OPTIONS = frozenset({
+    "-R", "--repo", "--hostname", "-X", "--method", "-f", "-F", "--field", "--raw-field", "--input", "-H",
+    "--header", "-q", "--jq", "-t", "--template", "--cache", "-p", "--preview", "--subject", "-b", "--body",
+    "--body-file", "-A", "--author-email", "--match-head-commit",
+})
+
+
+def _gh_operands(args: tuple[str, ...]) -> list[str]:
+    """The operands of a gh invocation: ``_positional`` without the values its options take."""
+    found: list[str] = []
+    value = False
+    for a in args:
+        if value:
+            value = False
+        elif a in _GH_VALUE_OPTIONS:
+            value = True
+        elif not a.startswith(("-", "\n", "\t")):
+            found.append(a)
+    return found
+
+
 def _pr_numbers(args: list[str]) -> set[str]:
     """The pull-request numbers a command names (`4`, `#4`, `.../pull/4`, `.../pulls/4/merge`)."""
     found: set[str] = set()
@@ -1596,7 +1619,7 @@ def _report_hit(kind: str, prog: str, args: tuple[str, ...], number: str | None,
 
     ``pr``: the claim names a pull request, which a local `git merge` does not merge."""
     base = _base(prog)
-    pos = _positional(args)
+    pos = _gh_operands(args) if base == "gh" else _positional(args)
     if _has_flag(args, _HELP_FLAGS):
         return False
     if kind in ("merge", "pr_create") and base in ("gh", "hub", "git"):
