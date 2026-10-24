@@ -224,6 +224,29 @@ def test_a_rest_merge_needs_put(command, verified):
 
 
 @pytest.mark.parametrize(
+    ("command", "level"),
+    [
+        # an option's value is text, not the PR the command acts on
+        ("gh pr merge 12 --body 'see https://github.com/o/r/pull/99'", "none"),
+        ("gh pr merge 12 -b 'closes #99' --squash", "none"),
+        ("gh pr merge 12 --subject 99", "none"),
+        ("gh pr merge 12 -t 99", "none"),
+        ("gh api -X PUT repos/o/r/pulls/12/merge -f commit_title='Merge /pull/99'", "none"),
+        ("gh api -X PUT repos/o/r/pulls/12/merge -f commit_title=repos/o/r/pulls/99/merge", "none"),
+        ("gh pr merge 99 --subject 12", "exact"),
+        ("gh pr merge https://github.com/o/r/pull/99 --body 'replaces #12'", "exact"),
+        ("gh api -X PUT repos/o/r/pulls/99/merge -f commit_title='Merge #12'", "exact"),
+        # a global option before the subcommand
+        ("gh -R o/r pr merge 99", "exact"),
+        ("gh --repo o/r pr merge 12", "none"),
+    ],
+)
+def test_a_merge_names_its_pr_by_an_operand_not_an_option_value(command, level):
+    result = _verify("PR #99 merged.", [Evidence("bash", {"command": command}, exit_code=0)])
+    assert [c.evidence for c in result.claims] == [level]
+
+
+@pytest.mark.parametrize(
     ("command", "verified"),
     [
         ("gh api repos/o/r/pulls", False),  # a list
@@ -1134,6 +1157,204 @@ def test_a_telegram_send_only_could_have_backed_a_send_elsewhere(text):
 def test_a_telegram_send_backs_no_addressed_email_claim(text):
     result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
     assert not result.verified and result.claims[0].evidence == "none"
+
+
+@pytest.mark.parametrize("text", ["Message sent to alice@example.com.", "Messages were sent to alice@example.com."])
+def test_a_passive_send_names_its_recipient(text):
+    assert _verify(text, [Evidence("send_email", {"to": "alice@example.com"})]).verified
+    result = _verify(text, [Evidence("send_email", {"to": "bob@x.io"})])
+    assert [c.evidence for c in result.claims] == ["none"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Message sent by email.", "Message sent by text.", "Message sent by Friday.", "Message sent by this morning."],
+)
+def test_a_send_by_a_channel_or_a_time_is_still_the_agents_claim(text):
+    # "by" names a channel or a time here, not someone else who sent it
+    assert [c.kind for c in _verify(text).claims] == ["email"]
+    assert not _verify(text).verified
+
+
+def test_a_send_by_someone_else_is_not_the_agents_claim():
+    assert _verify("Message sent by the scheduler.").claims == []
+
+
+# THE RULE (claim_verifier._ELSEWHERE; the NOUS_CLAIM_VERIFICATION_REPORTS_ENABLED row says the same): with one
+# successful send_file (the owner's Telegram chat), a send claim is "exact" unless its clause names a
+# DIFFERENT destination, then "plausible"; one naming an e-mail address is "none". A different destination
+# is mail (as the verb, the thing sent, the channel or the send_email tool), a named channel other than
+# Telegram, or a recipient (a name, a handle, a channel, a person or group) after "to", "shared ... with" or
+# "cc". You, the owner, the user, the chat, a DM, the bot and Telegram are not; nor is an infinitive, a
+# format, a language, an acronym, a time, an idiom ("due to", "a link to", "converted to"), a content word,
+# a tool other than send_email, a link, or anything after via/through/using that is no channel or mail.
+# The owner's own name is not known to the verifier, so "to Tim" stays plausible.
+E, P = "exact", "plausible"
+SEND_TAILS = [
+    ("", E),
+    # times ("by" a time is no destination)
+    (" on Monday", E),
+    (" on time", E),
+    (" at 7am", E),
+    (" today", E),
+    (" tonight", E),
+    (" this morning", E),
+    (" by 5pm", E),
+    (" by Friday", E),
+    (" by tomorrow", E),
+    (" by this morning", E),
+    # content
+    (" with a summary", E),
+    (" with the chart attached", E),
+    (" as a .docx", E),
+    (" as PDF", E),
+    (" in a zip", E),
+    (" in two parts", E),
+    (" with the email summary", E),
+    (" with an email-style layout", E),
+    (" with Gmail-style formatting", E),
+    (" in plain text", E),
+    (" with a link to the report", E),
+    # format conversions and other "to"s that name no one
+    (" converted to PDF", E),
+    (" converted to HTML", E),
+    (" converted to DOCX", E),
+    (" converted to CSV", E),
+    (" converted to JSON", E),
+    (" converted to pdf", E),
+    (" converted to Markdown", E),
+    (" translated to French", E),
+    (" to review", E),
+    (" to read on Monday", E),
+    (" up to date", E),
+    (" due to a delay", E),
+    (" according to plan", E),
+    (" moved to Friday", E),
+    (" to the end", E),
+    # you, the owner, the user, the chat
+    (" to you", E),
+    (" to the owner", E),
+    (" to the user", E),
+    (" to your DMs", E),
+    (" to me", E),
+    (" to Tim", P),  # the owner's name is not known to the verifier
+    # Telegram
+    (" via Telegram", E),
+    (" on Telegram", E),
+    (" to Telegram", E),
+    (" through the bot", E),
+    (" over the chat", E),
+    (" via the Telegram bot", E),
+    (" via DM", E),
+    (" over Telegram", E),
+    # tools and links
+    (" via send_file", E),
+    (" using send_file", E),
+    (" through send_file", E),
+    (" via a link", E),
+    (" as a link", E),
+    (" via a shared link", E),
+    (" through send_email", P),
+    (" via send_email", P),  # the mail tool names mail
+    # mail
+    (" via email", P),
+    (" by email", P),
+    (" by e-mail", P),
+    (" over email", P),
+    (" through email", P),
+    (" using email", P),
+    (" in the email thread", P),
+    (" through the mail server", P),
+    (" via e-mail", P),
+    # another channel
+    (" via Gmail", P),
+    (" via SMS", P),
+    (" by text", P),
+    (" via Slack", P),
+    (" on WhatsApp", P),
+    (" on Signal", P),
+    (" via Teams", P),
+    (" on Discord", P),
+    (" over iMessage", P),
+    (" in Outlook", P),
+    # another recipient
+    (" to Bob", P),
+    (" to @bob", P),
+    (" to #general", P),
+    (" in #general", P),
+    (" to the team channel", P),
+    (" to the Telegram group", P),
+    (" to the Telegram channel", P),
+    (" to stakeholders", P),
+    (" to them", P),
+    (" to your team", P),
+    (" to the team", P),
+    (" to bob", P),
+    (" to everyone", P),
+    (" to Google Drive", P),
+    (" to the CEO", P),
+    (" to Éric", P),
+    # combined
+    (" via Telegram on Monday with a summary", E),
+    (" as PDF to the owner", E),
+    (" to you on time", E),
+    (" via a link to the report", E),
+    (" via send_file at 7am", E),
+    (" to the user as a .docx", E),
+    (" on time via email", P),
+    (" to you via Slack", P),
+    (" on Monday to Bob", P),
+    (" via a link to Bob", P),
+    (" with a summary to stakeholders", P),
+    (" converted to PDF by email", P),
+    (" via Telegram to Bob", P),
+    (" to the owner and Bob", P),
+    (" to you and the team", P),
+    (" to you and @bob", P),
+    (" to you and on time", E),
+]
+SEND_CLAIMS = ["I sent the report{}.", "I forwarded the summary{}.", "Message sent{}.", "I sent the message{}."]
+
+
+@pytest.mark.parametrize(("tail", "level"), SEND_TAILS, ids=[tail.strip() or "-" for tail, _ in SEND_TAILS])
+@pytest.mark.parametrize("claim", SEND_CLAIMS)
+def test_the_send_destination_matrix(claim, tail, level):
+    result = _verify(claim.format(tail), [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [level]
+    assert result.verified is (level == E)
+
+
+def test_a_send_that_landed_in_the_chat_is_no_first_person_claim():
+    # the chat path's rule (_NOT_ELSEWHERE): the effect landed in the reply; the report's own form is a claim
+    for tail in (" in the chat", " to your chat", " with a link to the dashboard"):
+        assert _verify(f"I sent the report{tail}.").claims == []
+        result = _verify(f"Message sent{tail}.", [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+        assert [c.evidence for c in result.claims] == [E]
+
+
+@pytest.mark.parametrize("claim", SEND_CLAIMS)
+def test_a_send_to_an_address_is_never_a_telegram_send(claim):
+    result = _verify(claim.format(" to alice@example.com"), [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == ["none"]
+
+
+@pytest.mark.parametrize(
+    ("tail", "level"),
+    [
+        (" to the user's team", P),
+        (" to the owner’s team", P),
+        (" to your team", P),
+        (" to the user's chat", E),
+        (" to the user's DMs", E),
+        (" to the user's Telegram", E),
+        # a Telegram group or channel is another chat, possessive or not
+        (" to the user's Telegram group", P),
+        (" to the owner's Telegram channel", P),
+    ],
+)
+def test_a_possessive_of_the_owner_is_self_only_for_their_chat(tail, level):
+    result = _verify(f"I sent the report{tail}.", [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [level]
 
 
 def test_a_verifier_given_no_runner_takes_no_bash_call_for_a_runner_call():

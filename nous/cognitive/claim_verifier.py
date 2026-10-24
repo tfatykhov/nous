@@ -205,10 +205,13 @@ _DEPLOY_OBJECT = (rf"(?=\s+{_DET}(?:[\w-]+\s+){{0,2}}?(?:builds?|releases?|fix(?
 # Line- or sentence-initial: "Email sent to x", "Done. Saved to /tmp/x.md".
 _OPENING = r"(?:(?<![^\n])|(?<=[.!?]\s)|(?<=[✓✅]\s))"
 # "... by the scheduled task": someone else's completion, not the agent's;
-# "by 9am" and "by me" are not. Dots inside words pass, or the target would
-# shrink to `/srv/q3` to keep ".md by" out of reach.
+# "by 9am", "by Friday", "by me" and a channel ("by email", "by text") are not.
+# Dots inside words pass, or the target would shrink to `/srv/q3` to keep
+# ".md by" out of reach.
 _NOT_BY = (r"(?!(?:[^.\n;]|\.(?=\S)){0,60}?\bby\s+(?!me\b|myself\b|\d|noon\b|midnight\b|tonight\b"
-           r"|tomorrow\b|end\b|eod\b|eob\b|then\b|now\b|the\s+end\b)[\w$])")
+           r"|tomorrow\b|today\b|end\b|eod\b|eob\b|cob\b|then\b|now\b|the\s+end\b|next\b|lunch\b"
+           r"|this\s+(?:morning|afternoon|evening|week)\b|(?:mon|tues|wednes|thurs|fri|satur|sun)day\b"
+           r"|(?:e-?)?mail\b|text\b|sms\b|post\b|courier\b|hand\b)[\w$])")
 _MESSAGE = r"\b(?:e-?mail|message|report|note|reminder|summary|heads-up|invite|notification|alert|digest)\b"
 
 # (pattern, kind). Patterns that open with the subject group are claims only
@@ -1421,21 +1424,72 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
     return _best(levels)
 
 
-# A send claim whose clause names another destination than the owner's Telegram: a send_file could have
-# reached it only through a chat id it was given, never certainly. A destination is mail as the verb, the
-# thing sent or the channel ("emailed", "Email sent", "via email", "in the email thread", never "the email
-# summary"), a named channel ("on WhatsApp", "via <anything but Telegram>") or whoever follows "to" but
-# you, the owner, the chat, Telegram or an infinitive ("to Bob", "to them", "to the Telegram group"). A
-# time or content word ("on Monday", "with a summary") is none.
+# A send claim whose clause names another destination than the owner's Telegram chat: a send_file could have
+# reached it only through a chat id it was given, never certainly. THE RULE: a destination is named when the
+# clause has
+#   1. mail as the verb, the thing sent, the channel or the tool: "emailed", "mailed", "Email sent", "the
+#      email.", "via/by/over/through/in/using email", "the mail server", "send_email" (never "the email
+#      summary", "email-style");
+#   2. a named channel other than Telegram after via/on/over/through/by/in/into/using: Slack, WhatsApp,
+#      Signal, Discord, SMS, iMessage, Teams, Messenger, WeChat, Gmail, Outlook, LinkedIn, Twitter, and "text"
+#      after by/via/over (never "Gmail-style");
+#   3. a recipient after "to", "shared ... with" or "cc" ("a link to" and "to you and" take a name, a handle
+#      or a group): a name (a capital and a lowercase letter, "Bob", "Tim" -- the owner's name is not known
+#      here), a handle "@bob", a channel "#general" (also after in/on/into/via/over), or a person or group in
+#      lowercase ("them", "stakeholders", "bob", "the team", "your team", "the Telegram group").
+# Nothing else is: not you, the owner, the user, the chat, a DM, the bot or Telegram; not an infinitive ("to
+# review"), a format, language or acronym ("to PDF", "to pdf", "to Markdown", "to HTML", "to French"), a time
+# ("to Friday", "to 5pm", "to date", "to the end"), an idiom ("due to", "up to", "according to", "a link to
+# the report", "converted to"); not a time or content word ("on Monday", "by 5pm", "with a summary", "as a
+# .docx"); not a tool, a link or anything else after via/through/using ("via send_file", "via a link", "via DM").
+_NOT_A_RECIPIENT = (
+    # you, the owner, the user, the chat, the bot, Telegram (but its group or channel is another chat, and
+    # "the user's team" is someone else)
+    r"(?!(?:you|yourself|me|myself|here|(?:(?:the|your|my|our|this)\s+)?(?:owner|user|chat|dms?|bot"
+    r"|telegram(?!\s+(?:group|channel)\b)))\b"
+    r"(?!['’]s\s+(?!(?:chat|dms?|telegram(?!\s+(?:group|channel)\b)|inbox)\b)\w))"
+    # an infinitive
+    r"(?!(?:review|read|check|confirm|approve|see|look|keep|share|sign|use|be|date|make|help|show|let|get"
+    r"|give|reply|respond|follow|discuss|decide|go|do|start|finish|test|verify|track|compare|print|download"
+    r"|open|view|save|edit|update|fix|run|ensure|avoid|prepare|answer|inform|notify|remind|explain"
+    r"|summari[sz]e|highlight|cover|include|mark|close|cancel|catch|meet|take|bring)\b)"
+    # a format or a language
+    r"(?!(?:pdf|html?|docx?|csv|tsv|json|ya?ml|xml|xlsx?|pptx?|odt|rtf|txt|text|plain\s+text|markdown|md|png"
+    r"|jpe?g|gif|svg|webp|zip|tar|epub|latex|tex|excel|word|powerpoint|english|french|german|spanish|russian"
+    r"|italian|portuguese|chinese|japanese|korean|arabic|dutch|ukrainian|hebrew)\b|\.\w)"
+    # a time
+    r"(?!(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may|june"
+    r"|july|august|september|october|november|december|today|tomorrow|tonight|noon|midnight|now|later|eod"
+    r"|cob|next\s+week|the\s+(?:end|top|bottom|start|beginning|latest|previous|same|next|last))\b)"
+    # a name (a capital and a lowercase letter: "PDF" is an acronym), a word in lowercase, a handle, a channel
+    r"(?:(?-i:[A-ZÀ-Þ][a-zß-ÿ]|[a-zß-ÿ])|[@#]\w)"
+)
 _ELSEWHERE = re.compile(
+    # 1. mail
     r"\b(?:e-?)?mail(?:ed|ing)\b"
-    r"|\b(?:e-?)?mails?\b(?=\s*(?:[.,;:!?)]|$)|\s+(?:was|were|is|has|have|sent|to|via|by|with|on|at|for|about)\b)"
-    r"|\b(?:in|into|over|through|by)\s+(?:(?:the|an?)\s+)?(?:e-?)?mail\b"
-    r"|\b(?:via|on|over|through|by|in|into|using)\s+(?:(?:the|a)\s+)?(?:slack|whatsapp|signal|discord|sms"
-    r"|imessage|teams|messenger|wechat|gmail|outlook|linkedin|twitter|text)\b"
-    r"|\bvia\s+(?!(?:(?:the|a|your)\s+)?(?:telegram|bot|chat)\b)\w"
-    r"|\bto\s+(?!(?:you|yourself|me|(?:(?:the|your|my)\s+)?(?:owner|chat|dm|telegram(?!\s+(?:group|channel)\b)))\b)"
-    r"(?!(?:review|read|check|confirm|approve|see|look|keep|share|sign|use|be|date)\b)[\w@#]",
+    r"|\b(?:e-?)?mails?\b(?=\s*(?:[.,;:!?)]|$)"
+    r"|\s+(?:was|were|is|has|have|sent|to|via|by|with|on|at|for|about|and|or)\b)"
+    r"|\b(?:via|using|in|into|over|through|by)\s+(?:(?:the|an?|your|my)\s+)?(?:e-?)?mail\b(?!-)"
+    r"|\bsend_e?mail\b"
+    # 2. a named channel
+    r"|\b(?:via|on|over|through|by|in|into|using)\s+(?:(?:the|a|your|my)\s+)?(?:slack|whatsapp|signal|discord"
+    r"|sms|imessage|teams|messenger|wechat|gmail|outlook|linkedin|twitter)\b(?!-)"
+    r"|\b(?:via|over|by)\s+(?:a\s+)?text\b(?!-)"
+    # 3. a recipient
+    r"|(?<!\bdue )(?<!\bprior )(?<!\bup )(?<!\bthanks )(?<!\baccording )(?<!\bcompared )(?<!\bnext )"
+    r"(?<!\baddition )(?<!\border )(?<!\bclose )(?<!\bsimilar )(?<!\brelative )(?<!\brespect )(?<!\bregard )"
+    r"(?<!\blink )(?<!\blinks )(?<!\bconvert )(?<!\bconverted )(?<!\bconverting )(?<!\bexported )"
+    r"(?<!\btranslated )(?<!\brendered )(?<!\bformatted )(?<!\bcompiled )(?<!\bchanged )(?<!\bswitched )"
+    rf"\bto\s+{_NOT_A_RECIPIENT}"
+    # "a link to Bob" is sent to Bob; "a link to the report" points at the report
+    rf"|\blinks?\s+to\s+(?=(?-i:[A-ZÀ-Þ][a-zß-ÿ])|[@#]\w){_NOT_A_RECIPIENT}"
+    # "to you and Bob", "to the owner and the team"
+    r"|\bto\s+(?:(?:the|your|my)\s+)?(?:you|me|owner|user|chat)\s+(?:and|&)\s+"
+    rf"(?=(?-i:[A-ZÀ-Þ][a-zß-ÿ])|[@#]\w|(?:the|your|my|our|his|her|their)\s|(?:them|him|her|everyone)\b)"
+    rf"{_NOT_A_RECIPIENT}"
+    rf"|\bshared\s+(?:\S+\s+){{0,4}}?with\s+{_NOT_A_RECIPIENT}"
+    r"|\bcc(?:['’]?e?d)?\s+(?:(?-i:[A-ZÀ-Þ][a-zß-ÿ])|@\w)"
+    r"|\b(?:in|on|into|via|over)\s+#\w",
     re.IGNORECASE)
 
 
@@ -1524,6 +1578,29 @@ def _gh_api_method(args: tuple[str, ...]) -> str:
     return "POST" if fields else "GET"
 
 
+# gh options that take a value (`gh help api`, `gh help pr merge`, the global `-R`): the value is text -- a
+# title, a body, a field -- never the command's operand, so `--body 'see /pull/99'` names no PR 99.
+_GH_VALUE_OPTIONS = frozenset({
+    "-R", "--repo", "--hostname", "-X", "--method", "-f", "-F", "--field", "--raw-field", "--input", "-H",
+    "--header", "-q", "--jq", "-t", "--template", "--cache", "-p", "--preview", "--subject", "-b", "--body",
+    "--body-file", "-A", "--author-email", "--match-head-commit",
+})
+
+
+def _gh_operands(args: tuple[str, ...]) -> list[str]:
+    """The operands of a gh invocation: ``_positional`` without the values its options take."""
+    found: list[str] = []
+    value = False
+    for a in args:
+        if value:
+            value = False
+        elif a in _GH_VALUE_OPTIONS:
+            value = True
+        elif not a.startswith(("-", "\n", "\t")):
+            found.append(a)
+    return found
+
+
 def _pr_numbers(args: list[str]) -> set[str]:
     """The pull-request numbers a command names (`4`, `#4`, `.../pull/4`, `.../pulls/4/merge`)."""
     found: set[str] = set()
@@ -1544,7 +1621,7 @@ def _report_hit(kind: str, prog: str, args: tuple[str, ...], number: str | None,
 
     ``pr``: the claim names a pull request, which a local `git merge` does not merge."""
     base = _base(prog)
-    pos = _positional(args)
+    pos = _gh_operands(args) if base == "gh" else _positional(args)
     if _has_flag(args, _HELP_FLAGS):
         return False
     if kind in ("merge", "pr_create") and base in ("gh", "hub", "git"):
@@ -1662,7 +1739,7 @@ _WORK_ID = rf"(?:\s+|\s*[(:#]\s*)`?(?:{_JOB_ID}|{_HEX_ID})`?"
 # (pattern, kind, attempt_only). Active forms need the first person or a
 # sentence opening ("Merged PR #4."): "Tim merged PR #4" is not the agent's.
 _REPORT_PATTERNS: list[tuple[str, str, bool]] = [
-    (rf"\b(?:e-?mails?|messages?){_PASSIVE}sent\b{_NOT_BY}", "email", False),
+    (rf"\b(?:e-?mails?|messages?){_PASSIVE}sent\b(?:\s+to\s+{_ADDRESS})?{_NOT_BY}", "email", False),
     (rf"{_OPENING}(?:sent|e-?mailed)\s+(?:the\s+|an\s+)?e-?mail\b(?:\s+to\s+{_ADDRESS})?", "email", False),
     (rf"\b{_PR}{_PASSIVE}merged\b{_NOT_BY}", "merge", False),
     (rf"(?:{_FIRST}|{_OPENING})merged\s+(?:the\s+)?(?:{_PR}|#\d+|branch)", "merge", False),
