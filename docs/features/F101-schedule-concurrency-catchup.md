@@ -75,7 +75,7 @@ For each due recurring schedule, `_fire_with_policies`:
 3. Works out the number of runs (above). For each run it calls the concurrency gate and then either records the suppressed fire or starts the run. Starting a run uses the F064.5 continuation bookkeeping, and the row is re-read between runs so that a continuation cycle carries forward.
 4. Advances the schedule once: `next_fire_at` is the next slot after now, `fire_count` grows by the runs started, and `last_fired_at` is set only if a run started. The slot advances even when every run was coalesced or skipped.
 
-**Failures.** An error before the first run starts (queue full, closed container, database) propagates as before F101: the schedule is not advanced and is retried. An error after a run has started ends the catch-up there: the runs already started are counted and the schedule advances, so the next check cannot start the same slots again.
+**Failures.** An error before the first run starts (queue full, closed container, database) propagates as before F101: the schedule is not advanced and is retried. An error after a run has started ends the catch-up there, and so does a cancellation. The runs already started are counted and the schedule advances, so the next check cannot start the same slots again.
 
 ## Manual run
 
@@ -85,7 +85,7 @@ For each due recurring schedule, `_fire_with_policies`:
 |----------|------|
 | 202 `{"status": "started", "run_id", "schedule_id"}` | a run was started |
 | 200 `{"status": "coalesced"/"skipped", "run_id", "schedule_id"}` | the policy held it back; `run_id` is the active run |
-| 404 | no active schedule of this agent with that id |
+| 404 | no active recurring schedule of this agent with that id (a one-shot schedule's own fire takes no fire lock, so it has no manual run) |
 | 409 | the flag is off, another fire holds the lock, the queue is full, or the schedule's container intention is closed |
 | 400 | malformed id |
 

@@ -63,6 +63,10 @@ class ScheduleBusy(RuntimeError):
     """F101: another fire of the same schedule holds its fire lock."""
 
 
+class ScheduleNotFound(LookupError):
+    """F101: no active recurring schedule of this agent has that id."""
+
+
 async def create_fire(
     heart: Heart,
     settings: Settings,
@@ -203,13 +207,19 @@ async def _suppress_if_active(
 async def run_schedule_now(heart: Heart, settings: Settings, schedule_id: UUID, *, bus: Any = None) -> FireResult:
     """F101: start one run of an active schedule now, unless its concurrency policy holds it back.
 
-    Leaves next_fire_at, fire_count and the continuation cycle alone. Raises ``LookupError``
-    for an unknown, inactive or other agent's schedule, ``ScheduleBusy`` when another fire of
-    it is in progress, and create_fire's ``ValueError`` (queue full, container closed).
+    Leaves next_fire_at, fire_count and the continuation cycle alone. Raises ``ScheduleNotFound``
+    for an unknown, inactive, one-shot or other agent's schedule (a one-shot schedule's own fire
+    does not take the fire lock), ``ScheduleBusy`` when another fire of it is in progress, and
+    create_fire's ``ValueError`` (queue full, container closed).
     """
     schedule = await heart.schedules.get(schedule_id)
-    if schedule is None or schedule.agent_id != settings.agent_id or not schedule.active:
-        raise LookupError(f"no active schedule {schedule_id}")
+    if (
+        schedule is None
+        or schedule.agent_id != settings.agent_id
+        or not schedule.active
+        or schedule.schedule_type != "recurring"
+    ):
+        raise ScheduleNotFound(f"no active recurring schedule {schedule_id}")
     async with _fire_lock(heart, schedule_id) as taken:
         if not taken:
             raise ScheduleBusy(f"schedule {schedule_id} is being fired")
@@ -413,7 +423,8 @@ class TaskScheduler:
         check), the row is re-read and each due run passes the concurrency gate. The slot then
         advances, also when every run was coalesced or skipped. An error before the first run
         started propagates and leaves the schedule unadvanced (retried, as before F101); one
-        after it ends the catch-up there, and the runs already started are counted.
+        after it (a cancellation too) ends the catch-up there, and the runs already started
+        are counted, so the next check cannot start the same slots again.
         """
         async with _fire_lock(self._heart, schedule.id) as taken:
             if not taken:
@@ -422,25 +433,30 @@ class TaskScheduler:
             schedule = await self._heart.schedules.get(schedule.id)
             if schedule is None or not schedule.active or schedule.next_fire_at is None or schedule.next_fire_at > now:
                 return 0
+            schedule_id = schedule.id
             runs = _runs_due(schedule, now, self._settings)
             started = 0
+            finished = False
             try:
                 for i in range(runs):
                     if i and schedule.continuation_turns:
                         # The continuation cycle moved on with the previous run.
-                        schedule = await self._heart.schedules.get(schedule.id)
+                        schedule = await self._heart.schedules.get(schedule_id)
                     if await _suppress_if_active(self._heart, self._settings, schedule, now, self._bus, "schedule"):
                         continue
                     await self._enqueue(schedule, started)
                     started += 1
+                finished = True
             except Exception:
                 if not started:
                     raise
                 logger.warning(
                     "Schedule %s: catch-up stopped after %d of %d run(s)",
-                    schedule.id.hex[:8], started, runs, exc_info=True,
+                    schedule_id.hex[:8], started, runs, exc_info=True,
                 )
-            await self._heart.schedules.advance(schedule.id, now, fires=started)
+            finally:
+                if finished or started:
+                    await self._heart.schedules.advance(schedule_id, now, fires=started)
         return started
 
     async def _enqueue(self, schedule: Schedule, earlier_runs: int = 0) -> None:

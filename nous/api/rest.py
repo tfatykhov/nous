@@ -1345,7 +1345,9 @@ def create_app(
         202 ``started`` with the new run's id; 200 ``coalesced``/``skipped`` with the active run's id.
         The schedule's next_fire_at and fire_count do not change.
         """
-        from nous.handlers.task_scheduler import ScheduleBusy, run_schedule_now
+        from nous.brain.intentions import IntentionRootClosed
+        from nous.handlers.task_scheduler import ScheduleBusy, ScheduleNotFound, run_schedule_now
+        from nous.heart.subtasks import SubtaskQueueFull
 
         try:
             schedule_id = UUID(request.path_params["id"])
@@ -1358,14 +1360,12 @@ def create_app(
             )
         try:
             result = await run_schedule_now(heart, settings, schedule_id, bus=bus)
-        except LookupError:
-            return JSONResponse({"error": "Active schedule not found"}, status_code=404)
-        except ScheduleBusy as e:
-            return JSONResponse({"error": str(e)}, status_code=409)
-        except ValueError as e:  # queue full, or the schedule's container intention closed
+        except ScheduleNotFound:
+            return JSONResponse({"error": "Active recurring schedule not found"}, status_code=404)
+        except (ScheduleBusy, SubtaskQueueFull, IntentionRootClosed) as e:
             return JSONResponse({"error": str(e)}, status_code=409)
         except Exception as e:
-            logger.error("Run schedule error: %s", e)
+            logger.exception("Run schedule error")
             return JSONResponse({"error": str(e)}, status_code=500)
         return JSONResponse(
             {"status": result.outcome, "run_id": str(result.run_id), "schedule_id": str(schedule_id)},

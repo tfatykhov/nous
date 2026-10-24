@@ -28,7 +28,8 @@ class _Bus:
 
 
 def _settings(agent_id: str | None = None, **kw) -> Settings:
-    return Settings(schedule_check_interval=1, agent_id=agent_id or f"test-f101-{uuid.uuid4().hex[:8]}", **kw)
+    kw.setdefault("schedule_check_interval", 1)
+    return Settings(agent_id=agent_id or f"test-f101-{uuid.uuid4().hex[:8]}", **kw)
 
 
 @pytest.fixture
@@ -602,3 +603,134 @@ async def test_list_tasks_shows_the_policies(heart, settings):
 
     assert "concurrency: always_enqueue, catch-up: enqueue_missed_with_cap (cap 4)" in text_out
     assert "concurrency: coalesce_if_active, catch-up: skip_missed" in text_out
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups: the fire lock, partial catch-up, late checks, scope
+# ---------------------------------------------------------------------------
+
+
+async def test_a_held_fire_lock_stops_both_the_check_and_a_manual_run(heart, settings):
+    from sqlalchemy import text
+
+    schedule = await _due_schedule(heart)
+    async with heart.db.session() as holder:
+        assert await holder.scalar(
+            text("SELECT pg_try_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": f"schedule_fire:{schedule.id.hex}"}
+        )
+        assert await TaskScheduler(heart, settings)._fire_due_tasks() == 0
+        from nous.handlers.task_scheduler import ScheduleBusy
+
+        with pytest.raises(ScheduleBusy):
+            await run_schedule_now(heart, settings, schedule.id)
+        async with _client(heart, settings) as client:
+            assert (await client.post(f"/schedules/{schedule.id}/run")).status_code == 409
+    assert await _runs(heart, schedule) == []
+    assert (await heart.schedules.get(schedule.id)).next_fire_at == schedule.next_fire_at
+    # Released with the holder's transaction: the next check fires.
+    assert await TaskScheduler(heart, settings)._fire_due_tasks() == 1
+
+
+async def test_a_catch_up_cut_short_counts_its_runs_and_advances(heart, settings):
+    for i in range(3):  # the pending limit is 5: room for two runs
+        await heart.subtasks.create(task=f"filler {i}")
+    schedule = await _due_schedule(
+        heart,
+        missed_slots=3,
+        concurrency_policy="always_enqueue",
+        catch_up_policy="enqueue_missed_with_cap",
+        catch_up_cap=3,
+    )
+
+    assert await TaskScheduler(heart, settings)._fire_due_tasks() == 2
+
+    after = await heart.schedules.get(schedule.id)
+    assert after.fire_count == 2
+    assert after.next_fire_at > datetime.now(UTC)
+
+
+async def test_a_late_check_is_not_a_missed_slot(heart):
+    settings = _settings(heart.agent_id, schedule_check_interval=300)
+    schedule = await heart.schedules.create(
+        task="t",
+        schedule_type="recurring",
+        interval_seconds=60,
+        concurrency_policy="always_enqueue",
+        catch_up_policy="enqueue_missed_with_cap",
+    )
+    async with heart.db.session() as s:
+        await s.execute(
+            update(Schedule)
+            .where(Schedule.id == schedule.id)
+            .values(next_fire_at=datetime.now(UTC) - timedelta(seconds=90))
+        )
+        await s.commit()
+
+    assert await TaskScheduler(heart, settings)._fire_due_tasks() == 1
+
+
+async def test_a_pending_subtask_older_than_the_max_age_is_not_active(heart):
+    settings = _settings(heart.agent_id, schedule_active_run_max_age_seconds=3600)
+    schedule = await _due_schedule(heart)
+    sub = await _active_subtask(heart, schedule, status="pending")
+    async with heart.db.session() as s:
+        await s.execute(
+            update(Subtask).where(Subtask.id == sub.id).values(created_at=datetime.now(UTC) - timedelta(seconds=3601))
+        )
+        await s.commit()
+
+    assert await find_active_run(heart, settings, schedule.id, datetime.now(UTC)) is None
+
+
+async def test_a_running_subtask_with_no_timeout_uses_the_default(heart):
+    settings = _settings(heart.agent_id, subtask_default_timeout=600)
+    schedule = await _due_schedule(heart)
+    sub = await _active_subtask(heart, schedule, started_ago=600 + 200)
+    async with heart.db.session() as s:
+        await s.execute(update(Subtask).where(Subtask.id == sub.id).values(timeout_seconds=0))
+        await s.commit()
+
+    assert await find_active_run(heart, settings, schedule.id, datetime.now(UTC)) == ActiveRun("subtask", sub.id)
+
+
+async def test_manual_run_of_another_agents_schedule_is_refused(heart, settings):
+    schedule = await heart.schedules.create(task="t", schedule_type="recurring", interval_seconds=3600)
+
+    with pytest.raises(LookupError):
+        await run_schedule_now(heart, _settings(), schedule.id)
+    assert await _runs(heart, schedule) == []
+
+
+async def test_a_once_schedule_keeps_the_legacy_path_with_the_flag_on(heart, settings):
+    schedule = await heart.schedules.create(
+        task="t", schedule_type="once", fire_at=datetime.now(UTC) - timedelta(minutes=1)
+    )
+    await _active_subtask(heart, schedule)
+    bus = _Bus()
+
+    assert await TaskScheduler(heart, settings, bus=bus)._fire_due_tasks() == 0
+
+    after = await heart.schedules.get(schedule.id)
+    assert after.active is True  # deferred, not consumed
+    assert after.next_fire_at == schedule.next_fire_at
+    assert bus.events == []
+
+
+async def test_manual_run_of_a_once_schedule_is_refused(heart, settings):
+    schedule = await heart.schedules.create(
+        task="t", schedule_type="once", fire_at=datetime.now(UTC) + timedelta(hours=1)
+    )
+
+    with pytest.raises(LookupError):
+        await run_schedule_now(heart, settings, schedule.id)
+    async with _client(heart, settings) as client:
+        assert (await client.post(f"/schedules/{schedule.id}/run")).status_code == 404
+    assert await _runs(heart, schedule) == []
+
+
+async def test_rest_run_with_a_full_queue_is_a_conflict(heart, settings):
+    schedule = await heart.schedules.create(task="t", schedule_type="recurring", interval_seconds=3600)
+    for i in range(5):
+        await heart.subtasks.create(task=f"filler {i}")
+    async with _client(heart, settings) as client:
+        assert (await client.post(f"/schedules/{schedule.id}/run")).status_code == 409
