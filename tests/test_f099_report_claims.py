@@ -239,6 +239,15 @@ def test_a_rest_merge_needs_put(command, verified):
         # a global option before the subcommand
         ("gh -R o/r pr merge 99", "exact"),
         ("gh --repo o/r pr merge 12", "none"),
+        ("gh --repo o/r pr merge 99", "exact"),
+        # a boolean takes no value: listing one as value-taking would swallow the PR number
+        ("gh pr merge -s 12", "none"),
+        ("gh pr merge -m 12", "none"),
+        ("gh pr merge -r 12", "none"),
+        ("gh pr merge -d 12", "none"),
+        ("gh pr merge --squash 12", "none"),
+        ("gh pr merge --delete-branch 12", "none"),
+        ("gh pr merge -s 99", "exact"),
     ],
 )
 def test_a_merge_names_its_pr_by_an_operand_not_an_option_value(command, level):
