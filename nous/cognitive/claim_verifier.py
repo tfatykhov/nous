@@ -14,14 +14,18 @@ from bisect import bisect_left, bisect_right
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import cached_property
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 from nous.cognitive.bash_side_effect import (
+    _ASSIGNMENT,
     READ_COMMANDS,
     command_invocations,
     command_string,
     git_subcommand,
     program_name,
+    simple_commands,
 )
 from nous.cognitive.execution_ledger import EVIDENCE_TRUNCATED, Invocation, bash_invocations
 
@@ -40,6 +44,8 @@ class ClaimViolation:
     found_in_turn: bool
     found_in_ledger: bool
     capable_tools: tuple[str, ...] = ()  # every tool that could have grounded it
+    # "plausible": a call could have done it but does not show it did (verify_report: not confirmed)
+    evidence: str = "none"
 
 
 @dataclass(frozen=True)
@@ -56,6 +62,8 @@ class Evidence:
     # False: the call failed or was blocked -- evidence only that it was TRIED
     # (a report's verdict on an action, verify_report)
     ok: bool = True
+    # bash: the job status a `runner.sh status|result` output stated (execution_ledger.observed_status)
+    observed_status: str | None = None
 
     @cached_property
     def runs(self) -> tuple[Invocation, ...] | None:
@@ -111,6 +119,7 @@ class Claim:
     target: str | None = None  # a path or recipient the claim names
     span: tuple[int, int] = field(default=(0, 0), compare=False)
     attempt_only: bool = False  # a verdict on an action: any recorded try of it backs the claim
+    clause: str = field(default="", compare=False)  # the clause the claim is in ("I sent it by email")
 
 
 # First person: "I", "I've", "I have", "I just", "I also" ... The "I" is
@@ -244,8 +253,14 @@ _QUOTED = re.compile(r"```.*?(?:```|\Z)|^[ \t]*>[^\n]*|\"[^\"\n]{0,300}\"|“[^�
 
 
 def _blank(match: re.Match[str]) -> str:
-    """Same length, newlines kept: offsets and sentence ends stay put."""
-    return re.sub(r"[^\n]", " ", match.group(0))
+    """Same length, newlines kept: offsets and sentence ends stay put.
+
+    A quoted work id (`job "job-…"`) is the agent naming it, not a quotation: it is kept, in backticks."""
+    quoted = match.group(0)
+    inner = quoted[1:-1]
+    if quoted[0] in "\"“" and _QUOTED_ID.fullmatch(inner):
+        return f"`{inner}`"
+    return re.sub(r"[^\n]", " ", quoted)
 
 # The signal an argument must carry for a capable tool to count as evidence.
 # Every pattern is linear: this turn's evidence is untruncated and is scanned
@@ -1406,18 +1421,39 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
     return _best(levels)
 
 
+# A send claim whose clause names another destination than the owner's Telegram: a send_file could have
+# reached it only through a chat id it was given, never certainly. A destination is mail as the verb, the
+# thing sent or the channel ("emailed", "Email sent", "via email", "in the email thread", never "the email
+# summary"), a named channel ("on WhatsApp", "via <anything but Telegram>") or whoever follows "to" but
+# you, the owner, the chat, Telegram or an infinitive ("to Bob", "to them", "to the Telegram group"). A
+# time or content word ("on Monday", "with a summary") is none.
+_ELSEWHERE = re.compile(
+    r"\b(?:e-?)?mail(?:ed|ing)\b"
+    r"|\b(?:e-?)?mails?\b(?=\s*(?:[.,;:!?)]|$)|\s+(?:was|were|is|has|have|sent|to|via|by|with|on|at|for|about)\b)"
+    r"|\b(?:in|into|over|through|by)\s+(?:(?:the|an?)\s+)?(?:e-?)?mail\b"
+    r"|\b(?:via|on|over|through|by|in|into|using)\s+(?:(?:the|a)\s+)?(?:slack|whatsapp|signal|discord|sms"
+    r"|imessage|teams|messenger|wechat|gmail|outlook|linkedin|twitter|text)\b"
+    r"|\bvia\s+(?!(?:(?:the|a|your)\s+)?(?:telegram|bot|chat)\b)\w"
+    r"|\bto\s+(?!(?:you|yourself|me|(?:(?:the|your|my)\s+)?(?:owner|chat|dm|telegram(?!\s+(?:group|channel)\b)))\b)"
+    r"(?!(?:review|read|check|confirm|approve|see|look|keep|share|sign|use|be|date)\b)[\w@#]",
+    re.IGNORECASE)
+
+
 def evidence_level(claim: Claim, ev: Evidence) -> str:
     """How well one successful call supports one claim: exact, plausible or none."""
     kind = CLAIM_KINDS[claim.kind]
     if ev.tool_name not in kind.capable_tools:
         return "none"
-    # a rule that reads no arguments is judged by the target alone, whether
-    # the arguments were kept ({} from the runner: a producer or a Telegram
-    # send carries none the verifier uses) or never given
+    # a rule that reads no arguments is judged by the claim alone (its target;
+    # for a Telegram send its clause too), whether the arguments were kept ({}
+    # from the runner: a producer or a Telegram send carries none the verifier
+    # uses) or never given
     if ev.tool_name in _PRODUCERS:  # writes to memory or the companion: no destination
         return "none" if claim.target else "plausible"
-    if ev.tool_name == "send_file":  # a Telegram send cannot have reached a named address
-        return "none" if claim.target else "plausible"
+    if ev.tool_name == "send_file":  # a Telegram send: no named address, and no e-mail
+        if claim.target:
+            return "none"
+        return "plausible" if _ELSEWHERE.search(claim.clause or claim.text) else "exact"
     if not ev.args:  # names-only evidence from a legacy caller
         return "plausible"
     if ev.tool_name == "bash":
@@ -1441,7 +1477,7 @@ REPORT_KINDS: dict[str, ClaimKind] = {
     "merge": ClaimKind("bash", frozenset({"bash", "run_python"})),
     "pr_create": ClaimKind("bash", frozenset({"bash", "run_python"})),
     "test_run": ClaimKind("bash", frozenset({"bash", "run_python"})),
-    "cancel": ClaimKind("cancel_task", frozenset({"cancel_task", "dag", "dag_manage"})),
+    "cancel": ClaimKind("cancel_task", frozenset({"cancel_task", "dag", "dag_manage", "bash"})),
 }
 # What a command must RUN to back the claim: read from the parsed invocations
 # (the shell wrappers -- `bash -lc`, `env`, `cd x &&` -- already unwrapped), never
@@ -1614,19 +1650,28 @@ def _report_run_level(claim: Claim, ev: Evidence) -> str:
 _PR = r"(?:PR|pull\s+request)(?:\s*#\d+)?"
 _PASSIVE = r"\s+(?:(?:was|were|has\s+been|have\s+been|got|is|is\s+now)\s+)?"
 _CANCELLABLE = r"(?:task|subtask|run|job|dag|schedule|intention|work|chain)"
+# The work item a cancel claim names: a runner job id, or a hex id (a whole UUID, or a prefix with a digit
+# and a letter, so "decade" and a date are no id), each a whole token ("facade-1234" is none). A DAG's NAME is
+# not read as one: no recorded cancel carries it (dag_manage cancels by dag_id), so it could neither
+# confirm nor refute the claim, and "the DAG mid-run" would read as a name.
+_JOB_ID = r"job-\d{8}-\d{6}-[0-9a-f]{6,}(?![\w-])"
+_HEX_ID = (r"(?:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{6,})"
+           r"(?![\w-])")
+# after the noun: "task 8f10c3ba", "job (job-...)", "DAG: 5e6f7a8b", "task `8f10c3ba`"
+_WORK_ID = rf"(?:\s+|\s*[(:#]\s*)`?(?:{_JOB_ID}|{_HEX_ID})`?"
 # (pattern, kind, attempt_only). Active forms need the first person or a
 # sentence opening ("Merged PR #4."): "Tim merged PR #4" is not the agent's.
 _REPORT_PATTERNS: list[tuple[str, str, bool]] = [
     (rf"\b(?:e-?mails?|messages?){_PASSIVE}sent\b{_NOT_BY}", "email", False),
-    (rf"{_OPENING}(?:sent|e-?mailed)\s+(?:the\s+|an\s+)?e-?mail\b", "email", False),
+    (rf"{_OPENING}(?:sent|e-?mailed)\s+(?:the\s+|an\s+)?e-?mail\b(?:\s+to\s+{_ADDRESS})?", "email", False),
     (rf"\b{_PR}{_PASSIVE}merged\b{_NOT_BY}", "merge", False),
     (rf"(?:{_FIRST}|{_OPENING})merged\s+(?:the\s+)?(?:{_PR}|#\d+|branch)", "merge", False),
     (rf"\b{_PR}{_PASSIVE}(?:opened|created|raised|filed)\b{_NOT_BY}", "pr_create", False),
     (rf"(?:{_FIRST}|{_OPENING})(?:opened|created|raised|filed)\s+(?:a\s+|the\s+)?(?:new\s+|draft\s+)?{_PR}",
      "pr_create", False),
-    (rf"(?:{_FIRST}|{_OPENING})cancel+ed\s+(?:the\s+|that\s+|this\s+)?(?:[\w-]+\s+)?{_CANCELLABLE}\b",
-     "cancel", False),
-    (rf"\b{_CANCELLABLE}(?:\s+[0-9a-f]{{6,}})?{_PASSIVE}cancel+ed\b{_NOT_BY}", "cancel", False),
+    (rf"(?:{_FIRST}|{_OPENING})cancel+ed\s+(?:the\s+|that\s+|this\s+)?"
+     rf"(?:(?:[\w-]+\s+)?{_CANCELLABLE}\b(?!-)(?:{_WORK_ID})?|`?{_JOB_ID}`?)", "cancel", False),
+    (rf"\b(?:{_CANCELLABLE}\b(?!-)(?:{_WORK_ID})?|{_JOB_ID}){_PASSIVE}cancel+ed\b{_NOT_BY}", "cancel", False),
     # a verdict on a cancel says one was issued, whatever it did
     (r"\bcancel(?:l?ation)?\s+(?:did\s+not|didn['’]t|failed|worked|succeeded|took\s+effect|was\s+ignored)"
      r"(?:\s+[\w-]+){0,3}", "cancel", True),
@@ -1666,12 +1711,212 @@ def _reported_before(reported: list[int], scope_starts: list[int], start: int) -
     return i < len(reported) and reported[i] < start
 
 
+_JOB_ID_RE = re.compile(rf"(?<![\w-]){_JOB_ID}", re.IGNORECASE)
+_HEX_ID_RE = re.compile(rf"(?<![\w-]){_HEX_ID}", re.IGNORECASE)
+_QUOTED_ID = re.compile(rf"{_JOB_ID}|{_HEX_ID}", re.IGNORECASE)  # kept by _blank
+# a hex id is read where a claim names its work item, after the noun: in "the cafe2024 job" it is a name
+_NAMED_HEX_ID_RE = re.compile(rf"\b{_CANCELLABLE}\b(?!-)(?:\s+|\s*[(:#]\s*)`?(?P<id>{_HEX_ID})", re.IGNORECASE)
+
+
+def _claimed_work_id(text: str) -> str | None:
+    """The work item a cancel claim names (a job id, or a hex id after the noun), lowercased; None if none."""
+    job = _JOB_ID_RE.search(text)
+    if job:
+        return job.group(0).lower()
+    hex_id = _NAMED_HEX_ID_RE.search(text)
+    return hex_id.group("id").lower() if hex_id else None
+
+
+def _names_a_job(text: str) -> bool:
+    """Whether a cancel claim names a runner job: a job id, or a hex id after "job" (its hex tail)."""
+    hex_id = _NAMED_HEX_ID_RE.search(text)
+    return bool(_JOB_ID_RE.search(text) or (hex_id and hex_id.group(0)[:3].lower() == "job"))
+
+
+_UUID_FORM = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+
+
+def _arg_hex(value: str) -> str | None:
+    """The hex digits of an id a call was GIVEN (lowercase), or None if it is no hex id.
+
+    A recorded argument is no prose, so the claim text's digit-and-letter rule (``_HEX_ID``) is not used here:
+    any hex run of 6 or more is an id ("12345678", "abcdefab"), and so is a prefix of a hyphenated UUID and
+    any spelling of a UUID that ``uuid.UUID`` reads, as dag_manage and cancel_task do."""
+    try:
+        return UUID(value).hex
+    except ValueError:
+        pass
+    if re.fullmatch(r"[0-9a-f]{6,}", value):
+        return value
+    hyphens_fit = all(c == "-" if f == "-" else c in "0123456789abcdef" for c, f in zip(value, _UUID_FORM))
+    if 8 < len(value) <= len(_UUID_FORM) and hyphens_fit:
+        return value.replace("-", "")
+    return None
+
+
+def _work_level(claimed: str | None, values: list[str]) -> str:
+    """Whether a call on ``values`` (the ids it was given) was on the work item a claim names.
+
+    Only ids of one shape are compared -- a hex prefix with a UUID (or a job id's hex tail), a job id with
+    a job id: a job id and a UUID neither confirm nor refute each other. Hex ids are compared without their
+    hyphens, so a UUID matches however either side spells it."""
+    if claimed is None:
+        return "plausible"  # the claim names no work item: any cancel could be it
+    job = bool(_JOB_ID_RE.fullmatch(claimed))
+    comparable: list[str] = []
+    for value in (v.lower() for v in values if v):
+        if _JOB_ID_RE.fullmatch(value):
+            comparable.append(value if job else value.rsplit("-", 1)[-1])
+        elif not job and (digits := _arg_hex(value)) is not None:
+            comparable.append(digits)
+    if not comparable:
+        return "plausible"
+    if job:
+        hit = claimed in comparable
+    else:
+        claimed = claimed.replace("-", "")
+        hit = any(v.startswith(claimed) or claimed.startswith(v) for v in comparable)
+    return "exact" if hit else "none"
+
+
+def _runner_cancel_level(claim: Claim, ev: Evidence, claimed: str | None, runner: str | None) -> str:
+    """What a bash call of the job runner tells about a cancel claim.
+
+    `runner.sh cancel <id>` that exited 0 backs a cancel of that job (it exits 0 for a job already
+    finished too, which it then marks cancelled). `runner.sh status|result <id>` is a read: its exit code
+    is the job's state, not the read's, so it is ignored, and the job status the output stated
+    (``observed_status``) backs only the passive "job <id> was cancelled", never "I cancelled job <id>".
+    A cancel counts wherever it is in the command when it certainly ran and succeeded; a status read
+    counts only when the command runs the runner alone (after a `cd`): a second command's output could
+    be the status line. A row that kept no command backs nothing: it could be any command; an unreadable
+    command cannot disprove anything."""
+    runs = ev.runs
+    if runner is None:
+        return "none"
+    if runs is None:
+        return "plausible"
+    levels = ["none"]
+    dirs = _cd_dirs(ev.args.get("command") or ev.args.get("cmd") or "", runs)
+    found = []  # per call: its program, whether it certainly ran, its runner arguments
+    for (prog, args, certain), cd in zip(runs, dirs):
+        word, cwd = cd or (prog, None)
+        found.append((prog, certain, _runner_args(word, args, runner, cwd)))
+    for _, certain, pos in found:
+        if certain and pos is not None and len(pos) >= 2 and pos[0] == "cancel":
+            levels.append(_work_level(claimed, [pos[1]]))
+    calls = [pos for prog, _, pos in found if _base(prog) != "cd"]
+    pos = calls[0] if len(calls) == 1 else None
+    if pos is not None and len(pos) == 2 and pos[0] in ("status", "result") and ev.observed_status == "cancelled" \
+            and re.search(r"cancel+ed$", claim.text, re.IGNORECASE):
+        levels.append(_work_level(claimed, [pos[1]]))
+    return _best(levels)
+
+
+_TRACE_OPTIONS = re.compile(r"-[xveu]+")
+
+
+def runner_path(workspace_dir: str) -> str:
+    """The job runner of a workspace, by the path tool_policy lets a lineage run it."""
+    return str(Path(workspace_dir) / "claude-jobs" / "runner.sh")
+
+
+def _cd_dirs(command: str, runs: tuple) -> list[tuple[str, str] | None]:
+    """Per call of ``runs``: its program word as written and the directory an absolute `cd <dir> &&` just
+    before it certainly moved to; None for a call with no such cd.
+
+    Read from the command text, not ``runs``: an invocation's certainty is unknown whenever the exit is not 0
+    (a status read exits with the job's state), ``runs`` unwraps `bash -c 'cd x'` and `(cd x)`, whose cd
+    moves a child shell only, and it keeps a relative program as `./<name>`. So the text's simple commands
+    must be ``runs`` one to one (no branch dropped, no string unwrapped; an assignment alone runs nothing);
+    the cd must be a simple command of its own, joined to the call by `&&` (blank or comment lines after it
+    continue the command), and not after `||` or `|` (where it may be skipped or run in a subshell)."""
+    found: list[tuple[str, str] | None] = [None] * len(runs)
+    commands = simple_commands(command)
+    if commands is None:
+        return found
+    kept: list[tuple[list[str], list[str], list[str], str]] = []
+    for c in commands:  # blank and comment lines after `&&`, `||` or `|` continue the command
+        if not (c == ([], [], [], "\n") and kept and kept[-1][3] in ("&&", "||", "|")):
+            kept.append(c)
+    commands = kept
+    calls = [i for i, (words, _, _, _) in enumerate(commands)
+             if words and not all(_ASSIGNMENT.match(w) for w in words)]
+    if len(calls) != len(runs) or any(
+            (program_name(commands[i][0][0]), *commands[i][0][1:]) != (prog, *args)
+            for i, (prog, args, _) in zip(calls, runs)):
+        return found
+    for k, i in enumerate(calls):
+        cd = commands[i - 1][0] if i >= 1 else []
+        if len(cd) == 2 and cd[0] == "cd" and posixpath.isabs(cd[1]) and commands[i - 1][3] == "&&" \
+                and (i < 2 or commands[i - 2][3] not in ("||", "|")):
+            found[k] = (commands[i][0][0], cd[1])
+    return found
+
+
+def _runner_args(prog: str, args: tuple[str, ...], runner: str | None, cwd: str | None = None) -> list[str] | None:
+    """The positional arguments of an invocation of ``runner`` (`bash [opts] <runner> ...` too); None if not one.
+
+    ``runner`` is the workspace's `claude-jobs/runner.sh` by its absolute path, as tool_policy allows it: a
+    relative `runner.sh` or another directory's could be any script. None: no call is a runner call. A
+    relative script is resolved against ``cwd``, the absolute directory a `cd` certainly moved to
+    (``_cd_dirs``): `./runner.sh`, `claude-jobs/runner.sh`, `bash runner.sh`; never a bare name run
+    directly (PATH finds it, not the cwd) nor one through `..` (the kernel resolves it past a symlink).
+
+    Only the options that change how a script runs, not what runs, may come before it (`bash -x runner.sh`):
+    `-c` runs its string and `-s` its stdin, so the next word is not what ran; any other word there must be the
+    runner's exact path (so a `-c` string, an option value or a word with spaces is none)."""
+    if _base(prog) in ("bash", "sh"):
+        i = 0
+        while i < len(args) and _TRACE_OPTIONS.fullmatch(args[i]):
+            i += 1
+        if i < len(args) and args[i] == "--":  # the options end: the next word is the script
+            i += 1
+        if i == len(args):
+            return None
+        prog, args = args[i], args[i + 1:]
+    elif "/" not in prog:
+        cwd = None
+    if cwd is not None and not posixpath.isabs(prog) and ".." not in prog.split("/"):
+        prog = posixpath.normpath(posixpath.join(cwd, prog))
+    return _positional(args) if runner is not None and prog == runner else None
+
+
+def _cancel_level(claim: Claim, ev: Evidence, runner: str | None) -> str:
+    """How well one recorded call backs a cancel claim: it must be a cancel, of the work item named."""
+    claimed = _claimed_work_id(claim.text)
+    if ev.tool_name == "bash":
+        return _runner_cancel_level(claim, ev, claimed, runner)
+    action = ev.args.get("action")
+    if ev.tool_name != "cancel_task":
+        if action is None:
+            return "plausible"  # names only: a cancel cannot be told from a status read
+        if action != "cancel":
+            return "none"
+    # a DAG cancel cancels the DAG (dag_id); a node_name it was given is not what it cancelled
+    keys = ("task_id", "id") if ev.tool_name == "cancel_task" else ("dag_id",)
+    return _work_level(claimed, [ev.args.get(k, "") for k in keys])
+
+
+# Kinds a "plausible" level still backs in a report: a write to a computed path and a deploy have no
+# exact form, a test claim's exit code is already checked, a verdict says only that something was tried,
+# and a cancel that names no work item is backed by any cancel. Every other completion claim (sent,
+# merged, pushed, committed, opened a PR, cancelled <id>) needs a call that shows it happened.
+_PLAUSIBLE_BACKS = frozenset({"file_write", "deploy", "test_run"})
+
+
+def _backed_by_plausible(claim: Claim) -> bool:
+    return (claim.kind in _PLAUSIBLE_BACKS or claim.attempt_only
+            or (claim.kind == "cancel" and _claimed_work_id(claim.text) is None))
+
+
 UNVERIFIED_MARKER = "[Unverified claims]"
 _UNVERIFIED_SHOWN = 5
 
 
-def report_level(claim: Claim, ev: Evidence) -> str:
+def report_level(claim: Claim, ev: Evidence, runner: str | None = None) -> str:
     """How well one recorded call supports one report claim: exact, plausible or none.
+
+    ``runner`` is the job runner's path (``runner_path``); without it no bash call backs a cancel claim.
 
     A failed or blocked call backs only a verdict on the action (``attempt_only``):
     "the cancel did not take effect" says a cancel was issued, not that it worked.
@@ -1686,10 +1931,7 @@ def report_level(claim: Claim, ev: Evidence) -> str:
     if ev.tool_name not in kind.capable_tools:
         return "none"
     if claim.kind == "cancel":
-        action = ev.args.get("action")
-        if ev.tool_name != "cancel_task" and action is not None:
-            return "exact" if action == "cancel" else "none"
-        return "exact" if ev.tool_name == "cancel_task" else "plausible"
+        return _cancel_level(claim, ev, runner)
     outcome = _test_outcome(claim)
     if outcome is not None and (ev.exit_code is None or (ev.exit_code == 0) != (outcome == "pass")):
         return "none"  # a pass needs exit 0 and a failure a non-zero exit; an unknown exit backs neither
@@ -1706,7 +1948,8 @@ def ledger_evidence(actions: Any) -> list[Evidence]:
     """Every call of an in-memory ledger as evidence, the failed ones marked."""
     return [
         Evidence(a.tool_name, a.evidence_args, a.exit_code, a.side_effect_type,
-                 a.invocations if a.tool_name == "bash" else _UNREAD, ok=a.status == "success")
+                 a.invocations if a.tool_name == "bash" else _UNREAD, ok=a.status == "success",
+                 observed_status=a.observed_status)
         for a in actions
     ]
 
@@ -1714,20 +1957,29 @@ def ledger_evidence(actions: Any) -> list[Evidence]:
 def unverified_note(violations: list[ClaimViolation]) -> str:
     """The line a report or arrival note carries for its unbacked claims.
 
-    The claims are quoted, so reading the note again extracts none of them."""
-    quoted = "; ".join(
-        '"' + " ".join(v.claimed_text.replace('"', "'").split())[:120] + '"'
-        for v in violations[:_UNVERIFIED_SHOWN]
-    )
+    The claims are quoted, so reading the note again extracts none of them. A claim some call could
+    have done (``evidence == "plausible"``) is worded apart: it is not confirmed, not refuted."""
+    shown = violations[:_UNVERIFIED_SHOWN]
+
+    def quoted(group: list[ClaimViolation]) -> str:
+        return "; ".join('"' + " ".join(v.claimed_text.replace('"', "'").split())[:120] + '"' for v in group)
+
+    unbacked = [v for v in shown if v.evidence != "plausible"]
+    unconfirmed = [v for v in shown if v.evidence == "plausible"]
+    parts: list[str] = []
+    if unbacked:
+        parts.append(f"No recorded tool call of this work backs: {quoted(unbacked)}")
+    if unconfirmed:
+        parts.append(f"Could not confirm from the recorded calls: {quoted(unconfirmed)}")
     more = f" (and {len(violations) - _UNVERIFIED_SHOWN} more)" if len(violations) > _UNVERIFIED_SHOWN else ""
-    return (f"{UNVERIFIED_MARKER} No recorded tool call of this work backs: {quoted}{more}. "
-            "Treat these as not observed.")
+    return f"{UNVERIFIED_MARKER} {'. '.join(parts)}{more}. Treat these as not observed."
 
 
 class ClaimVerifier:
     """Verifies that action claims in assistant responses are grounded in actual tool use."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, runner_path: str | None = None) -> None:
+        self._runner_path = runner_path  # the job runner a report's cancel claim may be backed by; None: none
         self._compiled: list[tuple[re.Pattern[str], str]] = [
             (re.compile(pattern, re.IGNORECASE), kind) for pattern, kind in _CLAIM_PATTERNS
         ]
@@ -1823,7 +2075,11 @@ class ClaimVerifier:
         forms a report uses (``_REPORT_PATTERNS``). ``evidence`` is every
         recorded call of the work, failed ones marked ``ok=False``;
         ``cancelled`` is true when the work was cancelled outside any tool call
-        (the owner's cancel), which backs a claim about a cancel.
+        (the owner's cancel), which backs a claim about a cancel that names no
+        runner job id.
+        A completion claim needs ``exact`` evidence; a ``plausible`` one is a
+        violation marked ``evidence="plausible"`` (not confirmed), except for
+        the kinds ``_backed_by_plausible`` lets through.
         Deterministic and model-free; it never blocks anything.
         """
         first = self._extract_claims(text)
@@ -1833,12 +2089,13 @@ class ClaimVerifier:
         checks: list[ClaimCheck] = []
         violations: list[ClaimViolation] = []
         for claim in claims:
-            if claim.kind == "cancel" and cancelled:
+            # the owner cancels the root's own work, never a runner job
+            if claim.kind == "cancel" and cancelled and not _names_a_job(claim.text):
                 level = "exact"
             else:
-                level = _best(["none", *(report_level(claim, ev) for ev in evidence)])
+                level = _best(["none", *(report_level(claim, ev, self._runner_path) for ev in evidence)])
             checks.append(ClaimCheck(claim.kind, claim.text, level))
-            if level == "none":
+            if level == "none" or (level == "plausible" and not _backed_by_plausible(claim)):
                 kind = CLAIM_KINDS.get(claim.kind) or REPORT_KINDS[claim.kind]
                 violations.append(ClaimViolation(
                     claimed_text=claim.text,
@@ -1846,6 +2103,7 @@ class ClaimVerifier:
                     found_in_turn=False,
                     found_in_ledger=False,
                     capable_tools=tuple(sorted(kind.capable_tools)),
+                    evidence=level,
                 ))
         if not violations:
             return VerificationResult(verified=True, claims=checks)
@@ -1881,8 +2139,10 @@ class ClaimVerifier:
                 if any(k2 == kind and s < end and start < e for k2, (s, e) in taken):
                     continue
                 taken.add((kind, (start, end)))
+                target = match.groupdict().get("target")
+                clause = text[clause_starts[c] if c >= 0 else 0:clause_ends[k] if k < len(clause_ends) else len(text)]
                 found.append(Claim(kind=kind, text=match.group(0).strip(), span=(start, end),
-                                   attempt_only=attempt))
+                                   target=target.lower() if target else None, attempt_only=attempt, clause=clause))
         found.sort(key=lambda claim: claim.span[0])
         return found
 
@@ -1908,6 +2168,7 @@ class ClaimVerifier:
                 k = bisect_left(clause_ends, end)
                 if k < len(clause_ends) and text[clause_ends[k]] == "?":
                     continue  # "Was the email sent to x?" asks; it does not claim
+                clause_end = clause_ends[k] if k < len(clause_ends) else len(text)
                 c = bisect_right(clause_starts, start) - 1
                 clause = clause_starts[c] if c >= 0 else 0
                 i = bisect_left(conditions, clause)
@@ -1934,7 +2195,7 @@ class ClaimVerifier:
                     if "@" in target:
                         target = target.lower()
                 found.append((start, Claim(kind=kind, text=match.group(0).strip(), target=target,
-                                           span=(start, end))))
+                                           span=(start, end), clause=text[clause:clause_end])))
         found.sort(key=lambda item: item[0])
         return [claim for _, claim in found]
 

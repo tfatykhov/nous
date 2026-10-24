@@ -44,6 +44,20 @@ def test_run_python_stores_a_hash_never_the_code():
     assert "sk-live" not in str(args)
 
 
+@pytest.mark.parametrize(
+    ("dag_id", "kept"),
+    [
+        ("5E6F7A", "5e6f7a"),  # the short id dag_manage list prints: 6 to 12 hex
+        ("5e6f7a8b9c0d", "5e6f7a8b9c0d"),
+        ("5e6f7", None),  # 5: too short to be one
+        ("5e6f7a8b9c0d1", None),  # 13: no short id, and no UUID
+        ("5e6f7a8b-1111-4222-8333-444455556666", "5e6f7a8b-1111-4222-8333-444455556666"),
+    ],
+)
+def test_dag_manage_keeps_only_a_short_id_or_a_uuid(dag_id, kept):
+    assert durable_key_args("dag_manage", {"action": "cancel", "dag_id": dag_id}).get("dag_id") == kept
+
+
 def test_send_email_stores_recipients_but_hashes_subject_and_body():
     args = durable_key_args("send_email", {"to": "tim@example.com", "subject": "Premarket", "body": "numbers"})
     assert args["to"] == "tim@example.com"

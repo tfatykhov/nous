@@ -31,8 +31,8 @@ from nous.brain import continuation, intention_calibration
 from nous.brain.continuation import INTENT_SESSION_PREFIX, Resolution
 from nous.brain.intentions import AUTHORITY_INTERNAL
 from nous.cancellation import cancel_requested
-from nous.cognitive.claim_verifier import ClaimVerifier, ClaimViolation, Evidence, unverified_note
-from nous.cognitive.execution_ledger import bash_exit_code, bash_masked_failure
+from nous.cognitive.claim_verifier import ClaimVerifier, ClaimViolation, Evidence, runner_path, unverified_note
+from nous.cognitive.execution_ledger import RUNNER_STATUSES, bash_exit_code, bash_masked_failure
 from nous.events import Event
 from nous.heart.result_inbox import format_inbox_messages, neutralize_delimiters
 from nous.storage.models import (
@@ -164,16 +164,31 @@ def _summary_exit_code(summary: str | None) -> int | None:
     return None
 
 
+def _summary_status(summary: str | None) -> str | None:
+    """The runner job status a durable bash summary keeps (``status <word>``, before the output's length)."""
+    for part in (summary or "").split("; "):
+        if m := re.fullmatch(rf"status ({RUNNER_STATUSES})", part):
+            return m.group(1)
+        if re.match(r"\d+ chars of output", part):
+            break
+    return None
+
+
 def _ledger_row_evidence(row: Any) -> Evidence:
     """A durable ledger row as claim evidence. The row keeps a hash of a command or a script, never the text, so
-    those are names-only evidence unless detail capture kept the redacted input. A bash row keeps its exit code."""
+    those are names-only evidence unless detail capture kept the redacted input. A bash row keeps its exit code
+    and the runner job status it read."""
     if row.tool_name in ("bash", "run_python"):
         key = "command" if row.tool_name == "bash" else "code"
         args = {key: row.input_text} if row.input_text else {}
     else:
         args = {str(k): str(v) for k, v in (row.key_args or {}).items()}
-    exit_code = _summary_exit_code(row.result_summary) if row.tool_name == "bash" else None
-    return Evidence(row.tool_name, args, exit_code, row.side_effect_type, ok=row.status == "success")
+    bash = row.tool_name == "bash"
+    exit_code = _summary_exit_code(row.result_summary) if bash else None
+    status = _summary_status(row.result_summary) if bash else None
+    return Evidence(
+        row.tool_name, args, exit_code, row.side_effect_type, ok=row.status == "success", observed_status=status
+    )
 
 
 def make_resolve_intention_executor(
@@ -1424,7 +1439,7 @@ class ContinuationRunner:
     ) -> list[tuple[Any, list[ClaimViolation]]]:
         """Each result row of a subtask or DAG, checked against the calls that work alone recorded: a subtask's
         final report is backed by its own tool log, not by a sibling's."""
-        verifier = ClaimVerifier()
+        verifier = ClaimVerifier(runner_path=runner_path(self._settings.workspace_dir))
         flagged: list[tuple[Any, list[ClaimViolation]]] = []
         for row in claim.inbox_rows:
             if row.source_kind not in ("subtask", "dag"):
@@ -1455,7 +1470,8 @@ class ContinuationRunner:
         unverified-claims line appended in warn and enforce) and whether a claim was unbacked. Never blocks."""
         if mode is None:
             return note, False
-        result = ClaimVerifier().verify_report(note, [*lineage.calls, *turn_calls], cancelled=lineage.cancelled)
+        verifier = ClaimVerifier(runner_path=runner_path(self._settings.workspace_dir))
+        result = verifier.verify_report(note, [*lineage.calls, *turn_calls], cancelled=lineage.cancelled)
         if result.verified:
             return note, False
         logger.warning(

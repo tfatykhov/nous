@@ -43,6 +43,7 @@ from nous.api.execution_context import ExecutionContext
 from nous.cognitive.execution_ledger import (
     bash_exit_code,
     classify_side_effect,
+    observed_status,
     redact_error_text,
     redact_text,
 )
@@ -85,6 +86,7 @@ _TERMINAL = frozenset(s for s in LEDGER_STATUSES if s != "pending")
 _WORD, _UUID, _EMAILS, _CHAT, _PATH, _SOURCE, _HASH = (
     "word", "uuid", "emails", "chat", "path", "source", "hash",
 )
+_DAG_ID = "dag_id"  # a UUID, or the short hex id `dag_manage list` prints and dag_manage accepts
 _DURABLE_ARGS: dict[str, dict[str, str]] = {
     # A bash command is code: hashed like run_python's, never kept.
     "bash": {"command": _HASH},
@@ -103,7 +105,7 @@ _DURABLE_ARGS: dict[str, dict[str, str]] = {
     "heartbeat_check_create": {"name": _HASH, "prompt": _HASH},
     "heartbeat_check_manage": {"action": _WORD, "name": _HASH},
     "dag_create": {"name": _HASH, "nodes": _HASH},
-    "dag_manage": {"action": _WORD, "dag_id": _UUID, "node_name": _HASH},
+    "dag_manage": {"action": _WORD, "dag_id": _DAG_ID, "node_name": _HASH},
     "push_surface": {"template": _WORD, "dedup_key": _HASH, "params": _HASH},
     "compose_surface": {"archetype": _WORD, "dedup_key": _HASH, "intent": _HASH, "data_sources": _HASH},
     "resolve_decision": {
@@ -118,6 +120,7 @@ _WORD_SHAPE = re.compile(r"[a-z][a-z_]{0,31}")
 _MAX_ARG_NAMES = 16
 _EMAIL_SHAPE = re.compile(r"[^@\s,;<>\"']+@[^@\s,;<>\"']+\.[A-Za-z]{2,}")
 _CHAT_SHAPE = re.compile(r"-?\d{1,20}")
+_ID_PREFIX_SHAPE = re.compile(r"[0-9a-fA-F]{6,12}")
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -139,7 +142,9 @@ def _shaped(kind: str, value: Any) -> str | None:
     text = str(value)
     if kind == _WORD:
         return text if _WORD_SHAPE.fullmatch(text) else None
-    if kind == _UUID:
+    if kind == _DAG_ID and _ID_PREFIX_SHAPE.fullmatch(text):
+        return text.lower()
+    if kind in (_UUID, _DAG_ID):
         try:
             return str(UUID(text))
         except ValueError:
@@ -309,7 +314,8 @@ def _summary(
     print whatever the code prints (`cat .env; touch x` is a write whose
     output is a secrets file). None of that is vettable by pattern redaction,
     and the arguments are already hashed in key_args. The shape is its length,
-    plus bash's authoritative exit-code trailer and timeout line. The one
+    plus bash's authoritative exit-code trailer and timeout line, and the job
+    status a `runner.sh status` prints (one word of a fixed set). The one
     exception is a call that closed ``error``: its first ERROR_EXCERPT_CHARS
     characters are kept after ``redact_error_text``, so a diagnostics job can
     see why it failed. That redaction cannot recognize an unlabeled value, so
@@ -332,6 +338,10 @@ def _summary(
                 body = body[timeout.end():]
             if (exit_code := bash_exit_code(text)) is not None:
                 parts.append(f"exit code {exit_code}")
+            # one word of runner.sh's status set, read by a fixed pattern (from whatever command
+            # printed it; the verifier decides whether it was a runner read): never output text
+            if (status_word := observed_status(body)) is not None:
+                parts.append(f"status {status_word}")
         excerpt = ""
         if status == "error":
             # Redact the whole scan window, then cut: a secret across the cut stays masked.

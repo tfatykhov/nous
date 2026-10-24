@@ -84,7 +84,18 @@ _EVIDENCE_ARGS: dict[str, tuple[str, ...]] = {
     "write_file": ("path", "file_path"),
     "send_email": ("to", "cc", "subject"),
     "send_file": ("file_path", "chat_id", "caption"),
+    # a cancel claim names the work item it cancelled
+    "cancel_task": ("task_id", "id"),
+    "dag_manage": ("action", "dag_id", "node_name"),
 }
+# The job status `runner.sh status|result` prints in the head of its output. Only this code-authored
+# pattern reads it, and only a word of the runner's own set is kept: the durable ledger may store it.
+# It is read from ANY bash call's output (an `echo "Status: cancelled"` too); only the verifier's check
+# that the call was a lone `runner.sh status|result` makes it evidence.
+RUNNER_STATUSES = r"running|completed|failed|cancelled|unknown"
+_RUNNER_STATUS_LINE = re.compile(r"^Status: (.*)$", re.MULTILINE)
+_RUNNER_STATUS = re.compile(rf"({RUNNER_STATUSES})(?: \(process died\))?")
+_RUNNER_STATUS_HEAD_CHARS = 300
 # bash_tool always appends this trailer: the authoritative wrapper status.
 _BASH_EXIT_CODE = re.compile(r"(?:\A|\n)Exit code: (-?\d+)\s*\Z")
 # A line a command prints when it failed (bash_masked_failure). Anchored at the start of a line and
@@ -153,6 +164,17 @@ def bash_invocations(
         (prog, tuple(_bound_arg(a) for a in args[:_MAX_INVOCATION_ARGS]), certain)
         for prog, args, certain in found
     )
+
+
+def observed_status(result: str | None) -> str | None:
+    """The job status a `runner.sh status|result` output states in its head; None when it states none.
+
+    Read from the tool's real output, not from the model's reply; but any command can print such a line,
+    so whether the call WAS a runner read is the verifier's question (claim_verifier, from the command's
+    invocations)."""
+    line = _RUNNER_STATUS_LINE.search((result or "")[:_RUNNER_STATUS_HEAD_CHARS])  # the FIRST status line
+    match = _RUNNER_STATUS.fullmatch(line.group(1).rstrip("\r")) if line else None
+    return match.group(1) if match else None
 
 
 def bash_exit_code(result: str | None) -> int | None:
@@ -252,6 +274,7 @@ class ExecutedAction:
     evidence_args: dict[str, str] = field(default_factory=dict)
     # bash only: what the command runs, read at record time; None = unreadable
     invocations: tuple[Invocation, ...] | None = None
+    observed_status: str | None = None  # bash only: see observed_status()
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +319,7 @@ class ExecutionLedger:
             evidence_args=evidence_args(tool_name, tool_input),
             invocations=(bash_invocations(_extract_bash_command(tool_input), bash_exit_code(str(result)))
                          if tool_name == "bash" else None),
+            observed_status=observed_status(str(result)) if tool_name == "bash" else None,
         )
         self.actions.append(action)
         if status == "blocked":
