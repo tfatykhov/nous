@@ -993,6 +993,10 @@ class Settings(BaseSettings):
     # (e.g. before calling ingest_document). Pure dialogue web_fetch calls
     # are still soft-trimmed downstream by tool_soft_trim_chars.
     web_fetch_max_chars: int = 50000
+    # F103: flag-only prompt-injection + secret screen over web_fetch results and the
+    # browser_task summary (nous/api/injection_screen.py). off = no screen; flag = log a
+    # WARNING and emit an injection_screen_flagged event; the content is never changed.
+    injection_screen_mode: Literal["off", "flag"] = "flag"
     tavily_api_key: str = Field("", validation_alias="TAVILY_API_KEY")
     exa_api_key: str = Field("", validation_alias="EXA_API_KEY")
     search_provider: str = "auto"  # auto, tavily, exa, brave
