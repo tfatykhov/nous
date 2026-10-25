@@ -1755,7 +1755,7 @@ _OWNER_ONLY_PREP = (rf"(?:(?:as|in)\s+(?:(?:a|an)\s+)?\.?{_FORMAT}(?:\s+(?:file|
 _OWNER_ONLY_TAIL = (rf",?\s+{_OWNER_ONLY_PREP}|\s+{_SELF_ADVERB}|\s+at\s+(?:{_A_TIME}|{_AT_TAIL})"
                     rf"|\s*\(\s*(?:{_A_SENT_THING}|{_A_COUNT}|{_SELF_ADVERB}|{_OWNER_ONLY_PREP})\s*\)"
                     rf"|\s+via\s+telegram\b|[ \t]*\n[ \t]*{_OWNER_ONLY_END}"
-                    rf"|\s*,\s*{_OWNER_ONLY_END}|\s*,?\s*(?:{_THAT_IS}|namely),?\s+{_A_SENT_THING}")
+                    rf"|\s*,\s*{_OWNER_ONLY_END}|\s*(?:,\s*)?(?:{_THAT_IS}|namely),?\s+{_A_SENT_THING}")
 # The rest of the sentence after a new self head, all of it owner-only tails. Atomic and possessive: no tail is read
 # again once taken, so a long rest is linear.
 _OWNER_ONLY_REST = re.compile(rf"(?:(?>{_OWNER_ONLY_TAIL}))*+\s*", re.IGNORECASE)
