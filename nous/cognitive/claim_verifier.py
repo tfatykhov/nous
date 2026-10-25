@@ -252,8 +252,10 @@ _FIRST_CLAIM_RE = re.compile(_FIRST + _CLAIM_VERBS, re.IGNORECASE)
 # Where a clause ends, for the `and` rule and the question rule; a comma
 # right before "and" joins.
 _CLAUSE_END = re.compile(r"[.!?](?=\s|$)|\n|[;:—]|,(?!\s*and\b)")
-# Where a sentence ends, for what a send_file claim is judged by: a full stop, a blank line or a list item.
-_SENTENCE_END = re.compile(r"[.!?](?=\s|$)|\n[ \t]*\n|\n(?=[ \t]*(?:[-*+•]|\d+[.)])\s)")
+# Where a sentence ends, for what a send_file claim is judged by: a full stop, a blank line or a list item; but
+# not a line break right after "user" or "bot" (main reads "the user ..." as a recipient whatever follows it).
+_SENTENCE_END = re.compile(r"[.!?](?=\s|$)|(?<!\buser)(?<!\buser )(?<!\bbot)(?<!\bbot )"
+                           r"(?:\n[ \t]*\n|\n(?=[ \t]*(?:[-*+•]|\d+[.)])\s))", re.IGNORECASE)
 # A condition earlier in the clause: "if I pushed", "check whether it was saved".
 _CONDITION = re.compile(r"\b(?:if|whether|unless)\b", re.IGNORECASE)
 # Text that is not the agent speaking: fenced code, block quotes, quotations.
@@ -1474,13 +1476,14 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
 # function word in lowercase ("to you and archived the draft", "to you and on time"); but "a link to the summary and
 # Bob" names Bob. A word on these lists counts only when it heads its phrase (_HEADS; a self word, _SELF_ENDS):
 # "to the next reviewer", "to the end user", "to the user group", "to French colleagues" name someone.
-# A word on the lists below is what a phrase names only when it heads the phrase: a punctuation mark, the end or a
-# function word follows it, not a word it modifies ("to the end" and "to the end of the day", not "to the end
-# user"; "to French", not "to French colleagues"; "to the user", not "to the user group"; not "today's").
-_HEADS = (r"(?=\s*(?:[.,;:!?)\]\"”—–]|$)|[ \t]*\n|\s+(?:and|or|&|as|at|by|for|from|in|into|on|onto|of|over|via|through"
-          r"|using|with|without|to|before|after|until|till|since|so|then|too|also|again|instead|directly"
-          r"|immediately|first|already|only|here|now|later|today|yesterday|tonight|tomorrow|this|that|i|we|you"
-          r"|he|she|they|it)\b)")
+# A word on the lists below is what a phrase names only when it heads the phrase: a punctuation mark, the end, a
+# line break (not after "user" or "bot": main reads "the user ..." as a recipient) or a function word follows it, not a
+# word it modifies ("to the end" and "to the end of the day", not "to the end user"; "to French", not "to French
+# colleagues"; "to the user", not "to the user group"; not "today's").
+_HEADS = (r"(?=\s*(?:[.,;:!?)\]\"”—–]|$)|(?<!user)(?<!bot)[ \t]*\n|(?:[ \t]+|(?<!user)(?<!bot)\s+)"
+          r"(?:and|or|&|as|at|by|for|from|in|into|on|onto|of|over|via|through|using|with|without|to|before|after"
+          r"|until|till|since|so|then|too|also|again|instead|directly|immediately|first|already|only|here|now|later"
+          r"|today|yesterday|tonight|tomorrow|this|that|i|we|you|he|she|they|it)\b)")
 # A time: a day or month name (before a day number or a part of the day), a month abbreviation before a day
 # number ("Oct 24", not "Jan"), a clock time, a time adverb, "next week", "the latest/previous/same/next/last"
 # before a time noun ("the next morning", "the last hour", "the same time"), or "the end/top/bottom/start/
@@ -1550,7 +1553,7 @@ _A_SENT_THING = (r"(?:(?:the|a|an|your|my|our|this|that|these|those)\s+(?:[\w.'�
                  r"|svg|webp|zip|tar|gz|tgz|py|ipynb|js|ts|sh|sql|log|epub|mp4|mov|mp3|wav)\b)")
 # An adverb after a self word: "to the owner earlier", "via Telegram successfully"
 _SELF_ADVERB = (r"(?:earlier|just|now|already|today|directly|first|again|too|also|both|twice|once|successfully"
-                r"|personally|privately|separately)\b")
+                r"|personally|privately|separately|right\s+away)\b")
 # Where such a tail must end for it to name no one: the bracket closes or the phrase or line ends ("to the owner
 # (twice).", not "to the owner (twice and Bob)")
 _TAIL_ENDS = r"(?=\s*(?:[).,;:!?]|$)|[ \t]*\n)"
@@ -1572,7 +1575,8 @@ _NOT_A_TRANSPORT = (r"(?!(?:the|a|an|your|my|our|this)\b|(?:telegram|bot|chat|dm
 _PRODUCED = ("generated", "rendered", "built", "made", "created", "produced", "formatted", "written", "wrote", "drawn",
              "plotted", "computed", "calculated", "compiled", "prepared", "designed", "styled", "drafted", "assembled",
              "analysed", "analyzed", "summarised", "summarized", "charted", "visualised", "visualized", "modelled",
-             "modeled", "derived", "extracted", "processed", "cleaned", "converted", "exported", "edited", "done")
+             "modeled", "derived", "extracted", "processed", "cleaned", "converted", "exported", "edited", "done",
+             "typeset", "laid out")
 _USING = ("using" + "".join(rf"(?<!\b{w} using)" for w in _PRODUCED)  # checked only where "using" is
           + r"(?!\s+(?:the|a|an|your|my|our|this)\s+(?:[\w-]+\s+)?(?:data|dataset|numbers|figures|template|format"
           rf"|layout|style|results|stats|statistics|metrics)\b{_HEADS})")
@@ -1642,8 +1646,9 @@ _ELSEWHERE = re.compile(
     r"|\b(?:to|via|through|over|on|using)\s+(?:(?:the|your|my)\s+)?(?:you|yourself|me|myself|owner|user|chat|dms?"
     rf"|bot|telegram|send_file|send_telegram)\b(?:\s+{_SELF_ADVERB}|\s+at\s+(?:{_A_TIME}|{_AT_TAIL})"
     r"|\s*\([^()\n]{0,60}\))*"
-    r"(?:,?\s+(?:and|&|as\s+well\s+as)\s+|,\s+(?:then|plus|also)\s+|(?:\s*\(\s*|\s+[-–—]\s+|\s*[:;—]\s*"
-    r"|(?<!\byou)(?<!\byourself)(?<!\bme)(?<!\bmyself),\s*|[ \t]*\n[ \t]*(?=\S+(?:[ \t]+\S+){0,2}[ \t]*(?:\n|$))"
+    r"(?:,?\s+(?:and|&|as\s+well\s+as)\s+|,\s+(?:then|plus|also)\s+|(?<=\))\s+|(?:\s*\(\s*|\s+[-–—]\s+|\s*[:;—]\s*"
+    r"|(?<!\byou)(?<!\byourself)(?<!\bme)(?<!\bmyself),\s*"
+    r"|[ \t]*\n[ \t]*(?:(?:then|plus|also)\s+)?(?=\S+(?:[ \t]+\S+){0,2}[ \t]*(?:\n|$))"
     r")"
     rf"{_NOT_A_TAIL}|\s+for\s+(?=(?-i:(?![a-zß-ÿ\d_])\w[a-zß-ÿ])|[@#]\w))"
     rf"(?:only\s+)?{_NOT_A_VERB}{_NOT_A_RECIPIENT}"

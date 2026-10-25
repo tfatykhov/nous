@@ -1830,6 +1830,9 @@ SEND_PHRASINGS = [
     " to the owner at home and {}",
     " to the owner at dinner, then {}",
     " to the owner (twice) and {}",
+    " to the user right away and {}",
+    " to the bot\n\n{}",
+    " to the bot\n- {}",
 ]
 # Cells where only one alternative can catch the destination, so that each one is held by the test on its own
 DECOY_CELLS = [
@@ -1912,6 +1915,18 @@ def test_the_review_probes_of_the_cross_rule(text, level):
         ("I sent the report to the user—Bob.", P),
         ("I sent the report to the owner, also Bob.", P),
         ("I sent the report to the owner\nBob.", P),
+        # main reads "the user ..." as a recipient whatever follows: so does a next line after "user"
+        ("I sent the report to the user\nBob, Carol and Dave.", P),
+        ("I sent the report to the user \n Bob Carol Dave Eve.", P),
+        ("I sent the report to the user\nthen Bob", P),
+        ("I sent the report to the user\nalso Bob", P),
+        ("I sent the report to the user\n- Bob", P),
+        ("I sent the report to the user\n\nBob", P),
+        ("I sent the report to the owner (twice) Bob.", P),
+        ("I sent the report to the user\nthen Bob, Carol and Dave.", P),
+        ("I sent the report to the bot\nBob.", P),
+        ("I sent the report to the bot\n- Bob", P),
+        ("I sent the report to the user right away and Bob.", P),
         # ... but the next sentence, a bullet, a vocative or an owner-only tail is not a destination
         ("I sent the report to the owner. Bob will review it.", E),
         ("I sent the report to the owner.\n\nBob will review it.", E),
@@ -2067,6 +2082,7 @@ def test_common_owner_only_tails_are_no_recipient(text, level):
         ("I sent the summary I wrote using the template.", E),
         ("I sent the report built using pandas, formatted using the template.", E),
         ("I sent the report made using Excel.", E),
+        ("I sent the report, typeset using LaTeX.", E),
         ("I sent the summary I wrote using pandas.", E),
         ("I sent the report using the latest data.", E),
         # ... but after a send verb, or alone after the object, it is how the report was sent
