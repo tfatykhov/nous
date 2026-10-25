@@ -2235,6 +2235,41 @@ def test_a_future_or_negated_clause_is_not_this_sends_destination(text, level):
 
 
 @pytest.mark.parametrize(
+    ("text", "level"),
+    [
+        # a closer or a heading on the next line, and a note, a version, a date, a time or an adverb after a bare
+        # comma, name no one when they end the sentence
+        ("I sent the report to you\nDone.", E),
+        ("I sent the report to you\nThanks.", E),
+        ("I sent the report to you\nSummary:", E),
+        ("I sent the report to you\nNext steps:", E),
+        ("I sent the report to you\nNext steps:\n- review it", E),
+        ("I sent the report to the owner\nAll good.", E),
+        ("I sent the report to the owner\nSee attached.", E),
+        ("I sent the report to the owner, FYI.", E),
+        ("I sent the report to the owner, v2.", E),
+        ("I sent the report to the owner, 10:05 UTC.", E),
+        ("I sent the report to the owner, 2026-10-24.", E),
+        ("I sent the report to the owner, that is you.", E),
+        ("I sent the report to the owner, finally.", E),
+        ("I sent the report via Telegram, FYI.", E),
+        # ... but not when the sentence goes on, and a name on the next line is still read
+        ("I sent the report to the owner, FYI Bob.", P),
+        ("I sent the report to the owner, finally, Bob.", P),
+        ("I sent the report to the owner, v2 for Bob.", P),
+        ("I sent the report to the user, FYI\nBob", P),
+        ("I sent the report to the owner\nDone\nBob", P),
+        ("I sent the report to the owner\nSummary:\nBob will review it", P),
+        ("I sent the report to the owner\nBob.", P),
+        ("I sent the report to the owner, that is Bob.", P),
+    ],
+)
+def test_a_closer_or_a_note_after_a_self_word_names_no_one(text, level):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [level]
+
+
+@pytest.mark.parametrize(
     "unit",
     ["for a b ", "as ", "at 9am ", "for x today ", "i.e. ", "to the owner for review ", "and also ", "; will x ",
      ", not to x "],

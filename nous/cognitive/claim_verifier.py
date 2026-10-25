@@ -1573,6 +1573,14 @@ _TAIL_ENDS = r"(?=\s*(?:[).,;:!?]|$)|[ \t]*\n)"
 _NOT_A_TAIL = (rf"(?!(?:{_A_SENT_THING}|\d+\s*(?:pages?|slides?|sheets?|charts?|tables?|files?|attachments?|parts?"
                r"|sections?|rows?|lines?|words?|items?|kb|mb|gb|bytes?|min(?:ute)?s?|sec(?:ond)?s?|hours?|days?)\b"
                rf"|{_SELF_ADVERB}){_TAIL_ENDS})")
+# What may end the sentence after a mark or on the next line without naming anyone: a note, a version, a date, a
+# clock time, an adverb, a closer or a heading ("to the owner, FYI", ", v2", ", 2026-10-24", ", 10:05 UTC", ",
+# finally", "to you<newline>Done", "<newline>Summary:"). Only at the end of the sentence, so nothing after it is hidden
+# ("to the owner, FYI Bob", "<newline>Summary:<newline>Bob").
+_OWNER_ONLY_END = (r"(?:fyi|asap|btw|nb|ps|v\d+(?:\.\d+)*|\d{4}-\d\d-\d\d|\d{1,2}:\d\d(?:\s*(?:utc|gmt|[ap]m))?"
+                   r"|finally|also|too|again|anyway|instead|eventually|thanks|thank\s+you|cheers|done|all\s+good"
+                   r"|see\s+attached|(?:summary|next\s+steps|details|notes?|attachments?|highlights|results|changes"
+                   r"|status):)[ \t]*$")
 # A time or a place after "to <self> at" that names no one: "at lunch", "at the usual time", "at the office" (not
 # "at lunch with Bob", "at the office of Bob", "at Worktime HQ")
 _AT_TAIL = (r"(?:lunch|[a-z]+time|dinner|breakfast|night|dawn|dusk|work|home|first|last|least|most|all|length|hand"
@@ -1669,7 +1677,7 @@ _ELSEWHERE = re.compile(
     r"|(?<!\byou)(?<!\byourself)(?<!\bme)(?<!\bmyself),\s*"
     r"|[ \t]*\n[ \t]*(?:(?:then|plus|also)\s+)?(?=\S+(?:[ \t]+\S+){0,2}[ \t]*(?:\n|$))"
     r")"
-    rf"{_NOT_A_TAIL}(?!(?:i\.e|e\.g|viz)\.|{_CONNECTOR}\b)|\s+for\s+(?=(?-i:(?![a-zß-ÿ\d_])\w[a-zß-ÿ])|[@#]\w))"
+    rf"{_NOT_A_TAIL}(?!(?:i\.e|e\.g|viz)\.|{_CONNECTOR}\b|{_OWNER_ONLY_END})|\s+for\s+(?=(?-i:(?![a-zß-ÿ\d_])\w[a-zß-ÿ])|[@#]\w))"
     rf"(?:only\s+)?{_NOT_A_VERB}{_NOT_A_RECIPIENT}"
     # "to the user at Bob", "to you at the London office" (not "to the owner at 7am", "at once", "at lunch", "at
     # the usual time", "at the office"), and an address anywhere in the sentence
