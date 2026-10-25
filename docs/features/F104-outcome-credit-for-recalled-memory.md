@@ -481,39 +481,48 @@ Phase 3 analysis with its own decision rule, written down before it runs.
     written with that offline check, before it runs): two held-out decisions with the same recalled
     set (same ids, same ranks) and different response overlap, so different `strength`, get the
     same gate score
+  - gate score uses the deployed adjustment: a held-out decision whose recalled memories all have
+    `n_eff < 2` at its fold's start (each with `p_mem ≠ p_base`) gets gate score exactly 0
 
 **Phase 2 gate: turn on the boost.** All three must hold:
 
-1. **At least 300** credited (decision, memory) pairs among the scored rows (`source = 'context'`,
-   type fact, decision or episode).
+1. **At least 300** scored held-out rows (defined in item 2, pooled over all folds) whose memory has
+   `n_eff ≥ 2` in the fold that scores the row, so each has a deployed adjustment. Rows below the
+   section 3 threshold are left out of the count: they score 0, and counting them would let the
+   gate's evidence floor be met by rows Phase 2 never moves. The count uses no outcome of the scored
+   week, so it joins the wait condition in item 2 ("When it runs").
 2. **Offline rolling-origin check**, with the decision rule fixed here, before any data arrives:
    - **Rows scored.** Only rows Phase 2 can re-rank: `source = 'context'` rows of type `fact`,
      `decision` and `episode`. Procedure rows are out (Phase 2 doesn't boost them, see Procedures),
      and so are `profile` and `session_profile` rows (never boosted, section 1). A decision with no
      such row is not scored and doesn't count toward the pool.
-   - **Score.** A decision's score is the `rank_w(rank)`-weighted mean of `p_mem − p_base` over its
-     scored rows, with `p_mem` from the same `source = 'context'` rows as the boost read. The
-     held-out rows are weighted by rank only, not by `w` (section 2 says why). The fit rows keep
-     their stored `credited_weight = w`, strength included, since for them it is history. For the fold
-     that scores week k+1, `p_mem` and `p_base` use only rows with `credited_at` before that week
-     starts, decayed from the week's start (not from `now()`). Re-grades overwrite,
-     so a fit row carries its current grade, not the grade it had at the fold's start. That is
-     accepted: a re-grade corrects an earlier decision's label and carries nothing about the scored
-     week's outcomes.
+   - **Score.** A decision's score is the `rank_w(rank)`-weighted mean of the deployed adjustment
+     `boost − 1` over its scored rows, with `boost` exactly as section 3 defines it (same `n_eff`
+     threshold, same clip bounds) and computed from the same `source = 'context'` rows as the boost
+     read. So a row whose memory has `n_eff < 2` scores 0, and any other row its clipped
+     `boost − 1`. The gate must measure the ranking change Phase 2 would deploy, and a memory below the
+     evidence threshold doesn't move, so it contributes 0; a decision whose rows all fall below it
+     scores 0 and stays in the pool as a neutral score. The held-out rows are weighted by rank only,
+     not by `w` (section 2 says why). The fit rows keep their stored `credited_weight = w`, strength
+     included, since for them it is history. For the fold that scores week k+1, `p_mem`, `p_base`
+     and `n_eff` use only rows with `credited_at` before that week starts, decayed from the week's
+     start (not from `now()`). Re-grades overwrite, so a fit row carries its current grade, not the
+     grade it had at the fold's start. That is accepted: a re-grade corrects an earlier decision's
+     label and carries nothing about the scored week's outcomes.
    - **Folds.** For every k across at least 8 weeks of capture: fit on weeks 1..k, score the eligible
      graded decisions of week k+1. A decision is scored once, in the fold for its week.
    - **Pool.** Pool the scored decisions over all folds. The pool must hold **at least 30
      non-success** (partial or failure) scored decisions.
-   - **When it runs.** Exactly once, at the first week boundary where both hold: at least 8 weeks of
-     capture, and at least 30 non-success decisions in the pool. Before that the gate is shut, not
-     failed, and nobody computes the AUC early.
+   - **When it runs.** Exactly once, at the first week boundary where all three hold: at least 8
+     weeks of capture, at least 30 non-success decisions in the pool, and item 1's 300 rows. Before
+     that the gate is shut, not failed, and nobody computes the AUC early.
    - **Test.** Pooled AUC of score for success against non-success, with the null distribution from
      10,000 label permutations within each scored week. Pass if the one-sided permutation
      **p < 0.05**.
-   - **Stop rule.** If 8 weeks of capture don't reach 30 non-success decisions, the gate stays shut;
-     the folds keep extending week by week, with the same rule, until the condition above holds. The
-     single run is final: a failed check ends Phase 2, and F104 stays at Phase 1 as an analytics
-     feature.
+   - **Stop rule.** If 8 weeks of capture don't reach 30 non-success decisions and item 1's 300
+     rows, the gate stays shut; the folds keep extending week by week, with the same rule, until the
+     condition above holds. The single run is final: a failed check ends Phase 2, and F104 stays at
+     Phase 1 as an analytics feature.
 
    **Why only the boosted types.** The gate decides whether to turn on a boost that touches facts,
    decisions and episodes only. If procedure credit predicted outcomes and the others didn't, an
