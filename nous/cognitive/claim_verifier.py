@@ -1547,6 +1547,10 @@ _ELSEWHERE = re.compile(
     r"|\b(?:via|over|by)\s+(?:a\s+)?text\b(?!-)"
     r"|\bby\s+(?:post|courier|hand|fax)\b"
     r"|\bchat(?:[ _-]?id)?\s*[=:]?\s*-?\d{5,}"  # another chat, by its id
+    # ... anyone or anything after "by" but me, a time, the owner's chat or a link ("I sent the report by Bob")
+    rf"|\bby\s+(?!{_A_TIME}|\d|(?:me|myself|noon|midnight|tonight|tomorrow|today|eod|eob|cob|then|now|lunch"
+    r"|next\s+week|end\s+of|this\s+(?:morning|afternoon|evening|week)|(?:a\s+)?(?:shared\s+)?links?)\b"
+    rf"|(?:(?:the|your|my)\s+)?{_A_SELF})[\w@#]"
     # ... or any other transport than Telegram, a tool, a link or a time after via/through/using, and a place
     # after on/over (not a topic: "a note on the outage")
     rf"|\b(?:via|through|using)\s+(?!{_A_TIME})(?:(?:the|a|an|your|my|our|this)\s+)?{_NOT_A_TRANSPORT}"

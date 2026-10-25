@@ -1743,6 +1743,43 @@ def test_mail_as_the_topic_is_no_destination(text, level):
     assert [c.evidence for c in result.claims] == [level]
 
 
+# THE RULE, as a property: with only a send_file (the owner's Telegram chat) as evidence, a send claim that names
+# anyone or anything else as its destination is never exact, whatever the phrasing. Main scores none of these
+# cells higher than plausible except where it finds no claim, so "never exact" also holds "never higher than
+# main" (a claim whose recipient is an address stays "none").
+OTHER_DESTINATIONS = [
+    # names, in any case, and names ending in -ed
+    "Bob", "bob", "Mark", "O'Brien", "Иван", "fred", "ahmed", "syed", "jared", "Ned",
+    # dotted, underscored and styled names
+    "bob.smith", "bob_smith", "_Bob_", "*Bob*", "`Bob`",
+    # addresses
+    "bob@x.io", "bob.smith@example.com", "_bob@x.io_",
+    # handles and channels
+    "@bob", "#general", "_Slack_", "*Slack*", "`Slack`",
+    # underscore words that are no sending tool
+    "send_slack", "the SLACK_WEBHOOK", "the mail_server",
+    # channel-named actors
+    "Slack's reminder bot", "Telegram's scheduler", "Slack automation",
+    # groups and other people
+    "the team", "the Telegram group", "the user group", "stakeholders", "the owner's manager",
+    # chat ids
+    "chat_id -100123", "chat_id=-100123", "chat -1001234",
+]
+SEND_PHRASINGS = [" via {}", " to {}", " with a link to {}", " to you and {}", " by {}", " to the user at {}"]
+
+
+@pytest.mark.parametrize("destination", OTHER_DESTINATIONS)
+@pytest.mark.parametrize("phrasing", SEND_PHRASINGS)
+@pytest.mark.parametrize("claim", ["I sent the report{}.", "Message sent{}.", "I forwarded the summary{}."])
+def test_a_send_file_never_confirms_a_send_to_someone_else(claim, phrasing, destination):
+    text = claim.format(phrasing.format(destination))
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert "exact" not in [c.evidence for c in result.claims], text
+    assert result.verified is not True or not result.claims, text
+    if phrasing == " to {}" and "@" in destination.strip("_") and not destination.startswith("@"):
+        assert [c.evidence for c in result.claims] == ["none"], text
+
+
 def test_a_verifier_given_no_runner_takes_no_bash_call_for_a_runner_call():
     evidence = [Evidence("bash", {"command": f"bash {RUNNER} cancel {JOB}"}, exit_code=0)]
     assert not ClaimVerifier().verify_report(f"I cancelled job {JOB}.", evidence).verified
