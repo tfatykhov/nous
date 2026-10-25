@@ -913,7 +913,7 @@ async def create_components(settings: Settings) -> dict:
         brave=BraveProvider(api_key=settings.brave_search_api_key),
         mode=settings.search_provider,
     )
-    register_web_tools(dispatcher, settings, web_http, router=search_router)
+    register_web_tools(dispatcher, settings, web_http, router=search_router, bus=bus)
 
     # Issue #220: Register Telegram file delivery tool (gated on bot token)
     if settings.telegram_bot_token:
@@ -934,7 +934,7 @@ async def create_components(settings: Settings) -> dict:
     if settings.browser_task_enabled:
         from nous.browser.tools import register_browser_tools
 
-        register_browser_tools(dispatcher, settings)
+        register_browser_tools(dispatcher, settings, bus=bus)
         logger.info("Browser task tool registered (browser_task, model %s)", settings.browser_task_model)
 
     # F020: Register cache_retrieve tool
