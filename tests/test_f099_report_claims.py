@@ -2586,6 +2586,7 @@ ALLOW_TAILS = [
     " just now",
     " twice",
     " at 9am",
+    " at 9:30",
     " at lunch",
     " (twice)",
     " (report.pdf)",
@@ -2595,6 +2596,7 @@ ALLOW_TAILS = [
     " in PDF",
     " on Monday",
     " by 5pm",
+    " by 9:30",
     " with a summary",
     " for review",
     " as requested",
@@ -2722,6 +2724,30 @@ def test_the_review_sentences_after_a_new_self_head_are_plausible(text):
 def test_the_gains_after_a_new_self_head_stay_exact(text):
     result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
     assert [c.evidence for c in result.claims] == [E]
+
+
+@pytest.mark.parametrize(
+    ("text", "level"),
+    [
+        # a clock time is one time token: its colon is no connector
+        ("I sent the report to you by 9:30.", E),
+        ("I sent the report to you at 9:30.", E),
+        ("I sent the report to you by 21:00 UTC.", E),
+        ("I sent the report to the owner by 9:30 am.", E),
+        ("I sent the report to you at 14:05.", E),
+        ("I sent the report to you by 9:30pm.", E),
+        ("I sent the report to the user by 9:30.", E),
+        ("I sent the report to the user at 14:05 UTC.", E),
+        # ... but a colon after a number still introduces whoever follows it
+        ("I sent the report to you by 9: Bob.", P),
+        ("I sent the report to you by 9:30: Bob.", P),
+        ("I sent the report to you at 9:30, Bob.", P),
+        ("I sent the report to the user by 9:30 for Bob.", P),
+    ],
+)
+def test_the_colon_of_a_clock_time_is_no_connector(text, level):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [level]
 
 
 @pytest.mark.parametrize(

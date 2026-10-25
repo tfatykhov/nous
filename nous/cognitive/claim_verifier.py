@@ -1489,10 +1489,11 @@ _HEADS = (r"(?=\s*(?:[.,;:!?)\]\"”—–]|$)|(?<!user)(?<!bot)[ \t]*\n|(?:[ \t
           r"|until|till|since|so|then|too|also|again|instead|directly|immediately|first|already|only|here|now|later"
           r"|today|yesterday|tonight|tomorrow|this|that|i|we|you|he|she|they|it)\b)")
 # A time: a day or month name (before a day number or a part of the day), a month abbreviation before a day
-# number ("Oct 24", not "Jan"), a clock time, a time adverb, "next week", "the latest/previous/same/next/last"
-# before a time noun ("the next morning", "the last hour", "the same time"), or "the end/top/bottom/start/
-# beginning/latest/previous/same/next/last" alone or before "of"; each one heading its phrase. Each is a
-# narrowing of an older, wider form, so no phrase is a time now that was not before. The time nouns: second, minute,
+# number ("Oct 24", not "Jan"), a clock time ("9am", "9:30", "21:00 UTC"), a time adverb, "next week", "the
+# latest/previous/same/next/last" before a time noun ("the next morning", "the last hour", "the same time"), or "the
+# end/top/bottom/start/beginning/latest/previous/same/next/last" alone or before "of"; each one heading its phrase. Each
+# but "9:30" is a narrowing of an older, wider form, so no other phrase is a time now that was not before; "to 9:30"
+# names no one either. The time nouns: second, minute,
 # hour, day, night, morning, afternoon, evening, week, weekend, fortnight, month, quarter, year, sprint, run,
 # cycle, round, iteration, time, and a version or release ("the next release").
 _A_TIME = (r"(?:(?:(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may"
@@ -1504,7 +1505,8 @@ _A_TIME = (r"(?:(?:(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|j
            r"|night|morning|afternoon|evening|week|weekend|fortnight|month|quarter|year|sprint|run|cycle|round"
            r"|iteration|time|version|release)s?"
            r"|the\s+(?:end|top|bottom|start|beginning|latest|previous|same|next|last)"
-           r"|\d{1,2}(?::\d\d)?\s*(?:am|pm))\b" + _HEADS + ")")
+           r"|\d{1,2}:\d\d(?:\s*(?:am|pm))?(?:\s+(?:utc|gmt|bst|cet|cest|eet|eest|msk|ist|jst|[ecmp][sd]t))?"
+           r"|\d{1,2}\s*(?:am|pm))\b" + _HEADS + ")")
 # The owner's chat, as a noun: the owner, the user, the chat, a DM, the bot, Telegram, chained ("the Telegram
 # bot") or as the owner's chat, DMs or Telegram ("the user's DMs"); "the user group", "the Telegram channel",
 # "the user's team" and "the bot's owner" are someone else.
@@ -1600,11 +1602,12 @@ _AT_TAIL = (r"(?:lunch|[a-z]+time|dinner|breakfast|night|dawn|dusk|work|home|fir
             rf"|the\s+(?:(?:[\w-]+\s+)?(?:time|moment|hour|meeting|weekend)s?|office))\b{_TAIL_ENDS}")
 # A short prepositional tail after a self word: "to the user as a PDF", "on Monday", "for review", "by 5pm" (up to
 # three words, none of them a preposition, a connector, an adverb or a self word, so the tail is read one way only
-# and never starts another self word's reading: "via telegram via telegram ..." is linear)
+# and never starts another self word's reading: "via telegram via telegram ..." is linear); a clock time is one word
+# ("by 9:30")
 _PREPOSITION = r"(?:as|in|with|on|by|for|via|through|over|using)"
 _PREP_TAIL = (rf"(?:{_PREPOSITION}|at(?!\s+(?:{_A_TIME}|{_AT_TAIL})))"
               rf"(?:\s+(?!{_SELF_ADVERB}|(?:{_PREPOSITION}|at|to|or|not|but|that|right|{_CONNECTOR}|{_SELF}|you|yourself"
-              r"|me|myself|send_file|send_telegram)\b)[\w'’-]+){1,3}")
+              r"|me|myself|send_file|send_telegram)\b)[\w'’-]+(?::\d\d)?){1,3}")
 # After via/through/using/on/over: Telegram, the bot, the chat, a DM, here, a link, the sending tool by name
 # (send_file, send_telegram) or a time word.
 _NOT_A_TRANSPORT = (r"(?!(?:the|a|an|your|my|our|this)\b|(?:telegram|bot|chat|dms?)(?:\s+(?:telegram|bot|chat|dms?))*\b"
@@ -1687,7 +1690,7 @@ _ELSEWHERE = re.compile(
     rf"|\s*\([^()\n]{{0,60}}\)|\s+{_PREP_TAIL})*"
     rf"(?:(?:\s*[,;:(—–-]\s*|\s+){_CONNECTOR},?\s+(?!{_AN_EXAMPLE}|{_NOTHING_MORE})|(?<=\))\s+"
     rf"|(?:\s*[,;:(—–]\s*|\s+){_THAT_IS},?\s*(?!{_AN_EXAMPLE})"  # "to the user, i.e. Bob"
-    r"|(?:\s*\(\s*|\s+[-–—]\s+|\s*[:;—]\s*"
+    r"|(?:\s*\(\s*|\s+[-–—]\s+|\s*(?:[;—]|:(?!(?<=\d:)\d))\s*"  # not the colon of a clock time ("by 9:30")
     r"|(?<!\byou)(?<!\byourself)(?<!\bme)(?<!\bmyself),\s*"
     r"|[ \t]*\n[ \t]*(?:(?:then|plus|also)\s+)?(?=\S+(?:[ \t]+\S+){0,2}[ \t]*(?:\n|$))"
     r")"
