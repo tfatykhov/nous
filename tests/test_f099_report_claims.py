@@ -1985,6 +1985,40 @@ def test_a_time_or_a_manner_after_by_is_no_one(text, level):
 
 
 @pytest.mark.parametrize(
+    ("text", "level"),
+    [
+        # a time or a place after "to <self> at" is no one; a capitalised pronoun after a connector is no person;
+        # a file, a count or an adverb in brackets or after a dash is no recipient ...
+        ("I sent the report to you at lunch.", E),
+        ("I sent the report to you at night.", E),
+        ("I sent the report to you at the usual time.", E),
+        ("I sent the report to you at the office.", E),
+        ("I sent the report to the owner at lunchtime.", E),
+        ("I sent the report to you via Telegram and I waited for a reply.", E),
+        ("I sent the report to you via Telegram and I'm waiting for a reply.", E),
+        ("I sent the report to the owner and We're done.", E),
+        ("I sent the report to you (report.pdf).", E),
+        ("I sent the report to you - 3 pages.", E),
+        ("I sent the report to the owner (twice).", E),
+        ("I sent the report to the owner (the full report).", E),
+        ("I sent the report to the owner - it is attached.", E),
+        # ... but a person, a handle, an address or a named office or desk is
+        ("I sent the report to the user at Bob.", P),
+        ("I sent the report to you at bob.", P),
+        ("I sent the report to you at @bob.", P),
+        ("I sent the report to you at the London office.", P),
+        ("I sent the report to the owner at the billing address.", P),
+        ("I sent the report to the owner (Bob).", P),
+        ("I sent the report to the owner - the team.", P),
+        ("I sent the report to you via Telegram and Bob.", P),
+    ],
+)
+def test_common_owner_only_tails_are_no_recipient(text, level):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [level]
+
+
+@pytest.mark.parametrize(
     "token", ["a" * 20000, "a_" * 10000, "9" * 20000, "chat_id" * 3000], ids=["letters", "a_", "digits", "chat_id"]
 )
 def test_a_long_word_in_a_send_sentence_is_scanned_in_linear_time(token):

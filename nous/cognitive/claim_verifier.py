@@ -1459,8 +1459,11 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
 #      is not on the lists below -- a name ("Bob", "Tim": the owner's name is not known here; "Mark", "O'Brien",
 #      "Иван"), an acronym ("HR", "S3"), a number ("3 people"), a handle "@bob", a channel "#general" (also
 #      after in/on/into/via/over), a person or group in lowercase ("them", "bob", "the team", "the Telegram
-#      group"), an address (anywhere in the clause: "to the user at bob@x.io"), a place after "at" after a self
-#      word ("to the user at Bob", not "to the owner at 7am"); and after "a link to" one that is no sent thing
+#      group"), an address (anywhere in the sentence: "to the user at bob@x.io"), a place after "at" after a self
+#      word ("to the user at Bob", "to you at the London office", not "to the owner at 7am", "at lunch", "at the
+#      office"); a bracket, a dash or a mark after a self word holding anything but a sent thing, a count or an
+#      adverb ("to the user: Bob", not "to you (report.pdf)", "to you - 3 pages"); and after "a link to" one that
+#      is no sent thing
 #      ("a link to the team", not "a link to the report", "to it", "to https://...", "to report.pdf").
 # Nothing else is: not you, the owner, the user, the chat, a DM, the bot or Telegram, nor the owner's chat ("the user's
 # DMs"; but "the user's team" or "inbox" is someone else's); not an infinitive in lowercase ("to review"; "to Mark" is a
@@ -1527,6 +1530,7 @@ _NOT_A_RECIPIENT = (
 # are listed, since a name can end in -ed too ("to you and ahmed", "and fred")
 _NOT_A_VERB = (r"(?!(?-i:then|also|now|later|again|so|on|in|at|by|with|as|for|from|via|over|through|i|it|we|will|would"
                r"|who|whom|which|that|but|because|since|while|when|thanks|please|including"
+               r"|I|We|It|That|This|I['’]m|We['’]re"
                r"|can|could|should|have|has|had|is|was|am|only|nobody|no\s+one|none|done|sent|told|made|put|set|left"
                r"|got|wrote|b?cc(?:['’]?e?d)?|(?:archiv|forward|copi|sav|mov|notifi|ping|add|attach|upload|post|clos"
                r"|updat|delet|remov|fil|creat|merg|push|committ|schedul|shar|logg|not|confirm|check|verifi|open|renam"
@@ -1543,6 +1547,12 @@ _A_SENT_THING = (r"(?:(?:the|a|an|your|my|our|this|that|these|those)\s+(?:[\w.'�
                  rf"|section)(?:e?s)?\b{_HEADS}|(?-i:it|this|that)\b|https?\b|www\.|[/~]"
                  r"|[\w-]+\.(?:pdf|md|txt|csv|tsv|json|ya?ml|xml|html?|docx?|xlsx?|pptx?|odt|ods|rtf|png|jpe?g|gif"
                  r"|svg|webp|zip|tar|gz|tgz|py|ipynb|js|ts|sh|sql|log|epub|mp4|mov|mp3|wav)\b)")
+# What a bracket, a dash or another mark after a self word may hold without naming anyone: a sent thing, a count
+# or an adverb ("to you (report.pdf)", "to you - 3 pages", "to the owner (twice)").
+_NOT_A_TAIL = (rf"(?!{_A_SENT_THING}|\d+\s*(?:pages?|slides?|sheets?|charts?|tables?|files?|attachments?|parts?"
+               r"|sections?|rows?|lines?|words?|items?|kb|mb|gb|bytes?|min(?:ute)?s?|sec(?:ond)?s?|hours?|days?)\b"
+               r"|(?:earlier|just|now|already|today|directly|first|again|too|also|both|twice|once|successfully"
+               r"|personally|privately|separately)\b)")
 # After via/through/using/on/over: Telegram, the bot, the chat, a DM, here, a link, the sending tool by name
 # (send_file, send_telegram) or a time word.
 _NOT_A_TRANSPORT = (r"(?!(?:the|a|an|your|my|our|this)\b|(?:telegram|bot|chat|dms?)(?:\s+(?:telegram|bot|chat|dms?))*\b"
@@ -1611,13 +1621,15 @@ _ELSEWHERE = re.compile(
     r"|\b(?:to|via|through|over|on|using)\s+(?:(?:the|your|my)\s+)?(?:you|yourself|me|myself|owner|user|chat|dms?"
     r"|bot|telegram|send_file|send_telegram)\b(?:\s+(?:earlier|just|now|already|today|directly|first|again|too|also"
     r"|both|twice|once|successfully|personally|privately|separately))*"
-    r"(?:,?\s+(?:and|&|as\s+well\s+as)\s+|,\s+(?:then|plus|also)\s+|\s*\(\s*|\s+[-–—]\s+|\s*[:;—]\s*"
-    r"|(?<!\byou)(?<!\byourself)(?<!\bme)(?<!\bmyself),\s*|[ \t]*\n[ \t]*(?=\S+(?:[ \t]+\S+){0,2}[ \t]*(?:\n|$))"
-    r"|\s+for\s+(?=(?-i:(?![a-zß-ÿ\d_])\w[a-zß-ÿ])|[@#]\w))"
+    r"(?:,?\s+(?:and|&|as\s+well\s+as)\s+|,\s+(?:then|plus|also)\s+|(?:\s*\(\s*|\s+[-–—]\s+|\s*[:;—]\s*"
+    r"|(?<!\byou)(?<!\byourself)(?<!\bme)(?<!\bmyself),\s*|[ \t]*\n[ \t]*(?=\S+(?:[ \t]+\S+){0,2}[ \t]*(?:\n|$)))"
+    rf"{_NOT_A_TAIL}|\s+for\s+(?=(?-i:(?![a-zß-ÿ\d_])\w[a-zß-ÿ])|[@#]\w))"
     rf"(?:only\s+)?{_NOT_A_VERB}{_NOT_A_RECIPIENT}"
-    # "to the user at Bob" (not "to the owner at 7am", "at once"), and an address anywhere in the clause
+    # "to the user at Bob", "to you at the London office" (not "to the owner at 7am", "at once", "at lunch", "at
+    # the usual time", "at the office"), and an address anywhere in the clause
     r"|\bto\s+(?:(?:the|your|my)\s+)?(?:you|yourself|me|myself|owner|user|chat|dms?|bot|telegram)\s+at\s+"
-    rf"(?!{_A_TIME}|\d|once\b)[\w@#]"
+    rf"(?!{_A_TIME}|\d|(?:once|lunch|[a-z]+time|dinner|breakfast|night|dawn|dusk|work|home|first|last|least|most"
+    rf"|all|length|hand)\b|the\s+(?:(?:[\w-]+\s+)?(?:time|moment|hour|meeting|weekend)s?|office)\b{_HEADS})[\w@#]"
     r"|(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+"  # anchored: a long word is scanned once, not from each letter
     rf"|\bshared\s+(?:\S+\s+){{0,4}}?with\s+{_NOT_A_RECIPIENT}"
     rf"|\bb?cc(?:['’]?e?d)?\s+(?!(?:you|yourself|me|myself)\b"
