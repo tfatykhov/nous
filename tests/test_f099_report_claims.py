@@ -1256,7 +1256,7 @@ SEND_TAILS = [
     (" via the Telegram bot", E),
     (" via DM", E),
     (" over Telegram", E),
-    # tools and links
+    # the sending tool, by its name (not any word with "_": "via send_slack" is another transport), and links
     (" via send_file", E),
     (" using send_file", E),
     (" through send_file", E),
@@ -1554,6 +1554,39 @@ def test_a_link_to_a_group_names_a_recipient(text, level):
 def test_by_a_channel_is_the_agents_send_and_by_post_is_not(text, level):
     result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
     assert [c.evidence for c in result.claims] == ([level] if level else [])
+
+
+@pytest.mark.parametrize(
+    ("text", "level"),
+    [
+        # the sending tool is exempt by name, not any word with "_": italics, handles, env vars, functions
+        ("I sent the report via send_file.", E),
+        ("I sent the report using send_telegram_file.", E),
+        ("I sent the report via _Slack_.", P),
+        ("I sent the report via bob_smith.", P),
+        ("I sent the report via send_slack.", P),
+        ("I sent the report via send_sms.", P),
+        ("I sent the report via the mail_server.", P),
+        ("I sent the report via the SLACK_WEBHOOK.", P),
+        # a single _, * or backtick around a word is styling, as ** is
+        ("I sent the report via *Slack*.", P),
+        ("I sent the report via `Slack`.", P),
+        ("I sent the report to `Bob`.", P),
+        ("I sent the report to *Bob*.", P),
+        ("I sent the report to you and `Bob`.", P),
+        ("I sent the report to `you`.", E),
+        ("I sent the report via `send_file`.", E),
+        # a chat id is another chat
+        ("I sent the report via send_file with chat_id -100123.", P),
+        ("I sent the report via send_file with chat_id=-100123.", P),
+        ("I sent the report via send_file with chat -1001234.", P),
+        ("Message sent to chat -1001234.", P),
+        ("Message sent with chat_id `-100123`.", P),
+    ],
+)
+def test_a_tool_is_exempt_by_name_and_styling_or_a_chat_id_hides_no_destination(text, level):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [level]
 
 
 def test_a_verifier_given_no_runner_takes_no_bash_call_for_a_runner_call():

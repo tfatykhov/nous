@@ -1435,10 +1435,12 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
 #   2. a named channel other than Telegram after via/on/over/through/by/in/into/using: Slack, WhatsApp,
 #      Signal, Discord, SMS, iMessage, Teams, Messenger, WeChat, Gmail, Outlook, LinkedIn, Twitter, and "text"
 #      after by/via/over (never "Gmail-style"); after via/through/using, any other word too ("via SMTP", "via
-#      the API") but Telegram, the bot, the chat, a DM, "here", a tool (a word with "_": "via send_file"), a
-#      link and a time; after on/over, a place: a capitalised word, a handle or "the wiki/website/channel/..."
+#      the API") but Telegram, the bot, the chat, a DM, "here", the sending tool by name ("via send_file", a
+#      tool name with "telegram" in it: "send_telegram"; not any word with "_": "via _Slack_", "via
+#      send_slack"), a link and a time; after on/over, a place: a capitalised word, a handle or "the
+#      wiki/website/channel/..."
 #      (never a topic or a time: "a note on the outage", "on it", "on Monday", "on Oct 24", "over lunch");
-#      post, a courier, a hand or a fax after "by";
+#      post, a courier, a hand or a fax after "by"; a chat id ("chat_id -100123", "chat -1001234") is another chat;
 #   3. a recipient after "to", "to you and", "shared ... with", "cc", "bcc" or "copied" (in): anything that
 #      is not on the lists below -- a name ("Bob", "Tim": the owner's name is not known here; "Mark", "O'Brien",
 #      "Иван"), an acronym ("HR", "S3"), a number ("3 people"), a handle "@bob", a channel "#general" (also
@@ -1508,11 +1510,11 @@ _A_SENT_THING = (r"(?:(?:the|a|an|your|my|our|this|that|these|those)\s+(?:[\w.'�
                  r"|ticket|thread|commit|branch|diff|log|image|photo|screenshot|form|invite|presentation"
                  r"|release|spec|plan|proposal|agenda|minutes|transcript|archive|attachment|copy|version|section)"
                  rf"(?:e?s)?\b{_HEADS}|(?-i:it|this|that)\b|https?\b|www\.|[/~]|[\w-]+\.\w)")
-# After via/through/using/on/over: Telegram, the bot, the chat, a DM, here, a link, a tool (a word with "_") or
-# a time word.
+# After via/through/using/on/over: Telegram, the bot, the chat, a DM, here, a link, the sending tool by name
+# (send_file, or a tool name with "telegram" in it: "send_telegram") or a time word.
 _NOT_A_TRANSPORT = (r"(?!(?:the|a|an|your|my|our|this)\b|(?:telegram|bot|chat|dms?)(?:\s+(?:telegram|bot|chat|dms?))*\b"
                     rf"{_HEADS}|(?:here|(?:shared\s+)?links?|time|schedule|request|demand|completion|arrival|track"
-                    rf"|hold|weekend|morning|afternoon|evening|night)\b{_HEADS}|\w*_)")
+                    rf"|hold|weekend|morning|afternoon|evening|night)\b{_HEADS}|send_file\b|\w*(?:_telegram|telegram_))")
 _ELSEWHERE = re.compile(
     # 1. mail
     r"\b(?:e-?)?mail(?:ed|ing)\b"
@@ -1525,6 +1527,7 @@ _ELSEWHERE = re.compile(
     r"|sms|imessage|teams|messenger|wechat|gmail|outlook|linkedin|twitter)\b(?!-)"
     r"|\b(?:via|over|by)\s+(?:a\s+)?text\b(?!-)"
     r"|\bby\s+(?:post|courier|hand|fax)\b"
+    r"|\bchat(?:[ _-]?id)?\s*[=:]?\s*-?\d{5,}"  # another chat, by its id
     # ... or any other transport than Telegram, a tool, a link or a time after via/through/using, and a place
     # after on/over (not a topic: "a note on the outage")
     rf"|\b(?:via|through|using)\s+(?!{_A_TIME})(?:(?:the|a|an|your|my|our|this)\s+)?{_NOT_A_TRANSPORT}"
@@ -1553,6 +1556,8 @@ _ELSEWHERE = re.compile(
     r"|\bcopied\s+(?:(?-i:(?![a-zß-ÿ\d_])\w[a-zß-ÿ]+)\b(?![.'’]\w)|[@#]\w|[\w.+-]+@)"
     r"|\b(?:in|on|into|via|over)\s+#\w",
     re.IGNORECASE)
+# A single _, * or backtick around a word is styling, as ** is: "via _Slack_", "to `Bob`"
+_STYLED = re.compile(r"(?<![\w*`])([_*`])([^\s*`]+?)\1(?![\w*`])")
 
 
 def evidence_level(claim: Claim, ev: Evidence) -> str:
@@ -1569,7 +1574,7 @@ def evidence_level(claim: Claim, ev: Evidence) -> str:
     if ev.tool_name == "send_file":  # a Telegram send: no named address, and no e-mail
         if claim.target:
             return "none"
-        return "plausible" if _ELSEWHERE.search(claim.clause or claim.text) else "exact"
+        return "plausible" if _ELSEWHERE.search(_STYLED.sub(r"\2", claim.clause or claim.text)) else "exact"
     if not ev.args:  # names-only evidence from a legacy caller
         return "plausible"
     if ev.tool_name == "bash":
