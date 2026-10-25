@@ -1445,8 +1445,9 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
 #      is not on the lists below -- a name ("Bob", "Tim": the owner's name is not known here; "Mark", "O'Brien",
 #      "Иван"), an acronym ("HR", "S3"), a number ("3 people"), a handle "@bob", a channel "#general" (also
 #      after in/on/into/via/over), a person or group in lowercase ("them", "bob", "the team", "the Telegram
-#      group"), an address; and after "a link to" one that is no sent thing ("a link to the team", not "a link
-#      to the report", "to it", "to https://...", "to report.pdf").
+#      group"), an address (anywhere in the clause: "to the user at bob@x.io"), a place after "at" after a self
+#      word ("to the user at Bob", not "to the owner at 7am"); and after "a link to" one that is no sent thing
+#      ("a link to the team", not "a link to the report", "to it", "to https://...", "to report.pdf").
 # Nothing else is: not you, the owner, the user, the chat, a DM, the bot or Telegram, nor the owner's chat ("the user's
 # DMs"; but "the user's team" or "inbox" is someone else's); not an infinitive in lowercase ("to review"; "to Mark" is a
 # name), a format or language ("to PDF", "to pdf", "to Markdown", "to French"), a time ("to Friday", "to 5pm", "to
@@ -1565,6 +1566,10 @@ _ELSEWHERE = re.compile(
     # "to you and Bob", "to the owner and the team" (not "to you and archived it", "to you and on time")
     r"|\bto\s+(?:(?:the|your|my)\s+)?(?:you|yourself|me|myself|owner|user|chat|dms?|bot|telegram)\s+(?:and|&)\s+"
     rf"(?:only\s+)?{_NOT_A_VERB}{_NOT_A_RECIPIENT}"
+    # "to the user at Bob" (not "to the owner at 7am", "at once"), and an address anywhere in the clause
+    r"|\bto\s+(?:(?:the|your|my)\s+)?(?:you|yourself|me|myself|owner|user|chat|dms?|bot|telegram)\s+at\s+"
+    rf"(?!{_A_TIME}|\d|once\b)[\w@#]"
+    r"|[\w.+-]+@[\w-]+(?:\.[\w-]+)+"
     rf"|\bshared\s+(?:\S+\s+){{0,4}}?with\s+{_NOT_A_RECIPIENT}"
     rf"|\bb?cc(?:['’]?e?d)?\s+(?!(?:you|yourself|me|myself)\b"
     rf"|(?:(?:the|your|my)\s+)?(?:owner|user|chat)\b{_SELF_ENDS})"

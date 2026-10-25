@@ -1665,6 +1665,28 @@ def test_a_name_ending_in_ed_is_no_verb(text, level):
     assert [c.evidence for c in result.claims] == [level]
 
 
+@pytest.mark.parametrize(
+    ("text", "level"),
+    [
+        # an address anywhere in the clause is another destination, and so is a place "at" after a self word
+        ("I sent the report to the user at bob@x.io.", P),
+        ("I sent the report to you at bob.smith@example.com.", P),
+        ("I sent the report to the owner from ops@x.io.", P),
+        ("I sent the report to the user at Bob.", P),
+        ("I sent the report to the user at the team channel.", P),
+        ("Message sent to the owner at @bob.", P),
+        # ... but a time after "at" is none
+        ("I sent the report to the owner at 7am.", E),
+        ("I sent the report to you at noon.", E),
+        ("I sent the report to the user at the end of the day.", E),
+        ("I sent the report to the owner at once.", E),
+    ],
+)
+def test_an_address_or_a_place_after_a_self_word_is_another_destination(text, level):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [level]
+
+
 def test_a_verifier_given_no_runner_takes_no_bash_call_for_a_runner_call():
     evidence = [Evidence("bash", {"command": f"bash {RUNNER} cancel {JOB}"}, exit_code=0)]
     assert not ClaimVerifier().verify_report(f"I cancelled job {JOB}.", evidence).verified
