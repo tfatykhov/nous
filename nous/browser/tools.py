@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from nous.api.injection_screen import screen_tool_result
 from nous.api.tools import ToolDispatcher, _tool_error
 from nous.browser.loop import UnsupportedModelError, run_browser_task, validate_model
 
@@ -38,7 +39,7 @@ _BROWSER_TASK_SCHEMA: dict[str, Any] = {
 }
 
 
-def register_browser_tools(dispatcher: ToolDispatcher, settings: Any) -> None:
+def register_browser_tools(dispatcher: ToolDispatcher, settings: Any, bus: Any = None) -> None:
     """Register browser_task. An unsupported NOUS_BROWSER_TASK_MODEL is logged now and refused on every call."""
     try:
         validate_model(settings.browser_task_model)
@@ -52,6 +53,11 @@ def register_browser_tools(dispatcher: ToolDispatcher, settings: Any) -> None:
         max_steps: int = 30,
     ) -> dict[str, Any]:
         result = await run_browser_task(goal, allowed_domains, start_url, max_steps, settings=settings)
+        # F103: flag-only screen of the inner model's summary (it may echo injected page text);
+        # a weak signal, since a hijacked model can write a clean-looking summary.
+        await screen_tool_result(
+            result.summary, source="browser_task", url=result.final_url, settings=settings, bus=bus
+        )
         text = result.render()
         if result.status in ("error", "timeout", "busy"):
             return _tool_error(text)

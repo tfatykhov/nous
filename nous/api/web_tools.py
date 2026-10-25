@@ -17,11 +17,13 @@ from urllib.parse import urlparse
 
 import httpx
 
+from nous.api.injection_screen import screen_tool_result
 from nous.api.tools import ToolDispatcher, _tool_error
 from nous.config import Settings
 
 if TYPE_CHECKING:
     from nous.api.search_router import SearchRouter
+    from nous.events import EventBus
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +221,7 @@ async def _web_fetch(
     *,
     _settings: Settings,
     _http: httpx.AsyncClient,
+    _bus: EventBus | None = None,
 ) -> dict[str, Any]:
     """Fetch URL and extract readable content."""
     try:
@@ -282,6 +285,8 @@ async def _web_fetch(
         if len(text) > effective_max:
             text = text[:effective_max] + "\n\n[... truncated]"
 
+        # F103: flag-only; never raises and never changes the text.
+        await screen_tool_result(text, source="web_fetch", url=current_url, settings=_settings, bus=_bus)
         return _mcp_response(f"Content from {url} ({len(text)} chars):\n\n{text}")
 
     except httpx.TimeoutException:
@@ -373,6 +378,7 @@ def register_web_tools(
     settings: Settings,
     http_client: httpx.AsyncClient,
     router: SearchRouter | None = None,
+    bus: EventBus | None = None,
 ) -> None:
     """Register web tools (web_search, web_fetch) with the dispatcher.
 
@@ -386,7 +392,7 @@ def register_web_tools(
         )
 
     async def _fetch(url: str, max_chars: int | None = None) -> dict[str, Any]:
-        return await _web_fetch(url, max_chars, _settings=settings, _http=http_client)
+        return await _web_fetch(url, max_chars, _settings=settings, _http=http_client, _bus=bus)
 
     dispatcher.register("web_search", _search, _WEB_SEARCH_SCHEMA)
     dispatcher.register("web_fetch", _fetch, _WEB_FETCH_SCHEMA)

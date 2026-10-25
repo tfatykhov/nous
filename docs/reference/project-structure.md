@@ -162,6 +162,7 @@ nous/
 │       ├── compensation.py     # Harness 2.8: snapshots of side-effecting writes so a background mutation can be reverted (NOUS_COMPENSATION_ENABLED)
 │       ├── builtin_tools.py    # bash, read_file, write_file
 │       ├── web_tools.py        # web_search, web_fetch (multi-tier routing)
+│       ├── injection_screen.py # F103: flag-only prompt-injection + secret screen over web_fetch / browser_task results
 │       ├── search_providers.py # SearchProvider protocol + Tavily, Exa, Brave
 │       ├── search_router.py   # Query classification + cascading fallback
 │       ├── compaction.py       # History compaction engine
