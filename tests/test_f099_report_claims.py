@@ -2270,6 +2270,19 @@ def test_a_closer_or_a_note_after_a_self_word_names_no_one(text, level):
 
 
 @pytest.mark.parametrize(
+    "text",
+    [
+        "I sent the report to you\n\nEmail: bob@x.io",
+        "I sent the report to you\n\n- emailed the summary to Bob",
+        "I sent the report to the owner\n\nContact: bob@x.io",
+    ],
+)
+def test_a_blank_line_ends_the_sentence_a_send_file_is_judged_by(text):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims][:1] == [E]
+
+
+@pytest.mark.parametrize(
     "unit",
     ["for a b ", "as ", "at 9am ", "for x today ", "i.e. ", "to the owner for review ", "and also ", "; will x ",
      ", not to x "],
