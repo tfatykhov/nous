@@ -8,6 +8,7 @@ against the calls the work recorded; an unbacked claim is annotated and, in enfo
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from datetime import UTC, datetime
@@ -1947,7 +1948,23 @@ def test_a_send_file_never_confirms_someone_else_after_a_self_word_and_a_connect
         assert "exact" not in [c.evidence for c in result.claims], text
 
 
-@pytest.mark.parametrize("head", ["to the user via Telegram", "to you at 9am", "to the owner (twice)"])
+CONTROL_TAILS = [
+    ", i.e. done",
+    ", namely the Q3 one",
+    ", that is all",
+    ", as well as the summary",
+    ", including the summary",
+    ", e.g. the Q3 one",
+    ", plus the summary",
+    ", then archived it",
+    ", and that is all",
+    ", as requested",
+    ", done",
+]
+
+
+# after the heads main exempted; after the others only a tail on their allow list stays exact (see NEW_SELF_HEADS)
+@pytest.mark.parametrize("head", ["to the owner via Telegram", "to you at 9am", "to the owner (twice)"])
 @pytest.mark.parametrize(
     "tail",
     [
@@ -2478,6 +2495,177 @@ def test_the_window_runs_past_an_abbreviation(abbreviation):
 def test_a_real_sentence_end_still_ends_the_window(text, level):
     result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
     assert [c.evidence for c in result.claims] == [level]
+
+
+# Round 6: a self head that main did not take for the owner's chat on its own ("to the user", "to our bot", "via this
+# chat", "via send_file") was plausible on main whatever followed. After it, the rest of the sentence must be owner-only
+# tails, all of it; anything left over could be someone and gives plausible, as on main. The heads main exempted, copied
+# from main's _ELSEWHERE; every other one generated here is new.
+MAIN_EXEMPT_HEAD = re.compile(
+    r"to\s+(?:you|yourself|me|(?:(?:the|your|my)\s+)?(?:owner|chat|dm|telegram(?!\s+(?:group|channel)\b)))\b"
+    r"|via\s+(?:(?:the|a|your)\s+)?(?:telegram|bot|chat)\b",
+    re.IGNORECASE,
+)
+SELF_NOUNS = ["bot", "chat", "DM", "DMs", "Telegram", "Telegram DMs", "Telegram bot", "Telegram chat", "bot chat", "user"]
+SELF_DETERMINERS = ["", "the ", "your ", "my ", "our ", "this ", "the user's "]
+NEW_SELF_HEADS = [
+    head
+    for head in [f"{p} {d}{n}" for p in ("to", "via") for d in SELF_DETERMINERS for n in SELF_NOUNS]
+    + ["via send_file", "via send_telegram"]
+    if not MAIN_EXEMPT_HEAD.match(head)
+]
+# ... and those that are exact on their own; the rest ("via the user", "to the user's bot") are plausible on main and head,
+# and "to this chat" is no send claim (the reply rule: "I put it in this chat")
+NEW_EXACT_HEADS = [
+    h
+    for h in NEW_SELF_HEADS
+    if not (h.startswith("via the user's") or h.endswith(("user's bot", "user's bot chat", "user's user")))
+    and not (h.startswith("via") and h.endswith(" user"))
+    and h != "to this chat"
+]
+# The owner-only tails: each names no one, alone or repeated
+ALLOW_TAILS = [
+    "",
+    " earlier",
+    " just now",
+    " twice",
+    " at 9am",
+    " at lunch",
+    " (twice)",
+    " (report.pdf)",
+    " (as a PDF)",
+    " via Telegram",
+    " as a PDF",
+    " in PDF",
+    " on Monday",
+    " by 5pm",
+    " with a summary",
+    " for review",
+    " as requested",
+    ", as requested",
+    ", FYI",
+    ", v2",
+    ", 2026-10-24",
+    ", 10:05 UTC",
+    ", i.e. the report",
+    ", namely the Q3 report",
+    " as a PDF on Monday",
+    " earlier (twice), FYI",
+    "\nDone",
+]
+# What could be someone: every one of these leaves something over
+PERSON_TAILS = [
+    " with Bob",
+    " as Bob",
+    " on behalf of Bob",
+    " as requested by Bob",
+    " and it should reach Bob too",
+    " together with Bob",
+    " so Bob can read it",
+    " for Иван",
+    " with bob",
+    " for Bob",
+    " alongside the team",
+    " (Bob)",
+    ", then Bob",
+    " and Bob",
+    " as a PDF for Bob",
+    " earlier with Bob",
+    " via Telegram for Bob",
+    " (as a PDF) and Bob",
+    ", FYI Bob",
+    "\nDone\nBob",
+    *[c.format(p) for c in GRID_CONNECTORS for p in GRID_PEOPLE],
+    *[
+        sep + p
+        for sep in [" ", ": ", "; ", ", ", " — ", "—", "\n", " (", " - ", " and ", ", then ", ", also ", "\nthen ",
+                    " at ", " at lunch and ", " at lunch, then ", " (twice) ", " (twice) and ", " earlier and ",
+                    " at 7am and ", " right away and "]
+        for p in ["Bob", "bob", "Иван", "the team", "alongside the team"]
+    ],
+]
+
+
+def test_the_new_self_heads_are_the_77_the_review_counted():
+    assert len(NEW_EXACT_HEADS) == 77
+    for head in NEW_SELF_HEADS:
+        result = _verify(f"I sent the report {head}.", [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+        expected = [] if head == "to this chat" else [E] if head in NEW_EXACT_HEADS else [P]
+        assert [c.evidence for c in result.claims] == expected, head
+
+
+@pytest.mark.parametrize("head", NEW_SELF_HEADS)
+def test_after_a_new_self_head_whatever_is_left_over_names_someone(head):
+    for tail in PERSON_TAILS:
+        text = f"I sent the report {head}{tail}."
+        result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+        assert "exact" not in [c.evidence for c in result.claims], text
+
+
+@pytest.mark.parametrize("head", NEW_EXACT_HEADS)
+def test_after_a_new_self_head_owner_only_tails_stay_exact(head):
+    for tail in ALLOW_TAILS:
+        text = f"I sent the report {head}{tail}."
+        result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+        # a line break right after "user" or "bot" is read as main read it: as a recipient
+        expected = P if tail.startswith("\n") and head.endswith(("user", "bot")) else E
+        assert [c.evidence for c in result.claims] == [expected], text
+
+
+@pytest.mark.parametrize("head", NEW_EXACT_HEADS)
+def test_after_a_new_self_head_a_control_not_on_the_allow_list_is_plausible_as_on_main(head):
+    for tail in CONTROL_TAILS:
+        text = f"I sent the report {head}{tail}."
+        result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+        assert [c.evidence for c in result.claims] == [E if tail in (", as requested", ", done") else P], text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I sent the report to the user with Bob.",
+        "I sent the report to the user as Bob.",
+        "I sent the report to the user on behalf of Bob.",
+        "I sent the report to the user as requested by Bob.",
+        "I sent the report to the user and it should reach Bob too.",
+        "I sent the report to the user together with Bob.",
+        "I sent the report to the user so Bob can read it.",
+        "I sent the report to the user for Иван.",
+        "I sent the report to our bot and Bob.",
+        "I sent the report to the user's DMs and Bob.",
+        "I sent the report to your DMs with Bob.",
+        "I sent the report via send_telegram with Bob.",
+        "I sent the report via our bot (Bob).",
+        "I sent the report via this chat, then Bob.",
+        "I sent the report to this bot and Bob.",
+        "I sent the report to our Telegram and Bob.",
+        "I sent the report to the user as a PDF for Bob.",
+        "I sent the report to the user, not to Bob.",
+    ],
+)
+def test_the_review_sentences_after_a_new_self_head_are_plausible(text):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [P]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I sent the report to the user.",
+        "I sent the report via send_file.",
+        "I sent the report to the bot.",
+        "I sent the report to the user via Telegram.",
+        "Message sent to the user.",
+        "I forwarded the summary to the user.",
+        "I sent the report to the user as a PDF.",
+        "I sent the report to the user earlier.",
+        # a later clause that claims no send is dropped first, where it may be
+        "I sent the report to our Telegram; I will send it via Slack tomorrow.",
+    ],
+)
+def test_the_gains_after_a_new_self_head_stay_exact(text):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [E]
 
 
 @pytest.mark.xfail(

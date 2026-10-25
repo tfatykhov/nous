@@ -1517,7 +1517,8 @@ _SELF = r"(?:owner|user|chat|dms?|bot|telegram)"
 _SELF_ENDS = (rf"(?:{_HEADS}|(?=\s*\(|\s+[-–—]\s|\s+(?:earlier|just|twice|once|because|successfully|privately"
               r"|personally|separately|manually|automatically|promptly|quickly|securely|safely|both|alone|together"
               r"|while|when|per|yet|anyway|as\s+well|right|who|whom|which|asap)\b))")
-_A_SELF = rf"(?:{_SELF}(?:\s+{_SELF})*(?:['’]s\s+(?:chat|dms?|telegram)(?:\s+{_SELF})*)?\b{_SELF_ENDS})"
+_A_SELF_PHRASE = rf"(?:{_SELF}(?:\s+{_SELF})*(?:['’]s\s+(?:chat|dms?|telegram)(?:\s+{_SELF})*)?\b)"
+_A_SELF = rf"(?:{_A_SELF_PHRASE}{_SELF_ENDS})"
 _NOT_A_RECIPIENT = (
     # you, me, here, or the owner's chat as a noun
     rf"(?!(?:you|yourself|me|myself|here)\b|(?:(?:the|your|my|our|this)\s+)?{_A_SELF})"
@@ -1582,9 +1583,9 @@ _CONNECTOR = (r"(?:and(?:\s+(?:also|then|later|afterwards))?|&|as\s+well\s+as|th
 _NOTHING_MORE = rf"(?:(?<=\bthat is )|(?<=\bthat['’]s )|that\s+is\s+|that['’]s\s+)(?:all|everything|it)\b{_TAIL_ENDS}"
 # What a bracket, a dash or another mark after a self word may hold without naming anyone: a sent thing, a count
 # or an adverb ("to you (report.pdf)", "to you - 3 pages", "to the owner (twice)").
-_NOT_A_TAIL = (rf"(?!(?:{_A_SENT_THING}|\d+\s*(?:pages?|slides?|sheets?|charts?|tables?|files?|attachments?|parts?"
-               r"|sections?|rows?|lines?|words?|items?|kb|mb|gb|bytes?|min(?:ute)?s?|sec(?:ond)?s?|hours?|days?)\b"
-               rf"|{_SELF_ADVERB}){_TAIL_ENDS})")
+_A_COUNT = (r"\d+\s*(?:pages?|slides?|sheets?|charts?|tables?|files?|attachments?|parts?|sections?|rows?|lines?|words?"
+            r"|items?|kb|mb|gb|bytes?|min(?:ute)?s?|sec(?:ond)?s?|hours?|days?)\b")
+_NOT_A_TAIL = rf"(?!(?:{_A_SENT_THING}|{_A_COUNT}|{_SELF_ADVERB}){_TAIL_ENDS})"
 # What may end the sentence after a mark or on the next line without naming anyone: a note, a version, a date, a
 # clock time, an adverb, a closer or a heading ("to the owner, FYI", ", v2", ", 2026-10-24", ", 10:05 UTC", ",
 # finally", "to you<newline>Done", "<newline>Summary:"). Only at the end of the sentence, so nothing after it is hidden
@@ -1724,6 +1725,40 @@ _NOT_DONE = re.compile(
     re.IGNORECASE)
 # A single _, * or backtick around a word is styling, as ** is: "via _Slack_", "to `Bob`"
 _STYLED = re.compile(r"(?<![\w*`])([_*`])([^\s*`]+?)\1(?![\w*`])")
+# The self heads main took for the owner's chat on their own, copied from main's rule: "to you", "to me", "to the
+# owner", "to (the/your/my) DM, chat or Telegram", "via (the/a/your) Telegram, bot or chat". They stay on the rules above.
+_MAIN_EXEMPT_TO = r"(?:you|yourself|me|(?:(?:the|your|my)\s+)?(?:owner|chat|dm|telegram(?!\s+(?:group|channel)\b)))\b"
+_MAIN_EXEMPT_VIA = r"(?:(?:the|a|your)\s+)?(?:telegram|bot|chat)\b"
+# Every other self head after "to" or "via" ("to the user", "to our bot", "to the user's DMs", "via this chat", "via
+# send_file") main read as someone else whatever followed. After it the rest of the sentence must be owner-only tails
+# (_OWNER_ONLY_REST), all of it: anything left over could be someone ("with Bob", "as Bob", "so Bob can read it", "for
+# Иван") and gives plausible, as on main. A head missing from the exempt list costs a "Could not confirm", not an
+# overclaim.
+_NEW_SELF_HEAD = re.compile(
+    rf"\bto\s+(?!{_MAIN_EXEMPT_TO})(?:(?:the|your|my|our|this)\s+)?{_A_SELF_PHRASE}"
+    rf"|\bvia\s+(?!{_MAIN_EXEMPT_VIA})(?:(?:the|a|your|my|our|this)\s+)?(?:{_A_SELF_PHRASE}|send_(?:file|telegram)\b)",
+    re.IGNORECASE)
+# A short prepositional phrase that names no one: a format, a time, a summary or charts, a review, "as requested"
+_FORMAT = r"(?:pdf|csv|xlsx?|docx?|pptx?|markdown|md|html?|json|png|zip|txt)"
+_OWNER_ONLY_PREP = (rf"(?:(?:as|in)\s+(?:(?:a|an)\s+)?\.?{_FORMAT}(?:\s+(?:file|attachment|document))?\b"
+                    r"|(?:at|by)\s+the\s+end\s+of\s+(?:the|this|next)\s+(?:day|week|month|quarter|year)\b"
+                    rf"|(?:on|by)\s+{_A_TIME}"
+                    r"|with\s+(?:(?:a|an|the)\s+)?(?:short\s+|brief\s+)?(?:summary|charts?|tables?|figures|graphs?|notes?"
+                    r"|details|attachments?)\b"
+                    r"|for\s+(?:your\s+)?(?:review|approval|sign-?off|feedback|reference|records|comments)\b"
+                    r"|as\s+(?:requested|discussed|promised|agreed|planned|asked|usual)\b)")
+# One owner-only tail: a self adverb, an "at" time or place, a bracket that holds only a sent thing, a count, an adverb
+# or such a phrase ("(twice)", "(report.pdf)", "(as a PDF)"; not "(Bob)"), "via Telegram", the phrase itself (also
+# after a comma), a closer or heading on the next line, a note, version, date or time after a comma ("FYI", "v2"), or
+# "i.e.", "e.g.", "viz." or "namely" before a sent thing. A tail once taken is not read again, so the longer phrase
+# comes first ("at the end of the day" before "at the end").
+_OWNER_ONLY_TAIL = (rf",?\s+{_OWNER_ONLY_PREP}|\s+{_SELF_ADVERB}|\s+at\s+(?:{_A_TIME}|{_AT_TAIL})"
+                    rf"|\s*\(\s*(?:{_A_SENT_THING}|{_A_COUNT}|{_SELF_ADVERB}|{_OWNER_ONLY_PREP})\s*\)"
+                    rf"|\s+via\s+telegram\b|[ \t]*\n[ \t]*{_OWNER_ONLY_END}"
+                    rf"|\s*,\s*{_OWNER_ONLY_END}|\s*,?\s*(?:{_THAT_IS}|namely),?\s+{_A_SENT_THING}")
+# The rest of the sentence after a new self head, all of it owner-only tails. Atomic and possessive: no tail is read
+# again once taken, so a long rest is linear.
+_OWNER_ONLY_REST = re.compile(rf"(?:(?>{_OWNER_ONLY_TAIL}))*+\s*", re.IGNORECASE)
 
 
 def evidence_level(claim: Claim, ev: Evidence) -> str:
@@ -1748,7 +1783,10 @@ def evidence_level(claim: Claim, ev: Evidence) -> str:
             # recipient whatever followed: the dropped clause can then raise no score above main
             sentence = clause + _NOT_DONE.sub("", sentence[len(clause):])
         sentence = _STYLED.sub(r"\2", sentence)
-        return "plausible" if _ELSEWHERE.search(sentence) else "exact"
+        if _ELSEWHERE.search(sentence):
+            return "plausible"
+        head = _NEW_SELF_HEAD.search(sentence)
+        return "plausible" if head and not _OWNER_ONLY_REST.fullmatch(sentence, head.end()) else "exact"
     if not ev.args:  # names-only evidence from a legacy caller
         return "plausible"
     if ev.tool_name == "bash":
