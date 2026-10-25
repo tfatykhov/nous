@@ -309,7 +309,7 @@ def _bare_url(url: str) -> str:
         bare = f"{scheme}:" if scheme else ""
     else:
         host = parts.netloc.rpartition("@")[2]  # drop userinfo
-        first, _, rest = parts.path.lstrip("/").partition("/")
+        first, _, rest = parts.path.replace("\\", "/").lstrip("/").partition("/")  # browsers read "\\" as "/"
         bare = f"{scheme}://{host}" + (f"/{first}/…" if rest else parts.path)
     return bare if len(bare) <= _MAX_URL_CHARS else bare[: _MAX_URL_CHARS - 1] + "…"
 

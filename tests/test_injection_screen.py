@@ -523,6 +523,8 @@ class TestScreenToolResult:
             ("https://[2001:db8::1]:8443/a/b/c", "https://[2001:db8::1]:8443/a/…"),
             ("https://host.example", "https://host.example"),
             ("https://host.example/reset/", "https://host.example/reset/"),
+            # Browsers read a backslash in an http(s) path as a slash.
+            ("https://host.example/reset\\abc123TOKEN\\x", "https://host.example/reset/…"),
             ("HTTP://Host.example/A/B", "http://Host.example/A/…"),
             ("javascript:alert(document.cookie)", "javascript:"),
             ("file:///etc/passwd", "file:"),
