@@ -121,6 +121,7 @@ class Claim:
     attempt_only: bool = False  # a verdict on an action: any recorded try of it backs the claim
     clause: str = field(default="", compare=False)  # the clause the claim is in ("I sent it by email")
     sentence: str = field(default="", compare=False)  # its clause to the end of the sentence (a send_file's scope)
+    opening: str = field(default="", compare=False)  # the sentence before its clause ("Done:", "For Bob,")
 
 
 # First person: "I", "I've", "I have", "I just", "I also" ... The "I" is
@@ -271,6 +272,12 @@ def _sentence_end(sentence_ends: list[int], clause_end: int, text: str) -> int:
     """Where the sentence holding a clause that ends at ``clause_end`` ends."""
     i = bisect_left(sentence_ends, clause_end)
     return sentence_ends[i] if i < len(sentence_ends) else len(text)
+
+
+def _sentence_start(sentence_starts: list[int], clause_start: int) -> int:
+    """Where the sentence holding a clause that starts at ``clause_start`` starts."""
+    i = bisect_right(sentence_starts, clause_start) - 1
+    return sentence_starts[i] if i >= 0 else 0
 
 
 def _blank(match: re.Match[str]) -> str:
@@ -1772,6 +1779,30 @@ _OWNER_ONLY_TAIL = (rf",?\s+{_OWNER_ONLY_PREP}|\s+{_SELF_ADVERB}|\s+at\s+(?:{_A_
 # The rest of the sentence after a new self head, all of it owner-only tails. Each tail is atomic (a later tail that
 # fails does not make an earlier one try another reading) and the loop possessive, so a long rest is linear.
 _OWNER_ONLY_REST = re.compile(rf"(?:(?>{_OWNER_ONLY_TAIL}))*+\s*", re.IGNORECASE)
+# What a sentence may say before a new self head ("Done: I have also sent the Q3 report with the CI results"): an
+# opener or a list mark, a subject, auxiliaries and self adverbs, a send verb and a sent thing (it, them, a file name,
+# or a determiner, plain words and a noun) with its own attachment, or the passive "<sent thing> sent". Anything left
+# over could be someone ("I sent Bob the report", "For Bob,", "a copy for Bob", "Bob's report") and gives plausible,
+# as on main. A word before the noun is taken only where another listed word follows it, and every loop is
+# possessive, so the check is linear.
+_SENT_NOUN = (r"(?:summary|summaries|copy|copies|(?:report|message|e-?mail|note|reminder|digest|update|file|doc"
+              r"|document|draft|chart|table|sheet|spreadsheet|deck|slide|presentation|result|log|image|screenshot"
+              r"|attachment|version|link)s?|data)")
+_SENT_WORD = rf"(?:{_PLAIN_WORD}|ci|{_SENT_NOUN})"
+_SENT_PHRASE = rf"(?:{_SENT_WORD}\s++(?={_SENT_WORD}\b))*+{_SENT_NOUN}\b"
+_SENT_FILE = (r"[\w-]++\.(?:pdf|md|txt|csv|tsv|json|ya?ml|xml|html?|docx?|xlsx?|pptx?|odt|ods|rtf|png|jpe?g|gif|svg"
+              r"|webp|zip|tar|gz|tgz|py|ipynb|js|ts|sh|sql|log|epub|mp4|mov|mp3|wav)\b")
+_SENT_DET = r"(?:the|a|an|my|our|your|this|today['’]s)\s++"
+_BEFORE_HEAD = re.compile(
+    r"\s*+(?:(?:done:|update:|as\s+requested,)\s*+)?+(?:(?:[-*•]|\d+[.)])\s++)?+"
+    r"(?>(?:(?:i|we)(?:['’]ve)?\s++)?+(?:(?:have|had|just|also|already|earlier)\s++)*+"
+    r"(?:sent|forwarded|shared|delivered|posted|uploaded|attached)\s++"
+    rf"(?:(?:it|them)\b|{_SENT_FILE}|{_SENT_DET}{_SENT_PHRASE})"
+    rf"(?:\s++(?:with|about|from|for)\s++{_SENT_DET}{_SENT_PHRASE})?+"
+    rf"|(?:(?:it|them)\b|{_SENT_FILE}|(?:{_SENT_DET})?+{_SENT_PHRASE})\s++(?:(?:was|were|has\s+been|have\s+been)\s++)?+"
+    r"(?:(?:just|also|already|earlier)\s++)*+(?:sent|forwarded|delivered))"
+    rf"(?:\s++{_SELF_ADVERB})*+\s*+",
+    re.IGNORECASE)
 # Main's rule, verbatim. Where it finds a destination in the claim's clause, main scored a send_file plausible; there,
 # exact needs each place it found to start a new self head (and the rest to be owner-only tails, above). Any other
 # place main found ("to notify Bob", "to myself", "via a link", "according to Bob", "on text") stays plausible.
@@ -1816,7 +1847,8 @@ def evidence_level(claim: Claim, ev: Evidence) -> str:
         if any(not _NEW_SELF_HEAD.match(read, m.start()) for m in _MAIN_ELSEWHERE.finditer(read)):
             return "plausible"
         head = _NEW_SELF_HEAD.search(sentence)
-        if head and not _OWNER_ONLY_REST.fullmatch(sentence, head.end()):
+        if head and not (_OWNER_ONLY_REST.fullmatch(sentence, head.end())
+                         and _BEFORE_HEAD.fullmatch(claim.opening + sentence[:head.start()])):
             return "plausible"
         return "exact"
     if not ev.args:  # names-only evidence from a legacy caller
@@ -2508,7 +2540,9 @@ class ClaimVerifier:
         text = _QUOTED.sub(_blank, text).replace("**", "")
         clause_starts = [m.end() for m in _CLAUSE_END.finditer(text)]
         clause_ends = [m.start() for m in _CLAUSE_END.finditer(text)]
-        sentence_ends = [m.start() for m in _SENTENCE_END.finditer(text)]
+        sentence_marks = list(_SENTENCE_END.finditer(text))
+        sentence_ends = [m.start() for m in sentence_marks]
+        sentence_starts = [m.end() for m in sentence_marks]
         reported = [m.start() for m in _REPORTED.finditer(text)]
         scope_starts = [m.end() for m in _REPORTED_SCOPE_END.finditer(text)]
         taken = {(c.kind, c.span) for c in first}
@@ -2534,7 +2568,8 @@ class ClaimVerifier:
                 found.append(Claim(kind=kind, text=match.group(0).strip(), span=(start, end),
                                    target=target.lower() if target else None, attempt_only=attempt,
                                    clause=text[clause_start:clause_end],
-                                   sentence=text[clause_start:_sentence_end(sentence_ends, clause_end, text)]))
+                                   sentence=text[clause_start:_sentence_end(sentence_ends, clause_end, text)],
+                                   opening=text[_sentence_start(sentence_starts, clause_start):clause_start]))
         found.sort(key=lambda claim: claim.span[0])
         return found
 
@@ -2548,7 +2583,9 @@ class ClaimVerifier:
         ends = [m for m in _CLAUSE_END.finditer(text)]
         clause_ends = [m.start() for m in ends]
         clause_starts = [m.end() for m in ends]
-        sentence_ends = [m.start() for m in _SENTENCE_END.finditer(text)]
+        sentence_marks = list(_SENTENCE_END.finditer(text))
+        sentence_ends = [m.start() for m in sentence_marks]
+        sentence_starts = [m.end() for m in sentence_marks]
         first_claims = [m.start() for m in _FIRST_CLAIM_RE.finditer(text)]
         conditions = [m.start() for m in _CONDITION.finditer(text)]
         reported = [m.start() for m in _REPORTED.finditer(text)]
@@ -2589,7 +2626,8 @@ class ClaimVerifier:
                         target = target.lower()
                 found.append((start, Claim(kind=kind, text=match.group(0).strip(), target=target,
                                            span=(start, end), clause=text[clause:clause_end],
-                                           sentence=text[clause:_sentence_end(sentence_ends, clause_end, text)])))
+                                           sentence=text[clause:_sentence_end(sentence_ends, clause_end, text)],
+                                           opening=text[_sentence_start(sentence_starts, clause):clause])))
         found.sort(key=lambda item: item[0])
         return [claim for _, claim in found]
 

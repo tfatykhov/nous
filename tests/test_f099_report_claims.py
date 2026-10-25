@@ -2907,6 +2907,121 @@ def test_a_long_owner_only_rest_that_fails_at_its_end_is_linear(head, rest, fail
     _assert_linear(lambda size: f"I sent the report {head} " + rest * (size // len(rest)) + fail)
 
 
+# Before a new self head, the words from the start of the sentence must be an opener, a subject, a send verb and a
+# sent thing (with its own attachment); anything else could be someone
+PERSON_BEFORE = [
+    "I sent Bob the report {}.",
+    "I sent the report and a copy for Bob {}.",
+    "I sent the report for Bob {}.",
+    "For Bob, I sent the report {}.",
+    "Bob and I sent the report {}.",
+    "I sent Bob's report {}.",
+    "I sent the report about Bob {}.",
+    "I sent the report from Bob {}.",
+    "I sent the report with Bob's notes {}.",
+    "I sent the report to you with Bob and {}.",
+    "I sent the Bob report {}.",
+    "I sent the report for the team {}.",
+    "I sent the report with the Bob notes {}.",
+    "Bob: I sent the report {}.",
+    "I sent the report, Bob, {}.",
+    "I sent the report for Иван {}.",
+]
+ALLOW_BEFORE = [
+    "I sent the report {}.",
+    "Message sent {}.",
+    "I forwarded the summary {}.",
+    "I sent the weekly summary {}.",
+    "Done: I sent the report {}.",
+    "Update: I sent the report {}.",
+    "I have also sent the Q3 report {}.",
+    "I sent report.pdf {}.",
+    "I sent the report with the CI results {}.",
+    "- I sent the report {}.",
+    "I just sent the final PDF report {}.",
+    "I sent the report earlier {}.",
+]
+
+
+@pytest.mark.parametrize("head", NEW_EXACT_HEADS)
+def test_before_a_new_self_head_whatever_is_left_over_names_someone(head):
+    for before in PERSON_BEFORE:
+        text = before.format(head)
+        levels = [c.evidence for c in _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})]).claims]
+        assert levels and "exact" not in levels, text
+
+
+@pytest.mark.parametrize("head", NEW_EXACT_HEADS)
+def test_before_a_new_self_head_an_opener_subject_verb_and_sent_thing_stay_exact(head):
+    for before in ALLOW_BEFORE:
+        text = before.format(head)
+        result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+        assert [c.evidence for c in result.claims] == [E], text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I sent Bob the report to the user.",
+        "I sent the report and a copy for Bob to the user.",
+        "I sent the report for Bob to the user.",
+        "For Bob, I sent the report to the user.",
+        "Bob and I sent the report to the user.",
+        "I sent Bob's report via send_file.",
+        "I sent the report about Bob to our bot.",
+        "I sent the report from Bob to our bot.",
+        "I sent the report with Bob's notes to our bot.",
+        "I sent the report to you with Bob and via send_file.",
+    ],
+)
+def test_the_review_sentences_before_a_new_self_head_are_plausible(text):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [P]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I sent the report to the user.",
+        "Message sent to the user.",
+        "I forwarded the summary to the user.",
+        "I sent the weekly summary to the user.",
+        "Done: I sent the report to the user.",
+        "I have also sent the Q3 report via send_file.",
+        "I sent report.pdf to the user.",
+        "Update: I sent the report to the user.",
+        "I sent the report with the CI results to the user.",
+        # the gains of round 6
+        "I sent the report via send_file.",
+        "I sent the report to the bot.",
+        "I sent the report to the user via Telegram.",
+        "I sent the report to the user as a PDF.",
+        "I sent the report to the user earlier.",
+    ],
+)
+def test_the_gains_before_a_new_self_head_stay_exact(text):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [E]
+
+
+@pytest.mark.parametrize(
+    ("before", "fail"),
+    [
+        ("I ", "just "),
+        ("I sent the ", "weekly "),
+        ("I sent the report with the ", "final "),
+        ("", "Done: "),
+        ("", "- "),
+        ("I sent the report ", "earlier "),
+    ],
+    ids=["adverbs", "plain-words", "attachment-words", "openers", "markers", "trailing-adverbs"],
+)
+@pytest.mark.parametrize("end", ["sent the report", "Bob"], ids=["passes", "fails-before-head"])
+@pytest.mark.parametrize("head", ["to the user", "via our bot"])
+def test_a_long_run_before_a_new_self_head_is_linear(head, before, fail, end):
+    _assert_linear(lambda size: before + fail * (size // len(fail)) + f"{end} {head}")
+
+
 @pytest.mark.xfail(
     strict=True,
     reason="known gap, exact on main too: the other destination is in no position the rule reads",
