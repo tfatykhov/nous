@@ -1538,9 +1538,12 @@ def test_a_link_to_a_group_names_a_recipient(text, level):
         ("Message sent by post.", None),
         ("Message sent by hand.", None),
         ("Message sent by courier.", None),
+        ("Message sent by fax.", None),
         # ... but the agent's own "by post" names a transport a send_file cannot be
         ("I sent the report by post.", P),
         ("I sent the report by courier.", P),
+        ("I sent the report by hand.", P),
+        ("I sent the report by fax.", P),
         # a channel after "by" names no other sender: the claim is checked
         ("Message sent by Telegram.", E),
         ("Message sent by DM.", E),
