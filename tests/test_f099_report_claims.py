@@ -1641,6 +1641,30 @@ def test_a_self_word_followed_by_an_adverb_is_still_the_owners_chat(text, level)
     assert [c.evidence for c in result.claims] == [level]
 
 
+@pytest.mark.parametrize(
+    ("text", "level"),
+    [
+        # a name ending in -ed is a name, not a verb
+        ("I sent the report with a link to the summary and fred.", P),
+        ("I sent the report to you and ahmed.", P),
+        ("I sent the report to you and syed.", P),
+        ("I sent the report to you and jared.", P),
+        ("I sent the report to you and fred.", P),
+        ("I sent the report to the owner and ned.", P),
+        # ... and a verb on the list is a verb
+        ("I sent the report to you and archived the draft.", E),
+        ("I sent the report to you and forwarded it.", E),
+        ("I sent the report to you and pinned it.", E),
+        ("I sent the report to you and updated the ticket.", E),
+        ("I sent the report to you and deleted the draft.", E),
+        ("I sent the report with a link to the summary and attached the chart.", E),
+    ],
+)
+def test_a_name_ending_in_ed_is_no_verb(text, level):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [level]
+
+
 def test_a_verifier_given_no_runner_takes_no_bash_call_for_a_runner_call():
     evidence = [Evidence("bash", {"command": f"bash {RUNNER} cancel {JOB}"}, exit_code=0)]
     assert not ClaimVerifier().verify_report(f"I cancelled job {JOB}.", evidence).verified

@@ -1508,9 +1508,15 @@ _NOT_A_RECIPIENT = (
     # anything else: a name, an acronym, a number, a word in lowercase, a handle, a channel
     r"[\w@#]"
 )
-# After "to you and": not a verb or a function word ("to you and archived it", "to you and on time")
+# After "to you and": not a verb or a function word ("to you and archived it", "to you and on time"); the verbs
+# are listed, since a name can end in -ed too ("to you and ahmed", "and fred")
 _NOT_A_VERB = (r"(?!(?-i:then|also|now|later|again|so|on|in|at|by|with|as|for|from|via|over|through|i|it|we|will"
-               r"|would|can|could|should|have|has|had|is|was|am|only|nobody|no\s+one|none|[a-z]+ed)\b)")
+               r"|would|can|could|should|have|has|had|is|was|am|only|nobody|no\s+one|none|told|made|put|set|left"
+               r"|got|wrote|(?:archiv|forward|copi|sav|mov|notifi|ping|add|attach|upload|post|clos|updat|delet"
+               r"|remov|fil|creat|merg|push|committ|schedul|shar|logg|not|confirm|check|verifi|open|renam|pinn"
+               r"|deploy|start|stopp|finish|complet|publish|link|flagg|tagg|mark|repli|ask|clean|clear|sync"
+               r"|export|convert|generat|queu|revert|restor|back|includ|summari[sz]|review|sign|print|download"
+               r"|edit|fix|test|tidi|resolv|assign|approv|cancell?|declin|reject|accept|answer|respond|invit)ed)\b)")
 # What "a link to" points at rather than sends to: a sent thing, it, a URL, a path or a file name (a known
 # extension: "report.pdf", not "bob.smith"); never an address ("bob.smith@example.com").
 _A_SENT_THING = (r"(?![\w.+-]+@)(?:(?:the|a|an|your|my|our|this|that|these|those)\s+(?:[\w.'’-]+\s+){0,3}?"
