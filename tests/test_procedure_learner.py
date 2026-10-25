@@ -298,6 +298,8 @@ def _build_learner(settings: Settings | None = None):
     # not search_procedures (RRF rank). Default to "no duplicate found" so the
     # creation tests aren't blocked by an AsyncMock returning a truthy MagicMock.
     heart.find_similar_procedures.return_value = []
+    # A new row (version 1): a version above 1 is a create-time dedupe merge.
+    heart.store_procedure.return_value = _make_procedure_detail()
     s = settings or _make_settings()
     learner = ProcedureLearner(brain, heart, embeddings, s, llm_client)
     return learner, brain, heart, embeddings, llm_client
@@ -332,7 +334,7 @@ async def test_decision_cluster_creates_procedure():
     heart.search_procedures.return_value = []
 
     # Store succeeds
-    heart.store_procedure.return_value = MagicMock()
+    heart.store_procedure.return_value = _make_procedure_detail()
 
     stats = await learner.run_sleep_learning()
 
@@ -466,7 +468,7 @@ async def test_episode_lesson_clustering():
 
     # No duplicate
     heart.search_procedures.return_value = []
-    heart.store_procedure.return_value = MagicMock()
+    heart.store_procedure.return_value = _make_procedure_detail()
 
     stats = await learner.run_sleep_learning()
 
@@ -589,7 +591,7 @@ async def test_max_cap_enforcement():
 
     llm_client.call.return_value = _mock_llm_response(_llm_procedure_data(cited_ids=[summaries[0].id, summaries[1].id]))
     heart.search_procedures.return_value = []
-    heart.store_procedure.return_value = MagicMock()
+    heart.store_procedure.return_value = _make_procedure_detail()
 
     stats = await learner.run_sleep_learning()
 
@@ -998,7 +1000,7 @@ async def test_malformed_list_fields_are_not_split_into_letters():
     stored = heart.store_procedure.call_args[0][0]
     assert stored.goals[1:] == ["abc"]
     assert stored.tags == ["xy", "auto:decision_cluster"]
-    assert stored.name == "Unnamed procedure"
+    assert stored.name == "Unnamed procedure: A database call is about to be made from async code"
 
 
 @pytest.mark.asyncio
@@ -1150,6 +1152,7 @@ async def test_weak_review_revise_with_a_malformed_answer_keeps_the_procedure():
 
     heart.retire_procedure.assert_called_once_with(second.id)
     heart.store_procedure.assert_not_called()
+    heart.update_procedure_body.assert_not_called()
     assert stats["weak_reviewed"] == 1
     assert stats["llm_failed"] == 1
 
@@ -1173,11 +1176,43 @@ async def test_weak_review_revise_keeps_a_lone_string_pattern_whole():
 
     await learner.run_sleep_learning()
 
-    heart.retire_procedure.assert_called_once_with(weak.id)
-    revised = heart.store_procedure.call_args[0][0]
+    heart.retire_procedure.assert_not_called()
+    heart.store_procedure.assert_not_called()
+    procedure_id, revised = heart.update_procedure_body.call_args[0]
+    assert procedure_id == weak.id
     assert revised.core_patterns == ["check the exit code"]
     assert revised.description == "Sharper description"
     assert revised.implementation_notes == weak.implementation_notes
+    assert heart.update_procedure_body.call_args.kwargs["expected_version"] == weak.version
+    assert heart.update_procedure_body.call_args.kwargs["reason"] == "weak review: revise: too vague"
+
+
+@pytest.mark.asyncio
+async def test_weak_review_revise_of_a_body_changed_meanwhile_is_skipped():
+    """A stale expected_version: the revision would drop the change, so it is not written."""
+    from nous.heart import ProcedureConflictError
+
+    learner, brain, heart, _emb, llm_client = _build_learner()
+    brain.list_decisions.side_effect = [([], 0), ([], 0)]
+    heart.list_episodes.return_value = []
+    first = _make_procedure_detail(name="Weak one", effectiveness=0.20)
+    second = _make_procedure_detail(name="Weak two", effectiveness=0.20)
+    heart.search_procedures.return_value = [
+        _make_procedure_summary(name="Weak one"),
+        _make_procedure_summary(name="Weak two"),
+    ]
+    heart.get_procedure.side_effect = [first, second]
+    heart.update_procedure_body.side_effect = ProcedureConflictError("moved on")
+    llm_client.call.side_effect = [
+        _mock_llm_response({"action": "revise", "reason": "vague", "revised_description": "Sharper"}),
+        _mock_llm_response({"action": "retire", "reason": "unreliable"}),
+    ]
+
+    stats = await learner.run_sleep_learning()
+
+    assert heart.update_procedure_body.await_args[0][0] == first.id
+    heart.retire_procedure.assert_called_once_with(second.id)
+    assert (stats["weak_reviewed"], stats["llm_failed"]) == (1, 0)
 
 
 def test_a_bare_string_naming_an_input_id_is_not_a_citation():
@@ -1626,3 +1661,32 @@ async def test_a_custom_finder_replaces_the_global_probe_and_covered_goes_to_cou
     assert len(seen) == 1 and counts["covered"] == 1 and learner._gate_counts["covered"] == 0
     heart.find_similar_procedures.assert_not_called()
     heart.append_procedure_notes.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_lesson_without_a_name_is_named_after_its_cue():
+    """Not one fallback name for every unnamed lesson: the create-time name lock compares names."""
+    learner, *_ = _build_learner()
+    ids = {str(uuid4()): "success"}
+    first = _llm_procedure_data(cited_ids=list(ids))
+    del first["name"]
+    second = {**first, "cue": "A send tool returned ok"}
+
+    names = {learner._gated_procedure_input(d, ids, "auto:x").name for d in (first, second)}
+
+    assert names == {
+        "Unnamed procedure: A database call is about to be made from async code",
+        "Unnamed procedure: A send tool returned ok",
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_lesson_merged_into_an_existing_procedure_counts_as_covered():
+    learner, _brain, heart, _emb, _llm = _build_learner()
+    ids = {str(uuid4()): "success"}
+    proc_input = learner._gated_procedure_input(_llm_procedure_data(cited_ids=list(ids)), ids, "auto:x")
+    heart.store_procedure.return_value = _make_procedure_detail().model_copy(update={"version": 2})
+    counts = {"covered": 0}
+
+    assert await learner._store_unless_covered(proc_input, counts=counts) is False
+    assert counts["covered"] == 1

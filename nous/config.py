@@ -1604,6 +1604,12 @@ class Settings(BaseSettings):
     procedure_affinity_beta: float = 0.10
     procedure_min_activations_for_boost: int = 5
 
+    # F102: create-time procedure dedupe (versioning itself is always on). With it, store()
+    # merges a learned procedure into an active one of the same normalized name, or into an
+    # auto-learned one whose stored embedding is this close (raw cosine), instead of inserting.
+    procedure_dedupe_enabled: bool = True
+    procedure_dedupe_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
+
     # F023: Memory Admission Control (A-MAC)
     admission_control_enabled: bool = True
     admission_shadow_mode: bool = True
