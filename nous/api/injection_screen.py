@@ -301,7 +301,7 @@ def _bare_url(url: str) -> str:
     scheme alone. The result is stored in nous_system.events and shown in the Activity feed.
     """
     try:
-        parts = urlsplit(url)
+        parts = urlsplit(url.replace("\\", "/"))  # browsers read "\\" as "/" in an http(s) URL
     except ValueError:
         return ""
     scheme = parts.scheme.lower()
@@ -309,7 +309,7 @@ def _bare_url(url: str) -> str:
         bare = f"{scheme}:" if scheme else ""
     else:
         host = parts.netloc.rpartition("@")[2]  # drop userinfo
-        first, _, rest = parts.path.replace("\\", "/").lstrip("/").partition("/")  # browsers read "\\" as "/"
+        first, _, rest = parts.path.lstrip("/").partition("/")
         bare = f"{scheme}://{host}" + (f"/{first}/…" if rest else parts.path)
     return bare if len(bare) <= _MAX_URL_CHARS else bare[: _MAX_URL_CHARS - 1] + "…"
 

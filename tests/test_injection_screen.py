@@ -525,6 +525,7 @@ class TestScreenToolResult:
             ("https://host.example/reset/", "https://host.example/reset/"),
             # Browsers read a backslash in an http(s) path as a slash.
             ("https://host.example/reset\\abc123TOKEN\\x", "https://host.example/reset/…"),
+            ("https://host.example\\reset\\abc123TOKEN", "https://host.example/reset/…"),
             ("HTTP://Host.example/A/B", "http://Host.example/A/…"),
             ("javascript:alert(document.cookie)", "javascript:"),
             ("file:///etc/passwd", "file:"),
