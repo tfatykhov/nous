@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     tesseract-ocr \
     redis-tools \
+    openssh-client \
     sudo \
     && rm -rf /var/lib/apt/lists/*
 
