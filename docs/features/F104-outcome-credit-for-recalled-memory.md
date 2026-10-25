@@ -67,15 +67,19 @@ New table `brain.decision_recall_context` (the only new table):
 - `decision_id` UUID: FK to `brain.decisions(id)`, ON DELETE CASCADE.
 - `memory_type`: `fact` | `decision` | `episode` | `procedure`
 - `memory_id` UUID
-- `rank` SMALLINT: 0-based position within its type among the memories **delivered** to the model
-  (after boosts, the relevance filter and the section budget cut; see "Delivered ids only" below).
-  Ranks are counted after the cut, so they have no gaps. Rank restarts at 0 for each type, so
-  the rank weight below is applied **per type**: the first fact and the first episode both get
-  weight 1.0. The Phase 2 analysis compares types, so a per-type comparison must keep this in mind
-  (a decision with recalls of four types carries up to four weight-1.0 rows).
+- `rank` SMALLINT: 0-based position among the memories **delivered** to the model with the same
+  `memory_type` and `source` (after boosts, the relevance filter and the section budget cut; see
+  "Delivered ids only" below). Ranks are counted after the cut, so they have no gaps. Rank restarts
+  at 0 for each (type, source) pair, so the rank weight below is applied **per pair**: the first
+  Relevant Facts fact, the first User Profile fact and the first episode all get weight 1.0. A
+  per-type comparison must keep this in mind (a decision can carry one weight-1.0 row per pair).
 - `strength` REAL: the F017 overlap strength (0, 0.2, 0.5 or 1.0) that post_turn already computes.
-  NULL if usage tracking is off.
-- `source`: `context` (Phase 1). `recall_deep` is added in Phase 3.
+  NULL if usage tracking is off, and always NULL on `profile` and `session_profile` rows: post_turn
+  computes strength only for the ids in `recalled_*_ids` (`nous/cognitive/layer.py:1302-1316`), and
+  F104 doesn't widen that.
+- `source`: which block delivered the memory. Phase 1 writes `context` (the ranked recall sections:
+  Relevant Facts, decisions, episodes, procedures), `profile` (the User Profile block) and
+  `session_profile` (the Session Profile intent leg). `recall_deep` is added in Phase 3.
 - `credited_reward` REAL NULL, `credited_weight` REAL NULL: the row's current credit. NULL means the
   row contributes nothing (not reviewed yet, or relabelled out).
 - `credited_at` TIMESTAMPTZ NULL: when the row was **first** credited from an eligible review, by the
@@ -151,16 +155,19 @@ the model saw. `ContextEngine.build` fills `recalled_ids` **before** `_truncate_
 `_tr_budget_cut` (`context.py:331`), and only the F091 trace excludes them (`context.py:1696`).
 `BuildResult.recalled_ids` still returns them (`context.py:1716`). So:
 
-- `BuildResult` gains `delivered_ids: dict[str, list[str]]`: `recalled_ids` per type with every
-  `(id, type)` in `_tr_budget_cut` removed, order kept. `TurnContext` carries it to post_turn.
+- `BuildResult` gains `delivered_ids: dict[str, list[tuple[str, str]]]`: per type, `(id, source)`
+  pairs in order. For `source = "context"` they are `recalled_ids` with every `(id, type)` in
+  `_tr_budget_cut` removed, order kept. `delivered_ids["fact"]` also holds the delivered profile
+  facts (see "Profile facts" below). `TurnContext` carries it to post_turn.
   `_tr_budget` runs whether or not the retrieval trace is on (with tracing off `tr` is `NULL_TRACE`
   and only the trace write is skipped), and it is called for all four types (`context.py:937`,
   `:1063`, `:1503`, `:1637`).
 - "Order" is the order in which `build` appended ids to `recalled_ids`. For procedures that is
   collection order, not strictly render order: they are appended in two places (`context.py:1293`
   and `:1463`).
-- The snapshot is built from `delivered_ids` only, and `rank` is the index in that filtered list, so
-  the survivors of a cut close the gap (ranks 0, 1, 2, not 0, 2, 3).
+- The snapshot is built from `delivered_ids` only, and `rank` is the index among the pairs of the
+  same source in that filtered list, so the survivors of a cut close the gap (ranks 0, 1, 2, not
+  0, 2, 3).
 - `recalled_ids` and its consumers (F071 dedup, `UsageTracker`, the REST turn response) are not
   changed.
 - `_tr_budget` (`context.py:334`) is a conservative probe: an item whose line survives in part
@@ -168,11 +175,58 @@ the model saw. `ContextEngine.build` fills `recalled_ids` **before** `_truncate_
   it and the cut set is incomplete; the snapshot then over-states delivery for that section, exactly
   as the trace does.
 
+**Profile facts.** Two fact blocks never enter `recalled_ids`, so filtering it alone would drop
+facts the model did see, the always-recalled identity and preference facts included:
+
+- **User Profile** (`build` step 1b, `context.py:670-811`): `profile_facts`, rendered by
+  `_format_facts` and cut by `_truncate_to_budget_lines` (`:789`). `profile_fact_ids` (`:785`) is
+  taken **before** that cut on purpose (it is the leg's double-injection guard), so it is not the
+  delivered set either.
+- **Session Profile** (step 6a, `:1077-1150`, behind `profile_intent_leg_enabled`, default off):
+  `leg_facts`, cut by `_truncate_to_budget_lines` against `profile_intent_leg_budget` (`:1137`).
+
+`recalled_ids["fact"]` holds only Tier-3 facts (`context.py:676`, `:1051`): Tier-3 search excludes
+the tier-1 categories (`exclude_categories=TIER1_FACT_CATEGORIES`, `:968`), the leg searches only
+them (`:1101`), and the leg drops every id in `profile_fact_ids` (`:1131`). So the three blocks
+are disjoint within one build, and the PK can't collide.
+
+Each block's delivered facts are the ones whose content probe survives in that block's **truncated**
+text, the same test `_tr_budget` applies (first 40 characters of the content, `context.py:348-349`),
+so a fact whose line `_truncate_to_budget_lines` dropped gets no row. The check is a plain helper,
+not `_tr_budget` itself, because these facts are not in the F091 trace's rendered set and must not
+add `tr.drop` events. It also covers the helper's char-slice fallback when the first line alone
+exceeds the budget (`:2018-2021`): a partly sliced first fact counts as delivered when its probe
+survives the slice, as with `_tr_budget`. Block order is kept: `delivered_ids["fact"]` holds the User Profile pairs, then the
+Relevant Facts pairs, then the Session Profile pairs, which is the render order (priority 1, then
+the two priority-6 sections in append order).
+
+**Ranking rule: a source tag, not a merged order.** Each block gets its own `source` and its own
+rank sequence from 0. A merged order was ruled out: User Profile renders first, so up to
+`profile_fact_limit` (20) always-injected facts would push every Relevant Facts fact down the rank
+weights, and the always-present facts would hold weight 1.0. The blocks are also chosen differently
+(standing profile vs. relevance search vs. intent leg), so a rank in one says nothing about a rank in
+another.
+
+**What profile rows are used for.** They are written and credited like any other row, and the diag
+report shows them as their own group (section 2 and Phases). They are **not** recall wins: Phase 2
+neither boosts them nor scores them in its gate. The boost read and the gate use `source = 'context'`
+rows only (section 3, Phase 2 gate). Tier-1 facts can't reach the ranked fact list anyway (the
+`:968` exclusion), so a profile row could only ever add to a memory that Phase 2 never ranks. The
+explicit `source` filter keeps that true if a fact's category later changes: the turns in which the
+fact was injected unconditionally still don't count as evidence for ranking it.
+
+Not covered, as before: temporal-tier episodes in "Recent Conversations" also reach the model
+without entering `recalled_ids` (F091 adds them to its rendered set from `_temporal_episode_ids`,
+`context.py:1697-1703`). F104 v1 writes no rows for them; giving them their own `source` would follow
+the profile-fact pattern and is left for a later change.
+
 Decisions **skipped**: continuation turns (F099 lineage decisions are graded by `f099`, which this
 design excludes anyway), and turns with no delivered IDs.
 
-Size: four types, top-k each, about 30 rows per decision at most. That's about 15k rows a month at
-current volume, so no retention policy is needed in v1.
+Size: four types, top-k each, about 30 `context` rows per decision at most, plus up to 20 User
+Profile rows (`profile_fact_limit`, or 12 with `profile_core_enabled`) and up to 5 Session Profile
+rows (`profile_intent_leg_limit`). That's about 15k `context` rows and up to about 12k profile rows a
+month at current volume, so no retention policy is needed in v1.
 
 ### 2. Credit on review (capture, Phase 1)
 
@@ -311,7 +365,7 @@ relevance order (the 3a fix).
 ```
 p_base  = agent's mean reward over eligible graded decisions in the last 90 days  (cached 1 h)
           # mean of r per decision, partial = 0.5: about 0.92 today, not the 86% success share
-for each credited snapshot row i of the memory (credited_weight IS NOT NULL):
+for each credited context row i of the memory (source = 'context', credited_weight IS NOT NULL):
   d_i   = 0.5 ** (age_days(credited_at_i) / 60)             # each row decays by its own credit time
 alpha   = Σ d_i · w_i · r_i
 beta    = Σ d_i · w_i · (1 − r_i)
@@ -331,7 +385,7 @@ FROM (SELECT memory_id, credited_weight, credited_reward,
              power(0.5, extract(epoch FROM now() - credited_at) / 86400 / 60) AS d
       FROM brain.decision_recall_context
       WHERE agent_id = :agent_id AND memory_type = :type AND memory_id = ANY(:ids)
-        AND credited_weight IS NOT NULL) s
+        AND source = 'context' AND credited_weight IS NOT NULL) s
 GROUP BY memory_id
 ```
 
@@ -339,11 +393,12 @@ Per-row decay is why the stored totals are gone. Decaying a stored total by its 
 (the earlier draft) brings old mass back to full weight: a memory credited once a year ago and once
 today would count last year's credit in full. Here each contribution ages on its own.
 
-Read cost: one row per (decision, memory) pair, about 15k a month in total. The memory most often
-recalled (an identity fact in nearly every decision) gathers about 130 rows a month, so a top-k batch
-reads a few thousand index rows at most. If that ever shows in turn latency, a cache table keyed by
-`(agent_id, memory_type, memory_id)` can be rebuilt from the snapshot rows (refreshed in that key
-order, per section 2). v1 has no cache.
+Only `source = 'context'` rows count (section 1, "What profile rows are used for"), so the boost
+never treats an always-injected profile fact's presence as evidence. Read cost: one row per
+(decision, memory) pair, about 15k `context` rows a month. A memory recalled in nearly every
+decision gathers about 130 rows a month, so a top-k batch reads a few thousand index rows at most.
+If that ever shows in turn latency, a cache table keyed by `(agent_id, memory_type, memory_id)` can
+be rebuilt from the snapshot rows (refreshed in that key order, per section 2). v1 has no cache.
 
 - **Shrinks toward the base rate.** With only a few observations, `p_mem ≈ p_base` and boost ≈ 1, so a
   memory isn't punished for a single bad day.
@@ -360,8 +415,9 @@ running shadow mode for at least 4 weeks.
 
 Phase 1 still writes and credits procedure snapshot rows. That's cheap, and it gives a graded signal
 we can compare with F037's tool-error proxy. Phase 2 does **not** boost procedures: F037 affinity
-already ranks them, and two outcome signals on one item would double-count. Phase 3 evaluates
-replacing F037's proxy with graded credit.
+already ranks them, and two outcome signals on one item would double-count. For the same reason the
+Phase 2 gate doesn't score procedure rows (see the gate). The procedure comparison is a separate
+Phase 3 analysis with its own decision rule, written down before it runs.
 
 ## Phases
 
@@ -371,7 +427,9 @@ replacing F037's proxy with graded credit.
   threading, `OutcomeCreditHandler` (row grade, decision-row lock), re-grade overwrite.
 - `scripts/diag/outcome_credit_report.py`: top and bottom memories by `p_mem − p_base` with
   `n_eff ≥ 2`, the snapshot row count, eligible reviews credited per week, and the count of
-  mismatched decisions (credit that disagrees with the decision row, section 2).
+  mismatched decisions (credit that disagrees with the decision row, section 2). `context` rows and
+  profile rows (`profile`, `session_profile`) are listed as separate groups, and procedures as their
+  own group; the report computes no gate statistic.
 - Tests:
   - snapshot written for the deliberation decision and for tool-recorded decisions in the turn,
     with `decision_session_id_enabled` off (the default), on both `run_turn` and `stream_chat`
@@ -379,6 +437,11 @@ replacing F037's proxy with graded credit.
     failed `record_decision` call adds no id
   - budget cut: with a section budget that cuts one of three recalled facts, the cut fact gets no
     snapshot row, and the two survivors have ranks 0 and 1
+  - profile facts: with three User Profile facts and a `user_profile` budget whose line cut drops the
+    third, plus two Relevant Facts facts, the two delivered profile facts get `source = 'profile'`
+    rows at ranks 0 and 1 (strength NULL), the cut profile fact gets no row, and the Relevant Facts
+    rows keep `source = 'context'` at ranks 0 and 1. The same for a Session Profile fact cut by
+    `profile_intent_leg_budget` (`source = 'session_profile'`)
   - no snapshot for a deleted deliberation or a continuation turn
   - auto and f099 reviews credit nothing
   - success → partial re-grade leaves the row at the partial values, with `credited_at` unchanged
@@ -405,22 +468,30 @@ replacing F037's proxy with graded credit.
     C, B, A), reviewed concurrently from two sessions, both commit with no deadlock or lock timeout,
     and the read-time stats for A, B and C equal the sum of both decisions' credit
   - rows of another `agent_id` are not read
+  - profile rows don't feed the read: the section 3 stats query, which the report also uses for its
+    `context` group, returns no row for a fact whose only credited rows are `profile` rows
   - an empty delivered set writes nothing
 
 **Phase 2 gate: turn on the boost.** All three must hold:
 
-1. **At least 300** credited (decision, memory) pairs.
+1. **At least 300** credited (decision, memory) pairs among the scored rows (`source = 'context'`,
+   type fact, decision or episode).
 2. **Offline rolling-origin check**, with the decision rule fixed here, before any data arrives:
-   - **Score.** A decision's score is the `w`-weighted mean of `p_mem − p_base` over its snapshot
-     rows. For the fold that scores week k+1, `p_mem` and `p_base` use only rows with `credited_at`
-     before that week starts, decayed from the week's start (not from `now()`). Re-grades overwrite,
+   - **Rows scored.** Only rows Phase 2 can re-rank: `source = 'context'` rows of type `fact`,
+     `decision` and `episode`. Procedure rows are out (Phase 2 doesn't boost them, see Procedures),
+     and so are `profile` and `session_profile` rows (never boosted, section 1). A decision with no
+     such row is not scored and doesn't count toward the pool.
+   - **Score.** A decision's score is the `w`-weighted mean of `p_mem − p_base` over its scored
+     rows, with `p_mem` from the same `source = 'context'` rows as the boost read. For the fold
+     that scores week k+1, `p_mem` and `p_base` use only rows with `credited_at` before that week
+     starts, decayed from the week's start (not from `now()`). Re-grades overwrite,
      so a fit row carries its current grade, not the grade it had at the fold's start. That is
      accepted: a re-grade corrects an earlier decision's label and carries nothing about the scored
      week's outcomes.
    - **Folds.** For every k across at least 8 weeks of capture: fit on weeks 1..k, score the eligible
      graded decisions of week k+1. A decision is scored once, in the fold for its week.
    - **Pool.** Pool the scored decisions over all folds. The pool must hold **at least 30
-     non-success** (partial or failure) decisions.
+     non-success** (partial or failure) scored decisions.
    - **When it runs.** Exactly once, at the first week boundary where both hold: at least 8 weeks of
      capture, and at least 30 non-success decisions in the pool. Before that the gate is shut, not
      failed, and nobody computes the AUC early.
@@ -431,6 +502,11 @@ replacing F037's proxy with graded credit.
      the folds keep extending week by week, with the same rule, until the condition above holds. The
      single run is final: a failed check ends Phase 2, and F104 stays at Phase 1 as an analytics
      feature.
+
+   **Why only the boosted types.** The gate decides whether to turn on a boost that touches facts,
+   decisions and episodes only. If procedure credit predicted outcomes and the others didn't, an
+   all-row score could pass the gate on a signal the boost never uses; procedure noise could
+   instead fail it and, under the stop rule, end Phase 2 for good.
 
    **Why not "AUC ≥ 0.6 or Mann–Whitney p < 0.1" on one week** (the earlier draft): a week holds about
    32 eligible decisions, about 4 non-success against 28 success. The null AUC then has standard
@@ -447,7 +523,10 @@ replacing F037's proxy with graded credit.
 - Add in-turn `recall_deep` results as `source=recall_deep` rows. This needs the IDs the tool returned
   in the turn, threaded explicitly in the F091 style (the tool already reads the turn's recalled IDs for
   F071 dedup).
-- Replace the F037 tool-error proxy with graded credit for procedures, or blend the two.
+- **Procedure credit analysis**, separate from the Phase 2 gate. Before it runs, the Phase 3 spec
+  writes down its own decision rule (score, folds, test and threshold, as the Phase 2 gate does) for
+  whether graded procedure credit predicts outcomes better than F037's tool-error proxy. Only if it
+  passes: replace the F037 proxy with graded credit for procedures, or blend the two.
 - Persist `UsageTracker` (separate small fix; worth doing anyway, since citation stats reset on every
   deploy).
 - An "avoid" cue: when a recalled decision has `outcome=failure` *and* its snapshot memories have low
@@ -456,9 +535,11 @@ replacing F037's proxy with graded credit.
 
 ## Risks
 
-- **Confounding.** Memories that are always recalled (identity facts, Tim's preferences) are present
-  in every decision, so they track `p_base` and get boost ≈ 1. That is the correct answer: base-rate
-  centring is what neutralises them.
+- **Confounding.** Memories that are always delivered (identity facts, Tim's preferences in the User
+  Profile) are present in nearly every decision, so their credit tracks `p_base`. Their rows are
+  `source = 'profile'`: credited and reported, but neither boosted nor scored in the gate (section
+  1). Base-rate centring would neutralise them anyway; the source filter makes it explicit. Memories
+  recalled very often through the ranked sections get the same centring.
 - **Rich get richer.** A boosted memory gets recalled more, collects more credit and gets boosted
   more. Three things limit this: the ±20% cap, prior shrinkage, and decay. The diag report watches the
   rank-shift distribution in shadow mode.
