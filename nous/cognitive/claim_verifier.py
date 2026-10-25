@@ -120,6 +120,8 @@ class Claim:
     span: tuple[int, int] = field(default=(0, 0), compare=False)
     attempt_only: bool = False  # a verdict on an action: any recorded try of it backs the claim
     clause: str = field(default="", compare=False)  # the clause the claim is in ("I sent it by email")
+    sentence: str = field(default="", compare=False)  # its clause to the end of the sentence (a send_file's scope)
+    opening: str = field(default="", compare=False)  # the sentence before its clause ("Done:", "For Bob,")
 
 
 # First person: "I", "I've", "I have", "I just", "I also" ... The "I" is
@@ -205,10 +207,16 @@ _DEPLOY_OBJECT = (rf"(?=\s+{_DET}(?:[\w-]+\s+){{0,2}}?(?:builds?|releases?|fix(?
 # Line- or sentence-initial: "Email sent to x", "Done. Saved to /tmp/x.md".
 _OPENING = r"(?:(?<![^\n])|(?<=[.!?]\s)|(?<=[✓✅]\s))"
 # "... by the scheduled task": someone else's completion, not the agent's;
-# "by 9am" and "by me" are not. Dots inside words pass, or the target would
-# shrink to `/srv/q3` to keep ".md by" out of reach.
+# "by 9am", "by Friday", "by me" and a channel ("by email", "by text", "by Slack") are not; post, a courier
+# or a hand is someone else's delivery. A channel is one only as the whole phrase: a mark, the end or
+# to/at/on/for/with/and follows it; "by Slack's reminder bot", "by Telegram bot" name another actor.
+# Dots inside words pass, or the target would shrink to `/srv/q3` to keep
+# ".md by" out of reach.
 _NOT_BY = (r"(?!(?:[^.\n;]|\.(?=\S)){0,60}?\bby\s+(?!me\b|myself\b|\d|noon\b|midnight\b|tonight\b"
-           r"|tomorrow\b|end\b|eod\b|eob\b|then\b|now\b|the\s+end\b)[\w$])")
+           r"|tomorrow\b|today\b|end\b|eod\b|eob\b|cob\b|then\b|now\b|the\s+end\b|next\b|lunch\b"
+           r"|this\s+(?:morning|afternoon|evening|week)\b|(?:mon|tues|wednes|thurs|fri|satur|sun)day\b"
+           r"|(?:(?:e-?)?mail|text|sms|telegram|dms?|slack|whatsapp|signal|discord|imessage|teams|messenger|wechat"
+           r"|gmail|outlook)(?=[ \t]*(?:[.,;:!?()\]\"”—–\n]|$)|\s+(?:to|at|on|for|with|and)\b))[\w$])")
 _MESSAGE = r"\b(?:e-?mail|message|report|note|reminder|summary|heads-up|invite|notification|alert|digest)\b"
 
 # (pattern, kind). Patterns that open with the subject group are claims only
@@ -245,11 +253,31 @@ _FIRST_CLAIM_RE = re.compile(_FIRST + _CLAIM_VERBS, re.IGNORECASE)
 # Where a clause ends, for the `and` rule and the question rule; a comma
 # right before "and" joins.
 _CLAUSE_END = re.compile(r"[.!?](?=\s|$)|\n|[;:—]|,(?!\s*and\b)")
+# Where a sentence ends, for what a send_file claim is judged by: a full stop, a blank line or a list item; but
+# not the stop of an abbreviation ("to the user, i.e. Bob", "No. 5"), nor a line break right after "user" or "bot"
+# (main reads "the user ..." as a recipient whatever follows it).
+# (checked only where the stop is; a lookbehind's alternatives must be one width, so they are grouped by length)
+_SENTENCE_END = re.compile(r"[!?](?=\s|$)|\.(?=\s|$)(?<!\b(?:cf|vs|dr|mr|ms)\.)(?<!\b(?:i\.e|e\.g|viz|etc|mrs)\.)"
+                           r"(?<!\bprof\.)(?<!\ba\.k\.a\.)(?<!\bapprox\.)(?!(?<=\bno\.)\s*\d)"
+                           r"|(?<!\buser)(?<!\buser )(?<!\bbot)(?<!\bbot )"
+                           r"(?:\n[ \t]*\n|\n(?=[ \t]*(?:[-*+•]|\d+[.)])\s))", re.IGNORECASE)
 # A condition earlier in the clause: "if I pushed", "check whether it was saved".
 _CONDITION = re.compile(r"\b(?:if|whether|unless)\b", re.IGNORECASE)
 # Text that is not the agent speaking: fenced code, block quotes, quotations.
 _QUOTED = re.compile(r"```.*?(?:```|\Z)|^[ \t]*>[^\n]*|\"[^\"\n]{0,300}\"|“[^”\n]{0,300}”",
                      re.DOTALL | re.MULTILINE)
+
+
+def _sentence_end(sentence_ends: list[int], clause_end: int, text: str) -> int:
+    """Where the sentence holding a clause that ends at ``clause_end`` ends."""
+    i = bisect_left(sentence_ends, clause_end)
+    return sentence_ends[i] if i < len(sentence_ends) else len(text)
+
+
+def _sentence_start(sentence_starts: list[int], clause_start: int) -> int:
+    """Where the sentence holding a clause that starts at ``clause_start`` starts."""
+    i = bisect_right(sentence_starts, clause_start) - 1
+    return sentence_starts[i] if i >= 0 else 0
 
 
 def _blank(match: re.Match[str]) -> str:
@@ -1421,20 +1449,373 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
     return _best(levels)
 
 
-# A send claim whose clause names another destination than the owner's Telegram: a send_file could have
-# reached it only through a chat id it was given, never certainly. A destination is mail as the verb, the
-# thing sent or the channel ("emailed", "Email sent", "via email", "in the email thread", never "the email
-# summary"), a named channel ("on WhatsApp", "via <anything but Telegram>") or whoever follows "to" but
-# you, the owner, the chat, Telegram or an infinitive ("to Bob", "to them", "to the Telegram group"). A
-# time or content word ("on Monday", "with a summary") is none.
+# A send claim whose sentence names another destination than the owner's Telegram chat: a send_file could have
+# reached it only through a chat id it was given, never certainly. THE RULE: a destination is named when the
+# sentence, from the claim's clause to its end (a clause-ending mark does not hide "to the user — Bob"), has
+#   1. mail as the verb, the thing sent, the channel or the tool: "emailed", "mailed", "Email sent", "the
+#      email.", "via/by/over/through/in/using email", "the mail server", "send_email" (never "the email
+#      summary", "email-style");
+#   2. a named channel other than Telegram after via/on/over/through/by/in/into/using: Slack, WhatsApp,
+#      Signal, Discord, SMS, iMessage, Teams, Messenger, WeChat, Gmail, Outlook, LinkedIn, Twitter, and "text"
+#      or SMS after by/via/over, or after in/as with an article or before "message" ("in a text message", "as an
+#      SMS"; not "in a text file/form/format", "in plain text", "as text") (never "Gmail-style"); after
+#      via/through/using, any other word too ("via SMTP", "via the API") but Telegram, the bot, the chat, a DM,
+#      "here", the sending tool by name ("via send_file", "via send_telegram"; not any other word with "_": "via
+#      _Slack_", "via send_slack", "via telegram_group"), a link and a time (but "using" after a participle, or
+#      before the data or a template, is how the report was made: "charts generated using matplotlib"); after
+#      on/over, a place: a capitalised word, a handle or "the wiki/website/channel/..." (never a topic or a
+#      time: "a note on the outage", "on it", "on Monday", "on Oct 24", "over lunch");
+#      post, a courier, a hand or a fax after "by", and anyone right after "<the message> by" or "sent by"
+#      but you, a time, the owner's chat, a link, a gerund or a manner ("the report by Bob", not "by Friday",
+#      "by DM", "by attaching it", "by request", "by Friday EOD", "by our bot", "by send_file"); a chat id
+#      ("chat_id -100123", "chat -1001234") is another chat;
+#   3. a recipient after "to", "to you and", "shared ... with", "cc", "bcc" or "copied" (in): anything that
+#      is not on the lists below -- a name ("Bob", "Tim": the owner's name is not known here; "Mark", "O'Brien",
+#      "Иван"), an acronym ("HR", "S3"), a number ("3 people"), a handle "@bob", a channel "#general" (also
+#      after in/on/into/via/over), a person or group in lowercase ("them", "bob", "the team", "the Telegram
+#      group"), an address (anywhere in the sentence: "to the user at bob@x.io"), a place after "at" after a self
+#      word ("to the user at Bob", "to you at the London office", not "to the owner at 7am", "at lunch", "at the
+#      office"); a bracket, a dash or a mark after a self word holding anything but a sent thing, a count or an
+#      adverb ("to the user: Bob", not "to you (report.pdf)", "to you - 3 pages"); and after "a link to" one that
+#      is no sent thing ("a link to the team", not "a link to the report", "to it", "to https://...", "to
+#      report.pdf").
+# Nothing else is: not you, the owner, the user, the chat, a DM, the bot or Telegram, nor the owner's chat ("the user's
+# DMs"; but "the user's team" or "inbox" is someone else's); not an infinitive in lowercase ("to review"; "to Mark" is a
+# name), a format or language ("to PDF", "to pdf", "to Markdown", "to French"), a time ("to Friday", "to 5pm", "to
+# date", "to the end", "the next morning"; so "to May" is read as a time too), an idiom ("due to", "up to", "according
+# to", "converted to"); not a content word ("with a summary", "as a .docx"); after "to you and", not a verb or a
+# function word in lowercase ("to you and archived the draft", "to you and on time"); but "a link to the summary and
+# Bob" names Bob. A word on these lists counts only when it heads its phrase (_HEADS; a self word, _SELF_ENDS):
+# "to the next reviewer", "to the end user", "to the user group", "to French colleagues" name someone.
+# A word on the lists below is what a phrase names only when it heads the phrase: a punctuation mark, the end, a
+# line break (not after "user" or "bot": main reads "the user ..." as a recipient) or a function word follows it, not a
+# word it modifies ("to the end" and "to the end of the day", not "to the end user"; "to French", not "to French
+# colleagues"; "to the user", not "to the user group"; not "today's").
+_HEADS = (r"(?=\s*(?:[.,;:!?)\]\"”—–]|$)|(?<!user)(?<!bot)[ \t]*\n|(?:[ \t]+|(?<!user)(?<!bot)\s+)"
+          r"(?:and|or|&|as|at|by|for|from|in|into|on|onto|of|over|via|through|using|with|without|to|before|after"
+          r"|until|till|since|so|then|too|also|again|instead|directly|immediately|first|already|only|here|now|later"
+          r"|today|yesterday|tonight|tomorrow|this|that|i|we|you|he|she|they|it)\b)")
+# A time: a day or month name (before a day number or a part of the day), a month abbreviation before a day
+# number ("Oct 24", not "Jan"), a clock time ("9am", "9:30", "21:00 UTC"), a time adverb, "next week", "the
+# latest/previous/same/next/last" before a time noun ("the next morning", "the last hour", "the same time"), or "the
+# end/top/bottom/start/beginning/latest/previous/same/next/last" alone or before "of"; each one heading its phrase. Each
+# but "9:30" is a narrowing of an older, wider form, so no other phrase is a time now that was not before; "to 9:30"
+# names no one either. The time nouns: second, minute,
+# hour, day, night, morning, afternoon, evening, week, weekend, fortnight, month, quarter, year, sprint, run,
+# cycle, round, iteration, time, and a version or release ("the next release").
+_A_TIME = (r"(?:(?:(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may"
+           r"|june|july|august|september|october|november|december)"
+           r"(?:\s+(?:\d{1,2}(?:st|nd|rd|th)?|morning|afternoon|evening|night))?"
+           r"|(?:jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec)\.?\s+\d{1,2}(?:st|nd|rd|th)?"
+           r"|today|tomorrow|tonight|noon|midnight|now|later|eod|cob|next\s+week"
+           r"|the\s+(?:latest|previous|same|next|last)\s+(?:second|minute|hour|day"
+           r"|night|morning|afternoon|evening|week|weekend|fortnight|month|quarter|year|sprint|run|cycle|round"
+           r"|iteration|time|version|release)s?"
+           r"|the\s+(?:end|top|bottom|start|beginning|latest|previous|same|next|last)"
+           r"|\d{1,2}:\d\d(?:\s*(?:am|pm))?(?:\s+(?:utc|gmt|bst|cet|cest|eet|eest|msk|ist|jst|[ecmp][sd]t))?"
+           r"|\d{1,2}\s*(?:am|pm))\b" + _HEADS + ")")
+# The owner's chat, as a noun: the owner, the user, the chat, a DM, the bot, Telegram, chained ("the Telegram
+# bot") or as the owner's chat, DMs or Telegram ("the user's DMs"); "the user group", "the Telegram channel",
+# "the user's team" and "the bot's owner" are someone else.
+_SELF = r"(?:owner|user|chat|dms?|bot|telegram)"
+# What may follow a self word for it to stay the owner's chat: what may follow any listed word (_HEADS), a
+# bracket, a dash, or an adverb or conjunction ("to the owner earlier", "... (see above)", "... - done", "via
+# Telegram successfully"). Anything else names someone else: a noun it modifies ("the user group"), a
+# possessive ("the owner's manager"), a name ("the user Bob", "the user bob"). The list is closed, so an
+# unlisted word errs to "Could not confirm" (main read every "to the user ..." so).
+_SELF_ENDS = (rf"(?:{_HEADS}|(?=\s*\(|\s+[-–—]\s|\s+(?:earlier|just|twice|once|because|successfully|privately"
+              r"|personally|separately|manually|automatically|promptly|quickly|securely|safely|both|alone|together"
+              r"|while|when|per|yet|anyway|as\s+well|right|who|whom|which|asap)\b))")
+_A_SELF_PHRASE = rf"(?:{_SELF}(?:\s+{_SELF})*(?:['’]s\s+(?:chat|dms?|telegram)(?:\s+{_SELF})*)?\b)"
+_A_SELF = rf"(?:{_A_SELF_PHRASE}{_SELF_ENDS})"
+_NOT_A_RECIPIENT = (
+    # you, me, here, or the owner's chat as a noun
+    rf"(?!(?:you|yourself|me|myself|here)\b|(?:(?:the|your|my|our|this)\s+)?{_A_SELF})"
+    # an infinitive, in lowercase: "to Mark" is a name
+    r"(?!(?-i:review|read|check|confirm|approve|see|look|keep|share|sign|use|be|date|make|help|show|let|get"
+    r"|give|reply|respond|follow|discuss|decide|go|do|start|finish|test|verify|track|compare|print|download"
+    r"|open|view|save|edit|update|fix|run|ensure|avoid|prepare|answer|inform|notify|remind|explain"
+    r"|summari[sz]e|highlight|cover|include|mark|close|cancel|catch|meet|take|bring)\b)"
+    # a format or a language
+    r"(?!(?:pdf|html?|docx?|csv|tsv|json|ya?ml|xml|xlsx?|pptx?|odt|rtf|txt|text|plain\s+text|markdown|md|png"
+    r"|jpe?g|gif|svg|webp|zip|tar|epub|latex|tex|excel|word|powerpoint|english|french|german|spanish|russian"
+    rf"|italian|portuguese|chinese|japanese|korean|arabic|dutch|ukrainian|hebrew)\b{_HEADS}|\.\w)"
+    rf"(?!{_A_TIME})"
+    # anything else: a name, an acronym, a number, a word in lowercase, a handle, a channel
+    r"[\w@#]"
+)
+# After "to you and": not a verb or a function word ("to you and archived it", "to you and on time"); the verbs
+# are listed, since a name can end in -ed too ("to you and ahmed", "and fred")
+_NOT_A_VERB = (r"(?!(?-i:then|also|now|later|again|so|on|in|at|by|with|as|for|from|via|over|through|i|it|we|will|would"
+               r"|who|whom|which|because|since|while|when|thanks|please|ok|okay"
+               r"|I|We|It|That|This|I['’]m|We['’]re"
+               r"|can|could|should|have|has|had|is|was|am|only|nobody|no\s+one|none|done|sent|told|made|put|set|left"
+               r"|got|wrote|b?cc(?:['’]?e?d)?|(?:archiv|forward|copi|sav|mov|notifi|ping|add|attach|upload|post|clos"
+               r"|updat|delet|remov|fil|creat|merg|push|committ|schedul|shar|logg|not|confirm|check|verifi|open|renam"
+               r"|pinn|deploy|start|stopp|finish|complet|publish|link|flagg|tagg|mark|repli|ask|clean|clear|sync"
+               r"|export|convert|generat|queu|revert|restor|back|includ|summari[sz]|review|sign|print|download|edit"
+               r"|fix|test|tidi|resolv|assign|approv|cancell?|declin|reject|accept|answer|respond|invit)ed)\b)")
+# What "a link to" points at rather than sends to: a sent thing, it, a URL, a path or a file name with a known
+# extension ("report.pdf", not "bob.smith" or "bob.smith@example.com").
+# A known file extension ("report.pdf")
+_FILE_EXT = (r"(?:pdf|md|txt|csv|tsv|json|ya?ml|xml|html?|docx?|xlsx?|pptx?|odt|ods|rtf|png|jpe?g|gif|svg|webp"
+             r"|zip|tar|gz|tgz|py|ipynb|js|ts|sh|sql|log|epub|mp4|mov|mp3|wav)\b")
+_A_SENT_THING = (r"(?:(?:the|a|an|your|my|our|this|that|these|those)\s+(?:[\w.'’-]+\s+){0,3}?"
+                 r"(?:report|summar(?:y|ies)|file|doc|document|page|dashboard|chart|sheet|spreadsheet|folder|draft"
+                 r"|pr|pull\s+request|issue|repo|repository|article|post|site|website|video|recording|slide|deck|note"
+                 r"|result|data|table|ticket|thread|commit|branch|diff|log|image|photo|screenshot|form|invite"
+                 r"|presentation|release|spec|plan|proposal|agenda|minutes|transcript|archive|attachment|copy|version"
+                 rf"|section)(?:e?s)?\b{_HEADS}|(?-i:it|this|that)\b|https?\b|www\.|[/~]"
+                 rf"|[\w-]+\.{_FILE_EXT})")
+# Where such a tail must end for it to name no one: the bracket closes or the phrase or line ends ("to the owner
+# (twice).", not "to the owner (twice and Bob)")
+_TAIL_ENDS = r"(?=\s*(?:[).,;:!?]|$)|[ \t]*\n)"
+# "i.e.", "e.g." or "viz.": what follows names this send's recipient again ("to the user, i.e. Bob")
+_THAT_IS = r"(?:i\.e|e\.g|viz)\."
+# What a connector or "i.e.", "e.g." or "viz." may name without naming anyone: a sent thing, "the Q3 one", a format,
+# a link, charts or figures, or a review word ("to you, e.g. the Q3 one", "i.e. the PDF", "for review and approval";
+# not "to you, i.e. Bob", "and that is Bob", "and it will reach Bob", nor a thing for someone: "plus a copy for Bob");
+# and after "that is",
+# nothing more ("to you, that is all", "and that is all"; but "and all" may be everyone)
+_AN_EXAMPLE = (rf"(?!that\s+is\b|that['’]s\b|(?-i:it|this|that)\b(?!{_TAIL_ENDS}))"
+               rf"(?:{_A_SENT_THING}|(?:the|this|that)\s+(?:[\w-]+\s+){{0,2}}?ones?\b{_HEADS}"
+               r"|(?:(?:the|a|an)\s+)?(?:pdf|csv|xlsx?|docx?|pptx?|markdown|md|html?|json|png|zip)\b(?!['’.-])"
+               r"|(?:(?:a|the)\s+)?(?:shared\s+)?links?\b|(?:all\s+)?(?:(?:the|my|our|your)\s+)?(?:[\w-]+\s+)?"
+               r"(?:charts|tables|figures|numbers|graphs|plots|slides|files|attachments|notes|details)\b"
+               r"|(?:approval|sign-?off|feedback|comments|reference|records|context)\b)"
+               r"(?!\s+(?:for|to|with|from|by|via|cc)\b)")
+# An adverb after a self word: "to the owner earlier", "via Telegram successfully"
+_SELF_ADVERB = (r"(?:earlier|just|now|already|today|directly|first|again|too|also|both|twice|once|successfully"
+                r"|personally|privately|separately|right\s+away)\b")
+# A word that joins the owner and someone else: "to you and Bob", "to the owner, namely Bob", "to you not just Bob"
+_CONNECTOR = (r"(?:and(?:\s+(?:also|then|later|afterwards))?|&|as\s+well\s+as|then|plus|also|namely|including"
+              r"|not\s+(?:just|only)|but\s+also|in\s+particular|that\s+is|that['’]s|specifically|especially|meaning"
+              r"|mainly|mostly|notably)")
+_NOTHING_MORE = rf"(?:(?<=\bthat is )|(?<=\bthat['’]s )|that\s+is\s+|that['’]s\s+)(?:all|everything|it)\b{_TAIL_ENDS}"
+# What a bracket, a dash or another mark after a self word may hold without naming anyone: a sent thing, a count
+# or an adverb ("to you (report.pdf)", "to you - 3 pages", "to the owner (twice)").
+_A_COUNT = (r"\d+\s*(?:pages?|slides?|sheets?|charts?|tables?|files?|attachments?|parts?|sections?|rows?|lines?|words?"
+            r"|items?|kb|mb|gb|bytes?|min(?:ute)?s?|sec(?:ond)?s?|hours?|days?)\b")
+_NOT_A_TAIL = rf"(?!(?:{_A_SENT_THING}|{_A_COUNT}|{_SELF_ADVERB}){_TAIL_ENDS})"
+# What may end the sentence after a mark or on the next line without naming anyone: a note, a version, a date, a
+# clock time, an adverb, a closer or a heading ("to the owner, FYI", ", v2", ", 2026-10-24", ", 10:05 UTC", ",
+# finally", "to you<newline>Done", "<newline>Summary:"). Only at the end of the sentence, so nothing after it is hidden
+# ("to the owner, FYI Bob", "<newline>Summary:<newline>Bob").
+_OWNER_ONLY_END = (r"(?:fyi|asap|btw|nb|ps|v\d+(?:\.\d+)*|\d{4}-\d\d-\d\d|\d{1,2}:\d\d(?:\s*(?:utc|gmt|[ap]m))?"
+                   r"|finally|also|too|again|anyway|instead|eventually|thanks|thank\s+you|cheers|done|all\s+good"
+                   r"|see\s+attached|(?:summary|next\s+steps|details|notes?|attachments?|highlights|results|changes"
+                   r"|status):)[ \t]*$")
+# A time or a place after "to <self> at" that names no one: "at lunch", "at bedtime", "at the usual time", "at the
+# office" (not "at lunch with Bob", "at the office of Bob", "at Worktime HQ", "at Bobtime")
+_AT_TAIL = (r"(?:lunch|(?:lunch|bed|dinner|tea|day|night|supper)time|dinner|breakfast|night|dawn|dusk|work|home|first"
+            r"|last|least|most|all|length|hand"
+            rf"|the\s+(?:(?:[\w-]+\s+)?(?:time|moment|hour|meeting|weekend)s?|office))\b{_TAIL_ENDS}")
+# A short prepositional tail after a self word: "to the user as a PDF", "on Monday", "for review", "by 5pm" (up to
+# three words, none of them a preposition, a connector, an adverb or a self word, so the tail is read one way only
+# and never starts another self word's reading: "via telegram via telegram ..." is linear); a clock time is one word
+# ("by 9:30")
+_PREPOSITION = r"(?:as|in|with|on|by|for|via|through|over|using)"
+_PREP_TAIL = (rf"(?:{_PREPOSITION}|at(?!\s+(?:{_A_TIME}|{_AT_TAIL})))"
+              rf"(?:\s+(?!{_SELF_ADVERB}|(?:{_PREPOSITION}|at|to|or|not|but|that|right|{_CONNECTOR}|{_SELF}|you|yourself"
+              r"|me|myself|send_file|send_telegram)\b)[\w'’-]+(?::\d\d)?){1,3}")
+# After via/through/using/on/over: Telegram, the bot, the chat, a DM, here, a link, the sending tool by name
+# (send_file, send_telegram) or a time word.
+_NOT_A_TRANSPORT = (r"(?!(?:the|a|an|your|my|our|this)\b|(?:telegram|bot|chat|dms?)(?:\s+(?:telegram|bot|chat|dms?))*\b"
+                    rf"{_SELF_ENDS}|(?:here|(?:shared\s+)?links?|time|schedule|request|demand|completion|arrival|track"
+                    rf"|hold|weekend|morning|afternoon|evening|night)\b{_HEADS}|send_(?:file|telegram)\b)")
+# A participle that says how the report was made: "charts generated using matplotlib", "built using pandas"
+_PRODUCED = ("generated", "rendered", "built", "made", "created", "produced", "formatted", "written", "wrote", "drawn",
+             "plotted", "computed", "calculated", "compiled", "prepared", "designed", "styled", "drafted", "assembled",
+             "analysed", "analyzed", "summarised", "summarized", "charted", "visualised", "visualized", "modelled",
+             "modeled", "derived", "extracted", "processed", "cleaned", "converted", "exported", "edited", "done",
+             "typeset", "laid out")
+_USING = ("using" + "".join(rf"(?<!\b{w} using)" for w in _PRODUCED)  # checked only where "using" is
+          + r"(?!\s+(?:the|a|an|your|my|our|this)\s+(?:[\w-]+\s+)?(?:data|dataset|numbers|figures|template|format"
+          rf"|layout|style|results|stats|statistics|metrics)\b{_HEADS})")
 _ELSEWHERE = re.compile(
+    # every alternative starts at a word boundary or where an address can start: one test of that first, so a
+    # long word costs one step per character, not one per alternative
+    r"(?:\b|(?<![\w.+-])(?=[\w.+-]))(?:"
+    # 1. mail
+    r"\b(?:e-?)?mail(?:ed|ing)\b"
+    r"|\b(?:e-?)?mails?\b(?=\s*(?:[.,;:!?)]|$)"
+    r"|\s+(?:was|were|is|has|have|sent|to|via|by|with|on|at|for|about)\b)"
+    r"|\b(?:via|using|in|into|over|through|by)\s+(?:(?:the|an?|your|my)\s+)?(?:e-?)?mail\b(?!-)"
+    r"|\bsend_e?mail\b"
+    # 2. a named channel
+    r"|\b(?:via|on|over|through|by|in|into|using)\s+(?:(?:the|a|your|my)\s+)?(?:slack|whatsapp|signal|discord"
+    r"|sms|imessage|teams|messenger|wechat|gmail|outlook|linkedin|twitter)\b(?!-)"
+    # a text message or an SMS after in/as too ("in a text message", "as an SMS"; not "in a text file", "as text")
+    r"|(?:\b(?:via|over|by)\s+(?:an?\s+)?(?:text|sms)|\b(?:in|as)\s+(?:an?\s+(?:text|sms)|sms|texts?\s+messages?))"
+    r"\b(?!-)(?!\s+(?:file|form|format)s?\b)"
+    r"|\bby\s+(?:post|courier|hand|fax)\b"
+    r"|\bchat[ _-]?id\b\s*(?:[=:]\s*)?-?\d|\bchat\s+-\d{5,}"  # another chat, by its id (not "chat 12345 logs")
+    # ... anyone or anything right after "<the message> by" or "sent by" ("I sent the report by Bob", "Message
+    # sent by @bob", "by sendmail", "by the team") but you, a time, the owner's chat, a link, a gerund or a
+    # manner ("by attaching it", "by request", "by direct message", "by Friday EOD", "by our bot"); not "sorted
+    # by date", "requested by you". A closed list of what is no one: an unlisted word errs to "Could not confirm"
+    r"|(?:\b(?:e-?mails?|messages?|reports?|notes?|reminders?|summary|summaries|invites?|notifications?|alerts?"
+    r"|digests?|heads-up)|\bsent|\bforwarded)\s+by\s+"
+    rf"(?!{_A_TIME}|\d|(?:you|yourself|me|myself|noon|midnight|midday|tonight|tomorrow|today|eod|eob|cob|then|now"
+    r"|lunch|next\s+week|end\s+of|this\s+(?:morning|afternoon|evening|week)|(?:a\s+)?(?:shared\s+)?links?|request"
+    r"|default|itself|mistake|accident|schedule|way\s+of|(?:direct|private)\s+messages?"
+    r"|(?:the\s+)?(?:deadline|due\s+date|scheduled\s+time)|(?-i:[a-z]+ing)"
+    # ... nor a day ("Friday EOD", "Monday 5pm"), a business or holiday time, "<the agreed> time", the sending
+    # tool or a file
+    r"|monday|tuesday|wednesday|thursday|friday|saturday|sunday|eo[dwmqy]|t\+\d|q[1-4])\b"
+    r"|(?:christmas|xmas|easter|thanksgiving|new\s+year|[a-z]+time|close\s+of\s+(?:business|play)"
+    r"|(?:the|an?|our|your|my)\s+(?:[\w-]+\s+){0,2}?(?:time|deadline|date|cut-?off|hour|day|week|month|meeting"
+    rf"|call|stand-?up)s?|send_(?:file|telegram)|files?)\b{_HEADS}"
+    rf"|(?:(?:the|your|my|our)\s+)?{_A_SELF})[\w@#]"
+    # ... or any other transport than Telegram, a tool, a link or a time after via/through/using, and a place
+    # after on/over (not a topic: "a note on the outage"); "using" after a participle of making (_PRODUCED), or
+    # before the data or a template, is how the report was made ("charts generated using matplotlib", "built
+    # using pandas", "using the latest data"), not how it was sent
+    rf"|\b(?:via|through|{_USING})\s+(?!{_A_TIME})(?:(?:the|a|an|your|my|our|this)\s+)?{_NOT_A_TRANSPORT}"
+    r"(?![\w.]*-style\b)[\w@#]"
+    rf"|\b(?:on|over)\s+(?!{_A_TIME})(?!the\s+(?:same|next|previous|last)\s+page\b)"  # no place
+    rf"(?:{_NOT_A_TRANSPORT}(?-i:(?![a-zß-ÿ\d_])\w)|@\w|(?:the|a|an|your|my|our|this)\s+(?:[\w-]+\s+)?"
+    r"(?:wiki|website|site|page|board|forum|server|channel|group|platform|portal|feed|blog|intranet|drive|cloud"
+    r"|repo|repository|tracker)s?\b)"
+    # 3. a recipient
+    # (each idiom is checked only where "to" is: a check before it would run at every character)
+    r"|\bto(?<!\bdue to)(?<!\bprior to)(?<!\bup to)(?<!\bthanks to)(?<!\baccording to)(?<!\bcompared to)"
+    r"(?<!\bnext to)(?<!\baddition to)(?<!\border to)(?<!\bclose to)(?<!\bsimilar to)(?<!\brelative to)"
+    r"(?<!\brespect to)(?<!\bregard to)(?<!\blink to)(?<!\blinks to)(?<!\bconvert to)(?<!\bconverted to)"
+    r"(?<!\bconverting to)(?<!\bexported to)(?<!\btranslated to)(?<!\brendered to)(?<!\bformatted to)"
+    r"(?<!\bcompiled to)(?<!\bchanged to)(?<!\bswitched to)"
+    rf"\s+{_NOT_A_RECIPIENT}"
+    # "a link to the team" is sent to the team; "a link to the report" points at the report
+    rf"|\blinks?\s+to\s+(?!{_A_SENT_THING}){_NOT_A_RECIPIENT}"
+    rf"|\blinks?\s+to\s+(?:[^.,;:!?\n]|\.(?=\w)){{0,60}}?\s(?:(?:and|&)\s+|for\s+(?=(?-i:(?![a-zß-ÿ\d_])\w[a-zß-ÿ])"
+    rf"|[@#]\w)){_NOT_A_VERB}{_NOT_A_RECIPIENT}"
+    # "to you and Bob", "to the owner and the team", "via Telegram and Bob", "to the owner earlier and Bob", "to
+    # the owner as well as Bob", "to the owner (Bob)", "to the owner - Bob", "to the user: Bob", "to the user,
+    # then Bob", "to the user, Bob and Carol", "to the user<newline>Bob" (not "to you and archived it", "to you
+    # and on time", "to the owner (see above)", "to the owner - done", "to the owner; it covers Q3", a vocative
+    # "to you, Tim", nor a line longer than three words); a time, an "at" place or a bracketed aside may come
+    # between ("to the owner at dinner, then Bob", "to the owner (twice) and Bob")
+    r"|\b(?:to|via|through|over|on|using)\s+(?:(?:the|your|my)\s+)?(?:you|yourself|me|myself|owner|user|chat|dms?"
+    rf"|bot|telegram|send_file|send_telegram)\b(?:\s+{_SELF_ADVERB}|\s+at\s+(?:{_A_TIME}|{_AT_TAIL})"
+    rf"|\s*\([^()\n]{{0,60}}\)|\s+{_PREP_TAIL})*"
+    rf"(?:(?:\s*[,;:(—–-]\s*|\s+){_CONNECTOR},?\s+(?!{_AN_EXAMPLE}|{_NOTHING_MORE})|(?<=\))\s+"
+    rf"|(?:\s*[,;:(—–]\s*|\s+){_THAT_IS},?\s*(?!{_AN_EXAMPLE})"  # "to the user, i.e. Bob"
+    r"|(?:\s*\(\s*|\s+[-–—]\s+|\s*(?:[;—]|:(?!(?<=\d:)\d))\s*"  # not the colon of a clock time ("by 9:30")
+    r"|(?<!\byou)(?<!\byourself)(?<!\bme)(?<!\bmyself),\s*"
+    r"|[ \t]*\n[ \t]*(?:(?:then|plus|also)\s+)?(?=\S+(?:[ \t]+\S+){0,2}[ \t]*(?:\n|$))"
+    r")"
+    rf"{_NOT_A_TAIL}(?!{_THAT_IS}|{_CONNECTOR},?\s+(?:{_AN_EXAMPLE}|{_NOTHING_MORE}|(?:you|yourself|me|myself)\b{_TAIL_ENDS})"
+    rf"|{_OWNER_ONLY_END})|\s+for\s+(?=(?-i:(?![a-zß-ÿ\d_])\w[a-zß-ÿ])|[@#]\w))"
+    rf"(?:only\s+)?{_NOT_A_VERB}{_NOT_A_RECIPIENT}"
+    # "to the user at Bob", "to you at the London office" (not "to the owner at 7am", "at once", "at lunch", "at
+    # the usual time", "at the office"), and an address anywhere in the sentence
+    r"|\bto\s+(?:(?:the|your|my)\s+)?(?:you|yourself|me|myself|owner|user|chat|dms?|bot|telegram)\s+at\s+"
+    rf"(?!{_A_TIME}|\d|once\b|{_AT_TAIL})[\w@#]"
+    r"|(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+"  # anchored: a long word is scanned once, not from each letter
+    rf"|\bshared\s+(?:\S+\s+){{0,4}}?with\s+{_NOT_A_RECIPIENT}"
+    rf"|\bb?cc(?:['’]?e?d)?\s+(?!(?:you|yourself|me|myself)\b"
+    rf"|(?:(?:the|your|my)\s+)?(?:owner|user|chat)\b{_SELF_ENDS})"
+    r"[\w@#]"
+    # "copied in the team", "copied Bob", not "copied the file"
+    rf"|\bcopied\s+in\s+{_NOT_A_RECIPIENT}"
+    r"|\bcopied\s+(?:(?-i:(?![a-zß-ÿ\d_])\w[a-zß-ÿ]+)\b(?![.'’]\w)|[@#]\w|[\w.+-]+@)"
+    r"|\b(?:in|on|into|via|over)\s+#\w)",
+    re.IGNORECASE)
+# A later clause of its own that claims no completed send, up to the next mark or "but"/"and": a future, a negation or
+# an instruction ("; I will send it via Slack tomorrow", ", but did not send it via email", ", not to Bob", "; please
+# forward it to Bob"). It is not this send's destination. Not "not just Bob" (Bob got it too), nor a relative clause
+# or another subject ("who will forward it to Bob", "Bob will review it"); the verbs are in lowercase ("to you and
+# Will" names Will).
+# What main read as a recipient whatever followed ("to the user", "to the bot", "via send_file")
+_MAIN_RECIPIENT = re.compile(r"\b(?:user|bot|send_file)\b", re.IGNORECASE)
+_PRONOUN = r"(?:i|we|you|it|they)"
+_NOT_DONE = re.compile(
+    r"(?:[;,:—–]\s*(?:(?:but|and|though|yet)\s+)?|(?<!\s)\s+(?:but|and|though|yet)\s+)"  # one try per run of spaces
+    rf"(?:(?:{_PRONOUN}\s+)?(?-i:will|shall|(?:am|are|is)\s+going\s+to|plan\s+to|(?:did|do|have)(?:\s+not|n['’]t)"
+    r"|won['’]t|can(?:not|['’]t)?|could|should|[Pp]lease)"
+    rf"|{_PRONOUN}['’](?:ll|m\s+going\s+to|re\s+going\s+to)|(?-i:not)\s+(?:to|yet))\b"
+    r"(?:(?!\b(?:but|and)\b)[^;,:—–()\n])*",
+    re.IGNORECASE)
+# A single _, * or backtick around a word is styling, as ** is: "via _Slack_", "to `Bob`". The word does not hold its
+# own mark and is at most 60 characters, so an unmatched "_" does not re-read the rest of a long word ("-_a-_a-_a...")
+_STYLED = re.compile(r"(?<![\w*`])([_*`])((?:(?!\1)[^\s*`]){1,60}?)\1(?![\w*`])")
+# The self heads main took for the owner's chat on their own, copied from main's rule: "to you", "to me", "to the
+# owner", "to (the/your/my) DM, chat or Telegram", "via (the/a/your) Telegram, bot or chat". They stay on the rules
+# above.
+_MAIN_EXEMPT_TO = r"(?:you|yourself|me|(?:(?:the|your|my)\s+)?(?:owner|chat|dm|telegram(?!\s+(?:group|channel)\b)))\b"
+_MAIN_EXEMPT_VIA = r"(?:(?:the|a|your)\s+)?(?:telegram|bot|chat)\b"
+# Every other self head after "to" or "via" ("to the user", "to our bot", "to the user's DMs", "via this chat", "via
+# send_file") main read as someone else whatever followed. After it the rest of the sentence must be owner-only tails
+# (_OWNER_ONLY_REST), all of it: anything left over could be someone ("with Bob", "as Bob", "so Bob can read it", "for
+# Иван") and gives plausible, as on main. A head missing from the exempt list costs a "Could not confirm", not an
+# overclaim.
+_NEW_SELF_HEAD = re.compile(
+    rf"\bto\s+(?!{_MAIN_EXEMPT_TO})(?:(?:the|your|my|our|this)\s+)?{_A_SELF_PHRASE}"
+    rf"|\bvia\s+(?!{_MAIN_EXEMPT_VIA})(?:(?:the|a|your|my|our|this)\s+)?(?:{_A_SELF_PHRASE}|send_(?:file|telegram)\b)",
+    re.IGNORECASE)
+# A short prepositional phrase that names no one: a format, a time, a summary or charts, a review, "as requested"
+_FORMAT = r"(?:pdf|csv|xlsx?|docx?|pptx?|markdown|md|html?|json|png|zip|txt)"
+_OWNER_ONLY_PREP = (rf"(?:(?:as|in)\s+(?:(?:a|an)\s+)?\.?{_FORMAT}(?:\s+(?:file|attachment|document))?\b"
+                    r"|(?:at|by)\s+the\s+end\s+of\s+(?:the|this|next)\s+(?:day|week|month|quarter|year)\b"
+                    rf"|(?:on|by)\s+{_A_TIME}"
+                    r"|with\s+(?:(?:a|an|the)\s+)?(?:short\s+|brief\s+)?(?:summary|charts?|tables?|figures|graphs?|notes?"
+                    r"|details|attachments?)\b"
+                    r"|for\s+(?:your\s+)?(?:review|approval|sign-?off|feedback|reference|records|comments)\b"
+                    r"|as\s+(?:requested|discussed|promised|agreed|planned|asked|usual)\b)")
+# A sent thing or a place in an owner-only tail has only these words before its noun ("the Q3 report", "the usual
+# meeting"); any other word could be someone ("the Bob report", "the team's notes", "a copy for Bob's file")
+_PLAIN_WORD = (r"(?:q[1-4]|h[12]|fy\d+|\d{4}|v\d+|final|weekly|monthly|daily|quarterly|annual|yearly|latest|updated"
+               r"|revised|full|new|short|brief|draft|attached|requested|same|whole|first|last|previous|next|current|main|original"
+               r"|usual|agreed|scheduled|pdf|csv|xlsx?|docx?|pptx?|html?|json|png|zip|md|markdown|status|progress|sales"
+               r"|summary|test|pull|release|project)")
+_NO_NAME_INSIDE = (rf"(?!(?:the|a|an|your|my|our|this|that|these|those)\s+(?:{_PLAIN_WORD}\s+){{0,3}}"
+                   rf"(?!{_PLAIN_WORD}\b)[\w.'’-]+\s+[\w.'’-])")
+# One owner-only tail: a self adverb, an "at" time or place, a bracket that holds only a sent thing, a count, an adverb
+# or such a phrase ("(twice)", "(report.pdf)", "(as a PDF)"; not "(Bob)"), "via Telegram", the phrase itself (also
+# after a comma), a closer or heading on the next line, a note, version, date or time after a comma ("FYI", "v2"), or
+# "i.e.", "e.g.", "viz." or "namely" before a sent thing. A tail once taken is not read again, so the longer phrase
+# comes first ("at the end of the day" before "at the end").
+_OWNER_ONLY_TAIL = (rf",?\s+{_OWNER_ONLY_PREP}|\s+{_SELF_ADVERB}|\s+at\s+(?:{_A_TIME}|{_NO_NAME_INSIDE}{_AT_TAIL})"
+                    rf"|\s*\(\s*(?:{_NO_NAME_INSIDE}{_A_SENT_THING}|{_A_COUNT}|{_SELF_ADVERB}|{_OWNER_ONLY_PREP})\s*\)"
+                    rf"|\s+via\s+telegram\b|[ \t]*\n[ \t]*{_OWNER_ONLY_END}"
+                    rf"|\s*,\s*{_OWNER_ONLY_END}|\s*(?:,\s*)?(?:{_THAT_IS}|namely),?\s+{_NO_NAME_INSIDE}{_A_SENT_THING}")
+# The rest of the sentence after a new self head, all of it owner-only tails. Each tail is atomic (a later tail that
+# fails does not make an earlier one try another reading) and the loop possessive, so a long rest is linear.
+_OWNER_ONLY_REST = re.compile(rf"(?:(?>{_OWNER_ONLY_TAIL}))*+\s*", re.IGNORECASE)
+# What a sentence may say before a new self head ("Done: I have also sent the Q3 report with the CI results"): an
+# opener or a list mark, a subject, auxiliaries and self adverbs, a send verb and a sent thing (it, them, a file name,
+# or a determiner, plain words and a noun) with its own attachment, or the passive "<sent thing> sent". Anything left
+# over could be someone ("I sent Bob the report", "For Bob,", "a copy for Bob", "Bob's report") and gives plausible,
+# as on main. A word before the noun is taken only where another listed word follows it, and every loop is
+# possessive, so the check is linear.
+_SENT_NOUN = (r"(?:summary|summaries|copy|copies|(?:report|message|e-?mail|note|reminder|digest|update|file|doc"
+              r"|document|draft|chart|table|sheet|spreadsheet|deck|slide|presentation|result|log|image|screenshot"
+              r"|attachment|version|link)s?|data)")
+_SENT_WORD = rf"(?:{_PLAIN_WORD}|ci|{_SENT_NOUN})"
+_SENT_PHRASE = rf"(?:{_SENT_WORD}\s++(?={_SENT_WORD}\b))*+{_SENT_NOUN}\b"
+_SENT_IT = rf"(?:(?:it|them)\b|[\w-]++\.{_FILE_EXT})"
+_SENT_DET = r"(?:the|a|an|my|our|your|this|today['’]s)\s++"
+_BEFORE_HEAD = re.compile(
+    r"\s*+(?:(?:done:|update:|as\s++requested,)\s*+)?+(?:(?:[-*•]|\d++[.)])\s++)?+"
+    r"(?>(?:(?:i|we)(?:['’]ve)?+\s++)?+(?:(?:have|had|just|also|already|earlier)\s++)*+"
+    r"(?:sent|forwarded|shared|delivered|posted|uploaded|attached)\s++"
+    rf"(?:{_SENT_IT}|{_SENT_DET}{_SENT_PHRASE})"
+    rf"(?:\s++(?:with|about|from|for)\s++{_SENT_DET}{_SENT_PHRASE})?+"
+    rf"|(?:{_SENT_IT}|(?:{_SENT_DET})?+{_SENT_PHRASE})\s++(?:(?:was|were|has\s++been|have\s++been)\s++)?+"
+    r"(?:(?:just|also|already|earlier)\s++)*+(?:sent|forwarded|delivered))"
+    rf"(?:\s++{_SELF_ADVERB})*+\s*+",
+    re.IGNORECASE)
+# Main's rule, verbatim. Where it finds a destination in the claim's clause, main scored a send_file plausible; there,
+# exact needs each place it found to start a new self head (and the rest to be owner-only tails, above). Any other
+# place main found ("to notify Bob", "to myself", "via a link", "according to Bob", "on text") stays plausible.
+_MAIN_ELSEWHERE = re.compile(
     r"\b(?:e-?)?mail(?:ed|ing)\b"
     r"|\b(?:e-?)?mails?\b(?=\s*(?:[.,;:!?)]|$)|\s+(?:was|were|is|has|have|sent|to|via|by|with|on|at|for|about)\b)"
     r"|\b(?:in|into|over|through|by)\s+(?:(?:the|an?)\s+)?(?:e-?)?mail\b"
     r"|\b(?:via|on|over|through|by|in|into|using)\s+(?:(?:the|a)\s+)?(?:slack|whatsapp|signal|discord|sms"
     r"|imessage|teams|messenger|wechat|gmail|outlook|linkedin|twitter|text)\b"
-    r"|\bvia\s+(?!(?:(?:the|a|your)\s+)?(?:telegram|bot|chat)\b)\w"
-    r"|\bto\s+(?!(?:you|yourself|me|(?:(?:the|your|my)\s+)?(?:owner|chat|dm|telegram(?!\s+(?:group|channel)\b)))\b)"
+    rf"|\bvia\s+(?!{_MAIN_EXEMPT_VIA})\w"
+    rf"|\bto\s+(?!{_MAIN_EXEMPT_TO})"
     r"(?!(?:review|read|check|confirm|approve|see|look|keep|share|sign|use|be|date)\b)[\w@#]",
     re.IGNORECASE)
 
@@ -1453,7 +1834,27 @@ def evidence_level(claim: Claim, ev: Evidence) -> str:
     if ev.tool_name == "send_file":  # a Telegram send: no named address, and no e-mail
         if claim.target:
             return "none"
-        return "plausible" if _ELSEWHERE.search(claim.clause or claim.text) else "exact"
+        # the whole sentence from the claim's clause on: "to the user — Bob", "to the user: Bob"
+        sentence = claim.sentence or claim.clause or claim.text
+        clause = claim.clause or ""
+        if (clause and sentence.startswith(clause) and not _MAIN_RECIPIENT.search(sentence)
+                and not _NEW_SELF_HEAD.search(sentence)):
+            # only past the claim's clause (main read no further), and not after a word main took for a
+            # recipient whatever followed nor any other new self head: the dropped clause can then raise no
+            # score above main
+            sentence = clause + _NOT_DONE.sub("", sentence[len(clause):])
+        sentence = _STYLED.sub(r"\2", sentence)
+        if _ELSEWHERE.search(sentence):
+            return "plausible"
+        # main's verdict, on main's input: each place it found must start a new self head
+        read = claim.clause or claim.text
+        if any(not _NEW_SELF_HEAD.match(read, m.start()) for m in _MAIN_ELSEWHERE.finditer(read)):
+            return "plausible"
+        head = _NEW_SELF_HEAD.search(sentence)
+        if head and not (_OWNER_ONLY_REST.fullmatch(sentence, head.end())
+                         and _BEFORE_HEAD.fullmatch(claim.opening + sentence[:head.start()])):
+            return "plausible"
+        return "exact"
     if not ev.args:  # names-only evidence from a legacy caller
         return "plausible"
     if ev.tool_name == "bash":
@@ -1524,6 +1925,29 @@ def _gh_api_method(args: tuple[str, ...]) -> str:
     return "POST" if fields else "GET"
 
 
+# gh options that take a value (`gh help api`, `gh help pr merge`, the global `-R`): the value is text -- a
+# title, a body, a field -- never the command's operand, so `--body 'see /pull/99'` names no PR 99.
+_GH_VALUE_OPTIONS = frozenset({
+    "-R", "--repo", "--hostname", "-X", "--method", "-f", "-F", "--field", "--raw-field", "--input", "-H",
+    "--header", "-q", "--jq", "-t", "--template", "--cache", "-p", "--preview", "--subject", "-b", "--body",
+    "--body-file", "-A", "--author-email", "--match-head-commit",
+})
+
+
+def _gh_operands(args: tuple[str, ...]) -> list[str]:
+    """The operands of a gh invocation: ``_positional`` without the values its options take."""
+    found: list[str] = []
+    value = False
+    for a in args:
+        if value:
+            value = False
+        elif a in _GH_VALUE_OPTIONS:
+            value = True
+        elif not a.startswith(("-", "\n", "\t")):
+            found.append(a)
+    return found
+
+
 def _pr_numbers(args: list[str]) -> set[str]:
     """The pull-request numbers a command names (`4`, `#4`, `.../pull/4`, `.../pulls/4/merge`)."""
     found: set[str] = set()
@@ -1544,7 +1968,7 @@ def _report_hit(kind: str, prog: str, args: tuple[str, ...], number: str | None,
 
     ``pr``: the claim names a pull request, which a local `git merge` does not merge."""
     base = _base(prog)
-    pos = _positional(args)
+    pos = _gh_operands(args) if base == "gh" else _positional(args)
     if _has_flag(args, _HELP_FLAGS):
         return False
     if kind in ("merge", "pr_create") and base in ("gh", "hub", "git"):
@@ -1662,7 +2086,7 @@ _WORK_ID = rf"(?:\s+|\s*[(:#]\s*)`?(?:{_JOB_ID}|{_HEX_ID})`?"
 # (pattern, kind, attempt_only). Active forms need the first person or a
 # sentence opening ("Merged PR #4."): "Tim merged PR #4" is not the agent's.
 _REPORT_PATTERNS: list[tuple[str, str, bool]] = [
-    (rf"\b(?:e-?mails?|messages?){_PASSIVE}sent\b{_NOT_BY}", "email", False),
+    (rf"\b(?:e-?mails?|messages?){_PASSIVE}sent\b(?:\s+to\s+{_ADDRESS})?{_NOT_BY}", "email", False),
     (rf"{_OPENING}(?:sent|e-?mailed)\s+(?:the\s+|an\s+)?e-?mail\b(?:\s+to\s+{_ADDRESS})?", "email", False),
     (rf"\b{_PR}{_PASSIVE}merged\b{_NOT_BY}", "merge", False),
     (rf"(?:{_FIRST}|{_OPENING})merged\s+(?:the\s+)?(?:{_PR}|#\d+|branch)", "merge", False),
@@ -2120,6 +2544,9 @@ class ClaimVerifier:
         text = _QUOTED.sub(_blank, text).replace("**", "")
         clause_starts = [m.end() for m in _CLAUSE_END.finditer(text)]
         clause_ends = [m.start() for m in _CLAUSE_END.finditer(text)]
+        sentence_marks = list(_SENTENCE_END.finditer(text))
+        sentence_ends = [m.start() for m in sentence_marks]
+        sentence_starts = [m.end() for m in sentence_marks]
         reported = [m.start() for m in _REPORTED.finditer(text)]
         scope_starts = [m.end() for m in _REPORTED_SCOPE_END.finditer(text)]
         taken = {(c.kind, c.span) for c in first}
@@ -2140,9 +2567,13 @@ class ClaimVerifier:
                     continue
                 taken.add((kind, (start, end)))
                 target = match.groupdict().get("target")
-                clause = text[clause_starts[c] if c >= 0 else 0:clause_ends[k] if k < len(clause_ends) else len(text)]
+                clause_start = clause_starts[c] if c >= 0 else 0
+                clause_end = clause_ends[k] if k < len(clause_ends) else len(text)
                 found.append(Claim(kind=kind, text=match.group(0).strip(), span=(start, end),
-                                   target=target.lower() if target else None, attempt_only=attempt, clause=clause))
+                                   target=target.lower() if target else None, attempt_only=attempt,
+                                   clause=text[clause_start:clause_end],
+                                   sentence=text[clause_start:_sentence_end(sentence_ends, clause_end, text)],
+                                   opening=text[_sentence_start(sentence_starts, clause_start):clause_start]))
         found.sort(key=lambda claim: claim.span[0])
         return found
 
@@ -2156,6 +2587,9 @@ class ClaimVerifier:
         ends = [m for m in _CLAUSE_END.finditer(text)]
         clause_ends = [m.start() for m in ends]
         clause_starts = [m.end() for m in ends]
+        sentence_marks = list(_SENTENCE_END.finditer(text))
+        sentence_ends = [m.start() for m in sentence_marks]
+        sentence_starts = [m.end() for m in sentence_marks]
         first_claims = [m.start() for m in _FIRST_CLAIM_RE.finditer(text)]
         conditions = [m.start() for m in _CONDITION.finditer(text)]
         reported = [m.start() for m in _REPORTED.finditer(text)]
@@ -2195,7 +2629,9 @@ class ClaimVerifier:
                     if "@" in target:
                         target = target.lower()
                 found.append((start, Claim(kind=kind, text=match.group(0).strip(), target=target,
-                                           span=(start, end), clause=text[clause:clause_end])))
+                                           span=(start, end), clause=text[clause:clause_end],
+                                           sentence=text[clause:_sentence_end(sentence_ends, clause_end, text)],
+                                           opening=text[_sentence_start(sentence_starts, clause):clause])))
         found.sort(key=lambda item: item[0])
         return [claim for _, claim in found]
 
