@@ -1519,9 +1519,9 @@ _NOT_A_VERB = (r"(?!(?-i:then|also|now|later|again|so|on|in|at|by|with|as|for|fr
                r"|deploy|start|stopp|finish|complet|publish|link|flagg|tagg|mark|repli|ask|clean|clear|sync"
                r"|export|convert|generat|queu|revert|restor|back|includ|summari[sz]|review|sign|print|download"
                r"|edit|fix|test|tidi|resolv|assign|approv|cancell?|declin|reject|accept|answer|respond|invit)ed)\b)")
-# What "a link to" points at rather than sends to: a sent thing, it, a URL, a path or a file name (a known
-# extension: "report.pdf", not "bob.smith"); never an address ("bob.smith@example.com").
-_A_SENT_THING = (r"(?![\w.+-]+@)(?:(?:the|a|an|your|my|our|this|that|these|those)\s+(?:[\w.'’-]+\s+){0,3}?"
+# What "a link to" points at rather than sends to: a sent thing, it, a URL, a path or a file name with a known
+# extension ("report.pdf", not "bob.smith" or "bob.smith@example.com").
+_A_SENT_THING = (r"(?:(?:the|a|an|your|my|our|this|that|these|those)\s+(?:[\w.'’-]+\s+){0,3}?"
                  r"(?:report|summar(?:y|ies)|file|doc|document|page|dashboard|chart|sheet|spreadsheet|folder|draft"
                  r"|pr|pull\s+request|issue|repo|repository|article|post|site|website|video|recording|slide|deck|note"
                  r"|result|data|table|ticket|thread|commit|branch|diff|log|image|photo|screenshot|form|invite"
