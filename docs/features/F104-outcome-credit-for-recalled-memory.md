@@ -117,19 +117,24 @@ before the snapshot transaction locks the decision row. Two kinds of decision ge
      the id. Only on success.
   3. The runner collects the ids into a new `TurnResult.recorded_decision_ids: list[str]`
      (`nous/cognitive/schemas.py:221`), and post_turn snapshots those ids. The collection has to
-     survive every way a turn ends:
+     survive every way a turn ends that still reaches post_turn:
      - **Non-streaming.** `_tool_loop` returns a 4-tuple (`nous/api/runner.py:1670`), and when it
        raises, the `except` at `:1699` builds the `TurnResult` without it. So the ids go out through
        a collector list passed in, the way `usage_out` already is (`:1415`, `:1688`), not through
-       the return value. `_dispatch_with_ledger` keeps its `CallOutcome` local, so `Dispatched`
-       (`:123`) gains a field for the id, or the collector is passed down to it.
+       the return value. `_dispatch_with_ledger` keeps its `CallOutcome` local, so the collector is
+       passed down to it and filled there (a field on `Dispatched`, `:123`, would be lost whenever
+       the call raises or is cancelled, since nothing is returned).
      - **Streaming.** Read `outcome.recorded_decision_id` straight after the dispatch, also in the
        `CancelledError`/`GeneratorExit` branch (`:2765`). post_turn runs shielded from `finally`
        (`:2935`), so ids collected there still reach it.
 
   Not covered, by design: `record_decision` calls made inside `run_python`, or dispatched over MCP or
   REST, run with their own outcome or none and belong to no chat turn; an approved action run
-  through `execute_single_call` (`:3128`) has no post_turn. Those decisions get no snapshot.
+  through `execute_single_call` (`:3128`) has no post_turn. Nor does a **cancelled** non-streaming
+  turn (for example the subtask timeout, `nous/handlers/subtask_worker.py:156`): `run_turn` reaches post_turn only
+  after `except Exception` (`:1699`, `:1731`), and `CancelledError` is not an `Exception`, so that
+  turn writes no snapshot at all, the deliberation decision's included. Those decisions get no
+  snapshot.
 
   This is the same mechanism Phase 3 plans for `recall_deep` results.
 
@@ -143,7 +148,7 @@ before the snapshot transaction locks the decision row. Two kinds of decision ge
 **Delivered ids only.** `TurnContext.recalled_{fact,decision,episode,procedure}_ids` over-state what
 the model saw. `ContextEngine.build` fills `recalled_ids` **before** `_truncate_to_budget`
 (`nous/cognitive/context.py:325`). Items whose lines the section budget removed land in
-`_tr_budget_cut` (`context.py:331`), and only the F091 trace excludes them (`context.py:1694`).
+`_tr_budget_cut` (`context.py:331`), and only the F091 trace excludes them (`context.py:1696`).
 `BuildResult.recalled_ids` still returns them (`context.py:1716`). So:
 
 - `BuildResult` gains `delivered_ids: dict[str, list[str]]`: `recalled_ids` per type with every
@@ -234,11 +239,15 @@ short transaction per decision that starts by locking the **decision row**:
 `SELECT outcome, reviewer FROM brain.decisions WHERE id = :decision_id AND agent_id = :agent_id FOR NO KEY UPDATE`.
 That lock exists even before any snapshot row does, which a lock on the snapshot rows alone would
 not (see "Review before snapshot" below). It also orders the read against reviews: every review
-writes the row with an `UPDATE` that changes no key column, which takes the same `FOR NO KEY UPDATE`
-row lock, so under READ COMMITTED the select waits for an in-flight review and then returns its
-committed grade. `FOR NO KEY UPDATE`, not `FOR UPDATE`: `FOR UPDATE` would also conflict with the
+takes a row lock on the decision at least as strong as `FOR NO KEY UPDATE` (its `UPDATE` changes no
+key column; `Brain._review` first takes `FOR UPDATE` when `preserve_graded` or `capture` is set,
+`brain.py:1241-1242` via `_get_decision_orm`, `:2381`, which `resolve_decision` does through `capture` whenever
+it runs under the dispatcher, `tools.py:2269-2286`). Either conflicts with ours, so under READ COMMITTED the select waits
+for an in-flight review and then returns its committed grade. `FOR NO KEY UPDATE`, not `FOR UPDATE`: `FOR UPDATE` would also conflict with the
 `KEY SHARE` lock that every FK-child insert of the decision takes (tags, reasons, thoughts, and the
-snapshot's own rows), so those inserts would queue behind credit. After the decision
+snapshot's own rows), so those inserts would queue behind credit. (While a review holding
+`FOR UPDATE` runs, FK-child inserts, the snapshot insert included, wait for that review; that is
+today's behaviour and F104 adds nothing to it.) After the decision
 row, the handler locks the decision's snapshot rows with
 `SELECT ... ORDER BY memory_type, memory_id FOR UPDATE`, as before. Lock order is therefore always
 decision row, then its snapshot rows in `(memory_type, memory_id)` order, and no F104 transaction
@@ -280,6 +289,14 @@ grade at the last write, not on which writer ran first:
 
 Each (decision, memory) pair holds one row (the PK), so one decision contributes one credit per
 memory to the read-time sums however many events or inserts arrive.
+
+**Limit: convergence assumes every event is handled.** The handler is fire-and-forget and logs and
+swallows its errors, as the distiller does, and the emit is a separate step after the review's
+commit (`brain.py:1124-1127`). A crash between commit and emit, or a failed handler run, leaves the
+rows on an older grade until the decision's next review. v1 does not add a repair sweep. Instead
+`scripts/diag/outcome_credit_report.py` counts **mismatched decisions**: snapshot rows whose
+credit isn't what the decision row's current grade gives. A non-zero count is the signal to add a
+reconcile pass (which would reuse the handler's locked step per decision).
 
 No FK from the snapshot's `memory_id` to the memory tables. It is polymorphic, like `graph_edges`.
 Retired or superseded memories keep their rows, and they cost nothing.
@@ -353,7 +370,8 @@ replacing F037's proxy with graded credit.
 - Migration 093, `post_turn` snapshot (delivered ids, credit at insert), the `record_decision` id
   threading, `OutcomeCreditHandler` (row grade, decision-row lock), re-grade overwrite.
 - `scripts/diag/outcome_credit_report.py`: top and bottom memories by `p_mem − p_base` with
-  `n_eff ≥ 2`, the snapshot row count, and eligible reviews credited per week.
+  `n_eff ≥ 2`, the snapshot row count, eligible reviews credited per week, and the count of
+  mismatched decisions (credit that disagrees with the decision row, section 2).
 - Tests:
   - snapshot written for the deliberation decision and for tool-recorded decisions in the turn,
     with `decision_session_id_enabled` off (the default), on both `run_turn` and `stream_chat`
