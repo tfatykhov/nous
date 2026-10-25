@@ -201,6 +201,7 @@ _COVERT_HOW = (
 _HARNESS_FOOTER = re.compile(r"\(internal id - do not mention to user\.")
 
 _OVERRIDE_WORDS = ("override", "ignore", "disregard", "forget", "instruction", "note", "message")
+_MARKER_WORDS = ("instruction", "directive", "prompt", "message", "note")
 RULES: tuple[Rule, ...] = (
     Rule(
         "indirect-injection-in-tool-result",
@@ -213,14 +214,14 @@ RULES: tuple[Rule, ...] = (
         "indirect-injection-new-instructions-marker",
         hard=True,
         weight=HARD_WEIGHT,
-        matches=_all_of((_NEW_INSTRUCTIONS, ("instruction", "directive", "prompt", "message", "note"))),
+        matches=_all_of((_NEW_INSTRUCTIONS, _MARKER_WORDS)),
     ),
     Rule("exfiltrate-context-via-markdown-image", hard=True, weight=HARD_WEIGHT, matches=_exfil_image),
     Rule(
         "indirect-injection-new-instructions-unaddressed",
         hard=False,
         weight=1,
-        matches=_all_of((_NEW_INSTRUCTIONS_UNADDRESSED, ("instruction", "directive", "prompt", "message", "note"))),
+        matches=_all_of((_NEW_INSTRUCTIONS_UNADDRESSED, _MARKER_WORDS)),
     ),
     Rule(
         "covert-action-injection",
