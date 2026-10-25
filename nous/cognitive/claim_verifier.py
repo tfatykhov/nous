@@ -1453,8 +1453,8 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
 # date", "to the end", "the next morning"; so "to May" is read as a time too), an idiom ("due to", "up to", "according
 # to", "converted to"); not a content word ("with a summary", "as a .docx"); after "to you and", not a verb or a
 # function word in lowercase ("to you and archived the draft", "to you and on time"); but "a link to the summary and
-# Bob" names Bob. A word on these lists counts only when it heads its phrase (_HEADS): "to the next reviewer", "to the
-# end user", "to the user group", "to French colleagues" name someone.
+# Bob" names Bob. A word on these lists counts only when it heads its phrase (_HEADS; a self word, _SELF_ENDS):
+# "to the next reviewer", "to the end user", "to the user group", "to French colleagues" name someone.
 # A word on the lists below is what a phrase names only when it heads the phrase: a punctuation mark, the end or a
 # function word follows it, not a word it modifies ("to the end" and "to the end of the day", not "to the end
 # user"; "to French", not "to French colleagues"; "to the user", not "to the user group"; not "today's").
@@ -1483,7 +1483,15 @@ _A_TIME = (r"(?:(?:(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|j
 # bot") or as the owner's chat, DMs or Telegram ("the user's DMs"); "the user group", "the Telegram channel",
 # "the user's team" and "the bot's owner" are someone else.
 _SELF = r"(?:owner|user|chat|dms?|bot|telegram)"
-_A_SELF = rf"(?:{_SELF}(?:\s+{_SELF})*(?:['’]s\s+(?:chat|dms?|telegram)(?:\s+{_SELF})*)?\b{_HEADS})"
+# What may follow a self word for it to stay the owner's chat: what may follow any listed word (_HEADS), a
+# bracket, a dash, or an adverb or conjunction ("to the owner earlier", "... (see above)", "... - done", "via
+# Telegram successfully"). Anything else names someone else: a noun it modifies ("the user group"), a
+# possessive ("the owner's manager"), a name ("the user Bob", "the user bob"). The list is closed, so an
+# unlisted word errs to "Could not confirm" (main read every "to the user ..." so).
+_SELF_ENDS = (rf"(?:{_HEADS}|(?=\s*\(|\s+[-–—]\s|\s+(?:earlier|just|twice|once|because|successfully|privately"
+              r"|personally|separately|manually|automatically|promptly|quickly|securely|safely|both|alone|together"
+              r"|while|when|per|yet|anyway|as\s+well)\b))")
+_A_SELF = rf"(?:{_SELF}(?:\s+{_SELF})*(?:['’]s\s+(?:chat|dms?|telegram)(?:\s+{_SELF})*)?\b{_SELF_ENDS})"
 _NOT_A_RECIPIENT = (
     # you, me, here, or the owner's chat as a noun
     rf"(?!(?:you|yourself|me|myself|here)\b|(?:(?:the|your|my|our|this)\s+)?{_A_SELF})"
@@ -1502,7 +1510,7 @@ _NOT_A_RECIPIENT = (
 )
 # After "to you and": not a verb or a function word ("to you and archived it", "to you and on time")
 _NOT_A_VERB = (r"(?!(?-i:then|also|now|later|again|so|on|in|at|by|with|as|for|from|via|over|through|i|it|we|will"
-               r"|would|can|could|should|have|has|had|is|was|am|[a-z]+ed)\b)")
+               r"|would|can|could|should|have|has|had|is|was|am|only|nobody|no\s+one|none|[a-z]+ed)\b)")
 # What "a link to" points at rather than sends to: a sent thing, it, a URL, a path or a file name (a known
 # extension: "report.pdf", not "bob.smith"); never an address ("bob.smith@example.com").
 _A_SENT_THING = (r"(?![\w.+-]+@)(?:(?:the|a|an|your|my|our|this|that|these|those)\s+(?:[\w.'’-]+\s+){0,3}?"
@@ -1516,7 +1524,7 @@ _A_SENT_THING = (r"(?![\w.+-]+@)(?:(?:the|a|an|your|my|our|this|that|these|those
 # After via/through/using/on/over: Telegram, the bot, the chat, a DM, here, a link, the sending tool by name
 # (send_file, or a tool name with "telegram" in it: "send_telegram") or a time word.
 _NOT_A_TRANSPORT = (r"(?!(?:the|a|an|your|my|our|this)\b|(?:telegram|bot|chat|dms?)(?:\s+(?:telegram|bot|chat|dms?))*\b"
-                    rf"{_HEADS}|(?:here|(?:shared\s+)?links?|time|schedule|request|demand|completion|arrival|track"
+                    rf"{_SELF_ENDS}|(?:here|(?:shared\s+)?links?|time|schedule|request|demand|completion|arrival|track"
                     rf"|hold|weekend|morning|afternoon|evening|night)\b{_HEADS}|send_file\b|\w*(?:_telegram|telegram_))")
 _ELSEWHERE = re.compile(
     # 1. mail
@@ -1550,9 +1558,10 @@ _ELSEWHERE = re.compile(
     rf"|\blinks?\s+to\s+[^.,;:!?\n]{{0,60}}?\s(?:and|&)\s+{_NOT_A_VERB}{_NOT_A_RECIPIENT}"
     # "to you and Bob", "to the owner and the team" (not "to you and archived it", "to you and on time")
     r"|\bto\s+(?:(?:the|your|my)\s+)?(?:you|yourself|me|myself|owner|user|chat|dms?|bot|telegram)\s+(?:and|&)\s+"
-    rf"{_NOT_A_VERB}{_NOT_A_RECIPIENT}"
+    rf"(?:only\s+)?{_NOT_A_VERB}{_NOT_A_RECIPIENT}"
     rf"|\bshared\s+(?:\S+\s+){{0,4}}?with\s+{_NOT_A_RECIPIENT}"
-    rf"|\bb?cc(?:['’]?e?d)?\s+(?!(?:you|yourself|me|myself)\b|(?:(?:the|your|my)\s+)?(?:owner|user|chat)\b{_HEADS})"
+    rf"|\bb?cc(?:['’]?e?d)?\s+(?!(?:you|yourself|me|myself)\b"
+    rf"|(?:(?:the|your|my)\s+)?(?:owner|user|chat)\b{_SELF_ENDS})"
     r"[\w@#]"
     # "copied in the team", "copied Bob", not "copied the file"
     rf"|\bcopied\s+in\s+{_NOT_A_RECIPIENT}"

@@ -1597,6 +1597,50 @@ def test_a_tool_is_exempt_by_name_and_styling_or_a_chat_id_hides_no_destination(
     assert [c.evidence for c in result.claims] == [level]
 
 
+@pytest.mark.parametrize(
+    ("text", "level"),
+    [
+        # a self word followed by an adverb, a bracket or a dash is still the owner's chat ...
+        ("I sent the report to the owner earlier.", E),
+        ("I sent the report to the owner just now.", E),
+        ("I sent the report to the owner twice.", E),
+        ("I sent the report to the owner because the job finished.", E),
+        ("I sent the report to the owner (see above).", E),
+        ("I sent the report to the owner - done.", E),
+        ("I sent the report to the user successfully.", E),
+        ("I sent the report via Telegram successfully.", E),
+        ("I sent the report via the bot earlier.", E),
+        ("I sent the report to you and only you.", E),
+        ("I sent the report to you and nobody else.", E),
+        ("I sent the report to you and no one else.", E),
+        ("I sent the report to you, and cc'd the owner earlier.", E),
+        # ... unless a noun, a possessive or a name follows that makes it someone else
+        ("I sent the report to the owner group.", P),
+        ("I sent the report to the owner team.", P),
+        ("I sent the report to the user list.", P),
+        ("I sent the report to the user id 12345.", P),
+        ("I sent the report to the user base.", P),
+        ("I sent the report to the Telegram admins.", P),
+        ("I sent the report to the bot moderators.", P),
+        ("I sent the report to the owner's manager.", P),
+        ("I sent the report to the owner’s assistant.", P),
+        ("I sent the report to the Telegram bot team.", P),
+        ("I sent the report via the Telegram channel.", P),
+        ("I sent the report via the bot admins.", P),
+        ("I sent the report and cc'd the user group.", P),
+        ("I sent the report to you and the owner team.", P),
+        ("I sent the report to the user bob.", P),
+        ("I sent the report to the user Bob.", P),
+        ("I sent the report to the owner @bob.", P),
+        ("I sent the report via Telegram bob.", P),
+        ("I sent the report to you and only Bob.", P),
+    ],
+)
+def test_a_self_word_followed_by_an_adverb_is_still_the_owners_chat(text, level):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [level]
+
+
 def test_a_verifier_given_no_runner_takes_no_bash_call_for_a_runner_call():
     evidence = [Evidence("bash", {"command": f"bash {RUNNER} cancel {JOB}"}, exit_code=0)]
     assert not ClaimVerifier().verify_report(f"I cancelled job {JOB}.", evidence).verified
