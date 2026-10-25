@@ -275,6 +275,12 @@ use_w(s)    = 0.4 + 0.6 × s              # never 0: an unused memory still dilu
             = 0.7 when strength is NULL
 ```
 
+This `w` is the **training** weight: it is what a credited row stores, and what the read-time
+stats (section 3) and the gate's fit weeks use. The Phase 2 gate scores a **held-out** decision with
+`rank_w(rank)` alone (see the gate). `strength` is overlap with that turn's final response
+(`nous/cognitive/layer.py:1319-1329`), and the boost runs before the response exists, so using it
+would let a successful answer that cites good memories score higher just because it cites them.
+
 **Update:** the handler writes only the decision's own snapshot rows, from the row's grade:
 `credited_reward = r`, `credited_weight = w`, `credited_at = COALESCE(credited_at, now())`. There is
 **no stored per-memory total**. An earlier draft upserted running `alpha`/`beta` sums into a
@@ -471,6 +477,10 @@ Phase 3 analysis with its own decision rule, written down before it runs.
   - profile rows don't feed the read: the section 3 stats query, which the report also uses for its
     `context` group, returns no row for a fact whose only credited rows are `profile` rows
   - an empty delivered set writes nothing
+  - gate score ignores held-out response overlap (a test of the Phase 2 gate's score function,
+    written with that offline check, before it runs): two held-out decisions with the same recalled
+    set (same ids, same ranks) and different response overlap, so different `strength`, get the
+    same gate score
 
 **Phase 2 gate: turn on the boost.** All three must hold:
 
@@ -481,8 +491,10 @@ Phase 3 analysis with its own decision rule, written down before it runs.
      `decision` and `episode`. Procedure rows are out (Phase 2 doesn't boost them, see Procedures),
      and so are `profile` and `session_profile` rows (never boosted, section 1). A decision with no
      such row is not scored and doesn't count toward the pool.
-   - **Score.** A decision's score is the `w`-weighted mean of `p_mem − p_base` over its scored
-     rows, with `p_mem` from the same `source = 'context'` rows as the boost read. For the fold
+   - **Score.** A decision's score is the `rank_w(rank)`-weighted mean of `p_mem − p_base` over its
+     scored rows, with `p_mem` from the same `source = 'context'` rows as the boost read. The
+     held-out rows are weighted by rank only, not by `w` (section 2 says why). The fit rows keep
+     their stored `credited_weight = w`, strength included, since for them it is history. For the fold
      that scores week k+1, `p_mem` and `p_base` use only rows with `credited_at` before that week
      starts, decayed from the week's start (not from `now()`). Re-grades overwrite,
      so a fit row carries its current grade, not the grade it had at the fold's start. That is
