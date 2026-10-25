@@ -1436,12 +1436,13 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
 #   2. a named channel other than Telegram after via/on/over/through/by/in/into/using: Slack, WhatsApp,
 #      Signal, Discord, SMS, iMessage, Teams, Messenger, WeChat, Gmail, Outlook, LinkedIn, Twitter, and "text"
 #      after by/via/over (never "Gmail-style"); after via/through/using, any other word too ("via SMTP", "via
-#      the API") but Telegram, the bot, the chat, a DM, "here", the sending tool by name ("via send_file", a
-#      tool name with "telegram" in it: "send_telegram"; not any word with "_": "via _Slack_", "via
-#      send_slack"), a link and a time; after on/over, a place: a capitalised word, a handle or "the
-#      wiki/website/channel/..."
+#      the API") but Telegram, the bot, the chat, a DM, "here", the sending tool by name ("via send_file", "via
+#      send_telegram"; not any other word with "_": "via _Slack_", "via send_slack", "via telegram_group"), a
+#      link and a time; after on/over, a place: a capitalised word, a handle or "the wiki/website/channel/..."
 #      (never a topic or a time: "a note on the outage", "on it", "on Monday", "on Oct 24", "over lunch");
-#      post, a courier, a hand or a fax after "by"; a chat id ("chat_id -100123", "chat -1001234") is another chat;
+#      post, a courier, a hand or a fax after "by", and anyone right after "<the message> by" or "sent by"
+#      but you, a time, the owner's chat, a link, a gerund or a manner ("the report by Bob", not "by Friday",
+#      "by DM", "by attaching it", "by request"); a chat id ("chat_id -100123", "chat -1001234") is another chat;
 #   3. a recipient after "to", "to you and", "shared ... with", "cc", "bcc" or "copied" (in): anything that
 #      is not on the lists below -- a name ("Bob", "Tim": the owner's name is not known here; "Mark", "O'Brien",
 #      "Иван"), an acronym ("HR", "S3"), a number ("3 people"), a handle "@bob", a channel "#general" (also
@@ -1492,7 +1493,7 @@ _SELF = r"(?:owner|user|chat|dms?|bot|telegram)"
 # unlisted word errs to "Could not confirm" (main read every "to the user ..." so).
 _SELF_ENDS = (rf"(?:{_HEADS}|(?=\s*\(|\s+[-–—]\s|\s+(?:earlier|just|twice|once|because|successfully|privately"
               r"|personally|separately|manually|automatically|promptly|quickly|securely|safely|both|alone|together"
-              r"|while|when|per|yet|anyway|as\s+well)\b))")
+              r"|while|when|per|yet|anyway|as\s+well|right|who|whom|which|asap)\b))")
 _A_SELF = rf"(?:{_SELF}(?:\s+{_SELF})*(?:['’]s\s+(?:chat|dms?|telegram)(?:\s+{_SELF})*)?\b{_SELF_ENDS})"
 _NOT_A_RECIPIENT = (
     # you, me, here, or the owner's chat as a noun
@@ -1512,13 +1513,13 @@ _NOT_A_RECIPIENT = (
 )
 # After "to you and": not a verb or a function word ("to you and archived it", "to you and on time"); the verbs
 # are listed, since a name can end in -ed too ("to you and ahmed", "and fred")
-_NOT_A_VERB = (r"(?!(?-i:then|also|now|later|again|so|on|in|at|by|with|as|for|from|via|over|through|i|it|we|will"
-               r"|would|can|could|should|have|has|had|is|was|am|only|nobody|no\s+one|none|told|made|put|set|left"
-               r"|got|wrote|(?:archiv|forward|copi|sav|mov|notifi|ping|add|attach|upload|post|clos|updat|delet"
-               r"|remov|fil|creat|merg|push|committ|schedul|shar|logg|not|confirm|check|verifi|open|renam|pinn"
-               r"|deploy|start|stopp|finish|complet|publish|link|flagg|tagg|mark|repli|ask|clean|clear|sync"
-               r"|export|convert|generat|queu|revert|restor|back|includ|summari[sz]|review|sign|print|download"
-               r"|edit|fix|test|tidi|resolv|assign|approv|cancell?|declin|reject|accept|answer|respond|invit)ed)\b)")
+_NOT_A_VERB = (r"(?!(?-i:then|also|now|later|again|so|on|in|at|by|with|as|for|from|via|over|through|i|it|we|will|would"
+               r"|can|could|should|have|has|had|is|was|am|only|nobody|no\s+one|none|done|sent|told|made|put|set|left"
+               r"|got|wrote|b?cc(?:['’]?e?d)?|(?:archiv|forward|copi|sav|mov|notifi|ping|add|attach|upload|post|clos"
+               r"|updat|delet|remov|fil|creat|merg|push|committ|schedul|shar|logg|not|confirm|check|verifi|open|renam"
+               r"|pinn|deploy|start|stopp|finish|complet|publish|link|flagg|tagg|mark|repli|ask|clean|clear|sync"
+               r"|export|convert|generat|queu|revert|restor|back|includ|summari[sz]|review|sign|print|download|edit"
+               r"|fix|test|tidi|resolv|assign|approv|cancell?|declin|reject|accept|answer|respond|invit)ed)\b)")
 # What "a link to" points at rather than sends to: a sent thing, it, a URL, a path or a file name with a known
 # extension ("report.pdf", not "bob.smith" or "bob.smith@example.com").
 _A_SENT_THING = (r"(?:(?:the|a|an|your|my|our|this|that|these|those)\s+(?:[\w.'’-]+\s+){0,3}?"
@@ -1530,10 +1531,10 @@ _A_SENT_THING = (r"(?:(?:the|a|an|your|my|our|this|that|these|those)\s+(?:[\w.'�
                  r"|[\w-]+\.(?:pdf|md|txt|csv|tsv|json|ya?ml|xml|html?|docx?|xlsx?|pptx?|odt|ods|rtf|png|jpe?g|gif"
                  r"|svg|webp|zip|tar|gz|tgz|py|ipynb|js|ts|sh|sql|log|epub|mp4|mov|mp3|wav)\b)")
 # After via/through/using/on/over: Telegram, the bot, the chat, a DM, here, a link, the sending tool by name
-# (send_file, or a tool name with "telegram" in it: "send_telegram") or a time word.
+# (send_file, send_telegram) or a time word.
 _NOT_A_TRANSPORT = (r"(?!(?:the|a|an|your|my|our|this)\b|(?:telegram|bot|chat|dms?)(?:\s+(?:telegram|bot|chat|dms?))*\b"
                     rf"{_SELF_ENDS}|(?:here|(?:shared\s+)?links?|time|schedule|request|demand|completion|arrival|track"
-                    rf"|hold|weekend|morning|afternoon|evening|night)\b{_HEADS}|send_file\b|\w*(?:_telegram|telegram_))")
+                    rf"|hold|weekend|morning|afternoon|evening|night)\b{_HEADS}|send_(?:file|telegram)\b)")
 _ELSEWHERE = re.compile(
     # 1. mail
     r"\b(?:e-?)?mail(?:ed|ing)\b"
@@ -1546,10 +1547,16 @@ _ELSEWHERE = re.compile(
     r"|sms|imessage|teams|messenger|wechat|gmail|outlook|linkedin|twitter)\b(?!-)"
     r"|\b(?:via|over|by)\s+(?:a\s+)?text\b(?!-)"
     r"|\bby\s+(?:post|courier|hand|fax)\b"
-    r"|\bchat(?:[ _-]?id)?\s*[=:]?\s*-?\d{5,}"  # another chat, by its id
-    # ... anyone or anything after "by" but me, a time, the owner's chat or a link ("I sent the report by Bob")
-    rf"|\bby\s+(?!{_A_TIME}|\d|(?:me|myself|noon|midnight|tonight|tomorrow|today|eod|eob|cob|then|now|lunch"
-    r"|next\s+week|end\s+of|this\s+(?:morning|afternoon|evening|week)|(?:a\s+)?(?:shared\s+)?links?)\b"
+    r"|\bchat[ _-]?id\b\s*(?:[=:]\s*)?-?\d|\bchat\s+-\d{5,}"  # another chat, by its id (not "chat 12345 logs")
+    # ... anyone or anything right after "<the message> by" or "sent by" ("I sent the report by Bob", "Message
+    # sent by @bob") but you, a time, the owner's chat, a link, a gerund or a manner ("by attaching it", "by
+    # request", "by direct message"); not "sorted by date", "requested by you"
+    r"|(?:\b(?:e-?mails?|messages?|reports?|notes?|reminders?|summary|summaries|invites?|notifications?|alerts?"
+    r"|digests?|heads-up)|\bsent|\bforwarded)\s+by\s+"
+    rf"(?!{_A_TIME}|\d|(?:you|yourself|me|myself|noon|midnight|midday|tonight|tomorrow|today|eod|eob|cob|then|now"
+    r"|lunch|next\s+week|end\s+of|this\s+(?:morning|afternoon|evening|week)|(?:a\s+)?(?:shared\s+)?links?|request"
+    r"|default|itself|mistake|accident|schedule|way\s+of|(?:direct|private)\s+messages?"
+    r"|(?:the\s+)?(?:deadline|due\s+date|scheduled\s+time)|(?-i:[a-z]+ing))\b"
     rf"|(?:(?:the|your|my)\s+)?{_A_SELF})[\w@#]"
     # ... or any other transport than Telegram, a tool, a link or a time after via/through/using, and a place
     # after on/over (not a topic: "a note on the outage")
@@ -1567,9 +1574,16 @@ _ELSEWHERE = re.compile(
     rf"\bto\s+{_NOT_A_RECIPIENT}"
     # "a link to the team" is sent to the team; "a link to the report" points at the report
     rf"|\blinks?\s+to\s+(?!{_A_SENT_THING}){_NOT_A_RECIPIENT}"
-    rf"|\blinks?\s+to\s+[^.,;:!?\n]{{0,60}}?\s(?:and|&)\s+{_NOT_A_VERB}{_NOT_A_RECIPIENT}"
-    # "to you and Bob", "to the owner and the team" (not "to you and archived it", "to you and on time")
-    r"|\bto\s+(?:(?:the|your|my)\s+)?(?:you|yourself|me|myself|owner|user|chat|dms?|bot|telegram)\s+(?:and|&)\s+"
+    rf"|\blinks?\s+to\s+(?:[^.,;:!?\n]|\.(?=\w)){{0,60}}?\s(?:(?:and|&)\s+|for\s+(?=(?-i:(?![a-zß-ÿ\d_])\w[a-zß-ÿ])"
+    rf"|[@#]\w)){_NOT_A_VERB}{_NOT_A_RECIPIENT}"
+    # "to you and Bob", "to the owner and the team", "via Telegram and Bob", "to the owner earlier and Bob", "to
+    # the owner as well as Bob", "to the owner (Bob)", "to the owner - Bob" (not "to you and archived it", "to you
+    # and on time", "to the owner (see above)", "to the owner - done")
+    r"|\b(?:to|via|through|over|on|using)\s+(?:(?:the|your|my)\s+)?(?:you|yourself|me|myself|owner|user|chat|dms?"
+    r"|bot|telegram|send_file|send_telegram)\b(?:\s+(?:earlier|just|now|already|today|directly|first|again|too|also"
+    r"|both|twice|once|successfully|personally|privately|separately))*"
+    r"(?:,?\s+(?:and|&|as\s+well\s+as)\s+|\s*\(\s*|\s+[-–—]\s+"
+    r"|\s+for\s+(?=(?-i:(?![a-zß-ÿ\d_])\w[a-zß-ÿ])|[@#]\w))"
     rf"(?:only\s+)?{_NOT_A_VERB}{_NOT_A_RECIPIENT}"
     # "to the user at Bob" (not "to the owner at 7am", "at once"), and an address anywhere in the clause
     r"|\bto\s+(?:(?:the|your|my)\s+)?(?:you|yourself|me|myself|owner|user|chat|dms?|bot|telegram)\s+at\s+"
