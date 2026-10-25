@@ -1947,6 +1947,44 @@ def test_a_text_message_is_a_channel(text, level):
 
 
 @pytest.mark.parametrize(
+    ("text", "level"),
+    [
+        # a time or a manner after "<the message> by" or "sent by" is no one ...
+        ("I sent the report by the agreed time.", E),
+        ("I sent the report by lunchtime.", E),
+        ("I sent the report by Friday EOD.", E),
+        ("I sent the report by Monday 5pm.", E),
+        ("I sent the report by Monday noon.", E),
+        ("I sent the report by close of business.", E),
+        ("I sent the report by EOW.", E),
+        ("I sent the report by EOM.", E),
+        ("I sent the report by COB.", E),
+        ("I sent the report by T+1.", E),
+        ("I sent the report by Q3.", E),
+        ("I sent the report by Christmas.", E),
+        ("I sent the report by the usual deadline.", E),
+        ("I sent the report by our bot.", E),
+        ("I sent the report by send_file.", E),
+        ("I sent the report by file.", E),
+        # ... but a person, a handle or another transport is
+        ("I sent the report by Bob.", P),
+        ("I sent the report by bob.", P),
+        ("I sent the report by @bob.", P),
+        ("I sent the report by sendmail.", P),
+        ("I sent the report by smtplib.", P),
+        ("I sent the report by curl.", P),
+        ("I sent the report by webhook.", P),
+        ("I sent the report by courier.", P),
+        ("I sent the report by the API.", P),
+        ("I sent the report by the team.", P),
+    ],
+)
+def test_a_time_or_a_manner_after_by_is_no_one(text, level):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [level]
+
+
+@pytest.mark.parametrize(
     "token", ["a" * 20000, "a_" * 10000, "9" * 20000, "chat_id" * 3000], ids=["letters", "a_", "digits", "chat_id"]
 )
 def test_a_long_word_in_a_send_sentence_is_scanned_in_linear_time(token):

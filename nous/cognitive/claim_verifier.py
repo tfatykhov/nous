@@ -1453,7 +1453,8 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
 #      (never a topic or a time: "a note on the outage", "on it", "on Monday", "on Oct 24", "over lunch");
 #      post, a courier, a hand or a fax after "by", and anyone right after "<the message> by" or "sent by"
 #      but you, a time, the owner's chat, a link, a gerund or a manner ("the report by Bob", not "by Friday",
-#      "by DM", "by attaching it", "by request"); a chat id ("chat_id -100123", "chat -1001234") is another chat;
+#      "by DM", "by attaching it", "by request", "by Friday EOD", "by our bot", "by send_file"); a chat id
+#      ("chat_id -100123", "chat -1001234") is another chat;
 #   3. a recipient after "to", "to you and", "shared ... with", "cc", "bcc" or "copied" (in): anything that
 #      is not on the lists below -- a name ("Bob", "Tim": the owner's name is not known here; "Mark", "O'Brien",
 #      "Иван"), an acronym ("HR", "S3"), a number ("3 people"), a handle "@bob", a channel "#general" (also
@@ -1566,15 +1567,22 @@ _ELSEWHERE = re.compile(
     r"|\bby\s+(?:post|courier|hand|fax)\b"
     r"|\bchat[ _-]?id\b\s*(?:[=:]\s*)?-?\d|\bchat\s+-\d{5,}"  # another chat, by its id (not "chat 12345 logs")
     # ... anyone or anything right after "<the message> by" or "sent by" ("I sent the report by Bob", "Message
-    # sent by @bob") but you, a time, the owner's chat, a link, a gerund or a manner ("by attaching it", "by
-    # request", "by direct message"); not "sorted by date", "requested by you"
+    # sent by @bob", "by sendmail", "by the team") but you, a time, the owner's chat, a link, a gerund or a
+    # manner ("by attaching it", "by request", "by direct message", "by Friday EOD", "by our bot"); not "sorted
+    # by date", "requested by you". A closed list of what is no one: an unlisted word errs to "Could not confirm"
     r"|(?:\b(?:e-?mails?|messages?|reports?|notes?|reminders?|summary|summaries|invites?|notifications?|alerts?"
     r"|digests?|heads-up)|\bsent|\bforwarded)\s+by\s+"
     rf"(?!{_A_TIME}|\d|(?:you|yourself|me|myself|noon|midnight|midday|tonight|tomorrow|today|eod|eob|cob|then|now"
     r"|lunch|next\s+week|end\s+of|this\s+(?:morning|afternoon|evening|week)|(?:a\s+)?(?:shared\s+)?links?|request"
     r"|default|itself|mistake|accident|schedule|way\s+of|(?:direct|private)\s+messages?"
-    r"|(?:the\s+)?(?:deadline|due\s+date|scheduled\s+time)|(?-i:[a-z]+ing))\b"
-    rf"|(?:(?:the|your|my)\s+)?{_A_SELF})[\w@#]"
+    r"|(?:the\s+)?(?:deadline|due\s+date|scheduled\s+time)|(?-i:[a-z]+ing)"
+    # ... nor a day ("Friday EOD", "Monday 5pm"), a business or holiday time, "<the agreed> time", the sending
+    # tool or a file
+    r"|monday|tuesday|wednesday|thursday|friday|saturday|sunday|eo[dwmqy]|t\+\d|q[1-4]|christmas|xmas|easter"
+    r"|thanksgiving|new\s+year|[a-z]+time|close\s+of\s+(?:business|play)"
+    r"|(?:the|an?|our|your|my)\s+(?:[\w-]+\s+){0,2}?(?:time|deadline|date|cut-?off|hour|day|week|month|meeting"
+    r"|call|stand-?up)s?|send_(?:file|telegram)|files?)\b"
+    rf"|(?:(?:the|your|my|our)\s+)?{_A_SELF})[\w@#]"
     # ... or any other transport than Telegram, a tool, a link or a time after via/through/using, and a place
     # after on/over (not a topic: "a note on the outage")
     rf"|\b(?:via|through|using)\s+(?!{_A_TIME})(?:(?:the|a|an|your|my|our|this)\s+)?{_NOT_A_TRANSPORT}"
