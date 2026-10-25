@@ -2878,8 +2878,10 @@ def test_where_main_found_a_destination_only_a_new_self_head_may_be_exact(text):
         ("I sent the report to the user at Bobtime.", P),
         ("I sent the report to the user at bobtime.", P),
         ("I sent the report via this chat at Worktime.", P),
-        *[(f"I sent the report to the user at {t}.", E)
-          for t in ("lunchtime", "bedtime", "dinnertime", "teatime", "daytime", "nighttime", "suppertime")],
+        *[
+            (f"I sent the report to the user at {t}.", E)
+            for t in ("lunchtime", "bedtime", "dinnertime", "teatime", "daytime", "nighttime", "suppertime")
+        ],
     ],
 )
 def test_an_owner_only_tail_holds_no_name(text, level):

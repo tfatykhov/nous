@@ -1557,14 +1557,16 @@ _NOT_A_VERB = (r"(?!(?-i:then|also|now|later|again|so|on|in|at|by|with|as|for|fr
                r"|fix|test|tidi|resolv|assign|approv|cancell?|declin|reject|accept|answer|respond|invit)ed)\b)")
 # What "a link to" points at rather than sends to: a sent thing, it, a URL, a path or a file name with a known
 # extension ("report.pdf", not "bob.smith" or "bob.smith@example.com").
+# A known file extension ("report.pdf")
+_FILE_EXT = (r"(?:pdf|md|txt|csv|tsv|json|ya?ml|xml|html?|docx?|xlsx?|pptx?|odt|ods|rtf|png|jpe?g|gif|svg|webp"
+             r"|zip|tar|gz|tgz|py|ipynb|js|ts|sh|sql|log|epub|mp4|mov|mp3|wav)\b")
 _A_SENT_THING = (r"(?:(?:the|a|an|your|my|our|this|that|these|those)\s+(?:[\w.'’-]+\s+){0,3}?"
                  r"(?:report|summar(?:y|ies)|file|doc|document|page|dashboard|chart|sheet|spreadsheet|folder|draft"
                  r"|pr|pull\s+request|issue|repo|repository|article|post|site|website|video|recording|slide|deck|note"
                  r"|result|data|table|ticket|thread|commit|branch|diff|log|image|photo|screenshot|form|invite"
                  r"|presentation|release|spec|plan|proposal|agenda|minutes|transcript|archive|attachment|copy|version"
                  rf"|section)(?:e?s)?\b{_HEADS}|(?-i:it|this|that)\b|https?\b|www\.|[/~]"
-                 r"|[\w-]+\.(?:pdf|md|txt|csv|tsv|json|ya?ml|xml|html?|docx?|xlsx?|pptx?|odt|ods|rtf|png|jpe?g|gif"
-                 r"|svg|webp|zip|tar|gz|tgz|py|ipynb|js|ts|sh|sql|log|epub|mp4|mov|mp3|wav)\b)")
+                 rf"|[\w-]+\.{_FILE_EXT})")
 # Where such a tail must end for it to name no one: the bracket closes or the phrase or line ends ("to the owner
 # (twice).", not "to the owner (twice and Bob)")
 _TAIL_ENDS = r"(?=\s*(?:[).,;:!?]|$)|[ \t]*\n)"
@@ -1791,16 +1793,15 @@ _SENT_NOUN = (r"(?:summary|summaries|copy|copies|(?:report|message|e-?mail|note|
               r"|attachment|version|link)s?|data)")
 _SENT_WORD = rf"(?:{_PLAIN_WORD}|ci|{_SENT_NOUN})"
 _SENT_PHRASE = rf"(?:{_SENT_WORD}\s++(?={_SENT_WORD}\b))*+{_SENT_NOUN}\b"
-_SENT_FILE = (r"[\w-]++\.(?:pdf|md|txt|csv|tsv|json|ya?ml|xml|html?|docx?|xlsx?|pptx?|odt|ods|rtf|png|jpe?g|gif|svg"
-              r"|webp|zip|tar|gz|tgz|py|ipynb|js|ts|sh|sql|log|epub|mp4|mov|mp3|wav)\b")
+_SENT_IT = rf"(?:(?:it|them)\b|[\w-]++\.{_FILE_EXT})"
 _SENT_DET = r"(?:the|a|an|my|our|your|this|today['’]s)\s++"
 _BEFORE_HEAD = re.compile(
-    r"\s*+(?:(?:done:|update:|as\s+requested,)\s*+)?+(?:(?:[-*•]|\d+[.)])\s++)?+"
-    r"(?>(?:(?:i|we)(?:['’]ve)?\s++)?+(?:(?:have|had|just|also|already|earlier)\s++)*+"
+    r"\s*+(?:(?:done:|update:|as\s++requested,)\s*+)?+(?:(?:[-*•]|\d++[.)])\s++)?+"
+    r"(?>(?:(?:i|we)(?:['’]ve)?+\s++)?+(?:(?:have|had|just|also|already|earlier)\s++)*+"
     r"(?:sent|forwarded|shared|delivered|posted|uploaded|attached)\s++"
-    rf"(?:(?:it|them)\b|{_SENT_FILE}|{_SENT_DET}{_SENT_PHRASE})"
+    rf"(?:{_SENT_IT}|{_SENT_DET}{_SENT_PHRASE})"
     rf"(?:\s++(?:with|about|from|for)\s++{_SENT_DET}{_SENT_PHRASE})?+"
-    rf"|(?:(?:it|them)\b|{_SENT_FILE}|(?:{_SENT_DET})?+{_SENT_PHRASE})\s++(?:(?:was|were|has\s+been|have\s+been)\s++)?+"
+    rf"|(?:{_SENT_IT}|(?:{_SENT_DET})?+{_SENT_PHRASE})\s++(?:(?:was|were|has\s++been|have\s++been)\s++)?+"
     r"(?:(?:just|also|already|earlier)\s++)*+(?:sent|forwarded|delivered))"
     rf"(?:\s++{_SELF_ADVERB})*+\s*+",
     re.IGNORECASE)
