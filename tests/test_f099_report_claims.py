@@ -1723,6 +1723,23 @@ def test_a_channel_alone_after_by_is_still_the_agents_claim(text, kind):
     assert _kinds(text) == [kind]
 
 
+@pytest.mark.parametrize(
+    ("text", "level"),
+    [
+        # mail as the topic of the report is no destination; as its channel it is
+        ("I sent the report about email and SMS usage.", E),
+        ("I sent the summary of email or chat volume.", E),
+        ("I sent the report on mail and parcel volumes.", E),
+        ("I sent the report by email and SMS.", P),
+        ("I sent the report via email or Slack.", P),
+        ("I sent the report through the mail and the chat.", P),
+    ],
+)
+def test_mail_as_the_topic_is_no_destination(text, level):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [level]
+
+
 def test_a_verifier_given_no_runner_takes_no_bash_call_for_a_runner_call():
     evidence = [Evidence("bash", {"command": f"bash {RUNNER} cancel {JOB}"}, exit_code=0)]
     assert not ClaimVerifier().verify_report(f"I cancelled job {JOB}.", evidence).verified

@@ -1538,7 +1538,7 @@ _ELSEWHERE = re.compile(
     # 1. mail
     r"\b(?:e-?)?mail(?:ed|ing)\b"
     r"|\b(?:e-?)?mails?\b(?=\s*(?:[.,;:!?)]|$)"
-    r"|\s+(?:was|were|is|has|have|sent|to|via|by|with|on|at|for|about|and|or)\b)"
+    r"|\s+(?:was|were|is|has|have|sent|to|via|by|with|on|at|for|about)\b)"
     r"|\b(?:via|using|in|into|over|through|by)\s+(?:(?:the|an?|your|my)\s+)?(?:e-?)?mail\b(?!-)"
     r"|\bsend_e?mail\b"
     # 2. a named channel
