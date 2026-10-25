@@ -1616,7 +1616,8 @@ def evidence_level(claim: Claim, ev: Evidence) -> str:
     if ev.tool_name == "send_file":  # a Telegram send: no named address, and no e-mail
         if claim.target:
             return "none"
-        return "plausible" if _ELSEWHERE.search(_STYLED.sub(r"\2", claim.clause or claim.text)) else "exact"
+        clause = _STYLED.sub(r"\2", claim.clause or claim.text)
+        return "plausible" if _ELSEWHERE.search(clause) else "exact"
     if not ev.args:  # names-only evidence from a legacy caller
         return "plausible"
     if ev.tool_name == "bash":
