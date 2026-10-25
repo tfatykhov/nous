@@ -2307,10 +2307,11 @@ def _deadline(seconds):
 
 
 def _assert_linear(sentence_of_size):
-    """``evidence_level`` on the sentences of about 1, 5 and 20 KB that ``sentence_of_size`` builds is linear in time.
+    """``evidence_level`` on the sentences of about 1, 2, 5 and 20 KB that ``sentence_of_size`` builds is linear in time.
 
-    1 KB first: over 0.5 s there fails a cubic pattern at once. Then four times the text must take about four times as
-    long, not sixteen. The whole check stops after 5 s (``_deadline``)."""
+    1 KB first: over 0.5 s fails at once. Then each size must take at most twice its share of the one before (four
+    times as long for 20 KB as for 5 KB, not sixteen), checked before the next size runs, so a superlinear pattern
+    fails on a small input. The whole check stops after 5 s (``_deadline``)."""
     evidence = Evidence("send_file", {"file_path": "/tmp/r.pdf"})
 
     def best(size):
@@ -2323,11 +2324,13 @@ def _assert_linear(sentence_of_size):
         return min(times)
 
     with _deadline(5):
-        tiny = best(1_000)
-        assert tiny < 0.5, tiny
-        small, large = best(5_000), best(20_000)
-    assert large < 8 * small + 0.01, (small, large)
-    assert large < 0.5, large
+        size, took = 1_000, best(1_000)
+        assert took < 0.5, took
+        for larger in (2_000, 5_000, 20_000):
+            took_larger = best(larger)
+            assert took_larger < 2 * (larger / size) * took + 0.005, (size, took, larger, took_larger)
+            size, took = larger, took_larger
+    assert took < 0.5, took
 
 
 @pytest.mark.parametrize(
