@@ -2200,9 +2200,45 @@ def test_a_long_word_in_a_send_sentence_is_scanned_in_linear_time(token):
 
 
 @pytest.mark.parametrize(
+    ("text", "level"),
+    [
+        # a later clause that claims no completed send (future, negated, instructional) is not this send's destination
+        ("I sent the report; I will send it via Slack tomorrow.", E),
+        ("I sent the report, but did not send it via email.", E),
+        ("I sent the report to you, not to Bob.", E),
+        ("I sent the report. I will send it via Slack tomorrow.", E),
+        ("I sent the report, but I did not send it to Bob.", E),
+        ("I sent the report and I'll email it to Bob later.", E),
+        ("I sent the report; I'm going to post it on Slack.", E),
+        ("I sent the report, and we plan to share it via Slack.", E),
+        ("I sent the report; it won't go to the team.", E),
+        ("I sent the report; please forward it to Bob.", E),
+        ("I sent the report; you can share it via Slack.", E),
+        ("I sent the report, not yet to Bob.", E),
+        # ... but "not just" and "not only" add a person, and the clause ends at the next mark or "but"
+        ("I sent the report to the owner, not just Bob.", P),
+        ("I sent the report to the owner, not only Bob.", P),
+        ("I sent the report to the user, not to Bob but to Carol.", P),
+        ("I sent the report, but did not send it via email; I sent it via Slack.", P),
+        # ... and only a clause of its own counts: a relative clause or another subject is still read
+        ("I sent the report to the user, who will forward it to Bob.", P),
+        ("I sent the report to Bob; I will send it via Slack tomorrow.", P),
+        ("I sent the report via Slack; I will resend it tomorrow.", P),
+        ("Please note I sent the report via Slack.", P),
+        ("I sent the report to the user and Will.", P),
+        ("I sent the report to the user; Will can forward it.", P),
+    ],
+)
+def test_a_future_or_negated_clause_is_not_this_sends_destination(text, level):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims][:1] == [level]
+
+
+@pytest.mark.parametrize(
     "unit",
-    ["for a b ", "as ", "at 9am ", "for x today ", "i.e. ", "to the owner for review ", "and also "],
-    ids=["for-a-b", "as", "at-9am", "for-x-today", "i.e.", "owner-chain", "and-also"],
+    ["for a b ", "as ", "at 9am ", "for x today ", "i.e. ", "to the owner for review ", "and also ", "; will x ",
+     ", not to x "],
+    ids=["for-a-b", "as", "at-9am", "for-x-today", "i.e.", "owner-chain", "and-also", "will", "not-to"],
 )
 def test_a_long_tail_after_a_self_word_is_scanned_in_linear_time(unit):
     # the prepositional tail, the adverbs and the connectors after a self word are read one way only: doubling

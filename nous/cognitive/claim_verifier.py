@@ -1685,6 +1685,18 @@ _ELSEWHERE = re.compile(
     r"|\bcopied\s+(?:(?-i:(?![a-zß-ÿ\d_])\w[a-zß-ÿ]+)\b(?![.'’]\w)|[@#]\w|[\w.+-]+@)"
     r"|\b(?:in|on|into|via|over)\s+#\w)",
     re.IGNORECASE)
+# A later clause of its own that claims no completed send, up to the next mark or "but"/"and": a future, a negation or
+# an instruction ("; I will send it via Slack tomorrow", ", but did not send it via email", ", not to Bob", "; please
+# forward it to Bob"). It is not this send's destination. Not "not just Bob" (Bob got it too), nor a relative clause
+# or another subject ("who will forward it to Bob", "Bob will review it"); the verbs are in lowercase ("to you and
+# Will" names Will).
+_NOT_DONE = re.compile(
+    r"(?:[;,:—–]\s*(?:(?:but|and|though|yet)\s+)?|\s+(?:but|and|though|yet)\s+)"
+    r"(?:(?:(?:i|we|you|it|they)\s+)?(?-i:will|shall|(?:am|are|is)\s+going\s+to|plan\s+to|did\s+not|didn['’]t"
+    r"|do\s+not|don['’]t|have\s+not|haven['’]t|won['’]t|cannot|can['’]t|can|could|should|[Pp]lease)"
+    r"|(?:i|we|you|it|they)['’](?:ll|m\s+going\s+to|re\s+going\s+to)|(?-i:not)\s+(?:to|yet))\b"
+    r"(?:(?!\b(?:but|and)\b)[^;,:—–()\n])*",
+    re.IGNORECASE)
 # A single _, * or backtick around a word is styling, as ** is: "via _Slack_", "to `Bob`"
 _STYLED = re.compile(r"(?<![\w*`])([_*`])([^\s*`]+?)\1(?![\w*`])")
 
@@ -1705,6 +1717,10 @@ def evidence_level(claim: Claim, ev: Evidence) -> str:
             return "none"
         # the whole sentence from the claim's clause on: "to the user — Bob", "to the user: Bob"
         sentence = _STYLED.sub(r"\2", claim.sentence or claim.clause or claim.text)
+        after = sentence.find(claim.text)
+        if after >= 0:  # only after the claim: "Please note I sent it via Slack" is still read
+            after += len(claim.text)
+            sentence = sentence[:after] + _NOT_DONE.sub("", sentence[after:])
         return "plausible" if _ELSEWHERE.search(sentence) else "exact"
     if not ev.args:  # names-only evidence from a legacy caller
         return "plausible"
