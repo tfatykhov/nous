@@ -1561,6 +1561,10 @@ _AN_EXAMPLE = rf"(?:{_A_SENT_THING}|(?:the|this|that)\s+(?:[\w-]+\s+){{0,2}}?one
 # An adverb after a self word: "to the owner earlier", "via Telegram successfully"
 _SELF_ADVERB = (r"(?:earlier|just|now|already|today|directly|first|again|too|also|both|twice|once|successfully"
                 r"|personally|privately|separately|right\s+away)\b")
+# A word that joins the owner and someone else: "to you and Bob", "to the owner, namely Bob", "to you not just Bob"
+_CONNECTOR = (r"(?:and(?:\s+(?:also|then|later|afterwards))?|&|as\s+well\s+as|then|plus|also|namely|including"
+              r"|not\s+(?:just|only)|but\s+also|in\s+particular|that\s+is|that['’]s|specifically|especially|meaning"
+              r"|mainly|mostly|notably)")
 # Where such a tail must end for it to name no one: the bracket closes or the phrase or line ends ("to the owner
 # (twice).", not "to the owner (twice and Bob)")
 _TAIL_ENDS = r"(?=\s*(?:[).,;:!?]|$)|[ \t]*\n)"
@@ -1573,6 +1577,12 @@ _NOT_A_TAIL = (rf"(?!(?:{_A_SENT_THING}|\d+\s*(?:pages?|slides?|sheets?|charts?|
 # "at lunch with Bob", "at the office of Bob", "at Worktime HQ")
 _AT_TAIL = (r"(?:lunch|[a-z]+time|dinner|breakfast|night|dawn|dusk|work|home|first|last|least|most|all|length|hand"
             rf"|the\s+(?:(?:[\w-]+\s+)?(?:time|moment|hour|meeting|weekend)s?|office))\b{_TAIL_ENDS}")
+# A short prepositional tail after a self word: "to the user as a PDF", "on Monday", "for review", "by 5pm" (up to
+# three words, none of them a preposition, a connector or an adverb, so the tail is read one way only)
+_PREP_TAIL = (rf"(?:as|in|with|on|by|for|via|through|over|using|at(?!\s+(?:{_A_TIME}|{_AT_TAIL})))"
+              rf"(?:\s+(?!{_SELF_ADVERB}|(?:as|in|with|on|by|for|at|via|through|over|using|to|and|or|then|plus|also"
+              r"|namely|including|not|but|that|specifically|especially|meaning|mainly|mostly|notably|right)\b)"
+              r"[\w'’-]+){1,3}")
 # After via/through/using/on/over: Telegram, the bot, the chat, a DM, here, a link, the sending tool by name
 # (send_file, send_telegram) or a time word.
 _NOT_A_TRANSPORT = (r"(?!(?:the|a|an|your|my|our|this)\b|(?:telegram|bot|chat|dms?)(?:\s+(?:telegram|bot|chat|dms?))*\b"
@@ -1652,14 +1662,14 @@ _ELSEWHERE = re.compile(
     # between ("to the owner at dinner, then Bob", "to the owner (twice) and Bob")
     r"|\b(?:to|via|through|over|on|using)\s+(?:(?:the|your|my)\s+)?(?:you|yourself|me|myself|owner|user|chat|dms?"
     rf"|bot|telegram|send_file|send_telegram)\b(?:\s+{_SELF_ADVERB}|\s+at\s+(?:{_A_TIME}|{_AT_TAIL})"
-    r"|\s*\([^()\n]{0,60}\))*"
-    r"(?:,?\s+(?:and|&|as\s+well\s+as)\s+|,\s+(?:then|plus|also)\s+|(?<=\))\s+"
+    rf"|\s*\([^()\n]{{0,60}}\)|\s+{_PREP_TAIL})*"
+    rf"(?:(?:\s*[,;:(—–-]\s*|\s+){_CONNECTOR},?\s+(?!{_AN_EXAMPLE}|(?:all|everything)\b{_TAIL_ENDS})|(?<=\))\s+"
     rf"|(?:\s*[,;:(—–]\s*|\s+)(?:i\.e|e\.g|viz)\.,?\s*(?!{_AN_EXAMPLE})"  # "to the user, i.e. Bob"
     r"|(?:\s*\(\s*|\s+[-–—]\s+|\s*[:;—]\s*"
     r"|(?<!\byou)(?<!\byourself)(?<!\bme)(?<!\bmyself),\s*"
     r"|[ \t]*\n[ \t]*(?:(?:then|plus|also)\s+)?(?=\S+(?:[ \t]+\S+){0,2}[ \t]*(?:\n|$))"
     r")"
-    rf"{_NOT_A_TAIL}(?!(?:i\.e|e\.g|viz)\.)|\s+for\s+(?=(?-i:(?![a-zß-ÿ\d_])\w[a-zß-ÿ])|[@#]\w))"
+    rf"{_NOT_A_TAIL}(?!(?:i\.e|e\.g|viz)\.|{_CONNECTOR}\b)|\s+for\s+(?=(?-i:(?![a-zß-ÿ\d_])\w[a-zß-ÿ])|[@#]\w))"
     rf"(?:only\s+)?{_NOT_A_VERB}{_NOT_A_RECIPIENT}"
     # "to the user at Bob", "to you at the London office" (not "to the owner at 7am", "at once", "at lunch", "at
     # the usual time", "at the office"), and an address anywhere in the sentence

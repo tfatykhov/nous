@@ -1857,6 +1857,85 @@ def test_a_send_file_never_confirms_a_send_to_someone_else(claim, tail):
         assert levels == ["none"], text  # the recipient is an address: a send_file never reaches one
 
 
+# The review's grid: a self word, optionally with a transport or a tail, then a connector and someone else. Main read
+# "the user ...", "the bot ..." and "via send_file ..." as a recipient whatever followed, so no cell may be exact there;
+# after the other heads main is exact, and the connector rule makes them plausible too.
+GRID_HEADS = [
+    "to the user via Telegram", "to the owner via Telegram", "to the bot via Telegram", "to you via Telegram",
+    "to the user via the bot", "to you at 9am", "to the owner at 9am", "to the user at 9am",
+    "to the owner (twice)", "to the user (twice)", "to the bot (twice)", "to you (twice)",
+    "to the user earlier", "to the owner just now", "to the user today", "to the bot directly",
+    "to the user as a PDF", "to the owner in PDF", "to the user on Monday", "to the owner by 5pm",
+    "to the user with a summary", "to the owner for review", "to the user as requested",
+    "via Telegram", "via the bot", "via send_file", "to the user", "to the owner", "to the bot", "to you",
+]
+GRID_CONNECTORS = [
+    ", i.e. {}", ", namely {}", ", that is {}", ", that is, {}", ", specifically {}", ", especially {}",
+    ", and also {}", ", as well as {}", ", not just {}", ", including {}", ", meaning {}", ", viz. {}",
+    ", e.g. {}", ", in particular {}", ", mainly {}", ", mostly {}", ", notably {}", ", plus {}", ", then {}",
+    ", also {}", ", and {}", ", {}", " — {}", ": {}", "; {}", " ({})", " and {}", " and also {}", " as well as {}",
+    " plus {}", " i.e. {}", " namely {}", " including {}", " not just {}", " but also {}", " then {}",
+    " and then {}", " and later {}", " and afterwards {}",
+]
+GRID_PEOPLE = ["Bob", "bob@x.io", "@bob", "the team"]
+
+
+@pytest.mark.parametrize("connector", GRID_CONNECTORS)
+@pytest.mark.parametrize("head", GRID_HEADS)
+def test_a_send_file_never_confirms_someone_else_after_a_self_word_and_a_connector(head, connector):
+    for person in GRID_PEOPLE:
+        text = f"I sent the report {head}{connector.format(person)}."
+        if connector == ", {}" and head.endswith("you") and person != "bob@x.io":
+            continue  # a vocative ("to you, Tim"), exact on main too
+        result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+        assert "exact" not in [c.evidence for c in result.claims], text
+
+
+@pytest.mark.parametrize("head", ["to the user via Telegram", "to you at 9am", "to the owner (twice)"])
+@pytest.mark.parametrize(
+    "tail",
+    [", i.e. done", ", namely the Q3 one", ", that is all", ", as well as the summary", ", including the summary",
+     ", e.g. the Q3 one", ", plus the summary", ", then archived it", ", and that is all", ", as requested", ", done"],
+)
+def test_an_owner_only_tail_after_a_connector_stays_exact(head, tail):
+    result = _verify(f"I sent the report {head}{tail}.", [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [E]
+
+
+@pytest.mark.parametrize(
+    ("text", "level"),
+    [
+        # a short prepositional tail between the self word and the connector does not hide the person
+        ("I sent the report to the user as a PDF and Bob.", P),
+        ("I sent the report to the user on Monday, Bob.", P),
+        ("I sent the report to the user for review — Bob.", P),
+        ("I sent the report to the user by 5pm (Bob).", P),
+        ("I sent the report to the user with a summary, plus Bob.", P),
+        ("I sent the report to the owner via the API and Bob.", P),
+        ("I sent the report to the owner using send_file, then Bob.", P),
+        # ... nor do the connectors that were missing
+        ("I sent the report to the user and also Bob.", P),
+        ("I sent the report to the owner and then Bob.", P),
+        ("I sent the report to the owner and later Bob.", P),
+        ("I sent the report to you, including Bob.", P),
+        ("I sent the report to you plus Bob.", P),
+        ("I sent the report to you namely Bob.", P),
+        ("I sent the report to you not just Bob.", P),
+        ("I sent the report to you but also Bob.", P),
+        ("I sent the report to you, in particular Bob.", P),
+        ("I sent the report to the owner then Bob.", P),
+        # ... while a tail that names no one stays exact
+        ("I sent the report to the owner as a PDF.", E),
+        ("I sent the report to the owner on Monday, as requested.", E),
+        ("I sent the report to you for review and then archived it.", E),
+        ("I sent the report to the owner by 5pm, then archived the draft.", E),
+    ],
+)
+def test_a_prepositional_tail_does_not_hide_the_next_person(text, level):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [level]
+
+
 @pytest.mark.parametrize(
     ("text", "level"),
     [
@@ -2118,6 +2197,31 @@ def test_a_long_word_in_a_send_sentence_is_scanned_in_linear_time(token):
         assert evidence_level(claim, evidence) == "exact"  # no match: the whole sentence is scanned
         best = min(best, time.perf_counter() - start)
     assert best < 0.05, best
+
+
+@pytest.mark.parametrize(
+    "unit",
+    ["for a b ", "as ", "at 9am ", "for x today ", "i.e. ", "to the owner for review ", "and also "],
+    ids=["for-a-b", "as", "at-9am", "for-x-today", "i.e.", "owner-chain", "and-also"],
+)
+def test_a_long_tail_after_a_self_word_is_scanned_in_linear_time(unit):
+    # the prepositional tail, the adverbs and the connectors after a self word are read one way only: doubling
+    # the text doubles the time, it does not square it
+    evidence = Evidence("send_file", {"file_path": "/tmp/r.pdf"})
+
+    def best(size):
+        sentence = "I sent the report to the owner " + unit * (size // len(unit))
+        claim = Claim(kind="email", text="I sent the report", sentence=sentence)
+        times = []
+        for _ in range(3):
+            start = time.perf_counter()
+            evidence_level(claim, evidence)
+            times.append(time.perf_counter() - start)
+        return min(times)
+
+    small, large = best(10_000), best(20_000)
+    assert large < 3 * small + 0.01, (small, large)
+    assert large < 0.5, large
 
 
 @pytest.mark.parametrize("head", ["to the user via Telegram", "to the owner (twice)", "to you at 9am", "to the bot"])
