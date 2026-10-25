@@ -29,7 +29,7 @@ export interface LegYield {
  * The yield to display for one leg. A mechanism leg from before
  * `counted_in` existed gets its yield from the record:
  * - spreading activation records exactly one expansion per row it appended;
- * - the 1-hop fallback owns graph_expanded whenever spreading supplied none.
+ * - the 1-hop fallback owns the rest of graph_expanded (no such leg = 0).
  */
 export function legYield(
   leg: RetrievalLeg,
@@ -45,11 +45,10 @@ export function legYield(
     return { n: spreadRows, countedIn: 'graph_expanded', derived: true };
   }
   const expanded = legs.find((l) => l.name === 'graph_expanded');
-  if (spreadRows > 0) {
-    // Spreading supplied graph_expanded, so the fallback did not run.
-    return { n: 0, countedIn: 'graph_expanded', derived: true };
-  }
-  return { n: expanded ? expanded.n_returned : null, countedIn: 'graph_expanded', derived: true };
+  // The pipeline emits a graph_expanded leg only when it holds rows (true of
+  // every record since F091 shipped), so no such leg means it held none.
+  const nExpanded = expanded ? expanded.n_returned : 0;
+  return { n: Math.max(0, nExpanded - spreadRows), countedIn: 'graph_expanded', derived: true };
 }
 
 /**

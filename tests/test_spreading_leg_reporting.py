@@ -133,6 +133,51 @@ class TestMechanismYield:
         assert legs["brain_graph"]["counted_in"] == "graph_expanded"
 
     @pytest.mark.asyncio
+    async def test_spreading_that_raises_midway_keeps_its_rows_apart(self):
+        """Spreading appends one row, raises, and the 1-hop fallback appends to
+        the same list. Each mechanism must report only its own rows."""
+
+        class _RaiseOnSecondSpread(RetrievalTrace):
+            n = 0
+
+            def expansion(self, **kw):
+                if kw.get("stage") == "stage4_spreading_activation":
+                    type(self).n += 1
+                    if type(self).n == 2:
+                        raise RuntimeError("boom")
+                return super().expansion(**kw)
+
+        heart = _make_heart(recall_results=[])
+        brain = _make_brain(
+            neighbors_by_node={DECISION_ONE_ID: [NeighborResult(
+                id=HOP_NEIGHBOUR, node_type="fact", description="one hop",
+                edge_relation="related_to", edge_weight=0.8, created_at=AT,
+            )]},
+            contradictions=[], decision_results=_make_decision_summaries(),
+        )
+        brain._resolve_node_descriptions = AsyncMock(
+            return_value={SPREAD_A: ("a", AT), SPREAD_B: ("b", AT)})
+        tr = _RaiseOnSecondSpread(query="q")
+        with patch(
+            "nous.brain.spreading_activation.spreading_activation_search",
+            AsyncMock(return_value=[(SPREAD_A, "fact", 0.5, 1), (SPREAD_B, "fact", 0.4, 1)]),
+        ), patch(
+            "nous.brain.spreading_activation.compute_graph_density",
+            AsyncMock(return_value=5.0),
+        ):
+            await run_recall_pipeline(
+                query="q", heart=heart, brain=brain,
+                settings=_make_settings(spreading_activation_enabled="true"),
+                limit=10, trace=tr,
+            )
+        legs = _legs(tr)
+        assert legs["spreading_activation"]["error"], "the exception is still reported"
+        assert legs["spreading_activation"]["n_returned"] == 2, (
+            "both rows were appended before tr.expansion raised on the second"
+        )
+        assert legs["brain_graph"]["n_returned"] == legs["graph_expanded"]["n_returned"] - 2
+
+    @pytest.mark.asyncio
     async def test_one_hop_alone_reports_its_yield(self):
         tr = await _run(
             spreading="false",

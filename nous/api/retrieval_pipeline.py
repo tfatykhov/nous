@@ -763,20 +763,22 @@ async def run_recall_pipeline(
         # brain_graph / spreading_activation land here with None and are given
         # their yield just below.
         tr.leg(_leg_name, attempted=True, n_returned=_leg_counts.get(_leg_name))
-    # The mechanism that filled ``acc.graph_expanded`` reports those rows as its
-    # yield. Spreading that ran but resolved nothing reports an explicit 0 (it
-    # then hands over to the 1-hop fallback, which owns any rows).
+    # Each mechanism reports the ``acc.graph_expanded`` rows it appended.
+    # Spreading rows are exactly those with edge_relation "spreading_activation"
+    # (Stage 4 builds them so); the 1-hop fallback owns the rest. Counting by
+    # row rather than by `spreading_activation_used` stays exact when spreading
+    # raises after appending some rows and the fallback then appends more to
+    # the same list. Spreading that ran but resolved nothing reports a true 0.
+    _n_spread = sum(
+        1 for n in acc.graph_expanded if n.edge_relation == "spreading_activation"
+    )
     if "spreading_activation" in _attempted:
-        tr.leg(
-            "spreading_activation", attempted=True,
-            n_returned=len(acc.graph_expanded) if acc.spreading_activation_used else 0,
-            counted_in="graph_expanded",
-        )
-    if "brain_graph" in _attempted and not acc.spreading_activation_used:
-        tr.leg(
-            "brain_graph", attempted=True,
-            n_returned=len(acc.graph_expanded), counted_in="graph_expanded",
-        )
+        tr.leg("spreading_activation", attempted=True,
+               n_returned=_n_spread, counted_in="graph_expanded")
+    if "brain_graph" in _attempted:
+        tr.leg("brain_graph", attempted=True,
+               n_returned=len(acc.graph_expanded) - _n_spread,
+               counted_in="graph_expanded")
     for _stage, _n_err in acc.stage_errors.items():
         # ``stage_errors`` is not purely errors: Stage 2b files its
         # corroboration counter there (``*_duplicates``, documented at :1343 as

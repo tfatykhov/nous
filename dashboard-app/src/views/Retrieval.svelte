@@ -1067,7 +1067,7 @@
                  convergence, so that is now called out here in words. -->
             <div class="xsummary">
               {#if expansionTotals.seeds !== null}
-                <span><strong>{expansionTotals.seeds}</strong> direct seeds</span>
+                <span><strong>{expansionTotals.seeds}</strong> seeds</span>
               {:else}
                 <span class="muted">multi-seed traversal only</span>
               {/if}

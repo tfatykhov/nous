@@ -42,9 +42,18 @@ describe('legYield', () => {
     expect(legYield(bg, legs, [exp('stage4_decision_1hop')]).n).toBe(7);
   });
 
-  it('gives an old 1-hop marker 0 when spreading supplied graph_expanded', () => {
+  it('reads an old fallback that found nothing as 0, not unknown', () => {
+    // graph_expanded is emitted only when it holds rows, so its absence is 0.
     const bg = leg('brain_graph', 0);
-    expect(legYield(bg, [leg('graph_expanded', 3), bg], [exp(SPREADING_STAGE, 'multi')]).n).toBe(0);
+    expect(legYield(bg, [leg('brain', 2), bg, leg('heart_graph_memory', 1)], [])).toEqual(
+      { n: 0, countedIn: 'graph_expanded', derived: true },
+    );
+  });
+
+  it('splits graph_expanded between spreading and the fallback', () => {
+    // Spreading raised after appending 1 row; the fallback appended 2 more.
+    const bg = leg('brain_graph', 0);
+    expect(legYield(bg, [leg('graph_expanded', 3), bg], [exp(SPREADING_STAGE, 'multi')]).n).toBe(2);
   });
 
   it('leaves every other leg as stored, 0 included', () => {
