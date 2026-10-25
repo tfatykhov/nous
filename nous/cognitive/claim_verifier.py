@@ -1726,11 +1726,12 @@ _NOT_DONE = re.compile(
     rf"|{_PRONOUN}['’](?:ll|m\s+going\s+to|re\s+going\s+to)|(?-i:not)\s+(?:to|yet))\b"
     r"(?:(?!\b(?:but|and)\b)[^;,:—–()\n])*",
     re.IGNORECASE)
-# A single _, * or backtick around a word is styling, as ** is: "via _Slack_", "to `Bob`". The word does not hold its own
-# mark and is at most 60 characters, so an unmatched "_" does not re-read the rest of a long word ("-_a-_a-_a...")
+# A single _, * or backtick around a word is styling, as ** is: "via _Slack_", "to `Bob`". The word does not hold its
+# own mark and is at most 60 characters, so an unmatched "_" does not re-read the rest of a long word ("-_a-_a-_a...")
 _STYLED = re.compile(r"(?<![\w*`])([_*`])((?:(?!\1)[^\s*`]){1,60}?)\1(?![\w*`])")
 # The self heads main took for the owner's chat on their own, copied from main's rule: "to you", "to me", "to the
-# owner", "to (the/your/my) DM, chat or Telegram", "via (the/a/your) Telegram, bot or chat". They stay on the rules above.
+# owner", "to (the/your/my) DM, chat or Telegram", "via (the/a/your) Telegram, bot or chat". They stay on the rules
+# above.
 _MAIN_EXEMPT_TO = r"(?:you|yourself|me|(?:(?:the|your|my)\s+)?(?:owner|chat|dm|telegram(?!\s+(?:group|channel)\b)))\b"
 _MAIN_EXEMPT_VIA = r"(?:(?:the|a|your)\s+)?(?:telegram|bot|chat)\b"
 # Every other self head after "to" or "via" ("to the user", "to our bot", "to the user's DMs", "via this chat", "via
@@ -1751,18 +1752,39 @@ _OWNER_ONLY_PREP = (rf"(?:(?:as|in)\s+(?:(?:a|an)\s+)?\.?{_FORMAT}(?:\s+(?:file|
                     r"|details|attachments?)\b"
                     r"|for\s+(?:your\s+)?(?:review|approval|sign-?off|feedback|reference|records|comments)\b"
                     r"|as\s+(?:requested|discussed|promised|agreed|planned|asked|usual)\b)")
+# A sent thing or a place in an owner-only tail has only these words before its noun ("the Q3 report", "the usual
+# meeting"); any other word could be someone ("the Bob report", "the team's notes", "a copy for Bob's file")
+_PLAIN_WORD = (r"(?:q[1-4]|h[12]|fy\d+|\d{4}|v\d+|final|weekly|monthly|daily|quarterly|annual|yearly|latest|updated"
+               r"|revised|full|new|short|brief|draft|attached|requested|same|whole|first|last|previous|next|current|main|original"
+               r"|usual|agreed|scheduled|pdf|csv|xlsx?|docx?|pptx?|html?|json|png|zip|md|markdown|status|progress|sales"
+               r"|summary|test|pull|release|project)")
+_NO_NAME_INSIDE = (rf"(?!(?:the|a|an|your|my|our|this|that|these|those)\s+(?:{_PLAIN_WORD}\s+){{0,3}}"
+                   rf"(?!{_PLAIN_WORD}\b)[\w.'’-]+\s+[\w.'’-])")
 # One owner-only tail: a self adverb, an "at" time or place, a bracket that holds only a sent thing, a count, an adverb
 # or such a phrase ("(twice)", "(report.pdf)", "(as a PDF)"; not "(Bob)"), "via Telegram", the phrase itself (also
 # after a comma), a closer or heading on the next line, a note, version, date or time after a comma ("FYI", "v2"), or
 # "i.e.", "e.g.", "viz." or "namely" before a sent thing. A tail once taken is not read again, so the longer phrase
 # comes first ("at the end of the day" before "at the end").
-_OWNER_ONLY_TAIL = (rf",?\s+{_OWNER_ONLY_PREP}|\s+{_SELF_ADVERB}|\s+at\s+(?:{_A_TIME}|{_AT_TAIL})"
-                    rf"|\s*\(\s*(?:{_A_SENT_THING}|{_A_COUNT}|{_SELF_ADVERB}|{_OWNER_ONLY_PREP})\s*\)"
+_OWNER_ONLY_TAIL = (rf",?\s+{_OWNER_ONLY_PREP}|\s+{_SELF_ADVERB}|\s+at\s+(?:{_A_TIME}|{_NO_NAME_INSIDE}{_AT_TAIL})"
+                    rf"|\s*\(\s*(?:{_NO_NAME_INSIDE}{_A_SENT_THING}|{_A_COUNT}|{_SELF_ADVERB}|{_OWNER_ONLY_PREP})\s*\)"
                     rf"|\s+via\s+telegram\b|[ \t]*\n[ \t]*{_OWNER_ONLY_END}"
-                    rf"|\s*,\s*{_OWNER_ONLY_END}|\s*(?:,\s*)?(?:{_THAT_IS}|namely),?\s+{_A_SENT_THING}")
-# The rest of the sentence after a new self head, all of it owner-only tails. Atomic and possessive: no tail is read
-# again once taken, so a long rest is linear.
+                    rf"|\s*,\s*{_OWNER_ONLY_END}|\s*(?:,\s*)?(?:{_THAT_IS}|namely),?\s+{_NO_NAME_INSIDE}{_A_SENT_THING}")
+# The rest of the sentence after a new self head, all of it owner-only tails. Each tail is atomic (a later tail that
+# fails does not make an earlier one try another reading) and the loop possessive, so a long rest is linear.
 _OWNER_ONLY_REST = re.compile(rf"(?:(?>{_OWNER_ONLY_TAIL}))*+\s*", re.IGNORECASE)
+# Main's rule, verbatim. Where it finds a destination in the claim's clause, main scored a send_file plausible; there,
+# exact needs each place it found to start a new self head (and the rest to be owner-only tails, above). Any other
+# place main found ("to notify Bob", "to myself", "via a link", "according to Bob", "on text") stays plausible.
+_MAIN_ELSEWHERE = re.compile(
+    r"\b(?:e-?)?mail(?:ed|ing)\b"
+    r"|\b(?:e-?)?mails?\b(?=\s*(?:[.,;:!?)]|$)|\s+(?:was|were|is|has|have|sent|to|via|by|with|on|at|for|about)\b)"
+    r"|\b(?:in|into|over|through|by)\s+(?:(?:the|an?)\s+)?(?:e-?)?mail\b"
+    r"|\b(?:via|on|over|through|by|in|into|using)\s+(?:(?:the|a)\s+)?(?:slack|whatsapp|signal|discord|sms"
+    r"|imessage|teams|messenger|wechat|gmail|outlook|linkedin|twitter|text)\b"
+    rf"|\bvia\s+(?!{_MAIN_EXEMPT_VIA})\w"
+    rf"|\bto\s+(?!{_MAIN_EXEMPT_TO})"
+    r"(?!(?:review|read|check|confirm|approve|see|look|keep|share|sign|use|be|date)\b)[\w@#]",
+    re.IGNORECASE)
 
 
 def evidence_level(claim: Claim, ev: Evidence) -> str:
@@ -1789,8 +1811,14 @@ def evidence_level(claim: Claim, ev: Evidence) -> str:
         sentence = _STYLED.sub(r"\2", sentence)
         if _ELSEWHERE.search(sentence):
             return "plausible"
+        # main's verdict, on main's input: each place it found must start a new self head
+        read = claim.clause or claim.text
+        if any(not _NEW_SELF_HEAD.match(read, m.start()) for m in _MAIN_ELSEWHERE.finditer(read)):
+            return "plausible"
         head = _NEW_SELF_HEAD.search(sentence)
-        return "plausible" if head and not _OWNER_ONLY_REST.fullmatch(sentence, head.end()) else "exact"
+        if head and not _OWNER_ONLY_REST.fullmatch(sentence, head.end()):
+            return "plausible"
+        return "exact"
     if not ev.args:  # names-only evidence from a legacy caller
         return "plausible"
     if ev.tool_name == "bash":

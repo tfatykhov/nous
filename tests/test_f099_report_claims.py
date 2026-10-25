@@ -1232,23 +1232,23 @@ SEND_TAILS = [
     (" with an email-style layout", E),
     (" with Gmail-style formatting", E),
     (" in plain text", E),
-    (" with a link to the report", E),
+    (" with a link to the report", P),  # as on main (main's rule finds it)
     # format conversions and other "to"s that name no one
-    (" converted to PDF", E),
-    (" converted to HTML", E),
-    (" converted to DOCX", E),
-    (" converted to CSV", E),
-    (" converted to JSON", E),
-    (" converted to pdf", E),
-    (" converted to Markdown", E),
-    (" translated to French", E),
+    (" converted to PDF", P),  # as on main (main's rule finds it)
+    (" converted to HTML", P),  # as on main (main's rule finds it)
+    (" converted to DOCX", P),  # as on main (main's rule finds it)
+    (" converted to CSV", P),  # as on main (main's rule finds it)
+    (" converted to JSON", P),  # as on main (main's rule finds it)
+    (" converted to pdf", P),  # as on main (main's rule finds it)
+    (" converted to Markdown", P),  # as on main (main's rule finds it)
+    (" translated to French", P),  # as on main (main's rule finds it)
     (" to review", E),
     (" to read on Monday", E),
     (" up to date", E),
-    (" due to a delay", E),
-    (" according to plan", E),
-    (" moved to Friday", E),
-    (" to the end", E),
+    (" due to a delay", P),  # as on main (main's rule finds it)
+    (" according to plan", P),  # as on main (main's rule finds it)
+    (" moved to Friday", P),  # as on main (main's rule finds it)
+    (" to the end", P),  # as on main (main's rule finds it)
     # you, the owner, the user, the chat
     (" to you", E),
     (" to the owner", E),
@@ -1269,9 +1269,9 @@ SEND_TAILS = [
     (" via send_file", E),
     (" using send_file", E),
     (" through send_file", E),
-    (" via a link", E),
+    (" via a link", P),  # as on main (main's rule finds it)
     (" as a link", E),
-    (" via a shared link", E),
+    (" via a shared link", P),  # as on main (main's rule finds it)
     (" through send_email", P),
     (" via send_email", P),  # the mail tool names mail
     # mail
@@ -1324,9 +1324,9 @@ SEND_TAILS = [
     (" to O'Brien", P),
     (" to _Bob_", P),
     (" to Mark", P),  # a capitalised word is a name, not an infinitive
-    (" to mark the changes", E),
-    (" to May", E),  # accepted leftover: a month (May, June, April, August, March) is read as a time
-    (" moved to 5pm", E),
+    (" to mark the changes", P),  # as on main (main's rule finds it)
+    (" to May", P),  # as on main (main's rule finds it)
+    (" moved to 5pm", P),  # as on main (main's rule finds it)
     # any transport after via/through/using/over/on that is not Telegram, a tool, a link or a time
     (" via SMTP", P),
     (" via sendmail", P),
@@ -1350,7 +1350,7 @@ SEND_TAILS = [
     (" via Telegram on Monday with a summary", E),
     (" as PDF to the owner", E),
     (" to you on time", E),
-    (" via a link to the report", E),
+    (" via a link to the report", P),  # as on main (main's rule finds it)
     (" via send_file at 7am", E),
     (" to the user as a .docx", E),
     (" on time via email", P),
@@ -1404,7 +1404,7 @@ SEND_TAILS = [
     (" on schedule", E),
     (" on hold", E),
     (" via the Telegram group", P),
-    (" via Slack-style formatting", E),
+    (" via Slack-style formatting", P),  # as on main (main's rule finds it)
     (" and cc'd you", E),
     (" and bcc'd the owner", E),
     (" and copied bob@x.io", P),
@@ -1424,10 +1424,10 @@ def test_the_send_destination_matrix(claim, tail, level):
 
 def test_a_send_that_landed_in_the_chat_is_no_first_person_claim():
     # the chat path's rule (_NOT_ELSEWHERE): the effect landed in the reply; the report's own form is a claim
-    for tail in (" in the chat", " to your chat", " with a link to the dashboard"):
+    for tail, level in ((" in the chat", E), (" to your chat", E), (" with a link to the dashboard", P)):
         assert _verify(f"I sent the report{tail}.").claims == []
         result = _verify(f"Message sent{tail}.", [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
-        assert [c.evidence for c in result.claims] == [E]
+        assert [c.evidence for c in result.claims] == [level]  # "to the dashboard": main's rule finds it
 
 
 @pytest.mark.parametrize("claim", SEND_CLAIMS)
@@ -1490,14 +1490,14 @@ def test_a_possessive_of_the_owner_is_self_only_for_their_chat(tail, level):
         (" next week", E),
         (" in the last hour", E),
         (" over the last hour", E),
-        (" and moved the sync to the next day", E),
-        (" and moved the sync to the end of the month", E),
-        (" and moved the sync to next week", E),
-        (" and moved the sync to the same time", E),
-        (" and moved the sync to Monday morning", E),
-        (" and moved the sync to Oct 24", E),
-        (" and moved the sync to 5pm today", E),
-        (" to the end of the thread", E),
+        (" and moved the sync to the next day", P),  # as on main (main's rule finds it)
+        (" and moved the sync to the end of the month", P),  # as on main (main's rule finds it)
+        (" and moved the sync to next week", P),  # as on main (main's rule finds it)
+        (" and moved the sync to the same time", P),  # as on main (main's rule finds it)
+        (" and moved the sync to Monday morning", P),  # as on main (main's rule finds it)
+        (" and moved the sync to Oct 24", P),  # as on main (main's rule finds it)
+        (" and moved the sync to 5pm today", P),  # as on main (main's rule finds it)
+        (" to the end of the thread", P),  # as on main (main's rule finds it)
         (" to you directly", E),
         (" to the user as a PDF", E),
         (" via the Telegram bot", E),
@@ -1517,22 +1517,25 @@ def test_a_listed_word_excludes_only_the_phrase_it_heads(tail, level):
         ("I sent the report link to the team.", P),
         ("I sent the report with links to the team.", P),
         ("I sent the report with a link to Bob.", P),
-        ("I sent the report with a link to the Q3 report.", E),
-        ("I sent the summary with links to the files.", E),
-        ("I sent the report with a link to it.", E),
-        ("I sent the report with a link to https://x.io/r.", E),
-        ("I sent the report with a link to report.pdf.", E),
+        ("I sent the report with a link to the Q3 report.", P),  # as on main (main's rule finds it)
+        ("I sent the summary with links to the files.", P),  # as on main (main's rule finds it)
+        ("I sent the report with a link to it.", P),  # as on main (main's rule finds it)
+        ("I sent the report with a link to https://x.io/r.", P),  # as on main (main's rule finds it)
+        ("I sent the report with a link to report.pdf.", P),  # as on main (main's rule finds it)
         # an address or a dotted name is never a sent thing
         ("I sent the report link to bob.smith@example.com.", P),
         ("I sent the report with a link to bob.smith@example.com.", P),
         ("I sent the report with a link to bob@example.com.", P),
         ("I sent the report with a link to bob.smith.", P),
-        ("I sent the report link to report.pdf.", E),
-        ("I sent the report with a link to notes.md.", E),
-        ("I sent the report with a link to Q3-summary.xlsx.", E),
-        ("I sent the report with a link to the team's report.", E),
+        ("I sent the report link to report.pdf.", P),  # as on main (main's rule finds it)
+        ("I sent the report with a link to notes.md.", P),  # as on main (main's rule finds it)
+        ("I sent the report with a link to Q3-summary.xlsx.", P),  # as on main (main's rule finds it)
+        ("I sent the report with a link to the team's report.", P),  # as on main (main's rule finds it)
         ("I sent the report with a link to the summary and Bob.", P),
-        ("I sent the report with a link to the summary and archived the draft.", E),
+        (
+            "I sent the report with a link to the summary and archived the draft.",
+            P,
+        ),  # as on main (main's rule finds it)
     ],
 )
 def test_a_link_to_a_group_names_a_recipient(text, level):
@@ -1674,7 +1677,10 @@ def test_a_self_word_followed_by_an_adverb_is_still_the_owners_chat(text, level)
         ("I sent the report to you and pinned it.", E),
         ("I sent the report to you and updated the ticket.", E),
         ("I sent the report to you and deleted the draft.", E),
-        ("I sent the report with a link to the summary and attached the chart.", E),
+        (
+            "I sent the report with a link to the summary and attached the chart.",
+            P,
+        ),  # as on main (main's rule finds it)
     ],
 )
 def test_a_name_ending_in_ed_is_no_verb(text, level):
@@ -1969,22 +1975,7 @@ CONTROL_TAILS = [
 
 # after the heads main exempted; after the others only a tail on their allow list stays exact (see NEW_SELF_HEADS)
 @pytest.mark.parametrize("head", ["to the owner via Telegram", "to you at 9am", "to the owner (twice)"])
-@pytest.mark.parametrize(
-    "tail",
-    [
-        ", i.e. done",
-        ", namely the Q3 one",
-        ", that is all",
-        ", as well as the summary",
-        ", including the summary",
-        ", e.g. the Q3 one",
-        ", plus the summary",
-        ", then archived it",
-        ", and that is all",
-        ", as requested",
-        ", done",
-    ],
-)
+@pytest.mark.parametrize("tail", CONTROL_TAILS)
 def test_an_owner_only_tail_after_a_connector_stays_exact(head, tail):
     result = _verify(f"I sent the report {head}{tail}.", [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
     assert [c.evidence for c in result.claims] == [E]
@@ -2139,11 +2130,11 @@ def test_a_send_file_is_judged_by_its_whole_sentence(text, level):
         ("I sent the report by text.", P),
         ("I sent the report via a text.", P),
         # ... but a text file, form or format and plain text are what was sent
-        ("I sent the report in a text file.", E),
+        ("I sent the report in a text file.", P),  # as on main (main's rule finds it)
         ("I sent the report in plain text.", E),
-        ("I sent the report in text form.", E),
-        ("I sent the report in text format.", E),
-        ("I sent the report in a text format.", E),
+        ("I sent the report in text form.", P),  # as on main (main's rule finds it)
+        ("I sent the report in text format.", P),  # as on main (main's rule finds it)
+        ("I sent the report in a text format.", P),  # as on main (main's rule finds it)
         ("I sent the report as a text form.", E),
         ("I sent the report in SMS.", P),
         ("I sent the report as text.", E),
@@ -2303,11 +2294,11 @@ def _deadline(seconds):
         yield
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous)
+        signal.signal(signal.SIGALRM, signal.SIG_DFL if previous is None else previous)
 
 
 def _assert_linear(sentence_of_size):
-    """``evidence_level`` on the sentences of about 1, 2, 5 and 20 KB that ``sentence_of_size`` builds is linear in time.
+    """``evidence_level`` is linear in time on the 1, 2, 5 and 20 KB sentences that ``sentence_of_size`` builds.
 
     1 KB first: over 0.5 s fails at once. Then each size must take at most twice its share of the one before (four
     times as long for 20 KB as for 5 KB, not sixteen), checked before the next size runs, so a superlinear pattern
@@ -2565,7 +2556,18 @@ MAIN_EXEMPT_HEAD = re.compile(
     r"|via\s+(?:(?:the|a|your)\s+)?(?:telegram|bot|chat)\b",
     re.IGNORECASE,
 )
-SELF_NOUNS = ["bot", "chat", "DM", "DMs", "Telegram", "Telegram DMs", "Telegram bot", "Telegram chat", "bot chat", "user"]
+SELF_NOUNS = [
+    "bot",
+    "chat",
+    "DM",
+    "DMs",
+    "Telegram",
+    "Telegram DMs",
+    "Telegram bot",
+    "Telegram chat",
+    "bot chat",
+    "user",
+]
 SELF_DETERMINERS = ["", "the ", "your ", "my ", "our ", "this ", "the user's "]
 NEW_SELF_HEADS = [
     head
@@ -2573,8 +2575,8 @@ NEW_SELF_HEADS = [
     + ["via send_file", "via send_telegram"]
     if not MAIN_EXEMPT_HEAD.match(head)
 ]
-# ... and those that are exact on their own; the rest ("via the user", "to the user's bot") are plausible on main and head,
-# and "to this chat" is no send claim (the reply rule: "I put it in this chat")
+# ... and those that are exact on their own; the rest ("via the user", "to the user's bot") are plausible on main and
+# head, and "to this chat" is no send claim (the reply rule: "I put it in this chat")
 NEW_EXACT_HEADS = [
     h
     for h in NEW_SELF_HEADS
@@ -2612,6 +2614,14 @@ ALLOW_TAILS = [
     ", namely the Q3 report",
     " as a PDF on Monday",
     " earlier (twice), FYI",
+    " at the end of the day",
+    " (3 pages)",
+    ", e.g. the report",
+    ", viz. the report",
+    " for approval",
+    " with charts",
+    " right away",
+    "\nSummary:",
     "\nDone",
 ]
 # What could be someone: every one of these leaves something over
@@ -2626,10 +2636,6 @@ PERSON_TAILS = [
     " for Иван",
     " with bob",
     " for Bob",
-    " alongside the team",
-    " (Bob)",
-    ", then Bob",
-    " and Bob",
     " as a PDF for Bob",
     " earlier with Bob",
     " via Telegram for Bob",
@@ -2639,9 +2645,29 @@ PERSON_TAILS = [
     *[c.format(p) for c in GRID_CONNECTORS for p in GRID_PEOPLE],
     *[
         sep + p
-        for sep in [" ", ": ", "; ", ", ", " — ", "—", "\n", " (", " - ", " and ", ", then ", ", also ", "\nthen ",
-                    " at ", " at lunch and ", " at lunch, then ", " (twice) ", " (twice) and ", " earlier and ",
-                    " at 7am and ", " right away and "]
+        for sep in [
+            " ",
+            ": ",
+            "; ",
+            ", ",
+            " — ",
+            "—",
+            "\n",
+            " (",
+            " - ",
+            " and ",
+            ", then ",
+            ", also ",
+            "\nthen ",
+            " at ",
+            " at lunch and ",
+            " at lunch, then ",
+            " (twice) ",
+            " (twice) and ",
+            " earlier and ",
+            " at 7am and ",
+            " right away and ",
+        ]
         for p in ["Bob", "bob", "Иван", "the team", "alongside the team"]
     ],
 ]
@@ -2651,16 +2677,21 @@ def test_the_new_self_heads_are_the_77_the_review_counted():
     assert len(NEW_EXACT_HEADS) == 77
     for head in NEW_SELF_HEADS:
         result = _verify(f"I sent the report {head}.", [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
-        expected = [] if head == "to this chat" else [E] if head in NEW_EXACT_HEADS else [P]
+        if head == "to this chat":
+            expected = []  # no send claim (the reply rule)
+        elif head in NEW_EXACT_HEADS:
+            expected = [E]
+        else:
+            expected = [P]
         assert [c.evidence for c in result.claims] == expected, head
 
 
-@pytest.mark.parametrize("head", NEW_SELF_HEADS)
+@pytest.mark.parametrize("head", [h for h in NEW_SELF_HEADS if h != "to this chat"])
 def test_after_a_new_self_head_whatever_is_left_over_names_someone(head):
     for tail in PERSON_TAILS:
         text = f"I sent the report {head}{tail}."
-        result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
-        assert "exact" not in [c.evidence for c in result.claims], text
+        levels = [c.evidence for c in _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})]).claims]
+        assert levels and "exact" not in levels, text
 
 
 @pytest.mark.parametrize("head", NEW_EXACT_HEADS)
@@ -2678,6 +2709,7 @@ def test_after_a_new_self_head_a_control_not_on_the_allow_list_is_plausible_as_o
     for tail in CONTROL_TAILS:
         text = f"I sent the report {head}{tail}."
         result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+        # ", as requested" and ", done" are owner-only tails (_OWNER_ONLY_PREP, _OWNER_ONLY_END); the rest are not
         assert [c.evidence for c in result.claims] == [E if tail in (", as requested", ", done") else P], text
 
 
@@ -2772,6 +2804,107 @@ def test_the_colon_of_a_clock_time_is_no_connector(text, level):
 def test_styling_is_unwrapped_once_per_word(text, level):
     result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
     assert [c.evidence for c in result.claims] == [level]
+
+
+# Where main's own rule found a destination in the claim's clause, only a new self head with an owner-only rest is
+# exact: every other place main flagged stays plausible, as on main
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I sent the report to notify Bob.",
+        "I sent the report to inform Bob.",
+        "I sent the report to help Bob.",
+        "I sent the report to discuss with Bob.",
+        "I sent the report to myself with Bob.",
+        "I sent the report to myself so Bob can read it.",
+        "I sent the report to here with Bob.",
+        "I sent the report via a link for Иван.",
+        "I sent the report via the link as Bob.",
+        "I sent the report via here with Bob.",
+        "I sent the report to pdf with Bob.",
+        "I sent the report to Monday as Bob.",
+        "I sent the report to 9am for Иван.",
+        "I sent the report to 10:30 with Bob.",
+        "I sent the report to 21:00 UTC for Bob.",
+        "I sent the report according to Bob.",
+        "I sent the report thanks to Bob.",
+        "I sent the report on text with Bob.",
+        "I sent the report in text for Bob.",
+        "Message sent to the user with Bob.",
+        "I forwarded the summary to our bot as Bob.",
+        # ... nor does a head spelt another way
+        "I sent the report to the user’s DMs with Bob.",
+        "I sent the report to user's DMs with Bob.",
+        "I SENT THE REPORT TO THE USER WITH BOB.",
+        "I sent the report to  the user with Bob.",
+    ],
+)
+def test_where_main_found_a_destination_only_a_new_self_head_may_be_exact(text):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [P]
+
+
+@pytest.mark.parametrize(
+    ("text", "level"),
+    [
+        # a name or a possessive inside an owner-only tail is someone
+        ("I sent the report to the user at the Bob meeting.", P),
+        ("I sent the report via this chat at the Bob meeting.", P),
+        ("I sent the report to the user at the Иван meeting.", P),
+        ("I sent the report to our bot (the Bob report).", P),
+        ("I sent the report to the user's DMs (the Bob and Carol copy).", P),
+        ("I sent the report to the user (a copy for Bob's file).", P),
+        ("I sent the report to the user (your and Bob's copy).", P),
+        ("I sent the report to the user, namely the Bob Smith report.", P),
+        ("I sent the report to the user, namely the bob report.", P),
+        ("I sent the report to the user, namely the team's report.", P),
+        ("I sent the report via our bot, i.e. the Bob report.", P),
+        # ... while a closed list of words before the thing stays owner-only
+        ("I sent the report to the user at the usual meeting.", E),
+        ("I sent the report to our bot (the Q3 report).", E),
+        ("I sent the report to the user, namely the final PDF report.", E),
+        ("I sent the report to the user (the weekly summary).", E),
+        # a later clause is dropped only where no user, bot or send_file is in the sentence, and never one that names
+        # someone without a future or a negation
+        ("I sent the report to our Telegram; Bob will get it later.", P),
+        ("I sent the report to your DMs; I will resend it later and Bob too.", P),
+        ("I sent the report to the user; I will send it via Slack tomorrow.", P),
+    ],
+)
+def test_an_owner_only_tail_holds_no_name(text, level):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [level]
+
+
+@pytest.mark.parametrize("head", NEW_EXACT_HEADS)
+def test_after_a_new_self_head_a_preposition_and_another_destination_is_plausible(head):
+    for preposition in ("as", "in", "with", "on", "by", "for", "at", "via"):
+        for destination in OTHER_DESTINATIONS:
+            text = f"I sent the report {head} {preposition} {destination}."
+            levels = [c.evidence for c in _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})]).claims]
+            assert "exact" not in levels, text
+            # "as chat -100..." is the chat path's "landed in the chat" rule (no claim), as in the cross test
+            assert levels or destination.startswith("chat"), text
+
+
+@pytest.mark.parametrize(
+    "styled",
+    ["to `" + "b" * 60 + "`", "via _" + "s" * 60 + "_"],
+)
+def test_a_styled_word_of_60_characters_is_read_unwrapped(styled):
+    result = _verify(f"I sent the report {styled}.", [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [P]
+
+
+@pytest.mark.parametrize(
+    ("rest", "fail"),
+    [("earlier (twice) ", "for Bob"), ("as a PDF ", "Bob"), (" ", "Bob"), ("at 9am ", "with Bob")],
+    ids=["twice-then-bob", "pdf-then-bob", "spaces-then-bob", "at-then-bob"],
+)
+@pytest.mark.parametrize("head", ["to the user", "via our bot"])
+def test_a_long_owner_only_rest_that_fails_at_its_end_is_linear(head, rest, fail):
+    # the rest is read to its end and then fails: no tail is read again
+    _assert_linear(lambda size: f"I sent the report {head} " + rest * (size // len(rest)) + fail)
 
 
 @pytest.mark.xfail(
