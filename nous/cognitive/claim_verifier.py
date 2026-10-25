@@ -1503,13 +1503,16 @@ _NOT_A_RECIPIENT = (
 # After "to you and": not a verb or a function word ("to you and archived it", "to you and on time")
 _NOT_A_VERB = (r"(?!(?-i:then|also|now|later|again|so|on|in|at|by|with|as|for|from|via|over|through|i|it|we|will"
                r"|would|can|could|should|have|has|had|is|was|am|[a-z]+ed)\b)")
-# What "a link to" points at rather than sends to: a sent thing, it, a URL, a path or a file name.
-_A_SENT_THING = (r"(?:(?:the|a|an|your|my|our|this|that|these|those)\s+(?:[\w.'’-]+\s+){0,3}?(?:report|summar(?:y|ies)"
-                 r"|file|doc|document|page|dashboard|chart|sheet|spreadsheet|folder|draft|pr|pull\s+request|issue"
-                 r"|repo|repository|article|post|site|website|video|recording|slide|deck|note|result|data|table"
-                 r"|ticket|thread|commit|branch|diff|log|image|photo|screenshot|form|invite|presentation"
-                 r"|release|spec|plan|proposal|agenda|minutes|transcript|archive|attachment|copy|version|section)"
-                 rf"(?:e?s)?\b{_HEADS}|(?-i:it|this|that)\b|https?\b|www\.|[/~]|[\w-]+\.\w)")
+# What "a link to" points at rather than sends to: a sent thing, it, a URL, a path or a file name (a known
+# extension: "report.pdf", not "bob.smith"); never an address ("bob.smith@example.com").
+_A_SENT_THING = (r"(?![\w.+-]+@)(?:(?:the|a|an|your|my|our|this|that|these|those)\s+(?:[\w.'’-]+\s+){0,3}?"
+                 r"(?:report|summar(?:y|ies)|file|doc|document|page|dashboard|chart|sheet|spreadsheet|folder|draft"
+                 r"|pr|pull\s+request|issue|repo|repository|article|post|site|website|video|recording|slide|deck|note"
+                 r"|result|data|table|ticket|thread|commit|branch|diff|log|image|photo|screenshot|form|invite"
+                 r"|presentation|release|spec|plan|proposal|agenda|minutes|transcript|archive|attachment|copy|version"
+                 rf"|section)(?:e?s)?\b{_HEADS}|(?-i:it|this|that)\b|https?\b|www\.|[/~]"
+                 r"|[\w-]+\.(?:pdf|md|txt|csv|tsv|json|ya?ml|xml|html?|docx?|xlsx?|pptx?|odt|ods|rtf|png|jpe?g|gif"
+                 r"|svg|webp|zip|tar|gz|tgz|py|ipynb|js|ts|sh|sql|log|epub|mp4|mov|mp3|wav)\b)")
 # After via/through/using/on/over: Telegram, the bot, the chat, a DM, here, a link, the sending tool by name
 # (send_file, or a tool name with "telegram" in it: "send_telegram") or a time word.
 _NOT_A_TRANSPORT = (r"(?!(?:the|a|an|your|my|our|this)\b|(?:telegram|bot|chat|dms?)(?:\s+(?:telegram|bot|chat|dms?))*\b"
