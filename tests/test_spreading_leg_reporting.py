@@ -213,14 +213,16 @@ async def _edge(session, agent_id, src, tgt, weight):
 @pytest.mark.asyncio
 async def test_cte_reports_the_seed_of_the_winning_path(brain, session):
     """d3 hangs off seed d1 and d4 off seed d2. d5 is reachable from both;
-    d1's edge is stronger, so d1's path wins and d1 is reported."""
+    d1's edge is stronger, so d1's path wins and d1 is reported. d6 is two
+    hops out (d1 -> d3 -> d6): its seed is d1, not the d3 it was reached from."""
     d = [await brain.record(_inp(f"Seed attribution decision {i} for spreading"),
-                            session=session) for i in range(1, 6)]
-    d1, d2, d3, d4, d5 = (x.id for x in d)
+                            session=session) for i in range(1, 7)]
+    d1, d2, d3, d4, d5, d6 = (x.id for x in d)
     await _edge(session, brain.agent_id, d1, d3, 1.0)
     await _edge(session, brain.agent_id, d2, d4, 1.0)
     await _edge(session, brain.agent_id, d1, d5, 0.9)
     await _edge(session, brain.agent_id, d2, d5, 0.2)
+    await _edge(session, brain.agent_id, d3, d6, 1.0)
     await session.flush()
 
     seeds = [(d1, "decision", 0.9), (d2, "decision", 0.9)]
@@ -233,3 +235,6 @@ async def test_cte_reports_the_seed_of_the_winning_path(brain, session):
     assert seed_of[d3] == d1
     assert seed_of[d4] == d2
     assert seed_of[d5] == d1, "the stronger path wins MAX, so its seed is reported"
+    depth = {r[0]: r[3] for r in reported}
+    assert depth[d6] == 2
+    assert seed_of[d6] == d1, "the seed is carried along the path, not the parent node"
