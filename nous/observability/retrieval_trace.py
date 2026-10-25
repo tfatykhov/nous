@@ -184,6 +184,14 @@ class Leg:
     n_keyword_queries: int | None = None
     n_keyword_zero: int | None = None
     n_keyword_fallback: int | None = None
+    # A mechanism leg whose rows are counted under ANOTHER leg's name. The
+    # spreading activation and 1-hop fallback stages both append to the one
+    # ``graph_expanded`` list, whose candidates carry entry_leg="graph_expanded".
+    # The mechanism that ran reports its own yield in ``n_returned`` and names
+    # that leg here, so the table can say "15, counted in graph_expanded" instead
+    # of the 0 it showed as "ran, found nothing". ``None`` (every other leg, and
+    # every row written before this field) is omitted from ``to_dict``.
+    counted_in: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -201,6 +209,8 @@ class Leg:
             value = getattr(self, key)
             if value is not None:
                 d[key] = value
+        if self.counted_in is not None:
+            d["counted_in"] = self.counted_in
         return d
 
 
@@ -346,6 +356,7 @@ class RetrievalTrace:
         n_keyword_queries: int | None = None,
         n_keyword_zero: int | None = None,
         n_keyword_fallback: int | None = None,
+        counted_in: str | None = None,
     ) -> None:
         """Record (or update) one leg's summary. Idempotent per name.
 
@@ -370,6 +381,8 @@ class RetrievalTrace:
         ):
             if value is not None:
                 setattr(entry, key, value)
+        if counted_in is not None:
+            entry.counted_in = counted_in
         if error is not None:
             entry.error = error
         if skip_reason is not None:

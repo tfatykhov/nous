@@ -733,11 +733,13 @@ async def run_recall_pipeline(
     # fallback, for one, is skipped based on runtime spreading success.
     # ``acc.graph_expanded`` is filled by EITHER spreading activation OR the
     # 1-hop fallback — never both — and `_tr_entries` tags every one of those
-    # candidates `entry_leg="graph_expanded"`. So the yield must be reported
-    # under THAT name, or candidates reference a leg that has no record while
-    # the legs that do exist claim zero. `brain_graph` / `spreading_activation`
-    # stay as attempt markers (which mechanism ran), carrying no count of
-    # their own — a count on them would double the same rows.
+    # candidates `entry_leg="graph_expanded"`. So the yield is reported under
+    # THAT name, or candidates reference a leg that has no record. The
+    # mechanism legs `spreading_activation` / `brain_graph` then get their own
+    # yield below, marked ``counted_in="graph_expanded"`` so a reader knows the
+    # two numbers are the same rows. They used to carry no count at all, which
+    # `Leg` stored as 0 and the dashboard showed as "ran, found nothing" on
+    # every retrieval where spreading supplied the whole graph expansion.
     _leg_counts = {
         "heart_primary": len(acc.heart_results),
         "chunk": len(acc.chunk_results),
@@ -758,8 +760,23 @@ async def run_recall_pipeline(
         # (they are the only legs whose yield is known there), and they are
         # ALSO in attempted_legs — so defaulting to 0 here overwrote a
         # correct count with zero. ``leg()`` treats None as "leave it alone".
-        # brain_graph / spreading_activation land here with None by design.
+        # brain_graph / spreading_activation land here with None and are given
+        # their yield just below.
         tr.leg(_leg_name, attempted=True, n_returned=_leg_counts.get(_leg_name))
+    # The mechanism that filled ``acc.graph_expanded`` reports those rows as its
+    # yield. Spreading that ran but resolved nothing reports an explicit 0 (it
+    # then hands over to the 1-hop fallback, which owns any rows).
+    if "spreading_activation" in _attempted:
+        tr.leg(
+            "spreading_activation", attempted=True,
+            n_returned=len(acc.graph_expanded) if acc.spreading_activation_used else 0,
+            counted_in="graph_expanded",
+        )
+    if "brain_graph" in _attempted and not acc.spreading_activation_used:
+        tr.leg(
+            "brain_graph", attempted=True,
+            n_returned=len(acc.graph_expanded), counted_in="graph_expanded",
+        )
     for _stage, _n_err in acc.stage_errors.items():
         # ``stage_errors`` is not purely errors: Stage 2b files its
         # corroboration counter there (``*_duplicates``, documented at :1343 as
@@ -1631,11 +1648,16 @@ async def _run_stages(
                     # consume the result window (codex P2 round 2,
                     # PR #556). The python-side guards below stay as a
                     # belt for callers/mocks that ignore exclude_ids.
+                    # `winning_seed` maps each activated node to the seed its
+                    # winning path started from, for F091 attribution only.
+                    winning_seed: dict[UUID, UUID] = {}
                     activated = await spreading_activation_search(
                         sa_session, brain.agent_id, seeds, settings,
                         limit=_SPREADING_OVERFETCH_LIMIT,
                         exclude_ids=seed_ids | seen_ids | candidate_ids,
+                        seed_out=winning_seed,
                     )
+                    seed_by_id = {str(s[0]): s for s in seeds}
                     # A4: the floor was a bare `0.1` literal here and in the
                     # F091 mirror below. Both now read the setting so a
                     # relative-floor experiment is a config arm; the default
@@ -1704,10 +1726,15 @@ async def _run_stages(
                                 created_at=created or datetime.now(UTC),
                             )
                         )
-                        # F091: spreading is multi-hop, so the CTE returns an
-                        # activation rather than a single (seed, edge) pair —
-                        # there is no one seed to attribute. Record the whole
-                        # seed set's origin as the stage.
+                        # F091: the seed is the one the WINNING path started
+                        # from (the path whose activation this row carries),
+                        # reported by the CTE through `seed_out`. Other seeds
+                        # may reach the node more weakly; MAX keeps only the
+                        # best path. Before this, every spreading row was
+                        # recorded under seeds[0] with seed_type="multi", and
+                        # the dashboard rooted them all under that one seed.
+                        # The "multi" placeholder stays as the fallback for a
+                        # search that does not report seeds (mocks, old code).
                         #
                         # A8: `hop` is now the REAL depth of the winning path,
                         # reported by the CTE. It was hardcoded 2 here, which
@@ -1715,10 +1742,11 @@ async def _run_stages(
                         # two-hop and left the depth-1 vs depth-2 split — the
                         # split the whole depth question turns on — answerable
                         # only by running a max_depth=1 arm.
+                        _origin = seed_by_id.get(str(winning_seed.get(nid)))
                         tr.expansion(
-                            seed_id=seeds[0][0] if seeds else nid,
-                            seed_type="multi",
-                            seed_score=None,
+                            seed_id=_origin[0] if _origin else (seeds[0][0] if seeds else nid),
+                            seed_type=_origin[1] if _origin else "multi",
+                            seed_score=_origin[2] if _origin else None,
                             neighbor_id=nid, neighbor_type=ntype,
                             stage="stage4_spreading_activation", hop=depth,
                             edge_relation="spreading_activation",

@@ -9,6 +9,7 @@
     RetrievalExpansion,
   } from '../lib/types/api';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
+  import { legYield, unattributedSeed } from '../lib/retrievalLegs';
 
   // Server-side, not a client filter over the fetched page: the `context` path
   // fires every turn while recall_deep is occasional, so the recent-50 window
@@ -489,25 +490,25 @@
     // thing a per-seed tree cannot show structurally (it prints the neighbour
     // once under each parent), and it was the sole justification for the
     // bipartite diagram — so the tree has to state it outright.
-    // HOP-1 ONLY. A hop-2 row's seed_id is `seeds[0][0]` with
-    // seed_type="multi" (retrieval_pipeline.py:1565) — a placeholder for the
-    // whole activation, not a seed that reached this neighbour. Counting it
-    // meant a neighbour found by one real seed AND present in the spreading
-    // result reported "reached from 2 seeds", inventing convergence out of a
-    // field explicitly documented as unattributable.
+    // HOP-1 ONLY, and never the old seed_type="multi" placeholder (spreading
+    // rows written before the CTE reported each path's seed carried
+    // `seeds[0][0]`, not a seed that reached this neighbour). A spreading row's
+    // real seed is only the WINNING path's seed — weaker paths from other
+    // seeds are discarded by MAX — so hop-2 rows never count as convergence.
     const seedsPerNeighbour = new Map<string, Set<string>>();
     for (const r of rows) {
-      if (r.hop === 2 || r.seed_type === 'multi') continue;
+      if (r.hop === 2 || unattributedSeed(r)) continue;
       let s = seedsPerNeighbour.get(r.neighbor_id);
       if (!s) { s = new Set(); seedsPerNeighbour.set(r.neighbor_id, s); }
       s.add(r.seed_id);
     }
 
-    // Hop-2 spreading activation has NO single attributable seed — the CTE is
-    // multi-seed by construction. Rooting it under whichever seed happened to
-    // be recorded would be a tree that lies. It gets its own pseudo-group.
-    const spreading = rows.filter((r) => r.hop === 2);
-    const direct = rows.filter((r) => r.hop !== 2);
+    // Old spreading rows (both hops) have no attributable seed. Rooting them
+    // under the recorded first seed showed every spreading neighbour as that
+    // seed's, so they get their own pseudo-group. New spreading rows carry the
+    // winning path's seed and group under it like any other expansion.
+    const spreading = rows.filter((r) => unattributedSeed(r));
+    const direct = rows.filter((r) => !unattributedSeed(r));
 
     const groups = new Map<string, { seed: RetrievalExpansion; items: RetrievalExpansion[] }>();
     for (const r of direct) {
@@ -545,23 +546,23 @@
 
   let expansionTotals = $derived.by(() => {
     const rows: RetrievalExpansion[] = detail?.expansions ?? [];
-    const seeds = new Set(rows.filter((r) => r.hop !== 2).map((r) => r.seed_id));
+    const seeds = new Set(rows.filter((r) => !unattributedSeed(r)).map((r) => r.seed_id));
     const nbrs = new Set(rows.map((r) => r.neighbor_id));
     // Same hop-1-only rule as the per-row chip: the header count and the chip
     // must not disagree, and neither may treat the hop-2 placeholder as a seed.
     const conv = new Map<string, Set<string>>();
     for (const r of rows) {
-      if (r.hop === 2 || r.seed_type === 'multi') continue;
+      if (r.hop === 2 || unattributedSeed(r)) continue;
       let s = conv.get(r.neighbor_id);
       if (!s) { s = new Set(); conv.set(r.neighbor_id, s); }
       s.add(r.seed_id);
     }
-    // `seeds` counts DIRECT (hop-1) seeds only. Spreading activation is
-    // multi-seed by construction and stores its first id as an unattributable
-    // placeholder, so on a spreading-only retrieval this set is empty — and
-    // printing "0 seeds" would be observably false, since the producer starts
-    // from a non-empty seed list. Report it as absent instead.
-    const directRows = rows.filter((r) => r.hop !== 2);
+    // `seeds` counts seeds that rows are attributed to. Old spreading rows
+    // stored their first seed as an unattributable placeholder, so on such a
+    // spreading-only retrieval this set is empty — and printing "0 seeds"
+    // would be observably false, since the producer starts from a non-empty
+    // seed list. Report it as absent instead.
+    const directRows = rows.filter((r) => !unattributedSeed(r));
     return {
       seeds: directRows.length ? seeds.size : null,
       edges: rows.length,
@@ -573,7 +574,7 @@
       // displayed reach may be complete, and a blanket "true reach is wider"
       // was simply false. Generalised from one observation; narrowed to the
       // stage that actually has the gap.
-      hasSpreading: rows.some((r) => r.hop === 2 || r.seed_type === 'multi'),
+      hasSpreading: rows.some((r) => r.stage === 'stage4_spreading_activation' || unattributedSeed(r)),
       convergent: [...conv.values()].filter((s) => s.size > 1).length,
       // Counted by ENTRY LEG, not disposition. `tr.expansion()` is recorded at
       // retrieval_pipeline.py:1341, BEFORE the duplicate guard at :1371 — so a
@@ -1014,9 +1015,12 @@
             </thead>
             <tbody>
               {#each detail.legs as leg, li (li)}
+                {@const y = legYield(leg, detail.legs, detail.expansions ?? [])}
                 <tr>
                   <td><code>{leg.name}</code></td>
-                  <td class="num">{leg.n_returned}</td>
+                  <td class="num" title={y.derived ? 'Derived from this retrieval: the record predates per-mechanism counts' : undefined}>
+                    {y.n ?? '—'}{#if y.countedIn}<span class="muted sm"> in {y.countedIn}</span>{/if}
+                  </td>
                   <td class="num muted">{leg.n_deduped || '—'}</td>
                   <!-- Exact on every retrieval, unlike the sampled candidate
                        array below: how many rows this leg fetched and then
@@ -1029,7 +1033,7 @@
                     {:else if !leg.attempted}
                       <span class="badge badge-warn">skipped</span>
                       <span class="muted sm">{leg.skip_reason ?? ''}</span>
-                    {:else if leg.n_returned === 0}
+                    {:else if y.n === 0}
                       <span class="muted sm">ran, found nothing</span>
                     {:else}
                       <span class="muted sm">ok</span>
@@ -1103,7 +1107,7 @@
                 <summary class="seed-head">
                   {#if group.isSpreading}
                     <span class="chip sm prov">spreading activation</span>
-                    <span class="seed-label">multi-seed traversal, hop 2</span>
+                    <span class="seed-label">seed not recorded (older retrieval)</span>
                   {:else}
                     <span class="chip sm t-{group.seed.seed_type}">{group.seed.seed_type}</span>
                     <span class="seed-label" title={nodeLabel(group.seed.seed_id)}>
@@ -1133,6 +1137,9 @@
                            no visible reason. -->
                       {#if edge.extraction_method}
                         <span class="chip sm prov">{edge.extraction_method}</span>
+                      {/if}
+                      {#if edge.hop > 1}
+                        <span class="chip sm" title="Reached {edge.hop} hops from this seed">hop {edge.hop}</span>
                       {/if}
                       {#if seeds > 1}
                         <span class="chip sm conv" title="Also reached from {seeds - 1} other seed(s)">
