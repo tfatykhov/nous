@@ -1826,6 +1826,10 @@ SEND_PHRASINGS = [
     " to the user — {}",
     " to the owner, cc {}",
     " to the user\n{}",
+    # ... and after an excluded tail
+    " to the owner at home and {}",
+    " to the owner at dinner, then {}",
+    " to the owner (twice) and {}",
 ]
 # Cells where only one alternative can catch the destination, so that each one is held by the test on its own
 DECOY_CELLS = [
@@ -1905,10 +1909,16 @@ def test_the_review_probes_of_the_cross_rule(text, level):
         ("I sent the report to the user — the team.", P),
         ("I sent the report to the user\nBob.", P),
         ("I sent the report via send_file, chat_id -100123.", P),
+        ("I sent the report to the user—Bob.", P),
+        ("I sent the report to the owner, also Bob.", P),
+        ("I sent the report to the owner\nBob.", P),
         # ... but the next sentence, a bullet, a vocative or an owner-only tail is not a destination
         ("I sent the report to the owner. Bob will review it.", E),
         ("I sent the report to the owner.\n\nBob will review it.", E),
         ("I sent the report to the owner\n- archived the draft.", E),
+        ("I sent the report to the owner\n\nBob will review it.", E),
+        ("I sent the report to the owner\n- Bob.", E),
+        ("I sent the report to the owner\nok.", E),
         ("I sent the report to you, Tim.", E),
         ("I sent the report to you, as you asked.", E),
         ("I sent the report to the owner; it covers Q3.", E),
@@ -1938,6 +1948,9 @@ def test_a_send_file_is_judged_by_its_whole_sentence(text, level):
         ("I sent the report in plain text.", E),
         ("I sent the report in text form.", E),
         ("I sent the report in text format.", E),
+        ("I sent the report in a text format.", E),
+        ("I sent the report as a text form.", E),
+        ("I sent the report in SMS.", P),
         ("I sent the report as text.", E),
     ],
 )
@@ -1962,6 +1975,8 @@ def test_a_text_message_is_a_channel(text, level):
         ("I sent the report by T+1.", E),
         ("I sent the report by Q3.", E),
         ("I sent the report by Christmas.", E),
+        ("I sent the report by Thanksgiving.", E),
+        ("I sent the report by New Year.", E),
         ("I sent the report by the usual deadline.", E),
         ("I sent the report by our bot.", E),
         ("I sent the report by send_file.", E),
@@ -1977,6 +1992,13 @@ def test_a_text_message_is_a_channel(text, level):
         ("I sent the report by courier.", P),
         ("I sent the report by the API.", P),
         ("I sent the report by the team.", P),
+        # ... also after a time noun that does not end the phrase
+        ("I sent the report by the call center team.", P),
+        ("I forwarded the summary by the day shift.", P),
+        ("I sent the report by our call center.", P),
+        ("I sent the report by the board meeting chair.", P),
+        ("I sent the report by Files Inc.", P),
+        ("I sent the report by Worktime HQ.", P),
     ],
 )
 def test_a_time_or_a_manner_after_by_is_no_one(text, level):
@@ -1994,6 +2016,8 @@ def test_a_time_or_a_manner_after_by_is_no_one(text, level):
         ("I sent the report to you at the usual time.", E),
         ("I sent the report to you at the office.", E),
         ("I sent the report to the owner at lunchtime.", E),
+        ("I sent the report to you at home.", E),
+        ("I sent the report to you at work.", E),
         ("I sent the report to you via Telegram and I waited for a reply.", E),
         ("I sent the report to you via Telegram and I'm waiting for a reply.", E),
         ("I sent the report to the owner and We're done.", E),
@@ -2011,6 +2035,23 @@ def test_a_time_or_a_manner_after_by_is_no_one(text, level):
         ("I sent the report to the owner (Bob).", P),
         ("I sent the report to the owner - the team.", P),
         ("I sent the report to you via Telegram and Bob.", P),
+        # ... and so is someone after an excluded tail
+        ("I sent the report to the owner at the office of Bob.", P),
+        ("I sent the report to the owner at home and Bob.", P),
+        ("I sent the report to you at work and Bob.", P),
+        ("I sent the report to you at the board meeting with Bob.", P),
+        ("I sent the report to you at lunch with Bob.", P),
+        ("I sent the report to the owner at dinner, then Bob.", P),
+        ("I sent the report to the owner at 7am, then Bob.", P),
+        ("I sent the report to you at Worktime HQ.", P),
+        ("I sent the report to the owner (including Bob).", P),
+        ("I sent the report to the owner - including Bob.", P),
+        ("I sent the report to you and including Bob.", P),
+        ("I sent the report to the owner (but Bob too).", P),
+        ("I sent the report to the owner (that is, Bob).", P),
+        ("I sent the report to the owner (twice) and Bob.", P),
+        ("I sent the report to the owner (3 files) and Bob.", P),
+        ("I sent the report to the owner (the report) and Bob.", P),
     ],
 )
 def test_common_owner_only_tails_are_no_recipient(text, level):
@@ -2026,13 +2067,19 @@ def test_common_owner_only_tails_are_no_recipient(text, level):
         ("I sent the summary I wrote using the template.", E),
         ("I sent the report built using pandas, formatted using the template.", E),
         ("I sent the report made using Excel.", E),
+        ("I sent the summary I wrote using pandas.", E),
         ("I sent the report using the latest data.", E),
         # ... but after a send verb, or alone after the object, it is how the report was sent
         ("I sent the report using Slack.", P),
         ("I sent the report using sendmail.", P),
         ("I sent the report and forwarded using sendmail.", P),
+        ("I sent the report shared using sendmail.", P),
         ("Message sent using the API.", P),
         ("I sent the report, generated using pandas, via Slack.", P),
+        ("I sent the report using the data room.", P),
+        ("I sent the report using the metrics channel.", P),
+        ("I sent the report bundled using WeTransfer.", P),
+        ("I sent the report zipped using Dropbox.", P),
     ],
 )
 def test_using_after_a_participle_is_how_the_report_was_made(text, level):
@@ -2041,7 +2088,9 @@ def test_using_after_a_participle_is_how_the_report_was_made(text, level):
 
 
 @pytest.mark.parametrize(
-    "token", ["a" * 20000, "a_" * 10000, "9" * 20000, "chat_id" * 3000], ids=["letters", "a_", "digits", "chat_id"]
+    "token",
+    ["a" * 20000, "a_" * 10000, "9" * 20000, "chat_id" * 3000, "a." * 2500],
+    ids=["letters", "a_", "digits", "chat_id", "dotted-5k"],
 )
 def test_a_long_word_in_a_send_sentence_is_scanned_in_linear_time(token):
     # a base64 blob or a long path: the address alternative once restarted at every character (1.5 s at 20 KB)
