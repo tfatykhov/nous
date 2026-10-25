@@ -73,7 +73,7 @@ class SecretHit:
 class ScreenResult:
     score: int
     hits: tuple[str, ...]  # injection rule ids; soft hits alone are notes on a clean result
-    verdict: Verdict
+    verdict: Verdict  # injection rules only; secrets are reported beside it and never change it
     secrets: tuple[SecretHit, ...] = ()
     truncated: bool = False
 
@@ -140,8 +140,9 @@ _IGNORE_PREVIOUS = (
 )
 
 # --- exfiltrate-context-via-markdown-image, tightened. Upstream's instruction phrase also ends in a
-# bare "url" or "query string", which API docs say all the time ("include your API key in the query
-# string"); here it must end at an image. Added: a markdown image whose query carries a template
+# bare "url", "query string" or a markdown link "](https://", which API docs say all the time
+# ("include your API key in the query string"); here it must end at an image, which renders
+# without a click. Added: a markdown image whose query carries a template
 # placeholder ({conversation}, $SECRET) or 64+ characters of mixed-case encoded data (what a hijacked
 # browser model writes), except the signature parameters of signed CDN/S3 URLs.
 _EXFIL_INSTRUCTION = _all_of(
@@ -157,7 +158,7 @@ _MD_IMAGE_URL = re.compile(r"!\[[^\]\n]{0,200}+\]\((https?://[^)\s]{1,2048}+)\)"
 _PLACEHOLDER = re.compile(r"^(\{[^{}\s]{1,40}\}|\$\{?[A-Z_]{3,40}\}?|<[A-Za-z_ ]{3,40}>|\[[A-Z_]{3,40}\])$")
 _ENCODED = re.compile(r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)[A-Za-z0-9+/=_%.-]{64,}$")
 _SIGNED_URL_PARAM = re.compile(
-    r"^(x-amz-.*|x-goog-.*|sig|signature|jwt|token|expires|policy|key-pair-id|se|sp|sv|sr|st|skoid)$", re.IGNORECASE
+    r"^(x-amz-.*|x-goog-.*|sig|signature|jwt|expires|policy|key-pair-id|se|sp|sv|sr|st|skoid)$", re.IGNORECASE
 )
 
 
@@ -192,29 +193,34 @@ _OVERRIDE_WORDS = ("override", "ignore", "disregard", "forget", "instruction", "
 RULES: tuple[Rule, ...] = (
     Rule(
         "indirect-injection-in-tool-result",
-        True,
-        HARD_WEIGHT,
-        _all_of((_OVERRIDE, _OVERRIDE_WORDS), (_DOWNLOAD_AND_RUN, ("curl", "wget", "base64", "iwr"))),
+        hard=True,
+        weight=HARD_WEIGHT,
+        matches=_all_of((_OVERRIDE, _OVERRIDE_WORDS), (_DOWNLOAD_AND_RUN, ("curl", "wget", "base64", "iwr"))),
     ),
-    Rule("invisible-character-prompt-injection", True, HARD_WEIGHT, _invisible),
+    Rule("invisible-character-prompt-injection", hard=True, weight=HARD_WEIGHT, matches=_invisible),
     Rule(
         "indirect-injection-new-instructions-marker",
-        True,
-        HARD_WEIGHT,
-        _all_of((_NEW_INSTRUCTIONS, ("instruction", "directive", "prompt", "message", "note"))),
+        hard=True,
+        weight=HARD_WEIGHT,
+        matches=_all_of((_NEW_INSTRUCTIONS, ("instruction", "directive", "prompt", "message", "note"))),
     ),
-    Rule("exfiltrate-context-via-markdown-image", True, HARD_WEIGHT, _exfil_image),
+    Rule("exfiltrate-context-via-markdown-image", hard=True, weight=HARD_WEIGHT, matches=_exfil_image),
     Rule(
         "covert-action-injection",
-        False,
-        2,
-        _all_of(
+        hard=False,
+        weight=2,
+        matches=_all_of(
             (_COVERT_TELL, ("not", "don", "never", "without")),
             (_COVERT_HOW, ("silent", "secret", "quiet", "covert", "background", "without", "hide", "conceal")),
             ignore=_HARNESS_FOOTER,
         ),
     ),
-    Rule("ignore-previous-instructions", False, 1, _all_of((_IGNORE_PREVIOUS, ("ignore", "disregard", "forget")))),
+    Rule(
+        "ignore-previous-instructions",
+        hard=False,
+        weight=1,
+        matches=_all_of((_IGNORE_PREVIOUS, ("ignore", "disregard", "forget"))),
+    ),
 )
 
 # Secret-in-output detector (Beacon has none). Prefixed formats only: free-text "password: x" is everywhere on the web.
@@ -227,7 +233,12 @@ _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str], tuple[str, ...]], ...] = (
     # AWS documents its example keys (AKIAIOSFODNN7EXAMPLE) all over the web.
     ("aws_access_key", re.compile(r"\b(?:AKIA|ASIA)(?![0-9A-Z]{9}EXAMPLE\b)[0-9A-Z]{16}\b"), ("AKIA", "ASIA")),
     ("slack_token", re.compile(r"\bxox[bp]-[0-9A-Za-z-]{10,}"), ("xoxb-", "xoxp-")),
-    ("private_key", re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----"), ("PRIVATE KEY-----",)),
+    # The header plus the start of the body, so the hash prefix tells two keys apart.
+    (
+        "private_key",
+        re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[A-Za-z0-9+/=\s]{0,80}"),
+        ("PRIVATE KEY-----",),
+    ),
 )
 _MAX_SECRET_HITS = 20
 
@@ -266,9 +277,12 @@ def _bare_url(url: str) -> str:
     """Scheme, host and path only: a query string, fragment or userinfo can carry a token."""
     try:
         parts = urlsplit(url)
-        return f"{parts.scheme}://{parts.netloc.rpartition('@')[2]}{parts.path}" if parts.scheme else ""
     except ValueError:
         return ""
+    if not parts.scheme:
+        return ""
+    host = parts.netloc.rpartition("@")[2]  # drop userinfo
+    return f"{parts.scheme}://{host}{parts.path}"
 
 
 async def screen_tool_result(
@@ -276,7 +290,7 @@ async def screen_tool_result(
 ) -> ScreenResult | None:
     """Screen a web tool result in flag mode. Never raises; the caller returns its content unchanged.
 
-    Returns None when the screen is off or failed. NOUS_INJECTION_SCREEN_MODE is read per call.
+    Returns None when the screen is off or failed. ``settings.injection_screen_mode`` is read per call.
     """
     mode = getattr(settings, "injection_screen_mode", "flag")
     if mode == "off":
@@ -303,7 +317,9 @@ async def screen_tool_result(
             ",".join(f"{s.kind}:{s.sha256_prefix}" for s in result.secrets) or "-",
         )
     except Exception:
-        logger.exception("injection_screen failed (source=%s); the result passes through unscreened", source)
+        logger.exception(
+            "injection_screen failed (source=%s url=%s); the result passes through unscreened", source, _bare_url(url)
+        )
         return None
     if bus is not None:
         try:

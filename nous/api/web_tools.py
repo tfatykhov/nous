@@ -285,10 +285,6 @@ async def _web_fetch(
         if len(text) > effective_max:
             text = text[:effective_max] + "\n\n[... truncated]"
 
-        # F103: flag-only; never raises and never changes the text.
-        await screen_tool_result(text, source="web_fetch", url=current_url, settings=_settings, bus=_bus)
-        return _mcp_response(f"Content from {url} ({len(text)} chars):\n\n{text}")
-
     except httpx.TimeoutException:
         return _tool_error(f"Fetch timed out for: {url}")
     except httpx.ConnectError as e:
@@ -296,6 +292,10 @@ async def _web_fetch(
     except Exception as e:
         logger.exception("web_fetch error")
         return _tool_error(f"Fetch error: {e}")
+
+    # F103: flag-only, outside the fetch's error handling: it never raises and never changes the text.
+    await screen_tool_result(text, source="web_fetch", url=current_url, settings=_settings, bus=_bus)
+    return _mcp_response(f"Content from {url} ({len(text)} chars):\n\n{text}")
 
 
 # ---------------------------------------------------------------------------
