@@ -1444,8 +1444,10 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
 #      summary", "email-style");
 #   2. a named channel other than Telegram after via/on/over/through/by/in/into/using: Slack, WhatsApp,
 #      Signal, Discord, SMS, iMessage, Teams, Messenger, WeChat, Gmail, Outlook, LinkedIn, Twitter, and "text"
-#      after by/via/over (never "Gmail-style"); after via/through/using, any other word too ("via SMTP", "via
-#      the API") but Telegram, the bot, the chat, a DM, "here", the sending tool by name ("via send_file", "via
+#      or SMS after by/via/over, or after in/as with an article or before "message" ("in a text message", "as an
+#      SMS"; not "in a text file/form/format", "in plain text", "as text") (never "Gmail-style"); after
+#      via/through/using, any other word too ("via SMTP", "via the API") but Telegram, the bot, the chat, a DM,
+#      "here", the sending tool by name ("via send_file", "via
 #      send_telegram"; not any other word with "_": "via _Slack_", "via send_slack", "via telegram_group"), a
 #      link and a time; after on/over, a place: a capitalised word, a handle or "the wiki/website/channel/..."
 #      (never a topic or a time: "a note on the outage", "on it", "on Monday", "on Oct 24", "over lunch");
@@ -1555,7 +1557,9 @@ _ELSEWHERE = re.compile(
     # 2. a named channel
     r"|\b(?:via|on|over|through|by|in|into|using)\s+(?:(?:the|a|your|my)\s+)?(?:slack|whatsapp|signal|discord"
     r"|sms|imessage|teams|messenger|wechat|gmail|outlook|linkedin|twitter)\b(?!-)"
-    r"|\b(?:via|over|by)\s+(?:a\s+)?text\b(?!-)"
+    # a text message or an SMS after in/as too ("in a text message", "as an SMS"; not "in a text file", "as text")
+    r"|(?:\b(?:via|over|by)\s+(?:an?\s+)?(?:text|sms)|\b(?:in|as)\s+(?:an?\s+(?:text|sms)|sms|texts?\s+messages?))"
+    r"\b(?!-)(?!\s+(?:file|form|format)s?\b)"
     r"|\bby\s+(?:post|courier|hand|fax)\b"
     r"|\bchat[ _-]?id\b\s*(?:[=:]\s*)?-?\d|\bchat\s+-\d{5,}"  # another chat, by its id (not "chat 12345 logs")
     # ... anyone or anything right after "<the message> by" or "sent by" ("I sent the report by Bob", "Message

@@ -1920,6 +1920,31 @@ def test_a_send_file_is_judged_by_its_whole_sentence(text, level):
     assert [c.evidence for c in result.claims] == [level]
 
 
+@pytest.mark.parametrize(
+    ("text", "level"),
+    [
+        # a text message or an SMS is a channel after in/as/by/via/over, with or without an article ...
+        ("I sent the report in a text message.", P),
+        ("I sent the report in a text.", P),
+        ("I sent the report in text messages.", P),
+        ("I sent the report as a text message.", P),
+        ("I sent the report as an SMS.", P),
+        ("I sent the report in an SMS.", P),
+        ("I sent the report by text.", P),
+        ("I sent the report via a text.", P),
+        # ... but a text file, form or format and plain text are what was sent
+        ("I sent the report in a text file.", E),
+        ("I sent the report in plain text.", E),
+        ("I sent the report in text form.", E),
+        ("I sent the report in text format.", E),
+        ("I sent the report as text.", E),
+    ],
+)
+def test_a_text_message_is_a_channel(text, level):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [level]
+
+
 @pytest.mark.xfail(
     strict=True,
     reason="known gap, exact on main too: the other destination is in no position the rule reads",
