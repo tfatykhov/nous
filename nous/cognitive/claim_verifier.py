@@ -1548,6 +1548,9 @@ _NOT_A_TRANSPORT = (r"(?!(?:the|a|an|your|my|our|this)\b|(?:telegram|bot|chat|dm
                     rf"{_SELF_ENDS}|(?:here|(?:shared\s+)?links?|time|schedule|request|demand|completion|arrival|track"
                     rf"|hold|weekend|morning|afternoon|evening|night)\b{_HEADS}|send_(?:file|telegram)\b)")
 _ELSEWHERE = re.compile(
+    # every alternative starts at a word boundary or where an address can start: one test of that first, so a
+    # long word costs one step per character, not one per alternative
+    r"(?:\b|(?<![\w.+-])(?=[\w.+-]))(?:"
     # 1. mail
     r"\b(?:e-?)?mail(?:ed|ing)\b"
     r"|\b(?:e-?)?mails?\b(?=\s*(?:[.,;:!?)]|$)"
@@ -1581,11 +1584,13 @@ _ELSEWHERE = re.compile(
     r"(?:wiki|website|site|page|board|forum|server|channel|group|platform|portal|feed|blog|intranet|drive|cloud"
     r"|repo|repository|tracker)s?\b)"
     # 3. a recipient
-    r"|(?<!\bdue )(?<!\bprior )(?<!\bup )(?<!\bthanks )(?<!\baccording )(?<!\bcompared )(?<!\bnext )"
-    r"(?<!\baddition )(?<!\border )(?<!\bclose )(?<!\bsimilar )(?<!\brelative )(?<!\brespect )(?<!\bregard )"
-    r"(?<!\blink )(?<!\blinks )(?<!\bconvert )(?<!\bconverted )(?<!\bconverting )(?<!\bexported )"
-    r"(?<!\btranslated )(?<!\brendered )(?<!\bformatted )(?<!\bcompiled )(?<!\bchanged )(?<!\bswitched )"
-    rf"\bto\s+{_NOT_A_RECIPIENT}"
+    # (each idiom is checked only where "to" is: a check before it would run at every character)
+    r"|\bto(?<!\bdue to)(?<!\bprior to)(?<!\bup to)(?<!\bthanks to)(?<!\baccording to)(?<!\bcompared to)"
+    r"(?<!\bnext to)(?<!\baddition to)(?<!\border to)(?<!\bclose to)(?<!\bsimilar to)(?<!\brelative to)"
+    r"(?<!\brespect to)(?<!\bregard to)(?<!\blink to)(?<!\blinks to)(?<!\bconvert to)(?<!\bconverted to)"
+    r"(?<!\bconverting to)(?<!\bexported to)(?<!\btranslated to)(?<!\brendered to)(?<!\bformatted to)"
+    r"(?<!\bcompiled to)(?<!\bchanged to)(?<!\bswitched to)"
+    rf"\s+{_NOT_A_RECIPIENT}"
     # "a link to the team" is sent to the team; "a link to the report" points at the report
     rf"|\blinks?\s+to\s+(?!{_A_SENT_THING}){_NOT_A_RECIPIENT}"
     rf"|\blinks?\s+to\s+(?:[^.,;:!?\n]|\.(?=\w)){{0,60}}?\s(?:(?:and|&)\s+|for\s+(?=(?-i:(?![a-zß-ÿ\d_])\w[a-zß-ÿ])"
@@ -1605,7 +1610,7 @@ _ELSEWHERE = re.compile(
     # "to the user at Bob" (not "to the owner at 7am", "at once"), and an address anywhere in the clause
     r"|\bto\s+(?:(?:the|your|my)\s+)?(?:you|yourself|me|myself|owner|user|chat|dms?|bot|telegram)\s+at\s+"
     rf"(?!{_A_TIME}|\d|once\b)[\w@#]"
-    r"|[\w.+-]+@[\w-]+(?:\.[\w-]+)+"
+    r"|(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+"  # anchored: a long word is scanned once, not from each letter
     rf"|\bshared\s+(?:\S+\s+){{0,4}}?with\s+{_NOT_A_RECIPIENT}"
     rf"|\bb?cc(?:['’]?e?d)?\s+(?!(?:you|yourself|me|myself)\b"
     rf"|(?:(?:the|your|my)\s+)?(?:owner|user|chat)\b{_SELF_ENDS})"
@@ -1613,7 +1618,7 @@ _ELSEWHERE = re.compile(
     # "copied in the team", "copied Bob", not "copied the file"
     rf"|\bcopied\s+in\s+{_NOT_A_RECIPIENT}"
     r"|\bcopied\s+(?:(?-i:(?![a-zß-ÿ\d_])\w[a-zß-ÿ]+)\b(?![.'’]\w)|[@#]\w|[\w.+-]+@)"
-    r"|\b(?:in|on|into|via|over)\s+#\w",
+    r"|\b(?:in|on|into|via|over)\s+#\w)",
     re.IGNORECASE)
 # A single _, * or backtick around a word is styling, as ** is: "via _Slack_", "to `Bob`"
 _STYLED = re.compile(r"(?<![\w*`])([_*`])([^\s*`]+?)\1(?![\w*`])")

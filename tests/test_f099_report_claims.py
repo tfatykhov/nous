@@ -8,6 +8,7 @@ against the calls the work recorded; an unbacked claim is annotated and, in enfo
 
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -26,7 +27,7 @@ from sqlalchemy import select
 
 from nous.brain import continuation
 from nous.brain.continuation import Resolution, RootLimits
-from nous.cognitive.claim_verifier import UNVERIFIED_MARKER, ClaimVerifier, Evidence, runner_path
+from nous.cognitive.claim_verifier import UNVERIFIED_MARKER, Claim, ClaimVerifier, Evidence, evidence_level, runner_path
 from nous.cognitive.ledger_store import _summary
 from nous.config import Settings
 from nous.handlers.continuation_runner import ContinuationRunner, _ledger_row_evidence, build_arrival_prompt
@@ -1943,6 +1944,21 @@ def test_a_send_file_is_judged_by_its_whole_sentence(text, level):
 def test_a_text_message_is_a_channel(text, level):
     result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
     assert [c.evidence for c in result.claims] == [level]
+
+
+@pytest.mark.parametrize(
+    "token", ["a" * 20000, "a_" * 10000, "9" * 20000, "chat_id" * 3000], ids=["letters", "a_", "digits", "chat_id"]
+)
+def test_a_long_word_in_a_send_sentence_is_scanned_in_linear_time(token):
+    # a base64 blob or a long path: the address alternative once restarted at every character (1.5 s at 20 KB)
+    claim = Claim(kind="email", text="I sent the report", sentence=f"I sent the report {token}")
+    evidence = Evidence("send_file", {"file_path": "/tmp/r.pdf"})
+    best = float("inf")
+    for _ in range(3):
+        start = time.perf_counter()
+        assert evidence_level(claim, evidence) == "exact"  # no match: the whole sentence is scanned
+        best = min(best, time.perf_counter() - start)
+    assert best < 0.05, best
 
 
 @pytest.mark.xfail(
