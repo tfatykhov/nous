@@ -1816,6 +1816,15 @@ SEND_PHRASINGS = [
     " to the owner as well as {}",
     " to the owner ({})",
     " to the owner - {}",
+    # a clause-ending mark after a self word: the rest of the sentence is read too
+    " to the user: {}",
+    " to the user; {}",
+    " to the user, {}",
+    " to the user, then {}",
+    " to the owner, plus {}",
+    " to the user — {}",
+    " to the owner, cc {}",
+    " to the user\n{}",
 ]
 # Cells where only one alternative can catch the destination, so that each one is held by the test on its own
 DECOY_CELLS = [
@@ -1877,15 +1886,47 @@ def test_the_review_probes_of_the_cross_rule(text, level):
     assert [c.evidence for c in result.claims] == [level]
 
 
+@pytest.mark.parametrize(
+    ("text", "level"),
+    [
+        # a clause-ending mark after a self word does not hide the next person: a send_file is judged by its
+        # whole sentence, not by its clause
+        ("I sent the report to the user — Bob.", P),
+        ("I sent the report to the owner, cc Bob.", P),
+        ("I sent the report to the user: Bob.", P),
+        ("I sent the report to the user; bob@x.io.", P),
+        ("I sent the report to the user, then Bob.", P),
+        ("I sent the report to the user, plus Bob.", P),
+        ("I sent the report to the user, Bob and Carol.", P),
+        ("I sent the report to the user — via Slack.", P),
+        ("I sent the report to the user — cc Bob.", P),
+        ("I sent the report to the user — @bob.", P),
+        ("I sent the report to the user — the team.", P),
+        ("I sent the report to the user\nBob.", P),
+        ("I sent the report via send_file, chat_id -100123.", P),
+        # ... but the next sentence, a bullet, a vocative or an owner-only tail is not a destination
+        ("I sent the report to the owner. Bob will review it.", E),
+        ("I sent the report to the owner.\n\nBob will review it.", E),
+        ("I sent the report to the owner\n- archived the draft.", E),
+        ("I sent the report to you, Tim.", E),
+        ("I sent the report to you, as you asked.", E),
+        ("I sent the report to the owner; it covers Q3.", E),
+        ("I sent the report to the owner: done.", E),
+        ("I sent the report to the owner, then archived the draft.", E),
+    ],
+)
+def test_a_send_file_is_judged_by_its_whole_sentence(text, level):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [level]
+
+
 @pytest.mark.xfail(
     strict=True,
-    reason="known gap, exact on main too: the other destination is in another clause or in no position the rule reads",
+    reason="known gap, exact on main too: the other destination is in no position the rule reads",
 )
 @pytest.mark.parametrize(
     "text",
     [
-        "I sent the report to the user — Bob.",  # a dash ends the clause
-        "I sent the report to the owner, cc Bob.",  # so does a comma
         "I sent the report for Bob.",
         "I sent Bob the report.",
     ],

@@ -120,6 +120,7 @@ class Claim:
     span: tuple[int, int] = field(default=(0, 0), compare=False)
     attempt_only: bool = False  # a verdict on an action: any recorded try of it backs the claim
     clause: str = field(default="", compare=False)  # the clause the claim is in ("I sent it by email")
+    sentence: str = field(default="", compare=False)  # its clause to the end of the sentence (a send_file's scope)
 
 
 # First person: "I", "I've", "I have", "I just", "I also" ... The "I" is
@@ -251,11 +252,19 @@ _FIRST_CLAIM_RE = re.compile(_FIRST + _CLAIM_VERBS, re.IGNORECASE)
 # Where a clause ends, for the `and` rule and the question rule; a comma
 # right before "and" joins.
 _CLAUSE_END = re.compile(r"[.!?](?=\s|$)|\n|[;:—]|,(?!\s*and\b)")
+# Where a sentence ends, for what a send_file claim is judged by: a full stop, a blank line or a list item.
+_SENTENCE_END = re.compile(r"[.!?](?=\s|$)|\n[ \t]*\n|\n(?=[ \t]*(?:[-*+•]|\d+[.)])\s)")
 # A condition earlier in the clause: "if I pushed", "check whether it was saved".
 _CONDITION = re.compile(r"\b(?:if|whether|unless)\b", re.IGNORECASE)
 # Text that is not the agent speaking: fenced code, block quotes, quotations.
 _QUOTED = re.compile(r"```.*?(?:```|\Z)|^[ \t]*>[^\n]*|\"[^\"\n]{0,300}\"|“[^”\n]{0,300}”",
                      re.DOTALL | re.MULTILINE)
+
+
+def _sentence_end(sentence_ends: list[int], clause_end: int, text: str) -> int:
+    """Where the sentence holding a clause that ends at ``clause_end`` ends."""
+    i = bisect_left(sentence_ends, clause_end)
+    return sentence_ends[i] if i < len(sentence_ends) else len(text)
 
 
 def _blank(match: re.Match[str]) -> str:
@@ -1427,9 +1436,9 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
     return _best(levels)
 
 
-# A send claim whose clause names another destination than the owner's Telegram chat: a send_file could have
+# A send claim whose sentence names another destination than the owner's Telegram chat: a send_file could have
 # reached it only through a chat id it was given, never certainly. THE RULE: a destination is named when the
-# clause has
+# sentence, from the claim's clause to its end (a clause-ending mark does not hide "to the user — Bob"), has
 #   1. mail as the verb, the thing sent, the channel or the tool: "emailed", "mailed", "Email sent", "the
 #      email.", "via/by/over/through/in/using email", "the mail server", "send_email" (never "the email
 #      summary", "email-style");
@@ -1514,6 +1523,7 @@ _NOT_A_RECIPIENT = (
 # After "to you and": not a verb or a function word ("to you and archived it", "to you and on time"); the verbs
 # are listed, since a name can end in -ed too ("to you and ahmed", "and fred")
 _NOT_A_VERB = (r"(?!(?-i:then|also|now|later|again|so|on|in|at|by|with|as|for|from|via|over|through|i|it|we|will|would"
+               r"|who|whom|which|that|but|because|since|while|when|thanks|please|including"
                r"|can|could|should|have|has|had|is|was|am|only|nobody|no\s+one|none|done|sent|told|made|put|set|left"
                r"|got|wrote|b?cc(?:['’]?e?d)?|(?:archiv|forward|copi|sav|mov|notifi|ping|add|attach|upload|post|clos"
                r"|updat|delet|remov|fil|creat|merg|push|committ|schedul|shar|logg|not|confirm|check|verifi|open|renam"
@@ -1577,12 +1587,15 @@ _ELSEWHERE = re.compile(
     rf"|\blinks?\s+to\s+(?:[^.,;:!?\n]|\.(?=\w)){{0,60}}?\s(?:(?:and|&)\s+|for\s+(?=(?-i:(?![a-zß-ÿ\d_])\w[a-zß-ÿ])"
     rf"|[@#]\w)){_NOT_A_VERB}{_NOT_A_RECIPIENT}"
     # "to you and Bob", "to the owner and the team", "via Telegram and Bob", "to the owner earlier and Bob", "to
-    # the owner as well as Bob", "to the owner (Bob)", "to the owner - Bob" (not "to you and archived it", "to you
-    # and on time", "to the owner (see above)", "to the owner - done")
+    # the owner as well as Bob", "to the owner (Bob)", "to the owner - Bob", "to the user: Bob", "to the user,
+    # then Bob", "to the user, Bob and Carol", "to the user<newline>Bob" (not "to you and archived it", "to you
+    # and on time", "to the owner (see above)", "to the owner - done", "to the owner; it covers Q3", a vocative
+    # "to you, Tim", nor a line longer than three words)
     r"|\b(?:to|via|through|over|on|using)\s+(?:(?:the|your|my)\s+)?(?:you|yourself|me|myself|owner|user|chat|dms?"
     r"|bot|telegram|send_file|send_telegram)\b(?:\s+(?:earlier|just|now|already|today|directly|first|again|too|also"
     r"|both|twice|once|successfully|personally|privately|separately))*"
-    r"(?:,?\s+(?:and|&|as\s+well\s+as)\s+|\s*\(\s*|\s+[-–—]\s+"
+    r"(?:,?\s+(?:and|&|as\s+well\s+as)\s+|,\s+(?:then|plus|also)\s+|\s*\(\s*|\s+[-–—]\s+|\s*[:;—]\s*"
+    r"|(?<!\byou)(?<!\byourself)(?<!\bme)(?<!\bmyself),\s*|[ \t]*\n[ \t]*(?=\S+(?:[ \t]+\S+){0,2}[ \t]*(?:\n|$))"
     r"|\s+for\s+(?=(?-i:(?![a-zß-ÿ\d_])\w[a-zß-ÿ])|[@#]\w))"
     rf"(?:only\s+)?{_NOT_A_VERB}{_NOT_A_RECIPIENT}"
     # "to the user at Bob" (not "to the owner at 7am", "at once"), and an address anywhere in the clause
@@ -1616,8 +1629,9 @@ def evidence_level(claim: Claim, ev: Evidence) -> str:
     if ev.tool_name == "send_file":  # a Telegram send: no named address, and no e-mail
         if claim.target:
             return "none"
-        clause = _STYLED.sub(r"\2", claim.clause or claim.text)
-        return "plausible" if _ELSEWHERE.search(clause) else "exact"
+        # the whole sentence from the claim's clause on: "to the user — Bob", "to the user: Bob"
+        sentence = _STYLED.sub(r"\2", claim.sentence or claim.clause or claim.text)
+        return "plausible" if _ELSEWHERE.search(sentence) else "exact"
     if not ev.args:  # names-only evidence from a legacy caller
         return "plausible"
     if ev.tool_name == "bash":
@@ -2307,6 +2321,7 @@ class ClaimVerifier:
         text = _QUOTED.sub(_blank, text).replace("**", "")
         clause_starts = [m.end() for m in _CLAUSE_END.finditer(text)]
         clause_ends = [m.start() for m in _CLAUSE_END.finditer(text)]
+        sentence_ends = [m.start() for m in _SENTENCE_END.finditer(text)]
         reported = [m.start() for m in _REPORTED.finditer(text)]
         scope_starts = [m.end() for m in _REPORTED_SCOPE_END.finditer(text)]
         taken = {(c.kind, c.span) for c in first}
@@ -2327,9 +2342,12 @@ class ClaimVerifier:
                     continue
                 taken.add((kind, (start, end)))
                 target = match.groupdict().get("target")
-                clause = text[clause_starts[c] if c >= 0 else 0:clause_ends[k] if k < len(clause_ends) else len(text)]
+                clause_start = clause_starts[c] if c >= 0 else 0
+                clause_end = clause_ends[k] if k < len(clause_ends) else len(text)
                 found.append(Claim(kind=kind, text=match.group(0).strip(), span=(start, end),
-                                   target=target.lower() if target else None, attempt_only=attempt, clause=clause))
+                                   target=target.lower() if target else None, attempt_only=attempt,
+                                   clause=text[clause_start:clause_end],
+                                   sentence=text[clause_start:_sentence_end(sentence_ends, clause_end, text)]))
         found.sort(key=lambda claim: claim.span[0])
         return found
 
@@ -2343,6 +2361,7 @@ class ClaimVerifier:
         ends = [m for m in _CLAUSE_END.finditer(text)]
         clause_ends = [m.start() for m in ends]
         clause_starts = [m.end() for m in ends]
+        sentence_ends = [m.start() for m in _SENTENCE_END.finditer(text)]
         first_claims = [m.start() for m in _FIRST_CLAIM_RE.finditer(text)]
         conditions = [m.start() for m in _CONDITION.finditer(text)]
         reported = [m.start() for m in _REPORTED.finditer(text)]
@@ -2382,7 +2401,8 @@ class ClaimVerifier:
                     if "@" in target:
                         target = target.lower()
                 found.append((start, Claim(kind=kind, text=match.group(0).strip(), target=target,
-                                           span=(start, end), clause=text[clause:clause_end])))
+                                           span=(start, end), clause=text[clause:clause_end],
+                                           sentence=text[clause:_sentence_end(sentence_ends, clause_end, text)])))
         found.sort(key=lambda item: item[0])
         return [claim for _, claim in found]
 
