@@ -9,7 +9,8 @@ the content or a secret value). Spec: docs/features/F103-injection-screen.md.
 
 The six injection rules are ported from Asymptote Labs' agent-beacon threat
 rules (rules/prompt-injection/*.rule.yaml), keeping each rule's id; the
-changes from upstream are noted on each rule. agent-beacon is MIT licensed:
+changes from upstream are noted on each rule (one of them is split into a
+hard and a soft rule). agent-beacon is MIT licensed:
 
     Copyright (c) 2026 Asymptote Labs
 
@@ -125,13 +126,19 @@ def _invisible(text: str, lowered: str) -> bool:
     return bool(_INVISIBLE.search(_SUBDIVISION_FLAG.sub("", text)))
 
 
-# --- indirect-injection-new-instructions-marker: unchanged (upstream screens prompts; here web content).
+# --- indirect-injection-new-instructions-marker: upstream screens prompts; here web content, where
+# "Important note: you must have Python 3.12 installed" is everyday docs text. The hard rule needs an
+# addressee ("for the AI", "the assistant must") or an override/secret marker; upstream's bare
+# "you must" / "the model must" after an everyday marker is the soft rule below.
+_MARKER = r"\s+(system\s+)?(instructions?|directives?|prompt|message|note)\b.{0,40}"
+_UNADDRESSED = r":?\s*(you\s+must|the\s+model\s+(must|should|shall))"
 _NEW_INSTRUCTIONS = (
-    r"(new|updated|important|additional|override|special|secret)\s+(system\s+)?"
-    r"(instructions?|directives?|prompt|message|note)\b.{0,40}"
-    r"(for\s+(the\s+)?(ai|assistant|model|llm|agent|chatbot)|to\s+(the\s+)?(ai|assistant|model|llm|agent)|"
-    r":?\s*(you\s+must|the\s+(assistant|ai|model|agent)\s+(must|should|shall)))"
+    r"((new|updated|important|additional|override|special|secret)" + _MARKER + r"("
+    r"for\s+(the\s+)?(ai|assistant|model|llm|agent|chatbot)|to\s+(the\s+)?(ai|assistant|model|llm|agent)|"
+    r":?\s*the\s+(assistant|ai|agent)\s+(must|should|shall))|"
+    r"(override|secret)" + _MARKER + _UNADDRESSED + r")"
 )
+_NEW_INSTRUCTIONS_UNADDRESSED = r"(new|updated|important|additional|special)" + _MARKER + _UNADDRESSED
 
 # --- ignore-previous-instructions: unchanged, but soft (articles about prompt injection quote it).
 _IGNORE_PREVIOUS = (
@@ -209,6 +216,12 @@ RULES: tuple[Rule, ...] = (
         matches=_all_of((_NEW_INSTRUCTIONS, ("instruction", "directive", "prompt", "message", "note"))),
     ),
     Rule("exfiltrate-context-via-markdown-image", hard=True, weight=HARD_WEIGHT, matches=_exfil_image),
+    Rule(
+        "indirect-injection-new-instructions-unaddressed",
+        hard=False,
+        weight=1,
+        matches=_all_of((_NEW_INSTRUCTIONS_UNADDRESSED, ("instruction", "directive", "prompt", "message", "note"))),
+    ),
     Rule(
         "covert-action-injection",
         hard=False,
