@@ -2019,6 +2019,28 @@ def test_common_owner_only_tails_are_no_recipient(text, level):
 
 
 @pytest.mark.parametrize(
+    ("text", "level"),
+    [
+        # "using" after a participle, or before the data or a template, is how the report was made ...
+        ("I sent the report with charts generated using matplotlib.", E),
+        ("I sent the summary I wrote using the template.", E),
+        ("I sent the report built using pandas, formatted using the template.", E),
+        ("I sent the report made using Excel.", E),
+        ("I sent the report using the latest data.", E),
+        # ... but after a send verb, or alone after the object, it is how the report was sent
+        ("I sent the report using Slack.", P),
+        ("I sent the report using sendmail.", P),
+        ("I sent the report and forwarded using sendmail.", P),
+        ("Message sent using the API.", P),
+        ("I sent the report, generated using pandas, via Slack.", P),
+    ],
+)
+def test_using_after_a_participle_is_how_the_report_was_made(text, level):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [level]
+
+
+@pytest.mark.parametrize(
     "token", ["a" * 20000, "a_" * 10000, "9" * 20000, "chat_id" * 3000], ids=["letters", "a_", "digits", "chat_id"]
 )
 def test_a_long_word_in_a_send_sentence_is_scanned_in_linear_time(token):

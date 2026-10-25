@@ -1449,7 +1449,9 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
 #      via/through/using, any other word too ("via SMTP", "via the API") but Telegram, the bot, the chat, a DM,
 #      "here", the sending tool by name ("via send_file", "via
 #      send_telegram"; not any other word with "_": "via _Slack_", "via send_slack", "via telegram_group"), a
-#      link and a time; after on/over, a place: a capitalised word, a handle or "the wiki/website/channel/..."
+#      link and a time (but "using" after a participle, or before the data or a template, is how the report was
+#      made: "charts generated using matplotlib"); after on/over, a place: a capitalised word, a handle or "the
+#      wiki/website/channel/..."
 #      (never a topic or a time: "a note on the outage", "on it", "on Monday", "on Oct 24", "over lunch");
 #      post, a courier, a hand or a fax after "by", and anyone right after "<the message> by" or "sent by"
 #      but you, a time, the owner's chat, a link, a gerund or a manner ("the report by Bob", not "by Friday",
@@ -1558,6 +1560,11 @@ _NOT_A_TAIL = (rf"(?!{_A_SENT_THING}|\d+\s*(?:pages?|slides?|sheets?|charts?|tab
 _NOT_A_TRANSPORT = (r"(?!(?:the|a|an|your|my|our|this)\b|(?:telegram|bot|chat|dms?)(?:\s+(?:telegram|bot|chat|dms?))*\b"
                     rf"{_SELF_ENDS}|(?:here|(?:shared\s+)?links?|time|schedule|request|demand|completion|arrival|track"
                     rf"|hold|weekend|morning|afternoon|evening|night)\b{_HEADS}|send_(?:file|telegram)\b)")
+_USING = (r"(?:(?<!ed )|(?<=forwarded )|(?<=delivered )|(?<=posted )|(?<=shared )|(?<=mailed )|(?<=uploaded )"
+          r"|(?<=relayed )|(?<=messaged )|(?<=texted )|(?<=dispatched )|(?<=transmitted ))"
+          r"(?<!built )(?<!made )(?<!written )(?<!wrote )(?<!drawn )(?<!done )using"
+          r"(?!\s+(?:the|a|an|your|my|our|this)\s+(?:[\w-]+\s+)?(?:data|dataset|numbers|figures|template|format"
+          r"|layout|style|results|stats|statistics|metrics)\b)")
 _ELSEWHERE = re.compile(
     # every alternative starts at a word boundary or where an address can start: one test of that first, so a
     # long word costs one step per character, not one per alternative
@@ -1594,8 +1601,10 @@ _ELSEWHERE = re.compile(
     r"|call|stand-?up)s?|send_(?:file|telegram)|files?)\b"
     rf"|(?:(?:the|your|my|our)\s+)?{_A_SELF})[\w@#]"
     # ... or any other transport than Telegram, a tool, a link or a time after via/through/using, and a place
-    # after on/over (not a topic: "a note on the outage")
-    rf"|\b(?:via|through|using)\s+(?!{_A_TIME})(?:(?:the|a|an|your|my|our|this)\s+)?{_NOT_A_TRANSPORT}"
+    # after on/over (not a topic: "a note on the outage"); "using" after a participle other than a send verb, or
+    # before the data or a template, is how the report was made ("charts generated using matplotlib", "built
+    # using pandas", "using the latest data"), not how it was sent
+    rf"|\b(?:via|through|{_USING})\s+(?!{_A_TIME})(?:(?:the|a|an|your|my|our|this)\s+)?{_NOT_A_TRANSPORT}"
     r"(?![\w.]*-style\b)[\w@#]"
     rf"|\b(?:on|over)\s+(?!{_A_TIME})(?!the\s+(?:same|next|previous|last)\s+page\b)"  # no place
     rf"(?:{_NOT_A_TRANSPORT}(?-i:(?![a-zß-ÿ\d_])\w)|@\w|(?:the|a|an|your|my|our|this)\s+(?:[\w-]+\s+)?"
