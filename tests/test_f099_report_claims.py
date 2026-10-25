@@ -1687,6 +1687,42 @@ def test_an_address_or_a_place_after_a_self_word_is_another_destination(text, le
     assert [c.evidence for c in result.claims] == [level]
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        # a channel word is a channel only as the whole phrase after "by"; a possessive or a noun after it names
+        # another actor, for every pattern _NOT_BY guards
+        "Message sent by Telegram's scheduler.",
+        "Message sent by Telegram bot.",
+        "Message sent by Slack's reminder bot.",
+        "Email sent to bob@x.io by Gmail's scheduler.",
+        "PR #4 merged by Slack automation.",
+        "PR #4 opened by Slack bot.",
+        "The subtask was cancelled by Slack automation.",
+        "The report was saved to /tmp/r.md by Telegram's exporter.",
+    ],
+)
+def test_a_channel_named_actor_is_someone_elses_action(text):
+    assert _verify(text).claims == []
+    assert _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})]).claims == []
+
+
+@pytest.mark.parametrize(
+    ("text", "kind"),
+    [
+        ("Message sent by Slack.", "email"),
+        ("Message sent by Telegram.", "email"),
+        ("Message sent by Telegram, as asked.", "email"),
+        ("Message sent by email to the team.", "email"),
+        ("Message sent by Slack and email.", "email"),
+        ("Message sent by DM at 9am.", "email"),
+        ("Message sent by DM (see above).", "email"),
+    ],
+)
+def test_a_channel_alone_after_by_is_still_the_agents_claim(text, kind):
+    assert _kinds(text) == [kind]
+
+
 def test_a_verifier_given_no_runner_takes_no_bash_call_for_a_runner_call():
     evidence = [Evidence("bash", {"command": f"bash {RUNNER} cancel {JOB}"}, exit_code=0)]
     assert not ClaimVerifier().verify_report(f"I cancelled job {JOB}.", evidence).verified

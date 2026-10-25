@@ -206,14 +206,15 @@ _DEPLOY_OBJECT = (rf"(?=\s+{_DET}(?:[\w-]+\s+){{0,2}}?(?:builds?|releases?|fix(?
 _OPENING = r"(?:(?<![^\n])|(?<=[.!?]\s)|(?<=[✓✅]\s))"
 # "... by the scheduled task": someone else's completion, not the agent's;
 # "by 9am", "by Friday", "by me" and a channel ("by email", "by text", "by Slack") are not; post, a courier
-# or a hand is someone else's delivery.
+# or a hand is someone else's delivery. A channel is one only as the whole phrase: a mark, the end or
+# to/at/on/for/with/and follows it; "by Slack's reminder bot", "by Telegram bot" name another actor.
 # Dots inside words pass, or the target would shrink to `/srv/q3` to keep
 # ".md by" out of reach.
 _NOT_BY = (r"(?!(?:[^.\n;]|\.(?=\S)){0,60}?\bby\s+(?!me\b|myself\b|\d|noon\b|midnight\b|tonight\b"
            r"|tomorrow\b|today\b|end\b|eod\b|eob\b|cob\b|then\b|now\b|the\s+end\b|next\b|lunch\b"
            r"|this\s+(?:morning|afternoon|evening|week)\b|(?:mon|tues|wednes|thurs|fri|satur|sun)day\b"
-           r"|(?:e-?)?mail\b|text\b|sms\b|telegram\b|dms?\b|slack\b|whatsapp\b|signal\b|discord\b|imessage\b"
-           r"|teams\b|messenger\b|wechat\b|gmail\b|outlook\b)[\w$])")
+           r"|(?:(?:e-?)?mail|text|sms|telegram|dms?|slack|whatsapp|signal|discord|imessage|teams|messenger|wechat"
+           r"|gmail|outlook)(?=[ \t]*(?:[.,;:!?()\]\"”—–\n]|$)|\s+(?:to|at|on|for|with|and)\b))[\w$])")
 _MESSAGE = r"\b(?:e-?mail|message|report|note|reminder|summary|heads-up|invite|notification|alert|digest)\b"
 
 # (pattern, kind). Patterns that open with the subject group are claims only
