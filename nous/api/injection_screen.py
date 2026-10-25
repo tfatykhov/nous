@@ -4,8 +4,8 @@ Screens the text ``web_fetch`` returns and the ``browser_task`` summary for
 instructions planted for the model and for credentials. It never changes what
 the model sees: a flagged result is logged and, when an event bus is wired,
 recorded as an ``injection_screen_flagged`` event (rule ids, score, the URL
-without its query, secret types and sha256 prefixes; never the content or a
-secret value). Spec: docs/features/F103-injection-screen.md.
+cut to host and first path segment, secret types and sha256 prefixes; never
+the content or a secret value). Spec: docs/features/F103-injection-screen.md.
 
 The six injection rules are ported from Asymptote Labs' agent-beacon threat
 rules (rules/prompt-injection/*.rule.yaml), keeping each rule's id; the
@@ -277,16 +277,28 @@ def screen(text: str) -> ScreenResult:
     )
 
 
+_MAX_URL_CHARS = 120
+
+
 def _bare_url(url: str) -> str:
-    """Scheme, host and path only: a query string, fragment or userinfo can carry a token."""
+    """Scheme, host and first path segment of an http(s) URL, at most _MAX_URL_CHARS characters.
+
+    A query string, fragment, userinfo or deeper path can carry a token (``/reset/<token>``), and
+    the "path" of a ``data:`` or ``javascript:`` URL is its content, so other schemes keep the
+    scheme alone. The result is stored in nous_system.events and shown in the Activity feed.
+    """
     try:
         parts = urlsplit(url)
     except ValueError:
         return ""
-    if not parts.scheme:
-        return ""
-    host = parts.netloc.rpartition("@")[2]  # drop userinfo
-    return f"{parts.scheme}://{host}{parts.path}"
+    scheme = parts.scheme.lower()
+    if scheme not in ("http", "https"):
+        bare = f"{scheme}:" if scheme else ""
+    else:
+        host = parts.netloc.rpartition("@")[2]  # drop userinfo
+        first, _, rest = parts.path.lstrip("/").partition("/")
+        bare = f"{scheme}://{host}" + (f"/{first}/…" if rest else parts.path)
+    return bare if len(bare) <= _MAX_URL_CHARS else bare[: _MAX_URL_CHARS - 1] + "…"
 
 
 async def screen_tool_result(

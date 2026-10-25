@@ -476,13 +476,24 @@ class TestScreenToolResult:
     @pytest.mark.parametrize(
         ("url", "expected"),
         [
+            # The three rows of the PR #805 review.
+            ("https://example.com/reset/abc123TOKEN?x=1#f", "https://example.com/reset/…"),
+            ("https://u:p@host.io/s/SIGNED/path", "https://host.io/s/…"),
+            ("data:text/html,<script>x</script>", "data:"),
             ("https://user:hunter2@host.example:8080/p?q=1", "https://host.example:8080/p"),
             ("https://u:p@ss@host.example/", "https://host.example/"),
+            ("https://[2001:db8::1]:8443/a/b/c", "https://[2001:db8::1]:8443/a/…"),
+            ("https://host.example", "https://host.example"),
+            ("https://host.example/reset/", "https://host.example/reset/"),
+            ("HTTP://Host.example/A/B", "http://Host.example/A/…"),
+            ("javascript:alert(document.cookie)", "javascript:"),
+            ("file:///etc/passwd", "file:"),
             ("http://[::1", ""),
+            ("host.example/reset/abc", ""),
             ("", ""),
         ],
     )
-    async def test_the_url_is_reduced_to_scheme_host_and_path(
+    async def test_the_url_is_reduced_to_scheme_host_and_first_path_segment(
         self, url: str, expected: str, caplog: pytest.LogCaptureFixture
     ) -> None:
         bus = _bus()
@@ -491,7 +502,28 @@ class TestScreenToolResult:
             result = await screen_tool_result(text, source="web_fetch", url=url, settings=_settings(), bus=bus)
         assert result is not None
         assert bus.emit.call_args.args[0].data["url"] == expected
-        assert "hunter2" not in caplog.text and "p@ss" not in caplog.text
+        for leak in ("hunter2", "p@ss", "abc123TOKEN", "SIGNED", "<script>", "cookie", "passwd", "/b/c"):
+            assert leak not in caplog.text and leak not in repr(bus.emit.call_args.args[0].data)
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://example.com/" + "a" * 5000,
+            "https://example.com/reset/" + "T" * 5000,
+            "https://" + "h" * 300 + ".example/p",
+            "x" * 300 + "://host/p",
+            "data:text/html," + "<secret>" * 1000,
+        ],
+        ids=["long-path", "long-second-segment", "long-host", "long-scheme", "long-data-url"],
+    )
+    def test_the_url_is_capped(self, url: str) -> None:
+        bare = screen_mod._bare_url(url)
+        assert len(bare) <= screen_mod._MAX_URL_CHARS
+        assert "TTTT" not in bare and "secret" not in bare
+
+    @pytest.mark.parametrize("url", ["http://[", "https://a:b:c@[::1/x", "\x00://\ud800", "http://h:99999/p", "::::"])
+    def test_a_malformed_url_never_raises(self, url: str) -> None:
+        assert isinstance(screen_mod._bare_url(url), str)
 
     async def test_truncation_is_reported(self) -> None:
         bus = _bus()
