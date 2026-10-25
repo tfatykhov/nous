@@ -168,7 +168,11 @@ def _exfil_image(text: str, lowered: str) -> bool:
     if "![" not in text:
         return False
     for m in _MD_IMAGE_URL.finditer(text):
-        for name, value in parse_qsl(urlsplit(m.group(1)).query, keep_blank_values=True):
+        try:
+            query = urlsplit(m.group(1)).query
+        except ValueError:  # "http://[abc": one bad URL must not switch the whole screen off
+            continue
+        for name, value in parse_qsl(query, keep_blank_values=True):
             if _PLACEHOLDER.match(value):
                 return True
             if _ENCODED.match(value) and not _SIGNED_URL_PARAM.match(name):

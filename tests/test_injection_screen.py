@@ -386,6 +386,14 @@ class TestSecrets:
 
 
 class TestLimits:
+    def test_a_malformed_image_url_does_not_switch_the_screen_off(self) -> None:
+        """urlsplit raises on "http://[abc"; one such image must not hide the rest of the page."""
+        text = "![x](http://[abc) " + RULE_FIXTURES["invisible-character-prompt-injection"]["match"][1]
+        text += " " + _secret_samples()["github_token"]
+        result = screen(text)
+        assert "invisible-character-prompt-injection" in result.hits
+        assert [s.kind for s in result.secrets] == ["github_token"]
+
     def test_input_is_capped(self) -> None:
         payload = "a" * screen_mod.MAX_SCREEN_CHARS + "\U000e0069\U000e0067"
         result = screen(payload)
