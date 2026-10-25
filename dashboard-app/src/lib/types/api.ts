@@ -1469,6 +1469,12 @@ export interface RetrievalLeg {
   score_max: number | null;
   error: string | null;
   skip_reason: string | null;
+  /**
+   * Set on a mechanism leg (spreading_activation, brain_graph) whose rows are
+   * counted under another leg — always "graph_expanded". Absent on every other
+   * leg and on rows written before it existed (see lib/retrievalLegs.ts).
+   */
+  counted_in?: string | null;
 }
 
 /** One seed → edge → neighbor traversal. */

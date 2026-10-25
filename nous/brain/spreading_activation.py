@@ -89,6 +89,7 @@ async def spreading_activation_search(
     settings: Settings,
     limit: int = 20,
     exclude_ids: set[UUID] | None = None,
+    seed_out: dict[UUID, UUID] | None = None,
 ) -> list[tuple[UUID, str, float, int]]:
     """Run spreading activation CTE and return activated nodes.
 
@@ -102,6 +103,12 @@ async def spreading_activation_search(
             INSIDE the final SELECT — before the LIMIT — so known
             duplicates never consume the result window (codex P2,
             PR #556). Traversal still passes THROUGH excluded nodes.
+        seed_out: when given, filled with ``node_id -> seed_id``: the seed
+            the WINNING path started from (the path whose activation is
+            returned). F091 used to record every spreading row under the first
+            seed, so the dashboard rooted all of them under whichever seed
+            happened to be first. A separate out-parameter rather than a fifth
+            tuple element, so callers and mocks that unpack four stay valid.
 
     Returns:
         List of ``(node_id, node_type, activation, depth)`` sorted by
@@ -209,7 +216,7 @@ async def spreading_activation_search(
 
     sql = text(f"""
         WITH RECURSIVE activation AS (
-            SELECT id, node_type, score AS activation, 0 AS depth
+            SELECT id, node_type, score AS activation, 0 AS depth, id AS seed_id
             FROM (VALUES {values_clause}) AS seeds(id, node_type, score)
 
             UNION ALL
@@ -224,7 +231,8 @@ async def spreading_activation_search(
                     * CASE WHEN COALESCE(e.weight, 1.0) > 1.0 THEN 1.0
                            ELSE COALESCE(e.weight, 1.0) END
                     * :decay,
-                a.depth + 1
+                a.depth + 1,
+                a.seed_id
             FROM activation a
             JOIN brain.graph_edges e
                 ON (e.source_id = a.id OR e.target_id = a.id)
@@ -240,17 +248,19 @@ async def spreading_activation_search(
         -- ROW_NUMBER over (activation DESC, depth ASC) selects exactly the row
         -- MAX(activation) used to return, so `total_activation` is unchanged;
         -- the depth tie-break only decides which of two equally-activated
-        -- paths is reported, preferring the shorter.
+        -- paths is reported, preferring the shorter. seed_id is the LAST key:
+        -- it changes neither activation nor depth, only makes the reported
+        -- seed of an exact tie deterministic.
         ranked AS (
-            SELECT act.id, act.node_type, act.activation, act.depth,
+            SELECT act.id, act.node_type, act.activation, act.depth, act.seed_id,
                    ROW_NUMBER() OVER (
                        PARTITION BY act.id, act.node_type
-                       ORDER BY act.activation DESC, act.depth ASC
+                       ORDER BY act.activation DESC, act.depth ASC, act.seed_id ASC
                    ) AS rn
             FROM activation act
             {where_clause}
         )
-        SELECT id, node_type, activation AS total_activation, depth
+        SELECT id, node_type, activation AS total_activation, depth, seed_id
         FROM ranked
         WHERE rn = 1
         ORDER BY total_activation DESC
@@ -258,7 +268,11 @@ async def spreading_activation_search(
     """)
 
     result = await session.execute(sql, params)
+    rows = result.all()
+    if seed_out is not None:
+        for row in rows:
+            seed_out[row.id] = row.seed_id
     return [
         (row.id, row.node_type, float(row.total_activation), int(row.depth))
-        for row in result.all()
+        for row in rows
     ]
