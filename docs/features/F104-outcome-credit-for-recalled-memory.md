@@ -5,7 +5,9 @@
 **Status:** spec, not started. Two flags: `NOUS_OUTCOME_CREDIT_CAPTURE_ENABLED` (default `true`, writes
 only) and `NOUS_OUTCOME_CREDIT_BOOST_ENABLED` (default `false` until the Phase 2 gate passes).
 **Planned code:** `nous/cognitive/layer.py` (post_turn snapshot), `nous/handlers/outcome_credit.py`
-(new `decision_reviewed` subscriber), `nous/cognitive/context.py` (`_apply_outcome_boost`),
+(new `decision_reviewed` subscriber), `nous/cognitive/context.py` (delivered ids in `BuildResult`,
+`_apply_outcome_boost`), `nous/api/call_outcome.py` + `nous/api/tools.py` + `nous/api/runner.py` +
+`nous/cognitive/schemas.py` (the turn's `record_decision` ids, threaded to post_turn),
 `sql/migrations/093_outcome_credit.sql`, `scripts/diag/outcome_credit_report.py`.
 
 **Credit:** the idea comes from Memento (Memento-Teams/Memento; Zhou et al., *Fine-tuning LLM Agents
@@ -30,7 +32,8 @@ Nous learns which memories to recall from two signals, and neither one is the ou
 Graded outcomes exist. `brain.decisions.outcome` is set by `Brain.review`, which emits
 `decision_reviewed` after commit. But nothing records **which memories were in context** when the
 decision was made. `TurnContext.recalled_{fact,decision,episode,procedure}_ids` are sent back in the
-REST turn response (`api/rest.py`), passed to F071 dedup, and then dropped. So when a decision is
+REST turn response (`api/rest.py`), passed to F071 dedup, and then dropped (they also include items
+the section budget cut, see section 1). So when a decision is
 graded `failure`, the facts and past decisions that informed it get no blame. When it's graded
 `success`, they get no credit.
 
@@ -64,8 +67,9 @@ New table `brain.decision_recall_context` (the only new table):
 - `decision_id` UUID: FK to `brain.decisions(id)`, ON DELETE CASCADE.
 - `memory_type`: `fact` | `decision` | `episode` | `procedure`
 - `memory_id` UUID
-- `rank` SMALLINT: 0-based position within its type, in final context order (after boosts and the
-  relevance filter, so it matches what the model actually saw). Rank restarts at 0 for each type, so
+- `rank` SMALLINT: 0-based position within its type among the memories **delivered** to the model
+  (after boosts, the relevance filter and the section budget cut; see "Delivered ids only" below).
+  Ranks are counted after the cut, so they have no gaps. Rank restarts at 0 for each type, so
   the rank weight below is applied **per type**: the first fact and the first episode both get
   weight 1.0. The Phase 2 analysis compares types, so a per-type comparison must keep this in mind
   (a decision with recalls of four types carries up to four weight-1.0 rows).
@@ -74,8 +78,9 @@ New table `brain.decision_recall_context` (the only new table):
 - `source`: `context` (Phase 1). `recall_deep` is added in Phase 3.
 - `credited_reward` REAL NULL, `credited_weight` REAL NULL: the row's current credit. NULL means the
   row contributes nothing (not reviewed yet, or relabelled out).
-- `credited_at` TIMESTAMPTZ NULL: when the row was **first** credited by an eligible review. Written
-  once and never changed afterwards (see re-grades below). The decay is computed from it.
+- `credited_at` TIMESTAMPTZ NULL: when the row was **first** credited from an eligible review, by the
+  handler or at insert (section 2). Written once and never changed afterwards (see re-grades below).
+  The decay is computed from it.
 - `created_at`
 - PK `(decision_id, memory_type, memory_id)`, plus an index on `(agent_id, memory_type, memory_id)`
   for the read path.
@@ -86,29 +91,80 @@ count in CLAUDE.md (Database) changes to match, both in the implementation PR. T
 counted 56 → 58; on current main the base is 59 (F102 added `heart.procedure_versions`), and this
 design adds one table, not two, because `heart.memory_outcome_stats` is dropped (section 2).
 
-**When it's written:** in `CognitiveLayer.post_turn`, after step 4 (usage tracking), in the same session.
-That's the one point where the final recalled IDs, their order and their overlap strengths are all
-in hand. Two kinds of decision get a snapshot:
+**When it's written:** in `CognitiveLayer.post_turn`, after step 4 (usage tracking). That's the one
+point where the delivered IDs, their order and their overlap strengths are all in hand. Each
+decision's snapshot is written in **its own short transaction** (its own DB session), using the
+insert protocol in section 2. Every runner path calls post_turn without a session
+(`nous/api/runner.py:1508`, `:1731`, `:2190`, `:2935`), and steps 1–4 commit their own work, so the
+deliberation decision's finalize or delete (step 3, `nous/cognitive/layer.py:1253`) is committed
+before the snapshot transaction locks the decision row. Two kinds of decision get a snapshot:
 
 - **The turn's deliberation decision** (`turn_context.decision_id`). Only if it survives finalize:
-  informational turns delete their deliberation, and the snapshot goes with it.
-- **Decisions the `record_decision` tool wrote during this turn.** Rows with
-  `agent_id = <agent>`, `session_id = <session>` and `<turn start> <= created_at <= <turn end>`, where
-  turn end is the time post_turn starts. We don't use a ContextVar here: F091 documents that
-  ContextVars don't work on the streaming path (`stream_chat` resumes in a fresh copied context). A
-  post_turn query keyed on the session needs no threading at all.
+  informational turns delete their deliberation, and the snapshot goes with it. If the row is gone
+  when the snapshot transaction locks it, nothing is written.
+- **Decisions the `record_decision` tool wrote during this turn**, by explicit id. The tool does
+  **not** store the turn's session today: `record_decision` passes `session_id=None` unless
+  `decision_session_id_enabled` is on (`nous/api/tools.py:1380`), and that flag defaults to off
+  (`nous/config.py:899`). So a post_turn query by `session_id` would find none of them. Instead the
+  ids travel with the turn, in the F091 style (explicit threading, not a ContextVar: `stream_chat`
+  resumes in a fresh copied context, `nous/api/tools.py:600`):
+  1. `CallOutcome` (`nous/api/call_outcome.py:17`) gains `recorded_decision_id: str | None`. The
+     runner creates one `CallOutcome` per tool call (`nous/api/runner.py:2708` streaming,
+     `:3003` non-streaming), and the dispatcher sets it as the handler's current outcome inside the
+     handler's own task (`nous/api/tools.py:619`), so this works on both paths.
+  2. `record_decision` sets it straight after `brain.record` returns (`nous/api/tools.py:1384`),
+     before building its reply, so a timeout that cancels the call after the commit still leaves
+     the id. Only on success.
+  3. The runner collects the ids into a new `TurnResult.recorded_decision_ids: list[str]`
+     (`nous/cognitive/schemas.py:221`), and post_turn snapshots those ids. The collection has to
+     survive every way a turn ends:
+     - **Non-streaming.** `_tool_loop` returns a 4-tuple (`nous/api/runner.py:1670`), and when it
+       raises, the `except` at `:1699` builds the `TurnResult` without it. So the ids go out through
+       a collector list passed in, the way `usage_out` already is (`:1415`, `:1688`), not through
+       the return value. `_dispatch_with_ledger` keeps its `CallOutcome` local, so `Dispatched`
+       (`:123`) gains a field for the id, or the collector is passed down to it.
+     - **Streaming.** Read `outcome.recorded_decision_id` straight after the dispatch, also in the
+       `CancelledError`/`GeneratorExit` branch (`:2765`). post_turn runs shielded from `finally`
+       (`:2935`), so ids collected there still reach it.
 
-  Why turns in one session don't overlap: the runner holds a per-session `asyncio.Lock` across the
-  whole of `run_turn` and `stream_chat` (`_get_session_lock`, `nous/api/runner.py`), so two chat
-  turns of one session run one after the other in a process. Subtasks run under `subtask-<id>`, or
-  under a scheduled continuation's `schedule-…` session (`subtask_worker.py`, `task_scheduler.py`),
-  and either way go through `run_turn`, so they take the same per-session lock. The upper bound is defence in depth for a writer
-  outside that lock (a second process on the same database, which the execution ledger already
-  assumes away): it keeps out decisions written after this turn ended. A writer that runs inside
-  the window and outside the lock would still match; there is no such writer today.
+  Not covered, by design: `record_decision` calls made inside `run_python`, or dispatched over MCP or
+  REST, run with their own outcome or none and belong to no chat turn; an approved action run
+  through `execute_single_call` (`:3128`) has no post_turn. Those decisions get no snapshot.
+
+  This is the same mechanism Phase 3 plans for `recall_deep` results.
+
+  **Why not turn the flag on instead.** Enabling `decision_session_id_enabled` changes a write path
+  that has nothing to do with F104: session-scoped decisions enter the pool of
+  `DeliberationProtocol._is_duplicate`, where a match silently drops the turn's deliberation
+  decision (the flag's description, `nous/config.py:899`). Making it a prerequisite would ship that
+  behaviour change inside this feature. The explicit ids also need no turn time window, so a
+  decision written in another turn of the same session can't match.
+
+**Delivered ids only.** `TurnContext.recalled_{fact,decision,episode,procedure}_ids` over-state what
+the model saw. `ContextEngine.build` fills `recalled_ids` **before** `_truncate_to_budget`
+(`nous/cognitive/context.py:325`). Items whose lines the section budget removed land in
+`_tr_budget_cut` (`context.py:331`), and only the F091 trace excludes them (`context.py:1694`).
+`BuildResult.recalled_ids` still returns them (`context.py:1716`). So:
+
+- `BuildResult` gains `delivered_ids: dict[str, list[str]]`: `recalled_ids` per type with every
+  `(id, type)` in `_tr_budget_cut` removed, order kept. `TurnContext` carries it to post_turn.
+  `_tr_budget` runs whether or not the retrieval trace is on (with tracing off `tr` is `NULL_TRACE`
+  and only the trace write is skipped), and it is called for all four types (`context.py:937`,
+  `:1063`, `:1503`, `:1637`).
+- "Order" is the order in which `build` appended ids to `recalled_ids`. For procedures that is
+  collection order, not strictly render order: they are appended in two places (`context.py:1293`
+  and `:1463`).
+- The snapshot is built from `delivered_ids` only, and `rank` is the index in that filtered list, so
+  the survivors of a cut close the gap (ranks 0, 1, 2, not 0, 2, 3).
+- `recalled_ids` and its consumers (F071 dedup, `UsageTracker`, the REST turn response) are not
+  changed.
+- `_tr_budget` (`context.py:334`) is a conservative probe: an item whose line survives in part
+  counts as delivered. The snapshot inherits that. If the probe itself raises, `_tr_guard` swallows
+  it and the cut set is incomplete; the snapshot then over-states delivery for that section, exactly
+  as the trace does.
 
 Decisions **skipped**: continuation turns (F099 lineage decisions are graded by `f099`, which this
-design excludes anyway), and turns with no recalled IDs.
+design excludes anyway), and turns with no delivered IDs.
 
 Size: four types, top-k each, about 30 rows per decision at most. That's about 15k rows a month at
 current volume, so no retention policy is needed in v1.
@@ -116,10 +172,35 @@ current volume, so no retention policy is needed in v1.
 ### 2. Credit on review (capture, Phase 1)
 
 New handler `OutcomeCreditHandler` subscribes to `decision_reviewed`, using the same wiring pattern as
-`StrategyCardDistiller`: fire-and-forget task, coalesce per decision in flight.
+`StrategyCardDistiller`: fire-and-forget task, coalesce per decision in flight
+(`nous/handlers/strategy_card_distiller.py:210-273`). The event only says *which* decision to look
+at. Its `outcome` and `reviewer` are never used (see "The row is the grade" below), so a coalesced
+re-run needs nothing but the decision id.
 
-**Eligible reviews:** `outcome ∈ GRADED_OUTCOMES` and `reviewer ∉ NON_DISTILLING_REVIEWERS` (`auto`,
-`f099`), reusing the existing constant. The auto-reviewer's grade comes from stated confidence or PR
+**The row is the grade, not the event.** `Brain.review` commits and then emits
+(`nous/brain/brain.py:1120-1127`) as two separate steps, so two reviews of one decision can emit in
+the opposite order to their commits. Applying event values in arrival order could leave an older
+grade in place, or restore credit after a newer relabel to `noise`. So the handler reads the
+decision row's **current** `outcome` and `reviewer` after taking the decision lock (below), and
+writes from those. `StrategyCardDistiller._do_distil` already works this way: "The decision row is
+the truth, not the event that queued this run" (`strategy_card_distiller.py:301`, reading the row
+in `_retire_stale_cards`, `:500`). `Brain.review` emits only when it opened the session itself
+(`brain.py:1119-1127`), and every current caller lets it (`tools.py:2279`, `rest.py:1099`,
+`a2ui/actions.py:605` and `:824`, `decision_reviewer.py:320`, `intention_calibration.py:261`).
+`Brain.review_many` emits one event per reviewed item on the same terms (`brain.py:1150-1162`), and
+its callers (`tools.py:2329`, `:2349`) don't pass a session either. So
+every review commit is followed by an event, and the last handler run starts after the last commit and leaves the rows matching the final decision row.
+
+One writer breaks that today: the compensation revert of a review (`nous/api/compensation.py:778-797`)
+restores the prior `outcome` and `reviewer` with a direct `UPDATE` and emits nothing, so credit (and,
+already today, the distiller's card) would keep the reverted grade. The implementation PR makes the
+revert emit `decision_reviewed` after its commit when it restored a row. `StrategyCardDistiller` is
+the only other subscriber, and it also reads the row, so the extra event only brings its card in
+line with the row.
+
+**Eligible reviews:** the decision row has `outcome ∈ GRADED_OUTCOMES` and
+`reviewer ∉ NON_DISTILLING_REVIEWERS` (`auto`, `f099`; `nous/handlers/decision_reviewer.py:36`),
+reusing the existing constant. The auto-reviewer's grade comes from stated confidence or PR
 state, and an f099 grade says how a chain ended. Neither is evidence about the memories in context.
 Crediting from them would launder heuristics into ranking.
 
@@ -135,7 +216,7 @@ use_w(s)    = 0.4 + 0.6 × s              # never 0: an unused memory still dilu
             = 0.7 when strength is NULL
 ```
 
-**Update:** the handler writes only the decision's own snapshot rows:
+**Update:** the handler writes only the decision's own snapshot rows, from the row's grade:
 `credited_reward = r`, `credited_weight = w`, `credited_at = COALESCE(credited_at, now())`. There is
 **no stored per-memory total**. An earlier draft upserted running `alpha`/`beta` sums into a
 `heart.memory_outcome_stats` table; that table is dropped. Per-memory stats are computed at read time
@@ -148,14 +229,57 @@ correction to an old grade doesn't make old evidence count as fresh. A relabel t
 NULL (the row drops out of the read) and leaves `credited_at` alone. A later eligible grade of the
 same decision then still decays from the first credit.
 
-**Locking:** the step runs in one transaction that locks the decision's snapshot rows with
-`SELECT ... ORDER BY memory_type, memory_id FOR UPDATE`. Two reviews of the same decision serialize on
-those rows, and the later one's values win. Two reviews of *different* decisions touch disjoint rows
-(the PK starts with `decision_id`), so sharing memories can't make them wait on each other. The
+**Locking: one lock per decision, shared by the handler and the snapshot insert.** Both run in one
+short transaction per decision that starts by locking the **decision row**:
+`SELECT outcome, reviewer FROM brain.decisions WHERE id = :decision_id AND agent_id = :agent_id FOR NO KEY UPDATE`.
+That lock exists even before any snapshot row does, which a lock on the snapshot rows alone would
+not (see "Review before snapshot" below). It also orders the read against reviews: every review
+writes the row with an `UPDATE` that changes no key column, which takes the same `FOR NO KEY UPDATE`
+row lock, so under READ COMMITTED the select waits for an in-flight review and then returns its
+committed grade. `FOR NO KEY UPDATE`, not `FOR UPDATE`: `FOR UPDATE` would also conflict with the
+`KEY SHARE` lock that every FK-child insert of the decision takes (tags, reasons, thoughts, and the
+snapshot's own rows), so those inserts would queue behind credit. After the decision
+row, the handler locks the decision's snapshot rows with
+`SELECT ... ORDER BY memory_type, memory_id FOR UPDATE`, as before. Lock order is therefore always
+decision row, then its snapshot rows in `(memory_type, memory_id)` order, and no F104 transaction
+holds more than one decision row (post_turn writes each decision in its own transaction, section 1),
+so a writer that locks several decision rows at once (`Brain.review_many`) can't deadlock with it.
+Two reviews of the same decision serialize on the decision row, and the rows end up matching the
+row's final grade. Two reviews of *different* decisions touch disjoint rows (the PK starts with
+`decision_id`), so sharing memories can't make them wait on each other. The
 deadlock the round-1 review found came from the cross-decision stats upsert; with that upsert gone it
 can't happen. The fixed-order rule stays for anything that writes per-memory rows: if a cache of the
 read-time stats is ever added (see section 3), every refresh writes its rows in
 `(agent_id, memory_type, memory_id)` order, or takes their locks first in that order.
+
+**Review before snapshot.** A review can commit before the snapshot exists: the agent calls
+`record_decision` and then `resolve_decision` in the same turn (`resolve_decision` calls
+`Brain.review`, `nous/api/tools.py:2229-2290`), or an owner grades a decision during a long turn.
+The handler then finds no snapshot rows and does nothing, and the snapshot written later gets no
+event of its own. So the **snapshot insert reconciles at insert time**, under the same decision-row
+lock:
+
+1. Lock the decision row and read `outcome` and `reviewer` (the statement above). Row gone (a
+   deleted deliberation): write nothing.
+2. Insert the delivered rows with `ON CONFLICT (decision_id, memory_type, memory_id) DO NOTHING`.
+   If the row's grade is eligible, each row gets `credited_reward`, `credited_weight` and
+   `credited_at = now()` in the insert. Otherwise they stay NULL.
+3. Commit.
+
+**Exactly one credit, in either order.** Both writers compute a row's credit from the decision
+row's grade read under the lock, and neither adds to anything, so the result depends only on the
+grade at the last write, not on which writer ran first:
+
+- *Review, then snapshot:* the handler runs on zero rows (no-op). The insert reads the committed
+  grade and credits at insert.
+- *Snapshot, then review:* the insert stores NULL credit. The review's handler locks the row after
+  the review commits and credits the rows.
+- *Overlapping:* whichever takes the decision-row lock second sees the other's committed work. A
+  handler that runs after an insert that already credited rewrites the same values, and
+  `COALESCE` keeps the first `credited_at`.
+
+Each (decision, memory) pair holds one row (the PK), so one decision contributes one credit per
+memory to the read-time sums however many events or inserts arrive.
 
 No FK from the snapshot's `memory_id` to the memory tables. It is polymorphic, like `graph_edges`.
 Retired or superseded memories keep their rows, and they cost nothing.
@@ -226,23 +350,44 @@ replacing F037's proxy with graded credit.
 
 **Phase 1: capture (flag on, no ranking change)**
 
-- Migration 093, `post_turn` snapshot, `OutcomeCreditHandler`, re-grade overwrite.
+- Migration 093, `post_turn` snapshot (delivered ids, credit at insert), the `record_decision` id
+  threading, `OutcomeCreditHandler` (row grade, decision-row lock), re-grade overwrite.
 - `scripts/diag/outcome_credit_report.py`: top and bottom memories by `p_mem − p_base` with
   `n_eff ≥ 2`, the snapshot row count, and eligible reviews credited per week.
 - Tests:
-  - snapshot written for the deliberation decision and for tool-recorded decisions in the turn
-  - a decision in the same session created after the turn's end is not in its snapshot
+  - snapshot written for the deliberation decision and for tool-recorded decisions in the turn,
+    with `decision_session_id_enabled` off (the default), on both `run_turn` and `stream_chat`
+  - a decision recorded in an earlier turn of the same session is not in this turn's snapshot, and a
+    failed `record_decision` call adds no id
+  - budget cut: with a section budget that cuts one of three recalled facts, the cut fact gets no
+    snapshot row, and the two survivors have ranks 0 and 1
   - no snapshot for a deleted deliberation or a continuation turn
   - auto and f099 reviews credit nothing
   - success → partial re-grade leaves the row at the partial values, with `credited_at` unchanged
   - relabel to noise clears reward and weight and keeps `credited_at`
   - per-row decay: a memory credited 365 days ago and today has the old row at weight ≈ 0.015, not 1
-  - two concurrent reviews of one decision leave its rows at one review's values, not a mix
+  - review before snapshot: `record_decision` then `resolve_decision(success)` in one turn; the
+    handler runs on zero rows, and post_turn's insert credits the rows at insert from the row's grade
+  - snapshot before review: the insert stores NULL credit, and the later review's handler credits the
+    rows. Both orders end with identical rows and one `credited_at` per row
+  - review before snapshot by an excluded reviewer (`auto`): the insert stores NULL credit
+  - out-of-order events: review A (`success`) and then review B (`noise`) commit, and their events are
+    delivered B first, then A. The rows end matching the final decision row (`noise`: NULL credit),
+    not A's event values. The same with B = `partial`: rows at the partial values
+  - two concurrent reviews of one decision: after both handlers finish, every snapshot row's credit
+    equals what the decision row's final `outcome` and `reviewer` give, not merely one review's values
+  - a snapshot insert that waits on an in-flight review (review holds the decision row, uncommitted)
+    reads the review's committed grade once it commits. Pinned deterministically: hold the review's
+    transaction open, wait until `pg_stat_activity` shows the insert as a lock waiter, then commit
+    (a gather of two coroutines can pass with the lock removed if they happen not to overlap)
+  - a compensation revert of a credited review emits `decision_reviewed`, and the rows end matching
+    the restored grade
+  - the decision-row lock doesn't block an FK-child insert (a `decision_tags` row) while credit runs
   - lock order: two decisions sharing memories A, B, C, recalled in reverse rank order (A, B, C and
     C, B, A), reviewed concurrently from two sessions, both commit with no deadlock or lock timeout,
     and the read-time stats for A, B and C equal the sum of both decisions' credit
   - rows of another `agent_id` are not read
-  - an empty recall set writes nothing
+  - an empty delivered set writes nothing
 
 **Phase 2 gate: turn on the boost.** All three must hold:
 
