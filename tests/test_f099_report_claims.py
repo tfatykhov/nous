@@ -2120,6 +2120,39 @@ def test_a_long_word_in_a_send_sentence_is_scanned_in_linear_time(token):
     assert best < 0.05, best
 
 
+@pytest.mark.parametrize("head", ["to the user via Telegram", "to the owner (twice)", "to you at 9am", "to the bot"])
+@pytest.mark.parametrize("tail", [", i.e. Bob", " i.e. Bob", ", e.g. Bob", ", viz. Bob"])
+def test_an_abbreviation_does_not_end_the_sentence_a_send_file_is_judged_by(head, tail):
+    result = _verify(f"I sent the report {head}{tail}.", [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [P]
+
+
+@pytest.mark.parametrize(
+    "abbreviation",
+    ["i.e.", "e.g.", "viz.", "cf.", "etc.", "vs.", "approx.", "a.k.a.", "No. 5,", "Dr.", "Mr.", "Mrs.", "Ms.",
+     "Prof.", "I.E.", "E.g."],
+)
+def test_the_window_runs_past_an_abbreviation(abbreviation):
+    claims = ClaimVerifier(runner_path=RUNNER)._extract_claims(f"I sent the report to the owner, {abbreviation} Bob")
+    assert [c.sentence[-3:] for c in claims] == ["Bob"]
+
+
+@pytest.mark.parametrize(
+    ("text", "level"),
+    [
+        # a full stop after any other word still ends the sentence
+        ("I sent the report to the owner. Bob will review it.", E),
+        ("I sent the report to the owner! Bob will review it.", E),
+        ("I sent the report to the owner as noted. Bob will review it.", E),
+        ("I sent the report to the owner, as I said no. Bob will review it.", E),
+        ("I sent the report to you, e.g. the Q3 one.", E),
+    ],
+)
+def test_a_real_sentence_end_still_ends_the_window(text, level):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [level]
+
+
 @pytest.mark.xfail(
     strict=True,
     reason="known gap, exact on main too: the other destination is in no position the rule reads",

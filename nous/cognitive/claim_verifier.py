@@ -253,8 +253,12 @@ _FIRST_CLAIM_RE = re.compile(_FIRST + _CLAIM_VERBS, re.IGNORECASE)
 # right before "and" joins.
 _CLAUSE_END = re.compile(r"[.!?](?=\s|$)|\n|[;:—]|,(?!\s*and\b)")
 # Where a sentence ends, for what a send_file claim is judged by: a full stop, a blank line or a list item; but
-# not a line break right after "user" or "bot" (main reads "the user ..." as a recipient whatever follows it).
-_SENTENCE_END = re.compile(r"[.!?](?=\s|$)|(?<!\buser)(?<!\buser )(?<!\bbot)(?<!\bbot )"
+# not the stop of an abbreviation ("to the user, i.e. Bob", "No. 5"), nor a line break right after "user" or "bot"
+# (main reads "the user ..." as a recipient whatever follows it).
+_SENTENCE_END = re.compile(r"[!?](?=\s|$)|\.(?=\s|$)(?<!\bi\.e\.)(?<!\be\.g\.)(?<!\ba\.k\.a\.)(?<!\bviz\.)(?<!\bcf\.)"
+                           r"(?<!\betc\.)(?<!\bvs\.)(?<!\bapprox\.)(?<!\bdr\.)(?<!\bmr\.)(?<!\bmrs\.)(?<!\bms\.)(?<!\bprof\.)"
+                           r"(?!(?<=\bno\.)\s*\d)"
+                           r"|(?<!\buser)(?<!\buser )(?<!\bbot)(?<!\bbot )"
                            r"(?:\n[ \t]*\n|\n(?=[ \t]*(?:[-*+•]|\d+[.)])\s))", re.IGNORECASE)
 # A condition earlier in the clause: "if I pushed", "check whether it was saved".
 _CONDITION = re.compile(r"\b(?:if|whether|unless)\b", re.IGNORECASE)
@@ -1551,6 +1555,9 @@ _A_SENT_THING = (r"(?:(?:the|a|an|your|my|our|this|that|these|those)\s+(?:[\w.'�
                  rf"|section)(?:e?s)?\b{_HEADS}|(?-i:it|this|that)\b|https?\b|www\.|[/~]"
                  r"|[\w-]+\.(?:pdf|md|txt|csv|tsv|json|ya?ml|xml|html?|docx?|xlsx?|pptx?|odt|ods|rtf|png|jpe?g|gif"
                  r"|svg|webp|zip|tar|gz|tgz|py|ipynb|js|ts|sh|sql|log|epub|mp4|mov|mp3|wav)\b)")
+# What "i.e.", "e.g." or "viz." may name without naming anyone: a sent thing or "the Q3 one" ("to you, e.g. the Q3
+# one"; not "to you, i.e. Bob")
+_AN_EXAMPLE = rf"(?:{_A_SENT_THING}|(?:the|this|that)\s+(?:[\w-]+\s+){{0,2}}?ones?\b{_HEADS})"
 # An adverb after a self word: "to the owner earlier", "via Telegram successfully"
 _SELF_ADVERB = (r"(?:earlier|just|now|already|today|directly|first|again|too|also|both|twice|once|successfully"
                 r"|personally|privately|separately|right\s+away)\b")
@@ -1646,11 +1653,13 @@ _ELSEWHERE = re.compile(
     r"|\b(?:to|via|through|over|on|using)\s+(?:(?:the|your|my)\s+)?(?:you|yourself|me|myself|owner|user|chat|dms?"
     rf"|bot|telegram|send_file|send_telegram)\b(?:\s+{_SELF_ADVERB}|\s+at\s+(?:{_A_TIME}|{_AT_TAIL})"
     r"|\s*\([^()\n]{0,60}\))*"
-    r"(?:,?\s+(?:and|&|as\s+well\s+as)\s+|,\s+(?:then|plus|also)\s+|(?<=\))\s+|(?:\s*\(\s*|\s+[-–—]\s+|\s*[:;—]\s*"
+    r"(?:,?\s+(?:and|&|as\s+well\s+as)\s+|,\s+(?:then|plus|also)\s+|(?<=\))\s+"
+    rf"|(?:\s*[,;:(—–]\s*|\s+)(?:i\.e|e\.g|viz)\.,?\s*(?!{_AN_EXAMPLE})"  # "to the user, i.e. Bob"
+    r"|(?:\s*\(\s*|\s+[-–—]\s+|\s*[:;—]\s*"
     r"|(?<!\byou)(?<!\byourself)(?<!\bme)(?<!\bmyself),\s*"
     r"|[ \t]*\n[ \t]*(?:(?:then|plus|also)\s+)?(?=\S+(?:[ \t]+\S+){0,2}[ \t]*(?:\n|$))"
     r")"
-    rf"{_NOT_A_TAIL}|\s+for\s+(?=(?-i:(?![a-zß-ÿ\d_])\w[a-zß-ÿ])|[@#]\w))"
+    rf"{_NOT_A_TAIL}(?!(?:i\.e|e\.g|viz)\.)|\s+for\s+(?=(?-i:(?![a-zß-ÿ\d_])\w[a-zß-ÿ])|[@#]\w))"
     rf"(?:only\s+)?{_NOT_A_VERB}{_NOT_A_RECIPIENT}"
     # "to the user at Bob", "to you at the London office" (not "to the owner at 7am", "at once", "at lunch", "at
     # the usual time", "at the office"), and an address anywhere in the sentence
