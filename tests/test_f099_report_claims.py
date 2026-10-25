@@ -1861,21 +1861,77 @@ def test_a_send_file_never_confirms_a_send_to_someone_else(claim, tail):
 # "the user ...", "the bot ..." and "via send_file ..." as a recipient whatever followed, so no cell may be exact there;
 # after the other heads main is exact, and the connector rule makes them plausible too.
 GRID_HEADS = [
-    "to the user via Telegram", "to the owner via Telegram", "to the bot via Telegram", "to you via Telegram",
-    "to the user via the bot", "to you at 9am", "to the owner at 9am", "to the user at 9am",
-    "to the owner (twice)", "to the user (twice)", "to the bot (twice)", "to you (twice)",
-    "to the user earlier", "to the owner just now", "to the user today", "to the bot directly",
-    "to the user as a PDF", "to the owner in PDF", "to the user on Monday", "to the owner by 5pm",
-    "to the user with a summary", "to the owner for review", "to the user as requested",
-    "via Telegram", "via the bot", "via send_file", "to the user", "to the owner", "to the bot", "to you",
+    "to the user via Telegram",
+    "to the owner via Telegram",
+    "to the bot via Telegram",
+    "to you via Telegram",
+    "to the user via the bot",
+    "to you at 9am",
+    "to the owner at 9am",
+    "to the user at 9am",
+    "to the owner (twice)",
+    "to the user (twice)",
+    "to the bot (twice)",
+    "to you (twice)",
+    "to the user earlier",
+    "to the owner just now",
+    "to the user today",
+    "to the bot directly",
+    "to the user as a PDF",
+    "to the owner in PDF",
+    "to the user on Monday",
+    "to the owner by 5pm",
+    "to the user with a summary",
+    "to the owner for review",
+    "to the user as requested",
+    "via Telegram",
+    "via the bot",
+    "via send_file",
+    "to the user",
+    "to the owner",
+    "to the bot",
+    "to you",
 ]
 GRID_CONNECTORS = [
-    ", i.e. {}", ", namely {}", ", that is {}", ", that is, {}", ", specifically {}", ", especially {}",
-    ", and also {}", ", as well as {}", ", not just {}", ", including {}", ", meaning {}", ", viz. {}",
-    ", e.g. {}", ", in particular {}", ", mainly {}", ", mostly {}", ", notably {}", ", plus {}", ", then {}",
-    ", also {}", ", and {}", ", {}", " — {}", ": {}", "; {}", " ({})", " and {}", " and also {}", " as well as {}",
-    " plus {}", " i.e. {}", " namely {}", " including {}", " not just {}", " but also {}", " then {}",
-    " and then {}", " and later {}", " and afterwards {}",
+    ", i.e. {}",
+    ", namely {}",
+    ", that is {}",
+    ", that is, {}",
+    ", specifically {}",
+    ", especially {}",
+    ", and also {}",
+    ", as well as {}",
+    ", not just {}",
+    ", including {}",
+    ", meaning {}",
+    ", viz. {}",
+    ", e.g. {}",
+    ", in particular {}",
+    ", mainly {}",
+    ", mostly {}",
+    ", notably {}",
+    ", plus {}",
+    ", then {}",
+    ", also {}",
+    ", and {}",
+    ", {}",
+    " — {}",
+    ": {}",
+    "; {}",
+    " ({})",
+    " and {}",
+    " and also {}",
+    " as well as {}",
+    " plus {}",
+    " i.e. {}",
+    " namely {}",
+    " including {}",
+    " not just {}",
+    " but also {}",
+    " then {}",
+    " and then {}",
+    " and later {}",
+    " and afterwards {}",
 ]
 GRID_PEOPLE = ["Bob", "bob@x.io", "@bob", "the team"]
 
@@ -1894,8 +1950,19 @@ def test_a_send_file_never_confirms_someone_else_after_a_self_word_and_a_connect
 @pytest.mark.parametrize("head", ["to the user via Telegram", "to you at 9am", "to the owner (twice)"])
 @pytest.mark.parametrize(
     "tail",
-    [", i.e. done", ", namely the Q3 one", ", that is all", ", as well as the summary", ", including the summary",
-     ", e.g. the Q3 one", ", plus the summary", ", then archived it", ", and that is all", ", as requested", ", done"],
+    [
+        ", i.e. done",
+        ", namely the Q3 one",
+        ", that is all",
+        ", as well as the summary",
+        ", including the summary",
+        ", e.g. the Q3 one",
+        ", plus the summary",
+        ", then archived it",
+        ", and that is all",
+        ", as requested",
+        ", done",
+    ],
 )
 def test_an_owner_only_tail_after_a_connector_stays_exact(head, tail):
     result = _verify(f"I sent the report {head}{tail}.", [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
@@ -1929,6 +1996,19 @@ def test_an_owner_only_tail_after_a_connector_stays_exact(head, tail):
         ("I sent the report to the owner on Monday, as requested.", E),
         ("I sent the report to you for review and then archived it.", E),
         ("I sent the report to the owner by 5pm, then archived the draft.", E),
+        ("I sent the report to you for review and approval.", E),
+        ("I sent the report to you with charts and tables.", E),
+        ("I sent the report to you as a PDF and the CSV.", E),
+        ("I sent the report to you, including all charts.", E),
+        ("I sent the report to you, specifically the Q3 figures.", E),
+        ("I sent the report to you, i.e. the PDF.", E),
+        ("I sent the report to you, not just a link.", E),
+        # ... but a thing for someone, "that is <someone>", "and all" and a later clause after "it" still name them
+        ("I sent the report to the user, plus a copy for Bob.", P),
+        ("I sent the report to the user, including a copy for Bob.", P),
+        ("I sent the report to the user, and that is Bob.", P),
+        ("I sent the report to the user and all.", P),
+        ("I sent the report to the user, including it for Bob.", P),
     ],
 )
 def test_a_prepositional_tail_does_not_hide_the_next_person(text, level):
@@ -2208,9 +2288,7 @@ def test_a_long_word_in_a_send_sentence_is_scanned_in_linear_time(token):
         ("I sent the report to you, not to Bob.", E),
         ("I sent the report. I will send it via Slack tomorrow.", E),
         ("I sent the report, but I did not send it to Bob.", E),
-        ("I sent the report and I'll email it to Bob later.", E),
         ("I sent the report; I'm going to post it on Slack.", E),
-        ("I sent the report, and we plan to share it via Slack.", E),
         ("I sent the report; it won't go to the team.", E),
         ("I sent the report; please forward it to Bob.", E),
         ("I sent the report; you can share it via Slack.", E),
@@ -2226,6 +2304,17 @@ def test_a_long_word_in_a_send_sentence_is_scanned_in_linear_time(token):
         ("I sent the report via Slack; I will resend it tomorrow.", P),
         ("Please note I sent the report via Slack.", P),
         ("I sent the report to the user and Will.", P),
+        # ... only past the claim's own clause (main read that clause as a whole), and never after a word main took
+        # for a recipient whatever followed ("the user", "the bot", "send_file")
+        ("I sent the report and I'll email it to Bob later.", P),
+        ("I sent the report, and we plan to share it via Slack.", P),
+        ("I sent the report to the user, not to Bob.", P),
+        ("I sent the report to the user, not to mention Bob.", P),
+        ("I sent the report to the user, but did not forget Bob.", P),
+        ("I sent the report to the user and didn't leave out Bob.", P),
+        ("I sent the report to the user, and it will reach Bob shortly.", P),
+        ("I sent the report to the user, and you can ping @bob.", P),
+        ("I sent the report via send_file; I will email it to Bob.", P),
         ("I sent the report to the user; Will can forward it.", P),
     ],
 )
@@ -2284,17 +2373,51 @@ def test_a_blank_line_ends_the_sentence_a_send_file_is_judged_by(text):
 
 @pytest.mark.parametrize(
     "unit",
-    ["for a b ", "as ", "at 9am ", "for x today ", "i.e. ", "to the owner for review ", "and also ", "; will x ",
-     ", not to x "],
-    ids=["for-a-b", "as", "at-9am", "for-x-today", "i.e.", "owner-chain", "and-also", "will", "not-to"],
+    [
+        "for a b ",
+        "as ",
+        "at 9am ",
+        "for x today ",
+        "i.e. ",
+        "to the owner for review ",
+        "and also ",
+        "; will x ",
+        ", not to x ",
+        " ",
+        "\n",
+        ", ",
+        " but",
+        "via telegram ",
+        "on you ",
+        "via the bot ",
+    ],
+    ids=[
+        "for-a-b",
+        "as",
+        "at-9am",
+        "for-x-today",
+        "i.e.",
+        "owner-chain",
+        "and-also",
+        "will",
+        "not-to",
+        "spaces",
+        "newlines",
+        "commas",
+        "but",
+        "via-telegram",
+        "on-you",
+        "via-the-bot",
+    ],
 )
-def test_a_long_tail_after_a_self_word_is_scanned_in_linear_time(unit):
-    # the prepositional tail, the adverbs and the connectors after a self word are read one way only: doubling
-    # the text doubles the time, it does not square it
+@pytest.mark.parametrize("head", ["to the owner", "to you"])
+def test_a_long_tail_after_a_self_word_is_scanned_in_linear_time(unit, head):
+    # the prepositional tail, the adverbs, the connectors and the later clauses after a self word are read one way
+    # only: four times the text takes about four times as long, not sixteen
     evidence = Evidence("send_file", {"file_path": "/tmp/r.pdf"})
 
     def best(size):
-        sentence = "I sent the report to the owner " + unit * (size // len(unit))
+        sentence = f"I sent the report {head} " + unit * (size // len(unit))
         claim = Claim(kind="email", text="I sent the report", sentence=sentence)
         times = []
         for _ in range(3):
@@ -2303,8 +2426,8 @@ def test_a_long_tail_after_a_self_word_is_scanned_in_linear_time(unit):
             times.append(time.perf_counter() - start)
         return min(times)
 
-    small, large = best(10_000), best(20_000)
-    assert large < 3 * small + 0.01, (small, large)
+    small, large = best(5_000), best(20_000)
+    assert large < 8 * small + 0.01, (small, large)
     assert large < 0.5, large
 
 
@@ -2317,8 +2440,24 @@ def test_an_abbreviation_does_not_end_the_sentence_a_send_file_is_judged_by(head
 
 @pytest.mark.parametrize(
     "abbreviation",
-    ["i.e.", "e.g.", "viz.", "cf.", "etc.", "vs.", "approx.", "a.k.a.", "No. 5,", "Dr.", "Mr.", "Mrs.", "Ms.",
-     "Prof.", "I.E.", "E.g."],
+    [
+        "i.e.",
+        "e.g.",
+        "viz.",
+        "cf.",
+        "etc.",
+        "vs.",
+        "approx.",
+        "a.k.a.",
+        "No. 5,",
+        "Dr.",
+        "Mr.",
+        "Mrs.",
+        "Ms.",
+        "Prof.",
+        "I.E.",
+        "E.g.",
+    ],
 )
 def test_the_window_runs_past_an_abbreviation(abbreviation):
     claims = ClaimVerifier(runner_path=RUNNER)._extract_claims(f"I sent the report to the owner, {abbreviation} Bob")

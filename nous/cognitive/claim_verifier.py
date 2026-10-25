@@ -255,9 +255,9 @@ _CLAUSE_END = re.compile(r"[.!?](?=\s|$)|\n|[;:—]|,(?!\s*and\b)")
 # Where a sentence ends, for what a send_file claim is judged by: a full stop, a blank line or a list item; but
 # not the stop of an abbreviation ("to the user, i.e. Bob", "No. 5"), nor a line break right after "user" or "bot"
 # (main reads "the user ..." as a recipient whatever follows it).
-_SENTENCE_END = re.compile(r"[!?](?=\s|$)|\.(?=\s|$)(?<!\bi\.e\.)(?<!\be\.g\.)(?<!\ba\.k\.a\.)(?<!\bviz\.)(?<!\bcf\.)"
-                           r"(?<!\betc\.)(?<!\bvs\.)(?<!\bapprox\.)(?<!\bdr\.)(?<!\bmr\.)(?<!\bmrs\.)(?<!\bms\.)(?<!\bprof\.)"
-                           r"(?!(?<=\bno\.)\s*\d)"
+# (checked only where the stop is; a lookbehind's alternatives must be one width, so they are grouped by length)
+_SENTENCE_END = re.compile(r"[!?](?=\s|$)|\.(?=\s|$)(?<!\b(?:cf|vs|dr|mr|ms)\.)(?<!\b(?:i\.e|e\.g|viz|etc|mrs)\.)"
+                           r"(?<!\bprof\.)(?<!\ba\.k\.a\.)(?<!\bapprox\.)(?!(?<=\bno\.)\s*\d)"
                            r"|(?<!\buser)(?<!\buser )(?<!\bbot)(?<!\bbot )"
                            r"(?:\n[ \t]*\n|\n(?=[ \t]*(?:[-*+•]|\d+[.)])\s))", re.IGNORECASE)
 # A condition earlier in the clause: "if I pushed", "check whether it was saved".
@@ -1555,9 +1555,23 @@ _A_SENT_THING = (r"(?:(?:the|a|an|your|my|our|this|that|these|those)\s+(?:[\w.'�
                  rf"|section)(?:e?s)?\b{_HEADS}|(?-i:it|this|that)\b|https?\b|www\.|[/~]"
                  r"|[\w-]+\.(?:pdf|md|txt|csv|tsv|json|ya?ml|xml|html?|docx?|xlsx?|pptx?|odt|ods|rtf|png|jpe?g|gif"
                  r"|svg|webp|zip|tar|gz|tgz|py|ipynb|js|ts|sh|sql|log|epub|mp4|mov|mp3|wav)\b)")
-# What "i.e.", "e.g." or "viz." may name without naming anyone: a sent thing or "the Q3 one" ("to you, e.g. the Q3
-# one"; not "to you, i.e. Bob")
-_AN_EXAMPLE = rf"(?:{_A_SENT_THING}|(?:the|this|that)\s+(?:[\w-]+\s+){{0,2}}?ones?\b{_HEADS})"
+# Where such a tail must end for it to name no one: the bracket closes or the phrase or line ends ("to the owner
+# (twice).", not "to the owner (twice and Bob)")
+_TAIL_ENDS = r"(?=\s*(?:[).,;:!?]|$)|[ \t]*\n)"
+# "i.e.", "e.g." or "viz.": what follows names this send's recipient again ("to the user, i.e. Bob")
+_THAT_IS = r"(?:i\.e|e\.g|viz)\."
+# What a connector or "i.e.", "e.g." or "viz." may name without naming anyone: a sent thing, "the Q3 one", a format,
+# a link, charts or figures, or a review word ("to you, e.g. the Q3 one", "i.e. the PDF", "for review and approval";
+# not "to you, i.e. Bob", "and that is Bob", "and it will reach Bob", nor a thing for someone: "plus a copy for Bob");
+# and after "that is",
+# nothing more ("to you, that is all", "and that is all"; but "and all" may be everyone)
+_AN_EXAMPLE = (rf"(?!that\s+is\b|that['’]s\b|(?-i:it|this|that)\b(?!{_TAIL_ENDS}))"
+               rf"(?:{_A_SENT_THING}|(?:the|this|that)\s+(?:[\w-]+\s+){{0,2}}?ones?\b{_HEADS}"
+               r"|(?:(?:the|a|an)\s+)?(?:pdf|csv|xlsx?|docx?|pptx?|markdown|md|html?|json|png|zip)\b(?!['’.-])"
+               r"|(?:(?:a|the)\s+)?(?:shared\s+)?links?\b|(?:all\s+)?(?:(?:the|my|our|your)\s+)?(?:[\w-]+\s+)?"
+               r"(?:charts|tables|figures|numbers|graphs|plots|slides|files|attachments|notes|details)\b"
+               r"|(?:approval|sign-?off|feedback|comments|reference|records|context)\b)"
+               r"(?!\s+(?:for|to|with|from|by|via|cc)\b)")
 # An adverb after a self word: "to the owner earlier", "via Telegram successfully"
 _SELF_ADVERB = (r"(?:earlier|just|now|already|today|directly|first|again|too|also|both|twice|once|successfully"
                 r"|personally|privately|separately|right\s+away)\b")
@@ -1565,9 +1579,7 @@ _SELF_ADVERB = (r"(?:earlier|just|now|already|today|directly|first|again|too|als
 _CONNECTOR = (r"(?:and(?:\s+(?:also|then|later|afterwards))?|&|as\s+well\s+as|then|plus|also|namely|including"
               r"|not\s+(?:just|only)|but\s+also|in\s+particular|that\s+is|that['’]s|specifically|especially|meaning"
               r"|mainly|mostly|notably)")
-# Where such a tail must end for it to name no one: the bracket closes or the phrase or line ends ("to the owner
-# (twice).", not "to the owner (twice and Bob)")
-_TAIL_ENDS = r"(?=\s*(?:[).,;:!?]|$)|[ \t]*\n)"
+_NOTHING_MORE = rf"(?:(?<=\bthat is )|(?<=\bthat['’]s )|that\s+is\s+|that['’]s\s+)(?:all|everything|it)\b{_TAIL_ENDS}"
 # What a bracket, a dash or another mark after a self word may hold without naming anyone: a sent thing, a count
 # or an adverb ("to you (report.pdf)", "to you - 3 pages", "to the owner (twice)").
 _NOT_A_TAIL = (rf"(?!(?:{_A_SENT_THING}|\d+\s*(?:pages?|slides?|sheets?|charts?|tables?|files?|attachments?|parts?"
@@ -1586,11 +1598,12 @@ _OWNER_ONLY_END = (r"(?:fyi|asap|btw|nb|ps|v\d+(?:\.\d+)*|\d{4}-\d\d-\d\d|\d{1,2
 _AT_TAIL = (r"(?:lunch|[a-z]+time|dinner|breakfast|night|dawn|dusk|work|home|first|last|least|most|all|length|hand"
             rf"|the\s+(?:(?:[\w-]+\s+)?(?:time|moment|hour|meeting|weekend)s?|office))\b{_TAIL_ENDS}")
 # A short prepositional tail after a self word: "to the user as a PDF", "on Monday", "for review", "by 5pm" (up to
-# three words, none of them a preposition, a connector or an adverb, so the tail is read one way only)
-_PREP_TAIL = (rf"(?:as|in|with|on|by|for|via|through|over|using|at(?!\s+(?:{_A_TIME}|{_AT_TAIL})))"
-              rf"(?:\s+(?!{_SELF_ADVERB}|(?:as|in|with|on|by|for|at|via|through|over|using|to|and|or|then|plus|also"
-              r"|namely|including|not|but|that|specifically|especially|meaning|mainly|mostly|notably|right)\b)"
-              r"[\w'’-]+){1,3}")
+# three words, none of them a preposition, a connector, an adverb or a self word, so the tail is read one way only
+# and never starts another self word's reading: "via telegram via telegram ..." is linear)
+_PREPOSITION = r"(?:as|in|with|on|by|for|via|through|over|using)"
+_PREP_TAIL = (rf"(?:{_PREPOSITION}|at(?!\s+(?:{_A_TIME}|{_AT_TAIL})))"
+              rf"(?:\s+(?!{_SELF_ADVERB}|(?:{_PREPOSITION}|at|to|or|not|but|that|right|{_CONNECTOR}|{_SELF}|you|yourself"
+              r"|me|myself|send_file|send_telegram)\b)[\w'’-]+){1,3}")
 # After via/through/using/on/over: Telegram, the bot, the chat, a DM, here, a link, the sending tool by name
 # (send_file, send_telegram) or a time word.
 _NOT_A_TRANSPORT = (r"(?!(?:the|a|an|your|my|our|this)\b|(?:telegram|bot|chat|dms?)(?:\s+(?:telegram|bot|chat|dms?))*\b"
@@ -1671,13 +1684,14 @@ _ELSEWHERE = re.compile(
     r"|\b(?:to|via|through|over|on|using)\s+(?:(?:the|your|my)\s+)?(?:you|yourself|me|myself|owner|user|chat|dms?"
     rf"|bot|telegram|send_file|send_telegram)\b(?:\s+{_SELF_ADVERB}|\s+at\s+(?:{_A_TIME}|{_AT_TAIL})"
     rf"|\s*\([^()\n]{{0,60}}\)|\s+{_PREP_TAIL})*"
-    rf"(?:(?:\s*[,;:(—–-]\s*|\s+){_CONNECTOR},?\s+(?!{_AN_EXAMPLE}|(?:all|everything)\b{_TAIL_ENDS})|(?<=\))\s+"
-    rf"|(?:\s*[,;:(—–]\s*|\s+)(?:i\.e|e\.g|viz)\.,?\s*(?!{_AN_EXAMPLE})"  # "to the user, i.e. Bob"
+    rf"(?:(?:\s*[,;:(—–-]\s*|\s+){_CONNECTOR},?\s+(?!{_AN_EXAMPLE}|{_NOTHING_MORE})|(?<=\))\s+"
+    rf"|(?:\s*[,;:(—–]\s*|\s+){_THAT_IS},?\s*(?!{_AN_EXAMPLE})"  # "to the user, i.e. Bob"
     r"|(?:\s*\(\s*|\s+[-–—]\s+|\s*[:;—]\s*"
     r"|(?<!\byou)(?<!\byourself)(?<!\bme)(?<!\bmyself),\s*"
     r"|[ \t]*\n[ \t]*(?:(?:then|plus|also)\s+)?(?=\S+(?:[ \t]+\S+){0,2}[ \t]*(?:\n|$))"
     r")"
-    rf"{_NOT_A_TAIL}(?!(?:i\.e|e\.g|viz)\.|{_CONNECTOR}\b|{_OWNER_ONLY_END})|\s+for\s+(?=(?-i:(?![a-zß-ÿ\d_])\w[a-zß-ÿ])|[@#]\w))"
+    rf"{_NOT_A_TAIL}(?!{_THAT_IS}|{_CONNECTOR},?\s+(?:{_AN_EXAMPLE}|{_NOTHING_MORE}|(?:you|yourself|me|myself)\b{_TAIL_ENDS})"
+    rf"|{_OWNER_ONLY_END})|\s+for\s+(?=(?-i:(?![a-zß-ÿ\d_])\w[a-zß-ÿ])|[@#]\w))"
     rf"(?:only\s+)?{_NOT_A_VERB}{_NOT_A_RECIPIENT}"
     # "to the user at Bob", "to you at the London office" (not "to the owner at 7am", "at once", "at lunch", "at
     # the usual time", "at the office"), and an address anywhere in the sentence
@@ -1698,11 +1712,14 @@ _ELSEWHERE = re.compile(
 # forward it to Bob"). It is not this send's destination. Not "not just Bob" (Bob got it too), nor a relative clause
 # or another subject ("who will forward it to Bob", "Bob will review it"); the verbs are in lowercase ("to you and
 # Will" names Will).
+# What main read as a recipient whatever followed ("to the user", "to the bot", "via send_file")
+_MAIN_RECIPIENT = re.compile(r"\b(?:user|bot|send_file)\b", re.IGNORECASE)
+_PRONOUN = r"(?:i|we|you|it|they)"
 _NOT_DONE = re.compile(
-    r"(?:[;,:—–]\s*(?:(?:but|and|though|yet)\s+)?|\s+(?:but|and|though|yet)\s+)"
-    r"(?:(?:(?:i|we|you|it|they)\s+)?(?-i:will|shall|(?:am|are|is)\s+going\s+to|plan\s+to|did\s+not|didn['’]t"
-    r"|do\s+not|don['’]t|have\s+not|haven['’]t|won['’]t|cannot|can['’]t|can|could|should|[Pp]lease)"
-    r"|(?:i|we|you|it|they)['’](?:ll|m\s+going\s+to|re\s+going\s+to)|(?-i:not)\s+(?:to|yet))\b"
+    r"(?:[;,:—–]\s*(?:(?:but|and|though|yet)\s+)?|(?<!\s)\s+(?:but|and|though|yet)\s+)"  # one try per run of spaces
+    rf"(?:(?:{_PRONOUN}\s+)?(?-i:will|shall|(?:am|are|is)\s+going\s+to|plan\s+to|(?:did|do|have)(?:\s+not|n['’]t)"
+    r"|won['’]t|can(?:not|['’]t)?|could|should|[Pp]lease)"
+    rf"|{_PRONOUN}['’](?:ll|m\s+going\s+to|re\s+going\s+to)|(?-i:not)\s+(?:to|yet))\b"
     r"(?:(?!\b(?:but|and)\b)[^;,:—–()\n])*",
     re.IGNORECASE)
 # A single _, * or backtick around a word is styling, as ** is: "via _Slack_", "to `Bob`"
@@ -1724,11 +1741,13 @@ def evidence_level(claim: Claim, ev: Evidence) -> str:
         if claim.target:
             return "none"
         # the whole sentence from the claim's clause on: "to the user — Bob", "to the user: Bob"
-        sentence = _STYLED.sub(r"\2", claim.sentence or claim.clause or claim.text)
-        after = sentence.find(claim.text)
-        if after >= 0:  # only after the claim: "Please note I sent it via Slack" is still read
-            after += len(claim.text)
-            sentence = sentence[:after] + _NOT_DONE.sub("", sentence[after:])
+        sentence = claim.sentence or claim.clause or claim.text
+        clause = claim.clause or ""
+        if clause and sentence.startswith(clause) and not _MAIN_RECIPIENT.search(sentence):
+            # only past the claim's clause (main read no further), and not after a word main took for a
+            # recipient whatever followed: the dropped clause can then raise no score above main
+            sentence = clause + _NOT_DONE.sub("", sentence[len(clause):])
+        sentence = _STYLED.sub(r"\2", sentence)
         return "plausible" if _ELSEWHERE.search(sentence) else "exact"
     if not ev.args:  # names-only evidence from a legacy caller
         return "plausible"
