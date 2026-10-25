@@ -3035,6 +3035,50 @@ def test_a_long_run_before_a_new_self_head_is_linear(head, before, fail, end):
     _assert_linear(lambda size: before + fail * (size // len(fail)) + f"{end} {head}")
 
 
+@pytest.mark.parametrize(("before", "end"), [("the ", "report sent"), ("the ", "Bob sent"), ("", "report was sent")])
+@pytest.mark.parametrize("head", ["to the user", "via our bot"])
+def test_a_long_passive_run_before_a_new_self_head_is_linear(head, before, end):
+    _assert_linear(lambda size: before + "weekly " * (size // 7) + f"{end} {head}")
+
+
+@pytest.mark.parametrize(
+    ("text", "level"),
+    [
+        # the window starts at the sentence: an earlier sentence is not read
+        ("Bob called. I sent the report to the user.", E),
+        ("Bob\n\nI sent the report to the user.", E),
+        # ... but a single line break ends no sentence, so the line before it is read, as main reads it
+        ("Hi Tim\nI sent the report to the user.", P),
+        # the sent thing's own attachment, after about/from/for too
+        ("I sent the report about the Q3 results to the user.", E),
+        ("I sent the report for the weekly update to the user.", E),
+    ],
+)
+def test_the_words_before_a_new_self_head_are_read_from_the_start_of_the_sentence(text, level):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [level]
+
+
+@pytest.mark.parametrize(
+    ("opening", "sentence", "level"),
+    [
+        # forms the claim extractor does not produce today, read as they would be
+        ("As requested, ", "I sent the report to the user", E),
+        ("For Bob, ", "I sent the report to the user", P),
+        ("", "The report was sent to the user", E),
+        ("", "It was sent to the user", E),
+        ("", "report.pdf was sent to the user", E),
+        ("", "We sent them via our bot", E),
+        ("", "Bob's report was sent to the user", P),
+        ("", "The Bob report was sent to the user", P),
+        ("", "Bob sent the report to the user", P),
+    ],
+)
+def test_before_a_new_self_head_each_form_of_the_allow_list(opening, sentence, level):
+    claim = Claim(kind="email", text="sent", clause=sentence, sentence=sentence, opening=opening)
+    assert evidence_level(claim, Evidence("send_file", {"file_path": "/tmp/r.pdf"})) == level
+
+
 @pytest.mark.xfail(
     strict=True,
     reason="known gap, exact on main too: the other destination is in no position the rule reads",
