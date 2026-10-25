@@ -8,7 +8,10 @@ against the calls the work recorded; an unbacked claim is annotated and, in enfo
 
 from __future__ import annotations
 
+import contextlib
 import re
+import signal
+import threading
 import time
 import uuid
 from datetime import UTC, datetime
@@ -1800,6 +1803,7 @@ OTHER_DESTINATIONS = [
     "the user group",
     "stakeholders",
     "the owner's manager",
+    "_bob_smith_",
     # chat ids
     "chat_id -100123",
     "chat_id=-100123",
@@ -2279,6 +2283,53 @@ def test_using_after_a_participle_is_how_the_report_was_made(text, level):
     assert [c.evidence for c in result.claims] == [level]
 
 
+@contextlib.contextmanager
+def _deadline(seconds):
+    """Fail, rather than hang, when the code inside runs longer than ``seconds``.
+
+    A cubic mutant once hung a timing test for 90 minutes. A regex match checks for signals, so SIGALRM stops it; where
+    there is no SIGALRM (Windows), the 1 KB check of ``_assert_linear`` comes first and fails a superlinear pattern
+    before the large inputs run."""
+    if not hasattr(signal, "setitimer") or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def expire(signum, frame):
+        raise TimeoutError(f"over {seconds} s: not linear")
+
+    previous = signal.signal(signal.SIGALRM, expire)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def _assert_linear(sentence_of_size):
+    """``evidence_level`` on the sentences of about 1, 5 and 20 KB that ``sentence_of_size`` builds is linear in time.
+
+    1 KB first: over 0.5 s there fails a cubic pattern at once. Then four times the text must take about four times as
+    long, not sixteen. The whole check stops after 5 s (``_deadline``)."""
+    evidence = Evidence("send_file", {"file_path": "/tmp/r.pdf"})
+
+    def best(size):
+        claim = Claim(kind="email", text="I sent the report", sentence=sentence_of_size(size))
+        times = []
+        for _ in range(3):
+            start = time.perf_counter()
+            evidence_level(claim, evidence)
+            times.append(time.perf_counter() - start)
+        return min(times)
+
+    with _deadline(5):
+        tiny = best(1_000)
+        assert tiny < 0.5, tiny
+        small, large = best(5_000), best(20_000)
+    assert large < 8 * small + 0.01, (small, large)
+    assert large < 0.5, large
+
+
 @pytest.mark.parametrize(
     "token",
     ["a" * 20000, "a_" * 10000, "9" * 20000, "chat_id" * 3000, "a." * 2500],
@@ -2289,10 +2340,11 @@ def test_a_long_word_in_a_send_sentence_is_scanned_in_linear_time(token):
     claim = Claim(kind="email", text="I sent the report", sentence=f"I sent the report {token}")
     evidence = Evidence("send_file", {"file_path": "/tmp/r.pdf"})
     best = float("inf")
-    for _ in range(3):
-        start = time.perf_counter()
-        assert evidence_level(claim, evidence) == "exact"  # no match: the whole sentence is scanned
-        best = min(best, time.perf_counter() - start)
+    with _deadline(5):
+        for _ in range(3):
+            start = time.perf_counter()
+            assert evidence_level(claim, evidence) == "exact"  # no match: the whole sentence is scanned
+            best = min(best, time.perf_counter() - start)
     assert best < 0.05, best
 
 
@@ -2407,6 +2459,15 @@ def test_a_blank_line_ends_the_sentence_a_send_file_is_judged_by(text):
         "via telegram ",
         "on you ",
         "via the bot ",
+        "-_a",
+        "_a",
+        "*a",
+        "`a",
+        "user ",
+        "earlier ",
+        "(twice) ",
+        "as a PDF ",
+        "\n9:30 ",
     ],
     ids=[
         "for-a-b",
@@ -2425,27 +2486,22 @@ def test_a_blank_line_ends_the_sentence_a_send_file_is_judged_by(text):
         "via-telegram",
         "on-you",
         "via-the-bot",
+        "-_a",
+        "_a",
+        "*a",
+        "backtick-a",
+        "user",
+        "earlier",
+        "twice",
+        "as-a-pdf",
+        "clock",
     ],
 )
-@pytest.mark.parametrize("head", ["to the owner", "to you"])
+@pytest.mark.parametrize("head", ["to the owner", "to you", "to the user", "via our bot", ""])
 def test_a_long_tail_after_a_self_word_is_scanned_in_linear_time(unit, head):
-    # the prepositional tail, the adverbs, the connectors and the later clauses after a self word are read one way
-    # only: four times the text takes about four times as long, not sixteen
-    evidence = Evidence("send_file", {"file_path": "/tmp/r.pdf"})
-
-    def best(size):
-        sentence = f"I sent the report {head} " + unit * (size // len(unit))
-        claim = Claim(kind="email", text="I sent the report", sentence=sentence)
-        times = []
-        for _ in range(3):
-            start = time.perf_counter()
-            evidence_level(claim, evidence)
-            times.append(time.perf_counter() - start)
-        return min(times)
-
-    small, large = best(5_000), best(20_000)
-    assert large < 8 * small + 0.01, (small, large)
-    assert large < 0.5, large
+    # the prepositional tail, the adverbs, the connectors, the later clauses, the styling and the owner-only tails after
+    # a self word are read one way only (an unmatched "_" once re-read the rest of its word: 1.4 s at 20 KB)
+    _assert_linear(lambda size: f"I sent the report {head} " + unit * (size // len(unit)))
 
 
 @pytest.mark.parametrize("head", ["to the user via Telegram", "to the owner (twice)", "to you at 9am", "to the bot"])
@@ -2666,6 +2722,27 @@ def test_the_review_sentences_after_a_new_self_head_are_plausible(text):
 def test_the_gains_after_a_new_self_head_stay_exact(text):
     result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
     assert [c.evidence for c in result.claims] == [E]
+
+
+@pytest.mark.parametrize(
+    ("text", "level"),
+    [
+        # a single _, * or backtick around a word is styling; the styled word is read as it is
+        ("I sent the report via _Slack_.", P),
+        ("I sent the report to `Bob`.", P),
+        ("I sent the report via *Slack*.", P),
+        ("I sent the report to bob_smith.", P),
+        ("I sent the report to _bob_smith_.", P),
+        ("I sent the report via send_file.", E),
+        ("I sent the report via `send_file`.", E),
+        ("I sent the report to the owner with chat_id `-100123`.", P),
+        ("I sent the report to the owner as `a_b`.", E),
+        ("I sent the report to you as *a_b*.", E),
+    ],
+)
+def test_styling_is_unwrapped_once_per_word(text, level):
+    result = _verify(text, [Evidence("send_file", {"file_path": "/tmp/r.pdf"})])
+    assert [c.evidence for c in result.claims] == [level]
 
 
 @pytest.mark.xfail(

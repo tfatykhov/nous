@@ -1723,8 +1723,9 @@ _NOT_DONE = re.compile(
     rf"|{_PRONOUN}['’](?:ll|m\s+going\s+to|re\s+going\s+to)|(?-i:not)\s+(?:to|yet))\b"
     r"(?:(?!\b(?:but|and)\b)[^;,:—–()\n])*",
     re.IGNORECASE)
-# A single _, * or backtick around a word is styling, as ** is: "via _Slack_", "to `Bob`"
-_STYLED = re.compile(r"(?<![\w*`])([_*`])([^\s*`]+?)\1(?![\w*`])")
+# A single _, * or backtick around a word is styling, as ** is: "via _Slack_", "to `Bob`". The word does not hold its own
+# mark and is at most 60 characters, so an unmatched "_" does not re-read the rest of a long word ("-_a-_a-_a...")
+_STYLED = re.compile(r"(?<![\w*`])([_*`])((?:(?!\1)[^\s*`]){1,60}?)\1(?![\w*`])")
 # The self heads main took for the owner's chat on their own, copied from main's rule: "to you", "to me", "to the
 # owner", "to (the/your/my) DM, chat or Telegram", "via (the/a/your) Telegram, bot or chat". They stay on the rules above.
 _MAIN_EXEMPT_TO = r"(?:you|yourself|me|(?:(?:the|your|my)\s+)?(?:owner|chat|dm|telegram(?!\s+(?:group|channel)\b)))\b"
