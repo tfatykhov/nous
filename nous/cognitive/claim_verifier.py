@@ -1603,9 +1603,10 @@ _OWNER_ONLY_END = (r"(?:fyi|asap|btw|nb|ps|v\d+(?:\.\d+)*|\d{4}-\d\d-\d\d|\d{1,2
                    r"|finally|also|too|again|anyway|instead|eventually|thanks|thank\s+you|cheers|done|all\s+good"
                    r"|see\s+attached|(?:summary|next\s+steps|details|notes?|attachments?|highlights|results|changes"
                    r"|status):)[ \t]*$")
-# A time or a place after "to <self> at" that names no one: "at lunch", "at the usual time", "at the office" (not
-# "at lunch with Bob", "at the office of Bob", "at Worktime HQ")
-_AT_TAIL = (r"(?:lunch|[a-z]+time|dinner|breakfast|night|dawn|dusk|work|home|first|last|least|most|all|length|hand"
+# A time or a place after "to <self> at" that names no one: "at lunch", "at bedtime", "at the usual time", "at the
+# office" (not "at lunch with Bob", "at the office of Bob", "at Worktime HQ", "at Bobtime")
+_AT_TAIL = (r"(?:lunch|(?:lunch|bed|dinner|tea|day|night|supper)time|dinner|breakfast|night|dawn|dusk|work|home|first"
+            r"|last|least|most|all|length|hand"
             rf"|the\s+(?:(?:[\w-]+\s+)?(?:time|moment|hour|meeting|weekend)s?|office))\b{_TAIL_ENDS}")
 # A short prepositional tail after a self word: "to the user as a PDF", "on Monday", "for review", "by 5pm" (up to
 # three words, none of them a preposition, a connector, an adverb or a self word, so the tail is read one way only
@@ -1835,9 +1836,11 @@ def evidence_level(claim: Claim, ev: Evidence) -> str:
         # the whole sentence from the claim's clause on: "to the user — Bob", "to the user: Bob"
         sentence = claim.sentence or claim.clause or claim.text
         clause = claim.clause or ""
-        if clause and sentence.startswith(clause) and not _MAIN_RECIPIENT.search(sentence):
+        if (clause and sentence.startswith(clause) and not _MAIN_RECIPIENT.search(sentence)
+                and not _NEW_SELF_HEAD.search(sentence)):
             # only past the claim's clause (main read no further), and not after a word main took for a
-            # recipient whatever followed: the dropped clause can then raise no score above main
+            # recipient whatever followed nor any other new self head: the dropped clause can then raise no
+            # score above main
             sentence = clause + _NOT_DONE.sub("", sentence[len(clause):])
         sentence = _STYLED.sub(r"\2", sentence)
         if _ELSEWHERE.search(sentence):

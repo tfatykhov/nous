@@ -2752,8 +2752,6 @@ def test_the_review_sentences_after_a_new_self_head_are_plausible(text):
         "I forwarded the summary to the user.",
         "I sent the report to the user as a PDF.",
         "I sent the report to the user earlier.",
-        # a later clause that claims no send is dropped first, where it may be
-        "I sent the report to our Telegram; I will send it via Slack tomorrow.",
     ],
 )
 def test_the_gains_after_a_new_self_head_stay_exact(text):
@@ -2864,11 +2862,24 @@ def test_where_main_found_a_destination_only_a_new_self_head_may_be_exact(text):
         ("I sent the report to our bot (the Q3 report).", E),
         ("I sent the report to the user, namely the final PDF report.", E),
         ("I sent the report to the user (the weekly summary).", E),
-        # a later clause is dropped only where no user, bot or send_file is in the sentence, and never one that names
-        # someone without a future or a negation
+        # a later clause is dropped only where no new self head (nor user, bot or send_file) is in the sentence, and
+        # never one that names someone without a future or a negation
         ("I sent the report to our Telegram; Bob will get it later.", P),
         ("I sent the report to your DMs; I will resend it later and Bob too.", P),
         ("I sent the report to the user; I will send it via Slack tomorrow.", P),
+        ("I sent the report via this chat; I will send it to Bob.", P),
+        ("I sent the report to our Telegram; I will send it to Bob.", P),
+        ("I sent the report to your DMs; I will send it to Bob.", P),
+        ("I sent the report to this bot; I will send it to Bob.", P),
+        ("I sent the report to our Telegram; I will send it via Slack tomorrow.", P),
+        # ... and after an exempt head it still is
+        ("I sent the report to you; I will send it via Slack tomorrow.", E),
+        # a time after "at" is a closed list of times: "at Bobtime" could be someone
+        ("I sent the report to the user at Bobtime.", P),
+        ("I sent the report to the user at bobtime.", P),
+        ("I sent the report via this chat at Worktime.", P),
+        *[(f"I sent the report to the user at {t}.", E)
+          for t in ("lunchtime", "bedtime", "dinnertime", "teatime", "daytime", "nighttime", "suppertime")],
     ],
 )
 def test_an_owner_only_tail_holds_no_name(text, level):
