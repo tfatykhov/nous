@@ -73,6 +73,16 @@ Limitations, written into every report:
   so a replayed window can hold rows the live window did not.
 - It is a screen, not a measurement of answer quality.
 
+Two options added in Task 4:
+- `--seeds-from candidates` replays every retrieval whose `spreading_activation` leg was attempted,
+  including those where spreading found nothing and so recorded no seed. It rebuilds the live seeds
+  (the `brain` decisions and the top three `heart_primary` facts) and the live exclusion set (the
+  candidates the call already had before Stage 4, plus the Path A neighbours) from
+  `retrieval_log.candidates` and `expansions`, which removes both limitations above. On the A2
+  clone's 462 retrievals with recorded SA rows it reproduced every live SA row and activation.
+- `--edge-kinds` reports which kind of edge carried each kept row's last hop: `co_occurred`,
+  `co_mention` or `other`. For each row it re-runs that one hop from the node the winning path left.
+
 Hub share judges each row by the node its winning path's last hop left: its seed for a depth-1 row,
 the via node for a depth-2 row (`spreading_activation_search`'s `parent_out`, added in Task 3).
 Before Task 3 it used the winning seed's degree, which is exact for depth-1 rows only.

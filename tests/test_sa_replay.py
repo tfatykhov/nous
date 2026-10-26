@@ -26,19 +26,25 @@ from scripts.diag import sa_replay
 from scripts.diag.sa_replay import (
     BASE_CONFIG_KEYS,
     ArmRun,
+    EdgeHop,
     ReplaySeed,
     base_config_sources,
     build_settings,
     check_dsn_host,
+    edge_kind,
     embed_queries,
     hub_share,
     jaccard_at_k,
+    last_hop_edges,
     load_base_config,
+    load_candidate_seeds,
     load_degrees,
     load_replay_seeds,
     parse_arm,
+    parse_candidate_seeds,
     parse_replay_seeds,
     percentile,
+    replay,
     run_arm,
 )
 
@@ -168,6 +174,97 @@ def test_load_replay_seeds_dedupes_within_retrieval():
     # expansions as delivered by a driver that does not decode JSONB.
     raw = parse_replay_seeds([_log_row(json.dumps([_exp(A, seed_score=0.9)]))])
     assert raw[0].seeds == [(A, "fact", 0.9)]
+
+
+# ---------------------------------------------------------------------------
+# Seeds from retrieval_log.candidates (--seeds-from candidates)
+# ---------------------------------------------------------------------------
+
+
+def _cand(cid, leg, ctype="fact", score=0.8, stage="final", restored_from=None):
+    return {"id": str(cid), "type": ctype, "entry_leg": leg, "entry_score": score,
+            "entry_rank": None, "final_rank": None, "disposition": "rendered",
+            "disposition_stage": stage, "mutations": [], "restored_from": restored_from}
+
+
+def test_parse_candidate_seeds_mirrors_stage4():
+    """Seeds are the first max_expand brain decisions (score or 0.5) and the first
+    three scored heart_primary facts, in recorded order; the heart leg's own cut
+    is not a seed, also when another leg brought it back. The exclusion is every
+    pre-Stage-4 candidate less the heart and chunk cuts, plus the Path A
+    neighbours; Stage 4's own rows and later legs are not excluded."""
+    d1, d2, cut_fact, f1, f2, f3, f4, unscored, episode = (uuid4() for _ in range(9))
+    chunk, chunk_cut, path_a, path_2, sa_row, sa_low, parent_ep = (uuid4() for _ in range(7))
+    rescued_by_sa, rescued_by_path_a = uuid4(), uuid4()
+    rescued = "sliced_off@heart_recall_limit"
+    candidates = [
+        _cand(cut_fact, "heart_primary", score=0.99, stage="heart_recall_limit"),
+        _cand(rescued_by_sa, "heart_primary", score=0.98, restored_from=rescued),
+        _cand(rescued_by_path_a, "heart_primary", score=0.97, stage="script_limit", restored_from=rescued),
+        _cand(f1, "heart_primary", score=0.9),
+        _cand(episode, "heart_primary", ctype="episode", score=0.95),
+        _cand(unscored, "heart_primary", score=None),
+        _cand(f2, "heart_primary", score=0.7, stage="script_limit"),
+        _cand(f3, "heart_primary", score=0.6),
+        _cand(f4, "heart_primary", score=0.5),
+        _cand(chunk, "chunk", ctype="chunk"),
+        _cand(chunk_cut, "chunk", ctype="chunk", stage="chunk_rrf_merge"),
+        _cand(path_a, "heart_graph_memory", ctype="chunk"),
+        _cand(path_2, "heart_graph", ctype="decision"),
+        _cand(d1, "brain", ctype="decision", score=None),
+        _cand(d2, "brain", ctype="decision", score=0.4),
+        _cand(sa_row, "graph_expanded"),
+        _cand(sa_low, "spreading_activation", stage="spreading_activation_floor"),
+        _cand(parent_ep, "parent_episode", ctype="episode"),
+    ]
+    expansions = [
+        _exp(f1, stage="stage2b_heart_graph_memory", neighbor=rescued_by_path_a),
+        _exp(f1, stage="stage2b_heart_graph_memory", neighbor=path_a),
+        _exp(f1, neighbor=sa_row),
+    ]
+    row = {"id": "r1", "agent_id": "agent-x", "query": "q", "candidates": candidates,
+           "expansions": expansions}
+    [rs] = parse_candidate_seeds([row], max_expand=1)
+    assert rs.seeds == [(d1, "decision", 0.5), (f1, "fact", 0.9), (f2, "fact", 0.7), (f3, "fact", 0.6)]
+    assert rs.exclude == {
+        f1, episode, unscored, f2, f3, f4, chunk, path_a, path_2, d1, d2, rescued_by_path_a}
+    assert parse_candidate_seeds([row], max_expand=2)[0].seeds[:2] == [
+        (d1, "decision", 0.5), (d2, "decision", 0.4)]
+    # A driver that does not decode JSONB; a retrieval with no seed is dropped.
+    raw = parse_candidate_seeds(
+        [{**row, "candidates": json.dumps(candidates), "expansions": json.dumps(expansions)}], 1)
+    assert (raw[0].seeds, raw[0].exclude) == (rs.seeds, rs.exclude)
+    assert parse_candidate_seeds([{**row, "candidates": [_cand(chunk, "chunk", ctype="chunk")]}], 1) == []
+
+
+def test_edge_kind():
+    assert edge_kind("co_occurred", "co_occurrence") == "co_occurred"
+    assert edge_kind("related_to", "co_mention") == "co_mention"
+    assert edge_kind("related_to", "inferred") == "other"
+    assert edge_kind("related_to", None) == "other"
+
+
+def test_score_retrieval_reports_edge_kinds():
+    seed, n1, n2, n3 = (uuid4() for _ in range(4))
+    e1, e2 = uuid4(), uuid4()
+    rs = ReplaySeed(retrieval_id="r", agent_id="agent-x", query="q", seeds=[(seed, "fact", 0.8)])
+    run = ArmRun(
+        rows=[(n1, "fact", 0.4, 1), (n2, "fact", 0.2, 1), (n3, "fact", 0.05, 2)], seconds=0.001,
+        parent_of={n1: seed, n2: seed, n3: n1},
+        edge_of={n1: EdgeHop("other", e1), n2: EdgeHop("co_occurred", e2), n3: EdgeHop("co_mention", e1)},
+    )
+    out = sa_replay._score_retrieval(
+        rs, {"baseline": run}, {"baseline": Settings(_env_file=None)}, {}, edge_kinds=True)
+    arm = out["arms"]["baseline"]
+    assert arm["edge_kinds"] == {"other": 1, "co_occurred": 1}, "n3 is below the floor"
+    assert arm["assoc_rows"] == [
+        {"id": str(n2), "kind": "co_occurred", "edge_id": str(e2), "depth": 1, "activation": 0.2}]
+    summary = sa_replay._summarise([out, out], ["baseline"])["baseline"]
+    assert summary["edge_kinds_kept"] == {"co_occurred": 2, "co_mention": 0, "other": 2}
+    assert summary["retrievals_with_assoc_rows_kept"] == 2
+    plain = sa_replay._score_retrieval(rs, {"baseline": run}, {"baseline": Settings(_env_file=None)}, {})
+    assert "edge_kinds" not in plain["arms"]["baseline"]
+    assert "edge_kinds_kept" not in sa_replay._summarise([plain], ["baseline"])["baseline"]
 
 
 # ---------------------------------------------------------------------------
@@ -439,3 +536,121 @@ async def test_load_degrees_counts_eligible_edges_for_agent(session):
     assert degree[hub] == 2
     assert degree[x] == 1 and degree[y] == 1
     assert z not in degree and w not in degree
+
+
+def _log_row_sql(agent, rid, ts, *, legs, candidates, truncated=False):
+    return {"id": f"{agent}-{rid}", "a": agent, "ts": ts, "q": rid, "legs": json.dumps(legs),
+            "c": json.dumps(candidates), "tr": truncated}
+
+
+_SA_LEG = {"name": "spreading_activation", "attempted": True, "n_returned": 0}
+
+
+@pytest.mark.postgres_only
+async def test_load_candidate_seeds_reads_sa_attempted_for_agent(session):
+    """Retrievals whose SA leg was attempted and whose candidates are complete,
+    agent-scoped and oldest first, also when SA recorded no expansion."""
+    agent = f"sa-replay-{uuid4().hex[:8]}"
+    now = datetime.now(UTC)
+    fact = [_cand(A, "heart_primary", score=0.9)]
+    rows = [
+        _log_row_sql(agent, "first", now - timedelta(hours=2), legs=[_SA_LEG], candidates=fact),
+        _log_row_sql(agent, "no-sa", now - timedelta(hours=1),
+                     legs=[{"name": "heart_primary", "attempted": True}], candidates=fact),
+        _log_row_sql(agent, "sa-off", now - timedelta(minutes=30),
+                     legs=[{**_SA_LEG, "attempted": False}], candidates=fact),
+        _log_row_sql(agent, "truncated", now - timedelta(minutes=20), legs=[_SA_LEG], candidates=fact,
+                     truncated=True),
+        _log_row_sql(agent, "second", now, legs=[_SA_LEG], candidates=[_cand(B, "heart_primary", score=0.6)]),
+        _log_row_sql(f"{agent}-other", "foreign", now, legs=[_SA_LEG], candidates=fact),
+    ]
+    for r in rows:
+        await session.execute(text(
+            "INSERT INTO nous_system.retrieval_log (id, agent_id, timestamp, path, query, legs, candidates, "
+            "expansions, truncated) VALUES (:id, :a, :ts, 'pipeline', :q, CAST(:legs AS jsonb), "
+            "CAST(:c AS jsonb), '[]'::jsonb, :tr)"), r)
+    await session.flush()
+
+    since = now - timedelta(days=1)
+    got = await load_candidate_seeds(session, agent, since, limit=10, max_expand=5)
+    assert [rs.query for rs in got] == ["first", "second"]
+    assert got[0].seeds == [(A, "fact", 0.9)]
+    assert got[0].exclude == {A}
+    assert agent in await sa_replay.list_replay_agents(session, since, "candidates")
+    assert agent not in await sa_replay.list_replay_agents(session, since), "no SA expansion recorded"
+
+
+@pytest.mark.postgres_only
+async def test_run_arm_excludes_live_candidates(session):
+    """rs.exclude leaves known candidates out of the window, and activation
+    still passes through them (S -> A -> C)."""
+    agent = f"sa-replay-{uuid4().hex[:8]}"
+    s, a, b, c = uuid4(), uuid4(), uuid4(), uuid4()
+    await insert_edge(session, agent, s, a, weight=0.9)
+    await insert_edge(session, agent, s, b, weight=0.6)
+    await insert_edge(session, agent, a, c, weight=0.8)
+    rs = ReplaySeed(retrieval_id="r", agent_id=agent, query="q", seeds=[(s, "fact", 0.8)], exclude={a})
+    run = await run_arm(session, rs, Settings(_env_file=None))
+    assert [r[0] for r in run.rows] == [b, c]
+
+
+@pytest.mark.postgres_only
+async def test_last_hop_edges_picks_the_carrying_edge(session):
+    """Parallel edges S-N: co_mention 0.9 and inferred 0.3 (stored N -> S). Under
+    mult 0.5 the co_mention one carries N (0.45 > 0.3); under mult 0.3 the
+    inferred one does (0.27 < 0.3); flag off, co_mention is not eligible. On a
+    tie (S-M, 0.6 x 0.5 = 0.3 against 0.3) the non-associative edge wins. T is two hops out,
+    carried by H -co_occurred-> T."""
+    agent = f"sa-replay-{uuid4().hex[:8]}"
+    s, n, h, t, m = (uuid4() for _ in range(5))
+    await insert_edge(session, agent, s, n, weight=0.9, method="co_mention")
+    await insert_edge(session, agent, n, s, weight=0.3)
+    await insert_edge(session, agent, s, h, weight=1.0)
+    await insert_edge(session, agent, h, t, weight=0.8, relation="co_occurred", method="co_occurrence")
+    await insert_edge(session, agent, s, m, weight=0.6, method="co_mention")
+    await insert_edge(session, agent, m, s, weight=0.3)
+    run = ArmRun(rows=[], seconds=0.0, parent_of={n: s, h: s, t: h, m: s})
+    rows = [n, h, t, m]
+
+    def kinds(hops: dict[UUID, EdgeHop]) -> dict[UUID, str]:
+        return {k: v.kind for k, v in hops.items()}
+
+    assoc = Settings(_env_file=None, spreading_associative_edges_enabled=True)
+    assert kinds(await last_hop_edges(session, agent, run, rows, assoc)) == {
+        n: "co_mention", h: "other", t: "co_occurred", m: "other"}
+    low = Settings(_env_file=None, spreading_associative_edges_enabled=True,
+                   spreading_associative_weight_mult=0.3)
+    assert kinds(await last_hop_edges(session, agent, run, rows, low))[n] == "other"
+    assert kinds(await last_hop_edges(session, agent, run, rows, Settings(_env_file=None))) == {
+        n: "other", h: "other", m: "other"}
+    assert await last_hop_edges(session, agent, run, [], assoc) == {}
+
+
+@pytest.mark.postgres_only
+async def test_replay_edge_kinds_end_to_end(session, monkeypatch):
+    """A CR-shaped graph: the seed's only edges are co_occurred, and one
+    neighbour is already a live candidate. The baseline keeps nothing; the
+    associative arm keeps the other neighbour, carried by a co_occurred edge."""
+
+    async def _keep_fixture_transaction() -> None:
+        """replay() ends its read-only transaction per retrieval; here that
+        transaction is the fixture's, which must stay open to roll back."""
+
+    monkeypatch.setattr(session, "rollback", _keep_fixture_transaction)
+    agent = f"sa-replay-{uuid4().hex[:8]}"
+    s, known, fresh = uuid4(), uuid4(), uuid4()
+    await insert_edge(session, agent, s, known, weight=0.9, relation="co_occurred", method="co_occurrence")
+    await insert_edge(session, agent, s, fresh, weight=0.9, relation="co_occurred", method="co_occurrence")
+    rs = ReplaySeed(retrieval_id="r", agent_id=agent, query="q", seeds=[(s, "fact", 0.9)], exclude={s, known})
+    arms = {
+        "baseline": Settings(_env_file=None),
+        "assoc": Settings(_env_file=None, spreading_associative_edges_enabled=True),
+    }
+    out = await replay(session, {agent: [rs]}, arms, edge_kinds=True)
+    summary = sa_replay._summarise(out, list(arms))
+    assert summary["baseline"]["retrievals_with_rows_above_floor"] == 0
+    assert summary["assoc"]["rows_above_floor"] == 1
+    assert summary["assoc"]["edge_kinds_kept"] == {"co_occurred": 1, "co_mention": 0, "other": 0}
+    [row] = out[0]["arms"]["assoc"]["assoc_rows"]
+    assert row["id"] == str(fresh)
+    assert row["activation"] == pytest.approx(0.9 * 0.9 * 0.5 * 0.5)

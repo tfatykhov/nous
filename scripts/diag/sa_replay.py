@@ -26,6 +26,30 @@ Limitations, also written into every report:
     chunk hits, Path A neighbours). Only the seeds are known here, so a
     replayed window can hold rows the live window did not.
 
+``--seeds-from candidates`` (F105 Task 4) rebuilds both from
+``retrieval_log.candidates`` instead, for every retrieval whose
+``spreading_activation`` leg was attempted, so it also replays retrievals where
+spreading found nothing and recorded no seed. The seeds are the pipeline's: the
+first ``graph_recall_max_expand`` ``brain``-leg decisions (score ``or 0.5``) and
+the first three ``heart_primary`` facts with a score, in recorded order, leaving
+out the heart leg's own cut (``heart_recall_limit``). The exclusion is every
+candidate the live call already had before Stage 4: the ``heart_primary``,
+``chunk``, ``heart_graph``, ``heart_graph_memory`` and ``brain`` legs, less the
+heart and chunk cuts (``heart_recall_limit``, ``chunk_rrf_merge``, also when
+another leg brought the row back, which ``restored_from`` records), plus every
+Path A neighbour in the expansions. Rows with ``truncated`` set are skipped
+(their candidate list is incomplete). A decision first registered by another
+leg is missed as a seed. On the A2 clone's 462 retrievals with recorded SA
+rows (2026-10-26), this reproduced every live SA row set and activation.
+
+``--edge-kinds`` (F105 Task 4) re-runs the last hop of each kept row: the edges
+between the row and the node its winning path left (``parent_out``), under the
+arm's traversal predicate. The one with the largest clamped weight (times the
+associative multiplier when the arm allows associative edges) is the edge that
+carried the row; on a tie a non-associative edge wins, so a row counts as
+associative-carried only when no other edge carries it as well. Each row is
+grouped as ``co_occurred``, ``co_mention`` or ``other``.
+
 Read-only: every connection starts with ``default_transaction_read_only = on``
 (asyncpg ``server_settings``; the clone's own default is off), and the script
 checks it before reading.
@@ -78,7 +102,10 @@ from nous.api.retrieval_pipeline import (  # noqa: E402
     _SPREADING_OVERFETCH_LIMIT,
     _SPREADING_RESULT_CAP,
 )
-from nous.brain.graph_constants import autobehavior_exclusion_sql  # noqa: E402
+from nous.brain.graph_constants import (  # noqa: E402
+    autobehavior_exclusion_sql,
+    spreading_exclusion_sql,
+)
 from nous.brain.spreading_activation import spreading_activation_search  # noqa: E402
 from nous.config import Settings  # noqa: E402
 
@@ -121,21 +148,52 @@ LIMITATIONS: tuple[str, ...] = (
     "seeds, so a replayed window can hold rows the live window did not",
     "a screen, not a measurement of answer quality",
 )
+CANDIDATE_LIMITATIONS: tuple[str, ...] = (
+    "seeds and exclusions are rebuilt from retrieval_log.candidates and the Path A expansions: "
+    "the top-3 heart_primary facts and the brain-leg decisions; a decision first registered by "
+    "another leg is missed",
+    "rows with truncated candidates are skipped",
+    "a screen, not a measurement of answer quality",
+)
+
 HUB_SHARE_NOTE = (
     f"{HUB_SHARE_METHOD}: each row is judged by the degree of the node its winning path's last hop "
     "left (spreading_activation_search's parent_out): its seed for a depth-1 row, the via node for "
     "a depth-2 row"
 )
 
+# --seeds-from candidates: the legs whose ids the live Stage 4 call excluded
+# (retrieval_pipeline's candidate_ids and seen_ids), and the dispositions of
+# rows those legs cut before Stage 4, so never in the pipeline's lists.
+SEEDS_FROM = ("expansions", "candidates")
+LIVE_EXCLUDED_LEGS = frozenset({"heart_primary", "chunk", "heart_graph", "heart_graph_memory", "brain"})
+PRE_STAGE4_CUTS = frozenset({"heart_recall_limit", "chunk_rrf_merge"})
+HEART_FACT_SEEDS = 3  # retrieval_pipeline's heart_fact_seeds slice
+PATH_A_STAGE = "stage2b_heart_graph_memory"  # Path A neighbours, excluded live
+EDGE_KINDS = ("co_occurred", "co_mention", "other")
+
 
 @dataclass
 class ReplaySeed:
-    """One retrieval's recorded SA seeds, as ``(node_id, node_type, score)``."""
+    """One retrieval's recorded SA seeds, as ``(node_id, node_type, score)``.
+
+    ``exclude`` holds the live call's other candidates when they are known
+    (``--seeds-from candidates``); the seeds are always excluded as well.
+    """
 
     retrieval_id: str
     agent_id: str
     query: str
     seeds: list[tuple[UUID, str, float]]
+    exclude: set[UUID] = field(default_factory=set)
+
+
+@dataclass
+class EdgeHop:
+    """The edge that carried a row's last hop (``--edge-kinds``)."""
+
+    kind: str  # one of EDGE_KINDS
+    edge_id: UUID
 
 
 @dataclass
@@ -144,13 +202,15 @@ class ArmRun:
 
     ``rows`` are ``spreading_activation_search``'s ``(id, type, activation,
     depth)``; ``seed_of`` maps each row to its winning path's seed and
-    ``parent_of`` to the node that path's last hop left.
+    ``parent_of`` to the node that path's last hop left. ``edge_of`` is filled
+    by ``--edge-kinds`` only.
     """
 
     rows: list[tuple[UUID, str, float, int]]
     seconds: float
     seed_of: dict[UUID, UUID] = field(default_factory=dict)
     parent_of: dict[UUID, UUID] = field(default_factory=dict)
+    edge_of: dict[UUID, EdgeHop] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +300,12 @@ _HAS_SA_SEED = f"""EXISTS (
     SELECT 1 FROM jsonb_array_elements(r.expansions) e
     WHERE e->>'stage' = '{SA_STAGE}' AND e->>'seed_type' <> 'multi'
       AND jsonb_typeof(e->'seed_score') = 'number')"""
+# --seeds-from candidates: Stage 4 ran its CTE (the leg is marked attempted only
+# when it has seeds), and the candidate list is complete.
+_SA_ATTEMPTED = """r.truncated IS NOT TRUE AND r.candidates IS NOT NULL AND EXISTS (
+    SELECT 1 FROM jsonb_array_elements(r.legs) l
+    WHERE l->>'name' = 'spreading_activation' AND (l->>'attempted')::boolean)"""
+_REPLAYABLE = {"expansions": _HAS_SA_SEED, "candidates": _SA_ATTEMPTED}
 
 
 async def load_replay_seeds(
@@ -256,14 +322,85 @@ async def load_replay_seeds(
     return parse_replay_seeds(result.mappings().all())
 
 
-async def list_replay_agents(session: AsyncSession, since: datetime) -> list[str]:
-    """Every agent with post-#807 SA seeds since ``since`` (``--agent all``)."""
+async def list_replay_agents(
+    session: AsyncSession, since: datetime, seeds_from: str = "expansions"
+) -> list[str]:
+    """Every agent with replayable retrievals since ``since`` (``--agent all``)."""
     result = await session.execute(text(f"""
         SELECT DISTINCT r.agent_id FROM nous_system.retrieval_log r
-        WHERE r.timestamp >= :since AND {_HAS_SA_SEED}
+        WHERE r.timestamp >= :since AND {_REPLAYABLE[seeds_from]}
         ORDER BY 1
     """), {"since": since})
     return list(result.scalars().all())
+
+
+def _cut_before_stage4(c: Mapping[str, Any]) -> bool:
+    """A heart or chunk row its own leg cut, so never in the pipeline's lists.
+
+    A cut row that another leg brought back is marked ``rendered`` (or a later
+    disposition) with ``restored_from = "<disposition>@<stage>"``.
+    """
+    restored = str(c.get("restored_from") or "")
+    return c.get("disposition_stage") in PRE_STAGE4_CUTS or restored.partition("@")[2] in PRE_STAGE4_CUTS
+
+
+def parse_candidate_seeds(rows: Iterable[Mapping[str, Any]], max_expand: int) -> list[ReplaySeed]:
+    """Rebuild each retrieval's live SA seeds and exclusion set from its candidates.
+
+    Mirrors retrieval_pipeline's Stage 4: the first ``max_expand`` ``brain``
+    decisions (score ``or 0.5``), then the first ``HEART_FACT_SEEDS``
+    ``heart_primary`` facts with a score, both in recorded order; a heart row
+    the heart leg cut itself is not a seed. ``exclude`` is every candidate of
+    the ``LIVE_EXCLUDED_LEGS`` that its leg did not cut, plus every Path A
+    neighbour (a ``stage2b_heart_graph_memory`` expansion): a heart row cut and
+    then brought back by Path A keeps ``entry_leg = heart_primary``, yet the
+    live call excluded it as a Path A neighbour. Retrievals with no seed are
+    dropped.
+    """
+    out: list[ReplaySeed] = []
+    for row in rows:
+        candidates, expansions = row["candidates"], row.get("expansions")
+        if isinstance(candidates, str):
+            candidates = json.loads(candidates)
+        if isinstance(expansions, str):
+            expansions = json.loads(expansions)
+        live = [
+            c for c in candidates or []
+            if c.get("entry_leg") in LIVE_EXCLUDED_LEGS and not _cut_before_stage4(c)
+        ]
+        decisions = [
+            (UUID(c["id"]), "decision", float(c.get("entry_score") or 0.5))
+            for c in live if c["entry_leg"] == "brain" and c.get("type") == "decision"
+        ][:max_expand]
+        facts = [
+            (UUID(c["id"]), "fact", float(c["entry_score"]))
+            for c in live
+            if c["entry_leg"] == "heart_primary" and c.get("type") == "fact"
+            and isinstance(c.get("entry_score"), (int, float)) and not isinstance(c["entry_score"], bool)
+        ][:HEART_FACT_SEEDS]
+        seeds = decisions + facts
+        path_a = {UUID(e["neighbor_id"]) for e in expansions or [] if e.get("stage") == PATH_A_STAGE}
+        if seeds:
+            out.append(ReplaySeed(
+                retrieval_id=row["id"], agent_id=row["agent_id"], query=row["query"] or "",
+                seeds=seeds, exclude={UUID(c["id"]) for c in live} | path_a,
+            ))
+    return out
+
+
+async def load_candidate_seeds(
+    session: AsyncSession, agent_id: str, since: datetime, limit: int, max_expand: int
+) -> list[ReplaySeed]:
+    """The agent's first ``limit`` SA-attempted retrievals since ``since``, with
+    seeds and exclusions rebuilt from their candidates."""
+    result = await session.execute(text(f"""
+        SELECT r.id, r.agent_id, r.query, r.candidates, r.expansions
+        FROM nous_system.retrieval_log r
+        WHERE r.agent_id = :agent_id AND r.timestamp >= :since AND {_SA_ATTEMPTED}
+        ORDER BY r.timestamp, r.id
+        LIMIT :limit
+    """), {"agent_id": agent_id, "since": since, "limit": int(limit)})
+    return parse_candidate_seeds(result.mappings().all(), max_expand)
 
 
 async def load_degrees(session: AsyncSession, agent_id: str) -> dict[UUID, int]:
@@ -289,18 +426,66 @@ async def load_degrees(session: AsyncSession, agent_id: str) -> dict[UUID, int]:
 async def run_arm(session: AsyncSession, rs: ReplaySeed, settings: Settings) -> ArmRun:
     """Run the CTE for one retrieval under one arm's settings, timed.
 
-    Same window as the pipeline (``REPLAY_LIMIT``), with the seeds excluded as
-    the pipeline excludes them.
+    Same window as the pipeline (``REPLAY_LIMIT``), with the seeds (and
+    ``rs.exclude``, when known) excluded as the pipeline excludes them.
     """
     seed_of: dict[UUID, UUID] = {}
     parent_of: dict[UUID, UUID] = {}
     t0 = time.perf_counter()
     rows = await spreading_activation_search(
         session, rs.agent_id, rs.seeds, settings,
-        limit=REPLAY_LIMIT, exclude_ids={s[0] for s in rs.seeds}, seed_out=seed_of,
+        limit=REPLAY_LIMIT, exclude_ids={s[0] for s in rs.seeds} | rs.exclude, seed_out=seed_of,
         parent_out=parent_of,
     )
     return ArmRun(rows=rows, seconds=time.perf_counter() - t0, seed_of=seed_of, parent_of=parent_of)
+
+
+def edge_kind(relation: str, extraction_method: str | None) -> str:
+    """``co_occurred`` / ``co_mention`` for an associative edge, else ``other``
+    (the classes of ``graph_constants.associative_edge_sql``)."""
+    if relation == "co_occurred":
+        return "co_occurred"
+    if extraction_method == "co_mention":
+        return "co_mention"
+    return "other"
+
+
+async def last_hop_edges(
+    session: AsyncSession, agent_id: str, run: ArmRun, row_ids: Sequence[UUID], settings: Settings
+) -> dict[UUID, EdgeHop]:
+    """The edge that carried each row's last hop, re-run as one hop (``--edge-kinds``).
+
+    For each row, the edges between it and ``run.parent_of[row]`` (either
+    direction, this agent's, under the arm's traversal predicate). The one with
+    the largest clamped weight, times the associative multiplier when the arm
+    allows associative edges, is the one the CTE's winning path took: the fan
+    factor and decay are the same for every edge leaving that node. On a tie a
+    non-associative edge wins. A row with no parent or no edge is left out.
+    """
+    pairs = [(rid, run.parent_of[rid]) for rid in row_ids if rid in run.parent_of]
+    if not pairs:
+        return {}
+    allow = bool(getattr(settings, "spreading_associative_edges_enabled", False))
+    mult = float(getattr(settings, "spreading_associative_weight_mult", 0.5)) if allow else 1.0
+    result = await session.execute(text(f"""
+        SELECT p.child, e.id, e.relation, e.extraction_method, e.weight
+        FROM unnest(CAST(:children AS uuid[]), CAST(:parents AS uuid[])) AS p(child, parent)
+        JOIN brain.graph_edges e
+            ON (e.source_id = p.parent AND e.target_id = p.child)
+            OR (e.source_id = p.child AND e.target_id = p.parent)
+        WHERE e.agent_id = :agent_id AND {spreading_exclusion_sql("e.", allow_associative=allow)}
+    """), {
+        "children": [str(c) for c, _ in pairs], "parents": [str(p) for _, p in pairs],
+        "agent_id": agent_id,
+    })
+    best: dict[UUID, tuple[tuple[float, bool], EdgeHop]] = {}
+    for child, edge_id, relation, method, weight in result.all():
+        kind = edge_kind(relation, method)
+        w = 1.0 if weight is None else min(float(weight), 1.0)
+        key = (w * (mult if kind != "other" else 1.0), kind == "other")
+        if child not in best or key > best[child][0]:
+            best[child] = (key, EdgeHop(kind=kind, edge_id=edge_id))
+    return {child: hop for child, (_, hop) in best.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -489,15 +674,24 @@ def _resolved(settings: Settings, keys: Iterable[str]) -> dict[str, Any]:
     return {k: getattr(settings, _field_name(k)) for k in keys}
 
 
+def _above_floor(run: ArmRun, settings: Settings) -> list[tuple[UUID, str, float, int]]:
+    """The run's rows above that arm's activation floor, in CTE order."""
+    floor = float(getattr(settings, "spreading_activation_floor", 0.1))
+    return [r for r in run.rows if r[2] > floor]
+
+
 def _score_retrieval(
-    rs: ReplaySeed, runs: dict[str, ArmRun], arms: dict[str, Settings], degree: dict[UUID, int]
+    rs: ReplaySeed, runs: dict[str, ArmRun], arms: dict[str, Settings], degree: dict[UUID, int],
+    edge_kinds: bool = False,
 ) -> dict[str, Any]:
-    """Per-arm metrics of one retrieval; rows count when above that arm's floor."""
+    """Per-arm metrics of one retrieval; rows count when above that arm's floor.
+
+    With ``edge_kinds``, each arm also reports its kept rows by the kind of the
+    edge that carried their last hop (``run.edge_of``), and lists the
+    associative-carried ones with their edge ids.
+    """
     seed_ids = {s[0] for s in rs.seeds}
-    above: dict[str, list[tuple[UUID, str, float, int]]] = {}
-    for name, run in runs.items():
-        floor = float(getattr(arms[name], "spreading_activation_floor", 0.1))
-        above[name] = [r for r in run.rows if r[2] > floor]
+    above = {name: _above_floor(run, arms[name]) for name, run in runs.items()}
     baseline_ids = [r[0] for r in above[BASELINE]]
     per_arm: dict[str, Any] = {}
     for name, run in runs.items():
@@ -512,6 +706,14 @@ def _score_retrieval(
                 hub_share(kept, run.parent_of, seed_ids, degree, HUB_MIN_DEGREE) if kept else None
             ),
         }
+        if edge_kinds:
+            hops = [(r, run.edge_of[r[0]]) for r in kept if r[0] in run.edge_of]
+            per_arm[name]["edge_kinds"] = dict(Counter(hop.kind for _, hop in hops))
+            per_arm[name]["assoc_rows"] = [
+                {"id": str(r[0]), "kind": hop.kind, "edge_id": str(hop.edge_id), "depth": r[3],
+                 "activation": r[2]}
+                for r, hop in hops if hop.kind != "other"
+            ]
     return {
         "retrieval_id": rs.retrieval_id, "agent_id": rs.agent_id,
         "n_seeds": len(rs.seeds), "arms": per_arm,
@@ -544,15 +746,23 @@ def _summarise(retrievals: list[dict[str, Any]], arm_names: list[str]) -> dict[s
                 for r in retrievals
             ]
             entry["added_latency_ms_p95"] = percentile(added, 95)
+        if all("edge_kinds" in p for p in per):
+            kinds: Counter[str] = Counter()
+            for p in per:
+                kinds.update(p["edge_kinds"])
+            entry["edge_kinds_kept"] = {k: kinds.get(k, 0) for k in EDGE_KINDS}
+            entry["retrievals_with_assoc_rows_kept"] = sum(1 for p in per if p["assoc_rows"])
         summary[name] = entry
     return summary
 
 
 async def replay(
-    session: AsyncSession, by_agent: dict[str, list[ReplaySeed]], arms: dict[str, Settings]
+    session: AsyncSession, by_agent: dict[str, list[ReplaySeed]], arms: dict[str, Settings],
+    edge_kinds: bool = False,
 ) -> list[dict[str, Any]]:
     """Run every arm on every retrieval. The arm order rotates per retrieval so
-    no arm always pays the cold cache."""
+    no arm always pays the cold cache. With ``edge_kinds``, each arm's kept rows
+    get their last hop's edge (``last_hop_edges``), outside the timed call."""
     names = list(arms)
     out: list[dict[str, Any]] = []
     i = 0
@@ -564,7 +774,11 @@ async def replay(
             order = names[i % len(names):] + names[: i % len(names)]
             i += 1
             runs = {name: await run_arm(session, rs, arms[name]) for name in order}
-            out.append(_score_retrieval(rs, runs, arms, degree))
+            if edge_kinds:
+                for name, run in runs.items():
+                    kept = [r[0] for r in _above_floor(run, arms[name])[:JACCARD_K]]
+                    run.edge_of = await last_hop_edges(session, agent_id, run, kept, arms[name])
+            out.append(_score_retrieval(rs, runs, arms, degree, edge_kinds=edge_kinds))
             await session.rollback()  # end the read-only transaction per retrieval
     return out
 
@@ -598,6 +812,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
                    help="embed each replayed query (for Task 5 arms); needs OPENAI_API_KEY")
     p.add_argument("--embedding-cache", type=Path,
                    help="query embedding cache (default: next to --out)")
+    p.add_argument("--seeds-from", choices=SEEDS_FROM, default="expansions",
+                   help="where seeds come from: the recorded SA expansions (default), or every "
+                        "SA-attempted retrieval's candidates, with the live exclusion set")
+    p.add_argument("--edge-kinds", action="store_true",
+                   help="group each arm's kept rows by the kind of edge that carried their last hop")
     args = p.parse_args(argv)
     if args.since.tzinfo is None:
         p.error("--since needs a time zone (e.g. a trailing Z)")
@@ -626,9 +845,17 @@ async def _main(args: argparse.Namespace) -> dict[str, Any]:
                 raise SystemExit(f"session is not read-only (transaction_read_only={read_only})")
             agents: list[str] = []
             for a in args.agent:
-                agents.extend(await list_replay_agents(session, args.since) if a == "all" else [a])
+                agents.extend(
+                    await list_replay_agents(session, args.since, args.seeds_from) if a == "all" else [a])
             agents = list(dict.fromkeys(agents))
-            by_agent = {a: await load_replay_seeds(session, a, args.since, args.limit) for a in agents}
+            if args.seeds_from == "candidates":
+                max_expand = int(base.graph_recall_max_expand)
+                by_agent = {
+                    a: await load_candidate_seeds(session, a, args.since, args.limit, max_expand)
+                    for a in agents
+                }
+            else:
+                by_agent = {a: await load_replay_seeds(session, a, args.since, args.limit) for a in agents}
             await session.rollback()
 
             embeddings = None
@@ -649,7 +876,7 @@ async def _main(args: argparse.Namespace) -> dict[str, Any]:
                     await provider.close()
                 embeddings = {"cache": str(cache), "queries": len(vecs)}
 
-            retrievals = await replay(session, by_agent, arms)
+            retrievals = await replay(session, by_agent, arms, edge_kinds=args.edge_kinds)
     finally:
         await engine.dispose()
 
@@ -681,7 +908,9 @@ async def _main(args: argparse.Namespace) -> dict[str, Any]:
             "seed_types": dict(Counter(
                 s[1] for seeds in by_agent.values() for rs in seeds for s in rs.seeds)),
             "query_embeddings": embeddings,
-            "limitations": list(LIMITATIONS),
+            "seeds_from": args.seeds_from,
+            "edge_kinds": args.edge_kinds,
+            "limitations": list(CANDIDATE_LIMITATIONS if args.seeds_from == "candidates" else LIMITATIONS),
         },
         "summary": _summarise(retrievals, names),
         "retrievals": retrievals,
