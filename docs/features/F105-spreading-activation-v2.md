@@ -3,10 +3,11 @@
 **Status:** in progress. Each change below ships behind its own setting whose default reproduces
 today's behaviour exactly, and each is enabled only after its gates pass. Landed so far: the offline
 replay used as the gate (`scripts/diag/sa_replay.py`, Task 1), which changes no product behaviour;
-fan normalisation (Task 3), off by default (`NOUS_SPREADING_FAN_NORMALISATION_ENABLED`); and
+fan normalisation (Task 3), off by default (`NOUS_SPREADING_FAN_NORMALISATION_ENABLED`);
 associative edges at a reduced weight (Task 4), off by default
-(`NOUS_SPREADING_ASSOCIATIVE_EDGES_ENABLED`). Both offline gates passed; neither MAB arm has run
-yet.
+(`NOUS_SPREADING_ASSOCIATIVE_EDGES_ENABLED`); and a query-conditioned gate after the CTE (Task 5),
+off by default (`NOUS_SPREADING_QUERY_GATE_ENABLED`). The Task 3 and 4 offline gates passed; no
+MAB arm has run yet.
 
 **Builds on:** [F022 Graph-Augmented Recall](F022-graph-augmented-recall.md) (the density-gated
 recursive CTE in `nous/brain/spreading_activation.py`) and F091 retrieval telemetry
@@ -254,3 +255,43 @@ than associative edges. The CR arm below forces spreading on, as the measured CR
 with `NOUS_SPREADING_ACTIVATION_ENABLED=true` and the flag on, the only task that gets one.
 Pre-registered sign: CR SA rows go from 0 to more than 0 and CR accuracy does not fall; LME + qa2
 within the default rule.
+
+## Query-conditioned gate (Task 5)
+
+Settings: `NOUS_SPREADING_QUERY_GATE_ENABLED` (default `false`), `NOUS_SPREADING_QUERY_GATE_MODE`
+(`seed_relative`, `quantile` or `raw`; default `seed_relative`), `NOUS_SPREADING_QUERY_GATE_SEED_MIN`,
+and the `quantile` anchors `NOUS_SPREADING_QUERY_GATE_Q_LO` / `_Q_HI` (defaults 0 and 1, which make
+`quantile` the raw clamp); see [environment variables](../reference/environment-variables.md).
+
+The CTE scores a row by graph structure only, so a neighbour reached through a strong edge keeps a
+high activation however unrelated it is to the query. The gate runs in Stage 4 of
+`retrieval_pipeline.py`, after `spreading_activation_search` and before the activation floor and the
+result cap. With the flag on, Stage 4 embeds the query once (`brain.embeddings`, the provider Heart
+shares, so in practice an LRU hit after the chunk or exemplar leg), reads
+`cos = 1 - (embedding <=> query)` for each row and for its winning seed
+(`spreading_activation.query_cosines`: one agent-scoped query per node type over `brain.decisions`,
+`heart.facts`, `heart.episodes`, `heart.procedures` and `heart.episode_chunks`), and multiplies each
+row's activation by `gate_factor`:
+
+- `seed_relative` (primary): `min(1, max(cos_node, 0) / max(cos_seed, s_min))`. A node as relevant
+  to the query as the seed that activated it keeps its full activation. A seed whose cosine is below
+  `s_min`, zero or negative included, is divided by `s_min`, so its rows are still gated.
+- `quantile` (MAB arm G-B): `clamp((cos_node - q_lo) / (q_hi - q_lo), 0, 1)`.
+- `raw`: `max(cos_node, 0)`, the paper's form, kept to show why it is not the default.
+
+The factor is in [0, 1], so the gate never raises a score. The floor and the cap see the gated
+value. The rows are re-sorted by it (stably, so ties keep the CTE's order) before the cap takes its
+20, so a row the gate demotes gives up its cap slot. The F091 expansion row records the raw activation
+as `path_strength` and the gated one as `edge_weight`. No LLM is involved; the query embedding is one
+call, and the cosines one query per node type present.
+
+**Missing embeddings.** All five node tables have a nullable `embedding`: decisions recorded without
+an embedder, chunks mid-backfill and procedures can be NULL. A NULL node or seed embedding gets factor
+1.0, because absence is not a relevance value; the count goes to a `logger.debug` line. A missing
+embedder or an empty query vector skips the gate for the whole call. Any failure leaves the rows
+ungated and counts `n_stage_errors["spreading_query_gate"]`: the gate fails open and never turns
+spreading into the 1-hop fallback.
+
+**Over-fetch.** The CTE's 40-row window (`_SPREADING_OVERFETCH_LIMIT`) is cut by raw activation
+before the gate runs. The gate can only lower or reorder rows inside that window; it cannot bring in
+a row the window left out. That is left as is.

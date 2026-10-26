@@ -51,6 +51,8 @@ from nous.observability.retrieval_trace import (
 )
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from nous.brain.brain import Brain
     from nous.brain.schemas import DecisionSummary, NeighborResult
     from nous.config import Settings
@@ -1660,6 +1662,16 @@ async def _run_stages(
                         seed_out=winning_seed,
                     )
                     seed_by_id = {str(s[0]): s for s in seeds}
+                    # F105 Task 5: the query gate rescales `activated` before
+                    # the floor and the cap below, so both see the gated value.
+                    # The raw value stays as the expansion's path_strength.
+                    raw_activation: dict[tuple[UUID, str], float] = {}
+                    if getattr(settings, "spreading_query_gate_enabled", False) and activated:
+                        raw_activation = {(r[0], r[1]): r[2] for r in activated}
+                        activated = await _query_gate(
+                            sa_session, brain, query, settings, activated,
+                            winning_seed, seed_by_id, acc,
+                        )
                     # A4: the floor was a bare `0.1` literal here and in the
                     # F091 mirror below. Both now read the setting so a
                     # relative-floor experiment is a config arm; the default
@@ -1753,7 +1765,7 @@ async def _run_stages(
                             stage="stage4_spreading_activation", hop=depth,
                             edge_relation="spreading_activation",
                             edge_weight=activation,
-                            path_strength=activation,
+                            path_strength=raw_activation.get((nid, ntype), activation),
                         )
                         seen_ids.add(nid)
                         n_appended += 1
@@ -1932,6 +1944,71 @@ def _heart_results_to_pipeline(
             )
         )
     return out
+
+
+async def _query_gate(
+    session: "AsyncSession",
+    brain: "Brain",
+    query: str,
+    settings: "Settings",
+    activated: list[tuple[UUID, str, float, int]],
+    winning_seed: dict[UUID, UUID],
+    seed_by_id: dict[str, tuple[UUID, str, float]],
+    acc: _PipelineAccumulator,
+) -> list[tuple[UUID, str, float, int]]:
+    """F105 Task 5: scale each spreading row by its relevance to the query.
+
+    Each row's activation is multiplied by ``gate_factor(cos(node, q),
+    cos(winning seed, q))``, which is in [0, 1], and the rows are re-sorted by
+    the gated value (stably, so ties keep the CTE's order) for the result cap.
+    A node or seed without an embedding is neutral (factor 1.0). With no
+    embedder, or an empty query vector, the rows come back unchanged, and so
+    they do on any failure, counted in ``acc.stage_errors["spreading_query_gate"]``:
+    the gate fails open and never turns spreading into the 1-hop fallback.
+
+    The CTE's over-fetch window (``_SPREADING_OVERFETCH_LIMIT``) is cut before
+    this runs, so the gate cannot pull in a row that window left out.
+    """
+    embedder = getattr(brain, "embeddings", None)
+    if embedder is None:
+        return activated
+    try:
+        from nous.brain.spreading_activation import gate_factor, query_cosines
+
+        # The chunk and exemplar legs embed the same query: an LRU hit in practice.
+        query_vec = await embedder.embed(query)
+        if not query_vec:
+            return activated
+        nodes: dict[UUID, str] = {nid: ntype for nid, ntype, _a, _d in activated}
+        for nid, _ntype, _a, _d in activated:
+            seed = seed_by_id.get(str(winning_seed.get(nid)))
+            if seed is not None:
+                nodes.setdefault(seed[0], seed[1])
+        cos = await query_cosines(session, brain.agent_id, list(nodes.items()), query_vec)
+        mode = str(getattr(settings, "spreading_query_gate_mode", "seed_relative"))
+        q_lo = float(getattr(settings, "spreading_query_gate_q_lo", 0.0))
+        q_hi = float(getattr(settings, "spreading_query_gate_q_hi", 1.0))
+        s_min = float(getattr(settings, "spreading_query_gate_seed_min", 0.2))
+        gated: list[tuple[UUID, str, float, int]] = []
+        for nid, ntype, activation, depth in activated:
+            seed_id = winning_seed.get(nid)
+            factor = gate_factor(
+                cos.get(nid), cos.get(seed_id) if seed_id is not None else None,
+                mode, q_lo, q_hi, s_min,
+            )
+            gated.append((nid, ntype, activation * factor, depth))
+        gated.sort(key=lambda r: r[2], reverse=True)
+        logger.debug(
+            "Spreading query gate (%s): %d rows, %d without a node embedding (neutral)",
+            mode, len(gated), sum(1 for nid, *_ in activated if cos.get(nid) is None),
+        )
+        return gated
+    except Exception:
+        logger.debug("Spreading query gate failed; rows stay ungated", exc_info=True)
+        acc.stage_errors["spreading_query_gate"] = (
+            acc.stage_errors.get("spreading_query_gate", 0) + 1
+        )
+        return activated
 
 
 async def _apply_graph_adjacency_boost(

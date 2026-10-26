@@ -7,6 +7,7 @@ graph density exceeds a configurable threshold.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from uuid import UUID
 
 from sqlalchemy import text
@@ -346,3 +347,85 @@ async def spreading_activation_search(
         (row.id, row.node_type, float(row.total_activation), int(row.depth))
         for row in rows
     ]
+
+
+# F105 Task 5: where each graph node type keeps its embedding. Every table is
+# agent-scoped by ``agent_id`` and holds a nullable ``vector(1536)``.
+_EMBEDDING_TABLES: dict[str, str] = {
+    "decision": "brain.decisions",
+    "fact": "heart.facts",
+    "episode": "heart.episodes",
+    "procedure": "heart.procedures",
+    "chunk": "heart.episode_chunks",
+}
+
+
+async def query_cosines(
+    session: AsyncSession,
+    agent_id: str,
+    nodes: list[tuple[UUID, str]],
+    query_vec: Sequence[float],
+) -> dict[UUID, float | None]:
+    """F105: ``cos(node, query) = 1 - (embedding <=> query)`` for each node.
+
+    One query per node type present, ``id = ANY(:ids)``, this agent's rows only.
+    A node is ``None`` when it has no embedding, no row (or another agent's
+    row), or a type with no embedding table: absence is not a relevance value.
+    """
+    out: dict[UUID, float | None] = {nid: None for nid, _t in nodes}
+    by_type: dict[str, list[str]] = {}
+    for nid, ntype in nodes:
+        if ntype in _EMBEDDING_TABLES:
+            by_type.setdefault(ntype, []).append(str(nid))
+    if not by_type:
+        return out
+    vec_lit = "[" + ",".join(f"{v:.6f}" for v in query_vec) + "]"
+    for ntype, ids in by_type.items():
+        result = await session.execute(text(f"""
+            SELECT id, 1 - (embedding <=> CAST(:v AS vector)) AS cos
+            FROM {_EMBEDDING_TABLES[ntype]}
+            WHERE agent_id = :agent_id AND id = ANY(CAST(:ids AS uuid[])) AND embedding IS NOT NULL
+        """), {"v": vec_lit, "agent_id": agent_id, "ids": ids})
+        for row in result.all():
+            if row.id in out:
+                out[row.id] = float(row.cos)
+    return out
+
+
+def gate_factor(
+    cos_node: float | None,
+    cos_seed: float | None,
+    mode: str,
+    q_lo: float,
+    q_hi: float,
+    s_min: float,
+) -> float:
+    """F105: the query gate's multiplier for one spreading row, always in [0, 1].
+
+    - ``seed_relative``: ``min(1, max(cos_node, 0) / max(cos_seed, s_min))``. A
+      node as relevant to the query as the seed that activated it keeps full
+      activation; a seed with a cosine below ``s_min`` (zero or negative too)
+      is divided by ``s_min``, so it still gates. Neutral (1.0) when either
+      cosine is None.
+    - ``quantile``: ``clamp((cos_node - q_lo) / (q_hi - q_lo), 0, 1)``.
+    - ``raw``: ``max(cos_node, 0)``.
+
+    ``quantile`` and ``raw`` are neutral when ``cos_node`` is None. The result is
+    clamped, so a cosine a hair above 1 cannot amplify.
+    """
+    if mode == "seed_relative":
+        if cos_node is None or cos_seed is None:
+            return 1.0
+        factor = max(cos_node, 0.0) / max(cos_seed, s_min)
+    elif mode == "quantile":
+        if cos_node is None:
+            return 1.0
+        factor = (cos_node - q_lo) / (q_hi - q_lo)
+    elif mode == "raw":
+        if cos_node is None:
+            return 1.0
+        factor = cos_node
+    else:
+        raise ValueError(f"unknown spreading query gate mode {mode!r}")
+    return min(1.0, max(0.0, factor))
+

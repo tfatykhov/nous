@@ -1517,6 +1517,46 @@ class Settings(BaseSettings):
             "MAX bound activation <= seed_score."
         ),
     )
+    # F105 Task 5: query-conditioned gate, applied to the CTE's rows in Stage 4
+    # (retrieval_pipeline) before the floor and the cap. The SQL is unchanged.
+    spreading_query_gate_enabled: bool = Field(
+        default=False,
+        description=(
+            "F105: when true, each spreading row's activation is multiplied by "
+            "gate_factor(cos(node, query), cos(winning seed, query)), in [0, 1], "
+            "before the activation floor and the result cap. A missing embedding "
+            "is neutral (1.0); no embedder or an empty query vector skips the gate."
+        ),
+    )
+    spreading_query_gate_mode: Literal["seed_relative", "quantile", "raw"] = Field(
+        default="seed_relative",
+        description=(
+            "F105: seed_relative = min(1, max(cos_node, 0) / max(cos_seed, seed_min)); "
+            "quantile = clamp((cos_node - q_lo) / (q_hi - q_lo), 0, 1); "
+            "raw = max(cos_node, 0)."
+        ),
+    )
+    spreading_query_gate_q_lo: float = Field(
+        default=0.0,
+        ge=0.0,
+        lt=1.0,
+        description="F105: quantile mode's lower anchor (factor 0 at or below it).",
+    )
+    spreading_query_gate_q_hi: float = Field(
+        default=1.0,
+        gt=0.0,
+        le=1.0,
+        description="F105: quantile mode's upper anchor (factor 1 at or above it).",
+    )
+    spreading_query_gate_seed_min: float = Field(
+        default=0.2,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "F105: seed_relative mode's smallest denominator, so a seed with a low "
+            "or negative query cosine still gates its rows."
+        ),
+    )
 
     # F040: Graph densification — backfill
     # F044 tinyHippo-Lite v1 — STC state machine (telemetry-only slice).
@@ -3357,6 +3397,16 @@ class Settings(BaseSettings):
             raise ValueError(
                 "NOUS_CONTINUATION_MAX_WAIT_SECONDS must not be below NOUS_CONTINUATION_DEBOUNCE_SECONDS "
                 f"({self.continuation_max_wait_seconds} < {self.continuation_debounce_seconds})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_query_gate_anchors(self) -> "Settings":
+        """F105: quantile mode divides by q_hi - q_lo."""
+        if self.spreading_query_gate_q_lo >= self.spreading_query_gate_q_hi:
+            raise ValueError(
+                "NOUS_SPREADING_QUERY_GATE_Q_LO must be below NOUS_SPREADING_QUERY_GATE_Q_HI "
+                f"({self.spreading_query_gate_q_lo} >= {self.spreading_query_gate_q_hi})"
             )
         return self
 
