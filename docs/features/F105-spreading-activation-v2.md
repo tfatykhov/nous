@@ -96,9 +96,11 @@ With the flag on, each recursive step multiplies the activation leaving a node b
 edges in either direction, this agent's only, under the same eligibility predicate as the traversal
 (one `edge_filter` predicate builds both, so Task 4 changes them together). The factor is `<= 1`, so
 the MAX invariant `activation <= seed_score` holds. The degree is a `CROSS JOIN LATERAL` count placed
-before the edge join in the recursive term. It is exact, needs no schema change, uses the source and
-target edge indexes, and runs once per frontier row, not once per joined edge. A node reached by `k`
-paths pays `k` counts. With the flag off, the statement is byte-identical to before; one snapshot,
+before the edge join in the recursive term. It is exact, needs no schema change and uses the source
+and target edge indexes. It is meant to run once per frontier row, not once per joined edge, and
+`EXPLAIN` on realistic graphs shows that plan (below). The planner may still choose to evaluate it
+once per joined edge, which changes the cost only, never the value. A node reached by `k` paths pays
+`k` counts. With the flag off, the statement is byte-identical to before; one snapshot,
 `tests/fixtures/spreading_sql_default.sql`, checks that for every F105 flag.
 
 Why `(D0 / d) ^ gamma` and not SYNAPSE's `1 / d`: prod degree is p50 5, p90 15, p99 47, max 567, so a

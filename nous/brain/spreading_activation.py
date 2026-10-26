@@ -91,8 +91,10 @@ def _fan_factor_sql(edge_filter_sql: str) -> str:
     ``d <= :fan_free`` and ``(:fan_free / d) ** :fan_exp`` above it, so always
     ``<= 1``. Every ``:fan_free`` is cast to FLOAT: one bind parameter cannot be
     deduced as two types, and an integer ``:fan_free / d`` would truncate
-    10 / 41 to 0. Joined LATERAL before the edge join, it runs once per
-    frontier row rather than once per joined edge.
+    10 / 41 to 0. It is joined LATERAL before the edge join so that it runs
+    once per frontier row; EXPLAIN on realistic graphs shows that plan. The
+    planner may still evaluate it once per joined edge (it does on very small
+    graphs), which changes the cost only, never the value.
     """
     return (
         "SELECT CASE WHEN COUNT(*) <= CAST(:fan_free AS FLOAT) THEN 1.0"

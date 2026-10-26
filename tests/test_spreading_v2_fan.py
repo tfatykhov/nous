@@ -22,8 +22,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from pydantic import ValidationError
-from spreading_v2_helpers import insert_edge
-from test_spreading_sql_identity import SNAPSHOT, render
+from spreading_v2_helpers import SNAPSHOT, insert_edge, render
 
 from nous.brain.spreading_activation import spreading_activation_search
 from nous.config import Settings

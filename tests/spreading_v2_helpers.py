@@ -2,10 +2,25 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from nous.brain.spreading_activation import spreading_activation_search
+
+# The SQL ``spreading_activation_search`` sends with every F105 flag off; see
+# tests/test_spreading_sql_identity.py for how it was made and when it may change.
+SNAPSHOT = Path(__file__).parent / "fixtures" / "spreading_sql_default.sql"
+# Two seeds of two types and a non-empty exclusion, so every default fragment
+# (the VALUES list and the excluded_ids condition) is in the rendered text.
+SEEDS: list[tuple[UUID, str, float]] = [
+    (UUID("00000000-0000-0000-0000-0000000000a1"), "fact", 0.9),
+    (UUID("00000000-0000-0000-0000-0000000000a2"), "decision", 0.6),
+]
+EXCLUDE: set[UUID] = {SEEDS[0][0]}
 
 
 async def insert_edge(
@@ -39,3 +54,29 @@ async def insert_edge(
         params["m"] = method
     await session.execute(text(f"INSERT INTO brain.graph_edges ({cols}) VALUES ({vals})"), params)
     await session.flush()
+
+
+class _EmptyResult:
+    def all(self) -> list[Any]:
+        return []
+
+
+class RecordingSession:
+    """Fake session: ``execute`` stores the rendered SQL and returns no rows."""
+
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+
+    async def execute(self, sql: Any, params: dict[str, Any] | None = None) -> _EmptyResult:
+        self.statements.append(str(sql))
+        return _EmptyResult()
+
+
+async def render(settings: Any, **kwargs: Any) -> str:
+    """The SQL ``spreading_activation_search`` sends for the fixed call shape."""
+    session = RecordingSession()
+    await spreading_activation_search(
+        session, "agent-x", SEEDS, settings, exclude_ids=EXCLUDE, **kwargs,  # type: ignore[arg-type]
+    )
+    assert len(session.statements) == 1, session.statements
+    return session.statements[0]
