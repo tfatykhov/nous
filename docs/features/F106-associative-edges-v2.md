@@ -1,9 +1,11 @@
 # F106: Associative Edges v2
 
 **Status:** in progress. Task 1 (a query-relevance gate for Path A neighbours reached through an
-associative edge, and an associative-edge multiplier in the neighbour fetch order) and Task 2 (a v2
-of the co-mention edge builder) are built, with every setting off or neutral by default, so recall
-and the graph are unchanged until they are enabled. Task 3 is planned.
+associative edge, and an associative-edge multiplier in the neighbour fetch order), Task 2 (a v2 of
+the co-mention edge builder) and Task 3 (a v2 of the co-occurrence edge builder) are built, with
+every setting off or neutral by default, so recall and the graph are unchanged until they are
+enabled. Task 3 also fixes two counting bugs of the co-occurrence builder that apply with v2 off.
+Task 3b (a temporal-query exemption) was measured and not built.
 
 **Builds on:** [F076 Co-mention Entity Linking](F076-comention-entity-linking.md) (the `co_mention`
 edges), the experiential co-occurrence linker (`co_occurred` edges, `NOUS_COOCCURRENCE_LINKING_ENABLED`),
@@ -90,7 +92,7 @@ useful. The cutoff is specific to the embedding model (`text-embedding-3-large` 
 - The gate covers `co_occurred` edges as well as `co_mention`: both measured about as unrelated.
 - There is no exemption for temporal queries. The available signal, `has_temporal_signal`, matches
   very common words, so an exemption keyed on it would also exempt many queries that are not
-  temporal. A temporal exemption is deferred to Task 3, the co-occurrence redesign.
+  temporal. A precise exemption was measured with Task 3 and not built (see Task 3b).
 
 ### The fetch multiplier
 
@@ -252,7 +254,137 @@ pinned by `tests/test_graph_densifier.py` and `tests/test_comention_linking.py`.
 - **Not re-evaluated.** v2 with the hub cap of 20 and the cosine floor has not been through the
   offline test again; the flag stays off until it passes.
 
-## Task 3 (planned)
+## Task 3: co-occurrence builder v2
 
-- **Task 3: co-occurrence redesign.** Fix the algorithm that forms `co_occurred` edges where it does
-  not link the right facts. A temporal-query exemption for the gate is considered here.
+Behind `NOUS_COOCCURRENCE_V2_ENABLED` (default off). Off, the v1 builder links the same pairs at the
+same weight as before. Two counting fixes apply either way (see Reporting).
+
+### Why
+
+The v1 builder (`NOUS_COOCCURRENCE_LINKING_ENABLED`, itself off by default) links every pair of
+active facts from an episode with 2 to `NOUS_COOCCURRENCE_MAX_EPISODE_FACTS` (6) facts. A private
+audit judged same-conversation fact pairs with an episodic rubric (related = the same event, task or
+thread; 280 pairs across the rules). By the pair's embedding cosine:
+
+| Pair cosine | Judged related | Judged unrelated |
+|---|---|---|
+| below 0.25 | 16% | 34% |
+| 0.25 to 0.35 | 48% | 3% |
+| 0.35 to 0.45 | 73% | 2% |
+| 0.45 and above | 90% or more | 0% |
+
+By rule:
+
+- Same conversation and a shared extracted entity key: 78% related, 0% unrelated.
+- Facts enumerated from the same transcript chunk, at most 3 positions apart: 68% related, 5%
+  unrelated.
+- The time between two facts does not separate them: pairs at most 2 minutes apart and pairs 10 to
+  60 minutes apart were both 47% related.
+- The edges v1 had built: 57% related, 20% unrelated.
+
+v1's 2-to-6-fact gate also covers only 10% of facts. So v2 keeps the episode as the unit, drops the
+size gate and requires a thread signal.
+
+### Behaviour
+
+`GraphDensifier.plan_cooccurrence_changes()` computes a `CooccurrencePlan(inserts, deletes,
+reweights)`, the same shape as Task 2's `ComentionPlan`, without writing. `build_cooccurrence_edges()`
+applies one (deletes, restores, then inserts, in one transaction), and with `dry_run=True` returns
+`len(plan.inserts)`. Under v1 the plan is the v1 insert list with no deletes or reweights. Under v2:
+
+1. **Qualifying pair.** Two active facts of the agent with the same `source_episode_id`, and at
+   least one thread signal:
+   - an embedding cosine of at least `NOUS_COOCCURRENCE_MIN_COSINE` (0.30);
+   - a shared `heart.fact_entity_keys` key, read under that table's invariant (both facts active,
+     the key rows scoped to the agent);
+   - both facts carry a `source_ordinal` (the enumerative extractor's chunk index × 1,000,000 +
+     position), in the same chunk, at most `NOUS_COOCCURRENCE_ORDINAL_WINDOW` (3) positions apart.
+
+   When both facts are embedded, their cosine must also be below `NOUS_GRAPH_THRESHOLD_FACT_FACT`
+   (0.82): near-duplicates are the cosine densifier's job. A pair where either fact has no embedding
+   passes that ceiling and qualifies only on a key or an ordinal. There is no episode-size gate. The
+   check is one SQL predicate (pgvector cosine, ordinal arithmetic, then an `EXISTS` on the key
+   table), shared by the candidate read and the maintenance read.
+2. **Maintenance**, before linking. It covers every `co_occurrence` edge of the agent whose
+   endpoints are both active, not only those in the episode window, so old v1 edges are reached. An
+   edge whose pair no longer qualifies (no thread signal, a near-duplicate, or facts that are now in
+   different episodes) is deleted. A qualifying edge whose weight is below `NOUS_COOCCURRENCE_WEIGHT`
+   (or NULL) is restored to it, which undoes decay; a weight above it is kept. Deletes go first,
+   then restores, each in edge order, and the pass stops after `NOUS_COOCCURRENCE_PRUNE_MAX_PER_CYCLE`
+   (2000) changes in all. An edge with an inactive endpoint is left to the F053 dead-edge prune. The
+   `co_occurred` edges that another producer writes with extraction method `deterministic` are never
+   read or written.
+3. **Linking.** The candidates are the qualifying pairs of the newest
+   `NOUS_COOCCURRENCE_MAX_EPISODES_PER_CYCLE` (2000) episodes (episodes with at least 2 active facts,
+   ordered by their newest fact), computed in one SQL query. As in v1, a pair already joined by any
+   fact-fact edge (any relation, either direction) is skipped. Pairs link strongest cosine first;
+   pairs without a cosine come last, and ties go by fact id. The per-fact cap
+   `NOUS_COOCCURRENCE_MAX_EDGES_PER_FACT` (10) holds over the fact's lifetime: its count starts at its
+   current `co_occurrence` edges (any partner) less this plan's deletes. New edges get
+   `NOUS_COOCCURRENCE_WEIGHT` (0.9).
+4. **Interrupt.** The edge scan and the candidate scan yield to the event loop every 1000 rows; an
+   interrupt seen there leaves the plan empty, so the cycle writes nothing.
+
+**Reporting.**
+
+- **Honest insert count (v1 and v2).** The build returns the rows actually inserted: it writes one
+  `INSERT ... SELECT unnest(...) ON CONFLICT DO NOTHING` per batch of 500 pairs and adds up their row
+  counts. v1 counted every attempted insert, including the ones that hit a conflict. The interrupt
+  is now checked between batches rather than between single inserts.
+- **Sleep stats (v1 and v2).** `_phase_graph_densification` did not pop the `_co_occurrence` count,
+  so with co-occurrence linking on it was added into `orphan_edges_created`. It is now reported on
+  its own as `cooccurrence_edges` and listed in the `graph_densify` / `edge_add` audit counts. This
+  changes v1's numbers: `orphan_edges_created` no longer includes co-occurrence edges.
+- **Maintenance (v2 only).** `run_backfill_cycle` returns `_co_occurrence_deleted` and
+  `_co_occurrence_reweighted`; the sleep handler pops them into `cooccurrence_edges_deleted` and
+  `cooccurrence_edges_reweighted` and, when either is above 0, records a `graph_densify` /
+  `edge_prune` row in the consolidation audit with the rationale `F106 co_occurrence maintenance`.
+  The build also logs `F106: co_occurrence maintenance ...`.
+
+**The backfill script.** `scripts/backfill_cooccurrence_edges.py` plans once per agent and prints the
+insert, delete and restore counts. With `--commit`, when any of them is non-zero, it applies that same
+plan; it never plans again. As before it lifts the episode window to the corpus; maintenance stays
+within the per-cycle bound.
+
+### Offline test
+
+Set before the build: dry-run plans on a prod copy, with the episodic rubric judging 40 new links, 40
+deletes and 40 kept edges. It passes when new links are at least 65% related and at most 5%
+unrelated, and deletes at most 35% related; coverage (facts with at least one `co_occurred` edge)
+is reported before and after. It has not been run yet, and the flag stays off until it passes.
+
+### Settings
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `NOUS_COOCCURRENCE_V2_ENABLED` | `false` | Run the v2 builder |
+| `NOUS_COOCCURRENCE_MIN_COSINE` | `0.30` | Cosine signal: a same-episode pair at or above it qualifies |
+| `NOUS_COOCCURRENCE_ORDINAL_WINDOW` | `3` | Ordinal signal: most positions apart within one transcript chunk |
+| `NOUS_COOCCURRENCE_MAX_EDGES_PER_FACT` | `10` | Lifetime cap on a fact's `co_occurrence` edges |
+| `NOUS_COOCCURRENCE_PRUNE_MAX_PER_CYCLE` | `2000` | Most maintenance deletes plus restores per cycle; 0 turns maintenance off |
+
+v2 also reads `NOUS_COOCCURRENCE_WEIGHT`, `NOUS_COOCCURRENCE_MAX_EPISODES_PER_CYCLE` and
+`NOUS_GRAPH_THRESHOLD_FACT_FACT`, but not `NOUS_COOCCURRENCE_MAX_EPISODE_FACTS`. Tests:
+`tests/test_f106_cooccurrence_v2.py`, which also pins the v1 builder.
+
+### Limitations
+
+- **Cost.** The candidate query computes the cosine of every same-episode pair in the window, so its
+  cost grows with the square of episode size (a 1000-fact episode is about 500,000 pairs). Each
+  cycle also checks every `co_occurrence` edge of the agent. Neither is measured on a prod-sized
+  corpus.
+- **The key signal** needs entity-key rows, which only keyed facts have.
+- **The cosine floor and ceiling** depend on the embedding model (`text-embedding-3-large` at 1536
+  dimensions here).
+- **Convergence.** v1 edges that do not qualify are deleted at most 2000 per cycle (with the
+  restores), so a large v1 graph takes several cycles.
+- **Not evaluated.** The offline test above has not been run.
+
+## Task 3b: temporal-query exemption (measured, not built)
+
+Task 1 gates `co_occurred` neighbours like `co_mention` ones. A query about an occasion or a time
+("what else happened when ...", "what did we do that day") might want them ungated, but
+`has_temporal_signal` matches common words and cannot pick those queries out. The plan was to build a
+precise episodic-query detector, and exempt `co_occurred` neighbours from the gate on those queries,
+only if such queries are at least 5% of recall queries. An LLM classifier on 300 sampled prod recall
+queries found 0.7%, so neither was built, and Task 1's gate stays the only consumer rule.

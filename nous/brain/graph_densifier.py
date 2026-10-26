@@ -137,6 +137,46 @@ def _comention_rarity_weight(base: float, n: int, df: int) -> float:
     return base * math.log(n / df) / math.log(n / 2)
 
 
+@dataclass
+class CooccurrencePlan:
+    """F106: one cycle of co-occurrence builder changes, computed without writing.
+
+    Same shape as ``ComentionPlan``: ``inserts`` are canonical
+    ``(source_id, target_id, weight)`` (source < target as strings), ``deletes`` are
+    edge ids, and ``reweights`` are ``(edge_id, weight)`` restores. A v1 plan has no
+    deletes or reweights.
+    """
+
+    inserts: list[tuple[str, str, float]] = field(default_factory=list)
+    deletes: list[str] = field(default_factory=list)
+    reweights: list[tuple[str, float]] = field(default_factory=list)
+
+
+def _cooccurrence_qualifies_sql(a: str, b: str) -> str:
+    """F106: SQL boolean, true when facts ``a`` and ``b`` (``heart.facts`` aliases) have
+    a co-occurrence thread signal and are not near-duplicates. The caller checks the
+    shared episode.
+
+    Signals (any one): cosine ``>= :min_cos``; both enumerated (``source_ordinal``
+    = chunk_index * 1_000_000 + position) in the same chunk, ``<= :ord_win`` apart; a
+    shared ``heart.fact_entity_keys`` key. Ceiling: cosine ``< :ceiling`` when both are
+    embedded. Cheapest signal first, as Postgres stops an OR at the first true arm.
+    The key read follows that table's invariant (join active facts, agent-scoped)
+    because ``a`` and ``b`` are active facts of agent ``:a`` at every call site.
+    """
+    cos = f"(1 - ({a}.embedding <=> {b}.embedding))"
+    return (
+        f"((COALESCE({cos} >= :min_cos, FALSE) "
+        f"OR ({a}.source_ordinal IS NOT NULL AND {b}.source_ordinal IS NOT NULL "
+        f"AND {a}.source_ordinal / 1000000 = {b}.source_ordinal / 1000000 "
+        f"AND abs({a}.source_ordinal - {b}.source_ordinal) <= :ord_win) "
+        "OR EXISTS (SELECT 1 FROM heart.fact_entity_keys ka "
+        "JOIN heart.fact_entity_keys kb ON kb.entity_key = ka.entity_key AND kb.agent_id = :a "
+        f"WHERE ka.fact_id = {a}.id AND kb.fact_id = {b}.id AND ka.agent_id = :a)) "
+        f"AND ({a}.embedding IS NULL OR {b}.embedding IS NULL OR {cos} < :ceiling))"
+    )
+
+
 class GraphDensifier:
     """Orphan backfill engine for graph densification.
 
@@ -1344,8 +1384,15 @@ class GraphDensifier:
             results["_co_mention"] = 0
         # Gap-1 formation: experiential co-occurrence edges (default OFF; same wrapping
         # discipline — own edges commit independently, must not mask siblings on throw).
+        # F106: under co-occurrence v2 the plan's maintenance counts are reported too.
         try:
-            results["_co_occurrence"] = await self.build_cooccurrence_edges()
+            cooccurrence_plan = await self.plan_cooccurrence_changes()
+            results["_co_occurrence"] = await self.build_cooccurrence_edges(
+                plan=cooccurrence_plan,
+            )
+            if getattr(self._settings, "cooccurrence_v2_enabled", False):
+                results["_co_occurrence_deleted"] = len(cooccurrence_plan.deletes)
+                results["_co_occurrence_reweighted"] = len(cooccurrence_plan.reweights)
         except Exception:
             logger.warning(
                 "Gap-1: build_cooccurrence_edges failed for agent_id=%s "
@@ -1429,7 +1476,9 @@ class GraphDensifier:
                 )
             return count
 
-    async def build_cooccurrence_edges(self, *, dry_run: bool = False) -> int:
+    async def build_cooccurrence_edges(
+        self, *, dry_run: bool = False, plan: CooccurrencePlan | None = None,
+    ) -> int:
         """Gap-1 formation: link facts learned from the SAME source episode.
 
         Two facts mentioned together in one conversation/occasion co-occurred — an
@@ -1439,17 +1488,46 @@ class GraphDensifier:
         Edges are relation='co_occurred' (carries the occasion semantics so the agent can
         contextualise, unlike generic related_to) + extraction_method='co_occurrence'.
 
+        Which pairs link is ``plan_cooccurrence_changes()`` (v1, or F106 v2 under
+        ``cooccurrence_v2_enabled``). The build applies ``plan`` (default: a fresh one) in
+        one transaction. dry_run returns the count that WOULD be inserted
+        (``len(plan.inserts)``) and writes nothing.
+
+        Returns the number of edges actually inserted: a pair that hits ON CONFLICT is
+        not counted (F106; before, every attempted insert counted).
+        """
+        if plan is None:
+            plan = await self.plan_cooccurrence_changes()
+        if dry_run:
+            return len(plan.inserts)
+        return await self._apply_cooccurrence_plan(plan)
+
+    async def plan_cooccurrence_changes(self) -> CooccurrencePlan:
+        """F106: compute this cycle's co-occurrence changes without writing.
+
+        Empty when ``cooccurrence_linking_enabled`` is off. With
+        ``cooccurrence_v2_enabled`` off this is the v1 builder's insert list and no
+        deletes or reweights; on, the v2 plan (``_plan_cooccurrence_v2``).
+        """
+        s = self._settings
+        if not getattr(s, "cooccurrence_linking_enabled", False):
+            return CooccurrencePlan()
+        if getattr(s, "cooccurrence_v2_enabled", False):
+            return await self._plan_cooccurrence_v2()
+        return await self._plan_cooccurrence_v1()
+
+    async def _plan_cooccurrence_v1(self) -> CooccurrencePlan:
+        """v1 pairs: every pair of active facts in a focused episode.
+
         Noise gate: skip episodes that produced more than ``cooccurrence_max_episode_facts``
         facts — a focused chat co-mentions a few related things; a rambling one touches many
         unrelated topics, where linking all pairs is noise, not association. Pre-existing-edge
         guard (any relation, either direction) keeps it idempotent and never links a
-        contradicting pair. dry_run returns the count that WOULD be inserted.
+        contradicting pair.
         """
         from itertools import combinations
 
         s = self._settings
-        if not getattr(s, "cooccurrence_linking_enabled", False):
-            return 0
         max_facts = int(s.cooccurrence_max_episode_facts)
         max_eps = int(s.cooccurrence_max_episodes_per_cycle)
         weight = float(s.cooccurrence_weight)
@@ -1467,56 +1545,217 @@ class GraphDensifier:
                 {"a": self._agent_id, "maxf": max_facts, "lim": max_eps},
             )).all()
         if not rows:
-            return 0
+            return CooccurrencePlan()
 
         candidates: set[tuple[str, str]] = set()
         for (fids,) in rows:
             for a, b in combinations(sorted(fids), 2):
                 candidates.add((a, b))
-        if not candidates:
-            return 0
 
         # pre-existing fact-fact edges (any relation, either direction) among the candidate
         # facts -> hard skip (no dup; never overlay a contradicts/supersedes pair, which the
         # adjacency/spreading consumers would let reinforce each other).
-        all_ids = sorted({x for pair in candidates for x in pair})
+        existing = await self._existing_fact_pairs(sorted({x for pair in candidates for x in pair}))
+        return CooccurrencePlan(
+            inserts=[(a, b, weight) for a, b in sorted(candidates - existing)],
+        )
+
+    async def _plan_cooccurrence_v2(self) -> CooccurrencePlan:
+        """F106 co-occurrence v2 plan.
+
+        - **Qualifying pair:** two active facts of the agent with the same
+          ``source_episode_id``, and at least one thread signal (pair cosine
+          ``>= cooccurrence_min_cosine``; a shared ``heart.fact_entity_keys`` key; or
+          both enumerated, in the same transcript chunk and at most
+          ``cooccurrence_ordinal_window`` positions apart), and a cosine below
+          ``graph_threshold_fact_fact`` when both are embedded (near-duplicates are the
+          cosine densifier's). No episode-size gate. See ``_cooccurrence_qualifies_sql``.
+        - **Maintenance:** every co_occurrence edge of the agent whose endpoints are
+          both active. One whose pair does not qualify is deleted; one that qualifies
+          with a weight below ``cooccurrence_weight`` (or NULL) is restored to it.
+          Deletes first, then restores, each in (source_id, target_id, id) order, up to
+          ``cooccurrence_prune_max_per_cycle`` changes in all. An edge with an inactive
+          endpoint is left to the dead-edge prune (F053), and no other producer's edge
+          (a ``co_occurred`` edge with another extraction_method included) is read.
+        - **Linking:** qualifying pairs in the newest ``cooccurrence_max_episodes_per_cycle``
+          episodes (by newest active fact, at least 2 active facts), strongest cosine
+          first (pairs without one last), skipping any pair already joined by a fact-fact
+          edge (any relation, either direction). A fact's cap
+          ``cooccurrence_max_edges_per_fact`` is lifetime: its count starts at its
+          co_occurrence edges (any partner) less this plan's deletes. Weight
+          ``cooccurrence_weight``.
+
+        The edge and candidate scans yield to the event loop every 1000 rows; if the
+        densifier is interrupted there, the plan is empty.
+        """
+        s = self._settings
+        weight = float(s.cooccurrence_weight)
+        cap = int(s.cooccurrence_max_edges_per_fact)
+        prune_max = int(s.cooccurrence_prune_max_per_cycle)
+        params = {
+            "a": self._agent_id,
+            "lim": int(s.cooccurrence_max_episodes_per_cycle),
+            "min_cos": float(s.cooccurrence_min_cosine),
+            "ord_win": int(s.cooccurrence_ordinal_window),
+            "ceiling": float(s.graph_threshold_fact_fact),
+        }
+        qualifies = _cooccurrence_qualifies_sql("fa", "fb")
+
         async with self.db.session() as session:
-            ex = (await session.execute(
+            edge_rows = (await session.execute(
                 text(
-                    "SELECT source_id, target_id FROM brain.graph_edges "
-                    "WHERE agent_id = :a AND source_type='fact' AND target_type='fact' "
-                    "AND source_id = ANY(CAST(:ids AS uuid[])) "
-                    "AND target_id = ANY(CAST(:ids AS uuid[]))"
+                    "SELECT CAST(e.id AS text), CAST(e.source_id AS text), "
+                    "CAST(e.target_id AS text), e.weight, "
+                    "CASE WHEN fa.id IS NOT NULL AND fb.id IS NOT NULL THEN "
+                    "  COALESCE(fa.source_episode_id = fb.source_episode_id, FALSE) "
+                    f"  AND {qualifies} END "
+                    "FROM brain.graph_edges e "
+                    "LEFT JOIN heart.facts fa "
+                    "  ON fa.id = e.source_id AND fa.agent_id = :a AND fa.active = TRUE "
+                    "LEFT JOIN heart.facts fb "
+                    "  ON fb.id = e.target_id AND fb.agent_id = :a AND fb.active = TRUE "
+                    "WHERE e.agent_id = :a AND e.relation = 'co_occurred' "
+                    "AND e.extraction_method = 'co_occurrence' "
+                    "AND e.source_type = 'fact' AND e.target_type = 'fact' "
+                    "ORDER BY e.source_id, e.target_id, e.id"
                 ),
-                {"a": self._agent_id, "ids": all_ids},
+                params,
             )).all()
-        existing: set[tuple[str, str]] = set()
-        for src, tgt in ex:
-            x, y = str(src), str(tgt)
-            existing.add((x, y) if x < y else (y, x))
+            # fa.id < fb.id: uuid order is the order of the lowercase text form, so each
+            # pair comes back canonical (source < target as strings).
+            cand_rows = (await session.execute(
+                text(
+                    "WITH eps AS ("
+                    "  SELECT source_episode_id AS ep FROM heart.facts "
+                    "  WHERE agent_id = :a AND active = TRUE AND source_episode_id IS NOT NULL "
+                    "  GROUP BY source_episode_id HAVING count(*) >= 2 "
+                    "  ORDER BY max(learned_at) DESC, source_episode_id LIMIT :lim"
+                    ") "
+                    "SELECT CAST(fa.id AS text), CAST(fb.id AS text), "
+                    "1 - (fa.embedding <=> fb.embedding) "
+                    "FROM eps "
+                    "JOIN heart.facts fa "
+                    "  ON fa.source_episode_id = eps.ep AND fa.agent_id = :a AND fa.active = TRUE "
+                    "JOIN heart.facts fb "
+                    "  ON fb.source_episode_id = eps.ep AND fb.agent_id = :a AND fb.active = TRUE "
+                    "  AND fa.id < fb.id "
+                    f"WHERE {qualifies}"
+                ),
+                params,
+            )).all()
 
-        to_insert = [p for p in candidates if p not in existing]
-        if dry_run or not to_insert:
-            return len(to_insert)
+        # Maintenance, and each fact's current co_occurrence degree.
+        deg: dict[str, int] = defaultdict(int)
+        delete_cands: list[tuple[str, str, str]] = []
+        restore_cands: list[str] = []
+        for i, (eid, src, tgt, old_w, ok) in enumerate(edge_rows):
+            if i % _COMENTION_YIELD_EVERY == 0:
+                await asyncio.sleep(0)
+                if self._interrupted:
+                    return CooccurrencePlan()
+            deg[src] += 1
+            deg[tgt] += 1
+            if ok is None:  # an inactive endpoint: the dead-edge prune's job
+                continue
+            if not ok:
+                delete_cands.append((eid, src, tgt))
+            elif old_w is None or float(old_w) < weight - 1e-6:
+                restore_cands.append(eid)
+        deletes: list[str] = []
+        for eid, src, tgt in delete_cands[:prune_max]:
+            deletes.append(eid)
+            deg[src] -= 1
+            deg[tgt] -= 1
+        reweights = [(eid, weight) for eid in restore_cands[:prune_max - len(deletes)]]
 
+        existing = await self._existing_fact_pairs(
+            sorted({x for a, b, _ in cand_rows for x in (a, b)})
+        )
+        # Strongest cosine first; pairs without one (a fact not embedded) last.
+        ordered = sorted(
+            cand_rows, key=lambda r: (r[2] is None, -(r[2] or 0.0), r[0], r[1]),
+        )
+        inserts: list[tuple[str, str, float]] = []
+        for i, (a, b, _cos) in enumerate(ordered):
+            if i % _COMENTION_YIELD_EVERY == 0:
+                await asyncio.sleep(0)
+                if self._interrupted:
+                    return CooccurrencePlan()
+            if (a, b) in existing or deg[a] >= cap or deg[b] >= cap:
+                continue
+            deg[a] += 1
+            deg[b] += 1
+            inserts.append((a, b, weight))
+
+        return CooccurrencePlan(inserts=inserts, deletes=deletes, reweights=reweights)
+
+    async def _apply_cooccurrence_plan(self, plan: CooccurrencePlan) -> int:
+        """Write a co-occurrence plan (deletes, restores, inserts) in one transaction.
+
+        Deletes and restores touch only this agent's co_occurrence edges. Inserts go in
+        batches of 500, one ``INSERT ... SELECT unnest`` each, and the interrupt is
+        checked before each batch. Returns the rows actually inserted.
+        """
+        if not (plan.inserts or plan.deletes or plan.reweights):
+            return 0
+
+        own_edges = (
+            "agent_id = :a AND relation = 'co_occurred' AND extraction_method = 'co_occurrence'"
+        )
         inserted = 0
+        BATCH = 500
         async with self.db.session() as session:
-            for a, b in to_insert:
+            if plan.deletes:
+                await session.execute(
+                    text(
+                        f"DELETE FROM brain.graph_edges WHERE {own_edges} "
+                        "AND id = ANY(CAST(:ids AS uuid[]))"
+                    ),
+                    {"a": self._agent_id, "ids": plan.deletes},
+                )
+            if plan.reweights:
+                await session.execute(
+                    text(
+                        "UPDATE brain.graph_edges SET weight = r.w "
+                        "FROM unnest(CAST(:ids AS uuid[]), CAST(:ws AS float8[])) AS r(id, w) "
+                        f"WHERE brain.graph_edges.id = r.id AND {own_edges}"
+                    ),
+                    {
+                        "a": self._agent_id,
+                        "ids": [eid for eid, _ in plan.reweights],
+                        "ws": [w for _, w in plan.reweights],
+                    },
+                )
+            for i in range(0, len(plan.inserts), BATCH):
                 if self._interrupted:
                     break
-                await session.execute(
+                batch = plan.inserts[i:i + BATCH]
+                result = await session.execute(
                     text(
                         "INSERT INTO brain.graph_edges "
                         "(source_id, target_id, source_type, target_type, agent_id, "
                         " relation, weight, auto_linked, extraction_method) "
-                        "VALUES (CAST(:s AS uuid), CAST(:t AS uuid), 'fact', 'fact', :a, "
-                        " 'co_occurred', :w, TRUE, 'co_occurrence') "
+                        "SELECT p.s, p.t, 'fact', 'fact', :a, 'co_occurred', p.w, TRUE, "
+                        "'co_occurrence' "
+                        "FROM unnest(CAST(:s AS uuid[]), CAST(:t AS uuid[]), "
+                        "CAST(:w AS float8[])) AS p(s, t, w) "
                         "ON CONFLICT DO NOTHING"
                     ),
-                    {"s": a, "t": b, "a": self._agent_id, "w": weight},
+                    {
+                        "a": self._agent_id,
+                        "s": [a for a, _, _ in batch],
+                        "t": [b for _, b, _ in batch],
+                        "w": [w for _, _, w in batch],
+                    },
                 )
-                inserted += 1
+                inserted += result.rowcount or 0
             await session.commit()
+
+        if plan.deletes or plan.reweights:
+            logger.info(
+                "F106: co_occurrence maintenance for agent_id=%s: %d deleted, %d restored",
+                self._agent_id, len(plan.deletes), len(plan.reweights),
+            )
         return inserted
 
     async def build_comention_edges(

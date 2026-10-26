@@ -627,7 +627,10 @@ class SleepHandler:
                         "edge_add",
                         lambda: self._phase_graph_densification(sleep_stats),
                         sleep_stats,
-                        ("orphan_edges_created", "temporal_chain_edges", "comention_edges", "bridge_edges_created"),
+                        (
+                            "orphan_edges_created", "temporal_chain_edges", "comention_edges",
+                            "cooccurrence_edges", "bridge_edges_created",
+                        ),
                     ),
                 )
                 if success:
@@ -1951,6 +1954,12 @@ class SleepHandler:
             # F106: co-mention v2 maintenance counts, present only with v2 on.
             comention_deleted = result.pop("_co_mention_deleted", None)
             comention_reweighted = result.pop("_co_mention_reweighted", None)
+            # F106: pop the co-occurrence count too (same convention). Before F106 it
+            # was left in and summed into orphan_edges_created. Its v2 maintenance
+            # counts are present only with co-occurrence v2 on.
+            cooccurrence = result.pop("_co_occurrence", 0)
+            cooccurrence_deleted = result.pop("_co_occurrence_deleted", None)
+            cooccurrence_reweighted = result.pop("_co_occurrence_reweighted", None)
             total_edges = sum(result.values())
             sleep_stats["orphan_edges_created"] = total_edges
             sleep_stats["temporal_chain_edges"] = happened_before
@@ -1969,6 +1978,20 @@ class SleepHandler:
                             "comention_edges_reweighted": comention_reweighted or 0,
                         }},
                         rationale="F106 co_mention maintenance",
+                    )
+            sleep_stats["cooccurrence_edges"] = cooccurrence
+            if cooccurrence_deleted is not None:
+                sleep_stats["cooccurrence_edges_deleted"] = cooccurrence_deleted
+                sleep_stats["cooccurrence_edges_reweighted"] = cooccurrence_reweighted or 0
+                if self._auditor is not None and (cooccurrence_deleted or cooccurrence_reweighted):
+                    self._auditor.record(
+                        "graph_densify",
+                        "edge_prune",
+                        after={"counts": {
+                            "cooccurrence_edges_deleted": cooccurrence_deleted,
+                            "cooccurrence_edges_reweighted": cooccurrence_reweighted or 0,
+                        }},
+                        rationale="F106 co_occurrence maintenance",
                     )
             sleep_stats["ce_backfill_survived"] = ce_stats.get("survived", 0)
             sleep_stats["ce_backfill_pruned"] = ce_stats.get("pruned", 0)

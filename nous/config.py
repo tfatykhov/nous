@@ -3074,6 +3074,44 @@ class Settings(BaseSettings):
         ge=1,
         description="Safety bound: max episodes scanned per sleep cycle (most-recent first).",
     )
+    cooccurrence_v2_enabled: bool = Field(
+        default=False,
+        description=(
+            "F106: co-occurrence builder v2. A same-episode pair links only with a thread "
+            "signal (pair cosine >= cooccurrence_min_cosine, a shared fact_entity_keys key, "
+            "or enumerated facts within cooccurrence_ordinal_window in one transcript "
+            "chunk) and cosine below graph_threshold_fact_fact; no episode-size gate, a "
+            "lifetime per-fact cap, and a bounded maintenance pass over the builder's own "
+            "edges. Off: the v1 builder, unchanged."
+        ),
+    )
+    cooccurrence_min_cosine: float = Field(
+        default=0.30,
+        ge=0.0,
+        le=1.0,
+        description="F106: v2 cosine signal, a same-episode pair with cosine >= this qualifies.",
+    )
+    cooccurrence_ordinal_window: int = Field(
+        default=3,
+        ge=0,
+        description=(
+            "F106: v2 ordinal signal, two enumerated facts of one transcript chunk "
+            "(same source_ordinal // 1_000_000) at most this many positions apart qualify."
+        ),
+    )
+    cooccurrence_max_edges_per_fact: int = Field(
+        default=10,
+        ge=1,
+        description="F106: v2 lifetime cap on a fact's co_occurrence edges (existing ones count).",
+    )
+    cooccurrence_prune_max_per_cycle: int = Field(
+        default=2000,
+        ge=0,
+        description=(
+            "F106: v2 maintenance bound, the most co_occurrence edge deletes plus weight "
+            "restores per cycle. 0 disables maintenance."
+        ),
+    )
     # =========================================================================
     # F070 — Chunk-aware sleep consolidation (v1: edges only, no schema change)
     # =========================================================================
