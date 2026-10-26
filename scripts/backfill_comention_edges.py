@@ -90,7 +90,8 @@ async def backfill(agents: list[str], commit: bool, max_facts_override: int | No
                         "SELECT count(*) FROM brain.graph_edges WHERE agent_id=:a AND extraction_method='co_mention'",
                         agent,
                     )
-                print(f"[{agent}] BUILT {built} edges  -> co_mention total now {final}")
+                print(f"[{agent}] BUILT {built} edges, deleted {len(plan.deletes)}, "
+                      f"re-weighted {len(plan.reweights)}  -> co_mention total now {final}")
                 total_built += built
             elif commit:
                 print(f"[{agent}] nothing to build")

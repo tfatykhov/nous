@@ -4,8 +4,9 @@
 associative edge, and an associative-edge multiplier in the neighbour fetch order), Task 2 (a v2 of
 the co-mention edge builder) and Task 3 (a v2 of the co-occurrence edge builder) are built, with
 every setting off or neutral by default, so recall and the graph are unchanged until they are
-enabled. Task 3 also fixes two counting bugs of the co-occurrence builder that apply with v2 off.
-Task 3b (a temporal-query exemption) was measured and not built.
+enabled. Both v2 builders passed their offline tests on a prod-sized copy; [Rollout](#rollout) gives
+the order to turn things on. Tasks 2 and 3 also fix counting bugs that apply with v2 off. Task 3b (a
+temporal-query exemption) was measured and not built.
 
 **Builds on:** [F076 Co-mention Entity Linking](F076-comention-entity-linking.md) (the `co_mention`
 edges), the experiential co-occurrence linker (`co_occurred` edges, `NOUS_COOCCURRENCE_LINKING_ENABLED`),
@@ -78,7 +79,10 @@ legacy).
 embed, the read, an unknown mode) leaves that batch ungated, counts
 `n_stage_errors["path_a_associative_gate"]` and logs at debug. Path A always goes on.
 
-**Cost.** Nothing runs for a batch without an associative neighbour: about 3% of recalls fetch one.
+**Cost.** Nothing runs for a batch without an associative neighbour, so the gate's cosine read scales
+with associative coverage. Before the v2 builders about 3% of recalls fetched an associative
+neighbour; after co-occurrence v2, which gives most facts a `co_occurred` edge, the read runs on most
+recalls. The query embed is a cache hit.
 
 **Why `raw` is the default.** An offline test scored both modes on 557 delivered associative Path A
 rows from a 30-day prod recall log, judged by a blinded LLM judge. The cutoff was tuned on half of
@@ -187,12 +191,15 @@ list with no deletes or reweights. Under v2:
    edge, any relation, either direction, skips the pair). The per-fact cap now holds over the fact's
    lifetime: a fact's count starts at its current `co_mention` degree (every partner, in the index or
    not) after this plan's deletes. A new link also needs the pair's embedding cosine to be at least
-   `NOUS_COMENTION_V2_MIN_COSINE` (0.35). The cosines of all candidate pairs come from one query, and
-   a pair where either fact has no embedding passes. The floor is checked before the pair takes a cap
-   slot, so a rejected pair does not use one. It applies to new links only: it never deletes an
-   existing edge or keeps one from its re-weight. New edges get weight `w`. A pair is only ever linked
-   at its rarest shared entity (a skip there, for the cap, an existing edge or the cosine floor, holds
-   for every later entity), so a new edge already has the weight maintenance would give it.
+   `NOUS_COMENTION_MIN_COSINE` (0.35). The cosines of the candidate pairs come from one query (a pair
+   with an endpoint already at the cap is left out of it, since it can never link), and a pair where
+   either fact has no embedding passes. The floor is checked before the pair takes a cap slot, so a
+   rejected pair does not use one. It applies to new links only: it never deletes an existing edge or
+   keeps one from its re-weight. New edges get weight `w`. A pair is only ever linked at its rarest
+   shared entity (a skip there, for the cap, an existing edge or the cosine floor, holds for every
+   later entity), so a new edge already has the weight maintenance would give it. An interrupt during
+   this link loop stops linking: the cycle applies the complete maintenance plus the inserts planned
+   so far, as v1 does.
 
 **Reporting.** `run_backfill_cycle` returns `_co_mention_deleted` and `_co_mention_reweighted` with
 v2 on; the sleep handler pops them (so they never inflate `orphan_edges_created`) into sleep stats as
@@ -202,11 +209,23 @@ the consolidation audit (F035.6) with both counts and the rationale `F106 co_men
 the F053 dead-edge prune records its `edge_prune` row. The build also logs
 `F106: co_mention maintenance ...`.
 
+**Honest insert count (v1 and v2).** The build returns the rows actually inserted: one
+`INSERT ... SELECT unnest(...) ON CONFLICT DO NOTHING` per batch of 500 pairs, adding up their row
+counts. Before, it counted every insert it sent, including those that hit a conflict. This changes
+v1's numbers too: `comention_edges` in sleep stats, and the build log, no longer count conflicts.
+
 **Ownership of `co_mention` edges.** They are derived data: the builder creates them from fact text
 and can rebuild them, so v2 deletes the ones it no longer supports (as the F053 dead-edge prune
 deletes edges). It also owns their weights: if the tinyHippo downscale
 (`NOUS_TINYHIPPO_DOWNSCALE_ENABLED`, off) is turned on again, its downscale of `co_mention` edges is
 undone by the next cycle's maintenance, up to the per-cycle bound.
+
+The maintenance of both v2 builders also deletes consolidated (tinyHippo) edges, by design.
+Consolidation is earned by LTP, which counts co-retrieval, and an associative edge causes its own
+co-retrieval through Path A, so consolidation is not independent evidence that the edge is right. On
+the prod-sized copy (below), 242 of the 1,400 planned deletes were consolidated edges. Rows that
+recall had delivered through those edges were judged unrelated 57% of the time, against 51% for
+deleted edges that were not consolidated and 30% for consolidated edges that are kept.
 
 **The backfill script.** `scripts/backfill_comention_edges.py` plans once per agent and prints the
 insert, delete and re-weight counts. With `--commit`, when any of them is non-zero, it applies that
@@ -214,15 +233,19 @@ same plan (`build_comention_edges(plan=plan)`); it never plans again. It lifts
 `NOUS_COMENTION_INDEX_MAX_FACTS` to the corpus size as well as the per-cycle cap, so under v2 the plan
 covers the whole corpus; maintenance stays within the per-cycle bound.
 
-### The first offline test
+### Offline tests
 
-An offline test on a prod copy compared v1 and v2 plans, with a blinded judge rating sampled new
-links, deleted edges and kept edges. v2 as first built (hub cap 10 counted over the index, no cosine
-floor) failed on its new links: 62% were judged related, below the 70% bar. The unrelated new links
-mostly shared generic tech names, and good links that maintenance deleted shared entities named in
-11-17 facts. Two v2-only settings followed: `NOUS_COMENTION_V2_MAX_DEGREE` (20), so such entities
-still qualify, and `NOUS_COMENTION_V2_MIN_COSINE` (0.35) on new links. v2 with them has not been
-re-tested yet.
+The tests ran dry-run plans on a copy of a prod-sized agent (about 10k active facts and 106k edges),
+with an LLM judge rating sampled new links, deleted edges and kept edges blind, against bars set
+before each run.
+
+- **First iteration: failed.** v2 as first built (hub cap 10 counted over the index, no cosine floor)
+  failed on its new links: 62% were judged related, below the 70% bar. The unrelated new links mostly
+  shared generic tech names, and good links that maintenance deleted shared entities named in 11-17
+  facts. The two v2 settings came from that failure: `NOUS_COMENTION_V2_MAX_DEGREE` (20), so such
+  entities still qualify, and `NOUS_COMENTION_MIN_COSINE` (0.35) on new links.
+- **Re-test on a fresh sample: passed.** New links were 82% related and 3% unrelated. Deleted edges
+  were 40% related (bar: at most 45%). Kept edges were 70% related.
 
 ### Settings
 
@@ -232,7 +255,11 @@ re-tested yet.
 | `NOUS_COMENTION_INDEX_MAX_FACTS` | `50000` | Index size: the newest N active facts |
 | `NOUS_COMENTION_PRUNE_MAX_PER_CYCLE` | `2000` | Most maintenance deletes plus re-weights per cycle; 0 turns maintenance off |
 | `NOUS_COMENTION_V2_MAX_DEGREE` | `20` | v2 hub cap over the whole index (v1 keeps `NOUS_COMENTION_MAX_DEGREE`) |
-| `NOUS_COMENTION_V2_MIN_COSINE` | `0.35` | Embedding cosine a new v2 link needs; a fact without an embedding passes |
+| `NOUS_COMENTION_MIN_COSINE` | `0.35` | Embedding cosine a new v2 link needs; a fact without an embedding passes |
+
+Naming: the `v2` infix appears only where a v2 setting shadows a v1 one (`NOUS_COMENTION_V2_MAX_DEGREE`
+replaces `NOUS_COMENTION_MAX_DEGREE` under v2). Settings new in v2, like `NOUS_COMENTION_MIN_COSINE`
+and the co-occurrence ones, have none.
 
 v2 also reads the F076 settings `NOUS_COMENTION_MAX_EDGES_PER_NODE`, `NOUS_COMENTION_WEIGHT` and
 `NOUS_COMENTION_MIN_ENTITY_CHARS`, but not `NOUS_COMENTION_MAX_DEGREE` or
@@ -251,8 +278,6 @@ pinned by `tests/test_graph_densifier.py` and `tests/test_comention_linking.py`.
   here), and a new link where either fact has no embedding is not gated.
 - **The index boundary.** An edge to a fact that has fallen out of the index is neither deleted nor
   re-weighted.
-- **Not re-evaluated.** v2 with the hub cap of 20 and the cosine floor has not been through the
-  offline test again; the flag stays off until it passes.
 
 ## Task 3: co-occurrence builder v2
 
@@ -311,9 +336,9 @@ applies one (deletes, restores, then inserts, in one transaction), and with `dry
    different episodes) is deleted. A qualifying edge whose weight is below `NOUS_COOCCURRENCE_WEIGHT`
    (or NULL) is restored to it, which undoes decay; a weight above it is kept. Deletes go first,
    then restores, each in edge order, and the pass stops after `NOUS_COOCCURRENCE_PRUNE_MAX_PER_CYCLE`
-   (2000) changes in all. An edge with an inactive endpoint is left to the F053 dead-edge prune. The
-   `co_occurred` edges that another producer writes with extraction method `deterministic` are never
-   read or written.
+   (2000) changes in all. Consolidated edges are deleted too (see the ownership note under Task 2).
+   An edge with an inactive endpoint is left to the F053 dead-edge prune. The `co_occurred` edges
+   that another producer writes with extraction method `deterministic` are never read or written.
 3. **Linking.** The candidates are the qualifying pairs of the newest
    `NOUS_COOCCURRENCE_MAX_EPISODES_PER_CYCLE` (2000) episodes (episodes with at least 2 active facts,
    ordered by their newest fact), computed in one SQL query. As in v1, a pair already joined by any
@@ -321,7 +346,9 @@ applies one (deletes, restores, then inserts, in one transaction), and with `dry
    pairs without a cosine come last, and ties go by fact id. The per-fact cap
    `NOUS_COOCCURRENCE_MAX_EDGES_PER_FACT` (10) holds over the fact's lifetime: its count starts at its
    current `co_occurrence` edges (any partner) less this plan's deletes. New edges get
-   `NOUS_COOCCURRENCE_WEIGHT` (0.9).
+   `NOUS_COOCCURRENCE_WEIGHT` (0.9). The pair cosine is computed once per pair and used for the
+   floor, the ceiling and the order. Co-mention runs first in each cycle, and because of the
+   any-relation guard a pair linked by either builder is never linked by the other.
 4. **Interrupt.** The edge scan and the candidate scan yield to the event loop every 1000 rows; an
    interrupt seen there leaves the plan empty, so the cycle writes nothing.
 
@@ -339,7 +366,8 @@ applies one (deletes, restores, then inserts, in one transaction), and with `dry
   `_co_occurrence_reweighted`; the sleep handler pops them into `cooccurrence_edges_deleted` and
   `cooccurrence_edges_reweighted` and, when either is above 0, records a `graph_densify` /
   `edge_prune` row in the consolidation audit with the rationale `F106 co_occurrence maintenance`.
-  The build also logs `F106: co_occurrence maintenance ...`.
+  The build also logs `F106: co_occurrence maintenance ...`. When both v2 builders maintain in one
+  cycle, the cycle has two `graph_densify` / `edge_prune` rows, told apart by their rationale.
 
 **The backfill script.** `scripts/backfill_cooccurrence_edges.py` plans once per agent and prints the
 insert, delete and restore counts. With `--commit`, when any of them is non-zero, it applies that same
@@ -348,10 +376,16 @@ within the per-cycle bound.
 
 ### Offline test
 
-Set before the build: dry-run plans on a prod copy, with the episodic rubric judging 40 new links, 40
-deletes and 40 kept edges. It passes when new links are at least 65% related and at most 5%
-unrelated, and deletes at most 35% related; coverage (facts with at least one `co_occurred` edge)
-is reported before and after. It has not been run yet, and the flag stays off until it passes.
+Set before the build: dry-run plans on the same prod-sized copy as Task 2's tests (about 10k active
+facts and 106k edges), with an LLM judge applying the episodic rubric blind to 40 new links, 40
+deletes and 40 kept edges. The bar: new links at least 65% related and at most 5% unrelated, deletes
+at most 35% related. It passed:
+
+- new links 70% related, 0% unrelated;
+- deletes 20% related;
+- facts with at least one co-occurrence edge rose from 9.6% to 71.3%, through about 23k new edges
+  (at most 10 per fact);
+- the largest episode in the window had 175 facts (99th percentile 82), and planning took seconds.
 
 ### Settings
 
@@ -371,14 +405,13 @@ v2 also reads `NOUS_COOCCURRENCE_WEIGHT`, `NOUS_COOCCURRENCE_MAX_EPISODES_PER_CY
 
 - **Cost.** The candidate query computes the cosine of every same-episode pair in the window, so its
   cost grows with the square of episode size (a 1000-fact episode is about 500,000 pairs). Each
-  cycle also checks every `co_occurrence` edge of the agent. Neither is measured on a prod-sized
-  corpus.
+  cycle also checks every `co_occurrence` edge of the agent. On the prod-sized copy the largest
+  episode had 175 facts and planning took seconds; an agent with much larger episodes would pay more.
 - **The key signal** needs entity-key rows, which only keyed facts have.
 - **The cosine floor and ceiling** depend on the embedding model (`text-embedding-3-large` at 1536
   dimensions here).
 - **Convergence.** v1 edges that do not qualify are deleted at most 2000 per cycle (with the
   restores), so a large v1 graph takes several cycles.
-- **Not evaluated.** The offline test above has not been run.
 
 ## Task 3b: temporal-query exemption (measured, not built)
 
@@ -388,3 +421,22 @@ Task 1 gates `co_occurred` neighbours like `co_mention` ones. A query about an o
 precise episodic-query detector, and exempt `co_occurred` neighbours from the gate on those queries,
 only if such queries are at least 5% of recall queries. An LLM classifier on 300 sampled prod recall
 queries found 0.7%, so neither was built, and Task 1's gate stays the only consumer rule.
+
+## Rollout
+
+Every F106 setting is off or neutral by default. Turn them on in this order:
+
+1. The Task 1 gate (`NOUS_GRAPH_ASSOCIATIVE_QUERY_GATE_ENABLED`, `raw` mode, cutoff 0.31) together
+   with the associative fetch multiplier (`NOUS_GRAPH_ASSOCIATIVE_EDGE_MULTIPLIER`, about 0.55
+   suggested), before any v2 builder or in the same deploy.
+2. Co-mention v2 (`NOUS_COMENTION_V2_ENABLED`).
+3. Co-occurrence v2 (`NOUS_COOCCURRENCE_V2_ENABLED`, which runs only while
+   `NOUS_COOCCURRENCE_LINKING_ENABLED` is on).
+
+**Why the gate goes first.** Co-occurrence v2 adds about 23k edges at weight 0.9 on the prod-sized
+copy. Without the gate they reach Path A ungated, and without the multiplier they take the per-seed
+fetch slots ahead of cosine edges.
+
+**Not covered by the gate.** `_apply_graph_adjacency_boost` (`NOUS_GRAPH_ADJACENCY_BOOST_ENABLED`)
+also counts associative edges between candidates, and Task 1 does not gate it. That is a known
+follow-up.

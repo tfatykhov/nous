@@ -185,7 +185,7 @@ def test_new_settings_defaults() -> None:
     assert s.comention_index_max_facts == 50000
     assert s.comention_prune_max_per_cycle == 2000
     assert s.comention_v2_max_degree == 20
-    assert s.comention_v2_min_cosine == 0.35
+    assert s.comention_min_cosine == 0.35
 
 
 # ---------------------------------------------------------------------------
@@ -440,7 +440,7 @@ async def test_v2_hub_cap_defaults_to_20(db, named: int, v2_links: int) -> None:
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
 async def test_cosine_floor_on_new_links(db) -> None:
-    """A new link needs cosine >= comention_v2_min_cosine (0.35); a fact without an
+    """A new link needs cosine >= comention_min_cosine (0.35); a fact without an
     embedding passes; an existing edge is still re-weighted, whatever its cosine."""
     agent = f"test-f106cm-cos-{uuid4().hex[:8]}"
     lo1 = await _fact(db, agent, "Dara Velen leads Project Helios", 1, embedding=_axis(2))
@@ -462,7 +462,7 @@ async def test_cosine_floor_on_new_links(db) -> None:
     assert [eid for eid, _ in plan.reweights] == [ex_id]
 
     # Settings at 0 let the orthogonal pair through.
-    loose = await _densifier(db, _v2(comention_v2_min_cosine=0.0), agent).plan_comention_changes()
+    loose = await _densifier(db, _v2(comention_min_cosine=0.0), agent).plan_comention_changes()
     assert _canon(lo1, lo2) in _pairs(loose)
 
 
@@ -488,6 +488,78 @@ async def test_cosine_floor_rejects_before_the_cap_slot(db) -> None:
 
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
+async def test_capped_pairs_skip_the_cosine_read(db) -> None:
+    """X is at the lifetime cap (20 edges to retired facts). Its pairs can never link,
+    so only Y-Z is sent to the cosine query, and only Y-Z is planned."""
+    agent = f"test-f106cm-capcos-{uuid4().hex[:8]}"
+    x = await _fact(db, agent, "Dara Velen leads Project Helios", 100)
+    y = await _fact(db, agent, "Dara Velen studied at the Halvorsen Institute", 101)
+    z = await _fact(db, agent, "Dara Velen moved to the coast", 102)
+    await _fact(db, agent, "a plain note", 103)  # N > df, so the weight is above 0
+    for i in range(20):
+        partner = await _fact(db, agent, f"retired note {i}", i, active=False)
+        await _cm_edge(db, agent, x, partner, BASE)
+    dens = _densifier(db, _v2(), agent)
+    sent: list[set[tuple[str, str]]] = []
+    real = dens._fact_pair_cosines
+
+    async def spy(pairs: set[tuple[str, str]]) -> dict[tuple[str, str], float]:
+        sent.append(set(pairs))
+        return await real(pairs)
+
+    dens._fact_pair_cosines = spy
+    plan = await dens.plan_comention_changes()
+    assert sent == [{_canon(y, z)}]
+    assert _pairs(plan) == {_canon(y, z)}
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_reweights_down_to_the_rarity_weight(db) -> None:
+    """A 0.9 edge whose only shared entity is named by 4 of the 10 indexed facts is
+    lowered to that entity's rarity weight."""
+    agent = f"test-f106cm-down-{uuid4().hex[:8]}"
+    facts = [await _fact(db, agent, f"the Halvorsen Institute note {i}", i) for i in range(4)]
+    for i in range(6):
+        await _fact(db, agent, f"a plain note {i}", 10 + i)
+    eid = await _cm_edge(db, agent, facts[0], facts[1], BASE)
+    w4 = BASE * math.log(10 / 4) / math.log(10 / 2)
+    dens = _densifier(db, _v2(), agent)
+
+    plan = await dens.plan_comention_changes()
+    assert plan.deletes == []
+    assert [e for e, _ in plan.reweights] == [eid]
+    assert plan.reweights[0][1] == pytest.approx(w4)
+    assert w4 < BASE
+
+    await dens.build_comention_edges()
+    assert (await _cm_edges(db, agent))[_canon(facts[0], facts[1])] == pytest.approx(w4)
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+@pytest.mark.parametrize("v2", [False, True])
+async def test_insert_count_excludes_conflicts(db, v2: bool) -> None:
+    """A planned pair that another writer linked first hits ON CONFLICT and is not
+    counted (v1 and v2). Re-applying the same plan inserts and counts nothing."""
+    agent = f"test-f106cm-cnt-{uuid4().hex[:8]}"
+    a = await _fact(db, agent, "Dara Velen leads Project Helios", 1)
+    b = await _fact(db, agent, "Dara Velen studied at the Halvorsen Institute", 2)
+    c = await _fact(db, agent, "Dara Velen moved to the coast", 3)
+    await _fact(db, agent, "a plain note", 4)  # N > df, so the v2 weight is above 0
+    dens = _densifier(db, _v2() if v2 else _settings(), agent)
+
+    plan = await dens.plan_comention_changes()
+    assert _pairs(plan) == {_canon(a, b), _canon(a, c), _canon(b, c)}
+    await _cm_edge(db, agent, a, b, BASE)  # a concurrent cycle got there first
+
+    assert await dens.build_comention_edges(plan=plan) == 2
+    assert set(await _cm_edges(db, agent)) == _pairs(plan)
+    assert await dens.build_comention_edges(plan=plan) == 0
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
 async def test_v1_ignores_the_v2_settings(db) -> None:
     agent = f"test-f106cm-v1s-{uuid4().hex[:8]}"
     a = await _fact(db, agent, "Dara Velen leads Project Helios", 1, embedding=_axis(2))
@@ -497,7 +569,7 @@ async def test_v1_ignores_the_v2_settings(db) -> None:
 
     default = await _densifier(db, _settings(), agent).plan_comention_changes()
     tight = await _densifier(
-        db, _settings(comention_v2_max_degree=2, comention_v2_min_cosine=1.0), agent,
+        db, _settings(comention_v2_max_degree=2, comention_min_cosine=1.0), agent,
     ).plan_comention_changes()
     assert default == tight
     assert _pairs(default) == {_canon(a, b)}  # cosine 0 still links; 11 is a v1 hub

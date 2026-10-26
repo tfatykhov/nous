@@ -3021,7 +3021,7 @@ class Settings(BaseSettings):
             "the rarity weight's domain); v1 keeps comention_max_degree."
         ),
     )
-    comention_v2_min_cosine: float = Field(
+    comention_min_cosine: float = Field(
         default=0.35,
         ge=0.0,
         le=1.0,

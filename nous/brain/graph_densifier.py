@@ -106,9 +106,9 @@ def _get_relation(source_type: str, target_type: str) -> str:
                              _RELATION_MAP.get((target_type, source_type), "related_to"))
 
 
-# F106: the co-mention v2 scans yield to the event loop (and honour an interrupt)
-# once per this many facts or edges.
-_COMENTION_YIELD_EVERY = 1000
+# F106: the co-mention and co-occurrence v2 scans yield to the event loop (and
+# honour an interrupt) once per this many rows.
+_DENSIFIER_YIELD_EVERY = 1000
 
 
 @dataclass
@@ -152,10 +152,11 @@ class CooccurrencePlan:
     reweights: list[tuple[str, float]] = field(default_factory=list)
 
 
-def _cooccurrence_qualifies_sql(a: str, b: str) -> str:
+def _cooccurrence_qualifies_sql(a: str, b: str, cos: str) -> str:
     """F106: SQL boolean, true when facts ``a`` and ``b`` (``heart.facts`` aliases) have
-    a co-occurrence thread signal and are not near-duplicates. The caller checks the
-    shared episode.
+    a co-occurrence thread signal and are not near-duplicates. ``cos`` is the SQL for
+    their embedding cosine, computed once by the caller (NULL when either fact has no
+    embedding, since ``<=>`` is strict). The caller checks the shared episode.
 
     Signals (any one): cosine ``>= :min_cos``; both enumerated (``source_ordinal``
     = chunk_index * 1_000_000 + position) in the same chunk, ``<= :ord_win`` apart; a
@@ -164,7 +165,6 @@ def _cooccurrence_qualifies_sql(a: str, b: str) -> str:
     The key read follows that table's invariant (join active facts, agent-scoped)
     because ``a`` and ``b`` are active facts of agent ``:a`` at every call site.
     """
-    cos = f"(1 - ({a}.embedding <=> {b}.embedding))"
     return (
         f"((COALESCE({cos} >= :min_cos, FALSE) "
         f"OR ({a}.source_ordinal IS NOT NULL AND {b}.source_ordinal IS NOT NULL "
@@ -173,7 +173,7 @@ def _cooccurrence_qualifies_sql(a: str, b: str) -> str:
         "OR EXISTS (SELECT 1 FROM heart.fact_entity_keys ka "
         "JOIN heart.fact_entity_keys kb ON kb.entity_key = ka.entity_key AND kb.agent_id = :a "
         f"WHERE ka.fact_id = {a}.id AND kb.fact_id = {b}.id AND ka.agent_id = :a)) "
-        f"AND ({a}.embedding IS NULL OR {b}.embedding IS NULL OR {cos} < :ceiling))"
+        f"AND ({cos} IS NULL OR {cos} < :ceiling))"
     )
 
 
@@ -1599,7 +1599,12 @@ class GraphDensifier:
             "ord_win": int(s.cooccurrence_ordinal_window),
             "ceiling": float(s.graph_threshold_fact_fact),
         }
-        qualifies = _cooccurrence_qualifies_sql("fa", "fb")
+        qualifies = _cooccurrence_qualifies_sql("fa", "fb", "pc.cos")
+        # The pair cosine, computed once per pair (OFFSET 0 keeps the planner from
+        # inlining it into each use) and read by the floor, the ceiling and the order.
+        pair_cos = (
+            "CROSS JOIN LATERAL (SELECT 1 - (fa.embedding <=> fb.embedding) AS cos OFFSET 0) pc "
+        )
 
         async with self.db.session() as session:
             edge_rows = (await session.execute(
@@ -1614,7 +1619,8 @@ class GraphDensifier:
                     "  ON fa.id = e.source_id AND fa.agent_id = :a AND fa.active = TRUE "
                     "LEFT JOIN heart.facts fb "
                     "  ON fb.id = e.target_id AND fb.agent_id = :a AND fb.active = TRUE "
-                    "WHERE e.agent_id = :a AND e.relation = 'co_occurred' "
+                    + pair_cos
+                    + "WHERE e.agent_id = :a AND e.relation = 'co_occurred' "
                     "AND e.extraction_method = 'co_occurrence' "
                     "AND e.source_type = 'fact' AND e.target_type = 'fact' "
                     "ORDER BY e.source_id, e.target_id, e.id"
@@ -1631,15 +1637,15 @@ class GraphDensifier:
                     "  GROUP BY source_episode_id HAVING count(*) >= 2 "
                     "  ORDER BY max(learned_at) DESC, source_episode_id LIMIT :lim"
                     ") "
-                    "SELECT CAST(fa.id AS text), CAST(fb.id AS text), "
-                    "1 - (fa.embedding <=> fb.embedding) "
+                    "SELECT CAST(fa.id AS text), CAST(fb.id AS text), pc.cos "
                     "FROM eps "
                     "JOIN heart.facts fa "
                     "  ON fa.source_episode_id = eps.ep AND fa.agent_id = :a AND fa.active = TRUE "
                     "JOIN heart.facts fb "
                     "  ON fb.source_episode_id = eps.ep AND fb.agent_id = :a AND fb.active = TRUE "
                     "  AND fa.id < fb.id "
-                    f"WHERE {qualifies}"
+                    + pair_cos
+                    + f"WHERE {qualifies}"
                 ),
                 params,
             )).all()
@@ -1649,7 +1655,7 @@ class GraphDensifier:
         delete_cands: list[tuple[str, str, str]] = []
         restore_cands: list[str] = []
         for i, (eid, src, tgt, old_w, ok) in enumerate(edge_rows):
-            if i % _COMENTION_YIELD_EVERY == 0:
+            if i % _DENSIFIER_YIELD_EVERY == 0:
                 await asyncio.sleep(0)
                 if self._interrupted:
                     return CooccurrencePlan()
@@ -1677,7 +1683,7 @@ class GraphDensifier:
         )
         inserts: list[tuple[str, str, float]] = []
         for i, (a, b, _cos) in enumerate(ordered):
-            if i % _COMENTION_YIELD_EVERY == 0:
+            if i % _DENSIFIER_YIELD_EVERY == 0:
                 await asyncio.sleep(0)
                 if self._interrupted:
                     return CooccurrencePlan()
@@ -1890,6 +1896,8 @@ class GraphDensifier:
         edge can only block a pair if BOTH endpoints are in the scanned set; this bounds
         the lookup by the scan, not the agent's total historical edge count.
         """
+        if not fact_ids:
+            return set()
         async with self.db.session() as session:
             existing_rows = (await session.execute(
                 text(
@@ -1925,7 +1933,7 @@ class GraphDensifier:
         - **Linking:** as v1 (rarer entities first, pre-existing-edge guard), but the
           per-fact cap is lifetime: a fact's degree starts at its co_mention edge count
           (any partner) less this plan's deletes. A new link also needs the pair's
-          embedding cosine ``>= comention_v2_min_cosine`` (a fact without an embedding
+          embedding cosine ``>= comention_min_cosine`` (a fact without an embedding
           passes), checked before the pair takes a cap slot.
 
         The index and edge scans yield to the event loop every 1000 rows; if the
@@ -1937,7 +1945,7 @@ class GraphDensifier:
 
         s = self._settings
         max_degree = int(s.comention_v2_max_degree)
-        min_cos = float(s.comention_v2_min_cosine)
+        min_cos = float(s.comention_min_cosine)
         max_per_node = int(s.comention_max_edges_per_node)
         weight = float(s.comention_weight)
         min_chars = int(s.comention_min_entity_chars)
@@ -1970,7 +1978,7 @@ class GraphDensifier:
         fact_ents: dict[str, set[str]] = {}
         ent_to_facts: dict[str, list[str]] = {}
         for i, (fid, content) in enumerate(rows):
-            if i % _COMENTION_YIELD_EVERY == 0:
+            if i % _DENSIFIER_YIELD_EVERY == 0:
                 await asyncio.sleep(0)
                 if self._interrupted:
                     return ComentionPlan()
@@ -1996,7 +2004,7 @@ class GraphDensifier:
         delete_cands: list[tuple[str, str, str]] = []
         reweight_cands: list[tuple[str, float]] = []
         for i, (eid, src, tgt, old_w) in enumerate(cm_rows):
-            if i % _COMENTION_YIELD_EVERY == 0:
+            if i % _DENSIFIER_YIELD_EVERY == 0:
                 await asyncio.sleep(0)
                 if self._interrupted:
                     return ComentionPlan()
@@ -2018,8 +2026,12 @@ class GraphDensifier:
         reweights = reweight_cands[:prune_max - len(deletes)]
 
         existing = await self._existing_fact_pairs(list(fact_ents))
+        # A pair with an endpoint already at the cap can never link (degrees only rise
+        # from here), so it is left out of the cosine read.
         candidates = {
-            pair for ent in rarity for pair in combinations(sorted(ent_to_facts[ent]), 2)
+            (a, b)
+            for ent in rarity for a, b in combinations(sorted(ent_to_facts[ent]), 2)
+            if deg.get(a, 0) < max_per_node and deg.get(b, 0) < max_per_node
         } - existing
         cosines = await self._fact_pair_cosines(candidates)
 
@@ -2080,8 +2092,10 @@ class GraphDensifier:
     async def _apply_comention_plan(self, plan: ComentionPlan) -> int:
         """Write a co-mention plan (deletes, reweights, inserts) in one transaction.
 
-        Deletes and reweights touch only this agent's co_mention edges. Returns the
-        number of insert rows sent (an ON CONFLICT no-op still counts, as in v1).
+        Deletes and reweights touch only this agent's co_mention edges. Inserts go in
+        batches of 500, one ``INSERT ... SELECT unnest`` each. Returns the rows actually
+        inserted: a pair that hits ON CONFLICT is not counted (F106; before, every
+        insert sent counted).
         """
         if not (plan.inserts or plan.deletes or plan.reweights):
             return 0
@@ -2090,7 +2104,9 @@ class GraphDensifier:
             "INSERT INTO brain.graph_edges "
             "(source_id, target_id, source_type, target_type, agent_id, "
             " relation, weight, auto_linked, extraction_method) "
-            "VALUES (:s, :t, 'fact', 'fact', :a, 'related_to', :w, TRUE, 'co_mention') "
+            "SELECT p.s, p.t, 'fact', 'fact', :a, 'related_to', p.w, TRUE, 'co_mention' "
+            "FROM unnest(CAST(:s AS uuid[]), CAST(:t AS uuid[]), CAST(:w AS float8[])) "
+            "AS p(s, t, w) "
             "ON CONFLICT (source_id, target_id, relation) DO NOTHING"
         )
         inserted = 0
@@ -2116,11 +2132,16 @@ class GraphDensifier:
                 )
             for i in range(0, len(plan.inserts), BATCH):
                 batch = plan.inserts[i:i + BATCH]
-                await session.execute(
+                result = await session.execute(
                     insert_sql,
-                    [{"s": a, "t": b, "a": self._agent_id, "w": w} for a, b, w in batch],
+                    {
+                        "a": self._agent_id,
+                        "s": [a for a, _, _ in batch],
+                        "t": [b for _, b, _ in batch],
+                        "w": [w for _, _, w in batch],
+                    },
                 )
-                inserted += len(batch)
+                inserted += result.rowcount or 0
             await session.commit()
 
         if inserted:
