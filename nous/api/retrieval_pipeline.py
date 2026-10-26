@@ -1687,6 +1687,18 @@ async def _run_stages(
                         and nid not in candidate_ids
                         and activation > _floor
                     ]
+                    # F105: the gate left no hit where the raw rows had some.
+                    # That is a relevance verdict, not a resolution failure, so
+                    # the 1-hop fallback below must not re-add the same rows
+                    # ungated. A gate that skipped or failed changed nothing,
+                    # so this stays False for it.
+                    gate_pruned_all = not hits and any(
+                        raw > _floor
+                        for (nid, _t), raw in raw_activation.items()
+                        if nid not in seed_ids
+                        and nid not in seen_ids
+                        and nid not in candidate_ids
+                    )
                     # Resolve real content + created_at (shared with
                     # brain._neighbors). Ids the resolver omits —
                     # inactive facts/procedures, missing rows — are
@@ -1771,6 +1783,13 @@ async def _run_stages(
                         n_appended += 1
                 if n_appended > 0:
                     acc.spreading_activation_used = True
+                elif gate_pruned_all:
+                    # F105: the query gate pruned every row. Spreading stays
+                    # the mechanism and returns nothing; no 1-hop fallback.
+                    logger.debug(
+                        "Spreading query gate pruned every row (%d activated); no 1-hop fallback",
+                        len(raw_activation),
+                    )
                 else:
                     # Every activated node was dropped by resolution
                     # (inactive/foreign/dangling). Fall back to 1-hop
@@ -1965,8 +1984,9 @@ async def _query_gate(
     embedder, or an empty query vector, the rows come back unchanged, and so
     they do on any failure, counted in ``acc.stage_errors["spreading_query_gate"]``:
     the gate fails open, and a failure never turns spreading into the 1-hop
-    fallback. A gate that prunes every row below the floor does: Stage 4's
-    ``n_appended == 0`` branch then runs the 1-hop fallback, which is not gated.
+    fallback. Neither does a gate that prunes every row below the floor: Stage
+    4 then returns no spreading row and skips the fallback, which exists for
+    resolution failures and would re-add the pruned rows ungated.
 
     The CTE's over-fetch window (``_SPREADING_OVERFETCH_LIMIT``) is cut before
     this runs, so the gate cannot pull in a row that window left out.

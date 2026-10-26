@@ -33,6 +33,7 @@ from test_retrieval_pipeline import (  # noqa: E402  (test-local helper reuse)
 )
 
 from nous.api.retrieval_pipeline import run_recall_pipeline
+from nous.brain.schemas import NeighborResult
 from nous.brain.spreading_activation import gate_factor, query_cosines
 from nous.config import Settings
 from nous.observability.retrieval_trace import BELOW_FLOOR, SLICED_OFF, RetrievalTrace
@@ -218,12 +219,18 @@ async def _run(
     cosines: dict[UUID, float | None] | None = None,
     embedder: Any = "default",
     cosines_error: Exception | None = None,
+    resolved: dict[UUID, tuple[str, datetime]] | None = None,
+    neighbors_by_node: dict[UUID, list[NeighborResult]] | None = None,
 ) -> tuple[RetrievalTrace, Any, AsyncMock, Any]:
-    """Run the pipeline with a real trace; returns (trace, stats, query_cosines mock, embedder)."""
+    """Run the pipeline with a real trace; returns (trace, stats, query_cosines mock, embedder).
+
+    Every activated row resolves unless ``resolved`` says otherwise;
+    ``neighbors_by_node`` feeds the 1-hop fallback."""
     heart = _make_heart(recall_results=[])
-    brain = _make_brain(neighbors_by_node={}, contradictions=[], decision_results=_make_decision_summaries())
+    brain = _make_brain(neighbors_by_node=neighbors_by_node or {}, contradictions=[],
+                        decision_results=_make_decision_summaries())
     brain._resolve_node_descriptions = AsyncMock(
-        return_value={nid: (f"row {nid}", AT) for nid, *_ in activated})
+        return_value=resolved if resolved is not None else {nid: (f"row {nid}", AT) for nid, *_ in activated})
     if embedder == "default":
         embedder = MagicMock()
         embedder.embed = AsyncMock(return_value=_e1())
@@ -377,19 +384,65 @@ async def test_gate_defaults_match_settings():
     assert _sa_rows(tr)[str(NA)]["edge_weight"] == pytest.approx(0.4 * 0.095 / s_min)
 
 
-async def test_gate_pruning_every_row_falls_back_to_one_hop():
-    """Not a failure: a gate that prunes every row leaves spreading nothing to
-    append, and the existing n_appended == 0 branch hands over to the 1-hop
-    fallback, which the gate does not filter."""
+def _one_hop(nid: UUID) -> dict[UUID, list[NeighborResult]]:
+    """DECISION_ONE's 1-hop neighbour is ``nid``: the fallback would re-add it."""
+    return {DECISION_ONE_ID: [NeighborResult(
+        id=nid, node_type="fact", description="one hop", edge_relation="related_to",
+        edge_weight=0.8, created_at=AT,
+    )]}
+
+
+def _legs(tr: RetrievalTrace) -> dict[str, dict]:
+    return {leg["name"]: leg for leg in tr.to_dict()["legs"]}
+
+
+def _one_hop_rows(tr: RetrievalTrace) -> list[str]:
+    return [e["neighbor_id"] for e in tr.to_dict()["expansions"] if e["stage"] != SA_STAGE]
+
+
+async def test_gate_pruning_every_row_skips_the_one_hop_fallback():
+    """A relevance verdict, not a resolution failure: when the gate prunes
+    every row, spreading stays the mechanism and returns nothing. The 1-hop
+    fallback would re-add the pruned row ungated (it is DECISION_ONE's
+    neighbour), so it must not run."""
     tr, stats, _qc, _e = await _run(
         gate=GATE_ON, activated=[(NA, "fact", 0.4, 1)], seeds_out={NA: DECISION_ONE_ID},
-        cosines={NA: -0.1, DECISION_ONE_ID: 0.5},
+        cosines={NA: -0.1, DECISION_ONE_ID: 0.5}, neighbors_by_node=_one_hop(NA),
     )
     assert _sa_rows(tr) == {}
     assert "spreading_query_gate" not in stats.n_stage_errors
-    legs = {leg["name"]: leg for leg in tr.to_dict()["legs"]}
+    legs = _legs(tr)
     assert legs["spreading_activation"]["n_returned"] == 0
-    assert "brain_graph" in legs, "the 1-hop fallback ran"
+    assert "brain_graph" not in legs
+    assert _one_hop_rows(tr) == []
+    assert _candidates(tr)[str(NA)]["disposition"] == BELOW_FLOOR
+
+
+async def test_gate_on_resolution_failure_still_falls_back():
+    """The gate kept the row, but content resolution dropped it: the 1-hop
+    fallback runs as it does today."""
+    tr, _stats, _qc, _e = await _run(
+        gate=GATE_ON, activated=[(NA, "fact", 0.4, 1)], seeds_out={NA: DECISION_ONE_ID},
+        cosines={NA: 0.5, DECISION_ONE_ID: 0.5}, resolved={}, neighbors_by_node=_one_hop(NB),
+    )
+    assert _sa_rows(tr) == {}
+    assert _candidates(tr)[str(NA)]["disposition_stage"] == "spreading_content_unresolved"
+    assert "brain_graph" in _legs(tr)
+    assert _one_hop_rows(tr) == [str(NB)]
+
+
+async def test_gate_on_without_raw_hits_keeps_the_fallback():
+    """Every row was below the floor before the gate: the gate pruned nothing,
+    so the fallback runs as it does with the gate off."""
+    activated = [(NA, "fact", 0.08, 1)]
+    runs = [
+        await _run(gate=g, activated=activated, seeds_out={NA: DECISION_ONE_ID},
+                   cosines={NA: 0.5, DECISION_ONE_ID: 0.5}, neighbors_by_node=_one_hop(NB))
+        for g in (GATE_ON, None)
+    ]
+    for tr, *_ in runs:
+        assert "brain_graph" in _legs(tr)
+        assert _one_hop_rows(tr) == [str(NB)]
 
 
 async def test_gate_failure_fails_open():

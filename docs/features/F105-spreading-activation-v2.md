@@ -293,11 +293,13 @@ an embedder, chunks mid-backfill and procedures can be NULL. A NULL node or seed
 1.0, because absence is not a relevance value; the count goes to a `logger.debug` line. A missing
 embedder or an empty query vector skips the gate for the whole call. Any failure leaves the rows
 ungated and counts `n_stage_errors["spreading_query_gate"]`: the gate fails open and never turns
-spreading into the 1-hop fallback. A gate that prunes every row does: with nothing to append, Stage
-4's existing fallback runs the 1-hop expansion of the decision hits, which is not gated. In the
-offline gate below that is 21 of 462 retrievals under `seed_relative`. All their seeds are facts,
-so there the fallback has no decision to expand; with decision seeds it would replace the pruned
-rows by ungated 1-hop neighbours.
+spreading into the 1-hop fallback. Neither does a gate that prunes every row: spreading stays in use
+and returns no row, and the 1-hop fallback does not run. That fallback exists for rows that clear
+the floor but fail content resolution, which still fall back as before. After a full prune it would
+re-add the depth-1 part of the same rows, ungated and under the `brain_graph` /
+`heart_graph_memory` labels, and so undo the gate. A gate that skipped or failed pruned nothing, so
+when the raw rows were all below the floor anyway, the fallback runs as it does with the flag off. In
+the offline gate below, a full prune is 21 of 462 retrievals under `seed_relative`.
 
 **Over-fetch.** The CTE's 40-row window (`_SPREADING_OVERFETCH_LIMIT`) is cut by raw activation
 before the gate runs. The gate can only lower or reorder rows inside that window; it cannot bring in
