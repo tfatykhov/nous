@@ -377,6 +377,21 @@ async def test_gate_defaults_match_settings():
     assert _sa_rows(tr)[str(NA)]["edge_weight"] == pytest.approx(0.4 * 0.095 / s_min)
 
 
+async def test_gate_pruning_every_row_falls_back_to_one_hop():
+    """Not a failure: a gate that prunes every row leaves spreading nothing to
+    append, and the existing n_appended == 0 branch hands over to the 1-hop
+    fallback, which the gate does not filter."""
+    tr, stats, _qc, _e = await _run(
+        gate=GATE_ON, activated=[(NA, "fact", 0.4, 1)], seeds_out={NA: DECISION_ONE_ID},
+        cosines={NA: -0.1, DECISION_ONE_ID: 0.5},
+    )
+    assert _sa_rows(tr) == {}
+    assert "spreading_query_gate" not in stats.n_stage_errors
+    legs = {leg["name"]: leg for leg in tr.to_dict()["legs"]}
+    assert legs["spreading_activation"]["n_returned"] == 0
+    assert "brain_graph" in legs, "the 1-hop fallback ran"
+
+
 async def test_gate_failure_fails_open():
     """A failing cosine read leaves the rows ungated and spreading in use: the
     1-hop fallback does not take over."""

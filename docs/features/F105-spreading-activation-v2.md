@@ -293,7 +293,11 @@ an embedder, chunks mid-backfill and procedures can be NULL. A NULL node or seed
 1.0, because absence is not a relevance value; the count goes to a `logger.debug` line. A missing
 embedder or an empty query vector skips the gate for the whole call. Any failure leaves the rows
 ungated and counts `n_stage_errors["spreading_query_gate"]`: the gate fails open and never turns
-spreading into the 1-hop fallback.
+spreading into the 1-hop fallback. A gate that prunes every row does: with nothing to append, Stage
+4's existing fallback runs the 1-hop expansion of the decision hits, which is not gated. In the
+offline gate below that is 21 of 462 retrievals under `seed_relative`. All their seeds are facts,
+so there the fallback has no decision to expand; with decision seeds it would replace the pruned
+rows by ungated 1-hop neighbours.
 
 **Over-fetch.** The CTE's 40-row window (`_SPREADING_OVERFETCH_LIMIT`) is cut by raw activation
 before the gate runs. The gate can only lower or reorder rows inside that window; it cannot bring in

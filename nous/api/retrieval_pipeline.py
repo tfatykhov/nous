@@ -1964,7 +1964,9 @@ async def _query_gate(
     A node or seed without an embedding is neutral (factor 1.0). With no
     embedder, or an empty query vector, the rows come back unchanged, and so
     they do on any failure, counted in ``acc.stage_errors["spreading_query_gate"]``:
-    the gate fails open and never turns spreading into the 1-hop fallback.
+    the gate fails open, and a failure never turns spreading into the 1-hop
+    fallback. A gate that prunes every row below the floor does: Stage 4's
+    ``n_appended == 0`` branch then runs the 1-hop fallback, which is not gated.
 
     The CTE's over-fetch window (``_SPREADING_OVERFETCH_LIMIT``) is cut before
     this runs, so the gate cannot pull in a row that window left out.
