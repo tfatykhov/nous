@@ -2,9 +2,11 @@
 
 **Status:** in progress. Each change below ships behind its own setting whose default reproduces
 today's behaviour exactly, and each is enabled only after its gates pass. Landed so far: the offline
-replay used as the gate (`scripts/diag/sa_replay.py`, Task 1), which changes no product behaviour,
-and fan normalisation (Task 3), off by default (`NOUS_SPREADING_FAN_NORMALISATION_ENABLED`); its
-offline gate passed and its MAB arm has not run yet.
+replay used as the gate (`scripts/diag/sa_replay.py`, Task 1), which changes no product behaviour;
+fan normalisation (Task 3), off by default (`NOUS_SPREADING_FAN_NORMALISATION_ENABLED`); and
+associative edges at a reduced weight (Task 4), off by default
+(`NOUS_SPREADING_ASSOCIATIVE_EDGES_ENABLED`). Both offline gates passed; neither MAB arm has run
+yet.
 
 **Builds on:** [F022 Graph-Augmented Recall](F022-graph-augmented-recall.md) (the density-gated
 recursive CTE in `nous/brain/spreading_activation.py`) and F091 retrieval telemetry
@@ -194,3 +196,61 @@ count `co_occurred` or `co_mention` edges. A graph made mostly of them therefore
 gate, spreading does not run, and this flag is inert there unless `NOUS_SPREADING_ACTIVATION_ENABLED`
 is `true`. Making the flag matter on such graphs needs a separate decision about the density gate.
 That is out of scope here, because the gate is deliberately builder-flag-proof.
+
+**Offline gate (A2 clone, 2026-10-26).** Kept rows are the top 20 above the floor, as in Task 3.
+
+(a) Conflict resolution (CR), replayed live-shaped (`--seeds-from candidates --edge-kinds`): 1,186
+retrievals that attempted spreading, from 7 CR agents (the eighth holds no facts, so spreading never
+ran there).
+
+| arm | retrievals with rows above floor | rows above floor | carried by `co_occurred` / `co_mention` / other | Jaccard@20 vs baseline | added latency p95 |
+|---|---|---|---|---|---|
+| baseline | 18 | 18 | 0 / 0 / 18 | 1.00 | - |
+| associative (mult 0.5) | 188 | 203 | 203 / 0 / 0 | 0.85 | 1.1 ms |
+| associative (mult 1.0) | 188 | 203 | 203 / 0 / 0 | 0.85 | 1.1 ms |
+
+- The baseline's 18 rows are the 18 SA rows the CR run recorded. All come from one agent's four
+  inferred fact-to-fact edges, so "SA returns 0 rows on CR" holds for 1,168 of the 1,186 retrievals.
+- Associative-carried rows go from 0 to 203, in 188 retrievals. All are depth 1, with activation
+  0.197 to 0.225 (seed score x 0.9 x 0.5 x 0.5). They come from 17 distinct edges on two agents.
+- On this clone the CR graphs are mostly chunk-to-chunk `related_to` edges. The fact seeds start
+  from a different subgraph: each CR agent's facts (4 to 9) come from one source episode, and their
+  only edges are a complete `co_occurred` clique. The clique is complete, so every reachable fact is
+  one hop away, and the multiplier changes no row set.
+- The live exclusion matters. Excluding only the seeds, 930 retrievals would gain 2,525 rows; 2,322
+  of those neighbours were already candidates of the same retrieval. In 742 retrievals all of them
+  were, including every retrieval of the two other agents that have a clique. The live-shaped number
+  is the gate.
+
+(b) LME and qa2: Jaccard@20 against baseline is 1.00 in both seed modes (102 and 119 retrievals from
+recorded seeds, 108 and 120 from candidates). This is vacuous: neither agent has an associative
+edge, so the flag cannot change anything there. The other agents of the Task 3 window give a
+non-vacuous reading; six of them have 1 to 6 associative edges. There Jaccard@20 is 0.985
+live-shaped (15 agents, 299 retrievals: 15 associative-carried rows in 13 retrievals) and 0.90 with
+the seeds-only exclusion (14 agents, 223 retrievals). Over all 17 agents with recorded seeds, with
+the seeds-only exclusion, it is 0.93. Added latency p95 is 1.0 to 1.2 ms in every run.
+
+The gate passes: CR has associative-carried rows above the floor on 188 retrievals (gate: more than
+0), and LME/qa2 Jaccard@20 is 1.00 (gate: at least 0.6). Hub share is computed from the degrees of
+the edges the default traversal crosses, so under the associative arm it leaves out associative
+edges; it is not a gate metric for this task.
+
+**Provenance (report open question 7, this clone only).** 20 associative-carried CR rows were
+sampled (seed 4) and their edges' metadata read. All 20 are `co_occurred` edges with method
+`co_occurrence`, weight 0.9 and fact-to-fact, on two agents (12 and 8 rows). Each agent's
+`co_occurred` edges share one `created_at`, 1.4 s and 3.7 s after that agent's first other edge,
+inside the same July ingest. Across the CR agents, those with 4 to 6 facts carry the full clique (6,
+10 or 15 edges) and those with 8 or 9 facts carry none. That split is the builder's noise gate
+(`NOUS_COOCCURRENCE_MAX_EPISODE_FACTS`, default 6), not a flag state. So nothing on this clone
+suggests these edges were built under a different builder flag state. The question stays open for
+prod's 1,263 `co_occurred` and 3,294 `co_mention` edges, which this audit does not cover.
+
+**Density gate on CR.** `compute_graph_density` gives 2.22 to 2.67 on the CR agents. Counting their
+associative edges would give 2.22 to 2.67 as well, because they are at most 15 of 136 to 2,364
+edges. So on these graphs `auto` keeps spreading off whatever this flag says, for a reason other
+than associative edges. The CR arm below forces spreading on, as the measured CR fact was taken.
+
+**MAB arms** (not run yet): A, LME + qa2 with the flag on, read against the default rule; B, a CR arm
+with `NOUS_SPREADING_ACTIVATION_ENABLED=true` and the flag on, the only task that gets one.
+Pre-registered sign: CR SA rows go from 0 to more than 0 and CR accuracy does not fall; LME + qa2
+within the default rule.
