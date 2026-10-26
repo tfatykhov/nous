@@ -10,8 +10,9 @@ off by default (`NOUS_SPREADING_QUERY_GATE_ENABLED`); a budget on SA rows in the
 list (Task 6), off by default (`NOUS_SPREADING_BUDGET_ENABLED`); two more ways to combine the
 activation several seeds give one node (Task 7), off by default (`NOUS_SPREADING_AGGREGATION=max`);
 and a rescore of the existing recall candidates by their activation (Task 8), off by default
-(`NOUS_SPREADING_RESCORE_EXISTING_ENABLED`). The Task 3 to 8 offline gates passed; no MAB arm has
-run yet.
+(`NOUS_SPREADING_RESCORE_EXISTING_ENABLED`). The Task 3 to 8 offline gates passed. Of the
+MemoryAgentBench (MAB) arms on LME 60 + qa2 100, the parity arm (P1, Task 2) and the fan arm (F,
+Task 3) have run, each with no detectable change; the rest are pending.
 
 **Builds on:** [F022 Graph-Augmented Recall](F022-graph-augmented-recall.md) (the density-gated
 recursive CTE in `nous/brain/spreading_activation.py`) and F091 retrieval telemetry
@@ -65,6 +66,27 @@ qa2 100), paired against A2 (SA on, prod config) and A2off (SA off), read agains
 floor. With 160 questions and at most 8 where SA is the only gold source, the arms catch regressions
 and context savings; they cannot prove small accuracy gains.
 
+## Noise floor (Task 0)
+
+An unchanged rerun of the A2 reference config on fresh memory (arm A2r), paired with A2 question by
+question:
+
+| | only A2 right | only A2r right | net, A2r against A2 |
+|---|---|---|---|
+| qa2 (100) | 3 | 1 | -2 |
+| LME (60) | 4 | 2 | -2 |
+| pooled (160) | 7 | 3 | -4 |
+
+Ten of the 160 questions (6.25%) are discordant, and the rerun reproduced rendered context within
+2%. The threshold is T = max(1, |net|): 2 per cell and 4 pooled. An arm fails when its net loss
+against A2 exceeds T, and a gain is read only above T. McNemar p is reported for context only.
+
+The SA-only-gold union is four questions: qa2 no13, no38 and no59, and LME 9d25d4e0.
+
+**SA off (arm A2off).** With spreading switched off entirely the arm scored 140 of 160, against 138
+for A2 and 134 for A2r, inside T. Rendered context fell 14% on qa2 and 19% on LME, and all four
+SA-only-gold questions were still answered correctly without SA.
+
 ## Offline replay (Task 1)
 
 `scripts/diag/sa_replay.py` replays the seeds recorded in `retrieval_log.expansions` (post-#807
@@ -115,6 +137,30 @@ same activation and depth. Hub share by seed degree is 0.0, because no seed has 
 Three agents do have nodes of degree 718 to 878, but on this clone a hub can only be left at hop 2,
 as the via node, which the seed-degree share cannot see. A hub-share gate therefore needs Task 3's
 via-node output. By via node, the same baseline's hub share is 0.048 (Task 3 replay).
+
+## Phase 1 parity evidence (Task 2)
+
+Setting: `NOUS_SPREADING_SCORE_DEPTH1_PARITY` (default `false`), which predates F105; see
+[environment variables](../reference/environment-variables.md). Task 2 changes no code.
+
+**Deployed values**, read by name: parity unset (so `false`),
+`NOUS_GRAPH_NEIGHBOR_SEED_SCORE_ENABLED=true`, the inferred-edge penalty at its default 1.0 and
+spreading at `auto`. That is the scoring policy parity is defined against, so with the flag on the
+parity branch applies rather than going inert.
+
+**Offline replay (A2 clone).** Over 8,562 SA rows, the ratio of score to activation is 0.700 on
+every row today (activation x `graph_recall_decay`) and 2.0 under parity (activation /
+`spreading_activation_decay`). The row sets are identical in 462 of 462 retrievals, since the floor
+and the cap act on the activation before scoring. Approximate rank effect, from entry scores: under
+parity no SA row moves above a top-10 cutline and 12 move above a top-20 one, all on qa2.
+
+**MAB arm P1** (parity only): qa2 84, LME 54; net against A2 -1 (qa2), +1 (LME) and 0 (pooled), so
+no detectable change. SA rendered characters were unchanged. The arm's planned check that the
+rendered-id set is identical per question was replaced by the offline 462/462 proof above: agent
+runs are nondeterministic and issue different queries, so their id sets differ whatever the flag.
+
+Task 7 caps parity scores at 1 (`min(1, activation / decay)`, see the parity cap below), which is a
+no-op under `max`, so this evidence still holds.
 
 ## Fan normalisation (Task 3)
 
@@ -183,9 +229,12 @@ function stays the same. On a very small graph (the 41-edge test fixture) the pl
 first and runs the count once per joined edge; the results are the same and the cost there is
 negligible.
 
-**MAB arm F** (`NOUS_SPREADING_FAN_NORMALISATION_ENABLED=true`, defaults): not run yet.
-Pre-registered sign: the SA share of rendered characters falls (fewer rows clear the 0.1 floor), and
-accuracy stays within 1 question.
+**MAB arm F** (`NOUS_SPREADING_FAN_NORMALISATION_ENABLED=true`, defaults): qa2 85, LME 54; net
+against A2 0 (qa2), +1 (LME) and +1 (pooled), so no detectable change. Pre-registered sign: the SA
+share of rendered characters falls (fewer rows clear the 0.1 floor), and accuracy stays within 1
+question. Accuracy did, but the share did NOT fall: it is 15.6% on qa2 and 20.6% on LME, inside A2's
+range. Fan cut the rows the CTE returns on LME by 14% (885 against 1,037), but the rendered SA rows
+barely moved (616 against 626): it trims the tail of the CTE's window, not what reaches the prompt.
 
 ## Associative edges at a reduced weight (Task 4)
 
@@ -198,7 +247,8 @@ Associative edges are those with relation `co_occurred`, or extraction method `c
 gate. Task 4 gives the traversal its own predicate, `graph_constants.spreading_exclusion_sql`. With
 the flag off it returns exactly `autobehavior_exclusion_sql`, so the statement is byte-identical to
 before. With the flag on it excludes only `supersedes`, `contradicts` and `happened_before`
-(`SPREADING_ALWAYS_EXCLUDED_RELATIONS`, report §7), and each hop over an associative edge is
+(`SPREADING_ALWAYS_EXCLUDED_RELATIONS`; traversing them is on the internal research report's list of
+things not to do), and each hop over an associative edge is
 multiplied by the setting (`CASE WHEN <associative_edge_sql> THEN :assoc_mult ELSE 1.0 END`). The
 multiplier is `<= 1`, so the MAX invariant `activation <= seed_score` holds. At the defaults, seed 0.8
 over a 0.9 `co_mention` edge gives `0.8 x 0.9 x 0.5 (decay) x 0.5 = 0.18`, and over a 0.8
@@ -254,9 +304,10 @@ The gate passes: CR has associative-carried rows above the floor on 188 retrieva
 the edges the default traversal crosses, so under the associative arm it leaves out associative
 edges; it is not a gate metric for this task.
 
-**Provenance (report open question 7, this clone only).** 20 associative-carried CR rows were
-sampled (seed 4) and their edges' metadata read. All 20 are `co_occurred` edges with method
-`co_occurrence`, weight 0.9 and fact-to-fact, on two agents (12 and 8 rows). Each agent's
+**Provenance (an open question of the internal research report; this clone only).** 20
+associative-carried CR rows were sampled (seed 4) and their edges' metadata read. All 20 are
+`co_occurred` edges with method `co_occurrence`, weight 0.9 and fact-to-fact, on two agents (12 and
+8 rows). Each agent's
 `co_occurred` edges share one `created_at`, 1.4 s and 3.7 s after that agent's first other edge,
 inside the same July ingest. Across the CR agents, those with 4 to 6 facts carry the full clique (6,
 10 or 15 edges) and those with 8 or 9 facts carry none. That split is the builder's noise gate
@@ -381,6 +432,11 @@ line is set for `seed_relative`; G-B is run as the comparison arm. Pre-registere
 characters fall, and of the Task 0 SA-only-gold union (4 questions), the arm passes at 3 of 4 or
 more.
 
+**Enabling checklist.** `_query_gate` awaits the query embedding inside Stage 4's database session.
+The embed normally hits the LRU, since the chunk and exemplar legs embed the same query string,
+but a miss holds one pooled connection across the embedding call. Check that before enabling the
+gate.
+
 ## Budget for SA rows (Task 6)
 
 Settings: `NOUS_SPREADING_BUDGET_ENABLED` (default `false`), `NOUS_SPREADING_BUDGET_MAX_ROWS`
@@ -480,14 +536,15 @@ The CTE runs one set of paths per seed. A node reached from several seeds keeps 
 seed's best path under `max`, so two seeds pointing at one node give it no more activation than one
 does. Task 7 adds two ways to combine them:
 - `sat` (saturating sum): `min(1, sum of a_s)`.
-- `noisy_or` **[NOVEL]**: `1 - product of (1 - a_s)`. No paper fetched for F105 uses it (report
-  §7.3), so it is a hypothesis to test here and in the MAB arms, not a replication.
+- `noisy_or` **[NOVEL]**: `1 - product of (1 - a_s)`. No paper fetched for F105 uses it, so it is a
+  hypothesis to test here and in the MAB arms, not a replication.
 
 `a_s` is seed `s`'s best path to the node. A `per_seed` CTE keeps one row per (node, seed):
 `ROW_NUMBER() OVER (PARTITION BY id, node_type, seed_id ORDER BY activation DESC, depth ASC)`, rn 1.
 Parallel edges between two nodes and cycles through a seed's own paths therefore never count twice.
-There is no uncapped sum (report §7). Fan normalisation (Task 3) and the associative multiplier
-(Task 4) scale each path before this reduction, so the modes combine already-damped values.
+There is no uncapped sum, which is on the internal research report's list of things not to do. Fan
+normalisation (Task 3) and the associative multiplier (Task 4) scale each path before this
+reduction, so the modes combine already-damped values.
 
 The `ranked` CTE then computes the combination as a window over the node. It keeps the row of the
 largest contributor, ordered as under `max` (activation desc, depth asc, seed id asc), so the returned
@@ -514,7 +571,7 @@ cap never binds, since the ratio is at most the seed's score, so depth-1 parity 
 stays exact. Parity is off in prod and in A2.
 
 **Offline gate (A2 clone, 2026-10-26).** The definitions, the signs forced by construction and rough
-sizes were pre-registered in the task report before the replay. The plain replay
+sizes were pre-registered before the replay. The plain replay
 (`sa_replay.py --agent all`, the window of Tasks 3 to 5) gives rows above the floor, Jaccard@20 and
 latency, for both seed sources. A separate analysis script (not committed) also replays each
 retrieval uncapped under each mode and from each seed alone. That counts each node's seeds and
@@ -582,7 +639,7 @@ Settings: `NOUS_SPREADING_RESCORE_EXISTING_ENABLED` (default `false`) and
 [environment variables](../reference/environment-variables.md).
 
 **Why.** Stage 4 excludes every existing candidate from the CTE, so when the seeds reach a candidate
-that another leg already found, that corroboration is thrown away (report RC2). With the flag on, it
+that another leg already found, that corroboration is thrown away. With the flag on, it
 raises the candidate's score instead of being discarded.
 
 **The CTE.** `spreading_activation_search` takes `rescore_ids` and `rescore_out`. A seed among the
@@ -612,19 +669,28 @@ rescore. Seeds are filtered out once more there, for a search that ignores `resc
 `rerank_by_score` sort. A non-spreading result with an activation `a` scores
 `min(1, score x (1 + beta x a))`, recorded as a `spreading_rescore` mutation. Only a raise is
 applied: a score already above 1 (the adjacency boost can put one there) is left alone, so no score
-is ever lowered and a direct hit cannot be demoted by its own rescore (report Phase 3). Seeds,
-brain-leg decisions and spreading rows are never touched. Positions are kept, so ranks change only
-where the list is re-sorted: `recall_deep` sets `rerank_by_score` when chunks are on, and the eval
-runner always does. At beta 0.15 no score rises by more than 15%.
+is ever lowered and a direct hit cannot be demoted by its own rescore. Seeds, brain-leg decisions
+that no other leg found and spreading rows are never touched. The match is by id, so a decision that
+both the brain leg and a heart-graph leg found is raised in both rows. Positions are kept, so ranks
+change only where the list is re-sorted: `recall_deep` sets `rerank_by_score` when chunks are on,
+and the eval runner always does. At beta 0.15 no score rises by more than 15%.
 
 **Double counting.** `_apply_graph_adjacency_boost` (alpha 0.15, on in prod) already multiplies a
 candidate connected to other candidates by its edge weights, and Path A rows are candidates. So a
 Path A row reached over the edge that brought it in, or a candidate the boost already raised, can be
 credited twice for one edge. The offline gate splits its numbers on that line.
 
+**With the query gate (Task 5).** `rescore_out` carries the raw activation: the gate rescales only
+the SA rows Stage 4 appends. That is acceptable as built. A candidate's relevance to the query is
+owned by the leg that found it, the rescore's raise is bounded at 15% and monotone, and gating it
+would mostly trim the double-counted Path A rows.
+
+**With the budget (Task 6).** The rescore raises non-SA scores before the budget's cutline reads
+them, which is inert at the default `cutline_rank` 0.
+
 **Offline gate (A2 clone, 2026-10-26).** `sa_replay.py --seeds-from candidates --rescore`, the window
 of Tasks 3 to 7, base config A2 (aggregation `max`, beta 0.15). The definitions and the test were
-pre-registered in the task report before any candidate row was read. The `candidates` column has no
+pre-registered before any candidate row was read. The `candidates` column has no
 NULL in the window (sample rate 1.0). Of the 1,574 SA-attempted retrievals, the rescore applies to
 the 462 where spreading appended a row live (in the others the 1-hop fallback ran). Existing
 candidates are the delivered rows among the rescore ids. Group A is the Path A rows plus the rows the
@@ -659,5 +725,8 @@ rescore's only new information is a candidate reached at depth 2 through a node 
 The rank effect is accordingly small: group A gains a mean of a third of a rank, group B almost
 never moves.
 
-**MAB arm** (not run yet): R, the combined arm plus this flag, paired against the combined arm. If
-Task 4 is in the combined arm, R also runs with `NOUS_SPREADING_ASSOCIATIVE_EDGES_ENABLED` on and off.
+**MAB arm** (not run yet): R, the combined arm plus this flag, paired against the combined arm. The
+double counting measured above runs through the adjacency boost, not associative edges. A clean
+read of what the rescore adds therefore pairs arm R with the boost off
+(`NOUS_GRAPH_ADJACENCY_BOOST_ENABLED=false` in both arms of the pair), or tests a variant that skips
+candidates the boost already raised.
