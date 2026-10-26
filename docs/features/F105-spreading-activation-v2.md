@@ -527,9 +527,9 @@ Definitions:
 | added latency p95 | 1.1 ms | 1.3 ms | 0.8 ms | 0.8 ms |
 
 What the numbers show:
-- Every node reached from 2 or more seeds clears the floor under either mode; the weakest two-seed
-  sum is 0.109. The replayed seeds score 0.79 to 1.0, and the nodes two seeds share sit on strong
-  edges. So every floor-crosser is a multi-seed row, and `sat` and `noisy_or` admit the same rows.
+- Every node reached from 2 or more seeds clears the floor under either mode, in both sources. On
+  recorded seeds the weakest two-seed sum is 0.109: the seeds score 0.79 to 1.0, and the nodes two
+  seeds share sit on strong edges. So every floor-crosser is a multi-seed row, and `sat` and `noisy_or` admit the same rows.
   They differ only in order: their kept-row counts differ by one to three per seed source.
 - A single-seed row never moves up, as the construction forces. Under `sat`, 28% (recorded seeds)
   and 30% (live-shaped) of them move down; the mean over all single-seed rows is -0.8 places.
@@ -550,5 +550,6 @@ The gate passes as a screen. The implementation check is exact, `max` reproduces
 (Jaccard@20 1.00, 4,524 rows), and multi-seed rows are 14.6% to 14.9% of the rows above the floor. Had
 that share been under 1%, the MAB arms would have measured next to nothing.
 
-**MAB arms** (not run yet): `sat` and `noisy_or`, each the combined arm plus this one flag, paired
-against the combined arm (not A2), so the added flag is the only variable.
+**MAB arms** (not run yet): `sat` and `noisy_or`, each the combined arm (every flag of Tasks 3 to 6
+that passed its MAB arm, run together) plus this one flag, paired against the combined arm (not A2),
+so the added flag is the only variable.
