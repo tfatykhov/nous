@@ -111,6 +111,16 @@ def _fan_factor_sql(edge_filter_sql: str) -> str:
     )
 
 
+# F105 Task 7: how the per-seed best paths to a node (``act.activation``, one
+# row per seed) combine. noisy-OR caps each one below 1 so the logarithm is
+# defined; the GREATEST is a second guard.
+_OVER_NODE = "OVER (PARTITION BY act.id, act.node_type)"
+_COMBINE_SQL: dict[str, str] = {
+    "sat": f"LEAST(1, SUM(act.activation) {_OVER_NODE})",
+    "noisy_or": f"1 - EXP(SUM(LN(GREATEST(1 - LEAST(act.activation, 0.999999), 1e-6))) {_OVER_NODE})",
+}
+
+
 async def spreading_activation_search(
     session: AsyncSession,
     agent_id: str,
@@ -159,6 +169,17 @@ async def spreading_activation_search(
         enforced here rather than assumed of every writer. F105's fan factor
         is ``<= 1`` too, so the bound holds with fan normalisation on, and so
         is the associative-edge multiplier (Task 4, ``le=1.0``).
+
+        F105 Task 7, ``spreading_aggregation``: ``max`` (the default) is the
+        above and keeps this statement byte for byte. ``sat`` and ``noisy_or``
+        first keep each seed's best path to a node, so parallel edges and
+        cycles from one seed still count once, then combine the seeds'
+        contributions: ``min(1, sum)``, or ``1 - prod(1 - a)`` with each ``a``
+        capped at 0.999999. Both stay ``<= 1``, but a node reached from several
+        seeds can exceed its winning seed's score. ``depth``, ``seed_out`` and
+        ``parent_out`` then come from the largest contributor's best path
+        (ties: the shorter, then the lower seed id). These two modes use LEAST,
+        LN and EXP, so like the fan LATERAL they run on Postgres only.
 
         A8: ``depth`` is the hop count of the WINNING path — the one whose
         activation survived the MAX — not ``MIN(depth)``. Those differ when a
@@ -282,6 +303,65 @@ async def spreading_activation_search(
         ranked_parent = ", act.parent_id"
         final_parent = ", parent_id"
 
+    # F105 Task 7: "max" is today's statement, byte for byte.
+    aggregation = getattr(settings, "spreading_aggregation", "max")
+    if aggregation == "max":
+        aggregate_sql = f"""
+        -- A8: keep the winning path's depth alongside its activation.
+        -- ROW_NUMBER over (activation DESC, depth ASC) selects exactly the row
+        -- MAX(activation) used to return, so `total_activation` is unchanged;
+        -- the depth tie-break only decides which of two equally-activated
+        -- paths is reported, preferring the shorter. seed_id is the LAST key:
+        -- it changes neither activation nor depth, only makes the reported
+        -- seed of an exact tie deterministic.
+        ranked AS (
+            SELECT act.id, act.node_type, act.activation, act.depth, act.seed_id{ranked_parent},
+                   ROW_NUMBER() OVER (
+                       PARTITION BY act.id, act.node_type
+                       ORDER BY act.activation DESC, act.depth ASC, act.seed_id ASC
+                   ) AS rn
+            FROM activation act
+            {where_clause}
+        )
+        SELECT id, node_type, activation AS total_activation, depth, seed_id{final_parent}
+        FROM ranked
+        WHERE rn = 1
+        ORDER BY total_activation DESC
+        LIMIT :result_limit"""
+    elif aggregation in _COMBINE_SQL:
+        aggregate_sql = f"""
+        -- F105 Task 7: per_seed keeps each seed's best path to a node, so
+        -- parallel edges and cycles from one seed count once. ranked combines
+        -- the seeds' contributions over the node and keeps the largest
+        -- contributor's row (ordered as in max mode) for depth, seed_id and
+        -- parent_id.
+        per_seed AS (
+            SELECT act.id, act.node_type, act.activation, act.depth, act.seed_id{ranked_parent},
+                   ROW_NUMBER() OVER (
+                       PARTITION BY act.id, act.node_type, act.seed_id
+                       ORDER BY act.activation DESC, act.depth ASC
+                   ) AS seed_rn
+            FROM activation act
+            {where_clause}
+        ),
+        ranked AS (
+            SELECT act.id, act.node_type, act.depth, act.seed_id{ranked_parent},
+                   {_COMBINE_SQL[aggregation]} AS total_activation,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY act.id, act.node_type
+                       ORDER BY act.activation DESC, act.depth ASC, act.seed_id ASC
+                   ) AS rn
+            FROM per_seed act
+            WHERE act.seed_rn = 1
+        )
+        SELECT id, node_type, total_activation, depth, seed_id{final_parent}
+        FROM ranked
+        WHERE rn = 1
+        ORDER BY total_activation DESC
+        LIMIT :result_limit"""
+    else:
+        raise ValueError(f"unknown spreading aggregation {aggregation!r}")
+
     sql = text(f"""
         WITH RECURSIVE activation AS (
             SELECT id, node_type, score AS activation, 0 AS depth, id AS seed_id{seed_parent}
@@ -311,28 +391,7 @@ async def spreading_activation_search(
                 -- Single source of truth: graph_constants.autobehavior_exclusion_sql.
                 AND {excl_e}
                 AND e.agent_id = :agent_id
-        ),
-        -- A8: keep the winning path's depth alongside its activation.
-        -- ROW_NUMBER over (activation DESC, depth ASC) selects exactly the row
-        -- MAX(activation) used to return, so `total_activation` is unchanged;
-        -- the depth tie-break only decides which of two equally-activated
-        -- paths is reported, preferring the shorter. seed_id is the LAST key:
-        -- it changes neither activation nor depth, only makes the reported
-        -- seed of an exact tie deterministic.
-        ranked AS (
-            SELECT act.id, act.node_type, act.activation, act.depth, act.seed_id{ranked_parent},
-                   ROW_NUMBER() OVER (
-                       PARTITION BY act.id, act.node_type
-                       ORDER BY act.activation DESC, act.depth ASC, act.seed_id ASC
-                   ) AS rn
-            FROM activation act
-            {where_clause}
-        )
-        SELECT id, node_type, activation AS total_activation, depth, seed_id{final_parent}
-        FROM ranked
-        WHERE rn = 1
-        ORDER BY total_activation DESC
-        LIMIT :result_limit
+        ),{aggregate_sql}
     """)
 
     result = await session.execute(sql, params)

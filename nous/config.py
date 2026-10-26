@@ -1589,6 +1589,18 @@ class Settings(BaseSettings):
             "rows than this, there is no cutline."
         ),
     )
+    # F105 Task 7: how the CTE combines several seeds' activation on one node.
+    # "max" reproduces today's SQL byte for byte.
+    spreading_aggregation: Literal["max", "sat", "noisy_or"] = Field(
+        default="max",
+        description=(
+            "F105: each seed's contribution to a node is its best path there (parallel "
+            "edges and cycles never count twice); contributions from several seeds are "
+            "combined by max (the strongest seed's, today), sat (min(1, sum)) or noisy_or "
+            "(1 - prod(1 - a), a hypothesis: no fetched paper uses it). sat and noisy_or "
+            "stay <= 1 but can exceed the winning seed's score."
+        ),
+    )
 
     # F040: Graph densification — backfill
     # F044 tinyHippo-Lite v1 — STC state machine (telemetry-only slice).

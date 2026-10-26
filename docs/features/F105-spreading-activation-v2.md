@@ -6,9 +6,10 @@ replay used as the gate (`scripts/diag/sa_replay.py`, Task 1), which changes no 
 fan normalisation (Task 3), off by default (`NOUS_SPREADING_FAN_NORMALISATION_ENABLED`);
 associative edges at a reduced weight (Task 4), off by default
 (`NOUS_SPREADING_ASSOCIATIVE_EDGES_ENABLED`); a query-conditioned gate after the CTE (Task 5),
-off by default (`NOUS_SPREADING_QUERY_GATE_ENABLED`); and a budget on SA rows in the merged recall
-list (Task 6), off by default (`NOUS_SPREADING_BUDGET_ENABLED`). The Task 3, 4, 5 and 6 offline gates
-passed; no MAB arm has run yet.
+off by default (`NOUS_SPREADING_QUERY_GATE_ENABLED`); a budget on SA rows in the merged recall
+list (Task 6), off by default (`NOUS_SPREADING_BUDGET_ENABLED`); and two more ways to combine the
+activation several seeds give one node (Task 7), off by default (`NOUS_SPREADING_AGGREGATION=max`).
+The Task 3 to 7 offline gates passed; no MAB arm has run yet.
 
 **Builds on:** [F022 Graph-Augmented Recall](F022-graph-augmented-recall.md) (the density-gated
 recursive CTE in `nous/brain/spreading_activation.py`) and F091 retrieval telemetry
@@ -456,3 +457,98 @@ At `max_rows` 5, all delivered characters fall by 7.0% on A2 and 6.7% on A2r. Ag
 pre-registered sign (SA rendered characters down at least 50% against A2), this estimate predicts a
 miss at `max_rows` 5. Getting to about 50% takes `max_rows` 4 (-52% per retrieval, -49% per
 question), where the gold gate above passes only at its threshold, 3 of 4 under the union.
+
+## Aggregation across seeds (Task 7)
+
+Setting: `NOUS_SPREADING_AGGREGATION` (`max`, `sat` or `noisy_or`; default `max`); see
+[environment variables](../reference/environment-variables.md).
+
+The CTE runs one set of paths per seed. A node reached from several seeds keeps only the strongest
+seed's best path under `max`, so two seeds pointing at one node give it no more activation than one
+does. Task 7 adds two ways to combine them:
+- `sat` (saturating sum): `min(1, sum of a_s)`.
+- `noisy_or` **[NOVEL]**: `1 - product of (1 - a_s)`. No paper fetched for F105 uses it (report
+  §7.3), so it is a hypothesis to test here and in the MAB arms, not a replication.
+
+`a_s` is seed `s`'s best path to the node. A `per_seed` CTE keeps one row per (node, seed):
+`ROW_NUMBER() OVER (PARTITION BY id, node_type, seed_id ORDER BY activation DESC, depth ASC)`, rn 1.
+Parallel edges between two nodes and cycles through a seed's own paths therefore never count twice.
+There is no uncapped sum (report §7). Fan normalisation (Task 3) and the associative multiplier
+(Task 4) scale each path before this reduction, so the modes combine already-damped values.
+
+The `ranked` CTE then computes the combination as a window over the node. It keeps the row of the
+largest contributor, ordered as under `max` (activation desc, depth asc, seed id asc), so the returned
+depth, `seed_out` and `parent_out` all describe that one best path; `parent_id` is never aggregated.
+The where-clause conditions (exclusions, refused decisions, strategy cards, job lessons), the `LIMIT`
+and `ORDER BY total_activation DESC` are as before. Under `max` the statement is byte-identical to
+before (the snapshot test).
+
+**Bounds.** Both modes stay `<= 1`. noisy-OR caps each `a_s` at 0.999999 (and floors `1 - a_s` at
+1e-6), so `LN` is always defined. A lone path at 1.0 therefore returns 0.999999, and five paths at 1.0
+return 1.0 in a double. The invariant `activation <= winning seed's score`, which Tasks 3 and 4 keep,
+now holds per path but not per row: two seeds at 0.3 can give a node 0.6.
+
+**Parity caveat.** With `NOUS_SPREADING_SCORE_DEPTH1_PARITY` on, a row scores `activation / decay`.
+Under `sat` or `noisy_or` a multi-seed row can then score above 1, up to `1 / decay`. Parity is off in
+prod and in A2.
+
+**Offline gate (A2 clone, 2026-10-26).** The definitions, the signs forced by construction and rough
+sizes were pre-registered in the task report before the replay. The plain replay
+(`sa_replay.py --agent all`, the window of Tasks 3 to 5) gives rows above the floor, Jaccard@20 and
+latency, for both seed sources. A separate analysis script (not committed) also replays each
+retrieval uncapped under each mode and from each seed alone. That counts each node's seeds and
+compares the SQL's values with a Python combination of the per-seed best paths. Over 149,967 and
+142,257 checked rows there was no difference above 1e-9, and the reported seed and depth were always
+the largest contributor's.
+
+Definitions:
+- multi-seed row: reached with positive activation from 2 or more seeds;
+- floor-crosser: its `max` value is at or below the 0.1 floor and its value under the mode above it;
+- rank movement: the row's rank under `max` minus its rank under the mode, so positive is up. Ranks
+  are among the retrieval's rows above the floor, uncapped, by activation (ties by id);
+- kept: the first 20 rows above the floor of the 40-row window, which is what Stage 4 appends.
+
+| | recorded seeds (`expansions`) | live-shaped (`candidates`) |
+|---|---|---|
+| retrievals (with 2 or more seeds) | 462 (291) | 1,574 (1,533), 462 with rows above the floor |
+| rows above the floor under `max` | 4,524 | 3,570 |
+| of which multi-seed | 676 (14.9%), in 139 retrievals | 522 (14.6%), in 154 retrievals |
+| nodes reached from 2 or more seeds, any activation | 864 of 49,989 | 718 of 47,419 |
+
+| | `sat`, expansions | `noisy_or`, expansions | `sat`, candidates | `noisy_or`, candidates |
+|---|---|---|---|---|
+| rows above the floor | 4,712 | 4,712 | 3,766 | 3,766 |
+| floor-crossers (share of rows above the floor) | 188 (4.0%) | 188 (4.0%) | 196 (5.2%) | 196 (5.2%) |
+| floor-crossers among kept rows | 124 (2.9%) | 123 (2.9%) | 165 (4.8%) | 162 (4.7%) |
+| multi-seed rows: rank up / same / down | 424 / 87 / 165 | 405 / 104 / 167 | 286 / 179 / 57 | 271 / 195 / 56 |
+| multi-seed rows: rank movement, mean / median | +2.5 / +2 | +2.2 / +1 | +2.3 / +1 | +2.0 / +1 |
+| rows entering the kept 20 (all multi-seed) | 171, in 80 retrievals | 170, in 80 | 196, in 79 | 193, in 78 |
+| Jaccard@20 against `max` | 0.971 | 0.971 | 0.989 | 0.989 |
+| added latency p95 | 1.1 ms | 1.3 ms | 0.8 ms | 0.8 ms |
+
+What the numbers show:
+- Every node reached from 2 or more seeds clears the floor under either mode; the weakest two-seed
+  sum is 0.109. The replayed seeds score 0.79 to 1.0, and the nodes two seeds share sit on strong
+  edges. So every floor-crosser is a multi-seed row, and `sat` and `noisy_or` admit the same rows.
+  They differ only in order: their kept-row counts differ by one to three per seed source.
+- A single-seed row never moves up, as the construction forces. Under `sat`, 28% (recorded seeds)
+  and 30% (live-shaped) of them move down; the mean over all single-seed rows is -0.8 places.
+- On recorded seeds, LME holds 367 of the 676 multi-seed rows and 84 of the 188 floor-crossers. qa2
+  has 34 multi-seed rows and no floor-crosser, so on qa2 these modes can only reorder a few rows.
+  Ten of the 17 agents have a multi-seed row, eight a floor-crosser.
+
+Against the pre-registration:
+- The multi-seed share is inside its band on recorded seeds (10-35%). The live-shaped share is no
+  higher (14.6%), which is under its predicted band (20-50%).
+- Rank movement is inside its bands.
+- The floor-crosser share sits at the lower edge (4.0%) and is higher live-shaped (5.2%), as
+  predicted.
+- Jaccard@20 is above the predicted bands (0.97 and 0.99, against at most 0.97): the modes change
+  the kept rows less than expected.
+
+The gate passes as a screen. The implementation check is exact, `max` reproduces the baseline
+(Jaccard@20 1.00, 4,524 rows), and multi-seed rows are 14.6% to 14.9% of the rows above the floor. Had
+that share been under 1%, the MAB arms would have measured next to nothing.
+
+**MAB arms** (not run yet): `sat` and `noisy_or`, each the combined arm plus this one flag, paired
+against the combined arm (not A2), so the added flag is the only variable.
