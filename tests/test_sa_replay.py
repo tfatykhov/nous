@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
+from spreading_v2_helpers import insert_edge
 from sqlalchemy import text
 
 from nous.api.retrieval_pipeline import _score_memory_neighbor
@@ -24,6 +25,7 @@ from nous.config import Settings
 from scripts.diag import sa_replay
 from scripts.diag.sa_replay import (
     BASE_CONFIG_KEYS,
+    ArmRun,
     ReplaySeed,
     base_config_sources,
     build_settings,
@@ -116,6 +118,23 @@ def test_hub_share():
     assert hub_share(rows + [(hub_seed, "fact", 0.9, 0)], parents, seeds, degree, 50) == 0.5
     with pytest.raises(ValueError):
         hub_share([], {}, seeds, degree, 50)
+
+
+def test_score_retrieval_judges_depth2_rows_by_via_node():
+    """A depth-2 row leaves its via node, not its seed. Here the hub is reached
+    at hop 1 and left at hop 2, which the seed's degree (1) cannot show."""
+    seed, hub, beyond = uuid4(), uuid4(), uuid4()
+    rs = ReplaySeed(retrieval_id="r", agent_id="agent-x", query="q", seeds=[(seed, "fact", 0.8)])
+    run = ArmRun(
+        rows=[(hub, "fact", 0.4, 1), (beyond, "fact", 0.2, 2)], seconds=0.001,
+        seed_of={hub: seed, beyond: seed}, parent_of={hub: seed, beyond: hub},
+    )
+    out = sa_replay._score_retrieval(
+        rs, {"baseline": run}, {"baseline": Settings(_env_file=None)}, {seed: 1, hub: 60})
+    assert out["arms"]["baseline"]["hub_share"] == 0.5
+    summary = sa_replay._summarise([out], ["baseline"])["baseline"]
+    assert summary[f"hub_share_{sa_replay.HUB_SHARE_METHOD}"] == 0.5
+    assert sa_replay.HUB_SHARE_METHOD == "via_node"
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +383,20 @@ async def test_run_arm_baseline_matches_direct_call(brain, session):
     assert [r[0] for r in run.rows] == [d2, d3], "non-vacuous: both neighbours, seed excluded"
     assert run.seed_of == {d2: d1, d3: d1}
     assert run.seconds > 0
+
+
+@pytest.mark.postgres_only
+async def test_run_arm_reports_the_via_node(session):
+    """run_arm asks the CTE for each row's via node: T, two hops out, maps to H."""
+    agent = f"sa-replay-{uuid4().hex[:8]}"
+    s, h, t = uuid4(), uuid4(), uuid4()
+    await insert_edge(session, agent, s, h)
+    await insert_edge(session, agent, h, t)
+    rs = ReplaySeed(retrieval_id="r", agent_id=agent, query="q", seeds=[(s, "fact", 0.8)])
+    run = await run_arm(session, rs, Settings(_env_file=None))
+    assert [r[0] for r in run.rows] == [h, t]
+    assert run.parent_of == {h: s, t: h}
+    assert run.seed_of == {h: s, t: s}
 
 
 @pytest.mark.postgres_only

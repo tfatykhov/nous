@@ -82,6 +82,28 @@ def should_use_spreading_activation(
     return cached_density >= settings.spreading_activation_density_threshold
 
 
+def _fan_factor_sql(edge_filter_sql: str) -> str:
+    """F105: the fan factor of the frontier node ``a``, as a one-row subquery.
+
+    For ``a``'s degree ``d`` (edges where it is ``source_id`` or ``target_id``,
+    this agent only, under ``edge_filter_sql``: the traversal's own eligibility
+    predicate on alias ``e2``) the ``factor`` column is ``1.0`` when
+    ``d <= :fan_free`` and ``(:fan_free / d) ** :fan_exp`` above it, so always
+    ``<= 1``. Every ``:fan_free`` is cast to FLOAT: one bind parameter cannot be
+    deduced as two types, and an integer ``:fan_free / d`` would truncate
+    10 / 41 to 0. Joined LATERAL before the edge join, it runs once per
+    frontier row rather than once per joined edge.
+    """
+    return (
+        "SELECT CASE WHEN COUNT(*) <= CAST(:fan_free AS FLOAT) THEN 1.0"
+        " ELSE POWER(CAST(:fan_free AS FLOAT) / COUNT(*), CAST(:fan_exp AS FLOAT)) END AS factor"
+        " FROM brain.graph_edges e2"
+        " WHERE (e2.source_id = a.id OR e2.target_id = a.id)"
+        " AND e2.agent_id = :agent_id"
+        f" AND {edge_filter_sql}"
+    )
+
+
 async def spreading_activation_search(
     session: AsyncSession,
     agent_id: str,
@@ -90,6 +112,7 @@ async def spreading_activation_search(
     limit: int = 20,
     exclude_ids: set[UUID] | None = None,
     seed_out: dict[UUID, UUID] | None = None,
+    parent_out: dict[UUID, UUID] | None = None,
 ) -> list[tuple[UUID, str, float, int]]:
     """Run spreading activation CTE and return activated nodes.
 
@@ -109,6 +132,11 @@ async def spreading_activation_search(
             seed, so the dashboard rooted all of them under whichever seed
             happened to be first. A separate out-parameter rather than a fifth
             tuple element, so callers and mocks that unpack four stay valid.
+        parent_out: when given, filled with ``node_id -> parent_id``: the node
+            the winning path's last hop left (a seed maps to itself). F105: the
+            replay's hub share judges a depth-2 row by this via node. Only when
+            it is given does the CTE carry the extra column; which path wins is
+            unchanged.
 
     Returns:
         List of ``(node_id, node_type, activation, depth)`` sorted by
@@ -121,7 +149,8 @@ async def spreading_activation_search(
         multi-path/cyclic nodes exceed 1.0 and dominate the RRF-sorted
         merge.) The per-hop weight term is clamped to 1.0 in the CTE:
         ``brain.graph_edges.weight`` has no DB CHECK, so the bound is
-        enforced here rather than assumed of every writer.
+        enforced here rather than assumed of every writer. F105's fan factor
+        is ``<= 1`` too, so the bound holds with fan normalisation on.
 
         A8: ``depth`` is the hop count of the WINNING path — the one whose
         activation survived the MAX — not ``MIN(depth)``. Those differ when a
@@ -212,11 +241,29 @@ async def spreading_activation_search(
 
     values_clause = ", ".join(values_parts)
     # 2b: same auto-behavior exclusion as the density gate (graph_constants).
-    excl_e = autobehavior_exclusion_sql("e.")
+    # F105: one predicate for the traversal and the fan degree count, so a
+    # change to what the traversal may cross changes both.
+    edge_filter = autobehavior_exclusion_sql
+    excl_e = edge_filter("e.")
+
+    # F105 fragments: each is "" while its option is off, so the SQL is then
+    # byte-identical to before (tests/test_spreading_sql_identity.py).
+    fan_join = fan_mult = ""
+    if getattr(settings, "spreading_fan_normalisation_enabled", False):
+        params["fan_free"] = int(getattr(settings, "spreading_fan_free_degree", 10))
+        params["fan_exp"] = float(getattr(settings, "spreading_fan_exponent", 0.5))
+        fan_join = f"\n            CROSS JOIN LATERAL ({_fan_factor_sql(edge_filter('e2.'))}) fan"
+        fan_mult = "\n                    * fan.factor"
+    seed_parent = step_parent = ranked_parent = final_parent = ""
+    if parent_out is not None:
+        seed_parent = ", id AS parent_id"
+        step_parent = ",\n                a.id"
+        ranked_parent = ", act.parent_id"
+        final_parent = ", parent_id"
 
     sql = text(f"""
         WITH RECURSIVE activation AS (
-            SELECT id, node_type, score AS activation, 0 AS depth, id AS seed_id
+            SELECT id, node_type, score AS activation, 0 AS depth, id AS seed_id{seed_parent}
             FROM (VALUES {values_clause}) AS seeds(id, node_type, score)
 
             UNION ALL
@@ -230,10 +277,10 @@ async def spreading_activation_search(
                 a.activation
                     * CASE WHEN COALESCE(e.weight, 1.0) > 1.0 THEN 1.0
                            ELSE COALESCE(e.weight, 1.0) END
-                    * :decay,
+                    * :decay{fan_mult},
                 a.depth + 1,
-                a.seed_id
-            FROM activation a
+                a.seed_id{step_parent}
+            FROM activation a{fan_join}
             JOIN brain.graph_edges e
                 ON (e.source_id = a.id OR e.target_id = a.id)
             WHERE a.depth < :max_depth
@@ -252,7 +299,7 @@ async def spreading_activation_search(
         -- it changes neither activation nor depth, only makes the reported
         -- seed of an exact tie deterministic.
         ranked AS (
-            SELECT act.id, act.node_type, act.activation, act.depth, act.seed_id,
+            SELECT act.id, act.node_type, act.activation, act.depth, act.seed_id{ranked_parent},
                    ROW_NUMBER() OVER (
                        PARTITION BY act.id, act.node_type
                        ORDER BY act.activation DESC, act.depth ASC, act.seed_id ASC
@@ -260,7 +307,7 @@ async def spreading_activation_search(
             FROM activation act
             {where_clause}
         )
-        SELECT id, node_type, activation AS total_activation, depth, seed_id
+        SELECT id, node_type, activation AS total_activation, depth, seed_id{final_parent}
         FROM ranked
         WHERE rn = 1
         ORDER BY total_activation DESC
@@ -272,6 +319,9 @@ async def spreading_activation_search(
     if seed_out is not None:
         for row in rows:
             seed_out[row.id] = row.seed_id
+    if parent_out is not None:
+        for row in rows:
+            parent_out[row.id] = row.parent_id
     return [
         (row.id, row.node_type, float(row.total_activation), int(row.depth))
         for row in rows

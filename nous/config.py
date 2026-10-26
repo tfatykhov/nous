@@ -1470,6 +1470,32 @@ class Settings(BaseSettings):
             "Default 0.1 reproduces the previously-hardcoded literal exactly."
         ),
     )
+    # F105 Task 3: fan (degree) normalisation inside the CTE. Off reproduces
+    # today's SQL byte for byte (tests/test_spreading_sql_identity.py).
+    spreading_fan_normalisation_enabled: bool = Field(
+        default=False,
+        description=(
+            "F105: when true, activation leaving a node of eligible-edge degree d "
+            "is multiplied by 1 when d <= spreading_fan_free_degree, else by "
+            "(free_degree / d) ** spreading_fan_exponent, so a hub stops passing "
+            "full activation to each of its neighbours. The factor is <= 1, which "
+            "keeps the MAX bound activation <= seed_score."
+        ),
+    )
+    spreading_fan_free_degree: int = Field(
+        default=10,
+        ge=1,
+        description="F105: D0, the degree up to which fan normalisation leaves a node undamped.",
+    )
+    spreading_fan_exponent: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=2.0,
+        description=(
+            "F105: gamma in (D0 / d) ** gamma. 0.5 is a square-root dampener; 1.0 "
+            "with free degree 1 is SYNAPSE's plain 1/d."
+        ),
+    )
 
     # F040: Graph densification — backfill
     # F044 tinyHippo-Lite v1 — STC state machine (telemetry-only slice).

@@ -3,10 +3,10 @@
 Replays the seeds that live retrievals recorded in
 ``nous_system.retrieval_log.expansions`` through ``spreading_activation_search``
 on a CLONE database, once per arm, and reports per arm: rows above the floor,
-Jaccard@20 against the baseline arm, hub share, and latency p50/p95. Every arm is
-built on the A2 arm's resolved config (``--base-config``), read by named keys
-only. It is the offline gate of every later F105 task: a screen, not a
-measurement of answer quality.
+Jaccard@20 against the baseline arm, hub share (by each row's via node, from
+``parent_out``), and latency p50/p95. Every arm is built on the A2 arm's
+resolved config (``--base-config``), read by named keys only. It is the offline
+gate of every later F105 task: a screen, not a measurement of answer quality.
 
 Expansion element keys, confirmed on the A2 clone (mab26_p_base) on 2026-10-26
 with ``SELECT jsonb_pretty(e) FROM nous_system.retrieval_log r,
@@ -88,7 +88,7 @@ REPLAY_LIMIT = _SPREADING_OVERFETCH_LIMIT  # rows the pipeline asks the CTE for
 JACCARD_K = _SPREADING_RESULT_CAP  # rows the pipeline can append
 HUB_MIN_DEGREE = 50  # F105 plan, Task 3 gate
 # Names both the summary key and the header field, so they cannot drift apart.
-HUB_SHARE_METHOD = "seed_degree_only"
+HUB_SHARE_METHOD = "via_node"
 
 # A silent default for any of these would make the parity gate meaningless, so
 # each must appear in the base config file, set or declared "# unset: KEY".
@@ -122,9 +122,9 @@ LIMITATIONS: tuple[str, ...] = (
     "a screen, not a measurement of answer quality",
 )
 HUB_SHARE_NOTE = (
-    f"{HUB_SHARE_METHOD} (weaker): every row is judged by the degree of its winning seed. Exact "
-    "for depth-1 rows; a depth-2 row should be judged by the node it was reached from, which "
-    "needs Task 3's parent_out"
+    f"{HUB_SHARE_METHOD}: each row is judged by the degree of the node its winning path's last hop "
+    "left (spreading_activation_search's parent_out): its seed for a depth-1 row, the via node for "
+    "a depth-2 row"
 )
 
 
@@ -143,12 +143,14 @@ class ArmRun:
     """One arm's CTE result for one retrieval.
 
     ``rows`` are ``spreading_activation_search``'s ``(id, type, activation,
-    depth)``; ``seed_of`` maps each row to its winning path's seed.
+    depth)``; ``seed_of`` maps each row to its winning path's seed and
+    ``parent_of`` to the node that path's last hop left.
     """
 
     rows: list[tuple[UUID, str, float, int]]
     seconds: float
     seed_of: dict[UUID, UUID] = field(default_factory=dict)
+    parent_of: dict[UUID, UUID] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -185,10 +187,9 @@ def hub_share(
     """Share of SA rows whose winning path leaves a node of degree >= ``min_degree``.
 
     ``parents[row]`` is the node the row's winning path left: its seed for a
-    depth-1 row, the via node for a depth-2 row (Task 3's ``parent_out``).
-    Until Task 3 the replay passes the winning seed instead, which is exact for
-    depth-1 rows only (``HUB_SHARE_NOTE``). A seed's own row leaves nothing and
-    is not counted; a row with no parent counts as not leaving a hub.
+    depth-1 row, the via node for a depth-2 row (``spreading_activation_search``'s
+    ``parent_out``). A seed's own row leaves nothing and is not counted; a row
+    with no parent counts as not leaving a hub.
     """
     counted = [r for r in rows if r[0] not in seeds]
     if not counted:
@@ -292,12 +293,14 @@ async def run_arm(session: AsyncSession, rs: ReplaySeed, settings: Settings) -> 
     the pipeline excludes them.
     """
     seed_of: dict[UUID, UUID] = {}
+    parent_of: dict[UUID, UUID] = {}
     t0 = time.perf_counter()
     rows = await spreading_activation_search(
         session, rs.agent_id, rs.seeds, settings,
         limit=REPLAY_LIMIT, exclude_ids={s[0] for s in rs.seeds}, seed_out=seed_of,
+        parent_out=parent_of,
     )
-    return ArmRun(rows=rows, seconds=time.perf_counter() - t0, seed_of=seed_of)
+    return ArmRun(rows=rows, seconds=time.perf_counter() - t0, seed_of=seed_of, parent_of=parent_of)
 
 
 # ---------------------------------------------------------------------------
@@ -506,7 +509,7 @@ def _score_retrieval(
             "jaccard_at_k": jaccard_at_k([r[0] for r in above[name]], baseline_ids, JACCARD_K),
             "n_kept": len(kept),
             "hub_share": (
-                hub_share(kept, run.seed_of, seed_ids, degree, HUB_MIN_DEGREE) if kept else None
+                hub_share(kept, run.parent_of, seed_ids, degree, HUB_MIN_DEGREE) if kept else None
             ),
         }
     return {
