@@ -312,7 +312,7 @@ def test_rescore_record_ranks_and_groups():
     rs, run, settings = _rescore_case()
     rec = rescore_record(rs, run, settings)
     assert rec["applied"] and rec["reproduces_final_rank"]
-    assert (rec["n_delivered"], rec["n_existing"], rec["n_activated"]) == (7, 4, 2)
+    assert (rec["n_delivered"], rec["n_existing"], rec["n_activated"], rec["n_activated_a"]) == (7, 4, 2, 1)
     assert rec["score_demotions"] == 0
     assert (rec["moved_all"], rec["moved_existing"]) == (1, 1)
     assert rec["gains_a"] == [-2, 4], "K, then P"
@@ -343,11 +343,15 @@ def test_rescore_section_verdict():
     assert stats["moved_share_all"] == round(1 / 7, 4)
     assert stats["moved_share_existing"] == 0.25
     assert stats["existing_activated_share"] == 0.5
+    assert (stats["activated_share_group_a"], stats["activated_share_group_b"]) == (0.5, 0.5), "P of P, K; Y of X, Y"
     assert stats["gains_group_a"]["max"] == 4
     assert (stats["other_rows_moved_down"], stats["other_rows_max_drop"]) == (2, 2)
     assert stats["verdict"] == "fail"
     small = rescore_record(*_rescore_case(beta=0.15))
     assert sa_replay._rescore_stats([small])["verdict"] == "pass"
+    lopsided = {**small, "n_activated": 3, "n_activated_a": 1, "gains_a": [0], "gains_b": [0, 0, 0]}
+    stats = sa_replay._rescore_stats([lopsided])
+    assert (stats["activated_share_group_a"], stats["activated_share_group_b"]) == (1.0, round(2 / 3, 4))
     assert sa_replay.rescore_section([], ["baseline"])["arms"]["baseline"]["applied"]["verdict"] is None
 
 

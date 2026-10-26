@@ -996,6 +996,7 @@ def rescore_record(rs: ReplaySeed, run: ArmRun, settings: Settings) -> dict[str,
         "n_delivered": len(rows),
         "n_existing": len(existing),
         "n_activated": sum(1 for i in existing if run.rescore.get(rows[i].id, 0.0) > 0),
+        "n_activated_a": sum(1 for i in group_a if run.rescore.get(rows[i].id, 0.0) > 0),
         "score_demotions": sum(1 for b, a in zip(before, after, strict=True) if (a or 0.0) < (b or 0.0)),
         "moved_all": sum(1 for g in gain if abs(g) > RESCORE_MOVE),
         "moved_existing": sum(1 for i in existing if abs(gain[i]) > RESCORE_MOVE),
@@ -1042,11 +1043,16 @@ def _rescore_stats(per: list[dict[str, Any]]) -> dict[str, Any]:
     demotions = sum(p["score_demotions"] for p in per)
     drops = [d for p in per for d in p["drops_other"]]
     passed = moved_all < RESCORE_MOVED_MAX_SHARE and moved_existing < RESCORE_MOVED_MAX_SHARE and not demotions
+    n_a, n_b = sum(len(p["gains_a"]) for p in per), sum(len(p["gains_b"]) for p in per)
+    activated_a = sum(p["n_activated_a"] for p in per)
+    activated_b = sum(p["n_activated"] for p in per) - activated_a
     return {
         "retrievals": len(per),
         "delivered_rows": n_rows,
         "existing_candidates": n_existing,
         "existing_activated_share": round(sum(p["n_activated"] for p in per) / n_existing, 4),
+        "activated_share_group_a": round(activated_a / n_a, 4) if n_a else None,
+        "activated_share_group_b": round(activated_b / n_b, 4) if n_b else None,
         "moved_share_all": round(moved_all, 4),
         "moved_share_existing": round(moved_existing, 4),
         "score_demotions": demotions,
