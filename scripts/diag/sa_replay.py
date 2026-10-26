@@ -892,6 +892,16 @@ def gate_analysis(records: list[dict[str, Any]], floor: float) -> dict[str, Any]
     }
 
 
+def gate_section(retrievals: list[dict[str, Any]], floor: float) -> dict[str, Any]:
+    """The report's ``gate`` section: ``gate_analysis`` of the retrievals' gate
+    records, or an ``error`` entry when there is nothing to analyse (no record,
+    or no cosine), so a long replay still writes its report."""
+    records = [r["gate"] for r in retrievals if "gate" in r]
+    try:
+        return gate_analysis(records, floor)
+    except ValueError as e:
+        return {"error": str(e), "retrievals": len(records)}
+
 
 async def replay(
     session: AsyncSession, by_agent: dict[str, list[ReplaySeed]], arms: dict[str, Settings],
@@ -1028,10 +1038,7 @@ async def _main(args: argparse.Namespace) -> dict[str, Any]:
             retrievals = await replay(session, by_agent, arms, edge_kinds=args.edge_kinds, query_vecs=vecs)
     finally:
         await engine.dispose()
-    gate = None
-    if vecs is not None:
-        gate = gate_analysis(
-            [r["gate"] for r in retrievals if "gate" in r], float(base.spreading_activation_floor))
+    gate = gate_section(retrievals, float(base.spreading_activation_floor)) if vecs is not None else None
 
     dsn = urlsplit(args.dsn)
     names = list(arms)

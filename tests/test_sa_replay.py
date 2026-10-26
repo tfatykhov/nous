@@ -347,6 +347,17 @@ def test_gate_analysis_edge_cases():
         gate_analysis([{"seed_cos": [None], "rows": [_gate_row(0.5, None, None)]}], floor=0.1)
 
 
+def test_gate_section_reports_an_error_instead_of_raising():
+    """After a whole replay, nothing to analyse must not lose the report."""
+    no_records = sa_replay.gate_section([{"retrieval_id": "r"}], floor=0.1)
+    assert no_records["retrievals"] == 0 and "error" in no_records
+    no_cosines = sa_replay.gate_section(
+        [{"gate": {"seed_cos": [None], "rows": [_gate_row(0.5, None, None)]}}], floor=0.1)
+    assert no_cosines["retrievals"] == 1 and "error" in no_cosines
+    record = {"seed_cos": [0.5], "rows": [_gate_row(0.5, 0.4, 0.5)]}
+    assert sa_replay.gate_section([{"gate": record}, {}], floor=0.1) == gate_analysis([record], floor=0.1)
+
+
 # ---------------------------------------------------------------------------
 # Base config
 # ---------------------------------------------------------------------------
