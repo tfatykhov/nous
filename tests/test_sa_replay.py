@@ -355,6 +355,19 @@ def test_base_config_keys_are_settings_fields():
 # ---------------------------------------------------------------------------
 
 
+def test_cli_seed_source_defaults_to_expansions():
+    """The Task 1/3 reports were made from recorded expansions; candidates and
+    edge kinds are opt-in, so rerunning an old command line gives the old report."""
+    required = ["--dsn", "postgresql://u:p@localhost/clone", "--agent", "all",
+                "--since", "2026-10-25T17:39:00Z", "--base-config", "A2.env", "--out", "r.json"]
+    args = sa_replay._parse_args(required)
+    assert (args.seeds_from, args.edge_kinds) == ("expansions", False)
+    args = sa_replay._parse_args([*required, "--seeds-from", "candidates", "--edge-kinds"])
+    assert (args.seeds_from, args.edge_kinds) == ("candidates", True)
+    with pytest.raises(SystemExit):
+        sa_replay._parse_args([*required, "--seeds-from", "both"])
+
+
 def test_parse_arm():
     assert parse_arm("baseline") == ("baseline", {})
     assert parse_arm("deep=NOUS_SPREADING_ACTIVATION_MAX_DEPTH=3") == (
