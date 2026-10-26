@@ -323,8 +323,11 @@ applies one (deletes, restores, then inserts, in one transaction), and with `dry
    - an embedding cosine of at least `NOUS_COOCCURRENCE_MIN_COSINE` (0.30);
    - a shared `heart.fact_entity_keys` key, read under that table's invariant (both facts active,
      the key rows scoped to the agent);
-   - both facts carry a `source_ordinal` (the enumerative extractor's chunk index × 1,000,000 +
-     position), in the same chunk, at most `NOUS_COOCCURRENCE_ORDINAL_WINDOW` (3) positions apart.
+   - both are enumerated facts (source `enumerative_extractor`), whose `source_ordinal` is the
+     chunk index × 1,000,000 + position, in the same chunk and at most
+     `NOUS_COOCCURRENCE_ORDINAL_WINDOW` (3) positions apart. Facts of other sources are left out of
+     this signal even when they carry a `source_ordinal`: F086 exemplar facts number theirs
+     sequentially across chunks, so adjacent exemplar ordinals say nothing about a shared thread.
 
    When both facts are embedded, their cosine must also be below `NOUS_GRAPH_THRESHOLD_FACT_FACT`
    (0.82): near-duplicates are the cosine densifier's job. A pair where either fact has no embedding
@@ -394,7 +397,7 @@ at most 35% related. It passed:
 |---|---|---|
 | `NOUS_COOCCURRENCE_V2_ENABLED` | `false` | Run the v2 builder |
 | `NOUS_COOCCURRENCE_MIN_COSINE` | `0.30` | Cosine signal: a same-episode pair at or above it qualifies |
-| `NOUS_COOCCURRENCE_ORDINAL_WINDOW` | `3` | Ordinal signal: most positions apart within one transcript chunk |
+| `NOUS_COOCCURRENCE_ORDINAL_WINDOW` | `3` | Ordinal signal: most positions apart for two enumerated facts (source `enumerative_extractor`) of one transcript chunk |
 | `NOUS_COOCCURRENCE_MAX_EDGES_PER_FACT` | `10` | Lifetime cap on a fact's `co_occurrence` edges |
 | `NOUS_COOCCURRENCE_PRUNE_MAX_PER_CYCLE` | `2000` | Most maintenance deletes plus restores per cycle; 0 turns maintenance off |
 

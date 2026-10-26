@@ -22,7 +22,7 @@ from __future__ import annotations
 import math
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from pydantic import ValidationError
@@ -38,6 +38,8 @@ W = 0.9  # cooccurrence_weight default
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 DIM = 1536
 CHUNK = 1_000_000
+ENUM = "enumerative_extractor"  # the source whose ordinals are chunk * CHUNK + position
+EXEMPLAR = "exemplar_extractor"  # F086: plain sequential ordinals across chunks
 
 
 def _settings(**over) -> Settings:
@@ -83,19 +85,21 @@ async def _episode(db, agent: str) -> str:
 async def _fact(
     db, agent: str, episode: str | None, minute: int, *, active: bool = True,
     embedding: str | None = None, ordinal: int | None = None, keys: tuple[str, ...] = (),
+    source: str | None = None, fid: UUID | None = None,
 ) -> str:
     """Insert a fact learned ``minute`` minutes after T0 (larger = newer), with its
-    entity keys. No embedding or ordinal unless given."""
-    fid = uuid4()
+    entity keys. No embedding, ordinal or source unless given."""
+    fid = fid or uuid4()
     async with db.session() as session:
         await session.execute(
             text(
                 "INSERT INTO heart.facts (id, agent_id, content, active, learned_at, embedding, "
-                "source_episode_id, source_ordinal) "
-                "VALUES (:id, :a, :c, :act, :t, CAST(:e AS vector), :ep, :o)"
+                "source_episode_id, source_ordinal, source) "
+                "VALUES (:id, :a, :c, :act, :t, CAST(:e AS vector), :ep, :o, :src)"
             ),
             {"id": fid, "a": agent, "c": f"fact {minute}", "act": active,
-             "t": T0 + timedelta(minutes=minute), "e": embedding, "ep": episode, "o": ordinal},
+             "t": T0 + timedelta(minutes=minute), "e": embedding, "ep": episode, "o": ordinal,
+             "src": source},
         )
         for key in keys:
             await session.execute(
@@ -268,16 +272,56 @@ async def test_ordinal_signal(db, window: int, expect: set[str]) -> None:
     different chunks. A fact without an ordinal never links on this signal."""
     agent = f"test-f106co-ord-{uuid4().hex[:8]}"
     ep = await _episode(db, agent)
-    o1 = await _fact(db, agent, ep, 1, ordinal=5 * CHUNK + 10)
-    o2 = await _fact(db, agent, ep, 2, ordinal=5 * CHUNK + 13)
-    o3 = await _fact(db, agent, ep, 3, ordinal=5 * CHUNK + 17)
-    await _fact(db, agent, ep, 4, ordinal=5 * CHUNK + 999_999)
-    await _fact(db, agent, ep, 5, ordinal=6 * CHUNK)
-    await _fact(db, agent, ep, 6)
+    o1 = await _fact(db, agent, ep, 1, ordinal=5 * CHUNK + 10, source=ENUM)
+    o2 = await _fact(db, agent, ep, 2, ordinal=5 * CHUNK + 13, source=ENUM)
+    o3 = await _fact(db, agent, ep, 3, ordinal=5 * CHUNK + 17, source=ENUM)
+    await _fact(db, agent, ep, 4, ordinal=5 * CHUNK + 999_999, source=ENUM)
+    await _fact(db, agent, ep, 5, ordinal=6 * CHUNK, source=ENUM)
+    await _fact(db, agent, ep, 6, source=ENUM)
     names = {"12": _canon(o1, o2), "23": _canon(o2, o3)}
 
     plan = await _densifier(db, _v2(cooccurrence_ordinal_window=window), agent).plan_cooccurrence_changes()
     assert _pairs(plan) == {names[k] for k in expect}
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", [ENUM, EXEMPLAR])
+async def test_ordinal_signal_needs_enumerated_facts(db, source: str) -> None:
+    """Exemplar facts number their ordinals sequentially across chunks, so adjacent
+    exemplar ordinals are no thread signal. Each pair has adjacent ordinals, orthogonal
+    embeddings (cosine 0, below the floor) and no shared key. P has no edge (the
+    candidate read) and Q a decayed co_occurrence edge (the maintenance read), both of
+    ``source``. The mixed pairs (one enumerated, one exemplar fact) never qualify, in
+    either id order: R1/R2 without an edge, R3/R4 with one."""
+    agent = f"test-f106co-src-{uuid4().hex[:8]}"
+    ep = await _episode(db, agent)
+    ax = iter(range(1, 40, 2))
+
+    async def fact(minute: int, ordinal: int, src: str, fid: UUID | None = None) -> str:
+        return await _fact(db, agent, ep, minute, embedding=_axis(next(ax)), ordinal=ordinal,
+                           source=src, fid=fid)
+
+    async def mixed(minute: int, ordinal: int, enum_first: bool) -> tuple[str, str]:
+        lo, hi = sorted([uuid4(), uuid4()], key=str)  # source_id < target_id as strings
+        first, second = (ENUM, EXEMPLAR) if enum_first else (EXEMPLAR, ENUM)
+        return (await fact(minute, ordinal, first, lo), await fact(minute + 1, ordinal + 1, second, hi))
+
+    p1, p2 = await fact(1, 10, source), await fact(2, 11, source)
+    q1, q2 = await fact(3, 100, source), await fact(4, 101, source)
+    await mixed(5, 200, True)
+    await mixed(7, 300, False)
+    r3 = await _edge(db, agent, *await mixed(9, 400, True), 0.05)
+    r4 = await _edge(db, agent, *await mixed(11, 500, False), 0.05)
+    q_edge = await _edge(db, agent, q1, q2, 0.05)
+
+    plan = await _densifier(db, _v2(), agent).plan_cooccurrence_changes()
+    if source == ENUM:
+        assert _pairs(plan) == {_canon(p1, p2)}
+        assert set(plan.deletes) == {r3, r4} and plan.reweights == [(q_edge, W)]
+    else:
+        assert plan.inserts == []
+        assert set(plan.deletes) == {q_edge, r3, r4} and plan.reweights == []
 
 
 @pytest.mark.postgres_only
@@ -289,7 +333,7 @@ async def test_no_episode_size_gate(db) -> None:
     ep = await _episode(db, agent)
     facts: list[str] = []
     for i in range(30):
-        kw: dict = {"ordinal": i * 10}
+        kw: dict = {"ordinal": i * 10, "source": ENUM}
         if i in (0, 1):
             kw["keys"] = ("dara velen",)
         if i == 11:

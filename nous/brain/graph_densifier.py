@@ -152,14 +152,21 @@ class CooccurrencePlan:
     reweights: list[tuple[str, float]] = field(default_factory=list)
 
 
+# F106: the fact source whose source_ordinal is chunk_index * 1_000_000 + position
+# (enumerative_extractor.py). Other sources (F086 exemplar facts) number facts
+# sequentially across chunks, so the co-occurrence ordinal signal ignores them.
+_ENUMERATIVE_SOURCE = "enumerative_extractor"
+
+
 def _cooccurrence_qualifies_sql(a: str, b: str, cos: str) -> str:
     """F106: SQL boolean, true when facts ``a`` and ``b`` (``heart.facts`` aliases) have
     a co-occurrence thread signal and are not near-duplicates. ``cos`` is the SQL for
     their embedding cosine, computed once by the caller (NULL when either fact has no
     embedding, since ``<=>`` is strict). The caller checks the shared episode.
 
-    Signals (any one): cosine ``>= :min_cos``; both enumerated (``source_ordinal``
-    = chunk_index * 1_000_000 + position) in the same chunk, ``<= :ord_win`` apart; a
+    Signals (any one): cosine ``>= :min_cos``; both enumerated facts (source
+    ``:ord_source``, i.e. ``_ENUMERATIVE_SOURCE``, whose ``source_ordinal`` =
+    chunk_index * 1_000_000 + position) in the same chunk, ``<= :ord_win`` apart; a
     shared ``heart.fact_entity_keys`` key. Ceiling: cosine ``< :ceiling`` when both are
     embedded. Cheapest signal first, as Postgres stops an OR at the first true arm.
     The key read follows that table's invariant (join active facts, agent-scoped)
@@ -167,7 +174,8 @@ def _cooccurrence_qualifies_sql(a: str, b: str, cos: str) -> str:
     """
     return (
         f"((COALESCE({cos} >= :min_cos, FALSE) "
-        f"OR ({a}.source_ordinal IS NOT NULL AND {b}.source_ordinal IS NOT NULL "
+        f"OR ({a}.source = :ord_source AND {b}.source = :ord_source "
+        f"AND {a}.source_ordinal IS NOT NULL AND {b}.source_ordinal IS NOT NULL "
         f"AND {a}.source_ordinal / 1000000 = {b}.source_ordinal / 1000000 "
         f"AND abs({a}.source_ordinal - {b}.source_ordinal) <= :ord_win) "
         "OR EXISTS (SELECT 1 FROM heart.fact_entity_keys ka "
@@ -1597,6 +1605,7 @@ class GraphDensifier:
             "lim": int(s.cooccurrence_max_episodes_per_cycle),
             "min_cos": float(s.cooccurrence_min_cosine),
             "ord_win": int(s.cooccurrence_ordinal_window),
+            "ord_source": _ENUMERATIVE_SOURCE,
             "ceiling": float(s.graph_threshold_fact_fact),
         }
         qualifies = _cooccurrence_qualifies_sql("fa", "fb", "pc.cos")
