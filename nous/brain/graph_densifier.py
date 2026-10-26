@@ -8,7 +8,9 @@ disconnected clusters and proposes bridge edges between similar hubs.
 from __future__ import annotations
 
 import logging
+import math
 from collections import defaultdict
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -101,6 +103,32 @@ def _get_relation(source_type: str, target_type: str) -> str:
     """Get the relation type for a given type pair."""
     return _RELATION_MAP.get((source_type, target_type),
                              _RELATION_MAP.get((target_type, source_type), "related_to"))
+
+
+@dataclass
+class ComentionPlan:
+    """F106: one cycle of co-mention builder changes, computed without writing.
+
+    ``inserts`` are canonical ``(source_id, target_id, weight)`` (source < target as
+    strings), ``deletes`` are edge ids, and ``reweights`` are ``(edge_id, weight)``.
+    A v1 plan has no deletes or reweights. ``shared_entities`` and ``facts_scanned``
+    only feed the build log.
+    """
+
+    inserts: list[tuple[str, str, float]] = field(default_factory=list)
+    deletes: list[str] = field(default_factory=list)
+    reweights: list[tuple[str, float]] = field(default_factory=list)
+    shared_entities: int = 0
+    facts_scanned: int = 0
+
+
+def _comention_rarity_weight(base: float, n: int, df: int) -> float:
+    """F106: weight of a co_mention edge whose rarest shared entity is named by ``df``
+    of the ``n`` indexed facts: ``base * ln(n/df) / ln(n/2)``, so ``df=2`` gives
+    ``base`` and ``df=n`` gives 0. ``base`` when ``n <= 2``, where ``ln(n/2) <= 0``."""
+    if n <= 2:
+        return base
+    return base * math.log(n / df) / math.log(n / 2)
 
 
 class GraphDensifier:
@@ -1293,8 +1321,14 @@ class GraphDensifier:
         # Wrapped: this default-ON, last-in-cycle pass must not mask sibling
         # backfill stats or skip downstream phases if it throws (its own edges
         # commit independently; siblings already committed). Silent-failure review.
+        # F106: under co-mention v2 the plan's maintenance counts are reported too,
+        # under leading-underscore keys the sleep handler pops (absent under v1).
         try:
-            results["_co_mention"] = await self.build_comention_edges()
+            comention_plan = await self.plan_comention_changes()
+            results["_co_mention"] = await self.build_comention_edges(plan=comention_plan)
+            if getattr(self._settings, "comention_v2_enabled", False):
+                results["_co_mention_deleted"] = len(comention_plan.deletes)
+                results["_co_mention_reweighted"] = len(comention_plan.reweights)
         except Exception:
             logger.warning(
                 "F076: build_comention_edges failed for agent_id=%s "
@@ -1479,7 +1513,9 @@ class GraphDensifier:
             await session.commit()
         return inserted
 
-    async def build_comention_edges(self, *, dry_run: bool = False) -> int:
+    async def build_comention_edges(
+        self, *, dry_run: bool = False, plan: ComentionPlan | None = None,
+    ) -> int:
         """F076: link facts that NAME the same entity, independent of cosine.
 
         FACT-only by design. chunk<->chunk co-mention was considered and dropped: it
@@ -1505,15 +1541,40 @@ class GraphDensifier:
         guard (any relation, incl. contradicts) so we never duplicate a link or join a
         contradicting pair. Idempotent across sleep cycles.
 
+        F106: the build applies ``plan`` (default: ``plan_comention_changes()``), its
+        deletes, reweights and inserts in one transaction. With ``dry_run=True`` it
+        returns ``len(plan.inserts)`` and writes nothing.
+
         Returns the number of new co-mention edges inserted.
         """
+        if plan is None:
+            plan = await self.plan_comention_changes()
+        if dry_run:
+            return len(plan.inserts)
+        return await self._apply_comention_plan(plan)
+
+    async def plan_comention_changes(self) -> ComentionPlan:
+        """F106: compute this cycle's co-mention changes without writing.
+
+        With ``comention_v2_enabled`` off this is the v1 builder's insert list (weight
+        ``comention_weight``) and no deletes or reweights; on, the v2 plan
+        (``_plan_comention_v2``). Empty when ``comention_linking_enabled`` is off.
+        """
+        s = self._settings
+        if not getattr(s, "comention_linking_enabled", False):
+            return ComentionPlan()
+        if getattr(s, "comention_v2_enabled", False):
+            return await self._plan_comention_v2()
+        return await self._plan_comention_v1()
+
+    async def _plan_comention_v1(self) -> ComentionPlan:
+        """F076 v1 candidate pairs: the newest ``comention_max_facts_per_cycle`` facts,
+        hub gate and per-fact cap counted within that window, rarer entities first."""
         from itertools import combinations
 
         from nous.brain.entity_extraction import extract_entities
 
         s = self._settings
-        if not getattr(s, "comention_linking_enabled", False):
-            return 0
         max_degree = int(s.comention_max_degree)
         max_per_node = int(s.comention_max_edges_per_node)
         weight = float(s.comention_weight)
@@ -1530,7 +1591,7 @@ class GraphDensifier:
                 {"a": self._agent_id, "lim": max_facts},
             )).all()
         if not rows:
-            return 0
+            return ComentionPlan()
 
         # entity -> ordered unique fact ids (deterministic).
         ent_to_facts: dict[str, list[str]] = {}
@@ -1541,31 +1602,7 @@ class GraphDensifier:
                 if fid_s not in bucket:
                     bucket.append(fid_s)
 
-        # Pre-existing fact-fact edges of ANY relation (either direction) — skip to
-        # avoid (a) duplicate undirected related_to links + churn AND (b) adding a
-        # related_to edge OVER a contradicts/supersedes pair. adjacency-boost and
-        # spreading-activation filter only `relation != 'contradicts'`, so a co_mention
-        # related_to edge would let mutually-inconsistent facts reinforce each other.
-        # Loading every relation makes any prior edge a hard skip.
-        # P2-F: scope to the SCANNED facts — candidate pairs only come from `rows`, so an
-        # edge can only block a pair if BOTH endpoints are in the scanned set; this bounds
-        # the lookup by the per-cycle scan, not the agent's total historical edge count.
-        fact_ids = [str(fid) for fid, _ in rows]
-        async with self.db.session() as session:
-            existing_rows = (await session.execute(
-                text(
-                    "SELECT source_id, target_id FROM brain.graph_edges "
-                    "WHERE agent_id = :a "
-                    "AND source_type = 'fact' AND target_type = 'fact' "
-                    "AND source_id = ANY(CAST(:ids AS uuid[])) "
-                    "AND target_id = ANY(CAST(:ids AS uuid[]))"
-                ),
-                {"a": self._agent_id, "ids": fact_ids},
-            )).all()
-        existing: set[tuple[str, str]] = set()
-        for src, tgt in existing_rows:
-            a, b = str(src), str(tgt)
-            existing.add((a, b) if a < b else (b, a))
+        existing = await self._existing_fact_pairs([str(fid) for fid, _ in rows])
 
         # Candidate pairs: rarer entities first, skip hubs, cap per-node fan-out,
         # canonical (a < b), interrupt-aware.
@@ -1589,10 +1626,170 @@ class GraphDensifier:
             if self._interrupted:
                 break
 
-        if not to_insert:
+        return ComentionPlan(
+            inserts=[(a, b, weight) for a, b in to_insert],
+            shared_entities=sum(1 for v in ent_to_facts.values() if 2 <= len(v) <= max_degree),
+            facts_scanned=len(rows),
+        )
+
+    async def _existing_fact_pairs(self, fact_ids: list[str]) -> set[tuple[str, str]]:
+        """Canonical (a < b) pairs of ``fact_ids`` already joined by a fact-fact edge.
+
+        Pre-existing fact-fact edges of ANY relation (either direction) — skip to
+        avoid (a) duplicate undirected related_to links + churn AND (b) adding a
+        related_to edge OVER a contradicts/supersedes pair. adjacency-boost and
+        spreading-activation filter only `relation != 'contradicts'`, so a co_mention
+        related_to edge would let mutually-inconsistent facts reinforce each other.
+        Loading every relation makes any prior edge a hard skip.
+        P2-F: scope to the SCANNED facts — candidate pairs only come from them, so an
+        edge can only block a pair if BOTH endpoints are in the scanned set; this bounds
+        the lookup by the scan, not the agent's total historical edge count.
+        """
+        async with self.db.session() as session:
+            existing_rows = (await session.execute(
+                text(
+                    "SELECT source_id, target_id FROM brain.graph_edges "
+                    "WHERE agent_id = :a "
+                    "AND source_type = 'fact' AND target_type = 'fact' "
+                    "AND source_id = ANY(CAST(:ids AS uuid[])) "
+                    "AND target_id = ANY(CAST(:ids AS uuid[]))"
+                ),
+                {"a": self._agent_id, "ids": fact_ids},
+            )).all()
+        existing: set[tuple[str, str]] = set()
+        for src, tgt in existing_rows:
+            a, b = str(src), str(tgt)
+            existing.add((a, b) if a < b else (b, a))
+        return existing
+
+    async def _plan_comention_v2(self) -> ComentionPlan:
+        """F106 co-mention v2 plan.
+
+        - **Index:** entities (stoplisted) of the newest ``comention_index_max_facts``
+          active facts; an entity's ``df`` is counted over the whole index.
+        - **Qualifying entity:** ``2 <= df <= comention_max_degree``; its weight is
+          ``_comention_rarity_weight(comention_weight, N, df)`` with N the index size.
+          A pair's target weight comes from its rarest qualifying shared entity.
+        - **Maintenance:** this agent's co_mention edges with both endpoints in the
+          index. One with no qualifying shared entity is deleted; one whose weight is
+          NULL or differs from the target by more than 1e-6 is re-weighted. Deletes go
+          first, then reweights, each in (source_id, target_id, id) order, up to
+          ``comention_prune_max_per_cycle`` changes in all. Edges with an endpoint
+          outside the index are left alone.
+        - **Linking:** as v1 (rarer entities first, pre-existing-edge guard), but the
+          per-fact cap is lifetime: a fact's degree starts at its co_mention edge count
+          (any partner) less this plan's deletes.
+        """
+        from itertools import combinations
+
+        from nous.brain.entity_extraction import extract_entities
+
+        s = self._settings
+        max_degree = int(s.comention_max_degree)
+        max_per_node = int(s.comention_max_edges_per_node)
+        weight = float(s.comention_weight)
+        min_chars = int(s.comention_min_entity_chars)
+        index_max = int(s.comention_index_max_facts)
+        prune_max = int(s.comention_prune_max_per_cycle)
+
+        async with self.db.session() as session:
+            rows = (await session.execute(
+                text(
+                    "SELECT id, content FROM heart.facts "
+                    "WHERE agent_id = :a AND active = TRUE "
+                    "ORDER BY learned_at DESC, id LIMIT :lim"
+                ),
+                {"a": self._agent_id, "lim": index_max},
+            )).all()
+            cm_rows = (await session.execute(
+                text(
+                    "SELECT id, source_id, target_id, weight FROM brain.graph_edges "
+                    "WHERE agent_id = :a AND relation = 'related_to' "
+                    "AND extraction_method = 'co_mention' "
+                    "AND source_type = 'fact' AND target_type = 'fact' "
+                    "ORDER BY source_id, target_id, id"
+                ),
+                {"a": self._agent_id},
+            )).all()
+        if not rows:
+            return ComentionPlan()
+
+        n = len(rows)
+        fact_ents: dict[str, set[str]] = {}
+        ent_to_facts: dict[str, list[str]] = {}
+        for fid, content in rows:
+            fid_s = str(fid)
+            ents = extract_entities(content or "", min_chars=min_chars, stoplist=True)
+            fact_ents[fid_s] = ents
+            for ent in ents:
+                ent_to_facts.setdefault(ent, []).append(fid_s)
+        rarity = {
+            ent: _comention_rarity_weight(weight, n, len(fids))
+            for ent, fids in ent_to_facts.items()
+            if 2 <= len(fids) <= max_degree
+        }
+
+        def target_weight(a: str, b: str) -> float | None:
+            # max weight = rarest shared entity (the weight falls as df rises).
+            shared = [rarity[e] for e in fact_ents[a] & fact_ents[b] if e in rarity]
+            return max(shared) if shared else None
+
+        # Maintenance, and each fact's current co_mention degree.
+        deg: dict[str, int] = defaultdict(int)
+        delete_cands: list[tuple[str, str, str]] = []
+        reweight_cands: list[tuple[str, float]] = []
+        for eid, src, tgt, old_w in cm_rows:
+            a, b = str(src), str(tgt)
+            deg[a] += 1
+            deg[b] += 1
+            if a not in fact_ents or b not in fact_ents:
+                continue
+            new_w = target_weight(a, b)
+            if new_w is None:
+                delete_cands.append((str(eid), a, b))
+            elif old_w is None or abs(float(old_w) - new_w) > 1e-6:
+                reweight_cands.append((str(eid), new_w))
+        deletes: list[str] = []
+        for eid, a, b in delete_cands[:prune_max]:
+            deletes.append(eid)
+            deg[a] -= 1
+            deg[b] -= 1
+        reweights = reweight_cands[:prune_max - len(deletes)]
+
+        existing = await self._existing_fact_pairs(list(fact_ents))
+
+        # A pair is only ever inserted at its first (rarest) shared entity: a skip
+        # there (cap, seen, existing) holds for every later entity too, so
+        # rarity[ent] is the pair's target weight and maintenance keeps it.
+        inserts: list[tuple[str, str, float]] = []
+        seen: set[tuple[str, str]] = set()
+        for ent in sorted(rarity, key=lambda k: (len(ent_to_facts[k]), k)):
+            for a, b in combinations(sorted(ent_to_facts[ent]), 2):
+                if deg[a] >= max_per_node or deg[b] >= max_per_node:
+                    continue
+                key = (a, b)
+                if key in seen or key in existing:
+                    continue
+                seen.add(key)
+                deg[a] += 1
+                deg[b] += 1
+                inserts.append((a, b, rarity[ent]))
+            if self._interrupted:
+                break
+
+        return ComentionPlan(
+            inserts=inserts, deletes=deletes, reweights=reweights,
+            shared_entities=len(rarity), facts_scanned=n,
+        )
+
+    async def _apply_comention_plan(self, plan: ComentionPlan) -> int:
+        """Write a co-mention plan (deletes, reweights, inserts) in one transaction.
+
+        Deletes and reweights touch only this agent's co_mention edges. Returns the
+        number of insert rows sent (an ON CONFLICT no-op still counts, as in v1).
+        """
+        if not (plan.inserts or plan.deletes or plan.reweights):
             return 0
-        if dry_run:
-            return len(to_insert)
 
         insert_sql = text(
             "INSERT INTO brain.graph_edges "
@@ -1604,11 +1801,29 @@ class GraphDensifier:
         inserted = 0
         BATCH = 500
         async with self.db.session() as session:
-            for i in range(0, len(to_insert), BATCH):
-                batch = to_insert[i:i + BATCH]
+            if plan.deletes:
+                await session.execute(
+                    text(
+                        "DELETE FROM brain.graph_edges "
+                        "WHERE agent_id = :a AND extraction_method = 'co_mention' "
+                        "AND id = ANY(CAST(:ids AS uuid[]))"
+                    ),
+                    {"a": self._agent_id, "ids": plan.deletes},
+                )
+            if plan.reweights:
+                await session.execute(
+                    text(
+                        "UPDATE brain.graph_edges SET weight = :w "
+                        "WHERE agent_id = :a AND extraction_method = 'co_mention' "
+                        "AND id = CAST(:id AS uuid)"
+                    ),
+                    [{"id": eid, "w": w, "a": self._agent_id} for eid, w in plan.reweights],
+                )
+            for i in range(0, len(plan.inserts), BATCH):
+                batch = plan.inserts[i:i + BATCH]
                 await session.execute(
                     insert_sql,
-                    [{"s": a, "t": b, "a": self._agent_id, "w": weight} for a, b in batch],
+                    [{"s": a, "t": b, "a": self._agent_id, "w": w} for a, b, w in batch],
                 )
                 inserted += len(batch)
             await session.commit()
@@ -1617,9 +1832,12 @@ class GraphDensifier:
             logger.info(
                 "F076: built %d co_mention edges for agent_id=%s "
                 "(%d shared entities over %d facts)",
-                inserted, self._agent_id,
-                sum(1 for v in ent_to_facts.values() if 2 <= len(v) <= max_degree),
-                len(rows),
+                inserted, self._agent_id, plan.shared_entities, plan.facts_scanned,
+            )
+        if plan.deletes or plan.reweights:
+            logger.info(
+                "F106: co_mention maintenance for agent_id=%s: %d deleted, %d re-weighted",
+                self._agent_id, len(plan.deletes), len(plan.reweights),
             )
         return inserted
 

@@ -65,10 +65,12 @@ async def backfill(agents: list[str], commit: bool, max_facts_override: int | No
                     agent,
                 )
             max_facts = max_facts_override if max_facts_override is not None else max(n_facts, 1)
-            # Force the builder on + lift the per-cycle cap to cover the whole corpus.
+            # Force the builder on + lift the per-cycle cap (and the F106 v2 index,
+            # used instead of it when NOUS_COMENTION_V2_ENABLED) to cover the whole corpus.
             s_agent = s.model_copy(update={
                 "comention_linking_enabled": True,
                 "comention_max_facts_per_cycle": max_facts,
+                "comention_index_max_facts": max_facts,
             })
             linker = GraphLinker(db, None, s_agent, agent)  # embedder unused by co-mention
             dens = GraphDensifier(db=db, graph_linker=linker, embedder=None,

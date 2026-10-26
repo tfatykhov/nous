@@ -48,6 +48,39 @@ _SEGMENT_RE = re.compile(r"[.!?;:\n]+|,\s")
 # Strip surrounding punctuation/quotes from a token (keep internal . & - ' for "U.S.", "AT&T").
 _EDGE_PUNCT = "\"'’“”()[]{}.,;:!?…«»"
 
+# F106 stoplist (``stoplist=True`` only): capitalized phrases that are timestamps,
+# imperative boilerplate or labels, not entities. They link facts that only share a
+# date or a rule header. Matched against the normalized (lowercased) phrase.
+_WEEKDAYS = (
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    "mon", "tue", "tues", "wed", "thu", "thur", "thurs", "fri", "sat", "sun",
+)
+_MONTHS = (
+    "january", "february", "march", "april", "may", "june", "july", "august",
+    "september", "october", "november", "december",
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
+)
+_TIMEZONES = ("edt", "est", "et", "utc", "gmt", "pst", "pdt", "cet", "cest")
+# A weekday followed by a month, or AM/PM followed by a time zone, anywhere in the
+# phrase: "mon sep", "tuesday october", "pm edt".
+_STOP_SEARCH_RE = re.compile(
+    rf"\b(?:{'|'.join(_WEEKDAYS)})\s+(?:{'|'.join(_MONTHS)})\b"
+    rf"|\b(?:am|pm)\s+(?:{'|'.join(_TIMEZONES)})\b"
+)
+_STOP_FULL_RE = re.compile(r"^(?:option [a-z0-9]|codex p[0-9])$")
+_STOP_PHRASES: frozenset[str] = frozenset({"do not", "must not", "hard rule"})
+_STOP_PREFIXES = ("standing rule",)
+
+
+def _is_stoplisted(phrase: str) -> bool:
+    """True when a normalized phrase is on the F106 stoplist."""
+    return (
+        phrase in _STOP_PHRASES
+        or phrase.startswith(_STOP_PREFIXES)
+        or _STOP_FULL_RE.match(phrase) is not None
+        or _STOP_SEARCH_RE.search(phrase) is not None
+    )
+
 
 def _strip_possessive(tok: str) -> str:
     low = tok.lower()
@@ -73,13 +106,16 @@ def _is_capitalized(tok: str) -> bool:
     return False
 
 
-def extract_entities(text: str, *, min_chars: int = 6) -> set[str]:
+def extract_entities(text: str, *, min_chars: int = 6, stoplist: bool = False) -> set[str]:
     """Extract normalized multi-token proper-noun phrases mentioned in ``text``.
 
     A phrase is a run of capitalized tokens (with optional lowercase connectors in
     between), with >=2 capitalized tokens, lowercased, length >= ``min_chars``.
     Single surnames are intentionally NOT emitted (precision over recall for a
     default-on edge builder). Sentence boundaries are not crossed.
+
+    ``stoplist=True`` (F106 co-mention v2) also drops timestamp, boilerplate and
+    label phrases (see ``_is_stoplisted``). The default leaves the output unchanged.
     """
     out: set[str] = set()
     if not text:
@@ -96,7 +132,7 @@ def extract_entities(text: str, *, min_chars: int = 6) -> set[str]:
                 run.pop()
             if n_caps >= 2:
                 phrase = " ".join(run).lower()
-                if len(phrase) >= min_chars:
+                if len(phrase) >= min_chars and not (stoplist and _is_stoplisted(phrase)):
                     out.add(phrase)
             run = []
             n_caps = 0

@@ -1948,10 +1948,16 @@ class SleepHandler:
             # F076: pop co-mention count too — it's a sleep-cycle associative-edge
             # metric, not a per-entity orphan-backfill edge (same convention).
             comention = result.pop("_co_mention", 0)
+            # F106: co-mention v2 maintenance counts, present only with v2 on.
+            comention_deleted = result.pop("_co_mention_deleted", None)
+            comention_reweighted = result.pop("_co_mention_reweighted", None)
             total_edges = sum(result.values())
             sleep_stats["orphan_edges_created"] = total_edges
             sleep_stats["temporal_chain_edges"] = happened_before
             sleep_stats["comention_edges"] = comention
+            if comention_deleted is not None:
+                sleep_stats["comention_edges_deleted"] = comention_deleted
+                sleep_stats["comention_edges_reweighted"] = comention_reweighted or 0
             sleep_stats["ce_backfill_survived"] = ce_stats.get("survived", 0)
             sleep_stats["ce_backfill_pruned"] = ce_stats.get("pruned", 0)
 

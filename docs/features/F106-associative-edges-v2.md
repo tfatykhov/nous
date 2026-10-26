@@ -1,9 +1,9 @@
 # F106: Associative Edges v2
 
 **Status:** in progress. Task 1 (a query-relevance gate for Path A neighbours reached through an
-associative edge, and an associative-edge multiplier in the neighbour fetch order) is built, with
-every setting off or neutral by default, so recall is unchanged until it is enabled. Tasks 2 and 3
-are planned once Task 1's evaluation is in.
+associative edge, and an associative-edge multiplier in the neighbour fetch order) and Task 2 (a v2
+of the co-mention edge builder) are built, with every setting off or neutral by default, so recall
+and the graph are unchanged until they are enabled. Task 3 is planned.
 
 **Builds on:** [F076 Co-mention Entity Linking](F076-comention-entity-linking.md) (the `co_mention`
 edges), the experiential co-occurrence linker (`co_occurred` edges, `NOUS_COOCCURRENCE_LINKING_ENABLED`),
@@ -127,11 +127,105 @@ and the `_neighbors` SQL are identical to before (`tests/test_f106_path_a_associ
   not measured offline.
 - The `raw` cutoff depends on the embedding model and must be re-tuned for another one.
 
-## Tasks 2 and 3 (planned)
+## Task 2: co-mention builder v2
 
-- **Task 2: co-mention builder v2.** Revisit how `co_mention` edges are created. Its starting point
-  is the pairwise result above: pairs on a rare shared entity are as precise as cosine edges.
+Behind `NOUS_COMENTION_V2_ENABLED` (default off). Off, the F076 builder is unchanged: the same facts
+are scanned, the same edges inserted at the same weight, and `dry_run` returns the same count.
+
+### Why
+
+The starting point is the pairwise result above: `co_mention` pairs on a rare shared entity are as
+precise as cosine edges. The v1 builder does not use that signal well:
+
+- **The window.** Each cycle scans only the newest `NOUS_COMENTION_MAX_FACTS_PER_CYCLE` (5000) facts
+  and counts an entity's frequency inside that window. An entity named by many older facts looks rare
+  there, so the hub gate (`NOUS_COMENTION_MAX_DEGREE`, 10) lets it link. A new fact never links to an
+  old one outside the window.
+- **The cap.** The per-fact cap (`NOUS_COMENTION_MAX_EDGES_PER_NODE`, 20) counts only the current
+  cycle's new edges, so a fact can gain up to 20 more in every cycle.
+- **The weight.** Every edge gets `NOUS_COMENTION_WEIGHT` (0.9), whether its entity is named by 2
+  facts or by 10.
+- **Noise phrases.** Timestamps (`Mon Sep`, `AM EDT`), imperative boilerplate (`DO NOT`, `HARD RULE`)
+  and labels (`Option B`, `Codex P1`) extract as entities and link unrelated facts.
+- **No repair.** An edge whose entity later becomes a hub stays forever.
+
+### Behaviour
+
+`GraphDensifier.plan_comention_changes()` computes a `ComentionPlan(inserts, deletes, reweights)`
+without writing; `build_comention_edges()` applies one, deletes, re-weights and inserts in a single
+transaction, and with `dry_run=True` returns `len(plan.inserts)`. Under v1 the plan is today's insert
+list with no deletes or reweights. Under v2:
+
+1. **Index.** Entities are extracted (with the stoplist) from the agent's newest
+   `NOUS_COMENTION_INDEX_MAX_FACTS` (50,000) active facts. An entity's frequency `df` is counted over
+   the whole index. The per-cycle window is not used.
+2. **Stoplist** (`extract_entities(..., stoplist=True)`). A phrase is dropped when it contains a
+   weekday followed by a month, abbreviated or full (`mon sep`, `tuesday october`), or AM/PM followed
+   by a time zone (`edt est et utc gmt pst pdt cet cest`), anywhere in the phrase; when it is exactly
+   `do not`, `must not` or `hard rule`; when it starts with `standing rule`; or when it is
+   `option <one letter or digit>` or `codex p<digit>`. With `stoplist=False` (the default, and v1)
+   extraction is unchanged.
+3. **Qualifying entity.** `2 <= df <= NOUS_COMENTION_MAX_DEGREE`.
+4. **Rarity weight.** `w(df) = NOUS_COMENTION_WEIGHT x ln(N/df) / ln(N/2)`, where N is the number of
+   indexed facts: `df = 2` gives the full weight, rarer is heavier, and `df = N` gives 0.
+   `NOUS_COMENTION_WEIGHT` when `N <= 2`. An edge's weight comes from its rarest qualifying shared
+   entity.
+5. **Maintenance**, before linking. It covers the agent's `co_mention` edges with both endpoints in
+   the index. An edge with no qualifying shared entity (its entity became a hub, is stoplisted, or is
+   no longer shared) is deleted. An edge whose weight is NULL or differs from its target `w` by more
+   than 1e-6 is set to `w`, which also restores a weight decayed to near zero. Deletes go first, then
+   re-weights, in edge order, and the pass stops after `NOUS_COMENTION_PRUNE_MAX_PER_CYCLE` (2000)
+   changes in all. An edge with an endpoint outside the index is left alone.
+6. **Linking.** Rarer entities first, as in v1, with the same pre-existing-edge guard (any fact-fact
+   edge, any relation, either direction, skips the pair). The per-fact cap now holds over the fact's
+   lifetime: a fact's count starts at its current `co_mention` degree (every partner, in the index or
+   not) after this plan's deletes. New edges get weight `w`. A pair is only ever linked at its rarest
+   shared entity, so a new edge already has the weight maintenance would give it.
+
+**Reporting.** `run_backfill_cycle` returns `_co_mention_deleted` and `_co_mention_reweighted` with
+v2 on; the sleep handler pops them (so they never inflate `orphan_edges_created`) into sleep stats as
+`comention_edges_deleted` and `comention_edges_reweighted`. With v2 off neither key appears. The
+build also logs `F106: co_mention maintenance ...` when it deletes or re-weights.
+
+**Ownership of `co_mention` edges.** They are derived data: the builder creates them from fact text
+and can rebuild them, so v2 deletes the ones it no longer supports (as the F053 dead-edge prune
+deletes edges). It also owns their weights: if the tinyHippo downscale
+(`NOUS_TINYHIPPO_DOWNSCALE_ENABLED`, off) is turned on again, its downscale of `co_mention` edges is
+undone by the next cycle's maintenance, up to the per-cycle bound.
+
+**The backfill script.** `scripts/backfill_comention_edges.py` lifts `NOUS_COMENTION_INDEX_MAX_FACTS`
+to the corpus size as well as the per-cycle cap, so under v2 it still covers the whole corpus. Its
+`--commit` run then applies maintenance too, within the per-cycle bound.
+
+### Settings
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `NOUS_COMENTION_V2_ENABLED` | `false` | Run the v2 builder |
+| `NOUS_COMENTION_INDEX_MAX_FACTS` | `50000` | Index size: the newest N active facts |
+| `NOUS_COMENTION_PRUNE_MAX_PER_CYCLE` | `2000` | Most maintenance deletes plus re-weights per cycle; 0 turns maintenance off |
+
+v2 also reads the F076 settings `NOUS_COMENTION_MAX_DEGREE`, `NOUS_COMENTION_MAX_EDGES_PER_NODE`,
+`NOUS_COMENTION_WEIGHT` and `NOUS_COMENTION_MIN_ENTITY_CHARS`, but not
+`NOUS_COMENTION_MAX_FACTS_PER_CYCLE`. Tests: `tests/test_f106_comention_v2.py`; the v1 builder stays
+pinned by `tests/test_graph_densifier.py` and `tests/test_comention_linking.py`.
+
+### Limitations
+
+- **Convergence.** v1 wrote every edge at 0.9, so the first v2 cycles mostly re-weight. With the
+  default bound a graph with more than 2000 edges to change takes several cycles; until then some
+  edges keep their v1 weight or their hub link.
+- **Cost.** Each cycle reads every `co_mention` edge of the agent and extracts entities from up to
+  50,000 facts in Python.
+- **Small corpora.** With N facts indexed, an entity named by all N gets weight 0 (it still links,
+  if `N <= NOUS_COMENTION_MAX_DEGREE`).
+- **The stoplist is lexical.** It catches the listed shapes only; other boilerplate still extracts.
+- **The index boundary.** An edge to a fact that has fallen out of the index is neither deleted nor
+  re-weighted.
+- **Not evaluated yet.** An offline comparison of v1 and v2 plans on a prod copy is pending; the flag
+  stays off until then.
+
+## Task 3 (planned)
+
 - **Task 3: co-occurrence redesign.** Fix the algorithm that forms `co_occurred` edges where it does
   not link the right facts. A temporal-query exemption for the gate is considered here.
-
-Both are planned after Task 1's evaluation.

@@ -2985,6 +2985,33 @@ class Settings(BaseSettings):
         ge=1,
         description="F076: max active facts scanned per sleep cycle (most-recent first); safety bound on the O(corpus) pass.",
     )
+    comention_v2_enabled: bool = Field(
+        default=False,
+        description=(
+            "F106: co-mention builder v2. Entity frequency and the hub gate are counted over "
+            "an index of the newest comention_index_max_facts active facts (not the "
+            "per-cycle window), entities pass a stoplist, the per-fact cap counts a fact's "
+            "existing co_mention edges, edges are weighted by the rarity of their rarest "
+            "shared entity, and a bounded maintenance pass deletes or re-weights the "
+            "builder's own edges. Off: the v1 builder, unchanged."
+        ),
+    )
+    comention_index_max_facts: int = Field(
+        default=50000,
+        ge=1,
+        description=(
+            "F106: v2 entity index size, the newest N active facts of the agent "
+            "(replaces comention_max_facts_per_cycle under v2)."
+        ),
+    )
+    comention_prune_max_per_cycle: int = Field(
+        default=2000,
+        ge=0,
+        description=(
+            "F106: v2 maintenance bound, the most co_mention edge deletes plus re-weights "
+            "per cycle. 0 disables maintenance."
+        ),
+    )
     # =========================================================================
     # Gap-1 Formation — experiential co-occurrence linking (migration 055)
     # =========================================================================
