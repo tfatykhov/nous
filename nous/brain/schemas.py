@@ -207,3 +207,8 @@ class NeighborResult(BaseModel):
     # graph_neighbor_seed_score_enabled. Spreading-activation rows keep None
     # BY DESIGN — their activation already composes the seed score per hop.
     seed_score: float | None = None
+    # F106: the Path A associative query gate's multiplier on this neighbour's
+    # score, set in Stage 2b only for a neighbour reached through an associative
+    # edge while the gate is on. None means ungated (neutral);
+    # _score_memory_neighbor multiplies by it.
+    query_gate_factor: float | None = None

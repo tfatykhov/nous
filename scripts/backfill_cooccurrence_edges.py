@@ -11,7 +11,10 @@ Forms relation='co_occurred', extraction_method='co_occurrence' edges between fa
 share a source_episode_id (mentioned together in one occasion), capped by the noise gate
 (`cooccurrence_max_episode_facts`, default 6) and the prior-edge skip (any existing fact-fact
 edge, incl. contradicts). Deterministic + idempotent: INSERT ... ON CONFLICT DO NOTHING.
-No LLM, no embeddings.
+No LLM, no embedding calls. Under F106 v2 (NOUS_COOCCURRENCE_V2_ENABLED) there is no size gate:
+a pair needs a thread signal (stored embedding cosine, a shared entity key, or adjacent
+transcript ordinals), and --commit also applies the plan's maintenance (deletes and weight
+restores, within NOUS_COOCCURRENCE_PRUNE_MAX_PER_CYCLE).
 
 SAFE BY DEFAULT: dry-run (preview yield only) unless you pass --commit. Prints the resolved
 DB target so you can confirm you are hitting prod before writing.
@@ -54,8 +57,14 @@ async def backfill(agents: list[str], commit: bool, max_episodes_override: int |
     await db.connect()
     print(f"DB target: host={s.db_host} port={s.db_port} db={s.db_name} user={s.db_user}")
     print(f"mode: {'COMMIT (writing edges)' if commit else 'DRY-RUN (preview only, no writes)'}")
-    print(f"cooccurrence_weight (new edges) = {s.cooccurrence_weight}  "
-          f"noise gate (max_episode_facts) = {s.cooccurrence_max_episode_facts}\n")
+    if s.cooccurrence_v2_enabled:
+        print(f"cooccurrence_weight (new edges) = {s.cooccurrence_weight}  F106 v2: "
+              f"min_cosine={s.cooccurrence_min_cosine} "
+              f"ordinal_window={s.cooccurrence_ordinal_window} "
+              f"max_edges_per_fact={s.cooccurrence_max_edges_per_fact}\n")
+    else:
+        print(f"cooccurrence_weight (new edges) = {s.cooccurrence_weight}  "
+              f"noise gate (max_episode_facts) = {s.cooccurrence_max_episode_facts}\n")
 
     total_built = 0
     try:
@@ -84,18 +93,22 @@ async def backfill(agents: list[str], commit: bool, max_episodes_override: int |
             dens = GraphDensifier(db=db, graph_linker=linker, embedder=None,
                                   settings=s_agent, agent_id=agent)
 
-            would = await dens.build_cooccurrence_edges(dry_run=True)
+            # Plan once; --commit applies this same plan (no re-plan). Deletes and
+            # restores are F106 v2 maintenance (always 0 under v1).
+            plan = await dens.plan_cooccurrence_changes()
             print(f"[{agent}] multi-fact_episodes={n_eps} existing_co_occurrence={n_existing} "
-                  f"scan_cap={max_eps}  -> WOULD build {would} new edges")
-            if commit and would:
-                built = await dens.build_cooccurrence_edges()
+                  f"scan_cap={max_eps}  -> WOULD build {len(plan.inserts)} new edges, "
+                  f"delete {len(plan.deletes)}, restore {len(plan.reweights)}")
+            if commit and (plan.inserts or plan.deletes or plan.reweights):
+                built = await dens.build_cooccurrence_edges(plan=plan)
                 async with db.session() as sess:
                     final = await _count(
                         sess,
                         "SELECT count(*) FROM brain.graph_edges WHERE agent_id=:a AND extraction_method='co_occurrence'",
                         agent,
                     )
-                print(f"[{agent}] BUILT {built} edges  -> co_occurrence total now {final}")
+                print(f"[{agent}] BUILT {built} edges, deleted {len(plan.deletes)}, "
+                      f"restored {len(plan.reweights)}  -> co_occurrence total now {final}")
                 total_built += built
             elif commit:
                 print(f"[{agent}] nothing to build")

@@ -96,6 +96,13 @@ def associative_edge_sql(col_prefix: str = "") -> str:
     return f"({p}relation = 'co_occurred' OR {p}extraction_method = 'co_mention')"
 
 
+def is_associative(relation: str | None, extraction_method: str | None) -> bool:
+    """Python mirror of :func:`associative_edge_sql` (F106): relation
+    ``co_occurred``, or extraction method ``co_mention``. A None field matches
+    nothing, as a NULL column does in the SQL."""
+    return relation == "co_occurred" or extraction_method == "co_mention"
+
+
 # --- episode lifecycle vs deletion (2026-07-12 F053 audit) ---
 # `heart.episodes.active` is OVERLOADED: on facts/procedures `active=false`
 # means soft-deleted, but on episodes it is the normal CLOSED lifecycle

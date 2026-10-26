@@ -65,27 +65,33 @@ async def backfill(agents: list[str], commit: bool, max_facts_override: int | No
                     agent,
                 )
             max_facts = max_facts_override if max_facts_override is not None else max(n_facts, 1)
-            # Force the builder on + lift the per-cycle cap to cover the whole corpus.
+            # Force the builder on + lift the per-cycle cap (and the F106 v2 index,
+            # used instead of it when NOUS_COMENTION_V2_ENABLED) to cover the whole corpus.
             s_agent = s.model_copy(update={
                 "comention_linking_enabled": True,
                 "comention_max_facts_per_cycle": max_facts,
+                "comention_index_max_facts": max_facts,
             })
             linker = GraphLinker(db, None, s_agent, agent)  # embedder unused by co-mention
             dens = GraphDensifier(db=db, graph_linker=linker, embedder=None,
                                   settings=s_agent, agent_id=agent)
 
-            would = await dens.build_comention_edges(dry_run=True)
+            # Plan once; --commit applies this same plan (no re-plan). Deletes and
+            # re-weights are F106 v2 maintenance (always 0 under v1).
+            plan = await dens.plan_comention_changes()
             print(f"[{agent}] active_facts={n_facts} existing_co_mention={n_existing} "
-                  f"scan_cap={max_facts}  -> WOULD build {would} new edges")
-            if commit and would:
-                built = await dens.build_comention_edges()
+                  f"scan_cap={max_facts}  -> WOULD build {len(plan.inserts)} new edges, "
+                  f"delete {len(plan.deletes)}, re-weight {len(plan.reweights)}")
+            if commit and (plan.inserts or plan.deletes or plan.reweights):
+                built = await dens.build_comention_edges(plan=plan)
                 async with db.session() as sess:
                     final = await _count(
                         sess,
                         "SELECT count(*) FROM brain.graph_edges WHERE agent_id=:a AND extraction_method='co_mention'",
                         agent,
                     )
-                print(f"[{agent}] BUILT {built} edges  -> co_mention total now {final}")
+                print(f"[{agent}] BUILT {built} edges, deleted {len(plan.deletes)}, "
+                      f"re-weighted {len(plan.reweights)}  -> co_mention total now {final}")
                 total_built += built
             elif commit:
                 print(f"[{agent}] nothing to build")

@@ -1733,7 +1733,28 @@ class Brain:
         # NULL first under DESC). ROW_NUMBER works on both Postgres and the SQLite
         # used in tests (avoids Postgres-only DISTINCT ON).
         combined = source_q.union_all(target_q).subquery()
-        _w = func.coalesce(combined.c.edge_weight, -1.0)
+        # F106: graph_associative_edge_multiplier scales an associative edge's
+        # weight (graph_constants.is_associative) in BOTH orderings below — which
+        # edge represents a neighbour, and which neighbours fill the LIMIT — so
+        # 0.9 co_mention edges stop taking every slot before a cosine edge is
+        # read. The returned edge_weight stays raw. The CASE multiplies inside the
+        # COALESCE, so a NULL weight still sorts last (-1) whatever its edge. At
+        # 1.0 no CASE term is added, so the SQL is exactly today's.
+        _assoc_mult = float(getattr(self.settings, "graph_associative_edge_multiplier", 1.0))
+
+        def _order_weight(cols: Any) -> ColumnElement[Any]:
+            if _assoc_mult == 1.0:
+                return func.coalesce(cols.edge_weight, -1.0)
+            return func.coalesce(
+                cols.edge_weight * case(
+                    (or_(cols.edge_relation == "co_occurred",
+                         cols.extraction_method == "co_mention"), _assoc_mult),
+                    else_=1.0,
+                ),
+                -1.0,
+            )
+
+        _w = _order_weight(combined.c)
         ranked = (
             select(
                 combined.c.neighbor_id,
@@ -1773,7 +1794,7 @@ class Brain:
                 ranked.c.extraction_method,
             )
             .where(ranked.c.rn == 1)
-            .order_by(func.coalesce(ranked.c.edge_weight, -1.0).desc(), ranked.c.neighbor_id)
+            .order_by(_order_weight(ranked.c).desc(), ranked.c.neighbor_id)
             .limit(limit * 3)
         )
         result = await session.execute(union_q)

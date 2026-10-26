@@ -2873,6 +2873,68 @@ class Settings(BaseSettings):
             "decision."
         ),
     )
+    # F106 Task 1: associative edges (co_mention, co_occurred; see
+    # graph_constants.is_associative) in Path A. The gate runs in Stage 2b of
+    # retrieval_pipeline; the multiplier in Brain._neighbors and
+    # _score_memory_neighbor. Every default reproduces today's behaviour.
+    graph_associative_query_gate_enabled: bool = Field(
+        default=False,
+        description=(
+            "F106: when true, Stage 2b (Path A) reads cos(neighbour, query) for each "
+            "neighbour reached through an associative edge and gates it by "
+            "graph_associative_query_gate_mode. A missing embedding is neutral; no "
+            "embedder, an empty query vector or any failure leaves the neighbours ungated."
+        ),
+    )
+    graph_associative_query_gate_mode: Literal["raw", "seed_relative"] = Field(
+        default="raw",
+        description=(
+            "F106: raw = drop the neighbour when cos(neighbour, query) is below "
+            "graph_associative_query_gate_min_cosine, otherwise keep it unscaled; "
+            "seed_relative = scale its score by min(1, max(cos_node, 0) / "
+            "max(cos_seed, seed_min)) and drop it when that factor is below drop_below."
+        ),
+    )
+    graph_associative_query_gate_min_cosine: float = Field(
+        default=0.31,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "F106: raw mode's cutoff on cos(neighbour, query). 0.31 was tuned offline on "
+            "text-embedding-3-large at 1536 dimensions; another embedding model needs "
+            "its own value."
+        ),
+    )
+    graph_associative_query_gate_seed_min: float = Field(
+        default=0.19,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "F106: seed_relative mode's smallest denominator (F105's "
+            "spreading_query_gate_seed_min value), so a seed with a low or negative "
+            "query cosine still gates its neighbours."
+        ),
+    )
+    graph_associative_query_gate_drop_below: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "F106: seed_relative mode drops a gated neighbour whose factor is below "
+            "this; 0 scales only."
+        ),
+    )
+    graph_associative_edge_multiplier: float = Field(
+        default=1.0,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "F106: multiplies an associative edge's weight in Brain._neighbors' fetch "
+            "order (which neighbours fill each per-seed LIMIT) and an associative "
+            "neighbour's score in _score_memory_neighbor. The stored and returned "
+            "edge_weight stay raw. 1.0 leaves both unchanged."
+        ),
+    )
     # =========================================================================
     # F076 — Co-mention / shared-entity linking (associative graph layer)
     # =========================================================================
@@ -2923,6 +2985,52 @@ class Settings(BaseSettings):
         ge=1,
         description="F076: max active facts scanned per sleep cycle (most-recent first); safety bound on the O(corpus) pass.",
     )
+    comention_v2_enabled: bool = Field(
+        default=False,
+        description=(
+            "F106: co-mention builder v2. Entity frequency and the hub gate are counted over "
+            "an index of the newest comention_index_max_facts active facts (not the "
+            "per-cycle window), entities pass a stoplist, the per-fact cap counts a fact's "
+            "existing co_mention edges, edges are weighted by the rarity of their rarest "
+            "shared entity, and a bounded maintenance pass deletes or re-weights the "
+            "builder's own edges. Off: the v1 builder, unchanged."
+        ),
+    )
+    comention_index_max_facts: int = Field(
+        default=50000,
+        ge=1,
+        description=(
+            "F106: v2 entity index size, the newest N active facts of the agent "
+            "(replaces comention_max_facts_per_cycle under v2)."
+        ),
+    )
+    comention_prune_max_per_cycle: int = Field(
+        default=2000,
+        ge=0,
+        description=(
+            "F106: v2 maintenance bound, the most co_mention edge deletes plus re-weights "
+            "per cycle. 0 disables maintenance."
+        ),
+    )
+    comention_v2_max_degree: int = Field(
+        default=20,
+        ge=2,
+        description=(
+            "F106: the v2 hub cap, counted over the whole index. Under v2 it replaces "
+            "comention_max_degree in the qualifying check (so in linking, maintenance and "
+            "the rarity weight's domain); v1 keeps comention_max_degree."
+        ),
+    )
+    comention_min_cosine: float = Field(
+        default=0.35,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "F106: a new v2 co_mention link needs the pair's embedding cosine >= this. "
+            "Inserts only: it never deletes an existing edge or blocks its re-weight. A "
+            "pair where either fact has no embedding passes."
+        ),
+    )
     # =========================================================================
     # Gap-1 Formation — experiential co-occurrence linking (migration 055)
     # =========================================================================
@@ -2965,6 +3073,44 @@ class Settings(BaseSettings):
         default=2000,
         ge=1,
         description="Safety bound: max episodes scanned per sleep cycle (most-recent first).",
+    )
+    cooccurrence_v2_enabled: bool = Field(
+        default=False,
+        description=(
+            "F106: co-occurrence builder v2. A same-episode pair links only with a thread "
+            "signal (pair cosine >= cooccurrence_min_cosine, a shared fact_entity_keys key, "
+            "or enumerated facts within cooccurrence_ordinal_window in one transcript "
+            "chunk) and cosine below graph_threshold_fact_fact; no episode-size gate, a "
+            "lifetime per-fact cap, and a bounded maintenance pass over the builder's own "
+            "edges. Off: the v1 builder, unchanged."
+        ),
+    )
+    cooccurrence_min_cosine: float = Field(
+        default=0.30,
+        ge=0.0,
+        le=1.0,
+        description="F106: v2 cosine signal, a same-episode pair with cosine >= this qualifies.",
+    )
+    cooccurrence_ordinal_window: int = Field(
+        default=3,
+        ge=0,
+        description=(
+            "F106: v2 ordinal signal, two enumerated facts of one transcript chunk "
+            "(same source_ordinal // 1_000_000) at most this many positions apart qualify."
+        ),
+    )
+    cooccurrence_max_edges_per_fact: int = Field(
+        default=10,
+        ge=1,
+        description="F106: v2 lifetime cap on a fact's co_occurrence edges (existing ones count).",
+    )
+    cooccurrence_prune_max_per_cycle: int = Field(
+        default=2000,
+        ge=0,
+        description=(
+            "F106: v2 maintenance bound, the most co_occurrence edge deletes plus weight "
+            "restores per cycle. 0 disables maintenance."
+        ),
     )
     # =========================================================================
     # F070 — Chunk-aware sleep consolidation (v1: edges only, no schema change)
