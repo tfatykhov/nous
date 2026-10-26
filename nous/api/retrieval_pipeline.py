@@ -2099,7 +2099,11 @@ async def _query_gate(
             seed = seed_by_id.get(str(winning_seed.get(nid)))
             if seed is not None:
                 nodes.setdefault(seed[0], seed[1])
-        cos = await query_cosines(session, brain.agent_id, list(nodes.items()), query_vec)
+        # A savepoint, so a SQL failure here (a statement timeout, a vector
+        # dimension mismatch) rolls back only this read: Stage 4 reuses the
+        # session for content resolution, which an aborted transaction fails.
+        async with session.begin_nested():
+            cos = await query_cosines(session, brain.agent_id, list(nodes.items()), query_vec)
         mode = str(getattr(settings, "spreading_query_gate_mode", "seed_relative"))
         q_lo = float(getattr(settings, "spreading_query_gate_q_lo", 0.0))
         q_hi = float(getattr(settings, "spreading_query_gate_q_hi", 1.0))

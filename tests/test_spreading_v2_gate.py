@@ -32,7 +32,8 @@ from test_retrieval_pipeline import (  # noqa: E402  (test-local helper reuse)
     _make_settings,
 )
 
-from nous.api.retrieval_pipeline import run_recall_pipeline
+from nous.api.retrieval_pipeline import _PipelineAccumulator, _query_gate, run_recall_pipeline
+from nous.brain.brain import Brain
 from nous.brain.schemas import NeighborResult
 from nous.brain.spreading_activation import gate_factor, query_cosines
 from nous.config import Settings
@@ -192,6 +193,31 @@ async def test_gate_is_agent_scoped(session):
     cos = await query_cosines(session, agent, [(foreign, "fact"), (own, "fact")], _e1())
     assert cos[foreign] is None
     assert cos[own] == pytest.approx(1.0)
+
+
+class _ShortEmbedder:
+    """A 3-dim query vector against 1536-dim rows: pgvector refuses the ``<=>``."""
+
+    async def embed(self, _text: str) -> list[float]:
+        return [1.0, 0.0, 0.0]
+
+
+@pytest.mark.postgres_only
+async def test_gate_sql_failure_leaves_the_session_usable(db, session):
+    """A cosine read that fails in Postgres fails open, and Stage 4's session,
+    which content resolution reuses next, is still usable: the read runs in a
+    savepoint, so only the savepoint is rolled back."""
+    agent = f"gate-{uuid4().hex[:8]}"
+    settings = Settings(_env_file=None, agent_id=agent)
+    brain = Brain(database=db, settings=settings, embedding_provider=_ShortEmbedder())  # type: ignore[arg-type]
+    fid = await _fact(session, agent, _vec(e1=1.0))  # a real row, so the operator is evaluated
+    activated = [(fid, "fact", 0.5, 1)]
+    acc = _PipelineAccumulator()
+    out = await _query_gate(session, brain, "q", settings, activated, {}, {}, acc)  # type: ignore[arg-type]
+    assert out == activated, "fails open: the rows stay ungated"
+    assert acc.stage_errors == {"spreading_query_gate": 1}
+    resolved = await brain._resolve_node_descriptions(session, {"fact": [fid]})
+    assert resolved[fid][0] == "gate test"
 
 
 # ---------------------------------------------------------------------------

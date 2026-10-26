@@ -360,8 +360,10 @@ call, and the cosines one query per node type present.
 an embedder, chunks mid-backfill and procedures can be NULL. A NULL node or seed embedding gets factor
 1.0, because absence is not a relevance value; the count goes to a `logger.debug` line. A missing
 embedder or an empty query vector skips the gate for the whole call. Any failure leaves the rows
-ungated and counts `n_stage_errors["spreading_query_gate"]`: the gate fails open and never turns
-spreading into the 1-hop fallback. Neither does a gate that prunes every row: spreading stays in use
+ungated and counts `n_stage_errors["spreading_query_gate"]`. The cosine read runs in a savepoint, so
+a SQL failure there (a statement timeout, a dimension mismatch) does not abort the session Stage 4
+then resolves content on. The gate fails open and never turns spreading into the 1-hop fallback.
+Neither does a gate that prunes every row: spreading stays in use
 and returns no row, and the 1-hop fallback does not run. That fallback exists for rows that clear
 the floor but fail content resolution, which still fall back as before. After a full prune it would
 re-add the depth-1 part of the same rows, ungated and under the `brain_graph` /
