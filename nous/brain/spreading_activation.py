@@ -516,8 +516,12 @@ def gate_factor(
     - ``raw``: ``max(cos_node, 0)``.
 
     ``quantile`` and ``raw`` are neutral when ``cos_node`` is None. The result is
-    clamped, so a cosine a hair above 1 cannot amplify.
+    clamped, so a cosine a hair above 1 cannot amplify. ``s_min`` must be
+    positive (the setting is ``gt=0``): at 0 a non-positive seed cosine would
+    divide by zero, so a direct caller gets a ``ValueError`` instead.
     """
+    if s_min <= 0:
+        raise ValueError(f"s_min must be positive, got {s_min!r}")
     if mode == "seed_relative":
         if cos_node is None or cos_seed is None:
             return 1.0

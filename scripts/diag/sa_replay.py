@@ -210,6 +210,7 @@ HEART_FACT_SEEDS = 3  # retrieval_pipeline's heart_fact_seeds slice
 PATH_A_STAGE = "stage2b_heart_graph_memory"  # Path A neighbours, excluded live
 EDGE_KINDS = ("co_occurred", "co_mention", "other")
 GATE_MODES = ("seed_relative", "quantile", "raw")  # F105 Task 5: Settings' spreading_query_gate_mode
+S_MIN_FLOOR = 0.01  # the derived s_min is clamped to this: gate_factor needs it positive
 RESCORE_MOVE = 3  # F105 Task 8 gate: a row "moves" when its rank changes by more than this
 RESCORE_MOVED_MAX_SHARE = 0.10  # ... and fewer than this share of rows may move
 
@@ -864,8 +865,10 @@ def gate_analysis(records: list[dict[str, Any]], floor: float) -> dict[str, Any]
     Two passes over ``gate_record`` outputs. The first derives the parameters
     from the cosines: ``s_min`` and ``q_hi`` are the median seed cosine, ``q_lo``
     the 10th percentile of the rows' node cosines (each rounded to 2 dp, as a
-    setting would be). The second applies ``gate_factor`` to every row: a row
-    is kept when its gated activation is still above ``floor``, else pruned.
+    setting would be). An ``s_min`` under ``S_MIN_FLOOR`` is clamped to it, with
+    a note in ``notes`` and on stderr. The second applies ``gate_factor`` to
+    every row: a row is kept when its gated activation is still above
+    ``floor``, else pruned.
     The pruned share is also given per tercile of the rows' winning-seed cosine
     (cut at its 33rd and 67th percentiles; rows whose seed has no embedding are
     their own group). Mean cosines leave out rows with no node embedding,
@@ -880,6 +883,11 @@ def gate_analysis(records: list[dict[str, Any]], floor: float) -> dict[str, Any]
         raise ValueError("gate analysis needs seed and node cosines")
     median_seed, p10_node = percentile(seed_cos, 50), percentile(node_cos, 10)
     s_min, q_lo, q_hi = round(median_seed, 2), round(p10_node, 2), round(median_seed, 2)
+    notes: list[str] = []
+    if s_min < S_MIN_FLOOR:
+        notes.append(f"s_min {s_min} (median seed cosine {median_seed:.4f}) clamped to {S_MIN_FLOOR}")
+        print(f"note: {notes[-1]}", file=sys.stderr)
+        s_min = S_MIN_FLOOR
     cuts = (percentile(row_seed_cos, 100 / 3), percentile(row_seed_cos, 200 / 3))
 
     def tercile(c: float | None) -> str:
@@ -934,6 +942,7 @@ def gate_analysis(records: list[dict[str, Any]], floor: float) -> dict[str, Any]
         "median_seed_cos": round(median_seed, 4),
         "p10_node_cos": round(p10_node, 4),
         "params": {"s_min": s_min, "q_lo": q_lo, "q_hi": q_hi, "floor": floor},
+        "notes": notes,
         "seed_cos_tercile_cuts": [round(c, 4) for c in cuts],
         "modes": modes,
     }

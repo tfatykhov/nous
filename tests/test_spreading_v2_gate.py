@@ -99,6 +99,15 @@ def test_gate_factor_modes():
         gate_factor(0.5, 0.5, "boost", 0.0, 1.0, 0.3)
 
 
+def test_gate_factor_refuses_non_positive_s_min():
+    """At s_min 0 a non-positive seed cosine would divide by zero. The setting is
+    gt=0, so only a direct caller can pass one; every mode refuses it."""
+    for s_min in (0.0, -0.1):
+        for mode in ("seed_relative", "quantile", "raw"):
+            with pytest.raises(ValueError, match="s_min"):
+                gate_factor(0.15, -0.001, mode, 0.0, 1.0, s_min)
+
+
 def test_gate_settings_bounds():
     """Off by default; the quantile anchors must be ordered; s_min is in (0, 1]."""
     s = Settings(_env_file=None)

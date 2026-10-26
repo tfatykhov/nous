@@ -411,6 +411,7 @@ def test_gate_analysis_derives_params_and_prunes():
     ]
     out = gate_analysis(records, floor=0.1)
     assert out["params"] == {"s_min": 0.5, "q_lo": 0.14, "q_hi": 0.5, "floor": 0.1}
+    assert out["notes"] == []
     assert (out["retrievals"], out["retrievals_with_rows_above_floor"], out["rows_above_floor"]) == (3, 2, 4)
     assert (out["seeds"], out["seeds_without_embedding"]) == (5, 2)
     assert out["rows_without_node_embedding_by_type"] == {"chunk": 1}
@@ -449,6 +450,22 @@ def test_gate_analysis_edge_cases():
     assert inverted["modes"]["raw"]["rows_above_floor_after"] == 1
     with pytest.raises(ValueError):
         gate_analysis([{"seed_cos": [None], "rows": [_gate_row(0.5, None, None)]}], floor=0.1)
+
+
+def test_gate_analysis_clamps_a_zero_s_min(capsys):
+    """A median seed cosine that rounds to 0 would make s_min 0, and a row whose
+    seed cosine is not positive would then divide by zero (the Codex repro:
+    seed -0.001, node 0.15, activation 0.4). s_min is clamped to 0.01 instead,
+    with a note in the report and on stderr."""
+    records = [{"seed_cos": [0.004, -0.001], "rows": [_gate_row(0.4, 0.15, -0.001)]}]
+    out = gate_analysis(records, floor=0.1)
+    assert out["median_seed_cos"] == pytest.approx(0.0015)
+    assert out["params"]["s_min"] == sa_replay.S_MIN_FLOOR == 0.01
+    assert len(out["notes"]) == 1 and "clamped to 0.01" in out["notes"][0]
+    assert "note: s_min 0.0" in capsys.readouterr().err
+    sr = out["modes"]["seed_relative"]
+    assert sr["rows_above_floor_after"] == 1, "0.15 / max(-0.001, 0.01) caps at 1: kept"
+    assert "error" not in sa_replay.gate_section([{"gate": records[0]}], floor=0.1)
 
 
 def test_gate_section_reports_an_error_instead_of_raising():
