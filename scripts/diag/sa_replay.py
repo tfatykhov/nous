@@ -81,10 +81,14 @@ Read-only: every connection starts with ``default_transaction_read_only = on``
 checks it before reading.
 
 Prod guard: the prod host is named by ``$PROD_HOST`` and/or ``--prod-host``
-(compared case-insensitively), never by a literal here. A DSN on it is refused
-unless ``--allow-prod-readonly`` is passed. With no prod host named, any host
-that is not loopback (``localhost``, ``127.0.0.0/8``, ``::1``) might be prod, so
-it is refused too unless ``--allow-prod-readonly`` is passed.
+(compared case-insensitively), never by a literal here. The guard checks every
+host the DSN can connect to: the authority's hosts and the ``host`` and
+``hostaddr`` query values, each a comma-separated list (libpq and asyncpg honour
+all of them). A DSN with any of them on the prod host is refused unless
+``--allow-prod-readonly`` is passed. With no prod host named, any host that is
+not loopback (``localhost``, ``127.0.0.0/8``, ``::1``) or a Unix-socket
+directory might be prod, so it is refused too unless ``--allow-prod-readonly``
+is passed.
 
 Usage (from the repo root):
   python scripts/diag/sa_replay.py --dsn postgresql://USER:PW@localhost:5433/CLONE_DB \\
@@ -115,7 +119,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 from uuid import UUID
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -710,26 +714,52 @@ def _is_loopback(host: str) -> bool:
         return False
 
 
+def _host_of(part: str) -> str:
+    """One entry of a host list, without its port. A Unix-socket directory
+    (it starts with ``/``, percent-encoded in an authority) is kept as is."""
+    part = unquote(part).strip()
+    if part.startswith("/"):
+        return part
+    if part.startswith("["):
+        part = part[: part.find("]") + 1] if "]" in part else part
+    elif part.count(":") == 1:
+        part = part.split(":")[0]
+    return _norm_host(part)  # a bare name, or an unbracketed IPv6 address
+
+
+def _dsn_hosts(dsn: str) -> list[str]:
+    """Every host the DSN can connect to: the authority's comma-separated hosts,
+    then the ``host`` and ``hostaddr`` query values, also comma-separated."""
+    parts = urlsplit(dsn)
+    values = [parts.netloc.rpartition("@")[2]]
+    query = parse_qs(parts.query, keep_blank_values=True)
+    values += query.get("host", []) + query.get("hostaddr", [])
+    hosts = [_host_of(p) for v in values for p in v.split(",")]
+    return [h for h in hosts if h]
+
+
 def check_dsn_host(dsn: str, allow_prod: bool, prod_host: str | None = None) -> None:
-    """Exit unless the DSN's host is safe to read without ``allow_prod``.
+    """Exit unless every host the DSN can connect to is safe to read without
+    ``allow_prod``.
 
     The prod hosts are ``prod_host`` (``--prod-host``) and ``$PROD_HOST``. With
-    neither set, every host but loopback is treated as possibly prod (fail closed),
-    and so is a DSN whose host cannot be read.
+    neither set, every host but loopback and a Unix socket is treated as possibly
+    prod (fail closed), and so is a DSN whose host cannot be read.
     """
     if allow_prod:
         return
-    host = _norm_host(urlsplit(dsn).hostname)
+    hosts = _dsn_hosts(dsn)
     prod = {_norm_host(h) for h in (prod_host, os.environ.get("PROD_HOST")) if h and h.strip()}
-    if not host:
+    if not hosts:
         raise SystemExit("cannot read the DSN's host: pass --allow-prod-readonly to proceed")
-    if host in prod:
-        raise SystemExit(f"refusing the prod host {host}: replay a clone, or pass --allow-prod-readonly")
-    if not prod and not _is_loopback(host):
-        raise SystemExit(
-            f"no prod host named (PROD_HOST or --prod-host), so the remote host {host} may be prod: "
-            "name the prod host, or pass --allow-prod-readonly"
-        )
+    for host in hosts:
+        if host in prod:
+            raise SystemExit(f"refusing the prod host {host}: replay a clone, or pass --allow-prod-readonly")
+        if not prod and not (host.startswith("/") or _is_loopback(host)):
+            raise SystemExit(
+                f"no prod host named (PROD_HOST or --prod-host), so the remote host {host} may be prod: "
+                "name the prod host, or pass --allow-prod-readonly"
+            )
 
 
 class _Embedder(Protocol):

@@ -97,9 +97,10 @@ database, once per arm. Every arm is built on the A2 arm's resolved config, read
 by named keys only, with the developer's own `.env` and `NOUS_*` variables kept out. Per arm it
 reports rows above the floor, Jaccard@20 against the baseline arm, hub share (rows whose winning
 path leaves a node of degree >= 50) and latency p50/p95. Connections are read-only. The script
-refuses, unless `--allow-prod-readonly` is passed:
-- a DSN on the prod host, which `PROD_HOST` or `--prod-host` names;
-- when neither is set, any host that is not loopback.
+refuses, unless `--allow-prod-readonly` is passed, a DSN with any host it can connect to (the
+authority's hosts and the `host` and `hostaddr` query values, each comma-separated) that is:
+- the prod host, which `PROD_HOST` or `--prod-host` names;
+- when neither is set, not loopback and not a Unix-socket directory.
 
 Limitations, written into every report:
 - `expansions` only holds winning seeds, so replayed seed sets are a subset of the live ones.

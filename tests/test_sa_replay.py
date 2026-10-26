@@ -654,6 +654,43 @@ def test_loopback_passes_without_prod_host(monkeypatch):
         check_dsn_host(f"postgresql://u:p@{host}:5433/clone", allow_prod=False)
 
 
+def test_guard_checks_query_string_hosts(monkeypatch):
+    """libpq and asyncpg connect to ``?host=`` / ``?hostaddr=`` values, so the
+    guard checks them as well as the authority (the Codex example)."""
+    monkeypatch.setenv("PROD_HOST", "prod.example")
+    for dsn in (
+        "postgresql://u:p@localhost/clone?host=prod.example:5432",
+        "postgresql://u:p@localhost/clone?host=localhost,PROD.example",
+        "postgresql://u:p@localhost/clone?hostaddr=prod.example",
+    ):
+        with pytest.raises(SystemExit, match="prod.example"):
+            check_dsn_host(dsn, allow_prod=False)
+        check_dsn_host(dsn, allow_prod=True)
+    check_dsn_host("postgresql://u:p@localhost/clone?host=replica.example", allow_prod=False)
+
+
+def test_guard_checks_every_authority_host(monkeypatch):
+    monkeypatch.setenv("PROD_HOST", "prod.example")
+    with pytest.raises(SystemExit, match="prod.example"):
+        check_dsn_host("postgresql://u:p@localhost:5433,prod.example:5432/clone", allow_prod=False)
+    monkeypatch.delenv("PROD_HOST")
+    with pytest.raises(SystemExit, match="replica.example"):
+        check_dsn_host("postgresql://u:p@127.0.0.1:5433,replica.example/clone", allow_prod=False)
+
+
+def test_guard_loopback_and_socket_query_hosts_pass(monkeypatch):
+    monkeypatch.delenv("PROD_HOST", raising=False)
+    for dsn in (
+        "postgresql://u:p@localhost/clone?host=127.0.0.1",
+        "postgresql://u:p@localhost/clone?host=127.0.0.1:5433,[::1]:5434",
+        "postgresql://u:p@/clone?host=/var/run/postgresql",
+        "postgresql://u:p@%2Fvar%2Frun%2Fpostgresql/clone",
+    ):
+        check_dsn_host(dsn, allow_prod=False)
+    with pytest.raises(SystemExit, match="replica.example"):
+        check_dsn_host("postgresql://u:p@localhost/clone?host=127.0.0.1,replica.example", allow_prod=False)
+
+
 class _CountingEmbedder:
     def __init__(self) -> None:
         self.calls: list[str] = []
