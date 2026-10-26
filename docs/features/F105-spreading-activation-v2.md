@@ -6,7 +6,7 @@ replay used as the gate (`scripts/diag/sa_replay.py`, Task 1), which changes no 
 fan normalisation (Task 3), off by default (`NOUS_SPREADING_FAN_NORMALISATION_ENABLED`);
 associative edges at a reduced weight (Task 4), off by default
 (`NOUS_SPREADING_ASSOCIATIVE_EDGES_ENABLED`); and a query-conditioned gate after the CTE (Task 5),
-off by default (`NOUS_SPREADING_QUERY_GATE_ENABLED`). The Task 3 and 4 offline gates passed; no
+off by default (`NOUS_SPREADING_QUERY_GATE_ENABLED`). The Task 3, 4 and 5 offline gates passed; no
 MAB arm has run yet.
 
 **Builds on:** [F022 Graph-Augmented Recall](F022-graph-augmented-recall.md) (the density-gated
@@ -27,9 +27,12 @@ From MAB replays under the prod config with SA forced on (2026-10-25/26):
 - Low-ranked SA rows still reach the prompt: `recall_deep` is exempt from SmartCompress and delivers
   a median of about 76 items whatever its `limit`. SA rows are rendered, just low-ranked and
   unbounded, so a ranking change reorders them; it does not decide which rows get in.
-- Conflict resolution (CR): SA returns 0 rendered rows, because that graph is mostly `co_occurred`
-  edges, which the CTE does not traverse. Under `auto`, `compute_graph_density` excludes the same
-  edges, so a CR-like graph stays under the 3.0 density gate and SA never runs there.
+- Conflict resolution (CR): SA returns 0 rendered rows. The plan put this down to a graph made mostly
+  of `co_occurred` edges, which the CTE does not traverse. Task 4 measured otherwise on the A2 clone:
+  the CR graphs are mostly chunk-to-chunk `related_to` edges, plus a small `co_occurred` clique
+  among each agent's few facts, where the fact seeds start. `compute_graph_density` gives 2.2 to 2.7
+  on the CR agents whether or not associative edges count, so under `auto` they stay under the 3.0
+  density gate and SA does not run there, for a reason other than associative edges (Task 4 below).
 - Prod resolves SA on through `auto` (density 3.86 > gate 3.0); `spreading_score_depth1_parity` is
   false.
 
@@ -295,3 +298,61 @@ spreading into the 1-hop fallback.
 **Over-fetch.** The CTE's 40-row window (`_SPREADING_OVERFETCH_LIMIT`) is cut by raw activation
 before the gate runs. The gate can only lower or reorder rows inside that window; it cannot bring in
 a row the window left out. That is left as is.
+
+**Offline gate (A2 clone, 2026-10-26).** `sa_replay.py --embed-queries`, baseline arm under the A2
+base config. Queries are embedded with the base config's model, `text-embedding-3-large` at 1536
+dimensions. Re-embedding 3 stored chunks and 3 stored facts with it gave a cosine of 1.0 against
+their stored vectors, so queries and nodes share one space. The primary window is Tasks 1 and 3's: 462
+retrievals from recorded seeds, 17 agents. It has 4,524 rows above the floor (3,982 chunks, 510
+facts, 32 procedures), counted over the CTE window before the result cap, as in Tasks 1 to 4. Every
+row and every one of the 831 seeds has an embedding, so the neutral case never fires here.
+
+| decile | 0 | 10 | 20 | 30 | 40 | 50 | 60 | 70 | 80 | 90 | 100 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `cos(node, q)`, 4,524 rows | -0.050 | 0.061 | 0.093 | 0.122 | 0.156 | 0.196 | 0.242 | 0.283 | 0.325 | 0.372 | 0.579 |
+| `cos(seed, q)`, 831 seeds | -0.002 | 0.089 | 0.113 | 0.134 | 0.156 | 0.186 | 0.217 | 0.259 | 0.296 | 0.356 | 0.608 |
+| `seed_relative` factor | 0.0 | 0.314 | 0.461 | 0.576 | 0.680 | 0.765 | 0.844 | 0.926 | 1.0 | 1.0 | 1.0 |
+
+The parameters come from these histograms:
+- `s_min` is the median seed cosine, 0.1859, so 0.19. It is now the setting's default.
+- Arm B's anchors are `q_lo` = the 10th percentile of the node cosines, 0.0605, so 0.06, and `q_hi` =
+  the median seed cosine, 0.19.
+
+These values hold for this embedding model only; another model needs its own measurement. Under
+`seed_relative`, 22.6% of rows keep factor 1 (at least as relevant as their seed) and 1.1% get 0.
+
+The pruned share is also given per tercile of each row's winning-seed cosine. The terciles are cut at
+0.155 and 0.285, giving 1,508, 1,510 and 1,506 rows.
+
+| mode | rows above floor, before / after | pruned | pruned per seed-cosine tercile, low / middle / high | retrievals keeping a row | mean `cos(node, q)`, kept / pruned |
+|---|---|---|---|---|---|
+| `seed_relative` (s_min 0.19) | 4,524 / 3,236 | 28.5% | 50.7% / 17.0% / 17.7% | 441 of 462 | 0.249 / 0.105 |
+| `quantile` (0.06, 0.19) | 4,524 / 3,140 | 30.6% | 68.8% / 20.8% / 2.2% | 424 | 0.267 / 0.075 |
+| `raw` | 4,524 / 311 | 93.1% | 100% / 96.4% / 82.9% | 135 | 0.393 / 0.194 |
+
+Against the pre-registered windows:
+- `seed_relative` passes. It prunes 28.5% (window 10-40%). Every tercile is inside 5-70% and none is
+  above 60%. Kept rows have the higher mean cosine.
+- `quantile` passes. It prunes 30.6% (window 20-60%), and kept rows have the higher mean cosine. Its
+  tercile split would fail the rule the plan sets for `seed_relative`: it gates on the node's
+  absolute cosine, so it prunes almost only the rows of weak seeds.
+- `raw` prunes 93.1%, above 60% as expected, which is why it is not the default.
+
+**Live-shaped check.** The same 17 agents were also replayed with `--seeds-from candidates`, which
+Task 4 showed reproduces the live SA rows. That gives 786 retrievals that attempted spreading, 462 of
+them with rows above the floor: 3,570 rows (3,327 chunks) and 2,356 seeds (23 of them decisions).
+Under the primary's parameters:
+- `seed_relative` prunes 34.2% (terciles 57.1% / 22.9% / 22.2%), with kept rows at mean cosine 0.252
+  and pruned rows at 0.107;
+- `quantile` prunes 34.3% (73.0% / 26.6% / 2.8%);
+- `raw` prunes 95.9%.
+
+This replay's own median seed cosine is lower, 0.146. It counts every live seed, including those
+of retrievals where spreading found nothing, while the expansions record only winning seeds. With `s_min` 0.15, `seed_relative` prunes 28.9% (43.1% /
+21.0% / 22.2%). Both readings pass the `seed_relative` windows. At the primary's parameters, though,
+the low tercile (57.1%) is close to the 60% mark at which the plan says a gate must be re-examined.
+
+**MAB arms** (not run yet): G, `NOUS_SPREADING_QUERY_GATE_ENABLED=true` (`seed_relative`, `s_min`
+0.19 by default); G-B, also `NOUS_SPREADING_QUERY_GATE_MODE=quantile`,
+`NOUS_SPREADING_QUERY_GATE_Q_LO=0.06` and `NOUS_SPREADING_QUERY_GATE_Q_HI=0.19`. Pre-registered sign:
+SA rendered characters fall, and SA-only-gold deliveries stay at 6 of 8 or more.
