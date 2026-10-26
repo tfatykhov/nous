@@ -26,6 +26,12 @@ Two sets, because the correct exclusion depends on consumer PURPOSE:
   *lineage* or *negative* edges as connectivity. ``co_occurred`` / ``co_mention``
   ARE legitimate associative connectivity for retrieval, so they are NOT excluded
   there — changing that is a live ranking decision (deferred, eval-gated).
+
+F105 Task 4 gives the spreading TRAVERSAL its own predicate,
+``spreading_exclusion_sql``. By default it is the auto-behavior one; behind
+``spreading_associative_edges_enabled`` it admits the associative edges and keeps
+refusing lineage, negative and temporal ones. The density gate, orphan detection
+and cluster discovery keep ``autobehavior_exclusion_sql`` whatever that flag says.
 """
 
 from __future__ import annotations
@@ -59,6 +65,35 @@ def autobehavior_exclusion_sql(col_prefix: str = "") -> str:
         f"{p}relation NOT IN ({rels}) "
         f"AND ({p}extraction_method IS NULL OR {p}extraction_method NOT IN ({methods}))"
     )
+
+
+# --- spreading traversal (F105 Task 4) ---
+# Never traversed, whatever the associative flag says (report §7: lineage,
+# negative and temporal edges are not associative connectivity). The rest of
+# AUTOBEHAVIOR_EXCLUDED_RELATIONS, plus AUTOBEHAVIOR_EXCLUDED_METHODS, is the
+# associative set that associative_edge_sql matches.
+SPREADING_ALWAYS_EXCLUDED_RELATIONS: frozenset[str] = frozenset(
+    {"supersedes", "contradicts", "happened_before"}
+)
+
+
+def spreading_exclusion_sql(col_prefix: str = "", *, allow_associative: bool = False) -> str:
+    """SQL boolean fragment for the edges spreading activation may traverse.
+
+    ``allow_associative=False`` returns exactly :func:`autobehavior_exclusion_sql`.
+    ``True`` excludes only :data:`SPREADING_ALWAYS_EXCLUDED_RELATIONS`, so
+    ``co_occurred`` and ``co_mention`` edges become traversable."""
+    if not allow_associative:
+        return autobehavior_exclusion_sql(col_prefix)
+    return f"{col_prefix}relation NOT IN ({_sql_list(SPREADING_ALWAYS_EXCLUDED_RELATIONS)})"
+
+
+def associative_edge_sql(col_prefix: str = "") -> str:
+    """SQL boolean fragment, true for an associative (builder co-occurrence) edge:
+    relation ``co_occurred``, or extraction method ``co_mention`` (whose relation
+    is ``related_to``)."""
+    p = col_prefix
+    return f"({p}relation = 'co_occurred' OR {p}extraction_method = 'co_mention')"
 
 
 # --- episode lifecycle vs deletion (2026-07-12 F053 audit) ---

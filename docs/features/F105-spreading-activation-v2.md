@@ -155,3 +155,32 @@ negligible.
 **MAB arm F** (`NOUS_SPREADING_FAN_NORMALISATION_ENABLED=true`, defaults): not run yet.
 Pre-registered sign: the SA share of rendered characters falls (fewer rows clear the 0.1 floor), and
 accuracy stays within 1 question.
+
+## Associative edges at a reduced weight (Task 4)
+
+Settings: `NOUS_SPREADING_ASSOCIATIVE_EDGES_ENABLED` (default `false`) and
+`NOUS_SPREADING_ASSOCIATIVE_WEIGHT_MULT` (default 0.5, bounded `(0, 1]`); see
+[environment variables](../reference/environment-variables.md).
+
+Associative edges are those with relation `co_occurred`, or extraction method `co_mention`
+(relation `related_to`). The traversal used to refuse them through the same predicate as the density
+gate. Task 4 gives the traversal its own predicate, `graph_constants.spreading_exclusion_sql`. With
+the flag off it returns exactly `autobehavior_exclusion_sql`, so the statement is byte-identical to
+before. With the flag on it excludes only `supersedes`, `contradicts` and `happened_before`
+(`SPREADING_ALWAYS_EXCLUDED_RELATIONS`, report §7), and each hop over an associative edge is
+multiplied by the setting (`CASE WHEN <associative_edge_sql> THEN :assoc_mult ELSE 1.0 END`). The
+multiplier is `<= 1`, so the MAX invariant `activation <= seed_score` holds. At the defaults, seed 0.8
+over a 0.9 `co_mention` edge gives `0.8 x 0.9 x 0.5 (decay) x 0.5 = 0.18`, and over a 0.8
+`co_occurred` edge it gives 0.16. A test pins the partition: every relation in
+`AUTOBEHAVIOR_EXCLUDED_RELATIONS` is either always excluded or associative, so a relation added to
+the auto-behavior set alone fails a test rather than silently becoming traversable or not.
+
+The fan degree count (Task 3) uses the same predicate as the traversal, so with both flags on, a
+node's associative edges count toward its degree.
+
+`compute_graph_density`, orphan detection and cluster discovery keep `autobehavior_exclusion_sql`
+and read no settings. **Consequence:** under `auto` (prod's mode), `compute_graph_density` does not
+count `co_occurred` or `co_mention` edges. A graph made mostly of them therefore stays under the 3.0
+gate, spreading does not run, and this flag is inert there unless `NOUS_SPREADING_ACTIVATION_ENABLED`
+is `true`. Making the flag matter on such graphs needs a separate decision about the density gate.
+That is out of scope here, because the gate is deliberately builder-flag-proof.

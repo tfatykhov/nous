@@ -12,7 +12,11 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nous.brain.graph_constants import autobehavior_exclusion_sql
+from nous.brain.graph_constants import (
+    associative_edge_sql,
+    autobehavior_exclusion_sql,
+    spreading_exclusion_sql,
+)
 from nous.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -152,7 +156,8 @@ async def spreading_activation_search(
         merge.) The per-hop weight term is clamped to 1.0 in the CTE:
         ``brain.graph_edges.weight`` has no DB CHECK, so the bound is
         enforced here rather than assumed of every writer. F105's fan factor
-        is ``<= 1`` too, so the bound holds with fan normalisation on.
+        is ``<= 1`` too, so the bound holds with fan normalisation on, and so
+        is the associative-edge multiplier (Task 4, ``le=1.0``).
 
         A8: ``depth`` is the hop count of the WINNING path — the one whose
         activation survived the MAX — not ``MIN(depth)``. Those differ when a
@@ -242,15 +247,28 @@ async def spreading_activation_search(
         params[f"score_{i}"] = float(score)
 
     values_clause = ", ".join(values_parts)
-    # 2b: same auto-behavior exclusion as the density gate (graph_constants).
-    # F105: one predicate for the traversal and the fan degree count, so a
-    # change to what the traversal may cross changes both.
-    edge_filter = autobehavior_exclusion_sql
+    # 2b: by default the same auto-behavior exclusion as the density gate
+    # (graph_constants). F105: one predicate for the traversal and the fan
+    # degree count, so a change to what the traversal may cross changes both.
+    # Task 4's flag admits associative edges to both; the density gate keeps
+    # its own predicate. (The SQL comment at the traversal's WHERE describes the
+    # default and stays as is: the flags-off text must not change.)
+    allow_associative = bool(getattr(settings, "spreading_associative_edges_enabled", False))
+
+    def edge_filter(col_prefix: str) -> str:
+        return spreading_exclusion_sql(col_prefix, allow_associative=allow_associative)
+
     excl_e = edge_filter("e.")
 
     # F105 fragments: each is "" while its option is off, so the SQL is then
     # byte-identical to before (tests/test_spreading_sql_identity.py).
-    fan_join = fan_mult = ""
+    fan_join = fan_mult = assoc_mult = ""
+    if allow_associative:
+        params["assoc_mult"] = float(getattr(settings, "spreading_associative_weight_mult", 0.5))
+        assoc_mult = (
+            f"\n                    * CASE WHEN {associative_edge_sql('e.')}"
+            " THEN CAST(:assoc_mult AS FLOAT) ELSE 1.0 END"
+        )
     if getattr(settings, "spreading_fan_normalisation_enabled", False):
         params["fan_free"] = int(getattr(settings, "spreading_fan_free_degree", 10))
         params["fan_exp"] = float(getattr(settings, "spreading_fan_exponent", 0.5))
@@ -279,7 +297,7 @@ async def spreading_activation_search(
                 a.activation
                     * CASE WHEN COALESCE(e.weight, 1.0) > 1.0 THEN 1.0
                            ELSE COALESCE(e.weight, 1.0) END
-                    * :decay{fan_mult},
+                    * :decay{fan_mult}{assoc_mult},
                 a.depth + 1,
                 a.seed_id{step_parent}
             FROM activation a{fan_join}

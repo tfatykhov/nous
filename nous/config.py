@@ -1496,6 +1496,27 @@ class Settings(BaseSettings):
             "with free degree 1 is SYNAPSE's plain 1/d."
         ),
     )
+    # F105 Task 4: associative edges in the traversal. Off reproduces today's
+    # SQL byte for byte. compute_graph_density does not read it: the auto-mode
+    # density gate stays builder-flag-proof.
+    spreading_associative_edges_enabled: bool = Field(
+        default=False,
+        description=(
+            "F105: when true, spreading activation also traverses associative "
+            "edges (relation co_occurred, or extraction_method co_mention), each "
+            "such hop multiplied by spreading_associative_weight_mult. "
+            "supersedes, contradicts and happened_before stay excluded."
+        ),
+    )
+    spreading_associative_weight_mult: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "F105: multiplier on a hop over an associative edge. le=1.0 keeps the "
+            "MAX bound activation <= seed_score."
+        ),
+    )
 
     # F040: Graph densification — backfill
     # F044 tinyHippo-Lite v1 — STC state machine (telemetry-only slice).
