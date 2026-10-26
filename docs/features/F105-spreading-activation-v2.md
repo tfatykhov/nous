@@ -415,12 +415,27 @@ sees: every gold row was delivered, and the ranks agree.
 | qa2 no59 | 4 / 4 | 4 / 4 |
 | LME 9d25d4e0 | gold not delivered by SA | 4 / 8 (tied with one other row) |
 
-At `max_rows` 5 with no cutline the gate passes: A2 keeps the gold for 3 of 4 questions and A2r for
-4 of 4 (gate: at least 3 of 4). At `max_rows` 4 it fails, because no13 drops out in both arms and A2
-is left at 2 of 4. The margin is thin in a second way: the three qa2 questions are carried by the
-same gold chunk of one agent, so the gate rests on two distinct rows. With a cutline of 20, all four
-fail. In these retrievals the 20th-best non-SA score is about 0.68 to 0.81, and the gold rows score
-0.085 to 0.105.
+Under the union rule each question is read from an arm where SA delivered its gold: the qa2 three
+from A2 (A2r gives the same ranks), LME 9d25d4e0 from A2r, since in A2 its gold did not come through
+SA. Per arm:
+
+| arm | qa2 no13 | qa2 no38 | qa2 no59 | LME 9d25d4e0 | verdict |
+|---|---|---|---|---|---|
+| B5 (`max_rows` 5, no cutline) | kept (5 <= 5) | kept (4) | kept (4) | kept (4) | 4 of 4, pass |
+| B5C (`max_rows` 5, cutline rank 20) | cut: 0.091 < 0.729 | cut: 0.095 < 0.676 | cut: 0.085 < 0.729 | cut: 0.105 < 0.813 | 0 of 4, fail |
+
+The B5C cells give the gold row's score against that retrieval's 20th-best non-SA score. The gate
+asks for at least 3 of 4. B5 passes with every gold inside the cap, and B5C cuts all four, as its
+pre-registered prediction says. The margin is thin:
+- At `max_rows` 4, no13 is cut, since its gold is the 5th of 5 SA rows in both arms. That leaves 3 of
+  4 under the union, exactly the threshold, and 2 of 4 in A2 alone.
+- LME's gold survives a cap of 4 only on its tie. It shares rank 4 with another row and comes first
+  in the list, so the stable sort keeps it.
+- At `max_rows` 3, all four are cut.
+- The three qa2 questions are carried by the same gold chunk of one agent, so the gate rests on two
+  distinct rows.
+
+B5C's cut is not close: the gold rows score 7 to 9 times below the cutline.
 
 **Context saving (estimate).** For each retrieval with SA rows, the rows kept are the top
 `max_rows` of its delivered SA rows by `edge_weight`. Characters are the content length of the
@@ -439,4 +454,5 @@ Counted per question instead (unique rows across a session's retrievals, the con
 comparisons), `max_rows` 5 gives -40% on A2 and -35% on A2r, and `max_rows` 4 gives -49% and -46%.
 At `max_rows` 5, all delivered characters fall by 7.0% on A2 and 6.7% on A2r. Against arm B5's
 pre-registered sign (SA rendered characters down at least 50% against A2), this estimate predicts a
-miss at `max_rows` 5. Getting to about 50% takes `max_rows` 4, which fails the gold gate above.
+miss at `max_rows` 5. Getting to about 50% takes `max_rows` 4 (-52% per retrieval, -49% per
+question), where the gold gate above passes only at its threshold, 3 of 4 under the union.
