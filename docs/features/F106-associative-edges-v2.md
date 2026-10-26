@@ -223,7 +223,8 @@ undone by the next cycle's maintenance, up to the per-cycle bound.
 The maintenance of both v2 builders also deletes consolidated (tinyHippo) edges, by design.
 Consolidation is earned by LTP, which counts co-retrieval, and an associative edge causes its own
 co-retrieval through Path A, so consolidation is not independent evidence that the edge is right. On
-the prod-sized copy (below), 242 of the 1,400 planned deletes were consolidated edges. Rows that
+the prod-sized copy (below), 242 of the 1,400 planned deletes were consolidated edges (163 of co-mention v2's 945 and 79 of
+co-occurrence v2's 455). Rows that
 recall had delivered through those edges were judged unrelated 57% of the time, against 51% for
 deleted edges that were not consolidated and 30% for consolidated edges that are kept.
 
