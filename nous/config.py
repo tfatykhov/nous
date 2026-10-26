@@ -1559,6 +1559,36 @@ class Settings(BaseSettings):
             "at 1536 dimensions); another embedding model needs its own value."
         ),
     )
+    # F105 Task 6: a budget on spreading rows in the merged recall list
+    # (retrieval_pipeline._apply_spreading_budget), after the F071 filter.
+    spreading_budget_enabled: bool = Field(
+        default=False,
+        description=(
+            "F105: when true, spreading rows in the merged recall list are bounded: "
+            "a row scoring below the cutline (the spreading_budget_cutline_rank-th "
+            "best non-spreading score) is dropped, then the spreading_budget_max_rows "
+            "best of the rest are kept. Non-spreading rows and the survivors' order "
+            "are untouched."
+        ),
+    )
+    spreading_budget_max_rows: int = Field(
+        default=5,
+        ge=0,
+        le=20,
+        description=(
+            "F105: how many spreading rows the budget keeps, by score. 20 is Stage 4's "
+            "own result cap, so le=20."
+        ),
+    )
+    spreading_budget_cutline_rank: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "F105: 0 = no cutline. Otherwise a spreading row must score at least the "
+            "score of this rank among the non-spreading rows; with fewer non-spreading "
+            "rows than this, there is no cutline."
+        ),
+    )
 
     # F040: Graph densification — backfill
     # F044 tinyHippo-Lite v1 — STC state machine (telemetry-only slice).

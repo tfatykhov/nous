@@ -5,9 +5,10 @@ today's behaviour exactly, and each is enabled only after its gates pass. Landed
 replay used as the gate (`scripts/diag/sa_replay.py`, Task 1), which changes no product behaviour;
 fan normalisation (Task 3), off by default (`NOUS_SPREADING_FAN_NORMALISATION_ENABLED`);
 associative edges at a reduced weight (Task 4), off by default
-(`NOUS_SPREADING_ASSOCIATIVE_EDGES_ENABLED`); and a query-conditioned gate after the CTE (Task 5),
-off by default (`NOUS_SPREADING_QUERY_GATE_ENABLED`). The Task 3, 4 and 5 offline gates passed; no
-MAB arm has run yet.
+(`NOUS_SPREADING_ASSOCIATIVE_EDGES_ENABLED`); a query-conditioned gate after the CTE (Task 5),
+off by default (`NOUS_SPREADING_QUERY_GATE_ENABLED`); and a budget on SA rows in the merged recall
+list (Task 6), off by default (`NOUS_SPREADING_BUDGET_ENABLED`). The Task 3, 4, 5 and 6 offline gates
+passed; no MAB arm has run yet.
 
 **Builds on:** [F022 Graph-Augmented Recall](F022-graph-augmented-recall.md) (the density-gated
 recursive CTE in `nous/brain/spreading_activation.py`) and F091 retrieval telemetry
@@ -365,3 +366,77 @@ fail the 70% tercile line under the live-shaped replay: its low tercile is prune
 line is set for `seed_relative`; G-B is run as the comparison arm. Pre-registered sign: SA rendered
 characters fall, and of the Task 0 SA-only-gold union (4 questions), the arm passes at 3 of 4 or
 more.
+
+## Budget for SA rows (Task 6)
+
+Settings: `NOUS_SPREADING_BUDGET_ENABLED` (default `false`), `NOUS_SPREADING_BUDGET_MAX_ROWS`
+(default 5, bounded `[0, 20]`) and `NOUS_SPREADING_BUDGET_CUTLINE_RANK` (default 0, no cutline); see
+[environment variables](../reference/environment-variables.md).
+
+**Why on the merged list.** Stage 4 caps spreading at 20 rows (`_SPREADING_RESULT_CAP`) before the
+merge, and `recall_deep` delivers the whole merged list: it has no `[:limit]` slice and is exempt
+from SmartCompress. A bound on how many SA rows reach the prompt therefore has to act on the merged
+list. The script path's `_apply_script_limit` slices the list again afterwards; the budget only frees
+slots there.
+
+**What it does.** `_apply_spreading_budget` in `retrieval_pipeline.py` runs in
+`run_recall_pipeline` after the `rerank_by_score` sort and the F071 filter, and before the F044
+recall-reactivation read. SA rows are those with `source == "spreading_activation"`.
+1. With a cutline rank k > 0, the cutline is the k-th best non-SA score, and there is none when the
+   list has fewer than k non-SA rows. An SA row strictly below it is dropped; one equal to it is
+   kept.
+2. Of the remaining SA rows, the `max_rows` best by score are kept. The sort is stable, so on a tie
+   the earlier row in the list is kept.
+
+Non-SA rows and the order of the survivors are untouched. The placement matters on both sides:
+after F071, so a row F071 removes takes no slot; before the reactivation read, so a cut row, which
+never reaches the model, is not reinforced as co-retrieved. The budget selects by score, so the sort
+before it does not change which rows survive. The pre-turn context path does not run Stage 4, so it
+has no SA rows (none in the A2 clone's 756 context retrievals).
+
+**Telemetry.** Each cut row gets the disposition `budget_truncated` at stage `spreading_budget`. The
+`spreading_activation` leg keeps `n_returned` as Stage 4 produced it and reports the cut in
+`n_dropped`. The count goes on the leg's existing summary call, which runs only when spreading was
+attempted, so the budget cannot create a leg on a retrieval where spreading did not run. The F091
+expansion rows are unchanged.
+
+**Offline gate (A2 and A2r clones, 2026-10-26).** For the Task 0 SA-only-gold union (qa2 no13,
+no38 and no59; LME 9d25d4e0), the benchmark operator exported each retrieval whose SA expansions
+carried the gold row, with the gold row's rank by `edge_weight` among that retrieval's SA
+expansions. `edge_weight` is the activation the pipeline used. With depth-1 parity off, an SA row
+scores activation x 0.7 in both arms, so the rank by `edge_weight` is the rank the budget uses. The
+ranks were re-checked against the SA rows each retrieval delivered, which are the rows the budget
+sees: every gold row was delivered, and the ranks agree.
+
+| question | A2: gold rank / SA rows | A2r: gold rank / SA rows |
+|---|---|---|
+| qa2 no13 | 5 / 5 | 5 / 5 |
+| qa2 no38 | 4 / 4 | 4 / 4 |
+| qa2 no59 | 4 / 4 | 4 / 4 |
+| LME 9d25d4e0 | gold not delivered by SA | 4 / 8 (tied with one other row) |
+
+At `max_rows` 5 with no cutline the gate passes: A2 keeps the gold for 3 of 4 questions and A2r for
+4 of 4 (gate: at least 3 of 4). At `max_rows` 4 it fails, because no13 drops out in both arms and A2
+is left at 2 of 4. The margin is thin in a second way: the three qa2 questions are carried by the
+same gold chunk of one agent, so the gate rests on two distinct rows. With a cutline of 20, all four
+fail. In these retrievals the 20th-best non-SA score is about 0.68 to 0.81, and the gold rows score
+0.085 to 0.105.
+
+**Context saving (estimate).** For each retrieval with SA rows, the rows kept are the top
+`max_rows` of its delivered SA rows by `edge_weight`. Characters are the content length of the
+delivered rows: fact and chunk content, episode summary, procedure and decision description. A2 has
+462 such retrievals, A2r 236.
+
+| `max_rows` | A2: SA rows per retrieval, median | A2: SA characters | A2: SA share of delivered characters | A2r: SA characters | A2r: SA share |
+|---|---|---|---|---|---|
+| off | 6 (mean 6.7) | - | 16.5% | - | 18.3% |
+| 8 | 6 | -23% | 13.3% | -16% | 15.9% |
+| 5 | 5 (mean 4.0) | -42% | 10.3% | -37% | 12.4% |
+| 4 | 4 | -52% | 8.7% | -47% | 10.6% |
+| 3 | 3 | -63% | 6.9% | -59% | 8.4% |
+
+Counted per question instead (unique rows across a session's retrievals, the convention of the arm
+comparisons), `max_rows` 5 gives -40% on A2 and -35% on A2r, and `max_rows` 4 gives -49% and -46%.
+At `max_rows` 5, all delivered characters fall by 7.0% on A2 and 6.7% on A2r. Against arm B5's
+pre-registered sign (SA rendered characters down at least 50% against A2), this estimate predicts a
+miss at `max_rows` 5. Getting to about 50% takes `max_rows` 4, which fails the gold gate above.

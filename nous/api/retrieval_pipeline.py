@@ -29,7 +29,7 @@ import time
 import weakref
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 from sqlalchemy import select
@@ -39,6 +39,7 @@ from nous.heart.keys import extract_entity_candidates, normalize_key
 from nous.heart.search import summarize_keyword_stats, with_keyword_stats
 from nous.observability.retrieval_trace import (
     BELOW_FLOOR,
+    BUDGET_TRUNCATED,
     DEDUPED,
     F071_EXCLUDED,
     FILTER_DROPPED,
@@ -719,6 +720,16 @@ async def run_recall_pipeline(
         ]
         excluded_in_context = before - len(results)
 
+    # F105 Task 6: bound the spreading rows. After F071, so a row F071 removed
+    # does not take a slot; before the reactivation write, so a cut row is not
+    # treated as co-retrieved. It selects by score, so the sort above does not
+    # change which rows survive. The cut is reported on the spreading leg below.
+    n_budget_cut: int | None = None
+    if getattr(settings, "spreading_budget_enabled", False):
+        before = len(results)
+        results = _apply_spreading_budget(results, settings, tr)
+        n_budget_cut = before - len(results)
+
     # F044 v1.1: record edges among the final co-retrieved set as STC recall
     # reactivations. Read-only here (one query); the ltp write is deferred to
     # the sleep flush, so the recall path stays write-free.
@@ -774,9 +785,13 @@ async def run_recall_pipeline(
     _n_spread = sum(
         1 for n in acc.graph_expanded if n.edge_relation == "spreading_activation"
     )
+    # `n_dropped` is the F105 budget's cut (None, left alone, with it off).
+    # Reported here rather than at the cut, so the budget cannot create a
+    # spreading leg on a retrieval where spreading never ran.
     if "spreading_activation" in _attempted:
         tr.leg("spreading_activation", attempted=True,
-               n_returned=_n_spread, counted_in="graph_expanded")
+               n_returned=_n_spread, n_dropped=n_budget_cut,
+               counted_in="graph_expanded")
     if "brain_graph" in _attempted:
         tr.leg("brain_graph", attempted=True,
                n_returned=len(acc.graph_expanded) - _n_spread,
@@ -1933,6 +1948,50 @@ async def _run_stages(
 # ---------------------------------------------------------------------------
 # Accumulator -> PipelineResult conversion
 # ---------------------------------------------------------------------------
+
+
+def _apply_spreading_budget(
+    results: list[PipelineResult], settings: "Settings", tr: Any
+) -> list[PipelineResult]:
+    """F105 Task 6: bound the spreading activation rows in the merged list.
+
+    Stage 4's ``_SPREADING_RESULT_CAP`` acts before the merge, and
+    ``recall_deep`` delivers the whole merged list (no ``[:limit]`` slice,
+    exempt from SmartCompress), so this is where the number of spreading rows
+    that reach the prompt can be bounded. Off (the default) returns ``results``
+    itself.
+
+    (1) With ``spreading_budget_cutline_rank`` k > 0, the cutline is the k-th
+    best non-spreading score (none when there are fewer than k such rows), and
+    a spreading row strictly below it is dropped. (2) Of the rest, the
+    ``spreading_budget_max_rows`` best by score are kept; the stable sort keeps
+    the earlier row on a tie. Every dropped row is recorded as
+    ``BUDGET_TRUNCATED``. Non-spreading rows and the relative order of the
+    survivors are untouched.
+    """
+    if not getattr(settings, "spreading_budget_enabled", False):
+        return results
+    max_rows = int(getattr(settings, "spreading_budget_max_rows", 5))
+    cutline_rank = int(getattr(settings, "spreading_budget_cutline_rank", 0))
+    sa_idx = [i for i, r in enumerate(results) if r.source == "spreading_activation"]
+    if cutline_rank > 0:
+        non_sa = sorted(
+            (r.score or 0.0 for r in results if r.source != "spreading_activation"),
+            reverse=True,
+        )
+        if len(non_sa) >= cutline_rank:
+            cutline = non_sa[cutline_rank - 1]
+            sa_idx = [i for i in sa_idx if (results[i].score or 0.0) >= cutline]
+    keep = set(
+        sorted(sa_idx, key=lambda i: results[i].score or 0.0, reverse=True)[:max_rows]
+    )
+    out: list[PipelineResult] = []
+    for i, r in enumerate(results):
+        if r.source == "spreading_activation" and i not in keep:
+            tr.drop(r.id, r.type, BUDGET_TRUNCATED, "spreading_budget")
+        else:
+            out.append(r)
+    return out
 
 
 def _heart_results_to_pipeline(
