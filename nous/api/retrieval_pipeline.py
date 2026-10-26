@@ -735,7 +735,7 @@ async def run_recall_pipeline(
         excluded_in_context = before - len(results)
 
     # F105 Task 6: bound the spreading rows. After F071, so a row F071 removed
-    # does not take a slot; before the reactivation write, so a cut row is not
+    # does not take a slot; before the reactivation read, so a cut row is not
     # treated as co-retrieved. It selects by score, so the sort above does not
     # change which rows survive. The cut is reported on the spreading leg below.
     n_budget_cut: int | None = None

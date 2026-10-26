@@ -8,7 +8,7 @@ Jaccard@20 against the baseline arm, hub share (by each row's via node, from
 resolved config (``--base-config``), read by named keys only. It is the offline
 gate of every later F105 task: a screen, not a measurement of answer quality.
 
-Expansion element keys, confirmed on the A2 clone (mab26_p_base) on 2026-10-26
+Expansion element keys, confirmed on the A2 clone on 2026-10-26
 with ``SELECT jsonb_pretty(e) FROM nous_system.retrieval_log r,
 jsonb_array_elements(r.expansions) e``: ``seed_id``, ``seed_type``,
 ``seed_score``, ``neighbor_id``, ``neighbor_type``, ``stage``, ``hop``,
@@ -87,7 +87,7 @@ that is not loopback (``localhost``, ``127.0.0.0/8``, ``::1``) might be prod, so
 it is refused too unless ``--allow-prod-readonly`` is passed.
 
 Usage (from the repo root):
-  python scripts/diag/sa_replay.py --dsn postgresql://USER:PW@localhost:5433/mab26_p_base \\
+  python scripts/diag/sa_replay.py --dsn postgresql://USER:PW@localhost:5433/CLONE_DB \\
       --agent all --since 2026-10-25T17:39:00Z --limit 300 \\
       --base-config PATH/TO/A2.env --arm baseline \\
       --arm 'deep=NOUS_SPREADING_ACTIVATION_MAX_DEPTH=3' --out report.json

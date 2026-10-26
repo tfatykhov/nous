@@ -68,7 +68,7 @@ def autobehavior_exclusion_sql(col_prefix: str = "") -> str:
 
 
 # --- spreading traversal (F105 Task 4) ---
-# Never traversed, whatever the associative flag says (report §7: lineage,
+# Never traversed, whatever the associative flag says (lineage,
 # negative and temporal edges are not associative connectivity). The rest of
 # AUTOBEHAVIOR_EXCLUDED_RELATIONS, plus AUTOBEHAVIOR_EXCLUDED_METHODS, is the
 # associative set that associative_edge_sql matches.
