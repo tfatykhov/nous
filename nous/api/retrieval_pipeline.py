@@ -2631,8 +2631,13 @@ def _f065_provenance_penalty(
         # ADDITIONAL hop is still discounted. Depth-1 reaches exact parity with
         # 1-hop; depth-2 keeps exactly one decay.
         #
-        # The bound MAX aggregation relies on survives: at depth 1 the result is
-        # `seed * w` with w clamped to 1.0 in the CTE, so score <= seed <= 1.
+        # The bound: under MAX aggregation the result is
+        # `seed * PROD(w) * decay^(depth-1)` with every w clamped to 1.0 in the
+        # CTE, so score <= seed <= 1 at any depth >= 1. F105 Task 7's `sat` and
+        # `noisy_or` (`spreading_aggregation`) combine several seeds on one
+        # node, so an activation can reach 1.0 and the ratio 1 / decay (2.0 at
+        # the default), above every direct hit: Plan 1.2's inflation. Hence the
+        # cap at 1.0, a no-op under MAX, so depth-1 parity stays exact.
         #
         # Measured counterfactual over 64 prod retrievals / 848 rendered
         # spreading rows: today and the earlier "just drop graph_recall_decay"
@@ -2682,7 +2687,7 @@ def _f065_provenance_penalty(
         ):
             sa_decay = float(getattr(settings, "spreading_activation_decay", 0.5))
             if sa_decay > 0.0:
-                return base_score / sa_decay
+                return min(1.0, base_score / sa_decay)
         return base_score * decay
     method = neighbor.extraction_method or "heuristic"
     penalty = settings.graph_inferred_edge_penalty if method == "inferred" else 1.0

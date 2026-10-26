@@ -14,6 +14,7 @@ and every search passes ``limit=100``: the CTE's final ORDER BY has no tie key.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
@@ -22,6 +23,8 @@ import pytest
 from pydantic import ValidationError
 from spreading_v2_helpers import SNAPSHOT, insert_edge, render
 
+from nous.api.retrieval_pipeline import _graph_expanded_to_pipeline, _score_memory_neighbor
+from nous.brain.schemas import NeighborResult
 from nous.brain.spreading_activation import spreading_activation_search
 from nous.config import Settings
 
@@ -62,6 +65,24 @@ async def _act(session, agent: str, seeds, settings, **kwargs: Any) -> dict[UUID
     """``node -> (activation, depth)`` over the whole (limit=100) result."""
     rows = await spreading_activation_search(session, agent, seeds, settings, limit=100, **kwargs)
     return {r[0]: (r[2], r[3]) for r in rows}
+
+
+def _parity(**over: Any) -> Settings:
+    """Depth-1 parity on, under the policy that defines it (prod's): seed-score
+    branch on, no inferred-edge penalty."""
+    return _settings(
+        spreading_score_depth1_parity=True, graph_neighbor_seed_score_enabled=True,
+        graph_inferred_edge_penalty=1.0, **over,
+    )
+
+
+def _score(node: UUID, activation: float, settings: Settings) -> float:
+    """The score the pipeline gives a spreading row (``_graph_expanded_to_pipeline``)."""
+    row = NeighborResult(
+        id=node, node_type="decision", description="n", edge_relation="spreading_activation",
+        edge_weight=activation, created_at=datetime.now(UTC),
+    )
+    return _graph_expanded_to_pipeline([row], settings)[0].score
 
 
 def test_aggregation_setting(monkeypatch):
@@ -258,3 +279,48 @@ async def test_aggregation_composes_with_fan_and_assoc(session):
         leaves = [n for n in act if n not in {s1, s2, x}]
         assert len(leaves) == 40
         assert all(act[n] == (pytest.approx(by_max[n][0]), 1) for n in leaves), "one seed reaches a leaf"
+
+
+@pytest.mark.postgres_only
+async def test_parity_score_is_capped_at_one(session):
+    """Under depth-1 parity a spreading row scores activation / decay. Two seeds
+    at 1.0 give X 1.0 under sat (0.75 under noisy-OR), which would score 2.0
+    (1.5), above every direct hit. The cap holds the score at 1.0."""
+    agent = _agent()
+    x = uuid4()
+    seeds = [(uuid4(), "decision", 1.0), (uuid4(), "decision", 1.0)]
+    for sid, _, _ in seeds:
+        await insert_edge(session, agent, sid, x)
+    raw = {"sat": 1.0, "noisy_or": 1 - 0.5 * 0.5}
+    for mode in COMBINING:
+        act = await _act(session, agent, seeds, _parity(spreading_aggregation=mode))
+        assert act[x] == (pytest.approx(raw[mode]), 1), mode
+        assert _score(x, act[x][0], _parity()) == pytest.approx(1.0), mode
+
+
+@pytest.mark.postgres_only
+async def test_parity_cap_is_a_no_op_under_max(session):
+    """Under max a depth-1 row's parity score is seed x w <= 1, so the cap never
+    binds. X (two seeds at 1.0, w 1.0) has activation 0.5 and scores 0.5 / 0.5 =
+    1.0; Y (seed 0.8, w 0.9) has 0.36 and scores 0.72, the 1-hop leg's score for
+    the same seed and edge."""
+    agent = _agent()
+    x, y, s = uuid4(), uuid4(), uuid4()
+    seeds = [(uuid4(), "decision", 1.0), (uuid4(), "decision", 1.0)]
+    for sid, _, _ in seeds:
+        await insert_edge(session, agent, sid, x)
+    await insert_edge(session, agent, s, y, weight=0.9)
+    settings = _parity()
+
+    act = await _act(session, agent, seeds, settings)
+    assert act[x] == (pytest.approx(0.5), 1)
+    assert _score(x, act[x][0], settings) == pytest.approx(0.5 / 0.5)
+
+    act = await _act(session, agent, [(s, "decision", 0.8)], settings)
+    assert act[y] == (pytest.approx(0.8 * 0.9 * 0.5), 1)
+    one_hop = NeighborResult(
+        id=y, node_type="decision", description="n", edge_relation="related_to", edge_weight=0.9,
+        created_at=datetime.now(UTC), extraction_method="inferred", seed_score=0.8,
+    )
+    assert _score(y, act[y][0], settings) == pytest.approx(0.36 / 0.5)
+    assert _score(y, act[y][0], settings) == pytest.approx(_score_memory_neighbor(one_hop, settings))

@@ -488,9 +488,12 @@ before (the snapshot test).
 return 1.0 in a double. The invariant `activation <= winning seed's score`, which Tasks 3 and 4 keep,
 now holds per path but not per row: two seeds at 0.3 can give a node 0.6.
 
-**Parity caveat.** With `NOUS_SPREADING_SCORE_DEPTH1_PARITY` on, a row scores `activation / decay`.
-Under `sat` or `noisy_or` a multi-seed row can then score above 1, up to `1 / decay`. Parity is off in
-prod and in A2.
+**Parity cap.** With `NOUS_SPREADING_SCORE_DEPTH1_PARITY` on, a row scores `activation / decay`. Under
+`sat` or `noisy_or` a multi-seed row's activation can exceed the decay, which would score it up to
+`1 / decay` (2.0 at the default), above every direct hit. So under parity, aggregated scores are capped
+at 1 (`min(1, activation / decay)` in `retrieval_pipeline._f065_provenance_penalty`). Under `max` the
+cap never binds, since the ratio is at most the seed's score, so depth-1 parity with the 1-hop leg
+stays exact. Parity is off in prod and in A2.
 
 **Offline gate (A2 clone, 2026-10-26).** The definitions, the signs forced by construction and rough
 sizes were pre-registered in the task report before the replay. The plain replay
