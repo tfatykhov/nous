@@ -1737,19 +1737,22 @@ class Brain:
         # weight (graph_constants.is_associative) in BOTH orderings below — which
         # edge represents a neighbour, and which neighbours fill the LIMIT — so
         # 0.9 co_mention edges stop taking every slot before a cosine edge is
-        # read. The returned edge_weight stays raw. At 1.0 no CASE term is
-        # added, so the SQL is exactly today's.
+        # read. The returned edge_weight stays raw. The CASE multiplies inside the
+        # COALESCE, so a NULL weight still sorts last (-1) whatever its edge. At
+        # 1.0 no CASE term is added, so the SQL is exactly today's.
         _assoc_mult = float(getattr(self.settings, "graph_associative_edge_multiplier", 1.0))
 
         def _order_weight(cols: Any) -> ColumnElement[Any]:
-            w = func.coalesce(cols.edge_weight, -1.0)
-            if _assoc_mult != 1.0:
-                w = w * case(
+            if _assoc_mult == 1.0:
+                return func.coalesce(cols.edge_weight, -1.0)
+            return func.coalesce(
+                cols.edge_weight * case(
                     (or_(cols.edge_relation == "co_occurred",
                          cols.extraction_method == "co_mention"), _assoc_mult),
                     else_=1.0,
-                )
-            return w
+                ),
+                -1.0,
+            )
 
         _w = _order_weight(combined.c)
         ranked = (

@@ -100,7 +100,7 @@ class _Embedder:
 @pytest_asyncio.fixture
 async def world(db):
     agent = f"f106-{uuid4().hex[:8]}"
-    settings = Settings().model_copy(update={"agent_id": agent})
+    settings = Settings(_env_file=None).model_copy(update={"agent_id": agent})
     w = SimpleNamespace(agent_id=agent, db=db, brain=Brain(database=db, settings=settings), axis=2)
     yield w
     w.brain.embeddings = None
@@ -111,9 +111,11 @@ async def world(db):
         await s.commit()
 
 
-async def _fact(session, agent: str, cos_q: float | None, axis: int, content: str = "f106 fact") -> UUID:
+async def _fact(
+    session, agent: str, cos_q: float | None, axis: int, content: str = "f106 fact", fid: UUID | None = None
+) -> UUID:
     """An active fact; ``cos_q=None`` leaves its embedding NULL."""
-    fid = uuid4()
+    fid = fid or uuid4()
     await session.execute(
         text("INSERT INTO heart.facts (id, agent_id, content, active) VALUES (:id, :a, :c, true)"),
         {"id": fid, "a": agent, "c": f"{content} {fid}"},
@@ -131,7 +133,7 @@ async def _edge(
     agent: str,
     src: UUID,
     tgt: UUID,
-    weight: float,
+    weight: float | None,
     relation: str = "related_to",
     method: str = "inferred",
 ) -> None:
@@ -325,9 +327,37 @@ async def test_is_associative_matches_the_sql_fragment(session):
 def test_expansion_serializes_the_gate_fields_only_when_set():
     base = {"seed_id": "s", "seed_type": "fact", "neighbor_id": "n", "neighbor_type": "fact", "stage": "x"}
     plain = Expansion(**base).to_dict()
-    assert "query_gate_factor" not in plain and "query_cosine" not in plain
-    gated = Expansion(**base, query_gate_factor=0.0, query_cosine=0.25).to_dict()
-    assert (gated["query_gate_factor"], gated["query_cosine"]) == (0.0, 0.25)
+    assert not {"query_gate_factor", "query_cosine", "query_gate_dropped"} & set(plain)
+    gated = Expansion(**base, query_gate_factor=0.0, query_cosine=0.25, query_gate_dropped=True).to_dict()
+    assert (gated["query_gate_factor"], gated["query_cosine"], gated["query_gate_dropped"]) == (0.0, 0.25, True)
+
+
+def test_a_dropped_path_never_wins_best_path():
+    """The resolver skips dropped paths by their flag, not by their strength: a
+    dropped path stronger than the kept one still loses, and a neighbour reached
+    only by dropped paths has no winner. Ungated paths resolve as before, a sole
+    0-strength one included."""
+    t = RetrievalTrace(query="q")
+    x, z, u = uuid4(), uuid4(), uuid4()
+
+    def exp(nid: UUID, strength: float, **gate: Any) -> None:
+        t.expansion(
+            seed_id=uuid4(),
+            seed_type="fact",
+            neighbor_id=nid,
+            neighbor_type="fact",
+            stage=PATH_A_STAGE,
+            path_strength=strength,
+            **gate,
+        )
+
+    exp(x, 0.2025, query_gate_factor=0.25, query_gate_dropped=True)
+    exp(x, 0.18)
+    exp(z, 0.0, query_gate_factor=0.0, query_gate_dropped=True)
+    exp(u, 0.0)
+    t.finalize([])
+    won = [e["won_best_path"] for e in t.to_dict()["expansions"]]
+    assert won == [False, True, False, True]
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +412,7 @@ def test_score_memory_neighbor_applies_multiplier(seed_score_on):
 
 
 def _brain(db, agent: str, mult: float | None) -> Brain:
-    settings = Settings().model_copy(update={"agent_id": agent})
+    settings = Settings(_env_file=None).model_copy(update={"agent_id": agent})
     brain = Brain(database=db, settings=settings)
     if mult is not None:
         brain.settings = settings.model_copy(update={"graph_associative_edge_multiplier": mult})
@@ -414,6 +444,28 @@ async def test_multiplier_orders_fetch(db, session):
     assert await fetch(0.5, 1) == [(c, 0.6)]
     assert await fetch(None, 3) == await fetch(1.0, 3) == [(m, 0.9), (o, 0.8), (c, 0.6)]
     assert await fetch(0.5, 3) == [(c, 0.6), (m, 0.9), (o, 0.8)], "raw weights, multiplied order"
+
+
+@pytest.mark.postgres_only
+async def test_multiplier_sorts_null_weights_last(db, session):
+    """A NULL weight sorts last (-1) whatever its edge: the multiplier applies
+    inside the COALESCE, so a NULL co_mention edge does not rank as -0.5 above a
+    NULL cosine edge. NULL ties break on the neighbour id, which puts the cosine
+    neighbour C first here."""
+    agent = f"f106-{uuid4().hex[:8]}"
+    seed = await _fact(session, agent, None, 2)
+    w = await _fact(session, agent, None, 3)
+    c = await _fact(session, agent, None, 4, fid=UUID(hex="0" * 8 + uuid4().hex[8:]))
+    m = await _fact(session, agent, None, 5, fid=UUID(hex="f" * 8 + uuid4().hex[8:]))
+    await _edge(session, agent, seed, w, 0.1)
+    await _edge(session, agent, seed, c, None)
+    await _edge(session, agent, seed, m, None, method="co_mention")
+    await session.flush()
+    for mult in (1.0, 0.5):
+        out = await _brain(db, agent, mult).neighbors(
+            seed, node_type="fact", limit=3, session=session, neighbor_type="fact"
+        )
+        assert [n.id for n in out] == [w, c, m], mult
 
 
 @pytest.mark.postgres_only
@@ -451,7 +503,7 @@ class _Statements:
 
 
 async def _neighbors_sql(db, settings: Any) -> tuple[str, dict]:
-    brain = Brain(database=db, settings=Settings())
+    brain = Brain(database=db, settings=Settings(_env_file=None))
     brain.settings = settings
     rec = _Statements()
     seed = UUID("00000000-0000-0000-0000-0000000000b1")
@@ -464,7 +516,7 @@ async def _neighbors_sql(db, settings: Any) -> tuple[str, dict]:
 async def test_multiplier_one_sql_unchanged(db):
     """At 1.0 ``_neighbors`` sends exactly the SQL it sends without the setting:
     no CASE term is added."""
-    base = Settings()
+    base = Settings(_env_file=None)
     absent = SimpleNamespace(**{k: v for k, v in base.model_dump().items() if k != "graph_associative_edge_multiplier"})
     at_one = base.model_copy(update={"graph_associative_edge_multiplier": 1.0})
     at_half = base.model_copy(update={"graph_associative_edge_multiplier": 0.5})
@@ -579,7 +631,13 @@ async def test_dedup_uses_gated_score(world, a_first):
     assert _first_seed(on) == str(a if a_first else b), "the seed order really differs"
     assert _scores(off)[str(x)] == pytest.approx(0.8 * 0.9), "non-vacuous: ungated, co_mention wins"
     assert _scores(on)[str(x)] == pytest.approx(0.7 * 0.6), "gated, the cosine path is stored"
-    assert _expansion(on, x, a)["query_gate_factor"] == pytest.approx(0.1)
+    assoc, cosine = _expansion(on, x, a), _expansion(on, x, b)
+    assert assoc["query_gate_factor"] == pytest.approx(0.1)
+    # The trace agrees: the gated path's strength includes its factor.
+    assert assoc["path_strength"] == pytest.approx(0.8 * 0.9 * 0.1)
+    assert cosine["path_strength"] == pytest.approx(0.7 * 0.6)
+    assert (assoc["won_best_path"], cosine["won_best_path"]) == (False, True)
+    assert _expansion(off, x, a)["won_best_path"] is True, "non-vacuous: ungated, the trace picks co_mention"
 
 
 @pytest.mark.postgres_only
@@ -596,6 +654,30 @@ async def test_dropped_path_never_replaces(world, a_first):
     assert _scores(kept)[str(x)] == pytest.approx(0.9 * 0.9 * 0.25), "non-vacuous: kept, it wins"
     assert _scores(dropped)[str(x)] == pytest.approx(0.3 * 0.6)
     assert _expansion(dropped, x, a)["query_gate_factor"] == pytest.approx(0.25)
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize("mode", ["raw", "seed_relative"])
+async def test_won_best_path_follows_the_gate(world, mode):
+    """X is reached by a dropped co_mention path from A and a kept cosine path
+    from B; Z only by a dropped co_mention path from A. The trace marks B's path
+    to X the winner and no path to Z. Ungated, A's path to X is the stronger
+    (0.81 > 0.18), so only the gate decides. In seed_relative mode the dropped
+    path's factor is 0.25, not 0, so its exclusion cannot rest on its strength."""
+    a, b, x = await _two_seeds_one_target(world, cos_x=0.2)
+    rows = _Facts(world)
+    z = await rows.fact(0.1, "sole")
+    await rows.edge(a, z, 0.9, method="co_mention")
+    f106 = RAW if mode == "raw" else {**SEED_RELATIVE, "query_gate_drop_below": 0.5}
+    _, _, on, _ = await _recall(world, [(a, 0.9), (b, 0.3)], f106)
+    dropped, kept, sole = _expansion(on, x, a), _expansion(on, x, b), _expansion(on, z)
+    assert str(x) in _scores(on) and str(z) not in _scores(on)
+    assert (dropped["query_gate_dropped"], dropped["path_strength"], dropped["won_best_path"]) == (True, 0.0, False)
+    assert (kept["won_best_path"], kept["path_strength"]) == (True, pytest.approx(0.3 * 0.6))
+    assert "query_gate_dropped" not in kept
+    assert (sole["query_gate_dropped"], sole["won_best_path"]) == (True, False)
+    _, _, off, _ = await _recall(world, [(a, 0.9), (b, 0.3)])
+    assert _expansion(off, x, a)["won_best_path"] is True, "non-vacuous"
 
 
 # ---------------------------------------------------------------------------
@@ -620,6 +702,8 @@ async def test_raw_mode_drops_below_min_cosine_and_keeps_the_rest_unscaled(world
     e_low, e_high = _expansion(on, low), _expansion(on, high)
     assert (e_low["query_gate_factor"], e_low["query_cosine"]) == (0.0, pytest.approx(0.25, abs=1e-5))
     assert (e_high["query_gate_factor"], e_high["query_cosine"]) == (1.0, pytest.approx(0.40, abs=1e-5))
+    assert e_low["path_strength"] == 0.0, "a dropped path has strength 0"
+    assert e_high["path_strength"] == _expansion(off, high)["path_strength"], "factor 1.0: unchanged"
     assert GATE_ERR not in stats.n_stage_errors
 
 

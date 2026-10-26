@@ -245,11 +245,14 @@ class Expansion:
     # still win. Recording it eagerly reported the loser as the winner.
     won_best_path: bool = True
     # F106: set only for a Path A neighbour the associative query gate read:
-    # its score multiplier (0.0 when the gate dropped it) and cos(neighbour,
-    # query), None when it has no embedding. Serialized only when set, so a
-    # trace with the gate off is unchanged.
+    # its score multiplier (raw mode: 0.0 when dropped, else 1.0), cos(neighbour,
+    # query) (None when it has no embedding), and whether the gate dropped the
+    # path. A gated path's path_strength includes the factor, and a dropped path
+    # never wins won_best_path. Serialized only when set, so a trace with the
+    # gate off is unchanged.
     query_gate_factor: float | None = None
     query_cosine: float | None = None
+    query_gate_dropped: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         d = {
@@ -270,6 +273,8 @@ class Expansion:
             d["query_gate_factor"] = _finite(self.query_gate_factor)
         if self.query_cosine is not None:
             d["query_cosine"] = _finite(self.query_cosine)
+        if self.query_gate_dropped:
+            d["query_gate_dropped"] = True
         return d
 
 
@@ -631,9 +636,15 @@ class RetrievalTrace:
         two paths as winners when a weak seed is visited first. Resolving here
         is order-independent: highest ``path_strength`` per (neighbour, stage)
         wins, ties break on first arrival, and None sorts last.
+
+        F106: a path the associative query gate dropped never wins, since the
+        pipeline neither keeps it nor lets it replace a stored path; a
+        neighbour reached only by dropped paths has no winner.
         """
         best: dict[tuple[str, str], int] = {}
         for i, e in enumerate(self._expansions):
+            if e.query_gate_dropped:
+                continue
             key = (e.neighbor_id, e.stage)
             cur = best.get(key)
             if cur is None or (e.path_strength or -1.0) > (

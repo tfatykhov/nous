@@ -61,8 +61,12 @@ Behind `NOUS_GRAPH_ASSOCIATIVE_QUERY_GATE_ENABLED` (default off). In Stage 2b, a
 The factor is set before Stage 2b's best-path comparison, so a node reached through an associative
 path from one seed and a cosine path from another keeps the path with the better *gated* score, and
 the replacement copies the factor along with the rest of the path. A dropped neighbour is still
-recorded as an F091 expansion, with `query_gate_factor` and `query_cosine`, so the prod log can
-measure the gate; it is then neither appended nor allowed to replace a stored path.
+recorded as an F091 expansion, with `query_gate_factor`, `query_cosine` and `query_gate_dropped`, so
+the prod log can measure the gate; it is then neither appended nor allowed to replace a stored path.
+The trace agrees with that choice: a gated expansion's `path_strength` is
+`seed_score × edge_weight × query_gate_factor`, a dropped one's is 0, and a dropped path never wins
+`won_best_path` (a neighbour reached only by dropped paths has no winner). An ungated expansion's
+`path_strength` is unchanged.
 `_score_memory_neighbor` multiplies the score by the factor in both of its branches (seed-score and
 legacy).
 
@@ -92,7 +96,8 @@ useful. The cutoff is specific to the embedding model (`text-embedding-3-large` 
 edge's weight wherever `Brain._neighbors` ranks by weight: in the per-neighbour window that picks
 which edge represents a neighbour, and in the ordering that picks which neighbours fill the LIMIT.
 At 0.5 a 0.9 `co_mention` edge ranks as 0.45, below a 0.6 cosine edge. The returned `edge_weight`
-stays the raw stored weight. At 1.0 no term is added and the compiled SQL is unchanged.
+stays the raw stored weight. The multiplier applies inside the `COALESCE`, so a NULL weight still
+sorts last whatever its edge. At 1.0 no term is added and the compiled SQL is unchanged.
 
 The same multiplier scales an associative neighbour's score in `_score_memory_neighbor`. That scorer
 is shared by Path A, Stage 2's decision neighbours and Stage 4's one-hop rows, and `_neighbors` serves
@@ -118,9 +123,6 @@ and the `_neighbors` SQL are identical to before (`tests/test_f106_path_a_associ
   offline test therefore cannot say how often an associative path was the runner-up to a cosine path,
   or what a cosine edge pushed out of a fetch window would have delivered. The multiplier's effect is
   not measured offline.
-- F091's `won_best_path` is resolved from the ungated `path_strength` (`seed_score × edge_weight`),
-  so for a gated neighbour it can disagree with the path Stage 2b stored. Each gated expansion
-  carries `query_gate_factor`, from which the gated strength can be recomputed.
 - The `raw` cutoff depends on the embedding model and must be re-tuned for another one.
 
 ## Tasks 2 and 3 (planned)

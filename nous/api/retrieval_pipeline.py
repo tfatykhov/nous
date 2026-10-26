@@ -1542,6 +1542,15 @@ async def _run_stages(
                         # keep the guard for defense against future filter drift.
                         if n.node_type == "decision":
                             continue
+                        # F106: a gated path's strength includes its factor and a
+                        # dropped path's is 0, so the trace's won_best_path agrees
+                        # with the path kept below. Ungated: exactly today's value.
+                        path_strength = (seed_score or 0.0) * (n.edge_weight or 0.0)
+                        n_gate = getattr(n, "query_gate_factor", None)
+                        if n.id in gate_drop:
+                            path_strength = 0.0
+                        elif n_gate is not None:
+                            path_strength *= n_gate
                         tr.expansion(
                             seed_id=seed_id, seed_type=seed_type,
                             seed_score=seed_score,
@@ -1550,9 +1559,10 @@ async def _run_stages(
                             edge_relation=n.edge_relation,
                             edge_weight=n.edge_weight,
                             extraction_method=getattr(n, "extraction_method", None),
-                            path_strength=(seed_score or 0.0) * (n.edge_weight or 0.0),
-                            query_gate_factor=getattr(n, "query_gate_factor", None),
+                            path_strength=path_strength,
+                            query_gate_factor=n_gate,
                             query_cosine=gate_cos.get(n.id),
+                            query_gate_dropped=n.id in gate_drop,
                         )
                         if n.id in gate_drop:
                             # Dropped by the gate: traced above, with its factor,
