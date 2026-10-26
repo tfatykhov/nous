@@ -76,11 +76,14 @@ async def backfill(agents: list[str], commit: bool, max_facts_override: int | No
             dens = GraphDensifier(db=db, graph_linker=linker, embedder=None,
                                   settings=s_agent, agent_id=agent)
 
-            would = await dens.build_comention_edges(dry_run=True)
+            # Plan once; --commit applies this same plan (no re-plan). Deletes and
+            # re-weights are F106 v2 maintenance (always 0 under v1).
+            plan = await dens.plan_comention_changes()
             print(f"[{agent}] active_facts={n_facts} existing_co_mention={n_existing} "
-                  f"scan_cap={max_facts}  -> WOULD build {would} new edges")
-            if commit and would:
-                built = await dens.build_comention_edges()
+                  f"scan_cap={max_facts}  -> WOULD build {len(plan.inserts)} new edges, "
+                  f"delete {len(plan.deletes)}, re-weight {len(plan.reweights)}")
+            if commit and (plan.inserts or plan.deletes or plan.reweights):
+                built = await dens.build_comention_edges(plan=plan)
                 async with db.session() as sess:
                     final = await _count(
                         sess,

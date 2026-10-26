@@ -61,11 +61,12 @@ _MONTHS = (
     "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
 )
 _TIMEZONES = ("edt", "est", "et", "utc", "gmt", "pst", "pdt", "cet", "cest")
-# A weekday followed by a month, or AM/PM followed by a time zone, anywhere in the
-# phrase: "mon sep", "tuesday october", "pm edt".
+# A weekday followed by a month, or AM/PM followed by a time zone, ending the phrase:
+# "mon sep", "tuesday october", "build bot mon sep", "pm edt" (not "rising sun may
+# festival", where the month does not end the phrase).
 _STOP_SEARCH_RE = re.compile(
-    rf"\b(?:{'|'.join(_WEEKDAYS)})\s+(?:{'|'.join(_MONTHS)})\b"
-    rf"|\b(?:am|pm)\s+(?:{'|'.join(_TIMEZONES)})\b"
+    rf"\b(?:{'|'.join(_WEEKDAYS)})\s+(?:{'|'.join(_MONTHS)})$"
+    rf"|\b(?:am|pm)\s+(?:{'|'.join(_TIMEZONES)})$"
 )
 _STOP_FULL_RE = re.compile(r"^(?:option [a-z0-9]|codex p[0-9])$")
 _STOP_PHRASES: frozenset[str] = frozenset({"do not", "must not", "hard rule"})

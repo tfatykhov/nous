@@ -158,34 +158,47 @@ list with no deletes or reweights. Under v2:
 
 1. **Index.** Entities are extracted (with the stoplist) from the agent's newest
    `NOUS_COMENTION_INDEX_MAX_FACTS` (50,000) active facts. An entity's frequency `df` is counted over
-   the whole index. The per-cycle window is not used.
-2. **Stoplist** (`extract_entities(..., stoplist=True)`). A phrase is dropped when it contains a
-   weekday followed by a month, abbreviated or full (`mon sep`, `tuesday october`), or AM/PM followed
-   by a time zone (`edt est et utc gmt pst pdt cet cest`), anywhere in the phrase; when it is exactly
-   `do not`, `must not` or `hard rule`; when it starts with `standing rule`; or when it is
-   `option <one letter or digit>` or `codex p<digit>`. With `stoplist=False` (the default, and v1)
-   extraction is unchanged.
-3. **Qualifying entity.** `2 <= df <= NOUS_COMENTION_MAX_DEGREE`.
+   the whole index. The per-cycle window is not used. The index scan and the edge scan (step 5) yield
+   to the event loop every 1000 facts or edges; an interrupt seen there leaves the plan empty, so the
+   cycle writes nothing.
+2. **Stoplist** (`extract_entities(..., stoplist=True)`). A phrase is dropped when it ends in a
+   weekday followed by a month, abbreviated or full (`mon sep`, `tuesday october`,
+   `build bot mon sep`, but not `rising sun may festival`), or in AM/PM followed by a time zone
+   (`edt est et utc gmt pst pdt cet cest`); when it is exactly `do not`, `must not` or `hard rule`;
+   when it starts with `standing rule`; or when it is `option <one letter or digit>` or
+   `codex p<digit>`. With `stoplist=False` (the default, and v1) extraction is unchanged.
+3. **Qualifying entity.** `2 <= df <= NOUS_COMENTION_V2_MAX_DEGREE` (20; v1 keeps
+   `NOUS_COMENTION_MAX_DEGREE`, 10), and a rarity weight above 0.
 4. **Rarity weight.** `w(df) = NOUS_COMENTION_WEIGHT x ln(N/df) / ln(N/2)`, where N is the number of
-   indexed facts: `df = 2` gives the full weight, rarer is heavier, and `df = N` gives 0.
-   `NOUS_COMENTION_WEIGHT` when `N <= 2`. An edge's weight comes from its rarest qualifying shared
-   entity.
+   indexed facts: `df = 2` gives the full weight and rarer is heavier. `df = N` gives 0, so an entity
+   named by every indexed fact does not qualify. `NOUS_COMENTION_WEIGHT` when `N <= 2`. An edge's
+   weight comes from its rarest qualifying shared entity.
 5. **Maintenance**, before linking. It covers the agent's `co_mention` edges with both endpoints in
-   the index. An edge with no qualifying shared entity (its entity became a hub, is stoplisted, or is
-   no longer shared) is deleted. An edge whose weight is NULL or differs from its target `w` by more
-   than 1e-6 is set to `w`, which also restores a weight decayed to near zero. Deletes go first, then
-   re-weights, in edge order, and the pass stops after `NOUS_COMENTION_PRUNE_MAX_PER_CYCLE` (2000)
-   changes in all. An edge with an endpoint outside the index is left alone.
+   the index. An edge with no qualifying shared entity (its entity became a hub, is stoplisted, weighs
+   0, or is no longer shared) is deleted. An edge whose weight is NULL or differs from its target `w`
+   by more than 1e-6 is set to `w`, which also restores a weight decayed to near zero. Deletes go
+   first, then re-weights, in edge order, and the pass stops after
+   `NOUS_COMENTION_PRUNE_MAX_PER_CYCLE` (2000) changes in all. An edge with an endpoint outside the
+   index is left alone, and so is every edge that is not `co_mention` (a `contradicts` or cosine
+   edge is never deleted or re-weighted, and still blocks a `co_mention` link on its pair).
 6. **Linking.** Rarer entities first, as in v1, with the same pre-existing-edge guard (any fact-fact
    edge, any relation, either direction, skips the pair). The per-fact cap now holds over the fact's
    lifetime: a fact's count starts at its current `co_mention` degree (every partner, in the index or
-   not) after this plan's deletes. New edges get weight `w`. A pair is only ever linked at its rarest
-   shared entity, so a new edge already has the weight maintenance would give it.
+   not) after this plan's deletes. A new link also needs the pair's embedding cosine to be at least
+   `NOUS_COMENTION_V2_MIN_COSINE` (0.35). The cosines of all candidate pairs come from one query, and
+   a pair where either fact has no embedding passes. The floor is checked before the pair takes a cap
+   slot, so a rejected pair does not use one. It applies to new links only: it never deletes an
+   existing edge or keeps one from its re-weight. New edges get weight `w`. A pair is only ever linked
+   at its rarest shared entity (a skip there, for the cap, an existing edge or the cosine floor, holds
+   for every later entity), so a new edge already has the weight maintenance would give it.
 
 **Reporting.** `run_backfill_cycle` returns `_co_mention_deleted` and `_co_mention_reweighted` with
 v2 on; the sleep handler pops them (so they never inflate `orphan_edges_created`) into sleep stats as
-`comention_edges_deleted` and `comention_edges_reweighted`. With v2 off neither key appears. The
-build also logs `F106: co_mention maintenance ...` when it deletes or re-weights.
+`comention_edges_deleted` and `comention_edges_reweighted`. With v2 off neither key appears. When a
+cycle deletes or re-weights, the sleep handler also records a `graph_densify` / `edge_prune` row in
+the consolidation audit (F035.6) with both counts and the rationale `F106 co_mention maintenance`, as
+the F053 dead-edge prune records its `edge_prune` row. The build also logs
+`F106: co_mention maintenance ...`.
 
 **Ownership of `co_mention` edges.** They are derived data: the builder creates them from fact text
 and can rebuild them, so v2 deletes the ones it no longer supports (as the F053 dead-edge prune
@@ -193,9 +206,21 @@ deletes edges). It also owns their weights: if the tinyHippo downscale
 (`NOUS_TINYHIPPO_DOWNSCALE_ENABLED`, off) is turned on again, its downscale of `co_mention` edges is
 undone by the next cycle's maintenance, up to the per-cycle bound.
 
-**The backfill script.** `scripts/backfill_comention_edges.py` lifts `NOUS_COMENTION_INDEX_MAX_FACTS`
-to the corpus size as well as the per-cycle cap, so under v2 it still covers the whole corpus. Its
-`--commit` run then applies maintenance too, within the per-cycle bound.
+**The backfill script.** `scripts/backfill_comention_edges.py` plans once per agent and prints the
+insert, delete and re-weight counts. With `--commit`, when any of them is non-zero, it applies that
+same plan (`build_comention_edges(plan=plan)`); it never plans again. It lifts
+`NOUS_COMENTION_INDEX_MAX_FACTS` to the corpus size as well as the per-cycle cap, so under v2 the plan
+covers the whole corpus; maintenance stays within the per-cycle bound.
+
+### The first offline test
+
+An offline test on a prod copy compared v1 and v2 plans, with a blinded judge rating sampled new
+links, deleted edges and kept edges. v2 as first built (hub cap 10 counted over the index, no cosine
+floor) failed on its new links: 62% were judged related, below the 70% bar. The unrelated new links
+mostly shared generic tech names, and good links that maintenance deleted shared entities named in
+11-17 facts. Two v2-only settings followed: `NOUS_COMENTION_V2_MAX_DEGREE` (20), so such entities
+still qualify, and `NOUS_COMENTION_V2_MIN_COSINE` (0.35) on new links. v2 with them has not been
+re-tested yet.
 
 ### Settings
 
@@ -204,9 +229,11 @@ to the corpus size as well as the per-cycle cap, so under v2 it still covers the
 | `NOUS_COMENTION_V2_ENABLED` | `false` | Run the v2 builder |
 | `NOUS_COMENTION_INDEX_MAX_FACTS` | `50000` | Index size: the newest N active facts |
 | `NOUS_COMENTION_PRUNE_MAX_PER_CYCLE` | `2000` | Most maintenance deletes plus re-weights per cycle; 0 turns maintenance off |
+| `NOUS_COMENTION_V2_MAX_DEGREE` | `20` | v2 hub cap over the whole index (v1 keeps `NOUS_COMENTION_MAX_DEGREE`) |
+| `NOUS_COMENTION_V2_MIN_COSINE` | `0.35` | Embedding cosine a new v2 link needs; a fact without an embedding passes |
 
-v2 also reads the F076 settings `NOUS_COMENTION_MAX_DEGREE`, `NOUS_COMENTION_MAX_EDGES_PER_NODE`,
-`NOUS_COMENTION_WEIGHT` and `NOUS_COMENTION_MIN_ENTITY_CHARS`, but not
+v2 also reads the F076 settings `NOUS_COMENTION_MAX_EDGES_PER_NODE`, `NOUS_COMENTION_WEIGHT` and
+`NOUS_COMENTION_MIN_ENTITY_CHARS`, but not `NOUS_COMENTION_MAX_DEGREE` or
 `NOUS_COMENTION_MAX_FACTS_PER_CYCLE`. Tests: `tests/test_f106_comention_v2.py`; the v1 builder stays
 pinned by `tests/test_graph_densifier.py` and `tests/test_comention_linking.py`.
 
@@ -215,15 +242,15 @@ pinned by `tests/test_graph_densifier.py` and `tests/test_comention_linking.py`.
 - **Convergence.** v1 wrote every edge at 0.9, so the first v2 cycles mostly re-weight. With the
   default bound a graph with more than 2000 edges to change takes several cycles; until then some
   edges keep their v1 weight or their hub link.
-- **Cost.** Each cycle reads every `co_mention` edge of the agent and extracts entities from up to
-  50,000 facts in Python.
-- **Small corpora.** With N facts indexed, an entity named by all N gets weight 0 (it still links,
-  if `N <= NOUS_COMENTION_MAX_DEGREE`).
+- **Cost.** Each cycle reads every `co_mention` edge of the agent, extracts entities from up to
+  50,000 facts in Python, and reads the cosine of every candidate pair in one query.
 - **The stoplist is lexical.** It catches the listed shapes only; other boilerplate still extracts.
+- **The cosine floor** depends on the embedding model (`text-embedding-3-large` at 1536 dimensions
+  here), and a new link where either fact has no embedding is not gated.
 - **The index boundary.** An edge to a fact that has fallen out of the index is neither deleted nor
   re-weighted.
-- **Not evaluated yet.** An offline comparison of v1 and v2 plans on a prod copy is pending; the flag
-  stays off until then.
+- **Not re-evaluated.** v2 with the hub cap of 20 and the cosine floor has not been through the
+  offline test again; the flag stays off until it passes.
 
 ## Task 3 (planned)
 

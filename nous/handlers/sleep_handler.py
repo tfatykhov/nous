@@ -1958,6 +1958,18 @@ class SleepHandler:
             if comention_deleted is not None:
                 sleep_stats["comention_edges_deleted"] = comention_deleted
                 sleep_stats["comention_edges_reweighted"] = comention_reweighted or 0
+                # F035.6: record the maintenance as an edge_prune action (the
+                # graph_densify summary row is edge_add, and these are not adds).
+                if self._auditor is not None and (comention_deleted or comention_reweighted):
+                    self._auditor.record(
+                        "graph_densify",
+                        "edge_prune",
+                        after={"counts": {
+                            "comention_edges_deleted": comention_deleted,
+                            "comention_edges_reweighted": comention_reweighted or 0,
+                        }},
+                        rationale="F106 co_mention maintenance",
+                    )
             sleep_stats["ce_backfill_survived"] = ce_stats.get("survived", 0)
             sleep_stats["ce_backfill_pruned"] = ce_stats.get("pruned", 0)
 

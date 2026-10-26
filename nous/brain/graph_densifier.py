@@ -7,6 +7,7 @@ disconnected clusters and proposes bridge edges between similar hubs.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 from collections import defaultdict
@@ -103,6 +104,11 @@ def _get_relation(source_type: str, target_type: str) -> str:
     """Get the relation type for a given type pair."""
     return _RELATION_MAP.get((source_type, target_type),
                              _RELATION_MAP.get((target_type, source_type), "related_to"))
+
+
+# F106: the co-mention v2 scans yield to the event loop (and honour an interrupt)
+# once per this many facts or edges.
+_COMENTION_YIELD_EVERY = 1000
 
 
 @dataclass
@@ -1667,9 +1673,10 @@ class GraphDensifier:
 
         - **Index:** entities (stoplisted) of the newest ``comention_index_max_facts``
           active facts; an entity's ``df`` is counted over the whole index.
-        - **Qualifying entity:** ``2 <= df <= comention_max_degree``; its weight is
-          ``_comention_rarity_weight(comention_weight, N, df)`` with N the index size.
-          A pair's target weight comes from its rarest qualifying shared entity.
+        - **Qualifying entity:** ``2 <= df <= comention_v2_max_degree`` and a rarity
+          weight ``_comention_rarity_weight(comention_weight, N, df)`` above 0, with N
+          the index size. A pair's target weight comes from its rarest qualifying
+          shared entity.
         - **Maintenance:** this agent's co_mention edges with both endpoints in the
           index. One with no qualifying shared entity is deleted; one whose weight is
           NULL or differs from the target by more than 1e-6 is re-weighted. Deletes go
@@ -1678,14 +1685,20 @@ class GraphDensifier:
           outside the index are left alone.
         - **Linking:** as v1 (rarer entities first, pre-existing-edge guard), but the
           per-fact cap is lifetime: a fact's degree starts at its co_mention edge count
-          (any partner) less this plan's deletes.
+          (any partner) less this plan's deletes. A new link also needs the pair's
+          embedding cosine ``>= comention_v2_min_cosine`` (a fact without an embedding
+          passes), checked before the pair takes a cap slot.
+
+        The index and edge scans yield to the event loop every 1000 rows; if the
+        densifier is interrupted there, the plan is empty.
         """
         from itertools import combinations
 
         from nous.brain.entity_extraction import extract_entities
 
         s = self._settings
-        max_degree = int(s.comention_max_degree)
+        max_degree = int(s.comention_v2_max_degree)
+        min_cos = float(s.comention_v2_min_cosine)
         max_per_node = int(s.comention_max_edges_per_node)
         weight = float(s.comention_weight)
         min_chars = int(s.comention_min_entity_chars)
@@ -1717,17 +1730,22 @@ class GraphDensifier:
         n = len(rows)
         fact_ents: dict[str, set[str]] = {}
         ent_to_facts: dict[str, list[str]] = {}
-        for fid, content in rows:
+        for i, (fid, content) in enumerate(rows):
+            if i % _COMENTION_YIELD_EVERY == 0:
+                await asyncio.sleep(0)
+                if self._interrupted:
+                    return ComentionPlan()
             fid_s = str(fid)
             ents = extract_entities(content or "", min_chars=min_chars, stoplist=True)
             fact_ents[fid_s] = ents
             for ent in ents:
                 ent_to_facts.setdefault(ent, []).append(fid_s)
-        rarity = {
-            ent: _comention_rarity_weight(weight, n, len(fids))
-            for ent, fids in ent_to_facts.items()
-            if 2 <= len(fids) <= max_degree
-        }
+        rarity: dict[str, float] = {}
+        for ent, fids in ent_to_facts.items():
+            if 2 <= len(fids) <= max_degree:
+                w = _comention_rarity_weight(weight, n, len(fids))
+                if w > 0:  # a weight-0 entity (df == N) is not a link
+                    rarity[ent] = w
 
         def target_weight(a: str, b: str) -> float | None:
             # max weight = rarest shared entity (the weight falls as df rises).
@@ -1738,7 +1756,11 @@ class GraphDensifier:
         deg: dict[str, int] = defaultdict(int)
         delete_cands: list[tuple[str, str, str]] = []
         reweight_cands: list[tuple[str, float]] = []
-        for eid, src, tgt, old_w in cm_rows:
+        for i, (eid, src, tgt, old_w) in enumerate(cm_rows):
+            if i % _COMENTION_YIELD_EVERY == 0:
+                await asyncio.sleep(0)
+                if self._interrupted:
+                    return ComentionPlan()
             a, b = str(src), str(tgt)
             deg[a] += 1
             deg[b] += 1
@@ -1757,10 +1779,14 @@ class GraphDensifier:
         reweights = reweight_cands[:prune_max - len(deletes)]
 
         existing = await self._existing_fact_pairs(list(fact_ents))
+        candidates = {
+            pair for ent in rarity for pair in combinations(sorted(ent_to_facts[ent]), 2)
+        } - existing
+        cosines = await self._fact_pair_cosines(candidates)
 
         # A pair is only ever inserted at its first (rarest) shared entity: a skip
-        # there (cap, seen, existing) holds for every later entity too, so
-        # rarity[ent] is the pair's target weight and maintenance keeps it.
+        # there (cap, seen, existing, cosine floor) holds for every later entity too,
+        # so rarity[ent] is the pair's target weight and maintenance keeps it.
         inserts: list[tuple[str, str, float]] = []
         seen: set[tuple[str, str]] = set()
         for ent in sorted(rarity, key=lambda k: (len(ent_to_facts[k]), k)):
@@ -1771,6 +1797,9 @@ class GraphDensifier:
                 if key in seen or key in existing:
                     continue
                 seen.add(key)
+                cos = cosines.get(key)
+                if cos is not None and cos < min_cos:
+                    continue  # rejected before it takes a cap slot
                 deg[a] += 1
                 deg[b] += 1
                 inserts.append((a, b, rarity[ent]))
@@ -1781,6 +1810,33 @@ class GraphDensifier:
             inserts=inserts, deletes=deletes, reweights=reweights,
             shared_entities=len(rarity), facts_scanned=n,
         )
+
+    async def _fact_pair_cosines(
+        self, pairs: set[tuple[str, str]],
+    ) -> dict[tuple[str, str], float]:
+        """Embedding cosine of each fact pair, in one query. A pair where either fact
+        has no embedding is absent from the result."""
+        if not pairs:
+            return {}
+        ordered = sorted(pairs)
+        async with self.db.session() as session:
+            rows = (await session.execute(
+                text(
+                    "SELECT CAST(p.a AS text), CAST(p.b AS text), "
+                    "1 - (fa.embedding <=> fb.embedding) "
+                    "FROM unnest(CAST(:left_ids AS uuid[]), CAST(:right_ids AS uuid[])) "
+                    "AS p(a, b) "
+                    "JOIN heart.facts fa ON fa.id = p.a AND fa.agent_id = :a "
+                    "JOIN heart.facts fb ON fb.id = p.b AND fb.agent_id = :a "
+                    "WHERE fa.embedding IS NOT NULL AND fb.embedding IS NOT NULL"
+                ),
+                {
+                    "a": self._agent_id,
+                    "left_ids": [a for a, _ in ordered],
+                    "right_ids": [b for _, b in ordered],
+                },
+            )).all()
+        return {(a, b): float(c) for a, b, c in rows}
 
     async def _apply_comention_plan(self, plan: ComentionPlan) -> int:
         """Write a co-mention plan (deletes, reweights, inserts) in one transaction.

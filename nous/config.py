@@ -3012,6 +3012,25 @@ class Settings(BaseSettings):
             "per cycle. 0 disables maintenance."
         ),
     )
+    comention_v2_max_degree: int = Field(
+        default=20,
+        ge=2,
+        description=(
+            "F106: the v2 hub cap, counted over the whole index. Under v2 it replaces "
+            "comention_max_degree in the qualifying check (so in linking, maintenance and "
+            "the rarity weight's domain); v1 keeps comention_max_degree."
+        ),
+    )
+    comention_v2_min_cosine: float = Field(
+        default=0.35,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "F106: a new v2 co_mention link needs the pair's embedding cosine >= this. "
+            "Inserts only: it never deletes an existing edge or blocks its re-weight. A "
+            "pair where either fact has no embedding passes."
+        ),
+    )
     # =========================================================================
     # Gap-1 Formation — experiential co-occurrence linking (migration 055)
     # =========================================================================
