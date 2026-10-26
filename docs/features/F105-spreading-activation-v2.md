@@ -94,7 +94,7 @@ Settings: `NOUS_SPREADING_FAN_NORMALISATION_ENABLED` (default `false`),
 With the flag on, each recursive step multiplies the activation leaving a node by its fan factor:
 `1` when the node's degree `d <= D0`, else `(D0 / d) ^ gamma`. `d` is the node's eligible-edge degree:
 edges in either direction, this agent's only, under the same eligibility predicate as the traversal
-(one `edge_filter` fragment feeds both, so Task 4 changes them together). The factor is `<= 1`, so
+(one `edge_filter` predicate builds both, so Task 4 changes them together). The factor is `<= 1`, so
 the MAX invariant `activation <= seed_score` holds. The degree is a `CROSS JOIN LATERAL` count placed
 before the edge join in the recursive term. It is exact, needs no schema change, uses the source and
 target edge indexes, and runs once per frontier row, not once per joined edge. A node reached by `k`
