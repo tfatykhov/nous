@@ -10,7 +10,10 @@ from nous.brain.graph_constants import (
     AUTOBEHAVIOR_EXCLUDED_METHODS,
     AUTOBEHAVIOR_EXCLUDED_RELATIONS,
     RETRIEVAL_EXCLUDED_RELATIONS,
+    SPREADING_ALWAYS_EXCLUDED_RELATIONS,
+    associative_edge_sql,
     autobehavior_exclusion_sql,
+    spreading_exclusion_sql,
 )
 
 
@@ -42,7 +45,8 @@ def test_all_autobehavior_consumers_use_the_constant():
 
     dens_src = inspect.getsource(spreading_activation)
     densifier_src = inspect.getsource(graph_densifier)
-    assert "autobehavior_exclusion_sql" in dens_src  # density + traversal
+    assert "autobehavior_exclusion_sql" in dens_src  # density gate
+    assert "spreading_exclusion_sql" in dens_src  # traversal (F105: its default is the same string)
     assert "autobehavior_exclusion_sql" in densifier_src  # find_orphans + discover_clusters
     # No stray hardcoded single-relation exclusions left behind.
     assert "relation <> 'supersedes'" not in dens_src
@@ -53,3 +57,35 @@ def test_neighbors_uses_retrieval_constant():
     from nous.brain import brain
     src = inspect.getsource(brain)
     assert "RETRIEVAL_EXCLUDED_RELATIONS" in src
+
+
+# --- F105 Task 4: the spreading traversal's own exclusion ---
+
+
+def test_spreading_exclusion_default_equals_autobehavior():
+    for prefix in ("", "e.", "e2."):
+        assert spreading_exclusion_sql(prefix) == autobehavior_exclusion_sql(prefix)
+        assert spreading_exclusion_sql(prefix, allow_associative=False) == autobehavior_exclusion_sql(prefix)
+
+
+def test_spreading_exclusion_allows_associative():
+    sql = spreading_exclusion_sql("e.", allow_associative=True)
+    for rel in ("supersedes", "contradicts", "happened_before"):
+        assert f"'{rel}'" in sql
+    assert "co_occurred" not in sql
+    assert "co_mention" not in sql
+    assert sql.startswith("e.relation NOT IN")
+
+
+def test_autobehavior_set_is_always_excluded_plus_associative():
+    """Every relation the auto-behavior set excludes is either never traversed or
+    associative. A relation added to the auto-behavior set alone fails here, so
+    whether spreading may cross it is decided rather than inherited."""
+    assert SPREADING_ALWAYS_EXCLUDED_RELATIONS == {"supersedes", "contradicts", "happened_before"}
+    assert AUTOBEHAVIOR_EXCLUDED_RELATIONS == SPREADING_ALWAYS_EXCLUDED_RELATIONS | {"co_occurred"}
+    assert AUTOBEHAVIOR_EXCLUDED_METHODS == {"co_mention"}
+
+
+def test_associative_edge_sql():
+    assert associative_edge_sql("e.") == "(e.relation = 'co_occurred' OR e.extraction_method = 'co_mention')"
+    assert associative_edge_sql() == "(relation = 'co_occurred' OR extraction_method = 'co_mention')"

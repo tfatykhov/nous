@@ -5,3 +5,4 @@ scripts/ops/*.sql text eol=lf
 android/gradlew text eol=lf
 *.bat text eol=crlf
 *.jar binary
+tests/fixtures/*.sql text eol=lf

@@ -1470,6 +1470,158 @@ class Settings(BaseSettings):
             "Default 0.1 reproduces the previously-hardcoded literal exactly."
         ),
     )
+    # F105 Task 3: fan (degree) normalisation inside the CTE. Off reproduces
+    # today's SQL byte for byte (tests/test_spreading_sql_identity.py).
+    spreading_fan_normalisation_enabled: bool = Field(
+        default=False,
+        description=(
+            "F105: when true, activation leaving a node of eligible-edge degree d "
+            "is multiplied by 1 when d <= spreading_fan_free_degree, else by "
+            "(free_degree / d) ** spreading_fan_exponent, so a hub stops passing "
+            "full activation to each of its neighbours. The factor is <= 1, which "
+            "keeps the MAX bound activation <= seed_score."
+        ),
+    )
+    spreading_fan_free_degree: int = Field(
+        default=10,
+        ge=1,
+        description="F105: D0, the degree up to which fan normalisation leaves a node undamped.",
+    )
+    spreading_fan_exponent: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=2.0,
+        description=(
+            "F105: gamma in (D0 / d) ** gamma. 0.5 is a square-root dampener; 1.0 "
+            "with free degree 1 is SYNAPSE's plain 1/d."
+        ),
+    )
+    # F105 Task 4: associative edges in the traversal. Off reproduces today's
+    # SQL byte for byte. compute_graph_density does not read it: the auto-mode
+    # density gate stays builder-flag-proof.
+    spreading_associative_edges_enabled: bool = Field(
+        default=False,
+        description=(
+            "F105: when true, spreading activation also traverses associative "
+            "edges (relation co_occurred, or extraction_method co_mention), each "
+            "such hop multiplied by spreading_associative_weight_mult. "
+            "supersedes, contradicts and happened_before stay excluded."
+        ),
+    )
+    spreading_associative_weight_mult: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "F105: multiplier on a hop over an associative edge. le=1.0 keeps the "
+            "MAX bound activation <= seed_score."
+        ),
+    )
+    # F105 Task 5: query-conditioned gate, applied to the CTE's rows in Stage 4
+    # (retrieval_pipeline) before the floor and the cap. The SQL is unchanged.
+    spreading_query_gate_enabled: bool = Field(
+        default=False,
+        description=(
+            "F105: when true, each spreading row's activation is multiplied by "
+            "gate_factor(cos(node, query), cos(winning seed, query)), in [0, 1], "
+            "before the activation floor and the result cap. A missing embedding "
+            "is neutral (1.0); no embedder or an empty query vector skips the gate."
+        ),
+    )
+    spreading_query_gate_mode: Literal["seed_relative", "quantile", "raw"] = Field(
+        default="seed_relative",
+        description=(
+            "F105: seed_relative = min(1, max(cos_node, 0) / max(cos_seed, seed_min)); "
+            "quantile = clamp((cos_node - q_lo) / (q_hi - q_lo), 0, 1); "
+            "raw = max(cos_node, 0)."
+        ),
+    )
+    spreading_query_gate_q_lo: float = Field(
+        default=0.0,
+        ge=0.0,
+        lt=1.0,
+        description="F105: quantile mode's lower anchor (factor 0 at or below it).",
+    )
+    spreading_query_gate_q_hi: float = Field(
+        default=1.0,
+        gt=0.0,
+        le=1.0,
+        description="F105: quantile mode's upper anchor (factor 1 at or above it).",
+    )
+    spreading_query_gate_seed_min: float = Field(
+        default=0.19,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "F105: seed_relative mode's smallest denominator, so a seed with a low "
+            "or negative query cosine still gates its rows. 0.19 is the median "
+            "cos(seed, query) of the Task 5 replay (831 seeds, text-embedding-3-large "
+            "at 1536 dimensions); another embedding model needs its own value."
+        ),
+    )
+    # F105 Task 6: a budget on spreading rows in the merged recall list
+    # (retrieval_pipeline._apply_spreading_budget), after the F071 filter.
+    spreading_budget_enabled: bool = Field(
+        default=False,
+        description=(
+            "F105: when true, spreading rows in the merged recall list are bounded: "
+            "a row scoring below the cutline (the spreading_budget_cutline_rank-th "
+            "best non-spreading score) is dropped, then the spreading_budget_max_rows "
+            "best of the rest are kept. Non-spreading rows and the survivors' order "
+            "are untouched."
+        ),
+    )
+    spreading_budget_max_rows: int = Field(
+        default=5,
+        ge=0,
+        le=20,
+        description=(
+            "F105: how many spreading rows the budget keeps, by score. 20 is Stage 4's "
+            "own result cap, so le=20."
+        ),
+    )
+    spreading_budget_cutline_rank: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "F105: 0 = no cutline. Otherwise a spreading row must score at least the "
+            "score of this rank among the non-spreading rows; with fewer non-spreading "
+            "rows than this, there is no cutline."
+        ),
+    )
+    # F105 Task 7: how the CTE combines several seeds' activation on one node.
+    # "max" reproduces today's SQL byte for byte.
+    spreading_aggregation: Literal["max", "sat", "noisy_or"] = Field(
+        default="max",
+        description=(
+            "F105: each seed's contribution to a node is its best path there (parallel "
+            "edges and cycles never count twice); contributions from several seeds are "
+            "combined by max (the strongest seed's, today), sat (min(1, sum)) or noisy_or "
+            "(1 - prod(1 - a), a hypothesis: no fetched paper uses it). sat and noisy_or "
+            "stay <= 1 but can exceed the winning seed's score."
+        ),
+    )
+    # F105 Task 8: spreading activation re-scores the recall candidates it
+    # reaches (retrieval_pipeline._apply_spreading_rescore). Off: Stage 4
+    # excludes them from the CTE as before, and its SQL is unchanged.
+    spreading_rescore_existing_enabled: bool = Field(
+        default=False,
+        description=(
+            "F105: when true, Stage 4 asks the spreading CTE for the activation of the "
+            "existing recall candidates (not the seeds) and, before the score sort, raises "
+            "each one's score to min(1, score * (1 + spreading_rescore_beta * activation)). "
+            "It never lowers a score and never touches seeds or spreading rows."
+        ),
+    )
+    spreading_rescore_beta: float = Field(
+        default=0.15,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "F105: the rescore's weight on activation; the same scale as "
+            "graph_adjacency_boost_alpha (0.15)."
+        ),
+    )
 
     # F040: Graph densification — backfill
     # F044 tinyHippo-Lite v1 — STC state machine (telemetry-only slice).
@@ -3310,6 +3462,16 @@ class Settings(BaseSettings):
             raise ValueError(
                 "NOUS_CONTINUATION_MAX_WAIT_SECONDS must not be below NOUS_CONTINUATION_DEBOUNCE_SECONDS "
                 f"({self.continuation_max_wait_seconds} < {self.continuation_debounce_seconds})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_query_gate_anchors(self) -> "Settings":
+        """F105: quantile mode divides by q_hi - q_lo."""
+        if self.spreading_query_gate_q_lo >= self.spreading_query_gate_q_hi:
+            raise ValueError(
+                "NOUS_SPREADING_QUERY_GATE_Q_LO must be below NOUS_SPREADING_QUERY_GATE_Q_HI "
+                f"({self.spreading_query_gate_q_lo} >= {self.spreading_query_gate_q_hi})"
             )
         return self
 

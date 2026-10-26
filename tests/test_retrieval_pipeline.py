@@ -158,6 +158,10 @@ class _FakeSession:
     async def execute(self, _stmt):
         return _FakeExecuteResult(self._contradictions)
 
+    def begin_nested(self):
+        """A savepoint is an async context manager, as on AsyncSession."""
+        return self
+
 
 def _make_brain(
     *, neighbors_by_node, contradictions, decision_results,

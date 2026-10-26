@@ -29,7 +29,7 @@ import time
 import weakref
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 from sqlalchemy import select
@@ -39,6 +39,7 @@ from nous.heart.keys import extract_entity_candidates, normalize_key
 from nous.heart.search import summarize_keyword_stats, with_keyword_stats
 from nous.observability.retrieval_trace import (
     BELOW_FLOOR,
+    BUDGET_TRUNCATED,
     DEDUPED,
     F071_EXCLUDED,
     FILTER_DROPPED,
@@ -51,6 +52,8 @@ from nous.observability.retrieval_trace import (
 )
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from nous.brain.brain import Brain
     from nous.brain.schemas import DecisionSummary, NeighborResult
     from nous.config import Settings
@@ -368,6 +371,11 @@ class _PipelineAccumulator:
     contradiction_checks_ran: bool = False
     chunks_searched: bool = False
 
+    # F105 Task 8: node id -> spreading activation of the existing candidates
+    # Stage 4's CTE reached (no seeds). Empty unless the rescore flag is on and
+    # spreading stayed the mechanism; consumed by _apply_spreading_rescore.
+    spreading_rescore: dict[UUID, float] = field(default_factory=dict)
+
     # Per-stage error counter — incremented when a try/except around a stage
     # call catches an exception. Surfaced via PipelineStats.n_stage_errors.
     stage_errors: dict[str, int] = field(default_factory=dict)
@@ -680,6 +688,15 @@ async def run_recall_pipeline(
                 tr.mutate(r.id, r.type, "recency_resolver", before, r.score,
                           reason=SUPERSEDED)
 
+    # F105 Task 8: raise the candidates spreading reached, before the sort
+    # below turns a raise into a rank gain. After the recency resolver: both
+    # multiply the score, so the order only matters at the clamp to 1.
+    if acc.spreading_rescore:
+        results = _apply_spreading_rescore(
+            results, acc.spreading_rescore,
+            float(getattr(settings, "spreading_rescore_beta", 0.15)), tr,
+        )
+
     # F065 follow-up (2026-05-23): optional score-based merge.
     #
     # The default stage-order assembly above places graph-expanded items
@@ -716,6 +733,16 @@ async def run_recall_pipeline(
             if str(r.id) not in exclude_ids.get(r.type, set())
         ]
         excluded_in_context = before - len(results)
+
+    # F105 Task 6: bound the spreading rows. After F071, so a row F071 removed
+    # does not take a slot; before the reactivation read, so a cut row is not
+    # treated as co-retrieved. It selects by score, so the sort above does not
+    # change which rows survive. The cut is reported on the spreading leg below.
+    n_budget_cut: int | None = None
+    if getattr(settings, "spreading_budget_enabled", False):
+        before = len(results)
+        results = _apply_spreading_budget(results, settings, tr)
+        n_budget_cut = before - len(results)
 
     # F044 v1.1: record edges among the final co-retrieved set as STC recall
     # reactivations. Read-only here (one query); the ltp write is deferred to
@@ -772,9 +799,13 @@ async def run_recall_pipeline(
     _n_spread = sum(
         1 for n in acc.graph_expanded if n.edge_relation == "spreading_activation"
     )
+    # `n_dropped` is the F105 budget's cut (None, left alone, with it off).
+    # Reported here rather than at the cut, so the budget cannot create a
+    # spreading leg on a retrieval where spreading never ran.
     if "spreading_activation" in _attempted:
         tr.leg("spreading_activation", attempted=True,
-               n_returned=_n_spread, counted_in="graph_expanded")
+               n_returned=_n_spread, n_dropped=n_budget_cut,
+               counted_in="graph_expanded")
     if "brain_graph" in _attempted:
         tr.leg("brain_graph", attempted=True,
                n_returned=len(acc.graph_expanded) - _n_spread,
@@ -1610,6 +1641,8 @@ async def _run_stages(
                 )
 
         if use_spreading:
+            rescore_on = bool(getattr(settings, "spreading_rescore_existing_enabled", False))
+            rescore_out: dict[UUID, float] = {}
             try:
                 from nous.brain.schemas import NeighborResult
                 from nous.brain.spreading_activation import (
@@ -1653,13 +1686,34 @@ async def _run_stages(
                     # `winning_seed` maps each activated node to the seed its
                     # winning path started from, for F091 attribution only.
                     winning_seed: dict[UUID, UUID] = {}
+                    # F105 Task 8: with the rescore on, the candidates are
+                    # rescore ids instead of excluded ones. The CTE still keeps
+                    # them out of its window and returns their activation.
+                    if rescore_on:
+                        search_kwargs: dict[str, Any] = {
+                            "exclude_ids": seed_ids | seen_ids,
+                            "rescore_ids": candidate_ids - seed_ids,
+                            "rescore_out": rescore_out,
+                        }
+                    else:
+                        search_kwargs = {"exclude_ids": seed_ids | seen_ids | candidate_ids}
                     activated = await spreading_activation_search(
                         sa_session, brain.agent_id, seeds, settings,
                         limit=_SPREADING_OVERFETCH_LIMIT,
-                        exclude_ids=seed_ids | seen_ids | candidate_ids,
                         seed_out=winning_seed,
+                        **search_kwargs,
                     )
                     seed_by_id = {str(s[0]): s for s in seeds}
+                    # F105 Task 5: the query gate rescales `activated` before
+                    # the floor and the cap below, so both see the gated value.
+                    # The raw value stays as the expansion's path_strength.
+                    raw_activation: dict[tuple[UUID, str], float] = {}
+                    if getattr(settings, "spreading_query_gate_enabled", False) and activated:
+                        raw_activation = {(r[0], r[1]): r[2] for r in activated}
+                        activated = await _query_gate(
+                            sa_session, brain, query, settings, activated,
+                            winning_seed, seed_by_id, acc,
+                        )
                     # A4: the floor was a bare `0.1` literal here and in the
                     # F091 mirror below. Both now read the setting so a
                     # relative-floor experiment is a config arm; the default
@@ -1675,6 +1729,18 @@ async def _run_stages(
                         and nid not in candidate_ids
                         and activation > _floor
                     ]
+                    # F105: the gate left no hit where the raw rows had some.
+                    # That is a relevance verdict, not a resolution failure, so
+                    # the 1-hop fallback below must not re-add the same rows
+                    # ungated. A gate that skipped or failed changed nothing,
+                    # so this stays False for it.
+                    gate_pruned_all = not hits and any(
+                        raw > _floor
+                        for (nid, _t), raw in raw_activation.items()
+                        if nid not in seed_ids
+                        and nid not in seen_ids
+                        and nid not in candidate_ids
+                    )
                     # Resolve real content + created_at (shared with
                     # brain._neighbors). Ids the resolver omits —
                     # inactive facts/procedures, missing rows — are
@@ -1753,12 +1819,19 @@ async def _run_stages(
                             stage="stage4_spreading_activation", hop=depth,
                             edge_relation="spreading_activation",
                             edge_weight=activation,
-                            path_strength=activation,
+                            path_strength=raw_activation.get((nid, ntype), activation),
                         )
                         seen_ids.add(nid)
                         n_appended += 1
                 if n_appended > 0:
                     acc.spreading_activation_used = True
+                elif gate_pruned_all:
+                    # F105: the query gate pruned every row. Spreading stays
+                    # the mechanism and returns nothing; no 1-hop fallback.
+                    logger.debug(
+                        "Spreading query gate pruned every row (%d activated); no 1-hop fallback",
+                        len(raw_activation),
+                    )
                 else:
                     # Every activated node was dropped by resolution
                     # (inactive/foreign/dangling). Fall back to 1-hop
@@ -1768,6 +1841,13 @@ async def _run_stages(
                         len(hits),
                     )
                     use_spreading = False
+                # F105 Task 8: only from a run spreading stays the mechanism
+                # of; the fallback abandons it. Seeds are left out again for
+                # a search that ignores rescore_ids (mocks).
+                if rescore_on and use_spreading:
+                    acc.spreading_rescore = {
+                        nid: a for nid, a in rescore_out.items() if nid not in seed_ids
+                    }
             except Exception:
                 logger.debug(
                     "Spreading activation failed, falling back to 1-hop"
@@ -1904,6 +1984,50 @@ async def _run_stages(
 # ---------------------------------------------------------------------------
 
 
+def _apply_spreading_budget(
+    results: list[PipelineResult], settings: "Settings", tr: Any
+) -> list[PipelineResult]:
+    """F105 Task 6: bound the spreading activation rows in the merged list.
+
+    Stage 4's ``_SPREADING_RESULT_CAP`` acts before the merge, and
+    ``recall_deep`` delivers the whole merged list (no ``[:limit]`` slice,
+    exempt from SmartCompress), so this is where the number of spreading rows
+    that reach the prompt can be bounded. Off (the default) returns ``results``
+    itself.
+
+    (1) With ``spreading_budget_cutline_rank`` k > 0, the cutline is the k-th
+    best non-spreading score (none when there are fewer than k such rows), and
+    a spreading row strictly below it is dropped. (2) Of the rest, the
+    ``spreading_budget_max_rows`` best by score are kept; the stable sort keeps
+    the earlier row on a tie. Every dropped row is recorded as
+    ``BUDGET_TRUNCATED``. Non-spreading rows and the relative order of the
+    survivors are untouched.
+    """
+    if not getattr(settings, "spreading_budget_enabled", False):
+        return results
+    max_rows = int(getattr(settings, "spreading_budget_max_rows", 5))
+    cutline_rank = int(getattr(settings, "spreading_budget_cutline_rank", 0))
+    sa_idx = [i for i, r in enumerate(results) if r.source == "spreading_activation"]
+    if cutline_rank > 0:
+        non_sa = sorted(
+            (r.score or 0.0 for r in results if r.source != "spreading_activation"),
+            reverse=True,
+        )
+        if len(non_sa) >= cutline_rank:
+            cutline = non_sa[cutline_rank - 1]
+            sa_idx = [i for i in sa_idx if (results[i].score or 0.0) >= cutline]
+    keep = set(
+        sorted(sa_idx, key=lambda i: results[i].score or 0.0, reverse=True)[:max_rows]
+    )
+    out: list[PipelineResult] = []
+    for i, r in enumerate(results):
+        if r.source == "spreading_activation" and i not in keep:
+            tr.drop(r.id, r.type, BUDGET_TRUNCATED, "spreading_budget")
+        else:
+            out.append(r)
+    return out
+
+
 def _heart_results_to_pipeline(
     heart_results: list["RecallResult"],
 ) -> list[PipelineResult]:
@@ -1932,6 +2056,78 @@ def _heart_results_to_pipeline(
             )
         )
     return out
+
+
+async def _query_gate(
+    session: "AsyncSession",
+    brain: "Brain",
+    query: str,
+    settings: "Settings",
+    activated: list[tuple[UUID, str, float, int]],
+    winning_seed: dict[UUID, UUID],
+    seed_by_id: dict[str, tuple[UUID, str, float]],
+    acc: _PipelineAccumulator,
+) -> list[tuple[UUID, str, float, int]]:
+    """F105 Task 5: scale each spreading row by its relevance to the query.
+
+    Each row's activation is multiplied by ``gate_factor(cos(node, q),
+    cos(winning seed, q))``, which is in [0, 1], and the rows are re-sorted by
+    the gated value (stably, so ties keep the CTE's order) for the result cap.
+    A node or seed without an embedding is neutral (factor 1.0). With no
+    embedder, or an empty query vector, the rows come back unchanged, and so
+    they do on any failure, counted in ``acc.stage_errors["spreading_query_gate"]``:
+    the gate fails open, and a failure never turns spreading into the 1-hop
+    fallback. Neither does a gate that prunes every row below the floor: Stage
+    4 then returns no spreading row and skips the fallback, which exists for
+    resolution failures and would re-add the pruned rows ungated.
+
+    The CTE's over-fetch window (``_SPREADING_OVERFETCH_LIMIT``) is cut before
+    this runs, so the gate cannot pull in a row that window left out.
+    """
+    embedder = getattr(brain, "embeddings", None)
+    if embedder is None:
+        return activated
+    try:
+        from nous.brain.spreading_activation import gate_factor, query_cosines
+
+        # The chunk and exemplar legs embed the same query: an LRU hit in practice.
+        query_vec = await embedder.embed(query)
+        if not query_vec:
+            return activated
+        nodes: dict[UUID, str] = {nid: ntype for nid, ntype, _a, _d in activated}
+        for nid, _ntype, _a, _d in activated:
+            seed = seed_by_id.get(str(winning_seed.get(nid)))
+            if seed is not None:
+                nodes.setdefault(seed[0], seed[1])
+        # A savepoint, so a SQL failure here (a statement timeout, a vector
+        # dimension mismatch) rolls back only this read: Stage 4 reuses the
+        # session for content resolution, which an aborted transaction fails.
+        async with session.begin_nested():
+            cos = await query_cosines(session, brain.agent_id, list(nodes.items()), query_vec)
+        mode = str(getattr(settings, "spreading_query_gate_mode", "seed_relative"))
+        q_lo = float(getattr(settings, "spreading_query_gate_q_lo", 0.0))
+        q_hi = float(getattr(settings, "spreading_query_gate_q_hi", 1.0))
+        s_min = float(getattr(settings, "spreading_query_gate_seed_min", 0.19))
+        gated: list[tuple[UUID, str, float, int]] = []
+        for nid, ntype, activation, depth in activated:
+            seed_id = winning_seed.get(nid)
+            factor = gate_factor(
+                cos.get(nid), cos.get(seed_id) if seed_id is not None else None,
+                mode, q_lo, q_hi, s_min,
+            )
+            gated.append((nid, ntype, activation * factor, depth))
+        gated.sort(key=lambda r: r[2], reverse=True)
+        logger.debug(
+            "Spreading query gate (%s): %d rows, %d without a node embedding (neutral)",
+            mode, len(gated), sum(1 for nid, *_ in activated if cos.get(nid) is None),
+        )
+        return gated
+    except Exception:
+        logger.debug("Spreading query gate failed; rows stay ungated", exc_info=True)
+        acc.stage_errors["spreading_query_gate"] = (
+            acc.stage_errors.get("spreading_query_gate", 0) + 1
+        )
+        return activated
 
 
 async def _apply_graph_adjacency_boost(
@@ -2041,6 +2237,31 @@ async def _apply_graph_adjacency_boost(
         boosted.append(replace(r, score=(r.score or 0.0) * boost))
     boosted.sort(key=lambda r: r.score or 0.0, reverse=True)
     return boosted
+
+
+def _apply_spreading_rescore(
+    results: list[PipelineResult], rescore: dict[UUID, float], beta: float, tr: Any
+) -> list[PipelineResult]:
+    """F105 Task 8: raise each recall candidate's score by its spreading activation.
+
+    A non-spreading result with an activation ``a`` in ``rescore`` scores
+    ``min(1.0, score * (1 + beta * a))``, recorded as a ``spreading_rescore``
+    mutation. Only a raise is applied: a score already above 1 (the adjacency
+    boost can put one there) or a missing one is left alone, so a direct hit is
+    never demoted. Spreading rows are skipped; seeds have no entry (Stage 4
+    leaves them out of ``rescore``). Positions are kept: the ``rerank_by_score``
+    sort, when on, is what turns a raise into a rank gain.
+    """
+    out: list[PipelineResult] = []
+    for r in results:
+        a = rescore.get(r.id)
+        if a is not None and r.source != "spreading_activation" and r.score is not None:
+            after = min(1.0, r.score * (1.0 + beta * a))
+            if after > r.score:
+                tr.mutate(r.id, r.type, "spreading_rescore", r.score, after)
+                r = replace(r, score=after)
+        out.append(r)
+    return out
 
 
 async def _record_recall_reactivation(
@@ -2473,8 +2694,13 @@ def _f065_provenance_penalty(
         # ADDITIONAL hop is still discounted. Depth-1 reaches exact parity with
         # 1-hop; depth-2 keeps exactly one decay.
         #
-        # The bound MAX aggregation relies on survives: at depth 1 the result is
-        # `seed * w` with w clamped to 1.0 in the CTE, so score <= seed <= 1.
+        # The bound: under MAX aggregation the result is
+        # `seed * PROD(w) * decay^(depth-1)` with every w clamped to 1.0 in the
+        # CTE, so score <= seed <= 1 at any depth >= 1. F105 Task 7's `sat` and
+        # `noisy_or` (`spreading_aggregation`) combine several seeds on one
+        # node, so an activation can reach 1.0 and the ratio 1 / decay (2.0 at
+        # the default), above every direct hit: Plan 1.2's inflation. Hence the
+        # cap at 1.0, a no-op under MAX, so depth-1 parity stays exact.
         #
         # Measured counterfactual over 64 prod retrievals / 848 rendered
         # spreading rows: today and the earlier "just drop graph_recall_decay"
@@ -2524,7 +2750,7 @@ def _f065_provenance_penalty(
         ):
             sa_decay = float(getattr(settings, "spreading_activation_decay", 0.5))
             if sa_decay > 0.0:
-                return base_score / sa_decay
+                return min(1.0, base_score / sa_decay)
         return base_score * decay
     method = neighbor.extraction_method or "heuristic"
     penalty = settings.graph_inferred_edge_penalty if method == "inferred" else 1.0

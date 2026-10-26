@@ -1,0 +1,1032 @@
+"""F105 Task 1: the read-only spreading activation replay (scripts/diag/sa_replay.py).
+
+The pure tests pin the metrics, the expansions parser and the base config the
+replay builds every arm on. The postgres_only tests pin that a replayed arm is
+exactly a direct ``spreading_activation_search`` call, and that seeds and
+degrees are read for the right agent and edges only.
+"""
+
+import json
+import os
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from uuid import UUID, uuid4
+
+import pytest
+import pytest_asyncio
+from spreading_v2_helpers import insert_edge
+from sqlalchemy import text
+
+from nous.api.retrieval_pipeline import _CHUNK_DROP_DISPOSITIONS, _score_memory_neighbor
+from nous.brain.brain import Brain
+from nous.brain.schemas import NeighborResult, ReasonInput, RecordInput
+from nous.brain.spreading_activation import spreading_activation_search
+from nous.config import Settings
+from scripts.diag import sa_replay
+from scripts.diag.sa_replay import (
+    BASE_CONFIG_KEYS,
+    ArmRun,
+    EdgeHop,
+    ReplaySeed,
+    base_config_sources,
+    build_settings,
+    check_dsn_host,
+    edge_kind,
+    embed_queries,
+    gate_analysis,
+    hub_share,
+    jaccard_at_k,
+    last_hop_edges,
+    load_base_config,
+    load_candidate_seeds,
+    load_degrees,
+    load_replay_seeds,
+    parse_arm,
+    parse_candidate_seeds,
+    parse_replay_seeds,
+    percentile,
+    replay,
+    rescore_record,
+    run_arm,
+)
+
+A, B, C, D = (UUID(f"0000000{i}-0000-0000-0000-000000000000") for i in range(1, 5))
+SA = "stage4_spreading_activation"
+
+# The real A2.env records keys prod leaves unset as "# unset: KEY" comment
+# lines; the parity keys appear in it that way. Fake values, same shape.
+_A2_LIKE = """\
+# A2 arm (fake values)
+NOUS_SPREADING_ACTIVATION_ENABLED=true
+NOUS_GRAPH_NEIGHBOR_SEED_SCORE_ENABLED=true
+# unset: NOUS_SPREADING_ACTIVATION_DECAY
+# unset: NOUS_SPREADING_SCORE_DEPTH1_PARITY
+# unset: NOUS_GRAPH_INFERRED_EDGE_PENALTY
+"""
+
+
+def _env_file(tmp_path: Path, body: str, name: str = "A2.env") -> Path:
+    path = tmp_path / name
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def _exp(seed_id, seed_type="fact", seed_score=0.8, stage=SA, neighbor=None):
+    return {
+        "hop": 1, "stage": stage, "seed_id": str(seed_id), "seed_type": seed_type,
+        "seed_score": seed_score, "neighbor_id": str(neighbor or uuid4()),
+        "neighbor_type": "fact", "edge_relation": "spreading_activation",
+        "edge_weight": 0.3, "path_strength": 0.3, "won_best_path": True,
+        "extraction_method": None,
+    }
+
+
+def _log_row(expansions, rid="r1"):
+    return {"id": rid, "agent_id": "agent-x", "query": "q", "expansions": expansions}
+
+
+# ---------------------------------------------------------------------------
+# Metrics
+# ---------------------------------------------------------------------------
+
+
+def test_jaccard_at_k():
+    assert jaccard_at_k([A, B, C], [B, C, D], 3) == 0.5
+    # Only the top k of each list count.
+    assert jaccard_at_k([A, B, C], [A, B, D], 2) == 1.0
+    # Two empty windows are the same window.
+    assert jaccard_at_k([], [], 20) == 1.0
+    assert jaccard_at_k([A], [], 20) == 0.0
+
+
+def test_percentile_p95():
+    xs = [float(x) for x in (7, 1, 20, 3, 15, 9, 12, 2, 18, 5, 11, 4, 16, 8, 19, 6, 14, 10, 17, 13)]
+    # Linear interpolation between closest ranks: rank 0.95 * 19 = 18.05.
+    assert percentile(xs, 95) == pytest.approx(19.05)
+    assert percentile(xs, 50) == pytest.approx(10.5)
+    assert percentile(xs, 100) == 20.0
+    with pytest.raises(ValueError):
+        percentile([], 95)
+
+
+def test_hub_share():
+    hub_seed, other_seed, hub_parent, small_parent = (uuid4() for _ in range(4))
+    r1, r2, r3, r4 = (uuid4() for _ in range(4))
+    rows = [
+        (r1, "fact", 0.4, 1),  # leaves its degree-60 seed
+        (r2, "fact", 0.2, 2),  # leaves a degree-60 via node
+        (r3, "fact", 0.3, 1),  # leaves a degree-5 seed
+        (r4, "fact", 0.15, 2),  # leaves a degree-3 via node
+    ]
+    parents = {r1: hub_seed, r2: hub_parent, r3: other_seed, r4: small_parent}
+    degree = {hub_seed: 60, hub_parent: 60, other_seed: 5, small_parent: 3}
+    seeds = {hub_seed, other_seed}
+    assert hub_share(rows, parents, seeds, degree, 50) == 0.5
+    # A seed's own (depth-0) row leaves nothing and is not an SA row.
+    assert hub_share(rows + [(hub_seed, "fact", 0.9, 0)], parents, seeds, degree, 50) == 0.5
+    with pytest.raises(ValueError):
+        hub_share([], {}, seeds, degree, 50)
+
+
+def test_score_retrieval_judges_depth2_rows_by_via_node():
+    """A depth-2 row leaves its via node, not its seed. Here the hub is reached
+    at hop 1 and left at hop 2, which the seed's degree (1) cannot show."""
+    seed, hub, beyond = uuid4(), uuid4(), uuid4()
+    rs = ReplaySeed(retrieval_id="r", agent_id="agent-x", query="q", seeds=[(seed, "fact", 0.8)])
+    run = ArmRun(
+        rows=[(hub, "fact", 0.4, 1), (beyond, "fact", 0.2, 2)], seconds=0.001,
+        seed_of={hub: seed, beyond: seed}, parent_of={hub: seed, beyond: hub},
+    )
+    out = sa_replay._score_retrieval(
+        rs, {"baseline": run}, {"baseline": Settings(_env_file=None)}, {seed: 1, hub: 60})
+    assert out["arms"]["baseline"]["hub_share"] == 0.5
+    summary = sa_replay._summarise([out], ["baseline"])["baseline"]
+    assert summary[f"hub_share_{sa_replay.HUB_SHARE_METHOD}"] == 0.5
+    assert sa_replay.HUB_SHARE_METHOD == "via_node"
+
+
+# ---------------------------------------------------------------------------
+# Seeds from retrieval_log.expansions
+# ---------------------------------------------------------------------------
+
+
+def test_load_replay_seeds_skips_multi_seed_type():
+    """Only post-#807 SA rows carry the real winning seed. A "multi" placeholder
+    or a null score is the pre-#807 shape, and a Path A (stage2b) expansion is
+    not a spreading seed at all."""
+    rows = [
+        _log_row([_exp(A, seed_type="multi", seed_score=None)], "pre807"),
+        _log_row([_exp(A, seed_score=None)], "null-score"),
+        _log_row([_exp(A, stage="stage2b_heart_graph_memory")], "path-a"),
+        _log_row([_exp(A, seed_type="multi"), _exp(B, seed_score=0.7)], "mixed"),
+    ]
+    out = parse_replay_seeds(rows)
+    assert [rs.retrieval_id for rs in out] == ["mixed"]
+    assert out[0].seeds == [(B, "fact", 0.7)]
+    assert out[0].agent_id == "agent-x"
+    assert out[0].query == "q"
+
+
+def test_load_replay_seeds_dedupes_within_retrieval():
+    one = parse_replay_seeds([_log_row([_exp(A, seed_score=0.9) for _ in range(3)])])
+    assert one[0].seeds == [(A, "fact", 0.9)]
+    two = parse_replay_seeds([_log_row(
+        [_exp(B, seed_score=0.6), _exp(A, seed_score=0.9), _exp(B, seed_score=0.6)])])
+    assert two[0].seeds == [(B, "fact", 0.6), (A, "fact", 0.9)], "first-seen order"
+    # expansions as delivered by a driver that does not decode JSONB.
+    raw = parse_replay_seeds([_log_row(json.dumps([_exp(A, seed_score=0.9)]))])
+    assert raw[0].seeds == [(A, "fact", 0.9)]
+
+
+# ---------------------------------------------------------------------------
+# Seeds from retrieval_log.candidates (--seeds-from candidates)
+# ---------------------------------------------------------------------------
+
+
+def _cand(cid, leg, ctype="fact", score=0.8, stage="final", restored_from=None):
+    return {"id": str(cid), "type": ctype, "entry_leg": leg, "entry_score": score,
+            "entry_rank": None, "final_rank": None, "disposition": "rendered",
+            "disposition_stage": stage, "mutations": [], "restored_from": restored_from}
+
+
+def test_parse_candidate_seeds_mirrors_stage4():
+    """Seeds are the first max_expand brain decisions (score or 0.5) and the first
+    three scored heart_primary facts, in recorded order; the heart leg's own cut
+    is not a seed, also when another leg brought it back. The exclusion is every
+    pre-Stage-4 candidate less the heart and chunk cuts, plus the Path A
+    neighbours; Stage 4's own rows and later legs are not excluded."""
+    d1, d2, cut_fact, f1, f2, f3, f4, unscored, episode = (uuid4() for _ in range(9))
+    chunk, chunk_cut, path_a, path_2, sa_row, sa_low, parent_ep = (uuid4() for _ in range(7))
+    rescued_by_sa, rescued_by_path_a = uuid4(), uuid4()
+    rescued = "sliced_off@heart_recall_limit"
+    candidates = [
+        _cand(cut_fact, "heart_primary", score=0.99, stage="heart_recall_limit"),
+        _cand(rescued_by_sa, "heart_primary", score=0.98, restored_from=rescued),
+        _cand(rescued_by_path_a, "heart_primary", score=0.97, stage="script_limit", restored_from=rescued),
+        _cand(f1, "heart_primary", score=0.9),
+        _cand(episode, "heart_primary", ctype="episode", score=0.95),
+        _cand(unscored, "heart_primary", score=None),
+        _cand(f2, "heart_primary", score=0.7, stage="script_limit"),
+        _cand(f3, "heart_primary", score=0.6),
+        _cand(f4, "heart_primary", score=0.5),
+        _cand(chunk, "chunk", ctype="chunk"),
+        _cand(chunk_cut, "chunk", ctype="chunk", stage="chunk_rrf_merge"),
+        _cand(path_a, "heart_graph_memory", ctype="chunk"),
+        _cand(path_2, "heart_graph", ctype="decision"),
+        _cand(d1, "brain", ctype="decision", score=None),
+        _cand(d2, "brain", ctype="decision", score=0.4),
+        _cand(sa_row, "graph_expanded"),
+        _cand(sa_low, "spreading_activation", stage="spreading_activation_floor"),
+        _cand(parent_ep, "parent_episode", ctype="episode"),
+    ]
+    expansions = [
+        _exp(f1, stage="stage2b_heart_graph_memory", neighbor=rescued_by_path_a),
+        _exp(f1, stage="stage2b_heart_graph_memory", neighbor=path_a),
+        _exp(f1, neighbor=sa_row),
+    ]
+    row = {"id": "r1", "agent_id": "agent-x", "query": "q", "candidates": candidates,
+           "expansions": expansions}
+    [rs] = parse_candidate_seeds([row], max_expand=1)
+    assert rs.seeds == [(d1, "decision", 0.5), (f1, "fact", 0.9), (f2, "fact", 0.7), (f3, "fact", 0.6)]
+    assert rs.exclude == {
+        f1, episode, unscored, f2, f3, f4, chunk, path_a, path_2, d1, d2, rescued_by_path_a}
+    assert parse_candidate_seeds([row], max_expand=2)[0].seeds[:2] == [
+        (d1, "decision", 0.5), (d2, "decision", 0.4)]
+    # A driver that does not decode JSONB; a retrieval with no seed is dropped.
+    raw = parse_candidate_seeds(
+        [{**row, "candidates": json.dumps(candidates), "expansions": json.dumps(expansions)}], 1)
+    assert (raw[0].seeds, raw[0].exclude) == (rs.seeds, rs.exclude)
+    assert parse_candidate_seeds([{**row, "candidates": [_cand(chunk, "chunk", ctype="chunk")]}], 1) == []
+
+
+def test_parse_candidate_seeds_skips_every_chunk_cut():
+    """The chunk leg records each hybrid_search cut as chunk_<stage>, one per
+    _CHUNK_DROP_DISPOSITIONS entry; none of them reached Stage 4."""
+    f1, kept = uuid4(), uuid4()
+    cuts = {stage: uuid4() for stage in _CHUNK_DROP_DISPOSITIONS}
+    candidates = [_cand(f1, "heart_primary", score=0.9), _cand(kept, "chunk", ctype="chunk")] + [
+        _cand(cid, "chunk", ctype="chunk", stage=f"chunk_{stage}") for stage, cid in cuts.items()]
+    row = {"id": "r1", "agent_id": "agent-x", "query": "q", "candidates": candidates, "expansions": []}
+    [rs] = parse_candidate_seeds([row], max_expand=1)
+    assert rs.exclude == {f1, kept}
+    assert "chunk_keyword_filter" in sa_replay.PRE_STAGE4_CUTS
+
+
+def test_parse_candidate_seeds_fills_rescore_fields():
+    """--rescore: the rescore ids are every leg's live candidate but brain's, plus
+    the Path A neighbours, less the seeds; delivered rows are those with a
+    final_rank, in that order; sa_appended follows the SA expansions."""
+    f1, f2, d1, d2, chunk, path_a, rescued, sa_row = (uuid4() for _ in range(8))
+    candidates = [
+        {**_cand(f1, "heart_primary", score=0.9), "final_rank": 2},
+        {**_cand(f2, "heart_primary", score=0.7), "final_rank": 1},
+        _cand(chunk, "chunk", ctype="chunk"),
+        _cand(d1, "brain", ctype="decision"),
+        {**_cand(d2, "brain", ctype="decision"), "final_rank": 3},
+        _cand(rescued, "heart_primary", stage="heart_recall_limit"),
+    ]
+    expansions = [_exp(f1, stage="stage2b_heart_graph_memory", neighbor=path_a), _exp(f1, neighbor=sa_row)]
+    row = {"id": "r1", "agent_id": "agent-x", "query": "q", "candidates": candidates, "expansions": expansions}
+    [rs] = parse_candidate_seeds([row], max_expand=1)
+    assert rs.seeds == [(d1, "decision", 0.8), (f1, "fact", 0.9), (f2, "fact", 0.7)]
+    assert rs.rescore == {chunk, path_a}
+    assert rs.exclude - rs.rescore == {f1, f2, d1, d2}, "what stays excluded: the seeds and brain hits"
+    assert rs.path_a == {path_a}
+    assert [c["id"] for c in rs.delivered] == [str(f2), str(f1), str(d2)]
+    assert rs.sa_appended
+    [rs] = parse_candidate_seeds([{**row, "expansions": expansions[:1]}], max_expand=1)
+    assert not rs.sa_appended
+
+
+def _delivered(cid, leg, score, rank, ctype="fact", boost=None):
+    """A delivered candidate; ``boost`` = (before, after) of an adjacency_boost mutation."""
+    c = {**_cand(cid, leg, ctype=ctype, score=score if boost is None else boost[0]), "final_rank": rank}
+    if boost is not None:
+        c["mutations"] = [{"stage": "adjacency_boost", "score_before": boost[0], "score_after": boost[1],
+                           "reason": None}]
+    return c
+
+
+def _rescore_case(beta=1.0, sa_appended=True):
+    """Delivered (final_rank order): a seed 0.95, X 0.90, brain D 0.55, chunk K
+    0.52 (boosted from 0.48), Path A row P 0.50, Y 0.40, SA row 0.30. P and Y
+    have activation 1.0, K 0.0."""
+    seed, x, d, k, p, y, sa_row = (uuid4() for _ in range(7))
+    delivered = [
+        _delivered(seed, "heart_primary", 0.95, 1), _delivered(x, "heart_primary", 0.90, 2),
+        _delivered(d, "brain", 0.55, 3, ctype="decision"),
+        _delivered(k, "chunk", None, 4, ctype="chunk", boost=(0.48, 0.52)),
+        _delivered(p, "heart_graph_memory", 0.50, 5), _delivered(y, "heart_primary", 0.40, 6),
+        _delivered(sa_row, "graph_expanded", 0.30, 7),
+    ]
+    rs = ReplaySeed(retrieval_id="r", agent_id="a", query="q", seeds=[(seed, "fact", 0.95)],
+                    rescore={x, k, p, y}, path_a=set(), delivered=delivered, sa_appended=sa_appended)
+    run = ArmRun(rows=[], seconds=0.0, rescore={p: 1.0, y: 1.0, k: 0.0, sa_row: 1.0})
+    return rs, run, Settings(_env_file=None, spreading_rescore_beta=beta)
+
+
+def test_rescore_record_ranks_and_groups():
+    """At beta 1.0: P 0.50 -> 1.0 (rank 5 -> 1), Y 0.40 -> 0.80 (6 -> 4). Group A
+    is P (Path A) and K (adjacency-boosted), B is X and Y; the seed, D and the SA
+    row are not candidates. Only P moves by more than 3."""
+    rs, run, settings = _rescore_case()
+    rec = rescore_record(rs, run, settings)
+    assert rec["applied"] and rec["reproduces_final_rank"]
+    assert (rec["n_delivered"], rec["n_existing"], rec["n_activated"], rec["n_activated_a"]) == (7, 4, 2, 1)
+    assert rec["score_demotions"] == 0
+    assert (rec["moved_all"], rec["moved_existing"]) == (1, 1)
+    assert rec["gains_a"] == [-2, 4], "K, then P"
+    assert rec["gains_b"] == [-1, 2], "X, then Y"
+    assert rec["drops_other"] == [-1, -2], "the seed and D"
+
+    off = rescore_record(*_rescore_case(sa_appended=False))
+    assert not off["applied"]
+    assert off["gains_a"] + off["gains_b"] + off["drops_other"] == [0, 0, 0, 0]
+
+    rs.delivered[1], rs.delivered[2] = rs.delivered[2], rs.delivered[1]
+    assert not rescore_record(rs, run, settings)["reproduces_final_rank"]
+
+
+def test_rescore_section_verdict():
+    """1 of 7 delivered rows and 1 of 4 candidates move by more than 3 ranks:
+    both at or above 10%, so the arm fails; a retrieval the rescore does not
+    apply to is counted apart."""
+    rec = rescore_record(*_rescore_case())
+    off = rescore_record(*_rescore_case(sa_appended=False))
+    retrievals = [{"rescore": {"window": "same", "arms": {"baseline": r}}} for r in (rec, off)]
+    section = sa_replay.rescore_section(retrievals, ["baseline"])
+    assert section["window_vs_plain_exclusion"] == {"same": 2}
+    arm = section["arms"]["baseline"]
+    assert (arm["not_applied"], arm["reproducing"]) == (1, 1)
+    stats = arm["applied"]
+    assert (stats["delivered_rows"], stats["existing_candidates"]) == (7, 4)
+    assert stats["moved_share_all"] == round(1 / 7, 4)
+    assert stats["moved_share_existing"] == 0.25
+    assert stats["existing_activated_share"] == 0.5
+    assert (stats["activated_share_group_a"], stats["activated_share_group_b"]) == (0.5, 0.5), "P of P, K; Y of X, Y"
+    assert stats["gains_group_a"]["max"] == 4
+    assert (stats["other_rows_moved_down"], stats["other_rows_max_drop"]) == (2, 2)
+    assert stats["verdict"] == "fail"
+    small = rescore_record(*_rescore_case(beta=0.15))
+    assert sa_replay._rescore_stats([small])["verdict"] == "pass"
+    lopsided = {**small, "n_activated": 3, "n_activated_a": 1, "gains_a": [0], "gains_b": [0, 0, 0]}
+    stats = sa_replay._rescore_stats([lopsided])
+    assert (stats["activated_share_group_a"], stats["activated_share_group_b"]) == (1.0, round(2 / 3, 4))
+    assert sa_replay.rescore_section([], ["baseline"])["arms"]["baseline"]["applied"]["verdict"] is None
+
+
+def test_edge_kind():
+    assert edge_kind("co_occurred", "co_occurrence") == "co_occurred"
+    assert edge_kind("related_to", "co_mention") == "co_mention"
+    assert edge_kind("related_to", "inferred") == "other"
+    assert edge_kind("related_to", None) == "other"
+
+
+def test_score_retrieval_reports_edge_kinds():
+    seed, n1, n2, n3 = (uuid4() for _ in range(4))
+    e1, e2 = uuid4(), uuid4()
+    rs = ReplaySeed(retrieval_id="r", agent_id="agent-x", query="q", seeds=[(seed, "fact", 0.8)])
+    run = ArmRun(
+        rows=[(n1, "fact", 0.4, 1), (n2, "fact", 0.2, 1), (n3, "fact", 0.05, 2)], seconds=0.001,
+        parent_of={n1: seed, n2: seed, n3: n1},
+        edge_of={n1: EdgeHop("other", e1), n2: EdgeHop("co_occurred", e2), n3: EdgeHop("co_mention", e1)},
+    )
+    out = sa_replay._score_retrieval(
+        rs, {"baseline": run}, {"baseline": Settings(_env_file=None)}, {}, edge_kinds=True)
+    arm = out["arms"]["baseline"]
+    assert arm["edge_kinds"] == {"other": 1, "co_occurred": 1}, "n3 is below the floor"
+    assert arm["assoc_rows"] == [
+        {"id": str(n2), "kind": "co_occurred", "edge_id": str(e2), "depth": 1, "activation": 0.2}]
+    summary = sa_replay._summarise([out, out], ["baseline"])["baseline"]
+    assert summary["edge_kinds_kept"] == {"co_occurred": 2, "co_mention": 0, "other": 2}
+    assert summary["retrievals_with_assoc_rows_kept"] == 2
+    plain = sa_replay._score_retrieval(rs, {"baseline": run}, {"baseline": Settings(_env_file=None)}, {})
+    assert "edge_kinds" not in plain["arms"]["baseline"]
+    assert "edge_kinds_kept" not in sa_replay._summarise([plain], ["baseline"])["baseline"]
+
+
+# ---------------------------------------------------------------------------
+# Query gate analysis (--embed-queries, F105 Task 5)
+# ---------------------------------------------------------------------------
+
+
+def _gate_row(activation, cos_node, cos_seed, ntype="fact"):
+    return {"id": str(uuid4()), "type": ntype, "activation": activation, "depth": 1,
+            "cos_node": cos_node, "cos_seed": cos_seed}
+
+
+def test_gate_analysis_derives_params_and_prunes():
+    """Seed cosines 0.6/0.4/0.5 give s_min = q_hi = 0.5; node cosines 0.1/0.3/0.6
+    give q_lo = p10 = 0.14. A missing cosine is neutral and left out of the means."""
+    records = [
+        {"seed_cos": [0.6, 0.4], "rows": [
+            _gate_row(0.5, 0.6, 0.6),  # as relevant as its seed: kept everywhere but raw
+            _gate_row(0.3, 0.1, 0.6),  # 0.3 * 0.1 / 0.6 = 0.05: pruned
+        ]},
+        {"seed_cos": [0.5, None], "rows": [
+            _gate_row(0.4, None, 0.5, ntype="chunk"),  # no node embedding: kept
+            _gate_row(0.2, 0.3, None),  # seed without embedding: kept under seed_relative
+        ]},
+        {"seed_cos": [None], "rows": []},
+    ]
+    out = gate_analysis(records, floor=0.1)
+    assert out["params"] == {"s_min": 0.5, "q_lo": 0.14, "q_hi": 0.5, "floor": 0.1}
+    assert out["notes"] == []
+    assert (out["retrievals"], out["retrievals_with_rows_above_floor"], out["rows_above_floor"]) == (3, 2, 4)
+    assert (out["seeds"], out["seeds_without_embedding"]) == (5, 2)
+    assert out["rows_without_node_embedding_by_type"] == {"chunk": 1}
+    assert out["rows_without_seed_embedding"] == 1
+    assert out["seed_cos_deciles"][0] == 0.4 and out["seed_cos_deciles"][-1] == 0.6
+    assert out["node_cos_deciles"][1] == pytest.approx(0.14)
+    # Row seed cosines 0.5 / 0.6 / 0.6: cuts at 0.5667 and 0.6, so both 0.6 rows are "middle".
+    assert out["seed_cos_tercile_cuts"] == [pytest.approx(0.5667, abs=1e-4), 0.6]
+
+    sr = out["modes"]["seed_relative"]
+    assert (sr["rows_above_floor_before"], sr["rows_above_floor_after"], sr["pruned_share"]) == (4, 3, 0.25)
+    assert sr["retrievals_with_rows_after"] == 2
+    assert (sr["mean_cos_kept"], sr["mean_cos_pruned"]) == (pytest.approx(0.45), pytest.approx(0.1))
+    assert sr["pruned_by_seed_cos_tercile"] == {
+        "low": {"rows": 1, "pruned": 0, "pruned_share": 0.0},
+        "middle": {"rows": 2, "pruned": 1, "pruned_share": 0.5},
+        "high": {"rows": 0, "pruned": 0, "pruned_share": None},
+        "no_seed_embedding": {"rows": 1, "pruned": 0, "pruned_share": 0.0},
+    }
+    assert (sr["factor_share_1"], sr["factor_share_0"]) == (0.75, 0.0)
+    assert sr["factor_deciles"][0] == pytest.approx(0.1 / 0.6, abs=1e-4)
+
+    qt = out["modes"]["quantile"]
+    # (0.3 - 0.14) / 0.36 = 0.444, times 0.2 = 0.089: under the floor.
+    assert (qt["rows_above_floor_after"], qt["pruned_share"]) == (2, 0.5)
+    assert (qt["mean_cos_kept"], qt["mean_cos_pruned"]) == (pytest.approx(0.6), pytest.approx(0.2))
+    raw = out["modes"]["raw"]
+    assert (raw["rows_above_floor_after"], raw["pruned_share"]) == (2, 0.5)
+    assert "factor_deciles" not in raw
+
+
+def test_gate_analysis_edge_cases():
+    """quantile needs q_lo < q_hi; with no cosines at all there is nothing to derive."""
+    inverted = gate_analysis([{"seed_cos": [0.2], "rows": [_gate_row(0.5, 0.9, 0.2)]}], floor=0.1)
+    assert "error" in inverted["modes"]["quantile"]
+    assert inverted["modes"]["raw"]["rows_above_floor_after"] == 1
+    with pytest.raises(ValueError):
+        gate_analysis([{"seed_cos": [None], "rows": [_gate_row(0.5, None, None)]}], floor=0.1)
+
+
+def test_gate_analysis_clamps_a_zero_s_min(capsys):
+    """A median seed cosine that rounds to 0 would make s_min 0, and a row whose
+    seed cosine is not positive would then divide by zero (the Codex repro:
+    seed -0.001, node 0.15, activation 0.4). s_min is clamped to 0.01 instead,
+    with a note in the report and on stderr."""
+    records = [{"seed_cos": [0.004, -0.001], "rows": [_gate_row(0.4, 0.15, -0.001)]}]
+    out = gate_analysis(records, floor=0.1)
+    assert out["median_seed_cos"] == pytest.approx(0.0015)
+    assert out["params"]["s_min"] == sa_replay.S_MIN_FLOOR == 0.01
+    assert len(out["notes"]) == 1 and "clamped to 0.01" in out["notes"][0]
+    assert "note: s_min 0.0" in capsys.readouterr().err
+    sr = out["modes"]["seed_relative"]
+    assert sr["rows_above_floor_after"] == 1, "0.15 / max(-0.001, 0.01) caps at 1: kept"
+    assert "error" not in sa_replay.gate_section([{"gate": records[0]}], floor=0.1)
+
+
+def test_gate_section_reports_an_error_instead_of_raising():
+    """After a whole replay, nothing to analyse must not lose the report."""
+    no_records = sa_replay.gate_section([{"retrieval_id": "r"}], floor=0.1)
+    assert no_records["retrievals"] == 0 and "error" in no_records
+    no_cosines = sa_replay.gate_section(
+        [{"gate": {"seed_cos": [None], "rows": [_gate_row(0.5, None, None)]}}], floor=0.1)
+    assert no_cosines["retrievals"] == 1 and "error" in no_cosines
+    record = {"seed_cos": [0.5], "rows": [_gate_row(0.5, 0.4, 0.5)]}
+    assert sa_replay.gate_section([{"gate": record}, {}], floor=0.1) == gate_analysis([record], floor=0.1)
+
+
+# ---------------------------------------------------------------------------
+# Base config
+# ---------------------------------------------------------------------------
+
+
+def test_load_base_config_named_keys_only(tmp_path):
+    path = _env_file(tmp_path, _A2_LIKE + "SECRET=x\nNOUS_OTHER_FLAG=1\n")
+    values = load_base_config(path)
+    assert values == {
+        "NOUS_SPREADING_ACTIVATION_ENABLED": "true",
+        "NOUS_GRAPH_NEIGHBOR_SEED_SCORE_ENABLED": "true",
+    }
+    assert "SECRET" not in values and "x" not in values.values()
+    assert set(values) <= set(BASE_CONFIG_KEYS)
+
+    # A parity key with no line at all (neither set nor "# unset:") raises.
+    missing = _env_file(tmp_path, _A2_LIKE.replace(
+        "# unset: NOUS_GRAPH_INFERRED_EDGE_PENALTY\n", ""), "missing.env")
+    with pytest.raises(ValueError, match="NOUS_GRAPH_INFERRED_EDGE_PENALTY"):
+        load_base_config(missing)
+
+
+def test_base_config_marks_defaults(tmp_path):
+    path = _env_file(tmp_path, _A2_LIKE)
+    sources = base_config_sources(path)
+    assert sources["NOUS_GRAPH_NEIGHBOR_SEED_SCORE_ENABLED"] == "file"
+    assert sources["NOUS_SPREADING_SCORE_DEPTH1_PARITY"] == "unset"
+    # Absent from the file and not a parity key: the Settings default.
+    assert sources["NOUS_SPREADING_ACTIVATION_FLOOR"] == "default"
+    assert set(sources) == set(BASE_CONFIG_KEYS)
+    # A "# unset:" parity key is not passed on, so it resolves to the Settings default.
+    values = load_base_config(path)
+    assert "NOUS_SPREADING_ACTIVATION_DECAY" not in values
+    base = build_settings(values)
+    assert base.spreading_activation_decay == Settings.model_fields["spreading_activation_decay"].default
+    assert base.spreading_score_depth1_parity is False
+    assert base.graph_inferred_edge_penalty == 1.0
+
+    no_decay = _env_file(tmp_path, _A2_LIKE.replace(
+        "# unset: NOUS_SPREADING_ACTIVATION_DECAY\n", ""), "no_decay.env")
+    with pytest.raises(ValueError, match="NOUS_SPREADING_ACTIVATION_DECAY"):
+        load_base_config(no_decay)
+
+
+def test_base_config_ignores_ambient_env(tmp_path, monkeypatch):
+    """A developer's shell NOUS_* variables and a .env in the cwd must not leak
+    into the base: either would silently change every arm."""
+    monkeypatch.setenv("NOUS_SPREADING_ACTIVATION_FLOOR", "0.9")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "NOUS_GRAPH_RECALL_DECAY=0.2\nNOUS_SPREADING_ACTIVATION_MAX_DEPTH=3\n", encoding="utf-8")
+    base = build_settings(load_base_config(_env_file(tmp_path, _A2_LIKE)))
+    assert base.spreading_activation_floor == 0.1
+    assert base.graph_recall_decay == 0.7
+    assert base.spreading_activation_max_depth == 2
+    assert base.graph_neighbor_seed_score_enabled is True
+    # The ambient environment is restored afterwards.
+    assert os.environ["NOUS_SPREADING_ACTIVATION_FLOOR"] == "0.9"
+
+
+def test_base_config_makes_parity_active(tmp_path):
+    """Under the A2 base the parity branch is live (a depth-1 row scores
+    activation / decay = 2.0x); on a bare base the same flag is inert (0.7x,
+    today's graph_recall_decay). That difference is why the replay needs A2."""
+    parity = {"NOUS_SPREADING_SCORE_DEPTH1_PARITY": "true"}
+    a2 = build_settings(load_base_config(_env_file(tmp_path, _A2_LIKE)), parity)
+    bare = build_settings({}, parity)
+    assert a2.graph_neighbor_seed_score_enabled is True
+    assert bare.graph_neighbor_seed_score_enabled is False
+    row = NeighborResult(
+        id=uuid4(), node_type="fact", description="d", edge_relation="spreading_activation",
+        edge_weight=0.4, created_at=datetime.now(UTC), seed_score=None,
+    )
+    assert _score_memory_neighbor(row, a2) / 0.4 == pytest.approx(2.0)
+    assert _score_memory_neighbor(row, bare) / 0.4 == pytest.approx(0.7)
+
+
+def test_base_config_names_the_embedding_model(tmp_path):
+    """--embed-queries must embed in the clone's vector space: the model comes
+    from the base file, and absent means the Settings default."""
+    base = build_settings(load_base_config(_env_file(
+        tmp_path, _A2_LIKE + "NOUS_EMBEDDING_MODEL=text-embedding-3-large\n")))
+    assert base.embedding_model == "text-embedding-3-large"
+    assert base.embedding_dimensions == 1536
+    sources = base_config_sources(_env_file(tmp_path, _A2_LIKE, "plain.env"))
+    assert sources["NOUS_EMBEDDING_MODEL"] == sources["NOUS_EMBEDDING_DIMENSIONS"] == "default"
+    assert "NOUS_EMBEDDING_MODEL" not in sa_replay.PARITY_KEYS
+
+
+def test_base_config_keys_are_settings_fields():
+    for key in BASE_CONFIG_KEYS:
+        assert key.startswith("NOUS_")
+        assert key[len("NOUS_"):].lower() in Settings.model_fields, key
+
+
+# ---------------------------------------------------------------------------
+# CLI pieces
+# ---------------------------------------------------------------------------
+
+
+def test_cli_seed_source_defaults_to_expansions():
+    """The Task 1/3 reports were made from recorded expansions; candidates and
+    edge kinds are opt-in, so rerunning an old command line gives the old report."""
+    required = ["--dsn", "postgresql://u:p@localhost/clone", "--agent", "all",
+                "--since", "2026-10-25T17:39:00Z", "--base-config", "A2.env", "--out", "r.json"]
+    args = sa_replay._parse_args(required)
+    assert (args.seeds_from, args.edge_kinds) == ("expansions", False)
+    args = sa_replay._parse_args([*required, "--seeds-from", "candidates", "--edge-kinds"])
+    assert (args.seeds_from, args.edge_kinds) == ("candidates", True)
+    with pytest.raises(SystemExit):
+        sa_replay._parse_args([*required, "--seeds-from", "both"])
+
+
+def test_cli_rescore_is_opt_in_and_needs_candidates():
+    required = ["--dsn", "postgresql://u:p@localhost/clone", "--agent", "all",
+                "--since", "2026-10-25T17:39:00Z", "--base-config", "A2.env", "--out", "r.json"]
+    assert sa_replay._parse_args(required).rescore is False
+    assert sa_replay._parse_args([*required, "--seeds-from", "candidates", "--rescore"]).rescore is True
+    with pytest.raises(SystemExit):
+        sa_replay._parse_args([*required, "--rescore"])
+
+
+def test_parse_arm():
+    assert parse_arm("baseline") == ("baseline", {})
+    assert parse_arm("deep=NOUS_SPREADING_ACTIVATION_MAX_DEPTH=3") == (
+        "deep", {"NOUS_SPREADING_ACTIVATION_MAX_DEPTH": "3"})
+    # A JSON value keeps its commas; only ",NOUS_KEY=" starts a new override.
+    name, over = parse_arm(
+        'mix=NOUS_DECISION_OUTCOME_SCORE_FACTORS={"superseded": 0.3, "noise": 0.1},'
+        "NOUS_SPREADING_ACTIVATION_FLOOR=0.2")
+    assert name == "mix"
+    assert over == {
+        "NOUS_DECISION_OUTCOME_SCORE_FACTORS": '{"superseded": 0.3, "noise": 0.1}',
+        "NOUS_SPREADING_ACTIVATION_FLOOR": "0.2",
+    }
+    # With extra="ignore" an unknown key would silently replay the baseline.
+    with pytest.raises(ValueError, match="NOUS_NO_SUCH_FLAG"):
+        parse_arm("typo=NOUS_NO_SUCH_FLAG=true")
+    with pytest.raises(ValueError):
+        parse_arm("baseline=NOUS_SPREADING_ACTIVATION_FLOOR=0.2")
+    with pytest.raises(ValueError):
+        parse_arm("nameonly")
+
+
+def test_refuses_prod_host(monkeypatch):
+    monkeypatch.setenv("PROD_HOST", "db.example.internal")
+    prod = "postgresql://u:p@DB.Example.Internal:5432/nous"
+    with pytest.raises(SystemExit):
+        check_dsn_host(prod, allow_prod=False)  # case-insensitive
+    check_dsn_host(prod, allow_prod=True)
+    # A prod host is named, so another remote host is known not to be it.
+    check_dsn_host("postgresql://u:p@replica.example.internal/nous", allow_prod=False)
+    # --prod-host names it as well as the environment does.
+    monkeypatch.delenv("PROD_HOST")
+    with pytest.raises(SystemExit):
+        check_dsn_host(prod, allow_prod=False, prod_host="db.example.internal")
+
+
+def test_refuses_unknown_remote_without_prod_host(monkeypatch):
+    """With no prod host named, a remote host might be prod: fail closed."""
+    monkeypatch.delenv("PROD_HOST", raising=False)
+    remote = "postgresql://u:p@db.example.internal:5432/nous"
+    with pytest.raises(SystemExit):
+        check_dsn_host(remote, allow_prod=False)
+    check_dsn_host(remote, allow_prod=True)
+    with pytest.raises(SystemExit):
+        check_dsn_host("postgresql:///nous", allow_prod=False)  # no readable host
+
+
+def test_loopback_passes_without_prod_host(monkeypatch):
+    monkeypatch.delenv("PROD_HOST", raising=False)
+    for host in ("localhost", "LOCALHOST", "127.0.0.1", "127.8.9.10", "[::1]"):
+        check_dsn_host(f"postgresql://u:p@{host}:5433/clone", allow_prod=False)
+
+
+def test_guard_checks_query_string_hosts(monkeypatch):
+    """libpq and asyncpg connect to ``?host=`` / ``?hostaddr=`` values, so the
+    guard checks them as well as the authority (the Codex example)."""
+    monkeypatch.setenv("PROD_HOST", "prod.example")
+    for dsn in (
+        "postgresql://u:p@localhost/clone?host=prod.example:5432",
+        "postgresql://u:p@localhost/clone?host=localhost,PROD.example",
+        "postgresql://u:p@localhost/clone?hostaddr=prod.example",
+    ):
+        with pytest.raises(SystemExit, match="prod.example"):
+            check_dsn_host(dsn, allow_prod=False)
+        check_dsn_host(dsn, allow_prod=True)
+    check_dsn_host("postgresql://u:p@localhost/clone?host=replica.example", allow_prod=False)
+
+
+def test_guard_checks_every_authority_host(monkeypatch):
+    monkeypatch.setenv("PROD_HOST", "prod.example")
+    with pytest.raises(SystemExit, match="prod.example"):
+        check_dsn_host("postgresql://u:p@localhost:5433,prod.example:5432/clone", allow_prod=False)
+    monkeypatch.delenv("PROD_HOST")
+    with pytest.raises(SystemExit, match="replica.example"):
+        check_dsn_host("postgresql://u:p@127.0.0.1:5433,replica.example/clone", allow_prod=False)
+
+
+def test_guard_loopback_and_socket_query_hosts_pass(monkeypatch):
+    monkeypatch.delenv("PROD_HOST", raising=False)
+    for dsn in (
+        "postgresql://u:p@localhost/clone?host=127.0.0.1",
+        "postgresql://u:p@localhost/clone?host=127.0.0.1:5433,[::1]:5434",
+        "postgresql://u:p@/clone?host=/var/run/postgresql",
+        "postgresql://u:p@%2Fvar%2Frun%2Fpostgresql/clone",
+    ):
+        check_dsn_host(dsn, allow_prod=False)
+    with pytest.raises(SystemExit, match="replica.example"):
+        check_dsn_host("postgresql://u:p@localhost/clone?host=127.0.0.1,replica.example", allow_prod=False)
+
+
+class _CountingEmbedder:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def embed(self, text: str) -> list[float]:
+        self.calls.append(text)
+        return [float(len(text)), 1.0]
+
+
+async def test_embed_queries_cache_makes_rerun_free(tmp_path):
+    cache = tmp_path / "emb.json"
+    first = _CountingEmbedder()
+    got = await embed_queries(["a", "bb", "a"], first, cache, "m@2")
+    assert got == {"a": [1.0, 1.0], "bb": [2.0, 1.0]}
+    assert first.calls == ["a", "bb"], "each distinct query is embedded once"
+    again = _CountingEmbedder()
+    assert await embed_queries(["bb", "a"], again, cache, "m@2") == got
+    assert again.calls == [], "a rerun reads the cache"
+
+
+async def test_embed_queries_refuses_another_space(tmp_path):
+    """Vectors from another model would make every cosine meaningless, silently."""
+    cache = tmp_path / "emb.json"
+    await embed_queries(["a"], _CountingEmbedder(), cache, "text-embedding-3-small@1536")
+    with pytest.raises(ValueError, match="text-embedding-3-small@1536"):
+        await embed_queries(["a"], _CountingEmbedder(), cache, "text-embedding-3-large@1536")
+
+
+# ---------------------------------------------------------------------------
+# Postgres: the replay against the real CTE
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def brain(db, settings):
+    b = Brain(database=db, settings=settings)
+    yield b
+    await b.close()
+
+
+def _inp(description: str) -> RecordInput:
+    return RecordInput(
+        description=description, confidence=0.8, category="architecture",
+        stakes="low", reasons=[ReasonInput(type="analysis", text="sa replay test")],
+    )
+
+
+async def _edge(session, agent_id, src, tgt, weight, relation="related_to", method="inferred"):
+    """`flush`, never `commit`: the session fixture rolls back."""
+    await session.execute(text(
+        "INSERT INTO brain.graph_edges (source_id,target_id,source_type,target_type,"
+        "agent_id,relation,weight,auto_linked,extraction_method) "
+        "VALUES (:s,:t,'decision','decision',:a,:r,:w,true,:m)"),
+        {"s": str(src), "t": str(tgt), "a": agent_id, "r": relation, "w": weight, "m": method})
+
+
+@pytest.mark.postgres_only
+async def test_run_arm_baseline_matches_direct_call(brain, session):
+    """Distinct edge weights so the activation order cannot tie."""
+    d1, d2, d3 = [
+        (await brain.record(_inp(f"Replay identity decision {i} for spreading"), session=session)).id
+        for i in range(1, 4)
+    ]
+    await _edge(session, brain.agent_id, d1, d2, 0.9)
+    await _edge(session, brain.agent_id, d2, d3, 0.6)
+    await _edge(session, brain.agent_id, d1, d3, 0.3)
+    await session.flush()
+    rs = ReplaySeed(retrieval_id="r", agent_id=brain.agent_id, query="q",
+                    seeds=[(d1, "decision", 0.9)])
+    settings = Settings()
+
+    run = await run_arm(session, rs, settings)
+    direct = await spreading_activation_search(
+        session, brain.agent_id, rs.seeds, settings,
+        limit=sa_replay.REPLAY_LIMIT, exclude_ids={d1},
+    )
+    assert run.rows == direct
+    assert [r[0] for r in run.rows] == [d2, d3], "non-vacuous: both neighbours, seed excluded"
+    assert run.seed_of == {d2: d1, d3: d1}
+    assert run.seconds > 0
+
+
+@pytest.mark.postgres_only
+async def test_run_arm_reports_the_via_node(session):
+    """run_arm asks the CTE for each row's via node: T, two hops out, maps to H."""
+    agent = f"sa-replay-{uuid4().hex[:8]}"
+    s, h, t = uuid4(), uuid4(), uuid4()
+    await insert_edge(session, agent, s, h)
+    await insert_edge(session, agent, h, t)
+    rs = ReplaySeed(retrieval_id="r", agent_id=agent, query="q", seeds=[(s, "fact", 0.8)])
+    run = await run_arm(session, rs, Settings(_env_file=None))
+    assert [r[0] for r in run.rows] == [h, t]
+    assert run.parent_of == {h: s, t: h}
+    assert run.seed_of == {h: s, t: s}
+
+
+@pytest.mark.postgres_only
+async def test_load_replay_seeds_reads_sa_stage_for_agent(session):
+    """Agent-scoped, from `since` on, SA-stage expansions only, oldest first."""
+    agent = f"sa-replay-{uuid4().hex[:8]}"
+    now = datetime.now(UTC)
+    rows = [
+        ("old", agent, now - timedelta(days=2), [_exp(A)]),
+        ("first", agent, now - timedelta(hours=2), [_exp(A, seed_score=0.9), _exp(B)]),
+        ("path-a-only", agent, now - timedelta(hours=1), [_exp(C, stage="stage2b_heart_graph_memory")]),
+        ("second", agent, now, [_exp(C, seed_score=0.5)]),
+        ("foreign", f"{agent}-other", now, [_exp(D)]),
+    ]
+    for rid, ag, ts, exps in rows:
+        await session.execute(text(
+            "INSERT INTO nous_system.retrieval_log (id, agent_id, timestamp, path, query, expansions) "
+            "VALUES (:id, :a, :ts, 'pipeline', :q, CAST(:e AS jsonb))"),
+            {"id": f"{agent}-{rid}", "a": ag, "ts": ts, "q": rid, "e": json.dumps(exps)})
+    await session.flush()
+
+    got = await load_replay_seeds(session, agent, now - timedelta(days=1), limit=10)
+    assert [rs.query for rs in got] == ["first", "second"]
+    assert got[0].seeds == [(A, "fact", 0.9), (B, "fact", 0.8)]
+    assert (await load_replay_seeds(session, agent, now - timedelta(days=1), limit=1))[0].query == "first"
+
+
+@pytest.mark.postgres_only
+async def test_load_degrees_counts_eligible_edges_for_agent(session):
+    """Degree is the node's fan in the traversal: undirected, agent-scoped,
+    and blind to the edges the CTE refuses (co_occurred, co_mention)."""
+    agent = f"sa-replay-{uuid4().hex[:8]}"
+    hub, x, y, z, w = (uuid4() for _ in range(5))
+    await _edge(session, agent, hub, x, 0.5)
+    await _edge(session, agent, y, hub, 0.5)  # inbound counts too
+    await _edge(session, agent, hub, z, 0.5, method="co_mention")
+    await _edge(session, f"{agent}-other", hub, w, 0.5)
+    await session.flush()
+    degree = await load_degrees(session, agent)
+    assert degree[hub] == 2
+    assert degree[x] == 1 and degree[y] == 1
+    assert z not in degree and w not in degree
+
+
+def _log_row_sql(agent, rid, ts, *, legs, candidates, truncated=False):
+    return {"id": f"{agent}-{rid}", "a": agent, "ts": ts, "q": rid, "legs": json.dumps(legs),
+            "c": json.dumps(candidates), "tr": truncated}
+
+
+_SA_LEG = {"name": "spreading_activation", "attempted": True, "n_returned": 0}
+
+
+@pytest.mark.postgres_only
+async def test_load_candidate_seeds_reads_sa_attempted_for_agent(session):
+    """Retrievals whose SA leg was attempted and whose candidates are complete,
+    agent-scoped and oldest first, also when SA recorded no expansion."""
+    agent = f"sa-replay-{uuid4().hex[:8]}"
+    now = datetime.now(UTC)
+    fact = [_cand(A, "heart_primary", score=0.9)]
+    rows = [
+        _log_row_sql(agent, "first", now - timedelta(hours=2), legs=[_SA_LEG], candidates=fact),
+        _log_row_sql(agent, "no-sa", now - timedelta(hours=1),
+                     legs=[{"name": "heart_primary", "attempted": True}], candidates=fact),
+        _log_row_sql(agent, "sa-off", now - timedelta(minutes=30),
+                     legs=[{**_SA_LEG, "attempted": False}], candidates=fact),
+        _log_row_sql(agent, "truncated", now - timedelta(minutes=20), legs=[_SA_LEG], candidates=fact,
+                     truncated=True),
+        _log_row_sql(agent, "second", now, legs=[_SA_LEG], candidates=[_cand(B, "heart_primary", score=0.6)]),
+        _log_row_sql(f"{agent}-other", "foreign", now, legs=[_SA_LEG], candidates=fact),
+    ]
+    for r in rows:
+        await session.execute(text(
+            "INSERT INTO nous_system.retrieval_log (id, agent_id, timestamp, path, query, legs, candidates, "
+            "expansions, truncated) VALUES (:id, :a, :ts, 'pipeline', :q, CAST(:legs AS jsonb), "
+            "CAST(:c AS jsonb), '[]'::jsonb, :tr)"), r)
+    await session.flush()
+
+    since = now - timedelta(days=1)
+    got = await load_candidate_seeds(session, agent, since, limit=10, max_expand=5)
+    assert [rs.query for rs in got] == ["first", "second"]
+    assert got[0].seeds == [(A, "fact", 0.9)]
+    assert got[0].exclude == {A}
+    assert agent in await sa_replay.list_replay_agents(session, since, "candidates")
+    assert agent not in await sa_replay.list_replay_agents(session, since), "no SA expansion recorded"
+
+
+@pytest.mark.postgres_only
+async def test_run_arm_excludes_live_candidates(session):
+    """rs.exclude leaves known candidates out of the window, and activation
+    still passes through them (S -> A -> C)."""
+    agent = f"sa-replay-{uuid4().hex[:8]}"
+    s, a, b, c = uuid4(), uuid4(), uuid4(), uuid4()
+    await insert_edge(session, agent, s, a, weight=0.9)
+    await insert_edge(session, agent, s, b, weight=0.6)
+    await insert_edge(session, agent, a, c, weight=0.8)
+    rs = ReplaySeed(retrieval_id="r", agent_id=agent, query="q", seeds=[(s, "fact", 0.8)], exclude={a})
+    run = await run_arm(session, rs, Settings(_env_file=None))
+    assert [r[0] for r in run.rows] == [b, c]
+
+
+@pytest.mark.postgres_only
+async def test_run_arm_rescore_keeps_rows(session):
+    """--rescore: rescore id A (a live candidate) stays out of the window and
+    returns its activation; brain hit D stays excluded; the rows are those of the
+    plain exclusion."""
+    agent = f"sa-replay-{uuid4().hex[:8]}"
+    s, a, b, c, d = (uuid4() for _ in range(5))
+    await insert_edge(session, agent, s, a, weight=0.9)
+    await insert_edge(session, agent, s, b, weight=0.6)
+    await insert_edge(session, agent, a, c, weight=0.8)
+    await insert_edge(session, agent, s, d, weight=1.0)
+    rs = ReplaySeed(retrieval_id="r", agent_id=agent, query="q", seeds=[(s, "fact", 0.8)],
+                    exclude={a, d}, rescore={a})
+    plain = await run_arm(session, rs, Settings(_env_file=None))
+    run = await run_arm(session, rs, Settings(_env_file=None), rescore=True)
+    assert [r[0] for r in run.rows] == [r[0] for r in plain.rows] == [b, c]
+    assert run.rescore == {a: pytest.approx(0.36)}
+    assert plain.rescore == {}
+
+
+@pytest.mark.postgres_only
+async def test_replay_rescore_end_to_end(session, monkeypatch):
+    """A delivered candidate A reached at 0.36 from the seed rises above B; the
+    baseline's rows match the plain exclusion's."""
+
+    async def _keep_fixture_transaction() -> None:
+        """See test_replay_edge_kinds_end_to_end."""
+
+    monkeypatch.setattr(session, "rollback", _keep_fixture_transaction)
+    agent = f"sa-replay-{uuid4().hex[:8]}"
+    s, a, b, n = (uuid4() for _ in range(4))
+    await insert_edge(session, agent, s, a, weight=0.9)
+    await insert_edge(session, agent, s, n, weight=0.6)
+    delivered = [_delivered(b, "heart_primary", 0.52, 1), _delivered(a, "chunk", 0.50, 2, ctype="chunk")]
+    rs = ReplaySeed(retrieval_id="r", agent_id=agent, query="q", seeds=[(s, "fact", 0.8)],
+                    exclude={a, b}, rescore={a, b}, delivered=delivered, sa_appended=True)
+    out = await replay(session, {agent: [rs]}, {"baseline": Settings(_env_file=None)}, rescore=True)
+    rec = out[0]["rescore"]
+    assert rec["window"] == "same"
+    base = rec["arms"]["baseline"]
+    assert (base["n_existing"], base["n_activated"]) == (2, 1)
+    assert base["gains_b"] == [-1, 1], "0.50 x (1 + 0.15 x 0.36) = 0.527 passes 0.52"
+    assert out[0]["arms"]["baseline"]["n_rows"] == 1, "only N is a returned row"
+
+
+@pytest.mark.postgres_only
+async def test_last_hop_edges_picks_the_carrying_edge(session):
+    """Parallel edges S-N: co_mention 0.9 and inferred 0.3 (stored N -> S). Under
+    mult 0.5 the co_mention one carries N (0.45 > 0.3); under mult 0.3 the
+    inferred one does (0.27 < 0.3); flag off, co_mention is not eligible. On a
+    tie (S-M, 0.6 x 0.5 = 0.3 against 0.3) the non-associative edge wins. T is two hops out,
+    carried by H -co_occurred-> T."""
+    agent = f"sa-replay-{uuid4().hex[:8]}"
+    s, n, h, t, m = (uuid4() for _ in range(5))
+    await insert_edge(session, agent, s, n, weight=0.9, method="co_mention")
+    await insert_edge(session, agent, n, s, weight=0.3)
+    await insert_edge(session, agent, s, h, weight=1.0)
+    await insert_edge(session, agent, h, t, weight=0.8, relation="co_occurred", method="co_occurrence")
+    await insert_edge(session, agent, s, m, weight=0.6, method="co_mention")
+    await insert_edge(session, agent, m, s, weight=0.3)
+    run = ArmRun(rows=[], seconds=0.0, parent_of={n: s, h: s, t: h, m: s})
+    rows = [n, h, t, m]
+
+    def kinds(hops: dict[UUID, EdgeHop]) -> dict[UUID, str]:
+        return {k: v.kind for k, v in hops.items()}
+
+    assoc = Settings(_env_file=None, spreading_associative_edges_enabled=True)
+    assert kinds(await last_hop_edges(session, agent, run, rows, assoc)) == {
+        n: "co_mention", h: "other", t: "co_occurred", m: "other"}
+    low = Settings(_env_file=None, spreading_associative_edges_enabled=True,
+                   spreading_associative_weight_mult=0.3)
+    assert kinds(await last_hop_edges(session, agent, run, rows, low))[n] == "other"
+    assert kinds(await last_hop_edges(session, agent, run, rows, Settings(_env_file=None))) == {
+        n: "other", h: "other", m: "other"}
+    assert await last_hop_edges(session, agent, run, [], assoc) == {}
+
+
+@pytest.mark.postgres_only
+async def test_replay_edge_kinds_end_to_end(session, monkeypatch):
+    """A CR-shaped graph: the seed's only edges are co_occurred, and one
+    neighbour is already a live candidate. The baseline keeps nothing; the
+    associative arm keeps the other neighbour, carried by a co_occurred edge."""
+
+    async def _keep_fixture_transaction() -> None:
+        """replay() ends its read-only transaction per retrieval; here that
+        transaction is the fixture's, which must stay open to roll back."""
+
+    monkeypatch.setattr(session, "rollback", _keep_fixture_transaction)
+    agent = f"sa-replay-{uuid4().hex[:8]}"
+    s, known, fresh = uuid4(), uuid4(), uuid4()
+    await insert_edge(session, agent, s, known, weight=0.9, relation="co_occurred", method="co_occurrence")
+    await insert_edge(session, agent, s, fresh, weight=0.9, relation="co_occurred", method="co_occurrence")
+    rs = ReplaySeed(retrieval_id="r", agent_id=agent, query="q", seeds=[(s, "fact", 0.9)], exclude={s, known})
+    arms = {
+        "baseline": Settings(_env_file=None),
+        "assoc": Settings(_env_file=None, spreading_associative_edges_enabled=True),
+    }
+    out = await replay(session, {agent: [rs]}, arms, edge_kinds=True)
+    summary = sa_replay._summarise(out, list(arms))
+    assert summary["baseline"]["retrievals_with_rows_above_floor"] == 0
+    assert summary["assoc"]["rows_above_floor"] == 1
+    assert summary["assoc"]["edge_kinds_kept"] == {"co_occurred": 1, "co_mention": 0, "other": 0}
+    [row] = out[0]["arms"]["assoc"]["assoc_rows"]
+    assert row["id"] == str(fresh)
+    assert row["activation"] == pytest.approx(0.9 * 0.9 * 0.5 * 0.5)
+
+
+def _dim_vec(*coords: float) -> list[float]:
+    return list(coords) + [0.0] * (1536 - len(coords))
+
+
+@pytest.mark.postgres_only
+async def test_replay_records_gate_cosines(session, monkeypatch):
+    """--embed-queries: the baseline rows above the floor get cos(node, q) and
+    cos(winning seed, q), a NULL embedding stays None, and a retrieval whose
+    query has no vector gets no gate record."""
+
+    async def _keep_fixture_transaction() -> None:
+        """See test_replay_edge_kinds_end_to_end."""
+
+    monkeypatch.setattr(session, "rollback", _keep_fixture_transaction)
+    agent = f"sa-replay-{uuid4().hex[:8]}"
+    s, n1, n2 = uuid4(), uuid4(), uuid4()
+    half = 1 / 2 ** 0.5
+    for fid, vec in ((s, _dim_vec(1.0)), (n1, _dim_vec(half, half)), (n2, None)):
+        await session.execute(text(
+            "INSERT INTO heart.facts (id, agent_id, content, embedding) "
+            "VALUES (:id, :a, 'replay gate', CAST(:v AS vector))"),
+            {"id": fid, "a": agent, "v": None if vec is None else str(vec)})
+    await insert_edge(session, agent, s, n1, weight=0.9, src_type="fact", tgt_type="fact")
+    await insert_edge(session, agent, s, n2, weight=0.8, src_type="fact", tgt_type="fact")
+    seeds = [(s, "fact", 0.9)]
+    with_vec = ReplaySeed(retrieval_id="r1", agent_id=agent, query="q", seeds=seeds)
+    without = ReplaySeed(retrieval_id="r2", agent_id=agent, query="", seeds=seeds)
+    out = await replay(session, {agent: [with_vec, without]}, {"baseline": Settings(_env_file=None)},
+                       query_vecs={"q": _dim_vec(1.0)})
+    gate = out[0]["gate"]
+    assert gate["seed_cos"] == [pytest.approx(1.0)]
+    rows = {UUID(r["id"]): r for r in gate["rows"]}
+    assert set(rows) == {n1, n2}
+    assert rows[n1]["cos_node"] == pytest.approx(half, abs=1e-4)
+    assert rows[n2]["cos_node"] is None
+    assert rows[n1]["cos_seed"] == rows[n2]["cos_seed"] == pytest.approx(1.0)
+    assert rows[n1]["activation"] == pytest.approx(0.9 * 0.9 * 0.5)
+    assert "gate" not in out[1]

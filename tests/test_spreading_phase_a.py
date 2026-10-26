@@ -494,6 +494,15 @@ class TestDepth1Parity:
         # strongest possible depth-1: seed 1.0, weight 1.0
         assert _score_memory_neighbor(self._spread_row(1.0 * 1.0 * 0.5), s) <= 1.0
 
+    def test_aggregated_activation_is_capped_at_one(self):
+        """F105 Task 7: `sat` / `noisy_or` can give a node an activation above
+        the decay (several seeds combined), which would score 1.4 and 2.0 here.
+        The score is capped at 1.0, the top of the direct-hit scale."""
+        from nous.api.retrieval_pipeline import _score_memory_neighbor
+        s = self._parity_settings()
+        assert _score_memory_neighbor(self._spread_row(0.7), s) == pytest.approx(1.0)
+        assert _score_memory_neighbor(self._spread_row(1.0), s) == pytest.approx(1.0)
+
     def test_non_spreading_rows_are_untouched_by_the_flag(self):
         from nous.api.retrieval_pipeline import _score_memory_neighbor
         s = _make_settings(graph_recall_decay=0.7)
