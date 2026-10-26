@@ -244,9 +244,15 @@ class Expansion:
     # first-arrival is all that is knowable and a later, stronger path can
     # still win. Recording it eagerly reported the loser as the winner.
     won_best_path: bool = True
+    # F106: set only for a Path A neighbour the associative query gate read:
+    # its score multiplier (0.0 when the gate dropped it) and cos(neighbour,
+    # query), None when it has no embedding. Serialized only when set, so a
+    # trace with the gate off is unchanged.
+    query_gate_factor: float | None = None
+    query_cosine: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d = {
             "seed_id": self.seed_id,
             "seed_type": self.seed_type,
             "neighbor_id": self.neighbor_id,
@@ -260,6 +266,11 @@ class Expansion:
             "path_strength": _finite(self.path_strength),
             "won_best_path": self.won_best_path,
         }
+        if self.query_gate_factor is not None:
+            d["query_gate_factor"] = _finite(self.query_gate_factor)
+        if self.query_cosine is not None:
+            d["query_cosine"] = _finite(self.query_cosine)
+        return d
 
 
 def _key(item_id: Any, item_type: str) -> tuple[str, str]:

@@ -34,6 +34,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 
+from nous.brain.graph_constants import is_associative
 from nous.heart.exemplars import parse_label
 from nous.heart.keys import extract_entity_candidates, normalize_key
 from nous.heart.search import summarize_keyword_stats, with_keyword_stats
@@ -1498,6 +1499,12 @@ async def _run_stages(
             # single small union limit. Order is irrelevant; the global
             # rerank handles final ordering.
             mem_neighbor_types = ("fact", "episode", "chunk", "procedure")
+            # F106: one gate per recall, so the query is embedded at most once.
+            assoc_gate = (
+                _PathAAssociativeGate(brain, query, settings, acc)
+                if getattr(settings, "graph_associative_query_gate_enabled", False)
+                else None
+            )
             for seed_id, seed_type, seed_score in mem_seeds:
                 for nbr_type in mem_neighbor_types:
                     try:
@@ -1523,6 +1530,12 @@ async def _run_stages(
                             acc.stage_errors.get("heart_graph_memory_neighbors", 0) + 1
                         )
                         continue
+                    # F106: gate the batch's associative neighbours BEFORE the
+                    # best-path comparison below, so it compares gated scores.
+                    gate_cos: dict[UUID, float | None] = {}
+                    gate_drop: set[UUID] = set()
+                    if assoc_gate is not None:
+                        gate_cos, gate_drop = await assoc_gate.apply(seed_id, seed_type, mem_neighbors)
                     for n in mem_neighbors:
                         # Decision neighbors are handled by Stage 2 above; even
                         # though we passed neighbor_type=nbr_type (non-decision),
@@ -1538,7 +1551,14 @@ async def _run_stages(
                             edge_weight=n.edge_weight,
                             extraction_method=getattr(n, "extraction_method", None),
                             path_strength=(seed_score or 0.0) * (n.edge_weight or 0.0),
+                            query_gate_factor=getattr(n, "query_gate_factor", None),
+                            query_cosine=gate_cos.get(n.id),
                         )
+                        if n.id in gate_drop:
+                            # Dropped by the gate: traced above, with its factor,
+                            # so the logs can measure the gate; never appended,
+                            # and never allowed to replace a stored path.
+                            continue
                         if n.id in seen_mem:
                             # Reached from multiple seeds: keep the PATH (seed + edge)
                             # with the highest COMPOSED score, not just the strongest
@@ -1557,6 +1577,7 @@ async def _run_stages(
                                 prev.edge_weight = n.edge_weight
                                 prev.edge_relation = n.edge_relation
                                 prev.extraction_method = n.extraction_method
+                                prev.query_gate_factor = getattr(n, "query_gate_factor", None)
                             continue
                         # Skip duplicates against existing candidate pool. Track
                         # duplicates as a separate counter so eval can distinguish
@@ -2128,6 +2149,104 @@ async def _query_gate(
             acc.stage_errors.get("spreading_query_gate", 0) + 1
         )
         return activated
+
+
+class _PathAAssociativeGate:
+    """F106 Task 1: gate Path A neighbours reached through an associative edge.
+
+    Stage 2b builds one per recall when ``graph_associative_query_gate_enabled``
+    and calls :meth:`apply` on each ``brain.neighbors`` batch, before its
+    best-path comparison, so that comparison sees gated scores. Only a batch
+    holding an associative neighbour (``is_associative``) costs anything: the
+    query is embedded on the first such batch, at most once per recall (a
+    failed embed is not retried), and each such batch reads ``query_cosines``
+    in a short savepointed session of its own.
+
+    - ``raw`` mode reads only the associative neighbours' cosines. A neighbour
+      with ``cos(neighbour, q) < min_cosine`` is dropped (factor 0.0); any other
+      keeps factor 1.0, so its score is unchanged.
+    - ``seed_relative`` mode also reads the seed's cosine and sets the factor
+      to ``gate_factor(cos_n, cos_seed, "seed_relative", 0, 1, seed_min)``; a
+      neighbour whose factor is below ``drop_below`` is dropped.
+
+    A neighbour without an embedding is neutral in both modes (factor 1.0,
+    kept): absence is not a relevance value. Non-associative neighbours keep
+    ``query_gate_factor=None``. No embedder or an empty query vector leaves the
+    batch ungated; any failure does too, counted in
+    ``acc.stage_errors["path_a_associative_gate"]``. Path A always goes on.
+    """
+
+    def __init__(
+        self, brain: Brain, query: str, settings: Settings, acc: _PipelineAccumulator,
+    ) -> None:
+        self.brain = brain
+        self.query = query
+        self.acc = acc
+        # getattr defaults mirror the Settings defaults, for settings objects
+        # that predate these fields.
+        self.mode = str(getattr(settings, "graph_associative_query_gate_mode", "raw"))
+        self.min_cosine = float(getattr(settings, "graph_associative_query_gate_min_cosine", 0.31))
+        self.seed_min = float(getattr(settings, "graph_associative_query_gate_seed_min", 0.19))
+        self.drop_below = float(getattr(settings, "graph_associative_query_gate_drop_below", 0.0))
+        self._query_vec: list[float] | None = None
+        self._embedded = False
+
+    async def apply(
+        self, seed_id: UUID, seed_type: str, neighbors: list[NeighborResult],
+    ) -> tuple[dict[UUID, float | None], set[UUID]]:
+        """Set ``query_gate_factor`` on the batch's associative neighbours.
+
+        Returns ``(cosines, dropped)``: ``cos(neighbour, q)`` for each neighbour
+        the gate read (None without an embedding), and the ids to drop. Both are
+        empty when the batch is left ungated."""
+        assoc = [
+            n for n in neighbors
+            if n.node_type != "decision" and is_associative(n.edge_relation, n.extraction_method)
+        ]
+        if not assoc:
+            return {}, set()
+        embedder = getattr(self.brain, "embeddings", None)
+        if embedder is None:
+            return {}, set()
+        try:
+            from nous.brain.spreading_activation import gate_factor, query_cosines
+
+            if self.mode not in ("raw", "seed_relative"):
+                raise ValueError(f"unknown associative query gate mode {self.mode!r}")
+            if not self._embedded:
+                self._embedded = True
+                self._query_vec = await embedder.embed(self.query)
+            if not self._query_vec:
+                return {}, set()
+            nodes = [(n.id, n.node_type) for n in assoc]
+            if self.mode == "seed_relative":
+                nodes.append((seed_id, seed_type))
+            # A savepoint, as in _query_gate: a failed read rolls back only itself.
+            async with self.brain.db.session() as session:
+                async with session.begin_nested():
+                    cos = await query_cosines(session, self.brain.agent_id, nodes, self._query_vec)
+            factors: dict[UUID, float] = {}
+            dropped: set[UUID] = set()
+            for n in assoc:
+                c = cos.get(n.id)
+                if self.mode == "seed_relative":
+                    factor = gate_factor(c, cos.get(seed_id), "seed_relative", 0.0, 1.0, self.seed_min)
+                    drop = factor < self.drop_below
+                else:
+                    drop = c is not None and c < self.min_cosine
+                    factor = 0.0 if drop else 1.0
+                factors[n.id] = factor
+                if drop:
+                    dropped.add(n.id)
+        except Exception:
+            logger.debug("Path A associative query gate failed; the batch stays ungated", exc_info=True)
+            self.acc.stage_errors["path_a_associative_gate"] = (
+                self.acc.stage_errors.get("path_a_associative_gate", 0) + 1
+            )
+            return {}, set()
+        for n in assoc:
+            n.query_gate_factor = factors[n.id]
+        return {n.id: cos.get(n.id) for n in assoc}, dropped
 
 
 async def _apply_graph_adjacency_boost(
@@ -2792,6 +2911,12 @@ def _score_memory_neighbor(n: "NeighborResult", settings: "Settings") -> float:
     so a strong-seed+strong-edge neighbor can clear the top-k cutline that
     edge_weight*decay (ceiling ~0.70) structurally cannot. Falls back to the legacy
     formula when the flag is off or the seed_score wasn't threaded.
+
+    F106: in both branches the score is then multiplied by the neighbour's
+    ``query_gate_factor`` (Stage 2b's associative query gate; None is neutral)
+    and, for a neighbour reached through an associative edge, by
+    ``graph_associative_edge_multiplier``. Both are skipped at their neutral
+    values, so the result is then exactly today's.
     """
     if getattr(settings, "graph_neighbor_seed_score_enabled", False) and n.seed_score is not None:
         penalty = (
@@ -2803,8 +2928,16 @@ def _score_memory_neighbor(n: "NeighborResult", settings: "Settings") -> float:
         # so a >1 edge would push a seed-scored neighbor above the
         # direct-hit scale, reintroducing the inflation plan 1.2 removes
         # (codex PR #558 P2; mirrors the spreading-CTE clamp).
-        return n.seed_score * min(n.edge_weight, 1.0) * penalty
-    return _f065_provenance_penalty(n, n.edge_weight, settings.graph_recall_decay, settings)
+        score = n.seed_score * min(n.edge_weight, 1.0) * penalty
+    else:
+        score = _f065_provenance_penalty(n, n.edge_weight, settings.graph_recall_decay, settings)
+    gate = getattr(n, "query_gate_factor", None)
+    if gate is not None:
+        score *= gate
+    mult = float(getattr(settings, "graph_associative_edge_multiplier", 1.0))
+    if mult != 1.0 and is_associative(n.edge_relation, n.extraction_method):
+        score *= mult
+    return score
 
 
 def _heart_graph_memory_to_pipeline(

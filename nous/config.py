@@ -2873,6 +2873,68 @@ class Settings(BaseSettings):
             "decision."
         ),
     )
+    # F106 Task 1: associative edges (co_mention, co_occurred; see
+    # graph_constants.is_associative) in Path A. The gate runs in Stage 2b of
+    # retrieval_pipeline; the multiplier in Brain._neighbors and
+    # _score_memory_neighbor. Every default reproduces today's behaviour.
+    graph_associative_query_gate_enabled: bool = Field(
+        default=False,
+        description=(
+            "F106: when true, Stage 2b (Path A) reads cos(neighbour, query) for each "
+            "neighbour reached through an associative edge and gates it by "
+            "graph_associative_query_gate_mode. A missing embedding is neutral; no "
+            "embedder, an empty query vector or any failure leaves the neighbours ungated."
+        ),
+    )
+    graph_associative_query_gate_mode: Literal["raw", "seed_relative"] = Field(
+        default="raw",
+        description=(
+            "F106: raw = drop the neighbour when cos(neighbour, query) is below "
+            "graph_associative_query_gate_min_cosine, otherwise keep it unscaled; "
+            "seed_relative = scale its score by min(1, max(cos_node, 0) / "
+            "max(cos_seed, seed_min)) and drop it when that factor is below drop_below."
+        ),
+    )
+    graph_associative_query_gate_min_cosine: float = Field(
+        default=0.31,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "F106: raw mode's cutoff on cos(neighbour, query). 0.31 was tuned offline on "
+            "text-embedding-3-large at 1536 dimensions; another embedding model needs "
+            "its own value."
+        ),
+    )
+    graph_associative_query_gate_seed_min: float = Field(
+        default=0.19,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "F106: seed_relative mode's smallest denominator (F105's "
+            "spreading_query_gate_seed_min value), so a seed with a low or negative "
+            "query cosine still gates its neighbours."
+        ),
+    )
+    graph_associative_query_gate_drop_below: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "F106: seed_relative mode drops a gated neighbour whose factor is below "
+            "this; 0 scales only."
+        ),
+    )
+    graph_associative_edge_multiplier: float = Field(
+        default=1.0,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "F106: multiplies an associative edge's weight in Brain._neighbors' fetch "
+            "order (which neighbours fill each per-seed LIMIT) and an associative "
+            "neighbour's score in _score_memory_neighbor. The stored and returned "
+            "edge_weight stay raw. 1.0 leaves both unchanged."
+        ),
+    )
     # =========================================================================
     # F076 — Co-mention / shared-entity linking (associative graph layer)
     # =========================================================================
