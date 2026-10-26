@@ -35,8 +35,9 @@ the first three ``heart_primary`` facts with a score, in recorded order, leaving
 out the heart leg's own cut (``heart_recall_limit``). The exclusion is every
 candidate the live call already had before Stage 4: the ``heart_primary``,
 ``chunk``, ``heart_graph``, ``heart_graph_memory`` and ``brain`` legs, less the
-heart and chunk cuts (``heart_recall_limit``, ``chunk_rrf_merge``, also when
-another leg brought the row back, which ``restored_from`` records), plus every
+heart and chunk cuts (``heart_recall_limit`` and every ``chunk_<stage>`` of the
+pipeline's ``_CHUNK_DROP_DISPOSITIONS``, also when another leg brought the row
+back, which ``restored_from`` records), plus every
 Path A neighbour in the expansions. Rows with ``truncated`` set are skipped
 (their candidate list is incomplete). A decision first registered by another
 leg is missed as a seed. On the A2 clone's 462 retrievals with recorded SA
@@ -99,6 +100,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E4
 
 # The pipeline's own window constants, so the replay cannot drift from them.
 from nous.api.retrieval_pipeline import (  # noqa: E402
+    _CHUNK_DROP_DISPOSITIONS,
     _SPREADING_OVERFETCH_LIMIT,
     _SPREADING_RESULT_CAP,
 )
@@ -140,6 +142,9 @@ BASE_CONFIG_KEYS: tuple[str, ...] = (
     "NOUS_GRAPH_RECALL_MAX_EXPAND",
     "NOUS_DECISION_OUTCOME_SCORE_FACTORS",
     "NOUS_GRAPH_ADJACENCY_BOOST_EXCLUDE_DETERMINISTIC",
+    # --embed-queries embeds in the clone's vector space, so the base names it.
+    "NOUS_EMBEDDING_MODEL",
+    "NOUS_EMBEDDING_DIMENSIONS",
 )
 
 LIMITATIONS: tuple[str, ...] = (
@@ -167,7 +172,8 @@ HUB_SHARE_NOTE = (
 # rows those legs cut before Stage 4, so never in the pipeline's lists.
 SEEDS_FROM = ("expansions", "candidates")
 LIVE_EXCLUDED_LEGS = frozenset({"heart_primary", "chunk", "heart_graph", "heart_graph_memory", "brain"})
-PRE_STAGE4_CUTS = frozenset({"heart_recall_limit", "chunk_rrf_merge"})
+# The chunk leg records each hybrid_search cut as f"chunk_{stage}".
+PRE_STAGE4_CUTS = frozenset({"heart_recall_limit"} | {f"chunk_{s}" for s in _CHUNK_DROP_DISPOSITIONS})
 HEART_FACT_SEEDS = 3  # retrieval_pipeline's heart_fact_seeds slice
 PATH_A_STAGE = "stage2b_heart_graph_memory"  # Path A neighbours, excluded live
 EDGE_KINDS = ("co_occurred", "co_mention", "other")
@@ -648,19 +654,25 @@ class _Embedder(Protocol):
 
 
 async def embed_queries(
-    queries: Sequence[str], provider: _Embedder, cache_path: Path
+    queries: Sequence[str], provider: _Embedder, cache_path: Path, space: str
 ) -> dict[str, list[float]]:
-    """Embeddings of the non-empty queries, cached in a JSON file so a rerun is free."""
-    cache: dict[str, list[float]] = (
-        json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
-    )
+    """Embeddings of the non-empty queries, cached in a JSON file so a rerun is free.
+
+    ``space`` names the embedding space (model and dimensions). The cache file
+    records it and is refused under another one: a vector from another model
+    would make every cosine against the clone meaningless, and silently.
+    """
+    stored = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else None
+    if stored is not None and stored.get("space") != space:
+        raise ValueError(f"{cache_path.name} holds {stored.get('space')!r} vectors, not {space!r}")
+    cache: dict[str, list[float]] = stored["vectors"] if stored else {}
     wanted = [q for q in dict.fromkeys(queries) if q]
     missing = [q for q in wanted if q not in cache]
     for q in missing:
         cache[q] = list(await provider.embed(q))
     if missing:
         tmp = cache_path.with_name(cache_path.name + ".tmp")
-        tmp.write_text(json.dumps(cache), encoding="utf-8")
+        tmp.write_text(json.dumps({"space": space, "vectors": cache}), encoding="utf-8")
         tmp.replace(cache_path)
     return {q: cache[q] for q in wanted}
 
@@ -869,12 +881,16 @@ async def _main(args: argparse.Namespace) -> dict[str, Any]:
                     api_key=base.openai_api_key, model=base.embedding_model,
                     dimensions=base.embedding_dimensions,
                 )
+                space = f"{base.embedding_model}@{base.embedding_dimensions}"
                 try:
                     vecs = await embed_queries(
-                        [rs.query for seeds in by_agent.values() for rs in seeds], provider, cache)
+                        [rs.query for seeds in by_agent.values() for rs in seeds], provider, cache, space)
                 finally:
                     await provider.close()
-                embeddings = {"cache": str(cache), "queries": len(vecs)}
+                embeddings = {
+                    "cache": str(cache), "queries": len(vecs),
+                    "model": base.embedding_model, "dimensions": base.embedding_dimensions,
+                }
 
             retrievals = await replay(session, by_agent, arms, edge_kinds=args.edge_kinds)
     finally:

@@ -17,7 +17,7 @@ import pytest_asyncio
 from spreading_v2_helpers import insert_edge
 from sqlalchemy import text
 
-from nous.api.retrieval_pipeline import _score_memory_neighbor
+from nous.api.retrieval_pipeline import _CHUNK_DROP_DISPOSITIONS, _score_memory_neighbor
 from nous.brain.brain import Brain
 from nous.brain.schemas import NeighborResult, ReasonInput, RecordInput
 from nous.brain.spreading_activation import spreading_activation_search
@@ -237,6 +237,19 @@ def test_parse_candidate_seeds_mirrors_stage4():
     assert parse_candidate_seeds([{**row, "candidates": [_cand(chunk, "chunk", ctype="chunk")]}], 1) == []
 
 
+def test_parse_candidate_seeds_skips_every_chunk_cut():
+    """The chunk leg records each hybrid_search cut as chunk_<stage>, one per
+    _CHUNK_DROP_DISPOSITIONS entry; none of them reached Stage 4."""
+    f1, kept = uuid4(), uuid4()
+    cuts = {stage: uuid4() for stage in _CHUNK_DROP_DISPOSITIONS}
+    candidates = [_cand(f1, "heart_primary", score=0.9), _cand(kept, "chunk", ctype="chunk")] + [
+        _cand(cid, "chunk", ctype="chunk", stage=f"chunk_{stage}") for stage, cid in cuts.items()]
+    row = {"id": "r1", "agent_id": "agent-x", "query": "q", "candidates": candidates, "expansions": []}
+    [rs] = parse_candidate_seeds([row], max_expand=1)
+    assert rs.exclude == {f1, kept}
+    assert "chunk_keyword_filter" in sa_replay.PRE_STAGE4_CUTS
+
+
 def test_edge_kind():
     assert edge_kind("co_occurred", "co_occurrence") == "co_occurred"
     assert edge_kind("related_to", "co_mention") == "co_mention"
@@ -344,6 +357,18 @@ def test_base_config_makes_parity_active(tmp_path):
     assert _score_memory_neighbor(row, bare) / 0.4 == pytest.approx(0.7)
 
 
+def test_base_config_names_the_embedding_model(tmp_path):
+    """--embed-queries must embed in the clone's vector space: the model comes
+    from the base file, and absent means the Settings default."""
+    base = build_settings(load_base_config(_env_file(
+        tmp_path, _A2_LIKE + "NOUS_EMBEDDING_MODEL=text-embedding-3-large\n")))
+    assert base.embedding_model == "text-embedding-3-large"
+    assert base.embedding_dimensions == 1536
+    sources = base_config_sources(_env_file(tmp_path, _A2_LIKE, "plain.env"))
+    assert sources["NOUS_EMBEDDING_MODEL"] == sources["NOUS_EMBEDDING_DIMENSIONS"] == "default"
+    assert "NOUS_EMBEDDING_MODEL" not in sa_replay.PARITY_KEYS
+
+
 def test_base_config_keys_are_settings_fields():
     for key in BASE_CONFIG_KEYS:
         assert key.startswith("NOUS_")
@@ -433,12 +458,20 @@ class _CountingEmbedder:
 async def test_embed_queries_cache_makes_rerun_free(tmp_path):
     cache = tmp_path / "emb.json"
     first = _CountingEmbedder()
-    got = await embed_queries(["a", "bb", "a"], first, cache)
+    got = await embed_queries(["a", "bb", "a"], first, cache, "m@2")
     assert got == {"a": [1.0, 1.0], "bb": [2.0, 1.0]}
     assert first.calls == ["a", "bb"], "each distinct query is embedded once"
     again = _CountingEmbedder()
-    assert await embed_queries(["bb", "a"], again, cache) == got
+    assert await embed_queries(["bb", "a"], again, cache, "m@2") == got
     assert again.calls == [], "a rerun reads the cache"
+
+
+async def test_embed_queries_refuses_another_space(tmp_path):
+    """Vectors from another model would make every cosine meaningless, silently."""
+    cache = tmp_path / "emb.json"
+    await embed_queries(["a"], _CountingEmbedder(), cache, "text-embedding-3-small@1536")
+    with pytest.raises(ValueError, match="text-embedding-3-small@1536"):
+        await embed_queries(["a"], _CountingEmbedder(), cache, "text-embedding-3-large@1536")
 
 
 # ---------------------------------------------------------------------------
