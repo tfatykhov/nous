@@ -10,7 +10,7 @@ off by default (`NOUS_SPREADING_QUERY_GATE_ENABLED`); a budget on SA rows in the
 list (Task 6), off by default (`NOUS_SPREADING_BUDGET_ENABLED`); two more ways to combine the
 activation several seeds give one node (Task 7), off by default (`NOUS_SPREADING_AGGREGATION=max`);
 and a rescore of the existing recall candidates by their activation (Task 8), off by default
-(`NOUS_SPREADING_RESCORE_EXISTING_ENABLED`). The Task 3 to 7 offline gates passed; no MAB arm has
+(`NOUS_SPREADING_RESCORE_EXISTING_ENABLED`). The Task 3 to 8 offline gates passed; no MAB arm has
 run yet.
 
 **Builds on:** [F022 Graph-Augmented Recall](F022-graph-augmented-recall.md) (the density-gated
@@ -621,3 +621,43 @@ runner always does. At beta 0.15 no score rises by more than 15%.
 candidate connected to other candidates by its edge weights, and Path A rows are candidates. So a
 Path A row reached over the edge that brought it in, or a candidate the boost already raised, can be
 credited twice for one edge. The offline gate splits its numbers on that line.
+
+**Offline gate (A2 clone, 2026-10-26).** `sa_replay.py --seeds-from candidates --rescore`, the window
+of Tasks 3 to 7, base config A2 (aggregation `max`, beta 0.15). The definitions and the test were
+pre-registered in the task report before any candidate row was read. The `candidates` column has no
+NULL in the window (sample rate 1.0). Of the 1,574 SA-attempted retrievals, the rescore applies to
+the 462 where spreading appended a row live (in the others the 1-hop fallback ran). Existing
+candidates are the delivered rows among the rescore ids. Group A is the Path A rows plus the rows the
+adjacency boost raised; group B is the rest.
+
+| | applied (462 retrievals) | of which the recorded order reproduces (380) |
+|---|---|---|
+| delivered rows / existing candidates | 17,063 / 12,667 | 13,683 / 10,179 |
+| existing candidates with an activation | 20.5% | 22.3% |
+| ... in group A / group B | 53.3% of 4,817 / 0.39% of 7,850 | 59.9% of 3,759 / 0.34% of 6,420 |
+| rows moving more than 3 ranks: all delivered / existing | 0.43% / 0.58% | 0.35% / 0.47% |
+| score demotions | 0 | 0 |
+| group A: share moving up, mean gain, max | 20.1%, +0.33, +6 | 20.8%, +0.34, +6 |
+| group B: share moving up, mean gain, max | 0.25%, -0.18, +2 | 0.22%, -0.18, +2 |
+| other rows moving down, largest drop | 131, 3 | 92, 2 |
+
+The gate passes: fewer than 10% of the rows move by more than 3 ranks, in both populations, with no
+score lowered. In every retrieval the returned rows were those of the plain exclusion (1,561
+identical, 13 the same activations with tied rows swapped). The reconstructed order (each row at its
+last recorded score) is the recorded one in 380 of the 462 retrievals. In the other 82 (113 rows), a
+heart fact the heart leg cut at `heart_recall_limit` was delivered as a spreading row, and its record
+keeps the heart leg's higher `entry_score` (the first registration wins). That row's score is
+overstated, always at rank 25 or below; it is not a rescore id, so only its neighbours' ranks shift.
+
+**What it shows: nearly all of the rescore is double counting.** The activations land on group A
+(53%) and almost never on group B (0.4%): 2,565 of the 2,596 activated candidates (98.8%) are in
+group A. This follows from the construction. The seeds (the top decisions and heart facts) are in
+the list the adjacency boost scores, so a candidate reached at depth 1 shares a traversable edge
+with another row of that list, and the boost, which counts every edge between them but
+`contradicts`, has already credited that edge. With the adjacency boost on (as in prod and A2), the
+rescore's only new information is a candidate reached at depth 2 through a node outside the list.
+The rank effect is accordingly small: group A gains a mean of a third of a rank, group B almost
+never moves.
+
+**MAB arm** (not run yet): R, the combined arm plus this flag, paired against the combined arm. If
+Task 4 is in the combined arm, R also runs with `NOUS_SPREADING_ASSOCIATIVE_EDGES_ENABLED` on and off.
