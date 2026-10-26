@@ -33,6 +33,7 @@ from scripts.diag.sa_replay import (
     check_dsn_host,
     edge_kind,
     embed_queries,
+    gate_analysis,
     hub_share,
     jaccard_at_k,
     last_hop_edges,
@@ -278,6 +279,72 @@ def test_score_retrieval_reports_edge_kinds():
     plain = sa_replay._score_retrieval(rs, {"baseline": run}, {"baseline": Settings(_env_file=None)}, {})
     assert "edge_kinds" not in plain["arms"]["baseline"]
     assert "edge_kinds_kept" not in sa_replay._summarise([plain], ["baseline"])["baseline"]
+
+
+# ---------------------------------------------------------------------------
+# Query gate analysis (--embed-queries, F105 Task 5)
+# ---------------------------------------------------------------------------
+
+
+def _gate_row(activation, cos_node, cos_seed, ntype="fact"):
+    return {"id": str(uuid4()), "type": ntype, "activation": activation, "depth": 1,
+            "cos_node": cos_node, "cos_seed": cos_seed}
+
+
+def test_gate_analysis_derives_params_and_prunes():
+    """Seed cosines 0.6/0.4/0.5 give s_min = q_hi = 0.5; node cosines 0.1/0.3/0.6
+    give q_lo = p10 = 0.14. A missing cosine is neutral and left out of the means."""
+    records = [
+        {"seed_cos": [0.6, 0.4], "rows": [
+            _gate_row(0.5, 0.6, 0.6),  # as relevant as its seed: kept everywhere but raw
+            _gate_row(0.3, 0.1, 0.6),  # 0.3 * 0.1 / 0.6 = 0.05: pruned
+        ]},
+        {"seed_cos": [0.5, None], "rows": [
+            _gate_row(0.4, None, 0.5, ntype="chunk"),  # no node embedding: kept
+            _gate_row(0.2, 0.3, None),  # seed without embedding: kept under seed_relative
+        ]},
+        {"seed_cos": [None], "rows": []},
+    ]
+    out = gate_analysis(records, floor=0.1)
+    assert out["params"] == {"s_min": 0.5, "q_lo": 0.14, "q_hi": 0.5, "floor": 0.1}
+    assert (out["retrievals"], out["retrievals_with_rows_above_floor"], out["rows_above_floor"]) == (3, 2, 4)
+    assert (out["seeds"], out["seeds_without_embedding"]) == (5, 2)
+    assert out["rows_without_node_embedding_by_type"] == {"chunk": 1}
+    assert out["rows_without_seed_embedding"] == 1
+    assert out["seed_cos_deciles"][0] == 0.4 and out["seed_cos_deciles"][-1] == 0.6
+    assert out["node_cos_deciles"][1] == pytest.approx(0.14)
+    # Row seed cosines 0.5 / 0.6 / 0.6: cuts at 0.5667 and 0.6, so both 0.6 rows are "middle".
+    assert out["seed_cos_tercile_cuts"] == [pytest.approx(0.5667, abs=1e-4), 0.6]
+
+    sr = out["modes"]["seed_relative"]
+    assert (sr["rows_above_floor_before"], sr["rows_above_floor_after"], sr["pruned_share"]) == (4, 3, 0.25)
+    assert sr["retrievals_with_rows_after"] == 2
+    assert (sr["mean_cos_kept"], sr["mean_cos_pruned"]) == (pytest.approx(0.45), pytest.approx(0.1))
+    assert sr["pruned_by_seed_cos_tercile"] == {
+        "low": {"rows": 1, "pruned": 0, "pruned_share": 0.0},
+        "middle": {"rows": 2, "pruned": 1, "pruned_share": 0.5},
+        "high": {"rows": 0, "pruned": 0, "pruned_share": None},
+        "no_seed_embedding": {"rows": 1, "pruned": 0, "pruned_share": 0.0},
+    }
+    assert (sr["factor_share_1"], sr["factor_share_0"]) == (0.75, 0.0)
+    assert sr["factor_deciles"][0] == pytest.approx(0.1 / 0.6, abs=1e-4)
+
+    qt = out["modes"]["quantile"]
+    # (0.3 - 0.14) / 0.36 = 0.444, times 0.2 = 0.089: under the floor.
+    assert (qt["rows_above_floor_after"], qt["pruned_share"]) == (2, 0.5)
+    assert (qt["mean_cos_kept"], qt["mean_cos_pruned"]) == (pytest.approx(0.6), pytest.approx(0.2))
+    raw = out["modes"]["raw"]
+    assert (raw["rows_above_floor_after"], raw["pruned_share"]) == (2, 0.5)
+    assert "factor_deciles" not in raw
+
+
+def test_gate_analysis_edge_cases():
+    """quantile needs q_lo < q_hi; with no cosines at all there is nothing to derive."""
+    inverted = gate_analysis([{"seed_cos": [0.2], "rows": [_gate_row(0.5, 0.9, 0.2)]}], floor=0.1)
+    assert "error" in inverted["modes"]["quantile"]
+    assert inverted["modes"]["raw"]["rows_above_floor_after"] == 1
+    with pytest.raises(ValueError):
+        gate_analysis([{"seed_cos": [None], "rows": [_gate_row(0.5, None, None)]}], floor=0.1)
 
 
 # ---------------------------------------------------------------------------
@@ -700,3 +767,43 @@ async def test_replay_edge_kinds_end_to_end(session, monkeypatch):
     [row] = out[0]["arms"]["assoc"]["assoc_rows"]
     assert row["id"] == str(fresh)
     assert row["activation"] == pytest.approx(0.9 * 0.9 * 0.5 * 0.5)
+
+
+def _dim_vec(*coords: float) -> list[float]:
+    return list(coords) + [0.0] * (1536 - len(coords))
+
+
+@pytest.mark.postgres_only
+async def test_replay_records_gate_cosines(session, monkeypatch):
+    """--embed-queries: the baseline rows above the floor get cos(node, q) and
+    cos(winning seed, q), a NULL embedding stays None, and a retrieval whose
+    query has no vector gets no gate record."""
+
+    async def _keep_fixture_transaction() -> None:
+        """See test_replay_edge_kinds_end_to_end."""
+
+    monkeypatch.setattr(session, "rollback", _keep_fixture_transaction)
+    agent = f"sa-replay-{uuid4().hex[:8]}"
+    s, n1, n2 = uuid4(), uuid4(), uuid4()
+    half = 1 / 2 ** 0.5
+    for fid, vec in ((s, _dim_vec(1.0)), (n1, _dim_vec(half, half)), (n2, None)):
+        await session.execute(text(
+            "INSERT INTO heart.facts (id, agent_id, content, embedding) "
+            "VALUES (:id, :a, 'replay gate', CAST(:v AS vector))"),
+            {"id": fid, "a": agent, "v": None if vec is None else str(vec)})
+    await insert_edge(session, agent, s, n1, weight=0.9, src_type="fact", tgt_type="fact")
+    await insert_edge(session, agent, s, n2, weight=0.8, src_type="fact", tgt_type="fact")
+    seeds = [(s, "fact", 0.9)]
+    with_vec = ReplaySeed(retrieval_id="r1", agent_id=agent, query="q", seeds=seeds)
+    without = ReplaySeed(retrieval_id="r2", agent_id=agent, query="", seeds=seeds)
+    out = await replay(session, {agent: [with_vec, without]}, {"baseline": Settings(_env_file=None)},
+                       query_vecs={"q": _dim_vec(1.0)})
+    gate = out[0]["gate"]
+    assert gate["seed_cos"] == [pytest.approx(1.0)]
+    rows = {UUID(r["id"]): r for r in gate["rows"]}
+    assert set(rows) == {n1, n2}
+    assert rows[n1]["cos_node"] == pytest.approx(half, abs=1e-4)
+    assert rows[n2]["cos_node"] is None
+    assert rows[n1]["cos_seed"] == rows[n2]["cos_seed"] == pytest.approx(1.0)
+    assert rows[n1]["activation"] == pytest.approx(0.9 * 0.9 * 0.5)
+    assert "gate" not in out[1]

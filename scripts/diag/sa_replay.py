@@ -51,6 +51,16 @@ carried the row; on a tie a non-associative edge wins, so a row counts as
 associative-carried only when no other edge carries it as well. Each row is
 grouped as ``co_occurred``, ``co_mention`` or ``other``.
 
+``--embed-queries`` (F105 Task 5) embeds each replayed query in the base
+config's embedding space and reads ``cos(node, q)`` for the baseline arm's rows
+above the floor and ``cos(seed, q)`` for every seed (``query_cosines``). The
+report's ``gate`` section (``gate_analysis``) gives both decile histograms,
+derives ``s_min``, ``q_lo`` and ``q_hi`` from them, and applies each gate mode to
+those rows: rows above the floor before and after, the pruned share overall and
+per tercile of the winning seed's cosine, and the mean node cosine of kept and
+pruned rows. Rows are counted in the whole CTE window, before the result cap,
+as ``rows_above_floor`` is.
+
 Read-only: every connection starts with ``default_transaction_read_only = on``
 (asyncpg ``server_settings``; the clone's own default is off), and the script
 checks it before reading.
@@ -108,7 +118,11 @@ from nous.brain.graph_constants import (  # noqa: E402
     autobehavior_exclusion_sql,
     spreading_exclusion_sql,
 )
-from nous.brain.spreading_activation import spreading_activation_search  # noqa: E402
+from nous.brain.spreading_activation import (  # noqa: E402
+    gate_factor,
+    query_cosines,
+    spreading_activation_search,
+)
 from nous.config import Settings  # noqa: E402
 
 SA_STAGE = "stage4_spreading_activation"
@@ -177,6 +191,7 @@ PRE_STAGE4_CUTS = frozenset({"heart_recall_limit"} | {f"chunk_{s}" for s in _CHU
 HEART_FACT_SEEDS = 3  # retrieval_pipeline's heart_fact_seeds slice
 PATH_A_STAGE = "stage2b_heart_graph_memory"  # Path A neighbours, excluded live
 EDGE_KINDS = ("co_occurred", "co_mention", "other")
+GATE_MODES = ("seed_relative", "quantile", "raw")  # F105 Task 5: Settings' spreading_query_gate_mode
 
 
 @dataclass
@@ -494,6 +509,26 @@ async def last_hop_edges(
     return {child: hop for child, (_, hop) in best.items()}
 
 
+async def gate_record(
+    session: AsyncSession, rs: ReplaySeed, run: ArmRun, settings: Settings, query_vec: Sequence[float]
+) -> dict[str, Any]:
+    """F105 Task 5: the run's rows above the floor, each with ``cos(node, q)``
+    and ``cos(winning seed, q)`` (``None``: no embedding), plus every seed's
+    cosine. A row below the floor is left out: the gate never raises a score,
+    so it cannot lift one above it."""
+    rows = _above_floor(run, settings)
+    nodes = list(dict.fromkeys([(r[0], r[1]) for r in rows] + [(s[0], s[1]) for s in rs.seeds]))
+    cos = await query_cosines(session, rs.agent_id, nodes, query_vec)
+    return {
+        "seed_cos": [cos[s[0]] for s in rs.seeds],
+        "rows": [
+            {"id": str(r[0]), "type": r[1], "activation": r[2], "depth": r[3],
+             "cos_node": cos[r[0]], "cos_seed": cos.get(run.seed_of.get(r[0]))}
+            for r in rows
+        ],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Base config and arms
 # ---------------------------------------------------------------------------
@@ -768,13 +803,105 @@ def _summarise(retrievals: list[dict[str, Any]], arm_names: list[str]) -> dict[s
     return summary
 
 
+def _deciles(xs: list[float]) -> list[float]:
+    return [round(percentile(xs, p), 4) for p in range(0, 101, 10)]
+
+
+def _mean(xs: list[float]) -> float | None:
+    return round(sum(xs) / len(xs), 4) if xs else None
+
+
+def gate_analysis(records: list[dict[str, Any]], floor: float) -> dict[str, Any]:
+    """F105 Task 5: the query gate applied to the baseline rows, per mode.
+
+    Two passes over ``gate_record`` outputs. The first derives the parameters
+    from the cosines: ``s_min`` and ``q_hi`` are the median seed cosine, ``q_lo``
+    the 10th percentile of the rows' node cosines (each rounded to 2 dp, as a
+    setting would be). The second applies ``gate_factor`` to every row: a row
+    is kept when its gated activation is still above ``floor``, else pruned.
+    The pruned share is also given per tercile of the rows' winning-seed cosine
+    (cut at its 33rd and 67th percentiles; rows whose seed has no embedding are
+    their own group). Mean cosines leave out rows with no node embedding,
+    which the gate keeps (factor 1.0).
+    """
+    rows = [r for rec in records for r in rec["rows"]]
+    rec_of = [i for i, rec in enumerate(records) for _ in rec["rows"]]
+    seed_cos = [c for rec in records for c in rec["seed_cos"] if c is not None]
+    node_cos = [r["cos_node"] for r in rows if r["cos_node"] is not None]
+    row_seed_cos = [r["cos_seed"] for r in rows if r["cos_seed"] is not None]
+    if not seed_cos or not node_cos or not row_seed_cos:
+        raise ValueError("gate analysis needs seed and node cosines")
+    median_seed, p10_node = percentile(seed_cos, 50), percentile(node_cos, 10)
+    s_min, q_lo, q_hi = round(median_seed, 2), round(p10_node, 2), round(median_seed, 2)
+    cuts = (percentile(row_seed_cos, 100 / 3), percentile(row_seed_cos, 200 / 3))
+
+    def tercile(c: float | None) -> str:
+        if c is None:
+            return "no_seed_embedding"
+        return "low" if c <= cuts[0] else "middle" if c <= cuts[1] else "high"
+
+    groups = [tercile(r["cos_seed"]) for r in rows]
+    modes: dict[str, Any] = {}
+    for mode in GATE_MODES:
+        if mode == "quantile" and q_lo >= q_hi:
+            modes[mode] = {"error": f"q_lo {q_lo} >= q_hi {q_hi}"}
+            continue
+        factors = [gate_factor(r["cos_node"], r["cos_seed"], mode, q_lo, q_hi, s_min) for r in rows]
+        kept = [r["activation"] * f > floor for r, f in zip(rows, factors)]
+        per_group: dict[str, dict[str, Any]] = {}
+        for g in ("low", "middle", "high", "no_seed_embedding"):
+            idx = [i for i, x in enumerate(groups) if x == g]
+            pruned = sum(1 for i in idx if not kept[i])
+            per_group[g] = {"rows": len(idx), "pruned": pruned,
+                            "pruned_share": round(pruned / len(idx), 4) if idx else None}
+        n_kept = sum(kept)
+        cos_by_fate: dict[bool, list[float]] = {True: [], False: []}
+        for r, k in zip(rows, kept):
+            if r["cos_node"] is not None:
+                cos_by_fate[k].append(r["cos_node"])
+        entry: dict[str, Any] = {
+            "rows_above_floor_before": len(rows),
+            "rows_above_floor_after": n_kept,
+            "pruned_share": round(1 - n_kept / len(rows), 4),
+            "retrievals_with_rows_after": len({i for i, k in zip(rec_of, kept) if k}),
+            "mean_cos_kept": _mean(cos_by_fate[True]),
+            "mean_cos_pruned": _mean(cos_by_fate[False]),
+            "pruned_by_seed_cos_tercile": per_group,
+        }
+        if mode == "seed_relative":
+            entry["factor_deciles"] = _deciles(factors)
+            entry["factor_share_1"] = round(sum(1 for f in factors if f >= 1.0) / len(factors), 4)
+            entry["factor_share_0"] = round(sum(1 for f in factors if f <= 0.0) / len(factors), 4)
+        modes[mode] = entry
+    return {
+        "retrievals": len(records),
+        "retrievals_with_rows_above_floor": sum(1 for rec in records if rec["rows"]),
+        "rows_above_floor": len(rows),
+        "rows_by_type": dict(Counter(r["type"] for r in rows)),
+        "rows_without_node_embedding_by_type": dict(Counter(r["type"] for r in rows if r["cos_node"] is None)),
+        "rows_without_seed_embedding": sum(1 for r in rows if r["cos_seed"] is None),
+        "seeds": sum(len(rec["seed_cos"]) for rec in records),
+        "seeds_without_embedding": sum(1 for rec in records for c in rec["seed_cos"] if c is None),
+        "node_cos_deciles": _deciles(node_cos),
+        "seed_cos_deciles": _deciles(seed_cos),
+        "median_seed_cos": round(median_seed, 4),
+        "p10_node_cos": round(p10_node, 4),
+        "params": {"s_min": s_min, "q_lo": q_lo, "q_hi": q_hi, "floor": floor},
+        "seed_cos_tercile_cuts": [round(c, 4) for c in cuts],
+        "modes": modes,
+    }
+
+
+
 async def replay(
     session: AsyncSession, by_agent: dict[str, list[ReplaySeed]], arms: dict[str, Settings],
-    edge_kinds: bool = False,
+    edge_kinds: bool = False, query_vecs: Mapping[str, Sequence[float]] | None = None,
 ) -> list[dict[str, Any]]:
     """Run every arm on every retrieval. The arm order rotates per retrieval so
     no arm always pays the cold cache. With ``edge_kinds``, each arm's kept rows
-    get their last hop's edge (``last_hop_edges``), outside the timed call."""
+    get their last hop's edge (``last_hop_edges``), outside the timed call. With
+    ``query_vecs`` (query -> embedding), each retrieval whose query has one gets
+    a ``gate`` record of the baseline run (``gate_record``), also untimed."""
     names = list(arms)
     out: list[dict[str, Any]] = []
     i = 0
@@ -790,7 +917,11 @@ async def replay(
                 for name, run in runs.items():
                     kept = [r[0] for r in _above_floor(run, arms[name])[:JACCARD_K]]
                     run.edge_of = await last_hop_edges(session, agent_id, run, kept, arms[name])
-            out.append(_score_retrieval(rs, runs, arms, degree, edge_kinds=edge_kinds))
+            scored = _score_retrieval(rs, runs, arms, degree, edge_kinds=edge_kinds)
+            if query_vecs is not None and rs.query in query_vecs:
+                scored["gate"] = await gate_record(
+                    session, rs, runs[BASELINE], arms[BASELINE], query_vecs[rs.query])
+            out.append(scored)
             await session.rollback()  # end the read-only transaction per retrieval
     return out
 
@@ -821,7 +952,8 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     p.add_argument("--prod-host", help="the prod database host to refuse (also $PROD_HOST)")
     p.add_argument("--allow-prod-readonly", action="store_true")
     p.add_argument("--embed-queries", action="store_true",
-                   help="embed each replayed query (for Task 5 arms); needs OPENAI_API_KEY")
+                   help="embed each replayed query and report the query gate (F105 Task 5) on the "
+                        "baseline rows; needs OPENAI_API_KEY")
     p.add_argument("--embedding-cache", type=Path,
                    help="query embedding cache (default: next to --out)")
     p.add_argument("--seeds-from", choices=SEEDS_FROM, default="expansions",
@@ -871,6 +1003,7 @@ async def _main(args: argparse.Namespace) -> dict[str, Any]:
             await session.rollback()
 
             embeddings = None
+            vecs: dict[str, list[float]] | None = None
             if args.embed_queries:
                 from nous.brain.embeddings import EmbeddingProvider
 
@@ -892,9 +1025,13 @@ async def _main(args: argparse.Namespace) -> dict[str, Any]:
                     "model": base.embedding_model, "dimensions": base.embedding_dimensions,
                 }
 
-            retrievals = await replay(session, by_agent, arms, edge_kinds=args.edge_kinds)
+            retrievals = await replay(session, by_agent, arms, edge_kinds=args.edge_kinds, query_vecs=vecs)
     finally:
         await engine.dispose()
+    gate = None
+    if vecs is not None:
+        gate = gate_analysis(
+            [r["gate"] for r in retrievals if "gate" in r], float(base.spreading_activation_floor))
 
     dsn = urlsplit(args.dsn)
     names = list(arms)
@@ -929,6 +1066,7 @@ async def _main(args: argparse.Namespace) -> dict[str, Any]:
             "limitations": list(CANDIDATE_LIMITATIONS if args.seeds_from == "candidates" else LIMITATIONS),
         },
         "summary": _summarise(retrievals, names),
+        "gate": gate,
         "retrievals": retrievals,
     }
 
@@ -940,6 +1078,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     report = asyncio.run(_main(args))
     args.out.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
     print(json.dumps(report["summary"], indent=2))
+    if report["gate"] is not None:
+        print(json.dumps(report["gate"], indent=2))
     print(f"wrote {args.out} ({len(report['retrievals'])} retrievals)")
     return 0
 
