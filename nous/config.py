@@ -1601,6 +1601,27 @@ class Settings(BaseSettings):
             "stay <= 1 but can exceed the winning seed's score."
         ),
     )
+    # F105 Task 8: spreading activation re-scores the recall candidates it
+    # reaches (retrieval_pipeline._apply_spreading_rescore). Off: Stage 4
+    # excludes them from the CTE as before, and its SQL is unchanged.
+    spreading_rescore_existing_enabled: bool = Field(
+        default=False,
+        description=(
+            "F105: when true, Stage 4 asks the spreading CTE for the activation of the "
+            "existing recall candidates (not the seeds) and, before the score sort, raises "
+            "each one's score to min(1, score * (1 + spreading_rescore_beta * activation)). "
+            "It never lowers a score and never touches seeds or spreading rows."
+        ),
+    )
+    spreading_rescore_beta: float = Field(
+        default=0.15,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "F105: the rescore's weight on activation; the same scale as "
+            "graph_adjacency_boost_alpha (0.15)."
+        ),
+    )
 
     # F040: Graph densification — backfill
     # F044 tinyHippo-Lite v1 — STC state machine (telemetry-only slice).

@@ -371,6 +371,11 @@ class _PipelineAccumulator:
     contradiction_checks_ran: bool = False
     chunks_searched: bool = False
 
+    # F105 Task 8: node id -> spreading activation of the existing candidates
+    # Stage 4's CTE reached (no seeds). Empty unless the rescore flag is on and
+    # spreading stayed the mechanism; consumed by _apply_spreading_rescore.
+    spreading_rescore: dict[UUID, float] = field(default_factory=dict)
+
     # Per-stage error counter — incremented when a try/except around a stage
     # call catches an exception. Surfaced via PipelineStats.n_stage_errors.
     stage_errors: dict[str, int] = field(default_factory=dict)
@@ -682,6 +687,15 @@ async def run_recall_pipeline(
             if before is not None and before != r.score:
                 tr.mutate(r.id, r.type, "recency_resolver", before, r.score,
                           reason=SUPERSEDED)
+
+    # F105 Task 8: raise the candidates spreading reached, before the sort
+    # below turns a raise into a rank gain. After the recency resolver: both
+    # multiply the score, so the order only matters at the clamp to 1.
+    if acc.spreading_rescore:
+        results = _apply_spreading_rescore(
+            results, acc.spreading_rescore,
+            float(getattr(settings, "spreading_rescore_beta", 0.15)), tr,
+        )
 
     # F065 follow-up (2026-05-23): optional score-based merge.
     #
@@ -1627,6 +1641,8 @@ async def _run_stages(
                 )
 
         if use_spreading:
+            rescore_on = bool(getattr(settings, "spreading_rescore_existing_enabled", False))
+            rescore_out: dict[UUID, float] = {}
             try:
                 from nous.brain.schemas import NeighborResult
                 from nous.brain.spreading_activation import (
@@ -1670,11 +1686,22 @@ async def _run_stages(
                     # `winning_seed` maps each activated node to the seed its
                     # winning path started from, for F091 attribution only.
                     winning_seed: dict[UUID, UUID] = {}
+                    # F105 Task 8: with the rescore on, the candidates are
+                    # rescore ids instead of excluded ones. The CTE still keeps
+                    # them out of its window and returns their activation.
+                    if rescore_on:
+                        search_kwargs: dict[str, Any] = {
+                            "exclude_ids": seed_ids | seen_ids,
+                            "rescore_ids": candidate_ids - seed_ids,
+                            "rescore_out": rescore_out,
+                        }
+                    else:
+                        search_kwargs = {"exclude_ids": seed_ids | seen_ids | candidate_ids}
                     activated = await spreading_activation_search(
                         sa_session, brain.agent_id, seeds, settings,
                         limit=_SPREADING_OVERFETCH_LIMIT,
-                        exclude_ids=seed_ids | seen_ids | candidate_ids,
                         seed_out=winning_seed,
+                        **search_kwargs,
                     )
                     seed_by_id = {str(s[0]): s for s in seeds}
                     # F105 Task 5: the query gate rescales `activated` before
@@ -1814,6 +1841,13 @@ async def _run_stages(
                         len(hits),
                     )
                     use_spreading = False
+                # F105 Task 8: only from a run spreading stays the mechanism
+                # of; the fallback abandons it. Seeds are left out again for
+                # a search that ignores rescore_ids (mocks).
+                if rescore_on and use_spreading:
+                    acc.spreading_rescore = {
+                        nid: a for nid, a in rescore_out.items() if nid not in seed_ids
+                    }
             except Exception:
                 logger.debug(
                     "Spreading activation failed, falling back to 1-hop"
@@ -2199,6 +2233,31 @@ async def _apply_graph_adjacency_boost(
         boosted.append(replace(r, score=(r.score or 0.0) * boost))
     boosted.sort(key=lambda r: r.score or 0.0, reverse=True)
     return boosted
+
+
+def _apply_spreading_rescore(
+    results: list[PipelineResult], rescore: dict[UUID, float], beta: float, tr: Any
+) -> list[PipelineResult]:
+    """F105 Task 8: raise each recall candidate's score by its spreading activation.
+
+    A non-spreading result with an activation ``a`` in ``rescore`` scores
+    ``min(1.0, score * (1 + beta * a))``, recorded as a ``spreading_rescore``
+    mutation. Only a raise is applied: a score already above 1 (the adjacency
+    boost can put one there) or a missing one is left alone, so a direct hit is
+    never demoted. Spreading rows are skipped; seeds have no entry (Stage 4
+    leaves them out of ``rescore``). Positions are kept: the ``rerank_by_score``
+    sort, when on, is what turns a raise into a rank gain.
+    """
+    out: list[PipelineResult] = []
+    for r in results:
+        a = rescore.get(r.id)
+        if a is not None and r.source != "spreading_activation" and r.score is not None:
+            after = min(1.0, r.score * (1.0 + beta * a))
+            if after > r.score:
+                tr.mutate(r.id, r.type, "spreading_rescore", r.score, after)
+                r = replace(r, score=after)
+        out.append(r)
+    return out
 
 
 async def _record_recall_reactivation(

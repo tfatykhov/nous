@@ -7,9 +7,11 @@ fan normalisation (Task 3), off by default (`NOUS_SPREADING_FAN_NORMALISATION_EN
 associative edges at a reduced weight (Task 4), off by default
 (`NOUS_SPREADING_ASSOCIATIVE_EDGES_ENABLED`); a query-conditioned gate after the CTE (Task 5),
 off by default (`NOUS_SPREADING_QUERY_GATE_ENABLED`); a budget on SA rows in the merged recall
-list (Task 6), off by default (`NOUS_SPREADING_BUDGET_ENABLED`); and two more ways to combine the
-activation several seeds give one node (Task 7), off by default (`NOUS_SPREADING_AGGREGATION=max`).
-The Task 3 to 7 offline gates passed; no MAB arm has run yet.
+list (Task 6), off by default (`NOUS_SPREADING_BUDGET_ENABLED`); two more ways to combine the
+activation several seeds give one node (Task 7), off by default (`NOUS_SPREADING_AGGREGATION=max`);
+and a rescore of the existing recall candidates by their activation (Task 8), off by default
+(`NOUS_SPREADING_RESCORE_EXISTING_ENABLED`). The Task 3 to 7 offline gates passed; no MAB arm has
+run yet.
 
 **Builds on:** [F022 Graph-Augmented Recall](F022-graph-augmented-recall.md) (the density-gated
 recursive CTE in `nous/brain/spreading_activation.py`) and F091 retrieval telemetry
@@ -561,3 +563,50 @@ that share been under 1%, the MAB arms would have measured next to nothing.
 **MAB arms** (not run yet): `sat` and `noisy_or`, each the combined arm (every flag of Tasks 3 to 6
 that passed its MAB arm, run together) plus this one flag, paired against the combined arm (not A2),
 so the added flag is the only variable.
+
+## Re-scoring existing candidates (Task 8)
+
+Settings: `NOUS_SPREADING_RESCORE_EXISTING_ENABLED` (default `false`) and
+`NOUS_SPREADING_RESCORE_BETA` (default 0.15, bounded `(0, 1]`); see
+[environment variables](../reference/environment-variables.md).
+
+**Why.** Stage 4 excludes every existing candidate from the CTE, so when the seeds reach a candidate
+that another leg already found, that corroboration is thrown away (report RC2). With the flag on, it
+raises the candidate's score instead of being discarded.
+
+**The CTE.** `spreading_activation_search` takes `rescore_ids` and `rescore_out`. A seed among the
+rescore ids is dropped first. The `exclude_ids` predicate moves from the `ranked` (or `per_seed`)
+CTE to the final statement, which becomes two branches told apart by an `is_rescore` column:
+- the returned rows: neither excluded nor rescore ids, `ORDER BY total_activation DESC LIMIT
+  :result_limit`, in parentheses so the order and limit bind to this branch only;
+- the rescore rows: `id = ANY(:rescore_ids)`, with no limit.
+
+An outer `ORDER BY is_rescore, total_activation DESC` orders the union, and Python sorts the returned
+rows again, so their order does not rest on `UNION ALL`'s append order. Excluding a whole node never
+changes another node's `ROW_NUMBER` or window sum, so the returned rows are exactly those of
+`exclude_ids | rescore_ids` (tested with a two-row window the candidates would otherwise fill). A
+rescore row's activation is aggregated as any row's is (`NOUS_SPREADING_AGGREGATION`). An id in both
+sets is a rescore id. The outcome and strategy-card predicates stay in the CTE: the resolver drops
+such a node, so it is never a candidate with a score to raise. With no rescore id the statement is
+byte-identical to before (the snapshot test).
+
+**The pipeline.** With the flag on, Stage 4 passes `exclude_ids = seeds | brain hits` and
+`rescore_ids = candidates - seeds`, where the candidates are the heart and chunk hits, the
+heart-graph decisions and the Path A neighbours. The excluded set as a whole is unchanged, so the
+spreading rows are the same rows. The activations are kept (`acc.spreading_rescore`) only when
+spreading stays the mechanism: after the 1-hop fallback the CTE run is abandoned, and so is its
+rescore. Seeds are filtered out once more there, for a search that ignores `rescore_ids`.
+
+`_apply_spreading_rescore` runs in `run_recall_pipeline` after the recency resolver and before the
+`rerank_by_score` sort. A non-spreading result with an activation `a` scores
+`min(1, score x (1 + beta x a))`, recorded as a `spreading_rescore` mutation. Only a raise is
+applied: a score already above 1 (the adjacency boost can put one there) is left alone, so no score
+is ever lowered and a direct hit cannot be demoted by its own rescore (report Phase 3). Seeds,
+brain-leg decisions and spreading rows are never touched. Positions are kept, so ranks change only
+where the list is re-sorted: `recall_deep` sets `rerank_by_score` when chunks are on, and the eval
+runner always does. At beta 0.15 no score rises by more than 15%.
+
+**Double counting.** `_apply_graph_adjacency_boost` (alpha 0.15, on in prod) already multiplies a
+candidate connected to other candidates by its edge weights, and Path A rows are candidates. So a
+Path A row reached over the edge that brought it in, or a candidate the boost already raised, can be
+credited twice for one edge. The offline gate splits its numbers on that line.

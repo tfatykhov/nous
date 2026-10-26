@@ -130,6 +130,8 @@ async def spreading_activation_search(
     exclude_ids: set[UUID] | None = None,
     seed_out: dict[UUID, UUID] | None = None,
     parent_out: dict[UUID, UUID] | None = None,
+    rescore_ids: set[UUID] | None = None,
+    rescore_out: dict[UUID, float] | None = None,
 ) -> list[tuple[UUID, str, float, int]]:
     """Run spreading activation CTE and return activated nodes.
 
@@ -154,6 +156,15 @@ async def spreading_activation_search(
             replay's hub share judges a depth-2 row by this via node. Only when
             it is given does the CTE carry the extra column; which path wins is
             unchanged.
+        rescore_ids: F105 Task 8, the caller's existing candidates. A seed
+            among them is dropped first: it is not a rescore id. The rest never
+            appear in the returned list or use its ``limit``; each one the
+            traversal reaches comes back through ``rescore_out``. An id also in
+            ``exclude_ids`` is still a rescore id. None or empty: today's SQL.
+        rescore_out: when given, filled with ``node_id -> activation`` for the
+            reached ``rescore_ids``, aggregated as a returned row's is
+            (``spreading_aggregation``). ``seed_out`` and ``parent_out``
+            describe the returned rows only.
 
     Returns:
         List of ``(node_id, node_type, activation, depth)`` sorted by
@@ -191,6 +202,16 @@ async def spreading_activation_search(
         hop; before this, ``retrieval_pipeline`` hardcoded ``hop=2`` for every
         spreading expansion, so production telemetry could not separate a
         one-hop neighbour from a two-hop one.
+
+        F105 Task 8, ``rescore_ids``: the ``exclude_ids`` predicate moves from
+        the CTE to the final statement, which becomes two branches told apart
+        by an ``is_rescore`` column: the returned rows (neither excluded nor
+        rescore ids, ordered and limited as before) and the rescore rows.
+        Excluding a whole node never changes another node's ``ROW_NUMBER`` or
+        window sum, so the returned rows are those ``exclude_ids |
+        rescore_ids`` would give. The outcome and strategy-card predicates
+        stay in the CTE: the resolver drops such a node, so it is never a
+        candidate with a score to raise.
     """
     if not seed_nodes:
         return []
@@ -202,10 +223,13 @@ async def spreading_activation_search(
         "agent_id": agent_id,
         "result_limit": int(limit),
     }
+    seed_ids = {nid for nid, _ntype, _score in seed_nodes}
+    rescore = {nid for nid in rescore_ids or () if nid not in seed_ids}
     conditions: list[str] = []
     if exclude_ids:
         params["excluded_ids"] = [str(x) for x in exclude_ids]
-        conditions.append("act.id != ALL(CAST(:excluded_ids AS uuid[]))")
+        if not rescore:
+            conditions.append("act.id != ALL(CAST(:excluded_ids AS uuid[]))")
 
     # A6: a decision whose outcome the resolver refuses can NEVER be rendered,
     # but it still clears the activation floor and consumes a slot in the
@@ -306,6 +330,31 @@ async def spreading_activation_search(
     # F105 Task 7: "max" is today's statement, byte for byte.
     aggregation = getattr(settings, "spreading_aggregation", "max")
     if aggregation == "max":
+        final_cols = f"id, node_type, activation AS total_activation, depth, seed_id{final_parent}"
+    else:
+        final_cols = f"id, node_type, total_activation, depth, seed_id{final_parent}"
+    final_sql = f"""
+        SELECT {final_cols}
+        FROM ranked
+        WHERE rn = 1
+        ORDER BY total_activation DESC
+        LIMIT :result_limit"""
+    if rescore:
+        # F105 Task 8: parentheses bind ORDER BY and LIMIT to the first branch.
+        params["rescore_ids"] = [str(x) for x in rescore]
+        main_excl = " AND id != ALL(CAST(:excluded_ids AS uuid[]))" if exclude_ids else ""
+        final_sql = f"""
+        (SELECT {final_cols}, FALSE AS is_rescore
+         FROM ranked
+         WHERE rn = 1{main_excl} AND id != ALL(CAST(:rescore_ids AS uuid[]))
+         ORDER BY total_activation DESC
+         LIMIT :result_limit)
+        UNION ALL
+        (SELECT {final_cols}, TRUE AS is_rescore
+         FROM ranked
+         WHERE rn = 1 AND id = ANY(CAST(:rescore_ids AS uuid[])))
+        ORDER BY is_rescore, total_activation DESC"""
+    if aggregation == "max":
         aggregate_sql = f"""
         -- A8: keep the winning path's depth alongside its activation.
         -- ROW_NUMBER over (activation DESC, depth ASC) selects exactly the row
@@ -322,12 +371,7 @@ async def spreading_activation_search(
                    ) AS rn
             FROM activation act
             {where_clause}
-        )
-        SELECT id, node_type, activation AS total_activation, depth, seed_id{final_parent}
-        FROM ranked
-        WHERE rn = 1
-        ORDER BY total_activation DESC
-        LIMIT :result_limit"""
+        ){final_sql}"""
     elif aggregation in _COMBINE_SQL:
         aggregate_sql = f"""
         -- F105 Task 7: per_seed keeps each seed's best path to a node, so
@@ -353,12 +397,7 @@ async def spreading_activation_search(
                    ) AS rn
             FROM per_seed act
             WHERE act.seed_rn = 1
-        )
-        SELECT id, node_type, total_activation, depth, seed_id{final_parent}
-        FROM ranked
-        WHERE rn = 1
-        ORDER BY total_activation DESC
-        LIMIT :result_limit"""
+        ){final_sql}"""
     else:
         raise ValueError(f"unknown spreading aggregation {aggregation!r}")
 
@@ -396,6 +435,13 @@ async def spreading_activation_search(
 
     result = await session.execute(sql, params)
     rows = result.all()
+    if rescore:
+        if rescore_out is not None:
+            for row in rows:
+                if row.is_rescore:
+                    rescore_out[row.id] = float(row.total_activation)
+        # Sorted here too, so the order holds for a session that ignores ORDER BY.
+        rows = sorted((r for r in rows if not r.is_rescore), key=lambda r: r.total_activation, reverse=True)
     if seed_out is not None:
         for row in rows:
             seed_out[row.id] = row.seed_id
