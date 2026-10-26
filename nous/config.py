@@ -1549,12 +1549,14 @@ class Settings(BaseSettings):
         description="F105: quantile mode's upper anchor (factor 1 at or above it).",
     )
     spreading_query_gate_seed_min: float = Field(
-        default=0.2,
+        default=0.19,
         gt=0.0,
         le=1.0,
         description=(
             "F105: seed_relative mode's smallest denominator, so a seed with a low "
-            "or negative query cosine still gates its rows."
+            "or negative query cosine still gates its rows. 0.19 is the median "
+            "cos(seed, query) of the Task 5 replay (831 seeds, text-embedding-3-large "
+            "at 1536 dimensions); another embedding model needs its own value."
         ),
     )
 

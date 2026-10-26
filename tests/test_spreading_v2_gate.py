@@ -364,6 +364,19 @@ async def test_gate_cap_sees_gated_order():
     assert (cand["disposition"], cand["disposition_stage"]) == (SLICED_OFF, "spreading_result_cap")
 
 
+async def test_gate_defaults_match_settings():
+    """Settings without the parameter fields fall back to the Settings defaults:
+    here seed_min, the denominator of a seed whose cosine is below it."""
+    s_min = Settings.model_fields["spreading_query_gate_seed_min"].default
+    assert s_min == 0.19, "the Task 5 replay's median seed cosine"
+    activated = [(NA, "fact", 0.4, 1)]
+    tr, _stats, _qc, _e = await _run(
+        gate={"enabled": True}, activated=activated, seeds_out={NA: DECISION_ONE_ID},
+        cosines={NA: 0.095, DECISION_ONE_ID: 0.05},
+    )
+    assert _sa_rows(tr)[str(NA)]["edge_weight"] == pytest.approx(0.4 * 0.095 / s_min)
+
+
 async def test_gate_failure_fails_open():
     """A failing cosine read leaves the rows ungated and spreading in use: the
     1-hop fallback does not take over."""

@@ -1988,7 +1988,7 @@ async def _query_gate(
         mode = str(getattr(settings, "spreading_query_gate_mode", "seed_relative"))
         q_lo = float(getattr(settings, "spreading_query_gate_q_lo", 0.0))
         q_hi = float(getattr(settings, "spreading_query_gate_q_hi", 1.0))
-        s_min = float(getattr(settings, "spreading_query_gate_seed_min", 0.2))
+        s_min = float(getattr(settings, "spreading_query_gate_seed_min", 0.19))
         gated: list[tuple[UUID, str, float, int]] = []
         for nid, ntype, activation, depth in activated:
             seed_id = winning_seed.get(nid)
