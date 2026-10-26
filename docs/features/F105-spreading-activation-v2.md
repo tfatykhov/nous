@@ -360,5 +360,8 @@ the low tercile (57.1%) is close to the 60% mark at which the plan says a gate m
 
 **MAB arms** (not run yet): G, `NOUS_SPREADING_QUERY_GATE_ENABLED=true` (`seed_relative`, `s_min`
 0.19 by default); G-B, also `NOUS_SPREADING_QUERY_GATE_MODE=quantile`,
-`NOUS_SPREADING_QUERY_GATE_Q_LO=0.06` and `NOUS_SPREADING_QUERY_GATE_Q_HI=0.19`. Pre-registered sign:
-SA rendered characters fall, and SA-only-gold deliveries stay at 6 of 8 or more.
+`NOUS_SPREADING_QUERY_GATE_Q_LO=0.06` and `NOUS_SPREADING_QUERY_GATE_Q_HI=0.19`. Arm G-B's anchors
+fail the 70% tercile line under the live-shaped replay: its low tercile is pruned 73.0% there. That
+line is set for `seed_relative`; G-B is run as the comparison arm. Pre-registered sign: SA rendered
+characters fall, and of the Task 0 SA-only-gold union (4 questions), the arm passes at 3 of 4 or
+more.
