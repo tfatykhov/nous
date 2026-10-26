@@ -66,7 +66,9 @@ the prod log can measure the gate; it is then neither appended nor allowed to re
 The trace agrees with that choice: a gated expansion's `path_strength` is
 `seed_score × edge_weight × query_gate_factor`, a dropped one's is 0, and a dropped path never wins
 `won_best_path` (a neighbour reached only by dropped paths has no winner). An ungated expansion's
-`path_strength` is unchanged.
+`path_strength` is unchanged. `path_strength` leaves out the associative multiplier and the legacy
+scorer's provenance penalty, so the trace's winner matches Stage 2b's choice exactly only at
+`NOUS_GRAPH_ASSOCIATIVE_EDGE_MULTIPLIER = 1.0` with the seed-score scorer on.
 `_score_memory_neighbor` multiplies the score by the factor in both of its branches (seed-score and
 legacy).
 
