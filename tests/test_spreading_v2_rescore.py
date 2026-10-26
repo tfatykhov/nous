@@ -11,7 +11,7 @@ and every result are today's (tests/test_spreading_sql_identity.py).
 
 CTE graphs use bare UUIDs (``graph_edges`` has no foreign key to the node
 tables) and the Settings defaults: decay 0.5, max depth 2. Order assertions use
-distinct activations: the CTE has no id tie-break (R9).
+distinct activations: there is no id tie-break inside the CTE.
 """
 
 from __future__ import annotations

@@ -25,10 +25,12 @@ changes, each with an offline gate (the replay) and a MemoryAgentBench (MAB) arm
 
 ## Measured facts the plan is built on
 
-From MAB replays under the prod config with SA forced on (2026-10-25/26):
+From MAB replays of arm A2, the prod-equivalent config with SA forced on (2026-10-25/26):
 
 - SA rows fill 16-24% of the rendered prompt on LongMemEval (LME), multi-hop QA (qa2) and detective,
-  but delivered gold that no other leg found on only 4 of 60 LME and 4 of 100 qa2 questions.
+  but deliver gold that no other leg found on very few questions. An initial telemetry count gave 8
+  (4 of 60 LME and 4 of 100 qa2) with weak gold matching; the Task 0 analysis on both runs gives a
+  union of 4, which every gate uses.
 - Low-ranked SA rows still reach the prompt: `recall_deep` is exempt from SmartCompress and delivers
   a median of about 76 items whatever its `limit`. SA rows are rendered, just low-ranked and
   unbounded, so a ranking change reorders them; it does not decide which rows get in.
@@ -63,15 +65,15 @@ changing the floor or caps without a gate.
 Two gates per change. The **merge gate** is green tests (including a flags-off identity test) and
 the offline gate; the code merges with its flag off. The **enable gate** is the MAB arm (LME 60 +
 qa2 100), paired against A2 (SA on, prod config) and A2off (SA off), read against the Task 0 noise
-floor. With 160 questions and at most 8 where SA is the only gold source, the arms catch regressions
+floor. With 160 questions and 4 where SA is the only gold source, the arms catch regressions
 and context savings; they cannot prove small accuracy gains.
 
 ## Noise floor (Task 0)
 
-An unchanged rerun of the A2 reference config on fresh memory (arm A2r), paired with A2 question by
-question:
+An unchanged rerun of the A2 config on fresh memory (called the rerun below), paired with A2
+question by question:
 
-| | only A2 right | only A2r right | net, A2r against A2 |
+| | only A2 right | only the rerun right | net, rerun against A2 |
 |---|---|---|---|
 | qa2 (100) | 3 | 1 | -2 |
 | LME (60) | 4 | 2 | -2 |
@@ -84,8 +86,8 @@ against A2 exceeds T, and a gain is read only above T. McNemar p is reported for
 The SA-only-gold union is four questions: qa2 no13, no38 and no59, and LME 9d25d4e0.
 
 **SA off (arm A2off).** With spreading switched off entirely the arm scored 140 of 160, against 138
-for A2 and 134 for A2r, inside T. Rendered context fell 14% on qa2 and 19% on LME, and all four
-SA-only-gold questions were still answered correctly without SA.
+for A2 and 134 for the rerun, inside T. Rendered context fell 14% on qa2 and 19% on LME, and all
+four SA-only-gold questions were still answered correctly without SA.
 
 ## Offline replay (Task 1)
 
@@ -470,7 +472,7 @@ has no SA rows (none in the A2 clone's 756 context retrievals).
 attempted, so the budget cannot create a leg on a retrieval where spreading did not run. The F091
 expansion rows are unchanged.
 
-**Offline gate (A2 and A2r clones, 2026-10-26).** For the Task 0 SA-only-gold union (qa2 no13,
+**Offline gate (A2 and rerun clones, 2026-10-26).** For the Task 0 SA-only-gold union (qa2 no13,
 no38 and no59; LME 9d25d4e0), the benchmark operator exported each retrieval whose SA expansions
 carried the gold row, with the gold row's rank by `edge_weight` among that retrieval's SA
 expansions. `edge_weight` is the activation the pipeline used. With depth-1 parity off, an SA row
@@ -478,7 +480,7 @@ scores activation x 0.7 in both arms, so the rank by `edge_weight` is the rank t
 ranks were re-checked against the SA rows each retrieval delivered, which are the rows the budget
 sees: every gold row was delivered, and the ranks agree.
 
-| question | A2: gold rank / SA rows | A2r: gold rank / SA rows |
+| question | A2: gold rank / SA rows | rerun: gold rank / SA rows |
 |---|---|---|
 | qa2 no13 | 5 / 5 | 5 / 5 |
 | qa2 no38 | 4 / 4 | 4 / 4 |
@@ -486,8 +488,8 @@ sees: every gold row was delivered, and the ranks agree.
 | LME 9d25d4e0 | gold not delivered by SA | 4 / 8 (tied with one other row) |
 
 Under the union rule each question is read from an arm where SA delivered its gold: the qa2 three
-from A2 (A2r gives the same ranks), LME 9d25d4e0 from A2r, since in A2 its gold did not come through
-SA. Per arm:
+from A2 (the rerun gives the same ranks), LME 9d25d4e0 from the rerun, since in A2 its gold did not
+come through SA. Per arm:
 
 | arm | qa2 no13 | qa2 no38 | qa2 no59 | LME 9d25d4e0 | verdict |
 |---|---|---|---|---|---|
@@ -510,9 +512,9 @@ B5C's cut is not close: the gold rows score 7 to 9 times below the cutline.
 **Context saving (estimate).** For each retrieval with SA rows, the rows kept are the top
 `max_rows` of its delivered SA rows by `edge_weight`. Characters are the content length of the
 delivered rows: fact and chunk content, episode summary, procedure and decision description. A2 has
-462 such retrievals, A2r 236.
+462 such retrievals, the rerun 236.
 
-| `max_rows` | A2: SA rows per retrieval, median | A2: SA characters | A2: SA share of delivered characters | A2r: SA characters | A2r: SA share |
+| `max_rows` | A2: SA rows per retrieval, median | A2: SA characters | A2: SA share of delivered characters | rerun: SA characters | rerun: SA share |
 |---|---|---|---|---|---|
 | off | 6 (mean 6.7) | - | 16.5% | - | 18.3% |
 | 8 | 6 | -23% | 13.3% | -16% | 15.9% |
@@ -521,11 +523,12 @@ delivered rows: fact and chunk content, episode summary, procedure and decision 
 | 3 | 3 | -63% | 6.9% | -59% | 8.4% |
 
 Counted per question instead (unique rows across a session's retrievals, the convention of the arm
-comparisons), `max_rows` 5 gives -40% on A2 and -35% on A2r, and `max_rows` 4 gives -49% and -46%.
-At `max_rows` 5, all delivered characters fall by 7.0% on A2 and 6.7% on A2r. Against arm B5's
-pre-registered sign (SA rendered characters down at least 50% against A2), this estimate predicts a
-miss at `max_rows` 5. Getting to about 50% takes `max_rows` 4 (-52% per retrieval, -49% per
-question), where the gold gate above passes only at its threshold, 3 of 4 under the union.
+comparisons), `max_rows` 5 gives -40% on A2 and -35% on the rerun, and `max_rows` 4 gives -49%
+and -46%. At `max_rows` 5, all delivered characters fall by 7.0% on A2 and 6.7% on the rerun.
+Against arm B5's pre-registered sign (SA rendered characters down at least 50% against A2), this
+estimate predicts a miss at `max_rows` 5. Getting to about 50% takes `max_rows` 4 (-52% per
+retrieval, -49% per question), where the gold gate above passes only at its threshold, 3 of 4 under
+the union.
 
 ## Aggregation across seeds (Task 7)
 
