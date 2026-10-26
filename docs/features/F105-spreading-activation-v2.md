@@ -479,6 +479,9 @@ There is no uncapped sum (report §7). Fan normalisation (Task 3) and the associ
 The `ranked` CTE then computes the combination as a window over the node. It keeps the row of the
 largest contributor, ordered as under `max` (activation desc, depth asc, seed id asc), so the returned
 depth, `seed_out` and `parent_out` all describe that one best path; `parent_id` is never aggregated.
+So under `sat` and `noisy_or`, `seed_out` and the F091 expansion's seed name one seed while the row's
+activation and the expansion's `edge_weight` carry the combined value of several, and the replay's
+`expansions` seed source, which rebuilds seed sets from those records, inherits that limitation.
 The where-clause conditions (exclusions, refused decisions, strategy cards, job lessons), the `LIMIT`
 and `ORDER BY total_activation DESC` are as before. Under `max` the statement is byte-identical to
 before (the snapshot test).
@@ -486,7 +489,9 @@ before (the snapshot test).
 **Bounds.** Both modes stay `<= 1`. noisy-OR caps each `a_s` at 0.999999 (and floors `1 - a_s` at
 1e-6), so `LN` is always defined. A lone path at 1.0 therefore returns 0.999999, and five paths at 1.0
 return 1.0 in a double. The invariant `activation <= winning seed's score`, which Tasks 3 and 4 keep,
-now holds per path but not per row: two seeds at 0.3 can give a node 0.6.
+now holds per path but not per row: two seeds at 0.3 can give a node 0.6. Both formulas assume
+non-negative activations: `graph_edges.weight` has no lower CHECK, and a negative path would lower
+the combination rather than be ignored, but a row whose activation is negative falls under the floor.
 
 **Parity cap.** With `NOUS_SPREADING_SCORE_DEPTH1_PARITY` on, a row scores `activation / decay`. Under
 `sat` or `noisy_or` a multi-seed row's activation can exceed the decay, which would score it up to
