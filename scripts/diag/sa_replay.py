@@ -61,6 +61,21 @@ per tercile of the winning seed's cosine, and the mean node cosine of kept and
 pruned rows. Rows are counted in the whole CTE window, before the result cap,
 as ``rows_above_floor`` is.
 
+``--rescore`` (F105 Task 8, needs ``--seeds-from candidates``) runs every arm as
+Stage 4 does with ``spreading_rescore_existing_enabled`` on: the rebuilt
+candidates of every leg but ``brain``, less the seeds, are passed as
+``rescore_ids``, so the CTE returns the same rows plus each candidate's
+activation. Each retrieval's delivered list (the candidates with a
+``final_rank``) is rebuilt with each row's last recorded score (its last
+mutation's ``score_after``, else its ``entry_score``), and the arm's
+``_apply_spreading_rescore`` is applied when spreading appended a row live. The
+report's ``rescore`` section gives, per arm, the share of existing candidates
+with an activation, rank gains split into Path A or adjacency-boosted rows
+(whose edge the rescore may credit twice) and the rest, score demotions, and the
+share of rows moving more than ``RESCORE_MOVE`` ranks against the gate's
+``RESCORE_MOVED_MAX_SHARE``. It also checks that the reconstructed order is the
+recorded one, and that the baseline's rows equal a plain-exclusion run's.
+
 Read-only: every connection starts with ``default_transaction_read_only = on``
 (asyncpg ``server_settings``; the clone's own default is off), and the script
 checks it before reading.
@@ -113,6 +128,8 @@ from nous.api.retrieval_pipeline import (  # noqa: E402
     _CHUNK_DROP_DISPOSITIONS,
     _SPREADING_OVERFETCH_LIMIT,
     _SPREADING_RESULT_CAP,
+    PipelineResult,
+    _apply_spreading_rescore,
 )
 from nous.brain.graph_constants import (  # noqa: E402
     autobehavior_exclusion_sql,
@@ -124,6 +141,7 @@ from nous.brain.spreading_activation import (  # noqa: E402
     spreading_activation_search,
 )
 from nous.config import Settings  # noqa: E402
+from nous.observability.retrieval_trace import NULL_TRACE  # noqa: E402
 
 SA_STAGE = "stage4_spreading_activation"
 BASELINE = "baseline"
@@ -192,6 +210,8 @@ HEART_FACT_SEEDS = 3  # retrieval_pipeline's heart_fact_seeds slice
 PATH_A_STAGE = "stage2b_heart_graph_memory"  # Path A neighbours, excluded live
 EDGE_KINDS = ("co_occurred", "co_mention", "other")
 GATE_MODES = ("seed_relative", "quantile", "raw")  # F105 Task 5: Settings' spreading_query_gate_mode
+RESCORE_MOVE = 3  # F105 Task 8 gate: a row "moves" when its rank changes by more than this
+RESCORE_MOVED_MAX_SHARE = 0.10  # ... and fewer than this share of rows may move
 
 
 @dataclass
@@ -199,7 +219,13 @@ class ReplaySeed:
     """One retrieval's recorded SA seeds, as ``(node_id, node_type, score)``.
 
     ``exclude`` holds the live call's other candidates when they are known
-    (``--seeds-from candidates``); the seeds are always excluded as well.
+    (``--seeds-from candidates``); the seeds are always excluded as well. The
+    rest is filled from candidates too, for ``--rescore`` (F105 Task 8):
+    ``rescore`` is the part of ``exclude`` Stage 4 passes as ``rescore_ids``
+    with the rescore on (every leg but ``brain``, less the seeds), ``path_a``
+    the Path A neighbours, ``delivered`` the candidates with a ``final_rank``
+    in that order, and ``sa_appended`` whether spreading appended a row (so
+    stayed the mechanism, the rescore's condition).
     """
 
     retrieval_id: str
@@ -207,6 +233,10 @@ class ReplaySeed:
     query: str
     seeds: list[tuple[UUID, str, float]]
     exclude: set[UUID] = field(default_factory=set)
+    rescore: set[UUID] = field(default_factory=set)
+    path_a: set[UUID] = field(default_factory=set)
+    delivered: list[dict[str, Any]] = field(default_factory=list)
+    sa_appended: bool = False
 
 
 @dataclass
@@ -224,7 +254,8 @@ class ArmRun:
     ``rows`` are ``spreading_activation_search``'s ``(id, type, activation,
     depth)``; ``seed_of`` maps each row to its winning path's seed and
     ``parent_of`` to the node that path's last hop left. ``edge_of`` is filled
-    by ``--edge-kinds`` only.
+    by ``--edge-kinds`` only, ``rescore`` (the CTE's ``rescore_out``) by
+    ``--rescore`` only.
     """
 
     rows: list[tuple[UUID, str, float, int]]
@@ -232,6 +263,7 @@ class ArmRun:
     seed_of: dict[UUID, UUID] = field(default_factory=dict)
     parent_of: dict[UUID, UUID] = field(default_factory=dict)
     edge_of: dict[UUID, EdgeHop] = field(default_factory=dict)
+    rescore: dict[UUID, float] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -376,7 +408,7 @@ def parse_candidate_seeds(rows: Iterable[Mapping[str, Any]], max_expand: int) ->
     neighbour (a ``stage2b_heart_graph_memory`` expansion): a heart row cut and
     then brought back by Path A keeps ``entry_leg = heart_primary``, yet the
     live call excluded it as a Path A neighbour. Retrievals with no seed are
-    dropped.
+    dropped. The ``--rescore`` fields are filled as ``ReplaySeed`` describes.
     """
     out: list[ReplaySeed] = []
     for row in rows:
@@ -402,9 +434,15 @@ def parse_candidate_seeds(rows: Iterable[Mapping[str, Any]], max_expand: int) ->
         seeds = decisions + facts
         path_a = {UUID(e["neighbor_id"]) for e in expansions or [] if e.get("stage") == PATH_A_STAGE}
         if seeds:
+            non_brain = {UUID(c["id"]) for c in live if c["entry_leg"] != "brain"}
             out.append(ReplaySeed(
                 retrieval_id=row["id"], agent_id=row["agent_id"], query=row["query"] or "",
                 seeds=seeds, exclude={UUID(c["id"]) for c in live} | path_a,
+                rescore=(non_brain | path_a) - {s[0] for s in seeds}, path_a=path_a,
+                delivered=sorted(
+                    (c for c in candidates or [] if c.get("final_rank") is not None),
+                    key=lambda c: c["final_rank"]),
+                sa_appended=any(e.get("stage") == SA_STAGE for e in expansions or []),
             ))
     return out
 
@@ -444,21 +482,30 @@ async def load_degrees(session: AsyncSession, agent_id: str) -> dict[UUID, int]:
     return {row.node_id: int(row.degree) for row in result}
 
 
-async def run_arm(session: AsyncSession, rs: ReplaySeed, settings: Settings) -> ArmRun:
+async def run_arm(session: AsyncSession, rs: ReplaySeed, settings: Settings, rescore: bool = False) -> ArmRun:
     """Run the CTE for one retrieval under one arm's settings, timed.
 
     Same window as the pipeline (``REPLAY_LIMIT``), with the seeds (and
-    ``rs.exclude``, when known) excluded as the pipeline excludes them.
+    ``rs.exclude``, when known) excluded as the pipeline excludes them. With
+    ``rescore`` (F105 Task 8), ``rs.rescore`` is passed as ``rescore_ids``
+    instead, as Stage 4 does with the rescore on: the same rows, plus each
+    rescore id's activation in ``ArmRun.rescore``.
     """
     seed_of: dict[UUID, UUID] = {}
     parent_of: dict[UUID, UUID] = {}
+    rescore_out: dict[UUID, float] = {}
+    seed_ids = {s[0] for s in rs.seeds}
+    kwargs: dict[str, Any] = {"exclude_ids": seed_ids | rs.exclude}
+    if rescore:
+        kwargs = {"exclude_ids": seed_ids | (rs.exclude - rs.rescore), "rescore_ids": rs.rescore,
+                  "rescore_out": rescore_out}
     t0 = time.perf_counter()
     rows = await spreading_activation_search(
         session, rs.agent_id, rs.seeds, settings,
-        limit=REPLAY_LIMIT, exclude_ids={s[0] for s in rs.seeds} | rs.exclude, seed_out=seed_of,
-        parent_out=parent_of,
+        limit=REPLAY_LIMIT, seed_out=seed_of, parent_out=parent_of, **kwargs,
     )
-    return ArmRun(rows=rows, seconds=time.perf_counter() - t0, seed_of=seed_of, parent_of=parent_of)
+    return ArmRun(rows=rows, seconds=time.perf_counter() - t0, seed_of=seed_of, parent_of=parent_of,
+                  rescore=rescore_out)
 
 
 def edge_kind(relation: str, extraction_method: str | None) -> str:
@@ -892,6 +939,148 @@ def gate_analysis(records: list[dict[str, Any]], floor: float) -> dict[str, Any]
     }
 
 
+def _final_score(c: Mapping[str, Any]) -> float | None:
+    """A delivered candidate's score at the sort: its last mutation's, else its entry score."""
+    mutations = c.get("mutations") or []
+    return mutations[-1].get("score_after") if mutations else c.get("entry_score")
+
+
+def _ranks(scores: Sequence[float | None]) -> list[int]:
+    """1-based rank of each row by score descending (None as 0, as the pipeline's
+    sort does); a tie keeps list order."""
+    order = sorted(range(len(scores)), key=lambda i: (-(scores[i] or 0.0), i))
+    ranks = [0] * len(scores)
+    for pos, i in enumerate(order, 1):
+        ranks[i] = pos
+    return ranks
+
+
+def _double_counted(c: Mapping[str, Any], path_a: set[UUID]) -> bool:
+    """A Path A row, or one the adjacency boost raised: its edge may be credited twice."""
+    return (
+        c.get("entry_leg") == "heart_graph_memory" or UUID(c["id"]) in path_a
+        or any(m.get("stage") == "adjacency_boost" and m.get("score_after") != m.get("score_before")
+               for m in c.get("mutations") or [])
+    )
+
+
+def rescore_record(rs: ReplaySeed, run: ArmRun, settings: Settings) -> dict[str, Any]:
+    """F105 Task 8: the rescore applied to one retrieval's delivered list.
+
+    Each delivered row's score is reconstructed (``_final_score``) and the list
+    ranked by it, ties in ``final_rank`` order; ``reproduces_final_rank`` says
+    whether that order is the recorded one. The arm's ``_apply_spreading_rescore``
+    then raises the rows in ``rs.rescore`` by ``run.rescore``, only when
+    spreading appended a row (``applied``), and the list is ranked again. Gain =
+    old rank - new rank. "Existing" rows are the delivered rescore ids; group A
+    is those ``_double_counted``, group B the rest.
+    """
+    rows = [
+        PipelineResult(
+            id=UUID(c["id"]), type=c["type"], description="", score=_final_score(c),  # type: ignore[arg-type]
+            source="spreading_activation" if c.get("entry_leg") == "graph_expanded" else "heart",
+        )
+        for c in rs.delivered
+    ]
+    before = [r.score for r in rows]
+    after = before
+    if rs.sa_appended:
+        beta = float(getattr(settings, "spreading_rescore_beta", 0.15))
+        after = [r.score for r in _apply_spreading_rescore(rows, run.rescore, beta, NULL_TRACE)]
+    gain = [b - a for b, a in zip(_ranks(before), _ranks(after), strict=True)]
+    existing = [i for i, r in enumerate(rows) if r.id in rs.rescore]
+    group_a = {i for i in existing if _double_counted(rs.delivered[i], rs.path_a)}
+    return {
+        "applied": rs.sa_appended,
+        "reproduces_final_rank": all((a or 0.0) >= (b or 0.0) for a, b in zip(before, before[1:])),
+        "n_delivered": len(rows),
+        "n_existing": len(existing),
+        "n_activated": sum(1 for i in existing if run.rescore.get(rows[i].id, 0.0) > 0),
+        "score_demotions": sum(1 for b, a in zip(before, after, strict=True) if (a or 0.0) < (b or 0.0)),
+        "moved_all": sum(1 for g in gain if abs(g) > RESCORE_MOVE),
+        "moved_existing": sum(1 for i in existing if abs(gain[i]) > RESCORE_MOVE),
+        "gains_a": [gain[i] for i in existing if i in group_a],
+        "gains_b": [gain[i] for i in existing if i not in group_a],
+        "drops_other": [g for i, g in enumerate(gain) if g and rows[i].id not in rs.rescore],
+    }
+
+
+def _window_match(plain: list[tuple[UUID, str, float, int]], rescored: list[tuple[UUID, str, float, int]]) -> str:
+    """``same`` (the same ids in order), ``tie`` (the same activations, ids
+    swapped among equal values) or ``differs``."""
+    if [r[0] for r in plain] == [r[0] for r in rescored]:
+        return "same"
+    if [round(r[2], 9) for r in plain] == [round(r[2], 9) for r in rescored]:
+        return "tie"
+    return "differs"
+
+
+def _gain_stats(gains: list[int]) -> dict[str, Any]:
+    if not gains:
+        return {"n": 0}
+    return {
+        "n": len(gains),
+        "share_up": round(sum(1 for g in gains if g > 0) / len(gains), 4),
+        "share_up_gt_move": round(sum(1 for g in gains if g > RESCORE_MOVE) / len(gains), 4),
+        "mean": round(sum(gains) / len(gains), 4),
+        "max": max(gains),
+        "deciles": _deciles([float(g) for g in gains]),
+    }
+
+
+def _rescore_stats(per: list[dict[str, Any]]) -> dict[str, Any]:
+    """The rescore records of one arm, pooled, with the Task 8 verdict: pass when
+    fewer than ``RESCORE_MOVED_MAX_SHARE`` of the delivered rows and of the
+    existing candidates move by more than ``RESCORE_MOVE`` ranks, and no score
+    went down."""
+    n_rows = sum(p["n_delivered"] for p in per)
+    n_existing = sum(p["n_existing"] for p in per)
+    if not n_rows or not n_existing:
+        return {"retrievals": len(per), "verdict": None}
+    moved_all = sum(p["moved_all"] for p in per) / n_rows
+    moved_existing = sum(p["moved_existing"] for p in per) / n_existing
+    demotions = sum(p["score_demotions"] for p in per)
+    drops = [d for p in per for d in p["drops_other"]]
+    passed = moved_all < RESCORE_MOVED_MAX_SHARE and moved_existing < RESCORE_MOVED_MAX_SHARE and not demotions
+    return {
+        "retrievals": len(per),
+        "delivered_rows": n_rows,
+        "existing_candidates": n_existing,
+        "existing_activated_share": round(sum(p["n_activated"] for p in per) / n_existing, 4),
+        "moved_share_all": round(moved_all, 4),
+        "moved_share_existing": round(moved_existing, 4),
+        "score_demotions": demotions,
+        "gains_group_a": _gain_stats([g for p in per for g in p["gains_a"]]),
+        "gains_group_b": _gain_stats([g for p in per for g in p["gains_b"]]),
+        "other_rows_moved_down": len(drops),
+        "other_rows_max_drop": -min(drops) if drops else 0,
+        "verdict": "pass" if passed else "fail",
+    }
+
+
+def rescore_section(retrievals: list[dict[str, Any]], arm_names: list[str]) -> dict[str, Any]:
+    """The report's ``rescore`` section (F105 Task 8): per arm, ``_rescore_stats``
+    over the retrievals the rescore applies to, and over those of them whose
+    reconstructed order reproduces the recorded one; plus how often the
+    baseline's returned rows matched the plain exclusion's (``_window_match``)."""
+    recs = [r["rescore"] for r in retrievals if "rescore" in r]
+    out: dict[str, Any] = {
+        "retrievals": len(recs),
+        "window_vs_plain_exclusion": dict(Counter(r["window"] for r in recs)),
+        "arms": {},
+    }
+    for name in arm_names:
+        per = [r["arms"][name] for r in recs]
+        applied = [p for p in per if p["applied"]]
+        out["arms"][name] = {
+            "not_applied": len(per) - len(applied),
+            "reproducing": sum(1 for p in applied if p["reproduces_final_rank"]),
+            "applied": _rescore_stats(applied),
+            "applied_reproducing": _rescore_stats([p for p in applied if p["reproduces_final_rank"]]),
+        }
+    return out
+
+
 def gate_section(retrievals: list[dict[str, Any]], floor: float) -> dict[str, Any]:
     """The report's ``gate`` section: ``gate_analysis`` of the retrievals' gate
     records, or an ``error`` entry when there is nothing to analyse (no record,
@@ -906,12 +1095,16 @@ def gate_section(retrievals: list[dict[str, Any]], floor: float) -> dict[str, An
 async def replay(
     session: AsyncSession, by_agent: dict[str, list[ReplaySeed]], arms: dict[str, Settings],
     edge_kinds: bool = False, query_vecs: Mapping[str, Sequence[float]] | None = None,
+    rescore: bool = False,
 ) -> list[dict[str, Any]]:
     """Run every arm on every retrieval. The arm order rotates per retrieval so
     no arm always pays the cold cache. With ``edge_kinds``, each arm's kept rows
     get their last hop's edge (``last_hop_edges``), outside the timed call. With
     ``query_vecs`` (query -> embedding), each retrieval whose query has one gets
-    a ``gate`` record of the baseline run (``gate_record``), also untimed."""
+    a ``gate`` record of the baseline run (``gate_record``), also untimed. With
+    ``rescore`` (F105 Task 8), every arm runs with the rescore ids, and each
+    retrieval gets a ``rescore`` record: ``rescore_record`` per arm, and the
+    baseline's rows against a plain-exclusion run of it (``_window_match``)."""
     names = list(arms)
     out: list[dict[str, Any]] = []
     i = 0
@@ -922,7 +1115,7 @@ async def replay(
         for rs in seeds:
             order = names[i % len(names):] + names[: i % len(names)]
             i += 1
-            runs = {name: await run_arm(session, rs, arms[name]) for name in order}
+            runs = {name: await run_arm(session, rs, arms[name], rescore=rescore) for name in order}
             if edge_kinds:
                 for name, run in runs.items():
                     kept = [r[0] for r in _above_floor(run, arms[name])[:JACCARD_K]]
@@ -931,6 +1124,12 @@ async def replay(
             if query_vecs is not None and rs.query in query_vecs:
                 scored["gate"] = await gate_record(
                     session, rs, runs[BASELINE], arms[BASELINE], query_vecs[rs.query])
+            if rescore:
+                plain = await run_arm(session, rs, arms[BASELINE])
+                scored["rescore"] = {
+                    "window": _window_match(plain.rows, runs[BASELINE].rows),
+                    "arms": {name: rescore_record(rs, runs[name], arms[name]) for name in names},
+                }
             out.append(scored)
             await session.rollback()  # end the read-only transaction per retrieval
     return out
@@ -971,9 +1170,14 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
                         "SA-attempted retrieval's candidates, with the live exclusion set")
     p.add_argument("--edge-kinds", action="store_true",
                    help="group each arm's kept rows by the kind of edge that carried their last hop")
+    p.add_argument("--rescore", action="store_true",
+                   help="F105 Task 8: run with the candidates as rescore ids and report the rescore's "
+                        "rank effect on each retrieval's delivered list; needs --seeds-from candidates")
     args = p.parse_args(argv)
     if args.since.tzinfo is None:
         p.error("--since needs a time zone (e.g. a trailing Z)")
+    if args.rescore and args.seeds_from != "candidates":
+        p.error("--rescore needs --seeds-from candidates (the candidates and their scores)")
     return args
 
 
@@ -1035,10 +1239,12 @@ async def _main(args: argparse.Namespace) -> dict[str, Any]:
                     "model": base.embedding_model, "dimensions": base.embedding_dimensions,
                 }
 
-            retrievals = await replay(session, by_agent, arms, edge_kinds=args.edge_kinds, query_vecs=vecs)
+            retrievals = await replay(
+                session, by_agent, arms, edge_kinds=args.edge_kinds, query_vecs=vecs, rescore=args.rescore)
     finally:
         await engine.dispose()
     gate = gate_section(retrievals, float(base.spreading_activation_floor)) if vecs is not None else None
+    rescore = rescore_section(retrievals, list(arms)) if args.rescore else None
 
     dsn = urlsplit(args.dsn)
     names = list(arms)
@@ -1070,10 +1276,12 @@ async def _main(args: argparse.Namespace) -> dict[str, Any]:
             "query_embeddings": embeddings,
             "seeds_from": args.seeds_from,
             "edge_kinds": args.edge_kinds,
+            "rescore": args.rescore,
             "limitations": list(CANDIDATE_LIMITATIONS if args.seeds_from == "candidates" else LIMITATIONS),
         },
         "summary": _summarise(retrievals, names),
         "gate": gate,
+        "rescore": rescore,
         "retrievals": retrievals,
     }
 
@@ -1087,6 +1295,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(json.dumps(report["summary"], indent=2))
     if report["gate"] is not None:
         print(json.dumps(report["gate"], indent=2))
+    if report["rescore"] is not None:
+        print(json.dumps(report["rescore"], indent=2))
     print(f"wrote {args.out} ({len(report['retrievals'])} retrievals)")
     return 0
 

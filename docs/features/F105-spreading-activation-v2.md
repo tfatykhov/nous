@@ -93,6 +93,17 @@ Two options added in Task 4:
 - `--edge-kinds` reports which kind of edge carried each kept row's last hop: `co_occurred`,
   `co_mention` or `other`. For each row it re-runs that one hop from the node the winning path left.
 
+One option added in Task 8, off by default:
+- `--rescore` (with `--seeds-from candidates`) runs each arm as Stage 4 does with the rescore on: the
+  rebuilt candidates, less the brain hits and the seeds, are passed as rescore ids. It rebuilds each
+  retrieval's delivered list from the candidates with a `final_rank`, each row at its last recorded
+  score (its last mutation's `score_after`, else its `entry_score`). Where spreading appended a row
+  live, it applies `_apply_spreading_rescore` under the arm's settings and ranks the list again. The
+  report's `rescore` section gives the rank gains, split into Path A or adjacency-boosted rows and
+  the rest, the score demotions, and the Task 8 gate's verdict. It also checks that the
+  reconstructed order is the recorded one, and that the baseline's rows equal a plain-exclusion
+  run's.
+
 Hub share judges each row by the node its winning path's last hop left: its seed for a depth-1 row,
 the via node for a depth-2 row (`spreading_activation_search`'s `parent_out`, added in Task 3).
 Before Task 3 it used the winning seed's degree, which is exact for depth-1 rows only.

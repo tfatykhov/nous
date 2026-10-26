@@ -46,6 +46,7 @@ from scripts.diag.sa_replay import (
     parse_replay_seeds,
     percentile,
     replay,
+    rescore_record,
     run_arm,
 )
 
@@ -249,6 +250,105 @@ def test_parse_candidate_seeds_skips_every_chunk_cut():
     [rs] = parse_candidate_seeds([row], max_expand=1)
     assert rs.exclude == {f1, kept}
     assert "chunk_keyword_filter" in sa_replay.PRE_STAGE4_CUTS
+
+
+def test_parse_candidate_seeds_fills_rescore_fields():
+    """--rescore: the rescore ids are every leg's live candidate but brain's, plus
+    the Path A neighbours, less the seeds; delivered rows are those with a
+    final_rank, in that order; sa_appended follows the SA expansions."""
+    f1, f2, d1, d2, chunk, path_a, rescued, sa_row = (uuid4() for _ in range(8))
+    candidates = [
+        {**_cand(f1, "heart_primary", score=0.9), "final_rank": 2},
+        {**_cand(f2, "heart_primary", score=0.7), "final_rank": 1},
+        _cand(chunk, "chunk", ctype="chunk"),
+        _cand(d1, "brain", ctype="decision"),
+        {**_cand(d2, "brain", ctype="decision"), "final_rank": 3},
+        _cand(rescued, "heart_primary", stage="heart_recall_limit"),
+    ]
+    expansions = [_exp(f1, stage="stage2b_heart_graph_memory", neighbor=path_a), _exp(f1, neighbor=sa_row)]
+    row = {"id": "r1", "agent_id": "agent-x", "query": "q", "candidates": candidates, "expansions": expansions}
+    [rs] = parse_candidate_seeds([row], max_expand=1)
+    assert rs.seeds == [(d1, "decision", 0.8), (f1, "fact", 0.9), (f2, "fact", 0.7)]
+    assert rs.rescore == {chunk, path_a}
+    assert rs.exclude - rs.rescore == {f1, f2, d1, d2}, "what stays excluded: the seeds and brain hits"
+    assert rs.path_a == {path_a}
+    assert [c["id"] for c in rs.delivered] == [str(f2), str(f1), str(d2)]
+    assert rs.sa_appended
+    [rs] = parse_candidate_seeds([{**row, "expansions": expansions[:1]}], max_expand=1)
+    assert not rs.sa_appended
+
+
+def _delivered(cid, leg, score, rank, ctype="fact", boost=None):
+    """A delivered candidate; ``boost`` = (before, after) of an adjacency_boost mutation."""
+    c = {**_cand(cid, leg, ctype=ctype, score=score if boost is None else boost[0]), "final_rank": rank}
+    if boost is not None:
+        c["mutations"] = [{"stage": "adjacency_boost", "score_before": boost[0], "score_after": boost[1],
+                           "reason": None}]
+    return c
+
+
+def _rescore_case(beta=1.0, sa_appended=True):
+    """Delivered (final_rank order): a seed 0.95, X 0.90, brain D 0.55, chunk K
+    0.52 (boosted from 0.48), Path A row P 0.50, Y 0.40, SA row 0.30. P and Y
+    have activation 1.0, K 0.0."""
+    seed, x, d, k, p, y, sa_row = (uuid4() for _ in range(7))
+    delivered = [
+        _delivered(seed, "heart_primary", 0.95, 1), _delivered(x, "heart_primary", 0.90, 2),
+        _delivered(d, "brain", 0.55, 3, ctype="decision"),
+        _delivered(k, "chunk", None, 4, ctype="chunk", boost=(0.48, 0.52)),
+        _delivered(p, "heart_graph_memory", 0.50, 5), _delivered(y, "heart_primary", 0.40, 6),
+        _delivered(sa_row, "graph_expanded", 0.30, 7),
+    ]
+    rs = ReplaySeed(retrieval_id="r", agent_id="a", query="q", seeds=[(seed, "fact", 0.95)],
+                    rescore={x, k, p, y}, path_a=set(), delivered=delivered, sa_appended=sa_appended)
+    run = ArmRun(rows=[], seconds=0.0, rescore={p: 1.0, y: 1.0, k: 0.0, sa_row: 1.0})
+    return rs, run, Settings(_env_file=None, spreading_rescore_beta=beta)
+
+
+def test_rescore_record_ranks_and_groups():
+    """At beta 1.0: P 0.50 -> 1.0 (rank 5 -> 1), Y 0.40 -> 0.80 (6 -> 4). Group A
+    is P (Path A) and K (adjacency-boosted), B is X and Y; the seed, D and the SA
+    row are not candidates. Only P moves by more than 3."""
+    rs, run, settings = _rescore_case()
+    rec = rescore_record(rs, run, settings)
+    assert rec["applied"] and rec["reproduces_final_rank"]
+    assert (rec["n_delivered"], rec["n_existing"], rec["n_activated"]) == (7, 4, 2)
+    assert rec["score_demotions"] == 0
+    assert (rec["moved_all"], rec["moved_existing"]) == (1, 1)
+    assert rec["gains_a"] == [-2, 4], "K, then P"
+    assert rec["gains_b"] == [-1, 2], "X, then Y"
+    assert rec["drops_other"] == [-1, -2], "the seed and D"
+
+    off = rescore_record(*_rescore_case(sa_appended=False))
+    assert not off["applied"]
+    assert off["gains_a"] + off["gains_b"] + off["drops_other"] == [0, 0, 0, 0]
+
+    rs.delivered[1], rs.delivered[2] = rs.delivered[2], rs.delivered[1]
+    assert not rescore_record(rs, run, settings)["reproduces_final_rank"]
+
+
+def test_rescore_section_verdict():
+    """1 of 7 delivered rows and 1 of 4 candidates move by more than 3 ranks:
+    both at or above 10%, so the arm fails; a retrieval the rescore does not
+    apply to is counted apart."""
+    rec = rescore_record(*_rescore_case())
+    off = rescore_record(*_rescore_case(sa_appended=False))
+    retrievals = [{"rescore": {"window": "same", "arms": {"baseline": r}}} for r in (rec, off)]
+    section = sa_replay.rescore_section(retrievals, ["baseline"])
+    assert section["window_vs_plain_exclusion"] == {"same": 2}
+    arm = section["arms"]["baseline"]
+    assert (arm["not_applied"], arm["reproducing"]) == (1, 1)
+    stats = arm["applied"]
+    assert (stats["delivered_rows"], stats["existing_candidates"]) == (7, 4)
+    assert stats["moved_share_all"] == round(1 / 7, 4)
+    assert stats["moved_share_existing"] == 0.25
+    assert stats["existing_activated_share"] == 0.5
+    assert stats["gains_group_a"]["max"] == 4
+    assert (stats["other_rows_moved_down"], stats["other_rows_max_drop"]) == (2, 2)
+    assert stats["verdict"] == "fail"
+    small = rescore_record(*_rescore_case(beta=0.15))
+    assert sa_replay._rescore_stats([small])["verdict"] == "pass"
+    assert sa_replay.rescore_section([], ["baseline"])["arms"]["baseline"]["applied"]["verdict"] is None
 
 
 def test_edge_kind():
@@ -469,6 +569,15 @@ def test_cli_seed_source_defaults_to_expansions():
     assert (args.seeds_from, args.edge_kinds) == ("candidates", True)
     with pytest.raises(SystemExit):
         sa_replay._parse_args([*required, "--seeds-from", "both"])
+
+
+def test_cli_rescore_is_opt_in_and_needs_candidates():
+    required = ["--dsn", "postgresql://u:p@localhost/clone", "--agent", "all",
+                "--since", "2026-10-25T17:39:00Z", "--base-config", "A2.env", "--out", "r.json"]
+    assert sa_replay._parse_args(required).rescore is False
+    assert sa_replay._parse_args([*required, "--seeds-from", "candidates", "--rescore"]).rescore is True
+    with pytest.raises(SystemExit):
+        sa_replay._parse_args([*required, "--rescore"])
 
 
 def test_parse_arm():
@@ -716,6 +825,51 @@ async def test_run_arm_excludes_live_candidates(session):
     rs = ReplaySeed(retrieval_id="r", agent_id=agent, query="q", seeds=[(s, "fact", 0.8)], exclude={a})
     run = await run_arm(session, rs, Settings(_env_file=None))
     assert [r[0] for r in run.rows] == [b, c]
+
+
+@pytest.mark.postgres_only
+async def test_run_arm_rescore_keeps_rows(session):
+    """--rescore: rescore id A (a live candidate) stays out of the window and
+    returns its activation; brain hit D stays excluded; the rows are those of the
+    plain exclusion."""
+    agent = f"sa-replay-{uuid4().hex[:8]}"
+    s, a, b, c, d = (uuid4() for _ in range(5))
+    await insert_edge(session, agent, s, a, weight=0.9)
+    await insert_edge(session, agent, s, b, weight=0.6)
+    await insert_edge(session, agent, a, c, weight=0.8)
+    await insert_edge(session, agent, s, d, weight=1.0)
+    rs = ReplaySeed(retrieval_id="r", agent_id=agent, query="q", seeds=[(s, "fact", 0.8)],
+                    exclude={a, d}, rescore={a})
+    plain = await run_arm(session, rs, Settings(_env_file=None))
+    run = await run_arm(session, rs, Settings(_env_file=None), rescore=True)
+    assert [r[0] for r in run.rows] == [r[0] for r in plain.rows] == [b, c]
+    assert run.rescore == {a: pytest.approx(0.36)}
+    assert plain.rescore == {}
+
+
+@pytest.mark.postgres_only
+async def test_replay_rescore_end_to_end(session, monkeypatch):
+    """A delivered candidate A reached at 0.36 from the seed rises above B; the
+    baseline's rows match the plain exclusion's."""
+
+    async def _keep_fixture_transaction() -> None:
+        """See test_replay_edge_kinds_end_to_end."""
+
+    monkeypatch.setattr(session, "rollback", _keep_fixture_transaction)
+    agent = f"sa-replay-{uuid4().hex[:8]}"
+    s, a, b, n = (uuid4() for _ in range(4))
+    await insert_edge(session, agent, s, a, weight=0.9)
+    await insert_edge(session, agent, s, n, weight=0.6)
+    delivered = [_delivered(b, "heart_primary", 0.52, 1), _delivered(a, "chunk", 0.50, 2, ctype="chunk")]
+    rs = ReplaySeed(retrieval_id="r", agent_id=agent, query="q", seeds=[(s, "fact", 0.8)],
+                    exclude={a, b}, rescore={a, b}, delivered=delivered, sa_appended=True)
+    out = await replay(session, {agent: [rs]}, {"baseline": Settings(_env_file=None)}, rescore=True)
+    rec = out[0]["rescore"]
+    assert rec["window"] == "same"
+    base = rec["arms"]["baseline"]
+    assert (base["n_existing"], base["n_activated"]) == (2, 1)
+    assert base["gains_b"] == [-1, 1], "0.50 x (1 + 0.15 x 0.36) = 0.527 passes 0.52"
+    assert out[0]["arms"]["baseline"]["n_rows"] == 1, "only N is a returned row"
 
 
 @pytest.mark.postgres_only
