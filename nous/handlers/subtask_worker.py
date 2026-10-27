@@ -397,7 +397,7 @@ class SubtaskWorkerPool:
                     "guard": {"name": spec.name, "mode": spec.mode, "would_skip": would_skip},
                     "acted": schedule_guard.acted_verdict(signals, observed=observed),
                     "acted_by": signals,
-                    # no structured report (the legacy path): no finding can be seen, so not acting is unknown
+                    # no structured report (legacy path, or no report emitted): a finding can't be seen
                     "observed": observed,
                     "run_status": row.status,
                     # with the durable ledger off, no entry is ever written, so "ledger" cannot show up

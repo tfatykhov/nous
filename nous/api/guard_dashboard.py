@@ -133,7 +133,7 @@ def _row(rec: dict[str, Any], outcome: dict[str, Any] | None) -> dict[str, Any]:
         # derived from acted_by, never the stored flag: one definition, also for older records
         "acted": acted_verdict(acted_by, observed=observed) if acted_by is not None else None,
         "acted_by": acted_by,
-        # False: the run left no structured report (the legacy path), so "did nothing" could not be seen
+        # False: the run left no structured report (e.g. the legacy path), so "did nothing" could not be seen
         "observed": observed,
     }
 

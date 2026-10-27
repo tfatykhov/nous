@@ -161,7 +161,8 @@ def acted_signals(
     - ``ledger``: a ledger entry that was not blocked, other than a bash run of the guard's own command.
       The durable ledger holds only side-effecting calls (write, external, irreversible), never reads.
 
-    Whether the model acted is ``acted(signals)``: a ``finding`` or a ``ledger`` write. A run that finds
+    Whether the model acted is ``acted(signals)``: a ``finding`` or a ``ledger`` write (``acted_verdict``
+    makes it unknown for a run with no structured report and no ledger write). A run that finds
     nothing still writes a summary and an inbox row (or push), so ``report``, ``inbox`` and ``push`` are
     context, never acting on their own.
     """
@@ -194,15 +195,18 @@ def acted(signals: Sequence[str]) -> bool:
 def observed(row: Any) -> bool:
     """Whether a finding of the run could be seen: its row has a structured report.
 
-    The legacy path (``subtask_hardening_enabled=False``) writes only a result text, so a finding there is no
-    signal and a run without a ledger write may still have acted.
+    The legacy path (``subtask_hardening_enabled=False``) writes only a result text, and a hardened turn that
+    ends without emitting a report writes none, so a finding there is no signal and a run without a ledger
+    write may still have acted.
     """
     return isinstance(getattr(row, "report_jsonb", None), dict)
 
 
 def acted_verdict(signals: Sequence[str], *, observed: bool) -> bool | None:
     """``acted(signals)``, except None (unknown) for an unobserved run with nothing acting seen."""
-    return True if acted(signals) else (False if observed else None)
+    if acted(signals):
+        return True
+    return False if observed else None
 
 
 def _clip(text: str, limit: int = OUTPUT_MAX_BYTES) -> str:
