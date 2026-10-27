@@ -62,6 +62,7 @@ from nous.cognitive.execution_ledger import (
     bash_exit_code,
     classify_side_effect,
     evidence_args,
+    redact_error_text,
 )
 from nous.cognitive.layer import CognitiveLayer
 from nous.cognitive.ledger_store import DuplicateSend, HeldKey, LedgerStore, LedgerWriteError
@@ -87,6 +88,16 @@ def _no_cancelled_roots(_root_id: UUID) -> bool:
     """The default view of cancelled roots: none. Installed until ``set_cancelled_roots`` (F099 2e) replaces it,
     so a deployment with continuation off pays one attribute read and one call per lineage tool call."""
     return False
+
+
+_COMMAND_HEAD_CHARS = 300
+
+
+def _command_head(command: object) -> str:
+    """A refused lineage bash command as its policy-violation event keeps it: redacted as the ledger redacts an
+    error text, THEN clipped to _COMMAND_HEAD_CHARS (a secret cut first could be too short for the pattern that
+    recognizes it). Not a string: empty."""
+    return redact_error_text(command)[:_COMMAND_HEAD_CHARS] if isinstance(command, str) else ""
 
 
 # 012.2: a subtask may not delegate (no-nesting rule). F062: spawn_sync has identical
@@ -563,13 +574,16 @@ class AgentRunner:
                     workspace_dir=self._settings.workspace_dir,
                     lineage_shell=self._settings.f099_lineage_shell,
                     build_commands=self._settings.f099_lineage_build_commands,
+                    extra_write_dirs=self._settings.f099_lineage_write_dirs,
                 )
             if strict is not None:
                 scope = "internal_only" if ctx.authority == AUTHORITY_INTERNAL else ctx.kind
                 logger.warning(
                     "F099: refused %r in a %s turn (%s:%s, session=%s)", tool_name, ctx.kind, scope, strict, session_id
                 )
-                # mode "enforce": it was refused, which is what the dashboard counts under it.
+                # mode "enforce": it was refused, which is what the dashboard counts under it. A refused lineage
+                # bash call also keeps the head of its command, to check the shell's allowlist against.
+                shell = scope == "internal_only" and strict == "external" and tool_name == "bash"
                 self._log_f026_decision(
                     "harness_context_policy_violation",
                     {
@@ -577,17 +591,23 @@ class AgentRunner:
                         "context_kind": ctx.kind,
                         "violation": f"{scope}:{strict}",
                         "mode": "enforce",
+                        **({"command_head": _command_head(tool_input.get("command"))} if shell else {}),
                     },
                     session_id=session_id,
                 )
                 text = f"Tool error: '{tool_name}' is not allowed in this turn ({strict})."
                 if strict == "write_path":
                     text += " " + tool_policy.write_path_refusal_hint(
-                        ctx, self._settings.workspace_dir, lineage_shell=self._settings.f099_lineage_shell
+                        ctx,
+                        self._settings.workspace_dir,
+                        lineage_shell=self._settings.f099_lineage_shell,
+                        extra_write_dirs=self._settings.f099_lineage_write_dirs,
                     )
                 elif strict == "external" and tool_name == "bash" and ctx.authority == AUTHORITY_INTERNAL:
                     text += " " + tool_policy.lineage_bash_refusal_hint(
-                        build_commands=self._settings.f099_lineage_build_commands
+                        build_commands=self._settings.f099_lineage_build_commands,
+                        extra_write_dirs=self._settings.f099_lineage_write_dirs,
+                        workspace_dir=self._settings.workspace_dir,
                     )
                 return Refusal(text, "internal_only")
 
@@ -654,7 +674,13 @@ class AgentRunner:
         if violation is None:
             if policy_mode == "off":
                 return None
-            violation = tool_policy.evaluate(ctx, tool_name, tool_input, workspace_dir=self._settings.workspace_dir)
+            violation = tool_policy.evaluate(
+                ctx,
+                tool_name,
+                tool_input,
+                workspace_dir=self._settings.workspace_dir,
+                extra_write_dirs=self._settings.f099_lineage_write_dirs,
+            )
         if violation is None:
             return None
         # not_compensable is a safety invariant, not a policy preference: block

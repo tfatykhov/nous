@@ -340,6 +340,7 @@ def _runner_sh(tmp_path) -> str:
         "cat > {W}/claude-jobs/prompts/p.md <<'EOF'\nraw $HOME `id` text\nEOF\n"
         "{R} launch nous --prompt-file {W}/claude-jobs/prompts/p.md",
         "sleep 30 && {R} status job-20261010-222549-6e37c52b",
+        "bash {R} status",  # exactly bash and the runner's path (test_f099_lineage_shell_obstacles has the rest)
     ],
 )
 def test_the_lineage_shell_allows_the_delegation_path_and_reads(command, tmp_path):
@@ -408,8 +409,7 @@ def test_the_lineage_shell_allows_the_delegation_path_and_reads(command, tmp_pat
         "{R} cancel job-20261010-222549-6e37c52b",
         "{R} status ../../x",
         "{R}",
-        "bash {R} status",
-        "./runner.sh status",
+        "./runner.sh status",  # the cwd is the workspace, not claude-jobs
         # writes outside the two directories
         "printf x > {R}",
         "printf x > {W}/claude-jobs/prompts/../runner.sh",
@@ -763,6 +763,106 @@ async def test_a_lineage_bash_call_sees_only_the_allowlisted_environment(tmp_pat
     # The model cannot switch the scrub off: an argument named with "_" is the dispatcher's.
     text, _ = await d.dispatch("bash", {"command": command, "_lineage": False}, context=_internal("continuation"))
     assert "planted-s3cret" not in text
+
+
+def _gh_repo_dispatcher(tmp_path, settings=None):
+    from types import SimpleNamespace
+
+    from nous.api.builtin_tools import register_builtin_tools
+    from nous.api.tools import ToolDispatcher
+
+    d = ToolDispatcher()
+    stub = SimpleNamespace(workspace_dir=str(tmp_path / "ws"), github_default_repo="a/b")
+    register_builtin_tools(d, settings or stub)
+    return d
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX shell and printenv")
+async def test_a_lineage_bash_call_gets_gh_repo_from_the_setting_not_the_process(tmp_path, monkeypatch):
+    from nous.config import Settings
+
+    monkeypatch.setenv("GH_REPO", "evil/x")
+    text, _ = await _gh_repo_dispatcher(tmp_path).dispatch(
+        "bash", {"command": "printenv GH_REPO"}, context=_internal("continuation")
+    )
+    assert "a/b" in text and "evil/x" not in text
+    settings = Settings(_env_file=None, ANTHROPIC_API_KEY="k", workspace_dir=str(tmp_path / "ws"))
+    text, _ = await _gh_repo_dispatcher(tmp_path, settings).dispatch(
+        "bash", {"command": "printenv GH_REPO"}, context=_internal("continuation")
+    )
+    assert "tfatykhov/nous" in text and "evil/x" not in text  # the default
+
+
+def test_a_build_command_gets_no_gh_repo(monkeypatch):
+    from nous.api.builtin_tools import _lineage_env
+
+    monkeypatch.setenv("GH_REPO", "evil/x")
+    assert _lineage_env(False, "a/b")["GH_REPO"] == "a/b"
+    assert "GH_REPO" not in _lineage_env(True, "a/b")  # gh needs the token, which a build command does not get
+    assert "GH_REPO" not in _lineage_env(False, "")  # no setting: none, and never the process's
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX shell and printenv")
+@pytest.mark.parametrize(
+    "command",
+    [
+        "{R} status && printenv GH_REPO",
+        "bash {R} status && printenv GH_REPO",
+        "cd {W}/claude-jobs && ./runner.sh status && printenv GH_REPO",
+    ],
+)
+async def test_a_lineage_command_that_runs_the_runner_gets_no_gh_repo(command, tmp_path, monkeypatch):
+    """The Claude Code job runner.sh starts inherits the environment, and gh prefers GH_REPO to the job clone's own
+    remote: a job working on another repo would read or open PRs against the default one."""
+    ws = tmp_path / "ws"
+    (ws / "claude-jobs").mkdir(parents=True)
+    runner = ws / "claude-jobs" / "runner.sh"
+    runner.write_text('#!/bin/sh\necho "runner sees GH_REPO=${GH_REPO:-none}"\n')
+    runner.chmod(0o755)
+    monkeypatch.delenv("GH_REPO", raising=False)
+    d = _gh_repo_dispatcher(tmp_path)
+    text, _ = await d.dispatch("bash", {"command": command.format(R=runner, W=ws)}, context=_internal("continuation"))
+    assert "runner sees GH_REPO=none" in text and "a/b" not in text
+    text, _ = await d.dispatch("bash", {"command": "printenv GH_REPO"}, context=_internal("continuation"))
+    assert "a/b" in text  # PIN: without the runner, the setting
+
+
+@pytest.mark.parametrize(
+    ("command", "runner"),
+    [
+        ("/ws/claude-jobs/runner.sh status", True),
+        ("bash /ws/claude-jobs/runner.sh launch nous p", True),
+        ("cd /ws/claude-jobs && ./runner.sh status", True),
+        ("gh pr view 1 && /ws/claude-jobs/runner.sh list", True),
+        ("echo $(id)", True),  # unreadable: no GH_REPO, as the build scrub fails closed
+        ("echo 'x", True),
+        ("gh pr view 1", False),
+        ("cat /ws/claude-jobs/runner.sh", False),  # a read of the script runs nothing
+        ("ls *.md && gh pr view 1", False),
+        ("[ -f x ] && gh pr checks 1", False),
+    ],
+)
+def test_dispatch_marks_a_command_that_runs_the_runner(command, runner):
+    from nous.api.tool_policy import lineage_runs_runner
+
+    assert lineage_runs_runner(command) is runner
+
+
+def test_every_runner_spelling_the_policy_accepts_is_marked(tmp_path):
+    from nous.api.tool_policy import lineage_runs_runner
+
+    r = f"{tmp_path}/claude-jobs/runner.sh"
+    for command in (f"{r} status", f"bash {r} status", f"cd {tmp_path}/claude-jobs && ./runner.sh status"):
+        assert lineage_bash_allowed(_internal(), command, workspace_dir=str(tmp_path)), command
+        assert lineage_runs_runner(command) is True, command
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX shell and printenv")
+@pytest.mark.parametrize("ctx", [None, ExecutionContext(kind="subtask", session_id="s")])
+async def test_a_bash_call_outside_a_lineage_does_not_get_gh_repo(tmp_path, monkeypatch, ctx):
+    monkeypatch.delenv("GH_REPO", raising=False)
+    text, _ = await _gh_repo_dispatcher(tmp_path).dispatch("bash", {"command": "printenv GH_REPO"}, context=ctx)
+    assert "a/b" not in text
 
 
 @pytest.mark.skipif(os.name == "nt", reason="a POSIX shell and printenv")

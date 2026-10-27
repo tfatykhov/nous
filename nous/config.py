@@ -28,6 +28,59 @@ PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS = 2.0
 DEFAULT_GITHUB_REPO = "tfatykhov/nous"
 _GITHUB_REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 
+# NOUS_F099_LINEAGE_WRITE_DIRS: workspace directories no entry may name or lie in. claude-jobs holds runner.sh,
+# repos.json and the job directories; each root's lineage writes its own intentions/<root>/ (an entry there would
+# give one lineage another's); plugins/ is code a launched job loads.
+LINEAGE_WRITE_DIR_RESERVED = frozenset({"claude-jobs", "intentions", "plugins"})
+# Plain relative components: no empty, `.`, `..` or hidden one, none starting with `-` (an option to mkdir or cp),
+# and nothing the lineage shell's reader refuses or expands (a space, `~`, a glob, a quote, a backslash).
+_LINEAGE_WRITE_DIR_ENTRY = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)*")
+
+
+def lineage_write_dir_entry_problem(entry: object) -> str | None:
+    """Why ``entry`` cannot be a NOUS_F099_LINEAGE_WRITE_DIRS directory, or None. A trailing ``/`` is ignored.
+
+    Only the text: ``tool_policy.lineage_write_dirs`` resolves each entry again at every call (a symlink out of the
+    workspace, into a reserved directory or onto a file is dropped there)."""
+    if not isinstance(entry, str):
+        return "not a string"
+    if entry.startswith("/"):
+        return "an absolute path"
+    entry = entry.rstrip("/")
+    if not _LINEAGE_WRITE_DIR_ENTRY.fullmatch(entry):
+        return "not a plain workspace-relative path (letters, digits, _ . -; no empty, hidden, . or .. component)"
+    if entry.split("/")[0] in LINEAGE_WRITE_DIR_RESERVED:
+        return f"inside {entry.split('/')[0]}/, which no lineage may write"
+    return None
+
+
+def lineage_write_dir_resolved(workspace_dir: str, entry: object) -> tuple[Path | None, str | None]:
+    """``entry`` resolved under ``workspace_dir`` (symlinks followed) as ``(directory, None)``, or ``(None, why)``
+    when its text fails ``lineage_write_dir_entry_problem`` or it lands on the workspace itself, outside it, below a
+    hidden component, in or around ``claude-jobs``/``intentions``/``plugins``, or on a file. A missing directory is
+    kept (a lineage may create it). Checked at load (``Settings``) and again at every call
+    (``tool_policy.lineage_write_dirs``), since the filesystem can change in between."""
+    problem = lineage_write_dir_entry_problem(entry)
+    if problem is not None or not isinstance(entry, str):  # the second only narrows the type: a non-str has a problem
+        return None, problem
+    try:
+        workspace = Path(workspace_dir).resolve()
+        d = (workspace / entry.rstrip("/")).resolve()
+        if d == workspace or not d.is_relative_to(workspace):
+            return None, "it resolves to the workspace itself or outside it"
+        if any(p.startswith(".") for p in d.relative_to(workspace).parts):
+            return None, "it resolves below a hidden directory"
+        if any(
+            d.is_relative_to(r) or r.is_relative_to(d)
+            for r in ((workspace / n).resolve() for n in LINEAGE_WRITE_DIR_RESERVED)
+        ):
+            return None, "it resolves into or around claude-jobs, intentions or plugins"
+        if d.exists() and not d.is_dir():
+            return None, "it is a file"
+    except (OSError, ValueError, RuntimeError):  # an unresolvable name, a symlink loop
+        return None, "it cannot be resolved"
+    return d, None
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -924,8 +977,8 @@ class Settings(BaseSettings):
         default="",
         validation_alias="GITHUB_TOKEN",
     )
-    # The repository a DAG's pr wait reads when its wait_for names none. An owner/repo pair; anything else falls
-    # back to the default with a WARNING, never a boot failure.
+    # The repository a DAG's pr wait reads when its wait_for names none, and a lineage's bash gets as GH_REPO. An
+    # owner/repo pair; anything else falls back to the default with a WARNING, never a boot failure.
     github_default_repo: str = DEFAULT_GITHUB_REPO
 
     @field_validator("github_default_repo", mode="before")
@@ -1298,6 +1351,36 @@ class Settings(BaseSettings):
     # check|format --check and make <target> in a repo's top level, each with a closed option map
     # (tool_policy._build_allowed); the command runs without the GitHub token. Off: the shell is as before.
     f099_lineage_build_commands: bool = True
+    # F099 lineage write dirs: workspace-relative directories (a comma list in env) every lineage may also write
+    # into, with write_file, a redirection, or the lineage shell's mkdir -p / touch / cp. An entry that names or
+    # lies in claude-jobs, intentions or plugins, the workspace root, an absolute path, a `..` or hidden component
+    # is dropped with a WARNING (lineage_write_dir_entry_problem); tool_policy.lineage_write_dirs resolves the rest
+    # again at every call. Empty: as before.
+    f099_lineage_write_dirs: Annotated[list[str], NoDecode] = Field(default_factory=list)
+
+    @field_validator("f099_lineage_write_dirs", mode="before")
+    @classmethod
+    def _parse_lineage_write_dirs(cls, v: object) -> list[str]:
+        """Split the env string ourselves and drop every entry that is not a plain workspace directory."""
+        log = logging.getLogger(__name__)
+        if v is None:
+            return []
+        if isinstance(v, str):
+            v = v.split(",")
+        if not isinstance(v, (list, tuple)):
+            log.warning("NOUS_F099_LINEAGE_WRITE_DIRS is not a comma list; no extra write dir is allowed")
+            return []
+        kept: list[str] = []
+        for item in v:
+            entry = item.strip() if isinstance(item, str) else item
+            if entry == "":
+                continue
+            problem = lineage_write_dir_entry_problem(entry)
+            if problem is not None:
+                log.warning("NOUS_F099_LINEAGE_WRITE_DIRS: dropped %r: %s", entry, problem)
+            elif entry.rstrip("/") not in kept:
+                kept.append(entry.rstrip("/"))
+        return kept
 
     # F098 Phase C: result memory — a finished background subtask result
     # becomes an episode (+ document chunks), so recall_deep can find it.
@@ -3609,6 +3692,20 @@ class Settings(BaseSettings):
     def _detect_explicit_overrides(self) -> "Settings":
         object.__setattr__(self, "_compaction_threshold_explicit", "compaction_threshold" in self.model_fields_set)
         object.__setattr__(self, "_keep_recent_explicit", "keep_recent_tokens" in self.model_fields_set)
+        return self
+
+    @model_validator(mode="after")
+    def _resolve_lineage_write_dirs(self) -> "Settings":
+        """Drop, with a WARNING, a NOUS_F099_LINEAGE_WRITE_DIRS entry that already resolves out of place at load
+        (``lineage_write_dir_resolved``); tool_policy resolves the rest again at every call."""
+        kept = []
+        for entry in self.f099_lineage_write_dirs:
+            _, problem = lineage_write_dir_resolved(self.workspace_dir, entry)
+            if problem is None:
+                kept.append(entry)
+            else:
+                logging.getLogger(__name__).warning("NOUS_F099_LINEAGE_WRITE_DIRS: dropped %r: %s", entry, problem)
+        object.__setattr__(self, "f099_lineage_write_dirs", kept)
         return self
 
     @model_validator(mode="after")

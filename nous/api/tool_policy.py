@@ -12,7 +12,7 @@ import os
 import re
 import shlex
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
@@ -30,6 +30,7 @@ from nous.cognitive.bash_side_effect import (
     simple_commands,
 )
 from nous.cognitive.execution_ledger import classify_side_effect
+from nous.config import lineage_write_dir_resolved
 
 _ALL = frozenset({"none", "write", "external", "irreversible"})
 _WORK = frozenset({"none", "write", "external"})
@@ -183,6 +184,68 @@ _READ_ARG_ROLES: Mapping[str, _ArgRoles] = MappingProxyType(
         ),
     }
 )
+# Read programs that take no glob, each with a closed table. An option with an optional argument (diff --unified,
+# date --iso-8601) is a flag here: it takes `=value` and never the next word. diff: no -r (recursion), -l (runs
+# pr), -x/-X/-S (pattern or start files), --from-file/--to-file, -D, line or group formats or -N (_read_only_files
+# also wants exactly two regular files). date: no -s/--set (sets the clock) or -f/--file (reads dates from a file),
+# no -I (an optional attached argument; --iso-8601=FMT is the spelling). basename and dirname only edit strings.
+_READ_ONLY_ROLES: Mapping[str, _ArgRoles] = MappingProxyType(
+    {
+        "diff": _ArgRoles(
+            {**dict.fromkeys("qucwbBiEZay", "flag"), **dict.fromkeys("UC", "value")},
+            {
+                **dict.fromkeys(
+                    (
+                        "--brief --unified --context --ignore-case --ignore-all-space --ignore-space-change "
+                        "--ignore-blank-lines --ignore-trailing-space --ignore-tab-expansion --strip-trailing-cr "
+                        "--text --side-by-side --minimal --normal --expand-tabs --color --no-dereference"
+                    ).split(),
+                    "flag",
+                ),
+                **dict.fromkeys(("--width", "--tabsize", "--label"), "value"),
+            },
+            closed=True,
+        ),
+        "date": _ArgRoles(
+            {**dict.fromkeys("uR", "flag"), "d": "value", "r": "file"},
+            {
+                **dict.fromkeys("--utc --universal --rfc-email --iso-8601 --debug --help --version".split(), "flag"),
+                "--date": "value",
+                "--rfc-3339": "value",
+                "--reference": "file",
+            },
+            closed=True,
+        ),
+        "basename": _ArgRoles(
+            {**dict.fromkeys("az", "flag"), "s": "value"},
+            {**dict.fromkeys("--multiple --zero --help --version".split(), "flag"), "--suffix": "value"},
+            closed=True,
+        ),
+        "dirname": _ArgRoles({"z": "flag"}, dict.fromkeys("--zero --help --version".split(), "flag"), closed=True),
+    }
+)
+# test and `[`: an optional leading `!`, then one word, a unary test, or a binary one. No -a, -o, parentheses, -v
+# (reads a variable), -t (a terminal), or the tests of owners, modes, sockets and devices.
+_TEST_PROGRAMS = frozenset({"test", "["})
+_TEST_STRING_UNARY = frozenset({"-n", "-z"})
+_TEST_FILE_UNARY = frozenset({"-e", "-f", "-d", "-s", "-r", "-w", "-x", "-L", "-h"})
+_TEST_STRING_BINARY = frozenset({"=", "!=", "-eq", "-ne", "-lt", "-gt", "-le", "-ge"})
+_TEST_FILE_BINARY = frozenset({"-nt", "-ot", "-ef"})
+# A -d/--date string with TZ="..." names a zone file date opens, which may be any path.
+_DATE_TZ = re.compile(r"tz\s*=", re.IGNORECASE)
+# The commands that create files, only inside lineage_write_dirs (_fs_write_allowed). No mkdir -m/-v/-Z; no touch
+# -r/-d/-t/-h or --time (another file's times, a parsed date, a link itself); no cp -r/-R/-a/-d/-P/-L/-H/-l/-s/-t/-T
+# /-u/-i/-p, --parents, --backup, --reflink or --remove-destination: nothing that copies a tree, makes or keeps a
+# link, picks another target or copies modes and owners.
+_FS_WRITE_ROLES: Mapping[str, _ArgRoles] = MappingProxyType(
+    {
+        "mkdir": _ArgRoles({"p": "flag"}, {"--parents": "flag"}, closed=True),
+        "touch": _ArgRoles(dict.fromkeys("cam", "flag"), {"--no-create": "flag"}, closed=True),
+        "cp": _ArgRoles(
+            dict.fromkeys("nvf", "flag"), dict.fromkeys(("--no-clobber", "--verbose", "--force"), "flag"), closed=True
+        ),
+    }
+)
 # A jq filter that reads the environment (GITHUB_TOKEN is left in it) or imports a module or data file.
 _JQ_REFUSED = re.compile(r"\$ENV|\benv\b|\bimport\b|\binclude\b")
 _MAX_LINEAGE_CWDS = 16  # directories a chain of cd could have left the shell in; more is refused
@@ -265,6 +328,19 @@ LINEAGE_GIT_READS: Mapping[str, _GitRoles] = MappingProxyType(
             frozenset({"--diff-filter", "--unified"}),
             _GIT_DIFF_SHORT,
         ),
+        "merge-base": _GitRoles(
+            frozenset("--all --octopus --independent --is-ancestor --fork-point".split()), frozenset(), {}
+        ),
+        # Queries only: no --git-path, --resolve-git-dir, --parseopt, --sq-quote, --local-env-vars, --default,
+        # --prefix, --path-format or the other directory queries. A flag also takes `=value` (--short=8).
+        "rev-parse": _GitRoles(
+            frozenset(
+                "--short --abbrev-ref --verify --quiet --symbolic --symbolic-full-name --show-toplevel "
+                "--is-inside-work-tree --show-prefix --show-cdup --git-dir".split()
+            ),
+            frozenset(),
+            {"q": "flag"},
+        ),
     }
 )
 # pytest: no -p (a plugin), -c / --rootdir / --confcutdir / -o (another config or root), --pyargs (an installed
@@ -329,30 +405,51 @@ def internal_only_allowed(name: str, *, ctx: ExecutionContext, lineage_shell: bo
     return True
 
 
-def lineage_write_dirs(ctx: ExecutionContext, workspace_dir: str, *, lineage_shell: bool) -> list[Path]:
+def lineage_write_dirs(
+    ctx: ExecutionContext, workspace_dir: str, *, lineage_shell: bool, extra_dirs: Sequence[str] = ()
+) -> list[Path]:
     """The resolved directories an internal_only turn may write into: the root's own
     ``<workspace_dir>/intentions/<root_id>/`` when it has a root, and ``<workspace_dir>/claude-jobs/prompts/``
     only with ``lineage_shell`` (a prompt file there is for ``runner.sh launch``, which only the lineage shell
-    can run). Shared by write_file (``_write_path_allowed``) and the lineage shell's redirections."""
+    can run). Shared by write_file (``_write_path_allowed``) and the lineage shell's redirections.
+
+    ``extra_dirs`` (``NOUS_F099_LINEAGE_WRITE_DIRS``) are the owner's directories, resolved here at every call
+    (symlinks followed, ``config.lineage_write_dir_resolved``): one is dropped when its text is refused, or when it
+    resolves to the workspace itself, outside it, below a hidden component, onto a file, or into or around
+    ``claude-jobs``, ``intentions`` or ``plugins``. A missing one is kept, so a lineage may create it."""
     workspace = Path(workspace_dir).resolve()
     dirs: list[Path] = []
     if ctx.root_intention_id is not None:
         dirs.append(workspace / "intentions" / str(ctx.root_intention_id))
     if lineage_shell:
         dirs.append(workspace / "claude-jobs" / "prompts")
+    for entry in extra_dirs:
+        d, _ = lineage_write_dir_resolved(workspace_dir, entry)
+        if d is not None and d not in dirs:
+            dirs.append(d)
     return dirs
 
 
-def write_path_refusal_hint(ctx: ExecutionContext, workspace_dir: str, *, lineage_shell: bool) -> str:
+def write_path_refusal_hint(
+    ctx: ExecutionContext, workspace_dir: str, *, lineage_shell: bool, extra_write_dirs: Sequence[str] = ()
+) -> str:
     """Where write_file may write in this turn, appended to its ``write_path`` refusal."""
     if ctx.root_intention_id is None:
         return "write_file may not write in this turn: it has no root intention."
-    dirs = " or ".join(f"{d}/" for d in lineage_write_dirs(ctx, workspace_dir, lineage_shell=lineage_shell))
+    dirs = " or ".join(
+        f"{d}/"
+        for d in lineage_write_dirs(ctx, workspace_dir, lineage_shell=lineage_shell, extra_dirs=extra_write_dirs)
+    )
     return f"write_file may only write under {dirs}."
 
 
 def _write_path_allowed(
-    ctx: ExecutionContext, tool_input: Mapping[str, Any], workspace_dir: str, *, lineage_shell: bool = False
+    ctx: ExecutionContext,
+    tool_input: Mapping[str, Any],
+    workspace_dir: str,
+    *,
+    lineage_shell: bool = False,
+    extra_write_dirs: Sequence[str] = (),
 ) -> bool:
     """A write_file target is inside one of ``lineage_write_dirs`` once resolved.
 
@@ -367,9 +464,9 @@ def _write_path_allowed(
         return False
     try:
         workspace = Path(workspace_dir).resolve()
-        dirs = lineage_write_dirs(ctx, workspace_dir, lineage_shell=lineage_shell)
+        dirs = lineage_write_dirs(ctx, workspace_dir, lineage_shell=lineage_shell, extra_dirs=extra_write_dirs)
         target = Path(path).resolve() if Path(path).is_absolute() else (workspace / path).resolve()
-    except (OSError, ValueError):  # an unresolvable name
+    except (OSError, ValueError, RuntimeError):  # an unresolvable name, a symlink loop
         return False
     return any(target.is_relative_to(d) for d in dirs)
 
@@ -381,7 +478,7 @@ def _under(path: str, dirs: list[Path]) -> bool:
     try:
         target = Path(path).resolve()
         return any(target.is_relative_to(d.resolve()) for d in dirs)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RuntimeError):  # an unresolvable name, a symlink loop: refused, not raised
         return False
 
 
@@ -536,6 +633,159 @@ def _read_paths(prog: str, args: list[str]) -> tuple[list[str], list[str]] | Non
     return files, [o for o in operands if o != "-"]
 
 
+def _test_file_operands(args: list[str]) -> list[str] | None:
+    """The words of a ``test`` expression (``[``'s without its closing ``]``) that name a file, or None when the
+    expression is not one ``_TEST_*`` allows: after an optional leading ``!``, one word (a string), ``UNARY WORD``
+    or ``WORD BINARY WORD``. A binary operator is never a unary one, so the shell's precedence rules (a binary test
+    before a leading ``!``) read each allowed shape the same way."""
+    if args[:1] == ["!"]:
+        args = args[1:]
+    if len(args) == 1:
+        return []
+    if len(args) == 2 and args[0] in _TEST_STRING_UNARY:
+        return []
+    if len(args) == 2 and args[0] in _TEST_FILE_UNARY:
+        return [args[1]]
+    if len(args) == 3 and args[1] in _TEST_STRING_BINARY:
+        return []
+    if len(args) == 3 and args[1] in _TEST_FILE_BINARY:
+        return [args[0], args[2]]
+    return None
+
+
+def _read_only_files(prog: str, args: list[str]) -> tuple[list[str], bool] | None:
+    """For ``test``, ``[`` and a ``_READ_ONLY_ROLES`` program: the arguments that name a file, and whether each must
+    be a regular file (diff's two operands: a directory would compare every file the two share, dotfiles too), or
+    None when the call is refused whatever its paths name."""
+    if prog in _TEST_PROGRAMS:
+        if prog == "[":
+            if args[-1:] != ["]"]:
+                return None
+            args = args[:-1]
+        files = _test_file_operands(args)
+        return None if files is None else (files, False)
+    split = _split_read_args(args, _READ_ONLY_ROLES[prog])
+    if split is None:
+        return None
+    operands, files, values = split
+    if prog == "diff":
+        if len(operands) != 2 or "-" in operands:
+            return None
+        return operands, True
+    if prog == "date":
+        if len(operands) > 1 or not all(o.startswith("+") for o in operands):
+            return None  # a bare operand sets the clock
+        if any(_DATE_TZ.search(value) for _, value in values):
+            return None
+        return files, False
+    return ([], False) if operands else None  # basename, dirname: strings, at least one
+
+
+def _regular_files(paths: list[Path]) -> bool:
+    try:
+        return all(p.is_file() for p in paths)
+    except OSError:
+        return False
+
+
+def _write_target(path: str, cwd: Path | None, writable: list[Path], *, below: bool) -> Path | None:
+    """Where a mkdir/touch/cp target lands, once resolved (symlinks followed, dangling ones too, and ``..``), when
+    that is inside one of ``writable`` with no hidden component below it, else None. A relative target resolves
+    against ``cwd``, the directory the shell is SURELY in: None when it is not sure, since a check from every
+    directory it could be in would pass a target that is writable from one of them and lands elsewhere from the
+    other. ``below``: strictly below the directory, never the directory itself (touch or cp would make it a file).
+    ``~``, a leading ``-`` and a ``..`` component are refused: ``mkdir -p`` creates every directory it walks, so
+    ``research/../../x/../ws/research/ok`` would make ``x`` outside the workspace on the way to an endpoint inside
+    (one rule for every write target)."""
+    if path.startswith(("~", "-")) or "\x00" in path or ".." in path.split("/"):
+        return None
+    base = Path(path) if path.startswith("/") else cwd / path if cwd is not None else None
+    if base is None:
+        return None
+    try:
+        target = base.resolve()
+        for d in writable:
+            d = d.resolve()
+            if target.is_relative_to(d) and not (below and target == d):
+                return None if any(p.startswith(".") for p in target.relative_to(d).parts) else target
+    except (OSError, ValueError, RuntimeError):  # an unresolvable name, a symlink loop
+        pass
+    return None
+
+
+def _one_link(path: Path) -> bool:
+    """``path`` is not an existing file with another hard link: cp opens the file it overwrites, which would write
+    every name of that inode, a name outside the write dirs too (touch would set all their times)."""
+    try:
+        return not path.is_file() or path.stat().st_nlink == 1
+    except OSError:
+        return False
+
+
+def _redirect_allowed(path: str, cwd: Path | None, writable: list[Path]) -> bool:
+    """An output redirection's target: a sink, or a file inside ``writable`` (absolute: ``_under``; relative: a
+    ``_write_target`` against the sure cwd, as a mkdir/touch/cp target) that is not an existing file with another hard
+    link (``_one_link``: the shell opens it and writes through to every name of the inode)."""
+    if path in _LINEAGE_SINKS:
+        return True
+    if path.startswith("/"):
+        if ".." in path.split("/") or not _under(path, writable):  # no `..`: the rule of _write_target
+            return False
+        try:
+            landed: Path | None = Path(path).resolve()
+        except (OSError, ValueError, RuntimeError):  # an unresolvable name, a symlink loop
+            return False
+    else:
+        landed = _write_target(path, cwd, writable, below=True)
+    return landed is not None and _one_link(landed)
+
+
+def _fs_write_allowed(
+    prog: str, args: list[str], *, cwd: Path | None, cwds: list[Path], root: Path, writable: list[Path]
+) -> bool:
+    """``mkdir``, ``touch`` or ``cp`` (``_FS_WRITE_ROLES``) whose every target is a ``_write_target``.
+
+    mkdir: each operand (the write dir itself too: ``mkdir -p`` creates a listed directory that is missing). touch:
+    each operand, below a write dir. cp: two or more operands; the sources are reads (``_readable``, from every
+    directory the shell may be in) and the last operand is the destination. Copied into a directory, the copy is
+    ``<dir>/<source's last component as written>``, which is checked too (a link planted there, or a hidden name). A
+    destination that does not exist yet may be created as a directory earlier in the same command, so it is checked
+    both ways; several sources need a destination that is a directory (one, or written with a trailing ``/``)."""
+    split = _split_read_args(args, _FS_WRITE_ROLES[prog])
+    if split is None:
+        return False
+    operands = split[0]
+    if not operands or any(o.startswith("-") for o in operands):
+        return False  # `-` or a name after `--` that reads as an option
+    if prog == "mkdir":
+        return all(_write_target(o, cwd, writable, below=False) is not None for o in operands)
+    if prog == "touch":  # a hard-linked file's times are every name's, one outside the write dirs too
+        landed = [_write_target(o, cwd, writable, below=True) for o in operands]
+        return all(t is not None and _one_link(t) for t in landed)
+    if len(operands) < 2:
+        return False
+    *sources, dest = operands
+    if not all(_readable(s, cwds, root) is not None for s in sources):
+        return False
+    target = _write_target(dest, cwd, writable, below=False)
+    if target is None:
+        return False
+    try:
+        exists, as_dir = target.exists(), target.is_dir() or dest.endswith("/")
+    except OSError:
+        return False
+    if (dest.endswith("/") and exists and not target.is_dir()) or (len(sources) > 1 and not as_dir):
+        return False
+    written = [] if as_dir else [dest]  # the destination as a file
+    if as_dir or not exists:  # the copies in it as a directory
+        written += [f"{dest.rstrip('/')}/{s.rstrip('/').rsplit('/', 1)[-1]}" for s in sources]
+    for path in written:
+        landed = _write_target(path, cwd, writable, below=True)
+        if landed is None or not _one_link(landed):
+            return False
+    return True
+
+
 def _jq_filter_allowed(text: str) -> bool:
     """A jq filter (jq's own, or gh's ``--jq``, run by gojq) that reads no environment and imports nothing."""
     return _JQ_REFUSED.search(text) is None
@@ -652,6 +902,21 @@ def _runner_allowed(args: list[str], *, workspace: Path, readable: list[Path]) -
     return True
 
 
+def _runner_args(prog: str, args: list[str], *, jobs: Path, cwd: Path | None) -> list[str] | None:
+    """runner.sh's own arguments when the simple command runs it in one of its three accepted spellings, else None:
+    ``<workspace>/claude-jobs/runner.sh ARGS``; ``bash <workspace>/claude-jobs/runner.sh ARGS`` (exactly: no bash
+    option, which could read a script or startup file); ``./runner.sh ARGS`` only when the shell's cwd is surely
+    the jobs directory (``cwd``, resolved, is None when it is not sure)."""
+    runner = str(jobs / "runner.sh")
+    if prog == runner:
+        return args
+    if prog == "bash" and args[:1] == [runner]:
+        return args[1:]
+    if prog == "./runner.sh" and cwd is not None and cwd == jobs.resolve():
+        return args
+    return None
+
+
 def _build_repo(cwd: Path, root: Path, writable: list[Path]) -> bool:
     """``cwd`` (resolved) is a repo's top level a build command may run in: below the workspace, holding ``.git``,
     and neither inside nor around a directory a lineage may write (``lineage_write_dirs``, and ``intentions/`` as a
@@ -673,7 +938,8 @@ def _in_repo(operand: str, repo: Path) -> bool:
 
 
 def _git_allowed(args: list[str], repo: Path) -> bool:
-    """``git status|log|show|diff`` with the options in LINEAGE_GIT_READS, and operands that stay in ``repo``."""
+    """``git status|log|show|diff|merge-base|rev-parse`` with the options in LINEAGE_GIT_READS, and operands that stay
+    in ``repo``."""
     if not args or args[0] not in LINEAGE_GIT_READS:
         return False
     roles = LINEAGE_GIT_READS[args[0]]
@@ -731,39 +997,86 @@ def _build_allowed(prog: str, args: list[str], repo: Path) -> bool:
 
 def lineage_runs_build(command: str) -> bool:
     """Whether a lineage's bash ``command`` runs a build program, so dispatch gives it the build environment (no
-    GitHub token). True when the command cannot be read exactly: the scrub fails closed."""
-    commands = simple_commands(command)
+    GitHub token). True when the command cannot be read exactly: the scrub fails closed. Read with globs, as
+    ``lineage_bash_allowed`` reads it: a glob operand or a ``[`` is a word, not a reason to drop the token from a
+    command the allowlist accepted."""
+    commands = simple_commands(command, globs=True)
     if commands is None:
         return True
     return any(words and Path(words[0]).name in LINEAGE_BUILD_PROGRAMS for words, _, _, _ in commands)
 
 
-def lineage_bash_refusal_hint(*, build_commands: bool) -> str:
-    """What the lineage shell allows, appended to its refusal."""
+def lineage_runs_runner(command: str) -> bool:
+    """Whether a lineage's bash ``command`` runs runner.sh, so dispatch gives it no ``GH_REPO``: the Claude Code job
+    the runner starts inherits the environment, and gh prefers GH_REPO to a clone's own remote. A program named
+    ``runner.sh``, or a shell given a ``runner.sh`` operand: every spelling ``_runner_args`` accepts, and more (the
+    dispatcher has no workspace path to compare with). True when the command cannot be read exactly."""
+    commands = simple_commands(command, globs=True)
+    if commands is None:
+        return True
+    return any(
+        words
+        and (
+            Path(words[0]).name == "runner.sh"
+            or (Path(words[0]).name in _SHELLS and any(Path(w).name == "runner.sh" for w in words[1:]))
+        )
+        for words, _, _, _ in commands
+    )
+
+
+def lineage_bash_refusal_hint(
+    *, build_commands: bool, extra_write_dirs: Sequence[str] = (), workspace_dir: str | None = None
+) -> str:
+    """What the lineage shell allows, appended to its refusal. ``extra_write_dirs`` (NOUS_F099_LINEAGE_WRITE_DIRS)
+    are named only when they resolve under ``workspace_dir`` as ``lineage_write_dirs`` would use them now."""
+    dirs = ", ".join(
+        ["intentions/<root>/", "claude-jobs/prompts/"]
+        + [
+            f"{d.rstrip('/')}/"
+            for d in extra_write_dirs
+            if workspace_dir is not None and lineage_write_dir_resolved(workspace_dir, d)[0] is not None
+        ]
+    )
     text = (
         "The lineage shell allows only: plain reads (cat, ls, head, tail, wc, grep, jq, echo, printf, pwd, cd, "
-        "sleep, true) inside the workspace; read-only gh calls (pr view|checks|list|diff|status, issue view|list, "
-        "run view|list, repo view, gh api GET); claude-jobs/runner.sh launch|status|list|result"
+        "sleep, true, test, [ ... ], basename, dirname, date, diff of two files) inside the workspace; mkdir -p, "
+        f"touch and cp only into the workspace's {dirs}; read-only gh calls (pr view|checks|list|diff|status, "
+        "issue view|list, run view|list, repo view, gh api GET); claude-jobs/runner.sh launch|status|list|result, "
+        "run as <workspace>/claude-jobs/runner.sh, bash <workspace>/claude-jobs/runner.sh, or ./runner.sh right "
+        "after cd <workspace>/claude-jobs && (cancel a job with propose_action)"
     )
     if build_commands:
         text += (
-            "; and, in a git repo's top level reached by `cd <repo> &&`: git status|log|diff|show, pytest, "
+            "; and, in a git repo's top level reached by `cd <repo> &&`: "
+            "git status|log|diff|show|merge-base|rev-parse, pytest, "
             "ruff check --no-fix --no-fix-only, ruff format --check|--diff, "
             f"make {'|'.join(sorted(LINEAGE_MAKE_TARGETS))}, "
             "each with a fixed set of options and paths inside the repo, in a bash call without gh or runner.sh"
         )
-    return text + ". Join commands with ; && || | only. Propose anything else to the owner with propose_action."
+    return text + (
+        ". Write each command out in full: no $(...), no globs (except as a file operand of a read). "
+        "Join commands with ; && || | only. Propose anything else to the owner with propose_action."
+    )
 
 
 def lineage_bash_allowed(
-    ctx: ExecutionContext, command: str, *, workspace_dir: str, build_commands: bool = False
+    ctx: ExecutionContext,
+    command: str,
+    *,
+    workspace_dir: str,
+    build_commands: bool = False,
+    extra_write_dirs: Sequence[str] = (),
 ) -> bool:
     """Whether an internal_only turn may run this bash ``command`` (F099 lineage shell).
 
     An allowlist, failing closed: every simple command must be a LINEAGE_READ_COMMANDS command, a read-only
-    ``gh`` call, or ``<workspace_dir>/claude-jobs/runner.sh`` (the owner's Claude Code delegation path), joined
-    by ``; && || |`` or newlines only. An output redirection may target ``/dev/null`` or a file under the
-    root's own ``<workspace_dir>/intentions/<root_id>/`` or ``<workspace_dir>/claude-jobs/prompts/``.
+    ``gh`` call, or ``<workspace_dir>/claude-jobs/runner.sh`` (the owner's Claude Code delegation path, also as
+    ``bash <that path>`` or, from that directory, ``./runner.sh``: ``_runner_args``), a ``test``/``[`` or
+    ``_READ_ONLY_ROLES`` read (``_read_only_files``), or ``mkdir``/``touch``/``cp`` into ``lineage_write_dirs``
+    (``_fs_write_allowed``), joined by ``; && || |`` or newlines only. An output redirection may target
+    ``/dev/null`` or a file under ``lineage_write_dirs``: the root's own ``<workspace_dir>/intentions/<root_id>/``,
+    ``<workspace_dir>/claude-jobs/prompts/`` and the owner's ``extra_write_dirs`` (NOUS_F099_LINEAGE_WRITE_DIRS);
+    a relative one resolves against the cwd the shell is surely in (``_write_target``).
     Anything the reader cannot see exactly (``$``, a backtick, a brace, ``~``, an unquoted heredoc that expands,
     an unbalanced quote) is refused, so a chain or substitution that reaches a refused command is refused. A glob
     (``*``, ``?``, ``[abc]``) is refused too, except unquoted as a whole word that is a file operand of a read
@@ -781,7 +1094,8 @@ def lineage_bash_allowed(
     skipped by an ``||`` or run in a pipeline (a subshell), and a relative one needs the cwd known; it stays known
     only while every later join is ``&&`` or ``|``, so the command runs only if the ``cd`` succeeded. A build
     command runs the whole command without the GitHub token (``lineage_runs_build``), so it may not be joined with
-    ``gh`` or ``runner.sh``, which need the token.
+    ``gh`` or ``runner.sh``, which need the token. The same sure cwd is where a relative mkdir/touch/cp target
+    lands, and the only place ``./runner.sh`` runs from.
     """
     commands = simple_commands(command, globs=True)
     if commands is None or not any(words for words, _, _, _ in commands):
@@ -789,10 +1103,11 @@ def lineage_bash_allowed(
     builds = needs_token = False
     workspace = Path(workspace_dir)
     jobs = workspace / "claude-jobs"
-    writable = lineage_write_dirs(ctx, workspace_dir, lineage_shell=True)  # bash is offered only with the shell
+    # bash is offered only with the shell
+    writable = lineage_write_dirs(ctx, workspace_dir, lineage_shell=True, extra_dirs=extra_write_dirs)
     root = workspace.resolve()
     cwds = [root]
-    cwd: Path | None = root  # where the shell surely is, for a build command
+    cwd: Path | None = root  # where the shell surely is: a build command, a relative write target, ./runner.sh
     moved = False  # cwd is where a cd went: sure only while that cd's success gates what runs
     prev: str | None = None
     for words, targets, sources, op in commands:
@@ -805,12 +1120,14 @@ def lineage_bash_allowed(
             if targets or sources:
                 return False
             continue
-        if not all(t in _LINEAGE_SINKS or _under(t, writable) for t in targets):
+        if not all(_redirect_allowed(t, cwd, writable) for t in targets):
             return False
         if not all(s in _LINEAGE_SINKS or _readable(s, cwds, root) is not None for s in sources):
             return False
         prog, args = words[0], words[1:]
-        globbed = [w for w in words if isinstance(w, GlobWord)]
+        # `[` as the command word lexes as a glob (an unmatched bracket, which the shell keeps as it is); it is the
+        # one glob word a command that is not in _READ_ARG_ROLES may hold.
+        globbed = [w for w in (args if prog == "[" else words) if isinstance(w, GlobWord)]
         if globbed and prog not in _READ_ARG_ROLES:
             return False
         if prog in _READ_ARG_ROLES or prog == "cd":
@@ -831,8 +1148,9 @@ def lineage_bash_allowed(
                 runs = after in (None, "&&", ";", "\n") and op != "|"  # not skipped, not in a subshell
                 target = _readable(args[0], base, root) if runs and base is not None else None
                 cwd, moved = (target[0] if target else None), True
-        if prog == str(jobs / "runner.sh"):
-            if not _runner_allowed(args, workspace=workspace, readable=writable):
+        runner_args = _runner_args(prog, args, jobs=jobs, cwd=cwd)
+        if runner_args is not None:
+            if not _runner_allowed(runner_args, workspace=workspace, readable=writable):
                 return False
             needs_token = True
         elif prog == "gh":
@@ -841,6 +1159,18 @@ def lineage_bash_allowed(
             needs_token = True
         elif prog == "printf":
             if not _printf_allowed(args):
+                return False
+        elif prog in _TEST_PROGRAMS or prog in _READ_ONLY_ROLES:
+            checked = _read_only_files(prog, args)
+            if checked is None:
+                return False
+            files, regular = checked
+            for path in files:
+                reached = _readable(path, cwds, root)
+                if reached is None or (regular and not _regular_files(reached)):
+                    return False
+        elif prog in _FS_WRITE_ROLES:
+            if not _fs_write_allowed(prog, args, cwd=cwd, cwds=cwds, root=root, writable=writable):
                 return False
         elif build_commands and prog in LINEAGE_BUILD_PROGRAMS:
             if cwd is None or not _build_repo(cwd, root, writable):
@@ -861,6 +1191,7 @@ def internal_only_call_violation(
     workspace_dir: str,
     lineage_shell: bool = False,
     build_commands: bool = False,
+    extra_write_dirs: Sequence[str] = (),
 ) -> str | None:
     """The per-call rules of an internal_only turn, for a tool that WAS offered.
 
@@ -869,20 +1200,26 @@ def internal_only_call_violation(
     the lineage allowlist (``lineage_bash_allowed``, with the build commands when ``build_commands``, i.e.
     ``NOUS_F099_LINEAGE_BUILD_COMMANDS``). ``"write_path"``: write_file outside
     ``lineage_write_dirs`` (``claude-jobs/prompts/`` only with ``lineage_shell``, i.e.
-    ``NOUS_F099_LINEAGE_SHELL``). ``"foreign_cancel"``: cancel_task with an id that is not a
-    UUID. The cancel_task lineage check needs the target's row, so it lives in the
-    handler (``tools.py``); this sync function only rejects what needs no read.
+    ``NOUS_F099_LINEAGE_SHELL``; ``extra_write_dirs`` is ``NOUS_F099_LINEAGE_WRITE_DIRS``). ``"foreign_cancel"``:
+    cancel_task with an id that is not a UUID. The cancel_task lineage check needs the target's row, so it lives in
+    the handler (``tools.py``); this sync function only rejects what needs no read.
     """
     if name == "bash":
         command = tool_input.get("command")
         if not isinstance(command, str) or not lineage_bash_allowed(
-            ctx, command, workspace_dir=workspace_dir, build_commands=build_commands
+            ctx,
+            command,
+            workspace_dir=workspace_dir,
+            build_commands=build_commands,
+            extra_write_dirs=extra_write_dirs,
         ):
             return "external"
         return None
     if classify_side_effect(name, dict(tool_input)) in ("external", "irreversible"):
         return "external"
-    if name == "write_file" and not _write_path_allowed(ctx, tool_input, workspace_dir, lineage_shell=lineage_shell):
+    if name == "write_file" and not _write_path_allowed(
+        ctx, tool_input, workspace_dir, lineage_shell=lineage_shell, extra_write_dirs=extra_write_dirs
+    ):
         return "write_path"
     if name == "cancel_task":
         try:
@@ -1162,13 +1499,19 @@ def undoable_violation(ctx: ExecutionContext, tool_name: str, tool_input: Mappin
 
 
 def evaluate(
-    ctx: ExecutionContext, tool_name: str, tool_input: Mapping[str, Any], *, workspace_dir: str | None = None
+    ctx: ExecutionContext,
+    tool_name: str,
+    tool_input: Mapping[str, Any],
+    *,
+    workspace_dir: str | None = None,
+    extra_write_dirs: Sequence[str] = (),
 ) -> str | None:
     """None if ``ctx`` may make this call; otherwise the violation code:
     ``unclassified``, ``undeclared``, ``level:<level>``, ``spawn``, ``reenable``.
 
-    With ``workspace_dir``, an internal_only bash call on the lineage allowlist is judged at ``write``: the
-    read-only gh calls it permits are ``external`` only to the classifier, and a continuation's row is local."""
+    With ``workspace_dir``, an internal_only bash call on the lineage allowlist (with ``extra_write_dirs``,
+    ``NOUS_F099_LINEAGE_WRITE_DIRS``) is judged at ``write``: the read-only gh calls it permits are ``external``
+    only to the classifier, and a continuation's row is local."""
     if ctx.kind in FOREGROUND_KINDS:
         return None
     policy = CONTEXT_POLICY[ctx.kind]
@@ -1184,7 +1527,9 @@ def evaluate(
         and tool_name == "bash"
         and ctx.authority == AUTHORITY_INTERNAL
         and workspace_dir is not None
-        and lineage_bash_allowed(ctx, str(tool_input.get("command", "")), workspace_dir=workspace_dir)
+        and lineage_bash_allowed(
+            ctx, str(tool_input.get("command", "")), workspace_dir=workspace_dir, extra_write_dirs=extra_write_dirs
+        )
     ):
         level = "write"
     if level not in policy.levels:

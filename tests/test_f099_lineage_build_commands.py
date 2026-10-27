@@ -71,6 +71,22 @@ ALLOWED = [
     "cd nous && git show",
     "cd nous && git show --stat HEAD",
     "cd nous && git show HEAD:tests/test_a.py",
+    "cd nous && git merge-base HEAD main",
+    "cd nous && git merge-base --is-ancestor HEAD main",
+    "cd nous && git merge-base origin/main HEAD",
+    "cd nous && git merge-base --all --octopus a b c",
+    "cd nous && git merge-base --fork-point origin/main",
+    "cd nous && git rev-parse HEAD",
+    "cd nous && git rev-parse --short HEAD",
+    "cd nous && git rev-parse --short=8 HEAD",
+    "cd nous && git rev-parse --abbrev-ref HEAD",
+    "cd nous && git rev-parse --abbrev-ref=strict '@{{u}}'",  # str.format: {{u}} is @{u}
+    "cd nous && git rev-parse --verify -q main",
+    "cd nous && git rev-parse --symbolic-full-name HEAD",
+    "cd nous && git rev-parse --show-toplevel",
+    "cd nous && git rev-parse --is-inside-work-tree",
+    "cd nous && git rev-parse --show-prefix --show-cdup --git-dir",
+    "cd nous && git rev-parse 'HEAD~1'",
     # pytest
     "cd nous && pytest",
     "cd nous && pytest tests/test_a.py",
@@ -167,6 +183,37 @@ REFUSED = [
     "cd nous && git log --show-signature",
     "cd nous && git show ~/x",
     "cd nous && git status --no-such-option",
+    # git merge-base and rev-parse: options that read or name other files, other repos, or parse anything
+    "cd nous && git rev-parse --git-path hooks",
+    "cd nous && git rev-parse --git-path=hooks",
+    "cd nous && git rev-parse --resolve-git-dir /etc",
+    "cd nous && git rev-parse --parseopt",
+    "cd nous && git rev-parse --sq-quote x",
+    "cd nous && git rev-parse --local-env-vars",
+    "cd nous && git rev-parse --git-common-dir",
+    "cd nous && git rev-parse --absolute-git-dir",
+    "cd nous && git rev-parse --shared-index-path",
+    "cd nous && git rev-parse --path-format=absolute --git-dir",
+    "cd nous && git rev-parse --default HEAD",
+    "cd nous && git rev-parse --prefix x HEAD",
+    "cd nous && git rev-parse --since=1.day",
+    "cd nous && git rev-parse -C . HEAD",
+    "cd nous && git rev-parse -qv HEAD",
+    "cd nous && git rev-parse /etc/passwd",
+    "cd nous && git rev-parse ../x",
+    "cd nous && git rev-parse -- /etc/passwd",
+    "cd nous && git rev-parse .git/config",
+    "cd nous && git rev-par HEAD",
+    "cd nous && git merge-base -a HEAD main",
+    "cd nous && git merge-base --octopus-x a b",
+    "cd nous && git merge-base --al HEAD main",
+    "cd nous && git merge-base /etc/passwd HEAD",
+    "cd nous && git -C . rev-parse HEAD",
+    "cd nous && git rev-parse HEAD && gh pr view 1",
+    "cd nous && git merge-base HEAD main; {W}/claude-jobs/runner.sh status",
+    "git rev-parse HEAD",
+    "git merge-base HEAD main",
+    "cd nous/tests && git rev-parse HEAD",
     # pytest: plugins, config, rootdir, writes, code outside the repo
     "cd nous && pytest -p evil",
     "cd nous && pytest -pevil",
@@ -389,10 +436,23 @@ async def test_a_build_command_is_not_a_proposal_and_a_refused_one_still_is(ws):
         ("/usr/bin/git log", True),
         ("echo $(id)", True),  # unreadable: the scrub fails closed
         ("echo 'x", True),
+        # a glob or a `[` is read, not taken as unreadable: the token stays for gh and runner.sh
+        ("ls *.md && gh pr view 1", False),
+        ("[ -f a ] && gh pr view 1", False),
+        ("test -f a && gh pr view 1", False),
+        ("cd nous && [ -f a ] && pytest", True),
+        ("cd nous && pytest tests/*.py", True),
     ],
 )
 def test_dispatch_marks_a_command_that_runs_a_build_program(command, build):
     assert lineage_runs_build(command) is build
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX shell")
+@pytest.mark.parametrize("command", ["[ -d nous ] && printenv GITHUB_TOKEN", "ls nous/* && printenv GITHUB_TOKEN"])
+async def test_a_bracket_or_a_glob_does_not_cost_a_lineage_command_its_token(command, ws, secrets):
+    text, _ = await _bash_dispatcher(ws).dispatch("bash", {"command": command}, context=_internal())
+    assert "planted-gh-token" in text
 
 
 # -- the environment of a build command ---------------------------------------------------------------------

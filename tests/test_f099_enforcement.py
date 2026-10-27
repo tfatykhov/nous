@@ -422,9 +422,46 @@ def test_the_lineage_shell_refuses_and_logs_an_outward_command_in_every_mode(
                 "context_kind": "continuation",
                 "violation": "internal_only:external",
                 "mode": "enforce",
+                "command_head": command,  # nothing to redact in these, and all under 300 characters
             },
         )
     ]
+
+
+def _refused_bash_event(tmp_path, tool_input) -> dict:
+    r, _, events = _shell_runner(tmp_path)
+    assert _auth(r, _internal("continuation"), "bash", OFFERED, tool_input) is not None
+    [(event_type, data)] = events
+    assert event_type == "harness_context_policy_violation" and data["violation"] == "internal_only:external"
+    return data
+
+
+def test_a_refused_lineage_bash_call_logs_a_redacted_command_head(tmp_path):
+    data = _refused_bash_event(tmp_path, {"command": "rm -rf x # token=abc123secretvalue"})
+    assert data["command_head"].startswith("rm -rf x # token=")
+    assert "abc123secretvalue" not in data["command_head"]
+
+
+def test_the_command_head_is_redacted_before_it_is_clipped_to_300(tmp_path):
+    data = _refused_bash_event(tmp_path, {"command": "rm " + "x" * 1000})
+    assert len(data["command_head"]) == 300
+    # A provider key straddling character 300: clipped first, its 13 characters left would not match the key
+    # pattern (20 or more) and would be logged as they are.
+    data = _refused_bash_event(tmp_path, {"command": "x" * 283 + " sk-" + "A" * 40})
+    assert "[REDACTED_KEY]" in data["command_head"] and "AAAAA" not in data["command_head"]
+
+
+def test_only_a_refused_lineage_bash_call_logs_a_command_head(tmp_path):
+    r, _, events = _shell_runner(tmp_path)
+    assert _auth(r, _internal(), "write_file", OFFERED, {"path": "/etc/x", "content": "x"}) is not None
+    assert _auth(r, _internal(), "bash", ["recall_deep"], {"command": "rm -rf x"}) is not None  # not offered
+    assert [data["violation"] for _, data in events] == ["internal_only:write_path", "internal_only:not_offered"]
+    assert all("command_head" not in data for _, data in events)
+
+
+def test_a_command_that_is_not_a_string_logs_an_empty_head(tmp_path):
+    assert _refused_bash_event(tmp_path, {"command": 5})["command_head"] == ""
+    assert _refused_bash_event(tmp_path, {})["command_head"] == ""
 
 
 async def test_an_allowed_lineage_shell_command_is_dispatched_and_a_refused_one_is_not(tmp_path):
