@@ -214,7 +214,8 @@ class SubtaskWorkerPool:
         the run's own metadata or task text (the run only names its schedule), and its
         command only from the owner's allowlist in Settings. A
         check-and-fix run, or any run whose text is not the schedule's task, is never
-        guarded. A failed read means no guard.
+        guarded. A failed read means no guard. A guard that names no allowlisted command
+        means no guard too, and is recorded in a persisted ``subtask_guard_unresolved`` event.
         """
         if not self._settings.schedule_guards_enabled:
             return None
@@ -285,8 +286,9 @@ class SubtaskWorkerPool:
                 would_skip = schedule_guard.should_skip(spec, result)
                 logger.info("Guard of subtask %s ran in shadow mode (would_skip=%s); running the turn", sid, would_skip)
                 subtask.task += schedule_guard.receipt(spec, result)
-                self._shadow[subtask.id] = (spec, would_skip)
                 await self._record_guard_run(subtask, spec, result)
+                # Set last: from here _process_subtask's finally is what clears it (_record_shadow).
+                self._shadow[subtask.id] = (spec, would_skip)
                 return False
             if spec.mode != schedule_guard.MODE_SKIP or not schedule_guard.should_skip(spec, result):
                 # A script that could not run (126/127), was killed by a signal, or wrote to stderr

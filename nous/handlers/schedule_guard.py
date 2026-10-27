@@ -7,10 +7,10 @@ its own ``metadata``, which names an entry of the owner's allowlist ``NOUS_SCHED
 
 The command itself comes only from the allowlist (env), never from the row: the agent can write
 schedule rows through its shell and database access, so the row may only choose among commands
-the owner approved. A name that is not in the allowlist means no guard. The subtask worker runs
-the command before the run's model turn. When the command certifies there is nothing to do
-(``exit0_quiet``: exit 0 and whitespace-only stdout and stderr) the run completes with no model
-call. Any other result (non-zero exit, output on either stream, timeout, an unknown ``skip_when``,
+the owner approved. A name that is not in the allowlist means no guard (the worker records it as
+``subtask_guard_unresolved``). The subtask worker runs the command before the run's model turn. In
+``mode: skip``, when the command certifies there is nothing to do (``exit0_quiet``: exit 0 and
+whitespace-only stdout and stderr) the run completes with no model call. Any other result (non-zero exit, output on either stream, timeout, an unknown ``skip_when``,
 an error starting the command) fails open: the model turn runs as before, with ``receipt()``
 appended to its task text so the model does not need to run the command again.
 ``NOUS_SCHEDULE_GUARDS_ENABLED=false`` ignores guards.
