@@ -60,6 +60,25 @@ def test_the_roles_step_runs_the_runbook_form_through_the_database_containers_so
     assert "ON_ERROR_STOP=1" in roles.group(0) and "ON_ERROR_STOP=1" in check.group(0), step
 
 
+def test_the_roles_step_passes_the_reader_password() -> None:
+    # db_roles.sql refuses a first run without NOUS_READER_DB_PASSWORD (the db_query login)
+    step = _step("Create the database roles and check them")
+    assert re.search(r"^\s+NOUS_READER_DB_PASSWORD: \w+$", step, re.M), step
+    assert "-e NOUS_APP_DB_PASSWORD -e NOUS_SCORER_DB_PASSWORD -e NOUS_READER_DB_PASSWORD " in step, step
+
+
+def test_the_application_role_test_step_requires_the_reader_role() -> None:
+    # tests/test_db_query_live.py logs in as nous_reader and proves its limits there; NOUS_REQUIRE_READER_ROLE turns
+    # a missing role into a failure instead of a skip. The main job has no reader role and must not require one.
+    step = _step("Run the tests as the application role")
+    assert re.search(r"^\s+NOUS_READER_DB_PASSWORD: \w+$", step, re.M), step
+    assert re.search(r'^\s+NOUS_REQUIRE_READER_ROLE: "1"$', step, re.M), step
+    roles = _step("Create the database roles and check them")
+    password = re.search(r"NOUS_READER_DB_PASSWORD: (\w+)", roles).group(1)
+    assert f"NOUS_READER_DB_PASSWORD: {password}" in step, "the tests must log in with the password the roles step set"
+    assert "NOUS_REQUIRE_READER_ROLE" not in _step("Run tests"), _step("Run tests")
+
+
 def test_the_roles_are_checked_again_after_the_later_migrations() -> None:
     # A migration applied as nous_app can undo what the checks rely on (row security on a scorer input, say).
     text = (WORKFLOWS / "ci.yml").read_text()

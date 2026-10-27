@@ -156,8 +156,8 @@ def test_column_privileges_are_revoked_before_the_grants_and_verified():
     # where the table-level revokes name only the scorer, would survive them
     first_grant = ROLES.index("GRANT USAGE ON SCHEMA scoring")
     for revoke in (
-        "REVOKE ALL (%I) ON %s FROM PUBLIC, nous_app, nous_scorer CASCADE",
-        "REVOKE ALL (%I) ON %s FROM PUBLIC, nous_scorer CASCADE",
+        "REVOKE ALL (%I) ON %s FROM PUBLIC, nous_app, nous_scorer, nous_reader CASCADE",
+        "REVOKE ALL (%I) ON %s FROM PUBLIC, nous_scorer, nous_reader CASCADE",
     ):
         assert -1 < ROLES.find(revoke) < first_grant, revoke
     assert "('no column-level privilege reaches past the table-level grants', 'nous_admin'," in VERIFY
@@ -268,3 +268,171 @@ def test_verify_checks_that_the_outcome_constraint_admits_every_outcome_the_scor
     assert "pg_get_constraintdef" in check and "done_checked" in check
     # the script that repairs it checks the same constraint by the same name
     assert "ck_task_scores_outcome" in ROLES and "'done_checked'" in ROLES
+
+
+# -- nous_reader: the read-only login of the db_query tool ---------------------------------------------------------
+
+# The tables the reader may read (the db_query spec's list). A drift guard on the script's block only: what the
+# role can actually read is proven by tests/test_db_query_live.py against the live role.
+READER_TABLES = {
+    "brain.intentions",
+    "brain.intention_arrivals",
+    "brain.intention_proposals",
+    "brain.decisions",
+    "heart.subtasks",
+    "heart.schedules",
+    "heart.facts",
+    "heart.episodes",
+    "nous_system.execution_dags",
+    "nous_system.dag_nodes",
+    "nous_system.dag_edges",
+    "nous_system.dynamic_checks",
+    "nous_system.execution_ledger",
+    "nous_system.events",
+}
+# The column names db_roles.sql refuses to grant unless excluded; tests/test_db_query_live.py uses the same rule.
+CREDENTIAL_NAME = (
+    r"(^|_)(token|secret|password|passwd|credential|credentials)(_|$)|(api|private|secret|access|auth)_?key|fcm"
+)
+
+
+def _reader_rows() -> dict[str, set[str]]:
+    block = ROLES.split("-- reader tables begin", 1)[1].split("-- reader tables end", 1)[0]
+    rows = re.findall(r"^\s*\('([a-z_]+\.[a-z_]+)', ARRAY\[([^\]]*)\](?:::text\[\])?\),?$", block, re.M)
+    assert len(rows) == len([line for line in block.splitlines() if line.strip()]), block  # one row per line
+    names = [name for name, _ in rows]
+    assert len(names) == len(set(names)), names
+    return {name: set(re.findall(r"'([a-z_]+)'", excluded)) for name, excluded in rows}
+
+
+def test_the_reader_block_names_the_specs_tables():
+    rows = _reader_rows()
+    assert set(rows) == READER_TABLES
+    assert not any(name.startswith("scoring.") or "a2ui" in name for name in rows)
+
+
+def test_the_reader_does_not_get_episode_transcripts_or_lease_tokens():
+    rows = _reader_rows()
+    assert {
+        "detail",
+        "transcript",
+        "structured_summary",
+        "encoded_censors",
+        "participants",
+        "user_display_name",
+        "user_id",
+    } <= rows["heart.episodes"]
+    for table in ("brain.intentions", "brain.intention_arrivals", "brain.intention_proposals"):
+        assert "claim_token" in rows[table], table
+
+
+def test_the_reader_grant_generator_excludes_vectors_and_refuses_credential_names_and_non_tables():
+    block = ROLES.split("DO $reader$", 1)[1].split("$reader$;", 1)[0]
+    # by the type's name, not regtype text, which depends on the session's search_path
+    assert "typname NOT IN ('vector', 'halfvec', 'sparsevec', 'tsvector')" in block
+    assert "::regtype" not in block
+    # a view runs with its owner's privileges, so only plain tables are granted
+    assert "kind NOT IN ('r', 'p')" in block and "is not a plain table" in block
+    # the same credential-name rule the live test checks: the script fails closed on a new such column
+    assert CREDENTIAL_NAME in block
+    assert "looks like a credential; add it to the exclusion list or rename it" in block
+    assert "does not exist" in block and "GRANT SELECT (%s) ON %I.%I TO nous_reader" in block
+
+
+def test_nothing_but_select_is_granted_to_the_reader():
+    grants = {g.strip() for g in re.findall(r"GRANT\b[^;']*", _statements(ROLES)) if "nous_reader" in g}
+    assert grants == {
+        "GRANT SELECT (%s) ON %I.%I TO nous_reader",
+        "GRANT USAGE ON SCHEMA brain, heart, nous_system TO nous_reader",
+        'GRANT CONNECT ON DATABASE :"dbname" TO nous_reader',
+    }, grants
+    # every privilege the reader may hold from an earlier run is taken back before the grants
+    first = ROLES.index("GRANT USAGE ON SCHEMA brain, heart, nous_system TO nous_reader;")
+    for revoke in (
+        "REVOKE ALL ON ALL TABLES IN SCHEMA brain, heart, nous_system, public FROM nous_reader CASCADE;",
+        "REVOKE ALL ON ALL SEQUENCES IN SCHEMA brain, heart, nous_system, public FROM nous_reader CASCADE;",
+        "REVOKE ALL ON ALL ROUTINES IN SCHEMA brain, heart, nous_system FROM nous_reader CASCADE;",
+        "REVOKE ALL ON SCHEMA brain, heart, nous_system, public FROM nous_reader CASCADE;",
+        "REVOKE ALL ON SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer, nous_reader CASCADE;",
+        "REVOKE ALL ON ALL TABLES IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer, nous_reader CASCADE;",
+    ):
+        assert -1 < ROLES.find(revoke) < first, revoke
+    assert ROLES.index("DO $reader$") > first
+
+
+def test_the_reader_password_is_read_like_the_others():
+    assert "\\set reader_password `printenv NOUS_READER_DB_PASSWORD`" in ROLES
+    assert "PASSWORD :'reader_password'" in ROLES
+    assert not re.search(r"PASSWORD\s+'", _statements(ROLES), re.I)
+    begin = ROLES.index("\nBEGIN;\n")
+    for refusal in (
+        "RAISE EXCEPTION 'db_roles.sql: NOUS_READER_DB_PASSWORD must be letters and digits only",
+        "RAISE EXCEPTION 'db_roles.sql: set NOUS_READER_DB_PASSWORD for the first run'",
+        "RAISE EXCEPTION 'db_roles.sql: nous_reader''s stored password is not a SCRAM verifier",
+    ):
+        assert -1 < ROLES.find(refusal) < begin, refusal
+    assert ROLES.index("SET LOCAL password_encryption = 'scram-sha-256';") < ROLES.index("PASSWORD :'reader_password'")
+
+
+def test_the_reader_is_pinned_read_only_and_bounded():
+    for line in (
+        "ALTER ROLE nous_reader WITH NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS LOGIN;",
+        "ALTER ROLE nous_reader CONNECTION LIMIT 6 VALID UNTIL 'infinity';",
+        "ALTER ROLE nous_reader RESET ALL;",
+        "ALTER ROLE nous_reader SET search_path = pg_catalog, brain, heart, nous_system;",
+        "ALTER ROLE nous_reader SET row_security = off;",
+        "ALTER ROLE nous_reader SET default_transaction_read_only = on;",
+        "ALTER ROLE nous_reader SET statement_timeout = '5s';",
+        "ALTER ROLE nous_reader SET lock_timeout = '2s';",
+        "ALTER ROLE nous_reader SET idle_in_transaction_session_timeout = '15s';",
+        "ALTER ROLE nous_reader SET temp_file_limit = '256MB';",
+    ):
+        assert line in ROLES, line
+    assert ROLES.index("ALTER ROLE nous_reader RESET ALL;") < ROLES.index("ALTER ROLE nous_reader SET search_path")
+    # the database: connect only, no TEMP or CREATE
+    assert 'REVOKE ALL ON DATABASE :"dbname" FROM PUBLIC, nous_app, nous_scorer, nous_reader CASCADE;' in ROLES
+    # the postconditions name the reader
+    post = ROLES[ROLES.index("DO $post$") :]
+    assert "'nous_reader'" in post and "reader holds a privilege on scoring" in post
+
+
+READER_VERIFY_LABELS = (
+    "reader cannot read scoring.task_scores",
+    "reader reads an allowed table",
+    "reader cannot read an embedding",
+    "reader cannot read a push token",
+    "reader cannot INSERT",
+    "reader cannot read a server file",
+    "reader cannot run a program",
+    "reader holds SELECT on columns of exactly 14 tables and nothing else",
+    "reader reads no vector, tsvector or credential-named column",
+    "reader reads nothing in public",
+    "the reader's relations are plain tables without row policies",
+    "reader is not a member of any role and no role is a member of it",
+    "reader has no elevated attribute, a SCRAM verifier and a connection limit of 6",
+    "reader settings are pinned",
+    "reader has no CREATE or TEMP on the database or any schema",
+    "reader has nothing on scoring",
+    "no extension or foreign server can open a connection",
+)
+
+
+def test_verify_has_reader_checks():
+    for label in READER_VERIFY_LABELS:
+        assert "('" + label.replace("'", "''") + "', " in VERIFY, label
+    # verify runs as a superuser with SET LOCAL ROLE: SET ROLE back, the login pins and READ ONLY cannot be
+    # observed there, so those proofs belong to the login tests and verify must not claim them
+    reader_rows = _statements(VERIFY.split("-- nous_reader", 1)[1].split("-- catalog state", 1)[0])
+    assert reader_rows.count("'nous_reader', ") >= 7, reader_rows
+    assert "SET ROLE" not in reader_rows and "SESSION AUTHORIZATION" not in reader_rows
+    assert "tests/test_db_query_live.py" in VERIFY
+    # the reader's 14 tables are counted with column privileges (a column grant gives no table-level SELECT)
+    assert "has_any_column_privilege(''nous_reader'', c.oid, ''SELECT'')) = 14" in VERIFY
+
+
+def test_the_reader_credential_rule_is_the_same_in_the_script_and_the_live_test():
+    live = (Path(__file__).parent / "test_db_query_live.py").read_text(encoding="utf-8")
+    found = re.search(r'^CREDENTIAL_NAME = \(?\s*r"([^"]+)"', live, re.M)
+    assert found and found.group(1) == CREDENTIAL_NAME
+    # and verify's catalog check uses it too
+    assert CREDENTIAL_NAME in VERIFY

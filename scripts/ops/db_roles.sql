@@ -2,11 +2,11 @@
 --
 -- Database roles for the Nous deployment. Idempotent: safe to run again at any time.
 --
--- Run it on the database host, as a superuser, with the two passwords in the environment
+-- Run it on the database host, as a superuser, with the three passwords in the environment
 -- (they are read inside the container, so they never appear on a command line). A password is letters and
 -- digits only (openssl rand -hex 24), because the application puts it in its connection URL without escaping:
 --
---   docker exec -i -e NOUS_APP_DB_PASSWORD -e NOUS_SCORER_DB_PASSWORD nous-postgres \
+--   docker exec -i -e NOUS_APP_DB_PASSWORD -e NOUS_SCORER_DB_PASSWORD -e NOUS_READER_DB_PASSWORD nous-postgres \
 --       psql -U nous_admin -d nous -X -v ON_ERROR_STOP=1 -f - < scripts/ops/db_roles.sql
 --
 -- The first run happens while the bootstrap superuser can still log in, so it uses -U nous
@@ -26,6 +26,9 @@
 --                tables, may create objects in the database, may read the two scoring tables.
 --   nous_scorer  the scoring job: reads the tables named in task_score_job.SOURCE_TABLES, and
 --                reads, inserts and updates scoring.task_scores and scoring.scorer_heartbeat. Nothing else.
+--   nous_reader  the agent's db_query tool: reads the columns of the tables listed in section 5d, read-only and
+--                time-limited by its own settings. Nothing else. Run this script again after a migration adds a
+--                column or a table to that list, or the reader cannot see it.
 --   <bootstrap>  the superuser the database image created (role oid 10). PostgreSQL does not allow
 --                it to lose SUPERUSER, so its login is disabled and its password removed.
 --
@@ -51,6 +54,7 @@ SELECT current_database() AS dbname \gset
 
 SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nous_app') AS app_exists,
        EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nous_scorer') AS scorer_exists,
+       EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nous_reader') AS reader_exists,
        (to_regclass('scoring.task_scores') IS NOT NULL
         AND to_regclass('scoring.scorer_heartbeat') IS NOT NULL) AS scoring_exists,
        to_regclass('nous_system.check_audits') IS NOT NULL AS sources_exist \gset
@@ -58,10 +62,13 @@ SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nous_app') AS app_exists,
 -- The passwords are tested in psql's own shell, so that no query but ALTER ROLE carries them.
 \set app_password `printenv NOUS_APP_DB_PASSWORD`
 \set scorer_password `printenv NOUS_SCORER_DB_PASSWORD`
+\set reader_password `printenv NOUS_READER_DB_PASSWORD`
 \set has_app_pw `test -n "$NOUS_APP_DB_PASSWORD" && echo true || echo false`
 \set has_scorer_pw `test -n "$NOUS_SCORER_DB_PASSWORD" && echo true || echo false`
+\set has_reader_pw `test -n "$NOUS_READER_DB_PASSWORD" && echo true || echo false`
 \set app_pw_ok `case "$NOUS_APP_DB_PASSWORD" in *[!A-Za-z0-9]*) echo false;; *) echo true;; esac`
 \set scorer_pw_ok `case "$NOUS_SCORER_DB_PASSWORD" in *[!A-Za-z0-9]*) echo false;; *) echo true;; esac`
+\set reader_pw_ok `case "$NOUS_READER_DB_PASSWORD" in *[!A-Za-z0-9]*) echo false;; *) echo true;; esac`
 
 \if :scoring_exists
 \else
@@ -79,6 +86,10 @@ SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nous_app') AS app_exists,
 \else
     DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: NOUS_SCORER_DB_PASSWORD must be letters and digits only (openssl rand -hex 24)'; END $$;
 \endif
+\if :reader_pw_ok
+\else
+    DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: NOUS_READER_DB_PASSWORD must be letters and digits only (openssl rand -hex 24)'; END $$;
+\endif
 \if :has_app_pw
 \else
     \if :app_exists
@@ -93,12 +104,20 @@ SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nous_app') AS app_exists,
         DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: set NOUS_SCORER_DB_PASSWORD for the first run'; END $$;
     \endif
 \endif
+\if :has_reader_pw
+\else
+    \if :reader_exists
+    \else
+        DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: set NOUS_READER_DB_PASSWORD for the first run'; END $$;
+    \endif
+\endif
 
--- pg_hba lets the two service roles in with scram-sha-256 only, which an MD5 verifier (password_encryption = md5)
+-- pg_hba lets the three service roles in with scram-sha-256 only, which an MD5 verifier (password_encryption = md5)
 -- or no password at all cannot pass. A new password is stored as SCRAM below; a run that sets none for a role
 -- whose stored password is not a SCRAM verifier stops here.
 SELECT EXISTS (SELECT 1 FROM pg_authid WHERE rolname = 'nous_app' AND (rolpassword IS NULL OR rolpassword NOT LIKE 'SCRAM-SHA-256$%')) AS app_pw_not_scram,
-       EXISTS (SELECT 1 FROM pg_authid WHERE rolname = 'nous_scorer' AND (rolpassword IS NULL OR rolpassword NOT LIKE 'SCRAM-SHA-256$%')) AS scorer_pw_not_scram \gset
+       EXISTS (SELECT 1 FROM pg_authid WHERE rolname = 'nous_scorer' AND (rolpassword IS NULL OR rolpassword NOT LIKE 'SCRAM-SHA-256$%')) AS scorer_pw_not_scram,
+       EXISTS (SELECT 1 FROM pg_authid WHERE rolname = 'nous_reader' AND (rolpassword IS NULL OR rolpassword NOT LIKE 'SCRAM-SHA-256$%')) AS reader_pw_not_scram \gset
 \if :app_pw_not_scram
     \if :has_app_pw
     \else
@@ -109,6 +128,12 @@ SELECT EXISTS (SELECT 1 FROM pg_authid WHERE rolname = 'nous_app' AND (rolpasswo
     \if :has_scorer_pw
     \else
         DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: nous_scorer''s stored password is not a SCRAM verifier; set NOUS_SCORER_DB_PASSWORD (a new password is stored as SCRAM) and run again'; END $$;
+    \endif
+\endif
+\if :reader_pw_not_scram
+    \if :has_reader_pw
+    \else
+        DO $$ BEGIN RAISE EXCEPTION 'db_roles.sql: nous_reader''s stored password is not a SCRAM verifier; set NOUS_READER_DB_PASSWORD (a new password is stored as SCRAM) and run again'; END $$;
     \endif
 \endif
 
@@ -183,18 +208,26 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nous_scorer') THEN
         CREATE ROLE nous_scorer;
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nous_reader') THEN
+        CREATE ROLE nous_reader;
+    END IF;
 END
 $roles$;
 
 ALTER ROLE nous_app WITH NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS LOGIN;
 ALTER ROLE nous_scorer WITH NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS LOGIN;
+ALTER ROLE nous_reader WITH NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS LOGIN;
 -- A connection limit, an expiry or a setting left on a service role (default_transaction_read_only, say), for
 -- every database or for one, would stop the application or the scorer after the lock-out: clear them all. The
--- scorer's two pinned settings are set again below.
+-- scorer's two pinned settings and the reader's limits are set again below.
 ALTER ROLE nous_app CONNECTION LIMIT -1 VALID UNTIL 'infinity';
 ALTER ROLE nous_scorer CONNECTION LIMIT -1 VALID UNTIL 'infinity';
+-- db_query opens one connection per call, at most two at a time; a timed-out call's backend may linger a few
+-- seconds after the client drops it.
+ALTER ROLE nous_reader CONNECTION LIMIT 6 VALID UNTIL 'infinity';
 ALTER ROLE nous_app RESET ALL;
 ALTER ROLE nous_scorer RESET ALL;
+ALTER ROLE nous_reader RESET ALL;
 DO $settings$
 DECLARE
     s record;
@@ -202,7 +235,7 @@ BEGIN
     FOR s IN
         SELECT r.rolname, d.datname
           FROM pg_db_role_setting x JOIN pg_roles r ON r.oid = x.setrole JOIN pg_database d ON d.oid = x.setdatabase
-         WHERE r.rolname IN ('nous_app', 'nous_scorer') AND x.setdatabase <> 0
+         WHERE r.rolname IN ('nous_app', 'nous_scorer', 'nous_reader') AND x.setdatabase <> 0
          ORDER BY 1, 2
     LOOP
         EXECUTE format('ALTER ROLE %I IN DATABASE %I RESET ALL', s.rolname, s.datname);
@@ -218,6 +251,9 @@ SET LOCAL password_encryption = 'scram-sha-256';
 \if :has_scorer_pw
     ALTER ROLE nous_scorer PASSWORD :'scorer_password';
 \endif
+\if :has_reader_pw
+    ALTER ROLE nous_reader PASSWORD :'reader_password';
+\endif
 
 -- Neither the administrator nor the scorer resolves names through a schema named after the login: the application
 -- role may create schemas, and a schema called nous_admin or nous_scorer would otherwise come first.
@@ -228,13 +264,25 @@ ALTER ROLE nous_admin SET search_path = pg_catalog, public;
 ALTER ROLE nous_scorer SET search_path = pg_catalog, scoring;
 ALTER ROLE nous_scorer SET row_security = off;
 
+-- The reader is the agent's own query login: every session is read-only and bounded in time and temporary disk,
+-- whatever the client asks. The login applies these settings, so they hold without the client's cooperation.
+-- temp_file_limit may be set only by a superuser; this script runs as one, and the reader cannot change it.
+ALTER ROLE nous_reader SET search_path = pg_catalog, brain, heart, nous_system;
+ALTER ROLE nous_reader SET row_security = off;
+ALTER ROLE nous_reader SET default_transaction_read_only = on;
+ALTER ROLE nous_reader SET statement_timeout = '5s';
+ALTER ROLE nous_reader SET lock_timeout = '2s';
+ALTER ROLE nous_reader SET idle_in_transaction_session_timeout = '15s';
+ALTER ROLE nous_reader SET temp_file_limit = '256MB';
+
 -- 2. Database: the administrator owns it (so grants on it are the administrator's alone). Only the
---    two named roles may connect.
+--    three named roles may connect.
 ALTER DATABASE :"dbname" OWNER TO nous_admin;
-REVOKE ALL ON DATABASE :"dbname" FROM PUBLIC, nous_app, nous_scorer CASCADE;
+REVOKE ALL ON DATABASE :"dbname" FROM PUBLIC, nous_app, nous_scorer, nous_reader CASCADE;
 GRANT CONNECT, TEMP ON DATABASE :"dbname" TO nous_app;
 GRANT CREATE ON DATABASE :"dbname" TO nous_app;
 GRANT CONNECT ON DATABASE :"dbname" TO nous_scorer;
+GRANT CONNECT ON DATABASE :"dbname" TO nous_reader;
 
 -- 3. Ownership. The application owns its three schemas and everything in them, the administrator owns
 --    the scoring schema. Only objects with another owner are touched, so a second run changes nothing.
@@ -290,19 +338,20 @@ $own$;
 -- public: only the administrator creates there (older clusters let PUBLIC); USAGE stays for its functions and operators.
 REVOKE CREATE ON SCHEMA public FROM PUBLIC, nous_app, nous_scorer CASCADE;
 
--- 4. scoring: owned by nous_admin, written by the scorer, read by the application.
-REVOKE ALL ON SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer CASCADE;
-REVOKE ALL ON ALL TABLES IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer CASCADE;
-REVOKE ALL ON ALL SEQUENCES IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer CASCADE;
-REVOKE ALL ON ALL ROUTINES IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer CASCADE;
+-- 4. scoring: owned by nous_admin, written by the scorer, read by the application, hidden from the reader.
+REVOKE ALL ON SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer, nous_reader CASCADE;
+REVOKE ALL ON ALL TABLES IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer, nous_reader CASCADE;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer, nous_reader CASCADE;
+REVOKE ALL ON ALL ROUTINES IN SCHEMA scoring FROM PUBLIC, nous_app, nous_scorer, nous_reader CASCADE;
 -- A function nous_admin creates in scoring later gets PUBLIC's EXECUTE until this script runs again, and verify
 -- fails on it meanwhile. No default privilege is set for nous_admin to prevent that: it also creates extension
 -- functions (CREATE or ALTER EXTENSION), which the application must be able to execute.
 -- Column privileges (pg_attribute.attacl) sit apart from a table's ACL. A table-level REVOKE also takes back the
 -- same grantee's column privileges, but in brain, heart and nous_system the table-level revokes name only the
--- scorer, so a column grant to PUBLIC there would survive them. Take back every column privilege of PUBLIC, the
--- application and the scorer in scoring, and of PUBLIC and the scorer in the application schemas (the application
--- owns those tables; its own grants stay). The table-level grants below then set what each role may do.
+-- scorer and the reader, so a column grant to PUBLIC there would survive them. Take back every column privilege of
+-- PUBLIC, the application, the scorer and the reader in scoring, and of PUBLIC, the scorer and the reader in the
+-- application schemas (the application owns those tables; its own grants stay). The grants below then set what
+-- each role may do.
 DO $columns$
 DECLARE
     c record;
@@ -315,9 +364,9 @@ BEGIN
          ORDER BY 1, 2
     LOOP
         IF c.nspname = 'scoring' THEN
-            EXECUTE format('REVOKE ALL (%I) ON %s FROM PUBLIC, nous_app, nous_scorer CASCADE', c.attname, c.rel);
+            EXECUTE format('REVOKE ALL (%I) ON %s FROM PUBLIC, nous_app, nous_scorer, nous_reader CASCADE', c.attname, c.rel);
         ELSE
-            EXECUTE format('REVOKE ALL (%I) ON %s FROM PUBLIC, nous_scorer CASCADE', c.attname, c.rel);
+            EXECUTE format('REVOKE ALL (%I) ON %s FROM PUBLIC, nous_scorer, nous_reader CASCADE', c.attname, c.rel);
         END IF;
     END LOOP;
 END
@@ -348,7 +397,7 @@ BEGIN
     END LOOP;
 END
 $defacl$;
-ALTER DEFAULT PRIVILEGES FOR ROLE nous_admin IN SCHEMA scoring REVOKE ALL ON TABLES FROM PUBLIC, nous_app, nous_scorer;
+ALTER DEFAULT PRIVILEGES FOR ROLE nous_admin IN SCHEMA scoring REVOKE ALL ON TABLES FROM PUBLIC, nous_app, nous_scorer, nous_reader;
 ALTER DEFAULT PRIVILEGES FOR ROLE nous_admin IN SCHEMA scoring GRANT SELECT ON TABLES TO nous_app;
 
 -- 4b. The scores table admits every outcome the scorer writes (task_scoring.OUTCOMES). Migration 087 created the
@@ -371,9 +420,9 @@ $outcomes$;
 --    list with that constant), and nothing else in the application schemas.
 REVOKE ALL ON ALL TABLES IN SCHEMA brain, heart, nous_system FROM nous_scorer CASCADE;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA brain, heart, nous_system FROM nous_scorer CASCADE;
--- The scorer reaches whatever PUBLIC may, so PUBLIC gets nothing on the application's tables and sequences
--- (nous_app keeps everything as their owner), and no default privilege of nous_app hands new ones to PUBLIC or
--- the scorer, per schema or globally. The default for functions is handled below.
+-- The scorer and the reader reach whatever PUBLIC may, so PUBLIC gets nothing on the application's tables and
+-- sequences (nous_app keeps everything as their owner), and no default privilege of nous_app hands new ones to
+-- PUBLIC, the scorer or the reader, per schema or globally. The default for functions is handled below.
 REVOKE ALL ON ALL TABLES IN SCHEMA brain, heart, nous_system FROM PUBLIC CASCADE;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA brain, heart, nous_system FROM PUBLIC CASCADE;
 DO $appdefacl$
@@ -388,12 +437,12 @@ BEGIN
                LATERAL aclexplode(x.defaclacl) a
          WHERE x.defaclrole = 'nous_app'::regrole AND x.defaclobjtype IN ('r', 'S')
            AND (x.defaclnamespace = 0 OR n.nspname IN ('brain', 'heart', 'nous_system'))
-           AND (a.grantee = 0 OR a.grantee = 'nous_scorer'::regrole)
+           AND (a.grantee = 0 OR pg_get_userbyid(a.grantee) IN ('nous_scorer', 'nous_reader'))
     LOOP
         EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE nous_app %s REVOKE ALL ON %s FROM %s',
                        CASE WHEN d.nspname IS NULL THEN '' ELSE format('IN SCHEMA %I', d.nspname) END,
                        kinds ->> d.objtype::text,
-                       CASE WHEN d.grantee = 0 THEN 'PUBLIC' ELSE 'nous_scorer' END);
+                       CASE WHEN d.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(d.grantee)) END);
     END LOOP;
 END
 $appdefacl$;
@@ -420,7 +469,7 @@ GRANT SELECT ON nous_system.execution_dags TO nous_scorer;
 GRANT SELECT ON nous_system.execution_ledger TO nous_scorer;
 -- source tables end
 
--- 5b. No role is a member of the three roles above, and none of them is a member of any role.
+-- 5b. No role is a member of the four roles above, and none of them is a member of any role.
 DO $members$
 DECLARE
     m record;
@@ -428,8 +477,8 @@ BEGIN
     FOR m IN
         SELECT g.rolname AS grp, r.rolname AS mem
           FROM pg_auth_members am JOIN pg_roles g ON g.oid = am.roleid JOIN pg_roles r ON r.oid = am.member
-         WHERE g.rolname IN ('nous_app', 'nous_scorer', 'nous_admin')
-            OR r.rolname IN ('nous_app', 'nous_scorer', 'nous_admin')
+         WHERE g.rolname IN ('nous_app', 'nous_scorer', 'nous_admin', 'nous_reader')
+            OR r.rolname IN ('nous_app', 'nous_scorer', 'nous_admin', 'nous_reader')
          ORDER BY 1, 2
     LOOP
         EXECUTE format('REVOKE %I FROM %I CASCADE', m.grp, m.mem);
@@ -437,8 +486,9 @@ BEGIN
 END
 $members$;
 
--- 5c. Neither the application, the scorer nor PUBLIC holds a privilege on a server parameter (SET or ALTER SYSTEM).
---     %I quotes a dotted name such as plpgsql.extra_warnings as one identifier, which the command accepts.
+-- 5c. Neither the application, the scorer, the reader nor PUBLIC holds a privilege on a server parameter (SET or
+--     ALTER SYSTEM). %I quotes a dotted name such as plpgsql.extra_warnings as one identifier, which the command
+--     accepts.
 DO $params$
 DECLARE
     p record;
@@ -446,7 +496,7 @@ BEGIN
     FOR p IN
         SELECT DISTINCT x.parname, a.grantee
           FROM pg_parameter_acl x, LATERAL aclexplode(x.paracl) a
-         WHERE a.grantee IN (0, 'nous_app'::regrole, 'nous_scorer'::regrole)
+         WHERE a.grantee IN (0, 'nous_app'::regrole, 'nous_scorer'::regrole, 'nous_reader'::regrole)
          ORDER BY 1, 2
     LOOP
         EXECUTE format('REVOKE ALL ON PARAMETER %I FROM %s CASCADE', p.parname,
@@ -454,6 +504,83 @@ BEGIN
     END LOOP;
 END
 $params$;
+
+-- 5d. The reader (the agent's db_query tool) reads the columns of the tables listed below, and nothing else: no
+--     scoring, no push tokens, no table outside the list. Everything it may hold from an earlier run is taken
+--     back first, so the grants below are the whole of it and a run converges. A table is listed with the columns
+--     it must not read; vector and tsvector columns are never granted. The grant names columns, so a column a
+--     later migration adds stays unreadable until this script runs again. The script stops on a listed table that
+--     is missing or is not a plain table (a view would read with its owner's privileges), on an excluded column
+--     that no longer exists (the list needs review), and on a column whose name looks like a credential that the
+--     list does not exclude.
+REVOKE ALL ON ALL TABLES IN SCHEMA brain, heart, nous_system, public FROM nous_reader CASCADE;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA brain, heart, nous_system, public FROM nous_reader CASCADE;
+REVOKE ALL ON ALL ROUTINES IN SCHEMA brain, heart, nous_system FROM nous_reader CASCADE;
+REVOKE ALL ON SCHEMA brain, heart, nous_system, public FROM nous_reader CASCADE;
+GRANT USAGE ON SCHEMA brain, heart, nous_system TO nous_reader;
+DO $reader$
+DECLARE
+    t record;
+    rel oid;
+    nsp name;
+    tbl name;
+    kind "char";
+    cols text;
+    bad text;
+BEGIN
+    FOR t IN
+        SELECT * FROM (VALUES
+-- reader tables begin
+            ('brain.decisions', ARRAY[]::text[]),
+            ('brain.intention_arrivals', ARRAY['claim_token']),
+            ('brain.intention_proposals', ARRAY['claim_token']),
+            ('brain.intentions', ARRAY['claim_token']),
+            ('heart.episodes', ARRAY['detail', 'transcript', 'structured_summary', 'encoded_censors', 'participants', 'user_display_name', 'user_id']),
+            ('heart.facts', ARRAY[]::text[]),
+            ('heart.schedules', ARRAY[]::text[]),
+            ('heart.subtasks', ARRAY[]::text[]),
+            ('nous_system.dag_edges', ARRAY[]::text[]),
+            ('nous_system.dag_nodes', ARRAY[]::text[]),
+            ('nous_system.dynamic_checks', ARRAY[]::text[]),
+            ('nous_system.events', ARRAY[]::text[]),
+            ('nous_system.execution_dags', ARRAY['token_budget']),
+            ('nous_system.execution_ledger', ARRAY[]::text[])
+-- reader tables end
+        ) AS v(relname, excluded)
+    LOOP
+        rel := NULL;
+        SELECT c.oid, n.nspname, c.relname, c.relkind INTO rel, nsp, tbl, kind
+          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = split_part(t.relname, '.', 1) AND c.relname = split_part(t.relname, '.', 2);
+        IF rel IS NULL THEN
+            RAISE EXCEPTION 'db_roles.sql: %, a table the reader reads, does not exist', t.relname;
+        END IF;
+        IF kind NOT IN ('r', 'p') THEN
+            RAISE EXCEPTION 'db_roles.sql: % is not a plain table; the reader is granted tables only', t.relname;
+        END IF;
+        SELECT string_agg(x.col, ', ') INTO bad FROM unnest(t.excluded) AS x(col)
+         WHERE NOT EXISTS (SELECT 1 FROM pg_attribute a
+                            WHERE a.attrelid = rel AND a.attname = x.col AND a.attnum > 0 AND NOT a.attisdropped);
+        IF bad IS NOT NULL THEN
+            RAISE EXCEPTION 'db_roles.sql: %.% is excluded from the reader but does not exist; review the exclusion list', t.relname, bad;
+        END IF;
+        SELECT string_agg(a.attname, ', ' ORDER BY a.attnum) INTO bad FROM pg_attribute a
+         WHERE a.attrelid = rel AND a.attnum > 0 AND NOT a.attisdropped AND a.attname <> ALL (t.excluded)
+           AND a.attname ~ '(^|_)(token|secret|password|passwd|credential|credentials)(_|$)|(api|private|secret|access|auth)_?key|fcm';
+        IF bad IS NOT NULL THEN
+            RAISE EXCEPTION 'db_roles.sql: %.% looks like a credential; add it to the exclusion list or rename it', t.relname, bad;
+        END IF;
+        SELECT string_agg(quote_ident(a.attname), ', ' ORDER BY a.attnum) INTO cols
+          FROM pg_attribute a JOIN pg_type ty ON ty.oid = a.atttypid
+         WHERE a.attrelid = rel AND a.attnum > 0 AND NOT a.attisdropped AND a.attname <> ALL (t.excluded)
+           AND ty.typname NOT IN ('vector', 'halfvec', 'sparsevec', 'tsvector');
+        IF cols IS NULL THEN
+            RAISE EXCEPTION 'db_roles.sql: % has no column the reader may read', t.relname;
+        END IF;
+        EXECUTE format('GRANT SELECT (%s) ON %I.%I TO nous_reader', cols, nsp, tbl);
+    END LOOP;
+END
+$reader$;
 
 -- 6. Last: the bootstrap superuser can no longer log in, and has no password. Everything before
 --    this ran as a role that holds its own privileges, so nothing above depended on it.
@@ -465,13 +592,30 @@ DECLARE
     bad text;
 BEGIN
     SELECT string_agg(rolname, ', ') INTO bad FROM pg_roles
-     WHERE rolname IN ('nous_app', 'nous_scorer')
+     WHERE rolname IN ('nous_app', 'nous_scorer', 'nous_reader')
        AND (rolsuper OR rolcreaterole OR rolcreatedb OR rolreplication OR rolbypassrls);
     IF bad IS NOT NULL THEN RAISE EXCEPTION 'role has an elevated attribute: %', bad; END IF;
 
     SELECT string_agg(rolname, ', ') INTO bad FROM pg_authid
-     WHERE rolname IN ('nous_app', 'nous_scorer') AND (rolpassword IS NULL OR rolpassword NOT LIKE 'SCRAM-SHA-256$%');
+     WHERE rolname IN ('nous_app', 'nous_scorer', 'nous_reader') AND (rolpassword IS NULL OR rolpassword NOT LIKE 'SCRAM-SHA-256$%');
     IF bad IS NOT NULL THEN RAISE EXCEPTION 'password is not a SCRAM verifier: %', bad; END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname = 'nous_reader' AND r.rolcanlogin AND r.rolconnlimit = 6
+                     AND (SELECT count(*) FROM pg_db_role_setting s WHERE s.setrole = r.oid) = 1
+                     AND (SELECT s.setconfig FROM pg_db_role_setting s WHERE s.setrole = r.oid AND s.setdatabase = 0)
+                         @> ARRAY['search_path=pg_catalog, brain, heart, nous_system', 'row_security=off',
+                                  'default_transaction_read_only=on', 'statement_timeout=5s', 'lock_timeout=2s',
+                                  'idle_in_transaction_session_timeout=15s', 'temp_file_limit=256MB']
+                     AND (SELECT cardinality(s.setconfig) FROM pg_db_role_setting s WHERE s.setrole = r.oid) = 7) THEN
+        RAISE EXCEPTION 'the reader''s connection limit or settings are not the pinned ones';
+    END IF;
+
+    SELECT string_agg(n.nspname || '.' || c.relname, ', ') INTO bad
+      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'scoring' AND has_any_column_privilege('nous_reader', c.oid, 'SELECT');
+    IF bad IS NOT NULL OR has_schema_privilege('nous_reader', 'scoring', 'USAGE') THEN
+        RAISE EXCEPTION 'the reader holds a privilege on scoring: %', coalesce(bad, 'USAGE');
+    END IF;
 
     IF NOT (NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('nous_app', 'nous_scorer') AND (rolconnlimit <> -1 OR (rolvaliduntil IS NOT NULL AND rolvaliduntil <> 'infinity'))) AND NOT EXISTS (SELECT 1 FROM pg_db_role_setting s JOIN pg_roles r ON r.oid = s.setrole WHERE r.rolname = 'nous_app' OR (r.rolname = 'nous_scorer' AND NOT (s.setdatabase = 0 AND s.setconfig @> ARRAY['search_path=pg_catalog, scoring', 'row_security=off'] AND cardinality(s.setconfig) = 2)))) THEN
         SELECT string_agg(rolname, ', ') INTO bad FROM pg_roles WHERE rolname IN ('nous_app', 'nous_scorer');
@@ -480,13 +624,14 @@ BEGIN
 
     SELECT string_agg(r.rolname || ' in ' || g.rolname, ', ') INTO bad
       FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.member JOIN pg_roles g ON g.oid = m.roleid
-     WHERE r.rolname IN ('nous_app', 'nous_scorer') OR g.rolname IN ('nous_app', 'nous_scorer', 'nous_admin');
+     WHERE r.rolname IN ('nous_app', 'nous_scorer', 'nous_reader')
+        OR g.rolname IN ('nous_app', 'nous_scorer', 'nous_admin', 'nous_reader');
     IF bad IS NOT NULL THEN RAISE EXCEPTION 'unexpected role membership: %', bad; END IF;
 
     SELECT string_agg(DISTINCT x.parname || ' to '
                       || CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END, ', ') INTO bad
       FROM pg_parameter_acl x, LATERAL aclexplode(x.paracl) a
-     WHERE a.grantee IN (0, 'nous_app'::regrole, 'nous_scorer'::regrole);
+     WHERE a.grantee IN (0, 'nous_app'::regrole, 'nous_scorer'::regrole, 'nous_reader'::regrole);
     IF bad IS NOT NULL THEN RAISE EXCEPTION 'parameter privilege granted: %', bad; END IF;
 
     SELECT string_agg(n.nspname || '.' || c.relname, ', ') INTO bad

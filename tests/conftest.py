@@ -274,3 +274,31 @@ async def seed_guardrails(session):
         session.add(g)
     await session.flush()
     return guardrails
+
+
+# ---------------------------------------------------------------------------
+# The read-only database login (db_query)
+# ---------------------------------------------------------------------------
+
+READER_ROLE = "nous_reader"
+
+
+@pytest_asyncio.fixture(scope="session")
+async def reader_role(db) -> str:
+    """The login ``scripts/ops/db_roles.sql`` creates for ``db_query``.
+
+    Skips where the role does not exist (the main test job and a development database, which never run the
+    role script). With ``NOUS_REQUIRE_READER_ROLE=1`` (the "DB roles" CI job) a missing role fails instead, so
+    the role tests cannot pass by skipping there.
+    """
+    from sqlalchemy import text
+
+    async with db.engine.connect() as conn:
+        exists = (
+            await conn.execute(text("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :r)"), {"r": READER_ROLE})
+        ).scalar()
+    if not exists:
+        if os.environ.get("NOUS_REQUIRE_READER_ROLE") == "1":
+            pytest.fail(f"{READER_ROLE} does not exist and NOUS_REQUIRE_READER_ROLE=1: run scripts/ops/db_roles.sql")
+        pytest.skip(f"{READER_ROLE} does not exist (scripts/ops/db_roles.sql has not run on this database)")
+    return READER_ROLE
