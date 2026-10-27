@@ -315,6 +315,19 @@ LINEAGE_GIT_READS: Mapping[str, _GitRoles] = MappingProxyType(
             frozenset({"--diff-filter", "--unified"}),
             _GIT_DIFF_SHORT,
         ),
+        "merge-base": _GitRoles(
+            frozenset("--all --octopus --independent --is-ancestor --fork-point".split()), frozenset(), {}
+        ),
+        # Queries only: no --git-path, --resolve-git-dir, --parseopt, --sq-quote, --local-env-vars, --default,
+        # --prefix, --path-format or the other directory queries. A flag also takes `=value` (--short=8).
+        "rev-parse": _GitRoles(
+            frozenset(
+                "--short --abbrev-ref --verify --quiet --symbolic --symbolic-full-name --show-toplevel "
+                "--is-inside-work-tree --show-prefix --show-cdup --git-dir".split()
+            ),
+            frozenset(),
+            {"q": "flag"},
+        ),
     }
 )
 # pytest: no -p (a plugin), -c / --rootdir / --confcutdir / -o (another config or root), --pyargs (an installed
@@ -828,7 +841,8 @@ def _in_repo(operand: str, repo: Path) -> bool:
 
 
 def _git_allowed(args: list[str], repo: Path) -> bool:
-    """``git status|log|show|diff`` with the options in LINEAGE_GIT_READS, and operands that stay in ``repo``."""
+    """``git status|log|show|diff|merge-base|rev-parse`` with the options in LINEAGE_GIT_READS, and operands that stay
+    in ``repo``."""
     if not args or args[0] not in LINEAGE_GIT_READS:
         return False
     roles = LINEAGE_GIT_READS[args[0]]
@@ -906,7 +920,8 @@ def lineage_bash_refusal_hint(*, build_commands: bool) -> str:
     )
     if build_commands:
         text += (
-            "; and, in a git repo's top level reached by `cd <repo> &&`: git status|log|diff|show, pytest, "
+            "; and, in a git repo's top level reached by `cd <repo> &&`: "
+            "git status|log|diff|show|merge-base|rev-parse, pytest, "
             "ruff check --no-fix --no-fix-only, ruff format --check|--diff, "
             f"make {'|'.join(sorted(LINEAGE_MAKE_TARGETS))}, "
             "each with a fixed set of options and paths inside the repo, in a bash call without gh or runner.sh"
