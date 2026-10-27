@@ -233,6 +233,19 @@ _TEST_STRING_BINARY = frozenset({"=", "!=", "-eq", "-ne", "-lt", "-gt", "-le", "
 _TEST_FILE_BINARY = frozenset({"-nt", "-ot", "-ef"})
 # A -d/--date string with TZ="..." names a zone file date opens, which may be any path.
 _DATE_TZ = re.compile(r"tz\s*=", re.IGNORECASE)
+# The commands that create files, only inside lineage_write_dirs (_fs_write_allowed). No mkdir -m/-v/-Z; no touch
+# -r/-d/-t/-h or --time (another file's times, a parsed date, a link itself); no cp -r/-R/-a/-d/-P/-L/-H/-l/-s/-t/-T
+# /-u/-i/-p, --parents, --backup, --reflink or --remove-destination: nothing that copies a tree, makes or keeps a
+# link, picks another target or copies modes and owners.
+_FS_WRITE_ROLES: Mapping[str, _ArgRoles] = MappingProxyType(
+    {
+        "mkdir": _ArgRoles({"p": "flag"}, {"--parents": "flag"}, closed=True),
+        "touch": _ArgRoles(dict.fromkeys("cam", "flag"), {"--no-create": "flag"}, closed=True),
+        "cp": _ArgRoles(
+            dict.fromkeys("nvf", "flag"), dict.fromkeys(("--no-clobber", "--verbose", "--force"), "flag"), closed=True
+        ),
+    }
+)
 # A jq filter that reads the environment (GITHUB_TOKEN is left in it) or imports a module or data file.
 _JQ_REFUSED = re.compile(r"\$ENV|\benv\b|\bimport\b|\binclude\b")
 _MAX_LINEAGE_CWDS = 16  # directories a chain of cd could have left the shell in; more is refused
@@ -689,6 +702,81 @@ def _regular_files(paths: list[Path]) -> bool:
         return False
 
 
+def _write_target(path: str, cwd: Path | None, writable: list[Path], *, below: bool) -> Path | None:
+    """Where a mkdir/touch/cp target lands, once resolved (symlinks followed, dangling ones too, and ``..``), when
+    that is inside one of ``writable`` with no hidden component below it, else None. A relative target resolves
+    against ``cwd``, the directory the shell is SURELY in: None when it is not sure, since a check from every
+    directory it could be in would pass a target that is writable from one of them and lands elsewhere from the
+    other. ``below``: strictly below the directory, never the directory itself (touch or cp would make it a file).
+    ``~`` and a leading ``-`` are refused."""
+    if path.startswith(("~", "-")) or "\x00" in path:
+        return None
+    base = Path(path) if path.startswith("/") else cwd / path if cwd is not None else None
+    if base is None:
+        return None
+    try:
+        target = base.resolve()
+        for d in writable:
+            d = d.resolve()
+            if target.is_relative_to(d) and not (below and target == d):
+                return None if any(p.startswith(".") for p in target.relative_to(d).parts) else target
+    except (OSError, ValueError, RuntimeError):  # an unresolvable name, a symlink loop
+        pass
+    return None
+
+
+def _one_link(path: Path) -> bool:
+    """``path`` is not an existing file with another hard link: cp opens the file it overwrites, which would write
+    every name of that inode, a name outside the write dirs too."""
+    try:
+        return not path.is_file() or path.stat().st_nlink == 1
+    except OSError:
+        return False
+
+
+def _fs_write_allowed(
+    prog: str, args: list[str], *, cwd: Path | None, cwds: list[Path], root: Path, writable: list[Path]
+) -> bool:
+    """``mkdir``, ``touch`` or ``cp`` (``_FS_WRITE_ROLES``) whose every target is a ``_write_target``.
+
+    mkdir: each operand (the write dir itself too: ``mkdir -p`` creates a listed directory that is missing). touch:
+    each operand, below a write dir. cp: two or more operands; the sources are reads (``_readable``, from every
+    directory the shell may be in) and the last operand is the destination. Copied into a directory, the copy is
+    ``<dir>/<source's last component as written>``, which is checked too (a link planted there, or a hidden name). A
+    destination that does not exist yet may be created as a directory earlier in the same command, so it is checked
+    both ways; several sources need a destination that is a directory (one, or written with a trailing ``/``)."""
+    split = _split_read_args(args, _FS_WRITE_ROLES[prog])
+    if split is None:
+        return False
+    operands = split[0]
+    if not operands or any(o.startswith("-") for o in operands):
+        return False  # `-` or a name after `--` that reads as an option
+    if prog != "cp":
+        return all(_write_target(o, cwd, writable, below=prog == "touch") is not None for o in operands)
+    if len(operands) < 2:
+        return False
+    *sources, dest = operands
+    if not all(_readable(s, cwds, root) is not None for s in sources):
+        return False
+    target = _write_target(dest, cwd, writable, below=False)
+    if target is None:
+        return False
+    try:
+        exists, as_dir = target.exists(), target.is_dir() or dest.endswith("/")
+    except OSError:
+        return False
+    if (dest.endswith("/") and exists and not target.is_dir()) or (len(sources) > 1 and not as_dir):
+        return False
+    written = [] if as_dir else [dest]  # the destination as a file
+    if as_dir or not exists:  # the copies in it as a directory
+        written += [f"{dest.rstrip('/')}/{s.rstrip('/').rsplit('/', 1)[-1]}" for s in sources]
+    for path in written:
+        landed = _write_target(path, cwd, writable, below=True)
+        if landed is None or not _one_link(landed):
+            return False
+    return True
+
+
 def _jq_filter_allowed(text: str) -> bool:
     """A jq filter (jq's own, or gh's ``--jq``, run by gojq) that reads no environment and imports nothing."""
     return _JQ_REFUSED.search(text) is None
@@ -1038,6 +1126,9 @@ def lineage_bash_allowed(
                 reached = _readable(path, cwds, root)
                 if reached is None or (regular and not _regular_files(reached)):
                     return False
+        elif prog in _FS_WRITE_ROLES:
+            if not _fs_write_allowed(prog, args, cwd=cwd, cwds=cwds, root=root, writable=writable):
+                return False
         elif build_commands and prog in LINEAGE_BUILD_PROGRAMS:
             if cwd is None or not _build_repo(cwd, root, writable):
                 return False

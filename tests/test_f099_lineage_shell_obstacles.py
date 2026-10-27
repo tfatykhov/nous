@@ -17,6 +17,7 @@ from nous.api.execution_context import ExecutionContext
 from nous.api.tool_policy import (
     _write_path_allowed,
     internal_only_call_violation,
+    lineage_bash_allowed,
     lineage_write_dirs,
     write_path_refusal_hint,
 )
@@ -592,3 +593,290 @@ def test_the_bracket_word_is_the_only_glob_word_a_test_may_hold(tmp_path):
     assert _shell("cat sub/[ab].md", ws) is None  # PIN: the existing glob rule is unchanged
     assert _shell("[ x", ws) == "external"
     assert _shell("echo [", ws) == "external"  # a [ anywhere else is a glob word, refused as before
+
+
+# -- mkdir, touch and cp into the write dirs -------------------------------------------------------------------------
+
+
+def _write_ws(tmp_path):
+    """``tmp_path/ws`` with a listed ``research/``, the root's own directory, claude-jobs, and ``tmp_path/outside``."""
+    ws = tmp_path / "ws"
+    for d in ("research/sub", f"intentions/{RID}", f"intentions/{OTHER}", "claude-jobs/prompts", "claude-jobs/state"):
+        (ws / d).mkdir(parents=True)
+    for f in ("research/a.md", "other/src.md", "other/two.md", "claude-jobs/runner.sh", "repos.json", ".env"):
+        (ws / f).parent.mkdir(parents=True, exist_ok=True)
+        (ws / f).write_text(f)
+    (ws / "claude-jobs" / "state" / "submit_guard.enabled").write_text("")
+    (tmp_path / "outside").mkdir()
+    return ws
+
+
+def _w(command: str, ws, extra=("research",), ctx: ExecutionContext | None = None) -> bool:
+    command = command.format(W=ws, RID=RID, OTHER=OTHER)
+    return lineage_bash_allowed(ctx or _internal(), command, workspace_dir=str(ws), extra_write_dirs=list(extra))
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "mkdir -p {W}/research/a/b",
+        "mkdir {W}/research/new",
+        "mkdir --parents {W}/research/x {W}/research/y",
+        "mkdir -p {W}/research",  # the listed directory itself
+        "mkdir -p {W}/intentions/{RID}/notes",
+        "mkdir -p -- {W}/research/z",
+        "touch {W}/research/x.md",
+        "touch -c {W}/research/x.md {W}/research/y.md",
+        "touch -am {W}/research/a.md",
+        "touch --no-create {W}/research/a.md",
+        "touch {W}/intentions/{RID}/x.md",
+        "touch {W}/claude-jobs/prompts/p.md",
+        "cp {W}/other/src.md {W}/research/copy.md",
+        "cp -n {W}/other/src.md {W}/research/sub",
+        "cp -nv {W}/other/src.md {W}/other/two.md {W}/research/sub/",
+        "cp {W}/other/src.md {W}/research/",
+        "cp {W}/other/src.md {W}/research",  # an existing directory: the copy goes into it
+        "cp {W}/other/src.md {W}/other/two.md {W}/research/new/",
+        "cp --no-clobber --verbose --force {W}/other/src.md {W}/research/c.md",
+        "cp {W}/other/src.md {W}/claude-jobs/prompts/p.md",
+        "cp {W}/research/a.md {W}/research/b.md",
+        "cp {W}/claude-jobs/runner.sh {W}/research/runner-copy.sh",  # a read of claude-jobs, a write into research
+        "cd {W}/research && touch x.md",
+        "touch research/x",  # relative, from the workspace: the shell's cwd until a cd
+        "cd research && mkdir -p a && cp {W}/other/src.md a/",
+        "cd {W}/research && cp {W}/other/src.md .",
+        "mkdir -p {W}/research/a && touch {W}/research/a/x",
+        "mkdir -p {W}/research/a && cp {W}/other/src.md {W}/research/a",
+        "cd {W}/research && mkdir -p a && cd a && touch x",
+        "test -d {W}/research/a || mkdir -p {W}/research/a",
+    ],
+)
+def test_mkdir_touch_and_cp_may_write_into_the_write_dirs(command, tmp_path):
+    assert _w(command, _write_ws(tmp_path)) is True
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # outside the write dirs
+        "mkdir {W}/other/x",
+        "mkdir -p {W}/research/../other/x",
+        "mkdir -p {W}/researchx/a",
+        "mkdir -p {W}/claude-jobs/evil",
+        "mkdir -p {W}/claude-jobs",
+        "mkdir -p {W}/claude-jobs/state/x",
+        "mkdir -p {W}/claude-jobs/prompts/../state/x",
+        "mkdir -p {W}/intentions/{OTHER}/x",
+        "mkdir -p {W}/intentions/new",
+        "mkdir -p {W}/plugins/x",
+        "mkdir /tmp/x",
+        "mkdir {W}/x",
+        "mkdir x",
+        "touch {W}/other/x",
+        "touch {W}/claude-jobs/runner.sh",
+        "touch {W}/claude-jobs/prompts/../runner.sh",
+        "touch {W}/claude-jobs/state/submit_guard.enabled",
+        "touch {W}/claude-jobs/prompts/../state/submit_guard.enabled",
+        "touch {W}/repos.json",
+        "touch {W}/research",  # the listed directory itself: never turned into a file
+        "touch {W}/intentions/{RID}",
+        "cp {W}/other/src.md {W}/other/dst.md",
+        "cp {W}/other/src.md {W}/claude-jobs/runner.sh",
+        "cp {W}/other/src.md {W}/claude-jobs/state/submit_guard.enabled",
+        "cp {W}/other/src.md {W}/claude-jobs/prompts/../state/submit_guard.enabled",
+        "cp {W}/other/src.md {W}/claude-jobs/",
+        "cp {W}/other/src.md {W}/research/../repos.json",
+        # hidden names below a write dir
+        "mkdir {W}/research/.hid",
+        "mkdir -p {W}/research/a/.b/c",
+        "touch {W}/research/.x",
+        "cp {W}/other/src.md {W}/research/.git",
+        # options off the tables
+        "mkdir -m 777 {W}/research/a",
+        "mkdir -m777 {W}/research/a",
+        "mkdir --mode=777 {W}/research/a",
+        "mkdir -v {W}/research/a",
+        "mkdir -Z {W}/research/a",
+        "mkdir --par {W}/research/a",  # GNU takes the abbreviation; the closed table does not
+        "touch -r {W}/other/src.md {W}/research/x",
+        "touch --reference={W}/other/src.md {W}/research/x",
+        "touch -d 2020-01-01 {W}/research/x",
+        "touch -t 202001010000 {W}/research/x",
+        "touch -h {W}/research/x",
+        "touch --time=atime {W}/research/x",
+        "touch --ti=atime {W}/research/x",
+        "cp -r {W}/other {W}/research/o",
+        "cp -R {W}/other {W}/research/o",
+        "cp -a {W}/other/src.md {W}/research/o",
+        "cp -d {W}/other/src.md {W}/research/o",
+        "cp -P {W}/other/src.md {W}/research/o",
+        "cp -L {W}/other/src.md {W}/research/o",
+        "cp -l {W}/other/src.md {W}/research/o",
+        "cp -s {W}/other/src.md {W}/research/o",
+        "cp -u {W}/other/src.md {W}/research/o",
+        "cp -i {W}/other/src.md {W}/research/o",
+        "cp -p {W}/other/src.md {W}/research/o",
+        "cp -t {W}/research {W}/other/src.md",
+        "cp --target-directory={W}/research {W}/other/src.md",
+        "cp -T {W}/other/src.md {W}/research/o",
+        "cp --parents other/src.md {W}/research",
+        "cp --backup {W}/other/src.md {W}/research/o",
+        "cp --remove-destination {W}/other/src.md {W}/research/o",
+        "cp --reflink {W}/other/src.md {W}/research/o",
+        "cp --recur {W}/other {W}/research/o",
+        "cp --sparse=always {W}/other/src.md {W}/research/o",
+        # operands: too few, an option after --, a source outside the workspace or hidden
+        "mkdir",
+        "mkdir -p",
+        "touch",
+        "cp {W}/other/src.md",
+        "cp",
+        "mkdir -p -- -rf",
+        "touch -- -x",
+        "cp -- {W}/other/src.md -r",
+        "cp -- -r {W}/research/o",
+        "cp - {W}/research/o",
+        "cp /etc/passwd {W}/research/p",
+        "cp {W}/.env {W}/research/p",
+        "cp {W}/other/src.md {W}/other/two.md {W}/research/new.md",  # several sources need a directory
+        "cp {W}/other/src.md {W}/research/a.md/",
+        # expansions, globs, chains
+        "mkdir ~/x",
+        "touch ~/x",
+        "cp {W}/other/*.md {W}/research/",
+        "touch {W}/research/*.md",
+        "mkdir {W}/research/{{a,b}}",
+        'cp "$HOME/x" {W}/research/',
+        "mkdir -p {W}/research/a; rm -rf {W}/other",
+        "mkdir -p {W}/research/a && sh -c 'id'",
+        "touch {W}/research/x > {W}/other/y",
+        # where a relative target lands: only from a cwd the shell is sure of
+        "cd {W}/research ; touch x.md",
+        "cd {W}/research || touch x.md",
+        "cd {W}/research | touch x.md",
+        "cd {W}/claude-jobs && mkdir -p research/x",
+        "cd {W}/claude-jobs && touch research/x",
+        "cd {W}/claude-jobs && cp {W}/other/src.md research/x",
+        "cd {W}/other && cp src.md two.md",
+        "true || cd {W}/research && touch x.md",
+        # writable from the workspace, but the shell may be in claude-jobs by then: not sure, so refused
+        "cd {W}/claude-jobs ; mkdir -p research/x",
+        "cd {W}/claude-jobs ; touch research/x",
+        "cd claude-jobs ; cp {W}/other/src.md research/x",
+        "cd {W}/claude-jobs | touch research/x",
+        "cd {W}/claude-jobs || touch research/x",
+    ],
+)
+def test_mkdir_touch_and_cp_are_refused_everywhere_else(command, tmp_path):
+    assert _w(command, _write_ws(tmp_path)) is False
+
+
+def test_without_a_listed_dir_only_the_old_write_dirs_take_mkdir_touch_and_cp(tmp_path):
+    ws = _write_ws(tmp_path)
+    assert _w("touch {W}/research/x.md", ws, extra=()) is False
+    assert _w("touch {W}/intentions/{RID}/x.md", ws, extra=()) is True
+    assert _w("cp {W}/other/src.md {W}/claude-jobs/prompts/p.md", ws, extra=()) is True
+
+
+def test_a_lineage_without_a_root_has_no_intentions_dir_to_write(tmp_path):
+    ws = _write_ws(tmp_path)
+    damaged = _internal(root_intention_id=None, intention_id=None)
+    assert _w("touch {W}/intentions/{RID}/x.md", ws, ctx=damaged) is False
+    assert _w("touch {W}/intentions/None/x.md", ws, ctx=damaged) is False
+
+
+@needs_symlinks
+def test_a_write_through_a_symlink_out_of_a_write_dir_is_refused(tmp_path):
+    ws = _write_ws(tmp_path)
+    out = tmp_path / "outside"
+    (ws / "research" / "escape").symlink_to(out)
+    (ws / "research" / "evil.md").symlink_to(out / "target")  # dangling: touch and cp would create the target
+    (ws / "research" / "jobs").symlink_to(ws / "claude-jobs")
+    (ws / "research" / "state").symlink_to(ws / "claude-jobs" / "state" / "submit_guard.enabled")
+    for command in (
+        "mkdir -p {W}/research/escape/x",
+        "mkdir -p {W}/research/jobs/evil",
+        "touch {W}/research/evil.md",
+        "touch {W}/research/escape",
+        "touch {W}/research/state",
+        "touch {W}/research/jobs/runner.sh",
+        "cp {W}/other/src.md {W}/research/evil.md",
+        "cp {W}/other/src.md {W}/research/escape",
+        "cp {W}/other/src.md {W}/research/escape/",
+        "cp {W}/other/src.md {W}/research/state",
+        "cp {W}/other/src.md {W}/research/jobs/runner.sh",
+        "cd {W}/research/escape && touch x",
+        "cd {W}/research && touch escape/x",
+    ):
+        assert _w(command, ws) is False, command
+    (ws / "research").rename(ws / "research-real")
+    (ws / "research").symlink_to(out)  # the listed entry itself becomes a link out: dropped at this call
+    assert _w("touch {W}/research/x.md", ws) is False
+
+
+@needs_symlinks
+def test_a_planted_link_where_cp_puts_the_copy_is_refused(tmp_path):
+    """cp into a directory writes dir/<source's name>: that child is resolved too."""
+    ws = _write_ws(tmp_path)
+    (ws / "research" / "sub" / "src.md").symlink_to(tmp_path / "outside" / "t")
+    assert _w("cp {W}/other/two.md {W}/research/sub", ws) is True
+    assert _w("cp {W}/other/src.md {W}/research/sub", ws) is False
+    assert _w("cp {W}/other/src.md {W}/research/sub/", ws) is False
+    assert _w("cp {W}/other/two.md {W}/other/src.md {W}/research/sub", ws) is False
+
+
+@needs_symlinks
+def test_cp_names_the_copy_after_the_source_as_written(tmp_path):
+    """A source `.x` that links to a plain file reads as allowed, but cp would create research/.x."""
+    ws = _write_ws(tmp_path)
+    (ws / "other" / ".x").symlink_to(ws / "other" / "src.md")
+    (ws / "other" / "y").symlink_to(ws / "other" / "src.md")
+    assert _w("cp {W}/other/y {W}/research/", ws) is True
+    assert _w("cp {W}/other/.x {W}/research/", ws) is False
+    assert _w("cp {W}/other/.x {W}/research/new", ws) is False  # new may be a directory by the time cp runs
+
+
+@pytest.mark.skipif(not hasattr(os, "link") or os.name == "nt", reason="needs hard links")
+def test_cp_refuses_a_destination_that_is_a_hard_link(tmp_path):
+    ws = _write_ws(tmp_path)
+    os.link(ws / "claude-jobs" / "runner.sh", ws / "research" / "hard.sh")
+    assert _w("cp {W}/other/src.md {W}/research/hard.sh", ws) is False
+    assert _w("cp {W}/other/src.md {W}/research/a.md", ws) is True  # a file with one link
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "{W}/claude-jobs/state/submit_guard.enabled",
+        "{W}/claude-jobs/prompts/../state/submit_guard.enabled",
+        "{W}/claude-jobs/runner.sh",
+        "{W}/claude-jobs/repos.json",
+        "{W}/claude-jobs/job-20261027-101010-0a1b2c3d/nous_root",
+    ],
+)
+def test_no_write_path_reaches_claude_jobs_outside_prompts(path, tmp_path):
+    """write_file, a redirection, cp, touch and mkdir, with the write dirs listed, a reserved entry listed, or
+    none: the job directories and the runner's state stay out of reach."""
+    ws = _write_ws(tmp_path)
+    (ws / "claude-jobs" / "job-20261027-101010-0a1b2c3d").mkdir()
+    path = path.format(W=ws)
+    for extra in ((), ("research",), ("claude-jobs/state", "claude-jobs", "research")):
+        assert not _write_path_allowed(
+            _internal(), {"path": path, "content": "x"}, str(ws), lineage_shell=True, extra_write_dirs=extra
+        )
+        for command in (f"echo x > {path}", f"cp {ws}/other/src.md {path}", f"touch {path}", f"mkdir -p {path}"):
+            assert _w(command, ws, extra=extra) is False, (command, extra)
+
+
+def test_a_repo_inside_an_extra_write_dir_is_not_a_build_repo(tmp_path):
+    ws = _write_ws(tmp_path)
+    (ws / "research" / "repo" / ".git").mkdir(parents=True)
+    (ws / "notes" / ".git").mkdir(parents=True)
+    for command, extra in (
+        ("cd research/repo && git status", ["research"]),
+        ("cd research/repo && pytest", ["research"]),
+        ("cd notes && git status", ["notes/s0"]),  # around a listed directory
+    ):
+        kw = {"workspace_dir": str(ws), "build_commands": True}
+        assert not lineage_bash_allowed(_internal(), command, extra_write_dirs=extra, **kw), command
+        assert lineage_bash_allowed(_internal(), command, **kw), command  # PIN: without the listing, a build repo
