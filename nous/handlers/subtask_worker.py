@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from nous.handlers.subtask_executor import HardenedRunState
 from datetime import UTC, datetime
+from uuid import UUID
 
 import httpx
 
@@ -27,8 +28,10 @@ from nous.brain import continuation, intentions
 from nous.cancellation import cancel_requested
 from nous.config import Settings
 from nous.events import Event, EventBus
+from nous.handlers import schedule_guard
 from nous.heart.heart import Heart
-from nous.heart.result_inbox import record_subtask_result
+from nous.heart.job_runs import FIX_KEY
+from nous.heart.result_inbox import close_intention_quietly, record_subtask_result
 from nous.storage.models import Subtask
 
 logger = logging.getLogger(__name__)
@@ -150,7 +153,9 @@ class SubtaskWorkerPool:
     # ------------------------------------------------------------------
 
     async def _process_subtask(self, subtask: Subtask) -> None:
-        """Execute subtask with timeout protection."""
+        """Execute subtask with timeout protection, unless its schedule's guard completes it."""
+        if await self._run_guard(subtask):
+            return
         timeout = subtask.timeout_seconds or self._settings.subtask_default_timeout
         try:
             await asyncio.wait_for(
@@ -197,11 +202,134 @@ class SubtaskWorkerPool:
             self._inflight_state.pop(subtask.id, None)
             await self._record_inbox(subtask)
 
+    async def _guard_spec(self, subtask: Subtask) -> schedule_guard.GuardSpec | None:
+        """The guard of the schedule this run is a plain fire of, or None.
+
+        The guard's name comes from this agent's schedule row at run time, never from
+        the run's own metadata or task text (the run only names its schedule), and its
+        command only from the owner's allowlist in Settings. A
+        check-and-fix run, or any run whose text is not the schedule's task, is never
+        guarded. A failed read means no guard.
+        """
+        if not self._settings.schedule_guards_enabled:
+            return None
+        meta = getattr(subtask, "metadata_", None)
+        if not isinstance(meta, dict) or not meta.get("schedule_id") or FIX_KEY in meta:
+            return None
+        try:
+            schedule = await self._heart.schedules.get(UUID(meta["schedule_id"]))
+        except Exception:
+            logger.warning("Could not read the schedule of subtask %s for its guard", subtask.id.hex[:8], exc_info=True)
+            return None
+        if schedule is None or schedule.agent_id != self._settings.agent_id or schedule.task != subtask.task:
+            return None
+        raw = (schedule.metadata_ or {}).get("guard")
+        spec = schedule_guard.parse_guard(raw, self._settings.schedule_guard_commands)
+        if spec is None and raw is not None:
+            commands = self._settings.schedule_guard_commands
+            logger.warning(
+                "Schedule %s has a guard naming %r, which is not one of the %d NOUS_SCHEDULE_GUARD_COMMANDS "
+                "entries %s; ignoring it",
+                schedule.id, raw.get("name") if isinstance(raw, dict) else raw, len(commands), sorted(commands),
+            )
+        return spec
+
+    async def _run_guard(self, subtask: Subtask) -> bool:
+        """Run the schedule's guard, if any. True when it completed the run with no model call, or when the
+        run's root was cancelled before the command started (then nothing runs).
+
+        Otherwise the guard's receipt is appended to the run's task text in memory
+        (the row is not changed) and the model turn runs as usual: fail open. Never
+        raises, except for cancellation.
+
+        Every run of the command that returns a result leaves a durable record
+        (``schedule_guard.record``): on a skip in ``report_jsonb.guard``, otherwise in a
+        ``subtask_guard_ran`` event that the event bus persists (best effort: no bus, a
+        full queue or a failed insert loses it, with a log line). A run cut short by a
+        cancellation has no result and leaves only the log line.
+        """
+        sid = subtask.id.hex[:8]
+        result: schedule_guard.GuardResult | None = None  # set only once spec is: the except below relies on it
+        try:
+            spec = await self._guard_spec(subtask)
+            if spec is None:
+                return False
+            if self._root_cancelled(subtask):
+                # cancel_root already cancelled the row; the guard command is a side effect, so don't start it.
+                logger.info("Subtask %s: its root was cancelled before its guard ran; not running it", sid)
+                return True
+            result = await schedule_guard.run_guard(spec)
+            if not schedule_guard.should_skip(spec, result):
+                # A script that could not run (126/127), was killed by a signal, or wrote to stderr
+                # with exit 0 (which blocks every skip) is as broken as one that timed out.
+                broken = (
+                    result.error
+                    or result.timed_out
+                    or spec.skip_when != schedule_guard.SKIP_WHEN_EXIT0_QUIET
+                    or result.exit_code in (126, 127)
+                    or (result.exit_code is not None and result.exit_code < 0)
+                    or (result.exit_code == 0 and bool(result.stderr.strip()))
+                )
+                (logger.warning if broken else logger.info)(
+                    "Guard of subtask %s did not certify a no-op (exit=%s timed_out=%s error=%s skip_when=%s); "
+                    "running the turn",
+                    sid, result.exit_code, result.timed_out, result.error, spec.skip_when,
+                )
+                subtask.task += schedule_guard.receipt(spec, result)
+                await self._record_guard_run(subtask, spec, result)
+                return False
+            text = schedule_guard.skip_text(spec, result)
+            await self._heart.subtasks.complete(
+                subtask.id, text,
+                final_outcome="completed",
+                report_jsonb={"guard_skipped": True, "guard": schedule_guard.record(spec, result, skipped=True)},
+                attempts=0, tokens_in=0, tokens_out=0, tool_calls_made=0,
+                delivered=True,  # nothing to deliver: no reconciler pass or pre_turn reads it
+            )
+        except (asyncio.CancelledError, Exception) as exc:
+            if isinstance(exc, asyncio.CancelledError) and cancel_requested():
+                raise
+            logger.exception("Guard of subtask %s failed; running the turn", sid)
+            if result is not None:  # the command ran, but the skip was not written
+                await self._record_guard_run(subtask, spec, result)
+            return False
+        # The row is completed: from here on nothing may send the run to the model.
+        try:
+            await self._emit_event("subtask_guard_skipped", subtask, result=text)
+            # No inbox row, memory or push for a run that did nothing, but its intention
+            # still closes, as the inbox writer would have closed it.
+            if getattr(self._settings, "result_inbox_enabled", False) is True:
+                await close_intention_quietly(
+                    self._heart.result_inbox, self._settings, intentions.SOURCE_SUBTASK, subtask.id
+                )
+        except Exception:
+            logger.exception("Subtask %s: skipped by its guard, but its event or intention close failed", sid)
+        logger.info("Subtask %s skipped by its schedule's guard", sid)
+        return True
+
+    def _root_cancelled(self, subtask: Subtask) -> bool:
+        """F099 2e: the owner cancelled this run's root. The runner's view, the one ``_authorize_tool_call``
+        refuses every tool call on, read for the root the run's turn would name."""
+        root = ExecutionContext.for_subtask(subtask, "").root_intention_id
+        return root is not None and self._runner.root_cancelled(root)
+
+    async def _record_guard_run(
+        self, subtask: Subtask, spec: schedule_guard.GuardSpec, result: schedule_guard.GuardResult
+    ) -> None:
+        """Persist the record of a guard run that did not skip the run. Never raises."""
+        try:
+            await self._emit_event(
+                "subtask_guard_ran", subtask, extra={"guard": schedule_guard.record(spec, result, skipped=False)}
+            )
+        except Exception:
+            logger.exception("Subtask %s: could not record its guard run", subtask.id.hex[:8])
+
     async def _record_inbox(self, subtask: Subtask) -> None:
         """F098: queue the finished result for the conversation that spawned it,
         and (Phase C) write it to memory.
 
-        One site for every worker path (hardened, legacy, timeout): the row
+        One site for every worker path that runs a turn (hardened, legacy,
+        timeout); a run its schedule's guard skipped never comes here. The row
         is re-read once so both writers see the status that was actually
         committed. Inline subtasks never come through here — their result is
         returned in the calling turn. The two writers are independent: each
@@ -507,8 +635,9 @@ class SubtaskWorkerPool:
         *,
         result: str | None = None,
         error: str | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
-        """Emit a subtask lifecycle event on the bus."""
+        """Emit a subtask lifecycle event on the bus. ``extra`` is merged into its data."""
         if self._bus is None:
             return
 
@@ -520,6 +649,8 @@ class SubtaskWorkerPool:
             data["result"] = result[:500]
         if error is not None:
             data["error"] = error[:500]
+        if extra:
+            data.update(extra)
 
         await self._bus.emit(Event(
             type=event_type,

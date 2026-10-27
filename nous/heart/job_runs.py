@@ -55,6 +55,10 @@ WHERE ts.agent_id = :agent_id AND ts.task_kind = 'subtask' AND ts.scorer_version
 # Lesson reads rest on final labels: a provisional (unsettled) score may still be rewritten by the scorer.
 _SETTLED = " AND ts.settled"
 
+# A run its schedule's guard skipped (F107) made no model call: it is neither an exemplar of a good
+# run nor a run that dilutes a job's bad-run rate.
+_NOT_GUARD_SKIPPED = " AND (s.report_jsonb->>'guard_skipped') IS NULL"
+
 _ACTIVE_BAD = f" AND sch.active AND sch.schedule_type = 'recurring' AND ts.outcome IN ({_BAD_SQL})"
 
 
@@ -137,9 +141,9 @@ class JobRunReader:
         return [_run(r) for r in (kept if limit is None else kept[:limit])]
 
     async def good_runs(self, schedule_id: str, *, before: datetime, since: datetime, limit: int = 3) -> list[JobRun]:
-        """Good runs of one job in ``[since, before)``, newest first."""
+        """Good runs of one job in ``[since, before)``, newest first; guard-skipped runs left out."""
         sql = (
-            _SELECT + _FROM + _SETTLED
+            _SELECT + _FROM + _SETTLED + _NOT_GUARD_SKIPPED
             + f" AND s.metadata->>'schedule_id' = :schedule_id AND ts.outcome IN ({_GOOD_SQL})"
             + " AND ts.finished_at >= :since AND ts.finished_at < :before ORDER BY ts.finished_at DESC LIMIT :limit"
         )
@@ -155,12 +159,14 @@ class JobRunReader:
         limit: int = 20,
         settled_only: bool = True,
     ) -> list[JobRun]:
-        """Scored runs of one job (``not_scored`` left out), newest first; ``after`` exclusive, ``until`` inclusive.
+        """Scored runs of one job (``not_scored`` and guard-skipped runs left out), newest first.
+
+        ``after`` is exclusive, ``until`` inclusive.
 
         Lesson reads use settled scores only; pass ``settled_only=False`` to include provisional ones.
         """
         sql = (
-            _SELECT + _FROM + (_SETTLED if settled_only else "")
+            _SELECT + _FROM + (_SETTLED if settled_only else "") + _NOT_GUARD_SKIPPED
             + " AND s.metadata->>'schedule_id' = :schedule_id AND ts.outcome <> 'not_scored'"
             + " AND (CAST(:after AS timestamptz) IS NULL OR ts.finished_at > CAST(:after AS timestamptz))"
             + " AND (CAST(:until AS timestamptz) IS NULL OR ts.finished_at <= CAST(:until AS timestamptz))"

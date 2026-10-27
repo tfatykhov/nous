@@ -99,8 +99,8 @@ def subtask_envelope(subtask: Any, body_max: int) -> Envelope | None:
             lines.append(f"Error: {subtask.error}")
         return Envelope("FAILURE", title, _cap("\n".join(lines) or "failed", body_max, hint))
 
-    if subtask.status != "completed":
-        return None
+    if subtask.status != "completed" or report.get("guard_skipped") is True:
+        return None  # F107: a run its schedule's guard skipped did nothing
 
     if outcome == "incomplete_blocked":
         lines = [f"Blocked: {report.get('blocked_reason') or 'no_reason_given'}"]

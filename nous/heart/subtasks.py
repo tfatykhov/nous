@@ -176,6 +176,8 @@ class SubtaskManager:
         tool_calls_made: int | None = None,
         # F062 addition — when None, payload_schema_valid is left untouched.
         payload_schema_valid: bool | None = None,
+        # F107: True for a run with nothing to deliver, so no reader picks it up.
+        delivered: bool | None = None,
     ) -> None:
         """Mark a subtask as completed with its result."""
         values: dict = {
@@ -197,6 +199,8 @@ class SubtaskManager:
             values["tool_calls_made"] = tool_calls_made
         if payload_schema_valid is not None:
             values["payload_schema_valid"] = payload_schema_valid
+        if delivered is not None:
+            values["delivered"] = delivered
 
         async with self._db.session() as session:
             # Audit DG-2/HT-4: do not resurrect an already-terminal row. A

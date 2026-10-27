@@ -139,6 +139,27 @@ async def test_good_runs_window_and_order(job_env):  # noqa: F811
     ]
 
 
+async def test_guard_skipped_runs_are_neither_good_nor_scored_runs(job_env):  # noqa: F811
+    from sqlalchemy import update
+
+    from nous.storage.models import Subtask
+
+    env = await job_env()
+    r = env.heart.job_runs
+    s = await make_schedule(env)
+    real = await make_run(env, s, outcome="done_self", age_hours=10)
+    skipped = await make_run(env, s, outcome="done_self", age_hours=5)
+    async with env.db.session() as session:  # as the guard writes a skip (F107)
+        await session.execute(
+            update(Subtask).where(Subtask.id == skipped.id).values(report_jsonb={"guard_skipped": True, "guard": {}})
+        )
+        await session.commit()
+    since = NOW - timedelta(days=1)
+    assert [x.subtask_id for x in await r.good_runs(s.id.hex, before=NOW, since=since)] == [real.id]
+    assert [x.subtask_id for x in await r.scored_runs(s.id.hex)] == [real.id]
+    assert [x.subtask_id for x in await r.scored_runs(s.id.hex, settled_only=False)] == [real.id]
+
+
 async def test_lesson_reads_ignore_provisional_scores(job_env):  # noqa: F811
     env = await job_env()
     r = env.heart.job_runs

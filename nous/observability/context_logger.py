@@ -2,15 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
 logger = logging.getLogger(__name__)
+
+# Each DB write is cut off after this long and at most this many run at once, so the
+# fire-and-forget writes can never hold the shared connection pool (the April 2026
+# heartbeat triage hang was blamed on contention with these writes).
+DB_WRITE_TIMEOUT_SECONDS = 30
+DB_WRITE_CONCURRENCY = 4
+
+# The call_type of a model call made on a forked runner (the heartbeat's checks, triage and
+# callbacks). Those calls share this ring with chat, so the chat views leave them out.
+HEARTBEAT_CALL_TYPE = "heartbeat"
 
 # Section markers in system prompt -> internal names
 SECTION_MARKERS: dict[str, str] = {
@@ -343,19 +355,42 @@ class ContextLogger:
         # and immediately discarded can be GC'd mid-flight — silently dropping
         # the INSERT/UPDATE. Track + auto-discard on completion.
         self._pending_tasks: set = set()
+        # The INSERT task of each entry still being written, so its response UPDATE
+        # runs after it (an UPDATE that ran first matched no row: a NULL response).
+        self._insert_tasks: dict[str, asyncio.Task] = {}
+        self._db_slots = asyncio.Semaphore(DB_WRITE_CONCURRENCY)
 
-    def _schedule_bg(self, coro) -> None:
-        """Run a DB coroutine fire-and-forget while retaining a strong ref."""
+    def _schedule_bg(self, coro) -> asyncio.Task | None:
+        """Run a DB coroutine fire-and-forget while retaining a strong ref. Returns the task, or None."""
         import asyncio
 
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             coro.close()  # no loop (sync context) — avoid "never awaited" warning
-            return
+            return None
         task = loop.create_task(coro)
         self._pending_tasks.add(task)
         task.add_done_callback(self._pending_tasks.discard)
+        return task
+
+    async def _bounded(self, make_write: Callable[[], Awaitable[Any]]) -> None:
+        """One DB write, within the concurrency cap and the timeout.
+
+        Takes a factory, not a coroutine: the write's coroutine is created only once a slot
+        is held, so none is left un-awaited when there is no loop or the task is cancelled
+        while queued.
+        """
+        try:
+            async with self._db_slots:
+                await asyncio.wait_for(make_write(), timeout=DB_WRITE_TIMEOUT_SECONDS)
+        except TimeoutError:
+            logger.warning("F035.4: context log DB write timed out after %ss", DB_WRITE_TIMEOUT_SECONDS)
+
+    async def _update_after_insert(self, insert: asyncio.Task | None, entry: ContextLogEntry) -> None:
+        if insert is not None:
+            await asyncio.wait([insert])  # never raises: a failed INSERT still lets the UPDATE try
+        await self._bounded(lambda: self._db_updater(entry))
 
     def _sync_entries_index(self) -> None:
         """REVIEW FIX P1-8: Sync _entries_by_id with deque to prevent memory leak."""
@@ -399,7 +434,11 @@ class ContextLogger:
         if self._payload_store and payload:
             self._payload_store.capture(session_id, entry.id, payload)
         if self._db_writer:
-            self._schedule_bg(self._db_writer(entry))
+            task = self._schedule_bg(self._bounded(lambda: self._db_writer(entry)))
+            if task is not None:
+                self._insert_tasks[entry.id] = task
+                entry_id = entry.id
+                task.add_done_callback(lambda _t: self._insert_tasks.pop(entry_id, None))
         return entry
 
     def update_response(
@@ -420,14 +459,18 @@ class ContextLogger:
             entry.cache_read_tokens = cache_read
             entry.duration_ms = duration_ms
             entry.stop_reason = stop_reason
-            # OB-3: persist the response columns (fire-and-forget, mirrors log()).
+            # OB-3: persist the response columns (fire-and-forget, after the entry's INSERT).
             if self._db_updater is not None:
-                self._schedule_bg(self._db_updater(entry))
+                self._schedule_bg(self._update_after_insert(self._insert_tasks.get(entry_id), entry))
 
-    def get_recent(self, session_id: str | None = None, limit: int = 20) -> list[ContextLogEntry]:
+    def get_recent(
+        self, session_id: str | None = None, limit: int = 20, exclude_call_type: str | None = None
+    ) -> list[ContextLogEntry]:
         entries = list(reversed(self._entries))
         if session_id:
             entries = [e for e in entries if e.session_id == session_id]
+        if exclude_call_type:
+            entries = [e for e in entries if e.call_type != exclude_call_type]
         return entries[:limit]
 
     def get_entry(self, entry_id: str) -> ContextLogEntry | None:

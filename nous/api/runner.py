@@ -69,6 +69,7 @@ from nous.cognitive.schemas import ToolResult, TurnContext, TurnResult
 from nous.config import Settings
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput
+from nous.observability.context_logger import HEARTBEAT_CALL_TYPE
 
 logger = logging.getLogger(__name__)
 
@@ -396,6 +397,7 @@ class AgentRunner:
         self._current_turn_number: int = 0
         self._current_frame_id: str = "unknown"
         self._current_call_type: str = "chat"
+        self._fork_call_type: str | None = None  # set by fork(): every call of a fork logs under it
         self._last_context_entry_id: str | None = None
 
         # F026: Execution Integrity
@@ -689,6 +691,11 @@ class AgentRunner:
         self._root_cancelled = view
         for fork in self._forks:
             fork.set_cancelled_roots(view)
+
+    def root_cancelled(self, root_id: UUID) -> bool:
+        """F099 2e: whether the view of cancelled roots says ``root_id`` was cancelled, as ``_authorize_tool_call``
+        reads it. For work that starts a side effect outside a tool call (a schedule's guard command)."""
+        return self._root_cancelled(root_id)
 
     def set_snapshot_store(self, store: Any, workspace_dir: str) -> None:
         """Phase 2.8: compensation snapshots for compensable calls in background contexts."""
@@ -1328,8 +1335,11 @@ class AgentRunner:
         self._api_shared = True
 
     def set_context_logger(self, ctx_logger: Any) -> None:
-        """F035.4: Set context logger."""
+        """F035.4: Set context logger. Propagated to the forks, so the heartbeat's model calls are logged too."""
         self._context_logger = ctx_logger
+        if self._settings.context_log_forks_enabled:
+            for fork in self._forks:
+                fork.set_context_logger(ctx_logger)
 
     def _get_context_window_size(self) -> int:
         """Get configured or auto-detected context window size."""
@@ -1366,11 +1376,17 @@ class AgentRunner:
         forked._workspace_dir = self._workspace_dir
         forked._action_review_pusher = self._action_review_pusher
         forked._root_cancelled = self._root_cancelled  # F099 2e: and set_cancelled_roots propagates a later view
+        # F035.4: the heartbeat's checks, triage and callbacks run on a fork; sharing
+        # the logger gives their model calls context_log rows. It was withheld after the
+        # April 2026 triage hang (0d1d45e3), when the logger's fire-and-forget writes held
+        # no strong ref and had no bound; they now have both (ContextLogger._bounded).
+        # NOUS_CONTEXT_LOG_FORKS_ENABLED=false restores the withholding.
+        if self._settings.context_log_forks_enabled:
+            forked._context_logger = self._context_logger
+        # The heartbeat is the only caller of fork(); its calls log as "heartbeat",
+        # so they stay out of the chat views of the shared ring.
+        forked._fork_call_type = HEARTBEAT_CALL_TYPE
         self._forks.add(forked)
-        # F035.4: Context logger NOT propagated to forks — heartbeat triage
-        # uses a dedicated API client on a separate connection pool, and the
-        # context logger's async DB writer can contend with triage DB sessions.
-        # Heartbeat calls are visible via event bus stats instead.
         return forked
 
     async def close(self) -> None:
@@ -2035,7 +2051,7 @@ class AgentRunner:
                 _entry = self._context_logger.log(
                     session_id=self._current_session_id,
                     turn_number=self._current_turn_number,
-                    call_type=self._current_call_type,
+                    call_type=self._fork_call_type or self._current_call_type,
                     model=payload.get("model", ""),
                     system_prompt=flat_system_prompt,
                     messages=messages,
@@ -2503,14 +2519,17 @@ class AgentRunner:
 
                     # F036.1: Update context log with per-segment usage (not cumulative)
                     if self._context_logger and self._last_context_entry_id:
-                        self._context_logger.update_response(
-                            entry_id=self._last_context_entry_id,
-                            input_tokens=_segment_usage.get("input_tokens"),
-                            output_tokens=_segment_usage.get("output_tokens"),
-                            cache_creation=_segment_usage.get("cache_creation_input_tokens"),
-                            cache_read=_segment_usage.get("cache_read_input_tokens"),
-                            stop_reason=stop_reason or None,
-                        )
+                        try:
+                            self._context_logger.update_response(
+                                entry_id=self._last_context_entry_id,
+                                input_tokens=_segment_usage.get("input_tokens"),
+                                output_tokens=_segment_usage.get("output_tokens"),
+                                cache_creation=_segment_usage.get("cache_creation_input_tokens"),
+                                cache_read=_segment_usage.get("cache_read_input_tokens"),
+                                stop_reason=stop_reason or None,
+                            )
+                        except Exception:
+                            logger.warning("F035.4: context log response update failed", exc_info=True)
                         self._last_context_entry_id = None  # Consumed
 
                     # Stream segment ended -- collect thinking blocks from this iteration
@@ -3326,14 +3345,17 @@ class AgentRunner:
 
             # F035.4: Update context log with response metadata
             if self._context_logger and self._last_context_entry_id and api_response.usage:
-                self._context_logger.update_response(
-                    entry_id=self._last_context_entry_id,
-                    input_tokens=api_response.usage.get("input_tokens"),
-                    output_tokens=api_response.usage.get("output_tokens"),
-                    cache_creation=api_response.usage.get("cache_creation_input_tokens"),
-                    cache_read=api_response.usage.get("cache_read_input_tokens"),
-                    stop_reason=api_response.stop_reason,
-                )
+                try:
+                    self._context_logger.update_response(
+                        entry_id=self._last_context_entry_id,
+                        input_tokens=api_response.usage.get("input_tokens"),
+                        output_tokens=api_response.usage.get("output_tokens"),
+                        cache_creation=api_response.usage.get("cache_creation_input_tokens"),
+                        cache_read=api_response.usage.get("cache_read_input_tokens"),
+                        stop_reason=api_response.stop_reason,
+                    )
+                except Exception:
+                    logger.warning("F035.4: context log response update failed", exc_info=True)
                 self._last_context_entry_id = None  # Consumed
 
             # Accumulate usage + calibrate token estimator
