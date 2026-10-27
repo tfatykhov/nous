@@ -6,7 +6,7 @@ import uuid
 from dataclasses import asdict
 
 import pytest
-from f099_dashboard_support import put_arrivals, put_intention
+from f099_dashboard_support import put_arrivals, put_inbox, put_intention
 from f099_support import (
     CONT,
     env_factory,  # noqa: F401
@@ -63,6 +63,21 @@ async def _world(env) -> dict[str, uuid.UUID]:
     ids["container"] = container.id
     failed = await put_intention(env, failed_tokens=999)  # 999 < 1000: still under the token budget
     ids["failed_tokens"] = failed.id
+    # The stall gate's two rules: an ask is skipped, and owner input in an arrival's batch resets the run.
+    ask_gap = await put_intention(env)  # False, ask, False: the ask takes no place in the window, so 2
+    await put_arrivals(env, ask_gap, [{"progress": False}, {"progress": True, "decision": "ask"}, {"progress": False}])
+    ids["ask_gap"] = ask_gap.id
+    for name, marker, decision in (
+        ("answered", "owner-answer:telegram:1", "continue"),
+        ("decision_reset", "owner-decision:rest", "continue"),
+        ("ask_answered", "owner-answer:telegram:1", "ask"),
+        ("look_alike", "not-owner-answer:x", "continue"),
+    ):
+        root = await put_intention(env)
+        row = await put_inbox(env, root, source_kind="intention_report", correlation_id=marker)
+        shown = {"progress": False, "decision": decision, "inbox_ids": [row.id]}
+        await put_arrivals(env, root, [{"progress": False}, {"progress": False}, shown])
+        ids[name] = root.id
     return ids
 
 
@@ -88,6 +103,9 @@ async def test_root_limits_many_equals_root_limits_for_every_root(env_factory): 
         "limit_spawns",
     }
     assert many[ids["stall_broken"]].stalls == 1 and many[ids["stall"]].stalls == 2
+    assert many[ids["ask_gap"]].escalate == "budget_stall"
+    assert [many[ids[name]].stalls for name in ("answered", "decision_reset", "ask_answered")] == [0, 0, 0]
+    assert many[ids["look_alike"]].escalate == "budget_stall"
 
 
 async def test_root_limits_many_counts_failed_tokens_subtasks_and_dags_like_root_limits(env_factory):  # noqa: F811

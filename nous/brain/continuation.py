@@ -516,6 +516,24 @@ async def eligible_roots(
     return [(row.root_id, row.due) for row in result if row.due is not None]
 
 
+def _owner_input_in_batch() -> ColumnElement[bool]:
+    """Whether an arrival's batch (``inbox_ids``) held an owner-written row: an ``intention_report`` INFORM whose
+    correlation id starts with one of ``OWNER_INPUT_PREFIXES`` (an answer, or the outcome of a proposal the owner
+    decided). Keyed on the batch, never on the row's ``arrival_id``: an answer to one arrival's question is shown
+    to the next arrival. Correlated to ``IntentionArrival``."""
+    return (
+        exists()
+        .where(
+            ResultInbox.agent_id == IntentionArrival.agent_id,
+            ResultInbox.id == any_(IntentionArrival.inbox_ids),
+            ResultInbox.source_kind == SOURCE_INTENTION_REPORT,
+            ResultInbox.msg_type == "INFORM",
+            or_(*(ResultInbox.correlation_id.startswith(prefix, autoescape=True) for prefix in OWNER_INPUT_PREFIXES)),
+        )
+        .correlate(IntentionArrival)
+    )
+
+
 async def root_limits(session: AsyncSession, agent_id: str, root_id: UUID, *, settings: Any) -> RootLimits:
     """Every budget of a root, read from rows (spec 4.6: "all budgets are derived from rows when checked").
 
@@ -524,6 +542,11 @@ async def root_limits(session: AsyncSession, agent_id: str, root_id: UUID, *, se
     ``tokens_consumed``), plus its DAGs' ``tokens_consumed`` (which Task 2c1-8 feeds with check-node usage),
     plus its arrivals' tokens, plus what its failed attempts spent (``failed_tokens``, 2e: a retried attempt
     writes no arrival row).
+
+    ``stalls`` is the trailing run of verified no-progress arrivals, newest first. An ``ask`` arrival is left out
+    of it in SQL (it neither counts nor breaks the run, even one the verifier credited, nor takes a place in the
+    ``continuation_stall_limit`` window), and an arrival whose batch held owner input (``_owner_input_in_batch``,
+    an ask included) ends the run.
     """
     depth, spawns, failed_tokens = (
         await session.execute(
@@ -569,26 +592,24 @@ async def root_limits(session: AsyncSession, agent_id: str, root_id: UUID, *, se
             ).where(IntentionArrival.agent_id == agent_id, IntentionArrival.root_id == root_id)
         )
     ).one()
+    owner_input = _owner_input_in_batch()
     progress = (
-        (
-            await session.execute(
-                select(IntentionArrival.progress)
-                .where(
-                    IntentionArrival.agent_id == agent_id,
-                    IntentionArrival.root_id == root_id,
-                    IntentionArrival.gate_reason.is_(None),
-                    IntentionArrival.progress.is_not(None),
-                )
-                .order_by(IntentionArrival.n.desc())
-                .limit(int(settings.continuation_stall_limit))
+        await session.execute(
+            select(IntentionArrival.progress, owner_input.label("owner_input"))
+            .where(
+                IntentionArrival.agent_id == agent_id,
+                IntentionArrival.root_id == root_id,
+                IntentionArrival.gate_reason.is_(None),
+                IntentionArrival.progress.is_not(None),
+                or_(IntentionArrival.decision.is_distinct_from("ask"), owner_input),
             )
+            .order_by(IntentionArrival.n.desc())
+            .limit(int(settings.continuation_stall_limit))
         )
-        .scalars()
-        .all()
-    )
+    ).all()
     stalls = 0
-    for verified in progress:  # the trailing run of verified no-progress arrivals, newest first
-        if verified is not False:
+    for verified, shown_owner_input in progress:  # the trailing run of verified no-progress arrivals, newest first
+        if shown_owner_input or verified is not False:
             break
         stalls += 1
     tokens = int(subtask_tokens) + int(dag_tokens) + int(arrival_tokens) + int(failed_tokens)
@@ -721,18 +742,21 @@ async def root_limits_many(
 ) -> dict[UUID, RootLimits]:
     """``root_limits`` for many roots in a fixed number of queries (3c, ruling R4): the aggregates as GROUP BY
     ``root_id``, the stall scan as one windowed query. Pinned equal to ``root_limits`` for every root in
-    ``tests/test_f099_phase3c_limits.py``. ``root_limits`` is not edited (#744), so the escalation ladder below is
-    a deliberate copy: change both together. An id that names no root gets zeros, as ``root_limits`` does.
+    ``tests/test_f099_phase3c_limits.py``. ``root_limits`` keeps its own queries (#744), so the stall scan and the
+    escalation ladder below are deliberate copies: change both together. An id that names no root gets zeros, as
+    ``root_limits`` does.
     Read-only."""
     ids = list(dict.fromkeys(root_ids))
     if not ids:
         return {}
     tallies = await _root_tallies(session, agent_id, ids)
     stall_limit = int(settings.continuation_stall_limit)
+    owner_input = _owner_input_in_batch()
     ranked = (
         select(
             IntentionArrival.root_id.label("root_id"),
             IntentionArrival.progress.label("progress"),
+            owner_input.label("owner_input"),
             func.row_number()
             .over(partition_by=IntentionArrival.root_id, order_by=IntentionArrival.n.desc())
             .label("rk"),
@@ -742,21 +766,22 @@ async def root_limits_many(
             IntentionArrival.root_id.in_(ids),
             IntentionArrival.gate_reason.is_(None),
             IntentionArrival.progress.is_not(None),
+            or_(IntentionArrival.decision.is_distinct_from("ask"), owner_input),
         )
         .subquery()
     )
     stalls: dict[UUID, int] = {rid: 0 for rid in ids}
     running: set[UUID] = set(ids)  # roots whose trailing run of verified no-progress arrivals is still unbroken
-    for rid, verified in (
+    for rid, verified, shown_owner_input in (
         await session.execute(
-            select(ranked.c.root_id, ranked.c.progress)
+            select(ranked.c.root_id, ranked.c.progress, ranked.c.owner_input)
             .where(ranked.c.rk <= stall_limit)
             .order_by(ranked.c.root_id, ranked.c.rk)
         )
     ).all():
         if rid not in running:
             continue
-        if verified is not False:
+        if shown_owner_input or verified is not False:
             running.discard(rid)
             continue
         stalls[rid] += 1
