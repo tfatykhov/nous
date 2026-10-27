@@ -504,6 +504,23 @@ async def test_rows_are_capped_at_200(reader_settings):
     assert f"first {MAX_ROWS} rows" in lines[-1]
 
 
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "select a.n from generate_series(1, 10000) a(n), generate_series(1, 10000) b(n)",
+        "with recursive t(n) as (select 1 union all select n + 1 from t where n < 100000000) select n from t",
+    ],
+    ids=["cross-join-100m", "recursive-100m"],
+)
+async def test_the_server_stops_after_201_rows(reader_settings, sql):
+    # 100 million rows: only the LIMIT in the server-side wrapper ends this inside the statement timeout. Without
+    # it the server produces every row and the call ends in 57014, so the content alone tells the two apart.
+    lines = (await run_db_query(reader_settings, sql)).splitlines()
+    assert lines[0] == "n", lines[:2]
+    assert len(lines) == 1 + MAX_ROWS + 1 and all(line.isdigit() for line in lines[1:-1]), lines[-1]
+    assert f"first {MAX_ROWS} rows" in lines[-1]
+
+
 async def test_the_server_cuts_each_cell_before_sending_it(reader_settings):
     # the bound on what crosses the wire: removing the server-side cut makes this cell 5000 characters long
     columns, rows, truncated = await execute_readonly(reader_settings, "select repeat('x', 5000) as c, null as d")
