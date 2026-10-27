@@ -16,6 +16,10 @@ services:
       - DB_USER=${NOUS_APP_DB_USER:-nous}
       - DB_PASSWORD=${NOUS_APP_DB_PASSWORD:-${DB_PASSWORD:-nous_dev_password}}
       - DB_NAME=nous
+      # The db_query tool's own read-only login (scripts/ops/db_roles.sql creates it). Without the password the
+      # tool is not offered.
+      - NOUS_READER_DB_USER=${NOUS_READER_DB_USER:-nous_reader}
+      - NOUS_READER_DB_PASSWORD=${NOUS_READER_DB_PASSWORD:-}
       # The agent's GitHub token: gh and git in the agent, and the built-in PR completion check
       # (python -m nous.dag.typed_checks), which needs it for a private repository.
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}

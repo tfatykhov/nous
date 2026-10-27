@@ -165,6 +165,7 @@ nous/
 │       ├── companion_assets.py # Agent-hosted asset overlay behind /dashboard/v2
 │       ├── compensation.py     # Harness 2.8: snapshots of side-effecting writes so a background mutation can be reverted (NOUS_COMPENSATION_ENABLED)
 │       ├── builtin_tools.py    # bash, read_file, write_file
+│       ├── db_query.py         # db_query: one read-only SELECT as the nous_reader login (scripts/ops/db_roles.sql); row, cell and output caps, ledger redaction
 │       ├── job_marks.py        # The only code that touches files in a Claude Code job dir: small marks (cancelled_by, nous_root) opened without following links
 │       ├── web_tools.py        # web_search, web_fetch (multi-tier routing)
 │       ├── injection_screen.py # F103: flag-only prompt-injection + secret screen over web_fetch / browser_task results

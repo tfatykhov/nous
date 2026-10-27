@@ -221,6 +221,7 @@ FRAME_TOOLS: dict[str, list[str]] = {
         "web_fetch",
         "browser_task",  # F100; registered only when NOUS_BROWSER_TASK_ENABLED
         "cache_retrieve",
+        "db_query",  # registered only with NOUS_READER_DB_PASSWORD
         "spawn_task",
         "spawn_sync",
         "schedule_task",
@@ -255,6 +256,7 @@ FRAME_TOOLS: dict[str, list[str]] = {
         "web_search",
         "web_fetch",
         "cache_retrieve",
+        "db_query",  # registered only with NOUS_READER_DB_PASSWORD
         "list_tasks",
         "cancel_task",
         "run_python",
@@ -276,6 +278,7 @@ FRAME_TOOLS: dict[str, list[str]] = {
         "web_search",
         "web_fetch",
         "cache_retrieve",
+        "db_query",  # registered only with NOUS_READER_DB_PASSWORD
         "list_tasks",
         "cancel_task",
         "dag_manage",
@@ -305,6 +308,7 @@ FRAME_TOOLS: dict[str, list[str]] = {
         "web_search",
         "web_fetch",
         "cache_retrieve",
+        "db_query",  # registered only with NOUS_READER_DB_PASSWORD
         "spawn_task",
         "spawn_sync",
         "schedule_task",

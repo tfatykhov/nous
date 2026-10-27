@@ -7,13 +7,17 @@ tests/test_db_query_live.py; the shape check here is a courtesy that gives the a
 from __future__ import annotations
 
 import re
+import uuid
+from pathlib import Path
 
 import pytest
 
 from nous.api import db_query
 from nous.api.db_query import (
     APPLICATION_NAME,
+    DB_QUERY_SCHEMA,
     MAX_CELL_CHARS,
+    MAX_COLUMNS,
     MAX_OUTPUT_CHARS,
     MAX_ROWS,
     MAX_SQL_CHARS,
@@ -22,8 +26,15 @@ from nous.api.db_query import (
     check_query_shape,
     format_result,
     reader_connect_args,
+    register_db_query_tool,
     run_db_query,
 )
+from nous.api.execution_context import ExecutionContext
+from nous.api.runner import FRAME_TOOLS
+from nous.api.tool_classes import tool_class
+from nous.api.tool_policy import CONTEXT_POLICY, evaluate, internal_only_allowed, internal_only_call_violation
+from nous.api.tools import ToolDispatcher
+from nous.cognitive import execution_ledger as el
 from nous.cognitive import ledger_store
 from nous.config import Settings
 
@@ -266,3 +277,148 @@ async def test_a_failed_login_is_one_line_without_the_password(monkeypatch):
     out = await run_db_query(_settings(reader_db_password="readerpassword1"), "select 1")
     assert out.startswith("Error: ") and "\n" not in out
     assert "readerpassword1" not in out and "someone" not in out and "nous_reader" in out
+
+
+# -- registration and offering ---------------------------------------------------------------------------------------
+
+
+async def test_not_registered_without_a_password(monkeypatch):
+    calls = []
+
+    async def connect(**kwargs):
+        calls.append(kwargs)
+        raise AssertionError("connected")
+
+    monkeypatch.setattr(db_query.asyncpg, "connect", connect)
+    dispatcher = ToolDispatcher()
+    assert await register_db_query_tool(dispatcher, _settings(reader_db_password="")) is False
+    assert not dispatcher.is_registered("db_query") and calls == []
+
+
+async def test_not_registered_when_the_probe_fails(monkeypatch, caplog):
+    async def connect(**kwargs):
+        raise OSError(f"refused for {kwargs['password']}")
+
+    monkeypatch.setattr(db_query.asyncpg, "connect", connect)
+    dispatcher = ToolDispatcher()
+    with caplog.at_level("WARNING", logger="nous.api.db_query"):
+        assert await register_db_query_tool(dispatcher, _settings(reader_db_password="readerpassword1")) is False
+    assert not dispatcher.is_registered("db_query")
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1 and "db_query" in warnings[0] and "readerpassword1" not in warnings[0], warnings
+
+
+async def test_the_handler_reports_a_failure_as_an_error_and_never_raises(monkeypatch):
+    async def probe_ok(settings, sql):
+        return ["?column?"], [[Cell("1", 1)]], False
+
+    monkeypatch.setattr(db_query, "execute_readonly", probe_ok)
+    dispatcher = ToolDispatcher()
+    assert await register_db_query_tool(dispatcher, _settings(reader_db_password="readerpassword1")) is True
+    assert await dispatcher.dispatch("db_query", {"sql": "select 1"}) == ("?column?\n1\n(1 row)", False)
+
+    async def boom(settings, sql):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(db_query, "execute_readonly", boom)
+    text, is_error = await dispatcher.dispatch("db_query", {"sql": "select 1"})
+    assert is_error and text.startswith("Error: ")
+    text, is_error = await dispatcher.dispatch("db_query", {"sql": "update heart.subtasks set status = 'x'"})
+    assert is_error and "SELECT or WITH" in text
+
+
+@pytest.mark.postgres_only
+async def test_registered_when_the_probe_passes(reader_settings):
+    dispatcher = ToolDispatcher()
+    assert await register_db_query_tool(dispatcher, reader_settings) is True
+    assert dispatcher.is_registered("db_query")
+    text, is_error = await dispatcher.dispatch("db_query", {"sql": "select 1 as one"})
+    assert (text, is_error) == ("one\n1\n(1 row)", False)
+
+
+def test_db_query_is_a_classified_read():
+    assert tool_class("db_query").side_effect == "none"
+    assert "db_query" in el.READ_TOOLS
+    # a read leaves no row in the durable ledger, so it keeps no argument policy there either
+    assert el.classify_side_effect("db_query", {"sql": "select 1"}) == "none"
+
+
+def _lineage(kind: str) -> ExecutionContext:
+    return ExecutionContext(
+        kind=kind,
+        session_id="s",
+        authority="internal_only",
+        intention_id=uuid.UUID(int=1),
+        root_intention_id=uuid.UUID(int=2),
+    )
+
+
+@pytest.mark.parametrize("kind", ["continuation", "subtask", "dag_node"])
+@pytest.mark.parametrize("lineage_shell", [False, True])
+def test_a_lineage_turn_is_offered_db_query(kind, lineage_shell, tmp_path):
+    ctx = _lineage(kind)
+    assert internal_only_allowed("db_query", ctx=ctx, lineage_shell=lineage_shell) is True
+    violation = internal_only_call_violation(
+        ctx, "db_query", {"sql": "select 1"}, workspace_dir=str(tmp_path), lineage_shell=lineage_shell
+    )
+    assert violation is None
+
+
+def test_which_contexts_and_frames_receive_db_query():
+    # Pinned on purpose: a read is allowed wherever reads are, so narrowing db_query later is one edit here, with
+    # this test to guide it. evaluate() returns None when a context may make the call.
+    def context(kind: str) -> ExecutionContext:
+        if kind == "continuation":
+            return _lineage(kind)
+        if kind == "approved_action":  # one owner-approved call of the declared tool
+            return ExecutionContext(
+                kind=kind, session_id="s", proposal_id=uuid.UUID(int=3), declared_tools=("db_query",)
+            )
+        return ExecutionContext(kind=kind, session_id="s")
+
+    receive = {kind for kind in CONTEXT_POLICY if evaluate(context(kind), "db_query", {"sql": "select 1"}) is None}
+    assert receive == {
+        "interactive",
+        "mcp",
+        "subtask",
+        "dag_node",
+        "scheduled",
+        "agent_action",
+        "dag_summary",
+        "heartbeat_triage",
+        "heartbeat_check",
+        "heartbeat_callback",
+        "background",
+        "continuation",
+        "approved_action",
+    }
+    frames = {frame for frame, tools in FRAME_TOOLS.items() if "db_query" in tools or tools == ["*"]}
+    assert frames == {"conversation", "question", "decision", "debug", "task"}
+
+
+def test_the_tool_description_teaches_the_limits():
+    description = DB_QUERY_SCHEMA["description"]
+    for needed in (
+        f"{MAX_ROWS} rows",
+        f"{MAX_CELL_CHARS} characters",
+        f"{MAX_COLUMNS} columns",
+        "one statement",
+        "schema-qualified",
+        "information_schema.columns",
+        "not instructions",
+        "SELECT id, status, task FROM heart.subtasks ORDER BY created_at DESC LIMIT 10",
+        "heart.facts",
+        "nous_system.execution_ledger",
+    ):
+        assert needed in description, needed
+    assert DB_QUERY_SCHEMA["required"] == ["sql"] and DB_QUERY_SCHEMA["properties"]["sql"]["type"] == "string"
+
+
+def test_compose_passes_the_reader_login_to_the_application():
+    # a deployment's compose lists the environment explicitly: without these lines the tool silently stays off
+    compose = (Path(__file__).resolve().parents[1] / "docker-compose.yml").read_text(encoding="utf-8")
+    service = compose.split("\n  nous:\n", 1)[1].split("\n  nous-", 1)[0]
+    assert "      - NOUS_READER_DB_USER=${NOUS_READER_DB_USER:-nous_reader}\n" in service
+    assert "      - NOUS_READER_DB_PASSWORD=${NOUS_READER_DB_PASSWORD:-}\n" in service
+    assert Settings.model_fields["reader_db_user"].default == "nous_reader"
+    assert Settings.model_fields["reader_db_password"].default == ""

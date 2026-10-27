@@ -942,6 +942,15 @@ async def create_components(settings: Settings) -> dict:
 
     register_cache_retrieve_tool(dispatcher, database.session_factory)
 
+    # db_query: read-only SQL as its own database login, offered only with NOUS_READER_DB_PASSWORD and a login
+    # that passes the reader check. It never blocks start-up.
+    try:
+        from nous.api.db_query import register_db_query_tool
+
+        await register_db_query_tool(dispatcher, settings)
+    except Exception:
+        logger.exception("db_query registration failed; the tool is not offered")
+
     # 008: Register identity tools (gated by "initiation" frame)
     from nous.identity.tools import register_identity_tools
 
