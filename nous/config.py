@@ -28,6 +28,29 @@ PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS = 2.0
 DEFAULT_GITHUB_REPO = "tfatykhov/nous"
 _GITHUB_REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 
+# NOUS_F099_LINEAGE_WRITE_DIRS: workspace directories no entry may name or lie in. claude-jobs holds runner.sh,
+# repos.json and the job directories; each root's lineage writes its own intentions/<root>/ (an entry there would
+# give one lineage another's); plugins/ is code a launched job loads.
+LINEAGE_WRITE_DIR_RESERVED = frozenset({"claude-jobs", "intentions", "plugins"})
+# Plain relative components: no empty, `.`, `..` or hidden one, none starting with `-` (an option to mkdir or cp),
+# and nothing the lineage shell's reader refuses or expands (a space, `~`, a glob, a quote, a backslash).
+_LINEAGE_WRITE_DIR_ENTRY = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)*")
+
+
+def lineage_write_dir_entry_problem(entry: str) -> str | None:
+    """Why ``entry`` cannot be a NOUS_F099_LINEAGE_WRITE_DIRS directory, or None. A trailing ``/`` is ignored.
+
+    Only the text: ``tool_policy.lineage_write_dirs`` resolves each entry again at every call (a symlink out of the
+    workspace, into a reserved directory or onto a file is dropped there)."""
+    if entry.startswith("/"):
+        return "an absolute path"
+    entry = entry.rstrip("/")
+    if not _LINEAGE_WRITE_DIR_ENTRY.fullmatch(entry):
+        return "not a plain workspace-relative path (letters, digits, _ . -; no empty, hidden, . or .. component)"
+    if entry.split("/")[0] in LINEAGE_WRITE_DIR_RESERVED:
+        return f"inside {entry.split('/')[0]}/, which no lineage may write"
+    return None
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -1298,6 +1321,36 @@ class Settings(BaseSettings):
     # check|format --check and make <target> in a repo's top level, each with a closed option map
     # (tool_policy._build_allowed); the command runs without the GitHub token. Off: the shell is as before.
     f099_lineage_build_commands: bool = True
+    # F099 lineage write dirs: workspace-relative directories (a comma list in env) every lineage may also write
+    # into, with write_file, a redirection, or the lineage shell's mkdir -p / touch / cp. An entry that names or
+    # lies in claude-jobs, intentions or plugins, the workspace root, an absolute path, a `..` or hidden component
+    # is dropped with a WARNING (lineage_write_dir_entry_problem); tool_policy.lineage_write_dirs resolves the rest
+    # again at every call. Empty: as before.
+    f099_lineage_write_dirs: Annotated[list[str], NoDecode] = Field(default_factory=list)
+
+    @field_validator("f099_lineage_write_dirs", mode="before")
+    @classmethod
+    def _parse_lineage_write_dirs(cls, v: object) -> list[str]:
+        """Split the env string ourselves and drop every entry that is not a plain workspace directory."""
+        log = logging.getLogger(__name__)
+        if v is None:
+            return []
+        if isinstance(v, str):
+            v = v.split(",")
+        if not isinstance(v, (list, tuple)):
+            log.warning("NOUS_F099_LINEAGE_WRITE_DIRS is not a comma list; no extra write dir is allowed")
+            return []
+        kept: list[str] = []
+        for item in v:
+            entry = item.strip() if isinstance(item, str) else item
+            if entry == "":
+                continue
+            problem = lineage_write_dir_entry_problem(entry) if isinstance(entry, str) else "not a string"
+            if problem is not None:
+                log.warning("NOUS_F099_LINEAGE_WRITE_DIRS: dropped %r: %s", entry, problem)
+            elif entry.rstrip("/") not in kept:
+                kept.append(entry.rstrip("/"))
+        return kept
 
     # F098 Phase C: result memory — a finished background subtask result
     # becomes an episode (+ document chunks), so recall_deep can find it.

@@ -563,6 +563,7 @@ class AgentRunner:
                     workspace_dir=self._settings.workspace_dir,
                     lineage_shell=self._settings.f099_lineage_shell,
                     build_commands=self._settings.f099_lineage_build_commands,
+                    extra_write_dirs=self._settings.f099_lineage_write_dirs,
                 )
             if strict is not None:
                 scope = "internal_only" if ctx.authority == AUTHORITY_INTERNAL else ctx.kind
@@ -583,7 +584,10 @@ class AgentRunner:
                 text = f"Tool error: '{tool_name}' is not allowed in this turn ({strict})."
                 if strict == "write_path":
                     text += " " + tool_policy.write_path_refusal_hint(
-                        ctx, self._settings.workspace_dir, lineage_shell=self._settings.f099_lineage_shell
+                        ctx,
+                        self._settings.workspace_dir,
+                        lineage_shell=self._settings.f099_lineage_shell,
+                        extra_write_dirs=self._settings.f099_lineage_write_dirs,
                     )
                 elif strict == "external" and tool_name == "bash" and ctx.authority == AUTHORITY_INTERNAL:
                     text += " " + tool_policy.lineage_bash_refusal_hint(
@@ -654,7 +658,13 @@ class AgentRunner:
         if violation is None:
             if policy_mode == "off":
                 return None
-            violation = tool_policy.evaluate(ctx, tool_name, tool_input, workspace_dir=self._settings.workspace_dir)
+            violation = tool_policy.evaluate(
+                ctx,
+                tool_name,
+                tool_input,
+                workspace_dir=self._settings.workspace_dir,
+                extra_write_dirs=self._settings.f099_lineage_write_dirs,
+            )
         if violation is None:
             return None
         # not_compensable is a safety invariant, not a policy preference: block
