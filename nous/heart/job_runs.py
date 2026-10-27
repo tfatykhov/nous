@@ -159,8 +159,9 @@ class JobRunReader:
         limit: int = 20,
         settled_only: bool = True,
     ) -> list[JobRun]:
-        """Scored runs of one job (``not_scored`` and guard-skipped runs left out), newest first; ``after`` exclusive,
-        ``until`` inclusive.
+        """Scored runs of one job (``not_scored`` and guard-skipped runs left out), newest first.
+
+        ``after`` is exclusive, ``until`` inclusive.
 
         Lesson reads use settled scores only; pass ``settled_only=False`` to include provisional ones.
         """

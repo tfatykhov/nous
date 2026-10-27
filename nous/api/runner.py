@@ -1376,10 +1376,10 @@ class AgentRunner:
         # April 2026 triage hang (0d1d45e3), when the logger's fire-and-forget writes held
         # no strong ref and had no bound; they now have both (ContextLogger._bounded).
         # NOUS_CONTEXT_LOG_FORKS_ENABLED=false restores the withholding.
-        # The heartbeat is the only caller of fork(); its calls log as "heartbeat",
-        # so they stay out of the chat views of the shared ring.
         if self._settings.context_log_forks_enabled:
             forked._context_logger = self._context_logger
+        # The heartbeat is the only caller of fork(); its calls log as "heartbeat",
+        # so they stay out of the chat views of the shared ring.
         forked._fork_call_type = HEARTBEAT_CALL_TYPE
         self._forks.add(forked)
         return forked

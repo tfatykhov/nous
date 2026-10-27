@@ -2284,9 +2284,9 @@ class Settings(BaseSettings):
     # The commands a guard may run, as a JSON map of name -> shell command
     # (NOUS_SCHEDULE_GUARD_COMMANDS='{"ledger_sweep": "bash /path/sweep.sh"}'). A
     # schedule's metadata.guard only names an entry, so the agent, which can write
-    # schedule rows, can never choose what runs. Empty, invalid JSON or a non-object
-    # gives no commands (a WARNING; every guard falls through), never a boot failure;
-    # an entry whose name or command is not a non-empty string is dropped.
+    # schedule rows, can never choose what runs. Unset or empty gives no commands;
+    # so does invalid JSON or a non-object, with a WARNING; never a boot failure. An
+    # entry whose name or command is not a non-empty string is dropped (WARNING).
     schedule_guard_commands: Annotated[dict[str, str], NoDecode] = Field(default_factory=dict)
 
     @field_validator("schedule_guard_commands", mode="before")
@@ -2309,9 +2309,8 @@ class Settings(BaseSettings):
             return {}
         kept = {k: c for k, c in v.items() if isinstance(k, str) and k and isinstance(c, str) and c.strip()}
         if len(kept) != len(v):
-            log.warning(
-                "NOUS_SCHEDULE_GUARD_COMMANDS: dropped %d entries that are not name -> command", len(v) - len(kept)
-            )
+            dropped = sorted(repr(k) for k in v if k not in kept)
+            log.warning("NOUS_SCHEDULE_GUARD_COMMANDS: dropped entries that are not name -> command: %s", dropped)
         return kept
 
     # F064.6: work-queue ingress heartbeat check. Off by default. When true,

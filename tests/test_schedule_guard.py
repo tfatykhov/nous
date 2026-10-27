@@ -240,6 +240,16 @@ async def test_a_timeout_falls_through_and_kills_the_commands_children(tmp_path)
     assert not marker.exists()
 
 
+async def test_a_timeout_kills_a_background_child_after_its_shell_has_exited(tmp_path):
+    # The shell is gone (returncode set) but its child holds stdout: the group is still killed.
+    marker = tmp_path / "survived"
+    record: dict = {}
+    await _falls_through(_guard(f"(sleep 2; touch {marker}) & exit 0", timeout_seconds=1), record=record)
+    assert record["timed_out"] is True
+    await asyncio.sleep(2)
+    assert not marker.exists()
+
+
 async def test_a_timeout_returns_soon_when_an_escaped_child_holds_stdout(tmp_path, monkeypatch):
     # `setsid` puts the child outside the command's process group, so the group kill
     # misses it and it keeps stdout open; the wait for the pipes must still be bounded.
@@ -254,6 +264,63 @@ async def test_a_timeout_returns_soon_when_an_escaped_child_holds_stdout(tmp_pat
     finally:
         with contextlib.suppress(ValueError, OSError):
             os.kill(int(pidfile.read_text()), signal.SIGKILL)
+
+
+async def test_a_timeout_and_a_cancellation_use_the_bounded_group_kill(monkeypatch):
+    # The escaped-child test above relies on 3.12's proc.wait(); this holds on any version.
+    killed = []
+
+    async def spy(proc, **kw):
+        killed.append(proc.pid)
+        await nous_utils.kill_process_group(proc, **kw)
+
+    monkeypatch.setattr(schedule_guard, "kill_process_group", spy)
+    assert (await schedule_guard.run_guard(_spec("sleep 30", timeout_seconds=1))).timed_out
+    task = asyncio.create_task(schedule_guard.run_guard(_spec("sleep 30", timeout_seconds=30)))
+    await asyncio.sleep(0.3)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(killed) == 2
+
+
+async def test_a_cancelled_guard_returns_soon_when_an_escaped_child_holds_stdout(tmp_path, monkeypatch):
+    monkeypatch.setattr(nous_utils, "_KILL_WAIT_SECONDS", 0.5)
+    pidfile = tmp_path / "pid"
+    spec = _spec(f"setsid sleep 30 & echo $! > {pidfile}; sleep 30", timeout_seconds=30)
+    task = asyncio.create_task(schedule_guard.run_guard(spec))
+    try:
+        for _ in range(100):
+            if pidfile.exists() and pidfile.read_text().strip():
+                break
+            await asyncio.sleep(0.05)
+        start = time.monotonic()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=10)
+        assert time.monotonic() - start < 5
+    finally:
+        with contextlib.suppress(ValueError, OSError):
+            os.kill(int(pidfile.read_text()), signal.SIGKILL)
+
+
+@pytest.mark.parametrize(
+    ("command", "level"),
+    [("exit 1", "INFO"), ("exit 127", "WARNING"), ("kill -9 $$", "WARNING"), ("echo oops >&2", "WARNING")],
+)
+async def test_a_guard_that_looks_broken_falls_through_at_warning(command, level, caplog):
+    caplog.set_level("INFO", logger=worker_mod.logger.name)
+    await _falls_through(_guard(command))
+    [rec] = [r for r in caplog.records if "did not certify a no-op" in r.getMessage()]
+    assert rec.levelname == level
+
+
+async def test_a_guard_naming_no_allowlist_entry_warns_with_the_name(caplog):
+    schedule = _schedule({"name": "ledger_swep", "skip_when": "exit0_quiet"})
+    schedule.commands = {NAME: "true"}
+    await _unguarded(schedule, _run(schedule))
+    [rec] = [r for r in caplog.records if r.levelname == "WARNING" and "ledger_swep" in r.getMessage()]
+    assert NAME in rec.getMessage()
 
 
 async def test_a_guard_that_raises_falls_through(monkeypatch):
@@ -296,7 +363,9 @@ async def test_a_failed_record_never_fails_the_turn():
 
 async def test_stderr_alone_with_exit_0_falls_through_with_it_in_the_receipt():
     # a `...; true` script reports a failure only on stderr
-    task = await _falls_through(_guard("echo 'git: not found' >&2; true"))
+    record: dict = {}
+    task = await _falls_through(_guard("echo 'git: not found' >&2; true"), record=record)
+    assert (record["exit_code"], record["stderr_head"], record["stderr_bytes"]) == (0, "git: not found\n", 15)
     assert "exit: 0" in task
     assert "git: not found" in task
 

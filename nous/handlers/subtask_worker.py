@@ -226,8 +226,11 @@ class SubtaskWorkerPool:
         raw = (schedule.metadata_ or {}).get("guard")
         spec = schedule_guard.parse_guard(raw, self._settings.schedule_guard_commands)
         if spec is None and raw is not None:
+            commands = self._settings.schedule_guard_commands
             logger.warning(
-                "Schedule %s has a guard that names no NOUS_SCHEDULE_GUARD_COMMANDS entry; ignoring it", schedule.id
+                "Schedule %s has a guard naming %r, which is not one of the %d NOUS_SCHEDULE_GUARD_COMMANDS "
+                "entries %s; ignoring it",
+                schedule.id, raw.get("name") if isinstance(raw, dict) else raw, len(commands), sorted(commands),
             )
         return spec
 
@@ -238,20 +241,29 @@ class SubtaskWorkerPool:
         (the row is not changed) and the model turn runs as usual: fail open. Never
         raises, except for cancellation.
 
-        Every run of the command leaves a durable record (``schedule_guard.record``):
-        on a skip in ``report_jsonb.guard``, otherwise in a persisted
-        ``subtask_guard_ran`` event.
+        Every run of the command that returns a result leaves a durable record
+        (``schedule_guard.record``): on a skip in ``report_jsonb.guard``, otherwise in a
+        ``subtask_guard_ran`` event that the event bus persists (best effort: no bus, a
+        full queue or a failed insert loses it, with a log line). A run cut short by a
+        cancellation has no result and leaves only the log line.
         """
         sid = subtask.id.hex[:8]
-        result = None
+        result: schedule_guard.GuardResult | None = None  # set only once spec is: the except below relies on it
         try:
             spec = await self._guard_spec(subtask)
             if spec is None:
                 return False
             result = await schedule_guard.run_guard(spec)
             if not schedule_guard.should_skip(spec, result):
+                # A script that could not run (126/127), was killed by a signal, or wrote to stderr
+                # with exit 0 (which blocks every skip) is as broken as one that timed out.
                 broken = (
-                    result.error or result.timed_out or spec.skip_when != schedule_guard.SKIP_WHEN_EXIT0_QUIET
+                    result.error
+                    or result.timed_out
+                    or spec.skip_when != schedule_guard.SKIP_WHEN_EXIT0_QUIET
+                    or result.exit_code in (126, 127)
+                    or (result.exit_code is not None and result.exit_code < 0)
+                    or (result.exit_code == 0 and bool(result.stderr.strip()))
                 )
                 (logger.warning if broken else logger.info)(
                     "Guard of subtask %s did not certify a no-op (exit=%s timed_out=%s error=%s skip_when=%s); "

@@ -8,11 +8,12 @@ its own ``metadata``, which names an entry of the owner's allowlist ``NOUS_SCHED
 The command itself comes only from the allowlist (env), never from the row: the agent can write
 schedule rows through its shell and database access, so the row may only choose among commands
 the owner approved. A name that is not in the allowlist means no guard. The subtask worker runs
-the command before the run's model turn. When the command certifies there is
-nothing to do (``exit0_quiet``: exit 0 and whitespace-only stdout and stderr) the run completes with no model
-call. Any other result (non-zero exit, output on either stream, timeout, an unknown ``skip_when``, an error starting the
-command) fails open: the model turn runs as before, with ``receipt()`` appended to its task text so the
-model does not need to run the command again. ``NOUS_SCHEDULE_GUARDS_ENABLED=false`` ignores guards.
+the command before the run's model turn. When the command certifies there is nothing to do
+(``exit0_quiet``: exit 0 and whitespace-only stdout and stderr) the run completes with no model
+call. Any other result (non-zero exit, output on either stream, timeout, an unknown ``skip_when``,
+an error starting the command) fails open: the model turn runs as before, with ``receipt()``
+appended to its task text so the model does not need to run the command again.
+``NOUS_SCHEDULE_GUARDS_ENABLED=false`` ignores guards.
 """
 
 from __future__ import annotations
@@ -102,9 +103,10 @@ def _clip(text: str, limit: int = OUTPUT_MAX_BYTES) -> str:
 async def run_guard(spec: GuardSpec) -> GuardResult:
     """Run the guard command with a hard timeout. Never raises, except for cancellation.
 
-    On timeout or cancellation the command's whole process group is killed and the wait for
-    it is bounded (``kill_process_group``), so a child that left the group and still holds
-    the pipes cannot keep the worker waiting.
+    On timeout or cancellation the command's whole process group is killed, even when the
+    shell itself has already exited and only a background child of it holds the pipes
+    (``even_if_exited``), and the wait for it is bounded (``kill_process_group``), so a child
+    that left the group and still holds the pipes cannot keep the worker waiting either.
     """
     start = time.monotonic()
 
@@ -124,13 +126,13 @@ async def run_guard(spec: GuardSpec) -> GuardResult:
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=spec.timeout_seconds)
     except TimeoutError:
-        await kill_process_group(proc)
+        await kill_process_group(proc, even_if_exited=True)
         return GuardResult(None, "", "", elapsed(), timed_out=True)
     except Exception as exc:
-        await kill_process_group(proc)
+        await kill_process_group(proc, even_if_exited=True)
         return GuardResult(None, "", "", elapsed(), error=f"{type(exc).__name__}: {exc}")
     except BaseException:
-        await kill_process_group(proc)
+        await kill_process_group(proc, even_if_exited=True)
         raise
     return GuardResult(
         proc.returncode,
@@ -145,12 +147,12 @@ async def run_guard(spec: GuardSpec) -> GuardResult:
 def record(spec: GuardSpec, result: GuardResult, *, skipped: bool) -> dict[str, Any]:
     """The durable record of one run of the guard (JSON-ready).
 
-    ``stderr_head`` is the first 512 bytes of stderr, passed through the ledger's error
-    redaction since it is stored as written.
+    ``stderr_head`` is the first ``STDERR_HEAD_BYTES`` of stderr; it and ``command`` pass through
+    the ledger's error redaction since they are stored as written.
     """
     return {
         "name": spec.name,
-        "command": spec.command,
+        "command": redact_error_text(spec.command),
         "skip_when": spec.skip_when,
         "timeout_seconds": spec.timeout_seconds,
         "exit_code": result.exit_code,
