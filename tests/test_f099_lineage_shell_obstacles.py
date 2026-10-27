@@ -358,3 +358,237 @@ def test_the_hint_names_the_accepted_runner_forms():
         for needle in ("bash <workspace>/claude-jobs/runner.sh", "./runner.sh", "cd <workspace>/claude-jobs &&"):
             assert needle in hint
         assert "no $(...), no globs" in hint
+
+
+# -- read programs: test, [, basename, dirname, date, diff -------------------------------------------------------
+
+
+def _read_ws(tmp_path):
+    for name in ("a.md", "b.md", "c.md", "sub/a.md", "sub/b.md", "dir1/x", "dir2/x", "dir1/.secret", "dir2/.secret"):
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(name)
+    (tmp_path / ".env").write_text("SECRET=1")
+    (tmp_path / "intentions").mkdir()
+    return tmp_path
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "test -f {W}/a.md",
+        "test -d {W}/intentions",
+        "test ! -e {W}/nope",
+        "test -s {W}/a.md && cat {W}/a.md",
+        "test -e a.md || echo missing",
+        "test -L {W}/a.md",
+        "test x",
+        "test -n 'x y'",
+        "test -z ''",
+        "test 3 -lt 4",
+        "test a != b",
+        "test {W}/a.md -nt {W}/b.md",
+        "test {W}/a.md -ef {W}/a.md",
+        "test ! {W}/a.md -ot {W}/b.md",
+        "[ -f {W}/a.md ] && echo yes",
+        "[ ! -d {W}/nope ]",
+        '[ -n "x y" ]',
+        "[ 3 -lt 4 ]",
+        "[ a = a ]",
+        "[ ] ]",  # one word: the string ]
+        "[ -f 'a*' ]",  # quoted: a literal path in the workspace
+        "basename {W}/a/b.md",
+        "basename -s .md /etc/x.md",
+        "basename -a {W}/a.md {W}/b.md",
+        "basename --suffix=.md x.md",
+        "dirname {W}/a/b.md",
+        "dirname /etc/passwd",  # a string: nothing is read
+        "dirname -z a/b c/d",
+        "date",
+        "date -u +%Y%m%d",
+        "date +%s",
+        "date -d yesterday +%F",
+        "date -d @1700000000 -u",
+        "date --date='2 days ago' +%F",
+        "date -r {W}/a.md +%s",
+        "date --reference={W}/a.md",
+        "date --iso-8601=seconds",
+        "date --iso-8601",
+        "date --rfc-3339=seconds",
+        "date -R",
+        "diff {W}/a.md {W}/b.md",
+        "diff -u {W}/a.md {W}/b.md | head -20",
+        "diff -q {W}/a.md {W}/b.md",
+        "diff -U3 {W}/a.md {W}/b.md",
+        "diff -U 3 {W}/a.md {W}/b.md",
+        "diff --unified=2 {W}/a.md {W}/b.md",
+        "diff --unified {W}/a.md {W}/b.md",
+        "diff -wB --label x --label y {W}/a.md {W}/b.md",
+        "diff a.md b.md",
+        "diff -- {W}/a.md {W}/b.md",
+    ],
+)
+def test_the_new_read_programs_are_allowed(command, tmp_path):
+    ws = _read_ws(tmp_path)
+    assert _shell(command.format(W=ws), ws) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # test and [: a file outside the workspace or hidden, a shape outside the grammar, a glob
+        "test -f /etc/passwd",
+        "test -f {W}/.env",
+        "test -e {W}/../x",
+        "test ! -f /etc/passwd",
+        "test {W}/a.md -nt /etc/passwd",
+        "test /etc/passwd -ef {W}/a.md",
+        "test -nt {W}/a.md /etc/passwd",
+        "test -v HOME",
+        "test -t 0",
+        "test -O {W}/a.md",
+        "test -G {W}/a.md",
+        "test -S {W}/a.md",
+        "test -p {W}/a.md",
+        "test -c /dev/null",
+        "test -b /dev/sda",
+        "test -u {W}/a.md",
+        "test -k {W}/a.md",
+        "test -N {W}/a.md",
+        "test -f a -a -f b",
+        "test -f a -o -f b",
+        "test a -a b",
+        "test '(' -f a ')'",
+        "test a == a",
+        "test a '<' b",
+        "test",
+        "test !",
+        "test 1 2 3 4",
+        "test -f a*",
+        "test -f dir1/*",
+        "[ -f {W}/a.md",  # no ]
+        "[ -f {W}/a.md ] ]",
+        "[ -f /etc/passwd ]",
+        "[ -f a* ]",
+        "[ -f dir1/* ]",
+        "[[ -f a ]]",
+        "[ -f a ] > /tmp/x",
+        "[ -f $HOME ]",
+        "[ -f `id` ]",
+        "test -f a; rm -rf x",
+        # basename and dirname: options off the table, expansions, globs
+        "basename $(id)",
+        "basename *",
+        "basename dir1/*",
+        "basename",
+        "basename --zer x",
+        "dirname -q x",
+        "dirname",
+        "dirname ~",
+        # date: setting the clock, reading a file, a zone file, an operand that is not a format
+        "date -s '2026-01-01'",
+        "date --set=x",
+        "date --set x",
+        "date -f {W}/a.md",
+        "date --file={W}/a.md",
+        "date --fil={W}/a.md",
+        "date 010203042026",
+        "date -u 010203042026",
+        "date -- 010203042026",
+        "date +%s 010203042026",
+        "date -",
+        "date -r /etc/passwd",
+        "date -r {W}/.env",
+        "date --reference=/etc/passwd",
+        "date -d 'TZ=\"/etc/passwd\" now'",
+        "date -d 'tz=\"x\" now'",
+        "date -Iseconds",
+        "date -I",
+        "date --resolution",
+        "date +%s > {W}/x",
+        # diff: recursion, pr, other files, too many or too few operands, directories
+        "diff -r {W}/dir1 {W}/dir2",
+        "diff --recursive {W}/dir1 {W}/dir2",
+        "diff {W}/dir1 {W}/dir2",  # a directory: diff would compare the hidden files in both
+        "diff {W}/dir1/x {W}/dir2",
+        "diff -l {W}/a.md {W}/b.md",
+        "diff --paginate {W}/a.md {W}/b.md",
+        "diff {W}/a.md",
+        "diff {W}/a.md {W}/b.md {W}/c.md",
+        "diff - {W}/a.md",
+        "diff {W}/a.md -",
+        "diff {W}/a.md /etc/passwd",
+        "diff {W}/a.md {W}/.env",
+        "diff {W}/a.md {W}/nope.md",
+        "diff -x '*' {W}/a.md {W}/b.md",
+        "diff -X {W}/a.md {W}/a.md {W}/b.md",
+        "diff -S x {W}/a.md {W}/b.md",
+        "diff --from-file {W}/a.md {W}/b.md",
+        "diff --to-file={W}/a.md {W}/b.md",
+        "diff -D X {W}/a.md {W}/b.md",
+        "diff --line-format=%L {W}/a.md {W}/b.md",
+        "diff --new-line-format=%L {W}/a.md {W}/b.md",
+        "diff -N {W}/a.md {W}/b.md",
+        "diff -s {W}/a.md {W}/b.md",
+        "diff --unif=2 {W}/a.md {W}/b.md",
+        "diff {W}/*.md",
+        "diff {W}/a.md {W}/b*",
+        # what stays refused
+        "awk 1 {W}/a.md",
+        "ps aux",
+        "find {W} -name x",
+        "sort -o {W}/x {W}/a.md",
+    ],
+)
+def test_the_new_read_programs_refuse_everything_off_their_tables(command, tmp_path):
+    ws = _read_ws(tmp_path)
+    assert _shell(command.format(W=ws), ws) == "external"
+
+
+@needs_symlinks
+def test_a_new_read_through_a_symlink_out_of_the_workspace_is_refused(tmp_path):
+    ws = _read_ws(tmp_path / "ws")
+    (tmp_path / "out.md").write_text("x")
+    (ws / "link.md").symlink_to(tmp_path / "out.md")
+    (ws / "linkdir").symlink_to(tmp_path)
+    for command in (
+        "test -f {W}/link.md",
+        "[ -e {W}/linkdir ]",
+        "test {W}/a.md -nt {W}/link.md",
+        "date -r {W}/link.md",
+        "diff {W}/a.md {W}/link.md",
+        "diff {W}/a.md {W}/linkdir/out.md",
+    ):
+        assert _shell(command.format(W=ws), ws) == "external", command
+
+
+@needs_symlinks
+def test_a_relative_new_read_is_checked_from_every_directory_an_earlier_cd_could_reach(tmp_path):
+    ws = _read_ws(tmp_path / "ws")
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / "a.md").write_text("x")
+    (ws / "sub2").mkdir()
+    (ws / "sub2" / "a.md").symlink_to(tmp_path / "out" / "a.md")  # a.md from sub2 leaves the workspace
+    for program in ("test -f a.md", "date -r a.md", "diff a.md a.md", "[ -s a.md ]", "test a.md -nt b.md"):
+        assert _shell(program, ws) is None, program
+        assert _shell(f"cd sub && {program}", ws) is None, program  # both ws/a.md and ws/sub/a.md
+        assert _shell(f"cd sub2 && {program}", ws) == "external", program
+        assert _shell(f"cd sub2; {program}", ws) == "external", program  # checked from both, the cd may fail
+
+
+def test_diff_reads_only_regular_files(tmp_path):
+    ws = _read_ws(tmp_path)
+    assert _shell(f"diff {ws}/dir1/x {ws}/dir2/x", ws) is None
+    assert _shell(f"diff {ws}/dir1 {ws}/dir2", ws) == "external"  # PIN: both hold a .secret
+    assert _shell("cd sub && diff a.md b.md", ws) is None  # a.md and b.md are files from both cwds
+    assert _shell("cd dir1 && diff x x", ws) == "external"  # {W}/x is not
+
+
+def test_the_bracket_word_is_the_only_glob_word_a_test_may_hold(tmp_path):
+    ws = _read_ws(tmp_path)
+    assert _shell(f"[ -f {ws}/a.md ]", ws) is None
+    assert _shell("[ -f a* ]", ws) == "external"
+    assert _shell("[ -f 'a*' ]", ws) is None
+    assert _shell("ls [ab].md", ws) == "external"  # still refused at the workspace's top level
+    assert _shell("cat sub/[ab].md", ws) is None  # PIN: the existing glob rule is unchanged
+    assert _shell("[ x", ws) == "external"
+    assert _shell("echo [", ws) == "external"  # a [ anywhere else is a glob word, refused as before

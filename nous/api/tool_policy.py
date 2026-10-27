@@ -184,6 +184,55 @@ _READ_ARG_ROLES: Mapping[str, _ArgRoles] = MappingProxyType(
         ),
     }
 )
+# Read programs that take no glob, each with a closed table. An option with an optional argument (diff --unified,
+# date --iso-8601) is a flag here: it takes `=value` and never the next word. diff: no -r (recursion), -l (runs
+# pr), -x/-X/-S (pattern or start files), --from-file/--to-file, -D, line or group formats or -N (_read_only_files
+# also wants exactly two regular files). date: no -s/--set (sets the clock) or -f/--file (reads dates from a file),
+# no -I (an optional attached argument; --iso-8601=FMT is the spelling). basename and dirname only edit strings.
+_READ_ONLY_ROLES: Mapping[str, _ArgRoles] = MappingProxyType(
+    {
+        "diff": _ArgRoles(
+            {**dict.fromkeys("qucwbBiEZay", "flag"), **dict.fromkeys("UC", "value")},
+            {
+                **dict.fromkeys(
+                    (
+                        "--brief --unified --context --ignore-case --ignore-all-space --ignore-space-change "
+                        "--ignore-blank-lines --ignore-trailing-space --ignore-tab-expansion --strip-trailing-cr "
+                        "--text --side-by-side --minimal --normal --expand-tabs --color --no-dereference"
+                    ).split(),
+                    "flag",
+                ),
+                **dict.fromkeys(("--width", "--tabsize", "--label"), "value"),
+            },
+            closed=True,
+        ),
+        "date": _ArgRoles(
+            {**dict.fromkeys("uR", "flag"), "d": "value", "r": "file"},
+            {
+                **dict.fromkeys("--utc --universal --rfc-email --iso-8601 --debug --help --version".split(), "flag"),
+                "--date": "value",
+                "--rfc-3339": "value",
+                "--reference": "file",
+            },
+            closed=True,
+        ),
+        "basename": _ArgRoles(
+            {**dict.fromkeys("az", "flag"), "s": "value"},
+            {**dict.fromkeys("--multiple --zero --help --version".split(), "flag"), "--suffix": "value"},
+            closed=True,
+        ),
+        "dirname": _ArgRoles({"z": "flag"}, dict.fromkeys("--zero --help --version".split(), "flag"), closed=True),
+    }
+)
+# test and `[`: an optional leading `!`, then one word, a unary test, or a binary one. No -a, -o, parentheses, -v
+# (reads a variable), -t (a terminal), or the tests of owners, modes, sockets and devices.
+_TEST_PROGRAMS = frozenset({"test", "["})
+_TEST_STRING_UNARY = frozenset({"-n", "-z"})
+_TEST_FILE_UNARY = frozenset({"-e", "-f", "-d", "-s", "-r", "-w", "-x", "-L", "-h"})
+_TEST_STRING_BINARY = frozenset({"=", "!=", "-eq", "-ne", "-lt", "-gt", "-le", "-ge"})
+_TEST_FILE_BINARY = frozenset({"-nt", "-ot", "-ef"})
+# A -d/--date string with TZ="..." names a zone file date opens, which may be any path.
+_DATE_TZ = re.compile(r"tz\s*=", re.IGNORECASE)
 # A jq filter that reads the environment (GITHUB_TOKEN is left in it) or imports a module or data file.
 _JQ_REFUSED = re.compile(r"\$ENV|\benv\b|\bimport\b|\binclude\b")
 _MAX_LINEAGE_CWDS = 16  # directories a chain of cd could have left the shell in; more is refused
@@ -572,6 +621,61 @@ def _read_paths(prog: str, args: list[str]) -> tuple[list[str], list[str]] | Non
     return files, [o for o in operands if o != "-"]
 
 
+def _test_file_operands(args: list[str]) -> list[str] | None:
+    """The words of a ``test`` expression (``[``'s without its closing ``]``) that name a file, or None when the
+    expression is not one ``_TEST_*`` allows: after an optional leading ``!``, one word (a string), ``UNARY WORD``
+    or ``WORD BINARY WORD``. A binary operator is never a unary one, so the shell's precedence rules (a binary test
+    before a leading ``!``) read each allowed shape the same way."""
+    if args[:1] == ["!"]:
+        args = args[1:]
+    if len(args) == 1:
+        return []
+    if len(args) == 2 and args[0] in _TEST_STRING_UNARY:
+        return []
+    if len(args) == 2 and args[0] in _TEST_FILE_UNARY:
+        return [args[1]]
+    if len(args) == 3 and args[1] in _TEST_STRING_BINARY:
+        return []
+    if len(args) == 3 and args[1] in _TEST_FILE_BINARY:
+        return [args[0], args[2]]
+    return None
+
+
+def _read_only_files(prog: str, args: list[str]) -> tuple[list[str], bool] | None:
+    """For ``test``, ``[`` and a ``_READ_ONLY_ROLES`` program: the arguments that name a file, and whether each must
+    be a regular file (diff's two operands: a directory would compare every file the two share, dotfiles too), or
+    None when the call is refused whatever its paths name."""
+    if prog in _TEST_PROGRAMS:
+        if prog == "[":
+            if args[-1:] != ["]"]:
+                return None
+            args = args[:-1]
+        files = _test_file_operands(args)
+        return None if files is None else (files, False)
+    split = _split_read_args(args, _READ_ONLY_ROLES[prog])
+    if split is None:
+        return None
+    operands, files, values = split
+    if prog == "diff":
+        if len(operands) != 2 or "-" in operands:
+            return None
+        return operands, True
+    if prog == "date":
+        if len(operands) > 1 or not all(o.startswith("+") for o in operands):
+            return None  # a bare operand sets the clock
+        if any(_DATE_TZ.search(value) for _, value in values):
+            return None
+        return files, False
+    return ([], False) if operands else None  # basename, dirname: strings, at least one
+
+
+def _regular_files(paths: list[Path]) -> bool:
+    try:
+        return all(p.is_file() for p in paths)
+    except OSError:
+        return False
+
+
 def _jq_filter_allowed(text: str) -> bool:
     """A jq filter (jq's own, or gh's ``--jq``, run by gojq) that reads no environment and imports nothing."""
     return _JQ_REFUSED.search(text) is None
@@ -875,7 +979,9 @@ def lineage_bash_allowed(
         if not all(s in _LINEAGE_SINKS or _readable(s, cwds, root) is not None for s in sources):
             return False
         prog, args = words[0], words[1:]
-        globbed = [w for w in words if isinstance(w, GlobWord)]
+        # `[` as the command word lexes as a glob (an unmatched bracket, which the shell keeps as it is); it is the
+        # one glob word a command that is not in _READ_ARG_ROLES may hold.
+        globbed = [w for w in (args if prog == "[" else words) if isinstance(w, GlobWord)]
         if globbed and prog not in _READ_ARG_ROLES:
             return False
         if prog in _READ_ARG_ROLES or prog == "cd":
@@ -908,6 +1014,15 @@ def lineage_bash_allowed(
         elif prog == "printf":
             if not _printf_allowed(args):
                 return False
+        elif prog in _TEST_PROGRAMS or prog in _READ_ONLY_ROLES:
+            checked = _read_only_files(prog, args)
+            if checked is None:
+                return False
+            files, regular = checked
+            for path in files:
+                reached = _readable(path, cwds, root)
+                if reached is None or (regular and not _regular_files(reached)):
+                    return False
         elif build_commands and prog in LINEAGE_BUILD_PROGRAMS:
             if cwd is None or not _build_repo(cwd, root, writable):
                 return False
