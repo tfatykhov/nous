@@ -21,6 +21,7 @@ nous/
 │   ├── loop_watchdog.py        # Event-loop stall watchdog (stack dump + exit)
 │   ├── log_redaction.py        # Logging setup for both entry points: keeps the bot token and the API key out of the logs
 │   ├── cancellation.py         # cancel_requested(): a task's own cancellation, as opposed to one that came out of something it awaited
+│   ├── cancel_provenance.py    # Who cancelled a DAG or a Claude Code job: the record (owner, agent or harness), its renderers, the lone runner.sh call parser, the (by, via) pairs a job's cancelled_by may hold
 │   ├── storage/                # Database layer (async SQLAlchemy)
 │   │   ├── database.py         # Connection pool, session management
 │   │   ├── models.py           # ORM models
@@ -164,6 +165,7 @@ nous/
 │       ├── companion_assets.py # Agent-hosted asset overlay behind /dashboard/v2
 │       ├── compensation.py     # Harness 2.8: snapshots of side-effecting writes so a background mutation can be reverted (NOUS_COMPENSATION_ENABLED)
 │       ├── builtin_tools.py    # bash, read_file, write_file
+│       ├── job_marks.py        # The only code that touches files in a Claude Code job dir: small marks (cancelled_by, nous_root) opened without following links
 │       ├── web_tools.py        # web_search, web_fetch (multi-tier routing)
 │       ├── injection_screen.py # F103: flag-only prompt-injection + secret screen over web_fetch / browser_task results
 │       ├── search_providers.py # SearchProvider protocol + Tavily, Exa, Brave

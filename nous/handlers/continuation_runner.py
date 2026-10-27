@@ -23,6 +23,7 @@ from uuid import UUID
 
 from sqlalchemy import or_, select
 
+from nous import cancel_provenance
 from nous.a2ui.intention_keys import ACTIVE_KEY, INTENTION_DEDUP_PREFIX, KIND_PROPOSAL, KIND_QUESTION, parse_key
 from nous.api import tool_policy
 from nous.api.execution_context import ExecutionContext
@@ -577,7 +578,7 @@ class ContinuationRunner:
         bus: Any = None,
         dispatcher: Any = None,
         publisher: Any = None,
-        cancel_dag: Callable[[UUID, str], Awaitable[None]] | None = None,
+        cancel_dag: Callable[[UUID, str, dict | None], Awaitable[None]] | None = None,
     ) -> None:
         self._db = database
         self._settings = settings
@@ -611,7 +612,7 @@ class ContinuationRunner:
     def running_roots(self) -> frozenset[UUID]:
         return frozenset(self._running)
 
-    def set_cancel_dag(self, cancel_dag: Callable[[UUID, str], Awaitable[None]] | None) -> None:
+    def set_cancel_dag(self, cancel_dag: Callable[[UUID, str, dict | None], Awaitable[None]] | None) -> None:
         """Bind ``DAGOrchestrator.cancel_dag`` (main.py, once the orchestrator exists)."""
         self._cancel_dag = cancel_dag
 
@@ -743,17 +744,19 @@ class ContinuationRunner:
             return 0
         async with self._db.session() as session:
             strays = await continuation.stray_dag_ids(session, self._agent_id, limit=STRAY_DAG_BATCH)
-        return await self._cancel_dags(strays)
+        swept = cancel_provenance.record("owner", "root cancelled earlier, finished by the sweep")
+        return await self._cancel_dags(strays, swept)
 
-    async def _cancel_dags(self, dag_ids: Sequence[UUID]) -> int:
-        """The orchestrator's cancel for each DAG; one that raises is logged and left for the sweep."""
+    async def _cancel_dags(self, dag_ids: Sequence[UUID], cancelled_by: dict) -> int:
+        """The orchestrator's cancel for each DAG, recording ``cancelled_by`` (a ``cancel_provenance`` record); one
+        that raises is logged and left for the sweep."""
         done = 0
         for dag_id in dag_ids:
             if self._cancel_dag is None:
                 logger.warning("F099: DAG %s is running under a cancelled root and no orchestrator is bound", dag_id)
                 continue
             try:
-                await self._cancel_dag(dag_id, "cancelled by the owner")
+                await self._cancel_dag(dag_id, "cancelled by the owner", cancelled_by)
                 done += 1
             except asyncio.CancelledError:
                 raise
@@ -1993,7 +1996,8 @@ class ContinuationRunner:
             outcome = await continuation.cancel_root(session, self._agent_id, root_id, reason=reason, actor=actor)
             await session.commit()
         self._cancelled.update(outcome.root_ids)
-        cancelled_dags = await self._cancel_dags(outcome.dag_ids)
+        by_owner = cancel_provenance.record("owner", cancel_provenance.owner_via(actor))
+        cancelled_dags = await self._cancel_dags(outcome.dag_ids, by_owner)
         stopped = await self._stop_turns(outcome.root_ids)
         for cancelled in outcome.root_ids:
             await self._emit("intention.root_cancelled", {"root_id": str(cancelled), "reason": reason, "actor": actor})

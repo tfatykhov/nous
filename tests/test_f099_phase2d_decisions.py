@@ -537,3 +537,61 @@ async def test_a_decision_whose_transition_matches_no_row_raises(env_factory, mo
             await _decide(env, pid, approve=approve)
     monkeypatch.undo()
     assert (await proposal_row(env, pid)).state == "pending" and await _results(env, asked.root.id) == []
+
+
+# ---- the owner-decision marker on an outcome row (the stall gate reads it) -----------------------------------
+
+
+async def test_a_rejected_proposals_outcome_row_carries_the_owner_decision_marker(env_factory):  # noqa: F811
+    env = await env_factory(**CONT)
+    asked = await ask_with_proposals(env)
+    (pid,) = asked.ids
+    await _decide(env, pid, approve=False, actor="telegram:42")
+    (row,) = await _results(env, asked.root.id)
+    assert row.correlation_id == "owner-decision:telegram:42"
+
+
+async def test_an_executed_proposals_outcome_row_carries_the_marker(env_factory):  # noqa: F811
+    env = await env_factory(**CONT)
+    asked = await ask_with_proposals(env)
+    (pid,) = asked.ids
+    await _decide(env, pid, approve=True, actor="rest")
+    await _claim_execution(env, pid)
+    await _finish(env, pid, ok=True, result="Exit code: 0")
+    (row,) = await _results(env, asked.root.id)
+    assert row.correlation_id == "owner-decision:rest"
+
+
+async def test_an_in_doubt_failure_keeps_the_owner_decision_marker(env_factory):  # noqa: F811
+    """The sweep fails a call stuck in executing, but the owner's approval was the input that started it."""
+    env = await env_factory(**CONT)
+    asked = await ask_with_proposals(env)
+    (pid,) = asked.ids
+    await _decide(env, pid, approve=True, actor="companion:tim")
+    await _claim_execution(env, pid)
+    await _set_proposal(env, pid, updated_at=datetime.now(UTC) - timedelta(hours=1))
+    assert await _expire_proposals(env) == [(pid, "failed")]
+    (row,) = await _results(env, asked.root.id)
+    assert row.correlation_id == "owner-decision:companion:tim"
+
+
+async def test_an_expired_proposals_outcome_row_has_no_marker(env_factory):  # noqa: F811
+    env = await env_factory(**CONT)
+    asked = await ask_with_proposals(env)
+    (pid,) = asked.ids
+    await _set_proposal(env, pid, deadline=datetime.now(UTC) - timedelta(minutes=1))
+    assert await _expire_proposals(env) == [(pid, "expired")]
+    (row,) = await _results(env, asked.root.id)
+    assert row.correlation_id is None
+
+
+async def test_a_cancelled_unrunnable_proposal_writes_no_outcome_row(env_factory):  # noqa: F811
+    """A cancelled proposal belongs to an ended root, and nothing is written for an ended root: so no row can
+    carry a marker."""
+    env = await env_factory(**CONT)
+    asked = await ask_with_proposals(env)
+    (pid,) = asked.ids
+    await _decide(env, pid, approve=True, actor="telegram:42")
+    await set_intention(env, asked.root.id, root_cancelled_at=datetime.now(UTC))
+    assert (await _end_unrunnable(env, pid)).state == "cancelled"
+    assert await _results(env, asked.root.id) == []

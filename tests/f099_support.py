@@ -247,15 +247,19 @@ async def add_arrival(
     tokens: tuple[int, int] = (0, 0),
     decision: str = "continue",
     outcome: str = "resolved",
-) -> None:
-    """An arrival row as a committed arrival leaves it (the budgets read these)."""
+    inbox_ids: list[uuid.UUID] | None = None,
+) -> uuid.UUID:
+    """An arrival row as a committed arrival leaves it (the budgets read these). Returns its id."""
+    arrival_id = uuid.uuid4()
     async with env.db.session() as s:
         s.add(
             IntentionArrival(
+                id=arrival_id,
                 agent_id=env.agent,
                 root_id=root_id,
                 n=n,
                 intention_ids=[root_id],
+                inbox_ids=list(inbox_ids or []),
                 claim_token=uuid.uuid4(),
                 decision=decision,
                 progress_claimed=bool(progress),
@@ -267,6 +271,7 @@ async def add_arrival(
             )
         )
         await s.commit()
+    return arrival_id
 
 
 class StubCognitive:

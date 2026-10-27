@@ -444,10 +444,12 @@ class TestCodexFixes:
         )
         store = DAGStore(db, agent, s)
         cancel_calls: list = []
+        cancel_by: list = []
 
         class _SpyOrch:
-            async def cancel_dag(self, dag_id, reason="cancelled"):
+            async def cancel_dag(self, dag_id, reason="cancelled", cancelled_by=None):
                 cancel_calls.append((dag_id, reason))
+                cancel_by.append(cancelled_by)
 
         check = _make_check(
             FileJsonlAdapter(str(path)), items_mgr, store, _SpyOrch(), s,
@@ -490,10 +492,12 @@ class TestCodexFixes:
         )
         store = DAGStore(db, agent, s)
         cancel_calls: list = []
+        cancel_by: list = []
 
         class _SpyOrch:
-            async def cancel_dag(self, dag_id, reason="cancelled"):
+            async def cancel_dag(self, dag_id, reason="cancelled", cancelled_by=None):
                 cancel_calls.append((dag_id, reason))
+                cancel_by.append(cancelled_by)
 
         check = _make_check(
             FileJsonlAdapter(str(path)), items_mgr, store, _SpyOrch(), s,
@@ -502,6 +506,7 @@ class TestCodexFixes:
         # The orphan DAG must have been cancelled.
         assert len(cancel_calls) == 1
         assert "mark_dispatched failed" in cancel_calls[0][1]
+        assert [(b["by"], b["via"]) for b in cancel_by] == [("harness", "heartbeat work queue")]
         # A normal-urgency finding reports the dispatch failure.
         assert any(
             "Failed to dispatch" in f.summary and f.urgency == "normal"
@@ -522,10 +527,12 @@ class TestTerminalState:
         items_mgr = WorkQueueItemManager(db, agent)
         store = DAGStore(db, agent, settings_wq_on)
         cancel_calls: list = []
+        cancel_by: list = []
 
         class _SpyOrch:
-            async def cancel_dag(self, dag_id, reason="cancelled"):
+            async def cancel_dag(self, dag_id, reason="cancelled", cancelled_by=None):
                 cancel_calls.append((dag_id, reason))
+                cancel_by.append(cancelled_by)
 
         check = _make_check(
             FileJsonlAdapter(str(path)), items_mgr, store, _SpyOrch(), settings_wq_on,
@@ -538,6 +545,7 @@ class TestTerminalState:
         }))
         second = await check.run()
         assert len(cancel_calls) == 1
+        assert [(b["by"], b["via"]) for b in cancel_by] == [("harness", "heartbeat work queue")]
         fetched = await items_mgr.get_by_external("file_jsonl", "a1")
         assert fetched.terminal_state == "closed"
 
@@ -554,7 +562,7 @@ class TestTerminalState:
         store = DAGStore(db, agent, settings_wq_on)
 
         class _FailingOrch:
-            async def cancel_dag(self, dag_id, reason="cancelled"):
+            async def cancel_dag(self, dag_id, reason="cancelled", cancelled_by=None):
                 raise RuntimeError("simulated cancel failure")
 
         check = _make_check(

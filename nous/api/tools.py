@@ -33,6 +33,7 @@ from functools import partial
 from typing import Any
 from uuid import UUID
 
+from nous import cancel_provenance
 from nous.api.call_outcome import CallOutcome
 from nous.api.call_outcome import _current as _outcome_var  # the one setter (harness 2b)
 from nous.api.execution_context import ExecutionContext, resolve_context
@@ -532,6 +533,11 @@ class ToolDispatcher:
                 # bash's longer default timeout would outlast a short turn, which would then
                 # be cancelled before the call returned its output or its timeout error.
                 args = {**args, "_long_timeout": not ctx.is_short_turn}
+            if name in ("bash", "dag_manage"):
+                # Who a cancel belongs to (cancel_provenance): the agent's own turn, or the owner for an
+                # approved proposal. Set from the context, so the model cannot name another actor. bash
+                # records it only after a lone `runner.sh cancel <job id>` that succeeded.
+                args = {**args, "_actor": cancel_provenance.context_actor(ctx.kind)}
             if session_id is not None and name == "spawn_task":
                 args = {**args, "_session_id": session_id}
             if ctx.decision_id and name in ("spawn_task", "spawn_sync"):
@@ -5948,6 +5954,9 @@ def register_dag_tools(
                     f"Status: {dag.status}",
                     f"Nodes ({len(dag.nodes)}):",
                 ]
+                cancel_line = cancel_provenance.dag_cancel_line(dag)
+                if cancel_line:
+                    lines.insert(2, f"Cancelled: {cancel_line}")
                 held = getattr(orchestrator, "held_reason", lambda _dag_id: None)(dag.id)
                 if held and dag.status in ("pending", "running"):
                     lines.insert(2, f"Held: {held}")
@@ -5998,7 +6007,12 @@ def register_dag_tools(
                 return {"content": [{"type": "text", "text": "\n".join(lines)}]}
 
             elif action == "cancel":
-                await orchestrator.cancel_dag(dag.id, reason="cancelled by user")
+                actor = kwargs.get("_actor")
+                await orchestrator.cancel_dag(
+                    dag.id,
+                    reason="cancelled by user",
+                    cancelled_by=actor if isinstance(actor, dict) else cancel_provenance.agent_record(None),
+                )
                 return {"content": [{"type": "text", "text": f"Cancelled DAG '{dag.name}' ({str(dag.id)[:8]})"}]}
 
             elif action == "retry_node":

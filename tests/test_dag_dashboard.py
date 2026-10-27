@@ -158,3 +158,30 @@ async def test_get_dag_dashboard_node_and_edge_fields(db):
     edge = dag_data["edges"][0]
     assert "from_node_id" in edge
     assert "to_node_id" in edge
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_dags_postmortem_names_who_cancelled_it_as_text(db):
+    """The dashboard renders postmortem as text: a cancellation record is shown in the owner's words."""
+    from nous.api.dashboard_queries import get_dag_dashboard_data
+    from nous.cancel_provenance import dag_postmortem, record
+
+    agent_id = f"test-dag-dash-{uuid.uuid4().hex[:8]}"
+    store = DAGStore(db, agent_id=agent_id, settings=Settings())
+    req = DAGCreateRequest(
+        name="cancelled-dag", nodes=[DAGNodeSpec(name="t", type=DAGNodeType.subtask, instructions="Do it")]
+    )
+    by_owner = await store.create(req)
+    await store.update_dag_status(by_owner.id, "cancelled", postmortem=dag_postmortem(record("owner", "Telegram")))
+    by_agent = await store.create(req)
+    await store.update_dag_status(by_agent.id, "cancelled", postmortem=dag_postmortem(record("agent", "chat turn")))
+    unrecorded = await store.create(req)
+    await store.update_dag_status(unrecorded.id, "cancelled")
+
+    async with db.session() as session:
+        data = await get_dag_dashboard_data(session, agent_id)
+
+    shown = {row["id"]: row["postmortem"] for row in data["recent_dags"]}
+    assert shown[str(by_owner.id)] == "Cancelled by you (Telegram)"
+    assert shown[str(by_agent.id)] == "Cancelled by Nous (chat turn)"
+    assert shown[str(unrecorded.id)] is None

@@ -128,13 +128,15 @@ class FakeOrchestrator:
         self.retries: list[tuple[str, str]] = []
         self.retry_flags: list[bool] = []
         self.cancels: list[tuple[str, str]] = []
+        self.cancelled_by: list = []
 
     async def retry_node(self, dag_id, node_name, *, allow_declined=False):
         self.retries.append((str(dag_id), node_name))
         self.retry_flags.append(allow_declined)
 
-    async def cancel_dag(self, dag_id, reason=""):
+    async def cancel_dag(self, dag_id, reason="", cancelled_by=None):
         self.cancels.append((str(dag_id), reason))
+        self.cancelled_by.append(cancelled_by)
 
 
 # ---------------------------------------------------------------------------
@@ -598,6 +600,17 @@ async def test_dag_cancel_delegates_and_resolves(
     assert payload["resolved"] is True
     assert orchestrator.cancels == [(DAG_PARAMS["dag_id"], "cancelled via companion")]
     assert (await _surface_row(db, surface_id)).status == "resolved"
+
+
+async def test_companion_dag_cancel_is_an_owner_cancel(
+    router: ActionRouter, service, db, orchestrator: FakeOrchestrator
+) -> None:
+    surface_id = await service.push_built(dag_monitor(DAG_PARAMS))
+    nonce = (await _surface_row(db, surface_id)).nonce
+    status, _payload = await router.handle(_action_body("dag.cancel", surface_id, nonce), content_type=JSON)
+    assert status == 200
+    (by,) = orchestrator.cancelled_by
+    assert (by["by"], by["via"]) == ("owner", "companion")
 
 
 # ---------------------------------------------------------------------------

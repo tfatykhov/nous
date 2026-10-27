@@ -63,10 +63,11 @@ class DagRecorder:
     """A stand-in for ``DAGOrchestrator.cancel_dag``."""
 
     def __init__(self, fail_for=()) -> None:
-        self.calls, self.fail_for = [], set(fail_for)
+        self.calls, self.by, self.fail_for = [], [], set(fail_for)
 
-    async def __call__(self, dag_id, reason="cancelled"):
+    async def __call__(self, dag_id, reason="cancelled", cancelled_by=None):
         self.calls.append((dag_id, reason))
+        self.by.append(cancelled_by)
         if dag_id in self.fail_for:
             raise RuntimeError("the orchestrator is down")
 
@@ -81,9 +82,9 @@ async def test_cancel_root_cancels_the_lineage_the_dags_and_tells_the_bus(runner
     running, _ = await make_dag(env, status="running", parent=asked.root)
     dags, view_held = DagRecorder(), []
 
-    async def cancel_dag(dag_id, reason="cancelled"):  # the view holds the root before the orchestrator is asked
+    async def cancel_dag(dag_id, reason="cancelled", cancelled_by=None):  # the view holds the root first
         view_held.append(cont.root_is_cancelled(asked.root.id))
-        await dags(dag_id, reason)
+        await dags(dag_id, reason, cancelled_by)
 
     cont = _cont(env, cancel_dag=cancel_dag)
 
@@ -119,6 +120,21 @@ async def test_a_dag_the_orchestrator_cannot_cancel_is_left_to_the_sweep(runner_
     dags.fail_for.clear()
     await cont.run_once()  # the sweep finds the DAG still running under a cancelled root
     assert [call[0] for call in dags.calls] == [running.id, running.id]
+
+
+async def test_the_owner_root_cancel_attributes_the_cascaded_dag(runner_env):  # noqa: F811
+    env = await runner_env()
+    root = await make_root(env)
+    running, _ = await make_dag(env, status="running", parent=root)
+    dags = DagRecorder(fail_for={running.id})
+    cont = _cont(env, cancel_dag=dags)
+    await cont.cancel_root(root.id, reason="t", actor="telegram:42")
+    dags.fail_for.clear()
+    await cont.run_once()  # the sweep finishes the cancel the orchestrator refused
+    assert [call[0] for call in dags.calls] == [running.id, running.id]
+    owner, swept = dags.by
+    assert (owner["by"], owner["via"]) == ("owner", "Telegram")
+    assert swept["by"] == "owner" and "sweep" in swept["via"]
 
 
 async def test_the_sweep_leaves_a_running_dag_of_a_live_root_alone(runner_env):  # noqa: F811

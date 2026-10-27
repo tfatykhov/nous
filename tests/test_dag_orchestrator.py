@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 
+from nous.cancel_provenance import dag_postmortem, record
 from nous.config import Settings
 from nous.dag.orchestrator import CheckResult, DAGOrchestrator
 from nous.dag.schemas import (
@@ -292,6 +293,43 @@ class TestDAGOrchestratorCancel:
         fetched = await store.get_dag(dag.id)
         assert fetched.status == "completed"
         assert fetched.result_summary == original_summary
+
+    @pytest.mark.asyncio
+    async def test_cancel_dag_records_who_cancelled_it(self, store, orchestrator):
+        dag = await store.create(_two_subtask_request())
+        await orchestrator.start_dag(dag.id)
+        await orchestrator.cancel_dag(dag.id, reason="x", cancelled_by=record("owner", "Telegram"))
+        fetched = await store.get_dag(dag.id)
+        assert fetched.status == "cancelled"
+        assert (fetched.postmortem["cancellation"]["by"], fetched.postmortem["cancellation"]["via"]) == (
+            "owner",
+            "Telegram",
+        )
+
+    @pytest.mark.asyncio
+    async def test_cancel_dag_without_a_record_writes_no_postmortem(self, store, orchestrator):
+        dag = await store.create(_two_subtask_request())
+        await orchestrator.start_dag(dag.id)
+        await orchestrator.cancel_dag(dag.id, reason="x")
+        fetched = await store.get_dag(dag.id)
+        assert fetched.status == "cancelled" and fetched.postmortem is None
+
+    @pytest.mark.asyncio
+    async def test_a_dag_finalized_cancelled_by_a_tick_is_attributed_to_the_harness(self, store, orchestrator):
+        """No node failed and one was cancelled outside cancel_dag: the tick ends the DAG cancelled, and the record
+        names the harness without claiming a cause."""
+        dag = await store.create(_two_subtask_request())
+        await orchestrator.start_dag(dag.id)
+        fetched = await store.get_dag(dag.id)
+        research = next(n for n in fetched.nodes if n.name == "research")
+        write = next(n for n in fetched.nodes if n.name == "write")
+        await store.update_node(research.id, status="completed", result="done")
+        await store.update_node(write.id, status="cancelled")
+        await orchestrator.tick()
+        fetched = await store.get_dag(dag.id)
+        assert fetched.status == "cancelled"
+        assert fetched.postmortem["cancellation"]["by"] == "harness"
+        assert fetched.postmortem["cancellation"]["via"] == "a node was cancelled"
 
 
 class TestDAGOrchestratorBudget:
@@ -741,6 +779,34 @@ class TestDAGRetryNode:
         research = next(n for n in fetched.nodes if n.name == "research")
         assert research.status == "running"
         subtask_mgr.create.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_a_retry_clears_a_stale_cancellation_record(self, store, orchestrator, subtask_mgr):
+        """A reactivated DAG carries no cancellation from its previous outcome. A cancelled DAG cannot be retried,
+        so the stale record is written onto a failed one, as a cancel that lost a race with the tick leaves it."""
+        dag = await store.create(_two_subtask_request())
+        await orchestrator.start_dag(dag.id)
+        fetched = await store.get_dag(dag.id)
+        research = next(n for n in fetched.nodes if n.name == "research")
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=research.subtask_id, status="failed", result=None, error="OOM"
+        )
+        await orchestrator.tick()
+        assert (await store.get_dag(dag.id)).status == "failed"
+        await store.update_dag_status(dag.id, "failed", postmortem=dag_postmortem(record("owner", "Telegram")))
+
+        await orchestrator.retry_node(dag.id, "research")
+
+        fetched = await store.get_dag(dag.id)
+        assert fetched.status == "running" and fetched.postmortem is None
+
+    @pytest.mark.asyncio
+    async def test_reactivate_for_retry_clears_a_cancellation_record(self, store):
+        dag = await store.create(_two_subtask_request())
+        await store.update_dag_status(dag.id, "failed", postmortem=dag_postmortem(record("agent", "chat turn")))
+        await store.reactivate_for_retry(dag.id)
+        fetched = await store.get_dag(dag.id)
+        assert fetched.status == "running" and fetched.postmortem is None
 
     @pytest.mark.asyncio
     async def test_retry_node_not_failed_raises(self, store, orchestrator):
@@ -2468,6 +2534,26 @@ class TestDAGCompletionStatus:
         await orch._check_dag_completion(dag)
         args, _ = store.finalize_dag.await_args
         assert args[1] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_node_finalizes_cancelled_with_a_harness_record(self):
+        orch, store = self._orchestrator_with_mock_store()
+        dag = SimpleNamespace(
+            id=uuid.uuid4(),
+            nodes=[self._node("completed", "a"), self._node("cancelled", "b")],
+        )
+        await orch._check_dag_completion(dag)
+        args, kwargs = store.finalize_dag.await_args
+        assert args[1] == "cancelled"
+        assert kwargs["postmortem"]["cancellation"]["by"] == "harness"
+
+    @pytest.mark.asyncio
+    async def test_other_outcomes_carry_no_postmortem(self):
+        orch, store = self._orchestrator_with_mock_store()
+        dag = SimpleNamespace(id=uuid.uuid4(), nodes=[self._node("completed", "a"), self._node("failed", "b")])
+        await orch._check_dag_completion(dag)
+        _args, kwargs = store.finalize_dag.await_args
+        assert kwargs.get("postmortem") is None
 
     @pytest.mark.asyncio
     async def test_all_blocked_still_finalizes_failed(self):
