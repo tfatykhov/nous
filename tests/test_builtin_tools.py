@@ -828,3 +828,18 @@ class TestJobCancelProvenance:
         )
         assert not is_error, text
         assert describe_job_cancellation(str(ws), _JOB) == "cancelled by your own chat turn"
+
+    @pytest.mark.asyncio
+    async def test_a_cancel_whose_record_cannot_be_written_is_logged_as_a_warning(self, tmp_path, caplog):
+        import logging
+        import shutil
+
+        from nous.cancel_provenance import agent_record
+
+        ws = self._workspace(tmp_path)
+        shutil.rmtree(ws / "claude-jobs" / _JOB)  # the runner still exits 0; the record has nowhere to go
+        with caplog.at_level(logging.WARNING, logger="nous.api.builtin_tools"):
+            out = await self._run(ws, f"{ws}/claude-jobs/runner.sh cancel {_JOB}", agent_record("interactive"))
+        assert out == "Exit code: 0"
+        (rec,) = [r for r in caplog.records if r.name == "nous.api.builtin_tools"]
+        assert rec.levelno == logging.WARNING and _JOB in rec.getMessage() and str(ws) not in rec.getMessage()

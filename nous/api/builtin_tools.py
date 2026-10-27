@@ -142,7 +142,8 @@ def _job_cancel_provenance(
     verb, job_id = call
     if verb == "cancel":
         if actor is not None and returncode == 0 and not write_job_cancelled_by(workspace_dir, job_id, actor):
-            logger.debug("could not record who cancelled job %s", job_id)
+            # A status read of this job will say no cancel was recorded; say why here, by job id only.
+            logger.warning("could not record who cancelled job %s in its directory", job_id)
         return None
     if observed_status(stdout_text) == "cancelled":
         return f"Cancelled by: {describe_job_cancellation(workspace_dir, job_id)}"
