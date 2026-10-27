@@ -434,3 +434,43 @@ async def test_the_loader_hands_each_check_its_rows_guard_and_the_shared_context
     assert runs(counter) == 1
     runner.run_turn.assert_not_awaited()  # skip mode, quiet guard
     assert [t for t, _ in rec.events] == [check_guard.RAN]
+
+
+@pytest.mark.parametrize(
+    ("guard", "detail"),
+    [
+        ("gridbot_tick", "not a JSON object"),
+        ({"name": NAME, "is_action": True}, "integer timeout_seconds"),
+        ({"name": NAME, "is_action": True, "timeout_seconds": "600"}, "integer timeout_seconds"),
+    ],
+)
+async def test_a_guard_that_cannot_be_read_safely_is_refused_not_ignored(tmp_path, guard, detail):
+    command, counter = counted(tmp_path)
+    check, runner, rec = make(command)
+    check._guard = guard  # as the row holds it
+
+    await check.run()
+
+    assert runs(counter) == 0
+    runner.run_turn.assert_awaited_once()
+    assert "did NOT run" in instruction(runner)
+    [unresolved] = rec.of(check_guard.UNRESOLVED)
+    assert unresolved["guard"]["reason"] == "invalid" and detail in unresolved["guard"]["detail"]
+
+
+async def test_the_loaders_context_persists_records_through_the_bus_with_a_clipped_session_id():
+    from nous.config import Settings
+
+    bus = MagicMock()
+    bus.emit = AsyncMock()
+    settings = Settings(_env_file=None, agent_id="a1", schedule_guard_commands={NAME: "true"})
+    ctx = check_guard.context_for(settings, bus, MagicMock())
+    long_run = "dynamic-check-" + "x" * 120 + "-abcd1234"
+
+    await ctx.emit(check_guard.RAN, {"run_id": long_run}, long_run)
+
+    [event] = [c.args[0] for c in bus.emit.await_args_list]
+    assert (event.type, event.agent_id, event.session_id) == (check_guard.RAN, "a1", long_run[:100])
+    assert event.data == {"run_id": long_run}  # the whole run id stays in the data
+    assert ctx.commands == {NAME: "true"} and ctx.enabled is True
+    assert check_guard.context_for(settings, None, MagicMock()).emit is not None  # no bus: nothing to persist

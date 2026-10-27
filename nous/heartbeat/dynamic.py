@@ -21,7 +21,6 @@ from sqlalchemy.dialects.postgresql import JSONB
 
 from nous import undo_journal
 from nous.api.execution_context import ExecutionContext, lineage_from_stamp
-from nous.dag.store import DAG_CHECK_NAME_PREFIX
 from nous.handlers import schedule_guard
 from nous.heartbeat import check_guard
 from nous.heartbeat.registry import BaseCheck
@@ -180,8 +179,9 @@ class DynamicCheck(BaseCheck):
         # F099 I3: the lineage of the DAG this check runs for (its row's
         # metadata.intention); read into the heartbeat_check context.
         self._intention = intention
-        # F107 phase 3: the row's metadata.guard as written, and the loader's guard context.
-        self._guard = guard if isinstance(guard, dict) else None
+        # F107 phase 3: the row's metadata.guard as written (not an object: refused as invalid, never ignored),
+        # and the loader's guard context.
+        self._guard = guard
         self._guards = guards
         self._guard_in_flight = False
         # In-flight run tracking (codex P1, PR #656): disabling a check must
@@ -305,7 +305,11 @@ class DynamicCheck(BaseCheck):
         self._run_tasks.add(run_task)
         if self._active_runs is not None:
             self._active_runs.setdefault(self.name, set()).add(self)
-        run_status: str | None = None  # for the shadow record: set once the turn is over
+        # For the shadow record (F107 phase 3): set once the turn is over. A run cancelled by our caller (a
+        # shutdown, the runner's deadline) records nothing, like a subtask cut short by a shutdown.
+        run_status: str | None = None
+        findings: list[Finding] = []
+        response_text: str | None = None
         try:
             try:
                 response_text, _ctx, usage = await run_task
@@ -337,9 +341,6 @@ class DynamicCheck(BaseCheck):
 
             findings = self._parse_findings(response_text or "")
             run_status = "completed"
-            if shadow is not None:
-                await self._record_acted(session_id, shadow, findings, run_status, response_text)
-                shadow = None
             tokens = (usage or {}).get("input_tokens", 0) + (usage or {}).get("output_tokens", 0)
             return CheckResult(
                 has_updates=bool(findings),
@@ -362,8 +363,8 @@ class DynamicCheck(BaseCheck):
             self._disable_cancelled.discard(run_task)
             self._sibling_cancelled.discard(run_task)
             self._leave_active_runs()
-            if shadow is not None and run_status in ("failed", "cancelled"):
-                await self._record_acted(session_id, shadow, [], run_status)
+            if shadow is not None and run_status is not None:
+                await self._record_acted(session_id, shadow, findings, run_status, response_text)
             try:
                 await self._runner.end_conversation(session_id)
             except Exception:
@@ -397,11 +398,13 @@ class DynamicCheck(BaseCheck):
         if ctx is None or raw is None or not ctx.enabled:
             return "", None
         base = self._base(session_id)
+        from nous.dag.store import DAG_CHECK_NAME_PREFIX
+
         dag_owned = self._intention is not None or self.name.startswith(DAG_CHECK_NAME_PREFIX)
         resolved = check_guard.resolve(raw, ctx.commands, check_timeout=self.timeout, dag_owned=dag_owned)
         spec = resolved.spec
         if spec is None:
-            name = raw.get("name")
+            name = raw.get("name") if isinstance(raw, dict) else None
             logger.warning(
                 "Check '%s': its guard %r was not run (%s)", self.name, name, resolved.detail or resolved.reason
             )
@@ -422,6 +425,10 @@ class DynamicCheck(BaseCheck):
             self._active_runs.setdefault(self.name, set()).add(self)  # so a disable meanwhile reaches this run
         try:
             result = await schedule_guard.run_guard(spec)
+        except asyncio.CancelledError:
+            # run_guard killed the command's process group; a run cut short has no result to record.
+            logger.warning("Check '%s': its guard %r was cut short by a cancellation", self.name, spec.name)
+            raise
         finally:
             ctx.running.discard(self.name)
             self._guard_in_flight = False
@@ -450,7 +457,7 @@ class DynamicCheck(BaseCheck):
         shadow: tuple[schedule_guard.GuardSpec, bool],
         findings: list[Finding],
         run_status: str,
-        response: str | None = None,
+        response: str | None,
     ) -> None:
         """After the turn of a shadow-guarded run, persist whether the model acted (``schedule_guard.acted_signals``
         and ``acted_verdict``, phase 2's one definition) in a ``check_guard_acted`` event. Never raises."""
@@ -1257,28 +1264,20 @@ class DynamicCheckLoader:
         async with self._mutation_lock:
             async with self._db.session() as session:
                 current = (
-                    (
-                        await session.execute(
-                            select(table)
-                            .where(table.c.id == check_id)
-                            .where(table.c.agent_id == self._agent_id)
-                            .with_for_update()
-                        )
+                    await session.execute(
+                        select(table)
+                        .where(table.c.id == check_id)
+                        .where(table.c.agent_id == self._agent_id)
+                        .with_for_update()
                     )
-                    .mappings()
-                    .first()
-                )
+                ).mappings().first()
                 names = {row["name"] for row in (current, before) if row is not None}
                 for name in names:
-                    dag_owned = (
-                        name.startswith(DAG_CHECK_NAME_PREFIX)
-                        or (
-                            await session.execute(
-                                dag_check_nodes(self._agent_id).where(DAGNode.check_name == name).limit(1)
-                            )
-                        ).first()
-                        is not None
-                    )
+                    dag_owned = name.startswith(DAG_CHECK_NAME_PREFIX) or (
+                        await session.execute(
+                            dag_check_nodes(self._agent_id).where(DAGNode.check_name == name).limit(1)
+                        )
+                    ).first() is not None
                     if dag_owned:
                         return False, f"check {name!r} belongs to a DAG node; restore refused, nothing changed"
                 if before is None and (current is None or not current["enabled"]):

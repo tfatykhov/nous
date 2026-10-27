@@ -239,18 +239,21 @@ async def _check_rows(
     for check_id in [*current, *(h for h in by_check if h not in current)]:
         check = current.get(check_id)
         mine = by_check.get(check_id, [])
+        if check is not None:
+            info = {
+                "check": check.name, "enabled": check.enabled, "timeout_seconds": check.timeout_seconds,
+                **_guard_fields((check.metadata_ or {}).get(GUARD_KEY), commands),
+            }  # fmt: skip
+        else:
+            info = {
+                "check": names.get(check_id), "enabled": None, "timeout_seconds": None,
+                "name": None, "mode": None, "allowlisted": None,
+            }  # fmt: skip
+        # every run of a check with a guard leaves one record, so its runs are its records
         rows.append(
             {
                 "check_id": check_id,
-                "check": check.name if check is not None else names.get(check_id),
-                "enabled": check.enabled if check is not None else None,
-                "timeout_seconds": check.timeout_seconds if check is not None else None,
-                **(
-                    _guard_fields((check.metadata_ or {}).get(GUARD_KEY), commands)
-                    if check is not None
-                    else {"name": None, "mode": None, "allowlisted": None}
-                ),
-                # every run of a check with a guard leaves one record, so its runs are its records
+                **info,
                 **_tally(mine, len(mine)),
                 "last_runs": [row for _, row in mine[:RECENT_LIMIT]],
             }
@@ -343,7 +346,8 @@ async def get_guard_data(
 
     return {
         "enabled": settings.schedule_guards_enabled,
-        # The guard records other than skips are bus events: with the bus off none was persisted. Not named
+        # A schedule's guard records other than skips, and every record of a check's guard, are bus events: with
+        # the bus off none was persisted. Not named
         # events_persisted, which beside it in the response is NOUS_F026_PERSISTENCE_ENABLED, a different switch.
         "bus_enabled": settings.event_bus_enabled,
         "window_days": days,

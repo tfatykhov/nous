@@ -76,10 +76,16 @@ def max_guard_timeout(check_timeout: int) -> int:
     return check_timeout - TURN_RESERVE_SECONDS - KILL_BOUND_SECONDS
 
 
-def resolve(raw: dict[str, Any], commands: Mapping[str, str], *, check_timeout: int, dag_owned: bool) -> Resolved:
+def resolve(raw: Any, commands: Mapping[str, str], *, check_timeout: int, dag_owned: bool) -> Resolved:
     """The guard a check's ``metadata.guard`` describes, or why it may not run."""
+    if not isinstance(raw, dict):
+        return Resolved(None, "invalid", "metadata.guard is not a JSON object")
     if dag_owned:
         return Resolved(None, "invalid", "a DAG owns this check: a skip would read as the node's completion")
+    timeout = raw.get("timeout_seconds")
+    if raw.get("is_action") is True and (not isinstance(timeout, int) or isinstance(timeout, bool)):
+        # parse_guard would fall back to 60 s, which would cut a long action short on every run
+        return Resolved(None, "invalid", "a guard that is the check's action needs an integer timeout_seconds")
     # No cap here: a timeout too long for the check is refused below, never cut down to fit it silently.
     spec = schedule_guard.parse_guard(raw, commands, max_timeout=sys.maxsize)
     if spec is None:
@@ -95,8 +101,9 @@ def resolve(raw: dict[str, Any], commands: Mapping[str, str], *, check_timeout: 
     return Resolved(spec)
 
 
-def not_run_note(raw: dict[str, Any], resolved: Resolved) -> str:
+def not_run_note(raw: Any, resolved: Resolved) -> str:
     """What the model is told about a guard that was configured but not run."""
+    raw = raw if isinstance(raw, dict) else {}
     why = "it names no allowlisted command" if resolved.reason == "not_allowlisted" else resolved.detail
     lines = ["", "", f"[Run guard receipt] This check's guard {raw.get('name')!r} did NOT run: {why}."]
     if raw.get("is_action") is True:
@@ -141,7 +148,8 @@ def context_for(settings: Settings, bus: EventBus | None, db: Database) -> Check
 
     async def emit(event_type: str, data: dict[str, Any], session_id: str) -> None:
         if bus is not None:  # with the bus off nothing is persisted; the dashboard says so
-            await bus.emit(Event(type=event_type, agent_id=settings.agent_id, session_id=session_id, data=data))
+            # events.session_id is 100 characters; the data's run_id keeps the whole session id
+            await bus.emit(Event(type=event_type, agent_id=settings.agent_id, session_id=session_id[:100], data=data))
 
     async def ledger(session_id: str) -> list[tuple[str, str, Mapping[str, Any]]]:
         async with db.session() as session:
