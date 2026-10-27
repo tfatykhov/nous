@@ -91,7 +91,7 @@ def resolve(raw: Any, commands: Mapping[str, str], *, check_timeout: int | None,
         return Resolved(None, "invalid", "metadata.guard is not a JSON object")
     if dag_owned:
         return Resolved(None, "invalid", "a DAG owns this check: a skip would read as the node's completion")
-    if not isinstance(check_timeout, int) or isinstance(check_timeout, bool) or check_timeout < 1:
+    if check_timeout is None or check_timeout < 1:
         # dynamic_checks.timeout_seconds is nullable
         return Resolved(None, "invalid", "the check has no timeout to fit the guard in")
     if "is_action" in raw and not isinstance(raw["is_action"], bool):
