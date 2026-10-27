@@ -104,7 +104,7 @@ def _one_per_run(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     same id. Records with no subtask id are kept as they are.
     """
     best: dict[str, dict[str, Any]] = {}
-    loose = []
+    loose: list[dict[str, Any]] = []
     for rec in records:
         sid = rec["subtask_id"]
         if sid is None:
@@ -231,9 +231,9 @@ async def get_guard_data(
         reverse=True,
     )
     run_counts = Counter(_hex(_dict(r.metadata_).get("schedule_id")) for r in runs)
-
-    def of(schedule_id: str) -> list[tuple[dict[str, Any], dict[str, Any]]]:
-        return [pair for pair in pairs if pair[0]["schedule_id"] == schedule_id]
+    by_schedule: dict[str | None, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+    for pair in pairs:  # newest first, like pairs
+        by_schedule.setdefault(pair[0]["schedule_id"], []).append(pair)
 
     return {
         "enabled": settings.schedule_guards_enabled,
@@ -245,8 +245,8 @@ async def get_guard_data(
         "schedules": [
             {
                 **_schedule_row(s, settings.schedule_guard_commands),
-                **_tally(of(s.id.hex), run_counts[s.id.hex]),
-                "last_runs": [row for _, row in of(s.id.hex)[:RECENT_LIMIT]],
+                **_tally(by_schedule.get(s.id.hex, []), run_counts[s.id.hex]),
+                "last_runs": [row for _, row in by_schedule.get(s.id.hex, [])[:RECENT_LIMIT]],
             }
             for s in schedules
         ],

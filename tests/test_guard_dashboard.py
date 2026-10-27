@@ -380,7 +380,10 @@ async def test_a_skip_whose_write_raised_after_commit_counts_once_as_skipped(db,
     sch = schedule(agent, {"name": NAME, "mode": "skip"})
     sub = run(agent, sch, report={"guard_skipped": True, "guard": record(mode="skip", skipped=True)})
     await add(db, sch, sub)
-    await add(db, event(agent, "subtask_guard_ran", sub, sch, guard=record(mode="skip", reason="error")))
+    # emitted after the commit, so newer than the row: the row still wins
+    late = event(agent, "subtask_guard_ran", sub, sch, age_hours=0.9, guard=record(mode="skip", reason="error"))
+    assert late.created_at > sub.completed_at
+    await add(db, late)
     out = await data(db, agent)
     assert (out["guard_runs"], out["skipped"], out["fell_through"]["error"]) == (1, 1, 0)
     assert [(r["kind"], r["subtask_id"]) for r in out["recent"]] == [("skipped", sub.id.hex)]
