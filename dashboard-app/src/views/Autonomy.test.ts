@@ -64,6 +64,33 @@ const FULL = () => ({
   events_persisted: true,
   warn_classes: [{ mode: 'warn', context_kind: 'heartbeat_triage', violation: 'level:external', tool_name: 'bash', count: 138 }],
   job_fixes: { enabled: true, jobs: [JUDGING(), STOPPED()] },
+  guards: GUARDS(),
+});
+
+const guardRecord = (over: Record<string, unknown>) => ({
+  at: new Date(Date.now() - 3600_000).toISOString(), kind: 'would_skip', schedule_id: 'ef'.repeat(16),
+  subtask_id: '12'.repeat(16), name: 'ledger_sweep', mode: 'shadow', reason: null, exit_code: 0, timed_out: false,
+  duration_ms: 41, stdout_bytes: 0, stderr_bytes: 0, stderr_head: '', command: 'bash /x/sweep.sh', acted: false,
+  acted_by: [], observed: true, ...over,
+});
+const guardSchedule = (over: Record<string, unknown>) => ({
+  schedule_id: 'ef'.repeat(16), job: 'Run <i>the</i> ledger sweep', name: 'ledger_sweep', mode: 'shadow', allowlisted: true,
+  runs: 168, guard_runs: 160, skipped: 0, would_skip: 150, would_skip_unrecorded: 0, would_skip_unobserved: 0,
+  fell_through: { output: 6, stderr: 1, exit: 0, timeout: 0, error: 3, not_allowlisted: 0 },
+  shadow_misses: 0, shadow_misses_by_signal: { report: 0, finding: 0, inbox: 0, push: 0, ledger: 0 }, last_runs: [],
+  ...over,
+});
+const GUARDS = (over: Record<string, unknown> = {}) => ({
+  enabled: true, bus_enabled: true, window_days: 7,
+  schedules: [guardSchedule({})],
+  runs: 168, guard_runs: 160, skipped: 0, would_skip: 150, would_skip_unrecorded: 0, would_skip_unobserved: 0,
+  fell_through: { output: 6, stderr: 1, exit: 0, timeout: 0, error: 3, not_allowlisted: 0 },
+  shadow_misses: 0, shadow_misses_by_signal: { report: 0, finding: 0, inbox: 0, push: 0, ledger: 0 }, other: null,
+  recent: [
+    guardRecord({ acted: true, acted_by: ['report', 'ledger'] }),
+    guardRecord({ kind: 'fell_through', reason: 'stderr', stderr_bytes: 20, stderr_head: '<script>alert(1)</script>', subtask_id: '34'.repeat(16) }),
+  ],
+  ...over,
 });
 
 const fixRow = (over: Record<string, unknown>) => ({
@@ -289,6 +316,153 @@ describe('Autonomy view', () => {
     body = { ...FULL(), job_fixes: { enabled: true, jobs: [] } };
     render(Autonomy);
     expect(await screen.findByText(/No job has needed a check\./)).toBeTruthy();
+  });
+
+  it('shows each guarded job, the counts for the window and the latest records as plain text', async () => {
+    const { container } = render(Autonomy);
+    expect(await screen.findByRole('heading', { name: 'Run guards' })).toBeTruthy();
+    const section = screen.getByRole('heading', { name: 'Run guards' }).closest('section')!;
+    const text = section.textContent ?? '';
+    expect(text).toContain('Run <i>the</i> ledger sweep'); // job text and command output are never markup
+    expect(text).toContain('<script>alert(1)</script>');
+    expect(section.querySelector('i, script')).toBeNull();
+    expect(text).toContain('ledger_sweep');
+    expect(text).toContain('Shadow');
+    const valueOf = (label: string) => Array.from(section.querySelectorAll('dt')).find((dt) => dt.textContent === label)
+      ?.nextElementSibling?.textContent;
+    expect(valueOf('Runs')).toBe('168');
+    expect(valueOf('Guard ran')).toBe('160');
+    expect(valueOf('Would have skipped')).toBe('150');
+    expect(valueOf('Skipped')).toBe('0');
+    expect(text).toContain('Output 6');
+    expect(text).toContain('stderr 1');
+    expect(text).toContain('Error 3');
+    expect(text).toContain('Model acted: report, ledger');
+    expect(section.querySelector('[role="alert"]')).toBeNull();
+    expect(container.textContent).not.toMatch(/NaN|undefined/);
+  });
+
+  it('makes shadow misses stand out, with the acting kinds behind them', async () => {
+    body = { ...FULL(), guards: GUARDS({ shadow_misses: 3, shadow_misses_by_signal: { report: 3, finding: 1, inbox: 3, push: 0, ledger: 2 } }) };
+    render(Autonomy);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('3 shadow misses');
+    expect(alert.textContent).toContain('finding 1');
+    expect(alert.textContent).toContain('ledger 2');
+    // report and inbox come with every completed run: context in the records, not why a run is a miss
+    expect(alert.textContent).not.toContain('report');
+    expect(alert.textContent).not.toContain('inbox');
+  });
+
+  it('shows each guarded job with its own counts and shadow misses', async () => {
+    body = { ...FULL(), guards: GUARDS({ shadow_misses: 3, schedules: [
+      guardSchedule({ runs: 160, would_skip: 150, shadow_misses: 3 }),
+      guardSchedule({ schedule_id: 'cd'.repeat(16), job: 'Check the grid bot', mode: 'skip', runs: 8, skipped: 7, would_skip: 0 }),
+    ] }) };
+    render(Autonomy);
+    const row = async (job: string) => (await screen.findByText(job)).closest('tr')!;
+    const cells = (tr: HTMLElement) => Array.from(tr.querySelectorAll('td')).slice(2).map((td) => td.textContent);
+    const sweep = await row('Run <i>the</i> ledger sweep');
+    expect(cells(sweep)).toEqual(['160', '0', '150', '3']);
+    expect(sweep.querySelector('[data-testid="schedule-misses"]')!.classList.contains('acted')).toBe(true);
+    const grid = await row('Check the grid bot');
+    expect(cells(grid)).toEqual(['8', '7', '0', '0']);
+    expect(grid.querySelector('[data-testid="schedule-misses"]')!.classList.contains('acted')).toBe(false);
+  });
+
+  it("shows each job's own last runs as plain text, even when another job fills the latest records", async () => {
+    const hourly = Array.from({ length: 10 }, (_, i) => guardRecord({ subtask_id: `${i}`.padStart(32, 'a') }));
+    const daily = guardRecord({
+      at: new Date(Date.now() - 3 * 86_400_000).toISOString(), schedule_id: 'cd'.repeat(16), subtask_id: '9d'.repeat(16),
+      kind: 'fell_through', reason: 'stderr', stderr_bytes: 30, stderr_head: '<script>daily()</script>',
+      acted: true, acted_by: ['finding'],
+    });
+    body = { ...FULL(), guards: GUARDS({ recent: hourly, schedules: [
+      guardSchedule({ last_runs: hourly }),
+      guardSchedule({ schedule_id: 'cd'.repeat(16), job: 'Check the grid bot', mode: 'skip', last_runs: [daily] }),
+    ] }) };
+    const { container } = render(Autonomy);
+    const caption = await screen.findByText(/Latest 10 records/);
+    expect(caption.closest('table')!.textContent).not.toContain('<script>daily()</script>');
+    const grid = (await screen.findByText('Check the grid bot')).closest('tr')!;
+    const details = grid.nextElementSibling!.querySelector('details')!;
+    expect(details.querySelector('summary')!.textContent).toBe('Last 1 run of this job');
+    const [record] = Array.from(details.querySelectorAll(':scope tbody tr'));
+    expect(record.textContent).toContain('Fell through: stderr');
+    expect(record.textContent).toContain('Model acted: finding');
+    expect(record.querySelector('pre')!.textContent).toBe('<script>daily()</script>');
+    expect(container.querySelector('script')).toBeNull();
+    const sweep = (await screen.findByText('Run <i>the</i> ledger sweep')).closest('tr')!;
+    expect(sweep.nextElementSibling!.querySelector('summary')!.textContent).toBe('Last 10 runs of this job');
+  });
+
+  it('shows an unresolved guard with no mode, and a null mode of a guard that ran as unknown', async () => {
+    body = { ...FULL(), guards: GUARDS({ recent: [
+      guardRecord({ kind: 'fell_through', reason: 'not_allowlisted', name: 'nope', mode: null, exit_code: null, duration_ms: null, subtask_id: '56'.repeat(16) }),
+      guardRecord({ kind: 'fell_through', reason: 'error', mode: null, subtask_id: '78'.repeat(16) }),
+    ] }) };
+    render(Autonomy);
+    const caption = await screen.findByText(/Latest 2 records/);
+    const [unresolved, odd] = Array.from(caption.closest('table')!.querySelectorAll('tbody tr'));
+    expect(unresolved.querySelectorAll('td')[1].textContent).toBe('nope —');
+    expect(unresolved.textContent).toContain('Fell through: Not allowlisted');
+    expect(unresolved.textContent).not.toContain('Unknown mode');
+    expect(odd.querySelectorAll('td')[1].textContent).toContain('Unknown mode: —');
+  });
+
+  it('says how many would-skip runs have no record of what the model did', async () => {
+    body = { ...FULL(), guards: GUARDS({ would_skip_unrecorded: 2 }) };
+    render(Autonomy);
+    expect(await screen.findByText(/2 would-skip runs have no record of what the model did/)).toBeTruthy();
+  });
+
+  it('labels a run with no structured report "not observed", and counts those apart', async () => {
+    body = { ...FULL(), guards: GUARDS({ would_skip_unobserved: 1, recent: [
+      guardRecord({ acted: null, acted_by: ['inbox', 'push'], observed: false }),
+      guardRecord({ acted: null, acted_by: null, observed: null, subtask_id: '9a'.repeat(16) }),
+    ] }) };
+    render(Autonomy);
+    const caption = await screen.findByText(/Latest 2 records/);
+    const [legacy, unrecorded] = Array.from(caption.closest('table')!.querySelectorAll('tbody tr'));
+    expect(legacy.querySelectorAll('td')[4].textContent).toBe('not observed');
+    expect(unrecorded.querySelectorAll('td')[4].textContent).toBe('—');
+    expect(await screen.findByText(/1 would-skip run was not observed/)).toBeTruthy();
+  });
+
+  it('shows the records no guarded job holds in one Other row, so the rows add up to the totals', async () => {
+    const orphan = guardRecord({ schedule_id: null, subtask_id: '0f'.repeat(16), stderr_head: '<b>gone</b>' });
+    body = { ...FULL(), guards: GUARDS({ schedules: [], other: guardSchedule({
+      runs: 3, skipped: 2, would_skip: 1, shadow_misses: 1, last_runs: [orphan],
+    }) }) };
+    render(Autonomy);
+    const other = (await screen.findByText('Other (stopped, de-guarded or unresolved)')).closest('tr')!;
+    expect(Array.from(other.querySelectorAll('td')).map((td) => td.textContent)).toEqual(['—', '—', '3', '2', '1', '1']);
+    expect(other.querySelector('[data-testid="schedule-misses"]')!.classList.contains('acted')).toBe(true);
+    const details = other.nextElementSibling!.querySelector('details')!;
+    expect(details.querySelector('summary')!.textContent).toBe('Last 1 run in no row above');
+    expect(details.querySelector('pre')!.textContent).toBe('<b>gone</b>');
+    expect(details.querySelector('b')).toBeNull();
+    expect(screen.queryByText(/No schedule has a guard\./)).toBeNull();
+  });
+
+  it('says guards are off, or that nothing is guarded yet', async () => {
+    body = { ...FULL(), guards: GUARDS({ enabled: false }) };
+    render(Autonomy);
+    expect(await screen.findByText(/NOUS_SCHEDULE_GUARDS_ENABLED=false/)).toBeTruthy();
+    cleanup();
+    // the guards' own switch, not the response's events_persisted (F026 persistence)
+    body = { ...FULL(), events_persisted: true, guards: GUARDS({ bus_enabled: false }) };
+    render(Autonomy);
+    expect(await screen.findByText(/NOUS_EVENT_BUS_ENABLED=false/)).toBeTruthy();
+    cleanup();
+    body = { ...FULL(), events_persisted: false, warn_classes: [] };
+    render(Autonomy);
+    await screen.findByRole('heading', { name: 'Run guards' });
+    expect(screen.queryByText(/NOUS_EVENT_BUS_ENABLED=false/)).toBeNull();
+    cleanup();
+    body = { ...FULL(), guards: GUARDS({ schedules: [], recent: [], runs: 0, guard_runs: 0, would_skip: 0 }) };
+    render(Autonomy);
+    expect(await screen.findByText(/No schedule has a guard\./)).toBeTruthy();
   });
 
   it('says so when the endpoint fails', async () => {

@@ -1690,6 +1690,79 @@ export interface AutonomyData {
   warn_classes: { mode: string; context_kind: string; violation: string; tool_name: string; count: number }[];
   /** Every check-and-fix record, whatever `window_days` is (nous/api/job_fix_dashboard.py). */
   job_fixes: { enabled: boolean; jobs: JobFixRow[] };
+  /** F107 scheduled-run guards in the window (nous/api/guard_dashboard.py), from persisted records only. */
+  guards: GuardsBlock;
+}
+
+export type GuardReason = 'output' | 'stderr' | 'exit' | 'timeout' | 'error' | 'not_allowlisted';
+export type GuardSignal = 'report' | 'finding' | 'inbox' | 'push' | 'ledger';
+
+/** The counts are the totals over every schedule with a guard record or a guard now. */
+export interface GuardsBlock extends GuardCounts {
+  /** NOUS_SCHEDULE_GUARDS_ENABLED. */
+  enabled: boolean;
+  /** NOUS_EVENT_BUS_ENABLED. Every record but a skip is a bus event: false means nothing of them was recorded, not "none". */
+  bus_enabled: boolean;
+  window_days: number;
+  /** Active schedules with a guard, each with its own counts. `mode` as written: shadow (the default), skip, or an unknown one. */
+  schedules: GuardSchedule[];
+  /** The remainder of every count (records of stopped or de-guarded schedules, and ones naming no schedule),
+   *  so the rows add up to the totals; null when it is all zero. */
+  other: GuardOther | null;
+  /** The latest 10 records, newest first. Texts are command output and job text: plain text only. */
+  recent: GuardRecord[];
+}
+
+export interface GuardOther extends GuardCounts {
+  /** The latest 10 of those records, newest first. */
+  last_runs: GuardRecord[];
+}
+
+export interface GuardCounts {
+  runs: number;
+  guard_runs: number;
+  skipped: number;
+  would_skip: number;
+  /** Would-skip runs with no record yet of whether the model acted: not counted in shadow_misses either way. */
+  would_skip_unrecorded: number;
+  /** Would-skip runs whose record could not see a finding (no structured report: the legacy path, or no report emitted) and saw no ledger write. */
+  would_skip_unobserved: number;
+  fell_through: Record<GuardReason, number>;
+  /** Would-skip runs in which the model acted (a finding or a ledger write); never more than would_skip. */
+  shadow_misses: number;
+  shadow_misses_by_signal: Record<GuardSignal, number>;
+}
+
+export interface GuardSchedule extends GuardCounts {
+  schedule_id: string;
+  job: string;
+  name: string | null;
+  mode: string;
+  allowlisted: boolean;
+  /** This schedule's latest 10 records, newest first. */
+  last_runs: GuardRecord[];
+}
+
+export interface GuardRecord {
+  at: string;
+  kind: 'skipped' | 'would_skip' | 'fell_through';
+  schedule_id: string | null;
+  subtask_id: string | null;
+  name: string | null;
+  mode: string | null;
+  reason: GuardReason | null;
+  exit_code: number | null;
+  timed_out: boolean | null;
+  duration_ms: number | null;
+  stdout_bytes: number | null;
+  stderr_bytes: number | null;
+  stderr_head: string | null;
+  command: string | null;
+  /** Shadow runs only, once the turn is over: null when there is no record of it, or when it was not observed. */
+  acted: boolean | null;
+  acted_by: GuardSignal[] | null;
+  /** False when the run left no structured report, so "the model did nothing" could not be seen; null with no record. */
+  observed: boolean | null;
 }
 
 /** One recurring job check-and-fix has a record for. Texts are written by the check run: plain text only. */

@@ -71,10 +71,15 @@ async def test_the_route_answers_with_the_scoreboard_shape(app):
         "events_persisted",
         "warn_classes",
         "job_fixes",
+        "guards",
     }
     assert body["job_fixes"]["enabled"] is False and isinstance(body["job_fixes"]["jobs"], list)
+    assert body["guards"]["enabled"] is True and body["guards"]["window_days"] == 7
+    assert body["guards"]["schedules"] == [] and body["guards"]["recent"] == []
+    assert body["guards"]["bus_enabled"] is True and "events_persisted" not in body["guards"]
     assert body["window_days"] == 7
-    assert (await _get(app, "/dashboard/autonomy?days=30")).json()["window_days"] == 30
+    thirty = (await _get(app, "/dashboard/autonomy?days=30")).json()
+    assert thirty["window_days"] == 30 and thirty["guards"]["window_days"] == 30
 
 
 @pytest.mark.postgres_only

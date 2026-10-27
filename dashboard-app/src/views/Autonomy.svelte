@@ -2,7 +2,7 @@
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
-  import type { AutonomyData, InventoryTool, JobFixRow, ScoreStats, VerifiedShare } from '../lib/types/api';
+  import type { AutonomyData, GuardRecord, GuardReason, GuardSignal, InventoryTool, JobFixRow, ScoreStats, VerifiedShare } from '../lib/types/api';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import FilterBar from '../lib/ui/FilterBar.svelte';
   import DataTable from '../lib/ui/DataTable.svelte';
@@ -63,6 +63,29 @@
     { key: 'outcome', label: 'Where it stands' },
     { key: 'when', label: 'Latest' },
   ];
+  // F107 run guards: nous/handlers/schedule_guard.py's reasons and acted_signals kinds, in its order.
+  const GUARD_REASON_LABEL: Record<GuardReason, string> = {
+    output: 'Output', stderr: 'stderr', exit: 'Exit code', timeout: 'Timeout', error: 'Error', not_allowlisted: 'Not allowlisted',
+  };
+  // schedule_guard.ACTING_SIGNALS: report, inbox and push come with every completed run, so only these make a miss.
+  const GUARD_ACTING: GuardSignal[] = ['finding', 'ledger'];
+  const guardMode = (mode: string | null) =>
+    mode === 'shadow' ? 'Shadow' : mode === 'skip' ? 'Skip' : `Unknown mode: ${mode ?? '—'}`;
+  // An unresolved guard ran nothing, so its record has no mode by design: not an unknown one.
+  const recordMode = (r: GuardRecord) => (r.reason === 'not_allowlisted' ? '—' : guardMode(r.mode));
+  const guardOutcome = (r: GuardRecord) =>
+    r.kind === 'skipped' ? 'Skipped the turn'
+      : r.kind === 'would_skip' ? 'Would have skipped'
+        : `Fell through: ${r.reason ? GUARD_REASON_LABEL[r.reason] ?? r.reason : '—'}`;
+  const fellThrough = (counts: Record<GuardReason, number>) =>
+    (Object.keys(GUARD_REASON_LABEL) as GuardReason[]).filter((k) => counts[k] > 0)
+      .map((k) => `${GUARD_REASON_LABEL[k]} ${counts[k]}`).join(' · ') || 'none';
+  const guardActed = (r: GuardRecord) => {
+    if (r.acted === true) return `Model acted: ${(r.acted_by ?? []).join(', ')}`;
+    if (r.acted === false) return 'Model did nothing';
+    return r.observed === false ? 'not observed' : '—';
+  };
+
   const warnCols = [
     { key: 'context', label: 'Context' },
     { key: 'tool', label: 'Tool' },
@@ -375,6 +398,116 @@
     {/if}
   </section>
 
+  {@const g = d.guards}
+  <section class="panel" aria-labelledby="guard-title">
+    <div class="panel-head">
+      <h2 id="guard-title">Run guards</h2>
+      <span class="small muted">Scheduled script jobs that run a check before the model · last {w}</span>
+    </div>
+    {#if !g.enabled}
+      <p class="small muted" role="status">Off (<code>NOUS_SCHEDULE_GUARDS_ENABLED=false</code>): every guarded job runs the model as if it had no guard.</p>
+    {/if}
+    {#if !g.bus_enabled}
+      <p class="small muted" role="status">Only skips are recorded: the event bus is off (<code>NOUS_EVENT_BUS_ENABLED=false</code>), so the other counts read 0.</p>
+    {/if}
+    {#if g.shadow_misses > 0}
+      <div class="strip verdict-bad" role="alert">
+        <div>
+          <div class="verdict-title">{g.shadow_misses} shadow miss{g.shadow_misses === 1 ? '' : 'es'}</div>
+          <div class="verdict-detail">
+            Runs the guard would have skipped in which the model still acted
+            ({GUARD_ACTING.filter((k) => g.shadow_misses_by_signal[k] > 0).map((k) => `${k} ${g.shadow_misses_by_signal[k]}`).join(', ')}).
+            In skip mode that work would not have happened.
+          </div>
+        </div>
+      </div>
+    {/if}
+    {#if g.schedules.length === 0 && !g.other}
+      <p class="empty">No schedule has a guard. A guard is set by hand in a schedule's metadata; see F107.</p>
+    {:else}
+      <div class="table-wrap">
+        <table class="stats guards">
+          <thead><tr><th scope="col">Job</th><th scope="col">Guard</th><th scope="col">Mode</th><th scope="col">Runs</th><th scope="col">Skipped</th><th scope="col">Would skip</th><th scope="col">Shadow misses</th></tr></thead>
+          <tbody>
+            {#each g.schedules as s (s.schedule_id)}
+              <tr>
+                <th scope="row"><span class="job" title={s.job}>{s.job}</span></th>
+                <td><span class="mono">{s.name ?? '—'}</span>{#if !s.allowlisted} <span class="pill pill-warn">not allowlisted</span>{/if}</td>
+                <td><span class="pill" class:pill-warn={s.mode !== 'shadow' && s.mode !== 'skip'}>{guardMode(s.mode)}</span></td>
+                <td>{s.runs}</td>
+                <td>{s.skipped}</td>
+                <td>{s.would_skip}</td>
+                <td class:acted={s.shadow_misses > 0} data-testid="schedule-misses">{s.shadow_misses}</td>
+              </tr>
+              {@render lastRuns(s.last_runs, 'of this job')}
+            {/each}
+            {#if g.other}
+              <tr class="other">
+                <th scope="row">Other (stopped, de-guarded or unresolved)</th>
+                <td>—</td>
+                <td>—</td>
+                <td>{g.other.runs}</td>
+                <td>{g.other.skipped}</td>
+                <td>{g.other.would_skip}</td>
+                <td class:acted={g.other.shadow_misses > 0} data-testid="schedule-misses">{g.other.shadow_misses}</td>
+              </tr>
+              {@render lastRuns(g.other.last_runs, 'in no row above')}
+            {/if}
+          </tbody>
+        </table>
+      </div>
+    {/if}
+    <dl class="tiles guard-tiles">
+      <div><dt>Runs</dt><dd>{g.runs}</dd></div>
+      <div><dt>Guard ran</dt><dd>{g.guard_runs}</dd></div>
+      <div><dt>Skipped</dt><dd>{g.skipped}</dd></div>
+      <div><dt>Would have skipped</dt><dd>{g.would_skip}</dd></div>
+    </dl>
+    <p class="small">Fell through to the model: {fellThrough(g.fell_through)}</p>
+    {#if g.would_skip_unrecorded > 0}
+      <p class="small muted">{g.would_skip_unrecorded} would-skip run{g.would_skip_unrecorded === 1 ? ' has' : 's have'} no record of what the model did (still running, or the record was lost), so {g.would_skip_unrecorded === 1 ? 'it is' : 'they are'} not in the shadow-miss count.</p>
+    {/if}
+    {#if g.would_skip_unobserved > 0}
+      <p class="small muted">{g.would_skip_unobserved} would-skip run{g.would_skip_unobserved === 1 ? ' was' : 's were'} not observed: no structured report (the legacy path, or a turn that ended without one), so a finding could not be seen and {g.would_skip_unobserved === 1 ? 'it is' : 'they are'} neither a shadow miss nor clean.</p>
+    {/if}
+    {#snippet lastRuns(rows: GuardRecord[], of: string)}
+      {#if rows.length > 0}
+        <tr class="last-runs">
+          <td colspan="7">
+            <details>
+              <summary class="small">Last {rows.length} run{rows.length === 1 ? '' : 's'} {of}</summary>
+              {@render guardRecords(rows)}
+            </details>
+          </td>
+        </tr>
+      {/if}
+    {/snippet}
+    {#snippet guardRecords(rows: GuardRecord[], caption?: string)}
+      <div class="table-wrap">
+        <!-- Command output and job text: plain text interpolation only, never {@html}. -->
+        <table class="stats guards">
+          {#if caption}<caption class="label">{caption}</caption>{/if}
+          <thead><tr><th scope="col">When</th><th scope="col">Guard</th><th scope="col">Result</th><th scope="col">Exit</th><th scope="col">After the turn</th><th scope="col">stderr</th></tr></thead>
+          <tbody>
+            {#each rows as r, i (`${r.at}-${r.subtask_id}-${i}`)}
+              <tr>
+                <td>{fmtWhen(r.at)}</td>
+                <td><span class="mono">{r.name ?? '—'}</span> <span class="small muted">{recordMode(r)}</span></td>
+                <td>{guardOutcome(r)}</td>
+                <td>{r.timed_out ? 'timed out' : (r.exit_code ?? '—')}{#if r.duration_ms !== null} <span class="small muted">{r.duration_ms} ms</span>{/if}</td>
+                <td class:acted={r.acted === true}>{guardActed(r)}</td>
+                <td class="wrap">{#if r.stderr_head}<pre>{r.stderr_head}</pre>{:else}—{/if}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    {/snippet}
+    {#if g.recent.length > 0}
+      {@render guardRecords(g.recent, `Latest ${g.recent.length} records`)}
+    {/if}
+  </section>
+
   <section class="panel" aria-labelledby="warn-title">
     <div class="panel-head">
       <h2 id="warn-title">Tool-policy flags</h2>
@@ -422,6 +555,8 @@
     padding: 0.875rem 1.125rem; border-radius: 8px; border: 1px solid; margin-bottom: 1rem; }
   .verdict-warn { color: #f59e0b; border-color: rgba(245, 158, 11, 0.35); background: rgba(245, 158, 11, 0.08); }
   .verdict-ok { color: #10b981; border-color: rgba(16, 185, 129, 0.35); background: rgba(16, 185, 129, 0.08); }
+  .verdict-bad { color: var(--red); border-color: rgba(239, 68, 68, 0.5); background: rgba(239, 68, 68, 0.1); margin: 0 0 1rem; }
+  .verdict-bad .verdict-title { font-size: 1rem; }
   .verdict-muted { color: var(--muted); border-color: var(--border); background: transparent; }
   .verdict-title { font-size: 0.875rem; font-weight: 700; }
   .verdict-detail { font-size: 0.8125rem; color: var(--text); margin-top: 0.125rem; }
@@ -456,6 +591,14 @@
   .stats th:first-child, .stats td:first-child { text-align: left; }
   .stats thead th { font-size: 0.6875rem; font-weight: 600; color: var(--muted); }
   .censors { margin-top: 1.25rem; max-width: 28rem; }
+  .guards { margin-bottom: 1rem; }
+  .guards td.wrap { white-space: normal; text-align: left; min-width: 12rem; }
+  .guards td.wrap pre { margin: 0; font-family: var(--font-mono); font-size: 0.75rem; white-space: pre-wrap; overflow-wrap: anywhere;
+    max-height: 8rem; overflow-y: auto; }
+  .guards td.acted { color: #fb923c; font-weight: 600; }
+  .guard-tiles { margin-top: 0.25rem; }
+  .guards tr.last-runs > td { text-align: left; white-space: normal; }
+  .guards tr.last-runs .guards { margin: 0.25rem 0 0.5rem; }
   .legend { display: flex; gap: 1rem; flex-wrap: wrap; font-size: 0.75rem; color: var(--muted); margin: 0.5rem 0 0.75rem; }
   .legend i { display: inline-block; width: 0.625rem; height: 0.625rem; border-radius: 2px; margin-right: 0.375rem; vertical-align: -1px; }
   .stack { display: flex; width: 8rem; max-width: 100%; height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; }

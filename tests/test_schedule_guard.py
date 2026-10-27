@@ -112,7 +112,7 @@ NAME = "sweep"
 
 def _guard(command: str, **kw) -> dict:
     """A guard naming NAME, whose allowlisted command is ``command`` (see ``_schedule``)."""
-    return {"name": NAME, "skip_when": "exit0_quiet", "timeout_seconds": 10, "_command": command, **kw}
+    return {"name": NAME, "mode": "skip", "skip_when": "exit0_quiet", "timeout_seconds": 10, "_command": command, **kw}
 
 
 def _spec(command: str, **kw) -> schedule_guard.GuardSpec:
@@ -185,6 +185,9 @@ RECORD_FIELDS = {
     "stderr_bytes",
     "stderr_head",
     "skipped",
+    "mode",
+    "would_skip",
+    "reason",
 }
 
 
@@ -342,7 +345,8 @@ async def test_a_failed_complete_falls_through_to_the_turn():
     await pool._process_subtask(_run(schedule))
     pool._execute_subtask.assert_awaited_once()
     pool._record_inbox.assert_awaited_once()
-    assert _guard_ran(pool._bus)["exit_code"] == 0  # the skip was not written, so the run is recorded here
+    guard = _guard_ran(pool._bus)  # the skip was not written, so the run is recorded here
+    assert (guard["exit_code"], guard["would_skip"], guard["reason"]) == (0, True, "error")
 
 
 async def test_the_records_stderr_head_is_cut_at_512_bytes_and_redacted():
@@ -556,7 +560,7 @@ async def test_a_guarded_fire_completes_its_row_and_closes_its_intention(db):
             task=TASK,
             schedule_type="recurring",
             interval_seconds=3600,
-            metadata={"guard": {"name": NAME, "skip_when": "exit0_quiet", "timeout_seconds": 10}},
+            metadata={"guard": {"name": NAME, "mode": "skip", "skip_when": "exit0_quiet", "timeout_seconds": 10}},
         )
         fire = await create_fire(heart, settings, schedule)
         run = await heart.subtasks.dequeue("worker-0")
@@ -608,7 +612,7 @@ async def test_a_guard_that_falls_through_persists_its_record_as_an_event(db):
             task=TASK,
             schedule_type="recurring",
             interval_seconds=3600,
-            metadata={"guard": {"name": NAME, "skip_when": "exit0_quiet", "timeout_seconds": 10}},
+            metadata={"guard": {"name": NAME, "mode": "skip", "skip_when": "exit0_quiet", "timeout_seconds": 10}},
         )
         await create_fire(heart, settings, schedule)
         run = await heart.subtasks.dequeue("worker-0")
@@ -689,7 +693,7 @@ async def test_the_reconciler_writes_no_inbox_row_for_a_guard_skipped_run(db, mo
             schedule_type="recurring",
             interval_seconds=3600,
             session_id="chat-1",
-            metadata={"guard": {"name": NAME, "skip_when": "exit0_quiet", "timeout_seconds": 10}},
+            metadata={"guard": {"name": NAME, "mode": "skip", "skip_when": "exit0_quiet", "timeout_seconds": 10}},
         )
         plain = await heart.schedules.create(
             task="Summarise the day.", schedule_type="recurring", interval_seconds=3600, session_id="chat-1"
@@ -774,7 +778,7 @@ async def test_a_root_cancelled_before_the_guard_starts_runs_no_command(db, monk
             task=TASK,
             schedule_type="recurring",
             interval_seconds=3600,
-            metadata={"guard": {"name": NAME, "skip_when": "exit0_quiet", "timeout_seconds": 10}},
+            metadata={"guard": {"name": NAME, "mode": "skip", "skip_when": "exit0_quiet", "timeout_seconds": 10}},
         )
         await create_fire(heart, settings, schedule)
         run = await heart.subtasks.dequeue("worker-0")
@@ -808,4 +812,404 @@ async def test_a_root_cancelled_before_the_guard_starts_runs_no_command(db, monk
             assert launched == ["true"]
             assert row.status == "completed" and row.report_jsonb["guard_skipped"] is True
     finally:
+        await heart.close()
+
+
+# ---- phase 2: shadow mode ------------------------------------------------------------------------------
+
+
+def _shadow(command: str, **kw) -> dict:
+    """A guard naming NAME with no ``mode``: shadow, the default for a newly guarded job."""
+    guard = _guard(command, **kw)
+    guard.pop("mode")
+    return guard
+
+
+def _row(run, *, status="completed", report=None, legacy=False) -> SimpleNamespace:
+    """The re-read row of a run whose turn finished: a structured report unless ``legacy`` (result text only)."""
+    report = None if legacy else (report or {})
+    return SimpleNamespace(id=run.id, status=status, report_jsonb=report, result="done", metadata_=run.metadata_)
+
+
+def _events(bus, event_type: str) -> list:
+    return [c.args[0] for c in bus.emit.await_args_list if c.args[0].type == event_type]
+
+
+async def _shadow_run(
+    guard: dict, *, report=None, inbox=False, ledger=(), status="completed", push=False, legacy=False
+):
+    """Process one fire of a shadow-guarded schedule; the model turn is faked."""
+    schedule = _schedule(guard)
+    pool, runner, heart, bus, http, seen = _pool(schedule)
+    run = _run(schedule)
+    heart.subtasks.get = AsyncMock(return_value=_row(run, status=status, report=report, legacy=legacy))
+    heart.job_runs.ledger_effects = AsyncMock(return_value=list(ledger))
+    pool._record_inbox = AsyncMock(return_value=inbox)
+
+    async def fake_execute(subtask):
+        seen["task"] = subtask.task
+        if push:
+            await pool._notify_telegram(subtask, result="3 commits logged")
+
+    pool._execute_subtask = AsyncMock(side_effect=fake_execute)
+    http.post = AsyncMock(return_value=SimpleNamespace(is_success=True))
+    await pool._process_subtask(run)
+    return pool, heart, bus, http, seen, run
+
+
+def test_a_guard_without_a_mode_is_shadow_and_skip_must_be_written():
+    assert _spec("true").mode == schedule_guard.MODE_SHADOW == "shadow"
+    assert _spec("true", mode="skip").mode == schedule_guard.MODE_SKIP == "skip"
+    assert _spec("true", mode="dry_run").mode == "dry_run"  # kept, so the worker can see it is unknown
+
+
+async def test_a_shadow_guard_that_would_skip_still_runs_the_model_with_the_receipt(closed):
+    pool, heart, bus, _http, seen, run = await _shadow_run(_shadow("true"))
+    pool._execute_subtask.assert_awaited_once()
+    heart.subtasks.complete.assert_not_awaited()  # never a guard_skipped row: a real run for the scorer
+    assert seen["task"].startswith(TASK) and "[Run guard receipt]" in seen["task"]
+    assert closed == []
+    (ran,) = _events(bus, "subtask_guard_ran")
+    guard = ran.data["guard"]
+    assert set(guard) == RECORD_FIELDS
+    assert (guard["mode"], guard["would_skip"], guard["skipped"], guard["reason"]) == ("shadow", True, False, None)
+    assert ran.data["schedule_id"] == run.metadata_["schedule_id"]
+    assert _events(bus, "subtask_guard_skipped") == []
+
+
+async def test_a_shadow_guard_that_would_not_skip_records_its_reason():
+    _pool_, _heart, bus, *_rest = await _shadow_run(_shadow("echo 'logged 2 commits'"))
+    guard = _events(bus, "subtask_guard_ran")[0].data["guard"]
+    assert (guard["mode"], guard["would_skip"], guard["reason"]) == ("shadow", False, "output")
+
+
+@pytest.mark.parametrize("mode", ["dry_run", "", 5, "SKIP"])
+async def test_an_unknown_mode_falls_through_at_warning(mode, caplog):
+    schedule = _schedule(_guard("true", mode=mode))
+    pool, _runner, heart, bus, _http, seen = _pool(schedule)
+    with caplog.at_level("WARNING"):
+        await pool._process_subtask(_run(schedule))
+    pool._execute_subtask.assert_awaited_once()
+    heart.subtasks.complete.assert_not_awaited()
+    assert "[Run guard receipt]" in seen["task"] and "unknown mode" in seen["task"]
+    guard = _guard_ran(bus)  # the command certified a no-op, but no known mode acts on it: a config error
+    assert (guard["mode"], guard["would_skip"], guard["reason"]) == (str(mode), True, "error")
+    assert any("mode" in r.getMessage() and r.levelname == "WARNING" for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    ("command", "reason"),
+    [
+        ("echo hi", "output"),
+        ("echo oops >&2; true", "stderr"),
+        ("exit 3", "exit"),
+        ("echo hi; exit 3", "exit"),
+    ],
+)
+async def test_each_fall_through_records_its_reason(command, reason):
+    record: dict = {}
+    await _falls_through(_guard(command), record=record)
+    assert (record["mode"], record["would_skip"], record["reason"]) == ("skip", False, reason)
+
+
+async def test_a_timeout_and_an_error_record_their_reasons(monkeypatch):
+    record: dict = {}
+    await _falls_through(_guard("sleep 5", timeout_seconds=1), record=record)
+    assert record["reason"] == "timeout"
+
+    async def boom(*a, **kw):
+        raise OSError("no shell")
+
+    monkeypatch.setattr(schedule_guard.asyncio, "create_subprocess_shell", boom)
+    record.clear()
+    await _falls_through(_guard("true"), record=record)
+    assert record["reason"] == "error"
+
+
+async def test_a_skip_mode_skip_records_mode_and_would_skip(closed):
+    schedule = _schedule(_guard("true"))
+    pool, _runner, heart, *_rest = _pool(schedule)
+    await pool._process_subtask(_run(schedule))
+    guard = heart.subtasks.complete.await_args.kwargs["report_jsonb"]["guard"]
+    assert (guard["mode"], guard["would_skip"], guard["skipped"], guard["reason"]) == ("skip", True, True, None)
+
+
+# ---- phase 2: did the model act? ----------------------------------------------------------------------
+
+
+def _acted(bus) -> dict:
+    (event,) = _events(bus, "subtask_guard_acted")
+    assert event.persist is True
+    return event.data
+
+
+async def test_a_shadow_run_that_did_nothing_records_not_acted():
+    *_rest, bus, _http, _seen, run = await _shadow_run(_shadow("true"), report={"summary": ""})
+    data = _acted(bus)
+    assert (data["acted"], data["acted_by"]) == (False, [])
+    assert data["subtask_id"] == run.id.hex and data["schedule_id"] == run.metadata_["schedule_id"]
+    assert (data["guard"]["name"], data["guard"]["mode"], data["guard"]["would_skip"]) == (NAME, "shadow", True)
+    assert data["run_status"] == "completed" and data["ledger_persisted"] is True
+    assert data["observed"] is True
+
+
+async def test_a_legacy_run_with_no_report_is_not_observed_rather_than_clean():
+    # _execute_legacy (subtask_hardening_enabled=False) writes only a result text: a finding in it is not a
+    # signal, so "no finding" there is unknown, not "did nothing" (PR #811 review, Codex P2).
+    *_rest, bus, _http, _seen, _run_ = await _shadow_run(_shadow("true"), legacy=True, inbox=True, push=True)
+    data = _acted(bus)
+    assert (data["acted"], data["observed"], data["acted_by"]) == (None, False, ["inbox", "push"])
+
+
+async def test_a_legacy_run_that_wrote_through_the_ledger_still_acted():
+    # The ledger is read apart from the report: a write is seen whatever path the turn took.
+    ledger = [("write_file", "success", {"path": "/x"})]
+    *_rest, bus, _http, _seen, _run_ = await _shadow_run(_shadow("true"), legacy=True, ledger=ledger)
+    data = _acted(bus)
+    assert (data["acted"], data["observed"], data["acted_by"]) == (True, False, ["ledger"])
+
+
+@pytest.mark.parametrize(
+    ("signals", "observed", "verdict"),
+    [([], True, False), (["inbox"], False, None), (["ledger"], False, True), (["finding"], True, True)],
+)
+def test_acted_verdict_is_unknown_only_when_nothing_acting_was_seen_and_the_report_was_missing(
+    signals, observed, verdict
+):
+    assert schedule_guard.acted_verdict(signals, observed=observed) is verdict
+
+
+@pytest.mark.parametrize(
+    ("kw", "signal", "acted"),
+    [
+        ({"report": {"summary": "Logged 3 commits."}}, "report", False),
+        ({"report": {"summary": " ", "findings": ["a"]}}, "finding", True),
+        ({"report": {"summary": " ", "next_actions": ["merge #1"]}}, "finding", True),
+        ({"report": {"summary": " ", "incomplete": True, "blocked_reason": "no access"}}, "finding", True),
+        ({"inbox": True}, "inbox", False),
+        ({"push": True}, "push", False),
+        ({"ledger": [("write_file", "success", {"path": "/x"})]}, "ledger", True),
+        ({"ledger": [("bash", "unknown", {"command_sha256": "0" * 16})]}, "ledger", True),
+    ],
+)
+async def test_each_kind_of_action_is_recorded_and_only_a_finding_or_a_ledger_write_is_acting(kw, signal, acted):
+    # report, inbox and push come with every completed run, so they are context, not acting (PR #811 review).
+    *_rest, bus, _http, _seen, _run_ = await _shadow_run(_shadow("true"), **kw)
+    data = _acted(bus)
+    assert data["acted"] is acted and data["acted_by"] == [signal]
+
+
+@pytest.mark.parametrize(
+    ("signals", "acted"),
+    [
+        (["report", "inbox"], False),  # a "nothing to log" run on the hardened path
+        (["inbox", "push"], False),  # the same on the legacy path
+        (["report", "inbox", "push"], False),
+        ([], False),
+        (["report", "finding", "inbox"], True),
+        (["inbox", "push", "ledger"], True),
+    ],
+)
+def test_acted_is_a_finding_or_a_ledger_write(signals, acted):
+    assert schedule_guard.acted(signals) is acted
+
+
+async def test_a_nothing_to_log_run_is_not_acted():
+    *_rest, bus, _http, _seen, _run_ = await _shadow_run(
+        _shadow("true"), report={"summary": "No new commits; nothing to log."}, inbox=True
+    )
+    data = _acted(bus)
+    assert (data["acted"], data["acted_by"]) == (False, ["report", "inbox"])
+
+
+async def test_the_guards_own_command_and_a_blocked_call_are_not_acting():
+    own = schedule_guard.command_digest("true")
+    ledger = [("bash", "success", {"command_sha256": own, "command_len": "4"}), ("send_email", "blocked", {})]
+    *_rest, bus, _http, _seen, _run_ = await _shadow_run(_shadow("true"), ledger=ledger)
+    assert _acted(bus)["acted"] is False
+
+
+def test_acted_signals_is_the_one_definition():
+    row = SimpleNamespace(status="completed", report_jsonb={"summary": "x", "findings": ["f"]})
+    signals = schedule_guard.acted_signals(
+        row, inbox_written=True, pushed=True, ledger=[("write_file", "error", {})], guard_command="true"
+    )
+    assert signals == ["report", "finding", "inbox", "push", "ledger"]
+    assert schedule_guard.acted_signals(None, inbox_written=False, pushed=False, ledger=[], guard_command="t") == []
+    legacy = SimpleNamespace(report_jsonb=None)  # the legacy path writes no report, only a result text
+    assert schedule_guard.acted_signals(legacy, inbox_written=False, pushed=False, ledger=[], guard_command="t") == []
+
+
+async def test_a_push_is_counted_only_when_it_was_sent():
+    *_rest, bus, http, _seen, _run_ = await _shadow_run(_shadow("true"), push=True)
+    http.post.assert_awaited_once()
+    assert _acted(bus)["acted_by"] == ["push"]
+
+
+async def test_the_inbox_row_and_push_of_a_failed_run_are_not_acting():
+    # A failure notice is the system reporting, not the model acting; the run's status is recorded beside it.
+    *_rest, bus, http, _seen, _run_ = await _shadow_run(_shadow("true"), inbox=True, push=True, status="failed")
+    http.post.assert_awaited_once()
+    data = _acted(bus)
+    assert (data["acted"], data["run_status"]) == (False, "failed")
+
+
+@pytest.mark.parametrize("post", [RuntimeError("telegram down"), SimpleNamespace(is_success=False)])
+async def test_a_failed_push_is_not_counted(post):
+    schedule = _schedule(_shadow("true"))
+    pool, _runner, heart, bus, http, _seen = _pool(schedule)
+    run = _run(schedule)
+    heart.subtasks.get = AsyncMock(return_value=_row(run))
+    heart.job_runs.ledger_effects = AsyncMock(return_value=[])
+    pool._record_inbox = AsyncMock(return_value=False)
+    http.post = AsyncMock(side_effect=post) if isinstance(post, Exception) else AsyncMock(return_value=post)
+
+    async def fake_execute(subtask):
+        await pool._notify_telegram(subtask, result="x")
+
+    pool._execute_subtask = AsyncMock(side_effect=fake_execute)
+    await pool._process_subtask(run)
+    assert _acted(bus)["acted"] is False
+    assert pool._shadow == {} and pool._pushed == set()  # nothing left behind for the next run
+
+
+async def test_a_skip_mode_fall_through_records_no_acted_event():
+    schedule = _schedule(_guard("echo hi"))
+    pool, _runner, _heart, bus, *_rest = _pool(schedule)
+    await pool._process_subtask(_run(schedule))
+    assert _events(bus, "subtask_guard_acted") == []
+
+
+async def test_a_turn_that_timed_out_still_records_acted():
+    schedule = _schedule(_shadow("true"))
+    pool, _runner, heart, bus, _http, _seen = _pool(schedule)
+    run = _run(schedule)
+    run.timeout_seconds = 1
+    heart.subtasks.get = AsyncMock(return_value=_row(run, status="failed"))
+    heart.job_runs.ledger_effects = AsyncMock(return_value=[("write_file", "success", {})])
+    pool._record_inbox = AsyncMock(return_value=False)
+
+    async def slow(subtask):
+        await asyncio.sleep(5)
+
+    pool._execute_subtask = AsyncMock(side_effect=slow)
+    await pool._process_subtask(run)
+    data = _acted(bus)
+    assert (data["acted"], data["acted_by"], data["run_status"]) == (True, ["ledger"], "failed")
+
+
+async def test_a_run_left_running_by_a_shutdown_records_nothing():
+    *_rest, bus, _http, _seen, _run_ = await _shadow_run(_shadow("true"), status="running", inbox=True)
+    assert _events(bus, "subtask_guard_acted") == []
+
+
+async def test_a_failed_acted_record_never_fails_the_run(caplog):
+    schedule = _schedule(_shadow("true"))
+    pool, _runner, heart, bus, _http, _seen = _pool(schedule)
+    run = _run(schedule)
+    heart.subtasks.get = AsyncMock(side_effect=RuntimeError("db down"))
+    heart.job_runs.ledger_effects = AsyncMock(return_value=[])
+    pool._record_inbox = AsyncMock(return_value=False)
+    await pool._process_subtask(run)  # does not raise
+    assert _events(bus, "subtask_guard_acted") == []
+    assert "could not record whether the model acted" in caplog.text
+    assert pool._shadow == {}
+
+
+# ---- phase 2: an unresolved guard leaves a persisted record ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("guard", "name"), [({"name": "nope", "skip_when": "exit0_quiet"}, "nope"), ({"skip_when": "x"}, None)]
+)
+async def test_a_guard_that_names_no_allowlisted_command_emits_unresolved(guard, name):
+    schedule = _schedule(guard)
+    pool, _runner, _heart, bus, *_rest = _pool(schedule)
+    await pool._process_subtask(_run(schedule))
+    pool._execute_subtask.assert_awaited_once()
+    (event,) = _events(bus, "subtask_guard_unresolved")
+    assert event.persist is True
+    assert event.data["schedule_id"] == schedule.id.hex
+    assert (event.data["guard"]["name"], event.data["guard"]["reason"]) == (name, "not_allowlisted")
+    assert _events(bus, "subtask_guard_ran") == []
+
+
+@pytest.mark.postgres_only
+async def test_an_unresolved_guard_and_a_shadow_run_persist_their_events(db):
+    from sqlalchemy import select
+
+    from nous.brain.brain import Brain
+    from nous.events import EventBus
+    from nous.handlers.task_scheduler import create_fire
+    from nous.heart.heart import Heart
+    from nous.storage.models import Event as EventRow
+    from nous.storage.models import ExecutionLedgerEntry
+
+    settings = Settings(
+        _env_file=None,
+        agent_id=f"test-guard-{uuid.uuid4().hex[:8]}",
+        schedule_guard_commands={NAME: "true"},
+        result_inbox_enabled=True,
+    )
+    heart, brain, bus = Heart(db, settings), Brain(db, settings), EventBus()
+
+    async def persist(event):  # the persister main.py wires
+        await brain.emit_event(event.type, {**event.data}, session_id=event.session_id, event_id=event.event_id)
+
+    bus.set_db_persister(persist)
+    await bus.start()
+    try:
+        await heart.result_inbox.ensure_enabled_at()
+        unresolved = await heart.schedules.create(
+            task=TASK, schedule_type="recurring", interval_seconds=3600, metadata={"guard": {"name": "nope"}}
+        )
+        shadow = await heart.schedules.create(
+            task=TASK + " (2)",
+            schedule_type="recurring",
+            interval_seconds=3600,
+            session_id="chat-1",  # so its result goes to the inbox
+            metadata={"guard": {"name": NAME}},
+        )
+        pool = SubtaskWorkerPool(runner=MagicMock(), heart=heart, settings=settings, bus=bus)
+
+        async def turn(subtask):  # the model re-runs the guard's command and writes one file
+            async with db.session() as session:
+                for tool, key_args in (
+                    ("bash", {"command_sha256": schedule_guard.command_digest("true"), "command_len": "4"}),
+                    ("write_file", {"path": "/tmp/x"}),
+                ):
+                    session.add(
+                        ExecutionLedgerEntry(
+                            agent_id=settings.agent_id,
+                            context_kind="subtask",
+                            subtask_id=subtask.id,
+                            tool_name=tool,
+                            side_effect_type="write",
+                            key_args=key_args,
+                            status="success",
+                        )
+                    )
+                await session.commit()
+            await heart.subtasks.complete(subtask.id, "wrote x", final_outcome="completed")
+
+        pool._execute_subtask = AsyncMock(side_effect=turn)
+        for schedule in (unresolved, shadow):
+            await create_fire(heart, settings, schedule)
+            await pool._process_subtask(await heart.subtasks.dequeue("worker-0"))
+        assert pool._execute_subtask.await_count == 2
+        await bus.stop()  # drains the queue through the persister
+        async with db.session() as session:
+            rows = (
+                (await session.execute(select(EventRow).where(EventRow.agent_id == settings.agent_id))).scalars().all()
+            )
+        by_type = {r.event_type: r.data for r in rows}
+        assert by_type["subtask_guard_unresolved"]["schedule_id"] == unresolved.id.hex
+        assert by_type["subtask_guard_unresolved"]["guard"]["reason"] == "not_allowlisted"
+        assert by_type["subtask_guard_ran"]["guard"]["would_skip"] is True
+        acted = by_type["subtask_guard_acted"]
+        assert acted["schedule_id"] == shadow.id.hex and acted["acted_by"] == ["inbox", "ledger"]  # not the bash re-run
+        assert not any(r.event_type == "subtask_guard_skipped" for r in rows)
+    finally:
+        await bus.stop()
+        await brain.close()
         await heart.close()
