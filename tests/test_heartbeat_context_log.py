@@ -8,6 +8,7 @@ response's usage, and a failing logger never fails the check.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -192,6 +193,16 @@ def _ring() -> ContextLogger:
     return ctx
 
 
+class _NoDatabase:
+    """A database that is down: the endpoints' DB sections take their fallback, and no mock
+    coroutine is left unawaited (a MagicMock database left three)."""
+
+    @contextlib.asynccontextmanager
+    async def session(self):
+        raise ConnectionError("no database in this test")
+        yield
+
+
 def _client(ctx: ContextLogger):
     from starlette.testclient import TestClient
 
@@ -199,7 +210,7 @@ def _client(ctx: ContextLogger):
     from nous.config import Settings
 
     app = create_app(
-        runner=MagicMock(), brain=MagicMock(), heart=MagicMock(), cognitive=MagicMock(), database=MagicMock(),
+        runner=MagicMock(), brain=MagicMock(), heart=MagicMock(), cognitive=MagicMock(), database=_NoDatabase(),
         settings=Settings(_env_file=None), context_logger=ctx,
     )
     return TestClient(app)
