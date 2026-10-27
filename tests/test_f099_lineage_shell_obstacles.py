@@ -942,6 +942,15 @@ def test_no_write_path_reaches_claude_jobs_outside_prompts(path, tmp_path):
         ("cd {W}/intentions/{RID} && echo x > a.md", True),
         ("cd {W}/claude-jobs/prompts && echo x > p.md", True),
         ("echo x > research/n.md", True),  # from the workspace, where the shell starts
+        # writable from the workspace, but the shell may be elsewhere by then: not sure, so refused
+        ("cd {W}/claude-jobs ; echo x > research/n.md", False),
+        ("cd {W}/claude-jobs || echo x > research/n.md", False),
+        ("cd {W}/claude-jobs | echo x > research/n.md", False),
+        ("cd {W}/claude-jobs\necho x > research/n.md", False),
+        ("cd {W}/intentions/{OTHER} ; echo x > research/n.md", False),  # another root's research/ if the cd ran
+        ("cd {W}/intentions/{OTHER} ; echo x > intentions/{RID}/n.md", False),
+        ("cd {W}/other ; cat a.md > research/n.md", False),
+        ("echo x > research", False),  # the write dir itself
         ("cd {W}/research ; echo x > notes.md", False),  # the cd may have failed
         ("cd {W}/research || echo x > notes.md", False),
         ("cd {W}/research | echo x > notes.md", False),
