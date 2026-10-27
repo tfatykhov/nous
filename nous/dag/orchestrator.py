@@ -293,9 +293,10 @@ def _can_pass(exc: BaseException) -> bool:
 _CHECK_CMD_TIMEOUT = 10.0  # Hard timeout per check command invocation
 # Typed waits for lineage DAGs: the built-in PR check in a lineage DAG runs as
 # argv (no shell) with an environment built from scratch: the variables it
-# reads, PATH, and what an HTTPS client may need in a development shell.
+# reads, PATH, and what an HTTPS client may need in a development shell. No
+# PYTHONPATH: sys.executable already finds nous, and nothing else may change
+# what the interpreter loads.
 _TYPED_CHECK_ENV_PASSTHROUGH = (
-    "PYTHONPATH",
     "HTTPS_PROXY",
     "HTTP_PROXY",
     "NO_PROXY",

@@ -200,7 +200,6 @@ TYPED_CHECK_ENV = {
     "GITHUB_TOKEN",
     "NOUS_WORKSPACE_DIR",
     "NOUS_DAG_CREATED_AT",
-    "PYTHONPATH",
     "HTTPS_PROXY",
     "HTTP_PROXY",
     "NO_PROXY",
@@ -317,6 +316,9 @@ async def test_a_lineage_dag_from_before_the_rule_fails_its_shell_check_and_spaw
 @pytest.mark.postgres_only
 async def test_the_built_in_pr_check_runs_without_a_shell_in_a_lineage_dag(run_env, monkeypatch):
     spawns = Spawns(monkeypatch, returncode=0)
+    # Nothing in the parent's environment that changes what the interpreter loads reaches the check.
+    monkeypatch.setenv("PYTHONPATH", "/somewhere/else")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:3128")
     dag = await run_env.store.create(_request(_checked(DAGNodeType.subtask, TYPED)), intention=_internal())
     now = datetime.now(UTC)
     await run_env.store.update_dag_status(dag.id, "running")
@@ -331,6 +333,8 @@ async def test_the_built_in_pr_check_runs_without_a_shell_in_a_lineage_dag(run_e
     assert env["GITHUB_TOKEN"] == "t0ken"
     assert env["NOUS_WORKSPACE_DIR"] == str(run_env.workspace)
     assert "NOUS_DAG_CREATED_AT" in env and "PATH" in env
+    assert "PYTHONPATH" not in env
+    assert env["HTTPS_PROXY"] == "http://proxy.invalid:3128"  # a passthrough still passes
     assert kwargs["start_new_session"] is True
     row = await _node(run_env, dag.id)
     assert row.status == "completed"
