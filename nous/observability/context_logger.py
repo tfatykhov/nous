@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -373,20 +374,23 @@ class ContextLogger:
         task.add_done_callback(self._pending_tasks.discard)
         return task
 
-    async def _bounded(self, coro) -> None:
-        """One DB write, within the concurrency cap and the timeout."""
+    async def _bounded(self, make_write: Callable[[], Awaitable[Any]]) -> None:
+        """One DB write, within the concurrency cap and the timeout.
+
+        Takes a factory, not a coroutine: the write's coroutine is created only once a slot
+        is held, so none is left un-awaited when there is no loop or the task is cancelled
+        while queued.
+        """
         try:
             async with self._db_slots:
-                await asyncio.wait_for(coro, timeout=DB_WRITE_TIMEOUT_SECONDS)
+                await asyncio.wait_for(make_write(), timeout=DB_WRITE_TIMEOUT_SECONDS)
         except TimeoutError:
             logger.warning("F035.4: context log DB write timed out after %ss", DB_WRITE_TIMEOUT_SECONDS)
-        finally:
-            coro.close()  # no-op once it ran; avoids a never-awaited warning if cancelled while queued
 
     async def _update_after_insert(self, insert: asyncio.Task | None, entry: ContextLogEntry) -> None:
         if insert is not None:
             await asyncio.wait([insert])  # never raises: a failed INSERT still lets the UPDATE try
-        await self._bounded(self._db_updater(entry))
+        await self._bounded(lambda: self._db_updater(entry))
 
     def _sync_entries_index(self) -> None:
         """REVIEW FIX P1-8: Sync _entries_by_id with deque to prevent memory leak."""
@@ -430,7 +434,7 @@ class ContextLogger:
         if self._payload_store and payload:
             self._payload_store.capture(session_id, entry.id, payload)
         if self._db_writer:
-            task = self._schedule_bg(self._bounded(self._db_writer(entry)))
+            task = self._schedule_bg(self._bounded(lambda: self._db_writer(entry)))
             if task is not None:
                 self._insert_tasks[entry.id] = task
                 entry_id = entry.id
