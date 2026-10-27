@@ -15,7 +15,14 @@ from sqlalchemy.orm import aliased, selectinload
 from nous.brain import intentions
 from nous.brain.intentions import IntentionSpec
 from nous.config import Settings
-from nous.dag.schemas import PREDECESSOR_EDGE_TYPES, DAGCreateRequest, DAGNodeSpec, DAGNodeType
+from nous.dag.schemas import (
+    PR_WAIT_POLL_FLOOR_SECONDS,
+    PREDECESSOR_EDGE_TYPES,
+    DAGCreateRequest,
+    DAGNodeSpec,
+    DAGNodeType,
+    effective_poll_interval,
+)
 from nous.storage.database import Database
 from nous.storage.models import DAGEdge, DAGNode, DynamicCheckModel, ExecutionDAG, Subtask
 
@@ -174,17 +181,47 @@ class DAGStore:
         resolved: list[tuple[int, int | None]] = []
         problems: list[str] = []
         notes: list[str] = []
+        max_timeout = self._settings.dag_node_max_timeout
         for spec in specs:
             resolved_timeout = min(
                 spec.timeout_seconds if spec.timeout_seconds is not None else self._settings.dag_node_default_timeout,
-                self._settings.dag_node_max_timeout,
+                max_timeout,
             )
+            wait_kind = spec.wait_for.kind if spec.wait_for is not None else None
+            interval = effective_poll_interval(wait_kind, spec.completion_check_interval)
+            if wait_kind == "pr":
+                asked = spec.completion_check_interval
+                if asked is not None and asked < PR_WAIT_POLL_FLOOR_SECONDS:
+                    notes.append(
+                        f"node '{spec.name}': poll interval raised from {asked} to {PR_WAIT_POLL_FLOOR_SECONDS} s "
+                        "(a pr wait polls GitHub at most once a minute)"
+                    )
+                if spec.wait_for.repo is None and not (getattr(self._settings, "github_default_repo", "") or ""):
+                    problems.append(f"node '{spec.name}': pr wait needs repo (no NOUS_GITHUB_DEFAULT_REPO is set)")
+            # A check or wait node's timeout covers its polls: max_check_attempts
+            # polls one interval apart, plus one interval. Before the stall
+            # block, which compares against the resolved timeout.
+            if spec.type in (DAGNodeType.check, DAGNodeType.wait) and spec.max_check_attempts and interval:
+                needed = interval * (spec.max_check_attempts + 1)
+                if needed > max_timeout:
+                    problems.append(
+                        f"node '{spec.name}': {spec.max_check_attempts} polls every {interval} s need a timeout of "
+                        f"{needed} s, above NOUS_DAG_NODE_MAX_TIMEOUT={max_timeout}; lower max_check_attempts or "
+                        "completion_check_interval"
+                    )
+                elif resolved_timeout < needed:
+                    notes.append(
+                        f"node '{spec.name}': timeout_seconds raised from {resolved_timeout} to {needed} so "
+                        f"{spec.max_check_attempts} polls every {interval} s fit"
+                    )
+                    resolved_timeout = needed
             resolved_stall: int | None
-            if spec.type == DAGNodeType.approval:
+            if spec.type in (DAGNodeType.approval, DAGNodeType.wait):
                 # Harness Phase 3 §3.1: an approval node never runs, so no
                 # stall timeout applies. timeout_seconds keeps its resolved
                 # default above — the column is NOT NULL, and nothing reads
-                # it for an approval node.
+                # it for an approval node. A wait node runs nothing either:
+                # its own timeout bounds it (orchestrator._poll_wait_nodes).
                 resolved_stall = None
             elif spec.stall_timeout_seconds == 0:
                 # F064.1: explicitly disabled per-node — no inheritance, no check.
@@ -318,6 +355,7 @@ class DAGStore:
                     initial_status = "ready"
                 else:
                     initial_status = "pending"
+                wait_kind = spec.wait_for.kind if spec.wait_for is not None else None
                 approval_spec = None
                 if spec.type == DAGNodeType.approval:
                     approval_spec = {
@@ -344,7 +382,7 @@ class DAGStore:
                     timeout_seconds=resolved_timeout,
                     completion_condition=spec.completion_condition,
                     completion_check=spec.completion_check,
-                    completion_check_interval=spec.completion_check_interval,
+                    completion_check_interval=effective_poll_interval(wait_kind, spec.completion_check_interval),
                     max_check_attempts=spec.max_check_attempts,
                     stall_timeout_seconds=resolved_stall,
                     # F066.1 — fix-stage columns.
@@ -354,6 +392,7 @@ class DAGStore:
                     expected_modes=list(spec.expected_modes),
                     approval_spec=approval_spec,
                     undoable=spec.undoable,
+                    wait_for=spec.wait_for.model_dump(exclude_none=True) if spec.wait_for is not None else None,
                 )
                 session.add(node)
                 node_map[spec.name] = node

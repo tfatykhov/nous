@@ -7,6 +7,7 @@ env vars (DB_PASSWORD, DB_PORT, etc.) that docker-compose uses, so a single
 
 import json
 import logging
+import re
 import tempfile
 from pathlib import Path
 from typing import Annotated, Literal
@@ -22,6 +23,10 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 # without config importing the tool layer; `tools.py` imports this name, and
 # `test_timeout_grace_is_shared` asserts the two never drift apart.
 PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS = 2.0
+
+# NOUS_GITHUB_DEFAULT_REPO: an owner/repo pair, the same charset typed_checks.py accepts for a PR check's repo.
+DEFAULT_GITHUB_REPO = "tfatykhov/nous"
+_GITHUB_REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 
 
 class Settings(BaseSettings):
@@ -914,6 +919,21 @@ class Settings(BaseSettings):
         default="",
         validation_alias="GITHUB_TOKEN",
     )
+    # The repository a DAG's pr wait reads when its wait_for names none. An owner/repo pair; anything else falls
+    # back to the default with a WARNING, never a boot failure.
+    github_default_repo: str = DEFAULT_GITHUB_REPO
+
+    @field_validator("github_default_repo", mode="before")
+    @classmethod
+    def _check_github_default_repo(cls, v: object) -> str:
+        repo = v.strip() if isinstance(v, str) else ""
+        if _GITHUB_REPO.fullmatch(repo) and not any(part in (".", "..") for part in repo.split("/")):
+            return repo
+        logging.getLogger(__name__).warning(
+            "NOUS_GITHUB_DEFAULT_REPO %r is not an owner/repo pair; using %s", v, DEFAULT_GITHUB_REPO
+        )
+        return DEFAULT_GITHUB_REPO
+
     background_model: str = Field(
         default="claude-sonnet-4-6",
         validation_alias="NOUS_BACKGROUND_MODEL",
