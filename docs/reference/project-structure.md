@@ -75,7 +75,7 @@ nous/
 │   │   ├── session_monitor.py     # Session timeout monitoring
 │   │   ├── sleep_handler.py       # Sleep/reflection handler
 │   │   ├── subtask_worker.py      # Async subtask execution
-│   │   ├── schedule_guard.py      # F107: run-level guard for scheduled script jobs (a schedule's `metadata.guard` command runs before the model turn; exit 0 + empty stdout completes the run without one)
+│   │   ├── schedule_guard.py      # F107: run-level guard for scheduled script jobs (a schedule's `metadata.guard` names an entry of the `NOUS_SCHEDULE_GUARD_COMMANDS` allowlist, which runs before the model turn; `exit0_quiet`: exit 0 + empty stdout + empty stderr completes the run without one)
 │   │   ├── continuation_runner.py # F099 Phase 2c: ContinuationRunner (the loop, the turn, resolve_intention, the follow-up and fallbacks), build_arrival_prompt; Phase 3a: the card settle step
 │   │   ├── continuation_publisher.py # F099 Phase 2c: OwnerPublisher, the owner push to Telegram (quiet-hours aware, once per row); Phase 2d: PROPOSAL rows with buttons, QUESTION rows with force_reply, escaped HTML; Phase 3a: the companion card leg
 │   │   ├── task_scheduler.py      # Cron/one-shot scheduling
