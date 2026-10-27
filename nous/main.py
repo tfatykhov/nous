@@ -1322,6 +1322,7 @@ async def create_components(settings: Settings) -> dict:
                 logger.info("F035.3: BehaviorDriftCheck registered (interval=%ds)", drift_check.interval)
 
             # F034.5: Create dynamic check loader
+            from nous.heartbeat import check_guard
             from nous.heartbeat.dynamic import DynamicCheckLoader
 
             dynamic_loader = DynamicCheckLoader(
@@ -1331,6 +1332,7 @@ async def create_components(settings: Settings) -> dict:
                 max_checks=settings.heartbeat_max_dynamic_checks,
                 model_override=settings.heartbeat_model or settings.background_model,
                 default_timeout=settings.heartbeat_default_check_timeout,
+                guards=check_guard.context_for(settings, bus, database),  # F107 phase 3
             )
 
             # Create dedicated API client for heartbeat (isolated connection pool)

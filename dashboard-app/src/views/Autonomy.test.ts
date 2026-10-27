@@ -69,14 +69,14 @@ const FULL = () => ({
 
 const guardRecord = (over: Record<string, unknown>) => ({
   at: new Date(Date.now() - 3600_000).toISOString(), kind: 'would_skip', schedule_id: 'ef'.repeat(16),
-  subtask_id: '12'.repeat(16), name: 'ledger_sweep', mode: 'shadow', reason: null, exit_code: 0, timed_out: false,
+  subtask_id: '12'.repeat(16), check_id: null, name: 'ledger_sweep', mode: 'shadow', reason: null, exit_code: 0, timed_out: false,
   duration_ms: 41, stdout_bytes: 0, stderr_bytes: 0, stderr_head: '', command: 'bash /x/sweep.sh', acted: false,
   acted_by: [], observed: true, ...over,
 });
 const guardSchedule = (over: Record<string, unknown>) => ({
   schedule_id: 'ef'.repeat(16), job: 'Run <i>the</i> ledger sweep', name: 'ledger_sweep', mode: 'shadow', allowlisted: true,
   runs: 168, guard_runs: 160, skipped: 0, would_skip: 150, would_skip_unrecorded: 0, would_skip_unobserved: 0,
-  fell_through: { output: 6, stderr: 1, exit: 0, timeout: 0, error: 3, not_allowlisted: 0 },
+  fell_through: { output: 6, stderr: 1, exit: 0, timeout: 0, error: 3, not_allowlisted: 0, invalid: 0 },
   shadow_misses: 0, shadow_misses_by_signal: { report: 0, finding: 0, inbox: 0, push: 0, ledger: 0 }, last_runs: [],
   ...over,
 });
@@ -84,8 +84,8 @@ const GUARDS = (over: Record<string, unknown> = {}) => ({
   enabled: true, bus_enabled: true, window_days: 7,
   schedules: [guardSchedule({})],
   runs: 168, guard_runs: 160, skipped: 0, would_skip: 150, would_skip_unrecorded: 0, would_skip_unobserved: 0,
-  fell_through: { output: 6, stderr: 1, exit: 0, timeout: 0, error: 3, not_allowlisted: 0 },
-  shadow_misses: 0, shadow_misses_by_signal: { report: 0, finding: 0, inbox: 0, push: 0, ledger: 0 }, other: null,
+  fell_through: { output: 6, stderr: 1, exit: 0, timeout: 0, error: 3, not_allowlisted: 0, invalid: 0 },
+  shadow_misses: 0, shadow_misses_by_signal: { report: 0, finding: 0, inbox: 0, push: 0, ledger: 0 }, other: null, checks: [],
   recent: [
     guardRecord({ acted: true, acted_by: ['report', 'ledger'] }),
     guardRecord({ kind: 'fell_through', reason: 'stderr', stderr_bytes: 20, stderr_head: '<script>alert(1)</script>', subtask_id: '34'.repeat(16) }),
@@ -462,7 +462,29 @@ describe('Autonomy view', () => {
     cleanup();
     body = { ...FULL(), guards: GUARDS({ schedules: [], recent: [], runs: 0, guard_runs: 0, would_skip: 0 }) };
     render(Autonomy);
+    expect(await screen.findByText(/No schedule or heartbeat check has a guard\./)).toBeTruthy();
+  });
+
+  it('shows each guarded heartbeat check with its counts, misses and last runs', async () => {
+    const tick = guardSchedule({
+      runs: 288, would_skip: 280, shadow_misses: 1, schedule_id: undefined, job: undefined,
+      fell_through: { output: 6, stderr: 0, exit: 1, timeout: 0, error: 0, not_allowlisted: 0, invalid: 1 },
+      last_runs: [guardRecord({ kind: 'fell_through', reason: 'invalid', mode: null, name: 'gridbot_tick', schedule_id: null, subtask_id: null, check_id: 'c1'.repeat(16) })],
+    });
+    body = { ...FULL(), guards: GUARDS({ shadow_misses: 1, schedules: [], checks: [
+      { ...tick, check_id: 'c1'.repeat(16), check: 'gridbot-paper-tick', enabled: true, timeout_seconds: 900, name: 'gridbot_tick' },
+      { ...guardSchedule({ runs: 2, would_skip: 0, last_runs: [] }), check_id: 'c2'.repeat(16), check: 'old-check', enabled: true,
+        timeout_seconds: 60, name: null, mode: null, allowlisted: null },
+    ] }) };
+    render(Autonomy);
     expect(await screen.findByText(/No schedule has a guard\./)).toBeTruthy();
+    const tr = (await screen.findByText('gridbot-paper-tick')).closest('tr')!;
+    expect(Array.from(tr.querySelectorAll('td')).slice(2).map((td) => td.textContent)).toEqual(['288', '0', '280', '1']);
+    expect(tr.querySelector('[data-testid="check-misses"]')!.classList.contains('acted')).toBe(true);
+    expect(screen.getByText('Last 1 run of this check')).toBeTruthy();
+    expect(screen.getByText('Fell through: Refused (invalid)')).toBeTruthy();
+    const old = (await screen.findByText('old-check')).closest('tr')!;
+    expect(old.textContent).toContain('guard removed');
   });
 
   it('says so when the endpoint fails', async () => {

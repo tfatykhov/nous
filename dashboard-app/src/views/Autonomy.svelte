@@ -66,13 +66,14 @@
   // F107 run guards: nous/handlers/schedule_guard.py's reasons and acted_signals kinds, in its order.
   const GUARD_REASON_LABEL: Record<GuardReason, string> = {
     output: 'Output', stderr: 'stderr', exit: 'Exit code', timeout: 'Timeout', error: 'Error', not_allowlisted: 'Not allowlisted',
+    invalid: 'Refused (invalid)',
   };
   // schedule_guard.ACTING_SIGNALS: report, inbox and push come with every completed run, so only these make a miss.
   const GUARD_ACTING: GuardSignal[] = ['finding', 'ledger'];
   const guardMode = (mode: string | null) =>
     mode === 'shadow' ? 'Shadow' : mode === 'skip' ? 'Skip' : `Unknown mode: ${mode ?? '—'}`;
   // An unresolved guard ran nothing, so its record has no mode by design: not an unknown one.
-  const recordMode = (r: GuardRecord) => (r.reason === 'not_allowlisted' ? '—' : guardMode(r.mode));
+  const recordMode = (r: GuardRecord) => (r.reason === 'not_allowlisted' || r.reason === 'invalid' ? '—' : guardMode(r.mode));
   const guardOutcome = (r: GuardRecord) =>
     r.kind === 'skipped' ? 'Skipped the turn'
       : r.kind === 'would_skip' ? 'Would have skipped'
@@ -402,7 +403,7 @@
   <section class="panel" aria-labelledby="guard-title">
     <div class="panel-head">
       <h2 id="guard-title">Run guards</h2>
-      <span class="small muted">Scheduled script jobs that run a check before the model · last {w}</span>
+      <span class="small muted">Scheduled jobs and heartbeat checks that run a command before the model · last {w}</span>
     </div>
     {#if !g.enabled}
       <p class="small muted" role="status">Off (<code>NOUS_SCHEDULE_GUARDS_ENABLED=false</code>): every guarded job runs the model as if it had no guard.</p>
@@ -422,8 +423,10 @@
         </div>
       </div>
     {/if}
-    {#if g.schedules.length === 0 && !g.other}
-      <p class="empty">No schedule has a guard. A guard is set by hand in a schedule's metadata; see F107.</p>
+    {#if g.schedules.length === 0 && !g.other && g.checks.length === 0}
+      <p class="empty">No schedule or heartbeat check has a guard. A guard is set by hand in the row's metadata; see F107.</p>
+    {:else if g.schedules.length === 0 && !g.other}
+      <p class="small muted">No schedule has a guard.</p>
     {:else}
       <div class="table-wrap">
         <table class="stats guards">
@@ -453,6 +456,30 @@
               </tr>
               {@render lastRuns(g.other.last_runs, 'in no row above')}
             {/if}
+          </tbody>
+        </table>
+      </div>
+    {/if}
+    {#if g.checks.length > 0}
+      <div class="table-wrap">
+        <table class="stats guards" data-testid="guard-checks">
+          <thead><tr><th scope="col">Heartbeat check</th><th scope="col">Guard</th><th scope="col">Mode</th><th scope="col">Runs</th><th scope="col">Skipped</th><th scope="col">Would skip</th><th scope="col">Shadow misses</th></tr></thead>
+          <tbody>
+            {#each g.checks as c (c.check_id)}
+              <tr>
+                <th scope="row"><span class="mono">{c.check ?? c.check_id}</span>{#if c.enabled === false} <span class="pill">disabled</span>{/if}</th>
+                <td>
+                  {#if c.mode === null}<span class="small muted">guard removed</span>
+                  {:else}<span class="mono">{c.name ?? '—'}</span>{#if !c.allowlisted} <span class="pill pill-warn">not allowlisted</span>{/if}{/if}
+                </td>
+                <td>{#if c.mode !== null}<span class="pill" class:pill-warn={c.mode !== 'shadow' && c.mode !== 'skip'}>{guardMode(c.mode)}</span>{:else}—{/if}</td>
+                <td>{c.runs}</td>
+                <td>{c.skipped}</td>
+                <td>{c.would_skip}</td>
+                <td class:acted={c.shadow_misses > 0} data-testid="check-misses">{c.shadow_misses}</td>
+              </tr>
+              {@render lastRuns(c.last_runs, 'of this check')}
+            {/each}
           </tbody>
         </table>
       </div>
@@ -489,7 +516,7 @@
           {#if caption}<caption class="label">{caption}</caption>{/if}
           <thead><tr><th scope="col">When</th><th scope="col">Guard</th><th scope="col">Result</th><th scope="col">Exit</th><th scope="col">After the turn</th><th scope="col">stderr</th></tr></thead>
           <tbody>
-            {#each rows as r, i (`${r.at}-${r.subtask_id}-${i}`)}
+            {#each rows as r, i (`${r.at}-${r.subtask_id ?? r.check_id}-${i}`)}
               <tr>
                 <td>{fmtWhen(r.at)}</td>
                 <td><span class="mono">{r.name ?? '—'}</span> <span class="small muted">{recordMode(r)}</span></td>

@@ -21,6 +21,9 @@ from sqlalchemy.dialects.postgresql import JSONB
 
 from nous import undo_journal
 from nous.api.execution_context import ExecutionContext, lineage_from_stamp
+from nous.dag.store import DAG_CHECK_NAME_PREFIX
+from nous.handlers import schedule_guard
+from nous.heartbeat import check_guard
 from nous.heartbeat.registry import BaseCheck
 from nous.heartbeat.schemas import CheckResult, Finding
 
@@ -157,6 +160,8 @@ class DynamicCheck(BaseCheck):
         on_complete_tools: list[str] | None = None,
         active_runs: dict[str, set[DynamicCheck]] | None = None,
         intention: dict | None = None,
+        guard: dict | None = None,
+        guards: check_guard.CheckGuardContext | None = None,
     ) -> None:
         super().__init__()
         self.check_id = check_id
@@ -175,6 +180,10 @@ class DynamicCheck(BaseCheck):
         # F099 I3: the lineage of the DAG this check runs for (its row's
         # metadata.intention); read into the heartbeat_check context.
         self._intention = intention
+        # F107 phase 3: the row's metadata.guard as written, and the loader's guard context.
+        self._guard = guard if isinstance(guard, dict) else None
+        self._guards = guards
+        self._guard_in_flight = False
         # In-flight run tracking (codex P1, PR #656): disabling a check must
         # stop a run that is already executing, not only prevent the next one.
         # ``active_runs`` is owned by the loader so it can reach a running
@@ -202,6 +211,10 @@ class DynamicCheck(BaseCheck):
         run, so they do not report the final run's outcome.
         """
         cancelled = False
+        if self._guard_in_flight:
+            # F107 phase 3: the guard is left to finish (it may be the check's action, and a kill would cut
+            # it short); run() reads the flag once it returns and runs no turn.
+            self._self_disabled = True
         for task in list(self._run_tasks):
             if _CURRENT_CHECK_RUN.get() is task:
                 # The initiating run may live on an instance an ``update``
@@ -255,6 +268,12 @@ class DynamicCheck(BaseCheck):
             return CheckResult(skipped=True)
 
         session_id = f"dynamic-check-{self.name}-{uuid4().hex[:8]}"
+        guarded = await self._run_guard(session_id)
+        if guarded is None:
+            return CheckResult(skipped=True)
+        receipt, shadow = guarded
+        if receipt is None:
+            return CheckResult()  # the guard certified a no-op: no model call
         has_pipeline_tools = bool({"heartbeat_check_create", "heartbeat_check_manage"} & set(self._tools))
         pipeline_section = ""
         if has_pipeline_tools:
@@ -276,6 +295,7 @@ class DynamicCheck(BaseCheck):
             f'{{"has_findings": bool, "findings": [{{"summary": "...", '
             f'"urgency": "high|normal|low", "needs_action": bool}}]}}\n\n'
             f'If nothing noteworthy, return: {{"has_findings": false, "findings": []}}'
+            f"{receipt}"
         )
 
         run_task = asyncio.create_task(
@@ -285,6 +305,7 @@ class DynamicCheck(BaseCheck):
         self._run_tasks.add(run_task)
         if self._active_runs is not None:
             self._active_runs.setdefault(self.name, set()).add(self)
+        run_status: str | None = None  # for the shadow record: set once the turn is over
         try:
             try:
                 response_text, _ctx, usage = await run_task
@@ -295,6 +316,7 @@ class DynamicCheck(BaseCheck):
                     # a failed run so the runner records it and never reads it
                     # as success (the runner's own cancel still propagates).
                     logger.info("DynamicCheck '%s' cancelled mid-run: check disabled", self.name)
+                    run_status = "cancelled"
                     raise DynamicCheckCancelled(
                         f"check '{self.name}' was disabled while running",
                         by_sibling_run=run_task in self._sibling_cancelled,
@@ -302,16 +324,22 @@ class DynamicCheck(BaseCheck):
                 raise
             except Exception:
                 logger.exception("DynamicCheck '%s' failed", self.name)
+                run_status = "failed"
                 raise
             if run_task in self._disable_cancelled:
                 # The turn swallowed the cancel and returned anyway: a run the
                 # DAG terminated is still a failed run, never a completion.
+                run_status = "cancelled"
                 raise DynamicCheckCancelled(
                     f"check '{self.name}' was disabled while running",
                     by_sibling_run=run_task in self._sibling_cancelled,
                 )
 
             findings = self._parse_findings(response_text or "")
+            run_status = "completed"
+            if shadow is not None:
+                await self._record_acted(session_id, shadow, findings, run_status, response_text)
+                shadow = None
             tokens = (usage or {}).get("input_tokens", 0) + (usage or {}).get("output_tokens", 0)
             return CheckResult(
                 has_updates=bool(findings),
@@ -333,16 +361,118 @@ class DynamicCheck(BaseCheck):
             self._run_tasks.discard(run_task)
             self._disable_cancelled.discard(run_task)
             self._sibling_cancelled.discard(run_task)
-            if self._active_runs is not None and not self._run_tasks:
-                runs = self._active_runs.get(self.name)
-                if runs is not None:
-                    runs.discard(self)
-                    if not runs:
-                        self._active_runs.pop(self.name, None)
+            self._leave_active_runs()
+            if shadow is not None and run_status in ("failed", "cancelled"):
+                await self._record_acted(session_id, shadow, [], run_status)
             try:
                 await self._runner.end_conversation(session_id)
             except Exception:
                 pass
+
+    def _leave_active_runs(self) -> None:
+        """Drop this instance from the loader's in-flight map once it has no run in flight."""
+        if self._active_runs is not None and not self._run_tasks and not self._guard_in_flight:
+            runs = self._active_runs.get(self.name)
+            if runs is not None:
+                runs.discard(self)
+                if not runs:
+                    self._active_runs.pop(self.name, None)
+
+    def _base(self, session_id: str) -> dict[str, Any]:
+        return {"check_id": self.check_id, "check_name": self.name, "run_id": session_id}
+
+    async def _run_guard(
+        self, session_id: str
+    ) -> tuple[str | None, tuple[schedule_guard.GuardSpec, bool] | None] | None:
+        """F107 phase 3: run the check's guard, if any, before its model turn (see ``check_guard``).
+
+        Returns None when the run must not go on (a run of this check's guard is already in flight, or the check
+        was disabled while its guard ran), ``(None, None)`` when the guard certified a no-op in skip mode, and
+        otherwise ``(text, shadow)``: ``text`` is what the turn's instruction gets appended (the receipt, or "")
+        and ``shadow`` the guard and its would-skip for the record of whether the model acted. Never raises,
+        except for cancellation.
+        """
+        ctx = self._guards
+        raw = self._guard
+        if ctx is None or raw is None or not ctx.enabled:
+            return "", None
+        base = self._base(session_id)
+        dag_owned = self._intention is not None or self.name.startswith(DAG_CHECK_NAME_PREFIX)
+        resolved = check_guard.resolve(raw, ctx.commands, check_timeout=self.timeout, dag_owned=dag_owned)
+        spec = resolved.spec
+        if spec is None:
+            name = raw.get("name")
+            logger.warning(
+                "Check '%s': its guard %r was not run (%s)", self.name, name, resolved.detail or resolved.reason
+            )
+            await check_guard.emit_safely(
+                ctx,
+                check_guard.UNRESOLVED,
+                {**base, "guard": {"name": name[:100] if isinstance(name, str) else None,
+                                   "reason": resolved.reason, "detail": resolved.detail}},
+                session_id,
+            )  # fmt: skip
+            return check_guard.not_run_note(raw, resolved), None
+        if self.name in ctx.running:
+            logger.info("Check '%s': its guard is already running in another run; skipping this run", self.name)
+            return None
+        ctx.running.add(self.name)
+        self._guard_in_flight = True
+        if self._active_runs is not None:
+            self._active_runs.setdefault(self.name, set()).add(self)  # so a disable meanwhile reaches this run
+        try:
+            result = await schedule_guard.run_guard(spec)
+        finally:
+            ctx.running.discard(self.name)
+            self._guard_in_flight = False
+            self._leave_active_runs()
+        would_skip = schedule_guard.should_skip(spec, result)
+        skip = spec.mode == schedule_guard.MODE_SKIP and would_skip
+        await check_guard.emit_safely(
+            ctx, check_guard.RAN, {**base, "guard": schedule_guard.record(spec, result, skipped=skip)}, session_id
+        )
+        if skip:
+            logger.info("Check '%s' skipped by its guard", self.name)
+            return None, None
+        logger.info(
+            "Guard of check '%s' ran (mode=%s exit=%s timed_out=%s error=%s would_skip=%s); running the turn",
+            self.name, spec.mode, result.exit_code, result.timed_out, result.error, would_skip,
+        )  # fmt: skip
+        if not self.active or self._self_disabled:
+            logger.info("Check '%s' was disabled while its guard ran; no turn", self.name)
+            return None
+        shadow = (spec, would_skip) if spec.mode == schedule_guard.MODE_SHADOW else None
+        return schedule_guard.receipt(spec, result), shadow
+
+    async def _record_acted(
+        self,
+        session_id: str,
+        shadow: tuple[schedule_guard.GuardSpec, bool],
+        findings: list[Finding],
+        run_status: str,
+        response: str | None = None,
+    ) -> None:
+        """After the turn of a shadow-guarded run, persist whether the model acted (``schedule_guard.acted_signals``
+        and ``acted_verdict``, phase 2's one definition) in a ``check_guard_acted`` event. Never raises."""
+        ctx = self._guards
+        if ctx is None:
+            return
+        spec, would_skip = shadow
+        try:
+            ledger = await ctx.ledger(session_id)
+            signals = check_guard.acted(findings_payload(findings), ledger=ledger, command=spec.command)
+            seen = run_status == "completed" and check_guard.observed(response)
+        except Exception:
+            logger.exception("Check '%s': could not tell whether the model acted", self.name)
+            return
+        await check_guard.emit_safely(
+            ctx,
+            check_guard.ACTED,
+            {**self._base(session_id), "guard": {"name": spec.name, "mode": spec.mode, "would_skip": would_skip},
+             "acted": schedule_guard.acted_verdict(signals, observed=seen), "acted_by": signals,
+             "observed": seen, "run_status": run_status, "ledger_persisted": ctx.ledger_persisted},
+            session_id,
+        )  # fmt: skip
 
     async def _run_turn(self, session_id: str, instruction: str) -> tuple:
         """Run the agent turn inside this check's own run task."""
@@ -407,7 +537,8 @@ class DynamicCheck(BaseCheck):
         """Return a signature string for change detection."""
         return (
             f"{self.name}|{self._prompt}|{self._tools}|{self.interval}|{self.timeout}|"
-            f"{self.urgent_override}|{self._cron_expr}|{self.on_complete_prompt}|{self.on_complete_tools}"
+            f"{self.urgent_override}|{self._cron_expr}|{self.on_complete_prompt}|{self.on_complete_tools}|"
+            f"{json.dumps(self._guard, sort_keys=True, default=str)}"
         )
 
 
@@ -423,8 +554,10 @@ class DynamicCheckLoader:
         max_checks: int = 10,
         model_override: str | None = None,
         default_timeout: int = 30,
+        guards: check_guard.CheckGuardContext | None = None,
     ) -> None:
         self._db = db
+        self._guards = guards  # F107 phase 3: None means no check runs a guard
         self._registry = registry
         self._runner = runner
         self._agent_id = agent_id
@@ -519,6 +652,8 @@ class DynamicCheckLoader:
                 on_complete_tools=row.on_complete_tools or [],
                 active_runs=self._active_runs,
                 intention=_meta(row).get("intention"),
+                guard=_meta(row).get("guard"),
+                guards=self._guards,
             )
             check.set_cron(row.cron_expr)
 
@@ -836,6 +971,8 @@ class DynamicCheckLoader:
             on_complete_tools=validated_on_complete_tools,
             active_runs=self._active_runs,
             intention=(metadata or {}).get("intention"),
+            guard=(metadata or {}).get("guard"),
+            guards=self._guards,
         )
         check.set_cron(cron_expr)
         self._registry.register(check, permanent=False)
@@ -1120,20 +1257,28 @@ class DynamicCheckLoader:
         async with self._mutation_lock:
             async with self._db.session() as session:
                 current = (
-                    await session.execute(
-                        select(table)
-                        .where(table.c.id == check_id)
-                        .where(table.c.agent_id == self._agent_id)
-                        .with_for_update()
+                    (
+                        await session.execute(
+                            select(table)
+                            .where(table.c.id == check_id)
+                            .where(table.c.agent_id == self._agent_id)
+                            .with_for_update()
+                        )
                     )
-                ).mappings().first()
+                    .mappings()
+                    .first()
+                )
                 names = {row["name"] for row in (current, before) if row is not None}
                 for name in names:
-                    dag_owned = name.startswith(DAG_CHECK_NAME_PREFIX) or (
-                        await session.execute(
-                            dag_check_nodes(self._agent_id).where(DAGNode.check_name == name).limit(1)
-                        )
-                    ).first() is not None
+                    dag_owned = (
+                        name.startswith(DAG_CHECK_NAME_PREFIX)
+                        or (
+                            await session.execute(
+                                dag_check_nodes(self._agent_id).where(DAGNode.check_name == name).limit(1)
+                            )
+                        ).first()
+                        is not None
+                    )
                     if dag_owned:
                         return False, f"check {name!r} belongs to a DAG node; restore refused, nothing changed"
                 if before is None and (current is None or not current["enabled"]):
