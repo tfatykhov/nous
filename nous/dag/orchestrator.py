@@ -3306,6 +3306,7 @@ class DAGOrchestrator:
             user_agent="nous-dag-wait",
             call_cap=_WAIT_GITHUB_CALL_CAP,
             timeout=_WAIT_GITHUB_TIMEOUT,
+            token_name="GITHUB_TOKEN",
         )
 
     async def _finish_wait(self, node: DAGNode, status: str, **values: object) -> None:

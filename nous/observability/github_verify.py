@@ -63,6 +63,7 @@ class GitHubReader:
         call_cap: int = GITHUB_CALL_CAP,
         user_agent: str = "nous-task-scorer",
         timeout: float = REQUEST_TIMEOUT,
+        token_name: str = "the GitHub token",
     ) -> None:
         headers = {
             "Accept": "application/vnd.github+json",
@@ -75,6 +76,7 @@ class GitHubReader:
             base_url=GITHUB_API, headers=headers, timeout=timeout, transport=transport, follow_redirects=True
         )
         self._call_cap = call_cap
+        self._token_name = token_name  # the setting a 401 warning names, so the operator fixes the right one
         self.calls = 0
         self._memo: dict[str, Any] = {}
         self._failed: dict[str, str] = {}
@@ -111,7 +113,7 @@ class GitHubReader:
             if response.status_code in _RATE_LIMITED:
                 self._stopped = self._failed[key]
             elif response.status_code == 401:
-                logger.warning("Task scores: GitHub refused NOUS_SCORER_GITHUB_TOKEN (HTTP 401)")
+                logger.warning("GitHub refused %s (HTTP 401)", self._token_name)
             raise GitHubUnavailable(self._failed[key])
         else:
             try:

@@ -406,7 +406,7 @@ async def _run(agent_id: str | None, window_days: int) -> int:
         agents = [login for login in settings.scorer_agent_logins.split(",") if login.strip()]
         mergers = [login for login in settings.scorer_merger_logins.split(",") if login.strip()]
         if agents and mergers:
-            reader = GitHubReader(settings.scorer_github_token or None)
+            reader = GitHubReader(settings.scorer_github_token or None, token_name="NOUS_SCORER_GITHUB_TOKEN")
             verifier = PrVerifier(reader, agents, mergers)
         else:
             logger.info(

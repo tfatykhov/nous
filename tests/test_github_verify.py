@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -523,3 +524,18 @@ async def test_the_user_agent_and_timeout_are_the_callers():
         await default.aclose()
         await own.aclose()
     assert [r.headers["user-agent"] for r in seen] == ["nous-task-scorer", "nous-dag-wait"]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "named"),
+    [({}, "the GitHub token"), ({"token_name": "GITHUB_TOKEN"}, "GITHUB_TOKEN")],
+)
+async def test_a_401_names_the_token_the_reader_was_given(kwargs, named, caplog):
+    reader = GitHubReader(transport=httpx.MockTransport(lambda request: httpx.Response(401, json={})), **kwargs)
+    try:
+        with caplog.at_level(logging.WARNING, logger="nous.observability.github_verify"):
+            with pytest.raises(GitHubUnavailable, match="HTTP 401"):
+                await reader.pull("o/r", 1)
+    finally:
+        await reader.aclose()
+    assert [r.getMessage() for r in caplog.records] == [f"GitHub refused {named} (HTTP 401)"]

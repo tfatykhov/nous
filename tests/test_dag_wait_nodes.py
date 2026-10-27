@@ -415,6 +415,7 @@ async def test_the_default_reader_is_short_and_named(world):
         assert reader._client.timeout.read == 5.0
         assert reader._client.headers["user-agent"] == "nous-dag-wait"
         assert reader._client.headers["authorization"] == "Bearer t0ken"
+        assert reader._token_name == "GITHUB_TOKEN"  # what a 401 warning names
     finally:
         await reader.aclose()
 
