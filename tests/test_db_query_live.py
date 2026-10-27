@@ -333,7 +333,10 @@ async def canary(db, reader_role):
         await conn.execute(text("DELETE FROM heart.subtasks WHERE agent_id = :a"), {"a": CANARY_AGENT})
 
 
-async def test_the_login_settings_hold_without_the_clients_cooperation(reader_settings):
+async def test_the_login_defaults_are_pinned(reader_settings):
+    # These are the login's DEFAULTS: a bare session may change every one but temp_file_limit (see the next test).
+    # What holds against a bare login is its lack of privilege; read-only and the timeouts of a db_query call come
+    # from the tool's own transaction.
     async with _login(reader_settings) as conn:
         shown = {
             name: await conn.fetchval(f"SHOW {name}")
@@ -355,6 +358,31 @@ async def test_the_login_settings_hold_without_the_clients_cooperation(reader_se
         "temp_file_limit": "256MB",
         "row_security": "off",
     }
+
+
+async def test_a_bare_session_can_lift_the_defaults_but_not_the_temp_file_limit(reader_settings):
+    async with _login(reader_settings) as conn:
+        await conn.execute("SET default_transaction_read_only = off")  # a default, not a restriction
+        await conn.execute("SET statement_timeout = 0")
+        with pytest.raises(asyncpg.InsufficientPrivilegeError):
+            await conn.execute("SET temp_file_limit = '1GB'")
+
+
+@pytest.mark.parametrize(
+    ("sql", "sqlstate"),
+    [
+        # a large object is the one write that needs no privilege: the tool's READ ONLY transaction refuses it
+        ("select lo_create(0)", "25006"),
+        ("select lo_from_bytea(0, '\\x00')", "25006"),
+        ("select set_config('default_transaction_read_only', 'off', false), lo_create(0)", "25006"),
+        ("select set_config('transaction_read_only', 'off', true), lo_create(0)", "25001"),
+    ],
+)
+async def test_the_tool_cannot_create_a_large_object(db, reader_settings, sql, sqlstate):
+    out = await run_db_query(reader_settings, sql)
+    assert out.startswith(f"Error: {sqlstate} "), out
+    [(objects,)] = await _rows(db, "SELECT count(*) FROM pg_largeobject_metadata")
+    assert objects == 0
 
 
 WRITES = [

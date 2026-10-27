@@ -264,9 +264,10 @@ ALTER ROLE nous_admin SET search_path = pg_catalog, public;
 ALTER ROLE nous_scorer SET search_path = pg_catalog, scoring;
 ALTER ROLE nous_scorer SET row_security = off;
 
--- The reader is the agent's own query login: every session is read-only and bounded in time and temporary disk,
--- whatever the client asks. The login applies these settings, so they hold without the client's cooperation.
--- temp_file_limit may be set only by a superuser; this script runs as one, and the reader cannot change it.
+-- The reader is the agent's own query login. These are its session DEFAULTS: a session may change every one but
+-- temp_file_limit, which only a superuser may set (this script runs as one; the reader cannot change it). What
+-- holds against any client of this login is that it holds no privilege but SELECT on the columns granted in 5d.
+-- The db_query tool runs every statement in its own READ ONLY transaction with its own statement timeout.
 ALTER ROLE nous_reader SET search_path = pg_catalog, brain, heart, nous_system;
 ALTER ROLE nous_reader SET row_security = off;
 ALTER ROLE nous_reader SET default_transaction_read_only = on;

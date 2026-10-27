@@ -420,7 +420,7 @@ READER_VERIFY_LABELS = (
 def test_verify_has_reader_checks():
     for label in READER_VERIFY_LABELS:
         assert "('" + label.replace("'", "''") + "', " in VERIFY, label
-    # verify runs as a superuser with SET LOCAL ROLE: SET ROLE back, the login pins and READ ONLY cannot be
+    # verify runs as a superuser with SET LOCAL ROLE: SET ROLE back, the login defaults and READ ONLY cannot be
     # observed there, so those proofs belong to the login tests and verify must not claim them
     reader_rows = _statements(VERIFY.split("-- nous_reader", 1)[1].split("-- catalog state", 1)[0])
     assert reader_rows.count("'nous_reader', ") >= 7, reader_rows
