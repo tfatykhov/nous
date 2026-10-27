@@ -85,7 +85,7 @@ const GUARDS = (over: Record<string, unknown> = {}) => ({
   schedules: [guardSchedule({})],
   runs: 168, guard_runs: 160, skipped: 0, would_skip: 150, would_skip_unrecorded: 0, would_skip_unobserved: 0,
   fell_through: { output: 6, stderr: 1, exit: 0, timeout: 0, error: 3, not_allowlisted: 0 },
-  shadow_misses: 0, shadow_misses_by_signal: { report: 0, finding: 0, inbox: 0, push: 0, ledger: 0 },
+  shadow_misses: 0, shadow_misses_by_signal: { report: 0, finding: 0, inbox: 0, push: 0, ledger: 0 }, other: null,
   recent: [
     guardRecord({ acted: true, acted_by: ['report', 'ledger'] }),
     guardRecord({ kind: 'fell_through', reason: 'stderr', stderr_bytes: 20, stderr_head: '<script>alert(1)</script>', subtask_id: '34'.repeat(16) }),
@@ -427,6 +427,22 @@ describe('Autonomy view', () => {
     expect(legacy.querySelectorAll('td')[4].textContent).toBe('not observed');
     expect(unrecorded.querySelectorAll('td')[4].textContent).toBe('—');
     expect(await screen.findByText(/1 would-skip run was not observed/)).toBeTruthy();
+  });
+
+  it('shows the records no guarded job holds in one Other row, so the rows add up to the totals', async () => {
+    const orphan = guardRecord({ schedule_id: null, subtask_id: '0f'.repeat(16), stderr_head: '<b>gone</b>' });
+    body = { ...FULL(), guards: GUARDS({ schedules: [], other: guardSchedule({
+      runs: 3, skipped: 2, would_skip: 1, shadow_misses: 1, last_runs: [orphan],
+    }) }) };
+    render(Autonomy);
+    const other = (await screen.findByText('Other (stopped, de-guarded or unresolved)')).closest('tr')!;
+    expect(Array.from(other.querySelectorAll('td')).map((td) => td.textContent)).toEqual(['—', '—', '3', '2', '1', '1']);
+    expect(other.querySelector('[data-testid="schedule-misses"]')!.classList.contains('acted')).toBe(true);
+    const details = other.nextElementSibling!.querySelector('details')!;
+    expect(details.querySelector('summary')!.textContent).toBe('Last 1 run in no row above');
+    expect(details.querySelector('pre')!.textContent).toBe('<b>gone</b>');
+    expect(details.querySelector('b')).toBeNull();
+    expect(screen.queryByText(/No schedule has a guard\./)).toBeNull();
   });
 
   it('says guards are off, or that nothing is guarded yet', async () => {

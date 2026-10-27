@@ -1706,8 +1706,16 @@ export interface GuardsBlock extends GuardCounts {
   window_days: number;
   /** Active schedules with a guard, each with its own counts. `mode` as written: shadow (the default), skip, or an unknown one. */
   schedules: GuardSchedule[];
+  /** The remainder of every count (records of stopped or de-guarded schedules, and ones naming no schedule),
+   *  so the rows add up to the totals; null when it is all zero. */
+  other: GuardOther | null;
   /** The latest 10 records, newest first. Texts are command output and job text: plain text only. */
   recent: GuardRecord[];
+}
+
+export interface GuardOther extends GuardCounts {
+  /** The latest 10 of those records, newest first. */
+  last_runs: GuardRecord[];
 }
 
 export interface GuardCounts {

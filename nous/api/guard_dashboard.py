@@ -240,6 +240,10 @@ async def get_guard_data(
     by_schedule: dict[str | None, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
     for pair in pairs:  # newest first, like pairs
         by_schedule.setdefault(pair[0]["schedule_id"], []).append(pair)
+    # What no schedule row holds: records of stopped or de-guarded schedules, and ones naming no schedule.
+    active = {s.id.hex for s in schedules}
+    other_pairs = [pair for pair in pairs if pair[0]["schedule_id"] not in active]
+    other_runs = sum(run_counts[h] for h in ids - active)
 
     return {
         "enabled": settings.schedule_guards_enabled,
@@ -256,6 +260,12 @@ async def get_guard_data(
             }
             for s in schedules
         ],
+        # The remainder of every count, so the rows add up to the totals; null when it is all zero.
+        "other": (
+            {**_tally(other_pairs, other_runs), "last_runs": [row for _, row in other_pairs[:RECENT_LIMIT]]}
+            if other_pairs or other_runs
+            else None
+        ),
         # The totals, over every schedule with a guard record or a guard now.
         **_tally(pairs, sum(run_counts[h] for h in ids)),
         "recent": [row for _, row in pairs[:RECENT_LIMIT]],

@@ -21,6 +21,9 @@ pytestmark = pytest.mark.postgres_only  # JSONB reads (metadata->>'schedule_id',
 NOW = datetime.now(UTC)
 NAME = "sweep"
 REASONS = {"output", "stderr", "exit", "timeout", "error", "not_allowlisted"}
+COUNTS = (
+    "runs", "guard_runs", "skipped", "would_skip", "would_skip_unrecorded", "would_skip_unobserved", "shadow_misses",
+)  # fmt: skip
 
 
 @pytest_asyncio.fixture
@@ -123,6 +126,7 @@ async def test_the_shape_with_nothing_guarded(db, agent):
         "fell_through": {r: 0 for r in REASONS},
         "shadow_misses": 0,
         "shadow_misses_by_signal": {s: 0 for s in ("report", "finding", "inbox", "push", "ledger")},
+        "other": None,
         "recent": [],
     }
     assert (await data(db, agent, schedule_guards_enabled=False))["enabled"] is False
@@ -275,9 +279,10 @@ async def test_each_guarded_schedule_has_its_own_counts_and_last_runs(db, agent)
     assert [r["subtask_id"] for r in d["last_runs"]] == [s.id.hex for s in days_]
     for row in (h, d, out):
         assert row["shadow_misses"] <= row["would_skip"]
-    keys = ("runs", "guard_runs", "skipped", "would_skip", "would_skip_unrecorded", "would_skip_unobserved")
-    for key in (*keys, "shadow_misses"):
+    for key in COUNTS:
         assert out[key] == h[key] + d[key]
+    assert out["other"] is None
+    assert_totals_are_the_sum_of_the_rows(out)
     assert set(h) == {
         "schedule_id", "job", "name", "mode", "allowlisted", "runs", "guard_runs", "skipped", "would_skip",
         "would_skip_unrecorded", "would_skip_unobserved", "fell_through", "shadow_misses",
@@ -294,6 +299,58 @@ async def test_history_of_a_schedule_whose_guard_was_removed_still_counts(db, ag
     )
     out = await data(db, agent)
     assert out["schedules"] == [] and (out["runs"], out["guard_runs"], out["fell_through"]["exit"]) == (1, 1, 1)
+    # in no schedule row, so in the Other row: the rows add up to the totals (PR #811 review, P3-A)
+    other = out["other"]
+    assert (other["runs"], other["guard_runs"], other["fell_through"]["exit"]) == (1, 1, 1)
+    assert [r["subtask_id"] for r in other["last_runs"]] == [sub.id.hex]
+
+
+def assert_totals_are_the_sum_of_the_rows(out: dict) -> None:
+    rows = [*out["schedules"], *([out["other"]] if out["other"] else [])]
+    for key in COUNTS:
+        assert out[key] == sum(r[key] for r in rows), key
+    for key in ("fell_through", "shadow_misses_by_signal"):
+        for sub in out[key]:
+            assert out[key][sub] == sum(r[key][sub] for r in rows), (key, sub)
+
+
+async def test_the_totals_are_the_sum_of_the_rows_with_other(db, agent):
+    shadow = schedule(agent, {"name": NAME})
+    stopped = schedule(agent, {"name": NAME, "mode": "skip"}, active=False)
+    removed = schedule(agent, None)  # its guard was removed after its runs
+    unresolved = schedule(agent, {"name": "nope"})  # active and guarded: its own row, not Other
+    subs = {k: run(agent, sch) for k, sch in (("shadow", shadow), ("removed", removed), ("unresolved", unresolved))}
+    skipped = run(agent, stopped, report={"guard_skipped": True, "guard": record(mode="skip", skipped=True)})
+    await add(db, shadow, stopped, removed, unresolved, *subs.values(), skipped)
+    await add(
+        db,
+        event(agent, "subtask_guard_ran", subs["shadow"], shadow, guard=record()),
+        acted(agent, subs["shadow"], shadow, ["ledger"]),
+        event(agent, "subtask_guard_ran", subs["removed"], removed, guard=record()),
+        acted(agent, subs["removed"], removed, ["finding"]),
+        event(agent, "subtask_guard_unresolved", subs["unresolved"], unresolved, guard={"name": "nope"}),
+        # an unresolved record naming no schedule
+        Event(agent_id=agent, event_type="subtask_guard_unresolved", data={"guard": {"name": "x"}},
+              created_at=NOW - timedelta(hours=2)),
+    )  # fmt: skip
+    out = await data(db, agent)
+    assert {r["schedule_id"] for r in out["schedules"]} == {shadow.id.hex, unresolved.id.hex}
+    other = out["other"]
+    assert (other["runs"], other["guard_runs"], other["skipped"], other["would_skip"]) == (2, 2, 1, 1)
+    assert (other["shadow_misses"], other["fell_through"]["not_allowlisted"]) == (1, 1)
+    assert (out["shadow_misses"], out["fell_through"]["not_allowlisted"]) == (2, 2)
+    assert len(other["last_runs"]) == 3
+    assert_totals_are_the_sum_of_the_rows(out)
+
+
+async def test_there_is_no_other_row_when_every_record_has_its_row(db, agent):
+    sch = schedule(agent, {"name": NAME})
+    sub = run(agent, sch)
+    await add(db, sch, sub)
+    await add(db, event(agent, "subtask_guard_ran", sub, sch, guard=record()))
+    out = await data(db, agent)
+    assert out["other"] is None
+    assert_totals_are_the_sum_of_the_rows(out)
 
 
 async def test_another_agents_records_are_not_counted(db, agent):
@@ -323,6 +380,7 @@ async def test_skips_of_a_stopped_schedule_still_count_as_its_runs(db, agent):
     await add(db, sch, *subs)
     out = await data(db, agent)
     assert out["schedules"] == [] and (out["runs"], out["skipped"]) == (2, 2)
+    assert (out["other"]["runs"], out["other"]["skipped"]) == (2, 2)
 
 
 async def test_an_unresolved_guard_shows_in_recent_with_no_mode(db, agent):

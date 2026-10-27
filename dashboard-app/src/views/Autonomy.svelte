@@ -420,7 +420,7 @@
         </div>
       </div>
     {/if}
-    {#if g.schedules.length === 0}
+    {#if g.schedules.length === 0 && !g.other}
       <p class="empty">No schedule has a guard. A guard is set by hand in a schedule's metadata; see F107.</p>
     {:else}
       <div class="table-wrap">
@@ -437,17 +437,20 @@
                 <td>{s.would_skip}</td>
                 <td class:acted={s.shadow_misses > 0} data-testid="schedule-misses">{s.shadow_misses}</td>
               </tr>
-              {#if s.last_runs.length > 0}
-                <tr class="last-runs">
-                  <td colspan="7">
-                    <details>
-                      <summary class="small">Last {s.last_runs.length} run{s.last_runs.length === 1 ? '' : 's'} of this job</summary>
-                      {@render guardRecords(s.last_runs)}
-                    </details>
-                  </td>
-                </tr>
-              {/if}
+              {@render lastRuns(s.last_runs, 'of this job')}
             {/each}
+            {#if g.other}
+              <tr class="other">
+                <th scope="row">Other (stopped, de-guarded or unresolved)</th>
+                <td>—</td>
+                <td>—</td>
+                <td>{g.other.runs}</td>
+                <td>{g.other.skipped}</td>
+                <td>{g.other.would_skip}</td>
+                <td class:acted={g.other.shadow_misses > 0} data-testid="schedule-misses">{g.other.shadow_misses}</td>
+              </tr>
+              {@render lastRuns(g.other.last_runs, 'in no row above')}
+            {/if}
           </tbody>
         </table>
       </div>
@@ -465,6 +468,18 @@
     {#if g.would_skip_unobserved > 0}
       <p class="small muted">{g.would_skip_unobserved} would-skip run{g.would_skip_unobserved === 1 ? ' was' : 's were'} not observed: no structured report (the legacy path), so a finding could not be seen and {g.would_skip_unobserved === 1 ? 'it is' : 'they are'} neither a shadow miss nor clean.</p>
     {/if}
+    {#snippet lastRuns(rows: GuardRecord[], of: string)}
+      {#if rows.length > 0}
+        <tr class="last-runs">
+          <td colspan="7">
+            <details>
+              <summary class="small">Last {rows.length} run{rows.length === 1 ? '' : 's'} {of}</summary>
+              {@render guardRecords(rows)}
+            </details>
+          </td>
+        </tr>
+      {/if}
+    {/snippet}
     {#snippet guardRecords(rows: GuardRecord[], caption?: string)}
       <div class="table-wrap">
         <!-- Command output and job text: plain text interpolation only, never {@html}. -->
