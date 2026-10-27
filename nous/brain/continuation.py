@@ -3034,6 +3034,12 @@ IN_DOUBT_TEXT = (
     "The call was started, but its outcome was never recorded (the process stopped, or the call outlived its time "
     "limit). It was NOT run again: check whether it happened before asking for it again."
 )
+# An approved bash call whose stored result is only bash_tool's trailer: "(no output)" read as if nothing ran.
+SILENT_EXIT_ZERO_TEXT = (
+    "It ran and exited 0 without printing anything. With `&&` between steps, exit 0 means every step succeeded. "
+    "Check the effect with a read (ls/cat) if you need to."
+)
+_EXIT_ZERO_ONLY = re.compile(r"Exit code: 0")
 ANSWER_CORRELATION_PREFIX = "owner-answer:"
 # Fixed namespaces: the outcome row of a decision, and the answer row of a question, have deterministic ids per
 # intention, so a retried write collapses on the inbox's UNIQUE key.
@@ -3151,7 +3157,9 @@ async def _set_proposal_state(
 def _proposal_outcome(proposal: IntentionProposal, state: str, settings: Any) -> tuple[str, str]:
     """The title and body of the result a proposal's end becomes for the intention that asked (the model reads it)."""
     sid, tool = short_id(proposal.id), proposal.tool
-    if state == PROPOSAL_EXECUTED:
+    if state == PROPOSAL_EXECUTED and tool == "bash" and _EXIT_ZERO_ONLY.fullmatch((proposal.result or "").strip()):
+        body = f"The owner approved your proposal {sid} ({tool}) and it ran. {SILENT_EXIT_ZERO_TEXT}"
+    elif state == PROPOSAL_EXECUTED:
         shown = proposal.result or "(no output)"
         body = f"The owner approved your proposal {sid} ({tool}) and it ran. Its result:\n{shown}"
     elif state == PROPOSAL_FAILED:
