@@ -10,18 +10,29 @@ from nous.brain import continuation
 SETTINGS = SimpleNamespace(result_inbox_body_max_chars=4000)
 
 
-def _body(tool: str, result: str | None, state: str = continuation.PROPOSAL_EXECUTED) -> tuple[str, str]:
-    proposal = SimpleNamespace(id=uuid4(), tool=tool, result=result, error=None)
+def _body(
+    tool: str, result: str | None, state: str = continuation.PROPOSAL_EXECUTED, *, command: str = "mkdir -p out"
+) -> tuple[str, str]:
+    proposal = SimpleNamespace(id=uuid4(), tool=tool, arguments={"command": command}, result=result, error=None)
     _title, body = continuation._proposal_outcome(proposal, state, SETTINGS)
     return continuation.short_id(proposal.id), body
 
 
-def test_a_silent_bash_success_says_it_ran_and_exited_zero():
-    _sid, body = _body("bash", "Exit code: 0")
-    assert "It ran and exited 0 without printing anything" in body
-    assert "&&" in body and "ls/cat" in body
+def test_a_silent_bash_success_says_only_what_was_observed():
+    sid, body = _body("bash", "Exit code: 0")
+    assert body == f"The owner approved your proposal {sid} (bash). {continuation.SILENT_EXIT_ZERO_TEXT}"
+    assert "printed nothing and exited 0" in body
+    assert "status of the last command it ran" in body and "check its effect" in body
     assert "(no output)" not in body
-    assert continuation.SILENT_EXIT_ZERO_TEXT in body
+
+
+def test_a_silent_compound_command_is_not_said_to_have_succeeded_in_every_step():
+    """`false && touch out || true` exits 0 with `touch` never run: exit 0 is the last list's status only."""
+    _sid, body = _body("bash", "Exit code: 0", command="false && touch out || true")
+    lowered = body.lower()
+    assert "exited 0" in lowered
+    for claim in ("every step", "all steps", "succeeded", "each step"):
+        assert claim not in lowered
 
 
 def test_a_bash_success_with_output_is_unchanged():

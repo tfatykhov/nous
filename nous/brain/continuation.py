@@ -3059,10 +3059,11 @@ IN_DOUBT_TEXT = (
     "The call was started, but its outcome was never recorded (the process stopped, or the call outlived its time "
     "limit). It was NOT run again: check whether it happened before asking for it again."
 )
-# An approved bash call whose stored result is only bash_tool's trailer: "(no output)" read as if nothing ran.
+# An approved bash call whose stored result is only bash_tool's trailer: "(no output)" read as if nothing ran. It says
+# only what was observed: exit 0 is the last command's status (`false && touch out || true` exits 0, touch never ran).
 SILENT_EXIT_ZERO_TEXT = (
-    "It ran and exited 0 without printing anything. With `&&` between steps, exit 0 means every step succeeded. "
-    "Check the effect with a read (ls/cat) if you need to."
+    "It ran, printed nothing and exited 0. Exit 0 is the status of the last command it ran: if an earlier step "
+    "mattered, check its effect (for example, that the file exists) before relying on it."
 )
 _EXIT_ZERO_ONLY = re.compile(r"Exit code: 0")
 ANSWER_CORRELATION_PREFIX = "owner-answer:"
@@ -3188,7 +3189,7 @@ def _proposal_outcome(proposal: IntentionProposal, state: str, settings: Any) ->
     """The title and body of the result a proposal's end becomes for the intention that asked (the model reads it)."""
     sid, tool = short_id(proposal.id), proposal.tool
     if state == PROPOSAL_EXECUTED and tool == "bash" and _EXIT_ZERO_ONLY.fullmatch((proposal.result or "").strip()):
-        body = f"The owner approved your proposal {sid} ({tool}) and it ran. {SILENT_EXIT_ZERO_TEXT}"
+        body = f"The owner approved your proposal {sid} ({tool}). {SILENT_EXIT_ZERO_TEXT}"
     elif state == PROPOSAL_EXECUTED:
         shown = proposal.result or "(no output)"
         body = f"The owner approved your proposal {sid} ({tool}) and it ran. Its result:\n{shown}"
