@@ -71,6 +71,8 @@
   const GUARD_ACTING: GuardSignal[] = ['finding', 'ledger'];
   const guardMode = (mode: string | null) =>
     mode === 'shadow' ? 'Shadow' : mode === 'skip' ? 'Skip' : `Unknown mode: ${mode ?? '—'}`;
+  // An unresolved guard ran nothing, so its record has no mode by design: not an unknown one.
+  const recordMode = (r: GuardRecord) => (r.reason === 'not_allowlisted' ? '—' : guardMode(r.mode));
   const guardOutcome = (r: GuardRecord) =>
     r.kind === 'skipped' ? 'Skipped the turn'
       : r.kind === 'would_skip' ? 'Would have skipped'
@@ -459,7 +461,7 @@
             {#each g.recent as r, i (`${r.at}-${r.subtask_id}-${i}`)}
               <tr>
                 <td>{fmtWhen(r.at)}</td>
-                <td><span class="mono">{r.name ?? '—'}</span> <span class="small muted">{guardMode(r.mode)}</span></td>
+                <td><span class="mono">{r.name ?? '—'}</span> <span class="small muted">{recordMode(r)}</span></td>
                 <td>{guardOutcome(r)}</td>
                 <td>{r.timed_out ? 'timed out' : (r.exit_code ?? '—')}{#if r.duration_ms !== null} <span class="small muted">{r.duration_ms} ms</span>{/if}</td>
                 <td class:acted={r.acted === true}>{guardActed(r)}</td>

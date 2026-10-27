@@ -370,6 +370,20 @@ describe('Autonomy view', () => {
     expect(grid.querySelector('[data-testid="schedule-misses"]')!.classList.contains('acted')).toBe(false);
   });
 
+  it('shows an unresolved guard with no mode, and a null mode of a guard that ran as unknown', async () => {
+    body = { ...FULL(), guards: GUARDS({ recent: [
+      guardRecord({ kind: 'fell_through', reason: 'not_allowlisted', name: 'nope', mode: null, exit_code: null, duration_ms: null, subtask_id: '56'.repeat(16) }),
+      guardRecord({ kind: 'fell_through', reason: 'error', mode: null, subtask_id: '78'.repeat(16) }),
+    ] }) };
+    render(Autonomy);
+    const caption = await screen.findByText(/Latest 2 records/);
+    const [unresolved, odd] = Array.from(caption.closest('table')!.querySelectorAll('tbody tr'));
+    expect(unresolved.querySelectorAll('td')[1].textContent).toBe('nope —');
+    expect(unresolved.textContent).toContain('Fell through: Not allowlisted');
+    expect(unresolved.textContent).not.toContain('Unknown mode');
+    expect(odd.querySelectorAll('td')[1].textContent).toContain('Unknown mode: —');
+  });
+
   it('says how many would-skip runs have no record of what the model did', async () => {
     body = { ...FULL(), guards: GUARDS({ would_skip_unrecorded: 2 }) };
     render(Autonomy);
