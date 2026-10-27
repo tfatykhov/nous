@@ -128,7 +128,13 @@ def job_state(job_file: str, *, now: float | None = None) -> tuple[str, float] |
     found = _JOB_ID.findall(text) if text is not None else []
     if not found:
         return None
-    job_dir = posixpath.join(_workspace(), "claude-jobs", found[-1])
+    return job_state_for(found[-1], _workspace(), now=now)
+
+
+def job_state_for(job_id: str, workspace: str, *, now: float | None = None) -> tuple[str, float] | None:
+    """(status word, seconds since it was written) of job ``job_id`` under ``workspace``, as :func:`job_state` reads
+    it; None when not known. Reads only: unlike ``runner.sh status``, it never writes a status or ``finished_at``."""
+    job_dir = posixpath.join(workspace, "claude-jobs", job_id)
     status_path = posixpath.join(job_dir, "status")
     status = _read_head(status_path)
     try:
