@@ -2274,6 +2274,10 @@ class Settings(BaseSettings):
             "active run this long after it was created (a stuck DAG cannot hold a schedule forever)."
         ),
     )
+    # Run-level guard: a schedule whose metadata carries ``guard`` runs that command
+    # before its run's model turn and completes the run without one when the command
+    # certifies there is nothing to do. Off: guards are ignored entirely.
+    schedule_guards_enabled: bool = True
 
     # F064.6: work-queue ingress heartbeat check. Off by default. When true,
     # a WorkQueueCheck is registered that polls the configured adapter and

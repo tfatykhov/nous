@@ -343,19 +343,30 @@ class ContextLogger:
         # and immediately discarded can be GC'd mid-flight — silently dropping
         # the INSERT/UPDATE. Track + auto-discard on completion.
         self._pending_tasks: set = set()
+        # The INSERT task of each entry still being written, so its response UPDATE
+        # runs after it (an UPDATE that ran first matched no row: a NULL response).
+        self._insert_tasks: dict = {}
 
-    def _schedule_bg(self, coro) -> None:
-        """Run a DB coroutine fire-and-forget while retaining a strong ref."""
+    def _schedule_bg(self, coro):
+        """Run a DB coroutine fire-and-forget while retaining a strong ref. Returns the task, or None."""
         import asyncio
 
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             coro.close()  # no loop (sync context) — avoid "never awaited" warning
-            return
+            return None
         task = loop.create_task(coro)
         self._pending_tasks.add(task)
         task.add_done_callback(self._pending_tasks.discard)
+        return task
+
+    async def _update_after_insert(self, insert, entry) -> None:
+        import asyncio
+
+        if insert is not None:
+            await asyncio.wait([insert])  # never raises: a failed INSERT still lets the UPDATE try
+        await self._db_updater(entry)
 
     def _sync_entries_index(self) -> None:
         """REVIEW FIX P1-8: Sync _entries_by_id with deque to prevent memory leak."""
@@ -399,7 +410,10 @@ class ContextLogger:
         if self._payload_store and payload:
             self._payload_store.capture(session_id, entry.id, payload)
         if self._db_writer:
-            self._schedule_bg(self._db_writer(entry))
+            task = self._schedule_bg(self._db_writer(entry))
+            if task is not None:
+                self._insert_tasks[entry.id] = task
+                task.add_done_callback(lambda _t, key=entry.id: self._insert_tasks.pop(key, None))
         return entry
 
     def update_response(
@@ -422,7 +436,7 @@ class ContextLogger:
             entry.stop_reason = stop_reason
             # OB-3: persist the response columns (fire-and-forget, mirrors log()).
             if self._db_updater is not None:
-                self._schedule_bg(self._db_updater(entry))
+                self._schedule_bg(self._update_after_insert(self._insert_tasks.get(entry_id), entry))
 
     def get_recent(self, session_id: str | None = None, limit: int = 20) -> list[ContextLogEntry]:
         entries = list(reversed(self._entries))
