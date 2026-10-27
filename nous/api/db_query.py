@@ -276,17 +276,21 @@ def reader_connect_args(settings: Settings) -> dict[str, Any]:
     }
 
 
-def _wrapped(sql: str, clip: int) -> str:
-    """``sql`` as a subquery whose rows come back as two arrays: each value as text cut to ``clip`` characters,
-    and each value's full length. The server does the cut, so no value larger than ``clip`` crosses the wire,
-    and at most ``MAX_ROWS + 1`` rows do. ``sql`` has prepared as one statement on its own, so its parentheses
-    balance and it cannot reach out of the subquery. The newlines end a trailing ``--`` comment."""
-    return (
-        f"SELECT c.cells, c.lens FROM (\n{sql}\n) AS q CROSS JOIN LATERAL ("
-        f"SELECT array_agg(left(t.v, {int(clip)}) ORDER BY t.i) AS cells, array_agg(length(t.v) ORDER BY t.i) AS lens "
-        "FROM json_each_text(to_json(q.*)) WITH ORDINALITY AS t(k, v, i)) AS c "
-        f"LIMIT {MAX_ROWS + 1}"
-    )
+def _wrapped(sql: str, ncolumns: int, clip: int) -> str:
+    """``sql`` as a subquery whose ``ncolumns`` columns come back as pairs: each value cast to text and cut to
+    ``clip`` characters, and that text's full length. The server does the cut, so no value larger than ``clip``
+    crosses the wire, and at most ``MAX_ROWS + 1`` rows do. ``sql`` has prepared as one statement on its own, so
+    its parentheses balance and it cannot reach out of the subquery; the newlines end a trailing ``--`` comment.
+
+    The columns are renamed by position (``c1`` .. ``cN``), so duplicate or colliding names cannot matter.
+    ``OFFSET 0`` keeps the planner from pulling the subquery up, which would compute each value once per
+    reference; cast per column, a value is held about once, not once per row-to-JSON copy.
+    """
+    if ncolumns == 0:
+        return f"SELECT FROM (\n{sql}\n) AS q0 LIMIT {MAX_ROWS + 1}"
+    names = ", ".join(f"c{i}" for i in range(1, ncolumns + 1))
+    pairs = ", ".join(f"left(q.c{i}::text, {int(clip)}), length(q.c{i}::text)" for i in range(1, ncolumns + 1))
+    return f"SELECT {pairs} FROM (SELECT * FROM (\n{sql}\n) AS q0({names}) OFFSET 0) AS q LIMIT {MAX_ROWS + 1}"
 
 
 def _login_failure(settings: Settings, exc: BaseException) -> ReaderUnavailable:
@@ -317,12 +321,9 @@ async def _run(conn: Any, sql: str, clip: int) -> tuple[list[str], list[list[Cel
             raise QueryRefused(
                 f"{_RULE} It returns {len(columns)} columns; the limit is {MAX_COLUMNS} columns. Name fewer."
             )
-        records = await conn.fetch(_wrapped(sql, clip))
+        records = await conn.fetch(_wrapped(sql, len(columns), clip))
     truncated = len(records) > MAX_ROWS
-    rows = [
-        [Cell(text, length) for text, length in zip(r["cells"] or [], r["lens"] or [], strict=True)]
-        for r in records[:MAX_ROWS]
-    ]
+    rows = [[Cell(r[2 * i], r[2 * i + 1]) for i in range(len(columns))] for r in records[:MAX_ROWS]]
     return columns, rows, truncated
 
 

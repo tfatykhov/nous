@@ -532,6 +532,40 @@ async def test_the_server_cuts_each_cell_before_sending_it(reader_settings):
     assert out.splitlines()[1] == "x" * MAX_CELL_CHARS + "…[+1500 chars]"
 
 
+async def test_values_render_as_postgresql_text(reader_settings):
+    # each column is cast to text on the server: PostgreSQL's own output, in column order, duplicates kept
+    out = await run_db_query(
+        reader_settings,
+        "select array[1, 2] as a, '2026-10-27 10:00:00+00'::timestamptz at time zone 'UTC' as t, true as b, "
+        """null::int as n, '{"k": 1}'::jsonb as j, 7 as a""",
+    )
+    assert out.splitlines() == [
+        "a | t | b | n | j | a",
+        '{1,2} | 2026-10-27 10:00:00 | true | NULL | {"k": 1} | 7',
+        "(1 row)",
+    ], out
+
+
+async def test_column_names_cannot_collide_with_the_wrapper(reader_settings):
+    out = await run_db_query(reader_settings, 'select 1 as q, 2 as q0, 3 as c1, 4 as c2, 5 as "c1"')
+    assert out.splitlines()[:2] == ["q | q0 | c1 | c2 | c1", "1 | 2 | 3 | 4 | 5"], out
+
+
+async def test_a_statement_with_no_columns_still_counts_its_rows(reader_settings):
+    out = await run_db_query(reader_settings, "select from generate_series(1, 3)")
+    assert out.splitlines() == ["(no columns)", "", "", "", "(3 rows)"], out
+
+
+async def test_a_huge_single_cell_comes_back_cut_with_its_full_length(reader_settings):
+    # one 50 MB value: the server casts and cuts it per column, and only the cut crosses the wire
+    columns, rows, truncated = await execute_readonly(reader_settings, "select repeat('x', 50000000) as c")
+    assert columns == ["c"] and not truncated
+    [[cell]] = rows
+    assert cell.length == 50_000_000 and len(cell.text) == 4 * MAX_CELL_CHARS + redaction_scan_pad()
+    out = await run_db_query(reader_settings, "select repeat('x', 50000000) as c")
+    assert out.splitlines()[1] == "x" * MAX_CELL_CHARS + "…[+49999500 chars]", out[:200]
+
+
 async def test_huge_cells_and_rows_stay_bounded(reader_settings):
     # 300 MB of values: the server sends at most 201 cut rows, and the text stops at the output cap
     started = time.monotonic()
