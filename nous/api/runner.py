@@ -605,7 +605,8 @@ class AgentRunner:
                     )
                 elif strict == "external" and tool_name == "bash" and ctx.authority == AUTHORITY_INTERNAL:
                     text += " " + tool_policy.lineage_bash_refusal_hint(
-                        build_commands=self._settings.f099_lineage_build_commands
+                        build_commands=self._settings.f099_lineage_build_commands,
+                        extra_write_dirs=self._settings.f099_lineage_write_dirs,
                     )
                 return Refusal(text, "internal_only")
 

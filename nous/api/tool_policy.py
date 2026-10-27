@@ -997,14 +997,19 @@ def lineage_runs_build(command: str) -> bool:
     return any(words and Path(words[0]).name in LINEAGE_BUILD_PROGRAMS for words, _, _, _ in commands)
 
 
-def lineage_bash_refusal_hint(*, build_commands: bool) -> str:
-    """What the lineage shell allows, appended to its refusal."""
+def lineage_bash_refusal_hint(*, build_commands: bool, extra_write_dirs: Sequence[str] = ()) -> str:
+    """What the lineage shell allows, appended to its refusal. ``extra_write_dirs``: NOUS_F099_LINEAGE_WRITE_DIRS."""
+    dirs = ", ".join(
+        ["intentions/<root>/", "claude-jobs/prompts/"]
+        + [f"{d.rstrip('/')}/" for d in extra_write_dirs if lineage_write_dir_entry_problem(d) is None]
+    )
     text = (
         "The lineage shell allows only: plain reads (cat, ls, head, tail, wc, grep, jq, echo, printf, pwd, cd, "
-        "sleep, true) inside the workspace; read-only gh calls (pr view|checks|list|diff|status, issue view|list, "
-        "run view|list, repo view, gh api GET); claude-jobs/runner.sh launch|status|list|result, run as "
-        "<workspace>/claude-jobs/runner.sh, bash <workspace>/claude-jobs/runner.sh, or ./runner.sh right after "
-        "cd <workspace>/claude-jobs &&"
+        "sleep, true, test, [ ... ], basename, dirname, date, diff of two files) inside the workspace; mkdir -p, "
+        f"touch and cp only into the workspace's {dirs}; read-only gh calls (pr view|checks|list|diff|status, "
+        "issue view|list, run view|list, repo view, gh api GET); claude-jobs/runner.sh launch|status|list|result, "
+        "run as <workspace>/claude-jobs/runner.sh, bash <workspace>/claude-jobs/runner.sh, or ./runner.sh right "
+        "after cd <workspace>/claude-jobs && (cancel a job with propose_action)"
     )
     if build_commands:
         text += (
@@ -1032,9 +1037,11 @@ def lineage_bash_allowed(
 
     An allowlist, failing closed: every simple command must be a LINEAGE_READ_COMMANDS command, a read-only
     ``gh`` call, or ``<workspace_dir>/claude-jobs/runner.sh`` (the owner's Claude Code delegation path, also as
-    ``bash <that path>`` or, from that directory, ``./runner.sh``: ``_runner_args``), joined
-    by ``; && || |`` or newlines only. An output redirection may target ``/dev/null`` or a file under the
-    root's own ``<workspace_dir>/intentions/<root_id>/`` or ``<workspace_dir>/claude-jobs/prompts/``.
+    ``bash <that path>`` or, from that directory, ``./runner.sh``: ``_runner_args``), a ``test``/``[`` or
+    ``_READ_ONLY_ROLES`` read (``_read_only_files``), or ``mkdir``/``touch``/``cp`` into ``lineage_write_dirs``
+    (``_fs_write_allowed``), joined by ``; && || |`` or newlines only. An output redirection may target
+    ``/dev/null`` or a file under ``lineage_write_dirs``: the root's own ``<workspace_dir>/intentions/<root_id>/``,
+    ``<workspace_dir>/claude-jobs/prompts/`` and the owner's ``extra_write_dirs`` (NOUS_F099_LINEAGE_WRITE_DIRS).
     Anything the reader cannot see exactly (``$``, a backtick, a brace, ``~``, an unquoted heredoc that expands,
     an unbalanced quote) is refused, so a chain or substitution that reaches a refused command is refused. A glob
     (``*``, ``?``, ``[abc]``) is refused too, except unquoted as a whole word that is a file operand of a read
@@ -1052,7 +1059,8 @@ def lineage_bash_allowed(
     skipped by an ``||`` or run in a pipeline (a subshell), and a relative one needs the cwd known; it stays known
     only while every later join is ``&&`` or ``|``, so the command runs only if the ``cd`` succeeded. A build
     command runs the whole command without the GitHub token (``lineage_runs_build``), so it may not be joined with
-    ``gh`` or ``runner.sh``, which need the token.
+    ``gh`` or ``runner.sh``, which need the token. The same sure cwd is where a relative mkdir/touch/cp target
+    lands, and the only place ``./runner.sh`` runs from.
     """
     commands = simple_commands(command, globs=True)
     if commands is None or not any(words for words, _, _, _ in commands):
@@ -1064,7 +1072,7 @@ def lineage_bash_allowed(
     writable = lineage_write_dirs(ctx, workspace_dir, lineage_shell=True, extra_dirs=extra_write_dirs)
     root = workspace.resolve()
     cwds = [root]
-    cwd: Path | None = root  # where the shell surely is, for a build command
+    cwd: Path | None = root  # where the shell surely is: a build command, a relative write target, ./runner.sh
     moved = False  # cwd is where a cd went: sure only while that cd's success gates what runs
     prev: str | None = None
     for words, targets, sources, op in commands:

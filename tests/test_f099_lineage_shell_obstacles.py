@@ -11,7 +11,7 @@ import os
 import uuid
 
 import pytest
-from test_f099_enforcement import OFFERED, _auth, _shell_runner
+from test_f099_enforcement import MODES, OFFERED, _auth, _shell_runner
 
 from nous.api.execution_context import ExecutionContext
 from nous.api.tool_policy import (
@@ -880,3 +880,91 @@ def test_a_repo_inside_an_extra_write_dir_is_not_a_build_repo(tmp_path):
         kw = {"workspace_dir": str(ws), "build_commands": True}
         assert not lineage_bash_allowed(_internal(), command, extra_write_dirs=extra, **kw), command
         assert lineage_bash_allowed(_internal(), command, **kw), command  # PIN: without the listing, a build repo
+
+
+# -- the whole shell, through the runner -----------------------------------------------------------------------------
+
+NEW_COMMANDS = [
+    "mkdir -p {W}/research/a",
+    "touch {W}/research/x.md",
+    "cp {W}/a.md {W}/research/a.md",
+    "echo x > {W}/research/n.md",
+    "test -f {W}/a.md",
+    "[ -d {W}/research ]",
+    "basename {W}/a.md",
+    "dirname {W}/a.md",
+    "date +%s",
+    "diff {W}/a.md {W}/b.md",
+    "bash {R} status",
+    "cd {W}/claude-jobs && ./runner.sh status",
+    "cd nous && git rev-parse HEAD",
+    "cd nous && git merge-base HEAD main",
+    # joined with gh: the classifier rates the call external, so the policy's rescue must see the write dirs too
+    "mkdir -p {W}/research/a && gh pr view 1",
+    "cp {W}/a.md {W}/research/c.md; gh pr checks 1",
+    "echo x > {W}/research/n.md && gh pr view 1",
+    "[ -f {W}/a.md ] && gh pr view 1",
+]
+
+
+def _whole_ws(tmp_path):
+    for d in ("research", "claude-jobs/prompts", "nous/.git"):
+        (tmp_path / d).mkdir(parents=True)
+    for f in ("a.md", "b.md"):
+        (tmp_path / f).write_text(f)
+    return tmp_path
+
+
+@pytest.mark.parametrize(("offered_mode", "policy_mode"), MODES)
+@pytest.mark.parametrize("kind", ["continuation", "subtask", "dag_node"])
+def test_every_new_command_runs_in_every_mode(tmp_path, offered_mode, policy_mode, kind):
+    ws = _whole_ws(tmp_path)
+    r, _, events = _shell_runner(
+        ws,
+        f099_lineage_write_dirs=["research"],
+        tool_offered_set_enforcement_mode=offered_mode,
+        tool_context_policy_mode=policy_mode,
+    )
+    for command in NEW_COMMANDS:
+        command = command.format(W=ws, R=f"{ws}/claude-jobs/runner.sh")
+        assert _auth(r, _internal(kind), "bash", OFFERED, {"command": command}) is None, command
+    assert events == []
+
+
+def test_the_new_commands_are_not_offered_with_the_shell_off(tmp_path):
+    ws = _whole_ws(tmp_path)
+    r, _, events = _shell_runner(ws, f099_lineage_shell=False, f099_lineage_write_dirs=["research"])
+    offered = r._offered_tools(_internal(), "conversation", is_subtask=True, tool_filter=None, refuse_active=False)
+    names = [t["name"] for t in offered]
+    assert "bash" not in names  # PIN
+    refusal = _auth(r, _internal(), "bash", names, {"command": f"mkdir -p {ws}/research/a"})
+    assert refusal is not None and "(not_offered)" in refusal.text
+
+
+def test_the_hint_lists_the_new_programs_and_the_write_dirs(tmp_path):
+    from nous.api.tool_policy import lineage_bash_refusal_hint
+
+    for build_commands in (False, True):
+        hint = lineage_bash_refusal_hint(build_commands=build_commands, extra_write_dirs=["research", "notes/s0"])
+        for needle in (
+            "mkdir -p",
+            "touch",
+            "cp",
+            "test",
+            "[ ... ]",
+            "basename",
+            "dirname",
+            "date",
+            "diff",
+            "intentions/<root>/",
+            "claude-jobs/prompts/",
+            "research/",
+            "notes/s0/",
+            "cancel a job with propose_action",
+        ):
+            assert needle in hint, needle
+        assert len(hint) < 1200  # appended to the tool error of every refusal
+    assert "research/" not in lineage_bash_refusal_hint(build_commands=False)
+    r, _, _ = _shell_runner(_whole_ws(tmp_path), f099_lineage_write_dirs=["research"])
+    refusal = _auth(r, _internal(), "bash", OFFERED, {"command": "rm -rf x"})
+    assert refusal is not None and "research/" in refusal.text
