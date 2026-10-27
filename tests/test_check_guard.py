@@ -306,7 +306,9 @@ async def test_a_guard_on_a_check_with_no_timeout_is_refused_not_raised(tmp_path
     assert "did NOT run" in instruction(runner)
     [unresolved] = rec.of(check_guard.UNRESOLVED)
     assert unresolved["guard"] == {
-        "name": NAME, "reason": "invalid", "detail": "the check has no timeout to fit the guard in"
+        "name": NAME,
+        "reason": "invalid",
+        "detail": "the check has no timeout to fit the guard in",
     }
 
 
@@ -423,9 +425,10 @@ def test_the_guard_is_part_of_the_signature():
     b = DynamicCheck(check_id="c", name="n", prompt="p", tools=[], guard={"name": NAME, "mode": "skip"})
     assert a.signature() != b.signature()
     # writing "guard": null over a check with no guard key is a change: the next run refuses it
-    assert DynamicCheck(check_id="c", name="n", prompt="p", tools=[], guard=None).signature() != DynamicCheck(
-        check_id="c", name="n", prompt="p", tools=[]
-    ).signature()
+    assert (
+        DynamicCheck(check_id="c", name="n", prompt="p", tools=[], guard=None).signature()
+        != DynamicCheck(check_id="c", name="n", prompt="p", tools=[]).signature()
+    )
 
 
 async def test_the_loader_hands_each_check_its_rows_guard_and_the_shared_context(tmp_path):

@@ -59,7 +59,6 @@ class _NoGuard:
 NO_GUARD: Any = _NoGuard()
 
 
-
 @dataclass
 class CheckGuardContext:
     """What a check needs to run its guard, built once by the loader and shared by its checks."""
@@ -97,7 +96,9 @@ def resolve(raw: Any, commands: Mapping[str, str], *, check_timeout: int | None,
         return Resolved(None, "invalid", "the check has no timeout to fit the guard in")
     if "is_action" in raw and not isinstance(raw["is_action"], bool):
         # parse_guard would read it as not an action: the default timeout and a receipt that does not say so
-        return Resolved(None, "invalid", f"metadata.guard.is_action must be true or false (got {raw['is_action']!r:.40})")
+        return Resolved(
+            None, "invalid", f"metadata.guard.is_action must be true or false (got {raw['is_action']!r:.40})"
+        )
     timeout = raw.get("timeout_seconds")
     if raw.get("is_action") is True and (not isinstance(timeout, int) or isinstance(timeout, bool)):
         # parse_guard would fall back to 60 s, which would cut a long action short on every run
