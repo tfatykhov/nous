@@ -436,6 +436,16 @@
                 <td>{s.would_skip}</td>
                 <td class:acted={s.shadow_misses > 0} data-testid="schedule-misses">{s.shadow_misses}</td>
               </tr>
+              {#if s.last_runs.length > 0}
+                <tr class="last-runs">
+                  <td colspan="7">
+                    <details>
+                      <summary class="small">Last {s.last_runs.length} run{s.last_runs.length === 1 ? '' : 's'} of this job</summary>
+                      {@render guardRecords(s.last_runs)}
+                    </details>
+                  </td>
+                </tr>
+              {/if}
             {/each}
           </tbody>
         </table>
@@ -451,14 +461,14 @@
     {#if g.would_skip_unrecorded > 0}
       <p class="small muted">{g.would_skip_unrecorded} would-skip run{g.would_skip_unrecorded === 1 ? ' has' : 's have'} no record of what the model did (still running, or the record was lost), so {g.would_skip_unrecorded === 1 ? 'it is' : 'they are'} not in the shadow-miss count.</p>
     {/if}
-    {#if g.recent.length > 0}
+    {#snippet guardRecords(rows: GuardRecord[], caption?: string)}
       <div class="table-wrap">
         <!-- Command output and job text: plain text interpolation only, never {@html}. -->
         <table class="stats guards">
-          <caption class="label">Latest {g.recent.length} records</caption>
+          {#if caption}<caption class="label">{caption}</caption>{/if}
           <thead><tr><th scope="col">When</th><th scope="col">Guard</th><th scope="col">Result</th><th scope="col">Exit</th><th scope="col">After the turn</th><th scope="col">stderr</th></tr></thead>
           <tbody>
-            {#each g.recent as r, i (`${r.at}-${r.subtask_id}-${i}`)}
+            {#each rows as r, i (`${r.at}-${r.subtask_id}-${i}`)}
               <tr>
                 <td>{fmtWhen(r.at)}</td>
                 <td><span class="mono">{r.name ?? '—'}</span> <span class="small muted">{recordMode(r)}</span></td>
@@ -471,6 +481,9 @@
           </tbody>
         </table>
       </div>
+    {/snippet}
+    {#if g.recent.length > 0}
+      {@render guardRecords(g.recent, `Latest ${g.recent.length} records`)}
     {/if}
   </section>
 
@@ -563,6 +576,8 @@
     max-height: 8rem; overflow-y: auto; }
   .guards td.acted { color: #fb923c; font-weight: 600; }
   .guard-tiles { margin-top: 0.25rem; }
+  .guards tr.last-runs > td { text-align: left; white-space: normal; }
+  .guards tr.last-runs .guards { margin: 0.25rem 0 0.5rem; }
   .legend { display: flex; gap: 1rem; flex-wrap: wrap; font-size: 0.75rem; color: var(--muted); margin: 0.5rem 0 0.75rem; }
   .legend i { display: inline-block; width: 0.625rem; height: 0.625rem; border-radius: 2px; margin-right: 0.375rem; vertical-align: -1px; }
   .stack { display: flex; width: 8rem; max-width: 100%; height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; }

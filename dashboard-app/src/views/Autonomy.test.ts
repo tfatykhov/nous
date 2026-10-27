@@ -370,6 +370,32 @@ describe('Autonomy view', () => {
     expect(grid.querySelector('[data-testid="schedule-misses"]')!.classList.contains('acted')).toBe(false);
   });
 
+  it("shows each job's own last runs as plain text, even when another job fills the latest records", async () => {
+    const hourly = Array.from({ length: 10 }, (_, i) => guardRecord({ subtask_id: `${i}`.padStart(32, 'a') }));
+    const daily = guardRecord({
+      at: new Date(Date.now() - 3 * 86_400_000).toISOString(), schedule_id: 'cd'.repeat(16), subtask_id: '9d'.repeat(16),
+      kind: 'fell_through', reason: 'stderr', stderr_bytes: 30, stderr_head: '<script>daily()</script>',
+      acted: true, acted_by: ['finding'],
+    });
+    body = { ...FULL(), guards: GUARDS({ recent: hourly, schedules: [
+      guardSchedule({ last_runs: hourly }),
+      guardSchedule({ schedule_id: 'cd'.repeat(16), job: 'Check the grid bot', mode: 'skip', last_runs: [daily] }),
+    ] }) };
+    const { container } = render(Autonomy);
+    const caption = await screen.findByText(/Latest 10 records/);
+    expect(caption.closest('table')!.textContent).not.toContain('<script>daily()</script>');
+    const grid = (await screen.findByText('Check the grid bot')).closest('tr')!;
+    const details = grid.nextElementSibling!.querySelector('details')!;
+    expect(details.querySelector('summary')!.textContent).toBe('Last 1 run of this job');
+    const [record] = Array.from(details.querySelectorAll(':scope tbody tr'));
+    expect(record.textContent).toContain('Fell through: stderr');
+    expect(record.textContent).toContain('Model acted: finding');
+    expect(record.querySelector('pre')!.textContent).toBe('<script>daily()</script>');
+    expect(container.querySelector('script')).toBeNull();
+    const sweep = (await screen.findByText('Run <i>the</i> ledger sweep')).closest('tr')!;
+    expect(sweep.nextElementSibling!.querySelector('summary')!.textContent).toBe('Last 10 runs of this job');
+  });
+
   it('shows an unresolved guard with no mode, and a null mode of a guard that ran as unknown', async () => {
     body = { ...FULL(), guards: GUARDS({ recent: [
       guardRecord({ kind: 'fell_through', reason: 'not_allowlisted', name: 'nope', mode: null, exit_code: null, duration_ms: null, subtask_id: '56'.repeat(16) }),

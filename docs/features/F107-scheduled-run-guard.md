@@ -81,7 +81,7 @@ No guard is turned on in prod until these exist (owner requirement, PR #810 revi
   - `would_skip` counts shadow runs only.
   - `shadow_misses` counts the would-skip runs in the window whose `subtask_guard_acted` record says the model acted. A miss is counted only for a run with a would-skip `subtask_guard_ran` record in the window, so `shadow_misses <= would_skip` holds even when the best-effort bus drops a `ran` event or a run straddles the window edge.
   - Each `schedules` row carries its own counts (`runs`, `guard_runs`, `skipped`, `would_skip`, `would_skip_unrecorded`, `fell_through`, `shadow_misses`, `shadow_misses_by_signal`) and `last_runs`, its last 10 records, so the misses of one guard never mix with another's and an hourly job does not push a daily one's records out. The block's top-level counts and `recent` are the totals.
-  - The Autonomy view's "Run guards" section lists the guarded jobs, each with its runs, skips, would-skips and shadow misses, then the totals and the last 10 records. Every text in it (job, command, stderr) is rendered by interpolation, never as markup. Shadow misses above 0 show as an alert.
+  - The Autonomy view's "Run guards" section lists the guarded jobs, each with its runs, skips, would-skips and shadow misses and, folded under its row, its own last 10 records (`last_runs`), then the totals and the last 10 records over every job. Every text in it (job, command, stderr) is rendered by interpolation, never as markup. Shadow misses above 0 show as an alert.
 - No migration: the records are JSONB in `report_jsonb` and `nous_system.events.data`.
 
 ## Rollback
