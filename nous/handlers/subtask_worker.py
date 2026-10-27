@@ -205,9 +205,10 @@ class SubtaskWorkerPool:
     async def _guard_spec(self, subtask: Subtask) -> schedule_guard.GuardSpec | None:
         """The guard of the schedule this run is a plain fire of, or None.
 
-        Read from the schedule row at run time, never from the run's own metadata or
-        task text. A check-and-fix run, or any run whose text is not the schedule's
-        task, is never guarded. A failed read means no guard.
+        The guard itself comes from this agent's schedule row at run time, never from
+        the run's own metadata or task text (the run only names its schedule). A
+        check-and-fix run, or any run whose text is not the schedule's task, is never
+        guarded. A failed read means no guard.
         """
         if not self._settings.schedule_guards_enabled:
             return None
@@ -289,7 +290,8 @@ class SubtaskWorkerPool:
         """F098: queue the finished result for the conversation that spawned it,
         and (Phase C) write it to memory.
 
-        One site for every worker path (hardened, legacy, timeout): the row
+        One site for every worker path that runs a turn (hardened, legacy,
+        timeout); a run its schedule's guard skipped never comes here. The row
         is re-read once so both writers see the status that was actually
         committed. Inline subtasks never come through here — their result is
         returned in the calling turn. The two writers are independent: each

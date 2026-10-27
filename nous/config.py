@@ -2010,6 +2010,9 @@ class Settings(BaseSettings):
 
     # F035.4: Context visibility
     context_log_enabled: bool = True
+    # The heartbeat's forked runner shares the context logger, so check, triage and
+    # callback model calls are logged. Off: forks log nothing (the pre-F107 behaviour).
+    context_log_forks_enabled: bool = True
     context_log_full_payload: bool = False
     context_log_ring_size: int = 10
     context_log_max_total: int = 50

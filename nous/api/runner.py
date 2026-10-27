@@ -1330,8 +1330,9 @@ class AgentRunner:
     def set_context_logger(self, ctx_logger: Any) -> None:
         """F035.4: Set context logger. Propagated to the forks, so the heartbeat's model calls are logged too."""
         self._context_logger = ctx_logger
-        for fork in self._forks:
-            fork.set_context_logger(ctx_logger)
+        if self._settings.context_log_forks_enabled:
+            for fork in self._forks:
+                fork.set_context_logger(ctx_logger)
 
     def _get_context_window_size(self) -> int:
         """Get configured or auto-detected context window size."""
@@ -1369,9 +1370,12 @@ class AgentRunner:
         forked._action_review_pusher = self._action_review_pusher
         forked._root_cancelled = self._root_cancelled  # F099 2e: and set_cancelled_roots propagates a later view
         # F035.4: the heartbeat's checks, triage and callbacks run on a fork; sharing
-        # the logger gives their model calls context_log rows (one fire-and-forget
-        # INSERT/UPDATE each, as for the main runner's calls).
-        forked._context_logger = self._context_logger
+        # the logger gives their model calls context_log rows. It was withheld after the
+        # April 2026 triage hang (0d1d45e3), when the logger's fire-and-forget writes held
+        # no strong ref and had no bound; they now have both (ContextLogger._bounded).
+        # NOUS_CONTEXT_LOG_FORKS_ENABLED=false restores the withholding.
+        if self._settings.context_log_forks_enabled:
+            forked._context_logger = self._context_logger
         self._forks.add(forked)
         return forked
 

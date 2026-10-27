@@ -14,6 +14,7 @@ from nous.api.models import ApiResponse
 from nous.api.runner import AgentRunner
 from nous.api.tools import ToolDispatcher
 from nous.heartbeat.dynamic import DynamicCheck
+from nous.observability import context_logger as context_logger_mod
 from nous.observability.context_logger import ContextLogger
 from tests.test_runner_background import _MockBrain, _MockCognitive, _MockHeart, _settings, _SpyApi
 
@@ -140,3 +141,33 @@ async def test_a_failed_insert_does_not_block_the_update():
     ctx.update_response(entry.id, input_tokens=1)
     await _settle()
     updated.assert_awaited_once()
+
+
+def test_forks_log_nothing_when_the_fork_switch_is_off():
+    settings = _settings().model_copy(update={"context_log_forks_enabled": False})
+    runner = AgentRunner(_MockCognitive(), _MockBrain(), _MockHeart(), settings)
+    runner.set_context_logger(ContextLogger())
+    fork = runner.fork(_SpyApi())
+    assert fork._context_logger is None
+    runner.set_context_logger(ContextLogger())
+    assert fork._context_logger is None
+
+
+async def test_a_stuck_db_write_is_cut_off_and_frees_its_slot(monkeypatch):
+    monkeypatch.setattr(context_logger_mod, "DB_WRITE_TIMEOUT_SECONDS", 0.1)
+    written = []
+
+    async def writer(entry):
+        if entry.session_id == "stuck":
+            await asyncio.sleep(3600)
+        written.append(entry.session_id)
+
+    ctx = ContextLogger(db_writer=writer)
+    ctx._db_slots = asyncio.Semaphore(1)
+    for sid in ("stuck", "next"):
+        ctx.log(
+            session_id=sid, turn_number=1, call_type="subtask", model="m", system_prompt="p", messages=[],
+            tools=None, frame_id="f", context_window=200000,
+        )
+    await asyncio.wait_for(asyncio.gather(*list(ctx._pending_tasks)), timeout=5)
+    assert written == ["next"]

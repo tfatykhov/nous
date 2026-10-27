@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from uuid import uuid4
 
-if TYPE_CHECKING:
-    import asyncio
-
 logger = logging.getLogger(__name__)
+
+# Each DB write is cut off after this long and at most this many run at once, so the
+# fire-and-forget writes can never hold the shared connection pool (the April 2026
+# heartbeat triage hang was blamed on contention with these writes).
+DB_WRITE_TIMEOUT_SECONDS = 30
+DB_WRITE_CONCURRENCY = 4
 
 # Section markers in system prompt -> internal names
 SECTION_MARKERS: dict[str, str] = {
@@ -349,6 +353,7 @@ class ContextLogger:
         # The INSERT task of each entry still being written, so its response UPDATE
         # runs after it (an UPDATE that ran first matched no row: a NULL response).
         self._insert_tasks: dict[str, asyncio.Task] = {}
+        self._db_slots = asyncio.Semaphore(DB_WRITE_CONCURRENCY)
 
     def _schedule_bg(self, coro) -> asyncio.Task | None:
         """Run a DB coroutine fire-and-forget while retaining a strong ref. Returns the task, or None."""
@@ -364,12 +369,20 @@ class ContextLogger:
         task.add_done_callback(self._pending_tasks.discard)
         return task
 
-    async def _update_after_insert(self, insert, entry) -> None:
-        import asyncio
+    async def _bounded(self, coro) -> None:
+        """One DB write, within the concurrency cap and the timeout."""
+        try:
+            async with self._db_slots:
+                await asyncio.wait_for(coro, timeout=DB_WRITE_TIMEOUT_SECONDS)
+        except TimeoutError:
+            logger.warning("F035.4: context log DB write timed out after %ss", DB_WRITE_TIMEOUT_SECONDS)
+        finally:
+            coro.close()  # no-op once it ran; avoids a never-awaited warning if cancelled while queued
 
+    async def _update_after_insert(self, insert: asyncio.Task | None, entry: ContextLogEntry) -> None:
         if insert is not None:
             await asyncio.wait([insert])  # never raises: a failed INSERT still lets the UPDATE try
-        await self._db_updater(entry)
+        await self._bounded(self._db_updater(entry))
 
     def _sync_entries_index(self) -> None:
         """REVIEW FIX P1-8: Sync _entries_by_id with deque to prevent memory leak."""
@@ -413,7 +426,7 @@ class ContextLogger:
         if self._payload_store and payload:
             self._payload_store.capture(session_id, entry.id, payload)
         if self._db_writer:
-            task = self._schedule_bg(self._db_writer(entry))
+            task = self._schedule_bg(self._bounded(self._db_writer(entry)))
             if task is not None:
                 self._insert_tasks[entry.id] = task
                 entry_id = entry.id
@@ -438,7 +451,7 @@ class ContextLogger:
             entry.cache_read_tokens = cache_read
             entry.duration_ms = duration_ms
             entry.stop_reason = stop_reason
-            # OB-3: persist the response columns (fire-and-forget, mirrors log()).
+            # OB-3: persist the response columns (fire-and-forget, after the entry's INSERT).
             if self._db_updater is not None:
                 self._schedule_bg(self._update_after_insert(self._insert_tasks.get(entry_id), entry))
 
