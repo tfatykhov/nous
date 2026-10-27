@@ -422,6 +422,10 @@ def test_the_guard_is_part_of_the_signature():
     a = DynamicCheck(check_id="c", name="n", prompt="p", tools=[], guard={"name": NAME})
     b = DynamicCheck(check_id="c", name="n", prompt="p", tools=[], guard={"name": NAME, "mode": "skip"})
     assert a.signature() != b.signature()
+    # writing "guard": null over a check with no guard key is a change: the next run refuses it
+    assert DynamicCheck(check_id="c", name="n", prompt="p", tools=[], guard=None).signature() != DynamicCheck(
+        check_id="c", name="n", prompt="p", tools=[]
+    ).signature()
 
 
 async def test_the_loader_hands_each_check_its_rows_guard_and_the_shared_context(tmp_path):
@@ -452,6 +456,37 @@ async def test_the_loader_hands_each_check_its_rows_guard_and_the_shared_context
     assert [t for t, _ in rec.events] == [check_guard.RAN]
 
 
+async def test_the_loader_hands_a_null_guard_on_to_be_refused_and_no_key_as_no_guard(tmp_path):
+    from nous.heartbeat.dynamic import DynamicCheckLoader
+    from nous.heartbeat.registry import CheckRegistry
+
+    command, counter = counted(tmp_path)
+    rec = Recorder()
+    ctx = check_guard.CheckGuardContext(enabled=True, commands={NAME: command}, emit=rec.emit, ledger=rec.ledger)
+    runner = MagicMock()
+    runner.run_turn = AsyncMock(return_value=(CLEAN, None, {}))
+    runner.end_conversation = AsyncMock()
+    registry = CheckRegistry()
+    loader = DynamicCheckLoader(db=MagicMock(), registry=registry, runner=runner, agent_id="a", guards=ctx)
+    rows = []
+    for name, metadata in (("null-guard", {"guard": None}), ("no-guard", {})):
+        row = MagicMock(
+            id=f"row-{name}", prompt="p", tools=["bash"], interval_seconds=300, timeout_seconds=300, urgent=False,
+            on_complete_prompt=None, on_complete_tools=[], cron_expr=None, metadata_=metadata,
+        )  # fmt: skip
+        row.name = name
+        rows.append(row)
+    loader._fetch_enabled = AsyncMock(return_value=rows)
+
+    await loader.sync()
+    await registry.get_check("null-guard").run()
+    await registry.get_check("no-guard").run()
+
+    assert runs(counter) == 0 and runner.run_turn.await_count == 2
+    [unresolved] = rec.of(check_guard.UNRESOLVED)
+    assert unresolved["check_name"] == "null-guard" and unresolved["guard"]["reason"] == "invalid"
+
+
 @pytest.mark.parametrize(
     ("guard", "detail"),
     [
@@ -462,6 +497,7 @@ async def test_the_loader_hands_each_check_its_rows_guard_and_the_shared_context
         ({"name": NAME, "is_action": True, "timeout_seconds": -5}, "at least 1"),
         ({"name": NAME, "timeout_seconds": 0}, "at least 1"),
         ({"name": NAME, "is_action": "true", "timeout_seconds": 240}, "is_action must be true or false"),
+        (None, "not a JSON object"),  # {"guard": null}: the key is there, so it is a guard to refuse
     ],
 )
 async def test_a_guard_that_cannot_be_read_safely_is_refused_not_ignored(tmp_path, guard, detail):

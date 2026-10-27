@@ -159,7 +159,7 @@ class DynamicCheck(BaseCheck):
         on_complete_tools: list[str] | None = None,
         active_runs: dict[str, set[DynamicCheck]] | None = None,
         intention: dict | None = None,
-        guard: dict | None = None,
+        guard: Any = check_guard.NO_GUARD,
         guards: check_guard.CheckGuardContext | None = None,
     ) -> None:
         super().__init__()
@@ -179,8 +179,8 @@ class DynamicCheck(BaseCheck):
         # F099 I3: the lineage of the DAG this check runs for (its row's
         # metadata.intention); read into the heartbeat_check context.
         self._intention = intention
-        # F107 phase 3: the row's metadata.guard as written (not an object: refused as invalid, never ignored),
-        # and the loader's guard context.
+        # F107 phase 3: the row's metadata.guard as written, or NO_GUARD with no such key (anything not an object,
+        # null included, is refused as invalid, never ignored), and the loader's guard context.
         self._guard = guard
         self._guards = guards
         self._guard_in_flight = False
@@ -395,7 +395,7 @@ class DynamicCheck(BaseCheck):
         """
         ctx = self._guards
         raw = self._guard
-        if ctx is None or raw is None or not ctx.enabled:
+        if ctx is None or raw is check_guard.NO_GUARD or not ctx.enabled:
             return "", None
         base = self._base(session_id)
         from nous.dag.store import DAG_CHECK_NAME_PREFIX
@@ -666,7 +666,7 @@ class DynamicCheckLoader:
                 on_complete_tools=row.on_complete_tools or [],
                 active_runs=self._active_runs,
                 intention=_meta(row).get("intention"),
-                guard=_meta(row).get("guard"),
+                guard=_meta(row).get("guard", check_guard.NO_GUARD),
                 guards=self._guards,
             )
             check.set_cron(row.cron_expr)
@@ -985,7 +985,7 @@ class DynamicCheckLoader:
             on_complete_tools=validated_on_complete_tools,
             active_runs=self._active_runs,
             intention=(metadata or {}).get("intention"),
-            guard=(metadata or {}).get("guard"),
+            guard=(metadata or {}).get("guard", check_guard.NO_GUARD),
             guards=self._guards,
         )
         check.set_cron(cron_expr)

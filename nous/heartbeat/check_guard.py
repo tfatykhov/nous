@@ -50,6 +50,16 @@ Emit = Callable[[str, dict[str, Any], str], Awaitable[None]]  # event type, data
 Ledger = Callable[[str], Awaitable[Sequence[tuple[str, str, Mapping[str, Any]]]]]  # session id -> entries
 
 
+class _NoGuard:
+    def __repr__(self) -> str:
+        return "NO_GUARD"
+
+
+# A row with no ``guard`` key in its metadata. ``{"guard": null}`` is a guard, refused as not a JSON object.
+NO_GUARD: Any = _NoGuard()
+
+
+
 @dataclass
 class CheckGuardContext:
     """What a check needs to run its guard, built once by the loader and shared by its checks."""

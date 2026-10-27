@@ -626,3 +626,21 @@ async def test_malformed_check_records_do_not_break_the_block(db, agent):
     out = await data(db, agent)
     [row] = out["checks"]
     assert row["runs"] == 1 and sum(row["fell_through"].values()) == 1
+
+
+async def test_a_check_whose_guard_is_null_is_listed_as_a_refused_guard(db, agent):
+    """The runner refuses ``{"guard": null}`` as invalid, so the dashboard lists it and its invalid records."""
+    tick = check(agent, {})
+    tick.metadata_ = {"guard": None}
+    await add(db, tick)
+    await add(
+        db,
+        check_event(agent, "check_guard_unresolved", tick, "r1",
+                    guard={"name": None, "reason": "invalid", "detail": "metadata.guard is not a JSON object"}),
+    )  # fmt: skip
+
+    out = await data(db, agent)
+
+    [row] = out["checks"]
+    assert (row["check_id"], row["name"], row["allowlisted"]) == (tick.id.hex, None, False)
+    assert (row["runs"], row["guard_runs"], row["fell_through"]["invalid"]) == (1, 0, 1)
