@@ -686,6 +686,34 @@ async def test_the_command_builds_its_settings_once_and_scores_their_agent(db, a
     assert [r.task_id for r in await rows(db, agent)] == [str(sub.id)]
 
 
+async def test_the_scorer_names_its_own_token_to_its_github_reader(db, agent, monkeypatch):
+    """A 401 warning names the variable the operator must fix: the scorer's own, not the agent's."""
+    import nous.config
+    import nous.storage.database
+
+    built: list[dict] = []
+
+    class Reader:
+        def __init__(self, token=None, **kwargs):
+            built.append(kwargs)
+
+        async def aclose(self):
+            return None
+
+    class OneSettings:
+        def __init__(self):
+            self.agent_id = agent
+            self.scorer_agent_logins = "cognition-engines-nous-agent"  # PR verification on
+            self.scorer_merger_logins = "tfatykhov"
+            self.scorer_github_token = ""
+
+    monkeypatch.setattr(nous.config, "Settings", OneSettings)
+    monkeypatch.setattr(nous.storage.database, "Database", lambda settings: _Shared(db))
+    monkeypatch.setattr(job, "GitHubReader", Reader)
+    assert await job._run(None, 15) == 0
+    assert built == [{"token_name": "NOUS_SCORER_GITHUB_TOKEN"}]
+
+
 async def test_the_log_counts_the_rows_submitted_by_kind(db, agent, monkeypatch, caplog):
     await _done_subtask(db, agent)
     async with db.session() as s:

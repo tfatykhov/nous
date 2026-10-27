@@ -132,6 +132,23 @@ def lineage_stamp(intention_id: UUID, root_id: UUID, authority: str) -> dict[str
     return {"id": str(intention_id), "root_id": str(root_id), "authority": authority}
 
 
+def stamp_is_internal(stamp: Any) -> bool:
+    """Whether work carrying this lineage stamp is internal_only.
+
+    The rule of ``execution_context.lineage_from_stamp`` (which this module
+    cannot import): no stamp is owner, and a stamp that cannot be read fails
+    closed to internal_only.
+    """
+    if stamp is None:
+        return False
+    if not isinstance(stamp, dict):
+        return True
+    if parse_uuid(stamp.get("id")) is None or parse_uuid(stamp.get("root_id")) is None:
+        return True
+    authority = stamp.get("authority")
+    return authority not in AUTHORITIES or authority == AUTHORITY_INTERNAL
+
+
 @dataclass(frozen=True, slots=True)
 class IntentionSpec:
     """What a spawn path knows about the intention it records. The store

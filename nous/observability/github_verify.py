@@ -61,18 +61,22 @@ class GitHubReader:
         *,
         transport: httpx.AsyncBaseTransport | None = None,
         call_cap: int = GITHUB_CALL_CAP,
+        user_agent: str = "nous-task-scorer",
+        timeout: float = REQUEST_TIMEOUT,
+        token_name: str = "the GitHub token",
     ) -> None:
         headers = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "nous-task-scorer",
+            "User-Agent": user_agent,
         }
         if token:
             headers["Authorization"] = f"Bearer {token}"
         self._client = httpx.AsyncClient(  # follow_redirects: a renamed repository redirects its old name
-            base_url=GITHUB_API, headers=headers, timeout=REQUEST_TIMEOUT, transport=transport, follow_redirects=True
+            base_url=GITHUB_API, headers=headers, timeout=timeout, transport=transport, follow_redirects=True
         )
         self._call_cap = call_cap
+        self._token_name = token_name  # the setting a 401 warning names, so the operator fixes the right one
         self.calls = 0
         self._memo: dict[str, Any] = {}
         self._failed: dict[str, str] = {}
@@ -80,6 +84,11 @@ class GitHubReader:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+    @property
+    def rate_limited(self) -> bool:
+        """Whether GitHub answered one of this reader's requests with a rate limit (403 or 429): it asks no more."""
+        return self._stopped is not None
 
     async def _get(self, path: str, params: Mapping[str, str | int] | None = None) -> Any:
         key = f"{path}?{urlencode(sorted((params or {}).items()))}"
@@ -104,7 +113,7 @@ class GitHubReader:
             if response.status_code in _RATE_LIMITED:
                 self._stopped = self._failed[key]
             elif response.status_code == 401:
-                logger.warning("Task scores: GitHub refused NOUS_SCORER_GITHUB_TOKEN (HTTP 401)")
+                logger.warning("GitHub refused %s (HTTP 401)", self._token_name)
             raise GitHubUnavailable(self._failed[key])
         else:
             try:
@@ -126,6 +135,14 @@ class GitHubReader:
     async def pull(self, repo: str, number: int) -> dict[str, Any] | None:
         """The PR, or None when there is no such PR."""
         return await self._shaped(f"/repos/{repo}/pulls/{number}", None, dict)
+
+    async def check_runs(self, repo: str, sha: str) -> dict[str, Any] | None:
+        """The first page (100) of check runs on commit ``sha``, or None on a 404."""
+        return await self._shaped(f"/repos/{repo}/commits/{sha}/check-runs", {"per_page": 100}, dict)
+
+    async def reviews(self, repo: str, number: int) -> list[Any] | None:
+        """The first page (100) of the PR's reviews, oldest first, or None on a 404."""
+        return await self._shaped(f"/repos/{repo}/pulls/{number}/reviews", {"per_page": 100}, list)
 
     async def canonical_repo(self, repo: str) -> str:
         """The repository's current ``owner/name``: a transferred repository's branches are under its new owner."""

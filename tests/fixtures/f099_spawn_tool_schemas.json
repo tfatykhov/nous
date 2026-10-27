@@ -189,10 +189,10 @@
   },
   {
     "name": "dag_create",
-    "description": "Create a DAG to orchestrate subtasks and checks with dependency tracking. You do NOT need to poll for the result: when the DAG reaches a terminal state its outcome is delivered to you automatically (F087), so create it and move on. Use dag_manage only when the user asks about progress mid-flight, to cancel or retry, or to look up a DAG whose delivery you missed or that finished before this session (dag_manage action='recent').",
+    "description": "Create a DAG to orchestrate subtasks and checks with dependency tracking. A node that only waits for a Claude Code job, a pull request or a file must be a 'wait' node, not a 'check' node (see the node type). You do NOT need to poll for the result: when the DAG reaches a terminal state its outcome is delivered to you automatically (F087), so create it and move on. Use dag_manage only when the user asks about progress mid-flight, to cancel or retry, or to look up a DAG whose delivery you missed or that finished before this session (dag_manage action='recent').",
     "input_schema": {
       "type": "object",
-      "description": "Create a DAG to orchestrate subtasks and checks with dependency tracking. You do NOT need to poll for the result: when the DAG reaches a terminal state its outcome is delivered to you automatically (F087), so create it and move on. Use dag_manage only when the user asks about progress mid-flight, to cancel or retry, or to look up a DAG whose delivery you missed or that finished before this session (dag_manage action='recent').",
+      "description": "Create a DAG to orchestrate subtasks and checks with dependency tracking. A node that only waits for a Claude Code job, a pull request or a file must be a 'wait' node, not a 'check' node (see the node type). You do NOT need to poll for the result: when the DAG reaches a terminal state its outcome is delivered to you automatically (F087), so create it and move on. Use dag_manage only when the user asks about progress mid-flight, to cancel or retry, or to look up a DAG whose delivery you missed or that finished before this session (dag_manage action='recent').",
       "properties": {
         "name": {
           "type": "string",
@@ -216,9 +216,10 @@
                   "check",
                   "gate",
                   "callback",
-                  "fix"
+                  "fix",
+                  "wait"
                 ],
-                "description": "'callback' runs AFTER its predecessors and receives their results as context — use it to interpret or act on what earlier nodes produced (point a context_flow edge at it). It accepts frame_type / model / timeout_seconds like a subtask. Requires NOUS_DAG_CALLBACK_EXECUTION_ENABLED=true; with the flag off a callback completes instantly without running. 'gate' currently auto-passes — it is a marker, not an enforced quality check. Note: 'tools' below is honored ONLY for 'check' nodes — on every other node type (subtask, callback, gate, fix) it is silently ignored."
+                "description": "'callback' runs AFTER its predecessors and receives their results as context — use it to interpret or act on what earlier nodes produced (point a context_flow edge at it). It accepts frame_type / model / timeout_seconds like a subtask. Requires NOUS_DAG_CALLBACK_EXECUTION_ENABLED=true; with the flag off a callback completes instantly without running. 'gate' currently auto-passes — it is a marker, not an enforced quality check. Note: 'tools' below is honored ONLY for 'check' nodes — on every other node type (subtask, callback, gate, fix) it is silently ignored. 'wait' waits for a Claude Code job, a pull request or a file (wait_for) and runs no model and no shell: the orchestrator checks the condition every completion_check_interval seconds (default: every tick; a pr wait at most once a minute) until it holds (the node completes, and its result says what was seen), can no longer hold (it fails), or timeout_seconds or max_check_attempts runs out (it fails). A node that only waits for a job, a PR or a file must be a 'wait' node, not a 'check' node: a wait costs no worker. In a DAG created by a background (internal_only) turn, waits and the built-in PR check are the only conditions allowed: any other completion_check is refused there. A wait node takes name, type, instructions \"\" (put any note in description) and wait_for, and optionally timeout_seconds, completion_check_interval, max_check_attempts and description."
               },
               "instructions": {
                 "type": "string"
@@ -238,7 +239,7 @@
               "timeout_seconds": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Execution timeout in seconds (default: NOUS_DAG_NODE_DEFAULT_TIMEOUT, ceiling: NOUS_DAG_NODE_MAX_TIMEOUT). F087: now a REAL bound — a node still executing past this plus NOUS_DAG_NODE_TIMEOUT_GRACE_SECONDS is cancelled and failed, so size it to the work rather than leaving the default on a long job."
+                "description": "Execution timeout in seconds (default: NOUS_DAG_NODE_DEFAULT_TIMEOUT, ceiling: NOUS_DAG_NODE_MAX_TIMEOUT). F087: now a REAL bound — a node still executing past this plus NOUS_DAG_NODE_TIMEOUT_GRACE_SECONDS is cancelled and failed, so size it to the work rather than leaving the default on a long job. For a 'check' or 'wait' node with max_check_attempts and completion_check_interval, the timeout is raised to cover its polls (interval x attempts + one interval; the result says so in a Note line) and the DAG is refused when that is above NOUS_DAG_NODE_MAX_TIMEOUT. For a 'check' node the raised value is also its worker's own run timeout."
               },
               "stall_timeout_seconds": {
                 "type": "integer",
@@ -250,15 +251,66 @@
               },
               "completion_check": {
                 "type": "string",
-                "description": "Shell command polled each tick. Exit 0 = success, 1 = failed, 2 = still running. For work that ends in a pull request, use the built-in check 'python -m nous.dag.typed_checks pr <owner/repo> --head <branch>' (or --pr <n>), exactly as written: it passes once that PR exists and fails if it is closed without a merge. Give it a completion_check_interval of 300 or more. When the node launches a Claude Code job (claude-jobs/runner.sh launch) that opens the PR, have it write the job id to a file under the workspace (redirecting runner.sh launch's output into the file will do) and add ' --job-file <absolute path of that file>' to the same check instead of checking the job's status yourself: the node then waits while the job runs and fails when the job ends without the PR. Only this exact check counts as the PR check: a merged PR it names is the outside confirmation your work is scored on, and a job-status or gh check you write yourself earns nothing."
+                "description": "Shell command polled each tick. Exit 0 = success, 1 = failed, 2 = still running. For work that ends in a pull request, use the built-in check 'python -m nous.dag.typed_checks pr <owner/repo> --head <branch>' (or --pr <n>), exactly as written: it passes once that PR exists and fails if it is closed without a merge. Give it a completion_check_interval of 300 or more. When the node launches a Claude Code job (claude-jobs/runner.sh launch) that opens the PR, have it write the job id to a file under the workspace (redirecting runner.sh launch's output into the file will do) and add ' --job-file <absolute path of that file>' to the same check instead of checking the job's status yourself: the node then waits while the job runs and fails when the job ends without the PR. Only this exact check counts as the PR check: a merged PR it names is the outside confirmation your work is scored on, and a job-status or gh check you write yourself earns nothing. A DAG created by a background (internal_only) turn may carry no other completion_check: wait for a job, a PR or a file with a 'wait' node instead. A pr wait on a separate node earns no score: to be scored on a PR, keep this check on the node that opens it."
               },
               "completion_check_interval": {
                 "type": "integer",
-                "description": "Seconds between completion check polls (default: every tick)"
+                "description": "Seconds between completion check polls, or between a wait node's polls (default: every tick; a pr wait at least 60)"
               },
               "max_check_attempts": {
                 "type": "integer",
-                "description": "Max poll attempts before node fails"
+                "description": "Max poll attempts (completion check or wait) before node fails"
+              },
+              "wait_for": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "job",
+                      "pr",
+                      "file"
+                    ]
+                  },
+                  "job_id": {
+                    "type": "string"
+                  },
+                  "number": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "repo": {
+                    "type": "string"
+                  },
+                  "head": {
+                    "type": "string"
+                  },
+                  "until": {
+                    "type": "string",
+                    "enum": [
+                      "finished",
+                      "completed",
+                      "merged",
+                      "closed",
+                      "head_changed",
+                      "checks_done",
+                      "review_on_head"
+                    ]
+                  },
+                  "reviewer": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "nonempty": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "description": "(type='wait' only) What to wait for; one of three kinds. job: {\"kind\": \"job\", \"job_id\": \"job-20261027-101500-ab12cd34\", \"until\": \"completed\"}: a Claude Code job (claude-jobs/runner.sh launch prints its id). until \"finished\" (the default) takes any final status, \"completed\" fails the node when the job ends any other way; a job whose process died counts as failed. pr: {\"kind\": \"pr\", \"number\": 810, \"repo\": \"owner/name\", \"until\": \"merged\"}: repo defaults to NOUS_GITHUB_DEFAULT_REPO; until is \"merged\" (fails if the PR is closed without a merge), \"closed\", \"head_changed\" (needs \"head\", the commit sha it waits to move away from), \"checks_done\" (every check run on the head finished; failed ones are named in the result; pending while GitHub lists no check run on the head, so a repository without CI never passes it; with \"head\", fails if the head moved) or \"review_on_head\" (a review on the current head, from a login starting with \"reviewer\" when one is given). GitHub errors never fail a pr wait, and it polls at most once a minute. file: {\"kind\": \"file\", \"path\": \"research/out.md\", \"nonempty\": true}: a path under the workspace with no hidden component (nonempty waits for content, or an entry in a directory)."
               },
               "parent_node": {
                 "type": "string",

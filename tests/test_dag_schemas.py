@@ -129,6 +129,7 @@ class TestEnums:
             DAGNodeType.callback,
             DAGNodeType.fix,  # F066.1
             DAGNodeType.approval,  # Harness Phase 3
+            DAGNodeType.wait,  # typed waits (migration 093)
         }
 
     def test_dag_statuses(self):

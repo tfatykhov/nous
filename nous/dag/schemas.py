@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
+from collections.abc import Sequence
 from enum import Enum
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
+
+from nous.observability.task_scoring import parse_pr_check
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -28,6 +32,9 @@ class DAGNodeType(str, Enum):  # noqa: UP042 -- StrEnum changes str()/format() o
     fix = "fix"
     # Harness Phase 3 — waits durably on a person's answer on a companion card.
     approval = "approval"
+    # Typed wait (migration 093): a job, PR or file condition the orchestrator
+    # evaluates in-process. No model, no shell.
+    wait = "wait"
 
 
 class DAGStatus(str, Enum):  # noqa: UP042 -- StrEnum changes str()/format() output (e.g. dag/approval.py)
@@ -112,6 +119,156 @@ class ApprovalOption(BaseModel):
     id: str = Field(..., pattern=r"^[a-z0-9_-]{1,40}$")
     label: str = Field(..., min_length=1, max_length=80)
     outcome: Literal["proceed", "stop"]
+
+
+# Typed waits (migration 093). Every string is checked with re.fullmatch: a
+# pattern's `$` would also match before a trailing newline.
+JOB_ID_RE = re.compile(r"job-\d{8}-\d{6}-[0-9a-f]{8}")  # runner.sh's job directory names
+PR_REPO_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+PR_HEAD_RE = re.compile(r"[0-9a-fA-F]{7,40}")  # a commit sha, short or full
+GITHUB_LOGIN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}")
+# A pr wait asks GitHub at most once a minute, whatever interval was given.
+PR_WAIT_POLL_FLOOR_SECONDS = 60
+FILE_WAIT_PATH_MAX_CHARS = 300
+
+
+def file_wait_path_problem(path: str) -> str | None:
+    """Why ``path`` is no path a file wait may name, or None. Lexical only: where it
+    resolves (symlinks followed) is checked against the workspace at poll time."""
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in path):
+        return "path may not hold control characters"
+    for part in path.split("/"):
+        if part == "..":
+            return "path may not contain '..'"
+        if part.startswith("."):
+            return f"path may not have a hidden component ({part!r})"
+    return None
+
+
+class JobWait(BaseModel):
+    """Wait for a Claude Code job (``claude-jobs/<job_id>``): ``finished`` is any final
+    status, ``completed`` passes only on ``completed``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["job"]
+    job_id: str
+    until: Literal["finished", "completed"] = "finished"
+
+    @field_validator("job_id")
+    @classmethod
+    def _job_id(cls, value: str) -> str:
+        if not JOB_ID_RE.fullmatch(value):
+            raise ValueError("job_id must be a job id like job-20261027-101500-ab12cd34")
+        return value
+
+
+class PrWait(BaseModel):
+    """Wait for a pull request on GitHub. ``repo`` defaults to NOUS_GITHUB_DEFAULT_REPO."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["pr"]
+    number: int = Field(..., ge=1)
+    repo: str | None = None
+    head: str | None = None
+    until: Literal["merged", "closed", "head_changed", "checks_done", "review_on_head"]
+    reviewer: str | None = None
+
+    @field_validator("repo")
+    @classmethod
+    def _repo(cls, value: str | None) -> str | None:
+        if value is not None and (
+            not PR_REPO_RE.fullmatch(value) or any(part in (".", "..") for part in value.split("/"))
+        ):
+            raise ValueError("repo must be owner/name")
+        return value
+
+    @field_validator("head")
+    @classmethod
+    def _head(cls, value: str | None) -> str | None:
+        if value is not None and not PR_HEAD_RE.fullmatch(value):
+            raise ValueError("head must be a commit sha (7 to 40 hex characters)")
+        return value
+
+    @field_validator("reviewer")
+    @classmethod
+    def _reviewer(cls, value: str | None) -> str | None:
+        if value is not None and not GITHUB_LOGIN_RE.fullmatch(value):
+            raise ValueError("reviewer must be a GitHub login or the start of one")
+        return value
+
+    @model_validator(mode="after")
+    def _until_fields(self) -> PrWait:
+        if self.until == "head_changed" and self.head is None:
+            raise ValueError("until 'head_changed' needs head (the sha it waits to move away from)")
+        if self.reviewer is not None and self.until != "review_on_head":
+            raise ValueError("reviewer is allowed only with until 'review_on_head'")
+        return self
+
+
+class FileWait(BaseModel):
+    """Wait for a file or directory under the workspace (no hidden component)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["file"]
+    path: str = Field(..., min_length=1, max_length=FILE_WAIT_PATH_MAX_CHARS)
+    nonempty: bool = False
+
+    @field_validator("path")
+    @classmethod
+    def _path(cls, value: str) -> str:
+        problem = file_wait_path_problem(value)
+        if problem is not None:
+            raise ValueError(problem)
+        return value
+
+
+WaitFor = Annotated[JobWait | PrWait | FileWait, Field(discriminator="kind")]
+_WAIT_FOR = TypeAdapter(WaitFor)
+
+
+def parse_wait_for(raw: object) -> JobWait | PrWait | FileWait:
+    """The typed wait ``raw`` describes. Raises pydantic's ValidationError."""
+    return _WAIT_FOR.validate_python(raw)
+
+
+def effective_poll_interval(kind: str | None, interval: int | None) -> int | None:
+    """The interval a node is polled at: a pr wait never below the floor."""
+    if kind == "pr":
+        return max(interval or 0, PR_WAIT_POLL_FLOOR_SECONDS)
+    return interval
+
+
+# A DAG created by a background (internal_only) turn may wait only through
+# typed conditions: a wait node, or the built-in PR check, which the
+# orchestrator runs without a shell. task_scoring.parse_pr_check is the one
+# definition of that check, so the scorer and this rule cannot disagree.
+class LineageShellCheckRefused(ValueError):
+    """A lineage DAG carries a completion_check other than the built-in PR check."""
+
+
+def lineage_refuses_check(completion_check: str | None) -> bool:
+    """Whether a lineage DAG may not run this completion_check: any non-blank
+    command except exactly the built-in PR check."""
+    cmd = (completion_check or "").strip()
+    return bool(cmd) and parse_pr_check(cmd) is None
+
+
+def lineage_shell_check_message(names: Sequence[str]) -> str:
+    """The one refusal text, for dag_create and for the orchestrator. It starts
+    with "Refused:", never "Completion check", which the task scorer reads as a
+    check that ran and failed."""
+    nodes = ", ".join(f"'{name}'" for name in names)
+    return (
+        f"Refused: node(s) {nodes} carry a shell completion_check, which a DAG created by a background turn may "
+        "not run. Wait through a typed condition instead: a node of type 'wait' with wait_for "
+        '{"kind": "job" | "pr" | "file", ...} (job: a Claude Code job id; pr: a pull request; file: a path in the '
+        "workspace). The one completion_check such a DAG may carry is the built-in PR check, exactly "
+        "'python -m nous.dag.typed_checks pr <owner/repo> --pr <n>' (or --head <branch>, optionally with "
+        "--job-file <path>)."
+    )
 
 
 class DAGNodeSpec(BaseModel):
@@ -222,6 +379,9 @@ class DAGNodeSpec(BaseModel):
         description="Seconds allowed for an answer (default NOUS_DAG_APPROVAL_DEFAULT_WAIT_SECONDS).",
     )
 
+    # Typed waits (type='wait' only): the condition the orchestrator polls.
+    wait_for: WaitFor | None = Field(None, description="The typed condition a wait node polls.")
+
     @model_validator(mode="after")
     def _validate_approval_fields(self) -> DAGNodeSpec:
         approval_only = {
@@ -277,6 +437,34 @@ class DAGNodeSpec(BaseModel):
         # (see validate_dag's _validate_proceed_defaults)
         if self.recommended_option is not None and self.recommended_option not in by_id:
             raise ValueError(f"Approval node '{self.name}': recommended_option must name one of {ids}")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_wait_fields(self) -> DAGNodeSpec:
+        if self.type != DAGNodeType.wait:
+            if self.wait_for is not None:
+                raise ValueError(f"Node '{self.name}': wait_for is allowed only on wait nodes")
+            return self
+        # As for approval nodes, falsy values ([] / "" / 0) count as not given.
+        runs_nothing = {
+            "instructions": self.instructions.strip(),
+            "tools": self.tools,
+            "frame_type": self.frame_type,
+            "model": self.model,
+            "completion_condition": self.completion_condition,
+            "completion_check": self.completion_check,
+            "stall_timeout_seconds": self.stall_timeout_seconds,
+            "parent_node": self.parent_node,
+            "fix_actions": self.fix_actions,
+            "undoable": self.undoable,
+        }
+        given = sorted(k for k, v in runs_nothing.items() if v)
+        if given:
+            raise ValueError(
+                f"Wait node '{self.name}' does not take {given}: it runs no model (put any note in description)"
+            )
+        if self.wait_for is None:
+            raise ValueError(f"Wait node '{self.name}' needs wait_for, with kind 'job', 'pr' or 'file'")
         return self
 
 

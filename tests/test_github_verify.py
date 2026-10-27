@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -10,6 +11,7 @@ import pytest
 from nous.observability import task_scoring as ts
 from nous.observability.github_verify import (
     GitHubReader,
+    GitHubUnavailable,
     PrVerifier,
     StoredPrEvidence,
     stored_pr_evidence,
@@ -430,3 +432,110 @@ async def test_an_answer_of_the_wrong_shape_holds_the_pr_never_rejects_it(head, 
         await reader.aclose()
     assert out.v2_hold and out.evidence["v2_unavailable"] == ["unexpected response"]
     assert "v2_rejected" not in out.evidence
+
+
+# ---------------------------------------------------------------------------
+# Typed waits for lineage DAGs: the reader's check-run and review reads
+# ---------------------------------------------------------------------------
+
+
+def _recording(handler):
+    seen: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return handler(request)
+
+    return httpx.MockTransport(handle), seen
+
+
+async def test_check_runs_and_reviews_read_one_page_of_100():
+    runs = {"total_count": 1, "check_runs": [{"name": "ci", "status": "completed"}]}
+    reviews = [{"id": 1, "state": "APPROVED"}]
+
+    def handle(request):
+        return httpx.Response(200, json=runs if request.url.path.endswith("/check-runs") else reviews)
+
+    mock, seen = _recording(handle)
+    reader = GitHubReader(transport=mock)
+    try:
+        assert await reader.check_runs("o/r", "abc1234") == runs
+        assert await reader.reviews("o/r", 7) == reviews
+        assert await reader.reviews("o/r", 7) == reviews  # remembered: no second request
+    finally:
+        await reader.aclose()
+    assert [r.url.path for r in seen] == ["/repos/o/r/commits/abc1234/check-runs", "/repos/o/r/pulls/7/reviews"]
+    assert all(dict(r.url.params) == {"per_page": "100"} for r in seen)
+
+
+async def test_check_runs_and_reviews_are_none_on_a_404():
+    reader = GitHubReader(transport=httpx.MockTransport(lambda request: httpx.Response(404, json={})))
+    try:
+        assert await reader.check_runs("o/r", "abc1234") is None
+        assert await reader.reviews("o/r", 7) is None
+    finally:
+        await reader.aclose()
+
+
+async def test_a_500_is_unavailable_and_a_rate_limit_stops_the_reader():
+    mock, seen = _recording(lambda request: httpx.Response(500, json={}))
+    reader = GitHubReader(transport=mock)
+    try:
+        with pytest.raises(GitHubUnavailable, match="HTTP 500"):
+            await reader.reviews("o/r", 7)
+        assert reader.rate_limited is False
+    finally:
+        await reader.aclose()
+    mock, seen = _recording(lambda request: httpx.Response(403, json={}))
+    reader = GitHubReader(transport=mock)
+    try:
+        with pytest.raises(GitHubUnavailable, match="HTTP 403"):
+            await reader.check_runs("o/r", "abc1234")
+        assert reader.rate_limited is True
+        with pytest.raises(GitHubUnavailable):
+            await reader.reviews("o/r", 7)
+    finally:
+        await reader.aclose()
+    assert len(seen) == 1  # the 403 stopped the reader: the second read asked nothing
+
+
+@pytest.mark.parametrize(
+    ("method", "args", "body"), [("reviews", ("o/r", 7), {}), ("check_runs", ("o/r", "a1b2c3d"), [])]
+)
+async def test_a_wrong_shape_is_unavailable(method, args, body):
+    reader = GitHubReader(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body)))
+    try:
+        with pytest.raises(GitHubUnavailable, match="unexpected response"):
+            await getattr(reader, method)(*args)
+    finally:
+        await reader.aclose()
+
+
+async def test_the_user_agent_and_timeout_are_the_callers():
+    mock, seen = _recording(lambda request: httpx.Response(404, json={}))
+    default = GitHubReader(transport=mock)
+    own = GitHubReader(transport=mock, user_agent="nous-dag-wait", timeout=5.0)
+    try:
+        await default.pull("o/r", 1)
+        await own.pull("o/r", 1)
+        assert default._client.timeout.read == 10.0
+        assert own._client.timeout.read == 5.0
+    finally:
+        await default.aclose()
+        await own.aclose()
+    assert [r.headers["user-agent"] for r in seen] == ["nous-task-scorer", "nous-dag-wait"]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "named"),
+    [({}, "the GitHub token"), ({"token_name": "GITHUB_TOKEN"}, "GITHUB_TOKEN")],
+)
+async def test_a_401_names_the_token_the_reader_was_given(kwargs, named, caplog):
+    reader = GitHubReader(transport=httpx.MockTransport(lambda request: httpx.Response(401, json={})), **kwargs)
+    try:
+        with caplog.at_level(logging.WARNING, logger="nous.observability.github_verify"):
+            with pytest.raises(GitHubUnavailable, match="HTTP 401"):
+                await reader.pull("o/r", 1)
+    finally:
+        await reader.aclose()
+    assert [r.getMessage() for r in caplog.records] == [f"GitHub refused {named} (HTTP 401)"]

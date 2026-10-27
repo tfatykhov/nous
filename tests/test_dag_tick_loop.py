@@ -1310,6 +1310,9 @@ def _self_disabling_setup(fail_after_disable: bool = False):
         dynamic_loader=loader,
     )
     store = AsyncMock()
+    # An owner DAG: no intention, so no lineage stamp. A bare AsyncMock's lineage is a MagicMock, which is not a
+    # stamp, and a lineage that cannot be read refuses the node's shell completion_check.
+    store.intention_lineage.return_value = None
     orch = DAGOrchestrator(
         store=store,
         dynamic_loader=loader,

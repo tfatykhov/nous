@@ -1460,7 +1460,7 @@ class DAGNode(Base):
             name="chk_dag_node_status",
         ),
         CheckConstraint(
-            "node_type IN ('subtask', 'check', 'gate', 'callback', 'fix', 'approval')",
+            "node_type IN ('subtask', 'check', 'gate', 'callback', 'fix', 'approval', 'wait')",
             name="chk_dag_node_type",
         ),
         # Harness Phase 3 (migration 076): where an answer came from, not who.
@@ -1573,6 +1573,8 @@ class DAGNode(Base):
     answer_history: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     # Migration 089: one entry per attempt a reset discarded (nous/dag/attempts.py).
     attempt_history: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # Migration 093: a wait node's typed condition (nous/dag/waits.py). NULL for every other type.
+    wait_for: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     dag: Mapped["ExecutionDAG"] = relationship("ExecutionDAG", back_populates="nodes")
 
