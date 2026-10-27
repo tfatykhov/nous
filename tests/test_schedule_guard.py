@@ -1140,9 +1140,7 @@ async def test_an_unresolved_guard_and_a_shadow_run_persist_their_events(db):
         await bus.stop()  # drains the queue through the persister
         async with db.session() as session:
             rows = (
-                (await session.execute(select(EventRow).where(EventRow.agent_id == settings.agent_id)))
-                .scalars()
-                .all()
+                (await session.execute(select(EventRow).where(EventRow.agent_id == settings.agent_id))).scalars().all()
             )
         by_type = {r.event_type: r.data for r in rows}
         assert by_type["subtask_guard_unresolved"]["schedule_id"] == unresolved.id.hex

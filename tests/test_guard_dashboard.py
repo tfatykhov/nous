@@ -156,7 +156,9 @@ async def test_window_counts_and_fell_through_by_reason(db, agent):
         for i, r in enumerate(reasons)
     ]
     rows.append(event(agent, "subtask_guard_ran", ran[5], sch, guard=record()))  # shadow, would skip
-    rows.append(event(agent, "subtask_guard_unresolved", ran[6], sch, guard={"name": "nope", "reason": "not_allowlisted"}))
+    rows.append(
+        event(agent, "subtask_guard_unresolved", ran[6], sch, guard={"name": "nope", "reason": "not_allowlisted"})
+    )
     rows.append(event(agent, "subtask_guard_ran", ran[0], sch, age_hours=24 * 8, guard=record(reason="exit")))
     await add(db, sch, old, *skipped, *ran)
     await add(db, *rows)
@@ -223,7 +225,9 @@ async def test_history_of_a_schedule_whose_guard_was_removed_still_counts(db, ag
     sch = schedule(agent, None)  # its guard was removed after these runs
     sub = run(agent, sch)
     await add(db, sch, sub)
-    await add(db, event(agent, "subtask_guard_ran", sub, sch, guard=record(mode="skip", would_skip=False, reason="exit")))
+    await add(
+        db, event(agent, "subtask_guard_ran", sub, sch, guard=record(mode="skip", would_skip=False, reason="exit"))
+    )
     out = await data(db, agent)
     assert out["schedules"] == [] and (out["runs"], out["guard_runs"], out["fell_through"]["exit"]) == (1, 1, 1)
 

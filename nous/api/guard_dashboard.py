@@ -89,12 +89,16 @@ async def get_guard_data(
     agent_id = settings.agent_id
     since = (now or datetime.now(UTC)) - timedelta(days=days)
     schedules = (
-        await session.execute(
-            select(Schedule)
-            .where(Schedule.agent_id == agent_id, Schedule.active.is_(True), Schedule.metadata_.has_key(GUARD_KEY))
-            .order_by(Schedule.created_at)
+        (
+            await session.execute(
+                select(Schedule)
+                .where(Schedule.agent_id == agent_id, Schedule.active.is_(True), Schedule.metadata_.has_key(GUARD_KEY))
+                .order_by(Schedule.created_at)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     events = (
         await session.execute(
             select(Event.event_type, Event.data, Event.created_at).where(

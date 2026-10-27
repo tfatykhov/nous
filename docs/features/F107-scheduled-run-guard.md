@@ -1,6 +1,6 @@
 # F107: Scheduled Run Guard
 
-**Status:** PR open. `NOUS_SCHEDULE_GUARDS_ENABLED` (default `true`); nothing is guarded until a schedule's metadata has a `guard` that names an entry of `NOUS_SCHEDULE_GUARD_COMMANDS` (default empty).
+**Status:** phase 1 merged (#810); phase 2 (shadow mode, Run guards panel) PR open. `NOUS_SCHEDULE_GUARDS_ENABLED` (default `true`); nothing is guarded until a schedule's metadata has a `guard` that names an entry of `NOUS_SCHEDULE_GUARD_COMMANDS` (default empty).
 
 ## Problem
 
@@ -12,7 +12,7 @@ A deterministic guard runs first. The model runs only when the guard cannot cert
 
 - **Config, two parts:**
   - The commands: `NOUS_SCHEDULE_GUARD_COMMANDS`, a JSON map of name to shell command in the deployment's env, e.g. `{"ledger_sweep": "bash /tmp/nous-workspace/claude-jobs/ledger_sweep.sh"}`. Unset or empty gives no commands; so does invalid JSON or a non-object, with a WARNING at startup, never a boot failure. An entry whose name or command is not a non-empty string is dropped, with a WARNING naming it.
-  - The schedule: `heart.schedules.metadata.guard = {"name": "ledger_sweep", "skip_when": "exit0_quiet", "timeout_seconds": 60}`. The timeout defaults to 60 s and is clamped to 1 to 120 s. The guard is opt-in per schedule and needs no migration.
+  - The schedule: `heart.schedules.metadata.guard = {"name": "ledger_sweep", "mode": "shadow", "skip_when": "exit0_quiet", "timeout_seconds": 60}`. `mode` is `shadow` when absent; see [Phase 2](#phase-2-shadow-mode-and-the-run-guards-panel). The timeout defaults to 60 s and is clamped to 1 to 120 s. The guard is opt-in per schedule and needs no migration.
 - **Trust boundary:** the schedule row is **not** owner-only. No agent tool or REST endpoint writes schedule metadata, but the agent has general shell and database access, so it could write the row. The row therefore only *names* a command; the command line comes only from the allowlist, which lives in the env, outside the agent's reach. The allowlist pins the command line, not what a script does: an entry that runs a script the agent can write (anything under its workspace, e.g. `/tmp/nous-workspace`) still lets the agent decide what runs. For the guarantee to hold, point each entry at a script the agent cannot write (owned by another user, read-only, outside every mounted workspace). A `command` key in the row is ignored, and a name that is not in the allowlist means no guard: the turn runs as usual, with a WARNING naming the schedule, the name and the allowlist's entries. The worker reads the guard from the schedule row at run time (a schedule of this agent only), never from the run's own metadata or task text.
 - **Where it runs:** `SubtaskWorkerPool._process_subtask` (`nous/handlers/subtask_worker.py`), before the run's turn and outside its timeout.
   - The row is already `running`, so the guard's time comes out of F101's grace: `find_active_run` counts a running row only until `started_at + timeout + 300 s`. The guard timeout is therefore capped at 120 s (plus at most 5 s for the kill), well inside that grace.
@@ -20,7 +20,7 @@ A deterministic guard runs first. The model runs only when the guard cannot cert
   - The guard applies only to a plain fire of the schedule: the run's text must equal `schedule.task`, and the run must not be a check-and-fix run.
   - A manual "run now" (`POST /schedules/{id}/run`, F101) creates a plain fire too, so the guard can skip it as well. To force a model turn, run the task as a one-off subtask, or remove the guard first.
 - **Command:** an asyncio subprocess (`/bin/sh -c`) with stdin closed. It runs in its own session, and its whole process group is killed on timeout or cancellation, also when the shell has already exited and a background child of it holds the pipes. The wait after the kill is bounded (`nous.utils.kill_process_group`, 5 s), so a child that left the group (`setsid`) cannot strand the worker.
-- **Skip (`exit0_quiet`):** exit 0 with whitespace-only stdout **and** stderr. stderr counts because a script that ends in `; true` reports a failure only there; known chatter belongs in the script (`2>/dev/null`), not in the guard.
+- **Skip (`exit0_quiet`, `mode: skip` only):** exit 0 with whitespace-only stdout **and** stderr. stderr counts because a script that ends in `; true` reports a failure only there; known chatter belongs in the script (`2>/dev/null`), not in the guard.
   - The row is completed with result `skipped_by_guard: <command> exit=0 stdout=empty stderr=empty (<ms> ms)` and `final_outcome=completed`.
   - It records `attempts`/tokens/tool calls of 0 and `report_jsonb = {"guard_skipped": true, "guard": <record>}`.
   - It emits a persisted `subtask_guard_skipped` event.
@@ -33,7 +33,7 @@ A deterministic guard runs first. The model runs only when the guard cannot cert
   - The receipt holds the exit code or timeout, the duration, and the first 2 KB of stdout and stderr, fenced as command output.
   - The receipt's output enters the prompt **unscreened**: it does not pass through F103's injection screen or the tool-result path. It is treated as an owner-authored channel, because only an allowlisted command (owner-written, in the env) can produce it. A guard command must therefore not print content from untrusted sources (web pages, mail, third-party issue text); a script that does belongs in the model turn, behind the normal tool path.
   - So the model does not need to run the script again.
-- **A record of every run** (that returns a result; a run cut short by a cancellation leaves only a log line): the guard command runs outside tool classes, the execution ledger and F103, so each run leaves its own durable record: `{name, command, skip_when, timeout_seconds, exit_code, timed_out, error, duration_ms, stdout_bytes, stderr_bytes, stderr_head, skipped}`. `stderr_head` is the first 512 bytes of stderr; it and `command` pass through the ledger's error redaction (`redact_error_text`). On a skip it is `report_jsonb.guard`; on a fall-through (including a skip whose row write failed) it is the data of a `subtask_guard_ran` event, which the event bus persists to `nous_system.events` like every other subtask event (best effort, as for those: a full bus queue or a failed insert loses it, with a log line). A name that is not in the allowlist runs nothing and leaves only its WARNING.
+- **A record of every run** (that returns a result; a run cut short by a cancellation leaves only a log line): the guard command runs outside tool classes, the execution ledger and F103, so each run leaves its own durable record: `{name, command, skip_when, timeout_seconds, exit_code, timed_out, error, duration_ms, stdout_bytes, stderr_bytes, stderr_head, skipped}` (phase 2 adds `mode, would_skip, reason`). `stderr_head` is the first 512 bytes of stderr; it and `command` pass through the ledger's error redaction (`redact_error_text`). On a skip it is `report_jsonb.guard`; on a fall-through (including a skip whose row write failed) it is the data of a `subtask_guard_ran` event, which the event bus persists to `nous_system.events` like every other subtask event (best effort, as for those: a full bus queue or a failed insert loses it, with a log line). A name that is not in the allowlist runs nothing and leaves its WARNING and, since phase 2, a persisted `subtask_guard_unresolved` event.
 
 ## Pilot
 
@@ -45,15 +45,41 @@ NOUS_SCHEDULE_GUARD_COMMANDS={"ledger_sweep": "bash /tmp/nous-workspace/claude-j
 
 `/tmp/nous-workspace/claude-jobs/ledger_sweep.sh` is under the agent's workspace volume, so the agent can rewrite it. Before relying on the allowlist as a trust boundary, copy the script to an owner-owned, read-only path outside the workspace and point the entry there. The record of every run (below) makes any change visible after the fact either way.
 
-Then set the guard on the ledger sweep:
+Then set the guard on the ledger sweep, in shadow mode first:
 
 ```sql
 UPDATE heart.schedules
-SET metadata = metadata || '{"guard": {"name": "ledger_sweep", "skip_when": "exit0_quiet", "timeout_seconds": 60}}'::jsonb
+SET metadata = metadata || '{"guard": {"name": "ledger_sweep", "mode": "shadow", "skip_when": "exit0_quiet", "timeout_seconds": 60}}'::jsonb
 WHERE id = '83ff767a-1077-4f68-91e9-89fed1e62a55';
 ```
 
+Watch the Run guards section of the Autonomy view. Once its would-skip runs have no shadow misses you accept, switch it to skip (`jsonb_set(metadata, '{guard,mode}', '"skip"')`). No code path makes that switch.
+
 The script ends with `; true`, so its exit code is always 0. It prints a line only when it logged commits, so empty stdout is the signal, and a failure shows up on stderr, which sends the run to the model.
+
+## Phase 2: shadow mode and the Run guards panel
+
+No guard is turned on in prod until these exist (owner requirement, PR #810 review).
+
+- **Mode:** `metadata.guard.mode` is `shadow` or `skip`. When absent it is `shadow`, so a newly guarded job never loses a run. Any other value (`"SKIP"`, `""`, `null`) falls through at WARNING: the command still runs and is recorded, the receipt notes the unknown mode, and the record's `reason` is `error`. Only the owner switches a job to `skip`; no code path writes `mode`.
+- **Shadow runs:** the command runs and the model **always** runs.
+  - The receipt is appended as on a fall-through, so a guard that is itself the job's action is not run again by the model.
+  - The `subtask_guard_ran` event carries the record. `guard_skipped` is never set, so for the scorer and the job lessons the run is a real one.
+- **The record** (`schedule_guard.record`) gains `mode`, `would_skip` (whether the command certified a no-op, whatever the mode) and `reason` (`output`, `stderr`, `exit`, `timeout` or `error`; null when it certified a no-op in a known mode; `error` also for a skip whose row write failed). Events also carry `schedule_id`.
+- **Did the model act?** After the turn of a shadow run whose row is terminal, the worker emits a persisted `subtask_guard_acted` event: `{subtask_id, schedule_id, guard: {name, mode, would_skip}, acted, acted_by, run_status, ledger_persisted}`. It is emitted from `_process_subtask`'s `finally`, after `_record_inbox`, so a timed-out turn is recorded too. A run cut short by a shutdown, with its row still `running`, records nothing. "Acted" is defined once, in `schedule_guard.acted_signals`; `acted_by` lists the kinds, in this order:
+  - `report`: the report has a non-empty summary;
+  - `finding`: the report has findings or next actions, or says the work is incomplete or blocked;
+  - `inbox`: the inbox writer wrote a row (`record_subtask_result` returned true);
+  - `push`: the Telegram push was sent and Telegram answered 2xx;
+  - `ledger`: an execution-ledger entry of the run that was not `blocked`, other than a bash run of the guard's own command (matched on `key_args.command_sha256`, so only the exact command line). The durable ledger holds only side-effecting calls (write, external, irreversible), so none of these is a read. With `NOUS_EXECUTION_LEDGER_PERSIST_ENABLED=false` no entry exists, which `ledger_persisted` says.
+  - `inbox` and `push` count only for a run that completed: on a failed run they carry the system's failure notice.
+  - The list is the owner's, taken literally. A run that finds nothing usually still writes a summary and an inbox row, so `acted_by` is kept per kind. The panel's breakdown then shows whether a miss came only from `report`/`inbox`, or from a `finding`, a `push` or a `ledger` call.
+- **Unresolved guards:** a guard that names no allowlisted command (or no name) still runs no command, and now also emits a persisted `subtask_guard_unresolved` event (`{schedule_id, guard: {name, reason: "not_allowlisted"}}`) on each run, so a misconfigured guard has a history.
+- **The panel:** GET /dashboard/autonomy has a read-only `guards` block (`nous/api/guard_dashboard.py`, merged by the handler like `job_fixes`), described in [REST API](../reference/rest-api.md). It reads only `heart.schedules`, `heart.subtasks`, `nous_system.events` and Settings, never an in-memory ring. A record from before phase 2 counts as `mode: skip`, with its reason derived from its fields.
+  - `would_skip` counts shadow runs only.
+  - `shadow_misses` counts the `subtask_guard_acted` events of would-skip runs in which the model acted.
+  - The Autonomy view's "Run guards" section lists the guarded jobs, the counts and the last 10 records. Every text in it (job, command, stderr) is rendered by interpolation, never as markup. Shadow misses above 0 show as an alert.
+- No migration: the records are JSONB in `report_jsonb` and `nous_system.events.data`.
 
 ## Rollback
 
