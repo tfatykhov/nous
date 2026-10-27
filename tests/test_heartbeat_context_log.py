@@ -242,6 +242,9 @@ def test_logging_with_no_running_loop_creates_no_unawaited_coroutine():
         raise AssertionError("never runs without a loop")
 
     ctx = ContextLogger(db_writer=writer, db_updater=writer)
+    # Collect what earlier tests left first: a pooled connection one of them leaked warns (SAWarning is a
+    # RuntimeWarning) when collected, and would fail this test for a reason that is not its own.
+    gc.collect()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         entry = ctx.log(
