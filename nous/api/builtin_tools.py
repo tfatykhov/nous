@@ -100,12 +100,15 @@ _LINEAGE_BUILD_FIXED_ENV: dict[str, str] = {
 }
 
 
-def _lineage_env(build: bool) -> dict[str, str]:
-    """The environment of a lineage's bash: the _LINEAGE_BASH_ENV variables, or for a build command the
+def _lineage_env(build: bool, gh_repo: str = "") -> dict[str, str]:
+    """The environment of a lineage's bash: the _LINEAGE_BASH_ENV variables plus ``GH_REPO`` from ``gh_repo``
+    (NOUS_GITHUB_DEFAULT_REPO; the process's own GH_REPO is not in the allowlist), or for a build command the
     _LINEAGE_BUILD_ENV ones and _LINEAGE_BUILD_FIXED_ENV."""
     keep = _LINEAGE_BUILD_ENV if build else _LINEAGE_BASH_ENV
     env = {k: v for k, v in os.environ.items() if k in keep}
-    return {**env, **_LINEAGE_BUILD_FIXED_ENV} if build else env
+    if build:
+        return {**env, **_LINEAGE_BUILD_FIXED_ENV}
+    return {**env, "GH_REPO": gh_repo} if gh_repo else env
 
 
 def _mcp_response(text: str) -> dict[str, Any]:
@@ -164,6 +167,7 @@ async def bash_tool(
     _lineage_build: bool = False,
     _long_timeout: bool = False,
     _actor: dict | None = None,
+    _gh_repo: str = "",
 ) -> dict[str, Any]:
     """Execute a shell command in the workspace directory.
 
@@ -182,6 +186,8 @@ async def bash_tool(
         _actor: Set by dispatch: who the call's turn belongs to (a
             cancel_provenance record), recorded in a Claude Code job's dir
             after a lone ``runner.sh cancel <job id>`` that exits 0
+        _gh_repo: Set by the registration closure (NOUS_GITHUB_DEFAULT_REPO):
+            a lineage command's GH_REPO, unless it runs a build program
 
     Returns:
         MCP-format response with stdout + stderr
@@ -202,7 +208,7 @@ async def bash_tool(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(workspace),
-            env=_lineage_env(_lineage_build) if _lineage else None,
+            env=_lineage_env(_lineage_build, _gh_repo) if _lineage else None,
             # Own process group, so a timeout or a cancelled turn can stop the
             # whole command (``a; b``, pipelines), not only the /bin/sh parent.
             start_new_session=True,
@@ -981,6 +987,7 @@ def register_builtin_tools(dispatcher: ToolDispatcher, settings: Settings) -> No
     Creates closure wrappers that inject workspace_dir from settings.
     """
     workspace = settings.workspace_dir
+    gh_repo = getattr(settings, "github_default_repo", "")
 
     async def _bash(
         command: str,
@@ -998,6 +1005,7 @@ def register_builtin_tools(dispatcher: ToolDispatcher, settings: Settings) -> No
             _lineage_build=_lineage_build,
             _long_timeout=_long_timeout,
             _actor=_actor,
+            _gh_repo=gh_repo,
         )
 
     async def _read_file(path: str, offset: int = 0, limit: int = 0) -> dict[str, Any]:

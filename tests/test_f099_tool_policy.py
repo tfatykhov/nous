@@ -765,6 +765,51 @@ async def test_a_lineage_bash_call_sees_only_the_allowlisted_environment(tmp_pat
     assert "planted-s3cret" not in text
 
 
+def _gh_repo_dispatcher(tmp_path, settings=None):
+    from types import SimpleNamespace
+
+    from nous.api.builtin_tools import register_builtin_tools
+    from nous.api.tools import ToolDispatcher
+
+    d = ToolDispatcher()
+    stub = SimpleNamespace(workspace_dir=str(tmp_path / "ws"), github_default_repo="a/b")
+    register_builtin_tools(d, settings or stub)
+    return d
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX shell and printenv")
+async def test_a_lineage_bash_call_gets_gh_repo_from_the_setting_not_the_process(tmp_path, monkeypatch):
+    from nous.config import Settings
+
+    monkeypatch.setenv("GH_REPO", "evil/x")
+    text, _ = await _gh_repo_dispatcher(tmp_path).dispatch(
+        "bash", {"command": "printenv GH_REPO"}, context=_internal("continuation")
+    )
+    assert "a/b" in text and "evil/x" not in text
+    settings = Settings(_env_file=None, ANTHROPIC_API_KEY="k", workspace_dir=str(tmp_path / "ws"))
+    text, _ = await _gh_repo_dispatcher(tmp_path, settings).dispatch(
+        "bash", {"command": "printenv GH_REPO"}, context=_internal("continuation")
+    )
+    assert "tfatykhov/nous" in text and "evil/x" not in text  # the default
+
+
+def test_a_build_command_gets_no_gh_repo(monkeypatch):
+    from nous.api.builtin_tools import _lineage_env
+
+    monkeypatch.setenv("GH_REPO", "evil/x")
+    assert _lineage_env(False, "a/b")["GH_REPO"] == "a/b"
+    assert "GH_REPO" not in _lineage_env(True, "a/b")  # gh needs the token, which a build command does not get
+    assert "GH_REPO" not in _lineage_env(False, "")  # no setting: none, and never the process's
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX shell and printenv")
+@pytest.mark.parametrize("ctx", [None, ExecutionContext(kind="subtask", session_id="s")])
+async def test_a_bash_call_outside_a_lineage_does_not_get_gh_repo(tmp_path, monkeypatch, ctx):
+    monkeypatch.delenv("GH_REPO", raising=False)
+    text, _ = await _gh_repo_dispatcher(tmp_path).dispatch("bash", {"command": "printenv GH_REPO"}, context=ctx)
+    assert "a/b" not in text
+
+
 @pytest.mark.skipif(os.name == "nt", reason="a POSIX shell and printenv")
 @pytest.mark.parametrize("ctx", [None, ExecutionContext(kind="subtask", session_id="s")])
 async def test_a_bash_call_outside_a_lineage_keeps_the_full_environment(tmp_path, monkeypatch, ctx):
