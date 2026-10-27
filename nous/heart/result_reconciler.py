@@ -72,7 +72,8 @@ class InboxSubtaskPass:
 
     Candidates mirror the worker hook's writer: completed/failed, not inline,
     not a DAG node, with a routing key, not yet delivered, finished inside
-    the inbox age bound, and with no inbox row. Two more bounds:
+    the inbox age bound, not skipped by its schedule's guard (F107: such a run
+    is completed already delivered), and with no inbox row. Two more bounds:
 
     * Only subtasks that FINISHED at or after the inbox was first switched
       on (``heart.result_inbox_state``), so turning the flag on never
@@ -115,6 +116,7 @@ class InboxSubtaskPass:
                         .where(or_(Subtask.worker_id.is_(None), Subtask.worker_id != INLINE_WORKER_ID))
                         .where(Subtask.dag_node_id.is_(None))
                         .where(Subtask.delivered.is_(False))
+                        .where(Subtask.report_jsonb["guard_skipped"].astext.is_distinct_from("true"))
                         .where(routable)
                         .where(~has_row)
                         .order_by(Subtask.completed_at)

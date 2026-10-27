@@ -637,3 +637,90 @@ async def test_a_guard_that_falls_through_persists_its_record_as_an_event(db):
         await bus.stop()
         await brain.close()
         await heart.close()
+
+
+def test_the_envelope_of_a_guard_skipped_run_is_none():
+    from nous.heart.result_inbox import subtask_envelope
+
+    row = SimpleNamespace(
+        id=uuid.uuid4(),
+        task=TASK,
+        status="completed",
+        result="skipped_by_guard: true exit=0 stdout=empty",
+        error=None,
+        final_outcome="completed",
+        report_jsonb={"guard_skipped": True},
+    )
+    assert subtask_envelope(row, 2000) is None
+    row.report_jsonb = {}
+    assert subtask_envelope(row, 2000).msg_type == "INFORM"  # the same row without the flag has something to say
+
+
+@pytest.mark.postgres_only
+async def test_the_reconciler_writes_no_inbox_row_for_a_guard_skipped_run(db, monkeypatch):
+    from sqlalchemy import select, update
+
+    from nous.handlers.task_scheduler import create_fire
+    from nous.heart import result_reconciler
+    from nous.heart.heart import Heart
+    from nous.storage.models import ResultInbox, Subtask
+
+    settings = Settings(
+        _env_file=None,
+        agent_id=f"test-guard-{uuid.uuid4().hex[:8]}",
+        result_inbox_enabled=True,
+        schedule_guard_commands={NAME: "true"},
+    )
+    heart = Heart(db, settings)
+    selected = []
+    real_envelope = result_reconciler.subtask_envelope
+
+    def spy(subtask, body_max):  # what the pass selected
+        selected.append(subtask.id)
+        return real_envelope(subtask, body_max)
+
+    monkeypatch.setattr(result_reconciler, "subtask_envelope", spy)
+    try:
+        await heart.result_inbox.ensure_enabled_at()
+        guarded = await heart.schedules.create(
+            task=TASK,
+            schedule_type="recurring",
+            interval_seconds=3600,
+            session_id="chat-1",
+            metadata={"guard": {"name": NAME, "skip_when": "exit0_quiet", "timeout_seconds": 10}},
+        )
+        plain = await heart.schedules.create(
+            task="Summarise the day.", schedule_type="recurring", interval_seconds=3600, session_id="chat-1"
+        )
+        await create_fire(heart, settings, guarded)
+        skipped = await heart.subtasks.dequeue("worker-0")
+        await SubtaskWorkerPool(runner=MagicMock(), heart=heart, settings=settings, bus=AsyncMock())._process_subtask(
+            skipped
+        )
+        await create_fire(heart, settings, plain)
+        ran = await heart.subtasks.dequeue("worker-0")
+        await heart.subtasks.complete(ran.id, "3 commits logged")
+        row = await heart.subtasks.get(skipped.id)
+        assert row.parent_session_id == "chat-1" and row.report_jsonb["guard_skipped"] is True
+        assert row.delivered is True  # settled in the skip's own write
+
+        async def inbox_ids():
+            async with db.session() as session:
+                rows = await session.execute(
+                    select(ResultInbox.source_id).where(ResultInbox.agent_id == settings.agent_id)
+                )
+                return list(rows.scalars().all())
+
+        reconcile = result_reconciler.InboxSubtaskPass(db, heart.result_inbox, settings)
+        assert await reconcile.run(limit=10) == 1
+        assert await inbox_ids() == [ran.id]
+        # A skipped row whose settle was lost is still never selected, so never written nor rescanned.
+        async with db.session() as session:
+            await session.execute(update(Subtask).where(Subtask.id == skipped.id).values(delivered=False))
+            await session.commit()
+        selected.clear()
+        assert await reconcile.run(limit=10) == 0
+        assert skipped.id not in selected
+        assert await inbox_ids() == [ran.id]
+    finally:
+        await heart.close()

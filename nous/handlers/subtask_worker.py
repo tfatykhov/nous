@@ -279,6 +279,7 @@ class SubtaskWorkerPool:
                 final_outcome="completed",
                 report_jsonb={"guard_skipped": True, "guard": schedule_guard.record(spec, result, skipped=True)},
                 attempts=0, tokens_in=0, tokens_out=0, tool_calls_made=0,
+                delivered=True,  # nothing to deliver: no reconciler pass or pre_turn reads it
             )
         except (asyncio.CancelledError, Exception) as exc:
             if isinstance(exc, asyncio.CancelledError) and cancel_requested():
