@@ -250,6 +250,20 @@ class TestAgentSummaryLeg:
         assert http.post.await_args.kwargs["json"]["text"].startswith(line)
 
     @pytest.mark.asyncio
+    async def test_an_authored_summary_ending_with_the_line_gets_it_once_at_the_front(self, store):
+        dag = await store.create(_callback_dag())
+        await store.update_dag_status(dag.id, "cancelled", postmortem=dag_postmortem(record("owner", "Telegram")))
+        dag = await store.get_dag(dag.id)
+        line = f"DAG {str(dag.id)[:8]} was cancelled by the owner (Telegram)"
+        runner = AsyncMock()
+        runner.run_turn.return_value = ("Stopped. " + "Detail. " * 1000 + "\n" + line, None, {})
+        delivery = DAGResultDelivery(
+            _settings(dag_delivery_agent_summary_enabled=True), agent_id="a", runner=runner, http=_ok_http()
+        )
+        outcome = await delivery.deliver(dag)
+        assert outcome.summary.startswith(line + "\n\nStopped. ") and outcome.summary.count(line) == 1
+
+    @pytest.mark.asyncio
     async def test_the_cancel_line_is_not_added_twice(self, store):
         dag = await store.create(_callback_dag())
         await store.update_dag_status(dag.id, "cancelled", postmortem=dag_postmortem(record("owner", "Telegram")))
@@ -334,8 +348,22 @@ class TestTemplate:
         )
         dag = await store.get_dag(dag.id)
         lines = DAGResultDelivery(_settings(), agent_id="a").build_template(dag).splitlines()
-        assert lines[2] == f"DAG {str(dag.id)[:8]} was cancelled by your own continuation turn"
-        assert lines[1].startswith("Nodes:")
+        assert lines[0] == f"DAG {str(dag.id)[:8]} was cancelled by your own continuation turn"  # first: cut at tail
+        assert lines[1].startswith("DAG 'stopped-dag' was cancelled") and lines[2].startswith("Nodes:")
+
+    @pytest.mark.asyncio
+    async def test_a_long_dag_name_keeps_the_line_inside_the_smallest_inbox_cap(self, store):
+        from nous.heart.result_inbox import _cap
+
+        dag = await store.create(_callback_dag("n" * 200))  # the longest name a DAG may have
+        await store.update_dag_status(dag.id, "cancelled", postmortem=dag_postmortem(record("owner", "Telegram")))
+        dag = await store.get_dag(dag.id)
+        line = f"DAG {str(dag.id)[:8]} was cancelled by the owner (Telegram)"
+        outcome = await DAGResultDelivery(
+            _settings(result_inbox_body_max_chars=200), agent_id="a", http=_ok_http()
+        ).deliver(dag)
+        assert line in _cap(outcome.summary, 200, "hint")  # what the inbox stores at its smallest cap
+        assert outcome.summary.count(line) == 1
 
     @pytest.mark.asyncio
     async def test_the_template_for_a_cancelled_dag_with_no_record_adds_no_actor_line(self):

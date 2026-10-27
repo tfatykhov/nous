@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -55,6 +56,15 @@ _TELEGRAM_MAX_CHARS = 4096
 _TEMPLATE_MAX_NODE_LINES = 12
 _NODE_ERROR_CHARS = 160
 _SUMMARY_RESULT_CHARS = 600
+_BLANK_RUNS = re.compile(r"\n{3,}")
+
+
+def _lead_with(line: str, text: str) -> str:
+    """``text`` with ``line`` first and nowhere else (the inbox and the Telegram leg cut a long body at its tail)."""
+    if text.startswith(line) and text.count(line) == 1:
+        return text
+    rest = _BLANK_RUNS.sub("\n\n", text.replace(line, "")).strip()
+    return f"{line}\n\n{rest}" if rest else line
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,11 +185,11 @@ class DAGResultDelivery:
                 summary = authored
                 summary_authored = True
 
-        # The continuation reads this body: an authored or cached summary that left out who cancelled the DAG
-        # gets the template's line back, first, since the inbox and Telegram cut a long body at its tail.
+        # The continuation reads this body: who cancelled the DAG leads it, once, whatever an authored or cached
+        # summary did with the line, since the inbox and Telegram cut a long body at its tail.
         cancel_line = dag_cancel_line(dag)
-        if cancel_line and cancel_line not in summary:
-            summary = f"{cancel_line}\n\n{summary}"
+        if cancel_line:
+            summary = _lead_with(cancel_line, summary)
 
         if self._inbox is not None:
             await record_dag_result(
@@ -247,7 +257,7 @@ class DAGResultDelivery:
         ]
         cancel_line = dag_cancel_line(dag)  # who cancelled it, when a record says so
         if cancel_line:
-            lines.append(cancel_line)
+            lines.insert(0, cancel_line)  # first: a long DAG name can push the header past the inbox's cut
         if dag.token_budget:
             lines.append(
                 f"Tokens: {dag.tokens_consumed}/{dag.token_budget}"
