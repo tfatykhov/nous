@@ -2309,9 +2309,12 @@ class DAGOrchestrator:
             if lineage_internal:
                 # The built-in PR check, exactly (lineage_refuses_check): every
                 # argument's charset excludes whitespace, so splitting on the
-                # single spaces gives its argv. This interpreter, not PATH's.
+                # single spaces gives its argv. This interpreter, not PATH's,
+                # and -P: the node's directory is not put on sys.path, so no
+                # file in it can stand in for the module.
                 proc = await asyncio.create_subprocess_exec(
                     sys.executable,
+                    "-P",
                     *cmd.strip().split(" ")[1:],
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,

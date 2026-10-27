@@ -325,7 +325,7 @@ async def test_the_built_in_pr_check_runs_without_a_shell_in_a_lineage_dag(run_e
 
     assert spawns.shell == []
     [(argv, kwargs)] = spawns.exec
-    assert list(argv) == [sys.executable, "-m", "nous.dag.typed_checks", "pr", "o/r", "--pr", "5"]
+    assert list(argv) == [sys.executable, "-P", "-m", "nous.dag.typed_checks", "pr", "o/r", "--pr", "5"]
     env = kwargs["env"]
     assert set(env) <= TYPED_CHECK_ENV
     assert env["GITHUB_TOKEN"] == "t0ken"
