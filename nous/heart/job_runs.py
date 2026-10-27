@@ -20,10 +20,11 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from nous.observability.task_scoring import OUTCOMES, SCORER_VERSION
 from nous.storage.database import Database
+from nous.storage.models import ExecutionLedgerEntry
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +200,17 @@ class JobRunReader:
             if calls is not None and len(calls) < per_run:
                 calls.append((tool, status))
         return out
+
+    async def ledger_effects(self, subtask_id: UUID) -> list[tuple[str, str, dict[str, Any]]]:
+        """``(tool_name, status, key_args)`` of one run's ledger entries, oldest first (F107 phase 2)."""
+        L = ExecutionLedgerEntry
+        async with self._db.session() as session:
+            rows = await session.execute(
+                select(L.tool_name, L.status, L.key_args)
+                .where(L.agent_id == self._agent_id, L.subtask_id == subtask_id)
+                .order_by(L.created_at, L.id)
+            )
+            return [(tool, status, key_args or {}) for tool, status, key_args in rows.all()]
 
     async def schedules_with_bad_runs(self, *, since: datetime) -> list[str]:
         """Hex ids of active recurring jobs with a bad run since ``since``, newest bad run first.

@@ -3,7 +3,7 @@
 A recurring schedule whose run mostly executes a script and reports "nothing" can carry a guard in
 its own ``metadata``, which names an entry of the owner's allowlist ``NOUS_SCHEDULE_GUARD_COMMANDS``::
 
-    {"guard": {"name": "ledger_sweep", "skip_when": "exit0_quiet", "timeout_seconds": 60}}
+    {"guard": {"name": "ledger_sweep", "mode": "skip", "skip_when": "exit0_quiet", "timeout_seconds": 60}}
 
 The command itself comes only from the allowlist (env), never from the row: the agent can write
 schedule rows through its shell and database access, so the row may only choose among commands
@@ -14,20 +14,33 @@ call. Any other result (non-zero exit, output on either stream, timeout, an unkn
 an error starting the command) fails open: the model turn runs as before, with ``receipt()``
 appended to its task text so the model does not need to run the command again.
 ``NOUS_SCHEDULE_GUARDS_ENABLED=false`` ignores guards.
+
+``mode`` (phase 2) is ``shadow`` when absent: the command runs and is recorded, but the model turn always
+runs too, and after it the worker records whether the model acted (``acted_signals``). Only ``skip`` lets
+the guard complete a run, and only the owner writes it. Any other mode falls through, like an unknown
+``skip_when``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from nous.cognitive.execution_ledger import redact_error_text
+from nous.cognitive.ledger_store import durable_key_args
 from nous.utils import kill_process_group
 
 SKIP_WHEN_EXIT0_QUIET = "exit0_quiet"
+MODE_SHADOW = "shadow"
+MODE_SKIP = "skip"
+MODES = (MODE_SHADOW, MODE_SKIP)
+# Why a guard run did not certify a no-op; ``not_allowlisted`` is a guard that names no allowlisted command.
+REASONS = ("output", "stderr", "exit", "timeout", "error", "not_allowlisted")
+# The ledger statuses of a call that did not take effect (a blocked call was refused before dispatch).
+_NOT_ACTING_STATUSES = frozenset({"blocked"})
 DEFAULT_TIMEOUT_SECONDS = 60
 # The guard runs after the row is marked running and before the turn's own timeout starts, so a
 # guard that takes long eats into F101's grace (find_active_run counts a running row only until
@@ -44,6 +57,7 @@ class GuardSpec:
     command: str
     skip_when: str
     timeout_seconds: int
+    mode: str = MODE_SHADOW  # kept as written when unknown, so the worker can see it and fall through
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +92,7 @@ def parse_guard(raw: Any, commands: Mapping[str, str]) -> GuardSpec | None:
         command=command,
         skip_when=str(raw.get("skip_when") or SKIP_WHEN_EXIT0_QUIET),
         timeout_seconds=min(max(timeout, 1), MAX_TIMEOUT_SECONDS),
+        mode=str(raw["mode"]) if "mode" in raw else MODE_SHADOW,
     )
 
 
@@ -94,6 +109,75 @@ def should_skip(spec: GuardSpec, result: GuardResult) -> bool:
         and not result.stdout.strip()
         and not result.stderr.strip()
     )
+
+
+def fall_through_reason(spec: GuardSpec, result: GuardResult) -> str | None:
+    """Why this guard run does not end the run's work, or None when it certified a no-op in a known mode.
+
+    An unknown ``mode`` or ``skip_when`` on an otherwise quiet run is a configuration error: ``error``.
+    """
+    if result.error is not None:
+        return "error"
+    if result.timed_out:
+        return "timeout"
+    if result.exit_code != 0:
+        return "exit"
+    if result.stdout.strip():
+        return "output"
+    if result.stderr.strip():
+        return "stderr"
+    if spec.mode not in MODES or not should_skip(spec, result):
+        return "error"
+    return None
+
+
+def command_digest(command: str) -> str:
+    """How the execution ledger keeps a bash command (``key_args.command_sha256``)."""
+    return durable_key_args("bash", {"command": command})["command_sha256"]
+
+
+def acted_signals(
+    row: Any,
+    *,
+    inbox_written: bool,
+    pushed: bool,
+    ledger: Sequence[tuple[str, str, Mapping[str, Any]]],
+    guard_command: str,
+) -> list[str]:
+    """THE definition of "the model acted" in a guarded run (F107 phase 2): the kinds of action it took.
+
+    ``row`` is the run's subtask row after the turn, ``inbox_written`` whether the inbox writer wrote a row
+    for it, ``pushed`` whether its Telegram push was sent, and ``ledger`` the ``(tool_name, status, key_args)``
+    of its execution-ledger entries. Kinds, in this order:
+
+    - ``report``: the report has a non-empty summary;
+    - ``finding``: the report has findings or next actions, or says the work is incomplete or blocked;
+    - ``inbox`` / ``push``: an inbox row was written / a push was sent, for a run that completed (on a
+      failed run they carry the system's failure notice, not something the model did);
+    - ``ledger``: a ledger entry that was not blocked, other than a bash run of the guard's own command.
+      The durable ledger holds only side-effecting calls (write, external, irreversible), never reads.
+
+    The model acted when the list is not empty.
+    """
+    report = getattr(row, "report_jsonb", None)
+    report = report if isinstance(report, dict) else {}
+    completed = getattr(row, "status", None) == "completed"
+    own = command_digest(guard_command)
+    signals = []
+    if str(report.get("summary") or "").strip():
+        signals.append("report")
+    if report.get("findings") or report.get("next_actions") or report.get("incomplete") or report.get("blocked_reason"):
+        signals.append("finding")
+    if inbox_written and completed:
+        signals.append("inbox")
+    if pushed and completed:
+        signals.append("push")
+    if any(
+        status not in _NOT_ACTING_STATUSES and not (tool == "bash" and (key_args or {}).get("command_sha256") == own)
+        for tool, status, key_args in ledger
+    ):
+        signals.append("ledger")
+    return signals
 
 
 def _clip(text: str, limit: int = OUTPUT_MAX_BYTES) -> str:
@@ -144,8 +228,11 @@ async def run_guard(spec: GuardSpec) -> GuardResult:
     )
 
 
-def record(spec: GuardSpec, result: GuardResult, *, skipped: bool) -> dict[str, Any]:
+def record(spec: GuardSpec, result: GuardResult, *, skipped: bool, reason: str | None = None) -> dict[str, Any]:
     """The durable record of one run of the guard (JSON-ready).
+
+    ``would_skip`` is whether the command certified a no-op, whatever the mode; ``reason`` is
+    ``fall_through_reason`` unless the caller gives one (a skip whose row write failed is an ``error``).
 
     ``stderr_head`` is the first ``STDERR_HEAD_BYTES`` of stderr; it and ``command`` pass through
     the ledger's error redaction since they are stored as written.
@@ -163,6 +250,9 @@ def record(spec: GuardSpec, result: GuardResult, *, skipped: bool) -> dict[str, 
         "stderr_bytes": result.stderr_bytes,
         "stderr_head": redact_error_text(_clip(result.stderr, STDERR_HEAD_BYTES)),
         "skipped": skipped,
+        "mode": spec.mode,
+        "would_skip": should_skip(spec, result),
+        "reason": reason or fall_through_reason(spec, result),
     }
 
 
@@ -189,6 +279,8 @@ def receipt(spec: GuardSpec, result: GuardResult) -> str:
     ]
     if spec.skip_when != SKIP_WHEN_EXIT0_QUIET:
         lines.append(f"note: unknown skip_when {spec.skip_when!r}; the guard never skips with it")
+    if spec.mode not in MODES:
+        lines.append(f"note: unknown mode {spec.mode!r}; the guard never skips with it")
     for name, text in (("stdout", result.stdout), ("stderr", result.stderr)):
         if text.strip():
             lines += [f"{name} (command output, first {OUTPUT_MAX_BYTES} bytes):", "```", _clip(text).rstrip(), "```"]

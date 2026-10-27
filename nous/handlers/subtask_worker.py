@@ -84,6 +84,10 @@ class SubtaskWorkerPool:
         # in _execute_subtask, consumed in _process_subtask, cleared
         # after every dispatch.
         self._inflight_state: dict[Any, "HardenedRunState"] = {}
+        # F107 phase 2: the guard of each run in flight whose guard ran in shadow mode, and those of
+        # them whose Telegram push was sent; both read and cleared by _record_shadow after the turn.
+        self._shadow: dict[UUID, tuple[schedule_guard.GuardSpec, bool]] = {}  # spec, would_skip
+        self._pushed: set[UUID] = set()
 
     async def start(self) -> None:
         """Spawn worker tasks, after closing what a prior crash left behind.
@@ -200,7 +204,8 @@ class SubtaskWorkerPool:
             await self._notify_telegram(subtask, error=error_msg)
         finally:
             self._inflight_state.pop(subtask.id, None)
-            await self._record_inbox(subtask)
+            inbox_written = await self._record_inbox(subtask)
+            await self._record_shadow(subtask, inbox_written=inbox_written)
 
     async def _guard_spec(self, subtask: Subtask) -> schedule_guard.GuardSpec | None:
         """The guard of the schedule this run is a plain fire of, or None.
@@ -227,11 +232,26 @@ class SubtaskWorkerPool:
         spec = schedule_guard.parse_guard(raw, self._settings.schedule_guard_commands)
         if spec is None and raw is not None:
             commands = self._settings.schedule_guard_commands
+            name = raw.get("name") if isinstance(raw, dict) else raw
             logger.warning(
                 "Schedule %s has a guard naming %r, which is not one of the %d NOUS_SCHEDULE_GUARD_COMMANDS "
                 "entries %s; ignoring it",
-                schedule.id, raw.get("name") if isinstance(raw, dict) else raw, len(commands), sorted(commands),
+                schedule.id, name, len(commands), sorted(commands),
             )
+            try:  # persisted, so a misconfigured guard has a history on the dashboard
+                await self._emit_event(
+                    "subtask_guard_unresolved",
+                    subtask,
+                    extra={
+                        "schedule_id": schedule.id.hex,
+                        "guard": {
+                            "name": name[:100] if isinstance(name, str) else None,
+                            "reason": "not_allowlisted",
+                        },
+                    },
+                )
+            except Exception:
+                logger.exception("Subtask %s: could not record its unresolved guard", subtask.id.hex[:8])
         return spec
 
     async def _run_guard(self, subtask: Subtask) -> bool:
@@ -259,21 +279,31 @@ class SubtaskWorkerPool:
                 logger.info("Subtask %s: its root was cancelled before its guard ran; not running it", sid)
                 return True
             result = await schedule_guard.run_guard(spec)
-            if not schedule_guard.should_skip(spec, result):
+            if spec.mode == schedule_guard.MODE_SHADOW:
+                # Shadow: recorded like a fall-through, and the model always runs. The receipt goes in too,
+                # so a guard that is itself the job's action is not run again by the model.
+                would_skip = schedule_guard.should_skip(spec, result)
+                logger.info("Guard of subtask %s ran in shadow mode (would_skip=%s); running the turn", sid, would_skip)
+                subtask.task += schedule_guard.receipt(spec, result)
+                self._shadow[subtask.id] = (spec, would_skip)
+                await self._record_guard_run(subtask, spec, result)
+                return False
+            if spec.mode != schedule_guard.MODE_SKIP or not schedule_guard.should_skip(spec, result):
                 # A script that could not run (126/127), was killed by a signal, or wrote to stderr
                 # with exit 0 (which blocks every skip) is as broken as one that timed out.
                 broken = (
                     result.error
                     or result.timed_out
+                    or spec.mode != schedule_guard.MODE_SKIP
                     or spec.skip_when != schedule_guard.SKIP_WHEN_EXIT0_QUIET
                     or result.exit_code in (126, 127)
                     or (result.exit_code is not None and result.exit_code < 0)
                     or (result.exit_code == 0 and bool(result.stderr.strip()))
                 )
                 (logger.warning if broken else logger.info)(
-                    "Guard of subtask %s did not certify a no-op (exit=%s timed_out=%s error=%s skip_when=%s); "
-                    "running the turn",
-                    sid, result.exit_code, result.timed_out, result.error, spec.skip_when,
+                    "Guard of subtask %s did not certify a no-op (exit=%s timed_out=%s error=%s skip_when=%s "
+                    "mode=%s); running the turn",
+                    sid, result.exit_code, result.timed_out, result.error, spec.skip_when, spec.mode,
                 )
                 subtask.task += schedule_guard.receipt(spec, result)
                 await self._record_guard_run(subtask, spec, result)
@@ -291,7 +321,7 @@ class SubtaskWorkerPool:
                 raise
             logger.exception("Guard of subtask %s failed; running the turn", sid)
             if result is not None:  # the command ran, but the skip was not written
-                await self._record_guard_run(subtask, spec, result)
+                await self._record_guard_run(subtask, spec, result, reason="error")
             return False
         # The row is completed: from here on nothing may send the run to the model.
         try:
@@ -314,17 +344,64 @@ class SubtaskWorkerPool:
         return root is not None and self._runner.root_cancelled(root)
 
     async def _record_guard_run(
-        self, subtask: Subtask, spec: schedule_guard.GuardSpec, result: schedule_guard.GuardResult
+        self,
+        subtask: Subtask,
+        spec: schedule_guard.GuardSpec,
+        result: schedule_guard.GuardResult,
+        *,
+        reason: str | None = None,
     ) -> None:
         """Persist the record of a guard run that did not skip the run. Never raises."""
         try:
             await self._emit_event(
-                "subtask_guard_ran", subtask, extra={"guard": schedule_guard.record(spec, result, skipped=False)}
+                "subtask_guard_ran",
+                subtask,
+                extra={
+                    "schedule_id": subtask.metadata_["schedule_id"],
+                    "guard": schedule_guard.record(spec, result, skipped=False, reason=reason),
+                },
             )
         except Exception:
             logger.exception("Subtask %s: could not record its guard run", subtask.id.hex[:8])
 
-    async def _record_inbox(self, subtask: Subtask) -> None:
+    async def _record_shadow(self, subtask: Subtask, *, inbox_written: bool) -> None:
+        """F107 phase 2: after the turn of a shadow-guarded run, persist whether the model acted
+        (``schedule_guard.acted_signals``) in a ``subtask_guard_acted`` event. Never raises.
+
+        Only a run whose row is terminal is recorded: a turn cut short by a shutdown leaves its row
+        ``running``, and the run is not over.
+        """
+        shadow = self._shadow.pop(subtask.id, None)
+        pushed = subtask.id in self._pushed
+        self._pushed.discard(subtask.id)
+        if shadow is None:
+            return
+        spec, would_skip = shadow
+        try:
+            row = await self._heart.subtasks.get(subtask.id)
+            if row is None or row.status not in ("completed", "failed", "cancelled"):
+                return
+            ledger = await self._heart.job_runs.ledger_effects(subtask.id)
+            signals = schedule_guard.acted_signals(
+                row, inbox_written=inbox_written is True, pushed=pushed, ledger=ledger, guard_command=spec.command
+            )
+            await self._emit_event(
+                "subtask_guard_acted",
+                subtask,
+                extra={
+                    "schedule_id": subtask.metadata_["schedule_id"],
+                    "guard": {"name": spec.name, "mode": spec.mode, "would_skip": would_skip},
+                    "acted": bool(signals),
+                    "acted_by": signals,
+                    "run_status": row.status,
+                    # with the durable ledger off, no entry is ever written, so "ledger" cannot show up
+                    "ledger_persisted": self._settings.execution_ledger_persist_enabled,
+                },
+            )
+        except Exception:
+            logger.exception("Subtask %s: could not record whether the model acted", subtask.id.hex[:8])
+
+    async def _record_inbox(self, subtask: Subtask) -> bool:
         """F098: queue the finished result for the conversation that spawned it,
         and (Phase C) write it to memory.
 
@@ -333,21 +410,23 @@ class SubtaskWorkerPool:
         is re-read once so both writers see the status that was actually
         committed. Inline subtasks never come through here — their result is
         returned in the calling turn. The two writers are independent: each
-        swallows its own errors. Never raises.
+        swallows its own errors. Never raises. True when an inbox row was written.
         """
         inbox = getattr(self._settings, "result_inbox_enabled", False) is True
         memory = getattr(self._settings, "result_memory_enabled", False) is True
         if not inbox and not memory:
-            return
+            return False
         try:
             row = await self._heart.subtasks.get(subtask.id)
         except Exception:
             logger.warning("F098: could not re-read subtask %s for the inbox", subtask.id.hex[:8], exc_info=True)
-            return
+            return False
+        written = False
         if inbox:
-            await record_subtask_result(self._heart.result_inbox, row, self._settings)
+            written = await record_subtask_result(self._heart.result_inbox, row, self._settings)
         if memory:
             await self._heart.result_memory.record(row)
+        return written
 
     async def _execute_subtask(self, subtask: Subtask) -> None:
         """Run the subtask as an agent turn via AgentRunner.
@@ -721,11 +800,13 @@ class SubtaskWorkerPool:
         try:
             client = self._http or httpx.AsyncClient()
             try:
-                await client.post(
+                response = await client.post(
                     url,
                     json={"chat_id": chat_id, "text": text},
                     timeout=10,
                 )
+                if subtask.id in self._shadow and getattr(response, "is_success", False) is True:
+                    self._pushed.add(subtask.id)  # F107 phase 2: a sent push is an action of a shadow run
             finally:
                 if self._http is None:
                     await client.aclose()
