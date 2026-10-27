@@ -39,6 +39,8 @@ MODE_SKIP = "skip"
 MODES = (MODE_SHADOW, MODE_SKIP)
 # Why a guard run did not certify a no-op; ``not_allowlisted`` is a guard that names no allowlisted command.
 REASONS = ("output", "stderr", "exit", "timeout", "error", "not_allowlisted")
+# The kinds of action acted_signals reports, in its order.
+SIGNALS = ("report", "finding", "inbox", "push", "ledger")
 # The ledger statuses of a call that did not take effect (a blocked call was refused before dispatch).
 _NOT_ACTING_STATUSES = frozenset({"blocked"})
 DEFAULT_TIMEOUT_SECONDS = 60

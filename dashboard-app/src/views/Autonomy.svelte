@@ -441,6 +441,9 @@
       <div><dt>Would have skipped</dt><dd>{g.would_skip}</dd></div>
     </dl>
     <p class="small">Fell through to the model: {fellThrough(g.fell_through)}</p>
+    {#if g.would_skip_unrecorded > 0}
+      <p class="small muted">{g.would_skip_unrecorded} would-skip run{g.would_skip_unrecorded === 1 ? ' has' : 's have'} no record of what the model did (still running, or the record was lost), so {g.would_skip_unrecorded === 1 ? 'it is' : 'they are'} not in the shadow-miss count.</p>
+    {/if}
     {#if g.recent.length > 0}
       <div class="table-wrap">
         <!-- Command output and job text: plain text interpolation only, never {@html}. -->

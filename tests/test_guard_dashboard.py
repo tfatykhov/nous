@@ -118,6 +118,7 @@ async def test_the_shape_with_nothing_guarded(db, agent):
         "guard_runs": 0,
         "skipped": 0,
         "would_skip": 0,
+        "would_skip_unrecorded": 0,
         "fell_through": {r: 0 for r in REASONS},
         "shadow_misses": 0,
         "shadow_misses_by_signal": {s: 0 for s in ("report", "finding", "inbox", "push", "ledger")},
@@ -249,3 +250,64 @@ def test_the_block_reads_only_the_database_and_settings():
     source = inspect.getsource(dash)
     for name in ("context_log", "ContextLogger", "_entries", "runner", "_ledgers", "EventBus", "SubtaskWorkerPool"):
         assert name not in source
+
+
+async def test_skips_of_a_stopped_schedule_still_count_as_its_runs(db, agent):
+    sch = schedule(agent, {"name": NAME, "mode": "skip"}, active=False)  # skipped only, then stopped
+    subs = [
+        run(agent, sch, report={"guard_skipped": True, "guard": record(mode="skip", skipped=True)}) for _ in range(2)
+    ]
+    await add(db, sch, *subs)
+    out = await data(db, agent)
+    assert out["schedules"] == [] and (out["runs"], out["skipped"]) == (2, 2)
+
+
+async def test_an_unresolved_guard_shows_in_recent_with_no_mode(db, agent):
+    sch = schedule(agent, {"name": "nope"})
+    sub = run(agent, sch)
+    await add(db, sch, sub)
+    await add(
+        db, event(agent, "subtask_guard_unresolved", sub, sch, guard={"name": "nope", "reason": "not_allowlisted"})
+    )
+    (row,) = (await data(db, agent))["recent"]
+    assert (row["kind"], row["reason"], row["mode"], row["name"], row["exit_code"]) == (
+        "fell_through", "not_allowlisted", None, "nope", None,
+    )  # fmt: skip
+
+
+async def test_a_miss_counts_once_per_run_and_only_in_shadow_mode(db, agent):
+    sch = schedule(agent, {"name": NAME})
+    subs = [run(agent, sch) for _ in range(2)]
+    skip_mode = acted(agent, subs[1], sch, ["ledger"])
+    skip_mode.data = {**skip_mode.data, "guard": {"name": NAME, "mode": "skip", "would_skip": True}}
+    await add(db, sch, *subs)
+    await add(db, acted(agent, subs[0], sch, ["report"]), acted(agent, subs[0], sch, ["report"]), skip_mode)
+    assert (await data(db, agent))["shadow_misses"] == 1
+
+
+async def test_would_skip_runs_with_no_outcome_record_are_counted_apart(db, agent):
+    sch = schedule(agent, {"name": NAME})
+    subs = [run(agent, sch) for _ in range(3)]
+    await add(db, sch, *subs)
+    await add(
+        db, *(event(agent, "subtask_guard_ran", s, sch, guard=record()) for s in subs), acted(agent, subs[0], sch, [])
+    )
+    out = await data(db, agent)
+    assert (out["would_skip"], out["would_skip_unrecorded"]) == (3, 2)
+
+
+async def test_malformed_records_do_not_break_the_block(db, agent):
+    sch = schedule(agent, {"name": NAME})
+    sub = run(agent, sch)
+    bad = acted(agent, sub, sch, ["report"])
+    bad.data = {**bad.data, "acted_by": 5}
+    await add(db, sch, sub)
+    await add(
+        db,
+        bad,
+        event(agent, "subtask_guard_acted", sub, sch, guard="x", acted=True),
+        Event(agent_id=agent, event_type="subtask_guard_ran", data={"subtask_id": ["x"], "guard": 3}),
+        Event(agent_id=agent, event_type="subtask_guard_unresolved", data={"schedule_id": 7}),
+    )
+    out = await data(db, agent)
+    assert out["guard_runs"] == 1 and out["fell_through"]["not_allowlisted"] == 1

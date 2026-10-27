@@ -1095,6 +1095,7 @@ async def test_an_unresolved_guard_and_a_shadow_run_persist_their_events(db):
         _env_file=None,
         agent_id=f"test-guard-{uuid.uuid4().hex[:8]}",
         schedule_guard_commands={NAME: "true"},
+        result_inbox_enabled=True,
     )
     heart, brain, bus = Heart(db, settings), Brain(db, settings), EventBus()
 
@@ -1104,11 +1105,16 @@ async def test_an_unresolved_guard_and_a_shadow_run_persist_their_events(db):
     bus.set_db_persister(persist)
     await bus.start()
     try:
+        await heart.result_inbox.ensure_enabled_at()
         unresolved = await heart.schedules.create(
             task=TASK, schedule_type="recurring", interval_seconds=3600, metadata={"guard": {"name": "nope"}}
         )
         shadow = await heart.schedules.create(
-            task=TASK + " (2)", schedule_type="recurring", interval_seconds=3600, metadata={"guard": {"name": NAME}}
+            task=TASK + " (2)",
+            schedule_type="recurring",
+            interval_seconds=3600,
+            session_id="chat-1",  # so its result goes to the inbox
+            metadata={"guard": {"name": NAME}},
         )
         pool = SubtaskWorkerPool(runner=MagicMock(), heart=heart, settings=settings, bus=bus)
 
@@ -1147,7 +1153,7 @@ async def test_an_unresolved_guard_and_a_shadow_run_persist_their_events(db):
         assert by_type["subtask_guard_unresolved"]["guard"]["reason"] == "not_allowlisted"
         assert by_type["subtask_guard_ran"]["guard"]["would_skip"] is True
         acted = by_type["subtask_guard_acted"]
-        assert acted["schedule_id"] == shadow.id.hex and acted["acted_by"] == ["ledger"]  # not the bash re-run
+        assert acted["schedule_id"] == shadow.id.hex and acted["acted_by"] == ["inbox", "ledger"]  # not the bash re-run
         assert not any(r.event_type == "subtask_guard_skipped" for r in rows)
     finally:
         await bus.stop()

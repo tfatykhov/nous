@@ -76,7 +76,7 @@ const guardRecord = (over: Record<string, unknown>) => ({
 const GUARDS = (over: Record<string, unknown> = {}) => ({
   enabled: true, events_persisted: true, window_days: 7,
   schedules: [{ schedule_id: 'ef'.repeat(16), job: 'Run <i>the</i> ledger sweep', name: 'ledger_sweep', mode: 'shadow', allowlisted: true }],
-  runs: 168, guard_runs: 160, skipped: 0, would_skip: 150,
+  runs: 168, guard_runs: 160, skipped: 0, would_skip: 150, would_skip_unrecorded: 0,
   fell_through: { output: 6, stderr: 1, exit: 0, timeout: 0, error: 3, not_allowlisted: 0 },
   shadow_misses: 0, shadow_misses_by_signal: { report: 0, finding: 0, inbox: 0, push: 0, ledger: 0 },
   recent: [
@@ -343,6 +343,12 @@ describe('Autonomy view', () => {
     expect(alert.textContent).toContain('report 3');
     expect(alert.textContent).toContain('ledger 2');
     expect(alert.textContent).not.toContain('inbox');
+  });
+
+  it('says how many would-skip runs have no record of what the model did', async () => {
+    body = { ...FULL(), guards: GUARDS({ would_skip_unrecorded: 2 }) };
+    render(Autonomy);
+    expect(await screen.findByText(/2 would-skip runs have no record of what the model did/)).toBeTruthy();
   });
 
   it('says guards are off, or that nothing is guarded yet', async () => {

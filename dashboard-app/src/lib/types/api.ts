@@ -1709,6 +1709,8 @@ export interface GuardsBlock {
   guard_runs: number;
   skipped: number;
   would_skip: number;
+  /** Would-skip runs with no record yet of whether the model acted: not counted in shadow_misses either way. */
+  would_skip_unrecorded: number;
   fell_through: Record<GuardReason, number>;
   /** Shadow runs the guard would have skipped in which the model acted. */
   shadow_misses: number;

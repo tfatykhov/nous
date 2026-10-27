@@ -18,12 +18,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.config import Settings
 from nous.dag.approval import as_utc
-from nous.handlers.schedule_guard import MODE_SHADOW, MODE_SKIP, REASONS
+from nous.handlers.schedule_guard import MODE_SHADOW, MODE_SKIP, REASONS, SIGNALS
 from nous.storage.models import Event, Schedule, Subtask
 
 GUARD_KEY = "guard"
 RAN, UNRESOLVED, ACTED = "subtask_guard_ran", "subtask_guard_unresolved", "subtask_guard_acted"
-SIGNALS = ("report", "finding", "inbox", "push", "ledger")  # schedule_guard.acted_signals, in its order
 RECENT_LIMIT = 10
 JOB_CHARS = 120
 RECORD_KEYS = (
@@ -36,6 +35,11 @@ def _hex(value: object) -> str | None:
     return value.replace("-", "").lower() if isinstance(value, str) and value else None
 
 
+def _dict(value: object) -> dict[str, Any]:
+    """``value`` if it is a dict, else empty: these JSONB fields are written by code the agent can bypass."""
+    return value if isinstance(value, dict) else {}
+
+
 def _job(task: str) -> str:
     """The first non-empty line of the job's text, clipped."""
     line = next((ln.strip() for ln in (task or "").splitlines() if ln.strip()), "")
@@ -45,7 +49,10 @@ def _job(task: str) -> str:
 def _reason(guard: dict[str, Any]) -> str | None:
     """A record's fall-through reason. A record from before phase 2 has none: derived from its fields."""
     if "reason" in guard:
-        return guard["reason"] if guard["reason"] in REASONS else ("error" if guard["reason"] else None)
+        reason = guard["reason"]
+        if reason in REASONS:
+            return reason
+        return "error" if reason else None
     if guard.get("error"):
         return "error"
     if guard.get("timed_out"):
@@ -106,10 +113,9 @@ async def get_guard_data(
             )
         )
     ).all()
-    # A schedule whose guard was removed or that was stopped keeps its history: its records name it.
-    ids = {s.id.hex for s in schedules} | {
-        h for e in events if isinstance(e.data, dict) and (h := _hex(e.data.get("schedule_id")))
-    }
+    # A schedule whose guard was removed or that was stopped keeps its history: its records name it
+    # (a skipped run is its own record, so its schedule joins below).
+    ids = {s.id.hex for s in schedules} | {h for e in events if (h := _hex(_dict(e.data).get("schedule_id")))}
     runs = (
         await session.execute(
             select(Subtask.metadata_, Subtask.report_jsonb, Subtask.id, Subtask.completed_at).where(
@@ -126,37 +132,42 @@ async def get_guard_data(
     acted: dict[str, dict[str, Any]] = {}
     records: list[dict[str, Any]] = []
     for r in runs:
-        report = r.report_jsonb if isinstance(r.report_jsonb, dict) else {}
-        if report.get("guard_skipped") is True and isinstance(report.get(GUARD_KEY), dict):
-            meta = r.metadata_ if isinstance(r.metadata_, dict) else {}
+        report = _dict(r.report_jsonb)
+        if report.get("guard_skipped") is True and isinstance(report.get(GUARD_KEY), dict) and r.completed_at:
+            schedule_id = _hex(_dict(r.metadata_).get("schedule_id"))
+            if schedule_id:
+                ids.add(schedule_id)
             records.append(
                 {"at": as_utc(r.completed_at), "guard": report[GUARD_KEY], "subtask_id": r.id.hex,
-                 "schedule_id": _hex(meta.get("schedule_id")), "ran": True}
+                 "schedule_id": schedule_id, "ran": True}
             )  # fmt: skip
     for e in events:
-        data = e.data if isinstance(e.data, dict) else {}
-        guard = data.get(GUARD_KEY) if isinstance(data.get(GUARD_KEY), dict) else {}
+        data = _dict(e.data)
+        sid = data.get("subtask_id") if isinstance(data.get("subtask_id"), str) else None
         if e.event_type == ACTED:
-            if (sid := data.get("subtask_id")) is not None:
+            if sid is not None:
                 acted[sid] = data
             continue
         records.append(
-            {"at": as_utc(e.created_at), "guard": guard, "subtask_id": data.get("subtask_id"),
+            {"at": as_utc(e.created_at), "guard": _dict(data.get(GUARD_KEY)), "subtask_id": sid,
              "schedule_id": _hex(data.get("schedule_id")), "ran": e.event_type == RAN}
         )  # fmt: skip
 
     fell_through = dict.fromkeys(REASONS, 0)
-    counts = {"skipped": 0, "would_skip": 0}
+    counts = {"skipped": 0, "would_skip": 0, "would_skip_unrecorded": 0}
     rows = []
     for rec in records:
         guard = dict(rec["guard"])
-        guard.setdefault("mode", MODE_SKIP)  # every guard before phase 2 skipped
+        if rec["ran"]:
+            guard.setdefault("mode", MODE_SKIP)  # every guard before phase 2 skipped
         kind, reason = _classify(guard, rec["ran"])
+        a = acted.get(rec["subtask_id"]) if rec["subtask_id"] else None
         if kind == "fell_through":
             fell_through[reason] += 1
         else:
             counts[kind] += 1
-        a = acted.get(rec["subtask_id"]) if rec["subtask_id"] else None
+            if kind == "would_skip" and a is None:
+                counts["would_skip_unrecorded"] += 1
         rows.append(
             {
                 "at": rec["at"].isoformat(),
@@ -166,27 +177,31 @@ async def get_guard_data(
                 **{k: guard.get(k) for k in RECORD_KEYS},
                 "reason": reason,
                 "acted": a.get("acted") if a else None,
-                "acted_by": a.get("acted_by") if a else None,
+                "acted_by": a.get("acted_by") if a and isinstance(a.get("acted_by"), list) else None,
             }
         )
     rows.sort(key=lambda row: row["at"], reverse=True)
 
     misses = [
         a for a in acted.values()
-        if a.get("acted") is True and isinstance(a.get(GUARD_KEY), dict) and a[GUARD_KEY].get("would_skip") is True
-        and a[GUARD_KEY].get("mode") == MODE_SHADOW
+        if a.get("acted") is True and _dict(a.get(GUARD_KEY)).get("would_skip") is True
+        and _dict(a.get(GUARD_KEY)).get("mode") == MODE_SHADOW
     ]  # fmt: skip
-    by_signal = {s: sum(1 for a in misses if s in (a.get("acted_by") or ())) for s in SIGNALS}
+    by_signal = {
+        s: sum(1 for a in misses if isinstance(a.get("acted_by"), list) and s in a["acted_by"]) for s in SIGNALS
+    }
     return {
         "enabled": settings.schedule_guards_enabled,
         # The guard records other than skips are bus events: with the bus off none was persisted.
         "events_persisted": settings.event_bus_enabled,
         "window_days": days,
         "schedules": [_schedule_row(s, settings.schedule_guard_commands) for s in schedules],
-        "runs": sum(1 for r in runs if _hex((r.metadata_ or {}).get("schedule_id")) in ids),
+        "runs": sum(1 for r in runs if _hex(_dict(r.metadata_).get("schedule_id")) in ids),
         "guard_runs": sum(1 for rec in records if rec["ran"]),
         "skipped": counts["skipped"],
         "would_skip": counts["would_skip"],
+        # would-skip runs with no record of what the model did (its turn is still going, or the record was lost)
+        "would_skip_unrecorded": counts["would_skip_unrecorded"],
         "fell_through": fell_through,
         "shadow_misses": len(misses),
         "shadow_misses_by_signal": by_signal,

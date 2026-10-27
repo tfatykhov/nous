@@ -380,6 +380,7 @@ class SubtaskWorkerPool:
         try:
             row = await self._heart.subtasks.get(subtask.id)
             if row is None or row.status not in ("completed", "failed", "cancelled"):
+                logger.info("Subtask %s: its run is not over; no record of whether the model acted", subtask.id.hex[:8])
                 return
             ledger = await self._heart.job_runs.ledger_effects(subtask.id)
             signals = schedule_guard.acted_signals(
