@@ -255,7 +255,7 @@ class SubtaskWorkerPool:
             if spec is None:
                 return False
             if self._root_cancelled(subtask):
-                # cancel_root already cancelled the row; the command is a side effect, so it never starts.
+                # cancel_root already cancelled the row; the guard command is a side effect, so don't start it.
                 logger.info("Subtask %s: its root was cancelled before its guard ran; not running it", sid)
                 return True
             result = await schedule_guard.run_guard(spec)

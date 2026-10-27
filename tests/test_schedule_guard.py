@@ -696,7 +696,9 @@ async def test_the_reconciler_writes_no_inbox_row_for_a_guard_skipped_run(db, mo
         )
         await create_fire(heart, settings, guarded)
         skipped = await heart.subtasks.dequeue("worker-0")
-        await SubtaskWorkerPool(runner=MagicMock(), heart=heart, settings=settings, bus=AsyncMock())._process_subtask(
+        runner = MagicMock()
+        runner.root_cancelled = MagicMock(return_value=False)
+        await SubtaskWorkerPool(runner=runner, heart=heart, settings=settings, bus=AsyncMock())._process_subtask(
             skipped
         )
         await create_fire(heart, settings, plain)

@@ -72,8 +72,9 @@ class InboxSubtaskPass:
 
     Candidates mirror the worker hook's writer: completed/failed, not inline,
     not a DAG node, with a routing key, not yet delivered, finished inside
-    the inbox age bound, not skipped by its schedule's guard (F107: such a run
-    is completed already delivered), and with no inbox row. Two more bounds:
+    the inbox age bound, not skipped by its schedule's guard (F107: the skip is
+    written already delivered; the filter is defence in depth), and with no
+    inbox row. Two more bounds:
 
     * Only subtasks that FINISHED at or after the inbox was first switched
       on (``heart.result_inbox_state``), so turning the flag on never
