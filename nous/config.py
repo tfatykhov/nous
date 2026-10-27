@@ -975,8 +975,8 @@ class Settings(BaseSettings):
         default="",
         validation_alias="GITHUB_TOKEN",
     )
-    # The repository a DAG's pr wait reads when its wait_for names none. An owner/repo pair; anything else falls
-    # back to the default with a WARNING, never a boot failure.
+    # The repository a DAG's pr wait reads when its wait_for names none, and a lineage's bash gets as GH_REPO. An
+    # owner/repo pair; anything else falls back to the default with a WARNING, never a boot failure.
     github_default_repo: str = DEFAULT_GITHUB_REPO
 
     @field_validator("github_default_repo", mode="before")
