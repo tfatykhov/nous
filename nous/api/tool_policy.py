@@ -478,7 +478,7 @@ def _under(path: str, dirs: list[Path]) -> bool:
     try:
         target = Path(path).resolve()
         return any(target.is_relative_to(d.resolve()) for d in dirs)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RuntimeError):  # an unresolvable name, a symlink loop: refused, not raised
         return False
 
 

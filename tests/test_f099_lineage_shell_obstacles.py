@@ -897,6 +897,24 @@ async def test_what_the_policy_checks_is_where_the_shell_writes(tmp_path):
     assert (research / "d" / "two.md").is_file() and (research / "d" / "renamed.md").read_text() == "other/src.md"
 
 
+@needs_symlinks
+def test_a_symlink_loop_as_a_write_target_is_refused_not_raised(tmp_path):
+    """Path.resolve raises RuntimeError on a loop (Python 3.12): the call is refused, the check does not crash."""
+    ws = _write_ws(tmp_path)
+    (ws / "research" / "loop").symlink_to(ws / "research" / "loop")
+    for command in (
+        "echo x > {W}/research/loop",
+        "echo x >> {W}/research/loop",
+        "cd {W}/research && echo x > loop",
+        "touch {W}/research/loop",
+        "cd {W}/research && touch loop",
+        "cp {W}/other/src.md {W}/research/loop",
+    ):
+        assert _w(command, ws) is False, command
+    call = {"command": f"echo x > {ws}/research/loop"}
+    assert internal_only_call_violation(_internal(), "bash", call, workspace_dir=str(ws)) == "external"
+
+
 @pytest.mark.skipif(not hasattr(os, "link") or os.name == "nt", reason="needs hard links")
 def test_cp_refuses_a_destination_that_is_a_hard_link(tmp_path):
     ws = _write_ws(tmp_path)
