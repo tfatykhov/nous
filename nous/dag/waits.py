@@ -106,6 +106,21 @@ def evaluate_file(wait: FileWait, workspace: str) -> WaitOutcome:
     return WaitOutcome("met", f"file {name} exists and is not empty")
 
 
+def _invalid(exc: ValidationError) -> str:
+    first = exc.errors()[0]
+    where = ".".join(str(p) for p in first["loc"])
+    return one_line(f"wait_for is not valid: {where}: {first['msg']}")
+
+
+def wait_for_problem(wait_for: object) -> str | None:
+    """Why a stored ``wait_for`` is not a wait, or None."""
+    try:
+        parse_wait_for(wait_for)
+    except ValidationError as exc:
+        return _invalid(exc)
+    return None
+
+
 async def evaluate_wait(
     wait_for: object, *, workspace: str, github: GitHubReader | None, default_repo: str | None
 ) -> WaitOutcome:
@@ -113,9 +128,7 @@ async def evaluate_wait(
     try:
         wait = parse_wait_for(wait_for)
     except ValidationError as exc:
-        first = exc.errors()[0]
-        where = ".".join(str(p) for p in first["loc"])
-        return WaitOutcome("impossible", one_line(f"wait_for is not valid: {where}: {first['msg']}"))
+        return WaitOutcome("impossible", _invalid(exc))
     if isinstance(wait, JobWait):
         return await asyncio.to_thread(evaluate_job, wait, workspace)
     if isinstance(wait, FileWait):

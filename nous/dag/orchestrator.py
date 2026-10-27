@@ -50,6 +50,7 @@ import asyncio
 import logging
 import os
 import tempfile
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from dataclasses import dataclass
@@ -86,7 +87,7 @@ from nous.dag.approval import (
     stopped_summary,
 )
 from nous.dag.attempts import archived_attempts
-from nous.dag.schemas import PREDECESSOR_EDGE_TYPES, WAIT_EDGE_TYPES, DAGNodeStatus
+from nous.dag.schemas import PREDECESSOR_EDGE_TYPES, WAIT_EDGE_TYPES, DAGNodeStatus, effective_poll_interval
 from nous.dag.store import (
     _TERMINAL_DAG_STATUSES,
     DAG_CHECK_NAME_PREFIX,
@@ -96,8 +97,10 @@ from nous.dag.store import (
     TERMINAL_NODE_STATUSES,
     DAGStore,
 )
+from nous.dag.waits import WaitOutcome, evaluate_wait, wait_for_problem
 from nous.heart.subtasks import SubtaskQueueFull
 from nous.heartbeat.dynamic import FINAL_RUN_FINDINGS_KEY, DynamicCheckLimitReached, render_findings
+from nous.observability.github_verify import GitHubReader
 from nous.storage.models import DAGNode, ExecutionDAG
 from nous.utils import kill_process_group
 
@@ -285,6 +288,13 @@ _CHECK_CMD_TIMEOUT = 10.0  # Hard timeout per check command invocation
 _STALE_READY_GRACE_SECONDS = 300
 DAG_STATUS_BASE_DIR = Path(tempfile.gettempdir()) / "nous-workspace" / "dag-status"
 
+# Typed waits for lineage DAGs: the GitHub reader of a DAG's pr waits. Its I/O
+# runs under the tick lock, so each request is short; a rate limit backs every
+# pr wait off for a while (_poll_wait_nodes).
+_WAIT_GITHUB_TIMEOUT = 5.0
+_WAIT_GITHUB_CALL_CAP = 20  # a DAG has at most 10 nodes, and a pr wait asks at most twice a poll
+_WAIT_GITHUB_BACKOFF = timedelta(minutes=15)
+
 CheckStatus = Literal["success", "failed", "pending"]
 
 
@@ -372,6 +382,11 @@ class DAGOrchestrator:
         # starts another only if it never ran. Lost on a restart, like the
         # counts.
         self._unstopped_subtasks: dict = {}
+        # Typed waits: how a pr wait's GitHub reader is built (tests set it),
+        # and until when every pr wait is left alone after GitHub answered a
+        # rate limit. In memory: a restart asks again once.
+        self._github_reader_factory: Callable[[], GitHubReader] | None = None
+        self._github_backoff_until: datetime | None = None
 
     @property
     def approvals_wired(self) -> bool:
@@ -480,8 +495,9 @@ class DAGOrchestrator:
 
     def _costs_nothing(self, node: DAGNode) -> bool:
         """Never held by the gate: parking an approval takes no subtask, a gate
-        auto-passes, and a callback executes nothing while its flag is off."""
-        return node.node_type in ("approval", "gate") or (
+        auto-passes, a wait runs no model, and a callback executes nothing
+        while its flag is off."""
+        return node.node_type in ("approval", "gate", "wait") or (
             node.node_type == "callback" and not self._settings.dag_callback_execution_enabled
         )
 
@@ -1171,6 +1187,9 @@ class DAGOrchestrator:
         # 1.5 Poll awaiting_check nodes
         await self._poll_awaiting_checks(dag)
 
+        # 1.51 Typed waits: evaluate each parked wait node's wait_for.
+        await self._poll_wait_nodes(dag)
+
         # 1.52 Harness Phase 3: approval deadlines and lost-card re-pushes.
         # Before the budget and failure steps, so a default applied here is
         # propagated on this same tick.
@@ -1660,6 +1679,10 @@ class DAGOrchestrator:
         """Poll completion_check commands for nodes in awaiting_check status."""
         for node in dag.nodes:
             if node.status != "awaiting_check":
+                continue
+            if getattr(node, "node_type", None) == "wait":
+                # Its own poll (_poll_wait_nodes). The empty-command branch
+                # below would complete it: a wait has no completion_check.
                 continue
 
             cmd = node.completion_check
@@ -3145,6 +3168,145 @@ class DAGOrchestrator:
             )
         elif node_type == "approval":
             await self._launch_approval_node(node, dag)
+        elif node_type == "wait":
+            await self._launch_wait_node(node, dag)
+
+    async def _launch_wait_node(self, node: DAGNode, dag: ExecutionDAG) -> None:
+        """Typed waits for lineage DAGs: park the node in awaiting_check, where
+        _poll_wait_nodes evaluates its wait_for. No model, no shell, no worker,
+        no lineage read. The park write is the single reset point for an
+        attempt (as for an approval), so a retry or a fix-stage retry_as_is
+        starts with no polls spent."""
+        problem = wait_for_problem(node.wait_for)
+        if problem is not None:
+            await self._finish_launch(node, status="failed", error=problem)
+            return
+        now = datetime.now(UTC)
+        parked = await self._store.transition_node(
+            node.id,
+            from_statuses=_DISPATCHABLE,
+            dag_statuses=LIVE_DAG_STATUSES,
+            status="awaiting_check",
+            started_at=now,
+            awaiting_check_at=now,
+            check_attempts=0,
+            last_check_at=None,
+            result=None,
+            error=None,
+            completed_at=None,
+        )
+        if not parked:
+            logger.info("Wait node %s in DAG %s changed state before its park — not launched", node.name, dag.id)
+            return
+        self._defer_counts.pop(node.id, None)
+        node.status = "awaiting_check"
+        node.started_at = node.awaiting_check_at = now
+        node.check_attempts = 0
+        node.last_check_at = node.result = node.error = node.completed_at = None
+
+    def _wait_interval(self, node: DAGNode) -> int | None:
+        """A wait's poll interval, with a pr wait's floor applied again for a
+        row written without it (as _effective_timeout re-clamps)."""
+        kind = node.wait_for.get("kind") if isinstance(node.wait_for, dict) else None
+        return effective_poll_interval(kind, node.completion_check_interval)
+
+    def _new_github_reader(self) -> GitHubReader:
+        if self._github_reader_factory is not None:
+            return self._github_reader_factory()
+        return GitHubReader(
+            token=self._settings.github_token or None,
+            user_agent="nous-dag-wait",
+            call_cap=_WAIT_GITHUB_CALL_CAP,
+            timeout=_WAIT_GITHUB_TIMEOUT,
+        )
+
+    async def _finish_wait(self, node: DAGNode, status: str, **values: object) -> None:
+        """A wait's terminal write, conditional (§3.3): a cancel that landed
+        after this tick's load keeps its 'cancelled'. Mirrored only on a win."""
+        done_at = datetime.now(UTC)
+        if await self._store.transition_node(
+            node.id,
+            from_statuses={"awaiting_check"},
+            dag_statuses=LIVE_DAG_STATUSES,
+            status=status,
+            completed_at=done_at,
+            **values,
+        ):
+            node.status, node.completed_at = status, done_at
+            for column, value in values.items():
+                setattr(node, column, value)
+
+    async def _poll_wait_nodes(self, dag: ExecutionDAG) -> None:
+        """Typed waits for lineage DAGs: one poll of each parked wait node.
+
+        In order: its timeout (measured from the park), its interval, its
+        max_check_attempts, then the condition, evaluated in-process
+        (nous/dag/waits.py). met completes the node with the observation as
+        its result, impossible fails it, pending spends one attempt. An
+        evaluator that raises counts as pending. No worker evidence applies:
+        nothing runs for a wait.
+        """
+        waiting = [n for n in dag.nodes if n.status == "awaiting_check" and getattr(n, "node_type", None) == "wait"]
+        if not waiting:
+            return
+        reader: GitHubReader | None = None
+        try:
+            for node in waiting:
+                now = datetime.now(UTC)
+                attempts = node.check_attempts or 0
+                ref = as_utc(node.awaiting_check_at or node.started_at)
+                limit = self._effective_timeout(node)
+                if ref is not None and (now - ref).total_seconds() > limit:
+                    await self._finish_wait(node, "failed", error=f"Wait timed out after {limit}s ({attempts} polls)")
+                    continue
+                interval = self._wait_interval(node)
+                last = as_utc(node.last_check_at)
+                if interval and last is not None and (now - last).total_seconds() < interval:
+                    continue
+                if node.max_check_attempts and attempts >= node.max_check_attempts:
+                    error = f"Wait exceeded max attempts ({node.max_check_attempts})"
+                    await self._finish_wait(node, "failed", error=error)
+                    continue
+                is_pr = isinstance(node.wait_for, dict) and node.wait_for.get("kind") == "pr"
+                if is_pr and self._github_backoff_until is not None and now < self._github_backoff_until:
+                    # GitHub answered a rate limit: no pr wait asks, and none
+                    # spends an attempt, until the backoff ends. The timeout
+                    # above still runs, so a short wait can time out inside a
+                    # backoff: a bounded wait is the intended trade-off.
+                    continue
+                if is_pr and reader is None:
+                    reader = self._new_github_reader()
+                try:
+                    outcome = await evaluate_wait(
+                        node.wait_for,
+                        workspace=str(self._settings.workspace_dir),
+                        github=reader if is_pr else None,
+                        default_repo=getattr(self._settings, "github_default_repo", "") or None,
+                    )
+                except Exception:
+                    logger.exception("Could not evaluate wait node %s in DAG %s", node.name, dag.id)
+                    outcome = WaitOutcome("pending", "the wait could not be evaluated this poll")
+                if is_pr and reader is not None and reader.rate_limited:
+                    self._github_backoff_until = now + _WAIT_GITHUB_BACKOFF
+                    logger.warning(
+                        "GitHub rate-limited a pr wait; pr waits back off until %s", self._github_backoff_until
+                    )
+                attempts += 1
+                if outcome.state == "met":
+                    await self._finish_wait(
+                        node, "completed", result=outcome.text, check_attempts=attempts, last_check_at=now
+                    )
+                elif outcome.state == "impossible":
+                    await self._finish_wait(
+                        node, "failed", error=outcome.text, check_attempts=attempts, last_check_at=now
+                    )
+                elif await self._store.transition_node(
+                    node.id, from_statuses={"awaiting_check"}, check_attempts=attempts, last_check_at=now
+                ):
+                    node.check_attempts, node.last_check_at = attempts, now
+        finally:
+            if reader is not None:
+                await reader.aclose()
 
     async def answer_node(
         self,
