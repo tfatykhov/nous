@@ -69,6 +69,7 @@ from nous.cognitive.schemas import ToolResult, TurnContext, TurnResult
 from nous.config import Settings
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput
+from nous.observability.context_logger import HEARTBEAT_CALL_TYPE
 
 logger = logging.getLogger(__name__)
 
@@ -396,6 +397,7 @@ class AgentRunner:
         self._current_turn_number: int = 0
         self._current_frame_id: str = "unknown"
         self._current_call_type: str = "chat"
+        self._fork_call_type: str | None = None  # set by fork(): every call of a fork logs under it
         self._last_context_entry_id: str | None = None
 
         # F026: Execution Integrity
@@ -1374,8 +1376,11 @@ class AgentRunner:
         # April 2026 triage hang (0d1d45e3), when the logger's fire-and-forget writes held
         # no strong ref and had no bound; they now have both (ContextLogger._bounded).
         # NOUS_CONTEXT_LOG_FORKS_ENABLED=false restores the withholding.
+        # The heartbeat is the only caller of fork(); its calls log as "heartbeat",
+        # so they stay out of the chat views of the shared ring.
         if self._settings.context_log_forks_enabled:
             forked._context_logger = self._context_logger
+        forked._fork_call_type = HEARTBEAT_CALL_TYPE
         self._forks.add(forked)
         return forked
 
@@ -2041,7 +2046,7 @@ class AgentRunner:
                 _entry = self._context_logger.log(
                     session_id=self._current_session_id,
                     turn_number=self._current_turn_number,
-                    call_type=self._current_call_type,
+                    call_type=self._fork_call_type or self._current_call_type,
                     model=payload.get("model", ""),
                     system_prompt=flat_system_prompt,
                     messages=messages,

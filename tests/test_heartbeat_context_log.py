@@ -15,7 +15,7 @@ from nous.api.runner import AgentRunner
 from nous.api.tools import ToolDispatcher
 from nous.heartbeat.dynamic import DynamicCheck
 from nous.observability import context_logger as context_logger_mod
-from nous.observability.context_logger import ContextLogger
+from nous.observability.context_logger import HEARTBEAT_CALL_TYPE, ContextLogger
 from tests.test_runner_background import _MockBrain, _MockCognitive, _MockHeart, _settings, _SpyApi
 
 _NO_FINDINGS = '{"has_findings": false, "findings": []}'
@@ -81,6 +81,7 @@ async def test_a_dynamic_check_run_writes_a_context_log_row_with_its_usage():
     assert result.has_updates is False
     assert len(inserted) == 1
     assert inserted[0].session_id.startswith("dynamic-check-ledger_watch-")
+    assert inserted[0].call_type == HEARTBEAT_CALL_TYPE  # kept out of the chat views of the ring
     assert updated == [(inserted[0].id, 120, 7, 100)]
 
 
@@ -171,3 +172,50 @@ async def test_a_stuck_db_write_is_cut_off_and_frees_its_slot(monkeypatch):
         )
     await asyncio.wait_for(asyncio.gather(*list(ctx._pending_tasks)), timeout=5)
     assert written == ["next"]
+
+
+# ---- heartbeat rows stay out of the chat views of the shared ring ----------------------------------------
+
+
+def _ring() -> ContextLogger:
+    """A ring of a chat call, then more heartbeat calls than the views' limits, newest last."""
+    ctx = ContextLogger()
+    entries = [("chat-1", "chat")] + [(f"dynamic-check-x-{i}", HEARTBEAT_CALL_TYPE) for i in range(12)]
+    for sid, call_type in entries:
+        entry = ctx.log(
+            session_id=sid, turn_number=1, call_type=call_type, model="m", system_prompt="p", messages=[],
+            tools=None, frame_id="f", context_window=200000,
+        )
+        ctx.update_response(entry.id, input_tokens=10, output_tokens=1, cache_read=5, cache_creation=0)
+    return ctx
+
+
+def _client(ctx: ContextLogger):
+    from starlette.testclient import TestClient
+
+    from nous.api.rest import create_app
+    from nous.config import Settings
+
+    app = create_app(
+        runner=MagicMock(), brain=MagicMock(), heart=MagicMock(), cognitive=MagicMock(), database=MagicMock(),
+        settings=Settings(_env_file=None), context_logger=ctx,
+    )
+    return TestClient(app)
+
+
+def test_get_recent_drops_the_excluded_call_type_before_its_limit():
+    ctx = _ring()
+    assert [e.session_id for e in ctx.get_recent(limit=10, exclude_call_type=HEARTBEAT_CALL_TYPE)] == ["chat-1"]
+    assert len(ctx.get_recent(limit=10)) == 10
+
+
+def test_the_dashboards_and_the_context_log_list_leave_heartbeat_calls_out():
+    client = _client(_ring())
+    observability = client.get("/dashboard/observability").json()["context_log"]
+    assert [e["session_id"] for e in observability] == ["chat-1"]
+    cache = client.get("/dashboard/cache").json()
+    assert cache["summary"]["total_calls"] == 1
+    assert [e["session_id"] for e in client.get("/context/log").json()["entries"]] == ["chat-1"]
+    # one heartbeat session asked for by id is still there
+    one = client.get("/context/log", params={"session_id": "dynamic-check-x-3"}).json()["entries"]
+    assert [e["call_type"] for e in one] == [HEARTBEAT_CALL_TYPE]

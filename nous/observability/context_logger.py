@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 DB_WRITE_TIMEOUT_SECONDS = 30
 DB_WRITE_CONCURRENCY = 4
 
+# The call_type of a model call made on a forked runner (the heartbeat's checks, triage and
+# callbacks). Those calls share this ring with chat, so the chat views leave them out.
+HEARTBEAT_CALL_TYPE = "heartbeat"
+
 # Section markers in system prompt -> internal names
 SECTION_MARKERS: dict[str, str] = {
     "## Current Date/Time": "datetime",
@@ -455,10 +459,14 @@ class ContextLogger:
             if self._db_updater is not None:
                 self._schedule_bg(self._update_after_insert(self._insert_tasks.get(entry_id), entry))
 
-    def get_recent(self, session_id: str | None = None, limit: int = 20) -> list[ContextLogEntry]:
+    def get_recent(
+        self, session_id: str | None = None, limit: int = 20, exclude_call_type: str | None = None
+    ) -> list[ContextLogEntry]:
         entries = list(reversed(self._entries))
         if session_id:
             entries = [e for e in entries if e.session_id == session_id]
+        if exclude_call_type:
+            entries = [e for e in entries if e.call_type != exclude_call_type]
         return entries[:limit]
 
     def get_entry(self, entry_id: str) -> ContextLogEntry | None:

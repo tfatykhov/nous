@@ -62,6 +62,7 @@ Heartbeat checks, triage and callbacks run on a fork of the main `AgentRunner` (
 - The fork now shares the logger, and `set_context_logger` propagates it to existing forks. `NOUS_CONTEXT_LOG_FORKS_ENABLED=false` restores the old behaviour.
 - The logger was withheld from forks after the April 2026 heartbeat triage hang (`0d1d45e3`, "async DB writer contends with triage DB sessions"). Back then the fire-and-forget writes held no strong reference and had no bound. A plausible mechanism is a write task that was garbage-collected mid-flight and left its pooled connection checked out. Every write now has a strong reference (since #499), a 30 s timeout and a 4-write concurrency cap, so these writes cannot exhaust the pool.
 - After deploy, verify two things: heartbeat rows appear in `context_log`, and triage duration is unchanged.
-- Rows carry the check's session id `dynamic-check-<name>-<hex8>`.
+- Rows carry the check's session id `dynamic-check-<name>-<hex8>` and `call_type = "heartbeat"` (every call of a fork; the heartbeat is the only caller of `fork()`).
+- The fork's calls share the in-memory ring (200 entries) with chat, at about 280 check rows a day. So `/dashboard/observability` ("last 10 calls"), `/dashboard/cache` and `GET /context/log` without a `session_id` leave `heartbeat` calls out; the cache numbers describe the chat prompt. `GET /context/log?session_id=<a heartbeat session>` still returns that session.
 - A logger exception never fails a turn: both `update_response` call sites are now guarded, as `log` already was.
 - Each entry's response UPDATE now runs after its INSERT. Before, the UPDATE could run first, match no row, and leave the response columns NULL.

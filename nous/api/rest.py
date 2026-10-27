@@ -66,6 +66,7 @@ from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart import Heart
 from nous.heart.result_inbox import derive_channel
+from nous.observability.context_logger import HEARTBEAT_CALL_TYPE
 from nous.observability.retrieval_logger import RETRIEVAL_PATHS as _RETRIEVAL_PATHS
 from nous.observability.snapshots import (
     SNAPSHOT_METRICS_VERSION,
@@ -1937,9 +1938,9 @@ def create_app(
             logger.debug("dashboard_observability: drift_trends failed", exc_info=True)
             result["drift_trends"] = {}
 
-        # 6. Context log (last 10 calls)
+        # 6. Context log (last 10 calls, heartbeat calls left out)
         if context_logger is not None:
-            entries = context_logger.get_recent(limit=10)
+            entries = context_logger.get_recent(limit=10, exclude_call_type=HEARTBEAT_CALL_TYPE)
             result["context_log"] = [e.to_dict() for e in entries]
         else:
             result["context_log"] = []
@@ -1951,7 +1952,8 @@ def create_app(
         if context_logger is None:
             return JSONResponse({"error": "Context logging not enabled"}, status_code=503)
 
-        entries = context_logger.get_recent(limit=200)
+        # Heartbeat calls left out: the numbers describe the chat prompt's cache.
+        entries = context_logger.get_recent(limit=200, exclude_call_type=HEARTBEAT_CALL_TYPE)
 
         # Filter to entries that have actual token data (API has responded)
         calls = [e for e in entries if e.input_tokens_actual is not None]
@@ -3095,7 +3097,9 @@ def create_app(
         limit = int(request.query_params.get("limit", "20"))
         if context_logger is None:
             return JSONResponse({"entries": []})
-        entries = context_logger.get_recent(session_id=session_id, limit=limit)
+        # Without a session_id, heartbeat calls are left out; a heartbeat session asked for by id is not.
+        exclude = None if session_id else HEARTBEAT_CALL_TYPE
+        entries = context_logger.get_recent(session_id=session_id, limit=limit, exclude_call_type=exclude)
         return JSONResponse({"entries": [e.to_dict() for e in entries]})
 
     async def context_log_detail(request: Request) -> JSONResponse:
