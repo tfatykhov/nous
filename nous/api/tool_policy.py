@@ -983,6 +983,24 @@ def lineage_runs_build(command: str) -> bool:
     return any(words and Path(words[0]).name in LINEAGE_BUILD_PROGRAMS for words, _, _, _ in commands)
 
 
+def lineage_runs_runner(command: str) -> bool:
+    """Whether a lineage's bash ``command`` runs runner.sh, so dispatch gives it no ``GH_REPO``: the Claude Code job
+    the runner starts inherits the environment, and gh prefers GH_REPO to a clone's own remote. A program named
+    ``runner.sh``, or a shell given a ``runner.sh`` operand: every spelling ``_runner_args`` accepts, and more (the
+    dispatcher has no workspace path to compare with). True when the command cannot be read exactly."""
+    commands = simple_commands(command, globs=True)
+    if commands is None:
+        return True
+    return any(
+        words
+        and (
+            Path(words[0]).name == "runner.sh"
+            or (Path(words[0]).name in _SHELLS and any(Path(w).name == "runner.sh" for w in words[1:]))
+        )
+        for words, _, _, _ in commands
+    )
+
+
 def lineage_bash_refusal_hint(*, build_commands: bool, extra_write_dirs: Sequence[str] = ()) -> str:
     """What the lineage shell allows, appended to its refusal. ``extra_write_dirs``: NOUS_F099_LINEAGE_WRITE_DIRS."""
     dirs = ", ".join(

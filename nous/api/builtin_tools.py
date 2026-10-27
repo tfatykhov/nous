@@ -168,6 +168,7 @@ async def bash_tool(
     _long_timeout: bool = False,
     _actor: dict | None = None,
     _gh_repo: str = "",
+    _lineage_runner: bool = True,
 ) -> dict[str, Any]:
     """Execute a shell command in the workspace directory.
 
@@ -187,7 +188,12 @@ async def bash_tool(
             cancel_provenance record), recorded in a Claude Code job's dir
             after a lone ``runner.sh cancel <job id>`` that exits 0
         _gh_repo: Set by the registration closure (NOUS_GITHUB_DEFAULT_REPO):
-            a lineage command's GH_REPO, unless it runs a build program
+            a lineage command's GH_REPO, unless it runs a build program or
+            the runner
+        _lineage_runner: Set by dispatch with ``_lineage``: the command runs
+            runner.sh (tool_policy.lineage_runs_runner), whose Claude Code job
+            would inherit GH_REPO, so it gets none. True unless dispatch says
+            otherwise
 
     Returns:
         MCP-format response with stdout + stderr
@@ -208,7 +214,7 @@ async def bash_tool(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(workspace),
-            env=_lineage_env(_lineage_build, _gh_repo) if _lineage else None,
+            env=_lineage_env(_lineage_build, "" if _lineage_runner else _gh_repo) if _lineage else None,
             # Own process group, so a timeout or a cancelled turn can stop the
             # whole command (``a; b``, pipelines), not only the /bin/sh parent.
             start_new_session=True,
@@ -996,6 +1002,7 @@ def register_builtin_tools(dispatcher: ToolDispatcher, settings: Settings) -> No
         _lineage_build: bool = False,
         _long_timeout: bool = False,
         _actor: dict | None = None,
+        _lineage_runner: bool = True,
     ) -> dict[str, Any]:
         return await bash_tool(
             command,
@@ -1006,6 +1013,7 @@ def register_builtin_tools(dispatcher: ToolDispatcher, settings: Settings) -> No
             _long_timeout=_long_timeout,
             _actor=_actor,
             _gh_repo=gh_repo,
+            _lineage_runner=_lineage_runner,
         )
 
     async def _read_file(path: str, offset: int = 0, limit: int = 0) -> dict[str, Any]:
