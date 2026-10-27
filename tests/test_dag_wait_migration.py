@@ -88,8 +88,11 @@ async def test_a_wait_node_row_round_trips(db):
             await s.commit()
             dag_id = dag.id
         async with db.session() as s:
-            row = (await s.execute(text("SELECT node_type, wait_for FROM nous_system.dag_nodes WHERE dag_id = :d"),
-                                   {"d": dag_id})).one()
+            row = (
+                await s.execute(
+                    text("SELECT node_type, wait_for FROM nous_system.dag_nodes WHERE dag_id = :d"), {"d": dag_id}
+                )
+            ).one()
         assert row.node_type == "wait"
         assert row.wait_for == {"kind": "file", "path": "x"}
     finally:
