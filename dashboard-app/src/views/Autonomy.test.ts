@@ -64,6 +64,26 @@ const FULL = () => ({
   events_persisted: true,
   warn_classes: [{ mode: 'warn', context_kind: 'heartbeat_triage', violation: 'level:external', tool_name: 'bash', count: 138 }],
   job_fixes: { enabled: true, jobs: [JUDGING(), STOPPED()] },
+  guards: GUARDS(),
+});
+
+const guardRecord = (over: Record<string, unknown>) => ({
+  at: new Date(Date.now() - 3600_000).toISOString(), kind: 'would_skip', schedule_id: 'ef'.repeat(16),
+  subtask_id: '12'.repeat(16), name: 'ledger_sweep', mode: 'shadow', reason: null, exit_code: 0, timed_out: false,
+  duration_ms: 41, stdout_bytes: 0, stderr_bytes: 0, stderr_head: '', command: 'bash /x/sweep.sh', acted: false,
+  acted_by: [], ...over,
+});
+const GUARDS = (over: Record<string, unknown> = {}) => ({
+  enabled: true, events_persisted: true, window_days: 7,
+  schedules: [{ schedule_id: 'ef'.repeat(16), job: 'Run <i>the</i> ledger sweep', name: 'ledger_sweep', mode: 'shadow', allowlisted: true }],
+  runs: 168, guard_runs: 160, skipped: 0, would_skip: 150,
+  fell_through: { output: 6, stderr: 1, exit: 0, timeout: 0, error: 3, not_allowlisted: 0 },
+  shadow_misses: 0, shadow_misses_by_signal: { report: 0, finding: 0, inbox: 0, push: 0, ledger: 0 },
+  recent: [
+    guardRecord({ acted: true, acted_by: ['report'] }),
+    guardRecord({ kind: 'fell_through', reason: 'stderr', stderr_bytes: 20, stderr_head: '<script>alert(1)</script>', subtask_id: '34'.repeat(16) }),
+  ],
+  ...over,
 });
 
 const fixRow = (over: Record<string, unknown>) => ({
@@ -289,6 +309,50 @@ describe('Autonomy view', () => {
     body = { ...FULL(), job_fixes: { enabled: true, jobs: [] } };
     render(Autonomy);
     expect(await screen.findByText(/No job has needed a check\./)).toBeTruthy();
+  });
+
+  it('shows each guarded job, the counts for the window and the latest records as plain text', async () => {
+    const { container } = render(Autonomy);
+    expect(await screen.findByRole('heading', { name: 'Run guards' })).toBeTruthy();
+    const section = screen.getByRole('heading', { name: 'Run guards' }).closest('section')!;
+    const text = section.textContent ?? '';
+    expect(text).toContain('Run <i>the</i> ledger sweep'); // job text and command output are never markup
+    expect(text).toContain('<script>alert(1)</script>');
+    expect(section.querySelector('i, script')).toBeNull();
+    expect(text).toContain('ledger_sweep');
+    expect(text).toContain('Shadow');
+    const valueOf = (label: string) => Array.from(section.querySelectorAll('dt')).find((dt) => dt.textContent === label)
+      ?.nextElementSibling?.textContent;
+    expect(valueOf('Runs')).toBe('168');
+    expect(valueOf('Guard ran')).toBe('160');
+    expect(valueOf('Would have skipped')).toBe('150');
+    expect(valueOf('Skipped')).toBe('0');
+    expect(text).toContain('Output 6');
+    expect(text).toContain('stderr 1');
+    expect(text).toContain('Error 3');
+    expect(text).toContain('Model acted: report');
+    expect(section.querySelector('[role="alert"]')).toBeNull();
+    expect(container.textContent).not.toMatch(/NaN|undefined/);
+  });
+
+  it('makes shadow misses stand out, with the kinds of action behind them', async () => {
+    body = { ...FULL(), guards: GUARDS({ shadow_misses: 3, shadow_misses_by_signal: { report: 3, finding: 1, inbox: 0, push: 0, ledger: 2 } }) };
+    render(Autonomy);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('3 shadow misses');
+    expect(alert.textContent).toContain('report 3');
+    expect(alert.textContent).toContain('ledger 2');
+    expect(alert.textContent).not.toContain('inbox');
+  });
+
+  it('says guards are off, or that nothing is guarded yet', async () => {
+    body = { ...FULL(), guards: GUARDS({ enabled: false }) };
+    render(Autonomy);
+    expect(await screen.findByText(/NOUS_SCHEDULE_GUARDS_ENABLED=false/)).toBeTruthy();
+    cleanup();
+    body = { ...FULL(), guards: GUARDS({ schedules: [], recent: [], runs: 0, guard_runs: 0, would_skip: 0 }) };
+    render(Autonomy);
+    expect(await screen.findByText(/No schedule has a guard\./)).toBeTruthy();
   });
 
   it('says so when the endpoint fails', async () => {

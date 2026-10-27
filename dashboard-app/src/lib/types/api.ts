@@ -1690,6 +1690,51 @@ export interface AutonomyData {
   warn_classes: { mode: string; context_kind: string; violation: string; tool_name: string; count: number }[];
   /** Every check-and-fix record, whatever `window_days` is (nous/api/job_fix_dashboard.py). */
   job_fixes: { enabled: boolean; jobs: JobFixRow[] };
+  /** F107 scheduled-run guards in the window (nous/api/guard_dashboard.py), from persisted records only. */
+  guards: GuardsBlock;
+}
+
+export type GuardReason = 'output' | 'stderr' | 'exit' | 'timeout' | 'error' | 'not_allowlisted';
+export type GuardSignal = 'report' | 'finding' | 'inbox' | 'push' | 'ledger';
+
+export interface GuardsBlock {
+  /** NOUS_SCHEDULE_GUARDS_ENABLED. */
+  enabled: boolean;
+  /** Every record but a skip is a bus event: false means nothing of them was recorded, not "none". */
+  events_persisted: boolean;
+  window_days: number;
+  /** Active schedules with a guard. `mode` as written: shadow (the default), skip, or an unknown one. */
+  schedules: { schedule_id: string; job: string; name: string | null; mode: string; allowlisted: boolean }[];
+  runs: number;
+  guard_runs: number;
+  skipped: number;
+  would_skip: number;
+  fell_through: Record<GuardReason, number>;
+  /** Shadow runs the guard would have skipped in which the model acted. */
+  shadow_misses: number;
+  shadow_misses_by_signal: Record<GuardSignal, number>;
+  /** The latest 10 records, newest first. Texts are command output and job text: plain text only. */
+  recent: GuardRecord[];
+}
+
+export interface GuardRecord {
+  at: string;
+  kind: 'skipped' | 'would_skip' | 'fell_through';
+  schedule_id: string | null;
+  subtask_id: string | null;
+  name: string | null;
+  mode: string | null;
+  reason: GuardReason | null;
+  exit_code: number | null;
+  timed_out: boolean | null;
+  duration_ms: number | null;
+  stdout_bytes: number | null;
+  stderr_bytes: number | null;
+  stderr_head: string | null;
+  command: string | null;
+  /** Shadow runs only, once the turn is over: null when there is no record of it. */
+  acted: boolean | null;
+  acted_by: GuardSignal[] | null;
 }
 
 /** One recurring job check-and-fix has a record for. Texts are written by the check run: plain text only. */
