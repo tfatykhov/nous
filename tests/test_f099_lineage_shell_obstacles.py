@@ -906,6 +906,16 @@ def test_cp_refuses_a_destination_that_is_a_hard_link(tmp_path):
     assert _w("touch {W}/research/hard.sh", ws) is False  # its times are the runner's too
     assert _w("cd {W}/research && touch a.md hard.sh", ws) is False
     assert _w("touch {W}/research/a.md {W}/research/new.md", ws) is True
+    # a redirection opens the file it writes: through the link, the runner's own content
+    for command in (
+        "echo x > {W}/research/hard.sh",
+        "echo x >> {W}/research/hard.sh",
+        "cd {W}/research && echo x > hard.sh",
+        "echo x > research/hard.sh",
+        "cd {W}/research && cat <> hard.sh",
+    ):
+        assert _w(command, ws) is False, command
+    assert _w("echo x > {W}/research/a.md && echo y >> research/new.md", ws) is True
 
 
 @pytest.mark.parametrize(

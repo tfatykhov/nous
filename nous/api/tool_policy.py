@@ -720,6 +720,24 @@ def _one_link(path: Path) -> bool:
         return False
 
 
+def _redirect_allowed(path: str, cwd: Path | None, writable: list[Path]) -> bool:
+    """An output redirection's target: a sink, or a file inside ``writable`` (absolute: ``_under``; relative: a
+    ``_write_target`` against the sure cwd, as a mkdir/touch/cp target) that is not an existing file with another hard
+    link (``_one_link``: the shell opens it and writes through to every name of the inode)."""
+    if path in _LINEAGE_SINKS:
+        return True
+    if path.startswith("/"):
+        if not _under(path, writable):
+            return False
+        try:
+            landed: Path | None = Path(path).resolve()
+        except (OSError, ValueError, RuntimeError):  # an unresolvable name, a symlink loop
+            return False
+    else:
+        landed = _write_target(path, cwd, writable, below=True)
+    return landed is not None and _one_link(landed)
+
+
 def _fs_write_allowed(
     prog: str, args: list[str], *, cwd: Path | None, cwds: list[Path], root: Path, writable: list[Path]
 ) -> bool:
@@ -1100,12 +1118,7 @@ def lineage_bash_allowed(
             if targets or sources:
                 return False
             continue
-        # A relative target resolves against the sure cwd, as a mkdir/touch/cp target does (_write_target).
-        if not all(
-            t in _LINEAGE_SINKS
-            or (_under(t, writable) if t.startswith("/") else _write_target(t, cwd, writable, below=True) is not None)
-            for t in targets
-        ):
+        if not all(_redirect_allowed(t, cwd, writable) for t in targets):
             return False
         if not all(s in _LINEAGE_SINKS or _readable(s, cwds, root) is not None for s in sources):
             return False
