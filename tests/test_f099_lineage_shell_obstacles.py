@@ -193,6 +193,17 @@ def test_an_extra_entry_that_is_a_file_is_dropped(tmp_path):
     assert got == [*base, tmp_path.resolve() / "notes"]
 
 
+def test_an_entry_that_is_not_a_string_is_dropped_not_raised(tmp_path):
+    """Settings filters non-strings; a direct caller of lineage_write_dirs gets the same answer, not a crash."""
+    from nous.config import lineage_write_dir_entry_problem, lineage_write_dir_resolved
+
+    for entry in (5, None, b"research", ["research"]):
+        assert lineage_write_dir_entry_problem(entry) == "not a string"
+        assert lineage_write_dir_resolved(str(tmp_path), entry) == (None, "not a string")
+    got = lineage_write_dirs(_internal(), str(tmp_path), lineage_shell=False, extra_dirs=[5, None, "research"])
+    assert got[-1] == tmp_path.resolve() / "research" and len(got) == 2
+
+
 def test_a_missing_extra_dir_is_kept_so_it_can_be_created(tmp_path):
     got = lineage_write_dirs(_internal(), str(tmp_path), lineage_shell=False, extra_dirs=["research/new"])
     assert got[-1] == tmp_path.resolve() / "research" / "new"

@@ -37,11 +37,13 @@ LINEAGE_WRITE_DIR_RESERVED = frozenset({"claude-jobs", "intentions", "plugins"})
 _LINEAGE_WRITE_DIR_ENTRY = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)*")
 
 
-def lineage_write_dir_entry_problem(entry: str) -> str | None:
+def lineage_write_dir_entry_problem(entry: object) -> str | None:
     """Why ``entry`` cannot be a NOUS_F099_LINEAGE_WRITE_DIRS directory, or None. A trailing ``/`` is ignored.
 
     Only the text: ``tool_policy.lineage_write_dirs`` resolves each entry again at every call (a symlink out of the
     workspace, into a reserved directory or onto a file is dropped there)."""
+    if not isinstance(entry, str):
+        return "not a string"
     if entry.startswith("/"):
         return "an absolute path"
     entry = entry.rstrip("/")
@@ -52,14 +54,14 @@ def lineage_write_dir_entry_problem(entry: str) -> str | None:
     return None
 
 
-def lineage_write_dir_resolved(workspace_dir: str, entry: str) -> tuple[Path | None, str | None]:
+def lineage_write_dir_resolved(workspace_dir: str, entry: object) -> tuple[Path | None, str | None]:
     """``entry`` resolved under ``workspace_dir`` (symlinks followed) as ``(directory, None)``, or ``(None, why)``
     when its text fails ``lineage_write_dir_entry_problem`` or it lands on the workspace itself, outside it, below a
     hidden component, in or around ``claude-jobs``/``intentions``/``plugins``, or on a file. A missing directory is
     kept (a lineage may create it). Checked at load (``Settings``) and again at every call
     (``tool_policy.lineage_write_dirs``), since the filesystem can change in between."""
     problem = lineage_write_dir_entry_problem(entry)
-    if problem is not None:
+    if problem is not None or not isinstance(entry, str):  # the second only narrows the type: a non-str has a problem
         return None, problem
     try:
         workspace = Path(workspace_dir).resolve()
@@ -1373,7 +1375,7 @@ class Settings(BaseSettings):
             entry = item.strip() if isinstance(item, str) else item
             if entry == "":
                 continue
-            problem = lineage_write_dir_entry_problem(entry) if isinstance(entry, str) else "not a string"
+            problem = lineage_write_dir_entry_problem(entry)
             if problem is not None:
                 log.warning("NOUS_F099_LINEAGE_WRITE_DIRS: dropped %r: %s", entry, problem)
             elif entry.rstrip("/") not in kept:
