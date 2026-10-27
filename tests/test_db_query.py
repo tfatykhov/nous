@@ -23,6 +23,7 @@ from nous.api.db_query import (
     MAX_SQL_CHARS,
     Cell,
     QueryRefused,
+    answer_db_query,
     check_query_shape,
     format_result,
     reader_connect_args,
@@ -356,6 +357,19 @@ async def test_the_handler_reports_a_failure_as_an_error_and_never_raises(monkey
     assert is_error and text.startswith("Error: ")
     text, is_error = await dispatcher.dispatch("db_query", {"sql": "update heart.subtasks set status = 'x'"})
     assert is_error and "SELECT or WITH" in text
+
+
+async def test_a_result_that_reads_like_an_error_is_not_one(monkeypatch):
+    # the error flag comes from how the call ended, not from the text: a column may be named "Error: x"
+    async def named_like_an_error(settings, sql):
+        return ["Error: x"], [[Cell("1", 1)]], False
+
+    monkeypatch.setattr(db_query, "execute_readonly", named_like_an_error)
+    dispatcher = ToolDispatcher()
+    assert await register_db_query_tool(dispatcher, _settings(reader_db_password="readerpassword1")) is True
+    assert await dispatcher.dispatch("db_query", {"sql": 'select 1 as "Error: x"'}) == ("Error: x\n1\n(1 row)", False)
+    answer = await answer_db_query(_settings(reader_db_password="readerpassword1"), 'select 1 as "Error: x"')
+    assert answer == ("Error: x\n1\n(1 row)", False)
 
 
 @pytest.mark.postgres_only

@@ -386,21 +386,29 @@ def _one_line(text: str) -> str:
     return line if len(line) <= 2000 else line[:2000] + "…"
 
 
-def _error(text: str) -> str:
+class QueryAnswer(NamedTuple):
+    """What a db_query call returns: the text the agent sees, and whether the call failed."""
+
+    text: str
+    is_error: bool
+
+
+def _error(text: str) -> QueryAnswer:
     """What the agent sees for any failure."""
-    return "Error: " + _one_line(text)
+    return QueryAnswer("Error: " + _one_line(text), True)
 
 
-async def run_db_query(settings: Settings, sql: str) -> str:
+async def answer_db_query(settings: Settings, sql: str) -> QueryAnswer:
     """The tool: check the statement's shape, run it as the reader and return the rows as compact text. Every
-    failure comes back as one line starting with ``Error:``; it never raises. Logs one line per call with a hash
-    of the statement, never its text."""
+    failure comes back as one line starting with ``Error:`` and ``is_error`` set; it never raises. The flag comes
+    from how the call ended, never from the text (a column may be named ``Error: x``). Logs one line per call with
+    a hash of the statement, never its text."""
     started = time.monotonic()
     outcome, rows = "ok", "-"
     try:
         columns, cells, truncated = await execute_readonly(settings, check_query_shape(sql))
         rows = str(len(cells))
-        return format_result(columns, cells, truncated=truncated)
+        return QueryAnswer(format_result(columns, cells, truncated=truncated), False)
     except QueryRefused as exc:
         outcome = "refused"
         return _error(str(exc))
@@ -425,6 +433,11 @@ async def run_db_query(settings: Settings, sql: str) -> str:
             int((time.monotonic() - started) * 1000),
             outcome,
         )
+
+
+async def run_db_query(settings: Settings, sql: str) -> str:
+    """The text of ``answer_db_query``: the rows, or one line starting with ``Error:``."""
+    return (await answer_db_query(settings, sql)).text
 
 
 # -- the tool --------------------------------------------------------------------------------------------------------
@@ -473,9 +486,9 @@ async def register_db_query_tool(dispatcher: ToolDispatcher, settings: Settings)
         return False
 
     async def db_query(sql: str, **_: Any) -> dict[str, Any]:
-        text = await run_db_query(settings, sql)
-        result: dict[str, Any] = {"content": [{"type": "text", "text": text}]}
-        if text.startswith("Error:"):
+        answer = await answer_db_query(settings, sql)
+        result: dict[str, Any] = {"content": [{"type": "text", "text": answer.text}]}
+        if answer.is_error:
             result["is_error"] = True
         return result
 
