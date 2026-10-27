@@ -10,7 +10,9 @@ import re
 
 import pytest
 
+from nous.api import db_query
 from nous.api.db_query import (
+    APPLICATION_NAME,
     MAX_CELL_CHARS,
     MAX_OUTPUT_CHARS,
     MAX_ROWS,
@@ -19,8 +21,11 @@ from nous.api.db_query import (
     QueryRefused,
     check_query_shape,
     format_result,
+    reader_connect_args,
+    run_db_query,
 )
 from nous.cognitive import ledger_store
+from nous.config import Settings
 
 
 def _cells(*values: str | None) -> list[Cell]:
@@ -211,3 +216,53 @@ def test_redact_output_is_the_ledger_redaction():
     assert ledger_store.redact_output(sample) == ledger_store._redact_detail(sample)
     assert "hunter22" not in ledger_store.redact_output(sample)
     assert ledger_store.redaction_scan_pad() >= 256
+
+
+# -- the login -------------------------------------------------------------------------------------------------------
+
+
+def _settings(**over) -> Settings:
+    # the DB_* fields are read by their unprefixed aliases
+    base = {"DB_HOST": "dbhost", "DB_PORT": 6543, "DB_USER": "appuser", "DB_PASSWORD": "apppassword1", "DB_NAME": "nx"}
+    return Settings(**{**base, **over})
+
+
+def test_the_reader_login_never_uses_the_application_login():
+    args = reader_connect_args(_settings(reader_db_user="someone", reader_db_password="readerpassword1"))
+    assert args["user"] == "someone" and args["password"] == "readerpassword1"
+    assert (args["host"], args["port"], args["database"]) == ("dbhost", 6543, "nx")
+    assert "appuser" not in repr(args) and "apppassword1" not in repr(args)
+    assert args["server_settings"] == {"application_name": APPLICATION_NAME}
+    assert 0 < args["timeout"] <= 5
+
+
+async def test_not_configured_without_a_password_and_no_connection_is_opened(monkeypatch):
+    calls = []
+
+    async def connect(**kwargs):
+        calls.append(kwargs)
+        raise AssertionError("connected")
+
+    monkeypatch.setattr(db_query.asyncpg, "connect", connect)
+    out = await run_db_query(_settings(reader_db_password=""), "select 1")
+    assert out.startswith("Error: ") and "not configured" in out and "NOUS_READER_DB_PASSWORD" in out
+    assert calls == []
+
+
+async def test_a_refused_shape_opens_no_connection(monkeypatch):
+    async def connect(**kwargs):
+        raise AssertionError("connected")
+
+    monkeypatch.setattr(db_query.asyncpg, "connect", connect)
+    out = await run_db_query(_settings(reader_db_password="readerpassword1"), "delete from heart.subtasks")
+    assert out.startswith("Error: ") and "SELECT or WITH" in out
+
+
+async def test_a_failed_login_is_one_line_without_the_password(monkeypatch):
+    async def connect(**kwargs):
+        raise OSError(f"could not reach {kwargs['host']} with {kwargs['password']}\nsecond line")
+
+    monkeypatch.setattr(db_query.asyncpg, "connect", connect)
+    out = await run_db_query(_settings(reader_db_password="readerpassword1"), "select 1")
+    assert out.startswith("Error: ") and "\n" not in out
+    assert "readerpassword1" not in out and "someone" not in out and "nous_reader" in out

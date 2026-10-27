@@ -302,3 +302,14 @@ async def reader_role(db) -> str:
             pytest.fail(f"{READER_ROLE} does not exist and NOUS_REQUIRE_READER_ROLE=1: run scripts/ops/db_roles.sql")
         pytest.skip(f"{READER_ROLE} does not exist (scripts/ops/db_roles.sql has not run on this database)")
     return READER_ROLE
+
+
+@pytest.fixture(scope="session")
+def reader_settings(reader_role) -> Settings:
+    """Settings that log ``db_query`` in as the reader: the password comes from ``NOUS_READER_DB_PASSWORD``."""
+    settings = Settings()
+    if settings.reader_db_user != reader_role or not settings.reader_db_password:
+        if os.environ.get("NOUS_REQUIRE_READER_ROLE") == "1":
+            pytest.fail(f"set NOUS_READER_DB_PASSWORD (and NOUS_READER_DB_USER={reader_role}) to log in as the reader")
+        pytest.skip("NOUS_READER_DB_PASSWORD is not set")
+    return settings

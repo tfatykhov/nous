@@ -9,22 +9,63 @@ the result small: the statement's shape, the row and cell caps, and the ledger's
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import logging
 import re
+import time
 from collections.abc import Sequence
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
-from nous.cognitive.ledger_store import redact_output, redaction_scan_pad
+import asyncpg
+
+from nous.cognitive.ledger_store import SECRET_MASK, redact_output, redaction_scan_pad
+from nous.config import Settings
+
+logger = logging.getLogger(__name__)
 
 MAX_ROWS = 200
 MAX_CELL_CHARS = 500
 MAX_SQL_CHARS = 8_000
 MAX_OUTPUT_CHARS = 100_000
+# Columns a statement may return: with the per-cell window below, this bounds what one call can transfer.
+MAX_COLUMNS = 64
+STATEMENT_TIMEOUT = "5s"
+# The client's own limit on a whole call, past the statement timeout the login and the transaction set.
+CALL_TIMEOUT_SECONDS = 7.0
+CONNECT_TIMEOUT_SECONDS = 5.0
+APPLICATION_NAME = "nous-db-query"
+# One connection per call, and at most this many at once (the role allows a few more, for a backend that is
+# still closing after a timeout).
+_CALLS = asyncio.Semaphore(2)
 
 _RULE = "db_query runs one read-only statement that starts with SELECT or WITH."
+NOT_CONFIGURED = "db_query is not configured (NOUS_READER_DB_PASSWORD is not set)."
+# A privilege refusal: most often SELECT * over a table with unreadable columns.
+_PRIVILEGE_HINT = (
+    "Hint: some tables and columns (embeddings, search vectors, raw transcripts, tokens) are not readable, so name "
+    "the columns instead of *. List the readable tables with SELECT DISTINCT table_schema, table_name FROM "
+    "information_schema.columns WHERE table_schema IN ('brain', 'heart', 'nous_system'), and a table's readable "
+    "columns with SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'heart' AND "
+    "table_name = 'facts' ORDER BY ordinal_position."
+)
 
 
 class QueryRefused(ValueError):
     """The statement breaks a db_query rule. ``str(exc)`` is the one-line message the agent sees."""
+
+
+class ReaderUnavailable(RuntimeError):
+    """db_query cannot run: not configured, the login failed, or the login is not a restricted reader."""
+
+
+class ReaderError(Exception):
+    """The database refused or failed the statement; ``sqlstate`` is its SQLSTATE."""
+
+    def __init__(self, sqlstate: str, message: str) -> None:
+        super().__init__(f"{sqlstate} {message}")
+        self.sqlstate = sqlstate
+        self.message = message
 
 
 class Cell(NamedTuple):
@@ -202,3 +243,166 @@ def format_result(columns: Sequence[str], rows: Sequence[Sequence[Cell]], *, tru
     else:
         lines.append(f"({len(rows)} row{'' if len(rows) == 1 else 's'})")
     return "\n".join(lines)
+
+
+# -- running a statement as the reader -------------------------------------------------------------------------------
+
+# Run on every call before the statement: a login that a superuser could use, that can use scoring or that can
+# write the Brain is not the reader, whatever its name (a deployment that points NOUS_READER_DB_USER at the
+# application's login is refused here).
+_SELF_CHECK = """
+SELECT NOT r.rolsuper AND NOT r.rolbypassrls AND session_user = current_user
+   AND (to_regnamespace('scoring') IS NULL OR NOT has_schema_privilege('scoring', 'USAGE'))
+   AND (to_regclass('brain.decisions') IS NULL OR NOT has_table_privilege('brain.decisions', 'INSERT'))
+  FROM pg_roles r WHERE r.rolname = current_user
+"""
+
+
+def reader_connect_args(settings: Settings) -> dict[str, Any]:
+    """asyncpg.connect arguments for the reader login: the application's host, port and database, never its
+    login."""
+    return {
+        "host": settings.db_host,
+        "port": settings.db_port,
+        "user": settings.reader_db_user,
+        "password": settings.reader_db_password,
+        "database": settings.db_name,
+        "timeout": CONNECT_TIMEOUT_SECONDS,
+        "statement_cache_size": 0,
+        "server_settings": {"application_name": APPLICATION_NAME},
+    }
+
+
+def _wrapped(sql: str, clip: int) -> str:
+    """``sql`` as a subquery whose rows come back as two arrays: each value as text cut to ``clip`` characters,
+    and each value's full length. The server does the cut, so no value larger than ``clip`` crosses the wire,
+    and at most ``MAX_ROWS + 1`` rows do. ``sql`` has prepared as one statement on its own, so its parentheses
+    balance and it cannot reach out of the subquery. The newlines end a trailing ``--`` comment."""
+    return (
+        f"SELECT c.cells, c.lens FROM (\n{sql}\n) AS q CROSS JOIN LATERAL ("
+        f"SELECT array_agg(left(t.v, {int(clip)}) ORDER BY t.i) AS cells, array_agg(length(t.v) ORDER BY t.i) AS lens "
+        "FROM json_each_text(to_json(q.*)) WITH ORDINALITY AS t(k, v, i)) AS c "
+        f"LIMIT {MAX_ROWS + 1}"
+    )
+
+
+def _login_failure(settings: Settings, exc: BaseException) -> ReaderUnavailable:
+    detail = str(exc)
+    if settings.reader_db_password:
+        detail = detail.replace(settings.reader_db_password, SECRET_MASK)
+    return ReaderUnavailable(
+        f"db_query cannot log in as {settings.reader_db_user!r}: {type(exc).__name__}: {detail}".strip()
+    )
+
+
+async def _run(conn: Any, sql: str, clip: int) -> tuple[list[str], list[list[Cell]], bool]:
+    async with conn.transaction(readonly=True):
+        await conn.execute(f"SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT}'")
+        if not await conn.fetchval(_SELF_CHECK):
+            raise ReaderUnavailable(
+                "db_query's login is not a restricted reader (a superuser, or a role that can use scoring or "
+                "write the Brain); it refuses to run as it. Point NOUS_READER_DB_USER at the role "
+                "scripts/ops/db_roles.sql creates."
+            )
+        # Prepared alone first: one statement only (the server refuses several), its column names, and the column
+        # cap, all before anything runs.
+        statement = await conn.prepare(sql)
+        if statement.get_parameters():
+            raise QueryRefused(f"{_RULE} It may not use $1-style parameters; write the values in the statement.")
+        columns = [attr.name for attr in statement.get_attributes()]
+        if len(columns) > MAX_COLUMNS:
+            raise QueryRefused(
+                f"{_RULE} It returns {len(columns)} columns; the limit is {MAX_COLUMNS} columns. Name fewer."
+            )
+        records = await conn.fetch(_wrapped(sql, clip))
+    truncated = len(records) > MAX_ROWS
+    rows = [
+        [Cell(text, length) for text, length in zip(r["cells"] or [], r["lens"] or [], strict=True)]
+        for r in records[:MAX_ROWS]
+    ]
+    return columns, rows, truncated
+
+
+async def execute_readonly(settings: Settings, sql: str) -> tuple[list[str], list[list[Cell]], bool]:
+    """Run ``sql`` as the reader login: the column names, at most ``MAX_ROWS`` rows of cells, and whether more
+    rows existed.
+
+    A fresh connection per call, closed after it, so nothing a statement sets (a session setting, an advisory
+    lock) reaches the next call. Everything runs in a READ ONLY transaction with the statement timeout set again
+    locally, after a check that the login is a restricted reader. It does not check the statement's shape
+    (``run_db_query`` does): the database alone refuses what the shape check would. Raises ``ReaderUnavailable``,
+    ``QueryRefused`` or ``ReaderError``.
+    """
+    if not settings.reader_db_password:
+        raise ReaderUnavailable(NOT_CONFIGURED)
+    # The server's cut: a redaction window of four clips, plus the scan pad that _render drops from a cut cell.
+    clip = 4 * MAX_CELL_CHARS + redaction_scan_pad()
+    async with _CALLS:
+        conn: Any = None
+
+        async def call() -> tuple[list[str], list[list[Cell]], bool]:
+            nonlocal conn
+            try:
+                conn = await asyncpg.connect(**reader_connect_args(settings))
+            except (OSError, TimeoutError, asyncpg.PostgresError, asyncpg.InterfaceError) as exc:
+                raise _login_failure(settings, exc) from None
+            return await _run(conn, sql, clip)
+
+        try:
+            return await asyncio.wait_for(call(), CALL_TIMEOUT_SECONDS)
+        except TimeoutError:
+            if conn is not None:  # dropped at once: a graceful close would wait for the statement
+                conn.terminate()
+                conn = None
+            raise ReaderError("57014", f"the call was stopped after {CALL_TIMEOUT_SECONDS:g}s") from None
+        except asyncpg.PostgresError as exc:
+            message = str(exc) + (f" ({exc.hint})" if getattr(exc, "hint", None) else "")
+            raise ReaderError(exc.sqlstate or "XX000", message) from None
+        finally:
+            if conn is not None:
+                try:
+                    await asyncio.wait_for(conn.close(), 2.0)
+                except Exception:  # a connection that cannot close cleanly is dropped
+                    conn.terminate()
+
+
+def _error(text: str) -> str:
+    """One line, redacted, bounded: what the agent sees for any failure."""
+    line = " ".join(redact_output(text).split())
+    return "Error: " + (line if len(line) <= 2000 else line[:2000] + "…")
+
+
+async def run_db_query(settings: Settings, sql: str) -> str:
+    """The tool: check the statement's shape, run it as the reader and return the rows as compact text. Every
+    failure comes back as one line starting with ``Error:``; it never raises. Logs one line per call with a hash
+    of the statement, never its text."""
+    started = time.monotonic()
+    outcome, rows = "ok", "-"
+    try:
+        columns, cells, truncated = await execute_readonly(settings, check_query_shape(sql))
+        rows = str(len(cells))
+        return format_result(columns, cells, truncated=truncated)
+    except QueryRefused as exc:
+        outcome = "refused"
+        return _error(str(exc))
+    except ReaderUnavailable as exc:
+        outcome = "unavailable"
+        return _error(str(exc))
+    except ReaderError as exc:
+        outcome = f"error={exc.sqlstate}"
+        hint = f" {_PRIVILEGE_HINT}" if exc.sqlstate == "42501" else ""
+        return _error(f"{exc.sqlstate} {exc.message}{hint}")
+    except Exception as exc:  # the tool reports, it never raises into the dispatcher
+        outcome = f"error={type(exc).__name__}"
+        logger.warning("db_query failed: %s", _error(f"{type(exc).__name__}: {exc}"))
+        return _error(f"db_query failed: {type(exc).__name__}")
+    finally:
+        text = sql if isinstance(sql, str) else repr(sql)
+        logger.info(
+            "db_query sha256=%s len=%d rows=%s ms=%d %s",
+            hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:12],
+            len(text),
+            rows,
+            int((time.monotonic() - started) * 1000),
+            outcome,
+        )

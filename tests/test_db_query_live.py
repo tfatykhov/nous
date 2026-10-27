@@ -7,8 +7,27 @@ login), and the tool's own tests log in as ``nous_reader``. The role exists only
 
 from __future__ import annotations
 
+import asyncio
+import time
+from contextlib import asynccontextmanager
+
+import asyncpg
 import pytest
 from sqlalchemy import text
+
+from nous.api.db_query import (
+    APPLICATION_NAME,
+    MAX_CELL_CHARS,
+    MAX_COLUMNS,
+    MAX_OUTPUT_CHARS,
+    MAX_ROWS,
+    ReaderError,
+    execute_readonly,
+    reader_connect_args,
+    run_db_query,
+)
+from nous.cognitive.ledger_store import redaction_scan_pad
+from nous.config import Settings
 
 pytestmark = pytest.mark.postgres_only
 
@@ -250,3 +269,337 @@ async def test_reader_can_read_at_least_one_column_of_each_spec_table(db, reader
         r=reader_role,
     )
     assert (content, embedding) == (True, False)
+
+
+# -- the role's limits, logged in as the reader ----------------------------------------------------------------------
+# Raw statements on a direct login, so the proof is the role's own and does not depend on the tool's checks or its
+# wrapper. A refusal must be a privilege error (42501) or a read-only one (class 25): a syntax or missing-object
+# error would prove nothing.
+
+CANARY_AGENT = "test-db-query-canary"
+
+
+@asynccontextmanager
+async def _login(settings: Settings):
+    conn = await asyncpg.connect(**reader_connect_args(settings))
+    try:
+        yield conn
+    finally:
+        await conn.close()
+
+
+async def _refusal(settings: Settings, sql: str, *, read_only_txn: bool = True) -> str | None:
+    """The SQLSTATE a direct reader login gets for ``sql`` (extended protocol), or None if it ran."""
+    async with _login(settings) as conn:
+        try:
+            if read_only_txn:
+                async with conn.transaction(readonly=True):
+                    await conn.fetch(sql)
+            else:
+                await conn.fetch(sql)
+        except asyncpg.PostgresError as exc:
+            return exc.sqlstate
+    return None
+
+
+def _is_refusal(sqlstate: str | None) -> bool:
+    return sqlstate == "42501" or (sqlstate or "").startswith("25")
+
+
+async def _state(db) -> tuple[int, int, int, str]:
+    """What a write would change: the canary's count and status, brain's decisions and relations."""
+    [row] = await _rows(
+        db,
+        "SELECT (SELECT count(*) FROM heart.subtasks WHERE agent_id = :a), "
+        "(SELECT count(*) FROM brain.decisions), "
+        "(SELECT count(*) FROM pg_class WHERE relnamespace = 'brain'::regnamespace), "
+        "(SELECT string_agg(status, ',') FROM heart.subtasks WHERE agent_id = :a)",
+        a=CANARY_AGENT,
+    )
+    return row
+
+
+@pytest.fixture
+async def canary(db, reader_role):
+    """A subtask row the write attempts would change, so an unchanged count means something."""
+    async with db.engine.begin() as conn:
+        await conn.execute(text("DELETE FROM heart.subtasks WHERE agent_id = :a"), {"a": CANARY_AGENT})
+        await conn.execute(
+            text("INSERT INTO heart.subtasks (agent_id, task, status) VALUES (:a, 'db_query canary', 'completed')"),
+            {"a": CANARY_AGENT},
+        )
+    yield
+    async with db.engine.begin() as conn:
+        await conn.execute(text("DELETE FROM heart.subtasks WHERE agent_id = :a"), {"a": CANARY_AGENT})
+
+
+async def test_the_login_settings_hold_without_the_clients_cooperation(reader_settings):
+    async with _login(reader_settings) as conn:
+        shown = {
+            name: await conn.fetchval(f"SHOW {name}")
+            for name in (
+                "transaction_read_only",
+                "statement_timeout",
+                "lock_timeout",
+                "idle_in_transaction_session_timeout",
+                "temp_file_limit",
+                "row_security",
+            )
+        }
+        assert await conn.fetchrow("SELECT current_user, session_user") == ("nous_reader", "nous_reader")
+    assert shown == {
+        "transaction_read_only": "on",
+        "statement_timeout": "5s",
+        "lock_timeout": "2s",
+        "idle_in_transaction_session_timeout": "15s",
+        "temp_file_limit": "256MB",
+        "row_security": "off",
+    }
+
+
+WRITES = [
+    "insert into brain.decisions default values",
+    "update heart.subtasks set status = 'failed'",
+    "delete from heart.subtasks",
+    "truncate heart.subtasks",
+    "create table brain.zz (i int)",
+    "create temp table zz (i int)",
+    "alter table heart.subtasks add column zz int",
+    "drop table heart.subtasks",
+    "comment on table heart.subtasks is 'x'",
+    "grant select on heart.subtasks to public",
+    "select id from heart.subtasks for update",
+    "with x as (select 1) insert into heart.subtasks (agent_id, task) select 'test-db-query-canary', 'zz' from x",
+    "with x as (select 1) update heart.subtasks set status = 'failed'",
+    "with x as (select 1) delete from heart.subtasks",
+    "with d as (delete from heart.subtasks returning 1) select count(*) from d",
+    "select * into brain.zz from brain.decisions",
+]
+
+
+@pytest.mark.parametrize("sql", WRITES)
+@pytest.mark.parametrize("read_only_txn", [True, False], ids=["in-read-only-txn", "bare-login"])
+async def test_the_reader_cannot_write(db, reader_settings, canary, sql, read_only_txn):
+    before = await _state(db)
+    assert before[0] == 1 and before[3] == "completed"
+    state = await _refusal(reader_settings, sql, read_only_txn=read_only_txn)
+    assert _is_refusal(state), (sql, state)
+    assert await _state(db) == before
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "set role nous_app",
+        "set session authorization nous_app",
+        # the statement that escapes a SET LOCAL ROLE design: switching back to the session user works there
+        "select set_config('role', 'nous_app', true),"
+        " query_to_xml('select * from scoring.task_scores', true, false, '')",
+        "select query_to_xml('select * from scoring.task_scores', true, false, '')",
+        "select query_to_xml('select embedding from heart.facts', true, false, '')",
+    ],
+)
+async def test_the_reader_cannot_become_another_role_or_read_through_a_function(reader_settings, sql):
+    assert await _refusal(reader_settings, sql) == "42501", sql
+
+
+async def test_query_to_xml_runs_for_an_allowed_query(reader_settings):
+    # the control for the query_to_xml refusals above: the function itself runs for the reader
+    async with _login(reader_settings) as conn:
+        xml = await conn.fetchval("select query_to_xml('select 1 as x', true, false, '')")
+    assert "<x>1</x>" in xml
+
+
+async def test_reset_role_leaves_the_reader_the_reader(reader_settings):
+    async with _login(reader_settings) as conn:
+        with pytest.raises(asyncpg.InsufficientPrivilegeError):
+            # the simple protocol: two statements in one call
+            await conn.execute("reset role; select count(*) from scoring.task_scores")
+        assert await conn.fetchrow("SELECT current_user, session_user") == ("nous_reader", "nous_reader")
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "select pg_read_file('/etc/hostname')",
+        "select lo_import('/etc/hostname')",
+        "copy (select 1) to program 'true'",
+        "select pg_ls_dir('.')",
+        "select pg_reload_conf()",
+        "select * from pg_authid",
+        "select pg_terminate_backend(pid) from pg_stat_activity where usename = 'nous_app'",
+    ],
+)
+async def test_the_reader_cannot_touch_the_server(db, reader_settings, sql):
+    [(app_backends,)] = await _rows(db, "SELECT count(*) FROM pg_stat_activity WHERE usename = current_user")
+    state = await _refusal(reader_settings, sql)
+    if "pg_terminate_backend" in sql and state is None:
+        pass  # no row matched; the backend count below is the proof
+    else:
+        assert state == "42501", (sql, state)
+    [(after,)] = await _rows(db, "SELECT count(*) FROM pg_stat_activity WHERE usename = current_user")
+    assert after >= app_backends >= 1
+
+
+async def test_the_server_alone_refuses_a_second_statement(db, reader_settings, canary):
+    before = await _state(db)
+    with pytest.raises(ReaderError) as refused:
+        await execute_readonly(reader_settings, "select 1; delete from heart.subtasks")  # no shape check here
+    assert refused.value.sqlstate == "42601" and "multiple commands" in str(refused.value)
+    assert await _state(db) == before
+
+
+# -- the tool, end to end --------------------------------------------------------------------------------------------
+
+
+async def test_reader_reads_an_allowed_table(reader_settings):
+    text_ = await run_db_query(reader_settings, "select count(*) as n from nous_system.events")
+    lines = text_.splitlines()
+    assert lines[0] == "n" and lines[1].isdigit() and lines[-1] == "(1 row)", text_
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "select * from scoring.task_scores",
+        "select * from scoring.scorer_heartbeat",
+        "select fcm_token from nous_system.a2ui_push_installations",
+        "select embedding from heart.facts",
+        "select search_tsv from brain.decisions",
+        "select * from heart.facts",
+        "select to_jsonb(f) from heart.facts f",
+        "select id from heart.facts where embedding is null",
+        "select detail from heart.episodes",
+        "select claim_token from brain.intention_arrivals",
+        "select token_budget from nous_system.execution_dags",
+        "select * from nous_system.agent_identity",
+        "select * from pg_authid",
+    ],
+)
+async def test_the_tool_cannot_read_an_excluded_place(reader_settings, sql):
+    out = await run_db_query(reader_settings, sql)
+    assert out.startswith("Error: 42501") and "permission denied" in out, out
+
+
+async def test_the_tool_refuses_what_is_not_a_select(reader_settings):
+    for sql in ("do $$ begin null; end $$", "call pg_sleep(0)", "show statement_timeout", "set role nous_app"):
+        out = await run_db_query(reader_settings, sql)
+        assert out.startswith("Error: ") and "SELECT or WITH" in out, (sql, out)
+
+
+async def test_the_star_error_teaches_how_to_list_the_readable_columns(reader_settings):
+    out = await run_db_query(reader_settings, "select * from heart.facts")
+    assert "information_schema.columns" in out and "name the columns" in out, out
+    listing = await run_db_query(
+        reader_settings,
+        "SELECT column_name FROM information_schema.columns WHERE table_schema = 'heart' AND table_name = 'facts'",
+    )
+    names = set(listing.splitlines()[1:-1])
+    assert "content" in names and "embedding" not in names and "search_tsv" not in names, listing
+
+
+async def test_rows_are_capped_at_200(reader_settings):
+    lines = (await run_db_query(reader_settings, "select generate_series(1, 1000) as n")).splitlines()
+    assert lines[0] == "n" and lines[1:-1] == [str(i) for i in range(1, MAX_ROWS + 1)]
+    assert f"first {MAX_ROWS} rows" in lines[-1]
+
+
+async def test_the_server_cuts_each_cell_before_sending_it(reader_settings):
+    # the bound on what crosses the wire: removing the server-side cut makes this cell 5000 characters long
+    columns, rows, truncated = await execute_readonly(reader_settings, "select repeat('x', 5000) as c, null as d")
+    assert columns == ["c", "d"] and not truncated
+    [[cell, null]] = rows
+    assert len(cell.text) == 4 * MAX_CELL_CHARS + redaction_scan_pad() and cell.length == 5000
+    assert null.text is None
+    out = await run_db_query(reader_settings, "select repeat('x', 2000) as c")
+    assert out.splitlines()[1] == "x" * MAX_CELL_CHARS + "…[+1500 chars]"
+
+
+async def test_huge_cells_and_rows_stay_bounded(reader_settings):
+    # 300 MB of values: the server sends at most 201 cut rows, and the text stops at the output cap
+    started = time.monotonic()
+    out = await run_db_query(reader_settings, "select repeat('x', 1000000) as c from generate_series(1, 300)")
+    assert time.monotonic() - started < 8
+    lines = out.splitlines()
+    assert len(out) <= MAX_OUTPUT_CHARS and "output cut" in lines[-1], lines[-1]
+    assert len(lines) > 100 and all(line == "x" * MAX_CELL_CHARS + "…[+999500 chars]" for line in lines[1:-1])
+    columns, rows, truncated = await execute_readonly(
+        reader_settings, "select repeat('x', 1000000) as c from generate_series(1, 300)"
+    )
+    assert truncated and len(rows) == MAX_ROWS and {row[0].length for row in rows} == {1_000_000}
+
+
+async def test_too_many_columns_are_refused_before_the_statement_runs(reader_settings):
+    columns = ", ".join(["1/0 as a"] + [f"{i} as c{i}" for i in range(MAX_COLUMNS)])
+    out = await run_db_query(reader_settings, f"select {columns}")
+    assert out.startswith("Error: ") and f"{MAX_COLUMNS} columns" in out and "division by zero" not in out, out
+
+
+async def test_a_wide_result_stays_under_the_output_cap(reader_settings):
+    columns = ", ".join(f"repeat('y', 600) as c{i}" for i in range(MAX_COLUMNS))
+    out = await run_db_query(reader_settings, f"select {columns} from generate_series(1, 200)")
+    assert len(out) <= MAX_OUTPUT_CHARS and "fewer columns" in out.splitlines()[-1]
+
+
+async def _no_reader_backend_left(db) -> bool:
+    for _ in range(50):
+        [(n,)] = await _rows(
+            db, "SELECT count(*) FROM pg_stat_activity WHERE application_name = :a", a=APPLICATION_NAME
+        )
+        if n == 0:
+            return True
+        await asyncio.sleep(0.2)
+    return False
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "select pg_sleep(30)",
+        # a statement that lifts its own timeout: the timer armed at its start still fires, and the client's
+        # backstop stops the call even if it did not
+        "select set_config('statement_timeout', '0', true), pg_sleep(30)",
+    ],
+)
+async def test_a_slow_statement_is_stopped(db, reader_settings, sql):
+    started = time.monotonic()
+    out = await run_db_query(reader_settings, sql)
+    assert time.monotonic() - started < 8, out
+    assert out.startswith("Error: ") and ("statement timeout" in out or "stopped" in out), out
+    assert await _no_reader_backend_left(db)
+
+
+async def test_no_state_survives_a_call(db, reader_settings):
+    out = await run_db_query(
+        reader_settings, "select pg_try_advisory_lock(424242) as locked, set_config('statement_timeout', '0', false)"
+    )
+    assert not out.startswith("Error"), out
+    assert await _no_reader_backend_left(db)
+    [(locks,)] = await _rows(
+        db, "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND objid = 424242 AND classid = 0"
+    )
+    assert locks == 0
+    out = await run_db_query(reader_settings, "select current_setting('statement_timeout') as t")
+    assert out.splitlines()[1] == "5s", out
+
+
+async def test_secrets_in_a_row_are_redacted(reader_settings):
+    out = await run_db_query(reader_settings, "select 'api_key=abc123def456ghi789' as x")
+    assert "[REDACTED]" in out and "abc123def456ghi789" not in out
+
+
+async def test_a_wrong_password_names_the_login_not_the_password(reader_settings):
+    wrong = reader_settings.model_copy(update={"reader_db_password": "notthepassword123"})
+    out = await run_db_query(wrong, "select 1")
+    assert out.startswith("Error: ") and "nous_reader" in out and "notthepassword123" not in out, out
+
+
+async def test_the_app_login_is_refused_as_the_reader():
+    # No reader_role fixture: this is the negative control wherever a database is. The application's login is a
+    # superuser in the main test job and nous_app (which can use scoring) in the DB roles job; both are refused
+    # before the statement runs, so the canary's division by zero is never reached.
+    app = Settings()
+    as_app = app.model_copy(update={"reader_db_user": app.db_user, "reader_db_password": app.db_password})
+    out = await run_db_query(as_app, "select 1/0 as canary")
+    assert out.startswith("Error: ") and "not a restricted reader" in out, out
+    assert "division by zero" not in out and app.db_password not in out
