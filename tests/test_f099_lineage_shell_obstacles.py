@@ -860,6 +860,32 @@ def test_cp_names_the_copy_after_the_source_as_written(tmp_path):
     assert _w("cp {W}/other/.x {W}/research/new", ws) is False  # new may be a directory by the time cp runs
 
 
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX shell and GNU cp")
+async def test_what_the_policy_checks_is_where_the_shell_writes(tmp_path):
+    """Parity with the shell that runs the command: a relative target lands in the directory the policy took as
+    sure, and a copy into a directory is named after the source as written (a link's name, not its target's)."""
+    from types import SimpleNamespace
+
+    from nous.api.builtin_tools import register_builtin_tools
+    from nous.api.tools import ToolDispatcher
+
+    ws = _write_ws(tmp_path)
+    (ws / "other" / "y").symlink_to(ws / "other" / "src.md")
+    command = (
+        f"cd {ws}/research && touch x.md && mkdir -p d && cp {ws}/other/y . && cp {ws}/other/two.md d && "
+        f"cp {ws}/other/src.md d/renamed.md"
+    )
+    assert _w(command, ws) is True
+    d = ToolDispatcher()
+    register_builtin_tools(d, SimpleNamespace(workspace_dir=str(ws)))
+    text, _ = await d.dispatch("bash", {"command": command}, context=_internal())
+    assert text.endswith("Exit code: 0"), text
+    research = ws / "research"
+    assert (research / "x.md").is_file() and not (ws / "x.md").exists()
+    assert (research / "y").is_file() and not (research / "y").is_symlink() and not (research / "src.md").exists()
+    assert (research / "d" / "two.md").is_file() and (research / "d" / "renamed.md").read_text() == "other/src.md"
+
+
 @pytest.mark.skipif(not hasattr(os, "link") or os.name == "nt", reason="needs hard links")
 def test_cp_refuses_a_destination_that_is_a_hard_link(tmp_path):
     ws = _write_ws(tmp_path)
