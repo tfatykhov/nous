@@ -89,6 +89,22 @@ def test_the_roles_are_checked_again_after_the_later_migrations() -> None:
     assert "psql -U nous_admin -d nous" in step and "-f - < scripts/ops/verify_db_roles.sql" in step, step
 
 
+def test_the_role_script_runs_again_after_the_later_migrations() -> None:
+    # db_roles.sql's reader grant stops on a listed table a later migration made unsafe (a credential-named column,
+    # a view, a renamed excluded column): running it on the full schema fails the pull request, not the deploy.
+    text = (WORKFLOWS / "ci.yml").read_text()
+    later = text.index("- name: Apply every later migration as the application role\n")
+    rerun = text.index("- name: Re-run the role script after the later migrations\n")
+    again = text.index("- name: Check the database roles again after the later migrations\n")
+    assert later < rerun < again
+    step = _step("Re-run the role script after the later migrations")
+    container = "${{ job.services.postgres.id }}"
+    command = (
+        f"docker exec -i {container} psql -U nous_admin -d nous -X -v ON_ERROR_STOP=1 -f - < scripts/ops/db_roles.sql"
+    )
+    assert command in step, step
+
+
 def _jobs_running_on_every_pull_request() -> set[str]:
     """Names of the jobs whose workflow runs on every pull request: no path filter and no job-level ``if:``."""
     names = set()
