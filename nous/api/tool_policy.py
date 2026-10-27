@@ -1045,7 +1045,8 @@ def lineage_bash_allowed(
     ``_READ_ONLY_ROLES`` read (``_read_only_files``), or ``mkdir``/``touch``/``cp`` into ``lineage_write_dirs``
     (``_fs_write_allowed``), joined by ``; && || |`` or newlines only. An output redirection may target
     ``/dev/null`` or a file under ``lineage_write_dirs``: the root's own ``<workspace_dir>/intentions/<root_id>/``,
-    ``<workspace_dir>/claude-jobs/prompts/`` and the owner's ``extra_write_dirs`` (NOUS_F099_LINEAGE_WRITE_DIRS).
+    ``<workspace_dir>/claude-jobs/prompts/`` and the owner's ``extra_write_dirs`` (NOUS_F099_LINEAGE_WRITE_DIRS);
+    a relative one resolves against the cwd the shell is surely in (``_write_target``).
     Anything the reader cannot see exactly (``$``, a backtick, a brace, ``~``, an unquoted heredoc that expands,
     an unbalanced quote) is refused, so a chain or substitution that reaches a refused command is refused. A glob
     (``*``, ``?``, ``[abc]``) is refused too, except unquoted as a whole word that is a file operand of a read
@@ -1089,7 +1090,12 @@ def lineage_bash_allowed(
             if targets or sources:
                 return False
             continue
-        if not all(t in _LINEAGE_SINKS or _under(t, writable) for t in targets):
+        # A relative target resolves against the sure cwd, as a mkdir/touch/cp target does (_write_target).
+        if not all(
+            t in _LINEAGE_SINKS
+            or (_under(t, writable) if t.startswith("/") else _write_target(t, cwd, writable, below=True) is not None)
+            for t in targets
+        ):
             return False
         if not all(s in _LINEAGE_SINKS or _readable(s, cwds, root) is not None for s in sources):
             return False

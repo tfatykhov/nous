@@ -918,6 +918,43 @@ def test_no_write_path_reaches_claude_jobs_outside_prompts(path, tmp_path):
             assert _w(command, ws, extra=extra) is False, (command, extra)
 
 
+@pytest.mark.parametrize(
+    ("command", "allowed"),
+    [
+        # a relative target resolves against the directory the shell is surely in, as mkdir/touch/cp's do
+        ("cd {W}/research && echo x > notes.md", True),
+        ("cd {W}/research && date >> log.txt", True),
+        ("cd {W}/research && cat {W}/other/src.md > sub/copy.md", True),
+        ("cd {W}/intentions/{RID} && echo x > a.md", True),
+        ("cd {W}/claude-jobs/prompts && echo x > p.md", True),
+        ("echo x > research/n.md", True),  # from the workspace, where the shell starts
+        ("cd {W}/research ; echo x > notes.md", False),  # the cd may have failed
+        ("cd {W}/research || echo x > notes.md", False),
+        ("cd {W}/research | echo x > notes.md", False),
+        ("cd {W}/claude-jobs && echo x > research/n.md", False),  # lands in claude-jobs
+        ("cd {W}/claude-jobs && echo x > runner.sh", False),
+        ("cd {W}/claude-jobs/prompts && echo x > ../state/submit_guard.enabled", False),
+        ("cd {W}/research && echo x > ../repos.json", False),
+        ("cd {W}/research && echo x > .hidden", False),
+        ("cd {W}/other && echo x > n.md", False),
+        ("echo x > n.md", False),  # the workspace's top level is no write dir
+        ("cd {W}/research && echo x > /etc/x", False),
+        ("cd {W}/research && echo x > {W}/claude-jobs/runner.sh", False),
+    ],
+)
+def test_a_relative_redirection_target_lands_where_the_shell_surely_is(command, allowed, tmp_path):
+    assert _w(command, _write_ws(tmp_path)) is allowed
+
+
+@needs_symlinks
+def test_a_relative_redirection_through_a_link_out_of_a_write_dir_is_refused(tmp_path):
+    ws = _write_ws(tmp_path)
+    (ws / "research" / "evil.md").symlink_to(tmp_path / "outside" / "target")
+    (ws / "research" / "escape").symlink_to(tmp_path / "outside")
+    for command in ("cd {W}/research && echo x > evil.md", "cd {W}/research && echo x > escape/x"):
+        assert _w(command, ws) is False, command
+
+
 def test_a_repo_inside_an_extra_write_dir_is_not_a_build_repo(tmp_path):
     ws = _write_ws(tmp_path)
     (ws / "research" / "repo" / ".git").mkdir(parents=True)
