@@ -82,6 +82,9 @@ def resolve(raw: Any, commands: Mapping[str, str], *, check_timeout: int, dag_ow
         return Resolved(None, "invalid", "metadata.guard is not a JSON object")
     if dag_owned:
         return Resolved(None, "invalid", "a DAG owns this check: a skip would read as the node's completion")
+    if "is_action" in raw and not isinstance(raw["is_action"], bool):
+        # parse_guard would read it as not an action: the default timeout and a receipt that does not say so
+        return Resolved(None, "invalid", f"metadata.guard.is_action must be true or false (got {raw['is_action']!r:.40})")
     timeout = raw.get("timeout_seconds")
     if raw.get("is_action") is True and (not isinstance(timeout, int) or isinstance(timeout, bool)):
         # parse_guard would fall back to 60 s, which would cut a long action short on every run

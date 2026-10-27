@@ -445,6 +445,7 @@ async def test_the_loader_hands_each_check_its_rows_guard_and_the_shared_context
         ({"name": NAME, "is_action": True, "timeout_seconds": 0}, "at least 1"),
         ({"name": NAME, "is_action": True, "timeout_seconds": -5}, "at least 1"),
         ({"name": NAME, "timeout_seconds": 0}, "at least 1"),
+        ({"name": NAME, "is_action": "true", "timeout_seconds": 240}, "is_action must be true or false"),
     ],
 )
 async def test_a_guard_that_cannot_be_read_safely_is_refused_not_ignored(tmp_path, guard, detail):
