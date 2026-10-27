@@ -692,6 +692,11 @@ class AgentRunner:
         for fork in self._forks:
             fork.set_cancelled_roots(view)
 
+    def root_cancelled(self, root_id: UUID) -> bool:
+        """F099 2e: whether the view of cancelled roots says ``root_id`` was cancelled, as ``_authorize_tool_call``
+        reads it. For work that starts a side effect outside a tool call (a schedule's guard command)."""
+        return self._root_cancelled(root_id)
+
     def set_snapshot_store(self, store: Any, workspace_dir: str) -> None:
         """Phase 2.8: compensation snapshots for compensable calls in background contexts."""
         self._snap_store = store

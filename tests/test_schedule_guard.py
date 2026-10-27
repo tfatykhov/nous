@@ -76,6 +76,7 @@ def _pool(schedule: SimpleNamespace, **overrides):
     runner = MagicMock()
     runner.run_turn = AsyncMock(return_value=("ok", None, {}))
     runner.end_conversation = AsyncMock()
+    runner.root_cancelled = MagicMock(return_value=False)
     heart = MagicMock()
     heart.subtasks = AsyncMock()
     heart.schedules = AsyncMock()
@@ -562,6 +563,7 @@ async def test_a_guarded_fire_completes_its_row_and_closes_its_intention(db):
         assert run is not None and run.id == fire.id
         runner = MagicMock()
         runner.run_turn = AsyncMock()
+        runner.root_cancelled = MagicMock(return_value=False)
         bus = AsyncMock()
         await SubtaskWorkerPool(runner=runner, heart=heart, settings=settings, bus=bus)._process_subtask(run)
 
@@ -722,5 +724,86 @@ async def test_the_reconciler_writes_no_inbox_row_for_a_guard_skipped_run(db, mo
         assert await reconcile.run(limit=10) == 0
         assert skipped.id not in selected
         assert await inbox_ids() == [ran.id]
+    finally:
+        await heart.close()
+
+
+def test_the_runners_root_cancelled_reads_the_view_tool_calls_are_refused_on():
+    from nous.api.runner import AgentRunner
+
+    runner = AgentRunner.__new__(AgentRunner)
+    runner._forks = []
+    cancelled = uuid.uuid4()
+    runner.set_cancelled_roots({cancelled}.__contains__)
+    assert runner.root_cancelled(cancelled) is True
+    assert runner.root_cancelled(uuid.uuid4()) is False
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize("cancel", [True, False])
+async def test_a_root_cancelled_before_the_guard_starts_runs_no_command(db, monkeypatch, cancel):
+    from nous.api.execution_context import ExecutionContext
+    from nous.brain import continuation
+    from nous.handlers.task_scheduler import create_fire
+    from nous.heart.heart import Heart
+
+    settings = Settings(
+        _env_file=None,
+        agent_id=f"test-guard-{uuid.uuid4().hex[:8]}",
+        intentions_enabled=True,
+        result_inbox_enabled=True,
+        schedule_guard_commands={NAME: "true"},
+    )
+    heart = Heart(db, settings)
+    cancelled: set = set()
+    runner = MagicMock()
+    runner.run_turn = AsyncMock()
+    runner.root_cancelled = cancelled.__contains__
+    launched = []
+    real_run_guard = schedule_guard.run_guard
+
+    async def spy(spec):
+        launched.append(spec.command)
+        return await real_run_guard(spec)
+
+    monkeypatch.setattr(schedule_guard, "run_guard", spy)
+    try:
+        schedule = await heart.schedules.create(
+            task=TASK,
+            schedule_type="recurring",
+            interval_seconds=3600,
+            metadata={"guard": {"name": NAME, "skip_when": "exit0_quiet", "timeout_seconds": 10}},
+        )
+        await create_fire(heart, settings, schedule)
+        run = await heart.subtasks.dequeue("worker-0")
+        root = ExecutionContext.for_subtask(run, "").root_intention_id
+        assert root is not None
+        pool = SubtaskWorkerPool(runner=runner, heart=heart, settings=settings, bus=AsyncMock())
+        pool._execute_subtask = AsyncMock()
+        real_spec = pool._guard_spec
+
+        async def spec_then_cancel(subtask):  # the owner cancels while the schedule is read
+            spec = await real_spec(subtask)
+            if cancel:
+                async with db.session() as session:
+                    outcome = await continuation.cancel_root(
+                        session, settings.agent_id, root, reason="stop", actor="owner"
+                    )
+                    await session.commit()
+                cancelled.update(outcome.root_ids)  # as ContinuationRunner.cancel_root fills the view
+            return spec
+
+        pool._guard_spec = spec_then_cancel
+        await pool._process_subtask(run)
+
+        runner.run_turn.assert_not_awaited()
+        pool._execute_subtask.assert_not_awaited()
+        row = await heart.subtasks.get(run.id)
+        if cancel:
+            assert launched == []
+            assert (row.status, row.final_outcome, row.report_jsonb) == ("cancelled", "cancelled", None)
+        else:
+            assert launched == ["true"]
+            assert row.status == "completed" and row.report_jsonb["guard_skipped"] is True
     finally:
         await heart.close()

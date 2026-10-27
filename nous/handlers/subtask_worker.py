@@ -235,7 +235,8 @@ class SubtaskWorkerPool:
         return spec
 
     async def _run_guard(self, subtask: Subtask) -> bool:
-        """Run the schedule's guard, if any. True when it completed the run with no model call.
+        """Run the schedule's guard, if any. True when it completed the run with no model call, or when the
+        run's root was cancelled before the command started (then nothing runs).
 
         Otherwise the guard's receipt is appended to the run's task text in memory
         (the row is not changed) and the model turn runs as usual: fail open. Never
@@ -253,6 +254,10 @@ class SubtaskWorkerPool:
             spec = await self._guard_spec(subtask)
             if spec is None:
                 return False
+            if self._root_cancelled(subtask):
+                # cancel_root already cancelled the row; the command is a side effect, so it never starts.
+                logger.info("Subtask %s: its root was cancelled before its guard ran; not running it", sid)
+                return True
             result = await schedule_guard.run_guard(spec)
             if not schedule_guard.should_skip(spec, result):
                 # A script that could not run (126/127), was killed by a signal, or wrote to stderr
@@ -301,6 +306,12 @@ class SubtaskWorkerPool:
             logger.exception("Subtask %s: skipped by its guard, but its event or intention close failed", sid)
         logger.info("Subtask %s skipped by its schedule's guard", sid)
         return True
+
+    def _root_cancelled(self, subtask: Subtask) -> bool:
+        """F099 2e: the owner cancelled this run's root. The runner's view, the one ``_authorize_tool_call``
+        refuses every tool call on, read for the root the run's turn would name."""
+        root = ExecutionContext.for_subtask(subtask, "").root_intention_id
+        return root is not None and self._runner.root_cancelled(root)
 
     async def _record_guard_run(
         self, subtask: Subtask, spec: schedule_guard.GuardSpec, result: schedule_guard.GuardResult
