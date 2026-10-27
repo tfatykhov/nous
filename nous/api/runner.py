@@ -62,6 +62,7 @@ from nous.cognitive.execution_ledger import (
     bash_exit_code,
     classify_side_effect,
     evidence_args,
+    redact_error_text,
 )
 from nous.cognitive.layer import CognitiveLayer
 from nous.cognitive.ledger_store import DuplicateSend, HeldKey, LedgerStore, LedgerWriteError
@@ -87,6 +88,16 @@ def _no_cancelled_roots(_root_id: UUID) -> bool:
     """The default view of cancelled roots: none. Installed until ``set_cancelled_roots`` (F099 2e) replaces it,
     so a deployment with continuation off pays one attribute read and one call per lineage tool call."""
     return False
+
+
+_COMMAND_HEAD_CHARS = 300
+
+
+def _command_head(command: object) -> str:
+    """A refused lineage bash command as its policy-violation event keeps it: redacted as the ledger redacts an
+    error text, THEN clipped to _COMMAND_HEAD_CHARS (a secret cut first could be too short for the pattern that
+    recognizes it). Not a string: empty."""
+    return redact_error_text(command)[:_COMMAND_HEAD_CHARS] if isinstance(command, str) else ""
 
 
 # 012.2: a subtask may not delegate (no-nesting rule). F062: spawn_sync has identical
@@ -570,7 +581,9 @@ class AgentRunner:
                 logger.warning(
                     "F099: refused %r in a %s turn (%s:%s, session=%s)", tool_name, ctx.kind, scope, strict, session_id
                 )
-                # mode "enforce": it was refused, which is what the dashboard counts under it.
+                # mode "enforce": it was refused, which is what the dashboard counts under it. A refused lineage
+                # bash call also keeps the head of its command, to check the shell's allowlist against.
+                shell = scope == "internal_only" and strict == "external" and tool_name == "bash"
                 self._log_f026_decision(
                     "harness_context_policy_violation",
                     {
@@ -578,6 +591,7 @@ class AgentRunner:
                         "context_kind": ctx.kind,
                         "violation": f"{scope}:{strict}",
                         "mode": "enforce",
+                        **({"command_head": _command_head(tool_input.get("command"))} if shell else {}),
                     },
                     session_id=session_id,
                 )
