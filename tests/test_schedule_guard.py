@@ -1,6 +1,7 @@
 """Run-level guard for scheduled script jobs (nous/handlers/schedule_guard.py + the worker hook).
 
-The guard config is read from the schedule row's ``metadata.guard``. A guard that exits 0 with empty
+The guard config is read from the schedule row's ``metadata.guard``, which names an entry of the
+allowlist ``NOUS_SCHEDULE_GUARD_COMMANDS`` (the only source of a command). A guard that exits 0 with empty
 stdout and stderr completes the run with no model call; every other result falls through to the model turn with a
 receipt appended to the run's task text.
 """
@@ -37,12 +38,18 @@ def _settings(**overrides) -> Settings:
     return Settings(_env_file=None, **{**base, **overrides})
 
 
-def _schedule(guard: dict | None, *, task: str = TASK) -> SimpleNamespace:
+def _schedule(guard: dict | str | None, *, task: str = TASK) -> SimpleNamespace:
+    """A schedule row; a ``_command`` key of ``guard`` becomes NAME's allowlisted command, not row data."""
+    commands = {}
+    if isinstance(guard, dict) and "_command" in guard:
+        guard = dict(guard)
+        commands[NAME] = guard.pop("_command")
     return SimpleNamespace(
         id=uuid.uuid4(),
         agent_id=_settings().agent_id,
         task=task,
         metadata_={} if guard is None else {"guard": guard},
+        commands=commands,
     )
 
 
@@ -60,7 +67,7 @@ def _run(schedule: SimpleNamespace, **meta) -> SimpleNamespace:
     )
 
 
-def _pool(schedule: SimpleNamespace, settings: Settings | None = None):
+def _pool(schedule: SimpleNamespace, **overrides):
     runner = MagicMock()
     runner.run_turn = AsyncMock(return_value=("ok", None, {}))
     runner.end_conversation = AsyncMock()
@@ -70,7 +77,8 @@ def _pool(schedule: SimpleNamespace, settings: Settings | None = None):
     heart.schedules.get = AsyncMock(return_value=schedule)
     bus = AsyncMock()
     http = AsyncMock()
-    pool = SubtaskWorkerPool(runner=runner, heart=heart, settings=settings or _settings(), bus=bus, http_client=http)
+    settings = _settings(**{"schedule_guard_commands": schedule.commands, **overrides})
+    pool = SubtaskWorkerPool(runner=runner, heart=heart, settings=settings, bus=bus, http_client=http)
     seen: dict = {}
 
     async def fake_execute(subtask):
@@ -93,8 +101,16 @@ def closed(monkeypatch):
     return calls
 
 
+NAME = "sweep"
+
+
 def _guard(command: str, **kw) -> dict:
-    return {"command": command, "skip_when": "exit0_quiet", "timeout_seconds": 10, **kw}
+    """A guard naming NAME, whose allowlisted command is ``command`` (see ``_schedule``)."""
+    return {"name": NAME, "skip_when": "exit0_quiet", "timeout_seconds": 10, "_command": command, **kw}
+
+
+def _spec(command: str, **kw) -> schedule_guard.GuardSpec:
+    return schedule_guard.parse_guard({"name": NAME, **kw}, {NAME: command})
 
 
 # ---- skip path -----------------------------------------------------------------------------------------
@@ -137,7 +153,7 @@ async def test_a_failed_event_after_the_skip_never_sends_the_run_to_the_model(cl
 
 async def test_skip_does_not_close_the_intention_when_the_inbox_is_off(closed):
     schedule = _schedule(_guard("true"))
-    pool, *_ = _pool(schedule, _settings(result_inbox_enabled=False))
+    pool, *_ = _pool(schedule, result_inbox_enabled=False)
     await pool._process_subtask(_run(schedule))
     assert closed == []
 
@@ -184,7 +200,7 @@ async def test_a_timeout_returns_soon_when_an_escaped_child_holds_stdout(tmp_pat
     # misses it and it keeps stdout open; the wait for the pipes must still be bounded.
     monkeypatch.setattr(nous_utils, "_KILL_WAIT_SECONDS", 0.5)
     pidfile = tmp_path / "pid"
-    spec = schedule_guard.parse_guard({"command": f"setsid sleep 30 & echo $! > {pidfile}; sleep 30", "timeout_seconds": 1})
+    spec = _spec(f"setsid sleep 30 & echo $! > {pidfile}; sleep 30", timeout_seconds=1)
     start = time.monotonic()
     try:
         result = await schedule_guard.run_guard(spec)
@@ -245,8 +261,8 @@ async def test_the_receipt_keeps_at_most_2kb_of_output():
 # ---- no guard: unchanged behaviour ---------------------------------------------------------------------
 
 
-async def _unguarded(schedule, run, settings=None):
-    pool, runner, heart, *_rest, seen = _pool(schedule, settings)
+async def _unguarded(schedule, run, **overrides):
+    pool, runner, heart, *_rest, seen = _pool(schedule, **overrides)
     await pool._process_subtask(run)
     pool._execute_subtask.assert_awaited_once()
     heart.subtasks.complete.assert_not_awaited()
@@ -256,7 +272,7 @@ async def _unguarded(schedule, run, settings=None):
 
 async def test_the_kill_switch_ignores_guards():
     schedule = _schedule(_guard("true"))
-    heart = await _unguarded(schedule, _run(schedule), _settings(schedule_guards_enabled=False))
+    heart = await _unguarded(schedule, _run(schedule), schedule_guards_enabled=False)
     heart.schedules.get.assert_not_awaited()
 
 
@@ -291,10 +307,58 @@ async def test_a_run_whose_text_is_not_the_schedules_task_is_never_guarded():
     await _unguarded(schedule, run)
 
 
-@pytest.mark.parametrize("guard", [{"skip_when": "exit0_quiet"}, {"command": ""}, "true", {"command": 5}])
+@pytest.mark.parametrize("guard", [{"skip_when": "exit0_quiet"}, {"name": ""}, "true", {"name": 5}])
 async def test_a_malformed_guard_is_ignored(guard):
     schedule = _schedule(guard)
     await _unguarded(schedule, _run(schedule))
+
+
+# ---- the allowlist -------------------------------------------------------------------------------------
+
+
+async def test_a_name_that_is_not_in_the_allowlist_falls_through():
+    schedule = _schedule({"name": "not-allowlisted", "skip_when": "exit0_quiet"})
+    schedule.commands = {NAME: "true"}
+    await _unguarded(schedule, _run(schedule))
+
+
+async def test_an_empty_allowlist_falls_through():
+    schedule = _schedule(_guard("true"))
+    schedule.commands = {}
+    await _unguarded(schedule, _run(schedule))
+
+
+async def test_a_raw_command_in_the_row_is_never_executed(tmp_path):
+    marker = tmp_path / "ran"
+    schedule = _schedule({"command": f"touch {marker}", "skip_when": "exit0_quiet"})
+    schedule.commands = {NAME: "true"}
+    await _unguarded(schedule, _run(schedule))
+    assert not marker.exists()
+
+
+async def test_a_named_guard_runs_the_allowlisted_command_not_the_rows(tmp_path, closed):
+    marker = tmp_path / "ran"
+    schedule = _schedule({**_guard("true"), "command": f"touch {marker}"})
+    pool, runner, heart, *_ = _pool(schedule)
+    await pool._process_subtask(_run(schedule))
+    heart.subtasks.complete.assert_awaited_once()  # "true" ran and certified a no-op
+    assert heart.subtasks.complete.await_args.args[1].startswith("skipped_by_guard: true ")
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ('{"a": "bash /x.sh", "b": "true"}', {"a": "bash /x.sh", "b": "true"}),
+        ("", {}),
+        ("not json", {}),
+        ('["bash /x.sh"]', {}),
+        ('{"a": "true", "b": "", "c": 5, "": "true"}', {"a": "true"}),
+    ],
+)
+def test_the_allowlist_env_is_parsed_and_never_fails_boot(monkeypatch, raw, expected):
+    monkeypatch.setenv("NOUS_SCHEDULE_GUARD_COMMANDS", raw)
+    assert Settings(_env_file=None).schedule_guard_commands == expected
 
 
 async def test_a_failed_schedule_read_is_ignored():
@@ -311,14 +375,14 @@ async def test_a_failed_schedule_read_is_ignored():
 
 
 def test_parse_clamps_the_timeout():
-    assert schedule_guard.parse_guard({"command": "true", "timeout_seconds": 10_000}).timeout_seconds == 300
-    assert schedule_guard.parse_guard({"command": "true", "timeout_seconds": 0}).timeout_seconds == 1
-    assert schedule_guard.parse_guard({"command": "true"}).timeout_seconds == 60
+    assert _spec("true", timeout_seconds=10_000).timeout_seconds == 300
+    assert _spec("true", timeout_seconds=0).timeout_seconds == 1
+    assert _spec("true").timeout_seconds == 60
 
 
 async def test_a_cancelled_guard_kills_its_command(tmp_path):
     started, survived = tmp_path / "started", tmp_path / "survived"
-    spec = schedule_guard.parse_guard({"command": f"touch {started}; sleep 1; touch {survived}", "timeout_seconds": 30})
+    spec = _spec(f"touch {started}; sleep 1; touch {survived}", timeout_seconds=30)
     task = asyncio.create_task(schedule_guard.run_guard(spec))
     for _ in range(100):
         if started.exists():
@@ -346,11 +410,12 @@ async def test_a_guarded_fire_completes_its_row_and_closes_its_intention(db):
         agent_id=f"test-guard-{uuid.uuid4().hex[:8]}",
         intentions_enabled=True,
         result_inbox_enabled=True,
+        schedule_guard_commands={NAME: "true"},
     )
     heart = Heart(db, settings)
     try:
         schedule = await heart.schedules.create(
-            task=TASK, schedule_type="recurring", interval_seconds=3600, metadata={"guard": _guard("true")}
+            task=TASK, schedule_type="recurring", interval_seconds=3600, metadata={"guard": {"name": NAME, "skip_when": "exit0_quiet", "timeout_seconds": 10}}
         )
         fire = await create_fire(heart, settings, schedule)
         run = await heart.subtasks.dequeue("worker-0")

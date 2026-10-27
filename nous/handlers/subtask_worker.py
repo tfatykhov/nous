@@ -205,8 +205,9 @@ class SubtaskWorkerPool:
     async def _guard_spec(self, subtask: Subtask) -> schedule_guard.GuardSpec | None:
         """The guard of the schedule this run is a plain fire of, or None.
 
-        The guard itself comes from this agent's schedule row at run time, never from
-        the run's own metadata or task text (the run only names its schedule). A
+        The guard's name comes from this agent's schedule row at run time, never from
+        the run's own metadata or task text (the run only names its schedule), and its
+        command only from the owner's allowlist in Settings. A
         check-and-fix run, or any run whose text is not the schedule's task, is never
         guarded. A failed read means no guard.
         """
@@ -223,9 +224,11 @@ class SubtaskWorkerPool:
         if schedule is None or schedule.agent_id != self._settings.agent_id or schedule.task != subtask.task:
             return None
         raw = (schedule.metadata_ or {}).get("guard")
-        spec = schedule_guard.parse_guard(raw)
+        spec = schedule_guard.parse_guard(raw, self._settings.schedule_guard_commands)
         if spec is None and raw is not None:
-            logger.warning("Schedule %s has a guard with no usable command; ignoring it", schedule.id)
+            logger.warning(
+                "Schedule %s has a guard that names no NOUS_SCHEDULE_GUARD_COMMANDS entry; ignoring it", schedule.id
+            )
         return spec
 
     async def _run_guard(self, subtask: Subtask) -> bool:

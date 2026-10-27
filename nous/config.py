@@ -2281,6 +2281,36 @@ class Settings(BaseSettings):
     # before its run's model turn and completes the run without one when the command
     # certifies there is nothing to do. Off: guards are ignored entirely.
     schedule_guards_enabled: bool = True
+    # The commands a guard may run, as a JSON map of name -> shell command
+    # (NOUS_SCHEDULE_GUARD_COMMANDS='{"ledger_sweep": "bash /path/sweep.sh"}'). A
+    # schedule's metadata.guard only names an entry, so the agent, which can write
+    # schedule rows, can never choose what runs. Empty, invalid JSON or a non-object
+    # gives no commands (a WARNING; every guard falls through), never a boot failure;
+    # an entry whose name or command is not a non-empty string is dropped.
+    schedule_guard_commands: Annotated[dict[str, str], NoDecode] = Field(default_factory=dict)
+
+    @field_validator("schedule_guard_commands", mode="before")
+    @classmethod
+    def _parse_schedule_guard_commands(cls, v: object) -> dict[str, str]:
+        """Decode the JSON env string ourselves and drop what is not a usable entry."""
+        log = logging.getLogger(__name__)
+        if isinstance(v, str):
+            if not v.strip():
+                return {}
+            try:
+                v = json.loads(v)
+            except ValueError:
+                log.warning("NOUS_SCHEDULE_GUARD_COMMANDS is not valid JSON; no guard command is allowed")
+                return {}
+        if v is None:
+            return {}
+        if not isinstance(v, dict):
+            log.warning("NOUS_SCHEDULE_GUARD_COMMANDS is not a JSON object; no guard command is allowed")
+            return {}
+        kept = {k: c for k, c in v.items() if isinstance(k, str) and k and isinstance(c, str) and c.strip()}
+        if len(kept) != len(v):
+            log.warning("NOUS_SCHEDULE_GUARD_COMMANDS: dropped %d entries that are not name -> command", len(v) - len(kept))
+        return kept
 
     # F064.6: work-queue ingress heartbeat check. Off by default. When true,
     # a WorkQueueCheck is registered that polls the configured adapter and

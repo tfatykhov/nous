@@ -1,6 +1,6 @@
 # F107: Scheduled Run Guard
 
-**Status:** PR open. `NOUS_SCHEDULE_GUARDS_ENABLED` (default `true`); nothing is guarded until a schedule's metadata has a `guard`.
+**Status:** PR open. `NOUS_SCHEDULE_GUARDS_ENABLED` (default `true`); nothing is guarded until a schedule's metadata has a `guard` that names an entry of `NOUS_SCHEDULE_GUARD_COMMANDS` (default empty).
 
 ## Problem
 
@@ -10,8 +10,10 @@ Some recurring schedules run a model turn whose only job is to run one idempoten
 
 A deterministic guard runs first. The model runs only when the guard cannot certify that there is nothing to do.
 
-- **Config:** `heart.schedules.metadata.guard = {"command": "...", "skip_when": "exit0_quiet", "timeout_seconds": 60}`. The timeout defaults to 60 s and is clamped to 1 to 300 s. The guard is opt-in per schedule and needs no migration.
-- **Who may set it:** only the owner, by writing the schedule row. No agent tool or REST endpoint writes schedule metadata. The worker reads the guard from the schedule row at run time (a schedule of this agent only), never from the run's own metadata or task text.
+- **Config, two parts:**
+  - The commands: `NOUS_SCHEDULE_GUARD_COMMANDS`, a JSON map of name to shell command in the deployment's env, e.g. `{"ledger_sweep": "bash /tmp/nous-workspace/claude-jobs/ledger_sweep.sh"}`. Empty, invalid JSON or a non-object gives no commands (a WARNING at startup, never a boot failure), and an entry whose name or command is not a non-empty string is dropped.
+  - The schedule: `heart.schedules.metadata.guard = {"name": "ledger_sweep", "skip_when": "exit0_quiet", "timeout_seconds": 60}`. The timeout defaults to 60 s and is clamped to 1 to 300 s. The guard is opt-in per schedule and needs no migration.
+- **Trust boundary:** the schedule row is **not** owner-only. No agent tool or REST endpoint writes schedule metadata, but the agent has general shell and database access, so it could write the row. The row therefore only *names* a command; what runs comes only from the allowlist, which lives in the env, outside the agent's reach. A `command` key in the row is ignored, and a name that is not in the allowlist means no guard: the turn runs as usual, with a WARNING naming the schedule. The worker reads the guard from the schedule row at run time (a schedule of this agent only), never from the run's own metadata or task text.
 - **Where it runs:** `SubtaskWorkerPool._process_subtask` (`nous/handlers/subtask_worker.py`), before the run's turn and outside its timeout.
   - Fire bookkeeping is unchanged: `fire_count`, `next_fire_at`, the F101 policies, the run's intention and the subtask row are created exactly as before.
   - The guard applies only to a plain fire of the schedule: the run's text must equal `schedule.task`, and the run must not be a check-and-fix run.
@@ -31,11 +33,17 @@ A deterministic guard runs first. The model runs only when the guard cannot cert
 
 ## Pilot
 
-After merge, set the guard on the ledger sweep:
+After merge, add the command to the deployment's env and restart. `docker-compose.yml` passes `NOUS_*` variables one by one and is a code-owner path, so the owner adds the pass-through line `- NOUS_SCHEDULE_GUARD_COMMANDS=${NOUS_SCHEDULE_GUARD_COMMANDS:-}` to the `nous` service there (this PR does not), and sets the value in the host `.env`:
+
+```
+NOUS_SCHEDULE_GUARD_COMMANDS={"ledger_sweep": "bash /tmp/nous-workspace/claude-jobs/ledger_sweep.sh"}
+```
+
+Then set the guard on the ledger sweep:
 
 ```sql
 UPDATE heart.schedules
-SET metadata = metadata || '{"guard": {"command": "bash /tmp/nous-workspace/claude-jobs/ledger_sweep.sh", "skip_when": "exit0_quiet", "timeout_seconds": 60}}'::jsonb
+SET metadata = metadata || '{"guard": {"name": "ledger_sweep", "skip_when": "exit0_quiet", "timeout_seconds": 60}}'::jsonb
 WHERE id = '83ff767a-1077-4f68-91e9-89fed1e62a55';
 ```
 
@@ -44,7 +52,7 @@ The script ends with `; true`, so its exit code is always 0. It prints a line on
 ## Rollback
 
 - Remove the guard from one schedule: `UPDATE heart.schedules SET metadata = metadata - 'guard' WHERE id = ...`.
-- Turn guards off everywhere: `NOUS_SCHEDULE_GUARDS_ENABLED=false`.
+- Turn guards off everywhere: `NOUS_SCHEDULE_GUARDS_ENABLED=false`, or empty `NOUS_SCHEDULE_GUARD_COMMANDS`.
 
 ## Heartbeat model calls in `context_log` (same PR)
 

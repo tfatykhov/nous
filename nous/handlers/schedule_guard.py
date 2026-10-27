@@ -1,11 +1,14 @@
 """Run-level guard for scheduled script jobs.
 
 A recurring schedule whose run mostly executes a script and reports "nothing" can carry a guard in
-its own ``metadata`` (written by the owner, never by the agent or the task text)::
+its own ``metadata``, which names an entry of the owner's allowlist ``NOUS_SCHEDULE_GUARD_COMMANDS``::
 
-    {"guard": {"command": "bash /path/to/sweep.sh", "skip_when": "exit0_quiet", "timeout_seconds": 60}}
+    {"guard": {"name": "ledger_sweep", "skip_when": "exit0_quiet", "timeout_seconds": 60}}
 
-The subtask worker runs the command before the run's model turn. When the command certifies there is
+The command itself comes only from the allowlist (env), never from the row: the agent can write
+schedule rows through its shell and database access, so the row may only choose among commands
+the owner approved. A name that is not in the allowlist means no guard. The subtask worker runs
+the command before the run's model turn. When the command certifies there is
 nothing to do (``exit0_quiet``: exit 0 and whitespace-only stdout and stderr) the run completes with no model
 call. Any other result (non-zero exit, output on either stream, timeout, an unknown ``skip_when``, an error starting the
 command) fails open: the model turn runs as before, with ``receipt()`` appended to its task text so the
@@ -17,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
+from collections.abc import Mapping
 from typing import Any
 
 from nous.utils import kill_process_group
@@ -29,6 +33,7 @@ OUTPUT_MAX_BYTES = 2048
 
 @dataclass(frozen=True, slots=True)
 class GuardSpec:
+    name: str
     command: str
     skip_when: str
     timeout_seconds: int
@@ -44,17 +49,23 @@ class GuardResult:
     error: str | None = None
 
 
-def parse_guard(raw: Any) -> GuardSpec | None:
-    """The guard a schedule's ``metadata.guard`` describes, or None when there is no usable one."""
+def parse_guard(raw: Any, commands: Mapping[str, str]) -> GuardSpec | None:
+    """The guard a schedule's ``metadata.guard`` describes, or None when there is no usable one.
+
+    ``raw["name"]`` must name an entry of ``commands`` (the owner's allowlist); any ``command``
+    key in ``raw`` is ignored.
+    """
     if not isinstance(raw, dict):
         return None
-    command = raw.get("command")
+    name = raw.get("name")
+    command = commands.get(name) if isinstance(name, str) else None
     if not isinstance(command, str) or not command.strip():
         return None
     timeout = raw.get("timeout_seconds")
     if not isinstance(timeout, int) or isinstance(timeout, bool):
         timeout = DEFAULT_TIMEOUT_SECONDS
     return GuardSpec(
+        name=name,
         command=command,
         skip_when=str(raw.get("skip_when") or SKIP_WHEN_EXIT0_QUIET),
         timeout_seconds=min(max(timeout, 1), MAX_TIMEOUT_SECONDS),
