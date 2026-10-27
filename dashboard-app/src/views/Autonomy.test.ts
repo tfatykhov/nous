@@ -71,11 +71,11 @@ const guardRecord = (over: Record<string, unknown>) => ({
   at: new Date(Date.now() - 3600_000).toISOString(), kind: 'would_skip', schedule_id: 'ef'.repeat(16),
   subtask_id: '12'.repeat(16), name: 'ledger_sweep', mode: 'shadow', reason: null, exit_code: 0, timed_out: false,
   duration_ms: 41, stdout_bytes: 0, stderr_bytes: 0, stderr_head: '', command: 'bash /x/sweep.sh', acted: false,
-  acted_by: [], ...over,
+  acted_by: [], observed: true, ...over,
 });
 const guardSchedule = (over: Record<string, unknown>) => ({
   schedule_id: 'ef'.repeat(16), job: 'Run <i>the</i> ledger sweep', name: 'ledger_sweep', mode: 'shadow', allowlisted: true,
-  runs: 168, guard_runs: 160, skipped: 0, would_skip: 150, would_skip_unrecorded: 0,
+  runs: 168, guard_runs: 160, skipped: 0, would_skip: 150, would_skip_unrecorded: 0, would_skip_unobserved: 0,
   fell_through: { output: 6, stderr: 1, exit: 0, timeout: 0, error: 3, not_allowlisted: 0 },
   shadow_misses: 0, shadow_misses_by_signal: { report: 0, finding: 0, inbox: 0, push: 0, ledger: 0 }, last_runs: [],
   ...over,
@@ -83,7 +83,7 @@ const guardSchedule = (over: Record<string, unknown>) => ({
 const GUARDS = (over: Record<string, unknown> = {}) => ({
   enabled: true, bus_enabled: true, window_days: 7,
   schedules: [guardSchedule({})],
-  runs: 168, guard_runs: 160, skipped: 0, would_skip: 150, would_skip_unrecorded: 0,
+  runs: 168, guard_runs: 160, skipped: 0, would_skip: 150, would_skip_unrecorded: 0, would_skip_unobserved: 0,
   fell_through: { output: 6, stderr: 1, exit: 0, timeout: 0, error: 3, not_allowlisted: 0 },
   shadow_misses: 0, shadow_misses_by_signal: { report: 0, finding: 0, inbox: 0, push: 0, ledger: 0 },
   recent: [
@@ -414,6 +414,19 @@ describe('Autonomy view', () => {
     body = { ...FULL(), guards: GUARDS({ would_skip_unrecorded: 2 }) };
     render(Autonomy);
     expect(await screen.findByText(/2 would-skip runs have no record of what the model did/)).toBeTruthy();
+  });
+
+  it('labels a run with no structured report "not observed", and counts those apart', async () => {
+    body = { ...FULL(), guards: GUARDS({ would_skip_unobserved: 1, recent: [
+      guardRecord({ acted: null, acted_by: ['inbox', 'push'], observed: false }),
+      guardRecord({ acted: null, acted_by: null, observed: null, subtask_id: '9a'.repeat(16) }),
+    ] }) };
+    render(Autonomy);
+    const caption = await screen.findByText(/Latest 2 records/);
+    const [legacy, unrecorded] = Array.from(caption.closest('table')!.querySelectorAll('tbody tr'));
+    expect(legacy.querySelectorAll('td')[4].textContent).toBe('not observed');
+    expect(unrecorded.querySelectorAll('td')[4].textContent).toBe('—');
+    expect(await screen.findByText(/1 would-skip run was not observed/)).toBeTruthy();
   });
 
   it('says guards are off, or that nothing is guarded yet', async () => {

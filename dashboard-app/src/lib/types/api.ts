@@ -1717,6 +1717,8 @@ export interface GuardCounts {
   would_skip: number;
   /** Would-skip runs with no record yet of whether the model acted: not counted in shadow_misses either way. */
   would_skip_unrecorded: number;
+  /** Would-skip runs whose record could not see a finding (no structured report: the legacy path) and saw no ledger write. */
+  would_skip_unobserved: number;
   fell_through: Record<GuardReason, number>;
   /** Would-skip runs in which the model acted (a finding or a ledger write); never more than would_skip. */
   shadow_misses: number;
@@ -1748,9 +1750,11 @@ export interface GuardRecord {
   stderr_bytes: number | null;
   stderr_head: string | null;
   command: string | null;
-  /** Shadow runs only, once the turn is over: null when there is no record of it. */
+  /** Shadow runs only, once the turn is over: null when there is no record of it, or when it was not observed. */
   acted: boolean | null;
   acted_by: GuardSignal[] | null;
+  /** False when the run left no structured report, so "the model did nothing" could not be seen; null with no record. */
+  observed: boolean | null;
 }
 
 /** One recurring job check-and-fix has a record for. Texts are written by the check run: plain text only. */

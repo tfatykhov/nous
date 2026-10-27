@@ -81,7 +81,8 @@
     (Object.keys(GUARD_REASON_LABEL) as GuardReason[]).filter((k) => counts[k] > 0)
       .map((k) => `${GUARD_REASON_LABEL[k]} ${counts[k]}`).join(' · ') || 'none';
   const guardActed = (r: GuardRecord) =>
-    r.acted === null ? '—' : r.acted ? `Model acted: ${(r.acted_by ?? []).join(', ')}` : 'Model did nothing';
+    r.acted === null ? (r.observed === false ? 'not observed' : '—')
+      : r.acted ? `Model acted: ${(r.acted_by ?? []).join(', ')}` : 'Model did nothing';
 
   const warnCols = [
     { key: 'context', label: 'Context' },
@@ -460,6 +461,9 @@
     <p class="small">Fell through to the model: {fellThrough(g.fell_through)}</p>
     {#if g.would_skip_unrecorded > 0}
       <p class="small muted">{g.would_skip_unrecorded} would-skip run{g.would_skip_unrecorded === 1 ? ' has' : 's have'} no record of what the model did (still running, or the record was lost), so {g.would_skip_unrecorded === 1 ? 'it is' : 'they are'} not in the shadow-miss count.</p>
+    {/if}
+    {#if g.would_skip_unobserved > 0}
+      <p class="small muted">{g.would_skip_unobserved} would-skip run{g.would_skip_unobserved === 1 ? ' was' : 's were'} not observed: no structured report (the legacy path), so a finding could not be seen and {g.would_skip_unobserved === 1 ? 'it is' : 'they are'} neither a shadow miss nor clean.</p>
     {/if}
     {#snippet guardRecords(rows: GuardRecord[], caption?: string)}
       <div class="table-wrap">

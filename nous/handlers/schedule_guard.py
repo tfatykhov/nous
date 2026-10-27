@@ -16,8 +16,8 @@ appended to its task text so the model does not need to run the command again.
 ``NOUS_SCHEDULE_GUARDS_ENABLED=false`` ignores guards.
 
 ``mode`` (phase 2) is ``shadow`` when absent: the command runs and is recorded, but the model turn always
-runs too, and after it the worker records whether the model acted (``acted_signals``, ``acted``). Only ``skip`` lets
-the guard complete a run, and only the owner writes it. Any other mode falls through, like an unknown
+runs too, and after it the worker records whether the model acted (``acted_signals``, ``acted_verdict``).
+Only ``skip`` lets the guard complete a run, and only the owner writes it. Any other mode falls through, like an unknown
 ``skip_when``.
 """
 
@@ -189,6 +189,20 @@ def acted_signals(
 def acted(signals: Sequence[str]) -> bool:
     """Whether the model acted, given ``acted_signals``' kinds: it reported a finding or wrote through the ledger."""
     return bool(ACTING_SIGNALS & set(signals))
+
+
+def observed(row: Any) -> bool:
+    """Whether a finding of the run could be seen: its row has a structured report.
+
+    The legacy path (``subtask_hardening_enabled=False``) writes only a result text, so a finding there is no
+    signal and a run without a ledger write may still have acted.
+    """
+    return isinstance(getattr(row, "report_jsonb", None), dict)
+
+
+def acted_verdict(signals: Sequence[str], *, observed: bool) -> bool | None:
+    """``acted(signals)``, except None (unknown) for an unobserved run with nothing acting seen."""
+    return True if acted(signals) else (False if observed else None)
 
 
 def _clip(text: str, limit: int = OUTPUT_MAX_BYTES) -> str:

@@ -99,11 +99,11 @@ def event(agent, event_type, sub, sch, *, age_hours=1, **data) -> Event:
     )
 
 
-def acted(agent, sub, sch, signals, *, would_skip=True, age_hours=1) -> Event:
+def acted(agent, sub, sch, signals, *, would_skip=True, age_hours=1, observed=True) -> Event:
     guard = {"name": NAME, "mode": "shadow", "would_skip": would_skip}
     return event(
         agent, "subtask_guard_acted", sub, sch, age_hours=age_hours, guard=guard, acted=bool(signals),
-        acted_by=signals, run_status="completed", ledger_persisted=True,
+        acted_by=signals, observed=observed, run_status="completed", ledger_persisted=True,
     )  # fmt: skip
 
 
@@ -119,6 +119,7 @@ async def test_the_shape_with_nothing_guarded(db, agent):
         "skipped": 0,
         "would_skip": 0,
         "would_skip_unrecorded": 0,
+        "would_skip_unobserved": 0,
         "fell_through": {r: 0 for r in REASONS},
         "shadow_misses": 0,
         "shadow_misses_by_signal": {s: 0 for s in ("report", "finding", "inbox", "push", "ledger")},
@@ -239,7 +240,7 @@ async def test_recent_holds_the_last_ten_records_newest_first_with_acted_joined(
     assert recent[1]["stderr_head"] == "<b>x</b>"  # raw text; the view escapes it
     assert set(recent[1]) == {
         "at", "kind", "schedule_id", "subtask_id", "name", "mode", "reason", "exit_code", "timed_out",
-        "duration_ms", "stdout_bytes", "stderr_bytes", "stderr_head", "command", "acted", "acted_by",
+        "duration_ms", "stdout_bytes", "stderr_bytes", "stderr_head", "command", "acted", "acted_by", "observed",
     }  # fmt: skip
 
 
@@ -274,11 +275,13 @@ async def test_each_guarded_schedule_has_its_own_counts_and_last_runs(db, agent)
     assert [r["subtask_id"] for r in d["last_runs"]] == [s.id.hex for s in days_]
     for row in (h, d, out):
         assert row["shadow_misses"] <= row["would_skip"]
-    for key in ("runs", "guard_runs", "skipped", "would_skip", "would_skip_unrecorded", "shadow_misses"):
+    keys = ("runs", "guard_runs", "skipped", "would_skip", "would_skip_unrecorded", "would_skip_unobserved")
+    for key in (*keys, "shadow_misses"):
         assert out[key] == h[key] + d[key]
     assert set(h) == {
         "schedule_id", "job", "name", "mode", "allowlisted", "runs", "guard_runs", "skipped", "would_skip",
-        "would_skip_unrecorded", "fell_through", "shadow_misses", "shadow_misses_by_signal", "last_runs",
+        "would_skip_unrecorded", "would_skip_unobserved", "fell_through", "shadow_misses",
+        "shadow_misses_by_signal", "last_runs",
     }  # fmt: skip
 
 
@@ -415,6 +418,36 @@ async def test_would_skip_runs_with_no_outcome_record_are_counted_apart(db, agen
     )
     out = await data(db, agent)
     assert (out["would_skip"], out["would_skip_unrecorded"]) == (3, 2)
+
+
+async def test_a_legacy_would_skip_run_is_not_observed_and_not_clean(db, agent):
+    # The legacy path writes no structured report: a finding in its free text is no signal (PR #811, Codex P2).
+    sch = schedule(agent, {"name": NAME})
+    clean, legacy, legacy_wrote, older = (run(agent, sch) for _ in range(4))
+    old = acted(agent, older, sch, ["inbox", "push"])
+    old.data = {k: v for k, v in old.data.items() if k != "observed"}  # written before "observed" existed
+    await add(db, sch, clean, legacy, legacy_wrote, older)
+    await add(
+        db,
+        *(event(agent, "subtask_guard_ran", s, sch, guard=record()) for s in (clean, legacy, legacy_wrote, older)),
+        acted(agent, clean, sch, ["report", "inbox"]),
+        acted(agent, legacy, sch, ["inbox", "push"], observed=False),
+        acted(agent, legacy_wrote, sch, ["inbox", "ledger"], observed=False),  # a ledger write is seen anyway
+        old,
+    )
+    out = await data(db, agent)
+    by_id = {r["subtask_id"]: (r["acted"], r["observed"]) for r in out["recent"]}
+    assert by_id[legacy.id.hex] == (None, False)
+    assert by_id[legacy_wrote.id.hex] == (True, False)
+    assert by_id[clean.id.hex] == by_id[older.id.hex] == (False, True)
+    clean_runs = sum(1 for acted_, _ in by_id.values() if acted_ is False)
+    assert clean_runs == 2  # the legacy run is not clean
+    (row,) = out["schedules"]
+    for counts in (row, out):
+        assert (counts["would_skip"], counts["would_skip_unobserved"], counts["would_skip_unrecorded"]) == (4, 1, 0)
+        assert counts["shadow_misses"] == 1
+        parts = clean_runs + counts["shadow_misses"] + counts["would_skip_unrecorded"] + counts["would_skip_unobserved"]
+        assert parts == counts["would_skip"]
 
 
 async def test_malformed_records_do_not_break_the_block(db, agent):

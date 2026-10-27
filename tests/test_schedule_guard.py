@@ -825,8 +825,9 @@ def _shadow(command: str, **kw) -> dict:
     return guard
 
 
-def _row(run, *, status="completed", report=None) -> SimpleNamespace:
-    """The re-read row of a run whose turn finished."""
+def _row(run, *, status="completed", report=None, legacy=False) -> SimpleNamespace:
+    """The re-read row of a run whose turn finished: a structured report unless ``legacy`` (result text only)."""
+    report = None if legacy else (report or {})
     return SimpleNamespace(id=run.id, status=status, report_jsonb=report, result="done", metadata_=run.metadata_)
 
 
@@ -834,12 +835,14 @@ def _events(bus, event_type: str) -> list:
     return [c.args[0] for c in bus.emit.await_args_list if c.args[0].type == event_type]
 
 
-async def _shadow_run(guard: dict, *, report=None, inbox=False, ledger=(), status="completed", push=False):
+async def _shadow_run(
+    guard: dict, *, report=None, inbox=False, ledger=(), status="completed", push=False, legacy=False
+):
     """Process one fire of a shadow-guarded schedule; the model turn is faked."""
     schedule = _schedule(guard)
     pool, runner, heart, bus, http, seen = _pool(schedule)
     run = _run(schedule)
-    heart.subtasks.get = AsyncMock(return_value=_row(run, status=status, report=report))
+    heart.subtasks.get = AsyncMock(return_value=_row(run, status=status, report=report, legacy=legacy))
     heart.job_runs.ledger_effects = AsyncMock(return_value=list(ledger))
     pool._record_inbox = AsyncMock(return_value=inbox)
 
@@ -947,6 +950,33 @@ async def test_a_shadow_run_that_did_nothing_records_not_acted():
     assert data["subtask_id"] == run.id.hex and data["schedule_id"] == run.metadata_["schedule_id"]
     assert (data["guard"]["name"], data["guard"]["mode"], data["guard"]["would_skip"]) == (NAME, "shadow", True)
     assert data["run_status"] == "completed" and data["ledger_persisted"] is True
+    assert data["observed"] is True
+
+
+async def test_a_legacy_run_with_no_report_is_not_observed_rather_than_clean():
+    # _execute_legacy (subtask_hardening_enabled=False) writes only a result text: a finding in it is not a
+    # signal, so "no finding" there is unknown, not "did nothing" (PR #811 review, Codex P2).
+    *_rest, bus, _http, _seen, _run_ = await _shadow_run(_shadow("true"), legacy=True, inbox=True, push=True)
+    data = _acted(bus)
+    assert (data["acted"], data["observed"], data["acted_by"]) == (None, False, ["inbox", "push"])
+
+
+async def test_a_legacy_run_that_wrote_through_the_ledger_still_acted():
+    # The ledger is read apart from the report: a write is seen whatever path the turn took.
+    ledger = [("write_file", "success", {"path": "/x"})]
+    *_rest, bus, _http, _seen, _run_ = await _shadow_run(_shadow("true"), legacy=True, ledger=ledger)
+    data = _acted(bus)
+    assert (data["acted"], data["observed"], data["acted_by"]) == (True, False, ["ledger"])
+
+
+@pytest.mark.parametrize(
+    ("signals", "observed", "verdict"),
+    [([], True, False), (["inbox"], False, None), (["ledger"], False, True), (["finding"], True, True)],
+)
+def test_acted_verdict_is_unknown_only_when_nothing_acting_was_seen_and_the_report_was_missing(
+    signals, observed, verdict
+):
+    assert schedule_guard.acted_verdict(signals, observed=observed) is verdict
 
 
 @pytest.mark.parametrize(

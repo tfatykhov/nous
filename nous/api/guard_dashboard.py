@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.config import Settings
 from nous.dag.approval import as_utc
-from nous.handlers.schedule_guard import MODE_SHADOW, MODE_SKIP, REASONS, SIGNALS, acted
+from nous.handlers.schedule_guard import MODE_SHADOW, MODE_SKIP, REASONS, SIGNALS, acted_verdict
 from nous.storage.models import Event, Schedule, Subtask
 
 GUARD_KEY = "guard"
@@ -121,6 +121,8 @@ def _row(rec: dict[str, Any], outcome: dict[str, Any] | None) -> dict[str, Any]:
         guard.setdefault("mode", MODE_SKIP)  # every guard before phase 2 skipped
     kind, reason = _classify(guard, rec["ran"])
     acted_by = _acted_by(outcome)
+    # a record from before "observed" existed reads as observed, as it did when it was written
+    observed = None if acted_by is None else outcome.get("observed") is not False
     return {
         "at": rec["at"].isoformat(),
         "kind": kind,
@@ -129,8 +131,10 @@ def _row(rec: dict[str, Any], outcome: dict[str, Any] | None) -> dict[str, Any]:
         **{k: guard.get(k) for k in RECORD_KEYS},
         "reason": reason,
         # derived from acted_by, never the stored flag: one definition, also for older records
-        "acted": acted(acted_by) if acted_by is not None else None,
+        "acted": acted_verdict(acted_by, observed=observed) if acted_by is not None else None,
         "acted_by": acted_by,
+        # False: the run left no structured report (the legacy path), so "did nothing" could not be seen
+        "observed": observed,
     }
 
 
@@ -151,7 +155,9 @@ def _tally(pairs: list[tuple[dict[str, Any], dict[str, Any]]], runs: int) -> dic
         "skipped": sum(1 for row in rows if row["kind"] == "skipped"),
         "would_skip": len(would_skip),
         # would-skip runs with no record of what the model did (its turn is still going, or the record was lost)
-        "would_skip_unrecorded": sum(1 for row in would_skip if row["acted"] is None),
+        "would_skip_unrecorded": sum(1 for row in would_skip if row["acted"] is None and row["observed"] is None),
+        # would-skip runs with a record that could not see a finding (no structured report) and no ledger write
+        "would_skip_unobserved": sum(1 for row in would_skip if row["acted"] is None and row["observed"] is False),
         "fell_through": fell_through,
         "shadow_misses": len(misses),
         "shadow_misses_by_signal": {s: sum(1 for kinds in misses if s in kinds) for s in SIGNALS},
