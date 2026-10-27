@@ -26,6 +26,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import select, update
 
+from nous import cancel_provenance
 from nous.a2ui.intention_keys import KIND_ACTIVE, KIND_PROPOSAL, KIND_QUESTION, parse_key
 from nous.audits import AUDIT_VERDICT_ACTION
 from nous.brain import continuation, intentions
@@ -856,7 +857,11 @@ def _register_phase2_handlers(router: ActionRouter) -> None:
                     message=f"retrying {node}",
                     data_patches=[("/banner", f"Retry requested for {node}.")],
                 )
-            await orchestrator.cancel_dag(UUID(dag_id), reason="cancelled via companion")
+            await orchestrator.cancel_dag(
+                UUID(dag_id),
+                reason="cancelled via companion",
+                cancelled_by=cancel_provenance.record("owner", "companion"),
+            )
             return ActionResult(message="DAG cancelled", resolve_surface=True)
         except Exception as exc:
             logger.warning("F092 dag.%s failed", verb, exc_info=True)

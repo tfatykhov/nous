@@ -23,6 +23,7 @@ NO_RECORD_TEXT = "no cancel recorded by Nous (cancelled outside Nous, or by a co
 _VIA_MAX_CHARS = 60
 _NOT_PRINTABLE_ASCII = re.compile(r"[^ -~]")
 _TURN_LABELS = {"interactive": "chat turn", "continuation": "continuation turn", "mcp": "MCP turn"}
+_OWNER_WORDS = {"owner": "you", "agent": "Nous", "harness": "the harness"}
 _CANCELLED_BY = "cancelled_by"
 _CANCELLED_BY_MAX_BYTES = 512
 _RUNNER_VERBS = frozenset({"cancel", "status", "result"})
@@ -93,6 +94,14 @@ def describe(rec: object) -> str | None:
     if rec["by"] == "agent":
         return f"cancelled by your own {via}"
     return f"cancelled by the harness ({via})"
+
+
+def describe_for_owner(rec: object) -> str | None:
+    """The same record in the owner's words (the dashboard): ``Cancelled by you (Telegram)``, ``Cancelled by Nous
+    (chat turn)``, ``Cancelled by the harness (...)``; None for anything that is not one."""
+    if not isinstance(rec, dict) or rec.get("by") not in BY_VALUES:
+        return None
+    return f"Cancelled by {_OWNER_WORDS[rec['by']]} ({clean_via(rec.get('via'))})"
 
 
 def dag_postmortem(rec: dict[str, str]) -> dict[str, Any]:

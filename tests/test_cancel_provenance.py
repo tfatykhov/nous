@@ -218,3 +218,60 @@ def test_missing_or_garbled_file_reads_as_no_record(tmp_path, content):
         (job_dir / "cancelled_by").write_text(content)
     text = describe_job_cancellation(str(tmp_path), JOB)
     assert text == NO_RECORD_TEXT and "cancelled outside Nous" in text
+
+
+# ---- the dispatcher sets the actor; a model cannot ------------------------------------------------------------
+
+
+def _contexts():
+    from nous.api.execution_context import ExecutionContext
+
+    return {
+        "continuation": ExecutionContext(
+            kind="continuation", authority="internal_only", intention_id=uuid4(), root_intention_id=uuid4()
+        ),
+        "approved_action": ExecutionContext(kind="approved_action", proposal_id=uuid4(), declared_tools=("x",)),
+        "interactive": ExecutionContext(kind="interactive"),
+    }
+
+
+def _recording_dispatcher(name: str):
+    from nous.api.tools import ToolDispatcher
+
+    seen: list[dict] = []
+
+    async def handler(**kwargs):
+        seen.append(kwargs)
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+    dispatcher = ToolDispatcher()
+    schema = {"type": "object", "properties": {"action": {"type": "string"}, "command": {"type": "string"}}}
+    dispatcher.register(name, handler, schema)
+    return dispatcher, seen
+
+
+@pytest.mark.parametrize(
+    ("kind", "by", "via"),
+    [
+        ("continuation", "agent", "continuation turn"),
+        ("approved_action", "owner", "approved proposal"),
+        ("interactive", "agent", "chat turn"),
+    ],
+)
+async def test_dispatch_sets_the_actor_for_dag_manage_and_drops_a_forged_one(kind, by, via):
+    dispatcher, seen = _recording_dispatcher("dag_manage")
+    forged = {"by": "owner", "via": "Telegram", "at": "2026-01-01T00:00:00+00:00"}
+    await dispatcher.dispatch("dag_manage", {"action": "cancel", "_actor": forged}, context=_contexts()[kind])
+    (call,) = seen
+    assert (call["_actor"]["by"], call["_actor"]["via"]) == (by, via)
+
+
+def test_the_owner_facing_text_names_the_owner_as_you():
+    from nous.cancel_provenance import describe_for_owner
+
+    assert describe_for_owner(record("owner", "Telegram")) == "Cancelled by you (Telegram)"
+    assert describe_for_owner(agent_record("continuation")) == "Cancelled by Nous (continuation turn)"
+    assert describe_for_owner(record("harness", "a node was cancelled")) == (
+        "Cancelled by the harness (a node was cancelled)"
+    )
+    assert describe_for_owner({"by": "x"}) is None and describe_for_owner(None) is None

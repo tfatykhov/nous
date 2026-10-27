@@ -6,6 +6,7 @@ for JSON serialisation.  They never manage sessions themselves.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -17,6 +18,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain.spreading_activation import compute_graph_density
+from nous.cancel_provenance import describe_for_owner
 
 logger = logging.getLogger(__name__)
 
@@ -1880,6 +1882,14 @@ def _dag_iso(val: Any) -> str | None:
     return str(val)
 
 
+def _dag_postmortem_text(val: Any) -> str | None:
+    """``postmortem`` as the dashboard shows it (text): a cancellation record in the owner's words."""
+    if val is None or isinstance(val, str):
+        return val
+    cancellation = val.get("cancellation") if isinstance(val, dict) else None
+    return describe_for_owner(cancellation) or json.dumps(val, default=str)
+
+
 def _approval_actor(answered_by: str | None) -> str | None:
     """A person's identity, or None — never the 'unattributed' placeholder
     or the deadline actor (the answer source already says who acted)."""
@@ -2149,7 +2159,7 @@ async def get_dag_dashboard_data(
             "token_budget": row.token_budget,
             "tokens_consumed": row.tokens_consumed or 0,
             "result_summary": row.result_summary,
-            "postmortem": row.postmortem,
+            "postmortem": _dag_postmortem_text(row.postmortem),
             "node_count": row.node_count,
             "completed_count": row.completed_count,
         }

@@ -33,6 +33,7 @@ from nous.api.idempotency import SUMMARY_SESSION_PREFIX
 from nous.brain import continuation
 from nous.brain.intentions import AUTHORITY_INTERNAL, SOURCE_DAG, WAKE_CONTINUE
 from nous.brain.intentions import enabled as intentions_enabled
+from nous.cancel_provenance import dag_cancel_line
 from nous.config import Settings
 from nous.dag.approval import approval_line, is_answered_approval, stopped_at_approval
 from nous.events import Event
@@ -174,6 +175,12 @@ class DAGResultDelivery:
                 summary = authored
                 summary_authored = True
 
+        # The continuation reads this body: an authored or cached summary that left out who cancelled the DAG
+        # gets the template's line back.
+        cancel_line = dag_cancel_line(dag)
+        if cancel_line and cancel_line not in summary:
+            summary = f"{summary}\n\n{cancel_line}"
+
         if self._inbox is not None:
             await record_dag_result(
                 self._inbox,
@@ -238,6 +245,9 @@ class DAGResultDelivery:
             f"DAG '{dag.name}' {verb} ({str(dag.id)[:8]})",
             f"Nodes: {len(nodes)}" + (f" — {tally_text}" if tally_text else ""),
         ]
+        cancel_line = dag_cancel_line(dag)  # who cancelled it, when a record says so
+        if cancel_line:
+            lines.append(cancel_line)
         if dag.token_budget:
             lines.append(
                 f"Tokens: {dag.tokens_consumed}/{dag.token_budget}"

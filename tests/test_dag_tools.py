@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 
+from nous.cancel_provenance import context_actor
 from nous.config import Settings
 from nous.dag.orchestrator import DAGOrchestrator
 from nous.dag.schemas import (
@@ -433,6 +434,34 @@ class TestDagManageTool:
         result = await handler(action="cancel", dag_id=str(dag.id))
         text = result["content"][0]["text"]
         assert "Cancelled" in text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("actor", "expected"),
+        [
+            (context_actor("continuation"), "was cancelled by your own continuation turn"),
+            (context_actor("approved_action"), "was cancelled by the owner (approved proposal)"),
+            (None, "was cancelled by your own turn"),
+        ],
+    )
+    async def test_dag_manage_cancel_records_who_cancelled(self, tools, dag_store, actor, expected):
+        await tools._handlers["dag_create"](name="who-test", nodes=_simple_nodes(), edges=[])
+        dag = (await dag_store.get_active_dags())[0]
+        handler = tools._handlers["dag_manage"]
+        extra = {"_actor": actor} if actor is not None else {}
+        await handler(action="cancel", dag_id=str(dag.id), **extra)
+        text = (await handler(action="status", dag_id=str(dag.id)))["content"][0]["text"]
+        lines = text.splitlines()
+        assert lines[1] == "Status: cancelled"
+        assert lines[2] == f"Cancelled: DAG {str(dag.id)[:8]} {expected}"
+
+    @pytest.mark.asyncio
+    async def test_status_of_a_cancelled_dag_with_no_record_has_no_cancelled_line(self, tools, dag_store):
+        await tools._handlers["dag_create"](name="old-cancel", nodes=_simple_nodes(), edges=[])
+        dag = (await dag_store.get_active_dags())[0]
+        await dag_store.update_dag_status(dag.id, "cancelled", result_summary="cancelled by user")
+        text = (await tools._handlers["dag_manage"](action="status", dag_id=str(dag.id)))["content"][0]["text"]
+        assert "Status: cancelled" in text and "Cancelled:" not in text
 
     @pytest.mark.asyncio
     async def test_status_not_found(self, tools):

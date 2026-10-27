@@ -62,6 +62,7 @@ from uuid import UUID
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
+from nous import cancel_provenance
 from nous.brain.intentions import stamp_is_internal
 from nous.config import Settings
 from nous.dag._workspace import assert_inside_root, compute_workspace_path
@@ -981,8 +982,18 @@ class DAGOrchestrator:
             wave_zero = [n for n in dag.nodes if n.status == "ready"]
             await self._dispatch_ready_nodes(dag, wave_zero)
 
-    async def cancel_dag(self, dag_id: UUID, reason: str = "cancelled") -> None:
-        """Cancel a DAG and all non-terminal nodes."""
+    async def cancel_dag(
+        self, dag_id: UUID, reason: str = "cancelled", cancelled_by: dict | None = None
+    ) -> None:
+        """Cancel a DAG and all non-terminal nodes.
+
+        ``cancelled_by`` is a ``cancel_provenance`` record of who cancelled it,
+        stored in ``postmortem``; None stores nothing, and the outcome then
+        names no one. Written unconditionally, so a tick that finalized the
+        DAG 'cancelled' (with a harness record) between this call's load and
+        its write is overwritten with the real actor; a tick that lands after
+        it is refused (finalize_dag writes only a live DAG).
+        """
         dag = await self._store.get_dag(dag_id)
         if dag is None:
             raise ValueError(f"DAG {dag_id} not found")
@@ -1006,7 +1017,10 @@ class DAGOrchestrator:
                 await self._cancel_one(node, reason)
 
         await self._store.update_dag_status(
-            dag_id, "cancelled", result_summary=reason
+            dag_id,
+            "cancelled",
+            result_summary=reason,
+            postmortem=cancel_provenance.dag_postmortem(cancelled_by) if cancelled_by is not None else None,
         )
 
     async def retry_node(
@@ -4210,16 +4224,24 @@ class DAGOrchestrator:
                 summary = f"Failed nodes: {', '.join(failed_names)}"
             await self._finalize(dag, "failed", summary)
         elif any(n.status == "cancelled" for n in dag.nodes):
-            await self._finalize(dag, "cancelled", "DAG was cancelled")
+            # No node failed and something outside cancel_dag cancelled one:
+            # the record names the harness and claims no cause.
+            harness = cancel_provenance.record("harness", "a node was cancelled")
+            await self._finalize(
+                dag, "cancelled", "DAG was cancelled",
+                postmortem=cancel_provenance.dag_postmortem(harness),
+            )
         else:
             # All blocked — still mark as failed
             await self._finalize(dag, "failed", "All nodes blocked")
 
-    async def _finalize(self, dag: ExecutionDAG, status: str, summary: str) -> None:
+    async def _finalize(
+        self, dag: ExecutionDAG, status: str, summary: str, *, postmortem: dict | None = None
+    ) -> None:
         """The terminal DAG write, conditional on the rows (§3.3): a retry or an
         answer that landed after this tick loaded its copy wins, and the next
         tick decides again from fresh rows."""
-        if not await self._store.finalize_dag(dag.id, status, summary):
+        if not await self._store.finalize_dag(dag.id, status, summary, postmortem=postmortem):
             logger.info(
                 "DAG %s not finalized as %s: its rows changed after this tick's load",
                 dag.id, status,

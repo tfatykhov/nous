@@ -21,6 +21,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from nous import cancel_provenance
 from nous.brain import intentions
 from nous.brain.intentions import IntentionSpec
 from nous.heartbeat.registry import BaseCheck
@@ -34,6 +35,11 @@ if TYPE_CHECKING:
     from nous.heart.work_queue import WorkQueueItemManager
 
 logger = logging.getLogger(__name__)
+
+
+def _work_queue_cancel() -> dict[str, str]:
+    """Who cancelled a work-queue DAG (cancel_provenance): the harness, for the queue's own bookkeeping."""
+    return cancel_provenance.record("harness", "heartbeat work queue")
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +353,7 @@ class WorkQueueCheck(BaseCheck):
                     await self._orchestrator.cancel_dag(
                         dag.id,
                         reason="F064.6: mark_dispatched failed; cancelling orphan",
+                        cancelled_by=_work_queue_cancel(),
                     )
                 except Exception:
                     logger.exception(
@@ -450,6 +457,7 @@ class WorkQueueCheck(BaseCheck):
                     await self._orchestrator.cancel_dag(
                         dag.id,
                         reason="F064.6: reconciler mark_dispatched failed; cancelling orphan",
+                        cancelled_by=_work_queue_cancel(),
                     )
                 except Exception:
                     logger.exception(
@@ -511,6 +519,7 @@ class WorkQueueCheck(BaseCheck):
             await self._orchestrator.cancel_dag(
                 existing.dag_id,
                 reason=f"work_queue terminal state: {item.state}",
+                cancelled_by=_work_queue_cancel(),
             )
         except Exception as e:
             logger.exception(

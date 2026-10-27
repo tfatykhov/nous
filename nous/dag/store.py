@@ -617,9 +617,12 @@ class DAGStore:
             )
             await session.commit()
 
-    async def finalize_dag(self, dag_id: UUID, status: str, result_summary: str) -> bool:
+    async def finalize_dag(
+        self, dag_id: UUID, status: str, result_summary: str, *, postmortem: dict | None = None
+    ) -> bool:
         """Terminal DAG write decided from a tick's snapshot, conditional on the
         rows: the DAG is still live and none of its nodes is non-terminal.
+        ``postmortem`` (a cancellation record) is written with it when given.
 
         The tick decides "every node is terminal" from the copy it loaded, and
         retry_node / answer_node / cancel_dag do not take its lock. A retry that
@@ -633,6 +636,9 @@ class DAGStore:
             .where(DAGNode.status.not_in(sorted(TERMINAL_NODE_STATUSES)))
             .exists()
         )
+        values: dict = {"status": status, "completed_at": datetime.now(UTC), "result_summary": result_summary}
+        if postmortem is not None:
+            values["postmortem"] = postmortem
         async with self._db.session() as session:
             result = await session.execute(
                 update(ExecutionDAG)
@@ -640,11 +646,7 @@ class DAGStore:
                 .where(ExecutionDAG.agent_id == self._agent_id)
                 .where(ExecutionDAG.status.in_(sorted(LIVE_DAG_STATUSES)))
                 .where(~open_node)
-                .values(
-                    status=status,
-                    completed_at=datetime.now(UTC),
-                    result_summary=result_summary,
-                )
+                .values(**values)
             )
             await session.commit()
             return result.rowcount == 1
@@ -1150,6 +1152,7 @@ class DAGStore:
                         delivery_error=None,
                         delivery_summary=None,
                         delivery_generation=ExecutionDAG.delivery_generation + 1,
+                        postmortem=None,  # a cancellation record describes the outcome being retried
                     )
                 )
             await session.commit()
@@ -1191,6 +1194,7 @@ class DAGStore:
                     # Invalidate any delivery still in flight for the previous
                     # outcome (@codex P1 on e94cd42).
                     delivery_generation=ExecutionDAG.delivery_generation + 1,
+                    postmortem=None,  # a cancellation record describes the previous outcome
                 )
             )
             await session.commit()

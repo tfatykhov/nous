@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 
+from nous.cancel_provenance import dag_postmortem, record
 from nous.config import Settings
 from nous.dag.delivery import DAGResultDelivery
 from nous.dag.orchestrator import DAGOrchestrator
@@ -230,6 +231,31 @@ class TestAgentSummaryLeg:
         assert ctx.session_id == expected
 
     @pytest.mark.asyncio
+    async def test_an_authored_summary_of_a_cancelled_dag_keeps_who_cancelled_it(self, store):
+        """The continuation reads the delivered body: an authored summary that left the line out gets it back."""
+        dag = await store.create(_callback_dag())
+        await store.update_dag_status(dag.id, "cancelled", postmortem=dag_postmortem(record("owner", "Telegram")))
+        dag = await store.get_dag(dag.id)
+        runner = AsyncMock()
+        runner.run_turn.return_value = ("It was stopped before it ran.", None, {})
+        http = _ok_http()
+        delivery = DAGResultDelivery(
+            _settings(dag_delivery_agent_summary_enabled=True), agent_id="a", runner=runner, http=http
+        )
+        outcome = await delivery.deliver(dag)
+        line = f"DAG {str(dag.id)[:8]} was cancelled by the owner (Telegram)"
+        assert outcome.summary.startswith("It was stopped before it ran.") and outcome.summary.endswith(line)
+        assert http.post.await_args.kwargs["json"]["text"].endswith(line)
+
+    @pytest.mark.asyncio
+    async def test_the_cancel_line_is_not_added_twice(self, store):
+        dag = await store.create(_callback_dag())
+        await store.update_dag_status(dag.id, "cancelled", postmortem=dag_postmortem(record("owner", "Telegram")))
+        dag = await store.get_dag(dag.id)
+        outcome = await DAGResultDelivery(_settings(), agent_id="a", http=_ok_http()).deliver(dag)
+        assert outcome.summary.count("was cancelled by the owner (Telegram)") == 1
+
+    @pytest.mark.asyncio
     async def test_agent_summary_timeout_falls_back_to_template(self, store):
         """An unreachable LLM must degrade the message, not block the push."""
         dag = await _finished_dag(store)
@@ -297,6 +323,26 @@ class TestTemplate:
         dag.nodes = []
         text = DAGResultDelivery(_settings(), agent_id="a").build_template(dag)
         assert "delivery-dag" in text
+
+    @pytest.mark.asyncio
+    async def test_the_template_names_who_cancelled(self, store):
+        dag = await store.create(_callback_dag("stopped-dag"))
+        await store.update_dag_status(
+            dag.id, "cancelled", result_summary="x", postmortem=dag_postmortem(record("agent", "continuation turn"))
+        )
+        dag = await store.get_dag(dag.id)
+        lines = DAGResultDelivery(_settings(), agent_id="a").build_template(dag).splitlines()
+        assert lines[2] == f"DAG {str(dag.id)[:8]} was cancelled by your own continuation turn"
+        assert lines[1].startswith("Nodes:")
+
+    @pytest.mark.asyncio
+    async def test_the_template_for_a_cancelled_dag_with_no_record_adds_no_actor_line(self):
+        dag = SimpleNamespace(
+            id=uuid.uuid4(), name="old", status="cancelled", nodes=[], token_budget=None, tokens_consumed=0,
+            result_summary="cancelled by user",
+        )
+        text = DAGResultDelivery(_settings(), agent_id="a").build_template(dag)
+        assert "was cancelled (" in text and "cancelled by the" not in text and "your own" not in text
 
 
 # ---------------------------------------------------------------------------
