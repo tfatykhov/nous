@@ -114,9 +114,11 @@ async def get_guard_data(
     )
     events = (
         await session.execute(
-            select(Event.event_type, Event.data, Event.created_at).where(
+            select(Event.event_type, Event.data, Event.created_at)
+            .where(
                 Event.agent_id == agent_id, Event.event_type.in_((RAN, UNRESOLVED, ACTED)), Event.created_at >= since
             )
+            .order_by(Event.created_at)  # oldest first: of two acted records of one run, the newest wins
         )
     ).all()
     # A schedule whose guard was removed or that was stopped keeps its history: its records name it
@@ -161,6 +163,9 @@ async def get_guard_data(
 
     fell_through = dict.fromkeys(REASONS, 0)
     counts = {"skipped": 0, "would_skip": 0, "would_skip_unrecorded": 0}
+    # The acted records of would-skip runs in the window, so shadow_misses <= would_skip: an acted record
+    # whose ran record was dropped by the bus or fell out of the window is not a miss.
+    misses: list[list[str]] = []
     rows = []
     for rec in records:
         guard = dict(rec["guard"])
@@ -175,6 +180,8 @@ async def get_guard_data(
             counts[kind] += 1
             if kind == "would_skip" and a is None:
                 counts["would_skip_unrecorded"] += 1
+            elif kind == "would_skip" and acted_by is not None and acted(acted_by):
+                misses.append(acted_by)
         rows.append(
             {
                 "at": rec["at"].isoformat(),
@@ -190,11 +197,6 @@ async def get_guard_data(
         )
     rows.sort(key=lambda row: row["at"], reverse=True)
 
-    misses = [
-        kinds for a in outcomes.values()
-        if (kinds := _acted_by(a)) is not None and acted(kinds)
-        and _dict(a.get(GUARD_KEY)).get("would_skip") is True and _dict(a.get(GUARD_KEY)).get("mode") == MODE_SHADOW
-    ]  # fmt: skip
     by_signal = {s: sum(1 for kinds in misses if s in kinds) for s in SIGNALS}
     return {
         "enabled": settings.schedule_guards_enabled,

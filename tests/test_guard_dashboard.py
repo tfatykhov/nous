@@ -296,12 +296,42 @@ async def test_an_unresolved_guard_shows_in_recent_with_no_mode(db, agent):
 
 async def test_a_miss_counts_once_per_run_and_only_in_shadow_mode(db, agent):
     sch = schedule(agent, {"name": NAME})
-    subs = [run(agent, sch) for _ in range(2)]
+    skipped = {"guard_skipped": True, "guard": record(mode="skip", skipped=True)}
+    subs = [run(agent, sch), run(agent, sch, report=skipped)]
     skip_mode = acted(agent, subs[1], sch, ["ledger"])
     skip_mode.data = {**skip_mode.data, "guard": {"name": NAME, "mode": "skip", "would_skip": True}}
     await add(db, sch, *subs)
-    await add(db, acted(agent, subs[0], sch, ["finding"]), acted(agent, subs[0], sch, ["finding"]), skip_mode)
+    await add(
+        db, event(agent, "subtask_guard_ran", subs[0], sch, guard=record()),
+        acted(agent, subs[0], sch, ["finding"]), acted(agent, subs[0], sch, ["finding"]), skip_mode,
+    )  # fmt: skip
     assert (await data(db, agent))["shadow_misses"] == 1
+
+
+async def test_an_acted_record_without_a_would_skip_ran_record_is_not_a_miss(db, agent):
+    # The ran event was dropped by the best-effort bus: the acted record alone does not make a miss.
+    sch = schedule(agent, {"name": NAME})
+    sub = run(agent, sch)
+    await add(db, sch, sub)
+    await add(db, acted(agent, sub, sch, ["ledger"]))
+    out = await data(db, agent)
+    assert (out["would_skip"], out["shadow_misses"]) == (0, 0)
+
+
+async def test_a_miss_needs_its_ran_record_in_the_window(db, agent):
+    sch = schedule(agent, {"name": NAME})
+    edge, inside = run(agent, sch, age_hours=24 * 7 + 0.1), run(agent, sch)
+    await add(db, sch, edge, inside)
+    await add(
+        db,
+        event(agent, "subtask_guard_ran", edge, sch, age_hours=24 * 7 + 0.1, guard=record()),  # just out
+        acted(agent, edge, sch, ["ledger"], age_hours=24 * 7 - 0.1),  # just in: its run's turn ended later
+        event(agent, "subtask_guard_ran", inside, sch, guard=record()),
+        acted(agent, inside, sch, ["ledger"]),
+    )
+    out = await data(db, agent)
+    assert (out["would_skip"], out["shadow_misses"]) == (1, 1)
+    assert out["shadow_misses"] <= out["would_skip"]
 
 
 async def test_would_skip_runs_with_no_outcome_record_are_counted_apart(db, agent):

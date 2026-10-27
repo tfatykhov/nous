@@ -78,7 +78,7 @@ No guard is turned on in prod until these exist (owner requirement, PR #810 revi
 - **Unresolved guards:** a guard that names no allowlisted command (or no name) still runs no command, and now also emits a persisted `subtask_guard_unresolved` event (`{schedule_id, guard: {name, reason: "not_allowlisted"}}`) on each run, so a misconfigured guard has a history.
 - **The panel:** GET /dashboard/autonomy has a read-only `guards` block (`nous/api/guard_dashboard.py`, merged by the handler like `job_fixes`), described in [REST API](../reference/rest-api.md). It reads only `heart.schedules`, `heart.subtasks`, `nous_system.events` and Settings, never an in-memory ring. A record from before phase 2 counts as `mode: skip`, with its reason derived from its fields.
   - `would_skip` counts shadow runs only.
-  - `shadow_misses` counts the `subtask_guard_acted` events of would-skip runs in which the model acted.
+  - `shadow_misses` counts the would-skip runs in the window whose `subtask_guard_acted` record says the model acted. A miss is counted only for a run with a would-skip `subtask_guard_ran` record in the window, so `shadow_misses <= would_skip` holds even when the best-effort bus drops a `ran` event or a run straddles the window edge.
   - The Autonomy view's "Run guards" section lists the guarded jobs, the counts and the last 10 records. Every text in it (job, command, stderr) is rendered by interpolation, never as markup. Shadow misses above 0 show as an alert.
 - No migration: the records are JSONB in `report_jsonb` and `nous_system.events.data`.
 
