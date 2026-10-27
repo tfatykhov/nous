@@ -237,15 +237,17 @@ class TestAgentSummaryLeg:
         await store.update_dag_status(dag.id, "cancelled", postmortem=dag_postmortem(record("owner", "Telegram")))
         dag = await store.get_dag(dag.id)
         runner = AsyncMock()
-        runner.run_turn.return_value = ("It was stopped before it ran.", None, {})
+        authored = "It was stopped before it ran. " + "Detail. " * 1000  # longer than the inbox body cap
+        runner.run_turn.return_value = (authored, None, {})
         http = _ok_http()
         delivery = DAGResultDelivery(
             _settings(dag_delivery_agent_summary_enabled=True), agent_id="a", runner=runner, http=http
         )
         outcome = await delivery.deliver(dag)
         line = f"DAG {str(dag.id)[:8]} was cancelled by the owner (Telegram)"
-        assert outcome.summary.startswith("It was stopped before it ran.") and outcome.summary.endswith(line)
-        assert http.post.await_args.kwargs["json"]["text"].endswith(line)
+        # first: the inbox and Telegram cut a long body at its tail
+        assert outcome.summary.startswith(line) and "It was stopped before it ran." in outcome.summary
+        assert http.post.await_args.kwargs["json"]["text"].startswith(line)
 
     @pytest.mark.asyncio
     async def test_the_cancel_line_is_not_added_twice(self, store):

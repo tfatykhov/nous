@@ -176,10 +176,10 @@ class DAGResultDelivery:
                 summary_authored = True
 
         # The continuation reads this body: an authored or cached summary that left out who cancelled the DAG
-        # gets the template's line back.
+        # gets the template's line back, first, since the inbox and Telegram cut a long body at its tail.
         cancel_line = dag_cancel_line(dag)
         if cancel_line and cancel_line not in summary:
-            summary = f"{summary}\n\n{cancel_line}"
+            summary = f"{cancel_line}\n\n{summary}"
 
         if self._inbox is not None:
             await record_dag_result(
