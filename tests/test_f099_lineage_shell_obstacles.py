@@ -249,3 +249,112 @@ def test_the_runner_reads_the_write_dirs_setting(tmp_path):
     r, _, _ = _shell_runner(tmp_path, f099_lineage_write_dirs=["research"])
     refusal = _auth(r, _internal("continuation"), "write_file", OFFERED, {"path": "x.md", "content": "x"})
     assert refusal is not None and f"{tmp_path.resolve() / 'research'}/" in refusal.text
+
+
+# -- runner.sh spellings ---------------------------------------------------------------------------------------------
+
+JOB = "job-20261010-222549-6e37c52b"
+
+
+def _shell(command: str, ws, **kw) -> str | None:
+    return internal_only_call_violation(_internal(), "bash", {"command": command}, workspace_dir=str(ws), **kw)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash {R} status",
+        "bash {R} list --active",
+        "bash {R} status " + JOB,
+        "bash {R} launch nous 'do it' --model m",
+        "bash {R} launch nous --prompt-file {W}/claude-jobs/prompts/p.md",
+        "cd {W}/claude-jobs && ./runner.sh status",
+        "cd claude-jobs && ./runner.sh result " + JOB,
+        "cd {W}/claude-jobs && ./runner.sh launch nous p --effort high",
+        "cd {W}/claude-jobs && ls | ./runner.sh status",
+        "cd {W}/claude-jobs && bash {R} status",
+        "bash {R} status && gh pr view 1",
+    ],
+)
+def test_the_runner_may_be_run_through_bash_or_from_its_own_directory(command, tmp_path):
+    (tmp_path / "claude-jobs" / "prompts").mkdir(parents=True)
+    assert _shell(command.format(R=f"{tmp_path}/claude-jobs/runner.sh", W=tmp_path), tmp_path) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash {R} launch nous p --sys-prompt x",  # the same argument check as the bare path
+        "bash {R} launch nous --prompt-file /etc/passwd",
+        "bash {R} cleanup " + JOB,
+        "bash {R} gc",
+        "bash {R} status ../x",
+        "bash -x {R} status",
+        "bash -- {R} status",
+        "bash -c 'ls'",
+        "bash -c '{R} status'",
+        "bash {W}/claude-jobs/prompts/x.sh",
+        "bash {W}/claude-jobs/runner.sh.bak status",
+        "bash ./claude-jobs/runner.sh status",
+        "bash claude-jobs/runner.sh status",
+        "bash {R}",
+        "bash",
+        "sh {R} status",
+        "./runner.sh status",  # the cwd is the workspace
+        "cd {W}/claude-jobs ; ./runner.sh status",  # the cd may have failed
+        "cd {W}/claude-jobs || ./runner.sh status",
+        "cd {W}/claude-jobs | ./runner.sh status",
+        "cd {W}/claude-jobs && cd .. && ./runner.sh status",
+        "cd {W} && ./claude-jobs/runner.sh status",
+        "cd {W}/claude-jobs/prompts && ./runner.sh status",
+        "cd {W}/claude-jobs && ./runner.sh cleanup " + JOB,
+        "cd {W}/claude-jobs && ./runner.sh launch nous p --sys-prompt x",
+        "cd {W}/claude-jobs && runner.sh status",
+        "true && cd {W}/claude-jobs || ./runner.sh status",
+        "bash {R} status $(id)",
+        "bash {R} status *",
+        "bash {R} status > /tmp/x",
+    ],
+)
+def test_every_other_spelling_of_the_runner_is_refused(command, tmp_path):
+    (tmp_path / "claude-jobs" / "prompts").mkdir(parents=True)
+    assert _shell(command.format(R=f"{tmp_path}/claude-jobs/runner.sh", W=tmp_path), tmp_path) == "external"
+
+
+def test_a_cancel_through_bash_without_nous_root_is_refused(tmp_path):
+    """Cancel stays a proposal in every spelling."""
+    runner = f"{tmp_path}/claude-jobs/runner.sh"
+    for command in (
+        f"{runner} cancel {JOB}",
+        f"bash {runner} cancel {JOB}",
+        f"cd {tmp_path}/claude-jobs && ./runner.sh cancel {JOB}",
+    ):
+        assert _shell(command, tmp_path) == "external", command
+
+
+@needs_symlinks
+def test_the_runner_directory_is_compared_once_resolved(tmp_path):
+    (tmp_path / "claude-jobs").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "claude-jobs")
+    (tmp_path / "other").mkdir()
+    (tmp_path / "other" / "runner.sh").write_text("#!/bin/sh\n")
+    assert _shell(f"cd {tmp_path}/link && ./runner.sh status", tmp_path) is None  # the same directory
+    assert _shell(f"cd {tmp_path}/other && ./runner.sh status", tmp_path) == "external"
+
+
+def test_a_runner_through_bash_needs_the_token_so_it_cannot_join_a_build_command(tmp_path):
+    (tmp_path / "nous" / ".git").mkdir(parents=True)
+    runner = f"{tmp_path}/claude-jobs/runner.sh"
+    assert _shell("cd nous && pytest", tmp_path, build_commands=True) is None
+    for command in (f"cd nous && pytest && bash {runner} status", f"bash {runner} status; cd nous && pytest"):
+        assert _shell(command, tmp_path, build_commands=True) == "external", command
+
+
+def test_the_hint_names_the_accepted_runner_forms():
+    from nous.api.tool_policy import lineage_bash_refusal_hint
+
+    for build_commands in (False, True):
+        hint = lineage_bash_refusal_hint(build_commands=build_commands)
+        for needle in ("bash <workspace>/claude-jobs/runner.sh", "./runner.sh", "cd <workspace>/claude-jobs &&"):
+            assert needle in hint
+        assert "no $(...), no globs" in hint

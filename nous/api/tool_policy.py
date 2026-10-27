@@ -688,6 +688,21 @@ def _runner_allowed(args: list[str], *, workspace: Path, readable: list[Path]) -
     return True
 
 
+def _runner_args(prog: str, args: list[str], *, jobs: Path, cwd: Path | None) -> list[str] | None:
+    """runner.sh's own arguments when the simple command runs it in one of its three accepted spellings, else None:
+    ``<workspace>/claude-jobs/runner.sh ARGS``; ``bash <workspace>/claude-jobs/runner.sh ARGS`` (exactly: no bash
+    option, which could read a script or startup file); ``./runner.sh ARGS`` only when the shell's cwd is surely
+    the jobs directory (``cwd``, resolved, is None when it is not sure)."""
+    runner = str(jobs / "runner.sh")
+    if prog == runner:
+        return args
+    if prog == "bash" and args[:1] == [runner]:
+        return args[1:]
+    if prog == "./runner.sh" and cwd is not None and cwd == jobs.resolve():
+        return args
+    return None
+
+
 def _build_repo(cwd: Path, root: Path, writable: list[Path]) -> bool:
     """``cwd`` (resolved) is a repo's top level a build command may run in: below the workspace, holding ``.git``,
     and neither inside nor around a directory a lineage may write (``lineage_write_dirs``, and ``intentions/`` as a
@@ -781,7 +796,9 @@ def lineage_bash_refusal_hint(*, build_commands: bool) -> str:
     text = (
         "The lineage shell allows only: plain reads (cat, ls, head, tail, wc, grep, jq, echo, printf, pwd, cd, "
         "sleep, true) inside the workspace; read-only gh calls (pr view|checks|list|diff|status, issue view|list, "
-        "run view|list, repo view, gh api GET); claude-jobs/runner.sh launch|status|list|result"
+        "run view|list, repo view, gh api GET); claude-jobs/runner.sh launch|status|list|result, run as "
+        "<workspace>/claude-jobs/runner.sh, bash <workspace>/claude-jobs/runner.sh, or ./runner.sh right after "
+        "cd <workspace>/claude-jobs &&"
     )
     if build_commands:
         text += (
@@ -790,7 +807,10 @@ def lineage_bash_refusal_hint(*, build_commands: bool) -> str:
             f"make {'|'.join(sorted(LINEAGE_MAKE_TARGETS))}, "
             "each with a fixed set of options and paths inside the repo, in a bash call without gh or runner.sh"
         )
-    return text + ". Join commands with ; && || | only. Propose anything else to the owner with propose_action."
+    return text + (
+        ". Write each command out in full: no $(...), no globs (except as a file operand of a read). "
+        "Join commands with ; && || | only. Propose anything else to the owner with propose_action."
+    )
 
 
 def lineage_bash_allowed(
@@ -804,7 +824,8 @@ def lineage_bash_allowed(
     """Whether an internal_only turn may run this bash ``command`` (F099 lineage shell).
 
     An allowlist, failing closed: every simple command must be a LINEAGE_READ_COMMANDS command, a read-only
-    ``gh`` call, or ``<workspace_dir>/claude-jobs/runner.sh`` (the owner's Claude Code delegation path), joined
+    ``gh`` call, or ``<workspace_dir>/claude-jobs/runner.sh`` (the owner's Claude Code delegation path, also as
+    ``bash <that path>`` or, from that directory, ``./runner.sh``: ``_runner_args``), joined
     by ``; && || |`` or newlines only. An output redirection may target ``/dev/null`` or a file under the
     root's own ``<workspace_dir>/intentions/<root_id>/`` or ``<workspace_dir>/claude-jobs/prompts/``.
     Anything the reader cannot see exactly (``$``, a backtick, a brace, ``~``, an unquoted heredoc that expands,
@@ -875,8 +896,9 @@ def lineage_bash_allowed(
                 runs = after in (None, "&&", ";", "\n") and op != "|"  # not skipped, not in a subshell
                 target = _readable(args[0], base, root) if runs and base is not None else None
                 cwd, moved = (target[0] if target else None), True
-        if prog == str(jobs / "runner.sh"):
-            if not _runner_allowed(args, workspace=workspace, readable=writable):
+        runner_args = _runner_args(prog, args, jobs=jobs, cwd=cwd)
+        if runner_args is not None:
+            if not _runner_allowed(runner_args, workspace=workspace, readable=writable):
                 return False
             needs_token = True
         elif prog == "gh":

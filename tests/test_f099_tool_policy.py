@@ -340,6 +340,7 @@ def _runner_sh(tmp_path) -> str:
         "cat > {W}/claude-jobs/prompts/p.md <<'EOF'\nraw $HOME `id` text\nEOF\n"
         "{R} launch nous --prompt-file {W}/claude-jobs/prompts/p.md",
         "sleep 30 && {R} status job-20261010-222549-6e37c52b",
+        "bash {R} status",  # exactly bash and the runner's path (test_f099_lineage_shell_obstacles has the rest)
     ],
 )
 def test_the_lineage_shell_allows_the_delegation_path_and_reads(command, tmp_path):
@@ -408,8 +409,7 @@ def test_the_lineage_shell_allows_the_delegation_path_and_reads(command, tmp_pat
         "{R} cancel job-20261010-222549-6e37c52b",
         "{R} status ../../x",
         "{R}",
-        "bash {R} status",
-        "./runner.sh status",
+        "./runner.sh status",  # the cwd is the workspace, not claude-jobs
         # writes outside the two directories
         "printf x > {R}",
         "printf x > {W}/claude-jobs/prompts/../runner.sh",
