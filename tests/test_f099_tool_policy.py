@@ -41,6 +41,7 @@ LINEAGE_ALLOWED = frozenset(
         "cache_retrieve",
         "recall_hubs",
         "list_decisions",
+        "db_query",  # read-only SQL as a login PostgreSQL holds to SELECT on a fixed list of tables
         "submit_final_report",
         "write_file",
         "learn_fact",

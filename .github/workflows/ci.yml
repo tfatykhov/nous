@@ -143,8 +143,9 @@ jobs:
         env:
           NOUS_APP_DB_PASSWORD: ciapppassword1
           NOUS_SCORER_DB_PASSWORD: ciscorerpassword1
+          NOUS_READER_DB_PASSWORD: cireaderpassword1
         run: |
-          docker exec -i -e NOUS_APP_DB_PASSWORD -e NOUS_SCORER_DB_PASSWORD ${{ job.services.postgres.id }} psql -U nous -d nous -X -v ON_ERROR_STOP=1 -f - < scripts/ops/db_roles.sql
+          docker exec -i -e NOUS_APP_DB_PASSWORD -e NOUS_SCORER_DB_PASSWORD -e NOUS_READER_DB_PASSWORD ${{ job.services.postgres.id }} psql -U nous -d nous -X -v ON_ERROR_STOP=1 -f - < scripts/ops/db_roles.sql
           docker exec -i ${{ job.services.postgres.id }} psql -U nous_admin -d nous -X -v ON_ERROR_STOP=1 -f - < scripts/ops/verify_db_roles.sql
 
       - name: Apply every later migration as the application role
@@ -155,6 +156,12 @@ jobs:
           DB_PASSWORD: ciapppassword1
           DB_NAME: nous
         run: python scripts/ci/apply_migrations.py
+
+      - name: Re-run the role script after the later migrations
+        # As a deployment re-runs it: as the administrator, with the roles in place and no password to set. The
+        # reader's grant stops on a listed table a later migration made unsafe (a credential-named column, a view,
+        # a renamed excluded column), so this fails the pull request, not the deploy, and proves the run converges.
+        run: docker exec -i ${{ job.services.postgres.id }} psql -U nous_admin -d nous -X -v ON_ERROR_STOP=1 -f - < scripts/ops/db_roles.sql
 
       - name: Check the database roles again after the later migrations
         run: docker exec -i ${{ job.services.postgres.id }} psql -U nous_admin -d nous -X -v ON_ERROR_STOP=1 -f - < scripts/ops/verify_db_roles.sql
@@ -167,6 +174,9 @@ jobs:
           DB_PASSWORD: ciapppassword1
           DB_NAME: nous
           NOUS_TEST_DB: postgres
+          # tests/test_db_query_live.py logs in as nous_reader; a missing role fails them here instead of skipping
+          NOUS_READER_DB_PASSWORD: cireaderpassword1
+          NOUS_REQUIRE_READER_ROLE: "1"
         run: pytest tests/ -v --tb=short -m "not scoring_writer"
 
       - name: Probe, qualified DDL applies under the application role

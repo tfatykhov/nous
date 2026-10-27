@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     # seconds: a fraction could round to 0 ms, which Postgres reads as no limit.
     # The upper bound is Postgres's own, 2147483647 ms.
     db_lock_timeout_seconds: int = Field(default=0, ge=0, le=2_147_483)
+    # The db_query tool's own database login (nous/api/db_query.py), created by scripts/ops/db_roles.sql with
+    # SELECT on the columns of a fixed list of tables. Same host, port and database as the application. An empty
+    # password turns the tool off: it is not offered.
+    reader_db_user: str = "nous_reader"
+    reader_db_password: str = ""
     agent_id: str = "nous-default"
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536

@@ -221,6 +221,23 @@ def _redact_detail(text: str) -> str:
     return redact_error_text(text)
 
 
+def redact_output(text: str) -> str:
+    """The ledger's redaction for text shown back to the agent (``db_query`` results).
+
+    The public face of ``_redact_detail``: this process's own secret values and
+    their escaped spellings, then the reviewed patterns. It does not bound the
+    text; a caller that cuts it uses ``redaction_scan_pad`` as ``detail_text`` does.
+    """
+    return _redact_detail(text)
+
+
+def redaction_scan_pad() -> int:
+    """How many characters at a cut edge redaction cannot vouch for: a secret
+    split by the cut matches nothing, so the last this-many characters of a
+    redacted window are dropped (the longest own secret, at least the scan pad)."""
+    return max([_DETAIL_SCAN_PAD, *map(len, _own_secrets())])
+
+
 def detail_text(text: str, cap: int) -> str:
     """``text`` redacted and bounded to about ``cap`` characters.
 
@@ -236,7 +253,7 @@ def detail_text(text: str, cap: int) -> str:
     if len(text) <= cap:
         return _redact_detail(text)
     half = cap // 2
-    pad = max([_DETAIL_SCAN_PAD, *map(len, _own_secrets())])
+    pad = redaction_scan_pad()
     head = _redact_detail(text[: half + pad])
     tail = _redact_detail(text[-(half + pad):])
     head = head[: min(half, len(head) - pad)] if len(head) > pad else ""
