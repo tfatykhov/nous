@@ -27,6 +27,7 @@ import argparse
 import os
 import posixpath
 import re
+import stat
 import sys
 import time
 from collections.abc import Sequence
@@ -89,12 +90,35 @@ def _job_file_error(path: str) -> str | None:
     return None
 
 
+# A job can write its own directory: a FIFO there would block a plain open() for good, and a symlink would read
+# somewhere else. The open never blocks and never follows a last-component symlink; anything but a regular file is
+# not read.
+_READ_FLAGS = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+
+
 def _read_head(path: str, size: int = 256) -> str | None:
+    """The first ``size`` bytes of the regular file ``path``, decoded and stripped; None when it is no regular file,
+    is empty or cannot be read."""
     try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            return f.read(size).strip() or None
+        fd = os.open(path, _READ_FLAGS)
     except OSError:
         return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        chunks: list[bytes] = []
+        left = size
+        while left > 0:
+            chunk = os.read(fd, left)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            left -= len(chunk)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return b"".join(chunks).decode("utf-8", errors="replace").strip() or None
 
 
 def _gone(job_dir: str) -> bool:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import httpx
@@ -42,6 +43,28 @@ def _evaluate(workspace: Path, until: str = "finished"):
     assert _snapshot(job_dir) == before  # read-only: nothing written, touched or added
     assert not (job_dir / "finished_at").exists()
     return outcome
+
+
+no_fifo = pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are POSIX-only")
+
+
+def _within(seconds: float, fn, fifos: list[Path]):
+    """``fn()`` run in a thread that must return within ``seconds``. A thread stuck opening one of ``fifos`` for
+    reading is released afterwards by opening it for writing, so a failing test does not leave it blocked."""
+    box: dict = {}
+    thread = threading.Thread(target=lambda: box.setdefault("out", fn()), daemon=True)
+    thread.start()
+    thread.join(seconds)
+    blocked = thread.is_alive()
+    if blocked:
+        for fifo in fifos:
+            try:
+                os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+            except OSError:
+                pass
+        thread.join(seconds)
+    assert not blocked, "blocked on a FIFO"
+    return box["out"]
 
 
 def _dead_pid() -> int:
@@ -96,6 +119,24 @@ def test_a_job_with_no_readable_status_is_pending(tmp_path, status):
         _job(tmp_path, status)
     outcome = _evaluate(tmp_path)
     assert (outcome.state, outcome.text) == ("pending", f"job {JOB}: status not readable yet")
+
+
+@no_fifo
+def test_a_fifo_status_never_blocks_the_wait(tmp_path):
+    """The job can write its own directory: a FIFO there must not hang the tick that polls it."""
+    job_dir = _job(tmp_path, None)
+    os.mkfifo(job_dir / "status")
+    outcome = _within(2, lambda: _evaluate(tmp_path), [job_dir / "status"])
+    assert (outcome.state, outcome.text) == ("pending", f"job {JOB}: status not readable yet")
+
+
+@no_fifo
+@pytest.mark.parametrize("pid_file", ["run_pid", "pid"])
+def test_a_fifo_pid_file_is_unknown_not_gone(tmp_path, pid_file):
+    job_dir = _job(tmp_path, "running")
+    os.mkfifo(job_dir / pid_file)
+    outcome = _within(2, lambda: _evaluate(tmp_path), [job_dir / pid_file])
+    assert (outcome.state, outcome.text) == ("pending", f"job {JOB} is running")
 
 
 def test_a_status_word_is_one_short_line(tmp_path):
@@ -168,6 +209,7 @@ def test_the_workspace_root_itself_is_no_file_to_wait_for(tmp_path):
 
 
 def test_a_sibling_directory_sharing_the_prefix_is_outside(tmp_path):
+    # Two guards refuse it: commonpath, and the hidden-component check, since its relpath starts with "..".
     workspace = tmp_path / "ws"
     sibling = tmp_path / "ws2"
     workspace.mkdir()

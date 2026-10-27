@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 
 import httpx
@@ -353,3 +354,46 @@ def test_a_retry_appended_to_the_id_file_names_the_new_job(tmp_path, monkeypatch
     job_file = _job(tmp_path, "running", 600, job_id=retry, id_text=f"{JOB}\n{retry}\n")
     assert _head_check(job_file, NONE_YET) == 2  # the retry is still running: no failure from the old job
     assert _head_check(job_file, OPEN) == 2
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are POSIX-only")
+@pytest.mark.parametrize("fifo", ["id file", "status", "run_pid"])
+def test_a_fifo_never_blocks_the_job_lookup(fifo, tmp_path, monkeypatch):
+    """The job can write its own directory: a FIFO where a file is read is no file, and the read returns at once."""
+    monkeypatch.setenv("NOUS_WORKSPACE_DIR", str(tmp_path))
+    job_dir = tmp_path / "claude-jobs" / JOB
+    if fifo == "id file":
+        id_file = tmp_path / "dag-1" / "job.id"
+        id_file.parent.mkdir(parents=True)
+        os.mkfifo(id_file)
+        target, expected = id_file, None
+    elif fifo == "status":
+        id_file = _job(tmp_path, None)
+        job_dir.mkdir(parents=True)
+        os.mkfifo(job_dir / "status")
+        target, expected = job_dir / "status", None
+    else:
+        id_file = _job(tmp_path, "running")
+        os.mkfifo(job_dir / "run_pid")
+        target, expected = job_dir / "run_pid", "running"  # an unreadable pid file is unknown, not gone
+    box: dict = {}
+    thread = threading.Thread(target=lambda: box.setdefault("state", typed_checks.job_state(str(id_file))), daemon=True)
+    thread.start()
+    thread.join(2)
+    if thread.is_alive():  # release the stuck reader before failing
+        os.close(os.open(target, os.O_WRONLY | os.O_NONBLOCK))
+        thread.join(2)
+        pytest.fail("job_state blocked on a FIFO")
+    state = box["state"]
+    assert (state[0] if state else None) == expected
+
+
+@posix_only
+def test_a_symlinked_status_file_is_not_followed(tmp_path, monkeypatch):
+    monkeypatch.setenv("NOUS_WORKSPACE_DIR", str(tmp_path))
+    id_file = _job(tmp_path, None)
+    job_dir = tmp_path / "claude-jobs" / JOB
+    job_dir.mkdir(parents=True)
+    (tmp_path / "elsewhere").write_text("completed\n")
+    (job_dir / "status").symlink_to(tmp_path / "elsewhere")
+    assert typed_checks.job_state(id_file) is None
