@@ -52,6 +52,34 @@ def lineage_write_dir_entry_problem(entry: str) -> str | None:
     return None
 
 
+def lineage_write_dir_resolved(workspace_dir: str, entry: str) -> tuple[Path | None, str | None]:
+    """``entry`` resolved under ``workspace_dir`` (symlinks followed) as ``(directory, None)``, or ``(None, why)``
+    when its text fails ``lineage_write_dir_entry_problem`` or it lands on the workspace itself, outside it, below a
+    hidden component, in or around ``claude-jobs``/``intentions``/``plugins``, or on a file. A missing directory is
+    kept (a lineage may create it). Checked at load (``Settings``) and again at every call
+    (``tool_policy.lineage_write_dirs``), since the filesystem can change in between."""
+    problem = lineage_write_dir_entry_problem(entry)
+    if problem is not None:
+        return None, problem
+    try:
+        workspace = Path(workspace_dir).resolve()
+        d = (workspace / entry.rstrip("/")).resolve()
+        if d == workspace or not d.is_relative_to(workspace):
+            return None, "it resolves to the workspace itself or outside it"
+        if any(p.startswith(".") for p in d.relative_to(workspace).parts):
+            return None, "it resolves below a hidden directory"
+        if any(
+            d.is_relative_to(r) or r.is_relative_to(d)
+            for r in ((workspace / n).resolve() for n in LINEAGE_WRITE_DIR_RESERVED)
+        ):
+            return None, "it resolves into or around claude-jobs, intentions or plugins"
+        if d.exists() and not d.is_dir():
+            return None, "it is a file"
+    except (OSError, ValueError, RuntimeError):  # an unresolvable name, a symlink loop
+        return None, "it cannot be resolved"
+    return d, None
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="NOUS_",
@@ -3662,6 +3690,20 @@ class Settings(BaseSettings):
     def _detect_explicit_overrides(self) -> "Settings":
         object.__setattr__(self, "_compaction_threshold_explicit", "compaction_threshold" in self.model_fields_set)
         object.__setattr__(self, "_keep_recent_explicit", "keep_recent_tokens" in self.model_fields_set)
+        return self
+
+    @model_validator(mode="after")
+    def _resolve_lineage_write_dirs(self) -> "Settings":
+        """Drop, with a WARNING, a NOUS_F099_LINEAGE_WRITE_DIRS entry that already resolves out of place at load
+        (``lineage_write_dir_resolved``); tool_policy resolves the rest again at every call."""
+        kept = []
+        for entry in self.f099_lineage_write_dirs:
+            _, problem = lineage_write_dir_resolved(self.workspace_dir, entry)
+            if problem is None:
+                kept.append(entry)
+            else:
+                logging.getLogger(__name__).warning("NOUS_F099_LINEAGE_WRITE_DIRS: dropped %r: %s", entry, problem)
+        object.__setattr__(self, "f099_lineage_write_dirs", kept)
         return self
 
     @model_validator(mode="after")

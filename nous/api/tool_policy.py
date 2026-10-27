@@ -30,7 +30,7 @@ from nous.cognitive.bash_side_effect import (
     simple_commands,
 )
 from nous.cognitive.execution_ledger import classify_side_effect
-from nous.config import LINEAGE_WRITE_DIR_RESERVED, lineage_write_dir_entry_problem
+from nous.config import lineage_write_dir_entry_problem, lineage_write_dir_resolved
 
 _ALL = frozenset({"none", "write", "external", "irreversible"})
 _WORK = frozenset({"none", "write", "external"})
@@ -414,9 +414,9 @@ def lineage_write_dirs(
     can run). Shared by write_file (``_write_path_allowed``) and the lineage shell's redirections.
 
     ``extra_dirs`` (``NOUS_F099_LINEAGE_WRITE_DIRS``) are the owner's directories, resolved here at every call
-    (symlinks followed): one is dropped when its text fails ``lineage_write_dir_entry_problem``, or when it resolves
-    to the workspace itself, outside it, below a hidden component, onto a file, or into or around ``claude-jobs``,
-    ``intentions`` or ``plugins``. A missing one is kept, so a lineage may create it."""
+    (symlinks followed, ``config.lineage_write_dir_resolved``): one is dropped when its text is refused, or when it
+    resolves to the workspace itself, outside it, below a hidden component, onto a file, or into or around
+    ``claude-jobs``, ``intentions`` or ``plugins``. A missing one is kept, so a lineage may create it."""
     workspace = Path(workspace_dir).resolve()
     dirs: list[Path] = []
     if ctx.root_intention_id is not None:
@@ -424,22 +424,8 @@ def lineage_write_dirs(
     if lineage_shell:
         dirs.append(workspace / "claude-jobs" / "prompts")
     for entry in extra_dirs:
-        if lineage_write_dir_entry_problem(entry) is not None:
-            continue
-        try:
-            d = (workspace / entry.rstrip("/")).resolve()
-            reserved = [(workspace / name).resolve() for name in LINEAGE_WRITE_DIR_RESERVED]
-            if (
-                d == workspace
-                or not d.is_relative_to(workspace)
-                or any(p.startswith(".") for p in d.relative_to(workspace).parts)
-                or any(d.is_relative_to(r) or r.is_relative_to(d) for r in reserved)
-                or (d.exists() and not d.is_dir())
-            ):
-                continue
-        except (OSError, ValueError, RuntimeError):  # an unresolvable name, a symlink loop
-            continue
-        if d not in dirs:
+        d, _ = lineage_write_dir_resolved(workspace_dir, entry)
+        if d is not None and d not in dirs:
             dirs.append(d)
     return dirs
 

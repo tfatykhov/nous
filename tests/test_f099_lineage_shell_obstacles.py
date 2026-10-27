@@ -106,6 +106,30 @@ def test_write_dirs_setting_never_fails_the_boot(caplog):
         assert _settings(f099_lineage_write_dirs=["research", 7]).f099_lineage_write_dirs == ["research"]
 
 
+def test_write_dirs_setting_drops_an_entry_that_resolves_out_of_place_at_load(tmp_path, caplog):
+    """Text is checked first; then each entry is resolved against the workspace once at load (and again at every
+    call, below): an owner's misconfigured entry shows up as a WARNING at boot."""
+    (tmp_path / "research").mkdir()
+    (tmp_path / "repos.json").write_text("{}")
+    with caplog.at_level(logging.WARNING, logger="nous.config"):
+        settings = _settings(workspace_dir=str(tmp_path), f099_lineage_write_dirs=["research", "repos.json", "new"])
+    assert settings.f099_lineage_write_dirs == ["research", "new"]  # a missing one is kept
+    assert any("'repos.json'" in r.getMessage() and "a file" in r.getMessage() for r in caplog.records)
+
+
+@needs_symlinks
+@pytest.mark.parametrize(("link", "target"), [("out", "{OUT}"), ("jobs", "{W}/claude-jobs/state"), ("top", "{W}")])
+def test_write_dirs_setting_drops_a_symlinked_entry_at_load(link, target, tmp_path, caplog):
+    ws, out = tmp_path / "ws", tmp_path / "out"
+    (ws / "claude-jobs" / "state").mkdir(parents=True)
+    out.mkdir()
+    (ws / link).symlink_to(target.format(OUT=out, W=ws))
+    with caplog.at_level(logging.WARNING, logger="nous.config"):
+        settings = _settings(workspace_dir=str(ws), f099_lineage_write_dirs=[link, "research"])
+    assert settings.f099_lineage_write_dirs == ["research"]
+    assert any(repr(link) in r.getMessage() for r in caplog.records)
+
+
 # -- lineage_write_dirs ----------------------------------------------------------------------------------------------
 
 
