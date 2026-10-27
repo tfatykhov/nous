@@ -1,6 +1,7 @@
 """The ``guards`` section of GET /dashboard/autonomy (F107 phase 2): what the scheduled-run guards did.
 
-Read-only, and only from the database (``heart.schedules``, ``heart.subtasks``, ``nous_system.events``) and
+Read-only, and only from the database (``heart.schedules``, ``heart.subtasks``, ``nous_system.events``, and for
+phase 3 ``nous_system.dynamic_checks``) and
 Settings, so it shows what was persisted, never what one process happens to hold in memory. JSONB key reads,
 so Postgres only, like ``job_fix_dashboard``. A guard run leaves one record: ``report_jsonb.guard`` on a row it
 skipped, otherwise a ``subtask_guard_ran`` event; a guard naming no allowlisted command leaves a
@@ -249,7 +250,8 @@ async def _check_rows(
                 "check": names.get(check_id), "enabled": None, "timeout_seconds": None,
                 "name": None, "mode": None, "allowlisted": None,
             }  # fmt: skip
-        # every run of a check with a guard leaves one record, so its runs are its records
+        # runs with a guard record: a run skipped while the same check's guard was in flight, or cut short by a
+        # shutdown during its guard, leaves none (as for schedules, a cancelled guard leaves only a log line)
         rows.append(
             {
                 "check_id": check_id,

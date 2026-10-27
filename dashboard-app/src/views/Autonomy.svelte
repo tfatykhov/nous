@@ -409,7 +409,7 @@
       <p class="small muted" role="status">Off (<code>NOUS_SCHEDULE_GUARDS_ENABLED=false</code>): every guarded job runs the model as if it had no guard.</p>
     {/if}
     {#if !g.bus_enabled}
-      <p class="small muted" role="status">Only skips are recorded: the event bus is off (<code>NOUS_EVENT_BUS_ENABLED=false</code>), so the other counts read 0.</p>
+      <p class="small muted" role="status">Only the skips of scheduled jobs are recorded: the event bus is off (<code>NOUS_EVENT_BUS_ENABLED=false</code>), so the other counts, and every heartbeat check count, read 0.</p>
     {/if}
     {#if g.shadow_misses > 0}
       <div class="strip verdict-bad" role="alert">

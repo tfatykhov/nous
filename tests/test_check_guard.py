@@ -474,3 +474,36 @@ async def test_the_loaders_context_persists_records_through_the_bus_with_a_clipp
     assert event.data == {"run_id": long_run}  # the whole run id stays in the data
     assert ctx.commands == {NAME: "true"} and ctx.enabled is True
     assert check_guard.context_for(settings, None, MagicMock()).emit is not None  # no bus: nothing to persist
+
+
+async def test_a_check_disabled_while_its_refused_guard_is_recorded_runs_no_turn(tmp_path):
+    command, _ = counted(tmp_path)
+    check, runner, _ = make(command, commands={})  # not allowlisted: refused, recorded, then the turn
+
+    async def emit(event_type: str, data: dict, session_id: str) -> None:
+        await asyncio.sleep(0)
+        check._self_disabled = True  # a disable's gate landing during the record's await
+
+    check._guards.emit = emit
+
+    result = await check.run()
+
+    assert result.skipped is True
+    runner.run_turn.assert_not_awaited()
+
+
+async def test_a_run_whose_guard_is_running_counts_as_a_run_a_disable_would_cancel(tmp_path):
+    """So a disable that must not cancel a run (refuse_if_running) is refused, and one that does is not undoable."""
+    from nous.heartbeat.dynamic import DynamicCheckLoader
+    from nous.heartbeat.registry import CheckRegistry
+
+    command, _ = counted(tmp_path, "sleep 1")
+    check, _, _ = make(command)
+    loader = DynamicCheckLoader(db=MagicMock(), registry=CheckRegistry(), runner=MagicMock(), agent_id="a")
+    check._active_runs = loader._active_runs
+
+    task = asyncio.create_task(check.run())
+    await asyncio.sleep(0.3)
+    assert loader._has_cancellable_run(check.name) is True
+    await task
+    assert loader._has_cancellable_run(check.name) is False

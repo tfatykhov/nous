@@ -415,6 +415,8 @@ class DynamicCheck(BaseCheck):
                                    "reason": resolved.reason, "detail": resolved.detail}},
                 session_id,
             )  # fmt: skip
+            if not self.active or self._self_disabled:  # disabled while the record was written (#656)
+                return None
             return check_guard.not_run_note(raw, resolved), None
         if self.name in ctx.running:
             logger.info("Check '%s': its guard is already running in another run; skipping this run", self.name)
@@ -597,9 +599,14 @@ class DynamicCheckLoader:
     def _has_cancellable_run(self, name: str) -> bool:
         """Whether ``_cancel_active_runs(name)`` would cancel a run now: any
         in-flight run of ``name`` other than the one making this call (a
-        check disabling itself finishes its own run; it is never cancelled)."""
+        check disabling itself finishes its own run; it is never cancelled).
+        A run whose guard is running counts (F107 phase 3): the disable lets the
+        guard finish but drops its turn, so it cancels that run all the same."""
         initiator = _CURRENT_CHECK_RUN.get()
-        return any(task is not initiator for check in self._active_runs.get(name, ()) for task in check._run_tasks)
+        return any(
+            check._guard_in_flight or any(task is not initiator for task in check._run_tasks)
+            for check in self._active_runs.get(name, ())
+        )
 
     def set_runner(self, runner: AgentRunner) -> None:
         """Set the runner after construction (needed when runner is created in start())."""
