@@ -3041,6 +3041,11 @@ SILENT_EXIT_ZERO_TEXT = (
 )
 _EXIT_ZERO_ONLY = re.compile(r"Exit code: 0")
 ANSWER_CORRELATION_PREFIX = "owner-answer:"
+# The outcome row of a proposal the owner decided (approved and it ran or failed, or rejected). An expired or
+# cancelled proposal was ended by the system and carries no marker.
+OWNER_DECISION_CORRELATION_PREFIX = "owner-decision:"
+# The inbox rows that are the owner's input to a root: the stall gate resets on an arrival shown one.
+OWNER_INPUT_PREFIXES: tuple[str, ...] = (ANSWER_CORRELATION_PREFIX, OWNER_DECISION_CORRELATION_PREFIX)
 # Fixed namespaces: the outcome row of a decision, and the answer row of a question, have deterministic ids per
 # intention, so a retried write collapses on the inbox's UNIQUE key.
 _PROPOSAL_NAMESPACE = uuid.UUID("3f4b8a2e-5c1d-4e7a-9b63-2d8f1a0c7e55")
@@ -3182,10 +3187,26 @@ async def _settle_proposal(
 
     One INFORM per awaiting intention (``source_id`` = uuid5 of proposal and intention: idempotent), written
     through ``record_result``, so the rows are held (the intention is ``awaiting_owner``) and join the batch that
-    wakes. Nothing is written for an ended root (R8): ``record_result`` would turn the row into a raw REPORT."""
+    wakes. Nothing is written for an ended root (R8): ``record_result`` would turn the row into a raw REPORT.
+
+    A row whose outcome the owner decided (executed, failed or rejected, ``decided_by`` not the system) carries
+    ``OWNER_DECISION_CORRELATION_PREFIX`` plus the actor as its correlation id. ``decided_by`` is read from the row:
+    the caller's object can predate the decision's write."""
     arrival_id = proposal.arrival_id
     if arrival_id is None or await _root_end_state(session, agent_id, proposal.root_id) is not None:
         return False
+    decided_by = (
+        await session.execute(
+            select(IntentionProposal.decided_by).where(
+                IntentionProposal.agent_id == agent_id, IntentionProposal.id == proposal.id
+            )
+        )
+    ).scalar_one_or_none()
+    owner_decided = state in (PROPOSAL_EXECUTED, PROPOSAL_FAILED, PROPOSAL_REJECTED) and decided_by not in (
+        None,
+        "system",
+    )
+    correlation_id = f"{OWNER_DECISION_CORRELATION_PREFIX}{decided_by[:100]}" if owner_decided else None
     arrival = (
         await session.execute(
             select(IntentionArrival).where(IntentionArrival.agent_id == agent_id, IntentionArrival.id == arrival_id)
@@ -3221,6 +3242,7 @@ async def _settle_proposal(
             msg_type="INFORM",
             title=title,
             body=body,
+            correlation_id=correlation_id,
             arrival_id=arrival_id,
             settings=settings,
         )
