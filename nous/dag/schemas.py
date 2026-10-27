@@ -28,6 +28,9 @@ class DAGNodeType(str, Enum):  # noqa: UP042 -- StrEnum changes str()/format() o
     fix = "fix"
     # Harness Phase 3 — waits durably on a person's answer on a companion card.
     approval = "approval"
+    # Typed wait (migration 093): a job, PR or file condition the orchestrator
+    # evaluates in-process. No model, no shell.
+    wait = "wait"
 
 
 class DAGStatus(str, Enum):  # noqa: UP042 -- StrEnum changes str()/format() output (e.g. dag/approval.py)
