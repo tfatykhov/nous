@@ -1701,8 +1701,8 @@ export type GuardSignal = 'report' | 'finding' | 'inbox' | 'push' | 'ledger';
 export interface GuardsBlock extends GuardCounts {
   /** NOUS_SCHEDULE_GUARDS_ENABLED. */
   enabled: boolean;
-  /** Every record but a skip is a bus event: false means nothing of them was recorded, not "none". */
-  events_persisted: boolean;
+  /** NOUS_EVENT_BUS_ENABLED. Every record but a skip is a bus event: false means nothing of them was recorded, not "none". */
+  bus_enabled: boolean;
   window_days: number;
   /** Active schedules with a guard, each with its own counts. `mode` as written: shadow (the default), skip, or an unknown one. */
   schedules: GuardSchedule[];

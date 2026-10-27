@@ -81,7 +81,7 @@ const guardSchedule = (over: Record<string, unknown>) => ({
   ...over,
 });
 const GUARDS = (over: Record<string, unknown> = {}) => ({
-  enabled: true, events_persisted: true, window_days: 7,
+  enabled: true, bus_enabled: true, window_days: 7,
   schedules: [guardSchedule({})],
   runs: 168, guard_runs: 160, skipped: 0, would_skip: 150, would_skip_unrecorded: 0,
   fell_through: { output: 6, stderr: 1, exit: 0, timeout: 0, error: 3, not_allowlisted: 0 },
@@ -380,6 +380,16 @@ describe('Autonomy view', () => {
     body = { ...FULL(), guards: GUARDS({ enabled: false }) };
     render(Autonomy);
     expect(await screen.findByText(/NOUS_SCHEDULE_GUARDS_ENABLED=false/)).toBeTruthy();
+    cleanup();
+    // the guards' own switch, not the response's events_persisted (F026 persistence)
+    body = { ...FULL(), events_persisted: true, guards: GUARDS({ bus_enabled: false }) };
+    render(Autonomy);
+    expect(await screen.findByText(/NOUS_EVENT_BUS_ENABLED=false/)).toBeTruthy();
+    cleanup();
+    body = { ...FULL(), events_persisted: false, warn_classes: [] };
+    render(Autonomy);
+    await screen.findByRole('heading', { name: 'Run guards' });
+    expect(screen.queryByText(/NOUS_EVENT_BUS_ENABLED=false/)).toBeNull();
     cleanup();
     body = { ...FULL(), guards: GUARDS({ schedules: [], recent: [], runs: 0, guard_runs: 0, would_skip: 0 }) };
     render(Autonomy);

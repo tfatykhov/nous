@@ -402,7 +402,7 @@
     {#if !g.enabled}
       <p class="small muted" role="status">Off (<code>NOUS_SCHEDULE_GUARDS_ENABLED=false</code>): every guarded job runs the model as if it had no guard.</p>
     {/if}
-    {#if !g.events_persisted}
+    {#if !g.bus_enabled}
       <p class="small muted" role="status">Only skips are recorded: the event bus is off (<code>NOUS_EVENT_BUS_ENABLED=false</code>), so the other counts read 0.</p>
     {/if}
     {#if g.shadow_misses > 0}

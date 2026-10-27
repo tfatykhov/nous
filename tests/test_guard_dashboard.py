@@ -111,7 +111,7 @@ async def test_the_shape_with_nothing_guarded(db, agent):
     out = await data(db, agent)
     assert out == {
         "enabled": True,
-        "events_persisted": True,
+        "bus_enabled": True,
         "window_days": 7,
         "schedules": [],
         "runs": 0,
@@ -125,7 +125,9 @@ async def test_the_shape_with_nothing_guarded(db, agent):
         "recent": [],
     }
     assert (await data(db, agent, schedule_guards_enabled=False))["enabled"] is False
-    assert (await data(db, agent, event_bus_enabled=False))["events_persisted"] is False
+    assert (await data(db, agent, event_bus_enabled=False))["bus_enabled"] is False
+    # the guard records are bus events: F026 persistence, the response's events_persisted, does not gate them
+    assert (await data(db, agent, f026_persistence_enabled=False))["bus_enabled"] is True
 
 
 async def test_one_row_per_active_guarded_schedule_with_mode_name_and_a_clipped_job(db, agent):

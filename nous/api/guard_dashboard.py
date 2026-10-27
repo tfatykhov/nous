@@ -237,8 +237,9 @@ async def get_guard_data(
 
     return {
         "enabled": settings.schedule_guards_enabled,
-        # The guard records other than skips are bus events: with the bus off none was persisted.
-        "events_persisted": settings.event_bus_enabled,
+        # The guard records other than skips are bus events: with the bus off none was persisted. Not named
+        # events_persisted, which beside it in the response is NOUS_F026_PERSISTENCE_ENABLED, a different switch.
+        "bus_enabled": settings.event_bus_enabled,
         "window_days": days,
         # Each guarded schedule's own counts and last runs, so a second guard's records never mix with these.
         "schedules": [
