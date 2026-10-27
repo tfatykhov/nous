@@ -16,7 +16,7 @@ appended to its task text so the model does not need to run the command again.
 ``NOUS_SCHEDULE_GUARDS_ENABLED=false`` ignores guards.
 
 ``mode`` (phase 2) is ``shadow`` when absent: the command runs and is recorded, but the model turn always
-runs too, and after it the worker records whether the model acted (``acted_signals``). Only ``skip`` lets
+runs too, and after it the worker records whether the model acted (``acted_signals``, ``acted``). Only ``skip`` lets
 the guard complete a run, and only the owner writes it. Any other mode falls through, like an unknown
 ``skip_when``.
 """
@@ -41,6 +41,8 @@ MODES = (MODE_SHADOW, MODE_SKIP)
 REASONS = ("output", "stderr", "exit", "timeout", "error", "not_allowlisted")
 # The kinds of action acted_signals reports, in its order.
 SIGNALS = ("report", "finding", "inbox", "push", "ledger")
+# The kinds that go "beyond the task's 'do nothing' path"; report, inbox and push come with every completed run.
+ACTING_SIGNALS = frozenset({"finding", "ledger"})
 # The ledger statuses of a call that did not take effect (a blocked call was refused before dispatch).
 _NOT_ACTING_STATUSES = frozenset({"blocked"})
 DEFAULT_TIMEOUT_SECONDS = 60
@@ -159,7 +161,9 @@ def acted_signals(
     - ``ledger``: a ledger entry that was not blocked, other than a bash run of the guard's own command.
       The durable ledger holds only side-effecting calls (write, external, irreversible), never reads.
 
-    The model acted when the list is not empty.
+    Whether the model acted is ``acted(signals)``: a ``finding`` or a ``ledger`` write. A run that finds
+    nothing still writes a summary and an inbox row (or push), so ``report``, ``inbox`` and ``push`` are
+    context, never acting on their own.
     """
     report = getattr(row, "report_jsonb", None)
     report = report if isinstance(report, dict) else {}
@@ -180,6 +184,11 @@ def acted_signals(
     ):
         signals.append("ledger")
     return signals
+
+
+def acted(signals: Sequence[str]) -> bool:
+    """Whether the model acted, given ``acted_signals``' kinds: it reported a finding or wrote through the ledger."""
+    return bool(ACTING_SIGNALS & set(signals))
 
 
 def _clip(text: str, limit: int = OUTPUT_MAX_BYTES) -> str:

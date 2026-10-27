@@ -80,7 +80,7 @@ const GUARDS = (over: Record<string, unknown> = {}) => ({
   fell_through: { output: 6, stderr: 1, exit: 0, timeout: 0, error: 3, not_allowlisted: 0 },
   shadow_misses: 0, shadow_misses_by_signal: { report: 0, finding: 0, inbox: 0, push: 0, ledger: 0 },
   recent: [
-    guardRecord({ acted: true, acted_by: ['report'] }),
+    guardRecord({ acted: true, acted_by: ['report', 'ledger'] }),
     guardRecord({ kind: 'fell_through', reason: 'stderr', stderr_bytes: 20, stderr_head: '<script>alert(1)</script>', subtask_id: '34'.repeat(16) }),
   ],
   ...over,
@@ -330,18 +330,20 @@ describe('Autonomy view', () => {
     expect(text).toContain('Output 6');
     expect(text).toContain('stderr 1');
     expect(text).toContain('Error 3');
-    expect(text).toContain('Model acted: report');
+    expect(text).toContain('Model acted: report, ledger');
     expect(section.querySelector('[role="alert"]')).toBeNull();
     expect(container.textContent).not.toMatch(/NaN|undefined/);
   });
 
-  it('makes shadow misses stand out, with the kinds of action behind them', async () => {
-    body = { ...FULL(), guards: GUARDS({ shadow_misses: 3, shadow_misses_by_signal: { report: 3, finding: 1, inbox: 0, push: 0, ledger: 2 } }) };
+  it('makes shadow misses stand out, with the acting kinds behind them', async () => {
+    body = { ...FULL(), guards: GUARDS({ shadow_misses: 3, shadow_misses_by_signal: { report: 3, finding: 1, inbox: 3, push: 0, ledger: 2 } }) };
     render(Autonomy);
     const alert = await screen.findByRole('alert');
     expect(alert.textContent).toContain('3 shadow misses');
-    expect(alert.textContent).toContain('report 3');
+    expect(alert.textContent).toContain('finding 1');
     expect(alert.textContent).toContain('ledger 2');
+    // report and inbox come with every completed run: context in the records, not why a run is a miss
+    expect(alert.textContent).not.toContain('report');
     expect(alert.textContent).not.toContain('inbox');
   });
 

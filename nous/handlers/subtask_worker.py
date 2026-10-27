@@ -368,7 +368,7 @@ class SubtaskWorkerPool:
 
     async def _record_shadow(self, subtask: Subtask, *, inbox_written: bool) -> None:
         """F107 phase 2: after the turn of a shadow-guarded run, persist whether the model acted
-        (``schedule_guard.acted_signals``) in a ``subtask_guard_acted`` event. Never raises.
+        (``schedule_guard.acted_signals`` and ``acted``) in a ``subtask_guard_acted`` event. Never raises.
 
         Only a run whose row is terminal is recorded: a turn cut short by a shutdown leaves its row
         ``running``, and the run is not over.
@@ -394,7 +394,7 @@ class SubtaskWorkerPool:
                 extra={
                     "schedule_id": subtask.metadata_["schedule_id"],
                     "guard": {"name": spec.name, "mode": spec.mode, "would_skip": would_skip},
-                    "acted": bool(signals),
+                    "acted": schedule_guard.acted(signals),
                     "acted_by": signals,
                     "run_status": row.status,
                     # with the durable ledger off, no entry is ever written, so "ledger" cannot show up

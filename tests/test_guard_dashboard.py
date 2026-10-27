@@ -182,20 +182,39 @@ async def test_a_record_from_before_phase_2_counts_as_skip_mode_with_a_derived_r
 
 
 async def test_shadow_misses_are_would_skip_runs_where_the_model_acted(db, agent):
+    # Acting is a finding or a ledger write: report, inbox and push come with every completed run (PR #811 review).
     sch = schedule(agent, {"name": NAME})
-    subs = [run(agent, sch) for _ in range(4)]
+    subs = [run(agent, sch) for _ in range(7)]
     await add(db, sch, *subs)
     await add(
         db,
+        *(event(agent, "subtask_guard_ran", s, sch, guard=record()) for s in subs[:6]),
+        event(agent, "subtask_guard_ran", subs[6], sch, guard=record(would_skip=False, reason="output")),
         acted(agent, subs[0], sch, ["report", "ledger"]),
-        acted(agent, subs[1], sch, ["inbox"]),
-        acted(agent, subs[2], sch, []),
-        acted(agent, subs[3], sch, ["ledger"], would_skip=False),  # the guard said there was work: not a miss
-        acted(agent, subs[0], sch, ["push"], age_hours=24 * 8),
+        acted(agent, subs[1], sch, ["report", "finding", "inbox"]),
+        acted(agent, subs[2], sch, ["report", "inbox"]),  # a "nothing to log" run, hardened path
+        acted(agent, subs[3], sch, ["inbox", "push"]),  # the same, legacy path
+        acted(agent, subs[4], sch, []),
+        acted(agent, subs[6], sch, ["ledger"], would_skip=False),  # the guard said there was work: not a miss
     )
     out = await data(db, agent)
-    assert out["shadow_misses"] == 2
-    assert out["shadow_misses_by_signal"] == {"report": 1, "finding": 0, "inbox": 1, "push": 0, "ledger": 1}
+    assert (out["would_skip"], out["shadow_misses"]) == (6, 2)
+    assert out["shadow_misses_by_signal"] == {"report": 2, "finding": 1, "inbox": 1, "push": 0, "ledger": 1}
+    by_id = {r["subtask_id"]: r for r in out["recent"]}
+    assert [by_id[s.id.hex]["acted"] for s in subs[:5]] == [True, True, False, False, False]
+    assert by_id[subs[5].id.hex]["acted"] is None  # no acted record
+
+
+async def test_acted_is_derived_from_acted_by_not_the_stored_flag(db, agent):
+    # Records written before the narrowing carry acted=True for a report-only run.
+    sch = schedule(agent, {"name": NAME})
+    sub = run(agent, sch)
+    old = acted(agent, sub, sch, ["report", "inbox"])
+    old.data = {**old.data, "acted": True}
+    await add(db, sch, sub)
+    await add(db, event(agent, "subtask_guard_ran", sub, sch, guard=record()), old)
+    out = await data(db, agent)
+    assert out["shadow_misses"] == 0 and out["recent"][0]["acted"] is False
 
 
 async def test_recent_holds_the_last_ten_records_newest_first_with_acted_joined(db, agent):
@@ -207,13 +226,13 @@ async def test_recent_holds_the_last_ten_records_newest_first_with_acted_joined(
         for i, s in enumerate(subs)
     ]
     await add(db, sch, skip, *subs)
-    await add(db, *events, acted(agent, subs[0], sch, ["report"]))
+    await add(db, *events, acted(agent, subs[0], sch, ["report", "ledger"]))
     recent = (await data(db, agent))["recent"]
     assert len(recent) == dash.RECENT_LIMIT == 10
     assert [r["at"] for r in recent] == sorted((r["at"] for r in recent), reverse=True)
     assert (recent[0]["kind"], recent[0]["subtask_id"]) == ("skipped", skip.id.hex)
     assert (recent[1]["kind"], recent[1]["subtask_id"]) == ("would_skip", subs[0].id.hex)
-    assert (recent[1]["acted"], recent[1]["acted_by"]) == (True, ["report"])
+    assert (recent[1]["acted"], recent[1]["acted_by"]) == (True, ["report", "ledger"])
     assert recent[2]["acted"] is None  # no acted record (yet)
     assert recent[1]["stderr_head"] == "<b>x</b>"  # raw text; the view escapes it
     assert set(recent[1]) == {
@@ -281,7 +300,7 @@ async def test_a_miss_counts_once_per_run_and_only_in_shadow_mode(db, agent):
     skip_mode = acted(agent, subs[1], sch, ["ledger"])
     skip_mode.data = {**skip_mode.data, "guard": {"name": NAME, "mode": "skip", "would_skip": True}}
     await add(db, sch, *subs)
-    await add(db, acted(agent, subs[0], sch, ["report"]), acted(agent, subs[0], sch, ["report"]), skip_mode)
+    await add(db, acted(agent, subs[0], sch, ["finding"]), acted(agent, subs[0], sch, ["finding"]), skip_mode)
     assert (await data(db, agent))["shadow_misses"] == 1
 
 

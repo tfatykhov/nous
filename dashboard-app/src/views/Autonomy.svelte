@@ -67,7 +67,8 @@
   const GUARD_REASON_LABEL: Record<GuardReason, string> = {
     output: 'Output', stderr: 'stderr', exit: 'Exit code', timeout: 'Timeout', error: 'Error', not_allowlisted: 'Not allowlisted',
   };
-  const GUARD_SIGNALS: GuardSignal[] = ['report', 'finding', 'inbox', 'push', 'ledger'];
+  // schedule_guard.ACTING_SIGNALS: report, inbox and push come with every completed run, so only these make a miss.
+  const GUARD_ACTING: GuardSignal[] = ['finding', 'ledger'];
   const guardMode = (mode: string | null) =>
     mode === 'shadow' ? 'Shadow' : mode === 'skip' ? 'Skip' : `Unknown mode: ${mode ?? '—'}`;
   const guardOutcome = (r: GuardRecord) =>
@@ -410,7 +411,7 @@
           <div class="verdict-title">{g.shadow_misses} shadow miss{g.shadow_misses === 1 ? '' : 'es'}</div>
           <div class="verdict-detail">
             Runs the guard would have skipped in which the model still acted
-            ({GUARD_SIGNALS.filter((k) => g.shadow_misses_by_signal[k] > 0).map((k) => `${k} ${g.shadow_misses_by_signal[k]}`).join(', ')}).
+            ({GUARD_ACTING.filter((k) => g.shadow_misses_by_signal[k] > 0).map((k) => `${k} ${g.shadow_misses_by_signal[k]}`).join(', ')}).
             In skip mode that work would not have happened.
           </div>
         </div>

@@ -950,22 +950,46 @@ async def test_a_shadow_run_that_did_nothing_records_not_acted():
 
 
 @pytest.mark.parametrize(
-    ("kw", "signal"),
+    ("kw", "signal", "acted"),
     [
-        ({"report": {"summary": "Logged 3 commits."}}, "report"),
-        ({"report": {"summary": " ", "findings": ["a"]}}, "finding"),
-        ({"report": {"summary": " ", "next_actions": ["merge #1"]}}, "finding"),
-        ({"report": {"summary": " ", "incomplete": True, "blocked_reason": "no access"}}, "finding"),
-        ({"inbox": True}, "inbox"),
-        ({"push": True}, "push"),
-        ({"ledger": [("write_file", "success", {"path": "/x"})]}, "ledger"),
-        ({"ledger": [("bash", "unknown", {"command_sha256": "0" * 16})]}, "ledger"),
+        ({"report": {"summary": "Logged 3 commits."}}, "report", False),
+        ({"report": {"summary": " ", "findings": ["a"]}}, "finding", True),
+        ({"report": {"summary": " ", "next_actions": ["merge #1"]}}, "finding", True),
+        ({"report": {"summary": " ", "incomplete": True, "blocked_reason": "no access"}}, "finding", True),
+        ({"inbox": True}, "inbox", False),
+        ({"push": True}, "push", False),
+        ({"ledger": [("write_file", "success", {"path": "/x"})]}, "ledger", True),
+        ({"ledger": [("bash", "unknown", {"command_sha256": "0" * 16})]}, "ledger", True),
     ],
 )
-async def test_each_kind_of_action_counts_as_acted(kw, signal):
+async def test_each_kind_of_action_is_recorded_and_only_a_finding_or_a_ledger_write_is_acting(kw, signal, acted):
+    # report, inbox and push come with every completed run, so they are context, not acting (PR #811 review).
     *_rest, bus, _http, _seen, _run_ = await _shadow_run(_shadow("true"), **kw)
     data = _acted(bus)
-    assert data["acted"] is True and data["acted_by"] == [signal]
+    assert data["acted"] is acted and data["acted_by"] == [signal]
+
+
+@pytest.mark.parametrize(
+    ("signals", "acted"),
+    [
+        (["report", "inbox"], False),  # a "nothing to log" run on the hardened path
+        (["inbox", "push"], False),  # the same on the legacy path
+        (["report", "inbox", "push"], False),
+        ([], False),
+        (["report", "finding", "inbox"], True),
+        (["inbox", "push", "ledger"], True),
+    ],
+)
+def test_acted_is_a_finding_or_a_ledger_write(signals, acted):
+    assert schedule_guard.acted(signals) is acted
+
+
+async def test_a_nothing_to_log_run_is_not_acted():
+    *_rest, bus, _http, _seen, _run_ = await _shadow_run(
+        _shadow("true"), report={"summary": "No new commits; nothing to log."}, inbox=True
+    )
+    data = _acted(bus)
+    assert (data["acted"], data["acted_by"]) == (False, ["report", "inbox"])
 
 
 async def test_the_guards_own_command_and_a_blocked_call_are_not_acting():
