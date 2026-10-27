@@ -138,6 +138,37 @@ def test_shape_does_not_split_on_semicolons_inside_quotes(sql):
 @pytest.mark.parametrize(
     "sql",
     [
+        "with x as (select 1) delete from heart.subtasks",
+        "WITH x AS (SELECT 1) INSERT INTO heart.subtasks SELECT * FROM x",
+        "with x as (select 1) update heart.subtasks set status = 'x'",
+        "with recursive x(n) as (select 1) merge into t using x on true when matched then delete",
+        "with x as (select 1) /* c */ Delete from t",
+    ],
+)
+def test_shape_refuses_a_with_statement_that_writes(sql):
+    with pytest.raises(QueryRefused) as refused:
+        check_query_shape(sql)
+    assert "SELECT or WITH" in str(refused.value) and "writes" in str(refused.value)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "with x as (select 'delete' as w) select * from x",
+        'with x as (select 1 as "update") select * from x',
+        "with x as (select 1) select * from x where note = 'insert into t'",
+        "with x as (select 1) select deleted_at, updated_at, inserted from x",
+        # a data-modifying CTE inside the parentheses is the server's to refuse (read-only, no privilege)
+        "with d as (delete from t returning 1) select count(*) from d",
+    ],
+)
+def test_shape_lets_the_server_judge_what_a_with_statement_only_reads(sql):
+    assert check_query_shape(sql) == sql
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
         "select 'a",
         'select "a',
         "select $$a",

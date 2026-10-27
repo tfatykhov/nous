@@ -87,6 +87,9 @@ class Cell(NamedTuple):
 _IDENT_CHAR = re.compile(r"[A-Za-z0-9_$\x80-￿]")
 _DOLLAR_TAG = re.compile(r"\$(?:[A-Za-z_\x80-￿][A-Za-z0-9_\x80-￿]*)?\$")
 _FIRST_WORD = re.compile(r"(?i)(?:select|with)\b")
+# A write as the main statement of a WITH (outside its parentheses): refused with a clear message, where the
+# server would only report a syntax error inside the wrapper.
+_TOP_LEVEL_WRITE = re.compile(r"(?i)\b(?:insert|update|delete|merge)\b")
 
 
 def _unclosed(what: str) -> QueryRefused:
@@ -158,8 +161,9 @@ def check_query_shape(sql: str) -> str:
     Raises ``QueryRefused`` unless ``sql`` is one statement that starts with SELECT or WITH (after any comments),
     with every quote and comment closed and its parentheses balanced. This is a courtesy check that explains a
     refusal; the database is the authority. It refuses a second statement too, and PostgreSQL refuses one again,
-    since the statement is prepared. A WITH-prefixed write (``WITH x AS (...) DELETE ...``) passes here and is
-    the server's to refuse: the login is read-only and holds no write privilege.
+    since the statement is prepared. A WITH whose main statement writes (``WITH x AS (...) DELETE ...``) is
+    refused here with a clear message; a write inside its parentheses (a data-modifying CTE) is the server's to
+    refuse: the transaction is read-only and the login holds no write privilege.
     """
     if not isinstance(sql, str):
         raise QueryRefused(f"{_RULE} Pass the statement as text.")
@@ -178,12 +182,18 @@ def check_query_shape(sql: str) -> str:
         first = head.split(None, 1)[0][:20] if head else ""
         raise QueryRefused(f"{_RULE} This one starts with {first!r}." if first else f"{_RULE} This one is empty.")
     depth = 0
+    top: list[str] = []  # the statement outside every parenthesis
     for ch in skeleton:
         depth += (ch == "(") - (ch == ")")
         if depth < 0:
             break
+        top.append(ch if depth == 0 and ch != ")" else " ")
     if depth:
         raise QueryRefused(f"{_RULE} Its parentheses do not balance.")
+    if head[:4].lower() == "with" and _TOP_LEVEL_WRITE.search("".join(top)):
+        raise QueryRefused(
+            f"{_RULE} This WITH statement writes (INSERT, UPDATE, DELETE or MERGE); nothing can be written."
+        )
     return sql.strip()
 
 
