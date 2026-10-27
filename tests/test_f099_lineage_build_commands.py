@@ -389,10 +389,23 @@ async def test_a_build_command_is_not_a_proposal_and_a_refused_one_still_is(ws):
         ("/usr/bin/git log", True),
         ("echo $(id)", True),  # unreadable: the scrub fails closed
         ("echo 'x", True),
+        # a glob or a `[` is read, not taken as unreadable: the token stays for gh and runner.sh
+        ("ls *.md && gh pr view 1", False),
+        ("[ -f a ] && gh pr view 1", False),
+        ("test -f a && gh pr view 1", False),
+        ("cd nous && [ -f a ] && pytest", True),
+        ("cd nous && pytest tests/*.py", True),
     ],
 )
 def test_dispatch_marks_a_command_that_runs_a_build_program(command, build):
     assert lineage_runs_build(command) is build
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX shell")
+@pytest.mark.parametrize("command", ["[ -d nous ] && printenv GITHUB_TOKEN", "ls nous/* && printenv GITHUB_TOKEN"])
+async def test_a_bracket_or_a_glob_does_not_cost_a_lineage_command_its_token(command, ws, secrets):
+    text, _ = await _bash_dispatcher(ws).dispatch("bash", {"command": command}, context=_internal())
+    assert "planted-gh-token" in text
 
 
 # -- the environment of a build command ---------------------------------------------------------------------

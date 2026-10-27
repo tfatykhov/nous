@@ -767,8 +767,10 @@ def _build_allowed(prog: str, args: list[str], repo: Path) -> bool:
 
 def lineage_runs_build(command: str) -> bool:
     """Whether a lineage's bash ``command`` runs a build program, so dispatch gives it the build environment (no
-    GitHub token). True when the command cannot be read exactly: the scrub fails closed."""
-    commands = simple_commands(command)
+    GitHub token). True when the command cannot be read exactly: the scrub fails closed. Read with globs, as
+    ``lineage_bash_allowed`` reads it: a glob operand or a ``[`` is a word, not a reason to drop the token from a
+    command the allowlist accepted."""
+    commands = simple_commands(command, globs=True)
     if commands is None:
         return True
     return any(words and Path(words[0]).name in LINEAGE_BUILD_PROGRAMS for words, _, _, _ in commands)
