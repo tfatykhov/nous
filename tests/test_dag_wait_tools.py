@@ -89,6 +89,8 @@ def test_the_schema_teaches_the_wait_node():
         assert example in text
     for until in ("merged", "closed", "head_changed", "checks_done", "review_on_head"):
         assert until in text
+    # A repository without CI never lists a check run: checks_done does not pass vacuously.
+    assert "pending while GitHub lists no check run on the head" in text
 
 
 @pytest.mark.postgres_only

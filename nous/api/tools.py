@@ -6266,7 +6266,9 @@ def register_dag_tools(
                                     '"merged" (fails if the PR is closed without a merge), "closed", '
                                     '"head_changed" (needs "head", the commit sha it waits to move away from), '
                                     '"checks_done" (every check run on the head finished; failed ones are named in '
-                                    'the result; with "head", fails if the head moved) or "review_on_head" (a '
+                                    "the result; pending while GitHub lists no check run on the head, so a "
+                                    'repository without CI never passes it; with "head", fails if the head moved) '
+                                    'or "review_on_head" (a '
                                     'review on the current head, from a login starting with "reviewer" when one is '
                                     "given). GitHub errors never fail a pr wait, and it polls at most once a "
                                     'minute. file: {"kind": "file", "path": "research/out.md", "nonempty": true}: '
