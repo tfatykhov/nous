@@ -16,6 +16,7 @@ import shlex
 from datetime import UTC, datetime
 from typing import Any
 
+from nous.api.execution_context import CONTEXT_KINDS
 from nous.api.job_marks import JOB_ID_RE, read_job_mark, write_job_mark
 
 BY_VALUES = ("owner", "agent", "harness")
@@ -76,12 +77,21 @@ def agent_record(kind: str | None) -> dict[str, str]:
     return record("agent", turn_label(kind))
 
 
+def _context_by_via(kind: str | None) -> tuple[str, str]:
+    if kind == "approved_action":
+        return "owner", "approved proposal"
+    return "agent", turn_label(kind)
+
+
 def context_actor(kind: str | None) -> dict[str, str]:
     """Who a cancel made by a tool call in a turn of ``kind`` belongs to: the owner for an approved proposal (the
     owner decided that exact call), else the agent's own turn."""
-    if kind == "approved_action":
-        return record("owner", "approved proposal")
-    return agent_record(kind)
+    return record(*_context_by_via(kind))
+
+
+# The only (by, via) pairs a job's cancelled_by mark holds: what context_actor builds for a context kind (the
+# dispatcher's actor for bash). Built from the same function, so the two cannot drift.
+JOB_ACTORS: frozenset[tuple[str, str]] = frozenset(_context_by_via(kind) for kind in CONTEXT_KINDS)
 
 
 def describe(rec: object) -> str | None:
@@ -161,8 +171,8 @@ def write_job_cancelled_by(workspace_dir: str, job_id: str, rec: dict[str, str])
 
 
 def describe_job_cancellation(workspace_dir: str, job_id: str) -> str:
-    """``cancelled by ...`` from the job's ``cancelled_by`` mark; ``NO_RECORD_TEXT`` when there is none or it is
-    not a record as ``write_job_cancelled_by`` writes one (a ``via`` that cleaning would change was not)."""
+    """``cancelled by ...`` from the job's ``cancelled_by`` mark; ``NO_RECORD_TEXT`` when there is none or its
+    ``(by, via)`` is not one Nous writes (``JOB_ACTORS``): the file is in a directory the job itself can write."""
     raw = read_job_mark(workspace_dir, job_id, _CANCELLED_BY, max_bytes=_CANCELLED_BY_MAX_BYTES)
     if raw is None:
         return NO_RECORD_TEXT
@@ -170,6 +180,9 @@ def describe_job_cancellation(workspace_dir: str, job_id: str) -> str:
         rec = json.loads(raw)
     except ValueError:
         return NO_RECORD_TEXT
-    if not isinstance(rec, dict) or clean_via(rec.get("via")) != rec.get("via"):
+    if not isinstance(rec, dict):
+        return NO_RECORD_TEXT
+    by, via = rec.get("by"), rec.get("via")
+    if not (isinstance(by, str) and isinstance(via, str) and (by, via) in JOB_ACTORS):
         return NO_RECORD_TEXT
     return describe(rec) or NO_RECORD_TEXT

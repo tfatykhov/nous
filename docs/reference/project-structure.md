@@ -21,7 +21,7 @@ nous/
 │   ├── loop_watchdog.py        # Event-loop stall watchdog (stack dump + exit)
 │   ├── log_redaction.py        # Logging setup for both entry points: keeps the bot token and the API key out of the logs
 │   ├── cancellation.py         # cancel_requested(): a task's own cancellation, as opposed to one that came out of something it awaited
-│   ├── cancel_provenance.py    # Who cancelled a DAG or a Claude Code job: the record (owner, agent or harness), its renderers, the lone runner.sh call parser (stdlib + job_marks)
+│   ├── cancel_provenance.py    # Who cancelled a DAG or a Claude Code job: the record (owner, agent or harness), its renderers, the lone runner.sh call parser, the (by, via) pairs a job's cancelled_by may hold
 │   ├── storage/                # Database layer (async SQLAlchemy)
 │   │   ├── database.py         # Connection pool, session management
 │   │   ├── models.py           # ORM models
