@@ -88,6 +88,7 @@ nous/
 │   │   ├── registry.py         # CheckRegistry + BaseCheck ABC
 │   │   ├── checks.py           # HealthCheck, SelfInitiatedCheck, EmailCheck
 │   │   ├── dynamic.py          # DynamicCheck + DynamicCheckLoader (F034.5)
+│   │   ├── check_guard.py      # F107 phase 3: a dynamic check's run guard (metadata.guard, the schedule guard's allowlist and rules; timeout fit, is_action receipt, check_guard_* events)
 │   │   ├── fault_detector.py   # ProcessFaultCheck + RetrievalCanaryCheck (#653, land-dark)
 │   │   ├── work_queue.py       # F064.6 WorkQueueCheck (file_jsonl adapter)
 │   │   ├── finding_store.py    # F034.1 finding lifecycle persistence
@@ -149,7 +150,7 @@ nous/
 │       ├── intention_dashboard.py # F099 Phase 3c: GET /dashboard/intentions queries (the tree and the metrics), read-only, Postgres-only
 │       ├── autonomy_dashboard.py # Autonomy scoreboard: GET /dashboard/autonomy data (taps, approval cards, grades, task scores, inventory, warn classes), read-only
 │       ├── job_fix_dashboard.py # The scoreboard's job_fixes section: every check-and-fix record, read-only, Postgres-only
-│       ├── guard_dashboard.py   # The scoreboard's guards section (F107 phase 2): guarded schedules, guard outcomes and shadow misses in the window, read-only, Postgres-only
+│       ├── guard_dashboard.py   # The scoreboard's guards section (F107 phase 2/3): guarded schedules and heartbeat checks, guard outcomes and shadow misses in the window, read-only, Postgres-only
 │       ├── mcp.py              # MCP server (nous_chat, nous_decide, etc.)
 │       ├── runner.py           # Agent runner (tool loop, streaming)
 │       ├── preamble.py         # CLAUDE_CODE_PREAMBLE: system block 0 of every Messages request (one definition)
