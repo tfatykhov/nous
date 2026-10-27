@@ -10,6 +10,7 @@ skipped, otherwise a ``subtask_guard_ran`` event; a guard naming no allowlisted 
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -113,6 +114,50 @@ def _one_per_run(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [*best.values(), *loose]
 
 
+def _row(rec: dict[str, Any], outcome: dict[str, Any] | None) -> dict[str, Any]:
+    """One record as the view shows it, with what the model did after it (``outcome``, the acted record)."""
+    guard = dict(rec["guard"])
+    if rec["ran"]:
+        guard.setdefault("mode", MODE_SKIP)  # every guard before phase 2 skipped
+    kind, reason = _classify(guard, rec["ran"])
+    acted_by = _acted_by(outcome)
+    return {
+        "at": rec["at"].isoformat(),
+        "kind": kind,
+        "schedule_id": rec["schedule_id"],
+        "subtask_id": rec["subtask_id"],
+        **{k: guard.get(k) for k in RECORD_KEYS},
+        "reason": reason,
+        # derived from acted_by, never the stored flag: one definition, also for older records
+        "acted": acted(acted_by) if acted_by is not None else None,
+        "acted_by": acted_by,
+    }
+
+
+def _tally(pairs: list[tuple[dict[str, Any], dict[str, Any]]], runs: int) -> dict[str, Any]:
+    """The counts over ``(record, row)`` pairs; ``runs`` is the number of runs they belong to."""
+    rows = [row for _, row in pairs]
+    fell_through = dict.fromkeys(REASONS, 0)
+    for row in rows:
+        if row["kind"] == "fell_through":
+            fell_through[row["reason"]] += 1
+    would_skip = [row for row in rows if row["kind"] == "would_skip"]
+    # Misses are counted over the would-skip records in the window, so shadow_misses <= would_skip: an acted
+    # record whose ran record the bus dropped, or that fell out of the window, is not a miss.
+    misses = [row["acted_by"] for row in would_skip if row["acted"] is True]
+    return {
+        "runs": runs,
+        "guard_runs": sum(1 for rec, _ in pairs if rec["ran"]),
+        "skipped": sum(1 for row in rows if row["kind"] == "skipped"),
+        "would_skip": len(would_skip),
+        # would-skip runs with no record of what the model did (its turn is still going, or the record was lost)
+        "would_skip_unrecorded": sum(1 for row in would_skip if row["acted"] is None),
+        "fell_through": fell_through,
+        "shadow_misses": len(misses),
+        "shadow_misses_by_signal": {s: sum(1 for kinds in misses if s in kinds) for s in SIGNALS},
+    }
+
+
 async def get_guard_data(
     session: AsyncSession, settings: Settings, days: int, now: datetime | None = None
 ) -> dict[str, Any]:
@@ -180,57 +225,31 @@ async def get_guard_data(
         )  # fmt: skip
     records = _one_per_run(records)
 
-    fell_through = dict.fromkeys(REASONS, 0)
-    counts = {"skipped": 0, "would_skip": 0, "would_skip_unrecorded": 0}
-    # The acted records of would-skip runs in the window, so shadow_misses <= would_skip: an acted record
-    # whose ran record was dropped by the bus or fell out of the window is not a miss.
-    misses: list[list[str]] = []
-    rows = []
-    for rec in records:
-        guard = dict(rec["guard"])
-        if rec["ran"]:
-            guard.setdefault("mode", MODE_SKIP)  # every guard before phase 2 skipped
-        kind, reason = _classify(guard, rec["ran"])
-        a = outcomes.get(rec["subtask_id"]) if rec["subtask_id"] else None
-        acted_by = _acted_by(a)
-        if kind == "fell_through":
-            fell_through[reason] += 1
-        else:
-            counts[kind] += 1
-            if kind == "would_skip" and a is None:
-                counts["would_skip_unrecorded"] += 1
-            elif kind == "would_skip" and acted_by is not None and acted(acted_by):
-                misses.append(acted_by)
-        rows.append(
-            {
-                "at": rec["at"].isoformat(),
-                "kind": kind,
-                "schedule_id": rec["schedule_id"],
-                "subtask_id": rec["subtask_id"],
-                **{k: guard.get(k) for k in RECORD_KEYS},
-                "reason": reason,
-                # derived from acted_by, never the stored flag: one definition, also for older records
-                "acted": acted(acted_by) if acted_by is not None else None,
-                "acted_by": acted_by,
-            }
-        )
-    rows.sort(key=lambda row: row["at"], reverse=True)
+    pairs = sorted(
+        ((rec, _row(rec, outcomes.get(rec["subtask_id"] or ""))) for rec in records),
+        key=lambda pair: pair[1]["at"],
+        reverse=True,
+    )
+    run_counts = Counter(_hex(_dict(r.metadata_).get("schedule_id")) for r in runs)
 
-    by_signal = {s: sum(1 for kinds in misses if s in kinds) for s in SIGNALS}
+    def of(schedule_id: str) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+        return [pair for pair in pairs if pair[0]["schedule_id"] == schedule_id]
+
     return {
         "enabled": settings.schedule_guards_enabled,
         # The guard records other than skips are bus events: with the bus off none was persisted.
         "events_persisted": settings.event_bus_enabled,
         "window_days": days,
-        "schedules": [_schedule_row(s, settings.schedule_guard_commands) for s in schedules],
-        "runs": sum(1 for r in runs if _hex(_dict(r.metadata_).get("schedule_id")) in ids),
-        "guard_runs": sum(1 for rec in records if rec["ran"]),
-        "skipped": counts["skipped"],
-        "would_skip": counts["would_skip"],
-        # would-skip runs with no record of what the model did (its turn is still going, or the record was lost)
-        "would_skip_unrecorded": counts["would_skip_unrecorded"],
-        "fell_through": fell_through,
-        "shadow_misses": len(misses),
-        "shadow_misses_by_signal": by_signal,
-        "recent": rows[:RECENT_LIMIT],
+        # Each guarded schedule's own counts and last runs, so a second guard's records never mix with these.
+        "schedules": [
+            {
+                **_schedule_row(s, settings.schedule_guard_commands),
+                **_tally(of(s.id.hex), run_counts[s.id.hex]),
+                "last_runs": [row for _, row in of(s.id.hex)[:RECENT_LIMIT]],
+            }
+            for s in schedules
+        ],
+        # The totals, over every schedule with a guard record or a guard now.
+        **_tally(pairs, sum(run_counts[h] for h in ids)),
+        "recent": [row for _, row in pairs[:RECENT_LIMIT]],
     }

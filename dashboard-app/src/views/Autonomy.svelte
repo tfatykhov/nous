@@ -422,13 +422,17 @@
     {:else}
       <div class="table-wrap">
         <table class="stats guards">
-          <thead><tr><th scope="col">Job</th><th scope="col">Guard</th><th scope="col">Mode</th></tr></thead>
+          <thead><tr><th scope="col">Job</th><th scope="col">Guard</th><th scope="col">Mode</th><th scope="col">Runs</th><th scope="col">Skipped</th><th scope="col">Would skip</th><th scope="col">Shadow misses</th></tr></thead>
           <tbody>
             {#each g.schedules as s (s.schedule_id)}
               <tr>
                 <th scope="row"><span class="job" title={s.job}>{s.job}</span></th>
                 <td><span class="mono">{s.name ?? '—'}</span>{#if !s.allowlisted} <span class="pill pill-warn">not allowlisted</span>{/if}</td>
                 <td><span class="pill" class:pill-warn={s.mode !== 'shadow' && s.mode !== 'skip'}>{guardMode(s.mode)}</span></td>
+                <td>{s.runs}</td>
+                <td>{s.skipped}</td>
+                <td>{s.would_skip}</td>
+                <td class:acted={s.shadow_misses > 0} data-testid="schedule-misses">{s.shadow_misses}</td>
               </tr>
             {/each}
           </tbody>

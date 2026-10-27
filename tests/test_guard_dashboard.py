@@ -241,6 +241,45 @@ async def test_recent_holds_the_last_ten_records_newest_first_with_acted_joined(
     }  # fmt: skip
 
 
+async def test_each_guarded_schedule_has_its_own_counts_and_last_runs(db, agent):
+    hourly = schedule(agent, {"name": NAME})
+    daily = schedule(agent, {"name": NAME, "mode": "skip"}, task="Check the grid bot.")
+    ticks = [run(agent, hourly, age_hours=h + 0.5) for h in range(12)]  # newer than every daily run
+    days_ = [run(agent, daily, age_hours=24 * d + 13) for d in range(3)]
+    days_[0].report_jsonb = {"guard_skipped": True, "guard": record(mode="skip", skipped=True)}
+    await add(db, hourly, daily, *ticks, *days_)
+    await add(
+        db,
+        *(event(agent, "subtask_guard_ran", t, hourly, age_hours=h + 0.5, guard=record()) for h, t in enumerate(ticks)),
+        acted(agent, ticks[0], hourly, ["report", "ledger"]),
+        acted(agent, ticks[1], hourly, ["report", "inbox"]),
+        *(acted(agent, t, hourly, ["report"]) for t in ticks[2:11]),  # ticks[11] has no acted record
+        event(agent, "subtask_guard_ran", days_[1], daily, age_hours=37, guard=record(mode="skip", reason="exit")),
+        event(agent, "subtask_guard_ran", days_[2], daily, age_hours=61, guard=record(mode="skip", reason="stderr")),
+        acted(agent, days_[1], daily, ["finding"]),  # no would-skip record behind it: not a miss
+    )
+    out = await data(db, agent)
+    rows = {r["schedule_id"]: r for r in out["schedules"]}
+    h, d = rows[hourly.id.hex], rows[daily.id.hex]
+    assert (h["runs"], h["guard_runs"], h["skipped"], h["would_skip"], h["would_skip_unrecorded"]) == (12, 12, 0, 12, 1)
+    assert (h["shadow_misses"], h["shadow_misses_by_signal"]["ledger"]) == (1, 1)
+    assert h["fell_through"] == {r: 0 for r in REASONS}
+    assert (d["runs"], d["guard_runs"], d["skipped"], d["would_skip"], d["shadow_misses"]) == (3, 3, 1, 0, 0)
+    assert (d["fell_through"]["exit"], d["fell_through"]["stderr"]) == (1, 1)
+    # the hourly job fills the global last 10, but never the daily job's own list
+    assert {r["schedule_id"] for r in out["recent"]} == {hourly.id.hex}
+    assert [r["subtask_id"] for r in h["last_runs"]] == [t.id.hex for t in ticks[:10]]
+    assert [r["subtask_id"] for r in d["last_runs"]] == [s.id.hex for s in days_]
+    for row in (h, d, out):
+        assert row["shadow_misses"] <= row["would_skip"]
+    for key in ("runs", "guard_runs", "skipped", "would_skip", "would_skip_unrecorded", "shadow_misses"):
+        assert out[key] == h[key] + d[key]
+    assert set(h) == {
+        "schedule_id", "job", "name", "mode", "allowlisted", "runs", "guard_runs", "skipped", "would_skip",
+        "would_skip_unrecorded", "fell_through", "shadow_misses", "shadow_misses_by_signal", "last_runs",
+    }  # fmt: skip
+
+
 async def test_history_of_a_schedule_whose_guard_was_removed_still_counts(db, agent):
     sch = schedule(agent, None)  # its guard was removed after these runs
     sub = run(agent, sch)

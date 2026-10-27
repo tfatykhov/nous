@@ -73,9 +73,16 @@ const guardRecord = (over: Record<string, unknown>) => ({
   duration_ms: 41, stdout_bytes: 0, stderr_bytes: 0, stderr_head: '', command: 'bash /x/sweep.sh', acted: false,
   acted_by: [], ...over,
 });
+const guardSchedule = (over: Record<string, unknown>) => ({
+  schedule_id: 'ef'.repeat(16), job: 'Run <i>the</i> ledger sweep', name: 'ledger_sweep', mode: 'shadow', allowlisted: true,
+  runs: 168, guard_runs: 160, skipped: 0, would_skip: 150, would_skip_unrecorded: 0,
+  fell_through: { output: 6, stderr: 1, exit: 0, timeout: 0, error: 3, not_allowlisted: 0 },
+  shadow_misses: 0, shadow_misses_by_signal: { report: 0, finding: 0, inbox: 0, push: 0, ledger: 0 }, last_runs: [],
+  ...over,
+});
 const GUARDS = (over: Record<string, unknown> = {}) => ({
   enabled: true, events_persisted: true, window_days: 7,
-  schedules: [{ schedule_id: 'ef'.repeat(16), job: 'Run <i>the</i> ledger sweep', name: 'ledger_sweep', mode: 'shadow', allowlisted: true }],
+  schedules: [guardSchedule({})],
   runs: 168, guard_runs: 160, skipped: 0, would_skip: 150, would_skip_unrecorded: 0,
   fell_through: { output: 6, stderr: 1, exit: 0, timeout: 0, error: 3, not_allowlisted: 0 },
   shadow_misses: 0, shadow_misses_by_signal: { report: 0, finding: 0, inbox: 0, push: 0, ledger: 0 },
@@ -345,6 +352,22 @@ describe('Autonomy view', () => {
     // report and inbox come with every completed run: context in the records, not why a run is a miss
     expect(alert.textContent).not.toContain('report');
     expect(alert.textContent).not.toContain('inbox');
+  });
+
+  it('shows each guarded job with its own counts and shadow misses', async () => {
+    body = { ...FULL(), guards: GUARDS({ shadow_misses: 3, schedules: [
+      guardSchedule({ runs: 160, would_skip: 150, shadow_misses: 3 }),
+      guardSchedule({ schedule_id: 'cd'.repeat(16), job: 'Check the grid bot', mode: 'skip', runs: 8, skipped: 7, would_skip: 0 }),
+    ] }) };
+    render(Autonomy);
+    const row = async (job: string) => (await screen.findByText(job)).closest('tr')!;
+    const cells = (tr: HTMLElement) => Array.from(tr.querySelectorAll('td')).slice(2).map((td) => td.textContent);
+    const sweep = await row('Run <i>the</i> ledger sweep');
+    expect(cells(sweep)).toEqual(['160', '0', '150', '3']);
+    expect(sweep.querySelector('[data-testid="schedule-misses"]')!.classList.contains('acted')).toBe(true);
+    const grid = await row('Check the grid bot');
+    expect(cells(grid)).toEqual(['8', '7', '0', '0']);
+    expect(grid.querySelector('[data-testid="schedule-misses"]')!.classList.contains('acted')).toBe(false);
   });
 
   it('says how many would-skip runs have no record of what the model did', async () => {
