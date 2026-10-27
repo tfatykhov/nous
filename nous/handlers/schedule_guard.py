@@ -23,12 +23,14 @@ from dataclasses import dataclass
 from collections.abc import Mapping
 from typing import Any
 
+from nous.cognitive.execution_ledger import redact_error_text
 from nous.utils import kill_process_group
 
 SKIP_WHEN_EXIT0_QUIET = "exit0_quiet"
 DEFAULT_TIMEOUT_SECONDS = 60
 MAX_TIMEOUT_SECONDS = 300
 OUTPUT_MAX_BYTES = 2048
+STDERR_HEAD_BYTES = 512  # kept in the durable record of a run
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +49,8 @@ class GuardResult:
     duration_ms: int
     timed_out: bool = False
     error: str | None = None
+    stdout_bytes: int = 0
+    stderr_bytes: int = 0
 
 
 def parse_guard(raw: Any, commands: Mapping[str, str]) -> GuardSpec | None:
@@ -87,8 +91,8 @@ def should_skip(spec: GuardSpec, result: GuardResult) -> bool:
     )
 
 
-def _clip(text: str) -> str:
-    return text.encode("utf-8")[:OUTPUT_MAX_BYTES].decode("utf-8", errors="ignore")
+def _clip(text: str, limit: int = OUTPUT_MAX_BYTES) -> str:
+    return text.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
 
 
 async def run_guard(spec: GuardSpec) -> GuardResult:
@@ -125,8 +129,35 @@ async def run_guard(spec: GuardSpec) -> GuardResult:
         await kill_process_group(proc)
         raise
     return GuardResult(
-        proc.returncode, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace"), elapsed()
+        proc.returncode,
+        stdout.decode("utf-8", errors="replace"),
+        stderr.decode("utf-8", errors="replace"),
+        elapsed(),
+        stdout_bytes=len(stdout),
+        stderr_bytes=len(stderr),
     )
+
+
+def record(spec: GuardSpec, result: GuardResult, *, skipped: bool) -> dict[str, Any]:
+    """The durable record of one run of the guard (JSON-ready).
+
+    ``stderr_head`` is the first 512 bytes of stderr, passed through the ledger's error
+    redaction since it is stored as written.
+    """
+    return {
+        "name": spec.name,
+        "command": spec.command,
+        "skip_when": spec.skip_when,
+        "timeout_seconds": spec.timeout_seconds,
+        "exit_code": result.exit_code,
+        "timed_out": result.timed_out,
+        "error": result.error,
+        "duration_ms": result.duration_ms,
+        "stdout_bytes": result.stdout_bytes,
+        "stderr_bytes": result.stderr_bytes,
+        "stderr_head": redact_error_text(_clip(result.stderr, STDERR_HEAD_BYTES)),
+        "skipped": skipped,
+    }
 
 
 def skip_text(spec: GuardSpec, result: GuardResult) -> str:

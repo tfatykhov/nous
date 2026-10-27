@@ -20,7 +20,7 @@ A deterministic guard runs first. The model runs only when the guard cannot cert
 - **Command:** an asyncio subprocess (`/bin/sh -c`) with stdin closed. It runs in its own session, and its whole process group is killed on timeout or cancellation.
 - **Skip (`exit0_quiet`):** exit 0 with whitespace-only stdout **and** stderr. stderr counts because a script that ends in `; true` reports a failure only there; known chatter belongs in the script (`2>/dev/null`), not in the guard.
   - The row is completed with result `skipped_by_guard: <command> exit=0 stdout=empty stderr=empty (<ms> ms)` and `final_outcome=completed`.
-  - It records `attempts`/tokens/tool calls of 0 and `report_jsonb = {"guard_skipped": true, "guard": {...}}`.
+  - It records `attempts`/tokens/tool calls of 0 and `report_jsonb = {"guard_skipped": true, "guard": <record>}`.
   - It emits a persisted `subtask_guard_skipped` event.
   - The run's intention is closed quietly, as the inbox writer would close it.
   - No model call, no inbox row, no result memory, no Telegram push and no wake.
@@ -30,6 +30,7 @@ A deterministic guard runs first. The model runs only when the guard cannot cert
   - A malformed guard is ignored with a WARNING naming the schedule, and a guard that errors, times out or has an unknown `skip_when` is logged at WARNING.
   - The receipt holds the exit code or timeout, the duration, and the first 2 KB of stdout and stderr, fenced as command output.
   - So the model does not need to run the script again.
+- **A record of every run:** the guard command runs outside tool classes, the execution ledger and F103, so each run leaves its own durable record: `{name, command, skip_when, timeout_seconds, exit_code, timed_out, error, duration_ms, stdout_bytes, stderr_bytes, stderr_head, skipped}`. `stderr_head` is the first 512 bytes of stderr after the ledger's error redaction (`redact_error_text`). On a skip it is `report_jsonb.guard`; on a fall-through (including a skip whose row write failed) it is the data of a `subtask_guard_ran` event, which the event bus persists to `nous_system.events` like every other subtask event. A name that is not in the allowlist runs nothing and leaves only its WARNING.
 
 ## Pilot
 

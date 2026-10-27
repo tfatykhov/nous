@@ -237,8 +237,13 @@ class SubtaskWorkerPool:
         Otherwise the guard's receipt is appended to the run's task text in memory
         (the row is not changed) and the model turn runs as usual: fail open. Never
         raises, except for cancellation.
+
+        Every run of the command leaves a durable record (``schedule_guard.record``):
+        on a skip in ``report_jsonb.guard``, otherwise in a persisted
+        ``subtask_guard_ran`` event.
         """
         sid = subtask.id.hex[:8]
+        result = None
         try:
             spec = await self._guard_spec(subtask)
             if spec is None:
@@ -254,26 +259,21 @@ class SubtaskWorkerPool:
                     sid, result.exit_code, result.timed_out, result.error, spec.skip_when,
                 )
                 subtask.task += schedule_guard.receipt(spec, result)
+                await self._record_guard_run(subtask, spec, result)
                 return False
             text = schedule_guard.skip_text(spec, result)
             await self._heart.subtasks.complete(
                 subtask.id, text,
                 final_outcome="completed",
-                report_jsonb={
-                    "guard_skipped": True,
-                    "guard": {
-                        "command": spec.command,
-                        "skip_when": spec.skip_when,
-                        "exit_code": result.exit_code,
-                        "duration_ms": result.duration_ms,
-                    },
-                },
+                report_jsonb={"guard_skipped": True, "guard": schedule_guard.record(spec, result, skipped=True)},
                 attempts=0, tokens_in=0, tokens_out=0, tool_calls_made=0,
             )
         except (asyncio.CancelledError, Exception) as exc:
             if isinstance(exc, asyncio.CancelledError) and cancel_requested():
                 raise
             logger.exception("Guard of subtask %s failed; running the turn", sid)
+            if result is not None:  # the command ran, but the skip was not written
+                await self._record_guard_run(subtask, spec, result)
             return False
         # The row is completed: from here on nothing may send the run to the model.
         try:
@@ -288,6 +288,17 @@ class SubtaskWorkerPool:
             logger.exception("Subtask %s: skipped by its guard, but its event or intention close failed", sid)
         logger.info("Subtask %s skipped by its schedule's guard", sid)
         return True
+
+    async def _record_guard_run(
+        self, subtask: Subtask, spec: schedule_guard.GuardSpec, result: schedule_guard.GuardResult
+    ) -> None:
+        """Persist the record of a guard run that did not skip the run. Never raises."""
+        try:
+            await self._emit_event(
+                "subtask_guard_ran", subtask, extra={"guard": schedule_guard.record(spec, result, skipped=False)}
+            )
+        except Exception:
+            logger.exception("Subtask %s: could not record its guard run", subtask.id.hex[:8])
 
     async def _record_inbox(self, subtask: Subtask) -> None:
         """F098: queue the finished result for the conversation that spawned it,
@@ -600,8 +611,9 @@ class SubtaskWorkerPool:
         *,
         result: str | None = None,
         error: str | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
-        """Emit a subtask lifecycle event on the bus."""
+        """Emit a subtask lifecycle event on the bus. ``extra`` is merged into its data."""
         if self._bus is None:
             return
 
@@ -613,6 +625,8 @@ class SubtaskWorkerPool:
             data["result"] = result[:500]
         if error is not None:
             data["error"] = error[:500]
+        if extra:
+            data.update(extra)
 
         await self._bus.emit(Event(
             type=event_type,

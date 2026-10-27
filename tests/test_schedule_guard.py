@@ -132,6 +132,11 @@ async def test_exit0_with_no_output_completes_the_run_without_a_model_call(comma
     assert args[1].startswith(f"skipped_by_guard: {command} exit=0 stdout=empty stderr=empty (")
     assert kwargs["final_outcome"] == "completed"
     assert kwargs["report_jsonb"]["guard_skipped"] is True
+    guard = kwargs["report_jsonb"]["guard"]
+    assert set(guard) == RECORD_FIELDS
+    assert guard["command"] == command and guard["name"] == NAME
+    assert (guard["skipped"], guard["exit_code"], guard["timed_out"]) == (True, 0, False)
+    assert guard["timeout_seconds"] == 10 and guard["skip_when"] == "exit0_quiet"
     assert kwargs["tokens_in"] == 0 and kwargs["tokens_out"] == 0
     heart.subtasks.fail.assert_not_awaited()
     # an event, no wake, no push, no inbox row or memory; the run's intention still closes
@@ -161,18 +166,39 @@ async def test_skip_does_not_close_the_intention_when_the_inbox_is_off(closed):
 # ---- fall-through paths --------------------------------------------------------------------------------
 
 
-async def _falls_through(guard: dict) -> str:
+RECORD_FIELDS = {
+    "name", "command", "skip_when", "timeout_seconds", "exit_code", "timed_out", "error",
+    "duration_ms", "stdout_bytes", "stderr_bytes", "stderr_head", "skipped",
+}
+
+
+def _guard_ran(bus) -> dict:
+    """The guard record of the one ``subtask_guard_ran`` event the bus got."""
+    events = [c.args[0] for c in bus.emit.await_args_list]
+    assert [e.type for e in events] == ["subtask_guard_ran"]
+    assert events[0].persist is True  # the bus's DB persister writes it to nous_system.events
+    guard = events[0].data["guard"]
+    assert set(guard) == RECORD_FIELDS and guard["skipped"] is False
+    return guard
+
+
+async def _falls_through(guard: dict, *, record: dict | None = None) -> str:
     schedule = _schedule(guard)
-    pool, runner, heart, _, _, seen = _pool(schedule)
+    pool, runner, heart, bus, _, seen = _pool(schedule)
     await pool._process_subtask(_run(schedule))
     pool._execute_subtask.assert_awaited_once()
     heart.subtasks.complete.assert_not_awaited()
     pool._record_inbox.assert_awaited_once()
+    if record is not None:
+        record.update(_guard_ran(bus))
     return seen["task"]
 
 
 async def test_non_empty_stdout_falls_through_with_the_output_in_a_receipt():
-    task = await _falls_through(_guard("echo 'logged 3 commits'"))
+    record: dict = {}
+    task = await _falls_through(_guard("echo 'logged 3 commits'"), record=record)
+    assert (record["exit_code"], record["stdout_bytes"], record["stderr_bytes"]) == (0, 17, 0)
+    assert record["command"] == "echo 'logged 3 commits'"
     assert task.startswith(TASK)
     assert "exit: 0" in task
     assert "logged 3 commits" in task
@@ -180,7 +206,9 @@ async def test_non_empty_stdout_falls_through_with_the_output_in_a_receipt():
 
 
 async def test_a_non_zero_exit_falls_through():
-    task = await _falls_through(_guard("echo boom >&2; exit 3"))
+    record: dict = {}
+    task = await _falls_through(_guard("echo boom >&2; exit 3"), record=record)
+    assert (record["exit_code"], record["stderr_bytes"], record["stderr_head"]) == (3, 5, "boom\n")
     assert "exit: 3" in task
     assert "boom" in task
 
@@ -188,8 +216,10 @@ async def test_a_non_zero_exit_falls_through():
 async def test_a_timeout_falls_through_and_kills_the_commands_children(tmp_path):
     marker = tmp_path / "survived"
     start = time.monotonic()
-    task = await _falls_through(_guard(f"(sleep 2; touch {marker}) & wait", timeout_seconds=1))
+    record: dict = {}
+    task = await _falls_through(_guard(f"(sleep 2; touch {marker}) & wait", timeout_seconds=1), record=record)
     assert time.monotonic() - start < 10
+    assert (record["timed_out"], record["exit_code"], record["timeout_seconds"]) == (True, None, 1)
     assert "timed out after 1s" in task
     await asyncio.sleep(2)
     assert not marker.exists()
@@ -216,8 +246,10 @@ async def test_a_guard_that_raises_falls_through(monkeypatch):
         raise OSError("no shell")
 
     monkeypatch.setattr(schedule_guard.asyncio, "create_subprocess_shell", boom)
-    task = await _falls_through(_guard("true"))
+    record: dict = {}
+    task = await _falls_through(_guard("true"), record=record)
     assert "error: OSError: no shell" in task
+    assert record["error"] == "OSError: no shell"
 
 
 async def test_a_failed_complete_falls_through_to_the_turn():
@@ -227,6 +259,24 @@ async def test_a_failed_complete_falls_through_to_the_turn():
     await pool._process_subtask(_run(schedule))
     pool._execute_subtask.assert_awaited_once()
     pool._record_inbox.assert_awaited_once()
+    assert _guard_ran(pool._bus)["exit_code"] == 0  # the skip was not written, so the run is recorded here
+
+
+async def test_the_records_stderr_head_is_cut_at_512_bytes_and_redacted():
+    record: dict = {}
+    await _falls_through(_guard("echo password=hunter2 >&2; head -c 2000 /dev/zero | tr '\\0' e >&2"), record=record)
+    assert record["stderr_bytes"] == 2017
+    assert "hunter2" not in record["stderr_head"] and "[REDACTED]" in record["stderr_head"]
+    assert len(record["stderr_head"].encode()) <= 512 + len("[REDACTED]")
+
+
+async def test_a_failed_record_never_fails_the_turn():
+    schedule = _schedule(_guard("echo hi"))
+    pool, runner, heart, bus, *_rest, seen = _pool(schedule)
+    bus.emit.side_effect = RuntimeError("bus down")
+    await pool._process_subtask(_run(schedule))
+    pool._execute_subtask.assert_awaited_once()
+    assert "hi" in seen["task"]
 
 
 async def test_stderr_alone_with_exit_0_falls_through_with_it_in_the_receipt():
@@ -430,9 +480,64 @@ async def test_a_guarded_fire_completes_its_row_and_closes_its_intention(db):
         assert row.status == "completed" and row.final_outcome == "completed"
         assert row.result.startswith("skipped_by_guard: true exit=0 stdout=empty stderr=empty")
         assert row.report_jsonb["guard_skipped"] is True
+        assert set(row.report_jsonb["guard"]) == RECORD_FIELDS and row.report_jsonb["guard"]["skipped"] is True
         assert (row.tokens_in, row.tokens_out, row.attempts) == (0, 0, 0)
         intention = await heart.intentions.get_for_source(intentions.SOURCE_SUBTASK, run.id)
         assert intention is not None and intention.state != "open"
         assert [e.args[0].type for e in bus.emit.await_args_list] == ["subtask_guard_skipped"]
     finally:
+        await heart.close()
+
+
+@pytest.mark.postgres_only
+async def test_a_guard_that_falls_through_persists_its_record_as_an_event(db):
+    from sqlalchemy import select
+
+    from nous.brain.brain import Brain
+    from nous.events import EventBus
+    from nous.handlers.task_scheduler import create_fire
+    from nous.heart.heart import Heart
+    from nous.storage.models import Event as EventRow
+
+    settings = Settings(
+        _env_file=None,
+        agent_id=f"test-guard-{uuid.uuid4().hex[:8]}",
+        schedule_guard_commands={NAME: "echo 'logged 1 commit'"},
+    )
+    heart, brain, bus = Heart(db, settings), Brain(db, settings), EventBus()
+
+    async def persist(event):  # the persister main.py wires
+        await brain.emit_event(event.type, {**event.data}, session_id=event.session_id, event_id=event.event_id)
+
+    bus.set_db_persister(persist)
+    await bus.start()
+    try:
+        schedule = await heart.schedules.create(
+            task=TASK, schedule_type="recurring", interval_seconds=3600,
+            metadata={"guard": {"name": NAME, "skip_when": "exit0_quiet", "timeout_seconds": 10}},
+        )
+        await create_fire(heart, settings, schedule)
+        run = await heart.subtasks.dequeue("worker-0")
+        pool = SubtaskWorkerPool(runner=MagicMock(), heart=heart, settings=settings, bus=bus)
+        pool._execute_subtask = AsyncMock()
+        pool._record_inbox = AsyncMock()
+        await pool._process_subtask(run)
+        pool._execute_subtask.assert_awaited_once()
+        await bus.stop()  # drains the queue through the persister
+        async with db.session() as session:
+            rows = (
+                await session.execute(
+                    select(EventRow).where(
+                        EventRow.agent_id == settings.agent_id, EventRow.event_type == "subtask_guard_ran"
+                    )
+                )
+            ).scalars().all()
+        assert len(rows) == 1
+        guard = rows[0].data["guard"]
+        assert set(guard) == RECORD_FIELDS
+        assert (guard["skipped"], guard["exit_code"], guard["stdout_bytes"]) == (False, 0, 16)
+        assert rows[0].data["subtask_id"] == run.id.hex
+    finally:
+        await bus.stop()
+        await brain.close()
         await heart.close()
