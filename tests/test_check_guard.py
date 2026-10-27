@@ -442,6 +442,9 @@ async def test_the_loader_hands_each_check_its_rows_guard_and_the_shared_context
         ("gridbot_tick", "not a JSON object"),
         ({"name": NAME, "is_action": True}, "integer timeout_seconds"),
         ({"name": NAME, "is_action": True, "timeout_seconds": "600"}, "integer timeout_seconds"),
+        ({"name": NAME, "is_action": True, "timeout_seconds": 0}, "at least 1"),
+        ({"name": NAME, "is_action": True, "timeout_seconds": -5}, "at least 1"),
+        ({"name": NAME, "timeout_seconds": 0}, "at least 1"),
     ],
 )
 async def test_a_guard_that_cannot_be_read_safely_is_refused_not_ignored(tmp_path, guard, detail):

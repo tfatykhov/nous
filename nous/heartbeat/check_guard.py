@@ -86,6 +86,9 @@ def resolve(raw: Any, commands: Mapping[str, str], *, check_timeout: int, dag_ow
     if raw.get("is_action") is True and (not isinstance(timeout, int) or isinstance(timeout, bool)):
         # parse_guard would fall back to 60 s, which would cut a long action short on every run
         return Resolved(None, "invalid", "a guard that is the check's action needs an integer timeout_seconds")
+    if isinstance(timeout, int) and not isinstance(timeout, bool) and timeout < 1:
+        # parse_guard would clamp it to 1 s and kill the command on every run
+        return Resolved(None, "invalid", f"guard timeout_seconds must be at least 1 (got {timeout})")
     # No cap here: a timeout too long for the check is refused below, never cut down to fit it silently.
     spec = schedule_guard.parse_guard(raw, commands, max_timeout=sys.maxsize)
     if spec is None:
