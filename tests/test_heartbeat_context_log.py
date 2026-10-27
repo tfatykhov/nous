@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from nous.api.models import ApiResponse
 from nous.api.runner import AgentRunner
 from nous.api.tools import ToolDispatcher
@@ -219,3 +221,68 @@ def test_the_dashboards_and_the_context_log_list_leave_heartbeat_calls_out():
     # one heartbeat session asked for by id is still there
     one = client.get("/context/log", params={"session_id": "dynamic-check-x-3"}).json()["entries"]
     assert [e["call_type"] for e in one] == [HEARTBEAT_CALL_TYPE]
+
+
+def test_logging_with_no_running_loop_creates_no_unawaited_coroutine():
+    import gc
+    import warnings
+
+    async def writer(entry):
+        raise AssertionError("never runs without a loop")
+
+    ctx = ContextLogger(db_writer=writer, db_updater=writer)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        entry = ctx.log(
+            session_id="s", turn_number=1, call_type="chat", model="m", system_prompt="p", messages=[],
+            tools=None, frame_id="f", context_window=200000,
+        )
+        ctx.update_response(entry.id, input_tokens=1)
+        gc.collect()
+    assert not [w for w in caught if issubclass(w.category, RuntimeWarning)], [str(w.message) for w in caught]
+
+
+@pytest.mark.postgres_only
+async def test_a_real_db_write_cut_off_by_the_timeout_gives_back_a_usable_connection(monkeypatch):
+    # The April 2026 triage hang was blamed on these writes holding pooled connections. With a
+    # one-connection pool, a session the timeout cancelled must hand its connection back usable.
+    from sqlalchemy import text
+
+    from nous.config import Settings
+    from nous.storage.database import Database
+
+    monkeypatch.setattr(context_logger_mod, "DB_WRITE_TIMEOUT_SECONDS", 0.5)
+    database = Database(Settings(_env_file=None, db_pool_size=1, db_max_overflow=0))
+
+    async def stuck_writer(entry):
+        async with database.session() as session:
+            await session.execute(text("SELECT pg_sleep(29.25)"))
+
+    async def select_1() -> int:
+        async with database.session() as session:
+            return (await session.execute(text("SELECT 1"))).scalar_one()
+
+    try:
+        ctx = ContextLogger(db_writer=stuck_writer)
+        ctx.log(
+            session_id="s", turn_number=1, call_type="chat", model="m", system_prompt="p", messages=[],
+            tools=None, frame_id="f", context_window=200000,
+        )
+        start = asyncio.get_running_loop().time()
+        await asyncio.wait_for(asyncio.gather(*list(ctx._pending_tasks)), timeout=10)
+        assert asyncio.get_running_loop().time() - start < 5
+        assert await asyncio.wait_for(select_1(), timeout=5) == 1
+        assert database.engine.pool.checkedout() == 0
+        # and the server is not still running the cancelled statement
+        async with database.session() as session:
+            running = (
+                await session.execute(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity WHERE state = 'active' "
+                        "AND query = 'SELECT pg_sleep(29.25)'"
+                    )
+                )
+            ).scalar_one()
+        assert running == 0
+    finally:
+        await database.disconnect()
