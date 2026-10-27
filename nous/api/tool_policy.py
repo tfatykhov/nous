@@ -713,7 +713,7 @@ def _write_target(path: str, cwd: Path | None, writable: list[Path], *, below: b
 
 def _one_link(path: Path) -> bool:
     """``path`` is not an existing file with another hard link: cp opens the file it overwrites, which would write
-    every name of that inode, a name outside the write dirs too."""
+    every name of that inode, a name outside the write dirs too (touch would set all their times)."""
     try:
         return not path.is_file() or path.stat().st_nlink == 1
     except OSError:
@@ -737,8 +737,11 @@ def _fs_write_allowed(
     operands = split[0]
     if not operands or any(o.startswith("-") for o in operands):
         return False  # `-` or a name after `--` that reads as an option
-    if prog != "cp":
-        return all(_write_target(o, cwd, writable, below=prog == "touch") is not None for o in operands)
+    if prog == "mkdir":
+        return all(_write_target(o, cwd, writable, below=False) is not None for o in operands)
+    if prog == "touch":  # a hard-linked file's times are every name's, one outside the write dirs too
+        landed = [_write_target(o, cwd, writable, below=True) for o in operands]
+        return all(t is not None and _one_link(t) for t in landed)
     if len(operands) < 2:
         return False
     *sources, dest = operands

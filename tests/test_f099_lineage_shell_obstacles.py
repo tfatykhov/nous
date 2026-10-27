@@ -892,6 +892,9 @@ def test_cp_refuses_a_destination_that_is_a_hard_link(tmp_path):
     os.link(ws / "claude-jobs" / "runner.sh", ws / "research" / "hard.sh")
     assert _w("cp {W}/other/src.md {W}/research/hard.sh", ws) is False
     assert _w("cp {W}/other/src.md {W}/research/a.md", ws) is True  # a file with one link
+    assert _w("touch {W}/research/hard.sh", ws) is False  # its times are the runner's too
+    assert _w("cd {W}/research && touch a.md hard.sh", ws) is False
+    assert _w("touch {W}/research/a.md {W}/research/new.md", ws) is True
 
 
 @pytest.mark.parametrize(
