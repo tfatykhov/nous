@@ -334,6 +334,34 @@ async def test_a_miss_needs_its_ran_record_in_the_window(db, agent):
     assert out["shadow_misses"] <= out["would_skip"]
 
 
+async def test_a_skip_whose_write_raised_after_commit_counts_once_as_skipped(db, agent):
+    # complete() committed the guard_skipped row, then raised: the worker also emitted ran(reason="error").
+    sch = schedule(agent, {"name": NAME, "mode": "skip"})
+    sub = run(agent, sch, report={"guard_skipped": True, "guard": record(mode="skip", skipped=True)})
+    await add(db, sch, sub)
+    await add(db, event(agent, "subtask_guard_ran", sub, sch, guard=record(mode="skip", reason="error")))
+    out = await data(db, agent)
+    assert (out["guard_runs"], out["skipped"], out["fell_through"]["error"]) == (1, 1, 0)
+    assert [(r["kind"], r["subtask_id"]) for r in out["recent"]] == [("skipped", sub.id.hex)]
+
+
+async def test_a_run_reclaimed_after_a_shutdown_counts_once_by_its_newest_record(db, agent):
+    # The row went back to pending and its guard ran again under the same subtask id.
+    sch = schedule(agent, {"name": NAME})
+    sub = run(agent, sch, age_hours=2)
+    await add(db, sch, sub)
+    await add(
+        db,
+        event(agent, "subtask_guard_ran", sub, sch, age_hours=2, guard=record()),
+        event(agent, "subtask_guard_ran", sub, sch, age_hours=1, guard=record(would_skip=False, reason="output")),
+    )
+    out = await data(db, agent)
+    assert (out["guard_runs"], out["would_skip"], out["fell_through"]["output"]) == (1, 0, 1)
+    assert len(out["recent"]) == 1 and out["recent"][0]["reason"] == "output"
+    await add(db, event(agent, "subtask_guard_ran", sub, sch, age_hours=0.5, guard=record()))
+    assert (await data(db, agent))["would_skip"] == 1  # the newest wins again; the older would-skip is not added
+
+
 async def test_would_skip_runs_with_no_outcome_record_are_counted_apart(db, agent):
     sch = schedule(agent, {"name": NAME})
     subs = [run(agent, sch) for _ in range(3)]

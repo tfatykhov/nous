@@ -95,6 +95,24 @@ def _schedule_row(schedule: Schedule, commands: dict[str, str]) -> dict[str, Any
     }
 
 
+def _one_per_run(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One record per run (subtask id): the row's ``report_jsonb.guard`` over an event, else the newest.
+
+    A run can leave two: a skip whose ``complete()`` committed and then raised leaves its skipped row and a
+    ``ran`` event with reason ``error``, and a row reclaimed after a shutdown runs its guard again under the
+    same id. Records with no subtask id are kept as they are.
+    """
+    best: dict[str, dict[str, Any]] = {}
+    loose = []
+    for rec in records:
+        sid = rec["subtask_id"]
+        if sid is None:
+            loose.append(rec)
+        elif sid not in best or (rec["row"], rec["at"]) >= (best[sid]["row"], best[sid]["at"]):
+            best[sid] = rec
+    return [*best.values(), *loose]
+
+
 async def get_guard_data(
     session: AsyncSession, settings: Settings, days: int, now: datetime | None = None
 ) -> dict[str, Any]:
@@ -147,7 +165,7 @@ async def get_guard_data(
                 ids.add(schedule_id)
             records.append(
                 {"at": as_utc(r.completed_at), "guard": report[GUARD_KEY], "subtask_id": r.id.hex,
-                 "schedule_id": schedule_id, "ran": True}
+                 "schedule_id": schedule_id, "ran": True, "row": True}
             )  # fmt: skip
     for e in events:
         data = _dict(e.data)
@@ -158,8 +176,9 @@ async def get_guard_data(
             continue
         records.append(
             {"at": as_utc(e.created_at), "guard": _dict(data.get(GUARD_KEY)), "subtask_id": sid,
-             "schedule_id": _hex(data.get("schedule_id")), "ran": e.event_type == RAN}
+             "schedule_id": _hex(data.get("schedule_id")), "ran": e.event_type == RAN, "row": False}
         )  # fmt: skip
+    records = _one_per_run(records)
 
     fell_through = dict.fromkeys(REASONS, 0)
     counts = {"skipped": 0, "would_skip": 0, "would_skip_unrecorded": 0}
