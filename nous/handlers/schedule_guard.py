@@ -15,12 +15,11 @@ model does not need to run the command again. ``NOUS_SCHEDULE_GUARDS_ENABLED=fal
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import os
-import signal
 import time
 from dataclasses import dataclass
 from typing import Any
+
+from nous.utils import kill_process_group
 
 SKIP_WHEN_EXIT0_QUIET = "exit0_quiet"
 DEFAULT_TIMEOUT_SECONDS = 60
@@ -81,16 +80,12 @@ def _clip(text: str) -> str:
     return text.encode("utf-8")[:OUTPUT_MAX_BYTES].decode("utf-8", errors="ignore")
 
 
-def _kill_group(proc: asyncio.subprocess.Process) -> None:
-    # The command runs in its own session, so its children die with it.
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(proc.pid, signal.SIGKILL)
-
-
 async def run_guard(spec: GuardSpec) -> GuardResult:
     """Run the guard command with a hard timeout. Never raises, except for cancellation.
 
-    On timeout or cancellation the command's whole process group is killed.
+    On timeout or cancellation the command's whole process group is killed and the wait for
+    it is bounded (``kill_process_group``), so a child that left the group and still holds
+    the pipes cannot keep the worker waiting.
     """
     start = time.monotonic()
 
@@ -110,15 +105,13 @@ async def run_guard(spec: GuardSpec) -> GuardResult:
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=spec.timeout_seconds)
     except TimeoutError:
-        _kill_group(proc)
-        await proc.wait()
+        await kill_process_group(proc)
         return GuardResult(None, "", "", elapsed(), timed_out=True)
     except Exception as exc:
-        _kill_group(proc)
-        await proc.wait()
+        await kill_process_group(proc)
         return GuardResult(None, "", "", elapsed(), error=f"{type(exc).__name__}: {exc}")
     except BaseException:
-        _kill_group(proc)
+        await kill_process_group(proc)
         raise
     return GuardResult(
         proc.returncode, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace"), elapsed()

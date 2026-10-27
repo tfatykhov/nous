@@ -8,6 +8,9 @@ receipt appended to the run's task text.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
+import signal
 import time
 import uuid
 from types import SimpleNamespace
@@ -15,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from nous import utils as nous_utils
 from nous.config import Settings
 from nous.handlers import schedule_guard
 from nous.handlers import subtask_worker as worker_mod
@@ -173,6 +177,22 @@ async def test_a_timeout_falls_through_and_kills_the_commands_children(tmp_path)
     assert "timed out after 1s" in task
     await asyncio.sleep(2)
     assert not marker.exists()
+
+
+async def test_a_timeout_returns_soon_when_an_escaped_child_holds_stdout(tmp_path, monkeypatch):
+    # `setsid` puts the child outside the command's process group, so the group kill
+    # misses it and it keeps stdout open; the wait for the pipes must still be bounded.
+    monkeypatch.setattr(nous_utils, "_KILL_WAIT_SECONDS", 0.5)
+    pidfile = tmp_path / "pid"
+    spec = schedule_guard.parse_guard({"command": f"setsid sleep 30 & echo $! > {pidfile}; sleep 30", "timeout_seconds": 1})
+    start = time.monotonic()
+    try:
+        result = await schedule_guard.run_guard(spec)
+        assert time.monotonic() - start < 5
+        assert result.timed_out
+    finally:
+        with contextlib.suppress(ValueError, OSError):
+            os.kill(int(pidfile.read_text()), signal.SIGKILL)
 
 
 async def test_a_guard_that_raises_falls_through(monkeypatch):
