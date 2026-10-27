@@ -26,6 +26,9 @@ from nous.handlers import subtask_worker as worker_mod
 from nous.handlers import task_scheduler
 from nous.handlers.subtask_worker import SubtaskWorkerPool
 
+# The guard runs `/bin/sh` commands in their own session; the tests use /dev/zero, touch, setsid and killpg.
+pytestmark = pytest.mark.skipif(os.name != "posix" or not hasattr(os, "killpg"), reason="POSIX shell and process groups")
+
 TASK = "Run `bash /tmp/ledger_sweep.sh` and report what it logged."
 
 
