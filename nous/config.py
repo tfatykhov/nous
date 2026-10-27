@@ -2309,7 +2309,9 @@ class Settings(BaseSettings):
             return {}
         kept = {k: c for k, c in v.items() if isinstance(k, str) and k and isinstance(c, str) and c.strip()}
         if len(kept) != len(v):
-            log.warning("NOUS_SCHEDULE_GUARD_COMMANDS: dropped %d entries that are not name -> command", len(v) - len(kept))
+            log.warning(
+                "NOUS_SCHEDULE_GUARD_COMMANDS: dropped %d entries that are not name -> command", len(v) - len(kept)
+            )
         return kept
 
     # F064.6: work-queue ingress heartbeat check. Off by default. When true,

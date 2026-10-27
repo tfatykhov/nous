@@ -21,13 +21,14 @@ import pytest
 
 from nous import utils as nous_utils
 from nous.config import Settings
-from nous.handlers import schedule_guard
+from nous.handlers import schedule_guard, task_scheduler
 from nous.handlers import subtask_worker as worker_mod
-from nous.handlers import task_scheduler
 from nous.handlers.subtask_worker import SubtaskWorkerPool
 
 # The guard runs `/bin/sh` commands in their own session; the tests use /dev/zero, touch, setsid and killpg.
-pytestmark = pytest.mark.skipif(os.name != "posix" or not hasattr(os, "killpg"), reason="POSIX shell and process groups")
+pytestmark = pytest.mark.skipif(
+    os.name != "posix" or not hasattr(os, "killpg"), reason="POSIX shell and process groups"
+)
 
 TASK = "Run `bash /tmp/ledger_sweep.sh` and report what it logged."
 
@@ -171,8 +172,18 @@ async def test_skip_does_not_close_the_intention_when_the_inbox_is_off(closed):
 
 
 RECORD_FIELDS = {
-    "name", "command", "skip_when", "timeout_seconds", "exit_code", "timed_out", "error",
-    "duration_ms", "stdout_bytes", "stderr_bytes", "stderr_head", "skipped",
+    "name",
+    "command",
+    "skip_when",
+    "timeout_seconds",
+    "exit_code",
+    "timed_out",
+    "error",
+    "duration_ms",
+    "stdout_bytes",
+    "stderr_bytes",
+    "stderr_head",
+    "skipped",
 }
 
 
@@ -472,7 +483,10 @@ async def test_a_guarded_fire_completes_its_row_and_closes_its_intention(db):
     heart = Heart(db, settings)
     try:
         schedule = await heart.schedules.create(
-            task=TASK, schedule_type="recurring", interval_seconds=3600, metadata={"guard": {"name": NAME, "skip_when": "exit0_quiet", "timeout_seconds": 10}}
+            task=TASK,
+            schedule_type="recurring",
+            interval_seconds=3600,
+            metadata={"guard": {"name": NAME, "skip_when": "exit0_quiet", "timeout_seconds": 10}},
         )
         fire = await create_fire(heart, settings, schedule)
         run = await heart.subtasks.dequeue("worker-0")
@@ -520,7 +534,9 @@ async def test_a_guard_that_falls_through_persists_its_record_as_an_event(db):
     await bus.start()
     try:
         schedule = await heart.schedules.create(
-            task=TASK, schedule_type="recurring", interval_seconds=3600,
+            task=TASK,
+            schedule_type="recurring",
+            interval_seconds=3600,
             metadata={"guard": {"name": NAME, "skip_when": "exit0_quiet", "timeout_seconds": 10}},
         )
         await create_fire(heart, settings, schedule)
@@ -533,12 +549,16 @@ async def test_a_guard_that_falls_through_persists_its_record_as_an_event(db):
         await bus.stop()  # drains the queue through the persister
         async with db.session() as session:
             rows = (
-                await session.execute(
-                    select(EventRow).where(
-                        EventRow.agent_id == settings.agent_id, EventRow.event_type == "subtask_guard_ran"
+                (
+                    await session.execute(
+                        select(EventRow).where(
+                            EventRow.agent_id == settings.agent_id, EventRow.event_type == "subtask_guard_ran"
+                        )
                     )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
         assert len(rows) == 1
         guard = rows[0].data["guard"]
         assert set(guard) == RECORD_FIELDS
