@@ -5605,7 +5605,15 @@ def register_dag_tools(
     from pydantic import ValidationError
 
     from nous.dag.approval import approval_line, card_link
-    from nous.dag.schemas import DAGCreateRequest, DAGEdgeSpec, DAGNodeSpec, DAGNodeType
+    from nous.dag.schemas import (
+        DAGCreateRequest,
+        DAGEdgeSpec,
+        DAGNodeSpec,
+        DAGNodeType,
+        LineageShellCheckRefused,
+        lineage_refuses_check,
+        lineage_shell_check_message,
+    )
 
     # Harness Phase 3 §3.13: the wired Settings, not a fresh Settings() —
     # the flag is read at call time; the schema advertises the approval type
@@ -5653,6 +5661,19 @@ def register_dag_tools(
                 "Error: an internal-only turn cannot create approval nodes; "
                 "ask the owner through resolve_intention(decision='ask') instead."
             )
+        if kwargs.get("_origin_authority") == AUTHORITY_INTERNAL:
+            # Typed waits for lineage DAGs: refused here too, so it holds with
+            # NOUS_INTENTIONS_ENABLED off (no intention, so store.create cannot
+            # see the turn's authority).
+            refused = [
+                n.get("name")
+                for n in kwargs.get("nodes", [])
+                if isinstance(n, dict)
+                and isinstance(n.get("completion_check"), str)
+                and lineage_refuses_check(n["completion_check"])
+            ]
+            if refused:
+                return _tool_error(f"Error creating DAG: {lineage_shell_check_message(refused)}")
         if wants_approval:
             if not getattr(cfg, "dag_approval_nodes_enabled", False):
                 return _tool_error(
@@ -5737,6 +5758,9 @@ def register_dag_tools(
                 for key in ("options", "default_option", "recommended_option", "answer_timeout_seconds"):
                     if key in n:
                         node_data[key] = n[key]
+                # Typed waits: the wait node's condition, threaded explicitly too.
+                if "wait_for" in n:
+                    node_data["wait_for"] = n["wait_for"]
                 try:
                     node_specs.append(DAGNodeSpec(**node_data))
                 except ValidationError as e:
@@ -5829,6 +5853,7 @@ def register_dag_tools(
             intentions.IntentionRootClosed,
             intentions.IntentionParentMissing,
             intentions.IntentionLimitReached,
+            LineageShellCheckRefused,
         ) as e:
             # F099: a refused spawn is the model's to fix, not a crash; spec_from_tool_call
             # already logged the refusal at INFO.
@@ -6029,7 +6054,7 @@ def register_dag_tools(
             }
         }
 
-    node_type_enum = ["subtask", "check", "gate", "callback", "fix"]
+    node_type_enum = ["subtask", "check", "gate", "callback", "fix", "wait"]
     approval_help = ""
     approval_properties: dict[str, Any] = {}
     if approvals_advertised:
@@ -6093,6 +6118,8 @@ def register_dag_tools(
             "type": "object",
             "description": (
                 "Create a DAG to orchestrate subtasks and checks with dependency tracking. "
+                "A node that only waits for a Claude Code job, a pull request or a file must be a "
+                "'wait' node, not a 'check' node (see the node type). "
                 "You do NOT need to poll for the result: when the DAG reaches a terminal "
                 "state its outcome is delivered to you automatically (F087), so create it "
                 "and move on. Use dag_manage only when the user asks about progress "
@@ -6126,7 +6153,19 @@ def register_dag_tools(
                                     "'gate' currently auto-passes — it is a marker, not an "
                                     "enforced quality check. Note: 'tools' below is honored "
                                     "ONLY for 'check' nodes — on every other node type "
-                                    "(subtask, callback, gate, fix) it is silently ignored."
+                                    "(subtask, callback, gate, fix) it is silently ignored. "
+                                    "'wait' waits for a Claude Code job, a pull request or a file (wait_for) and "
+                                    "runs no model and no shell: the orchestrator checks the condition every "
+                                    "completion_check_interval seconds (default: every tick; a pr wait at most once "
+                                    "a minute) until it holds (the node completes, and its result says what was "
+                                    "seen), can no longer hold (it fails), or timeout_seconds or max_check_attempts "
+                                    "runs out (it fails). A node that only waits for a job, a PR or a file must be "
+                                    "a 'wait' node, not a 'check' node: a wait costs no worker. In a DAG created by "
+                                    "a background (internal_only) turn, waits and the built-in PR check are the only "
+                                    "conditions allowed: any other completion_check is refused there. A wait node "
+                                    'takes name, type, instructions "" (put any note in description) and wait_for, '
+                                    "and optionally timeout_seconds, completion_check_interval, max_check_attempts "
+                                    "and description."
                                 )
                                 + approval_help,
                             },
@@ -6141,7 +6180,12 @@ def register_dag_tools(
                                     "Execution timeout in seconds (default: NOUS_DAG_NODE_DEFAULT_TIMEOUT, ceiling: "
                                     "NOUS_DAG_NODE_MAX_TIMEOUT). F087: now a REAL bound — a node still executing past "
                                     "this plus NOUS_DAG_NODE_TIMEOUT_GRACE_SECONDS is cancelled and failed, so size it "
-                                    "to the work rather than leaving the default on a long job."
+                                    "to the work rather than leaving the default on a long job. For a 'check' or "
+                                    "'wait' node with max_check_attempts and completion_check_interval, the timeout "
+                                    "is raised to cover its polls (interval x attempts + one interval; the result "
+                                    "says so in a Note line) and the DAG is refused when that is above "
+                                    "NOUS_DAG_NODE_MAX_TIMEOUT. For a 'check' node the raised value is also its "
+                                    "worker's own run timeout."
                                 ),
                             },
                             "stall_timeout_seconds": {
@@ -6168,16 +6212,67 @@ def register_dag_tools(
                                     "checking the job's status yourself: the node then waits while the job runs and "
                                     "fails when the job ends without the PR. Only this exact check counts as the PR "
                                     "check: a merged PR it names is the outside confirmation your work is scored "
-                                    "on, and a job-status or gh check you write yourself earns nothing."
+                                    "on, and a job-status or gh check you write yourself earns nothing. "
+                                    "A DAG created by a background (internal_only) turn may carry no other "
+                                    "completion_check: wait for a job, a PR or a file with a 'wait' node instead. "
+                                    "A pr wait on a separate node earns no score: to be scored on a PR, keep this "
+                                    "check on the node that opens it."
                                 ),
                             },
                             "completion_check_interval": {
                                 "type": "integer",
-                                "description": "Seconds between completion check polls (default: every tick)",
+                                "description": (
+                                    "Seconds between completion check polls, or between a wait node's polls "
+                                    "(default: every tick; a pr wait at least 60)"
+                                ),
                             },
                             "max_check_attempts": {
                                 "type": "integer",
-                                "description": "Max poll attempts before node fails",
+                                "description": "Max poll attempts (completion check or wait) before node fails",
+                            },
+                            "wait_for": {
+                                "type": "object",
+                                "properties": {
+                                    "kind": {"type": "string", "enum": ["job", "pr", "file"]},
+                                    "job_id": {"type": "string"},
+                                    "number": {"type": "integer", "minimum": 1},
+                                    "repo": {"type": "string"},
+                                    "head": {"type": "string"},
+                                    "until": {
+                                        "type": "string",
+                                        "enum": [
+                                            "finished",
+                                            "completed",
+                                            "merged",
+                                            "closed",
+                                            "head_changed",
+                                            "checks_done",
+                                            "review_on_head",
+                                        ],
+                                    },
+                                    "reviewer": {"type": "string"},
+                                    "path": {"type": "string"},
+                                    "nonempty": {"type": "boolean"},
+                                },
+                                "required": ["kind"],
+                                "description": (
+                                    "(type='wait' only) What to wait for; one of three kinds. "
+                                    'job: {"kind": "job", "job_id": "job-20261027-101500-ab12cd34", '
+                                    '"until": "completed"}: a Claude Code job (claude-jobs/runner.sh launch prints '
+                                    'its id). until "finished" (the default) takes any final status, "completed" '
+                                    "fails the node when the job ends any other way; a job whose process died "
+                                    'counts as failed. pr: {"kind": "pr", "number": 810, "repo": "owner/name", '
+                                    '"until": "merged"}: repo defaults to NOUS_GITHUB_DEFAULT_REPO; until is '
+                                    '"merged" (fails if the PR is closed without a merge), "closed", '
+                                    '"head_changed" (needs "head", the commit sha it waits to move away from), '
+                                    '"checks_done" (every check run on the head finished; failed ones are named in '
+                                    'the result; with "head", fails if the head moved) or "review_on_head" (a '
+                                    'review on the current head, from a login starting with "reviewer" when one is '
+                                    "given). GitHub errors never fail a pr wait, and it polls at most once a "
+                                    'minute. file: {"kind": "file", "path": "research/out.md", "nonempty": true}: '
+                                    "a path under the workspace with no hidden component (nonempty waits for "
+                                    "content, or an entry in a directory)."
+                                ),
                             },
                             # F066.1 — fix-stage recovery fields. Only meaningful
                             # when type='fix'; the DAGCreateRequest validator
