@@ -694,8 +694,10 @@ def _write_target(path: str, cwd: Path | None, writable: list[Path], *, below: b
     against ``cwd``, the directory the shell is SURELY in: None when it is not sure, since a check from every
     directory it could be in would pass a target that is writable from one of them and lands elsewhere from the
     other. ``below``: strictly below the directory, never the directory itself (touch or cp would make it a file).
-    ``~`` and a leading ``-`` are refused."""
-    if path.startswith(("~", "-")) or "\x00" in path:
+    ``~``, a leading ``-`` and a ``..`` component are refused: ``mkdir -p`` creates every directory it walks, so
+    ``research/../../x/../ws/research/ok`` would make ``x`` outside the workspace on the way to an endpoint inside
+    (one rule for every write target)."""
+    if path.startswith(("~", "-")) or "\x00" in path or ".." in path.split("/"):
         return None
     base = Path(path) if path.startswith("/") else cwd / path if cwd is not None else None
     if base is None:
@@ -727,7 +729,7 @@ def _redirect_allowed(path: str, cwd: Path | None, writable: list[Path]) -> bool
     if path in _LINEAGE_SINKS:
         return True
     if path.startswith("/"):
-        if not _under(path, writable):
+        if ".." in path.split("/") or not _under(path, writable):  # no `..`: the rule of _write_target
             return False
         try:
             landed: Path | None = Path(path).resolve()

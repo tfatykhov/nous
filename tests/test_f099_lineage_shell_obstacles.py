@@ -1006,6 +1006,53 @@ def test_a_relative_redirection_through_a_link_out_of_a_write_dir_is_refused(tmp
         assert _w(command, ws) is False, command
 
 
+@pytest.mark.parametrize(
+    ("command", "allowed"),
+    [
+        # `..` in a write target: mkdir -p creates every directory it walks, not only the resolved endpoint
+        ("mkdir -p {W}/research/../../newdir/../ws/research/ok", False),
+        ("cd {W}/research && mkdir -p ../../newdir/../ws/research/ok", False),
+        ("mkdir -p research/a/../b", False),
+        ("mkdir -p {W}/research/a/../b", False),
+        ("mkdir {W}/research/sub/../c", False),
+        # one rule for every write target
+        ("touch {W}/research/a/../x.md", False),
+        ("cd {W}/research && touch sub/../x.md", False),
+        ("cp {W}/other/src.md {W}/research/sub/../c.md", False),
+        ("cd {W}/research && cp {W}/other/src.md sub/../c.md", False),
+        ("cp {W}/other/src.md {W}/research/sub/..", False),
+        ("echo x > {W}/research/sub/../n.md", False),
+        ("echo x >> research/sub/../n.md", False),
+        ("cd {W}/research && echo x > sub/../n.md", False),
+        # `.` components and plain relative paths still work; a `..` in a read is still only a read
+        ("mkdir -p research/a/b", True),
+        ("mkdir -p {W}/research/./a/./b", True),
+        ("cd {W}/research && mkdir -p ./a/b", True),
+        ("touch ./research/x.md", True),
+        ("cd {W}/research && echo x > ./n.md", True),
+        ("cp {W}/other/src.md {W}/research/./c.md", True),
+        ("cp {W}/research/../other/src.md {W}/research/c.md", True),
+    ],
+)
+def test_a_write_target_with_a_dotdot_component_is_refused(command, allowed, tmp_path):
+    assert _w(command, _write_ws(tmp_path)) is allowed
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX shell")
+def test_the_dotdot_refusal_stops_a_directory_mkdir_p_would_create_outside(tmp_path):
+    """The shell would create newdir outside the workspace on its way to an endpoint inside research/."""
+    import subprocess
+
+    ws = _write_ws(tmp_path)
+    command = f"mkdir -p {ws}/research/../../newdir/../ws/research/ok"
+    r, _, _ = _shell_runner(ws, f099_lineage_write_dirs=["research"])
+    refusal = _auth(r, _internal("continuation"), "bash", OFFERED, {"command": command})
+    assert refusal is not None and "(external)" in refusal.text
+    assert not (tmp_path / "newdir").exists()
+    subprocess.run(["/bin/sh", "-c", command], check=True)  # what the refusal prevents
+    assert (tmp_path / "newdir").is_dir() and (ws / "research" / "ok").is_dir()
+
+
 def test_a_repo_inside_an_extra_write_dir_is_not_a_build_repo(tmp_path):
     ws = _write_ws(tmp_path)
     (ws / "research" / "repo" / ".git").mkdir(parents=True)
