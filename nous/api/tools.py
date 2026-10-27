@@ -533,9 +533,10 @@ class ToolDispatcher:
                 # bash's longer default timeout would outlast a short turn, which would then
                 # be cancelled before the call returned its output or its timeout error.
                 args = {**args, "_long_timeout": not ctx.is_short_turn}
-            if name == "dag_manage":
+            if name in ("bash", "dag_manage"):
                 # Who a cancel belongs to (cancel_provenance): the agent's own turn, or the owner for an
-                # approved proposal. Set from the context, so the model cannot name another actor.
+                # approved proposal. Set from the context, so the model cannot name another actor. bash
+                # records it only after a lone `runner.sh cancel <job id>` that succeeded.
                 args = {**args, "_actor": cancel_provenance.context_actor(ctx.kind)}
             if session_id is not None and name == "spawn_task":
                 args = {**args, "_session_id": session_id}

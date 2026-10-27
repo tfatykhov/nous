@@ -689,3 +689,142 @@ class TestWriteFileTool:
 
         mode = stat.S_IMODE(target.stat().st_mode)
         assert mode == 0o755, f"expected 0o755, got {oct(mode)}"
+
+
+# ---------------------------------------------------------------------------
+# Claude Code job cancels: who cancelled, recorded by bash post-processing
+# ---------------------------------------------------------------------------
+
+_JOB = "job-20261027-101500-ab12cd34"
+_STUB_RUNNER = """#!/bin/sh
+# A stand-in for claude-jobs/runner.sh: cancel exits with the code in cancel_exit (0 when absent); status and
+# result print the job's status file the way the real runner leads its output.
+here="$(dirname "$0")"
+case "$1" in
+  cancel) exit "$(cat "$here/cancel_exit" 2>/dev/null || echo 0)" ;;
+  status|result) printf 'Status: %s\nJob: %s\n' "$(cat "$here/$2/status")" "$2" ;;
+  *) exit 2 ;;
+esac
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="runs a shell script and needs job marks")
+class TestJobCancelProvenance:
+    @staticmethod
+    def _workspace(tmp_path, *, status="running", cancel_exit=0):
+        import os
+
+        jobs = tmp_path / "claude-jobs"
+        (jobs / _JOB).mkdir(parents=True)
+        (jobs / _JOB / "status").write_text(status)
+        runner = jobs / "runner.sh"
+        runner.write_text(_STUB_RUNNER)
+        os.chmod(runner, 0o755)
+        if cancel_exit:
+            (jobs / "cancel_exit").write_text(str(cancel_exit))
+        return tmp_path
+
+    @staticmethod
+    async def _run(ws, command, actor=None):
+        return _extract_text(await bash_tool(command, _workspace_dir=str(ws), _actor=actor))
+
+    @staticmethod
+    def _mark(ws):
+        return ws / "claude-jobs" / _JOB / "cancelled_by"
+
+    @pytest.mark.asyncio
+    async def test_a_lone_runner_cancel_records_the_actor(self, tmp_path):
+        from nous.cancel_provenance import agent_record, describe_job_cancellation
+
+        ws = self._workspace(tmp_path)
+        out = await self._run(ws, f"{ws}/claude-jobs/runner.sh cancel {_JOB}", agent_record("continuation"))
+        assert out == "Exit code: 0" and self._mark(ws).exists()
+        assert describe_job_cancellation(str(ws), _JOB) == "cancelled by your own continuation turn"
+
+    @pytest.mark.asyncio
+    async def test_an_approved_proposal_cancel_is_recorded_as_the_owner(self, tmp_path):
+        from nous.cancel_provenance import describe_job_cancellation, record
+
+        ws = self._workspace(tmp_path)
+        await self._run(ws, f"bash {ws}/claude-jobs/runner.sh cancel {_JOB}", record("owner", "approved proposal"))
+        assert describe_job_cancellation(str(ws), _JOB) == "cancelled by the owner (approved proposal)"
+
+    @pytest.mark.asyncio
+    async def test_a_failed_cancel_records_nothing(self, tmp_path):
+        from nous.cancel_provenance import agent_record
+
+        ws = self._workspace(tmp_path, cancel_exit=1)
+        out = await self._run(ws, f"{ws}/claude-jobs/runner.sh cancel {_JOB}", agent_record("interactive"))
+        assert out.endswith("Exit code: 1") and not self._mark(ws).exists()
+
+    @pytest.mark.asyncio
+    async def test_a_compound_command_records_nothing(self, tmp_path):
+        from nous.cancel_provenance import agent_record
+
+        ws = self._workspace(tmp_path)
+        out = await self._run(ws, f"{ws}/claude-jobs/runner.sh cancel {_JOB} && echo done", agent_record("interactive"))
+        assert "done" in out and not self._mark(ws).exists()
+
+    @pytest.mark.asyncio
+    async def test_a_cancel_without_an_actor_records_nothing(self, tmp_path):
+        ws = self._workspace(tmp_path)
+        await self._run(ws, f"{ws}/claude-jobs/runner.sh cancel {_JOB}")
+        assert not self._mark(ws).exists()
+
+    @pytest.mark.asyncio
+    async def test_a_status_read_of_a_cancelled_job_names_the_actor(self, tmp_path):
+        from nous.cancel_provenance import agent_record
+
+        ws = self._workspace(tmp_path, status="cancelled")
+        await self._run(ws, f"{ws}/claude-jobs/runner.sh cancel {_JOB}", agent_record("continuation"))
+        for verb in ("status", "result"):
+            out = await self._run(ws, f"./claude-jobs/runner.sh {verb} {_JOB}")
+            assert "Cancelled by: cancelled by your own continuation turn" in out
+
+    @pytest.mark.asyncio
+    async def test_a_status_read_of_a_job_cancelled_outside_nous_says_so(self, tmp_path):
+        ws = self._workspace(tmp_path, status="cancelled")
+        out = await self._run(ws, f"claude-jobs/runner.sh status {_JOB}")
+        assert "Cancelled by: no cancel recorded by Nous" in out and "cancelled outside Nous" in out
+
+    @pytest.mark.asyncio
+    async def test_the_exit_code_stays_the_last_line(self, tmp_path):
+        from nous.cancel_provenance import agent_record
+        from nous.cognitive.execution_ledger import bash_exit_code, observed_status
+
+        ws = self._workspace(tmp_path, status="cancelled")
+        outside = await self._run(ws, f"{ws}/claude-jobs/runner.sh status {_JOB}")
+        await self._run(ws, f"{ws}/claude-jobs/runner.sh cancel {_JOB}", agent_record("interactive"))
+        recorded = await self._run(ws, f"{ws}/claude-jobs/runner.sh status {_JOB}")
+        for out in (outside, recorded):
+            assert out.splitlines()[-1] == "Exit code: 0"
+            assert observed_status(out) == "cancelled" and bash_exit_code(out) == 0
+            assert out.splitlines()[-2].startswith("Cancelled by: ")
+
+    @pytest.mark.asyncio
+    async def test_a_status_read_of_a_running_job_is_unchanged(self, tmp_path):
+        ws = self._workspace(tmp_path, status="running")
+        out = await self._run(ws, f"{ws}/claude-jobs/runner.sh status {_JOB}")
+        assert out == f"Status: running\nJob: {_JOB}\n\nExit code: 0"
+
+    @pytest.mark.asyncio
+    async def test_a_cancel_through_the_dispatcher_is_recorded_for_the_turn(self, tmp_path):
+        """The registered bash tool forwards the dispatcher's actor: a chat turn's cancel names the chat turn."""
+        from types import SimpleNamespace
+
+        from nous.api.builtin_tools import register_builtin_tools
+        from nous.api.execution_context import ExecutionContext
+        from nous.api.tools import ToolDispatcher
+        from nous.cancel_provenance import describe_job_cancellation
+
+        ws = self._workspace(tmp_path)
+        dispatcher = ToolDispatcher()
+        register_builtin_tools(dispatcher, SimpleNamespace(workspace_dir=str(ws)))
+        forged = {"by": "owner", "via": "Telegram", "at": "2026-01-01T00:00:00+00:00"}
+        text, is_error = await dispatcher.dispatch(
+            "bash",
+            {"command": f"{ws}/claude-jobs/runner.sh cancel {_JOB}", "_actor": forged},
+            context=ExecutionContext(kind="interactive"),
+        )
+        assert not is_error, text
+        assert describe_job_cancellation(str(ws), _JOB) == "cancelled by your own chat turn"

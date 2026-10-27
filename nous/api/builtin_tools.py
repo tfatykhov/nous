@@ -26,6 +26,8 @@ from nous import undo_journal
 from nous.api.call_outcome import current_outcome
 from nous.api.execution_context import BACKGROUND_BASH_TIMEOUT
 from nous.api.tools import ToolDispatcher, _tool_error
+from nous.cancel_provenance import describe_job_cancellation, parse_runner_call, write_job_cancelled_by
+from nous.cognitive.execution_ledger import observed_status
 from nous.config import Settings
 from nous.utils import kill_process_group
 
@@ -127,6 +129,26 @@ def _validate_path(path_str: str, workspace_dir: str) -> Path:
     return target
 
 
+def _job_cancel_provenance(
+    command: str, workspace_dir: str, actor: dict | None, returncode: int | None, stdout_text: str
+) -> str | None:
+    """Post-processing of a lone ``runner.sh cancel|status|result <job id>`` (``parse_runner_call``). A cancel that
+    exited 0 records ``actor`` as the job's ``cancelled_by``; a status or result read whose head says the job is
+    cancelled gets one ``Cancelled by: ...`` line, which the caller puts before the exit-code trailer. None when
+    there is nothing to add. Never raises."""
+    call = parse_runner_call(command, workspace_dir)
+    if call is None:
+        return None
+    verb, job_id = call
+    if verb == "cancel":
+        if actor is not None and returncode == 0 and not write_job_cancelled_by(workspace_dir, job_id, actor):
+            logger.debug("could not record who cancelled job %s", job_id)
+        return None
+    if observed_status(stdout_text) == "cancelled":
+        return f"Cancelled by: {describe_job_cancellation(workspace_dir, job_id)}"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Tool handlers
 # ---------------------------------------------------------------------------
@@ -140,6 +162,7 @@ async def bash_tool(
     _lineage: bool = False,
     _lineage_build: bool = False,
     _long_timeout: bool = False,
+    _actor: dict | None = None,
 ) -> dict[str, Any]:
     """Execute a shell command in the workspace directory.
 
@@ -155,6 +178,9 @@ async def bash_tool(
             token) and no stdin
         _long_timeout: Set by dispatch for a background turn that is not a
             short one (ExecutionContext.is_short_turn)
+        _actor: Set by dispatch: who the call's turn belongs to (a
+            cancel_provenance record), recorded in a Claude Code job's dir
+            after a lone ``runner.sh cancel <job id>`` that exits 0
 
     Returns:
         MCP-format response with stdout + stderr
@@ -216,6 +242,9 @@ async def bash_tool(
             parts.append(stdout_text)
         if stderr_text:
             parts.append(f"STDERR:\n{stderr_text}")
+        cancel_note = _job_cancel_provenance(command, _workspace_dir, _actor, proc.returncode, stdout_text)
+        if cancel_note:
+            parts.append(cancel_note)
         # Always appended (#179 codex round 13): the trailing line is the
         # AUTHORITATIVE wrapper status, so downstream consumers (compaction
         # bulk-failure detection) can disambiguate a quoted "Exit code: N"
@@ -958,6 +987,7 @@ def register_builtin_tools(dispatcher: ToolDispatcher, settings: Settings) -> No
         _lineage: bool = False,
         _lineage_build: bool = False,
         _long_timeout: bool = False,
+        _actor: dict | None = None,
     ) -> dict[str, Any]:
         return await bash_tool(
             command,
@@ -966,6 +996,7 @@ def register_builtin_tools(dispatcher: ToolDispatcher, settings: Settings) -> No
             _lineage=_lineage,
             _lineage_build=_lineage_build,
             _long_timeout=_long_timeout,
+            _actor=_actor,
         )
 
     async def _read_file(path: str, offset: int = 0, limit: int = 0) -> dict[str, Any]:
