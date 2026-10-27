@@ -243,7 +243,7 @@ class SubtaskWorkerPool:
             result = await schedule_guard.run_guard(spec)
             if not schedule_guard.should_skip(spec, result):
                 broken = (
-                    result.error or result.timed_out or spec.skip_when != schedule_guard.SKIP_WHEN_EXIT0_EMPTY_STDOUT
+                    result.error or result.timed_out or spec.skip_when != schedule_guard.SKIP_WHEN_EXIT0_QUIET
                 )
                 (logger.warning if broken else logger.info)(
                     "Guard of subtask %s did not certify a no-op (exit=%s timed_out=%s error=%s skip_when=%s); "

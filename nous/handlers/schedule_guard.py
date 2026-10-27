@@ -3,11 +3,11 @@
 A recurring schedule whose run mostly executes a script and reports "nothing" can carry a guard in
 its own ``metadata`` (written by the owner, never by the agent or the task text)::
 
-    {"guard": {"command": "bash /path/to/sweep.sh", "skip_when": "exit0_empty_stdout", "timeout_seconds": 60}}
+    {"guard": {"command": "bash /path/to/sweep.sh", "skip_when": "exit0_quiet", "timeout_seconds": 60}}
 
 The subtask worker runs the command before the run's model turn. When the command certifies there is
-nothing to do (``exit0_empty_stdout``: exit 0 and whitespace-only stdout) the run completes with no model
-call. Any other result (non-zero exit, output, timeout, an unknown ``skip_when``, an error starting the
+nothing to do (``exit0_quiet``: exit 0 and whitespace-only stdout and stderr) the run completes with no model
+call. Any other result (non-zero exit, output on either stream, timeout, an unknown ``skip_when``, an error starting the
 command) fails open: the model turn runs as before, with ``receipt()`` appended to its task text so the
 model does not need to run the command again. ``NOUS_SCHEDULE_GUARDS_ENABLED=false`` ignores guards.
 """
@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-SKIP_WHEN_EXIT0_EMPTY_STDOUT = "exit0_empty_stdout"
+SKIP_WHEN_EXIT0_QUIET = "exit0_quiet"
 DEFAULT_TIMEOUT_SECONDS = 60
 MAX_TIMEOUT_SECONDS = 300
 OUTPUT_MAX_BYTES = 2048
@@ -57,17 +57,23 @@ def parse_guard(raw: Any) -> GuardSpec | None:
         timeout = DEFAULT_TIMEOUT_SECONDS
     return GuardSpec(
         command=command,
-        skip_when=str(raw.get("skip_when") or SKIP_WHEN_EXIT0_EMPTY_STDOUT),
+        skip_when=str(raw.get("skip_when") or SKIP_WHEN_EXIT0_QUIET),
         timeout_seconds=min(max(timeout, 1), MAX_TIMEOUT_SECONDS),
     )
 
 
 def should_skip(spec: GuardSpec, result: GuardResult) -> bool:
-    """True only when the guard certifies the run has nothing to do."""
+    """True only when the guard certifies the run has nothing to do.
+
+    stderr counts: a script ending in ``; true`` reports a failure only there, so a skip
+    that ignored it would hide a broken script behind "nothing to do". Known chatter
+    belongs in the script (``2>/dev/null``), not in the guard.
+    """
     return (
-        spec.skip_when == SKIP_WHEN_EXIT0_EMPTY_STDOUT
+        spec.skip_when == SKIP_WHEN_EXIT0_QUIET
         and result.exit_code == 0
         and not result.stdout.strip()
+        and not result.stderr.strip()
     )
 
 
@@ -121,7 +127,7 @@ async def run_guard(spec: GuardSpec) -> GuardResult:
 
 def skip_text(spec: GuardSpec, result: GuardResult) -> str:
     """The result text of a run the guard completed."""
-    return f"skipped_by_guard: {spec.command} exit=0 stdout=empty ({result.duration_ms} ms)"
+    return f"skipped_by_guard: {spec.command} exit=0 stdout=empty stderr=empty ({result.duration_ms} ms)"
 
 
 def receipt(spec: GuardSpec, result: GuardResult) -> str:
@@ -140,7 +146,7 @@ def receipt(spec: GuardSpec, result: GuardResult) -> str:
         f"command: {spec.command}",
         f"{outcome} ({result.duration_ms} ms)",
     ]
-    if spec.skip_when != SKIP_WHEN_EXIT0_EMPTY_STDOUT:
+    if spec.skip_when != SKIP_WHEN_EXIT0_QUIET:
         lines.append(f"note: unknown skip_when {spec.skip_when!r}; the guard never skips with it")
     for name, text in (("stdout", result.stdout), ("stderr", result.stderr)):
         if text.strip():

@@ -1,7 +1,7 @@
 """Run-level guard for scheduled script jobs (nous/handlers/schedule_guard.py + the worker hook).
 
 The guard config is read from the schedule row's ``metadata.guard``. A guard that exits 0 with empty
-stdout completes the run with no model call; every other result falls through to the model turn with a
+stdout and stderr completes the run with no model call; every other result falls through to the model turn with a
 receipt appended to the run's task text.
 """
 
@@ -90,14 +90,14 @@ def closed(monkeypatch):
 
 
 def _guard(command: str, **kw) -> dict:
-    return {"command": command, "skip_when": "exit0_empty_stdout", "timeout_seconds": 10, **kw}
+    return {"command": command, "skip_when": "exit0_quiet", "timeout_seconds": 10, **kw}
 
 
 # ---- skip path -----------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("command", ["true", "printf '  \\n\\t'"])
-async def test_exit0_empty_stdout_completes_the_run_without_a_model_call(command, closed):
+@pytest.mark.parametrize("command", ["true", "printf '  \\n\\t'", "printf ' \\n' >&2"])
+async def test_exit0_with_no_output_completes_the_run_without_a_model_call(command, closed):
     schedule = _schedule(_guard(command))
     run = _run(schedule)
     pool, runner, heart, bus, http, _ = _pool(schedule)
@@ -109,7 +109,7 @@ async def test_exit0_empty_stdout_completes_the_run_without_a_model_call(command
     heart.subtasks.complete.assert_awaited_once()
     args, kwargs = heart.subtasks.complete.await_args
     assert args[0] == run.id
-    assert args[1].startswith(f"skipped_by_guard: {command} exit=0 stdout=empty (")
+    assert args[1].startswith(f"skipped_by_guard: {command} exit=0 stdout=empty stderr=empty (")
     assert kwargs["final_outcome"] == "completed"
     assert kwargs["report_jsonb"]["guard_skipped"] is True
     assert kwargs["tokens_in"] == 0 and kwargs["tokens_out"] == 0
@@ -193,6 +193,18 @@ async def test_a_failed_complete_falls_through_to_the_turn():
     pool._record_inbox.assert_awaited_once()
 
 
+async def test_stderr_alone_with_exit_0_falls_through_with_it_in_the_receipt():
+    # a `...; true` script reports a failure only on stderr
+    task = await _falls_through(_guard("echo 'git: not found' >&2; true"))
+    assert "exit: 0" in task
+    assert "git: not found" in task
+
+
+async def test_the_old_exit0_empty_stdout_mode_is_unknown_and_falls_through():
+    task = await _falls_through(_guard("true", skip_when="exit0_empty_stdout"))
+    assert "unknown skip_when" in task
+
+
 async def test_an_unknown_skip_when_falls_through():
     task = await _falls_through(_guard("true", skip_when="exit0"))
     assert "exit: 0" in task
@@ -259,7 +271,7 @@ async def test_a_run_whose_text_is_not_the_schedules_task_is_never_guarded():
     await _unguarded(schedule, run)
 
 
-@pytest.mark.parametrize("guard", [{"skip_when": "exit0_empty_stdout"}, {"command": ""}, "true", {"command": 5}])
+@pytest.mark.parametrize("guard", [{"skip_when": "exit0_quiet"}, {"command": ""}, "true", {"command": 5}])
 async def test_a_malformed_guard_is_ignored(guard):
     schedule = _schedule(guard)
     await _unguarded(schedule, _run(schedule))
@@ -331,7 +343,7 @@ async def test_a_guarded_fire_completes_its_row_and_closes_its_intention(db):
         runner.run_turn.assert_not_awaited()
         row = await heart.subtasks.get(run.id)
         assert row.status == "completed" and row.final_outcome == "completed"
-        assert row.result.startswith("skipped_by_guard: true exit=0 stdout=empty")
+        assert row.result.startswith("skipped_by_guard: true exit=0 stdout=empty stderr=empty")
         assert row.report_jsonb["guard_skipped"] is True
         assert (row.tokens_in, row.tokens_out, row.attempts) == (0, 0, 0)
         intention = await heart.intentions.get_for_source(intentions.SOURCE_SUBTASK, run.id)
