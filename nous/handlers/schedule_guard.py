@@ -28,7 +28,11 @@ from nous.utils import kill_process_group
 
 SKIP_WHEN_EXIT0_QUIET = "exit0_quiet"
 DEFAULT_TIMEOUT_SECONDS = 60
-MAX_TIMEOUT_SECONDS = 300
+# The guard runs after the row is marked running and before the turn's own timeout starts, so a
+# guard that takes long eats into F101's grace (find_active_run counts a running row only until
+# started_at + timeout + 300 s; past that a second run could start). Capped well below it: at most
+# 120 s plus kill_process_group's 5 s bound.
+MAX_TIMEOUT_SECONDS = 120
 OUTPUT_MAX_BYTES = 2048
 STDERR_HEAD_BYTES = 512  # kept in the durable record of a run
 

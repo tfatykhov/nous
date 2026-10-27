@@ -23,6 +23,7 @@ from nous import utils as nous_utils
 from nous.config import Settings
 from nous.handlers import schedule_guard
 from nous.handlers import subtask_worker as worker_mod
+from nous.handlers import task_scheduler
 from nous.handlers.subtask_worker import SubtaskWorkerPool
 
 TASK = "Run `bash /tmp/ledger_sweep.sh` and report what it logged."
@@ -425,7 +426,10 @@ async def test_a_failed_schedule_read_is_ignored():
 
 
 def test_parse_clamps_the_timeout():
-    assert _spec("true", timeout_seconds=10_000).timeout_seconds == 300
+    # well below F101's 300 s active-run grace (task_scheduler._STALE_GRACE_SECONDS)
+    assert _spec("true", timeout_seconds=10_000).timeout_seconds == 120
+    assert _spec("true", timeout_seconds=300).timeout_seconds == 120
+    assert schedule_guard.MAX_TIMEOUT_SECONDS + 5 < task_scheduler._STALE_GRACE_SECONDS / 2
     assert _spec("true", timeout_seconds=0).timeout_seconds == 1
     assert _spec("true").timeout_seconds == 60
 
