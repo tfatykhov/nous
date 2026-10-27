@@ -37,10 +37,9 @@ async def world(db, tmp_path):
         agent_id=agent,
         workspace_dir=str(tmp_path),
         github_default_repo="o/r",
-        github_token="",
         dag_node_default_timeout=600,
         dag_node_max_timeout=7200,
-    )
+    ).model_copy(update={"github_token": ""})  # read from GITHUB_TOKEN, not a NOUS_ name
     store = DAGStore(db, agent, cfg)
     subtask_mgr, loader = AsyncMock(), AsyncMock()
     orch = DAGOrchestrator(store=store, subtask_mgr=subtask_mgr, dynamic_loader=loader, settings=cfg)

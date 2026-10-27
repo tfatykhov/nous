@@ -49,6 +49,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 import tempfile
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -61,6 +62,7 @@ from uuid import UUID
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
+from nous.brain.intentions import stamp_is_internal
 from nous.config import Settings
 from nous.dag._workspace import assert_inside_root, compute_workspace_path
 from nous.dag.approval import (
@@ -87,7 +89,15 @@ from nous.dag.approval import (
     stopped_summary,
 )
 from nous.dag.attempts import archived_attempts
-from nous.dag.schemas import PREDECESSOR_EDGE_TYPES, WAIT_EDGE_TYPES, DAGNodeStatus, effective_poll_interval
+from nous.dag.schemas import (
+    PREDECESSOR_EDGE_TYPES,
+    WAIT_EDGE_TYPES,
+    DAGNodeStatus,
+    LineageShellCheckRefused,
+    effective_poll_interval,
+    lineage_refuses_check,
+    lineage_shell_check_message,
+)
 from nous.dag.store import (
     _TERMINAL_DAG_STATUSES,
     DAG_CHECK_NAME_PREFIX,
@@ -281,6 +291,17 @@ def _can_pass(exc: BaseException) -> bool:
 
 # Completion check polling
 _CHECK_CMD_TIMEOUT = 10.0  # Hard timeout per check command invocation
+# Typed waits for lineage DAGs: the built-in PR check in a lineage DAG runs as
+# argv (no shell) with an environment built from scratch: the variables it
+# reads, PATH, and what an HTTPS client may need in a development shell.
+_TYPED_CHECK_ENV_PASSTHROUGH = (
+    "PYTHONPATH",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "NO_PROXY",
+    "SSL_CERT_FILE",
+    "REQUESTS_CA_BUNDLE",
+)
 
 # Grace period before a 'ready' node in a running DAG is demoted to 'pending'
 # so the tick loop can pick it up. Wave-0 nodes normally transition immediately
@@ -1677,6 +1698,11 @@ class DAGOrchestrator:
 
     async def _poll_awaiting_checks(self, dag: ExecutionDAG) -> None:
         """Poll completion_check commands for nodes in awaiting_check status."""
+        # Typed waits for lineage DAGs: whether this DAG is internal_only, read
+        # once per call and only for a node with a command. A failed read is
+        # kept too, so no later node of the DAG runs its command this call.
+        internal: bool | None = None
+        lineage_unread = False
         for node in dag.nodes:
             if node.status != "awaiting_check":
                 continue
@@ -1694,6 +1720,31 @@ class DAGOrchestrator:
                 )
                 node.status, node.completed_at = "completed", done_at
                 self._release_check(node)
+                continue
+
+            # Typed waits for lineage DAGs: a lineage DAG may run no shell
+            # completion_check, only the built-in PR check (run without a
+            # shell). Rows written before this rule, or another way, are
+            # refused here, before any worker-evidence, interval or run step.
+            if lineage_unread:
+                continue
+            if internal is None:
+                try:
+                    internal = stamp_is_internal(await self._store.intention_lineage(dag.id))
+                except Exception as e:
+                    lineage_unread = True
+                    # The exception type only: str(e) of a DB error carries the SQL statement.
+                    logger.warning(
+                        "Could not read the intention of DAG %s (%s); its completion checks wait for the next tick",
+                        dag.id,
+                        type(e).__name__,
+                    )
+                    continue
+            if internal and lineage_refuses_check(cmd):
+                logger.warning("DAG %s node %s: lineage DAG shell completion_check refused", dag.id, node.name)
+                await self._finalize_awaiting_check_node(
+                    node, status="failed", error=lineage_shell_check_message([node.name])
+                )
                 continue
 
             # codex P1 round 4: the completion-check deadline must not start
@@ -1810,7 +1861,11 @@ class DAGOrchestrator:
 
             # Run the completion check
             try:
-                check = await self._run_completion_check(node)
+                check = await (
+                    self._run_completion_check(node, lineage_internal=True)
+                    if internal
+                    else self._run_completion_check(node)
+                )
                 attempts = (node.check_attempts or 0) + 1
                 now = datetime.now(UTC)
 
@@ -2170,8 +2225,14 @@ class DAGOrchestrator:
                 node.check_name, node.name,
             )
 
-    async def _run_completion_check(self, node: DAGNode) -> CheckResult:
+    async def _run_completion_check(self, node: DAGNode, *, lineage_internal: bool = False) -> CheckResult:
         """Run a completion_check shell command.
+
+        ``lineage_internal``: the node's DAG is internal_only. Its command must
+        then be exactly the built-in PR check, which runs as argv with no shell
+        and a from-scratch environment; any other command raises
+        LineageShellCheckRefused and nothing is started (the poll refuses such
+        a node first, so this is the last line, at the only spawn site).
 
         Exit code semantics:
             0 → success (done)
@@ -2189,6 +2250,8 @@ class DAGOrchestrator:
         cmd = node.completion_check
         if not cmd:
             return CheckResult("success")
+        if lineage_internal and lineage_refuses_check(cmd):
+            raise LineageShellCheckRefused(lineage_shell_check_message([node.name]))
 
         # F064.3: derive the per-node workspace + assert containment. The
         # dag attribute isn't on the node directly; we read it from the
@@ -2215,14 +2278,22 @@ class DAGOrchestrator:
             cwd_arg = str(workspace)
             # The built-in PR check (nous/dag/typed_checks.py) ignores PRs opened before the DAG, so a branch name
             # reused from an older PR cannot settle the node before this DAG's PR exists.
-            check_env = {**os.environ}
+            nous_env: dict[str, str] = {}
             # Its --job-file names a launched job's id file, read with the job's status under the workspace.
             workspace_dir = getattr(self._settings, "workspace_dir", None)
             if workspace_dir:
-                check_env["NOUS_WORKSPACE_DIR"] = str(workspace_dir)
+                nous_env["NOUS_WORKSPACE_DIR"] = str(workspace_dir)
             dag_created_at = getattr(dag, "created_at", None)
             if dag_created_at is not None:
-                check_env["NOUS_DAG_CREATED_AT"] = dag_created_at.isoformat()
+                nous_env["NOUS_DAG_CREATED_AT"] = dag_created_at.isoformat()
+            if lineage_internal:
+                check_env = {"PATH": os.environ.get("PATH", os.defpath)}
+                check_env.update({k: os.environ[k] for k in _TYPED_CHECK_ENV_PASSTHROUGH if k in os.environ})
+                if self._settings.github_token:
+                    check_env["GITHUB_TOKEN"] = self._settings.github_token
+                check_env.update(nous_env)
+            else:
+                check_env = {**os.environ, **nous_env}
         except (ValueError, OSError) as e:
             logger.warning(
                 "F064.3: completion_check workspace setup failed for node %s — %s; "
@@ -2235,16 +2306,30 @@ class DAGOrchestrator:
             )
 
         try:
-            proc = await asyncio.create_subprocess_shell(
-                cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd_arg,
-                env=check_env,
-                # Own process group, so that a timeout stops the whole
-                # command and not only the /bin/sh that started it.
-                start_new_session=True,
-            )
+            if lineage_internal:
+                # The built-in PR check, exactly (lineage_refuses_check): every
+                # argument's charset excludes whitespace, so splitting on the
+                # single spaces gives its argv. This interpreter, not PATH's.
+                proc = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    *cmd.strip().split(" ")[1:],
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd_arg,
+                    env=check_env,
+                    start_new_session=True,
+                )
+            else:
+                proc = await asyncio.create_subprocess_shell(
+                    cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd_arg,
+                    env=check_env,
+                    # Own process group, so that a timeout stops the whole
+                    # command and not only the /bin/sh that started it.
+                    start_new_session=True,
+                )
             try:
                 stdout, stderr = await asyncio.wait_for(
                     proc.communicate(), timeout=_CHECK_CMD_TIMEOUT,
@@ -3725,6 +3810,11 @@ class DAGOrchestrator:
             await self._defer_node(node, dag, "lineage stamp unreadable", backstop="lineage still unreadable")
             return
 
+        if stamp_is_internal(lineage) and lineage_refuses_check(node.completion_check):
+            # Typed waits for lineage DAGs: its check could never run, so no subtask is started for it.
+            await self._finish_launch(node, status="failed", error=lineage_shell_check_message([node.name]))
+            return
+
         # Build augmented instructions with predecessor context
         augmented = await self._build_predecessor_context(node, dag)
 
@@ -3839,6 +3929,11 @@ class DAGOrchestrator:
                 node.name,
             )
             await self._defer_node(node, dag, "lineage stamp unreadable", backstop="lineage still unreadable")
+            return
+
+        if stamp_is_internal(lineage) and lineage_refuses_check(node.completion_check):
+            # Typed waits for lineage DAGs: its check could never run, so no worker is started for it.
+            await self._finish_launch(node, status="failed", error=lineage_shell_check_message([node.name]))
             return
 
         augmented = await self._build_predecessor_context(node, dag)
