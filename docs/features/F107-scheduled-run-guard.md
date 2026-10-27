@@ -18,6 +18,7 @@ A deterministic guard runs first. The model runs only when the guard cannot cert
   - The row is already `running`, so the guard's time comes out of F101's grace: `find_active_run` counts a running row only until `started_at + timeout + 300 s`. The guard timeout is therefore capped at 120 s (plus at most 5 s for the kill), well inside that grace.
   - Fire bookkeeping is unchanged: `fire_count`, `next_fire_at`, the F101 policies, the run's intention and the subtask row are created exactly as before.
   - The guard applies only to a plain fire of the schedule: the run's text must equal `schedule.task`, and the run must not be a check-and-fix run.
+  - A manual "run now" (`POST /schedules/{id}/run`, F101) creates a plain fire too, so the guard can skip it as well. To force a model turn, run the task as a one-off subtask, or remove the guard first.
 - **Command:** an asyncio subprocess (`/bin/sh -c`) with stdin closed. It runs in its own session, and its whole process group is killed on timeout or cancellation.
 - **Skip (`exit0_quiet`):** exit 0 with whitespace-only stdout **and** stderr. stderr counts because a script that ends in `; true` reports a failure only there; known chatter belongs in the script (`2>/dev/null`), not in the guard.
   - The row is completed with result `skipped_by_guard: <command> exit=0 stdout=empty stderr=empty (<ms> ms)` and `final_outcome=completed`.
@@ -30,6 +31,7 @@ A deterministic guard runs first. The model runs only when the guard cannot cert
   - When the command ran, the guard's receipt is appended to the task text in memory; the row is not changed.
   - A malformed guard is ignored with a WARNING naming the schedule, and a guard that errors, times out or has an unknown `skip_when` is logged at WARNING.
   - The receipt holds the exit code or timeout, the duration, and the first 2 KB of stdout and stderr, fenced as command output.
+  - The receipt's output enters the prompt **unscreened**: it does not pass through F103's injection screen or the tool-result path. It is treated as an owner-authored channel, because only an allowlisted command (owner-written, in the env) can produce it. A guard command must therefore not print content from untrusted sources (web pages, mail, third-party issue text); a script that does belongs in the model turn, behind the normal tool path.
   - So the model does not need to run the script again.
 - **A record of every run:** the guard command runs outside tool classes, the execution ledger and F103, so each run leaves its own durable record: `{name, command, skip_when, timeout_seconds, exit_code, timed_out, error, duration_ms, stdout_bytes, stderr_bytes, stderr_head, skipped}`. `stderr_head` is the first 512 bytes of stderr after the ledger's error redaction (`redact_error_text`). On a skip it is `report_jsonb.guard`; on a fall-through (including a skip whose row write failed) it is the data of a `subtask_guard_ran` event, which the event bus persists to `nous_system.events` like every other subtask event. A name that is not in the allowlist runs nothing and leaves only its WARNING.
 
