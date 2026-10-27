@@ -15,6 +15,9 @@ an error starting the command) fails open: the model turn runs as before, with `
 appended to its task text so the model does not need to run the command again.
 ``NOUS_SCHEDULE_GUARDS_ENABLED=false`` ignores guards.
 
+``is_action: true`` (phase 3) marks a guard that is itself the job's action (a tick, a sweep): its receipt tells
+the model the action already ran once and must not run again.
+
 ``mode`` (phase 2) is ``shadow`` when absent: the command runs and is recorded, but the model turn always
 runs too, and after it the worker records whether the model acted (``acted_signals``, ``acted_verdict``).
 Only ``skip`` lets the guard complete a run, and only the owner writes it. Any other mode falls through, like an unknown
@@ -37,8 +40,9 @@ SKIP_WHEN_EXIT0_QUIET = "exit0_quiet"
 MODE_SHADOW = "shadow"
 MODE_SKIP = "skip"
 MODES = (MODE_SHADOW, MODE_SKIP)
-# Why a guard run did not certify a no-op; ``not_allowlisted`` is a guard that names no allowlisted command.
-REASONS = ("output", "stderr", "exit", "timeout", "error", "not_allowlisted")
+# Why a guard run did not certify a no-op; ``not_allowlisted`` is a guard that names no allowlisted command,
+# ``invalid`` one that is refused before it runs (a heartbeat check's guard whose timeout does not fit, F107 phase 3).
+REASONS = ("output", "stderr", "exit", "timeout", "error", "not_allowlisted", "invalid")
 # The kinds of action acted_signals reports, in its order.
 SIGNALS = ("report", "finding", "inbox", "push", "ledger")
 # The kinds that go "beyond the task's 'do nothing' path"; report, inbox and push come with every completed run.
@@ -62,6 +66,7 @@ class GuardSpec:
     skip_when: str
     timeout_seconds: int
     mode: str = MODE_SHADOW  # kept as written when unknown, so the worker can see it and fall through
+    is_action: bool = False  # the command is the job's action: the receipt says it must not run again
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,11 +81,11 @@ class GuardResult:
     stderr_bytes: int = 0
 
 
-def parse_guard(raw: Any, commands: Mapping[str, str]) -> GuardSpec | None:
+def parse_guard(raw: Any, commands: Mapping[str, str], *, max_timeout: int = MAX_TIMEOUT_SECONDS) -> GuardSpec | None:
     """The guard a schedule's ``metadata.guard`` describes, or None when there is no usable one.
 
     ``raw["name"]`` must name an entry of ``commands`` (the owner's allowlist); any ``command``
-    key in ``raw`` is ignored.
+    key in ``raw`` is ignored. ``timeout_seconds`` is capped at ``max_timeout``.
     """
     if not isinstance(raw, dict):
         return None
@@ -95,8 +100,9 @@ def parse_guard(raw: Any, commands: Mapping[str, str]) -> GuardSpec | None:
         name=name,
         command=command,
         skip_when=str(raw.get("skip_when") or SKIP_WHEN_EXIT0_QUIET),
-        timeout_seconds=min(max(timeout, 1), MAX_TIMEOUT_SECONDS),
+        timeout_seconds=min(max(timeout, 1), max_timeout),
         mode=str(raw["mode"]) if "mode" in raw else MODE_SHADOW,
+        is_action=raw.get("is_action") is True,
     )
 
 
@@ -296,16 +302,23 @@ def receipt(spec: GuardSpec, result: GuardResult) -> str:
         outcome = f"error: {result.error}"
     elif result.timed_out:
         outcome = f"timed out after {spec.timeout_seconds}s (killed)"
+        if spec.is_action:
+            outcome += "; the action was cut short and its state is unknown"
     else:
         outcome = f"exit: {result.exit_code}"
-    lines = [
-        "",
-        "",
-        "[Run guard receipt] The system already ran this command before this turn; "
-        "use its result below instead of running it again just to see the output.",
-        f"command: {spec.command}",
-        f"{outcome} ({result.duration_ms} ms)",
-    ]
+    if spec.is_action:
+        header = (
+            "[Run guard receipt] This command IS this job's action, and it already ran once, before this turn. "
+            "This receipt is its complete record. Do NOT run it again, nor any script it runs, not even to see "
+            "its output: diagnose from this receipt (and read its logs if your instructions allow) and report "
+            "per your instructions."
+        )
+    else:
+        header = (
+            "[Run guard receipt] The system already ran this command before this turn; "
+            "use its result below instead of running it again just to see the output."
+        )
+    lines = ["", "", header, f"command: {spec.command}", f"{outcome} ({result.duration_ms} ms)"]
     if spec.skip_when != SKIP_WHEN_EXIT0_QUIET:
         lines.append(f"note: unknown skip_when {spec.skip_when!r}; the guard never skips with it")
     if spec.mode not in MODES:
@@ -313,4 +326,6 @@ def receipt(spec: GuardSpec, result: GuardResult) -> str:
     for name, text in (("stdout", result.stdout), ("stderr", result.stderr)):
         if text.strip():
             lines += [f"{name} (command output, first {OUTPUT_MAX_BYTES} bytes):", "```", _clip(text).rstrip(), "```"]
+    if spec.is_action:
+        lines.append("Reminder: the action already ran this turn. Do NOT run it again.")
     return "\n".join(lines)

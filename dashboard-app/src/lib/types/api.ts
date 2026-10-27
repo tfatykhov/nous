@@ -1694,10 +1694,11 @@ export interface AutonomyData {
   guards: GuardsBlock;
 }
 
-export type GuardReason = 'output' | 'stderr' | 'exit' | 'timeout' | 'error' | 'not_allowlisted';
+/** `invalid`: a heartbeat check's guard refused before it ran (its timeout does not fit the check's, or a DAG owns the check). */
+export type GuardReason = 'output' | 'stderr' | 'exit' | 'timeout' | 'error' | 'not_allowlisted' | 'invalid';
 export type GuardSignal = 'report' | 'finding' | 'inbox' | 'push' | 'ledger';
 
-/** The counts are the totals over every schedule with a guard record or a guard now. */
+/** The counts are the totals over every schedule with a guard record or a guard now, and every guarded heartbeat check. */
 export interface GuardsBlock extends GuardCounts {
   /** NOUS_SCHEDULE_GUARDS_ENABLED. */
   enabled: boolean;
@@ -1709,6 +1710,8 @@ export interface GuardsBlock extends GuardCounts {
   /** The remainder of every count (records of stopped or de-guarded schedules, and ones naming no schedule),
    *  so the rows add up to the totals; null when it is all zero. */
   other: GuardOther | null;
+  /** F107 phase 3: one row per heartbeat check with a guard now or a record in the window. */
+  checks: GuardCheck[];
   /** The latest 10 records, newest first. Texts are command output and job text: plain text only. */
   recent: GuardRecord[];
 }
@@ -1743,11 +1746,27 @@ export interface GuardSchedule extends GuardCounts {
   last_runs: GuardRecord[];
 }
 
+export interface GuardCheck extends GuardCounts {
+  check_id: string;
+  /** The check's name; null when its row is gone and no record named it. */
+  check: string | null;
+  /** null when the check no longer has a guard (or no row): its records are kept until they leave the window. */
+  enabled: boolean | null;
+  timeout_seconds: number | null;
+  name: string | null;
+  mode: string | null;
+  allowlisted: boolean | null;
+  /** This check's latest 10 records, newest first. */
+  last_runs: GuardRecord[];
+}
+
 export interface GuardRecord {
   at: string;
   kind: 'skipped' | 'would_skip' | 'fell_through';
   schedule_id: string | null;
   subtask_id: string | null;
+  /** Set on a heartbeat check's record (F107 phase 3), null on a schedule's. */
+  check_id: string | null;
   name: string | null;
   mode: string | null;
   reason: GuardReason | null;

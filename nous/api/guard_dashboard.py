@@ -1,11 +1,17 @@
 """The ``guards`` section of GET /dashboard/autonomy (F107 phase 2): what the scheduled-run guards did.
 
-Read-only, and only from the database (``heart.schedules``, ``heart.subtasks``, ``nous_system.events``) and
+Read-only, and only from the database (``heart.schedules``, ``heart.subtasks``, ``nous_system.events``, and for
+phase 3 ``nous_system.dynamic_checks``) and
 Settings, so it shows what was persisted, never what one process happens to hold in memory. JSONB key reads,
 so Postgres only, like ``job_fix_dashboard``. A guard run leaves one record: ``report_jsonb.guard`` on a row it
 skipped, otherwise a ``subtask_guard_ran`` event; a guard naming no allowlisted command leaves a
 ``subtask_guard_unresolved`` event, and the turn of a shadow run a ``subtask_guard_acted`` event. Record texts
 (command, stderr head, job) are returned as written; the view renders them as plain text.
+
+Heartbeat dynamic checks carry guards too (F107 phase 3, ``nous/heartbeat/check_guard.py``): their records are
+``check_guard_ran`` (skips included), ``check_guard_unresolved`` and ``check_guard_acted`` events keyed by the
+check and its run (``run_id``). ``checks`` has one row per check with a guard now or a record in the window,
+counted like a schedule's, and the totals and ``recent`` cover schedules and checks alike.
 """
 
 from __future__ import annotations
@@ -20,10 +26,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nous.config import Settings
 from nous.dag.approval import as_utc
 from nous.handlers.schedule_guard import MODE_SHADOW, MODE_SKIP, REASONS, SIGNALS, acted_verdict
-from nous.storage.models import Event, Schedule, Subtask
+from nous.storage.models import DynamicCheckModel, Event, Schedule, Subtask
 
 GUARD_KEY = "guard"
 RAN, UNRESOLVED, ACTED = "subtask_guard_ran", "subtask_guard_unresolved", "subtask_guard_acted"
+# nous.heartbeat.check_guard's event types (not imported: this module reads only the database and Settings)
+CHECK_RAN, CHECK_UNRESOLVED, CHECK_ACTED = "check_guard_ran", "check_guard_unresolved", "check_guard_acted"
 RECENT_LIMIT = 10
 JOB_CHARS = 120
 RECORD_KEYS = (
@@ -73,8 +81,8 @@ def _reason(guard: dict[str, Any]) -> str | None:
 
 def _classify(guard: dict[str, Any], ran: bool) -> tuple[str, str | None]:
     """``(kind, reason)`` of one record: ``skipped``, ``would_skip`` (shadow) or ``fell_through`` with its reason."""
-    if not ran:
-        return "fell_through", "not_allowlisted"
+    if not ran:  # a check's guard can also be refused as invalid (F107 phase 3)
+        return "fell_through", "invalid" if guard.get("reason") == "invalid" else "not_allowlisted"
     if guard.get("skipped") is True:
         return "skipped", None
     reason = _reason(guard)
@@ -83,16 +91,22 @@ def _classify(guard: dict[str, Any], ran: bool) -> tuple[str, str | None]:
     return "fell_through", reason or "error"
 
 
-def _schedule_row(schedule: Schedule, commands: dict[str, str]) -> dict[str, Any]:
-    raw = (schedule.metadata_ or {}).get(GUARD_KEY)
+def _guard_fields(raw: object, commands: dict[str, str]) -> dict[str, Any]:
+    """The guard name, mode and allowlisting of a row's ``metadata.guard``."""
     raw = raw if isinstance(raw, dict) else {}
     name = raw.get("name") if isinstance(raw.get("name"), str) else None
     return {
-        "schedule_id": schedule.id.hex,
-        "job": _job(schedule.task),
         "name": name,
         "mode": str(raw["mode"]) if "mode" in raw else MODE_SHADOW,  # as parse_guard reads it
         "allowlisted": name in commands,
+    }
+
+
+def _schedule_row(schedule: Schedule, commands: dict[str, str]) -> dict[str, Any]:
+    return {
+        "schedule_id": schedule.id.hex,
+        "job": _job(schedule.task),
+        **_guard_fields((schedule.metadata_ or {}).get(GUARD_KEY), commands),
     }
 
 
@@ -128,6 +142,7 @@ def _row(rec: dict[str, Any], outcome: dict[str, Any] | None) -> dict[str, Any]:
         "kind": kind,
         "schedule_id": rec["schedule_id"],
         "subtask_id": rec["subtask_id"],
+        "check_id": rec.get("check_id"),
         **{k: guard.get(k) for k in RECORD_KEYS},
         "reason": reason,
         # derived from acted_by, never the stored flag: one definition, also for older records
@@ -162,6 +177,90 @@ def _tally(pairs: list[tuple[dict[str, Any], dict[str, Any]]], runs: int) -> dic
         "shadow_misses": len(misses),
         "shadow_misses_by_signal": {s: sum(1 for kinds in misses if s in kinds) for s in SIGNALS},
     }
+
+
+async def _check_rows(
+    session: AsyncSession, agent_id: str, since: datetime, commands: dict[str, str]
+) -> tuple[list[dict[str, Any]], list[tuple[dict[str, Any], dict[str, Any]]]]:
+    """One row per guarded heartbeat check, and the ``(record, row)`` pairs of all check records, newest first.
+
+    A check run leaves one ran or unresolved record (keyed by ``run_id``); its acted record joins it.
+    """
+    checks = (
+        (
+            await session.execute(
+                select(DynamicCheckModel)
+                .where(DynamicCheckModel.agent_id == agent_id, DynamicCheckModel.metadata_.has_key(GUARD_KEY))
+                .order_by(DynamicCheckModel.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    events = (
+        await session.execute(
+            select(Event.event_type, Event.data, Event.created_at)
+            .where(
+                Event.agent_id == agent_id,
+                Event.event_type.in_((CHECK_RAN, CHECK_UNRESOLVED, CHECK_ACTED)),
+                Event.created_at >= since,
+            )
+            .order_by(Event.created_at)  # oldest first: of two records of one run, the newest wins
+        )
+    ).all()
+    outcomes: dict[str, dict[str, Any]] = {}
+    by_run: dict[str, dict[str, Any]] = {}
+    names: dict[str, str] = {}
+    for e in events:
+        data = _dict(e.data)
+        run_id = data.get("run_id") if isinstance(data.get("run_id"), str) else None
+        check_id = _hex(data.get("check_id"))
+        if run_id is None or check_id is None:
+            continue
+        if e.event_type == CHECK_ACTED:
+            outcomes[run_id] = data
+            continue
+        if isinstance(data.get("check_name"), str):
+            names[check_id] = data["check_name"]
+        by_run[run_id] = {
+            "at": as_utc(e.created_at), "guard": _dict(data.get(GUARD_KEY)), "subtask_id": None, "schedule_id": None,
+            "check_id": check_id, "run_id": run_id, "ran": e.event_type == CHECK_RAN, "row": False,
+        }  # fmt: skip
+    pairs = sorted(
+        ((rec, _row(rec, outcomes.get(rec["run_id"]))) for rec in by_run.values()),
+        key=lambda pair: pair[1]["at"],
+        reverse=True,
+    )
+    by_check: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+    for pair in pairs:
+        by_check.setdefault(pair[0]["check_id"], []).append(pair)
+    current = {c.id.hex: c for c in checks}
+    rows = []
+    # Checks with a guard now, then checks whose guard was removed (or whose row is gone) but left records.
+    for check_id in [*current, *(h for h in by_check if h not in current)]:
+        check = current.get(check_id)
+        mine = by_check.get(check_id, [])
+        if check is not None:
+            info = {
+                "check": check.name, "enabled": check.enabled, "timeout_seconds": check.timeout_seconds,
+                **_guard_fields((check.metadata_ or {}).get(GUARD_KEY), commands),
+            }  # fmt: skip
+        else:
+            info = {
+                "check": names.get(check_id), "enabled": None, "timeout_seconds": None,
+                "name": None, "mode": None, "allowlisted": None,
+            }  # fmt: skip
+        # runs with a guard record: a run skipped while the same check's guard was in flight, or cut short by a
+        # shutdown during its guard, leaves none (as for schedules, a cancelled guard leaves only a log line)
+        rows.append(
+            {
+                "check_id": check_id,
+                **info,
+                **_tally(mine, len(mine)),
+                "last_runs": [row for _, row in mine[:RECENT_LIMIT]],
+            }
+        )
+    return rows, pairs
 
 
 async def get_guard_data(
@@ -244,10 +343,13 @@ async def get_guard_data(
     active = {s.id.hex for s in schedules}
     other_pairs = [pair for pair in pairs if pair[0]["schedule_id"] not in active]
     other_runs = sum(run_counts[h] for h in ids - active)
+    check_rows, check_pairs = await _check_rows(session, agent_id, since, settings.schedule_guard_commands)
+    every_pair = sorted([*pairs, *check_pairs], key=lambda pair: pair[1]["at"], reverse=True)
 
     return {
         "enabled": settings.schedule_guards_enabled,
-        # The guard records other than skips are bus events: with the bus off none was persisted. Not named
+        # A schedule's guard records other than skips, and every record of a check's guard, are bus events: with
+        # the bus off none was persisted. Not named
         # events_persisted, which beside it in the response is NOUS_F026_PERSISTENCE_ENABLED, a different switch.
         "bus_enabled": settings.event_bus_enabled,
         "window_days": days,
@@ -266,7 +368,9 @@ async def get_guard_data(
             if other_pairs or other_runs
             else None
         ),
-        # The totals, over every schedule with a guard record or a guard now.
-        **_tally(pairs, sum(run_counts[h] for h in ids)),
-        "recent": [row for _, row in pairs[:RECENT_LIMIT]],
+        # Each guarded heartbeat check's own counts and last runs (F107 phase 3).
+        "checks": check_rows,
+        # The totals, over every schedule with a guard record or a guard now and every guarded check.
+        **_tally(every_pair, sum(run_counts[h] for h in ids) + len(check_pairs)),
+        "recent": [row for _, row in every_pair[:RECENT_LIMIT]],
     }

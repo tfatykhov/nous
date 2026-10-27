@@ -14,13 +14,13 @@ import pytest_asyncio
 
 from nous.api import guard_dashboard as dash
 from nous.config import Settings
-from nous.storage.models import Event, Schedule, Subtask
+from nous.storage.models import DynamicCheckModel, Event, Schedule, Subtask
 
 pytestmark = pytest.mark.postgres_only  # JSONB reads (metadata->>'schedule_id', report_jsonb->>'guard_skipped')
 
 NOW = datetime.now(UTC)
 NAME = "sweep"
-REASONS = {"output", "stderr", "exit", "timeout", "error", "not_allowlisted"}
+REASONS = {"output", "stderr", "exit", "timeout", "error", "not_allowlisted", "invalid"}
 COUNTS = (
     "runs", "guard_runs", "skipped", "would_skip", "would_skip_unrecorded", "would_skip_unobserved", "shadow_misses",
 )  # fmt: skip
@@ -127,6 +127,7 @@ async def test_the_shape_with_nothing_guarded(db, agent):
         "shadow_misses": 0,
         "shadow_misses_by_signal": {s: 0 for s in ("report", "finding", "inbox", "push", "ledger")},
         "other": None,
+        "checks": [],
         "recent": [],
     }
     assert (await data(db, agent, schedule_guards_enabled=False))["enabled"] is False
@@ -174,7 +175,7 @@ async def test_window_counts_and_fell_through_by_reason(db, agent):
     assert out["runs"] == 8  # the 8-day-old run is out of the window
     assert out["guard_runs"] == 7  # the skip and six command runs; the unresolved guard ran nothing
     assert (out["skipped"], out["would_skip"]) == (1, 1)
-    assert out["fell_through"] == {r: 1 for r in REASONS}
+    assert out["fell_through"] == {r: int(r != "invalid") for r in REASONS}  # only a check's guard is invalid
 
 
 async def test_a_record_from_before_phase_2_counts_as_skip_mode_with_a_derived_reason(db, agent):
@@ -243,7 +244,7 @@ async def test_recent_holds_the_last_ten_records_newest_first_with_acted_joined(
     assert recent[2]["acted"] is None  # no acted record (yet)
     assert recent[1]["stderr_head"] == "<b>x</b>"  # raw text; the view escapes it
     assert set(recent[1]) == {
-        "at", "kind", "schedule_id", "subtask_id", "name", "mode", "reason", "exit_code", "timed_out",
+        "at", "kind", "schedule_id", "subtask_id", "check_id", "name", "mode", "reason", "exit_code", "timed_out",
         "duration_ms", "stdout_bytes", "stderr_bytes", "stderr_head", "command", "acted", "acted_by", "observed",
     }  # fmt: skip
 
@@ -306,7 +307,7 @@ async def test_history_of_a_schedule_whose_guard_was_removed_still_counts(db, ag
 
 
 def assert_totals_are_the_sum_of_the_rows(out: dict) -> None:
-    rows = [*out["schedules"], *([out["other"]] if out["other"] else [])]
+    rows = [*out["schedules"], *([out["other"]] if out["other"] else []), *out["checks"]]
     for key in COUNTS:
         assert out[key] == sum(r[key] for r in rows), key
     for key in ("fell_through", "shadow_misses_by_signal"):
@@ -523,3 +524,123 @@ async def test_malformed_records_do_not_break_the_block(db, agent):
     )
     out = await data(db, agent)
     assert out["guard_runs"] == 1 and out["fell_through"]["not_allowlisted"] == 1
+
+
+# --- heartbeat dynamic checks (F107 phase 3) ---------------------------------------------------------------
+
+
+def check(agent, guard, *, name="gridbot-paper-tick", enabled=True) -> DynamicCheckModel:
+    return DynamicCheckModel(
+        id=uuid.uuid4(),
+        agent_id=agent,
+        name=name,
+        description="tick",
+        prompt="Diagnose the tick.",
+        timeout_seconds=900,
+        enabled=enabled,
+        metadata_={} if guard is None else {"guard": guard},
+    )
+
+
+def check_event(agent, event_type, chk, run_id, *, age_hours=1, **data) -> Event:
+    return Event(
+        agent_id=agent,
+        event_type=event_type,
+        session_id=run_id,
+        # check_id as DynamicCheck holds it: str(uuid), with dashes
+        data={"check_id": str(chk.id), "check_name": chk.name, "run_id": run_id, **data},
+        created_at=NOW - timedelta(hours=age_hours),
+    )
+
+
+def check_acted(agent, chk, run_id, signals, *, observed=True, age_hours=1) -> Event:
+    return check_event(
+        agent, "check_guard_acted", chk, run_id, age_hours=age_hours - 0.01,
+        guard={"name": NAME, "mode": "shadow", "would_skip": True}, acted=bool(signals), acted_by=signals,
+        observed=observed, run_status="completed", ledger_persisted=True,
+    )  # fmt: skip
+
+
+async def test_each_guarded_check_has_its_own_row_and_counts_in_the_totals(db, agent):
+    sch = schedule(agent, {"name": NAME})
+    sub = run(agent, sch)
+    tick = check(agent, {"name": NAME, "mode": "shadow", "is_action": True})
+    plain = check(agent, None, name="plain")  # no guard, no records: no row
+    await add(db, sch, sub, tick, plain)
+    runs = [f"dynamic-check-gridbot-paper-tick-{i}" for i in range(5)]
+    await add(
+        db,
+        event(agent, "subtask_guard_ran", sub, sch, guard=record()),
+        acted(agent, sub, sch, []),
+        check_event(agent, "check_guard_ran", tick, runs[0], age_hours=5, guard=record()),
+        check_acted(agent, tick, runs[0], [], age_hours=5),  # clean
+        check_event(agent, "check_guard_ran", tick, runs[1], age_hours=4, guard=record()),
+        check_acted(agent, tick, runs[1], ["finding"], age_hours=4),  # a shadow miss
+        check_event(agent, "check_guard_ran", tick, runs[2], age_hours=3,
+                    guard=record(would_skip=False, reason="output", stdout_bytes=40)),
+        check_acted(agent, tick, runs[2], ["finding"], age_hours=3),  # fell through: not a miss
+        check_event(agent, "check_guard_unresolved", tick, runs[3], age_hours=2,
+                    guard={"name": NAME, "reason": "invalid", "detail": "guard timeout 900s ..."}),
+        check_event(agent, "check_guard_ran", tick, runs[4], age_hours=8 * 24, guard=record()),  # out of window
+    )  # fmt: skip
+
+    out = await data(db, agent)
+
+    [row] = out["checks"]
+    assert (row["check_id"], row["check"], row["name"], row["mode"]) == (tick.id.hex, tick.name, NAME, "shadow")
+    assert (row["allowlisted"], row["enabled"], row["timeout_seconds"]) == (True, True, 900)
+    assert (row["runs"], row["guard_runs"], row["would_skip"], row["shadow_misses"]) == (4, 3, 2, 1)
+    assert row["shadow_misses_by_signal"]["finding"] == 1
+    assert (row["fell_through"]["output"], row["fell_through"]["invalid"]) == (1, 1)
+    assert [r["check_id"] for r in row["last_runs"]] == [tick.id.hex] * 4
+    assert [r["kind"] for r in row["last_runs"]] == ["fell_through", "fell_through", "would_skip", "would_skip"]
+    assert row["last_runs"][0]["reason"] == "invalid"
+    assert row["last_runs"][2]["acted"] is True
+    assert (out["runs"], out["shadow_misses"], out["would_skip"]) == (5, 1, 3)
+    assert {r["check_id"] for r in out["recent"]} == {None, tick.id.hex}
+    assert_totals_are_the_sum_of_the_rows(out)
+
+
+async def test_a_check_whose_guard_was_removed_keeps_its_row_while_it_has_records(db, agent):
+    tick = check(agent, None)  # the guard is gone from its row
+    await add(db, tick)
+    await add(db, check_event(agent, "check_guard_ran", tick, "r1", guard=record(mode="skip", skipped=True)))
+
+    out = await data(db, agent)
+
+    [row] = out["checks"]
+    assert (row["check"], row["name"], row["mode"], row["skipped"], row["runs"]) == (tick.name, None, None, 1, 1)
+    assert out["skipped"] == 1
+
+
+async def test_malformed_check_records_do_not_break_the_block(db, agent):
+    tick = check(agent, {"name": NAME})
+    await add(db, tick)
+    await add(
+        db,
+        Event(agent_id=agent, event_type="check_guard_ran", data={"run_id": 5, "check_id": str(tick.id)}),
+        Event(agent_id=agent, event_type="check_guard_ran", data={"run_id": "r", "guard": 3}),
+        Event(agent_id=agent, event_type="check_guard_acted", data={"run_id": "r", "check_id": str(tick.id)}),
+        check_event(agent, "check_guard_ran", tick, "r2", guard=3),
+    )
+    out = await data(db, agent)
+    [row] = out["checks"]
+    assert row["runs"] == 1 and sum(row["fell_through"].values()) == 1
+
+
+async def test_a_check_whose_guard_is_null_is_listed_as_a_refused_guard(db, agent):
+    """The runner refuses ``{"guard": null}`` as invalid, so the dashboard lists it and its invalid records."""
+    tick = check(agent, {})
+    tick.metadata_ = {"guard": None}
+    await add(db, tick)
+    await add(
+        db,
+        check_event(agent, "check_guard_unresolved", tick, "r1",
+                    guard={"name": None, "reason": "invalid", "detail": "metadata.guard is not a JSON object"}),
+    )  # fmt: skip
+
+    out = await data(db, agent)
+
+    [row] = out["checks"]
+    assert (row["check_id"], row["name"], row["allowlisted"]) == (tick.id.hex, None, False)
+    assert (row["runs"], row["guard_runs"], row["fell_through"]["invalid"]) == (1, 0, 1)
