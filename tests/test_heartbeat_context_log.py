@@ -121,7 +121,8 @@ async def test_the_response_update_waits_for_the_row_insert():
     await _settle()
     assert order == []
     insert_gate.set()
-    await _settle()
+    while ctx._pending_tasks:
+        await asyncio.gather(*list(ctx._pending_tasks))
     assert order == ["insert", "update"]
 
 

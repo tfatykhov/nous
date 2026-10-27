@@ -35,7 +35,10 @@ def _settings(**overrides) -> Settings:
 
 def _schedule(guard: dict | None, *, task: str = TASK) -> SimpleNamespace:
     return SimpleNamespace(
-        id=uuid.uuid4(), task=task, metadata_={} if guard is None else {"guard": guard}
+        id=uuid.uuid4(),
+        agent_id=_settings().agent_id,
+        task=task,
+        metadata_={} if guard is None else {"guard": guard},
     )
 
 
@@ -118,6 +121,16 @@ async def test_exit0_empty_stdout_completes_the_run_without_a_model_call(command
     assert closed == [run.id]
 
 
+async def test_a_failed_event_after_the_skip_never_sends_the_run_to_the_model(closed):
+    schedule = _schedule(_guard("true"))
+    pool, runner, heart, bus, *_ = _pool(schedule)
+    bus.emit.side_effect = RuntimeError("bus down")
+    await pool._process_subtask(_run(schedule))
+    heart.subtasks.complete.assert_awaited_once()
+    pool._execute_subtask.assert_not_awaited()
+    runner.run_turn.assert_not_awaited()
+
+
 async def test_skip_does_not_close_the_intention_when_the_inbox_is_off(closed):
     schedule = _schedule(_guard("true"))
     pool, *_ = _pool(schedule, _settings(result_inbox_enabled=False))
@@ -152,11 +165,14 @@ async def test_a_non_zero_exit_falls_through():
     assert "boom" in task
 
 
-async def test_a_timeout_falls_through_and_kills_the_command():
+async def test_a_timeout_falls_through_and_kills_the_commands_children(tmp_path):
+    marker = tmp_path / "survived"
     start = time.monotonic()
-    task = await _falls_through(_guard("sleep 30", timeout_seconds=1))
+    task = await _falls_through(_guard(f"(sleep 2; touch {marker}) & wait", timeout_seconds=1))
     assert time.monotonic() - start < 10
     assert "timed out after 1s" in task
+    await asyncio.sleep(2)
+    assert not marker.exists()
 
 
 async def test_a_guard_that_raises_falls_through(monkeypatch):
@@ -168,10 +184,24 @@ async def test_a_guard_that_raises_falls_through(monkeypatch):
     assert "error: OSError: no shell" in task
 
 
+async def test_a_failed_complete_falls_through_to_the_turn():
+    schedule = _schedule(_guard("true"))
+    pool, runner, heart, *_rest, seen = _pool(schedule)
+    heart.subtasks.complete.side_effect = RuntimeError("db down")
+    await pool._process_subtask(_run(schedule))
+    pool._execute_subtask.assert_awaited_once()
+    pool._record_inbox.assert_awaited_once()
+
+
 async def test_an_unknown_skip_when_falls_through():
     task = await _falls_through(_guard("true", skip_when="exit0"))
     assert "exit: 0" in task
     assert "unknown skip_when" in task
+
+
+async def test_output_after_2kb_of_whitespace_is_not_empty():
+    task = await _falls_through(_guard("head -c 5000 /dev/zero | tr '\\0' ' '; echo logged"))
+    assert "exit: 0" in task
 
 
 async def test_the_receipt_keeps_at_most_2kb_of_output():
@@ -216,6 +246,12 @@ async def test_a_check_and_fix_run_is_never_guarded():
     await _unguarded(schedule, _run(schedule, job_fix=True))
 
 
+async def test_a_schedule_of_another_agent_is_never_read_for_a_guard():
+    schedule = _schedule(_guard("true"))
+    schedule.agent_id = "someone-else"
+    await _unguarded(schedule, _run(schedule))
+
+
 async def test_a_run_whose_text_is_not_the_schedules_task_is_never_guarded():
     schedule = _schedule(_guard("true"))
     run = _run(schedule)
@@ -249,15 +285,19 @@ def test_parse_clamps_the_timeout():
 
 
 async def test_a_cancelled_guard_kills_its_command(tmp_path):
-    marker = tmp_path / "survived"
-    spec = schedule_guard.parse_guard({"command": f"sleep 2 && touch {marker}", "timeout_seconds": 30})
+    started, survived = tmp_path / "started", tmp_path / "survived"
+    spec = schedule_guard.parse_guard({"command": f"touch {started}; sleep 1; touch {survived}", "timeout_seconds": 30})
     task = asyncio.create_task(schedule_guard.run_guard(spec))
-    await asyncio.sleep(0.3)
+    for _ in range(100):
+        if started.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert started.exists()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    await asyncio.sleep(2.5)
-    assert not marker.exists()
+    await asyncio.sleep(1.5)
+    assert not survived.exists()
 
 
 # ---- end to end on a real database ---------------------------------------------------------------------

@@ -2515,7 +2515,7 @@ class AgentRunner:
                                 stop_reason=stop_reason or None,
                             )
                         except Exception:
-                            logger.debug("F035.4: context log response update failed", exc_info=True)
+                            logger.warning("F035.4: context log response update failed", exc_info=True)
                         self._last_context_entry_id = None  # Consumed
 
                     # Stream segment ended -- collect thinking blocks from this iteration
@@ -3341,7 +3341,7 @@ class AgentRunner:
                         stop_reason=api_response.stop_reason,
                     )
                 except Exception:
-                    logger.debug("F035.4: context log response update failed", exc_info=True)
+                    logger.warning("F035.4: context log response update failed", exc_info=True)
                 self._last_context_entry_id = None  # Consumed
 
             # Accumulate usage + calibrate token estimator

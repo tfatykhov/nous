@@ -219,50 +219,70 @@ class SubtaskWorkerPool:
         except Exception:
             logger.warning("Could not read the schedule of subtask %s for its guard", subtask.id.hex[:8], exc_info=True)
             return None
-        if schedule is None or schedule.task != subtask.task:
+        if schedule is None or schedule.agent_id != self._settings.agent_id or schedule.task != subtask.task:
             return None
-        return schedule_guard.parse_guard((schedule.metadata_ or {}).get("guard"))
+        raw = (schedule.metadata_ or {}).get("guard")
+        spec = schedule_guard.parse_guard(raw)
+        if spec is None and raw is not None:
+            logger.warning("Schedule %s has a guard with no usable command; ignoring it", schedule.id)
+        return spec
 
     async def _run_guard(self, subtask: Subtask) -> bool:
         """Run the schedule's guard, if any. True when it completed the run with no model call.
 
         Otherwise the guard's receipt is appended to the run's task text in memory
-        (the row is not changed) and the model turn runs as usual: fail open.
+        (the row is not changed) and the model turn runs as usual: fail open. Never
+        raises, except for cancellation.
         """
-        spec = await self._guard_spec(subtask)
-        if spec is None:
-            return False
-        result = await schedule_guard.run_guard(spec)
-        if not schedule_guard.should_skip(spec, result):
-            logger.info(
-                "Guard of subtask %s did not certify a no-op (exit=%s timed_out=%s error=%s); running the turn",
-                subtask.id.hex[:8], result.exit_code, result.timed_out, result.error,
-            )
-            subtask.task = subtask.task + schedule_guard.receipt(spec, result)
-            return False
-        text = schedule_guard.skip_text(spec, result)
-        await self._heart.subtasks.complete(
-            subtask.id, text,
-            final_outcome="completed",
-            report_jsonb={
-                "guard_skipped": True,
-                "guard": {
-                    "command": spec.command,
-                    "skip_when": spec.skip_when,
-                    "exit_code": result.exit_code,
-                    "duration_ms": result.duration_ms,
+        sid = subtask.id.hex[:8]
+        try:
+            spec = await self._guard_spec(subtask)
+            if spec is None:
+                return False
+            result = await schedule_guard.run_guard(spec)
+            if not schedule_guard.should_skip(spec, result):
+                broken = (
+                    result.error or result.timed_out or spec.skip_when != schedule_guard.SKIP_WHEN_EXIT0_EMPTY_STDOUT
+                )
+                (logger.warning if broken else logger.info)(
+                    "Guard of subtask %s did not certify a no-op (exit=%s timed_out=%s error=%s skip_when=%s); "
+                    "running the turn",
+                    sid, result.exit_code, result.timed_out, result.error, spec.skip_when,
+                )
+                subtask.task += schedule_guard.receipt(spec, result)
+                return False
+            text = schedule_guard.skip_text(spec, result)
+            await self._heart.subtasks.complete(
+                subtask.id, text,
+                final_outcome="completed",
+                report_jsonb={
+                    "guard_skipped": True,
+                    "guard": {
+                        "command": spec.command,
+                        "skip_when": spec.skip_when,
+                        "exit_code": result.exit_code,
+                        "duration_ms": result.duration_ms,
+                    },
                 },
-            },
-            attempts=0, tokens_in=0, tokens_out=0, tool_calls_made=0,
-        )
-        await self._emit_event("subtask_guard_skipped", subtask, result=text)
-        # No inbox row, memory or push for a run that did nothing, but its intention
-        # still closes, as the inbox writer would have closed it.
-        if getattr(self._settings, "result_inbox_enabled", False) is True:
-            await close_intention_quietly(
-                self._heart.result_inbox, self._settings, intentions.SOURCE_SUBTASK, subtask.id
+                attempts=0, tokens_in=0, tokens_out=0, tool_calls_made=0,
             )
-        logger.info("Subtask %s skipped by its schedule's guard", subtask.id.hex[:8])
+        except (asyncio.CancelledError, Exception) as exc:
+            if isinstance(exc, asyncio.CancelledError) and cancel_requested():
+                raise
+            logger.exception("Guard of subtask %s failed; running the turn", sid)
+            return False
+        # The row is completed: from here on nothing may send the run to the model.
+        try:
+            await self._emit_event("subtask_guard_skipped", subtask, result=text)
+            # No inbox row, memory or push for a run that did nothing, but its intention
+            # still closes, as the inbox writer would have closed it.
+            if getattr(self._settings, "result_inbox_enabled", False) is True:
+                await close_intention_quietly(
+                    self._heart.result_inbox, self._settings, intentions.SOURCE_SUBTASK, subtask.id
+                )
+        except Exception:
+            logger.exception("Subtask %s: skipped by its guard, but its event or intention close failed", sid)
+        logger.info("Subtask %s skipped by its schedule's guard", sid)
         return True
 
     async def _record_inbox(self, subtask: Subtask) -> None:

@@ -11,7 +11,7 @@ Some recurring schedules run a model turn whose only job is to run one idempoten
 A deterministic guard runs first. The model runs only when the guard cannot certify that there is nothing to do.
 
 - **Config:** `heart.schedules.metadata.guard = {"command": "...", "skip_when": "exit0_empty_stdout", "timeout_seconds": 60}`. The timeout defaults to 60 s and is clamped to 1 to 300 s. The guard is opt-in per schedule and needs no migration.
-- **Who may set it:** only the owner, by writing the schedule row. No agent tool or REST endpoint writes schedule metadata. The worker reads the guard from the schedule row at run time, never from the run's own metadata or task text.
+- **Who may set it:** only the owner, by writing the schedule row. No agent tool or REST endpoint writes schedule metadata. The worker reads the guard from the schedule row at run time (a schedule of this agent only), never from the run's own metadata or task text.
 - **Where it runs:** `SubtaskWorkerPool._process_subtask` (`nous/handlers/subtask_worker.py`), before the run's turn and outside its timeout.
   - Fire bookkeeping is unchanged: `fire_count`, `next_fire_at`, the F101 policies, the run's intention and the subtask row are created exactly as before.
   - The guard applies only to a plain fire of the schedule: the run's text must equal `schedule.task`, and the run must not be a check-and-fix run.
@@ -22,9 +22,10 @@ A deterministic guard runs first. The model runs only when the guard cannot cert
   - It emits a persisted `subtask_guard_skipped` event.
   - The run's intention is closed quietly, as the inbox writer would close it.
   - No model call, no inbox row, no result memory, no Telegram push and no wake.
-- **Fall through (fail open):** a non-zero exit, non-empty stdout, a timeout, an unknown `skip_when`, an error starting the command, or a failed schedule read.
+- **Fall through (fail open):** a non-zero exit, non-empty stdout (all of it is checked, not just the first 2 KB), a timeout, an unknown `skip_when`, an error starting or reading the command, a failed schedule read, or a failed write of the skip.
   - The normal turn runs.
-  - Except after a failed schedule read, the guard's receipt is appended to the task text in memory; the row is not changed.
+  - When the command ran, the guard's receipt is appended to the task text in memory; the row is not changed.
+  - A malformed guard is ignored with a WARNING naming the schedule, and a guard that errors, times out or has an unknown `skip_when` is logged at WARNING.
   - The receipt holds the exit code or timeout, the duration, and the first 2 KB of stdout and stderr, fenced as command output.
   - So the model does not need to run the script again.
 

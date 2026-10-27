@@ -7,8 +7,11 @@ import logging
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -345,9 +348,9 @@ class ContextLogger:
         self._pending_tasks: set = set()
         # The INSERT task of each entry still being written, so its response UPDATE
         # runs after it (an UPDATE that ran first matched no row: a NULL response).
-        self._insert_tasks: dict = {}
+        self._insert_tasks: dict[str, asyncio.Task] = {}
 
-    def _schedule_bg(self, coro):
+    def _schedule_bg(self, coro) -> asyncio.Task | None:
         """Run a DB coroutine fire-and-forget while retaining a strong ref. Returns the task, or None."""
         import asyncio
 
@@ -413,7 +416,8 @@ class ContextLogger:
             task = self._schedule_bg(self._db_writer(entry))
             if task is not None:
                 self._insert_tasks[entry.id] = task
-                task.add_done_callback(lambda _t, key=entry.id: self._insert_tasks.pop(key, None))
+                entry_id = entry.id
+                task.add_done_callback(lambda _t: self._insert_tasks.pop(entry_id, None))
         return entry
 
     def update_response(

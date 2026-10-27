@@ -71,8 +71,8 @@ def should_skip(spec: GuardSpec, result: GuardResult) -> bool:
     )
 
 
-def _decode(data: bytes) -> str:
-    return data[:OUTPUT_MAX_BYTES].decode("utf-8", errors="replace")
+def _clip(text: str) -> str:
+    return text.encode("utf-8")[:OUTPUT_MAX_BYTES].decode("utf-8", errors="ignore")
 
 
 def _kill_group(proc: asyncio.subprocess.Process) -> None:
@@ -107,10 +107,16 @@ async def run_guard(spec: GuardSpec) -> GuardResult:
         _kill_group(proc)
         await proc.wait()
         return GuardResult(None, "", "", elapsed(), timed_out=True)
+    except Exception as exc:
+        _kill_group(proc)
+        await proc.wait()
+        return GuardResult(None, "", "", elapsed(), error=f"{type(exc).__name__}: {exc}")
     except BaseException:
         _kill_group(proc)
         raise
-    return GuardResult(proc.returncode, _decode(stdout), _decode(stderr), elapsed())
+    return GuardResult(
+        proc.returncode, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace"), elapsed()
+    )
 
 
 def skip_text(spec: GuardSpec, result: GuardResult) -> str:
@@ -138,5 +144,5 @@ def receipt(spec: GuardSpec, result: GuardResult) -> str:
         lines.append(f"note: unknown skip_when {spec.skip_when!r}; the guard never skips with it")
     for name, text in (("stdout", result.stdout), ("stderr", result.stderr)):
         if text.strip():
-            lines += [f"{name} (command output, first {OUTPUT_MAX_BYTES} bytes):", "```", text.rstrip(), "```"]
+            lines += [f"{name} (command output, first {OUTPUT_MAX_BYTES} bytes):", "```", _clip(text).rstrip(), "```"]
     return "\n".join(lines)
