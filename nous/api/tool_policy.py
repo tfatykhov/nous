@@ -30,7 +30,7 @@ from nous.cognitive.bash_side_effect import (
     simple_commands,
 )
 from nous.cognitive.execution_ledger import classify_side_effect
-from nous.config import lineage_write_dir_entry_problem, lineage_write_dir_resolved
+from nous.config import lineage_write_dir_resolved
 
 _ALL = frozenset({"none", "write", "external", "irreversible"})
 _WORK = frozenset({"none", "write", "external"})
@@ -1004,11 +1004,18 @@ def lineage_runs_runner(command: str) -> bool:
     )
 
 
-def lineage_bash_refusal_hint(*, build_commands: bool, extra_write_dirs: Sequence[str] = ()) -> str:
-    """What the lineage shell allows, appended to its refusal. ``extra_write_dirs``: NOUS_F099_LINEAGE_WRITE_DIRS."""
+def lineage_bash_refusal_hint(
+    *, build_commands: bool, extra_write_dirs: Sequence[str] = (), workspace_dir: str | None = None
+) -> str:
+    """What the lineage shell allows, appended to its refusal. ``extra_write_dirs`` (NOUS_F099_LINEAGE_WRITE_DIRS)
+    are named only when they resolve under ``workspace_dir`` as ``lineage_write_dirs`` would use them now."""
     dirs = ", ".join(
         ["intentions/<root>/", "claude-jobs/prompts/"]
-        + [f"{d.rstrip('/')}/" for d in extra_write_dirs if lineage_write_dir_entry_problem(d) is None]
+        + [
+            f"{d.rstrip('/')}/"
+            for d in extra_write_dirs
+            if workspace_dir is not None and lineage_write_dir_resolved(workspace_dir, d)[0] is not None
+        ]
     )
     text = (
         "The lineage shell allows only: plain reads (cat, ls, head, tail, wc, grep, jq, echo, printf, pwd, cd, "

@@ -607,6 +607,7 @@ class AgentRunner:
                     text += " " + tool_policy.lineage_bash_refusal_hint(
                         build_commands=self._settings.f099_lineage_build_commands,
                         extra_write_dirs=self._settings.f099_lineage_write_dirs,
+                        workspace_dir=self._settings.workspace_dir,
                     )
                 return Refusal(text, "internal_only")
 

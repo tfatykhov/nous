@@ -1035,7 +1035,9 @@ def test_the_hint_lists_the_new_programs_and_the_write_dirs(tmp_path):
     from nous.api.tool_policy import lineage_bash_refusal_hint
 
     for build_commands in (False, True):
-        hint = lineage_bash_refusal_hint(build_commands=build_commands, extra_write_dirs=["research", "notes/s0"])
+        hint = lineage_bash_refusal_hint(
+            build_commands=build_commands, extra_write_dirs=["research", "notes/s0"], workspace_dir=str(tmp_path)
+        )
         for needle in (
             "mkdir -p",
             "touch",
@@ -1058,3 +1060,21 @@ def test_the_hint_lists_the_new_programs_and_the_write_dirs(tmp_path):
     r, _, _ = _shell_runner(_whole_ws(tmp_path), f099_lineage_write_dirs=["research"])
     refusal = _auth(r, _internal(), "bash", OFFERED, {"command": "rm -rf x"})
     assert refusal is not None and "research/" in refusal.text
+
+
+def test_the_hint_names_only_the_write_dirs_the_policy_would_use(tmp_path):
+    """An entry lineage_write_dirs drops at this call (a file, a link out, a reserved name) is not promised."""
+    from nous.api.tool_policy import lineage_bash_refusal_hint
+
+    (tmp_path / "research").mkdir()
+    (tmp_path / "repos.json").write_text("{}")
+    entries = ["research", "repos.json", "claude-jobs", "notes/s0"]
+    hint = lineage_bash_refusal_hint(build_commands=False, extra_write_dirs=entries, workspace_dir=str(tmp_path))
+    assert "research/" in hint and "notes/s0/" in hint  # notes/s0 is missing: kept, a lineage may create it
+    assert "repos.json/" not in hint and "claude-jobs/," not in hint
+    if os.name != "nt":
+        (tmp_path / "out").symlink_to(tmp_path.parent)
+        hint = lineage_bash_refusal_hint(build_commands=False, extra_write_dirs=["out"], workspace_dir=str(tmp_path))
+        assert "out/" not in hint
+    assert "research/" not in lineage_bash_refusal_hint(build_commands=False, extra_write_dirs=["research"])
+    # no workspace given: no owner directory is promised
