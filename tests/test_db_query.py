@@ -451,6 +451,7 @@ def test_the_tool_description_teaches_the_limits():
         "schema-qualified",
         "information_schema.columns",
         "not instructions",
+        "large generated sets are refused",
         "SELECT id, status, task FROM heart.subtasks ORDER BY created_at DESC LIMIT 10",
         "heart.facts",
         "nous_system.execution_ledger",

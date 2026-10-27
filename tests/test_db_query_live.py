@@ -560,6 +560,12 @@ async def test_the_server_cuts_each_cell_before_sending_it(reader_settings):
     assert out.splitlines()[1] == "x" * MAX_CELL_CHARS + "…[+1500 chars]"
 
 
+async def test_a_large_generated_set_is_refused_by_the_temp_file_limit(reader_settings):
+    # generate_series in FROM is materialised whole before the LIMIT; the login's temp_file_limit stops it
+    out = await run_db_query(reader_settings, "select n from generate_series(1, 50000000) n")
+    assert out.startswith("Error: 53400 ") and "temp_file_limit" in out, out
+
+
 async def test_values_render_as_postgresql_text(reader_settings):
     # each column is cast to text on the server: PostgreSQL's own output, in column order, duplicates kept
     out = await run_db_query(
