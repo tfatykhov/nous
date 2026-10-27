@@ -14,7 +14,7 @@ import re
 import stat
 
 JOB_MARK_NAMES = frozenset({"cancelled_by", "nous_root"})
-JOB_ID_RE = re.compile(r"job-\d{8}-\d{6}-[0-9a-f]{8}")  # runner.sh's job directory names
+JOB_ID_RE = re.compile(r"job-\d{8}-\d{6}-[0-9a-f]{8}", re.ASCII)  # runner.sh's job directory names
 
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
@@ -22,8 +22,15 @@ _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)  # a FIFO planted as a mark fails or 
 _SUPPORTED = bool(_O_NOFOLLOW and _O_DIRECTORY) and os.open in os.supports_dir_fd
 
 
-def _valid(job_id: object, name: object) -> bool:
-    return _SUPPORTED and isinstance(job_id, str) and JOB_ID_RE.fullmatch(job_id) is not None and name in JOB_MARK_NAMES
+def _valid(workspace_dir: object, job_id: object, name: object) -> bool:
+    return (
+        _SUPPORTED
+        and isinstance(workspace_dir, str)
+        and "\x00" not in workspace_dir  # os.open raises ValueError, not OSError, on a NUL
+        and isinstance(job_id, str)
+        and JOB_ID_RE.fullmatch(job_id) is not None
+        and name in JOB_MARK_NAMES
+    )
 
 
 def _open_mark(workspace_dir: str, job_id: str, name: str, flags: int) -> int:
@@ -46,9 +53,9 @@ def _is_single_regular_file(fd: int) -> bool:
 
 def write_job_mark(workspace_dir: str, job_id: str, name: str, content: str, *, overwrite: bool) -> bool:
     """Write ``content`` (UTF-8) to the job's mark ``name``. ``overwrite=False`` writes only a new file. Whether it
-    was written: False for an invalid job id or name, a job dir that is missing or a link, a mark that exists
-    (``overwrite=False``) or is not a regular file with one link, and any OSError. Never raises."""
-    if not _valid(job_id, name):
+    was written: False for an invalid workspace dir, job id or name, a job dir that is missing or a link, a mark
+    that exists (``overwrite=False``) or is not a regular file with one link, and any OSError. Never raises."""
+    if not _valid(workspace_dir, job_id, name):
         return False
     try:
         data = content.encode("utf-8")
@@ -72,10 +79,10 @@ def write_job_mark(workspace_dir: str, job_id: str, name: str, content: str, *, 
 
 
 def read_job_mark(workspace_dir: str, job_id: str, name: str, *, max_bytes: int) -> str | None:
-    """The text of the job's mark ``name`` without one trailing newline, or None: an invalid job id or name, a
-    missing mark, a link or anything but a regular file with one link, content over ``max_bytes`` or not UTF-8,
-    and any OSError. Never raises."""
-    if not _valid(job_id, name):
+    """The text of the job's mark ``name`` without one trailing newline, or None: an invalid workspace dir, job id
+    or name, a missing mark, a link or anything but a regular file with one link, content over ``max_bytes`` or not
+    UTF-8, and any OSError. Never raises."""
+    if not _valid(workspace_dir, job_id, name):
         return None
     try:
         fd = _open_mark(workspace_dir, job_id, name, os.O_RDONLY)

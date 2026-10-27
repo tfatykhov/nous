@@ -145,3 +145,17 @@ def test_content_over_the_limit_or_not_utf8_reads_as_none(ws):
 
 def test_a_missing_mark_reads_as_none(ws):
     assert read_job_mark(str(ws), JOB, "cancelled_by", max_bytes=512) is None
+
+
+def test_a_job_id_with_non_ascii_digits_is_refused(ws):
+    lookalike = "job-٢٠٢٦١٠٢٧-١٠١٥٠٠-ab12cd34"
+    (ws / "claude-jobs" / lookalike).mkdir()
+    assert write_job_mark(str(ws), lookalike, "cancelled_by", "x", overwrite=True) is False
+    assert list((ws / "claude-jobs" / lookalike).iterdir()) == []
+    assert read_job_mark(str(ws), lookalike, "cancelled_by", max_bytes=512) is None
+
+
+@pytest.mark.parametrize("workspace_dir", [None, 7, "/tmp/ws\x00x"])
+def test_a_workspace_that_is_not_a_clean_string_is_refused_without_raising(workspace_dir):
+    assert write_job_mark(workspace_dir, JOB, "cancelled_by", "x", overwrite=True) is False
+    assert read_job_mark(workspace_dir, JOB, "cancelled_by", max_bytes=512) is None
