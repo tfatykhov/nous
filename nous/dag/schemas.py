@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from collections.abc import Sequence
 from enum import Enum
 from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
+
+from nous.observability.task_scoring import parse_pr_check
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -236,6 +239,36 @@ def effective_poll_interval(kind: str | None, interval: int | None) -> int | Non
     if kind == "pr":
         return max(interval or 0, PR_WAIT_POLL_FLOOR_SECONDS)
     return interval
+
+
+# A DAG created by a background (internal_only) turn may wait only through
+# typed conditions: a wait node, or the built-in PR check, which the
+# orchestrator runs without a shell. task_scoring.parse_pr_check is the one
+# definition of that check, so the scorer and this rule cannot disagree.
+class LineageShellCheckRefused(ValueError):
+    """A lineage DAG carries a completion_check other than the built-in PR check."""
+
+
+def lineage_refuses_check(completion_check: str | None) -> bool:
+    """Whether a lineage DAG may not run this completion_check: any non-blank
+    command except exactly the built-in PR check."""
+    cmd = (completion_check or "").strip()
+    return bool(cmd) and parse_pr_check(cmd) is None
+
+
+def lineage_shell_check_message(names: Sequence[str]) -> str:
+    """The one refusal text, for dag_create and for the orchestrator. It starts
+    with "Refused:", never "Completion check", which the task scorer reads as a
+    check that ran and failed."""
+    nodes = ", ".join(f"'{name}'" for name in names)
+    return (
+        f"Refused: node(s) {nodes} carry a shell completion_check, which a DAG created by a background turn may "
+        "not run. Wait through a typed condition instead: a node of type 'wait' with wait_for "
+        '{"kind": "job" | "pr" | "file", ...} (job: a Claude Code job id; pr: a pull request; file: a path in the '
+        "workspace). The one completion_check such a DAG may carry is the built-in PR check, exactly "
+        "'python -m nous.dag.typed_checks pr <owner/repo> --pr <n>' (or --head <branch>, optionally with "
+        "--job-file <path>)."
+    )
 
 
 class DAGNodeSpec(BaseModel):

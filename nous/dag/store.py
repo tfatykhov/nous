@@ -21,7 +21,10 @@ from nous.dag.schemas import (
     DAGCreateRequest,
     DAGNodeSpec,
     DAGNodeType,
+    LineageShellCheckRefused,
     effective_poll_interval,
+    lineage_refuses_check,
+    lineage_shell_check_message,
 )
 from nous.storage.database import Database
 from nous.storage.models import DAGEdge, DAGNode, DynamicCheckModel, ExecutionDAG, Subtask
@@ -313,6 +316,11 @@ class DAGStore:
                 if intention is not None
                 else None
             )
+            # Typed waits for lineage DAGs: refused before any row is added.
+            if prepared is not None and intentions.stamp_is_internal(prepared.stamp):
+                refused = [spec.name for spec in request.nodes if lineage_refuses_check(spec.completion_check)]
+                if refused:
+                    raise LineageShellCheckRefused(lineage_shell_check_message(refused))
 
             # Compute wave assignments
             waves = request.compute_waves()
