@@ -76,12 +76,15 @@ def max_guard_timeout(check_timeout: int) -> int:
     return check_timeout - TURN_RESERVE_SECONDS - KILL_BOUND_SECONDS
 
 
-def resolve(raw: Any, commands: Mapping[str, str], *, check_timeout: int, dag_owned: bool) -> Resolved:
+def resolve(raw: Any, commands: Mapping[str, str], *, check_timeout: int | None, dag_owned: bool) -> Resolved:
     """The guard a check's ``metadata.guard`` describes, or why it may not run."""
     if not isinstance(raw, dict):
         return Resolved(None, "invalid", "metadata.guard is not a JSON object")
     if dag_owned:
         return Resolved(None, "invalid", "a DAG owns this check: a skip would read as the node's completion")
+    if not isinstance(check_timeout, int) or isinstance(check_timeout, bool) or check_timeout < 1:
+        # dynamic_checks.timeout_seconds is nullable
+        return Resolved(None, "invalid", "the check has no timeout to fit the guard in")
     if "is_action" in raw and not isinstance(raw["is_action"], bool):
         # parse_guard would read it as not an action: the default timeout and a receipt that does not say so
         return Resolved(None, "invalid", f"metadata.guard.is_action must be true or false (got {raw['is_action']!r:.40})")

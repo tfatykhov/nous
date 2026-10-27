@@ -62,7 +62,7 @@ def make(
     guard: dict | None = None,
     *,
     response: str = CLEAN,
-    timeout: int = 300,
+    timeout: int | None = 300,
     rec: Recorder | None = None,
     enabled: bool = True,
     commands: dict | None = None,
@@ -292,6 +292,22 @@ async def test_a_guard_timeout_above_the_schedule_cap_is_kept_when_it_fits_the_c
 
 
 # --- unresolved and refused guards -------------------------------------------------------------------------
+
+
+async def test_a_guard_on_a_check_with_no_timeout_is_refused_not_raised(tmp_path):
+    """``dynamic_checks.timeout_seconds`` is nullable: there is no timeout to fit the guard in."""
+    command, counter = counted(tmp_path)
+    check, runner, rec = make(command, {"mode": "skip"}, timeout=None)
+
+    await check.run()
+
+    assert runs(counter) == 0
+    runner.run_turn.assert_awaited_once()
+    assert "did NOT run" in instruction(runner)
+    [unresolved] = rec.of(check_guard.UNRESOLVED)
+    assert unresolved["guard"] == {
+        "name": NAME, "reason": "invalid", "detail": "the check has no timeout to fit the guard in"
+    }
 
 
 async def test_a_guard_naming_no_allowlisted_command_is_not_run_and_is_recorded(tmp_path):
