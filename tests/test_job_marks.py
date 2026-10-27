@@ -148,7 +148,8 @@ def test_a_missing_mark_reads_as_none(ws):
 
 
 def test_a_job_id_with_non_ascii_digits_is_refused(ws):
-    lookalike = "job-٢٠٢٦١٠٢٧-١٠١٥٠٠-ab12cd34"
+    # the same shape in Arabic-Indic digits
+    lookalike = "job-\u0662\u0660\u0662\u0666\u0661\u0660\u0662\u0667-\u0661\u0660\u0661\u0665\u0660\u0660-ab12cd34"
     (ws / "claude-jobs" / lookalike).mkdir()
     assert write_job_mark(str(ws), lookalike, "cancelled_by", "x", overwrite=True) is False
     assert list((ws / "claude-jobs" / lookalike).iterdir()) == []

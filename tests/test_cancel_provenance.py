@@ -54,7 +54,7 @@ def test_describe_refuses_unknown_by_and_non_dicts():
 
 
 def test_via_is_cleaned_on_read():
-    text = describe({"by": "owner", "via": "a\nb\x00‮" + "x" * 200})
+    text = describe({"by": "owner", "via": "a\nb\x00\u202e" + "x" * 200})
     via = text.removeprefix("cancelled by the owner (").removesuffix(")")
     assert "\n" not in text and len(via) <= 60
     assert all(" " <= ch <= "~" for ch in text)
