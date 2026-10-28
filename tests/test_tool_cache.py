@@ -3,6 +3,7 @@
 import json
 import re
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -10,6 +11,7 @@ from nous.api.smart_compress import add_cache_key, smart_compress
 from nous.api.tool_cache import (
     cache_compressed_result,
     compute_hash_key,
+    get_cache_hints,
     _MAX_RETRIEVE_CHARS,
     _keyword_filter,
     _render_cached,
@@ -18,6 +20,7 @@ from nous.api.tool_cache import (
 )
 from nous.api.tools import CACHE_RETRIEVE_TOOL_DEF
 from nous.config import Settings
+from nous.storage.models import ToolCache
 
 
 class TestHashKey:
@@ -446,3 +449,35 @@ class TestRecoverEveryCut:
 
         assert got == "[result lines 10–25 of 60]\nrow 14 failed\nrow 21 failed"
         assert await retrieve_cached_result(session, session_id, "0" * 32, lines="1-5") is None
+
+
+def _row(agent_id: str, session_id: str, age: timedelta, n: int, command: str = "ls") -> ToolCache:
+    content = f"original {n} of {agent_id}/{session_id}"
+    return ToolCache(
+        agent_id=agent_id, session_id=session_id, hash_key=compute_hash_key(content), tool_name="bash",
+        tool_input={"command": command}, original_content=content, item_count=100 + n,
+        compressed_at=datetime.now(UTC) - age,
+    )
+
+
+@pytest.mark.postgres_only
+class TestCacheHints:
+    @pytest.mark.asyncio
+    async def test_seven_rows_give_the_five_newest_one_line_each(self, session):
+        agent_id, session_id = _ids()
+        # Inserted oldest-last, so insertion order is not the answer. Rows
+        # carry explicit times: now() is the same for a whole transaction.
+        rows = [_row(agent_id, session_id, timedelta(minutes=n), n, command=f"cmd {n}\n  --flag") for n in range(7)]
+        session.add_all(rows)
+        session.add(_row(agent_id, f"{session_id}-other", timedelta(seconds=1), 99))
+        await session.flush()
+
+        hints = await get_cache_hints(session, session_id)
+
+        assert len(hints) == 5
+        for n, hint in enumerate(hints):  # n = 0 is the newest
+            assert "\n" not in hint
+            assert hint == (
+                f'- bash("cmd {n} --flag"): {100 + n} items, cache_retrieve key {rows[n].hash_key}; '
+                'lines="A-B" fetches a range.'
+            )

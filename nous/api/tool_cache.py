@@ -256,14 +256,25 @@ async def has_cache_entries(session: AsyncSession, session_id: str) -> bool:
     return result.scalar_one_or_none() is not None
 
 
+# The Cached Results context section lists only the newest few: with bash
+# cached, a long session holds many entries, and the newest marker already
+# names its own key.
+_MAX_CACHE_HINTS = 5
+
+
 async def get_cache_hints(session: AsyncSession, session_id: str) -> list[str]:
-    """Get human-readable hints about available cached results."""
-    stmt = select(
-        ToolCache.hash_key,
-        ToolCache.tool_name,
-        ToolCache.tool_input,
-        ToolCache.item_count,
-    ).where(ToolCache.session_id == session_id)
+    """One line per cached result, the _MAX_CACHE_HINTS newest first."""
+    stmt = (
+        select(
+            ToolCache.hash_key,
+            ToolCache.tool_name,
+            ToolCache.tool_input,
+            ToolCache.item_count,
+        )
+        .where(ToolCache.session_id == session_id)
+        .order_by(ToolCache.compressed_at.desc())
+        .limit(_MAX_CACHE_HINTS)
+    )
     result = await session.execute(stmt)
     rows = result.all()
 
@@ -271,14 +282,16 @@ async def get_cache_hints(session: AsyncSession, session_id: str) -> list[str]:
     for hash_key, tool_name, tool_input, item_count in rows:
         input_summary = ""
         if tool_input:
-            # Extract first argument value as summary
+            # Extract first argument value as summary, on one line (a bash
+            # command can span several).
             first_val = next(iter(tool_input.values()), "")
             if isinstance(first_val, str):
-                input_summary = f'("{first_val[:60]}")'
+                one_line = " ".join(first_val.split())
+                input_summary = f'("{one_line[:60]}")'
         count_info = f"{item_count} items" if item_count else "content"
         hints.append(
-            f"- [{hash_key}] {tool_name}{input_summary}: {count_info}. "
-            f'Use cache_retrieve("{hash_key}") for full results.'
+            f"- {tool_name}{input_summary}: {count_info}, cache_retrieve key {hash_key}; "
+            'lines="A-B" fetches a range.'
         )
     return hints
 
