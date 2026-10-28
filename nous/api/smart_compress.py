@@ -256,8 +256,8 @@ class DictCompressResult:
     original_count: int = 0
 
     def to_text(self) -> str:
-        all_items = list({json.dumps(d, default=str): d for d in self.preserved + self.kept}.values())
-        result = json.dumps(all_items, default=str, indent=None)
+        """Preserved items, then kept items (disjoint by construction). Never dedups."""
+        result = json.dumps(self.preserved + self.kept, default=str, indent=None)
         return f"{result}\n{self.marker}"
 
 

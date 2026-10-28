@@ -432,6 +432,15 @@ class TestDictArrayCompression:
         result = compress_dict_array(items, max_k=5)
         assert "[SmartCompressed:" in result.marker
 
+    def test_repeated_items_are_not_deduplicated(self):
+        """Every kept item is emitted, however many times it repeats."""
+        items = [{"id": 1, "status": "ok"}] * 20 + [{"id": i, "status": "ok"} for i in range(2, 80)]
+        items[30] = {"id": 30, "status": "failed"}
+        result = compress_dict_array(items, max_k=10)
+
+        emitted = json.loads(result.to_text().split("\n")[0])
+        assert emitted == [{"id": 30, "status": "failed"}] + [{"id": 1, "status": "ok"}] * 10
+
 
 # --- Task 5: Entry Point ---
 
