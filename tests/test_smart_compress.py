@@ -1048,6 +1048,35 @@ class TestExemptTools:
         assert (await smart_compress("recall_recent", {}, text, settings)).text != text
 
 
+class TestCacheRetrieveNeverCompressed:
+    """cache_retrieve returns originals; cutting one again would undo it. The
+    rule is in code, so even the `[]` kill switch does not reach it."""
+
+    @staticmethod
+    def _retrieved() -> str:
+        """A retrieved range that trips every gate: long, an error word, many lines."""
+        lines = [f"{i:6}\tstep {i}: copied src/module_{i}.py to build/" for i in range(1, 301)]
+        lines[149] = "   150\tERROR: step 150 failed"
+        return "\n".join(["[result lines 1–300 of 301]", *lines])
+
+    @pytest.mark.parametrize("exempt", [[], ["recall_deep"]], ids=["kill-switch", "list-without-it"])
+    @pytest.mark.asyncio
+    async def test_passes_through_whatever_the_exempt_list(self, exempt):
+        settings = Settings(_env_file=None, smart_compress_enabled=True, smart_compress_exempt_tools=exempt)
+        text = self._retrieved()
+        assert "cache_retrieve" not in settings.smart_compress_exempt_tools
+        # The gates MUST hold, or this would pass for the wrong reason.
+        assert len(text) >= settings.smart_compress_min_chars
+        assert is_crushable(text, min_chars=settings.smart_compress_min_chars)
+        assert (await smart_compress("bash", {}, text, settings)).was_compressed is True
+
+        result = await smart_compress("cache_retrieve", {"hash_key": "0" * 32, "lines": "1-300"}, text, settings)
+
+        assert result.was_compressed is False
+        assert result.text == text
+        assert result.original_text is None
+
+
 class TestReadFileExempt:
     """2026-10-07: a 303-line report read with read_file was classified
     STRING_ARRAY (it contains "failed") and cut to ~63 non-contiguous lines;

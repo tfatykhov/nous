@@ -350,6 +350,9 @@ async def smart_compress(
         return passthrough
     if is_error:
         return passthrough
+    # Not configurable: cache_retrieve exists to return originals, and cutting one again would undo it.
+    if tool_name == "cache_retrieve":
+        return passthrough
     # Per-tool exemption. Everything below this point ranks by original
     # position and by `_score_line` — neither of which can see a retrieval
     # score — so a tool whose output is ALREADY ranked must not be re-ranked
