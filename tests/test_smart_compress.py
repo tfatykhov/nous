@@ -749,6 +749,43 @@ class TestReadFileExempt:
         assert result.was_compressed is True
 
 
+class TestDbQueryExempt:
+    """db_query (#816) bounds its own result (200 rows, 500-char cells,
+    100,000 chars) and says when rows were cut. A query result is rows the
+    model asked for; sampling them, or dropping repeated rows, changes the
+    answer."""
+
+    @staticmethod
+    def _query_result() -> str:
+        header = "id | status | detail"
+        rows = [
+            f"{i} | {'failed' if i % 9 == 0 else 'ok'} | " + "row detail text " * 4
+            for i in range(200)
+        ]
+        return "\n".join([header, *rows, "(200 rows)"])
+
+    def test_default_exempts_db_query(self):
+        assert "db_query" in Settings(_env_file=None).smart_compress_exempt_tools
+
+    @pytest.mark.asyncio
+    async def test_query_result_passes_through(self):
+        settings = Settings(_env_file=None, smart_compress_enabled=True)
+        text = self._query_result()
+        assert len(text) >= settings.smart_compress_min_chars
+        assert is_crushable(text, min_chars=settings.smart_compress_min_chars)
+
+        result = await smart_compress("db_query", {"sql": "SELECT 1"}, text, settings)
+
+        assert result.was_compressed is False
+        assert result.text == text
+
+    @pytest.mark.asyncio
+    async def test_same_text_still_compressed_for_bash(self):
+        settings = Settings(_env_file=None, smart_compress_enabled=True)
+        result = await smart_compress("bash", {}, self._query_result(), settings)
+        assert result.was_compressed is True
+
+
 class TestDagManageExempt:
     """#724: a DAG summary over 4096 units is cut for Telegram with a marker
     saying `dag_manage status <id>` shows the stored summary. A failed DAG's
