@@ -571,7 +571,9 @@ class TestAddCacheKey:
 
     def test_a_marker_quoted_in_the_body_is_left_alone(self):
         quoted = "[SmartCompressed: 9→2 lines, 0 error/outlier preserved, order kept, gaps marked, 999 chars original]"
-        final = "[SmartCompressed: 60→20 lines, 1 error/outlier preserved, order kept, gaps marked, 5000 chars original]"
+        final = (
+            "[SmartCompressed: 60→20 lines, 1 error/outlier preserved, order kept, gaps marked, 5000 chars original]"
+        )
         text = "\n".join(["row 1", quoted, "row 3", final, "Exit code: 0"])
 
         out = add_cache_key(text, _KEY).split("\n")

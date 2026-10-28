@@ -2809,18 +2809,32 @@ def register_nous_tools(
 
 _CACHE_RETRIEVE_SCHEMA = {
     "description": (
-        "Retrieve original content from a previously compressed search or fetch result. Use when you see a "
-        "[SmartCompressed] marker and need more detail."
+        "Retrieve the original of a compressed tool result: bash output as well as search and fetch results. "
+        "Use when a [SmartCompressed: ...] marker names a 'cache_retrieve key' and you need what was cut. "
+        "Pass lines=\"A-B\" with the numbers from a '[… result lines A–B omitted (N lines) …]' marker to get "
+        "exactly those lines."
     ),
     "type": "object",
     "properties": {
         "hash_key": {
             "type": "string",
-            "description": "The hash key from the [SmartCompressed] marker (e.g., 'abc123de01234567')",
+            "description": (
+                "The 'cache_retrieve key …' value in the [SmartCompressed: ...] marker (32 hex characters)."
+            ),
+        },
+        "lines": {
+            "type": "string",
+            "description": (
+                'Optional: a line range, "A-B" or "A" (1-based, inclusive), using the numbers in the '
+                "'[… result lines A–B omitted …]' markers. Returns only those lines."
+            ),
         },
         "query": {
             "type": "string",
-            "description": "Optional: return only items matching this query instead of everything.",
+            "description": (
+                "Optional: return only items matching this query instead of everything. With lines, the "
+                "range is taken first, then filtered."
+            ),
         },
     },
     "required": ["hash_key"],
@@ -2843,6 +2857,7 @@ def register_cache_retrieve_tool(
     async def _cache_retrieve(
         hash_key: str,
         query: str | None = None,
+        lines: str | None = None,
         session_id: str | None = None,
         **kwargs,
     ) -> dict:
@@ -2850,7 +2865,7 @@ def register_cache_retrieve_tool(
             return _tool_error("Error: no active session for cache lookup.")
         try:
             async with db_session_factory() as db_sess:
-                result = await retrieve_cached_result(db_sess, session_id, hash_key, query)
+                result = await retrieve_cached_result(db_sess, session_id, hash_key, query, lines=lines)
                 if result is None:
                     text = (
                         f"No cached result found for hash key '{hash_key}'. "

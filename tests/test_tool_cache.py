@@ -1,14 +1,22 @@
 """Tests for ReversibleCache — Postgres-backed tool result cache."""
 
 import json
+import re
+import uuid
+
 import pytest
 
+from nous.api.smart_compress import add_cache_key, smart_compress
 from nous.api.tool_cache import (
+    cache_compressed_result,
     compute_hash_key,
     _keyword_filter,
+    _render_cached,
     NON_REFETCHABLE_TOOLS,
+    retrieve_cached_result,
 )
 from nous.api.tools import CACHE_RETRIEVE_TOOL_DEF
+from nous.config import Settings
 
 
 class TestHashKey:
@@ -122,6 +130,85 @@ class TestCacheRetrieveToolDef:
         assert "query" in schema["properties"]
         assert "query" not in schema["required"]
 
+    def test_tool_def_lines_optional(self):
+        schema = CACHE_RETRIEVE_TOOL_DEF["input_schema"]
+        assert schema["properties"]["lines"]["type"] == "string"
+        assert "lines" not in schema["required"]
+
+    def test_tool_def_says_bash_lines_and_the_marker_key(self):
+        props = CACHE_RETRIEVE_TOOL_DEF["input_schema"]["properties"]
+        assert "bash" in CACHE_RETRIEVE_TOOL_DEF["description"]
+        assert 'lines="A-B"' in CACHE_RETRIEVE_TOOL_DEF["description"]
+        assert "result lines A–B omitted" in props["lines"]["description"]
+        assert "cache_retrieve key" in props["hash_key"]["description"]
+
+
+def _rows(n: int) -> str:
+    """An n-line result: "row 1" .. "row n", "failed" on every 7th row."""
+    return "\n".join(f"row {i}" + (" failed" if i % 7 == 0 else "") for i in range(1, n + 1))
+
+
+class TestLineRanges:
+    """cache_retrieve's `lines`: 1-based, inclusive, over content.split("\\n")."""
+
+    CONTENT = _rows(60)
+    LINES = CONTENT.split("\n")
+
+    @pytest.mark.parametrize("spec", ["10-20", "10–20", " 10 - 20 ", "10 – 20"])
+    def test_a_range_returns_those_lines_under_a_header(self, spec):
+        out = _render_cached(self.CONTENT, lines=spec)
+        assert out == "\n".join(["[result lines 10–20 of 60]", *self.LINES[9:20]])
+
+    def test_a_single_line(self):
+        assert _render_cached(self.CONTENT, lines="7") == "[result lines 7–7 of 60]\nrow 7 failed"
+        assert _render_cached(self.CONTENT, lines="7-7") == "[result lines 7–7 of 60]\nrow 7 failed"
+
+    def test_the_first_and_the_last_line(self):
+        assert _render_cached(self.CONTENT, lines="1") == "[result lines 1–1 of 60]\nrow 1"
+        assert _render_cached(self.CONTENT, lines="60") == "[result lines 60–60 of 60]\nrow 60"
+
+    def test_an_end_past_the_last_line_is_clipped(self):
+        out = _render_cached(self.CONTENT, lines="55-999")
+        assert out == "\n".join(["[result lines 55–60 of 60]", *self.LINES[54:]])
+
+    @pytest.mark.parametrize(
+        ("spec", "why"),
+        [
+            ("61", "only 60 lines"),
+            ("70-80", "only 60 lines"),
+            ("20-10", "first line is after the last"),
+            ("0-5", "start at 1"),
+            ("0", "start at 1"),
+            ("abc", "not a line range"),
+            ("3-", "not a line range"),
+            ("-5", "not a line range"),
+            ("1,5", "not a line range"),
+            ("1-5-9", "not a line range"),
+            ("2.5", "not a line range"),
+        ],
+    )
+    def test_a_range_that_names_no_lines_gets_a_plain_message(self, spec, why):
+        out = _render_cached(self.CONTENT, lines=spec)
+        assert why in out
+        assert "60 lines" in out
+        assert "row " not in out
+
+    def test_the_range_is_taken_first_then_filtered(self):
+        # "failed" is on rows 7, 14, ..., 56: only 14 and 21 are in 10-25.
+        out = _render_cached(self.CONTENT, lines="10-25", query="failed")
+        assert out == "[result lines 10–25 of 60]\nrow 14 failed\nrow 21 failed"
+
+    def test_a_filtered_range_with_no_match_says_so(self):
+        out = _render_cached(self.CONTENT, lines="1-6", query="failed")
+        assert out.split("\n")[0] == "[result lines 1–6 of 60]"
+        assert "No lines matching 'failed' in cached 6 lines." in out
+
+    def test_query_alone_is_unchanged(self):
+        assert _render_cached(self.CONTENT, query="failed") == _keyword_filter(self.CONTENT, "failed")
+
+    def test_no_arguments_return_the_whole_original(self):
+        assert _render_cached(self.CONTENT) == self.CONTENT
+
 
 class TestFrameToolAccess:
     def test_cache_retrieve_in_conversation_frame(self):
@@ -143,3 +230,90 @@ class TestFrameToolAccess:
     def test_cache_retrieve_in_task_via_wildcard(self):
         from nous.api.runner import FRAME_TOOLS
         assert "*" in FRAME_TOOLS["task"]  # wildcard covers all
+
+
+# --- Every cut can be undone (real Postgres) ---
+
+_GAP_RE = re.compile(r"^\[… result lines (\d+)–(\d+) omitted \((\d+) lines\) …\]$")
+
+
+def _ids() -> tuple[str, str]:
+    """A fresh agent and session per test, so no test sees another's rows."""
+    tag = uuid.uuid4().hex[:12]
+    return f"test-cache-{tag}", f"s-{tag}"
+
+
+@pytest.mark.postgres_only
+class TestRecoverEveryCut:
+    """The property that matters: a bash result is cut, cached, and every gap
+    marker's range brings back exactly the lines it stands for."""
+
+    @staticmethod
+    def _bash_output() -> list[str]:
+        lines = []
+        for i in range(1, 241):
+            if i % 40 == 0:
+                text = f"ERROR: step {i} failed"
+            elif i % 9 == 0:
+                text = ""
+            else:
+                text = f"step {i}: copied src/module_{i}.py to build/"
+            lines.append(f"{i:6}\t{text}")
+        return lines
+
+    @pytest.mark.asyncio
+    async def test_every_gap_marker_range_returns_exactly_the_omitted_lines(self, session):
+        settings = Settings(
+            _env_file=None, smart_compress_enabled=True, smart_compress_min_chars=100, smart_compress_max_k=20,
+        )
+        chunk = self._bash_output()
+        raw = "\n".join(chunk) + "\nExit code: 0"
+        result = await smart_compress("bash", {"command": "cat -n build.log"}, raw, settings)
+        assert result.was_compressed is True, "the output must be cut for this test to mean anything"
+        assert result.original_text == raw
+
+        agent_id, session_id = _ids()
+        key = await cache_compressed_result(
+            session, agent_id, session_id, "bash", {"command": "cat -n build.log"},
+            result.original_text, result.item_count,
+        )
+        text = add_cache_key(result.text, key)
+        out = text.split("\n")
+        assert out[-1] == "Exit code: 0"
+        assert f", cache_retrieve key {key}, {len(raw)} chars original]" in out[-2]
+
+        total = len(raw.split("\n"))
+        rebuilt: list[str] = []
+        gaps = 0
+        for line in out[:-2]:
+            m = _GAP_RE.match(line)
+            if not m:
+                rebuilt.append(line)
+                continue
+            gaps += 1
+            a, b, n = (int(g) for g in m.groups())
+            got = await retrieve_cached_result(session, session_id, key, lines=f"{a}-{b}")
+            header, *omitted = got.split("\n")
+            assert header == f"[result lines {a}–{b} of {total}]"
+            assert omitted == chunk[a - 1 : b] and len(omitted) == n
+            rebuilt.extend(omitted)
+        assert gaps >= 2
+        assert rebuilt == chunk, "the kept lines plus every retrieved gap must be the original, in order"
+
+        # The range exactly as the marker prints it, en dash and all.
+        first_gap = next(ln for ln in out if _GAP_RE.match(ln))
+        printed = re.search(r"result lines (\d+–\d+) omitted", first_gap).group(1)
+        a, b = (int(x) for x in printed.split("–"))
+        got = await retrieve_cached_result(session, session_id, key, lines=printed)
+        assert got == "\n".join([f"[result lines {a}–{b} of {total}]", *chunk[a - 1 : b]])
+
+    @pytest.mark.asyncio
+    async def test_a_range_then_a_query_through_the_cache(self, session):
+        agent_id, session_id = _ids()
+        content = _rows(60)
+        key = await cache_compressed_result(session, agent_id, session_id, "bash", {}, content)
+
+        got = await retrieve_cached_result(session, session_id, key, query="failed", lines="10-25")
+
+        assert got == "[result lines 10–25 of 60]\nrow 14 failed\nrow 21 failed"
+        assert await retrieve_cached_result(session, session_id, "0" * 32, lines="1-5") is None

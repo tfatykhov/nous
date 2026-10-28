@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from typing import Any
 
 from sqlalchemy import delete, select
@@ -84,10 +85,13 @@ async def retrieve_cached_result(
     session_id: str,
     hash_key: str,
     query: str | None = None,
+    lines: str | None = None,
 ) -> str | None:
     """Retrieve cached original content by hash_key.
 
-    If query is provided, filter items by simple keyword matching.
+    `lines` ("A-B", "A–B" or "A") returns only those 1-based lines, numbered
+    as the gap markers number them. If query is provided, filter items by
+    simple keyword matching; with both, the range is taken first.
     """
     stmt = select(ToolCache).where(
         ToolCache.session_id == session_id,
@@ -100,20 +104,59 @@ async def retrieve_cached_result(
         logger.info("Cache miss [%s] for session %s", hash_key, session_id[:8])
         return None
 
-    content = entry.original_content
+    content = _render_cached(entry.original_content, query=query, lines=lines)
+    logger.info(
+        "Cache hit [%s] %s (lines=%r, filter=%r) → %d chars",
+        hash_key, entry.tool_name, lines, query, len(content),
+    )
+    return content
 
+
+# A line range as cache_retrieve takes it: "A-B", "A–B" (the en dash the gap
+# markers print) or "A".
+_LINES_RE = re.compile(r"^\s*(\d+)\s*(?:[-–]\s*(\d+)\s*)?$")
+
+
+def _parse_lines(spec: str, total: int) -> tuple[int, int] | str:
+    """(A, B), 1-based and inclusive with B clipped to `total`, or a plain
+    message saying why `spec` names no lines of a `total`-line result."""
+    m = _LINES_RE.match(str(spec))
+    if m is None:
+        return (
+            f'lines="{spec}" is not a line range: use "A-B" or "A" (1-based, inclusive). '
+            f"This result has {total} lines."
+        )
+    a = int(m.group(1))
+    b = int(m.group(2)) if m.group(2) is not None else a
+    if a < 1:
+        return f'lines="{spec}": lines start at 1. This result has {total} lines.'
+    if a > b:
+        return f'lines="{spec}": the first line is after the last. This result has {total} lines.'
+    if a > total:
+        return f'lines="{spec}": this result has only {total} lines.'
+    return a, min(b, total)
+
+
+def _render_cached(content: str, query: str | None = None, lines: str | None = None) -> str:
+    """What cache_retrieve returns for a cached original.
+
+    `lines` numbers lines over `content.split("\\n")`, the numbering of the
+    gap markers, and the output starts with "[result lines A–B of N]".
+    `query` filters the whole content, or the range when both are given.
+    """
+    if lines:
+        all_lines = content.split("\n")
+        parsed = _parse_lines(lines, len(all_lines))
+        if isinstance(parsed, str):
+            return parsed
+        a, b = parsed
+        header = f"[result lines {a}–{b} of {len(all_lines)}]"
+        selected = "\n".join(all_lines[a - 1 : b])
+        if query:
+            return f"{header}\n{_keyword_filter(selected, query)}"
+        return f"{header}\n{selected}"
     if query:
-        content = _keyword_filter(content, query)
-        logger.info(
-            "Cache hit [%s] %s with filter %r → %d chars",
-            hash_key, entry.tool_name, query, len(content),
-        )
-    else:
-        logger.info(
-            "Cache hit [%s] %s → %d chars (full content)",
-            hash_key, entry.tool_name, len(content),
-        )
-
+        return _keyword_filter(content, query)
     return content
 
 
