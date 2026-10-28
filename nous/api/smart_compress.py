@@ -257,15 +257,21 @@ def compress_string_array(
 
 @dataclass
 class DictCompressResult:
-    """Result of dict_array compression."""
+    """Result of dict_array compression.
+
+    `kept` (items without an error word) and `preserved` (error-word items)
+    are disjoint by position. `body` is what is emitted: every selected item
+    in its original array position.
+    """
     kept: list[dict] = field(default_factory=list)
     preserved: list[dict] = field(default_factory=list)
     marker: str = ""
     original_count: int = 0
+    body: list[dict] = field(default_factory=list)
 
     def to_text(self) -> str:
-        """Preserved items, then kept items (disjoint by construction). Never dedups."""
-        result = json.dumps(self.preserved + self.kept, default=str, indent=None)
+        """The body as one JSON array, then the marker. Never dedups."""
+        result = json.dumps(self.body, default=str, indent=None)
         return f"{result}\n{self.marker}"
 
 
@@ -289,34 +295,44 @@ def _is_error_item(item: dict) -> bool:
 
 
 def compress_dict_array(items: list[dict], max_k: int = 50) -> DictCompressResult:
-    """Compress JSON array of objects. Uses score field if available, else keeps all."""
+    """Compress a JSON array of objects.
+
+    At most `max_k` items: returned unchanged, no marker. Otherwise keeps
+    every error-word item, plus the top `max_k` others by the detected score
+    field (ties by position), or the first `max_k` others when there is no
+    score field. Selected items are emitted in their ORIGINAL array order,
+    and nothing is deduplicated.
+    """
     if len(items) <= max_k:
-        return DictCompressResult(kept=items, original_count=len(items))
+        return DictCompressResult(kept=items, original_count=len(items), body=items)
 
-    # Preserve error items
-    preserved = [item for item in items if _is_error_item(item)]
-    non_error = [item for item in items if not _is_error_item(item)]
+    # Error-word items are always kept.
+    error_idx = {i for i, item in enumerate(items) if _is_error_item(item)}
+    others = [i for i in range(len(items)) if i not in error_idx]  # original order
 
-    # Detect and sort by score
-    score_field = _detect_score_field(non_error)
+    score_field = _detect_score_field([items[i] for i in others])
     if score_field:
-        sorted_items = sorted(non_error, key=lambda x: x.get(score_field, 0), reverse=True)
-        kept = sorted_items[:max_k]
+        # Stable sort: equal scores keep their original order.
+        ranked = sorted(others, key=lambda i: items[i].get(score_field, 0), reverse=True)
+        keep = set(ranked[:max_k])
     else:
-        # No score field — keep first max_k items (original order)
-        kept = non_error[:max_k]
+        keep = set(others[:max_k])
 
-    total = len(kept) + len(preserved)
-    if total == len(items):  # every item kept: nothing cut, no marker
-        return DictCompressResult(kept=items, original_count=len(items))
-    score_info = f"K={len(kept)} by {score_field}" if score_field else f"first {len(kept)}"
+    emitted = sorted(keep | error_idx)
+    if len(emitted) == len(items):  # every item kept: nothing cut, no marker
+        return DictCompressResult(kept=items, original_count=len(items), body=items)
+    score_info = f"K={len(keep)} by {score_field}" if score_field else f"first {len(keep)}"
     marker = (
-        f"[SmartCompressed: {len(items)}\u2192{total} items, "
-        f"{score_info}, {len(preserved)} outliers]"
+        f"[SmartCompressed: {len(items)}\u2192{len(emitted)} items, "
+        f"{score_info}, order kept, {len(error_idx)} outliers]"
     )
 
     return DictCompressResult(
-        kept=kept, preserved=preserved, marker=marker, original_count=len(items),
+        kept=[items[i] for i in sorted(keep)],
+        preserved=[items[i] for i in sorted(error_idx)],
+        marker=marker,
+        original_count=len(items),
+        body=[items[i] for i in emitted],
     )
 
 

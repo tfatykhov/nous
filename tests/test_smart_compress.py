@@ -634,9 +634,8 @@ class TestDictArrayCompression:
     def test_top_k_by_score_field(self):
         items = [{"id": i, "score": 1.0 - i * 0.05, "name": f"item_{i}"} for i in range(50)]
         result = compress_dict_array(items, max_k=10)
-        assert len(result.kept) <= 10
-        # Top items should be highest scored
-        assert result.kept[0]["score"] >= result.kept[-1]["score"]
+        # Ruling (2026-10-28): the top 10 by score, in their original order.
+        assert result.kept == items[:10]
 
     def test_detects_score_field(self):
         items = [{"id": i, "relevance": 0.9 - i * 0.1} for i in range(20)]
@@ -681,7 +680,74 @@ class TestDictArrayCompression:
         result = compress_dict_array(items, max_k=10)
 
         emitted = json.loads(result.to_text().split("\n")[0])
-        assert emitted == [{"id": 30, "status": "failed"}] + [{"id": 1, "status": "ok"}] * 10
+        # Ruling (2026-10-28): in original order, so the error item (index 30)
+        # comes after the ten kept copies (indices 0-9), not first.
+        assert emitted == [{"id": 1, "status": "ok"}] * 10 + [{"id": 30, "status": "failed"}]
+
+
+class TestDictArrayKeepsOrder:
+    """The selection is unchanged (error items, plus the top max_k others by
+    score or the first max_k), but every selected item is emitted in its
+    original array position, and the marker says 'order kept'."""
+
+    @staticmethod
+    def _shuffled_scores(n: int) -> list[dict]:
+        # Scores not monotone in position: (i * 37) % n is a permutation of 0..n-1.
+        return [{"id": i, "score": round(((i * 37) % n) / n, 3)} for i in range(n)]
+
+    def test_top_k_by_score_is_emitted_in_original_order(self):
+        items = self._shuffled_scores(60)
+        top = sorted(items, key=lambda it: it["score"], reverse=True)[:20]
+        assert [it["id"] for it in top] != sorted(it["id"] for it in top)  # a real test
+
+        result = compress_dict_array(items, max_k=20)
+
+        emitted = json.loads(result.to_text().split("\n")[0])
+        assert [it["id"] for it in emitted] == sorted(it["id"] for it in top)
+        assert emitted == result.body == result.kept
+
+    def test_error_items_stay_in_place(self):
+        items = self._shuffled_scores(60)
+        items[7]["status"] = "failed"
+        items[58]["status"] = "error: timeout"
+
+        result = compress_dict_array(items, max_k=50)
+
+        ids = [it["id"] for it in result.body]
+        assert ids == sorted(ids)
+        assert {7, 58} <= set(ids)
+        assert len(ids) == 52
+        assert result.marker == "[SmartCompressed: 60→52 items, K=50 by score, order kept, 2 outliers]"
+
+    def test_no_score_field_keeps_the_first_max_k_and_a_late_error_in_place(self):
+        items = [{"id": i, "status": "ok"} for i in range(80)]
+        items[3]["status"] = "failed"
+        items[75]["status"] = "failed"
+
+        result = compress_dict_array(items, max_k=10)
+
+        # Indices 0-10 minus the error at 3 are the first 10 others.
+        assert [it["id"] for it in result.body] == list(range(11)) + [75]
+        assert result.marker == "[SmartCompressed: 80→12 items, first 10, order kept, 2 outliers]"
+
+    @pytest.mark.asyncio
+    async def test_through_smart_compress_with_the_original_size(self):
+        settings = Settings(_env_file=None, smart_compress_enabled=True)
+        items = _ranked_items(200, failed_every=40)
+        # Reverse so the best scores sit at the end of the array.
+        items.reverse()
+        raw = json.dumps(items, indent=2)
+
+        result = await smart_compress("web_search", {}, raw, settings)
+
+        assert result.was_compressed is True
+        body, marker = result.text.split("\n")
+        ids = [it["id"] for it in json.loads(body)]
+        assert ids == sorted(ids, reverse=True)  # the array's own order
+        assert {0, 40, 80, 120, 160} <= set(ids)  # the error items
+        assert marker == (
+            f"[SmartCompressed: 200→55 items, K=50 by score, order kept, 5 outliers, {len(raw)} chars original]"
+        )
 
 
 # --- Task 5: Entry Point ---
