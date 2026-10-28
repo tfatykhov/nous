@@ -40,8 +40,12 @@ class TestNonRefetchableTools:
     def test_web_fetch_included(self):
         assert "web_fetch" in NON_REFETCHABLE_TOOLS
 
-    def test_bash_not_included(self):
-        assert "bash" not in NON_REFETCHABLE_TOOLS
+    def test_bash_included(self):
+        """Ruling (2026-10-28): bash was treated as re-fetchable, so a cut
+        bash result kept no original. Re-running a command is not
+        guaranteed to reproduce its output and may be slow or have side
+        effects, so the omitted lines must come from the cache."""
+        assert "bash" in NON_REFETCHABLE_TOOLS
 
     def test_read_file_not_included(self):
         assert "read_file" not in NON_REFETCHABLE_TOOLS

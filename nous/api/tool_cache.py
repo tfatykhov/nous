@@ -1,8 +1,8 @@
 """ReversibleCache — Postgres-backed cache for compressed tool results.
 
-When SmartCompress compresses a non-re-fetchable tool result (web_search,
-web_fetch), the original is stored here. The model can retrieve it via
-cache_retrieve tool.
+When SmartCompress compresses a non-re-fetchable tool result (bash,
+web_search, web_fetch, dag_manage), the original is stored here. The model
+can retrieve it via cache_retrieve tool.
 """
 
 from __future__ import annotations
@@ -29,8 +29,12 @@ logger = logging.getLogger(__name__)
 # the same input identically, so a second call reproduces the SAME
 # compressed output, not the original. Same criterion, different cause —
 # the next tool added here should satisfy "calling it again gets you back
-# to the original", not "the tool is nondeterministic".
-NON_REFETCHABLE_TOOLS = frozenset({"web_search", "web_fetch", "dag_manage"})
+# to the original", not "the tool is nondeterministic". bash qualifies too:
+# re-running a command is not guaranteed to reproduce its output (files,
+# processes and remote state change), and it may be slow or have side
+# effects, so the omitted lines of a cut bash result are only recoverable
+# from here.
+NON_REFETCHABLE_TOOLS = frozenset({"web_search", "web_fetch", "dag_manage", "bash"})
 
 
 def compute_hash_key(content: str) -> str:

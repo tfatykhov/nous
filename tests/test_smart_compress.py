@@ -614,7 +614,9 @@ class TestSmartCompressEntryPoint:
         assert len(result.text) < len(text)
         assert "[SmartCompressed:" in result.text
         assert result.was_compressed is True
-        assert result.original_text is None  # bash is re-fetchable
+        # Ruling (2026-10-28): bash is cached; re-running a command does not
+        # reliably reproduce the omitted lines.
+        assert result.original_text == text
 
     @pytest.mark.asyncio
     async def test_json_array_compressed(self):
