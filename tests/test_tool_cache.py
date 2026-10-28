@@ -3,6 +3,7 @@
 import json
 import re
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -20,7 +21,7 @@ from nous.api.tool_cache import (
     NON_REFETCHABLE_TOOLS,
     retrieve_cached_result,
 )
-from nous.api.tools import CACHE_RETRIEVE_TOOL_DEF
+from nous.api.tools import CACHE_RETRIEVE_TOOL_DEF, ToolDispatcher, register_cache_retrieve_tool
 from nous.config import Settings
 from nous.storage.models import ToolCache
 
@@ -214,6 +215,19 @@ class TestLineRanges:
 
     def test_no_arguments_return_the_whole_original(self):
         assert _render_cached(self.CONTENT) == self.CONTENT
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_a_blank_lines_value_means_no_range(self, blank):
+        assert _render_cached(self.CONTENT, lines=blank) == self.CONTENT
+
+    def test_a_bare_integer_zero_is_parsed_not_taken_as_no_range(self):
+        """A model can send a JSON 0 for the string field: it names no line,
+        so it gets the message, not the whole original."""
+        out = _render_cached(self.CONTENT, lines=0)
+        assert out == 'lines="0": lines start at 1. This result has 60 lines.'
+
+    def test_a_bare_integer_line_number_works(self):
+        assert _render_cached(self.CONTENT, lines=7) == "[result lines 7–7 of 60]\nrow 7 failed"
 
 
 _FOOTER_RE = re.compile(
@@ -484,6 +498,24 @@ class TestCacheHints:
                 'lines="A-B" fetches a range.'
             )
 
+    @pytest.mark.asyncio
+    async def test_rows_cached_at_the_same_moment_are_cut_by_id(self, session):
+        """Two writes in one transaction share now(): the 5-row cut among
+        them is by id, highest first, not arbitrary."""
+        agent_id, session_id = _ids()
+        at = datetime.now(UTC) - timedelta(minutes=1)
+        rows = [_row(agent_id, session_id, timedelta(0), n) for n in range(7)]
+        for n, row in enumerate(rows):
+            row.id = uuid.UUID(int=n + 1)
+            row.compressed_at = at
+        session.add_all(rows)
+        await session.flush()
+
+        hints = await get_cache_hints(session, session_id)
+
+        expected = [rows[n].hash_key for n in (6, 5, 4, 3, 2)]
+        assert [h.split("cache_retrieve key ")[1].split(";")[0] for h in hints] == expected
+
 
 @pytest.mark.postgres_only
 class TestAgePurge:
@@ -529,3 +561,36 @@ class TestAgePurge:
         assert [r.hash_key for r in rows] == [key]
         assert rows[0].compressed_at > datetime.now(UTC) - timedelta(days=1)
         assert await retrieve_cached_result(session, session_id, key) == content
+
+
+@pytest.mark.postgres_only
+class TestCacheRetrieveHandler:
+    """The registered cache_retrieve tool passes `lines` (and `query`) through
+    to the cache: dispatched like the runner dispatches it."""
+
+    @pytest.mark.asyncio
+    async def test_dispatching_a_range_returns_those_lines(self, session):
+        agent_id, session_id = _ids()
+        key = await cache_compressed_result(session, agent_id, session_id, "bash", {}, _rows(60))
+
+        @asynccontextmanager
+        async def factory():
+            yield session
+
+        dispatcher = ToolDispatcher()
+        register_cache_retrieve_tool(dispatcher, factory)
+
+        text, is_error = await dispatcher.dispatch(
+            "cache_retrieve", {"hash_key": key, "lines": "12–14"}, session_id=session_id,
+        )
+        assert is_error is False
+        assert text == "[result lines 12–14 of 60]\nrow 12\nrow 13\nrow 14 failed"
+
+        text, is_error = await dispatcher.dispatch(
+            "cache_retrieve", {"hash_key": key, "lines": "10-25", "query": "failed"}, session_id=session_id,
+        )
+        assert is_error is False
+        assert text == "[result lines 10–25 of 60]\nrow 14 failed\nrow 21 failed"
+
+        text, _ = await dispatcher.dispatch("cache_retrieve", {"hash_key": key, "lines": "99"}, session_id=session_id)
+        assert text == 'lines="99": this result has only 60 lines.'

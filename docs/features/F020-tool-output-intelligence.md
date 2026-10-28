@@ -221,7 +221,7 @@ When active cache entries exist, a "Cached Results" section lists the 5 newest, 
 
 ```
 Compressed results available:
-- bash("cat -n build.log"): 241 items, cache_retrieve key 3f2a9c0b1d4e5f60718293a4b5c6d7e8; lines="A-B" fetches a range.
+- bash("cat -n build.log"): 240 items, cache_retrieve key 6f67f0717d93948bf3f0aeb96be488ab; lines="A-B" fetches a range.
 - web_search("PyJWT vulnerabilities 2026"): 47 items, cache_retrieve key 0c1d2e3f405162738495a6b7c8d9e0f1; lines="A-B" fetches a range.
 ```
 

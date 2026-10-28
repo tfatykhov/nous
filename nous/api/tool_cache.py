@@ -163,7 +163,9 @@ def _render_cached(content: str, query: str | None = None, lines: str | None = N
     Every answer is held to _MAX_RETRIEVE_CHARS.
     """
     all_lines = content.split("\n")
-    if lines:
+    # None or a blank string means no range; anything else, a bare 0
+    # included, is parsed and gets a message if it names no lines.
+    if lines is not None and str(lines).strip() != "":
         parsed = _parse_lines(lines, len(all_lines))
         if isinstance(parsed, str):
             return parsed
@@ -289,7 +291,7 @@ async def get_cache_hints(session: AsyncSession, session_id: str) -> list[str]:
             ToolCache.item_count,
         )
         .where(ToolCache.session_id == session_id)
-        .order_by(ToolCache.compressed_at.desc())
+        .order_by(ToolCache.compressed_at.desc(), ToolCache.id.desc())  # id: a stable tie-break
         .limit(_MAX_CACHE_HINTS)
     )
     result = await session.execute(stmt)
