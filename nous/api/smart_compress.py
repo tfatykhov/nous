@@ -386,6 +386,8 @@ async def smart_compress(
             max_k=settings.smart_compress_max_k,
             elbow_threshold=settings.smart_compress_elbow_threshold,
         )
+        if not compressed.marker:  # nothing cut: the original bytes
+            return passthrough
         compressed_text = compressed.to_text()
         item_count = compressed.original_count
 
@@ -393,6 +395,11 @@ async def smart_compress(
         try:
             items = json.loads(body_text.strip())
             compressed = compress_dict_array(items, max_k=settings.smart_compress_max_k)
+            # Nothing cut: return the original bytes. to_text() would
+            # re-serialise it, which differs from body_text in whitespace, and
+            # count (and, for a non-refetchable tool, cache) as compression.
+            if not compressed.marker:
+                return passthrough
             compressed_text = compressed.to_text()
             item_count = compressed.original_count
         except (json.JSONDecodeError, TypeError):
@@ -401,6 +408,8 @@ async def smart_compress(
     elif content_type in (ContentType.LOG_FORMAT, ContentType.RAW_TEXT):
         lines = body_text.split("\n")
         compressed = compress_string_array(lines, max_k=settings.smart_compress_max_k)
+        if not compressed.marker:  # nothing cut: the original bytes
+            return passthrough
         compressed_text = compressed.to_text()
         item_count = compressed.original_count
 

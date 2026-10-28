@@ -542,6 +542,32 @@ class TestSmartCompressEntryPoint:
         assert result.was_compressed is True
         assert result.original_text == text  # web_search is non-re-fetchable
 
+    @pytest.mark.parametrize(
+        ("tool", "indent", "tail"),
+        [("web_search", 2, ""), ("bash", None, "\nExit code: 0")],
+    )
+    @pytest.mark.asyncio
+    async def test_json_array_with_nothing_cut_passes_through(self, tool, indent, tail):
+        """At most max_k items: nothing is cut, so the original bytes come back
+        and nothing is cached. Re-serialising it used to count as compression:
+        indentation lost, a stray newline before the exit line, and for
+        web_search a tool_cache row for a result nothing was cut from."""
+        settings = Settings(_env_file=None, smart_compress_enabled=True)
+        items = [
+            {"id": i, "score": round(1.0 - i * 0.02, 2), "title": f"result {i}", "snippet": "text " * 40}
+            for i in range(40)
+        ]
+        raw = json.dumps(items, indent=indent) + tail
+        assert len(items) <= settings.smart_compress_max_k
+        assert len(raw) >= settings.smart_compress_min_chars
+        assert is_crushable(raw[: len(raw) - len(tail)], min_chars=settings.smart_compress_min_chars)
+
+        result = await smart_compress(tool, {}, raw, settings)
+
+        assert result.was_compressed is False
+        assert result.text == raw
+        assert result.original_text is None
+
     @pytest.mark.asyncio
     async def test_bash_json_with_exit_line_keeps_dict_array_path(self):
         """#179 review: bash_tool now appends 'Exit code: N' to every result.
