@@ -96,6 +96,7 @@ Instead of hardcoded `head N + tail N` chars, find the natural elbow in the data
 4. K = elbow index, capped at `max_k` (default 50 lines)
 5. Allocate: first 30% of K from start of original, last 15% from end, remainder = highest-scored
 6. Emit the kept lines in their original order, with one `[… result lines A–B omitted (N lines) …]` line per omitted run. Pass the result through unchanged when it has at most `max_k` lines, or when the cut, gap lines included, would keep 80% or more of its characters
+7. `NOUS_SMART_COMPRESS_ELBOW_THRESHOLD` sets the cliff on every string path: `string_array`, `log_format` and `raw_text`
 
 **For `dict_array` (JSON API results):**
 1. Detect score field (bounded numeric, often sorted descending)

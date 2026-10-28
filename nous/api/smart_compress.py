@@ -441,7 +441,11 @@ async def smart_compress(
 
     elif content_type in (ContentType.LOG_FORMAT, ContentType.RAW_TEXT):
         lines = body_text.split("\n")
-        compressed = compress_string_array(lines, max_k=settings.smart_compress_max_k)
+        compressed = compress_string_array(
+            lines,
+            max_k=settings.smart_compress_max_k,
+            elbow_threshold=settings.smart_compress_elbow_threshold,
+        )
         if not compressed.marker:  # nothing cut: the original bytes
             return passthrough
         compressed_text = compressed.to_text()

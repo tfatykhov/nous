@@ -428,6 +428,50 @@ class TestOrderPreservingCompression:
             _walk(_cut(result), lines)
 
 
+class TestElbowThresholdOnLogFormat:
+    """The log-format branch passes `smart_compress_elbow_threshold` through,
+    as the string-array branch does. (Raw text is at most 10 lines, never
+    more than max_k at the default, so the threshold cannot show there.)"""
+
+    @staticmethod
+    def _log() -> list[str]:
+        """200 timestamped lines (digits: 0.5), every 10th with a URL (0.8),
+        one error line. 0.8 - 0.5 is a cliff at 0.2 but not at 0.3."""
+        lines = []
+        for i in range(200):
+            ts = f"2026-03-07T12:{i // 60:02d}:{i % 60:02d}Z"
+            if i == 120:
+                lines.append(f"{ts} ERROR upload of batch {i} failed")
+            elif i % 10 == 5:
+                lines.append(f"{ts} INFO fetched https://example.com/batch/{i}")
+            else:
+                lines.append(f"{ts} INFO processed batch {i} in 12 ms")
+        return lines
+
+    @pytest.mark.asyncio
+    async def test_a_non_default_threshold_changes_the_cut(self):
+        lines = self._log()
+        raw = "\n".join(lines)
+        assert classify_content(raw, min_chars=100) == ContentType.LOG_FORMAT
+
+        markers = {}
+        for threshold in (0.3, 0.2):
+            settings = Settings(
+                _env_file=None, smart_compress_enabled=True, smart_compress_min_chars=100,
+                smart_compress_elbow_threshold=threshold,
+            )
+            result = await smart_compress("bash", {}, raw, settings)
+
+            assert result.was_compressed is True
+            expected = compress_string_array(lines, max_k=50, elbow_threshold=threshold)
+            assert _body(result.text) == expected.body
+            markers[threshold] = result.text.split("\n")[-1]
+
+        # The default keeps K=50 lines; at 0.2 the URL cliff gives K=20.
+        assert markers[0.3].startswith("[SmartCompressed: 200→51 lines,")
+        assert markers[0.2].startswith("[SmartCompressed: 200→21 lines,")
+
+
 class TestMinCharsDefault:
     """Short results are left alone: below 8000 chars SmartCompress saved
     little (bash, 72 h in prod: 113 results up to 2 KB saved 19.6 K chars in
