@@ -16,6 +16,7 @@ import time
 from typing import Any, Protocol
 
 from nous.api.models import ApiResponse, Conversation, Message
+from nous.api.smart_compress import final_marker_line
 from nous.cognitive.schemas import (
     BULK_ESCALATION_TOOLS,
     DECAY_PROFILE_AGES,
@@ -599,7 +600,10 @@ class ConversationCompactor:
         re.MULTILINE,
     )
     # codex round 13: SmartCompress records the pre-compression size in its
-    # marker (smart_compress.py) so the bulk threshold still applies.
+    # marker (smart_compress.py) so the bulk threshold still applies. It is
+    # read only from the final marker line (final_marker_line, the locator
+    # add_cache_key uses): a whole body line quoting a marker, as `cat` of an
+    # old transcript prints it, passes the line anchor but is not the marker.
     _SMARTCOMPRESS_CHARS_RE = re.compile(
         r"^\[SmartCompressed:[^\]\n]*?(\d+) chars original\]\s*$",
         re.MULTILINE,
@@ -630,11 +634,15 @@ class ConversationCompactor:
         the bulk hint itself) are the durable signal. The MAX over all
         signals wins (review 2026-06-10): a soft-trimmed SmartCompress
         digest carries a trim marker recording only the digest length —
-        first-match precedence would shadow the real original size.
+        first-match precedence would shadow the real original size. The
+        SmartCompress size comes only from the final marker line; a soft
+        trim keeps the tail, so the marker is still the final line.
         """
         sizes = [len(text)]
         sizes.extend(int(s) for s in self._TRIM_MARKER_RE.findall(text))
-        sizes.extend(int(s) for s in self._SMARTCOMPRESS_CHARS_RE.findall(text))
+        marker = final_marker_line(text)
+        if marker is not None:
+            sizes.extend(int(s) for s in self._SMARTCOMPRESS_CHARS_RE.findall(marker))
         return max(sizes)
 
     def _item_is_bulk(self, item: dict[str, Any]) -> bool:

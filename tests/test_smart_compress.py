@@ -10,6 +10,7 @@ from nous.api.smart_compress import (
     is_crushable,
     ContentType,
     extract_preserved_lines,
+    final_marker_line,
     CompressResult,
     compress_string_array,
     compress_dict_array,
@@ -612,6 +613,7 @@ class TestAddCacheKey:
     )
     def test_no_final_marker_returns_the_text_unchanged(self, text):
         assert add_cache_key(text, _KEY) == text
+        assert final_marker_line(text) is None  # the one locator compaction shares
 
     def test_a_marker_quoted_in_the_body_is_left_alone(self):
         quoted = "[SmartCompressed: 9→2 lines, 0 error/outlier preserved, order kept, gaps marked, 999 chars original]"

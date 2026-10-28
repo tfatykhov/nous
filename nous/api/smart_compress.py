@@ -496,6 +496,28 @@ async def smart_compress(
 _FINAL_MARKER_RE = re.compile(r"^\[SmartCompressed:.*(, \d+ chars original\])$")
 
 
+def _final_marker(lines: list[str]) -> tuple[int, re.Match[str]] | None:
+    """Locate the final SmartCompressed marker: the last line, or the line
+    before a trailing "Exit code: " line, if that line is a marker
+    smart_compress() emits. No other line is read, so a marker quoted inside
+    the body never counts. Returns its index and match, or None."""
+    i = len(lines) - 1
+    if i >= 1 and lines[i].startswith("Exit code: "):
+        i -= 1
+    m = _FINAL_MARKER_RE.match(lines[i])
+    return None if m is None else (i, m)
+
+
+def final_marker_line(text: str) -> str | None:
+    """The final SmartCompressed marker line of `text`, or None.
+
+    One rule for every reader: add_cache_key() writes the key into this line
+    and compaction reads the original size from it.
+    """
+    found = _final_marker(text.split("\n"))
+    return None if found is None else found[1].group(0)
+
+
 def add_cache_key(text: str, key: str) -> str:
     """Name the cache_retrieve key in the final SmartCompressed marker.
 
@@ -506,11 +528,9 @@ def add_cache_key(text: str, key: str) -> str:
     The runner calls this only after the original was cached.
     """
     lines = text.split("\n")
-    i = len(lines) - 1
-    if i >= 1 and lines[i].startswith("Exit code: "):
-        i -= 1
-    m = _FINAL_MARKER_RE.match(lines[i])
-    if m is None:
+    found = _final_marker(lines)
+    if found is None:
         return text
+    i, m = found
     lines[i] = f"{lines[i][: m.start(1)]}, cache_retrieve key {key}{m.group(1)}"
     return "\n".join(lines)
