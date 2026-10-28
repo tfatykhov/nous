@@ -499,6 +499,23 @@ class TestCompactionReadsTheMarker:
 # --- Task 4: Dict Array Compression ---
 
 
+def _ranked_items(n: int, failed_every: int | None = None) -> list[dict]:
+    """A ranked JSON array shaped like search results; with `failed_every`,
+    every such item's snippet holds an error word."""
+    return [
+        {
+            "id": i,
+            "score": round(1.0 - i * 0.004, 3),
+            "title": f"result {i}",
+            "snippet": (
+                "the deploy failed on retry " if failed_every and i % failed_every == 0
+                else "the deploy finished normally "
+            ) * 8,
+        }
+        for i in range(n)
+    ]
+
+
 class TestDictArrayCompression:
     def test_top_k_by_score_field(self):
         items = [{"id": i, "score": 1.0 - i * 0.05, "name": f"item_{i}"} for i in range(50)]
@@ -533,6 +550,15 @@ class TestDictArrayCompression:
         items = [{"id": i, "score": 1.0 - i * 0.1} for i in range(20)]
         result = compress_dict_array(items, max_k=5)
         assert "[SmartCompressed:" in result.marker
+
+    def test_nothing_cut_with_error_items_has_no_marker(self):
+        """More than max_k items, but at most max_k without an error word:
+        every item is kept, so nothing is cut and there is no marker."""
+        items = _ranked_items(60, failed_every=5)
+        assert sum(1 for it in items if "failed" in it["snippet"]) == 12
+        result = compress_dict_array(items, max_k=50)
+        assert result.marker == ""
+        assert result.kept == items
 
     def test_repeated_items_are_not_deduplicated(self):
         """Every kept item is emitted, however many times it repeats."""
@@ -629,6 +655,45 @@ class TestSmartCompressEntryPoint:
         assert result.was_compressed is False
         assert result.text == raw
         assert result.original_text is None
+
+    @pytest.mark.asyncio
+    async def test_json_array_with_error_items_and_nothing_cut_passes_through(self):
+        """60 items, 12 with an error word, max_k 50: all 48 others fit, so
+        nothing is cut. It used to be re-serialised (indentation lost), the
+        error items moved to the front, marked '60→60 items' and cached."""
+        settings = Settings(_env_file=None, smart_compress_enabled=True)
+        raw = json.dumps(_ranked_items(60, failed_every=5), indent=2)
+        assert len(raw) >= settings.smart_compress_min_chars
+
+        result = await smart_compress("web_search", {}, raw, settings)
+
+        assert result.was_compressed is False
+        assert result.text == raw
+        assert result.original_text is None
+
+    @pytest.mark.asyncio
+    async def test_run_list_with_failures_and_nothing_cut_passes_through(self):
+        """The same with no score field: `gh run list --json`-like rows, 12 of
+        60 failed, through bash with its exit line."""
+        settings = Settings(_env_file=None, smart_compress_enabled=True)
+        runs = [
+            {
+                "databaseId": 1000 + i,
+                "name": "Tests",
+                "conclusion": "failure" if i % 5 == 0 else "success",
+                "status": "completed",
+                "headBranch": f"feat/x-{i}",
+                "message": "ci: run the tests " + ("after a failed push" if i % 5 == 0 else "on a clean push"),
+            }
+            for i in range(60)
+        ]
+        raw = json.dumps(runs, indent=2) + "\nExit code: 0"
+        assert len(raw) >= settings.smart_compress_min_chars
+
+        result = await smart_compress("bash", {"command": "gh run list --json ..."}, raw, settings)
+
+        assert result.was_compressed is False
+        assert result.text == raw
 
     @pytest.mark.asyncio
     async def test_bash_json_with_exit_line_keeps_dict_array_path(self):

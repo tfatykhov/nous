@@ -307,6 +307,8 @@ def compress_dict_array(items: list[dict], max_k: int = 50) -> DictCompressResul
         kept = non_error[:max_k]
 
     total = len(kept) + len(preserved)
+    if total == len(items):  # every item kept: nothing cut, no marker
+        return DictCompressResult(kept=items, original_count=len(items))
     score_info = f"K={len(kept)} by {score_field}" if score_field else f"first {len(kept)}"
     marker = (
         f"[SmartCompressed: {len(items)}\u2192{total} items, "
