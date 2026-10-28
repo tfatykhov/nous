@@ -2,7 +2,7 @@
 
 > **Status:** Planned
 > **Priority:** P1
-> **Depends on:** F016 (Context Pruning), Redis
+> **Depends on:** F016 (Context Pruning), Postgres (`heart.tool_cache`)
 
 ---
 
@@ -11,7 +11,7 @@
 Two complementary improvements to tool output handling that operate at **L0 (ingestion-time)** — before F016's age-based decay, before results ever enter `messages[]`.
 
 - **Phase 1 — SmartCompress:** Statistical ingestion-time compression. Preserves what matters (errors, outliers, scored items), adapts aggressively only when the signal is clear enough to know what to drop.
-- **Phase 2 — ReversibleCache:** Hash-keyed cache for non-re-fetchable tool outputs (`web_search`, `web_fetch`). When content is compressed, the original is stored in Redis and retrievable on demand via a `cache_retrieve` tool.
+- **Phase 2 — ReversibleCache:** Hash-keyed cache for non-re-fetchable tool outputs (`bash`, `web_search`, `web_fetch`, `dag_manage`). When content is compressed, the original is stored in Postgres (`heart.tool_cache`) and retrievable on demand via a `cache_retrieve` tool.
 
 These are additive to F016. SmartCompress reduces initial footprint so F016 pruning kicks in later and less aggressively. ReversibleCache closes the gap where F016's hard-clear permanently loses non-re-fetchable content.
 
@@ -155,22 +155,36 @@ NOUS_SMART_COMPRESS_ELBOW_THRESHOLD=0.3  # Score cliff to detect elbow
 
 `web_search` and `web_fetch` are **non-re-fetchable**: when F016 hard-clears them, the original results are permanently lost. Re-calling `web_search` would return different results (stale, different ranking). The model is left with only the regex-extracted facts (URLs, paths, key-values) from pre-prune extraction.
 
+`bash` is non-re-fetchable too: re-running a command is not guaranteed to reproduce its output, and it may be slow or have side effects. Before 2026-10-28 a cut bash result kept no original, so the lines SmartCompress omitted were lost.
+
 ### Solution
 
-When a non-re-fetchable tool result is compressed, store the original in Redis keyed by content hash. Inject a `cache_retrieve` tool so the model can get it back on demand.
+When a non-re-fetchable tool result is compressed, store the original in Postgres (`heart.tool_cache`) keyed by content hash. Inject a `cache_retrieve` tool so the model can get it back on demand.
+
+### As built (2026-10-28): every cut can be undone
+
+- **bash is cached.** `NON_REFETCHABLE_TOOLS` (`nous/api/tool_cache.py`) is `bash`, `web_search`, `web_fetch` and `dag_manage`. The original is stored as is, with no secret filtering: the cache is internal.
+- **The key is in the marker.** Once the cache write succeeds, the runner adds the key to the final marker, before the original size: `[SmartCompressed: 240→43 lines, 6 error/outlier preserved, order kept, gaps marked, cache_retrieve key 3f2a9c0b1d4e5f60718293a4b5c6d7e8, 12345 chars original]` (`add_cache_key` in `nous/api/smart_compress.py`). A bash `Exit code:` line stays last. If the write fails, the marker carries no key. The model can retrieve a result in the same turn it was cut, without waiting for the next turn's context hint.
+- **`lines` ranges.** `cache_retrieve(hash_key, lines="A-B")` returns lines A to B (1-based, inclusive; `"A–B"` with an en dash and `"A"` also work), numbered over `original_content.split("\n")`. This is the numbering of the gap markers, so the range in `[… result lines 61–118 omitted (58 lines) …]` returns exactly the omitted lines. The output starts with `[result lines A–B of N]`. An end past the last line is clipped. A start past the last line, a start below 1, a start after the end, or a malformed value returns a plain message that names N. With `query` as well, the range is taken first and then filtered.
+- **A 30,000-char cap per retrieval** (`_MAX_RETRIEVE_CHARS`). The header and the shown lines count toward it; the footer does not. Full or ranged output over the cap is cut after the last whole line that fits and ends with `[… result lines K–B not shown (M lines); call cache_retrieve with lines="K-B" …]`, so following the footers pages through the whole original. A single line longer than the cap is cut at the cap, and the footer says so; `cache_retrieve` cannot page within a line. `query` output keeps its 50-line / 20-item limits and is then cut at the cap with a plain footer.
+- **`cache_retrieve` output is never compressed.** `smart_compress()` passes it through in code, ahead of the configurable `smart_compress_exempt_tools`. Even the `[]` kill switch does not reach it.
+- **5 hints.** The Cached Results context section lists only the 5 newest entries of the session (by `compressed_at`), one line each, naming the key and saying `lines="A-B"` fetches a range.
+- **3-day purge.** Rows are deleted when their session ends (`session_ended`). A session that never ends was never cleaned up, so each insert also deletes the same agent's rows older than `CACHE_RETENTION` (3 days), in the insert's transaction. Another agent's rows are never touched.
 
 ---
 
 ### Cache Storage
 
+One `heart.tool_cache` row per cached original, unique on `(session_id, hash_key)`:
+
 ```
-Redis key:  nous:tool_cache:{session_id}:{SHA256(original_content)[:16]}
-TTL:        hard_clear_age × avg_turn_seconds (default: 15 × 120s = 30 min)
-Value:      {tool_name, tool_input, original_content, compressed_at, item_count}
+hash_key:   SHA256(original_content)[:32]
+Columns:    agent_id, session_id, tool_name, tool_input, original_content, compressed_at, item_count
+Cleanup:    on session_ended, plus a per-agent purge of rows older than 3 days on each insert
 ```
 
-**Non-re-fetchable tools (cached):** `web_search`, `web_fetch`, any future API-call tools
-**Re-fetchable tools (not cached):** `read_file`, `bash`, `run_python`, `list_files`
+**Non-re-fetchable tools (cached):** `bash`, `web_search`, `web_fetch`, `dag_manage`, any future API-call tools
+**Re-fetchable tools (not cached):** `read_file`, `run_python`, `list_files`
 
 ---
 
@@ -203,12 +217,12 @@ Added to the LLM's tool list **only when** there are active cache entries for th
 
 ### Context Hint
 
-When active cache entries exist, append to the "Context Safety" section:
+When active cache entries exist, a "Cached Results" section lists the 5 newest, one line each:
 
 ```
 Compressed results available:
-- [abc123de] web_search("PyJWT vulnerabilities 2026"): 47 items, 12 shown. Call cache_retrieve("abc123de") for more.
-- [def456gh] web_fetch("https://owasp.org/..."): 8,200 chars, summary shown. Call cache_retrieve("def456gh") for full content.
+- bash("cat -n build.log"): 241 items, cache_retrieve key 3f2a9c0b1d4e5f60718293a4b5c6d7e8; lines="A-B" fetches a range.
+- web_search("PyJWT vulnerabilities 2026"): 47 items, cache_retrieve key 0c1d2e3f405162738495a6b7c8d9e0f1; lines="A-B" fetches a range.
 ```
 
 ---
@@ -245,14 +259,14 @@ Turn N+5: context hint: "[abc123de] 47 items, 12 shown"
 | 1 | Crushability check + error preservation | ~60 | Prevents worst failure mode |
 | 2 | Adaptive K for `string_array` | ~80 | Biggest compression win for bash/grep |
 | 3 | `dict_array` score detection + top-K | ~60 | JSON API responses |
-| 4 | ReversibleCache (Redis store + TTL) | ~100 | Closes web_search gap |
+| 4 | ReversibleCache (Postgres `heart.tool_cache` + cleanup) | ~100 | Closes web_search gap |
 | 5 | `cache_retrieve` tool injection | ~80 | Makes cache usable |
 | 6 | BM25 search within cache | ~50 | Targeted retrieval |
 | 7 | `raw_text` structural section detection | ~80 | Large file compression |
 
 **Minimum viable:** Items 1-2 (140 LOC). Immediate wins with zero new infrastructure.
 **Full Phase 1:** Items 1-3 (200 LOC). Complete SmartCompress.
-**Full Phase 2:** Items 4-6 (230 LOC). Requires Redis (already in Nous infrastructure).
+**Full Phase 2:** Items 4-6 (230 LOC). Uses the existing Postgres database (`heart.tool_cache`).
 
 ---
 
