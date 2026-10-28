@@ -140,7 +140,7 @@ After:  imports + class definitions + constants + function signatures (no bodies
 
 ```env
 NOUS_SMART_COMPRESS_ENABLED=true
-NOUS_SMART_COMPRESS_MIN_CHARS=500      # Below this, never compress
+NOUS_SMART_COMPRESS_MIN_CHARS=8000     # Below this, never compress (500 until 2026-10-28)
 NOUS_SMART_COMPRESS_MAX_K=50           # Max items to keep per result
 NOUS_SMART_COMPRESS_ELBOW_THRESHOLD=0.3  # Score cliff to detect elbow
 ```

@@ -1110,7 +1110,14 @@ class Settings(BaseSettings):
 
     # SmartCompress (F020 Phase 1)
     smart_compress_enabled: bool = Field(default=True, description="Enable ingestion-time tool output compression")
-    smart_compress_min_chars: int = Field(default=500, description="Below this, never compress")
+    smart_compress_min_chars: int = Field(
+        default=8000,
+        description=(
+            "Below this, never compress. 8000, not 500: in 72 h of prod bash results, those under 2 KB "
+            "saved 19.6 K chars in all (87 of 113 by dedup alone) and those of 2-5 KB saved 92 K, while "
+            "every cut costs a re-read; 10-20 KB results saved 613 K."
+        ),
+    )
     smart_compress_max_k: int = Field(default=50, description="Max items to keep per compressed result")
     smart_compress_elbow_threshold: float = Field(default=0.3, description="Score cliff threshold for adaptive K")
     smart_compress_exempt_tools: list[str] = Field(

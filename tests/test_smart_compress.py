@@ -366,6 +366,46 @@ class TestOrderPreservingCompression:
             _walk(result.to_text().split("\n")[:-1], lines)
 
 
+class TestMinCharsDefault:
+    """Short results are left alone: below 8000 chars SmartCompress saved
+    little (bash, 72 h in prod: 113 results up to 2 KB saved 19.6 K chars in
+    all, 87 of them by dedup alone) and every cut costs a re-read."""
+
+    def test_default_is_8000(self):
+        assert Settings(_env_file=None).smart_compress_min_chars == 8000
+
+    @pytest.mark.asyncio
+    async def test_pilot_chunk_passes_through_at_defaults(self):
+        """The pilot's 60-line read (about 5 KB in prod) arrives untouched."""
+        settings = Settings(_env_file=None)
+        raw = "\n".join(_numbered_chunk()) + "\nExit code: 0"
+        assert 500 <= len(raw) < 8000
+
+        result = await smart_compress("bash", {}, raw, settings)
+
+        assert result.was_compressed is False
+        assert result.text == raw
+
+    @pytest.mark.asyncio
+    async def test_the_floor_is_the_only_difference(self):
+        """Same shape either side of the floor: below it passes through,
+        above it is compressed."""
+        settings = Settings(_env_file=None)
+
+        def rows(n: int) -> str:  # 77 chars + newline per row
+            return "\n".join(
+                f"{i:05d} | {'failed' if i % 10 == 0 else 'passed'} | " + "x" * 60 for i in range(n)
+            )
+
+        below, above = rows(100), rows(103)  # 7,799 and 8,033 chars
+        assert len(below) < 8000 <= len(above)
+        for text in (below, above):
+            assert is_crushable(text, min_chars=500)
+
+        assert (await smart_compress("bash", {}, below, settings)).was_compressed is False
+        assert (await smart_compress("bash", {}, above, settings)).was_compressed is True
+
+
 class TestCompactionReadsTheMarker:
     """compaction.py parses the original size from the LAST marker line. Run
     its real parser on a real compressed result."""
@@ -581,7 +621,8 @@ class TestSmartCompressEntryPoint:
         a lossless recovery path (FINDING 9) -- but the gap is exactly
         where an agent needs it most: a failed node's long, error-laden
         result. Built from the REAL gate conditions smart_compress checks,
-        not invented prose or a mock -- `is_crushable` requires >=500
+        not invented prose or a mock -- `is_crushable` requires at least
+        `smart_compress_min_chars` (8000 by default since 2026-10-28)
         chars AND an `_ERROR_PATTERNS` match (has_errors short-circuits
         the uniqueness check entirely); `compress_string_array` only
         drops content once there are MORE than `max_k` (default 50)
@@ -605,7 +646,7 @@ class TestSmartCompressEntryPoint:
         it again (the `[]` kill switch).
         """
         settings = Settings(_env_file=None, smart_compress_enabled=True, smart_compress_exempt_tools=[])
-        lines = [f"line {i}: processing step {i} completed" for i in range(60)]
+        lines = [f"line {i}: processing step {i} completed" for i in range(250)]
         lines.append("Traceback (most recent call last):")
         lines.append("RuntimeError: failed to complete the fix-stage retry")
         text = "\n".join(lines)
@@ -643,7 +684,7 @@ class TestExemptTools:
         can only be the exemption and not an incidental miss."""
         lines = [
             f"- [fact] memory item {i} recorded during session {i // 5}"
-            for i in range(120)
+            for i in range(200)
         ]
         lines.append("- [fact] the deploy failed on the first attempt")
         return "\n".join(lines)
@@ -803,7 +844,7 @@ class TestDagManageExempt:
             "  [-] verify (check, w1) — cancelled",
             "Summary:",
         ]
-        lines += [f"Paragraph {i}: migration step {i} {'failed' if i % 9 == 0 else 'finished'}." for i in range(120)]
+        lines += [f"Paragraph {i}: migration step {i} {'failed' if i % 9 == 0 else 'finished'}." for i in range(240)]
         return "\n".join(lines)
 
     def test_default_exempts_dag_manage(self):
