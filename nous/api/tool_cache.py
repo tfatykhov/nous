@@ -143,21 +143,70 @@ def _render_cached(content: str, query: str | None = None, lines: str | None = N
     `lines` numbers lines over `content.split("\\n")`, the numbering of the
     gap markers, and the output starts with "[result lines A–B of N]".
     `query` filters the whole content, or the range when both are given.
+    Every answer is held to _MAX_RETRIEVE_CHARS.
     """
+    all_lines = content.split("\n")
     if lines:
-        all_lines = content.split("\n")
         parsed = _parse_lines(lines, len(all_lines))
         if isinstance(parsed, str):
             return parsed
         a, b = parsed
         header = f"[result lines {a}–{b} of {len(all_lines)}]"
-        selected = "\n".join(all_lines[a - 1 : b])
         if query:
-            return f"{header}\n{_keyword_filter(selected, query)}"
-        return f"{header}\n{selected}"
+            selected = "\n".join(all_lines[a - 1 : b])
+            return _cap_plain(f"{header}\n{_keyword_filter(selected, query)}")
+        return _cap_lines(all_lines, a, b, header)
     if query:
-        return _keyword_filter(content, query)
-    return content
+        return _cap_plain(_keyword_filter(content, query))
+    return _cap_lines(all_lines, 1, len(all_lines), "")
+
+
+# One retrieval returns at most this many chars (the footer aside): a whole
+# large original would refill the context the cut was made to save.
+_MAX_RETRIEVE_CHARS = 30_000
+
+
+def _cap_lines(all_lines: list[str], a: int, b: int, header: str) -> str:
+    """`header` (if any), then lines a..b (1-based, inclusive), cut after the
+    last whole line that fits in _MAX_RETRIEVE_CHARS. A cut ends with a footer
+    naming the lines not shown and the `lines=` value that fetches them. When
+    not even line `a` fits, it is cut at the cap and the footer says so."""
+    shown = [header] if header else []
+    used = len(header)
+    n = a  # the next line to show
+    while n <= b:
+        cost = len(all_lines[n - 1]) + (1 if shown else 0)  # the line and its newline
+        if used + cost > _MAX_RETRIEVE_CHARS:
+            break
+        shown.append(all_lines[n - 1])
+        used += cost
+        n += 1
+    if n > b:
+        return "\n".join(shown)
+    if n > a:
+        return "\n".join([*shown, f"[… {_not_shown(n, b)} …]"])
+
+    # Not even line a fits: show its start, cut at the cap.
+    line = all_lines[a - 1]
+    room = _MAX_RETRIEVE_CHARS - used - (1 if shown else 0)
+    notes = [f"result line {a} cut at {room} of {len(line)} chars; cache_retrieve cannot page within a line"]
+    if a < b:
+        notes.append(_not_shown(a + 1, b))
+    return "\n".join([*shown, line[:room], f"[… {'; '.join(notes)} …]"])
+
+
+def _not_shown(k: int, b: int) -> str:
+    """The footer text for lines k..b left out by the cap."""
+    return f'result lines {k}–{b} not shown ({b - k + 1} lines); call cache_retrieve with lines="{k}-{b}"'
+
+
+def _cap_plain(text: str) -> str:
+    """A query answer held to _MAX_RETRIEVE_CHARS: cut at the cap (a filtered
+    JSON array is one line), with a plain footer."""
+    if len(text) <= _MAX_RETRIEVE_CHARS:
+        return text
+    footer = f"[… query result cut at {_MAX_RETRIEVE_CHARS} of {len(text)} chars; narrow the query …]"
+    return f"{text[:_MAX_RETRIEVE_CHARS]}\n{footer}"
 
 
 def _keyword_filter(content: str, query: str) -> str:

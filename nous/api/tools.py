@@ -2812,7 +2812,7 @@ _CACHE_RETRIEVE_SCHEMA = {
         "Retrieve the original of a compressed tool result: bash output as well as search and fetch results. "
         "Use when a [SmartCompressed: ...] marker names a 'cache_retrieve key' and you need what was cut. "
         "Pass lines=\"A-B\" with the numbers from a '[… result lines A–B omitted (N lines) …]' marker to get "
-        "exactly those lines."
+        "exactly those lines. A long answer is cut, and its last line names the lines= range for the rest."
     ),
     "type": "object",
     "properties": {

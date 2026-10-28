@@ -10,6 +10,7 @@ from nous.api.smart_compress import add_cache_key, smart_compress
 from nous.api.tool_cache import (
     cache_compressed_result,
     compute_hash_key,
+    _MAX_RETRIEVE_CHARS,
     _keyword_filter,
     _render_cached,
     NON_REFETCHABLE_TOOLS,
@@ -208,6 +209,134 @@ class TestLineRanges:
 
     def test_no_arguments_return_the_whole_original(self):
         assert _render_cached(self.CONTENT) == self.CONTENT
+
+
+_FOOTER_RE = re.compile(
+    r'^\[… result lines (\d+)–(\d+) not shown \((\d+) lines\); call cache_retrieve with lines="(\d+)-(\d+)" …\]$'
+)
+
+
+class TestRetrieveCap:
+    """One retrieval returns at most _MAX_RETRIEVE_CHARS (footer aside)."""
+
+    @staticmethod
+    def _wide(n: int) -> list[str]:
+        return [f"{i:5} " + "x" * 94 for i in range(1, n + 1)]  # 100 chars per line
+
+    def test_the_cap_is_30000(self):
+        assert _MAX_RETRIEVE_CHARS == 30_000
+
+    def test_a_result_at_the_cap_is_whole(self):
+        line = "y" * 99
+        content = "\n".join([line] * 400)[:_MAX_RETRIEVE_CHARS]
+        assert len(content) == _MAX_RETRIEVE_CHARS
+        assert _render_cached(content) == content
+        # One char more and the last (partial) line no longer fits.
+        out = _render_cached(content + "y").split("\n")
+        assert out[-1] == '[… result lines 301–301 not shown (1 lines); call cache_retrieve with lines="301-301" …]'
+
+    def test_a_full_result_over_the_cap_ends_with_the_next_range(self):
+        lines = self._wide(1000)  # 100,999 chars
+        out = _render_cached("\n".join(lines)).split("\n")
+
+        shown, footer = out[:-1], out[-1]
+        m = _FOOTER_RE.match(footer)
+        assert m, footer
+        k, b, n, k2, b2 = (int(g) for g in m.groups())
+        assert shown == lines[: k - 1], "whole lines only, in order"
+        assert len("\n".join(shown)) <= _MAX_RETRIEVE_CHARS
+        assert len("\n".join(lines[:k])) > _MAX_RETRIEVE_CHARS, "line K would not have fit"
+        assert (k, b, n, k2, b2) == (k, 1000, 1000 - k + 1, k, 1000)
+
+    def test_following_the_footers_rebuilds_the_original(self):
+        lines = self._wide(1000)
+        content = "\n".join(lines)
+        rebuilt = _render_cached(content).split("\n")
+        calls = 1
+        while (m := _FOOTER_RE.match(rebuilt[-1])) is not None:
+            rebuilt.pop()
+            header, *page = _render_cached(content, lines=f"{m.group(4)}-{m.group(5)}").split("\n")
+            assert header == f"[result lines {m.group(4)}–{m.group(5)} of 1000]"
+            assert len("\n".join([header, *page])) <= _MAX_RETRIEVE_CHARS + 200  # one footer at most
+            rebuilt.extend(page)
+            calls += 1
+        assert rebuilt == lines
+        assert calls == 4  # 100,999 chars in pages of at most 30,000
+
+    def test_a_ranged_result_over_the_cap_names_the_rest_of_its_range(self):
+        lines = self._wide(1000)
+        out = _render_cached("\n".join(lines), lines="101-900").split("\n")
+
+        assert out[0] == "[result lines 101–900 of 1000]"
+        m = _FOOTER_RE.match(out[-1])
+        assert m, out[-1]
+        k = int(m.group(1))
+        assert out[1:-1] == lines[100 : k - 1]
+        assert len("\n".join(out[:-1])) <= _MAX_RETRIEVE_CHARS
+        assert out[-1] == (
+            f'[… result lines {k}–900 not shown ({900 - k + 1} lines); call cache_retrieve with lines="{k}-900" …]'
+        )
+
+    def test_a_single_line_over_the_cap_is_cut_at_the_cap(self):
+        long = "z" * 50_000
+        content = "\n".join(["row 1", "row 2", long, "row 4", "row 5"])
+
+        # The full result stops before it, whole lines only.
+        assert _render_cached(content).split("\n") == [
+            "row 1", "row 2",
+            '[… result lines 3–5 not shown (3 lines); call cache_retrieve with lines="3-5" …]',
+        ]
+
+        # Asked for, it is cut at the cap and the footer says so, then names the rest.
+        out = _render_cached(content, lines="3-5").split("\n")
+        header = "[result lines 3–5 of 5]"
+        room = _MAX_RETRIEVE_CHARS - len(header) - 1
+        assert out[0] == header
+        assert out[1] == "z" * room
+        assert len("\n".join(out[:2])) == _MAX_RETRIEVE_CHARS
+        assert out[2] == (
+            f"[… result line 3 cut at {room} of 50000 chars; cache_retrieve cannot page within a line; "
+            'result lines 4–5 not shown (2 lines); call cache_retrieve with lines="4-5" …]'
+        )
+
+        # Alone, the footer has nothing more to name.
+        out = _render_cached(content, lines="3").split("\n")
+        assert out[2] == f"[… result line 3 cut at {room} of 50000 chars; cache_retrieve cannot page within a line …]"
+
+    def test_a_one_line_original_over_the_cap(self):
+        content = "j" * 40_000  # a one-line JSON blob, say
+        out = _render_cached(content).split("\n")
+        assert out == [
+            "j" * _MAX_RETRIEVE_CHARS,
+            "[… result line 1 cut at 30000 of 40000 chars; cache_retrieve cannot page within a line …]",
+        ]
+
+    def test_query_output_keeps_its_line_limit_and_gets_the_cap(self):
+        content = "\n".join(f"match {i} " + "q" * 990 for i in range(100))  # ~1,000 chars per line
+        out = _render_cached(content, query="match")
+
+        shown, footer = out.rsplit("\n", 1)
+        assert len(shown) == _MAX_RETRIEVE_CHARS
+        full = _keyword_filter(content, "match")
+        assert len(full.split("\n")) == 50  # the existing 50-line limit still applies first
+        assert shown == full[:_MAX_RETRIEVE_CHARS]
+        assert footer == f"[… query result cut at 30000 of {len(full)} chars; narrow the query …]"
+
+    def test_query_output_keeps_its_item_limit_and_gets_the_cap(self):
+        items = [{"title": f"match {i}", "body": "b" * 3000} for i in range(30)]
+        out = _render_cached(json.dumps(items), query="match")
+
+        shown, footer = out.rsplit("\n", 1)
+        full = _keyword_filter(json.dumps(items), "match")
+        assert len(json.loads(full)) == 20  # the existing 20-item limit still applies first
+        assert shown == full[:_MAX_RETRIEVE_CHARS]
+        assert footer.startswith("[… query result cut at 30000 of ")
+
+    def test_a_ranged_query_gets_the_cap(self):
+        content = "\n".join(f"match {i} " + "q" * 990 for i in range(100))
+        out = _render_cached(content, lines="1-80", query="match")
+        assert out.startswith("[result lines 1–80 of 100]\n")
+        assert out.rsplit("\n", 1)[1].startswith("[… query result cut at 30000 of ")
 
 
 class TestFrameToolAccess:
