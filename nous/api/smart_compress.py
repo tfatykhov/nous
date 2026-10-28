@@ -123,15 +123,21 @@ def extract_preserved_lines(lines: list[str]) -> list[str]:
 
 @dataclass
 class CompressResult:
-    """Result of compression — kept items + preserved items + marker."""
+    """Result of compression: the kept lines in original order, plus a marker.
+
+    `kept` (lines without an error word) and `preserved` (error-word lines)
+    are disjoint by position. `body` is what is emitted: every kept line in
+    its original order, with one gap line in place of each omitted run.
+    """
     kept: list[str] = field(default_factory=list)
     preserved: list[str] = field(default_factory=list)
     marker: str = ""
     original_count: int = 0
+    body: list[str] = field(default_factory=list)
 
     def to_text(self) -> str:
-        """Assemble compressed output."""
-        parts = list(dict.fromkeys(self.preserved + self.kept))  # Dedup, preserve order
+        """Assemble the output: the body, then the marker. Never dedups."""
+        parts = list(self.body)
         if self.marker:
             parts.append(self.marker)
         return "\n".join(parts)
@@ -153,67 +159,88 @@ def _score_line(line: str) -> float:
     return score
 
 
+# Score differences carry float noise: 0.8 - 0.5 == 0.30000000000000004,
+# which tripped a 0.3 elbow, gave K=1 and a negative mid count, and dropped
+# one arbitrary line. A cliff must clear the threshold by more than noise.
+_ELBOW_EPSILON = 1e-9
+# Floor for the elbow's K, so head + tail + mid is a real budget.
+_MIN_K = 10
+
+
+def _gap_line(start: int, end: int) -> str:
+    """The line standing in for omitted lines [start, end) (0-based), named
+    as 1-based line numbers of the result. It must never start with
+    "[SmartCompressed:": compaction parses that prefix as the summary marker."""
+    return f"[\u2026 lines {start + 1}\u2013{end} omitted ({end - start} lines) \u2026]"
+
+
 def compress_string_array(
     lines: list[str], max_k: int = 50, elbow_threshold: float = 0.3,
 ) -> CompressResult:
     """Compress newline-separated output (bash, grep, file listings).
 
-    Preserves errors, keeps top-K by relevance score, includes tail lines.
+    At most `max_k` lines: returned unchanged, no marker. Otherwise keeps
+    every error-word line, then K other lines: the head (30%), the tail
+    (15%) and the highest-`_score_line` lines for the rest, K set by the
+    score elbow. Kept lines are emitted in their ORIGINAL order with one gap
+    line per omitted run, and nothing is deduplicated.
     """
+    unchanged = CompressResult(kept=list(lines), body=list(lines), original_count=len(lines))
     if len(lines) <= max_k:
-        return CompressResult(
-            kept=lines, preserved=[], marker="", original_count=len(lines),
-        )
+        return unchanged
 
-    # 1. Extract hard-preserved lines
-    preserved = extract_preserved_lines(lines)
-    preserved_set = set(preserved)
+    # 1. Error-word lines are always kept.
+    error_idx = {i for i, ln in enumerate(lines) if _ERROR_PATTERNS.search(ln)}
+    others = [i for i in range(len(lines)) if i not in error_idx]  # original order
 
-    # 2. Score remaining lines
-    scored = [
-        (i, ln, _score_line(ln))
-        for i, ln in enumerate(lines)
-        if ln not in preserved_set
-    ]
-    scored.sort(key=lambda x: x[2], reverse=True)
+    # 2. Rank the others by score; ties by position.
+    scores = {i: _score_line(lines[i]) for i in others}
+    ranked = sorted(others, key=lambda i: (-scores[i], i))
 
-    # 3. Find elbow (score cliff)
+    # 3. Find elbow (score cliff), then floor K.
     k = max_k
-    for i in range(1, len(scored)):
-        if scored[i - 1][2] - scored[i][2] > elbow_threshold:
-            k = min(i, max_k)
+    for n in range(1, len(ranked)):
+        if scores[ranked[n - 1]] - scores[ranked[n]] > elbow_threshold + _ELBOW_EPSILON:
+            k = min(n, max_k)
             break
+    k = max(k, min(_MIN_K, max_k))
 
-    # 4. Allocate: 30% from start, 15% from tail, rest = highest scored
+    # 4. Allocate: 30% from start, 15% from tail, rest = highest scored.
     head_count = max(1, int(k * 0.30))
     tail_count = max(1, int(k * 0.15))
-    mid_count = k - head_count - tail_count
+    mid_count = max(0, k - head_count - tail_count)
+    keep = set(others[:head_count]) | set(others[-tail_count:])
+    keep |= set([i for i in ranked if i not in keep][:mid_count])
+    # A gap line costs a line: never use one to hide a single line.
+    chosen = keep | error_idx
+    keep |= {i for i in others if i not in chosen and i - 1 in chosen and i + 1 in chosen}
 
-    # Head lines (by original position)
-    non_preserved = [(i, ln) for i, ln, _s in scored]
-    by_position = sorted(non_preserved, key=lambda x: x[0])
-    head = [ln for _, ln in by_position[:head_count]]
+    emitted = sorted(keep | error_idx)
+    if len(emitted) == len(lines):
+        return unchanged
 
-    # Tail lines (last N from original)
-    tail = [ln for _, ln in by_position[-tail_count:]]
+    # 5. Emit in original order, one gap line per omitted run. The first and
+    # last lines are always kept (head/tail or error), so gaps are interior.
+    body: list[str] = []
+    cursor = 0
+    for i in emitted:
+        if i > cursor:
+            body.append(_gap_line(cursor, i))
+        body.append(lines[i])
+        cursor = i + 1
 
-    # Mid: highest scored not already in head/tail
-    head_tail_set = set(head + tail)
-    mid = [ln for _, ln, _s in scored if ln not in head_tail_set][:mid_count]
-
-    kept = head + mid + tail
-
-    total_kept = len(kept) + len(preserved)
+    preserved = [lines[i] for i in sorted(error_idx)]
     marker = (
-        f"[SmartCompressed: {len(lines)}\u2192{total_kept} lines, "
-        f"{len(preserved)} error/outlier preserved]"
+        f"[SmartCompressed: {len(lines)}\u2192{len(emitted)} lines, "
+        f"{len(preserved)} error/outlier preserved, order kept, gaps marked]"
     )
 
     return CompressResult(
-        kept=kept,
+        kept=[lines[i] for i in sorted(keep)],
         preserved=preserved,
         marker=marker,
         original_count=len(lines),
+        body=body,
     )
 
 
@@ -329,9 +356,8 @@ async def smart_compress(
     # #179: bash_tool appends an authoritative trailing "Exit code: N"
     # status line to EVERY result. Detach it before crushability checks,
     # classification, and compression — it breaks DICT_ARRAY json parsing,
-    # and line-dedup in to_text() keeps the FIRST occurrence so a quoted
-    # twin earlier in the output could displace the real status line from
-    # the tail — then deterministically re-attach it as the final line.
+    # and compression could cut it from the tail — then deterministically
+    # re-attach it as the final line, after the marker.
     status_line: str | None = None
     body_text = result_text
     stripped_tail = result_text.rstrip()

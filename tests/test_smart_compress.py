@@ -1,6 +1,8 @@
 """Tests for SmartCompress ingestion-time compression."""
 
 import json
+import re
+
 import pytest
 from nous.api.smart_compress import (
     classify_content,
@@ -134,6 +136,264 @@ class TestStringArrayCompression:
         assert len(text.split("\n")) < 100
 
 
+# --- Order preservation, gap markers, no dedup (2026-10-28) ---
+
+_GAP_RE = re.compile(r"^\[… lines (\d+)–(\d+) omitted \((\d+) lines\) …\]$")
+
+
+def _numbered_chunk() -> list[str]:
+    """The pilot's read, `sed -n 1,60p FILE | cat -n`: "failed" on line 37 and
+    a URL on line 52. Before the fix it came back as [37, 1, 52, 2, ...] with
+    line 59 dropped."""
+    steps = []
+    for i in range(1, 61):
+        if i % 6 == 0:
+            text = ""
+        elif i == 37:
+            text = "If a fetch failed, log it in the BLOCKED LEDGER and move on."
+        elif i == 52:
+            text = "See https://example.com/style-guide for the house style."
+        else:
+            text = f"Step {i}: do the thing described for this step and keep going."
+        steps.append(f"{i:6}\t{text}")
+    return steps
+
+
+def _walk(body: list[str], original: list[str]) -> list[tuple[int, int]]:
+    """Check that `body` is `original` in its original order, with every omitted
+    run replaced by ONE gap line naming its exact 1-based range. Returns the gaps.
+
+    This is the whole contract in one walk: no reordering, no duplicate, no
+    silent drop, no adjacent gaps, a gap's range and count are exact, and no
+    gap hides a single line (the gap line would cost as much as the line).
+    """
+    cursor = 0  # 0-based index of the next original line expected
+    gaps: list[tuple[int, int]] = []
+    previous_was_gap = False
+    for line in body:
+        m = _GAP_RE.match(line)
+        if m:
+            a, b, n = (int(g) for g in m.groups())
+            assert not previous_was_gap, f"two gap lines in a row at {a}"
+            assert a == cursor + 1, f"gap starts at {a}, expected {cursor + 1}"
+            assert b > a and n == b - a + 1, line
+            gaps.append((a, b))
+            cursor = b
+            previous_was_gap = True
+        else:
+            assert cursor < len(original), f"extra line {line!r}"
+            assert line == original[cursor], (
+                f"line {cursor + 1}: expected {original[cursor]!r}, got {line!r}"
+            )
+            cursor += 1
+            previous_was_gap = False
+    assert cursor == len(original), f"stopped at line {cursor} of {len(original)}"
+    return gaps
+
+
+def _body(text: str) -> list[str]:
+    """The compressed body: everything before the final marker (and exit line)."""
+    lines = text.split("\n")
+    if lines[-1].startswith("Exit code: "):
+        lines = lines[:-1]
+    assert lines[-1].startswith("[SmartCompressed:"), lines[-1]
+    return lines[:-1]
+
+
+class TestOrderPreservingCompression:
+    """Kept lines come out in their original order, each omitted run is one
+    gap line with its exact range, and nothing is deduplicated."""
+
+    def test_numbered_chunk_keeps_original_order(self):
+        chunk = _numbered_chunk()
+        result = compress_string_array(chunk, max_k=20)
+        body = result.to_text().split("\n")[:-1]
+
+        gaps = _walk(body, chunk)
+        assert gaps, "a cut must have happened at max_k=20"
+        numbers = [int(ln.split("\t")[0]) for ln in body if not _GAP_RE.match(ln)]
+        assert numbers == sorted(numbers)
+        assert 37 in numbers  # the error-word line, in place
+        assert numbers[0] == 1 and numbers[-1] == 60  # head and tail
+
+    @pytest.mark.asyncio
+    async def test_numbered_chunk_through_smart_compress_keeps_order(self):
+        settings = Settings(
+            _env_file=None, smart_compress_enabled=True, smart_compress_min_chars=100,
+            smart_compress_max_k=20,
+        )
+        chunk = _numbered_chunk()
+        raw = "\n".join(chunk) + "\nExit code: 0"
+
+        result = await smart_compress("bash", {"command": "sed -n 1,60p f | cat -n"}, raw, settings)
+
+        assert result.was_compressed is True
+        lines = result.text.split("\n")
+        assert lines[-1] == "Exit code: 0"
+        _walk(_body(result.text), chunk)
+
+    def test_gap_markers_name_exact_ranges(self):
+        lines = [f"row {i}" for i in range(1, 101)]
+        lines[49] = "ERROR: row 50 failed"
+        result = compress_string_array(lines, max_k=10)
+
+        # K=10 non-error lines: head 3 + tail 1 + mid 6 (ties by position),
+        # plus the error line in place.
+        assert result.to_text().split("\n")[:-1] == [
+            "row 1", "row 2", "row 3", "row 4", "row 5", "row 6", "row 7", "row 8", "row 9",
+            "[… lines 10–49 omitted (40 lines) …]",
+            "ERROR: row 50 failed",
+            "[… lines 51–99 omitted (49 lines) …]",
+            "row 100",
+        ]
+
+    def test_mixed_scores_obey_the_walk(self):
+        """Lines of every score class (error, URL, path, digit, plain, blank)
+        interleaved: the walk holds whatever the ranking picks."""
+        kinds = [
+            lambda i: f"ERROR: step {i} failed",
+            lambda i: f"see https://example.com/{i}",
+            lambda i: "edit /src/module.py",
+            lambda i: f"value {i}",
+            lambda i: "plain words only",
+            lambda i: "",
+        ]
+        lines = [kinds[(i * 7) % len(kinds)](i) for i in range(300)]
+        result = compress_string_array(lines, max_k=30)
+        body = result.to_text().split("\n")[:-1]
+
+        gaps = _walk(body, lines)
+        assert gaps
+        for line in body:
+            assert not line.startswith("[SmartCompressed:")
+
+    def test_repeated_rows_are_not_deduplicated(self):
+        lines = ["src/module.py:10: match"] * 80 + [f"src/file_{i}.py:10: match" for i in range(120)]
+        result = compress_string_array(lines, max_k=10)
+        body = result.to_text().split("\n")[:-1]
+
+        _walk(body, lines)
+        # Head 3 + mid 6 fall on the repeated rows: all nine are emitted.
+        assert body.count("src/module.py:10: match") == 9
+        assert len(result.kept) == 10
+
+    def test_kept_and_preserved_are_disjoint_even_for_repeated_error_lines(self):
+        lines = ["ERROR: retry failed"] * 5 + [f"row {i}" for i in range(100)]
+        result = compress_string_array(lines, max_k=10)
+        body = result.to_text().split("\n")[:-1]
+
+        _walk(body, lines)
+        assert result.preserved == ["ERROR: retry failed"] * 5
+        assert "ERROR: retry failed" not in result.kept
+        assert body.count("ERROR: retry failed") == 5
+
+    def test_at_most_max_k_lines_is_a_passthrough(self):
+        """Repeated rows in a short result came back as 3 of 10 rows with no
+        marker. At most max_k lines: the input, unchanged."""
+        table = ["id | status", "---|---"] + ["7 | ok"] * 5 + ["8 | failed"] + ["9 | ok"] * 3
+        exactly_max_k = ["dup"] * 20 + [f"line {i}" for i in range(29)] + ["ERROR: x"]
+        assert len(exactly_max_k) == 50
+        for lines in (table, exactly_max_k):
+            result = compress_string_array(lines, max_k=50)
+            assert result.marker == ""
+            assert result.to_text() == "\n".join(lines)
+
+    @pytest.mark.asyncio
+    async def test_short_table_passes_through_smart_compress_unchanged(self):
+        settings = Settings(_env_file=None, smart_compress_enabled=True, smart_compress_min_chars=100)
+        table = "\n".join(
+            ["id | status", "---|---"] + ["7 | ok"] * 5 + ["8 | failed"] + ["9 | ok"] * 3
+        ) + "\n" + "x" * 400 + "\nExit code: 0"
+        assert is_crushable(table, min_chars=100)
+
+        result = await smart_compress("bash", {"command": "psql"}, table, settings)
+
+        assert result.was_compressed is False
+        assert result.text == table
+
+    def test_float_noise_does_not_make_a_cliff(self):
+        """A URL line (0.8) among digit lines (0.5): 0.8 - 0.5 is
+        0.30000000000000004 in floats, which tripped the 0.3 elbow, gave K=1
+        and mid_count=-1, and `[:-1]` dropped one arbitrary line (line 59)."""
+        chunk = _numbered_chunk()
+        result = compress_string_array(chunk, max_k=50, elbow_threshold=0.3)
+        body = result.to_text().split("\n")[:-1] if result.marker else chunk
+
+        gaps = _walk(body, chunk)  # every gap hides at least 2 lines
+        # Either nothing was cut, or the cut is to the budget (K=50 non-error
+        # lines, plus any single line between two kept ones), never K=1.
+        if gaps:
+            assert 50 <= len(result.kept) < 59
+
+    @pytest.mark.asyncio
+    async def test_degenerate_k_through_smart_compress_drops_no_single_line(self):
+        settings = Settings(_env_file=None, smart_compress_enabled=True, smart_compress_min_chars=100)
+        chunk = _numbered_chunk()
+        raw = "\n".join(chunk) + "\nExit code: 0"
+
+        result = await smart_compress("bash", {}, raw, settings)
+
+        if result.was_compressed:
+            _walk(_body(result.text), chunk)  # in order, every gap >= 2 lines
+        else:
+            assert result.text == raw
+
+    def test_real_cliff_below_head_plus_tail_uses_the_floor(self):
+        """A genuine cliff after the first line (one URL, 0.8, then plain
+        lines, 0.3) gives K=1 < head + tail + 1. K is floored, so the cut is
+        to a real budget and mid_count is never negative."""
+        lines = ["see https://example.com/a"] + ["plain words only here"] * 99
+        result = compress_string_array(lines, max_k=50)
+        body = result.to_text().split("\n")[:-1]
+
+        _walk(body, lines)
+        assert len(result.kept) == 10
+        assert body.count("plain words only here") == 9
+
+    def test_a_single_omitted_line_is_kept_not_replaced_by_a_gap(self):
+        """51 equal lines at max_k=50: the budget would omit exactly one line.
+        A gap line would cost as much as that line, so it is kept, and with
+        nothing left to omit the input comes back unchanged."""
+        lines = [f"row {i}" for i in range(51)]
+        result = compress_string_array(lines, max_k=50)
+        assert result.marker == ""
+        assert result.to_text() == "\n".join(lines)
+
+    def test_tiny_max_k_never_goes_negative(self):
+        lines = [f"row {i}" for i in range(20)]
+        for max_k in (1, 2, 3):
+            result = compress_string_array(lines, max_k=max_k)
+            _walk(result.to_text().split("\n")[:-1], lines)
+
+
+class TestCompactionReadsTheMarker:
+    """compaction.py parses the original size from the LAST marker line. Run
+    its real parser on a real compressed result."""
+
+    @pytest.mark.asyncio
+    async def test_compaction_parser_reads_original_chars(self):
+        from nous.api.compaction import ConversationCompactor
+
+        settings = Settings(
+            _env_file=None, smart_compress_enabled=True, smart_compress_min_chars=100,
+            smart_compress_max_k=10,
+        )
+        lines = [f"row {i}" for i in range(1, 301)]
+        lines[149] = "ERROR: row 150 failed"
+        raw = "\n".join(lines) + "\nExit code: 1"
+
+        result = await smart_compress("bash", {}, raw, settings)
+
+        assert result.was_compressed is True
+        out = result.text.split("\n")
+        assert out[-1] == "Exit code: 1"
+        assert out[-2].startswith("[SmartCompressed:")
+        assert sum(1 for ln in out if ln.startswith("[SmartCompressed:")) == 1
+        assert ConversationCompactor._SMARTCOMPRESS_CHARS_RE.findall(result.text) == [str(len(raw))]
+        compactor = ConversationCompactor(settings)
+        assert compactor._original_result_size(result.text) == len(raw)
+
+
 # --- Task 4: Dict Array Compression ---
 
 
@@ -255,10 +515,11 @@ class TestSmartCompressEntryPoint:
         assert isinstance(parsed, list) and len(parsed) >= 5
 
     @pytest.mark.asyncio
-    async def test_dedup_does_not_displace_trailing_exit_line(self):
-        """#179 review: to_text() dedups identical lines keeping the FIRST
-        occurrence — a quoted 'Exit code: 1' early in the output must not
-        displace the authoritative trailing status line from the tail."""
+    async def test_quoted_exit_line_kept_in_place_and_trailing_exit_line_last(self):
+        """#179 review: a quoted 'Exit code: 1' early in the output must not
+        displace the authoritative trailing status line from the tail. Since
+        2026-10-28 nothing is deduplicated: the quoted line stays in place AND
+        the detached status line is re-attached as the final line."""
         settings = Settings(
             smart_compress_enabled=True,
             smart_compress_min_chars=100,
@@ -270,7 +531,12 @@ class TestSmartCompressEntryPoint:
         text = "\n".join(lines) + "\nExit code: 1"
         result = await smart_compress("bash", {}, text, settings)
         assert result.was_compressed is True
-        assert result.text.rstrip().split("\n")[-1] == "Exit code: 1"
+        out = result.text.split("\n")
+        assert out[-1] == "Exit code: 1"
+        assert out[-2].startswith("[SmartCompressed:")
+        assert out[1] == "Exit code: 1"  # the quoted line, in its original place
+        assert out.count("Exit code: 1") == 2
+        _walk(_body(result.text), lines)
 
     @pytest.mark.asyncio
     async def test_marker_records_original_chars(self):
