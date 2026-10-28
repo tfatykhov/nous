@@ -138,7 +138,7 @@ class TestStringArrayCompression:
 
 # --- Order preservation, gap markers, no dedup (2026-10-28) ---
 
-_GAP_RE = re.compile(r"^\[… lines (\d+)–(\d+) omitted \((\d+) lines\) …\]$")
+_GAP_RE = re.compile(r"^\[… result lines (\d+)–(\d+) omitted \((\d+) lines\) …\]$")
 
 
 def _numbered_chunk() -> list[str]:
@@ -241,9 +241,9 @@ class TestOrderPreservingCompression:
         # plus the error line in place.
         assert result.to_text().split("\n")[:-1] == [
             "row 1", "row 2", "row 3", "row 4", "row 5", "row 6", "row 7", "row 8", "row 9",
-            "[… lines 10–49 omitted (40 lines) …]",
+            "[… result lines 10–49 omitted (40 lines) …]",
             "ERROR: row 50 failed",
-            "[… lines 51–99 omitted (49 lines) …]",
+            "[… result lines 51–99 omitted (49 lines) …]",
             "row 100",
         ]
 

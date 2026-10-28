@@ -169,9 +169,10 @@ _MIN_K = 10
 
 def _gap_line(start: int, end: int) -> str:
     """The line standing in for omitted lines [start, end) (0-based), named
-    as 1-based line numbers of the result. It must never start with
+    as 1-based line numbers of the result ("result lines", so they are not
+    read as file lines after `sed -n 'X,Yp'`). It must never start with
     "[SmartCompressed:": compaction parses that prefix as the summary marker."""
-    return f"[\u2026 lines {start + 1}\u2013{end} omitted ({end - start} lines) \u2026]"
+    return f"[\u2026 result lines {start + 1}\u2013{end} omitted ({end - start} lines) \u2026]"
 
 
 def compress_string_array(
