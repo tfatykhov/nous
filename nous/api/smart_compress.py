@@ -165,6 +165,9 @@ def _score_line(line: str) -> float:
 _ELBOW_EPSILON = 1e-9
 # Floor for the elbow's K, so head + tail + mid is a real budget.
 _MIN_K = 10
+# Gap lines cost tokens: when the cut body (gap lines included) still holds
+# this fraction of the input's chars, the honest output is the original.
+_MAX_BODY_FRACTION = 0.8
 
 
 def _gap_line(start: int, end: int) -> str:
@@ -229,6 +232,8 @@ def compress_string_array(
             body.append(_gap_line(cursor, i))
         body.append(lines[i])
         cursor = i + 1
+    if len("\n".join(body)) >= _MAX_BODY_FRACTION * len("\n".join(lines)):
+        return unchanged
 
     preserved = [lines[i] for i in sorted(error_idx)]
     marker = (

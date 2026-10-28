@@ -9,6 +9,7 @@ from nous.api.smart_compress import (
     is_crushable,
     ContentType,
     extract_preserved_lines,
+    CompressResult,
     compress_string_array,
     compress_dict_array,
     smart_compress,
@@ -141,12 +142,12 @@ class TestStringArrayCompression:
 _GAP_RE = re.compile(r"^\[… result lines (\d+)–(\d+) omitted \((\d+) lines\) …\]$")
 
 
-def _numbered_chunk() -> list[str]:
+def _numbered_chunk(n: int = 60) -> list[str]:
     """The pilot's read, `sed -n 1,60p FILE | cat -n`: "failed" on line 37 and
     a URL on line 52. Before the fix it came back as [37, 1, 52, 2, ...] with
     line 59 dropped."""
     steps = []
-    for i in range(1, 61):
+    for i in range(1, n + 1):
         if i % 6 == 0:
             text = ""
         elif i == 37:
@@ -191,6 +192,12 @@ def _walk(body: list[str], original: list[str]) -> list[tuple[int, int]]:
     return gaps
 
 
+def _cut(result: CompressResult) -> list[str]:
+    """The body of a result that took the cut path; fails on a passthrough."""
+    assert result.marker, "expected a cut, got a passthrough"
+    return result.to_text().split("\n")[:-1]
+
+
 def _body(text: str) -> list[str]:
     """The compressed body: everything before the final marker (and exit line)."""
     lines = text.split("\n")
@@ -207,7 +214,7 @@ class TestOrderPreservingCompression:
     def test_numbered_chunk_keeps_original_order(self):
         chunk = _numbered_chunk()
         result = compress_string_array(chunk, max_k=20)
-        body = result.to_text().split("\n")[:-1]
+        body = _cut(result)
 
         gaps = _walk(body, chunk)
         assert gaps, "a cut must have happened at max_k=20"
@@ -239,7 +246,7 @@ class TestOrderPreservingCompression:
 
         # K=10 non-error lines: head 3 + tail 1 + mid 6 (ties by position),
         # plus the error line in place.
-        assert result.to_text().split("\n")[:-1] == [
+        assert _cut(result) == [
             "row 1", "row 2", "row 3", "row 4", "row 5", "row 6", "row 7", "row 8", "row 9",
             "[… result lines 10–49 omitted (40 lines) …]",
             "ERROR: row 50 failed",
@@ -260,7 +267,7 @@ class TestOrderPreservingCompression:
         ]
         lines = [kinds[(i * 7) % len(kinds)](i) for i in range(300)]
         result = compress_string_array(lines, max_k=30)
-        body = result.to_text().split("\n")[:-1]
+        body = _cut(result)
 
         gaps = _walk(body, lines)
         assert gaps
@@ -270,7 +277,7 @@ class TestOrderPreservingCompression:
     def test_repeated_rows_are_not_deduplicated(self):
         lines = ["src/module.py:10: match"] * 80 + [f"src/file_{i}.py:10: match" for i in range(120)]
         result = compress_string_array(lines, max_k=10)
-        body = result.to_text().split("\n")[:-1]
+        body = _cut(result)
 
         _walk(body, lines)
         # Head 3 + mid 6 fall on the repeated rows: all nine are emitted.
@@ -280,7 +287,7 @@ class TestOrderPreservingCompression:
     def test_kept_and_preserved_are_disjoint_even_for_repeated_error_lines(self):
         lines = ["ERROR: retry failed"] * 5 + [f"row {i}" for i in range(100)]
         result = compress_string_array(lines, max_k=10)
-        body = result.to_text().split("\n")[:-1]
+        body = _cut(result)
 
         _walk(body, lines)
         assert result.preserved == ["ERROR: retry failed"] * 5
@@ -314,29 +321,83 @@ class TestOrderPreservingCompression:
     def test_float_noise_does_not_make_a_cliff(self):
         """A URL line (0.8) among digit lines (0.5): 0.8 - 0.5 is
         0.30000000000000004 in floats, which tripped the 0.3 elbow, gave K=1
-        and mid_count=-1, and `[:-1]` dropped one arbitrary line (line 59)."""
-        chunk = _numbered_chunk()
+        and mid_count=-1, and `[:-1]` dropped one arbitrary line (line 59 of
+        the 60-line read). The same numbered shape at 200 lines, so the cut
+        path is taken: the cut is to the budget (K=50), never K=1 or K=10."""
+        chunk = _numbered_chunk(200)
         result = compress_string_array(chunk, max_k=50, elbow_threshold=0.3)
-        body = result.to_text().split("\n")[:-1] if result.marker else chunk
 
-        gaps = _walk(body, chunk)  # every gap hides at least 2 lines
-        # Either nothing was cut, or the cut is to the budget (K=50 non-error
-        # lines, plus any single line between two kept ones), never K=1.
-        if gaps:
-            assert 50 <= len(result.kept) < 59
+        _walk(_cut(result), chunk)  # in order, every gap >= 2 lines
+        # K=50 non-error lines, plus any single line between two kept ones.
+        assert 50 <= len(result.kept) < 60
 
     @pytest.mark.asyncio
     async def test_degenerate_k_through_smart_compress_drops_no_single_line(self):
         settings = Settings(_env_file=None, smart_compress_enabled=True, smart_compress_min_chars=100)
-        chunk = _numbered_chunk()
+        chunk = _numbered_chunk(200)
         raw = "\n".join(chunk) + "\nExit code: 0"
 
         result = await smart_compress("bash", {}, raw, settings)
 
-        if result.was_compressed:
-            _walk(_body(result.text), chunk)  # in order, every gap >= 2 lines
-        else:
-            assert result.text == raw
+        assert result.was_compressed is True
+        assert result.text.split("\n")[-1] == "Exit code: 0"
+        _walk(_body(result.text), chunk)  # in order, every gap >= 2 lines
+
+    @pytest.mark.asyncio
+    async def test_numbered_60_line_read_at_max_k_50_passes_through_whole(self):
+        """The original symptom, with the size gate open: the 60-line read
+        would lose about 8 lines (13% of its chars) to one gap, which is not
+        worth a cut, so it comes back byte for byte."""
+        settings = Settings(_env_file=None, smart_compress_enabled=True, smart_compress_min_chars=100)
+        assert settings.smart_compress_max_k == 50
+        raw = "\n".join(_numbered_chunk()) + "\nExit code: 0"
+
+        result = await smart_compress("bash", {"command": "sed -n 1,60p f | cat -n"}, raw, settings)
+
+        assert result.was_compressed is False
+        assert result.text == raw
+
+    @staticmethod
+    def _every_third_line_an_error(n: int) -> list[str]:
+        return [
+            f"step {i}: {'error: retry failed' if i % 3 == 0 else 'ok'}" for i in range(n)
+        ]
+
+    def test_error_dense_output_passes_through(self):
+        """Every 3rd line has an error word: every error line is kept in place,
+        so each pair between them becomes a gap line, and the 'compressed'
+        body was 97% of the input's chars (227 lines, 74 of them gap lines).
+        Not worth it: the input comes back unchanged."""
+        lines = self._every_third_line_an_error(300)
+        result = compress_string_array(lines, max_k=50)
+
+        assert result.marker == ""
+        assert result.to_text() == "\n".join(lines)
+
+    @pytest.mark.asyncio
+    async def test_error_dense_output_passes_through_smart_compress(self):
+        settings = Settings(_env_file=None, smart_compress_enabled=True, smart_compress_min_chars=100)
+        raw = "\n".join(self._every_third_line_an_error(300)) + "\nExit code: 1"
+        assert is_crushable(raw, min_chars=100)
+
+        result = await smart_compress("bash", {}, raw, settings)
+
+        assert result.was_compressed is False
+        assert result.text == raw
+
+    def test_pytest_shape_with_some_failures_still_compresses(self):
+        """The complement: 600 pytest -v lines, 1 in 10 FAILED, still saves
+        most of its chars, in order."""
+        lines = [
+            f"tests/test_mod_{i // 50}.py::test_case_{i} {'FAILED' if i % 10 == 0 else 'PASSED'} [{i * 100 // 600:3d}%]"
+            for i in range(600)
+        ]
+        result = compress_string_array(lines, max_k=50)
+        body = _cut(result)
+
+        _walk(body, lines)
+        assert len(result.preserved) == 60
+        assert len("\n".join(body)) < 0.5 * len("\n".join(lines))
 
     def test_real_cliff_below_head_plus_tail_uses_the_floor(self):
         """A genuine cliff after the first line (one URL, 0.8, then plain
@@ -344,7 +405,7 @@ class TestOrderPreservingCompression:
         to a real budget and mid_count is never negative."""
         lines = ["see https://example.com/a"] + ["plain words only here"] * 99
         result = compress_string_array(lines, max_k=50)
-        body = result.to_text().split("\n")[:-1]
+        body = _cut(result)
 
         _walk(body, lines)
         assert len(result.kept) == 10
@@ -363,7 +424,7 @@ class TestOrderPreservingCompression:
         lines = [f"row {i}" for i in range(20)]
         for max_k in (1, 2, 3):
             result = compress_string_array(lines, max_k=max_k)
-            _walk(result.to_text().split("\n")[:-1], lines)
+            _walk(_cut(result), lines)
 
 
 class TestMinCharsDefault:
