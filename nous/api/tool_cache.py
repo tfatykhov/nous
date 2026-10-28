@@ -11,9 +11,10 @@ import hashlib
 import json
 import logging
 import re
+from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,6 +38,10 @@ logger = logging.getLogger(__name__)
 # from here.
 NON_REFETCHABLE_TOOLS = frozenset({"web_search", "web_fetch", "dag_manage", "bash"})
 
+# How long a cached original is kept when its session never ends (see
+# cache_compressed_result).
+CACHE_RETENTION = timedelta(days=3)
+
 
 def compute_hash_key(content: str) -> str:
     """SHA256 of content, truncated to 32 hex chars (128-bit).
@@ -58,6 +63,18 @@ async def cache_compressed_result(
 ) -> str:
     """Store original content before compression. Returns hash_key."""
     hash_key = compute_hash_key(original_content)
+
+    # Rows are otherwise deleted only on session_ended, and a session that
+    # never ends is never cleaned up. Purge this agent's rows past
+    # CACHE_RETENTION here, in the insert's transaction; another agent's rows
+    # are left alone. Before the insert, so an old row with this key is
+    # replaced rather than kept by the conflict skip below.
+    await session.execute(
+        delete(ToolCache).where(
+            ToolCache.agent_id == agent_id,
+            ToolCache.compressed_at < func.now() - CACHE_RETENTION,
+        )
+    )
 
     # Upsert — same session+hash means same content, skip
     stmt = insert(ToolCache).values(

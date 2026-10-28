@@ -6,9 +6,11 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 
 from nous.api.smart_compress import add_cache_key, smart_compress
 from nous.api.tool_cache import (
+    CACHE_RETENTION,
     cache_compressed_result,
     compute_hash_key,
     get_cache_hints,
@@ -481,3 +483,49 @@ class TestCacheHints:
                 f'- bash("cmd {n} --flag"): {100 + n} items, cache_retrieve key {rows[n].hash_key}; '
                 'lines="A-B" fetches a range.'
             )
+
+
+@pytest.mark.postgres_only
+class TestAgePurge:
+    @staticmethod
+    async def _keys(session, agent_id: str) -> set[str]:
+        rows = await session.execute(select(ToolCache.hash_key).where(ToolCache.agent_id == agent_id))
+        return set(rows.scalars())
+
+    def test_retention_is_three_days(self):
+        assert CACHE_RETENTION == timedelta(days=3)
+
+    @pytest.mark.asyncio
+    async def test_the_next_insert_purges_only_this_agents_old_rows(self, session):
+        agent_id, session_id = _ids()
+        other_agent, _ = _ids()
+        old = _row(agent_id, f"{session_id}-a", timedelta(days=4), 1)
+        recent = _row(agent_id, f"{session_id}-b", timedelta(days=1), 2)
+        others_old = _row(other_agent, f"{session_id}-c", timedelta(days=4), 3)
+        session.add_all([old, recent, others_old])
+        await session.flush()
+        assert await self._keys(session, agent_id) == {old.hash_key, recent.hash_key}
+
+        new_key = await cache_compressed_result(session, agent_id, session_id, "bash", {}, "a new original")
+
+        assert await self._keys(session, agent_id) == {recent.hash_key, new_key}
+        assert await self._keys(session, other_agent) == {others_old.hash_key}
+
+    @pytest.mark.asyncio
+    async def test_an_old_row_with_the_same_key_is_replaced_not_kept(self, session):
+        """The purge runs before the insert, so the conflict skip cannot keep
+        a stale row: the key comes back with a fresh compressed_at."""
+        agent_id, session_id = _ids()
+        content = "the same original, cut again four days later"
+        session.add(ToolCache(
+            agent_id=agent_id, session_id=session_id, hash_key=compute_hash_key(content), tool_name="bash",
+            tool_input={}, original_content=content, compressed_at=datetime.now(UTC) - timedelta(days=4),
+        ))
+        await session.flush()
+
+        key = await cache_compressed_result(session, agent_id, session_id, "bash", {}, content)
+
+        rows = (await session.execute(select(ToolCache).where(ToolCache.agent_id == agent_id))).scalars().all()
+        assert [r.hash_key for r in rows] == [key]
+        assert rows[0].compressed_at > datetime.now(UTC) - timedelta(days=1)
+        assert await retrieve_cached_result(session, session_id, key) == content
