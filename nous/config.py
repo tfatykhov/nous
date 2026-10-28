@@ -1110,11 +1110,18 @@ class Settings(BaseSettings):
 
     # SmartCompress (F020 Phase 1)
     smart_compress_enabled: bool = Field(default=True, description="Enable ingestion-time tool output compression")
-    smart_compress_min_chars: int = Field(default=500, description="Below this, never compress")
+    smart_compress_min_chars: int = Field(
+        default=8000,
+        description=(
+            "Below this, never compress. 8000, not 500: in 72 h of prod bash results, those under 2 KB "
+            "saved 19.6 K chars in all (87 of 113 by dedup alone) and those of 2-5 KB saved 92 K, while "
+            "every cut costs a re-read; 10-20 KB results saved 613 K."
+        ),
+    )
     smart_compress_max_k: int = Field(default=50, description="Max items to keep per compressed result")
     smart_compress_elbow_threshold: float = Field(default=0.3, description="Score cliff threshold for adaptive K")
     smart_compress_exempt_tools: list[str] = Field(
-        default=["recall_deep", "recall_recent", "read_file", "dag_manage"],
+        default=["recall_deep", "recall_recent", "read_file", "dag_manage", "db_query"],
         description=(
             "Tools whose output SmartCompress must pass through untouched. "
             "SmartCompress ranks by ORIGINAL POSITION (30% head + 15% tail) and "
@@ -1144,6 +1151,9 @@ class Settings(BaseSettings):
             "(#724). Its size is bounded by the DAG: at most 10 nodes, one line each "
             "(result preview 500 chars), plus the stored summary; node_result returns one "
             "node's whole result, as its contract says. "
+            "db_query is exempt because it bounds its own result (200 rows, 500-char "
+            "cells, 100,000 chars) and says when rows were cut; sampling a query "
+            "result changes the answer. "
             "Set to `[]` to restore compression for every tool (kill switch)."
         ),
     )

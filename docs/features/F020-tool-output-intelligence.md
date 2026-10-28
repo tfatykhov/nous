@@ -65,11 +65,11 @@ Classify the result to pick the right compression strategy:
 
 | Type | Detection | Strategy |
 |------|-----------|----------|
-| `dict_array` | Valid JSON array of objects | Score/rank + cluster dedup + adaptive K |
+| `dict_array` | Valid JSON array of objects | Error items + at most `max_k` others, ranked by a score field if there is one; no dedup |
 | `string_array` | Newline-separated lines (bash/grep) | Error preservation + adaptive K on scores |
 | `log_format` | Timestamps + log levels | Error/change-point preservation |
 | `raw_text` | Large read_file output | Structural section detection |
-| `small` | < 500 chars | No compression |
+| `small` | < `NOUS_SMART_COMPRESS_MIN_CHARS` (8000 by default) | No compression |
 
 ---
 
@@ -95,12 +95,14 @@ Instead of hardcoded `head N + tail N` chars, find the natural elbow in the data
 3. Find elbow: where `score[i] - score[i+1] > threshold` (cliff in relevance)
 4. K = elbow index, capped at `max_k` (default 50 lines)
 5. Allocate: first 30% of K from start of original, last 15% from end, remainder = highest-scored
+6. Emit the kept lines in their original order, with one `[… result lines A–B omitted (N lines) …]` line per omitted run. Pass the result through unchanged when it has at most `max_k` lines, or when the cut, gap lines included, would keep 80% or more of its characters
 
 **For `dict_array` (JSON API results):**
 1. Detect score field (bounded numeric, often sorted descending)
-2. If found: use top-K by score (Kneedle elbow on score distribution)
-3. If not found: use cluster dedup (deduplicate near-identical items, keep one per cluster)
+2. If found: keep the top `max_k` items by score
+3. If not found: keep the first `max_k` items in their original order. Nothing is deduplicated: a repeated item is emitted as often as it is kept. At most `max_k` items in all: passed through unchanged
 4. Always include error items and structural outliers
+5. Pass the result through unchanged when every item is kept, or when the cut would keep 80% or more of its characters
 
 ---
 
@@ -140,7 +142,7 @@ After:  imports + class definitions + constants + function signatures (no bodies
 
 ```env
 NOUS_SMART_COMPRESS_ENABLED=true
-NOUS_SMART_COMPRESS_MIN_CHARS=500      # Below this, never compress
+NOUS_SMART_COMPRESS_MIN_CHARS=8000     # Below this, never compress (500 until 2026-10-28)
 NOUS_SMART_COMPRESS_MAX_K=50           # Max items to keep per result
 NOUS_SMART_COMPRESS_ELBOW_THRESHOLD=0.3  # Score cliff to detect elbow
 ```
