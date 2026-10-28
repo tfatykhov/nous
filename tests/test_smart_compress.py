@@ -5,6 +5,7 @@ import re
 
 import pytest
 from nous.api.smart_compress import (
+    add_cache_key,
     classify_content,
     is_crushable,
     ContentType,
@@ -494,6 +495,117 @@ class TestCompactionReadsTheMarker:
         assert ConversationCompactor._SMARTCOMPRESS_CHARS_RE.findall(result.text) == [str(len(raw))]
         compactor = ConversationCompactor(settings)
         assert compactor._original_result_size(result.text) == len(raw)
+
+
+# --- The cache_retrieve key in the final marker (2026-10-28) ---
+
+_KEY = "3f2a9c0b1d4e5f60718293a4b5c6d7e8"
+
+
+def _keyed(marker: str, key: str) -> str:
+    """`marker` with ", cache_retrieve key <key>" before ", N chars original]"."""
+    head, sep, tail = marker.rpartition(", ")
+    assert sep and re.fullmatch(r"\d+ chars original\]", tail), marker
+    return f"{head}, cache_retrieve key {key}, {tail}"
+
+
+class TestAddCacheKey:
+    """add_cache_key names the key in the final marker and nowhere else."""
+
+    _SETTINGS = dict(_env_file=None, smart_compress_enabled=True, smart_compress_min_chars=100, smart_compress_max_k=20)
+
+    @pytest.mark.asyncio
+    async def test_with_the_exit_line(self):
+        raw = "\n".join(_numbered_chunk()) + "\nExit code: 0"
+        result = await smart_compress("bash", {}, raw, Settings(**self._SETTINGS))
+        assert result.was_compressed is True
+        before = result.text.split("\n")
+
+        after = add_cache_key(result.text, _KEY).split("\n")
+
+        assert after[-1] == "Exit code: 0"
+        assert after[-2] == _keyed(before[-2], _KEY)
+        assert after[-2].endswith(f", cache_retrieve key {_KEY}, {len(raw)} chars original]")
+        assert after[:-2] == before[:-2]
+
+    @pytest.mark.asyncio
+    async def test_without_the_exit_line(self):
+        raw = "\n".join(_numbered_chunk())
+        result = await smart_compress("bash", {}, raw, Settings(**self._SETTINGS))
+        assert result.was_compressed is True
+        before = result.text.split("\n")
+
+        after = add_cache_key(result.text, _KEY).split("\n")
+
+        assert after[-1] == _keyed(before[-1], _KEY)
+        assert after[:-1] == before[:-1]
+
+    @pytest.mark.asyncio
+    async def test_the_items_marker_of_a_json_result(self):
+        settings = Settings(_env_file=None, smart_compress_enabled=True)
+        raw = json.dumps(_ranked_items(200), indent=2)
+        result = await smart_compress("web_search", {}, raw, settings)
+        assert result.was_compressed is True
+        before = result.text.split("\n")
+
+        after = add_cache_key(result.text, _KEY).split("\n")
+
+        assert after[-1] == _keyed(before[-1], _KEY)
+        assert after[-1].startswith("[SmartCompressed: 200→50 items")
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "plain output\nwith no marker at all",
+            "plain output\nExit code: 0",
+            "Exit code: 0",
+            "",
+            # A marker without the original size is not one smart_compress() emits.
+            "row 1\n[SmartCompressed: 60→20 lines, 1 error/outlier preserved, order kept, gaps marked]",
+            # The final line must BE the marker, not mention it.
+            "row 1\nsee [SmartCompressed: 60→20 lines, gaps marked, 5000 chars original]",
+        ],
+    )
+    def test_no_final_marker_returns_the_text_unchanged(self, text):
+        assert add_cache_key(text, _KEY) == text
+
+    def test_a_marker_quoted_in_the_body_is_left_alone(self):
+        quoted = "[SmartCompressed: 9→2 lines, 0 error/outlier preserved, order kept, gaps marked, 999 chars original]"
+        final = "[SmartCompressed: 60→20 lines, 1 error/outlier preserved, order kept, gaps marked, 5000 chars original]"
+        text = "\n".join(["row 1", quoted, "row 3", final, "Exit code: 0"])
+
+        out = add_cache_key(text, _KEY).split("\n")
+
+        assert out == ["row 1", quoted, "row 3", _keyed(final, _KEY), "Exit code: 0"]
+        # A quoted marker as the body's last line, with no real marker after
+        # it, is never reached: the line before the exit line is "row 3".
+        assert add_cache_key("\n".join([quoted, "row 3", "Exit code: 0"]), _KEY) == "\n".join(
+            [quoted, "row 3", "Exit code: 0"]
+        )
+
+    @pytest.mark.parametrize(
+        "key",
+        [_KEY, "0123456789abcdef0123456789012345", "12345678901234567890123456789012"],
+        ids=["hex", "ends-in-digits", "all-digits"],
+    )
+    @pytest.mark.asyncio
+    async def test_compaction_parser_reads_original_chars_from_a_keyed_marker(self, key):
+        """compaction's lazy `[^\\]\\n]*?(\\d+) chars original` must still read
+        the size, not the key's trailing digits."""
+        from nous.api.compaction import ConversationCompactor
+
+        settings = Settings(**{**self._SETTINGS, "smart_compress_max_k": 10})
+        lines = [f"row {i}" for i in range(1, 301)]
+        lines[149] = "ERROR: row 150 failed"
+        raw = "\n".join(lines) + "\nExit code: 1"
+        result = await smart_compress("bash", {}, raw, settings)
+        assert result.was_compressed is True
+
+        keyed = add_cache_key(result.text, key)
+
+        assert f"cache_retrieve key {key}" in keyed
+        assert ConversationCompactor._SMARTCOMPRESS_CHARS_RE.findall(keyed) == [str(len(raw))]
+        assert ConversationCompactor(settings)._original_result_size(keyed) == len(raw)
 
 
 # --- Task 4: Dict Array Compression ---

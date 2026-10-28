@@ -7,12 +7,15 @@ and parallel tool handling.
 """
 
 import uuid
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
 
 from nous.api.runner import AgentRunner, ApiResponse, Conversation, Message
+from nous.api.smart_compress import add_cache_key, smart_compress
+from nous.api.tool_cache import compute_hash_key
 from nous.api.tools import ToolDispatcher
 from nous.cognitive.schemas import FrameSelection, TurnContext
 from nous.config import Settings
@@ -563,3 +566,101 @@ class TestMalformedToolInputOnTheBackgroundPath:
         assert len(tool_results) == 1
         assert tool_results[0].error is None
         assert tool_results[0].result == "Echo: hi"
+
+
+# ---------------------------------------------------------------------------
+# F020: the cache_retrieve key reaches the marker only after a cached write
+# ---------------------------------------------------------------------------
+
+
+class _FakeDbSession:
+    """Stands in for an AsyncSession: execute fails when told to."""
+
+    def __init__(self, fail: bool) -> None:
+        self.execute = AsyncMock(side_effect=RuntimeError("db down") if fail else None)
+        self.commit = AsyncMock()
+
+
+class _FakeDb:
+    def __init__(self, fail: bool) -> None:
+        self.fail = fail
+
+    @asynccontextmanager
+    async def session(self):
+        yield _FakeDbSession(self.fail)
+
+
+class _HeartWithDb(MockHeart):
+    def __init__(self, fail: bool) -> None:
+        self.db = _FakeDb(fail)
+
+
+class TestSmartCompressCacheKey:
+    """The runner puts `cache_retrieve key <key>` in the marker it sends the
+    model only when cache_compressed_result succeeded."""
+
+    RAW = "\n".join(
+        f"{i:6}\t" + ("If a fetch failed, log it and move on." if i == 37 else f"Step {i}: do the thing.")
+        for i in range(1, 121)
+    ) + "\nExit code: 0"
+
+    async def _run(self, *, fail: bool) -> str:
+        settings = Settings(
+            _env_file=None, ANTHROPIC_API_KEY="test-key", agent_id="test-agent", max_turns=3,
+            smart_compress_enabled=True, smart_compress_min_chars=100, smart_compress_max_k=10,
+        )
+        dispatcher = ToolDispatcher()
+
+        async def bash(command: str = "", **kwargs) -> dict:
+            return {"content": [{"type": "text", "text": self.RAW}]}
+
+        dispatcher.register("bash", bash, {
+            "type": "object", "description": "Shell", "properties": {"command": {"type": "string"}},
+        })
+        runner = AgentRunner(MockCognitiveLayer(), MockBrain(), _HeartWithDb(fail), settings)
+        runner.set_dispatcher(dispatcher)
+        runner._call_api = AsyncMock(side_effect=[
+            _make_api_response(
+                stop_reason="tool_use",
+                tool_uses=[{"name": "bash", "input": {"command": "cat -n f"}, "id": "toolu_b"}],
+            ),
+            _make_api_response(text="Done", stop_reason="end_turn"),
+        ])
+        try:
+            await runner._tool_loop(
+                system_prompt="Test prompt", conversation=_make_conversation([("user", "go")]),
+                frame_id="task", session_id="s-cache-key",
+            )
+            messages = runner._call_api.call_args_list[1].kwargs["messages"]
+        finally:
+            await runner.close()
+        (block,) = [
+            b for m in messages if m.get("role") == "user" and isinstance(m.get("content"), list)
+            for b in m["content"] if isinstance(b, dict) and b.get("type") == "tool_result"
+        ]
+        return block["content"]
+
+    async def _unkeyed(self) -> str:
+        settings = Settings(
+            _env_file=None, smart_compress_enabled=True, smart_compress_min_chars=100, smart_compress_max_k=10,
+        )
+        result = await smart_compress("bash", {"command": "cat -n f"}, self.RAW, settings)
+        assert result.was_compressed is True and result.original_text == self.RAW
+        return result.text
+
+    @pytest.mark.asyncio
+    async def test_a_successful_write_adds_the_key(self):
+        content = await self._run(fail=False)
+
+        key = compute_hash_key(self.RAW)
+        assert content == add_cache_key(await self._unkeyed(), key)
+        assert content.split("\n")[-2].endswith(f", cache_retrieve key {key}, {len(self.RAW)} chars original]")
+        assert content.split("\n")[-1] == "Exit code: 0"
+
+    @pytest.mark.asyncio
+    async def test_a_failed_write_leaves_the_marker_unkeyed(self):
+        content = await self._run(fail=True)
+
+        assert content == await self._unkeyed()
+        assert "cache_retrieve key" not in content
+        assert content.split("\n")[-2].startswith("[SmartCompressed:")
