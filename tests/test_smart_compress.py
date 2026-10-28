@@ -143,9 +143,9 @@ _GAP_RE = re.compile(r"^\[… result lines (\d+)–(\d+) omitted \((\d+) lines\)
 
 
 def _numbered_chunk(n: int = 60) -> list[str]:
-    """The pilot's read, `sed -n 1,60p FILE | cat -n`: "failed" on line 37 and
-    a URL on line 52. Before the fix it came back as [37, 1, 52, 2, ...] with
-    line 59 dropped."""
+    """A prompt read with `sed -n 1,{n}p FILE | cat -n`: "failed" on line 37
+    and a URL on line 52. At 60 lines it used to come back as
+    [37, 1, 52, 2, ...] with line 59 dropped."""
     steps = []
     for i in range(1, n + 1):
         if i % 6 == 0:
@@ -436,8 +436,9 @@ class TestMinCharsDefault:
         assert Settings(_env_file=None).smart_compress_min_chars == 8000
 
     @pytest.mark.asyncio
-    async def test_pilot_chunk_passes_through_at_defaults(self):
-        """The pilot's 60-line read (about 5 KB in prod) arrives untouched."""
+    async def test_numbered_60_line_read_passes_through_at_defaults(self):
+        """A 60-line prompt read with `sed -n 1,60p FILE | cat -n` (about
+        5 KB) arrives untouched."""
         settings = Settings(_env_file=None)
         raw = "\n".join(_numbered_chunk()) + "\nExit code: 0"
         assert 500 <= len(raw) < 8000

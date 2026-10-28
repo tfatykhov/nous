@@ -114,6 +114,8 @@ def extract_preserved_lines(lines: list[str]) -> list[str]:
     """Extract lines that must ALWAYS be preserved regardless of compression.
 
     Hard guarantee: error/exception/traceback lines are never dropped.
+    `compress_string_array` selects by index and does not call this; it
+    remains the public error-line check.
     """
     return [ln for ln in lines if _ERROR_PATTERNS.search(ln)]
 

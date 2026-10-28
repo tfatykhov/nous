@@ -514,7 +514,7 @@ class TestBulkResultPruning:
         assert "do NOT re-run" in stub
 
     def test_smartcompressed_small_original_not_bulk(self):
-        """codex round 13: SmartCompress fires from ~500 chars — far below
+        """codex round 13: SmartCompress fires from 8000 chars by default — far below
         the bulk threshold — so the marker alone must NOT imply bulk; the
         recorded original size governs."""
         compactor = ConversationCompactor(_bulk_settings())

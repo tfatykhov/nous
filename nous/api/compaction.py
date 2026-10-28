@@ -664,7 +664,7 @@ class ConversationCompactor:
         ):
             return True
         # codex round 13: the SmartCompress marker alone is NOT bulk —
-        # compression fires from ~500 chars, far below the bulk threshold.
+        # compression fires from 8000 chars by default, far below the bulk threshold.
         # _original_result_size reads the recorded pre-compression size, so
         # the configured threshold governs compressed results too.
         return self._original_result_size(text) >= threshold
