@@ -411,6 +411,11 @@ async def smart_compress(
             if not compressed.marker:
                 return passthrough
             compressed_text = compressed.to_text()
+            # The string path's rule: a cut that keeps most of the chars is
+            # not worth it. Checked here because only here are the original
+            # bytes at hand.
+            if len(compressed_text) >= _MAX_BODY_FRACTION * len(body_text):
+                return passthrough
             item_count = compressed.original_count
         except (json.JSONDecodeError, TypeError):
             return passthrough

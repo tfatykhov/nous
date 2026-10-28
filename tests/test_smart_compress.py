@@ -696,6 +696,35 @@ class TestSmartCompressEntryPoint:
         assert result.text == raw
 
     @pytest.mark.asyncio
+    async def test_json_array_cut_that_saves_little_passes_through(self):
+        """51 ranked items at max_k 50: one item cut, and compact JSON for the
+        rest, kept about 91% of the chars. Not worth a cut (the string path's
+        rule): the original bytes come back and nothing is cached."""
+        settings = Settings(_env_file=None, smart_compress_enabled=True)
+        raw = json.dumps(_ranked_items(51), indent=2)
+        assert len(raw) >= settings.smart_compress_min_chars
+        assert compress_dict_array(json.loads(raw), max_k=50).marker  # the compressor does cut
+
+        result = await smart_compress("web_search", {}, raw, settings)
+
+        assert result.was_compressed is False
+        assert result.text == raw
+        assert result.original_text is None
+
+    @pytest.mark.asyncio
+    async def test_large_ranked_json_array_still_compresses_and_is_cached(self):
+        settings = Settings(_env_file=None, smart_compress_enabled=True)
+        raw = json.dumps(_ranked_items(200), indent=2)
+
+        result = await smart_compress("web_search", {}, raw, settings)
+
+        assert result.was_compressed is True
+        out = result.text.split("\n")
+        assert out[-1].startswith("[SmartCompressed: 200→50 items")
+        assert len(json.loads(out[0])) <= 50
+        assert result.original_text == raw
+
+    @pytest.mark.asyncio
     async def test_bash_json_with_exit_line_keeps_dict_array_path(self):
         """#179 review: bash_tool now appends 'Exit code: N' to every result.
         The status line must be detached before classification so bash JSON
