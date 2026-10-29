@@ -257,15 +257,21 @@ def compress_string_array(
 
 @dataclass
 class DictCompressResult:
-    """Result of dict_array compression."""
+    """Result of dict_array compression.
+
+    `kept` (items without an error word) and `preserved` (error-word items)
+    are disjoint by position. `body` is what is emitted: every selected item
+    in its original array position.
+    """
     kept: list[dict] = field(default_factory=list)
     preserved: list[dict] = field(default_factory=list)
     marker: str = ""
     original_count: int = 0
+    body: list[dict] = field(default_factory=list)
 
     def to_text(self) -> str:
-        """Preserved items, then kept items (disjoint by construction). Never dedups."""
-        result = json.dumps(self.preserved + self.kept, default=str, indent=None)
+        """The body as one JSON array, then the marker. Never dedups."""
+        result = json.dumps(self.body, default=str, indent=None)
         return f"{result}\n{self.marker}"
 
 
@@ -289,34 +295,47 @@ def _is_error_item(item: dict) -> bool:
 
 
 def compress_dict_array(items: list[dict], max_k: int = 50) -> DictCompressResult:
-    """Compress JSON array of objects. Uses score field if available, else keeps all."""
+    """Compress a JSON array of objects.
+
+    At most `max_k` items: returned unchanged, no marker. Otherwise keeps
+    every error-word item, plus the top `max_k` others by the detected score
+    field (ties by position), or the first `max_k` others when there is no
+    score field. Selected items are emitted in their ORIGINAL array order,
+    and nothing is deduplicated.
+    """
     if len(items) <= max_k:
-        return DictCompressResult(kept=items, original_count=len(items))
+        return DictCompressResult(kept=items, original_count=len(items), body=items)
 
-    # Preserve error items
-    preserved = [item for item in items if _is_error_item(item)]
-    non_error = [item for item in items if not _is_error_item(item)]
+    # Error-word items are always kept.
+    error_idx = {i for i, item in enumerate(items) if _is_error_item(item)}
+    others = [i for i in range(len(items)) if i not in error_idx]  # original order
 
-    # Detect and sort by score
-    score_field = _detect_score_field(non_error)
+    score_field = _detect_score_field([items[i] for i in others])
     if score_field:
-        sorted_items = sorted(non_error, key=lambda x: x.get(score_field, 0), reverse=True)
-        kept = sorted_items[:max_k]
+        # Stable sort: equal scores keep their original order. A null or
+        # missing score ranks as 0 (a real 0.0 is 0 as well). A non-numeric
+        # score such as "high" still raises TypeError here, and
+        # smart_compress() then passes the array through whole.
+        ranked = sorted(others, key=lambda i: items[i].get(score_field) or 0, reverse=True)
+        keep = set(ranked[:max_k])
     else:
-        # No score field — keep first max_k items (original order)
-        kept = non_error[:max_k]
+        keep = set(others[:max_k])
 
-    total = len(kept) + len(preserved)
-    if total == len(items):  # every item kept: nothing cut, no marker
-        return DictCompressResult(kept=items, original_count=len(items))
-    score_info = f"K={len(kept)} by {score_field}" if score_field else f"first {len(kept)}"
+    emitted = sorted(keep | error_idx)
+    if len(emitted) == len(items):  # every item kept: nothing cut, no marker
+        return DictCompressResult(kept=items, original_count=len(items), body=items)
+    score_info = f"K={len(keep)} by {score_field}" if score_field else f"first {len(keep)}"
     marker = (
-        f"[SmartCompressed: {len(items)}\u2192{total} items, "
-        f"{score_info}, {len(preserved)} outliers]"
+        f"[SmartCompressed: {len(items)}\u2192{len(emitted)} items, "
+        f"{score_info}, order kept, {len(error_idx)} outliers]"
     )
 
     return DictCompressResult(
-        kept=kept, preserved=preserved, marker=marker, original_count=len(items),
+        kept=[items[i] for i in sorted(keep)],
+        preserved=[items[i] for i in sorted(error_idx)],
+        marker=marker,
+        original_count=len(items),
+        body=[items[i] for i in emitted],
     )
 
 
@@ -425,7 +444,11 @@ async def smart_compress(
 
     elif content_type in (ContentType.LOG_FORMAT, ContentType.RAW_TEXT):
         lines = body_text.split("\n")
-        compressed = compress_string_array(lines, max_k=settings.smart_compress_max_k)
+        compressed = compress_string_array(
+            lines,
+            max_k=settings.smart_compress_max_k,
+            elbow_threshold=settings.smart_compress_elbow_threshold,
+        )
         if not compressed.marker:  # nothing cut: the original bytes
             return passthrough
         compressed_text = compressed.to_text()
@@ -476,6 +499,39 @@ async def smart_compress(
 _FINAL_MARKER_RE = re.compile(r"^\[SmartCompressed:.*(, \d+ chars original\])$")
 
 
+def _final_marker(lines: list[str]) -> tuple[int, re.Match[str]] | None:
+    """Locate the final SmartCompressed marker: the last line, or the line
+    before a trailing "Exit code: " line, if that line is a marker
+    smart_compress() emits. Tolerant at the end only: whitespace-only lines
+    after the marker or the exit line, and between them, are skipped, and
+    the marker is matched after rstrip. No other line is read, so a marker
+    quoted inside the body never counts. Returns its index and the match
+    (taken on the rstripped line, so its offsets hold in the line), or None."""
+
+    def skip_blank(i: int) -> int:
+        while i >= 0 and not lines[i].strip():
+            i -= 1
+        return i
+
+    i = skip_blank(len(lines) - 1)
+    if i >= 1 and lines[i].startswith("Exit code: "):
+        i = skip_blank(i - 1)
+    if i < 0:
+        return None
+    m = _FINAL_MARKER_RE.match(lines[i].rstrip())
+    return None if m is None else (i, m)
+
+
+def final_marker_line(text: str) -> str | None:
+    """The final SmartCompressed marker line of `text`, or None.
+
+    One rule for every reader: add_cache_key() writes the key into this line
+    and compaction reads the original size from it.
+    """
+    found = _final_marker(text.split("\n"))
+    return None if found is None else found[1].group(0)
+
+
 def add_cache_key(text: str, key: str) -> str:
     """Name the cache_retrieve key in the final SmartCompressed marker.
 
@@ -483,14 +539,14 @@ def add_cache_key(text: str, key: str) -> str:
     line. ", cache_retrieve key <key>" goes right before ", N chars
     original]". Only that one line is read, so a marker quoted inside the
     body is never touched; with no such marker the text comes back unchanged.
+    Every other byte, trailing whitespace and newlines included, is kept.
     The runner calls this only after the original was cached.
     """
     lines = text.split("\n")
-    i = len(lines) - 1
-    if i >= 1 and lines[i].startswith("Exit code: "):
-        i -= 1
-    m = _FINAL_MARKER_RE.match(lines[i])
-    if m is None:
+    found = _final_marker(lines)
+    if found is None:
         return text
-    lines[i] = f"{lines[i][: m.start(1)]}, cache_retrieve key {key}{m.group(1)}"
+    i, m = found
+    cut = m.start(1)
+    lines[i] = f"{lines[i][:cut]}, cache_retrieve key {key}{lines[i][cut:]}"
     return "\n".join(lines)

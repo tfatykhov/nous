@@ -96,6 +96,7 @@ Instead of hardcoded `head N + tail N` chars, find the natural elbow in the data
 4. K = elbow index, capped at `max_k` (default 50 lines)
 5. Allocate: first 30% of K from start of original, last 15% from end, remainder = highest-scored
 6. Emit the kept lines in their original order, with one `[… result lines A–B omitted (N lines) …]` line per omitted run. Pass the result through unchanged when it has at most `max_k` lines, or when the cut, gap lines included, would keep 80% or more of its characters
+7. `NOUS_SMART_COMPRESS_ELBOW_THRESHOLD` sets the cliff on every string path: `string_array`, `log_format` and `raw_text`
 
 **For `dict_array` (JSON API results):**
 1. Detect score field (bounded numeric, often sorted descending)
@@ -103,6 +104,7 @@ Instead of hardcoded `head N + tail N` chars, find the natural elbow in the data
 3. If not found: keep the first `max_k` items in their original order. Nothing is deduplicated: a repeated item is emitted as often as it is kept. At most `max_k` items in all: passed through unchanged
 4. Always include error items and structural outliers
 5. Pass the result through unchanged when every item is kept, or when the cut would keep 80% or more of its characters
+6. Emit every selected item in its original array position, error items included, and say `order kept` in the marker
 
 ---
 
@@ -118,8 +120,8 @@ After:  error lines (always) + top 23 lines by score + last 7 lines = ~800 chars
 **`dict_array` (JSON responses):**
 ```
 Before: [{"id": ..., "score": 0.92, ...}, ... × 500 items]
-After:  top 23 by score + 3 outliers
-        "[SmartCompressed: 500→26 items, K=23 by score, 3 outliers]"
+After:  top 23 by score + 3 outliers, in their original order
+        "[SmartCompressed: 500→26 items, K=23 by score, order kept, 3 outliers]"
 ```
 
 **`log_format`:**

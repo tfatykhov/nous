@@ -803,6 +803,160 @@ class TestBulkResultPruning:
             assert "never describe a failed one as successful" in prompt
 
 
+class TestOriginalSizeFromTheFinalMarker:
+    """_original_result_size reads the SmartCompress size only from the final
+    marker line (final_marker_line, the locator add_cache_key uses). A body
+    line that quotes a marker, as `cat` of an old transcript prints it, used
+    to claim its size and push a short result onto bulk decay."""
+
+    _QUOTED = (
+        "[SmartCompressed: 5000→58 lines, 3 error/outlier preserved, "
+        "order kept, gaps marked, 999999 chars original]"
+    )
+
+    @staticmethod
+    def _raw(exit_line: bool) -> str:
+        lines = [f"processed batch {i} -> ok status=200" for i in range(600)]
+        lines[300] = "ERROR: batch 300 failed"
+        return "\n".join(lines) + ("\nExit code: 0" if exit_line else "")
+
+    def test_a_quoted_marker_in_the_body_is_ignored(self):
+        compactor = ConversationCompactor(_bulk_settings())
+        real = (
+            "[SmartCompressed: 600→51 lines, 1 error/outlier preserved, "
+            "order kept, gaps marked, 9000 chars original]"
+        )
+        text = "\n".join(["$ cat old-transcript.txt", self._QUOTED, "row 3", real, "Exit code: 0"])
+
+        assert compactor._original_result_size(text) == 9000
+
+    _REAL = (
+        "[SmartCompressed: 600→51 lines, 1 error/outlier preserved, "
+        "order kept, gaps marked, 9000 chars original]"
+    )
+    _KEY = "3f2a9c0b1d4e5f60718293a4b5c6d7e8"
+    # End-of-text shapes the old MULTILINE `\s*$` regex read.
+    _TAILS = {
+        "trailing-newline": "\n",
+        "trailing-space": " \n",
+        "exit-line-then-newline": "\nExit code: 0\n",
+        "blank-line-before-exit-line": "\n\nExit code: 0",
+        "exit-line-with-trailing-space": "\nExit code: 0  ",
+    }
+
+    @pytest.mark.parametrize("tail", list(_TAILS.values()), ids=list(_TAILS))
+    def test_end_of_text_shapes_are_read_by_both_readers(self, tail):
+        """The locator is tolerant at the end only; the body still quotes a
+        bigger marker, which is still ignored. add_cache_key keys the same
+        line and keeps every other byte, the tail included."""
+        from nous.api.smart_compress import add_cache_key, final_marker_line
+
+        body = "\n".join(["$ cat old-transcript.txt", self._QUOTED, "row 3"])
+        text = f"{body}\n{self._REAL}{tail}"
+
+        assert final_marker_line(text) == self._REAL
+        assert ConversationCompactor(_bulk_settings())._original_result_size(text) == 9000
+        keyed = self._REAL.replace(
+            ", 9000 chars original]", f", cache_retrieve key {self._KEY}, 9000 chars original]"
+        )
+        assert add_cache_key(text, self._KEY) == f"{body}\n{keyed}{tail}"
+
+    @pytest.mark.parametrize(
+        "after",
+        ["\nmore output", "\nmore output\nExit code: 0", "\nExit code: 0\nmore output", "\n\nmore output\n"],
+        ids=["line", "line-then-exit", "exit-then-line", "blank-line-then-line"],
+    )
+    def test_a_body_line_after_the_marker_means_no_marker(self, after):
+        from nous.api.smart_compress import add_cache_key, final_marker_line
+
+        text = f"row 1\n{self._REAL}{after}"
+        assert len(text) < 9000
+
+        assert final_marker_line(text) is None
+        assert ConversationCompactor(_bulk_settings())._original_result_size(text) == len(text)
+        assert add_cache_key(text, self._KEY) == text
+
+    def test_a_short_result_quoting_a_marker_is_not_bulk(self):
+        compactor = ConversationCompactor(_bulk_settings())
+        content = "\n".join(["$ cat old-transcript.txt", self._QUOTED, "that was the old run", "Exit code: 0"])
+        assert len(content) < 500  # under the bulk threshold
+        assert compactor._original_result_size(content) == len(content)
+
+        messages: list[dict] = []
+        messages += _make_named_pair("bash", content, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("bash", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+
+        text = messages[1]["content"][0]["content"]
+        assert "Bulk tool output cleared" not in text
+        assert "do NOT re-run" not in text
+
+    @pytest.mark.parametrize("exit_line", [True, False], ids=["exit-line", "no-exit-line"])
+    @pytest.mark.asyncio
+    async def test_the_real_marker_is_read(self, exit_line):
+        from nous.api.smart_compress import final_marker_line, smart_compress
+
+        settings = _make_settings()
+        raw = self._raw(exit_line)
+        assert len(raw) >= settings.smart_compress_min_chars
+        result = await smart_compress("bash", {}, raw, settings)
+        assert result.was_compressed is True
+        out = result.text.split("\n")
+        assert final_marker_line(result.text) == (out[-2] if exit_line else out[-1])
+
+        assert ConversationCompactor(settings)._original_result_size(result.text) == len(raw)
+
+    @pytest.mark.asyncio
+    async def test_a_keyed_marker_is_read_and_a_body_quote_still_ignored(self):
+        from nous.api.smart_compress import add_cache_key, smart_compress
+
+        settings = _make_settings()
+        raw = self._raw(exit_line=True)
+        result = await smart_compress("bash", {}, raw, settings)
+        assert result.was_compressed is True
+        keyed = add_cache_key(result.text, "12345678901234567890123456789012")
+        assert "cache_retrieve key 12345678901234567890123456789012, " in keyed
+        quoted = f"{self._QUOTED}\n{keyed}"  # a quoted marker as the first body line
+
+        compactor = ConversationCompactor(settings)
+        assert compactor._original_result_size(keyed) == len(raw)
+        assert compactor._original_result_size(quoted) == len(raw)
+
+    @pytest.mark.asyncio
+    async def test_a_soft_trimmed_compressed_result_is_still_read(self):
+        """Compaction's own soft trim keeps the tail, so the marker (and the
+        exit line) are still last. The trim marker records only the digest's
+        length; the SmartCompress size wins."""
+        from nous.api.smart_compress import final_marker_line, smart_compress
+
+        settings = _make_settings(
+            NOUS_TOOL_SOFT_TRIM_CHARS="1000",
+            NOUS_TOOL_SOFT_TRIM_HEAD="200",
+            NOUS_TOOL_SOFT_TRIM_TAIL="300",
+        )
+        raw = self._raw(exit_line=True)
+        assert len(raw) < settings.tool_bulk_result_chars  # standard ages: soft trim at age 3
+        result = await smart_compress("bash", {}, raw, settings)
+        assert result.was_compressed is True
+        assert len(result.text) > settings.tool_soft_trim_chars
+        marker = final_marker_line(result.text)
+        assert marker is not None
+
+        compactor = ConversationCompactor(settings)
+        messages: list[dict] = []
+        messages += _make_named_pair("bash", result.text, "t0")
+        for i in range(1, 3):
+            messages += _make_named_pair("bash", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+
+        trimmed = messages[1]["content"][0]["content"]
+        assert f"of {len(result.text)} chars) ---" in trimmed
+        assert trimmed.split("\n")[-2:] == [marker, "Exit code: 0"]
+        assert final_marker_line(trimmed) == marker
+        assert compactor._original_result_size(trimmed) == len(raw)
+
+
 # ------------------------------------------------------------------
 # Extract Text Tests
 # ------------------------------------------------------------------
