@@ -5,6 +5,9 @@ import re
 
 import pytest
 from nous.api.smart_compress import (
+    _ERROR_PATTERNS,
+    _KEEP_PATTERNS,
+    _score_line,
     add_cache_key,
     classify_content,
     is_crushable,
@@ -471,6 +474,306 @@ class TestElbowThresholdOnLogFormat:
         # The default keeps K=50 lines; at 0.2 the URL cliff gives K=20.
         assert markers[0.3].startswith("[SmartCompressed: 200→51 lines,")
         assert markers[0.2].startswith("[SmartCompressed: 200→21 lines,")
+
+
+class TestTrailingBlankLines:
+    """Every bash body ends with "" (the newline before the detached exit
+    line). At K=10 that blank took the one tail slot and the real last line
+    was cut. Whitespace-only lines after the last line with content are now
+    always emitted, outside K, and the tail is the last lines with content."""
+
+    _SUMMARY = "summary: all items processed, see report"
+
+    @classmethod
+    def _crawl(cls) -> list[str]:
+        """A few URL lines (0.8), then repeated plain lines (0.3): the cliff
+        gives K at its floor of 10, so the tail is one line."""
+        lines = [f"fetched https://example.com/page/{i}" for i in range(3)]
+        lines += ["processing item ok, moving on to the next one in the queue"] * 300
+        return lines + [cls._SUMMARY]
+
+    @pytest.mark.asyncio
+    async def test_the_summary_survives_the_trailing_newline(self):
+        settings = Settings(_env_file=None)
+        content = self._crawl()
+        raw = "\n".join(content) + "\n" + "\nExit code: 0"
+        lines = content + [""]  # the body smart_compress() cuts
+
+        result = await smart_compress("bash", {"command": "crawl"}, raw, settings)
+
+        assert result.was_compressed is True
+        out = result.text.split("\n")
+        assert out[-1] == "Exit code: 0"
+        assert out[-2].startswith("[SmartCompressed: 305→11 lines,")
+        body = _body(result.text)
+        _walk(body, lines)
+        assert body[-2:] == [self._SUMMARY, ""]
+
+    def test_several_trailing_whitespace_lines_are_all_kept_outside_k(self):
+        trailing = ["", "   ", "", "\t"]
+        lines = self._crawl() + trailing
+
+        result = compress_string_array(lines, max_k=50)
+        body = _cut(result)
+
+        _walk(body, lines)
+        assert body[-5:] == [self._SUMMARY, *trailing]
+        # K=10 lines with content, plus the four trailing lines.
+        assert len(result.kept) == 10 + len(trailing)
+        assert result.kept[-5:] == [self._SUMMARY, *trailing]
+
+    @pytest.mark.asyncio
+    async def test_several_trailing_whitespace_lines_through_smart_compress(self):
+        settings = Settings(_env_file=None)
+        lines = self._crawl() + ["", "  ", ""]
+        raw = "\n".join(lines) + "\nExit code: 0"
+
+        result = await smart_compress("bash", {}, raw, settings)
+
+        assert result.was_compressed is True
+        assert result.text.split("\n")[-1] == "Exit code: 0"
+        body = _body(result.text)
+        _walk(body, lines)
+        assert body[-4:] == [self._SUMMARY, "", "  ", ""]
+
+    def test_only_whitespace_lines_pass_through(self):
+        lines = ["   "] * 60
+        result = compress_string_array(lines, max_k=50)
+        assert result.marker == ""
+        assert result.to_text() == "\n".join(lines)
+
+
+def _filler(n: int, start: int = 0) -> list[str]:
+    """pytest -v lines (a path in each, so 0.7)."""
+    return [f"tests/test_mod_{i:03d}.py::test_case_{i:03d} PASSED  [ {i % 100:2d}%]" for i in range(start, start + n)]
+
+
+# Lines the string paths always keep. Only the first matches `_ERROR_PATTERNS`;
+# in the live test every other one was cut.
+_ALWAYS_KEPT = [
+    "Traceback (most recent call last):",
+    "    raise ValueError('boom')",
+    "ValueError: boom",
+    "E       assert 1 == 2",
+    "KeyError: 'missing'",
+    "npm ERR! code ELIFECYCLE",
+    "rm: cannot remove 'x': Permission denied",
+    "3 errors",
+]
+_WARNINGS = [
+    "WARNING: config key 'foo' is deprecated, use 'bar'",
+    "WARNING: 3 tests used the deprecated fixture",
+]
+_PYTEST_SUMMARY = "========== 245 passed, 2 warnings in 12.34s =========="
+
+
+def _pytest_log() -> list[str]:
+    """The live test's 250-line log: a Python traceback, two WARNING lines and
+    other failure lines buried in pytest -v output, then a summary line."""
+    log = _filler(100)
+    log.append(_WARNINGS[0])
+    log += _filler(40, 100)
+    log += [_ALWAYS_KEPT[0], '  File "/app/nous/x.py", line 12, in run', _ALWAYS_KEPT[1], _ALWAYS_KEPT[2]]
+    log += _filler(60, 140)
+    log.append(_WARNINGS[1])
+    log += _filler(25, 200)
+    log.append(_ALWAYS_KEPT[3])
+    log += _filler(8, 225)
+    log += _ALWAYS_KEPT[4:]
+    log += _filler(5, 233)
+    log.append(_PYTEST_SUMMARY)
+    return log
+
+
+class TestAlwaysKeptLines:
+    """`_ERROR_PATTERNS` missed exception names, the plural "errors", npm ERR!,
+    pytest "E" lines and shell failures, so in a 256-line log only
+    "Traceback (most recent call last):" survived. `_KEEP_PATTERNS` lines are
+    always kept on the string paths; the compress/no-compress gate keeps
+    `_ERROR_PATTERNS`."""
+
+    @pytest.mark.asyncio
+    async def test_the_live_pytest_log_keeps_every_always_kept_line(self):
+        settings = Settings(_env_file=None)
+        content = _pytest_log()
+        assert len(content) == 250
+        raw = "\n".join(content) + "\n" + "\nExit code: 0"
+        assert len(raw) >= settings.smart_compress_min_chars
+
+        result = await smart_compress("bash", {"command": "pytest"}, raw, settings)
+
+        assert result.was_compressed is True
+        out = result.text.split("\n")
+        assert out[-1] == "Exit code: 0"
+        assert f", {len(_ALWAYS_KEPT)} error/outlier preserved," in out[-2]
+        body = _body(result.text)
+        _walk(body, content + [""])
+        for line in _ALWAYS_KEPT:
+            assert line in body, line
+        for line in _WARNINGS:  # ranked at 0.9, not always kept
+            assert line in body, line
+        assert body[-2:] == [_PYTEST_SUMMARY, ""]
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "ValueError: boom",
+            "    raise ValueError('boom')",
+            "KeyError: 'missing'",
+            "json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)",
+            "Caused by: java.lang.RuntimeException: boom",
+            "3 errors",
+            "Errors:",
+            "Errors: 2",
+            "npm ERR! code ELIFECYCLE",
+            "E       assert 1 == 2",
+            "E  + where 3 = len(x)",
+            "rm: cannot remove 'x': Permission denied",
+            "cat: notes.txt: No such file or directory",
+            "bash: jq: command not found",
+            "Segmentation fault (core dumped)",
+        ],
+    )
+    def test_keep_patterns_match_what_the_error_words_miss(self, line):
+        assert _KEEP_PATTERNS.search(line)
+        assert not _ERROR_PATTERNS.search(line)
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "Terror in the night",
+            "an errorless run",
+            "the terrors of the deep",
+            "He made no errors today",
+            "from nous.api import errors",
+            "error-free since Tuesday",
+            "file not found",
+            "E single space after the E",
+            "WARNING: disk almost full",
+        ],
+    )
+    def test_keep_patterns_do_not_match(self, line):
+        assert not _KEEP_PATTERNS.search(line)
+
+    def test_error_free_is_still_an_error_word_line(self):
+        """Unchanged: the hyphen is a word boundary, so `_ERROR_PATTERNS`
+        keeps "error-free" lines as before."""
+        assert _ERROR_PATTERNS.search("error-free since Tuesday")
+
+    @pytest.mark.asyncio
+    async def test_the_gate_is_unchanged(self):
+        """A 15 KB log of unique lines with WARNING lines and a ValueError but
+        none of the error words still passes through whole: widening the gate
+        would start cutting such logs."""
+        settings = Settings(_env_file=None)
+        lines = [
+            f"2026-10-28T12:{i // 60:02d}:{i % 60:02d}Z INFO request {i} served in {i % 17} ms by worker {i % 5}"
+            for i in range(240)
+        ]
+        lines[50] = "2026-10-28T12:00:50Z WARNING request 50 was slow: 2400 ms"
+        lines[120] = "2026-10-28T12:02:00Z WARNING header X-Old is deprecated"
+        lines[180] = "ValueError: request 180 had a bad header"
+        body_text = "\n".join(lines)
+        raw = body_text + "\nExit code: 0"
+        assert len(raw) >= 15_000
+        assert not _ERROR_PATTERNS.search(raw)
+        assert _KEEP_PATTERNS.search(lines[180])
+        assert is_crushable(body_text, min_chars=settings.smart_compress_min_chars) is False
+        # Only the gate stops it: the compressor itself would cut.
+        assert compress_string_array(lines, max_k=50).marker
+
+        result = await smart_compress("bash", {}, raw, settings)
+
+        assert result.was_compressed is False
+        assert result.text == raw
+
+
+def _log_with_warnings() -> list[str]:
+    """200 timestamped lines (digits: 0.5, no URLs), three WARN lines (0.9)
+    and one error line."""
+    lines = []
+    for i in range(200):
+        ts = f"2026-03-07T12:{i // 60:02d}:{i % 60:02d}Z"
+        if i in (40, 90, 150):
+            lines.append(f"{ts} WARN disk usage at {80 + i % 10}%")
+        elif i == 120:
+            lines.append(f"{ts} ERROR upload of batch {i} failed")
+        else:
+            lines.append(f"{ts} INFO processed batch {i} in 12 ms")
+    return lines
+
+
+class TestWarningRank:
+    """Warning and deprecation lines score 0.9: below error lines, above URLs.
+    They are ranked, not always kept, and the step down from them is never an
+    elbow cliff, so a few warnings do not shrink the budget."""
+
+    @pytest.mark.parametrize(
+        ("line", "score"),
+        [
+            ("ERROR: build failed", 1.0),
+            ("WARNING: config key 'foo' is deprecated", 0.9),
+            ("2026-10-28T12:00:00Z WARN disk usage at 85%", 0.9),
+            ("3 warnings", 0.9),
+            ("DeprecationWarning: use the new API", 0.9),
+            ("see https://example.com/a", 0.8),
+            ("edit /src/module.py", 0.7),
+            ("forewarned is forearmed", 0.3),
+            ("UserWarning: x", 0.9),
+            ("  /app/x.py:3: RuntimeWarning: y", 0.9),
+            ("forewarning", 0.3),
+        ],
+    )
+    def test_score_levels(self, line, score):
+        assert _score_line(line) == score
+
+    @pytest.mark.parametrize(
+        "lines",
+        [
+            _log_with_warnings(),
+            ["processing item ok"] * 100 + ["WARNING: slow"] + ["processing item ok"] * 100 + ["WARNING: slower"],
+        ],
+        ids=["timestamped-log", "plain-lines"],
+    )
+    def test_a_few_warnings_do_not_shrink_k(self, lines):
+        """0.9 -> 0.5 (or 0.3) clears the 0.3 threshold. Without the guard,
+        these cut to K=10 (the floor) instead of K=50."""
+        warnings = [ln for ln in lines if "WARN" in ln]
+        result = compress_string_array(lines, max_k=50, elbow_threshold=0.3)
+        body = _cut(result)
+
+        _walk(body, lines)
+        assert len(result.kept) >= 50
+        for line in warnings:
+            assert line in body
+
+    def test_a_cliff_below_the_warning_tier_still_counts(self):
+        """URL lines (0.8) over plain lines (0.3) are still a cliff when
+        warnings rank above them: K is floored at 10, and the warnings and
+        URLs fill it."""
+        lines = [f"fetched https://example.com/page/{i}" for i in range(3)]
+        lines += ["WARNING: slow page", "WARNING: slower page"]
+        lines += ["processing item ok"] * 300
+        result = compress_string_array(lines, max_k=50, elbow_threshold=0.3)
+        body = _cut(result)
+
+        _walk(body, lines)
+        assert len(result.kept) == 10
+        assert body[:5] == lines[:5]
+
+    def test_warnings_are_ranked_not_guaranteed(self):
+        """300 WARNING lines: the cut holds the budget, and most warnings go."""
+        lines = [f"WARNING: tests/test_mod_{i:03d}.py:12: call {i} uses a deprecated API" for i in range(300)]
+        lines += _filler(100)
+        lines.append("========== 100 passed, 300 warnings in 9.99s ==========")
+        result = compress_string_array(lines, max_k=50)
+        body = _cut(result)
+
+        _walk(body, lines)
+        assert result.preserved == []
+        assert len(result.kept) <= 50
+        assert len(body) < 0.2 * len(lines)
+        assert sum(1 for ln in body if ln.startswith("WARNING:")) < 50
 
 
 class TestMinCharsDefault:

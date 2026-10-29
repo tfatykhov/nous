@@ -31,6 +31,39 @@ _ERROR_PATTERNS = re.compile(
     r"\b(error|exception|failed|critical|traceback|fatal|panic)\b", re.IGNORECASE
 )
 
+# Lines the string paths also always keep, which `_ERROR_PATTERNS` misses.
+# Selection only: is_crushable() and the dict path keep `_ERROR_PATTERNS`, so
+# a unique log that merely contains one of these still comes back whole.
+_KEEP_PATTERNS = re.compile(
+    "|".join(
+        (
+            # Exception and error class names (ValueError, KeyError,
+            # JSONDecodeError, RuntimeException): "\berror\b" has no word
+            # boundary inside them. CamelCase and case-sensitive, so "Terror"
+            # and "errorless" do not match.
+            r"\b[A-Z][A-Za-z0-9]*(?:Error|Exception)\b",
+            # The plural in its two counting shapes ("3 errors", "Errors:"),
+            # which "\berror\b" misses. Not bare "errors": prose ("made no
+            # errors") and `import errors` are not failures.
+            r"(?i:\b\d+ errors\b|\berrors:)",
+            # npm's failure prefix.
+            r"npm ERR!",
+            # pytest's failure detail: "E", at least two spaces, then text.
+            r"^E {2,}\S",
+            # Shell and OS failures that carry none of the error words.
+            r"(?i:\b(?:permission denied|no such file or directory|command not found"
+            r"|segmentation fault|core dumped)\b)",
+        )
+    )
+)
+
+# Warning and deprecation lines rank just below error lines (1.0) and above
+# URLs (0.8). Ranked, not always kept: pytest can print hundreds of them.
+# The words are case-insensitive; warning class names (UserWarning,
+# RuntimeWarning) are CamelCase and case-sensitive, so "forewarning" misses.
+_WARNING_PATTERNS = re.compile(r"(?i:\bwarn(?:ing)?s?\b|\bdeprecat)|\b[A-Z][A-Za-z0-9]*Warning\b")
+_WARNING_SCORE = 0.9
+
 # Log timestamp pattern
 _LOG_TIMESTAMP = re.compile(
     r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}"
@@ -115,7 +148,9 @@ def extract_preserved_lines(lines: list[str]) -> list[str]:
 
     Hard guarantee: error/exception/traceback lines are never dropped.
     `compress_string_array` selects by index and does not call this; it
-    remains the public error-line check.
+    remains the public error-line check. `compress_string_array`
+    additionally keeps every `_KEEP_PATTERNS` line; this helper reports
+    error-word lines only.
     """
     return [ln for ln in lines if _ERROR_PATTERNS.search(ln)]
 
@@ -127,9 +162,10 @@ def extract_preserved_lines(lines: list[str]) -> list[str]:
 class CompressResult:
     """Result of compression: the kept lines in original order, plus a marker.
 
-    `kept` (lines without an error word) and `preserved` (error-word lines)
-    are disjoint by position. `body` is what is emitted: every kept line in
-    its original order, with one gap line in place of each omitted run.
+    `kept` (the other kept lines, trailing blank lines included) and
+    `preserved` (lines matching `_ERROR_PATTERNS` or `_KEEP_PATTERNS`) are
+    disjoint by position. `body` is what is emitted: every kept line in its
+    original order, with one gap line in place of each omitted run.
     """
     kept: list[str] = field(default_factory=list)
     preserved: list[str] = field(default_factory=list)
@@ -150,6 +186,8 @@ def _score_line(line: str) -> float:
     score = 0.3  # Base
     if _ERROR_PATTERNS.search(line):
         score = 1.0
+    elif _WARNING_PATTERNS.search(line):
+        score = _WARNING_SCORE
     elif re.search(r"https?://", line):
         score = max(score, 0.8)
     elif re.search(r"[/\\][\w.-]+\.[\w]+", line):  # File path
@@ -186,26 +224,43 @@ def compress_string_array(
     """Compress newline-separated output (bash, grep, file listings).
 
     At most `max_k` lines: returned unchanged, no marker. Otherwise keeps
-    every error-word line, then K other lines: the head (30%), the tail
+    every line matching `_ERROR_PATTERNS` or `_KEEP_PATTERNS` (outside K),
+    then K other lines: the head (30%), the tail
     (15%) and the highest-`_score_line` lines for the rest, K set by the
-    score elbow. Kept lines are emitted in their ORIGINAL order with one gap
+    score elbow. Whitespace-only lines after the last line with content are
+    always kept and not counted in K, so the tail is the last lines with
+    content. Kept lines are emitted in their ORIGINAL order with one gap
     line per omitted run, and nothing is deduplicated.
     """
     unchanged = CompressResult(kept=list(lines), body=list(lines), original_count=len(lines))
     if len(lines) <= max_k:
         return unchanged
 
-    # 1. Error-word lines are always kept.
-    error_idx = {i for i, ln in enumerate(lines) if _ERROR_PATTERNS.search(ln)}
-    others = [i for i in range(len(lines)) if i not in error_idx]  # original order
+    # 0. Whitespace-only lines after the last line with content are always
+    # emitted and outside K. A bash body ends with "" (the newline before
+    # the detached exit line), and at K=10 that blank took the one tail slot
+    # and the real last line was cut.
+    content_end = len(lines)
+    while content_end > 0 and not lines[content_end - 1].strip():
+        content_end -= 1
+    trailing_idx = set(range(content_end, len(lines)))
+
+    # 1. Error-word lines and `_KEEP_PATTERNS` lines are always kept.
+    always_idx = {i for i in range(content_end) if _ERROR_PATTERNS.search(lines[i]) or _KEEP_PATTERNS.search(lines[i])}
+    others = [i for i in range(content_end) if i not in always_idx]  # original order
 
     # 2. Rank the others by score; ties by position.
     scores = {i: _score_line(lines[i]) for i in others}
     ranked = sorted(others, key=lambda i: (-scores[i], i))
 
-    # 3. Find elbow (score cliff), then floor K.
+    # 3. Find elbow (score cliff), then floor K. The step down from the
+    # warning tier is never itself a cliff (0.9 -> 0.5 clears 0.3, so a few
+    # warnings in a numbered log would cut K from 50 to the floor); a cliff
+    # below it still counts, so K is never smaller than with the guard off.
+    # With no warnings, `first` is 0.
+    first = next((n for n, i in enumerate(ranked) if scores[i] < _WARNING_SCORE), len(ranked))
     k = max_k
-    for n in range(1, len(ranked)):
+    for n in range(first + 1, len(ranked)):
         if scores[ranked[n - 1]] - scores[ranked[n]] > elbow_threshold + _ELBOW_EPSILON:
             k = min(n, max_k)
             break
@@ -217,16 +272,18 @@ def compress_string_array(
     mid_count = max(0, k - head_count - tail_count)
     keep = set(others[:head_count]) | set(others[-tail_count:])
     keep |= set([i for i in ranked if i not in keep][:mid_count])
+    keep |= trailing_idx
     # A gap line costs a line: never use one to hide a single line.
-    chosen = keep | error_idx
+    chosen = keep | always_idx
     keep |= {i for i in others if i not in chosen and i - 1 in chosen and i + 1 in chosen}
 
-    emitted = sorted(keep | error_idx)
+    emitted = sorted(keep | always_idx)
     if len(emitted) == len(lines):
         return unchanged
 
     # 5. Emit in original order, one gap line per omitted run. The first and
-    # last lines are always kept (head/tail or error), so gaps are interior.
+    # last lines are always kept (head, tail, error or trailing blank), so
+    # gaps are interior.
     body: list[str] = []
     cursor = 0
     for i in emitted:
@@ -237,7 +294,7 @@ def compress_string_array(
     if len("\n".join(body)) >= _MAX_BODY_FRACTION * len("\n".join(lines)):
         return unchanged
 
-    preserved = [lines[i] for i in sorted(error_idx)]
+    preserved = [lines[i] for i in sorted(always_idx)]
     marker = (
         f"[SmartCompressed: {len(lines)}\u2192{len(emitted)} lines, "
         f"{len(preserved)} error/outlier preserved, order kept, gaps marked]"
