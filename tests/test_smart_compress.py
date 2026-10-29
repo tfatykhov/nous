@@ -5,6 +5,8 @@ import re
 
 import pytest
 from nous.api.smart_compress import (
+    _ERROR_PATTERNS,
+    _KEEP_PATTERNS,
     add_cache_key,
     classify_content,
     is_crushable,
@@ -538,6 +540,146 @@ class TestTrailingBlankLines:
         result = compress_string_array(lines, max_k=50)
         assert result.marker == ""
         assert result.to_text() == "\n".join(lines)
+
+
+def _filler(n: int, start: int = 0) -> list[str]:
+    """pytest -v lines (a path in each, so 0.7)."""
+    return [f"tests/test_mod_{i:03d}.py::test_case_{i:03d} PASSED  [ {i % 100:2d}%]" for i in range(start, start + n)]
+
+
+# Lines the string paths always keep. Only the first matches `_ERROR_PATTERNS`;
+# in the live test every other one was cut.
+_ALWAYS_KEPT = [
+    "Traceback (most recent call last):",
+    "    raise ValueError('boom')",
+    "ValueError: boom",
+    "E       assert 1 == 2",
+    "KeyError: 'missing'",
+    "npm ERR! code ELIFECYCLE",
+    "rm: cannot remove 'x': Permission denied",
+    "3 errors",
+]
+_WARNINGS = [
+    "WARNING: config key 'foo' is deprecated, use 'bar'",
+    "WARNING: 3 tests used the deprecated fixture",
+]
+_PYTEST_SUMMARY = "========== 245 passed, 2 warnings in 12.34s =========="
+
+
+def _pytest_log() -> list[str]:
+    """The live test's 250-line log: a Python traceback, two WARNING lines and
+    other failure lines buried in pytest -v output, then a summary line."""
+    log = _filler(100)
+    log.append(_WARNINGS[0])
+    log += _filler(40, 100)
+    log += [_ALWAYS_KEPT[0], '  File "/app/nous/x.py", line 12, in run', _ALWAYS_KEPT[1], _ALWAYS_KEPT[2]]
+    log += _filler(60, 140)
+    log.append(_WARNINGS[1])
+    log += _filler(25, 200)
+    log.append(_ALWAYS_KEPT[3])
+    log += _filler(8, 225)
+    log += _ALWAYS_KEPT[4:]
+    log += _filler(5, 233)
+    log.append(_PYTEST_SUMMARY)
+    return log
+
+
+class TestAlwaysKeptLines:
+    """`_ERROR_PATTERNS` missed exception names, the plural "errors", npm ERR!,
+    pytest "E" lines and shell failures, so in a 256-line log only
+    "Traceback (most recent call last):" survived. `_KEEP_PATTERNS` lines are
+    always kept on the string paths; the compress/no-compress gate keeps
+    `_ERROR_PATTERNS`."""
+
+    @pytest.mark.asyncio
+    async def test_the_live_pytest_log_keeps_every_always_kept_line(self):
+        settings = Settings(_env_file=None)
+        content = _pytest_log()
+        assert len(content) == 250
+        raw = "\n".join(content) + "\n" + "\nExit code: 0"
+        assert len(raw) >= settings.smart_compress_min_chars
+
+        result = await smart_compress("bash", {"command": "pytest"}, raw, settings)
+
+        assert result.was_compressed is True
+        out = result.text.split("\n")
+        assert out[-1] == "Exit code: 0"
+        assert f", {len(_ALWAYS_KEPT)} error/outlier preserved," in out[-2]
+        body = _body(result.text)
+        _walk(body, content + [""])
+        for line in _ALWAYS_KEPT:
+            assert line in body, line
+        assert body[-2:] == [_PYTEST_SUMMARY, ""]
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "ValueError: boom",
+            "    raise ValueError('boom')",
+            "KeyError: 'missing'",
+            "json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)",
+            "Caused by: java.lang.RuntimeException: boom",
+            "3 errors",
+            "Errors: 2",
+            "npm ERR! code ELIFECYCLE",
+            "E       assert 1 == 2",
+            "E  + where 3 = len(x)",
+            "rm: cannot remove 'x': Permission denied",
+            "cat: notes.txt: No such file or directory",
+            "bash: jq: command not found",
+            "Segmentation fault (core dumped)",
+        ],
+    )
+    def test_keep_patterns_match_what_the_error_words_miss(self, line):
+        assert _KEEP_PATTERNS.search(line)
+        assert not _ERROR_PATTERNS.search(line)
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "Terror in the night",
+            "an errorless run",
+            "the terrors of the deep",
+            "error-free since Tuesday",
+            "file not found",
+            "E single space after the E",
+            "WARNING: disk almost full",
+        ],
+    )
+    def test_keep_patterns_do_not_match(self, line):
+        assert not _KEEP_PATTERNS.search(line)
+
+    def test_error_free_is_still_an_error_word_line(self):
+        """Unchanged: the hyphen is a word boundary, so `_ERROR_PATTERNS`
+        keeps "error-free" lines as before."""
+        assert _ERROR_PATTERNS.search("error-free since Tuesday")
+
+    @pytest.mark.asyncio
+    async def test_the_gate_is_unchanged(self):
+        """A 15 KB log of unique lines with WARNING lines and a ValueError but
+        none of the error words still passes through whole: widening the gate
+        would start cutting such logs."""
+        settings = Settings(_env_file=None)
+        lines = [
+            f"2026-10-28T12:{i // 60:02d}:{i % 60:02d}Z INFO request {i} served in {i % 17} ms by worker {i % 5}"
+            for i in range(240)
+        ]
+        lines[50] = "2026-10-28T12:00:50Z WARNING request 50 was slow: 2400 ms"
+        lines[120] = "2026-10-28T12:02:00Z WARNING header X-Old is deprecated"
+        lines[180] = "ValueError: request 180 had a bad header"
+        body_text = "\n".join(lines)
+        raw = body_text + "\nExit code: 0"
+        assert len(raw) >= 15_000
+        assert not _ERROR_PATTERNS.search(raw)
+        assert _KEEP_PATTERNS.search(lines[180])
+        assert is_crushable(body_text, min_chars=settings.smart_compress_min_chars) is False
+        # Only the gate stops it: the compressor itself would cut.
+        assert compress_string_array(lines, max_k=50).marker
+
+        result = await smart_compress("bash", {}, raw, settings)
+
+        assert result.was_compressed is False
+        assert result.text == raw
 
 
 class TestMinCharsDefault:

@@ -31,6 +31,30 @@ _ERROR_PATTERNS = re.compile(
     r"\b(error|exception|failed|critical|traceback|fatal|panic)\b", re.IGNORECASE
 )
 
+# Lines the string paths also always keep, which `_ERROR_PATTERNS` misses.
+# Selection only: is_crushable() and the dict path keep `_ERROR_PATTERNS`, so
+# a unique log that merely contains one of these still comes back whole.
+_KEEP_PATTERNS = re.compile(
+    "|".join(
+        (
+            # Exception and error class names (ValueError, KeyError,
+            # JSONDecodeError, RuntimeException): "\berror\b" has no word
+            # boundary inside them. CamelCase and case-sensitive, so "Terror"
+            # and "errorless" do not match.
+            r"\b[A-Z][A-Za-z0-9]*(?:Error|Exception)\b",
+            # The plural ("3 errors", "Errors:"), which "\berror\b" misses.
+            r"(?i:\berrors\b)",
+            # npm's failure prefix.
+            r"npm ERR!",
+            # pytest's failure detail: "E", at least two spaces, then text.
+            r"^E {2,}\S",
+            # Shell and OS failures that carry none of the error words.
+            r"(?i:\b(?:permission denied|no such file or directory|command not found"
+            r"|segmentation fault|core dumped)\b)",
+        )
+    )
+)
+
 # Log timestamp pattern
 _LOG_TIMESTAMP = re.compile(
     r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}"
@@ -127,10 +151,10 @@ def extract_preserved_lines(lines: list[str]) -> list[str]:
 class CompressResult:
     """Result of compression: the kept lines in original order, plus a marker.
 
-    `kept` (lines without an error word, trailing blank lines included) and
-    `preserved` (error-word lines) are disjoint by position. `body` is what
-    is emitted: every kept line in its original order, with one gap line in
-    place of each omitted run.
+    `kept` (the other kept lines, trailing blank lines included) and
+    `preserved` (lines matching `_ERROR_PATTERNS` or `_KEEP_PATTERNS`) are
+    disjoint by position. `body` is what is emitted: every kept line in its
+    original order, with one gap line in place of each omitted run.
     """
     kept: list[str] = field(default_factory=list)
     preserved: list[str] = field(default_factory=list)
@@ -187,7 +211,8 @@ def compress_string_array(
     """Compress newline-separated output (bash, grep, file listings).
 
     At most `max_k` lines: returned unchanged, no marker. Otherwise keeps
-    every error-word line, then K other lines: the head (30%), the tail
+    every line matching `_ERROR_PATTERNS` or `_KEEP_PATTERNS` (outside K),
+    then K other lines: the head (30%), the tail
     (15%) and the highest-`_score_line` lines for the rest, K set by the
     score elbow. Whitespace-only lines after the last line with content are
     always kept and not counted in K, so the tail is the last lines with
@@ -207,9 +232,9 @@ def compress_string_array(
         content_end -= 1
     trailing_idx = set(range(content_end, len(lines)))
 
-    # 1. Error-word lines are always kept.
-    error_idx = {i for i in range(content_end) if _ERROR_PATTERNS.search(lines[i])}
-    others = [i for i in range(content_end) if i not in error_idx]  # original order
+    # 1. Error-word lines and `_KEEP_PATTERNS` lines are always kept.
+    always_idx = {i for i in range(content_end) if _ERROR_PATTERNS.search(lines[i]) or _KEEP_PATTERNS.search(lines[i])}
+    others = [i for i in range(content_end) if i not in always_idx]  # original order
 
     # 2. Rank the others by score; ties by position.
     scores = {i: _score_line(lines[i]) for i in others}
@@ -231,10 +256,10 @@ def compress_string_array(
     keep |= set([i for i in ranked if i not in keep][:mid_count])
     keep |= trailing_idx
     # A gap line costs a line: never use one to hide a single line.
-    chosen = keep | error_idx
+    chosen = keep | always_idx
     keep |= {i for i in others if i not in chosen and i - 1 in chosen and i + 1 in chosen}
 
-    emitted = sorted(keep | error_idx)
+    emitted = sorted(keep | always_idx)
     if len(emitted) == len(lines):
         return unchanged
 
@@ -251,7 +276,7 @@ def compress_string_array(
     if len("\n".join(body)) >= _MAX_BODY_FRACTION * len("\n".join(lines)):
         return unchanged
 
-    preserved = [lines[i] for i in sorted(error_idx)]
+    preserved = [lines[i] for i in sorted(always_idx)]
     marker = (
         f"[SmartCompressed: {len(lines)}\u2192{len(emitted)} lines, "
         f"{len(preserved)} error/outlier preserved, order kept, gaps marked]"
