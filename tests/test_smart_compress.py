@@ -7,6 +7,7 @@ import pytest
 from nous.api.smart_compress import (
     _ERROR_PATTERNS,
     _KEEP_PATTERNS,
+    _score_line,
     add_cache_key,
     classify_content,
     is_crushable,
@@ -609,6 +610,8 @@ class TestAlwaysKeptLines:
         _walk(body, content + [""])
         for line in _ALWAYS_KEPT:
             assert line in body, line
+        for line in _WARNINGS:  # ranked at 0.9, not always kept
+            assert line in body, line
         assert body[-2:] == [_PYTEST_SUMMARY, ""]
 
     @pytest.mark.parametrize(
@@ -680,6 +683,91 @@ class TestAlwaysKeptLines:
 
         assert result.was_compressed is False
         assert result.text == raw
+
+
+def _log_with_warnings() -> list[str]:
+    """200 timestamped lines (digits: 0.5, no URLs), three WARN lines (0.9)
+    and one error line."""
+    lines = []
+    for i in range(200):
+        ts = f"2026-03-07T12:{i // 60:02d}:{i % 60:02d}Z"
+        if i in (40, 90, 150):
+            lines.append(f"{ts} WARN disk usage at {80 + i % 10}%")
+        elif i == 120:
+            lines.append(f"{ts} ERROR upload of batch {i} failed")
+        else:
+            lines.append(f"{ts} INFO processed batch {i} in 12 ms")
+    return lines
+
+
+class TestWarningRank:
+    """Warning and deprecation lines score 0.9: below error lines, above URLs.
+    They are ranked, not always kept, and the step down from them is never an
+    elbow cliff, so a few warnings do not shrink the budget."""
+
+    @pytest.mark.parametrize(
+        ("line", "score"),
+        [
+            ("ERROR: build failed", 1.0),
+            ("WARNING: config key 'foo' is deprecated", 0.9),
+            ("2026-10-28T12:00:00Z WARN disk usage at 85%", 0.9),
+            ("3 warnings", 0.9),
+            ("DeprecationWarning: use the new API", 0.9),
+            ("see https://example.com/a", 0.8),
+            ("edit /src/module.py", 0.7),
+            ("forewarned is forearmed", 0.3),
+        ],
+    )
+    def test_score_levels(self, line, score):
+        assert _score_line(line) == score
+
+    @pytest.mark.parametrize(
+        "lines",
+        [
+            _log_with_warnings(),
+            ["processing item ok"] * 100 + ["WARNING: slow"] + ["processing item ok"] * 100 + ["WARNING: slower"],
+        ],
+        ids=["timestamped-log", "plain-lines"],
+    )
+    def test_a_few_warnings_do_not_shrink_k(self, lines):
+        """0.9 -> 0.5 (or 0.3) clears the 0.3 threshold. Without the guard,
+        these cut to K=10 (the floor) instead of K=50."""
+        warnings = [ln for ln in lines if "WARN" in ln]
+        result = compress_string_array(lines, max_k=50, elbow_threshold=0.3)
+        body = _cut(result)
+
+        _walk(body, lines)
+        assert len(result.kept) >= 50
+        for line in warnings:
+            assert line in body
+
+    def test_a_cliff_below_the_warning_tier_still_counts(self):
+        """URL lines (0.8) over plain lines (0.3) are still a cliff when
+        warnings rank above them: K is floored at 10, and the warnings and
+        URLs fill it."""
+        lines = [f"fetched https://example.com/page/{i}" for i in range(3)]
+        lines += ["WARNING: slow page", "WARNING: slower page"]
+        lines += ["processing item ok"] * 300
+        result = compress_string_array(lines, max_k=50, elbow_threshold=0.3)
+        body = _cut(result)
+
+        _walk(body, lines)
+        assert len(result.kept) == 10
+        assert body[:5] == lines[:5]
+
+    def test_warnings_are_ranked_not_guaranteed(self):
+        """300 WARNING lines: the cut holds the budget, and most warnings go."""
+        lines = [f"WARNING: tests/test_mod_{i:03d}.py:12: call {i} uses a deprecated API" for i in range(300)]
+        lines += _filler(100)
+        lines.append("========== 100 passed, 300 warnings in 9.99s ==========")
+        result = compress_string_array(lines, max_k=50)
+        body = _cut(result)
+
+        _walk(body, lines)
+        assert result.preserved == []
+        assert len(result.kept) <= 50
+        assert len(body) < 0.2 * len(lines)
+        assert sum(1 for ln in body if ln.startswith("WARNING:")) < 50
 
 
 class TestMinCharsDefault:

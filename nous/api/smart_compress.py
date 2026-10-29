@@ -55,6 +55,11 @@ _KEEP_PATTERNS = re.compile(
     )
 )
 
+# Warning and deprecation lines rank just below error lines (1.0) and above
+# URLs (0.8). Ranked, not always kept: pytest can print hundreds of them.
+_WARNING_PATTERNS = re.compile(r"\bwarn(?:ing)?s?\b|\bdeprecat", re.IGNORECASE)
+_WARNING_SCORE = 0.9
+
 # Log timestamp pattern
 _LOG_TIMESTAMP = re.compile(
     r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}"
@@ -175,6 +180,8 @@ def _score_line(line: str) -> float:
     score = 0.3  # Base
     if _ERROR_PATTERNS.search(line):
         score = 1.0
+    elif _WARNING_PATTERNS.search(line):
+        score = _WARNING_SCORE
     elif re.search(r"https?://", line):
         score = max(score, 0.8)
     elif re.search(r"[/\\][\w.-]+\.[\w]+", line):  # File path
@@ -240,9 +247,13 @@ def compress_string_array(
     scores = {i: _score_line(lines[i]) for i in others}
     ranked = sorted(others, key=lambda i: (-scores[i], i))
 
-    # 3. Find elbow (score cliff), then floor K.
+    # 3. Find elbow (score cliff), then floor K. The step down from the
+    # warning tier is never a cliff: 0.9 -> 0.5 clears 0.3, so a few warnings
+    # in a numbered log would cut K from 50 to the floor. Warnings change
+    # which lines fill K, not its size. With no warnings, `first` is 0.
+    first = next((n for n, i in enumerate(ranked) if scores[i] < _WARNING_SCORE), len(ranked))
     k = max_k
-    for n in range(1, len(ranked)):
+    for n in range(first + 1, len(ranked)):
         if scores[ranked[n - 1]] - scores[ranked[n]] > elbow_threshold + _ELBOW_EPSILON:
             k = min(n, max_k)
             break
