@@ -42,8 +42,10 @@ _KEEP_PATTERNS = re.compile(
             # boundary inside them. CamelCase and case-sensitive, so "Terror"
             # and "errorless" do not match.
             r"\b[A-Z][A-Za-z0-9]*(?:Error|Exception)\b",
-            # The plural ("3 errors", "Errors:"), which "\berror\b" misses.
-            r"(?i:\berrors\b)",
+            # The plural in its two counting shapes ("3 errors", "Errors:"),
+            # which "\berror\b" misses. Not bare "errors": prose ("made no
+            # errors") and `import errors` are not failures.
+            r"(?i:\b\d+ errors\b|\berrors:)",
             # npm's failure prefix.
             r"npm ERR!",
             # pytest's failure detail: "E", at least two spaces, then text.
@@ -57,7 +59,9 @@ _KEEP_PATTERNS = re.compile(
 
 # Warning and deprecation lines rank just below error lines (1.0) and above
 # URLs (0.8). Ranked, not always kept: pytest can print hundreds of them.
-_WARNING_PATTERNS = re.compile(r"\bwarn(?:ing)?s?\b|\bdeprecat", re.IGNORECASE)
+# The words are case-insensitive; warning class names (UserWarning,
+# RuntimeWarning) are CamelCase and case-sensitive, so "forewarning" misses.
+_WARNING_PATTERNS = re.compile(r"(?i:\bwarn(?:ing)?s?\b|\bdeprecat)|\b[A-Z][A-Za-z0-9]*Warning\b")
 _WARNING_SCORE = 0.9
 
 # Log timestamp pattern
@@ -144,7 +148,9 @@ def extract_preserved_lines(lines: list[str]) -> list[str]:
 
     Hard guarantee: error/exception/traceback lines are never dropped.
     `compress_string_array` selects by index and does not call this; it
-    remains the public error-line check.
+    remains the public error-line check. `compress_string_array`
+    additionally keeps every `_KEEP_PATTERNS` line; this helper reports
+    error-word lines only.
     """
     return [ln for ln in lines if _ERROR_PATTERNS.search(ln)]
 
@@ -248,9 +254,10 @@ def compress_string_array(
     ranked = sorted(others, key=lambda i: (-scores[i], i))
 
     # 3. Find elbow (score cliff), then floor K. The step down from the
-    # warning tier is never a cliff: 0.9 -> 0.5 clears 0.3, so a few warnings
-    # in a numbered log would cut K from 50 to the floor. Warnings change
-    # which lines fill K, not its size. With no warnings, `first` is 0.
+    # warning tier is never itself a cliff (0.9 -> 0.5 clears 0.3, so a few
+    # warnings in a numbered log would cut K from 50 to the floor); a cliff
+    # below it still counts, so K is never smaller than with the guard off.
+    # With no warnings, `first` is 0.
     first = next((n for n, i in enumerate(ranked) if scores[i] < _WARNING_SCORE), len(ranked))
     k = max_k
     for n in range(first + 1, len(ranked)):

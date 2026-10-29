@@ -623,6 +623,7 @@ class TestAlwaysKeptLines:
             "json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)",
             "Caused by: java.lang.RuntimeException: boom",
             "3 errors",
+            "Errors:",
             "Errors: 2",
             "npm ERR! code ELIFECYCLE",
             "E       assert 1 == 2",
@@ -643,6 +644,8 @@ class TestAlwaysKeptLines:
             "Terror in the night",
             "an errorless run",
             "the terrors of the deep",
+            "He made no errors today",
+            "from nous.api import errors",
             "error-free since Tuesday",
             "file not found",
             "E single space after the E",
@@ -716,6 +719,9 @@ class TestWarningRank:
             ("see https://example.com/a", 0.8),
             ("edit /src/module.py", 0.7),
             ("forewarned is forearmed", 0.3),
+            ("UserWarning: x", 0.9),
+            ("  /app/x.py:3: RuntimeWarning: y", 0.9),
+            ("forewarning", 0.3),
         ],
     )
     def test_score_levels(self, line, score):
