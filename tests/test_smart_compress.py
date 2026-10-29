@@ -473,6 +473,73 @@ class TestElbowThresholdOnLogFormat:
         assert markers[0.2].startswith("[SmartCompressed: 200→21 lines,")
 
 
+class TestTrailingBlankLines:
+    """Every bash body ends with "" (the newline before the detached exit
+    line). At K=10 that blank took the one tail slot and the real last line
+    was cut. Whitespace-only lines after the last line with content are now
+    always emitted, outside K, and the tail is the last lines with content."""
+
+    _SUMMARY = "summary: all items processed, see report"
+
+    @classmethod
+    def _crawl(cls) -> list[str]:
+        """A few URL lines (0.8), then repeated plain lines (0.3): the cliff
+        gives K at its floor of 10, so the tail is one line."""
+        lines = [f"fetched https://example.com/page/{i}" for i in range(3)]
+        lines += ["processing item ok, moving on to the next one in the queue"] * 300
+        return lines + [cls._SUMMARY]
+
+    @pytest.mark.asyncio
+    async def test_the_summary_survives_the_trailing_newline(self):
+        settings = Settings(_env_file=None)
+        content = self._crawl()
+        raw = "\n".join(content) + "\n" + "\nExit code: 0"
+        lines = content + [""]  # the body smart_compress() cuts
+
+        result = await smart_compress("bash", {"command": "crawl"}, raw, settings)
+
+        assert result.was_compressed is True
+        out = result.text.split("\n")
+        assert out[-1] == "Exit code: 0"
+        assert out[-2].startswith("[SmartCompressed: 305→11 lines,")
+        body = _body(result.text)
+        _walk(body, lines)
+        assert body[-2:] == [self._SUMMARY, ""]
+
+    def test_several_trailing_whitespace_lines_are_all_kept_outside_k(self):
+        trailing = ["", "   ", "", "\t"]
+        lines = self._crawl() + trailing
+
+        result = compress_string_array(lines, max_k=50)
+        body = _cut(result)
+
+        _walk(body, lines)
+        assert body[-5:] == [self._SUMMARY, *trailing]
+        # K=10 lines with content, plus the four trailing lines.
+        assert len(result.kept) == 10 + len(trailing)
+        assert result.kept[-5:] == [self._SUMMARY, *trailing]
+
+    @pytest.mark.asyncio
+    async def test_several_trailing_whitespace_lines_through_smart_compress(self):
+        settings = Settings(_env_file=None)
+        lines = self._crawl() + ["", "  ", ""]
+        raw = "\n".join(lines) + "\nExit code: 0"
+
+        result = await smart_compress("bash", {}, raw, settings)
+
+        assert result.was_compressed is True
+        assert result.text.split("\n")[-1] == "Exit code: 0"
+        body = _body(result.text)
+        _walk(body, lines)
+        assert body[-4:] == [self._SUMMARY, "", "  ", ""]
+
+    def test_only_whitespace_lines_pass_through(self):
+        lines = ["   "] * 60
+        result = compress_string_array(lines, max_k=50)
+        assert result.marker == ""
+        assert result.to_text() == "\n".join(lines)
+
+
 class TestMinCharsDefault:
     """Short results are left alone: below 8000 chars SmartCompress saved
     little (bash, 72 h in prod: 113 results up to 2 KB saved 19.6 K chars in

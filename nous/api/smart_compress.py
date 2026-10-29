@@ -127,9 +127,10 @@ def extract_preserved_lines(lines: list[str]) -> list[str]:
 class CompressResult:
     """Result of compression: the kept lines in original order, plus a marker.
 
-    `kept` (lines without an error word) and `preserved` (error-word lines)
-    are disjoint by position. `body` is what is emitted: every kept line in
-    its original order, with one gap line in place of each omitted run.
+    `kept` (lines without an error word, trailing blank lines included) and
+    `preserved` (error-word lines) are disjoint by position. `body` is what
+    is emitted: every kept line in its original order, with one gap line in
+    place of each omitted run.
     """
     kept: list[str] = field(default_factory=list)
     preserved: list[str] = field(default_factory=list)
@@ -188,16 +189,27 @@ def compress_string_array(
     At most `max_k` lines: returned unchanged, no marker. Otherwise keeps
     every error-word line, then K other lines: the head (30%), the tail
     (15%) and the highest-`_score_line` lines for the rest, K set by the
-    score elbow. Kept lines are emitted in their ORIGINAL order with one gap
+    score elbow. Whitespace-only lines after the last line with content are
+    always kept and not counted in K, so the tail is the last lines with
+    content. Kept lines are emitted in their ORIGINAL order with one gap
     line per omitted run, and nothing is deduplicated.
     """
     unchanged = CompressResult(kept=list(lines), body=list(lines), original_count=len(lines))
     if len(lines) <= max_k:
         return unchanged
 
+    # 0. Whitespace-only lines after the last line with content are always
+    # emitted and outside K. A bash body ends with "" (the newline before
+    # the detached exit line), and at K=10 that blank took the one tail slot
+    # and the real last line was cut.
+    content_end = len(lines)
+    while content_end > 0 and not lines[content_end - 1].strip():
+        content_end -= 1
+    trailing_idx = set(range(content_end, len(lines)))
+
     # 1. Error-word lines are always kept.
-    error_idx = {i for i, ln in enumerate(lines) if _ERROR_PATTERNS.search(ln)}
-    others = [i for i in range(len(lines)) if i not in error_idx]  # original order
+    error_idx = {i for i in range(content_end) if _ERROR_PATTERNS.search(lines[i])}
+    others = [i for i in range(content_end) if i not in error_idx]  # original order
 
     # 2. Rank the others by score; ties by position.
     scores = {i: _score_line(lines[i]) for i in others}
@@ -217,6 +229,7 @@ def compress_string_array(
     mid_count = max(0, k - head_count - tail_count)
     keep = set(others[:head_count]) | set(others[-tail_count:])
     keep |= set([i for i in ranked if i not in keep][:mid_count])
+    keep |= trailing_idx
     # A gap line costs a line: never use one to hide a single line.
     chosen = keep | error_idx
     keep |= {i for i in others if i not in chosen and i - 1 in chosen and i + 1 in chosen}
@@ -226,7 +239,8 @@ def compress_string_array(
         return unchanged
 
     # 5. Emit in original order, one gap line per omitted run. The first and
-    # last lines are always kept (head/tail or error), so gaps are interior.
+    # last lines are always kept (head, tail, error or trailing blank), so
+    # gaps are interior.
     body: list[str] = []
     cursor = 0
     for i in emitted:
