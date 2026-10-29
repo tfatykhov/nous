@@ -499,12 +499,23 @@ _FINAL_MARKER_RE = re.compile(r"^\[SmartCompressed:.*(, \d+ chars original\])$")
 def _final_marker(lines: list[str]) -> tuple[int, re.Match[str]] | None:
     """Locate the final SmartCompressed marker: the last line, or the line
     before a trailing "Exit code: " line, if that line is a marker
-    smart_compress() emits. No other line is read, so a marker quoted inside
-    the body never counts. Returns its index and match, or None."""
-    i = len(lines) - 1
+    smart_compress() emits. Tolerant at the end only: whitespace-only lines
+    after the marker or the exit line, and between them, are skipped, and
+    the marker is matched after rstrip. No other line is read, so a marker
+    quoted inside the body never counts. Returns its index and the match
+    (taken on the rstripped line, so its offsets hold in the line), or None."""
+
+    def skip_blank(i: int) -> int:
+        while i >= 0 and not lines[i].strip():
+            i -= 1
+        return i
+
+    i = skip_blank(len(lines) - 1)
     if i >= 1 and lines[i].startswith("Exit code: "):
-        i -= 1
-    m = _FINAL_MARKER_RE.match(lines[i])
+        i = skip_blank(i - 1)
+    if i < 0:
+        return None
+    m = _FINAL_MARKER_RE.match(lines[i].rstrip())
     return None if m is None else (i, m)
 
 
@@ -525,6 +536,7 @@ def add_cache_key(text: str, key: str) -> str:
     line. ", cache_retrieve key <key>" goes right before ", N chars
     original]". Only that one line is read, so a marker quoted inside the
     body is never touched; with no such marker the text comes back unchanged.
+    Every other byte, trailing whitespace and newlines included, is kept.
     The runner calls this only after the original was cached.
     """
     lines = text.split("\n")
@@ -532,5 +544,6 @@ def add_cache_key(text: str, key: str) -> str:
     if found is None:
         return text
     i, m = found
-    lines[i] = f"{lines[i][: m.start(1)]}, cache_retrieve key {key}{m.group(1)}"
+    cut = m.start(1)
+    lines[i] = f"{lines[i][:cut]}, cache_retrieve key {key}{lines[i][cut:]}"
     return "\n".join(lines)

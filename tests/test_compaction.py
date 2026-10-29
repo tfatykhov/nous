@@ -830,6 +830,52 @@ class TestOriginalSizeFromTheFinalMarker:
 
         assert compactor._original_result_size(text) == 9000
 
+    _REAL = (
+        "[SmartCompressed: 600→51 lines, 1 error/outlier preserved, "
+        "order kept, gaps marked, 9000 chars original]"
+    )
+    _KEY = "3f2a9c0b1d4e5f60718293a4b5c6d7e8"
+    # End-of-text shapes the old MULTILINE `\s*$` regex read.
+    _TAILS = {
+        "trailing-newline": "\n",
+        "trailing-space": " \n",
+        "exit-line-then-newline": "\nExit code: 0\n",
+        "blank-line-before-exit-line": "\n\nExit code: 0",
+        "exit-line-with-trailing-space": "\nExit code: 0  ",
+    }
+
+    @pytest.mark.parametrize("tail", list(_TAILS.values()), ids=list(_TAILS))
+    def test_end_of_text_shapes_are_read_by_both_readers(self, tail):
+        """The locator is tolerant at the end only; the body still quotes a
+        bigger marker, which is still ignored. add_cache_key keys the same
+        line and keeps every other byte, the tail included."""
+        from nous.api.smart_compress import add_cache_key, final_marker_line
+
+        body = "\n".join(["$ cat old-transcript.txt", self._QUOTED, "row 3"])
+        text = f"{body}\n{self._REAL}{tail}"
+
+        assert final_marker_line(text) == self._REAL
+        assert ConversationCompactor(_bulk_settings())._original_result_size(text) == 9000
+        keyed = self._REAL.replace(
+            ", 9000 chars original]", f", cache_retrieve key {self._KEY}, 9000 chars original]"
+        )
+        assert add_cache_key(text, self._KEY) == f"{body}\n{keyed}{tail}"
+
+    @pytest.mark.parametrize(
+        "after",
+        ["\nmore output", "\nmore output\nExit code: 0", "\nExit code: 0\nmore output", "\n\nmore output\n"],
+        ids=["line", "line-then-exit", "exit-then-line", "blank-line-then-line"],
+    )
+    def test_a_body_line_after_the_marker_means_no_marker(self, after):
+        from nous.api.smart_compress import add_cache_key, final_marker_line
+
+        text = f"row 1\n{self._REAL}{after}"
+        assert len(text) < 9000
+
+        assert final_marker_line(text) is None
+        assert ConversationCompactor(_bulk_settings())._original_result_size(text) == len(text)
+        assert add_cache_key(text, self._KEY) == text
+
     def test_a_short_result_quoting_a_marker_is_not_bulk(self):
         compactor = ConversationCompactor(_bulk_settings())
         content = "\n".join(["$ cat old-transcript.txt", self._QUOTED, "that was the old run", "Exit code: 0"])
