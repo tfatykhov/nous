@@ -312,8 +312,11 @@ def compress_dict_array(items: list[dict], max_k: int = 50) -> DictCompressResul
 
     score_field = _detect_score_field([items[i] for i in others])
     if score_field:
-        # Stable sort: equal scores keep their original order.
-        ranked = sorted(others, key=lambda i: items[i].get(score_field, 0), reverse=True)
+        # Stable sort: equal scores keep their original order. A null or
+        # missing score ranks as 0 (a real 0.0 is 0 as well). A non-numeric
+        # score such as "high" still raises TypeError here, and
+        # smart_compress() then passes the array through whole.
+        ranked = sorted(others, key=lambda i: items[i].get(score_field) or 0, reverse=True)
         keep = set(ranked[:max_k])
     else:
         keep = set(others[:max_k])

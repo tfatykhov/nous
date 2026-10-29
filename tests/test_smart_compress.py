@@ -776,6 +776,39 @@ class TestDictArrayKeepsOrder:
         assert [it["id"] for it in result.body] == list(range(11)) + [75]
         assert result.marker == "[SmartCompressed: 80→12 items, first 10, order kept, 2 outliers]"
 
+    def test_a_null_score_ranks_as_zero_and_is_cut_when_it_ranks_out(self):
+        """`"score": null` raised TypeError in the sort, and smart_compress()
+        passed the whole array through. It now ranks as 0."""
+        items = [{"id": i, "score": round(1.0 - i * 0.01, 2)} for i in range(60)]
+        items[30]["score"] = None
+
+        result = compress_dict_array(items, max_k=50)
+
+        ids = [it["id"] for it in result.body]
+        assert ids == [i for i in range(51) if i != 30]  # every other score is above 0
+        assert result.marker.startswith("[SmartCompressed: 60→50 items, K=50 by score, order kept")
+
+    def test_a_null_score_that_ranks_in_is_kept_in_place(self):
+        items = [{"id": i, "score": round(-i * 0.01, 2)} for i in range(60)]  # 0.0 down to -0.59
+        items[55]["score"] = None  # ranks as 0: ties item 0, ahead of every negative score
+
+        result = compress_dict_array(items, max_k=50)
+
+        assert [it["id"] for it in result.body] == list(range(49)) + [55]
+
+    @pytest.mark.asyncio
+    async def test_a_null_score_no_longer_forces_a_passthrough(self):
+        settings = Settings(_env_file=None, smart_compress_enabled=True)
+        items = _ranked_items(200)
+        items[10]["score"] = None  # would rank in at 0.96
+        raw = json.dumps(items, indent=2)
+
+        result = await smart_compress("web_search", {}, raw, settings)
+
+        assert result.was_compressed is True
+        ids = [it["id"] for it in json.loads(result.text.split("\n")[0])]
+        assert ids == [i for i in range(51) if i != 10]  # as 0 it ranks out
+
     @pytest.mark.asyncio
     async def test_through_smart_compress_with_the_original_size(self):
         settings = Settings(_env_file=None, smart_compress_enabled=True)
