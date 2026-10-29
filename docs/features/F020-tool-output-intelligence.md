@@ -78,6 +78,7 @@ Classify the result to pick the right compression strategy:
 **Regardless of compression strategy, always preserve:**
 
 - Lines/items containing: `error`, `exception`, `failed`, `critical`, `traceback`, `fatal`, `panic`
+- On the string paths (`string_array`, `log_format`, `raw_text`), also the lines those words miss (`_KEEP_PATTERNS`, since 2026-10-28): exception and error class names (case-sensitive CamelCase ending in `Error` or `Exception`, such as `ValueError`, `KeyError`, `JSONDecodeError`, `RuntimeException`), the plural `errors`, `npm ERR!`, pytest failure-detail lines (`E` followed by at least two spaces and text) and the shell failures `permission denied`, `no such file or directory`, `command not found`, `segmentation fault` and `core dumped`. Like error lines, they are kept outside K. The compress/no-compress gate (Step 1) and the `dict_array` path are unchanged and still use only the error words, so a log of unique lines that merely contains a WARNING or a `ValueError` still passes through whole
 - Structural outliers: items with fields that < 5% of other items have
 - Rare values in status-like fields (e.g., 95% are `"active"`, one is `"suspended"`)
 
@@ -90,11 +91,11 @@ This is a hard guarantee, not a best-effort. These lines are extracted first and
 Instead of hardcoded `head N + tail N` chars, find the natural elbow in the data.
 
 **For `string_array` (bash/grep outputs):**
-1. Score each line: error keywords = 1.0, contains path/URL = 0.8, contains number = 0.6, blank = 0.0
+1. Score each line: error keywords = 1.0, warning or deprecation (`\bwarn(?:ing)?s?\b` or `\bdeprecat`, case-insensitive) = 0.9, URL = 0.8, file path = 0.7, number = 0.5, other = 0.3, blank = 0.0. Warnings are ranked, not always kept: pytest can print hundreds of them, and the budget holds
 2. Sort by score descending
-3. Find elbow: where `score[i] - score[i+1] > threshold` (cliff in relevance)
+3. Find elbow: where `score[i] - score[i+1] > threshold` (cliff in relevance). The step down from the warning tier is never a cliff (0.9 to 0.5 would clear the default 0.3, and a few warnings in a timestamped log would cut K from 50 to 10), so warnings change which lines fill K, not its size
 4. K = elbow index, capped at `max_k` (default 50 lines)
-5. Allocate: first 30% of K from start of original, last 15% from end, remainder = highest-scored
+5. Allocate: first 30% of K from start of original, last 15% from end, remainder = highest-scored. The tail is the last lines with content: whitespace-only lines after the last line with content (every bash body ends with one, before the detached `Exit code:` line) are always emitted, not counted in K and never replaced by a gap line
 6. Emit the kept lines in their original order, with one `[… result lines A–B omitted (N lines) …]` line per omitted run. Pass the result through unchanged when it has at most `max_k` lines, or when the cut, gap lines included, would keep 80% or more of its characters
 7. `NOUS_SMART_COMPRESS_ELBOW_THRESHOLD` sets the cliff on every string path: `string_array`, `log_format` and `raw_text`
 
