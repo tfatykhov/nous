@@ -350,6 +350,9 @@ async def smart_compress(
         return passthrough
     if is_error:
         return passthrough
+    # Not configurable: cache_retrieve exists to return originals, and cutting one again would undo it.
+    if tool_name == "cache_retrieve":
+        return passthrough
     # Per-tool exemption. Everything below this point ranks by original
     # position and by `_score_line` — neither of which can see a retrieval
     # score — so a tool whose output is ALREADY ranked must not be re-ranked
@@ -466,3 +469,28 @@ async def smart_compress(
         original_text=result_text if cacheable else None,
         item_count=item_count,
     )
+
+
+# The final marker as smart_compress() emits it: a whole line that ends with
+# the original size. The key goes in front of that size.
+_FINAL_MARKER_RE = re.compile(r"^\[SmartCompressed:.*(, \d+ chars original\])$")
+
+
+def add_cache_key(text: str, key: str) -> str:
+    """Name the cache_retrieve key in the final SmartCompressed marker.
+
+    The marker is the last line, or the line before a trailing "Exit code: "
+    line. ", cache_retrieve key <key>" goes right before ", N chars
+    original]". Only that one line is read, so a marker quoted inside the
+    body is never touched; with no such marker the text comes back unchanged.
+    The runner calls this only after the original was cached.
+    """
+    lines = text.split("\n")
+    i = len(lines) - 1
+    if i >= 1 and lines[i].startswith("Exit code: "):
+        i -= 1
+    m = _FINAL_MARKER_RE.match(lines[i])
+    if m is None:
+        return text
+    lines[i] = f"{lines[i][: m.start(1)]}, cache_retrieve key {key}{m.group(1)}"
+    return "\n".join(lines)

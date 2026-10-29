@@ -50,7 +50,7 @@ from nous.api.models import (  # noqa: F401 — re-exported for backward compat
     Message,
 )
 from nous.api.preamble import CLAUDE_CODE_PREAMBLE
-from nous.api.smart_compress import smart_compress
+from nous.api.smart_compress import add_cache_key, smart_compress
 from nous.api.tool_classes import refuse_denylist
 from nous.brain.brain import Brain
 from nous.brain.continuation import INTENT_SESSION_PREFIX
@@ -3602,13 +3602,17 @@ class AgentRunner:
                         is_error=is_error,
                     )
 
-                    # F020: Cache original if non-re-fetchable and compressed
+                    # F020: Cache original if non-re-fetchable and compressed.
+                    # The marker names the cache_retrieve key only once the
+                    # write succeeded: a key that was never stored would send
+                    # the model to a miss.
+                    tool_text = compress_result.text
                     if compress_result.original_text and session_id:
                         try:
                             from nous.api.tool_cache import cache_compressed_result
 
                             async with self._heart.db.session() as db_sess:
-                                await cache_compressed_result(
+                                hash_key = await cache_compressed_result(
                                     db_sess,
                                     agent_id=self._settings.agent_id,
                                     session_id=session_id,
@@ -3617,6 +3621,7 @@ class AgentRunner:
                                     original_content=compress_result.original_text,
                                     item_count=compress_result.item_count,
                                 )
+                            tool_text = add_cache_key(compress_result.text, hash_key)
                         except Exception:
                             logger.warning("Failed to cache %s result", tool_name, exc_info=True)
 
@@ -3624,7 +3629,7 @@ class AgentRunner:
                         {
                             "type": "tool_result",
                             "tool_use_id": tool_use_id,
-                            "content": compress_result.text,
+                            "content": tool_text,
                             "is_error": is_error,
                         }
                     )
