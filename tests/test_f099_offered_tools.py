@@ -31,8 +31,7 @@ MODES = ("off", "warn", "enforce")
 # Literals on purpose, not the production constants: widening either constant must fail here.
 SPAWN = frozenset({"spawn_task", "dag_create"})
 HEARTBEAT_TRIAGE_UNOFFERED = frozenset(
-    {"spawn_task", "spawn_sync", "schedule_task", "heartbeat_check_create", "dag_create"}
-    | {"resolve_decisions"}
+    {"spawn_task", "spawn_sync", "schedule_task", "heartbeat_check_create", "dag_create"} | {"resolve_decisions"}
 )
 CHECK_DECLARED = frozenset(
     {

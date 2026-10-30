@@ -267,6 +267,8 @@ async def test_stream_chat_runs_an_alias_as_its_target():
     runner = _make_runner(cognitive, _make_mock_settings())
     calls: list = []
     runner.set_dispatcher(_dispatcher(calls))
+    store = _InputStore()
+    runner.set_ledger_store(store)
     events: list = []
     runner._log_f026_decision = lambda kind, data, session_id: events.append((kind, data))
     n = {"calls": 0}
@@ -286,6 +288,7 @@ async def test_stream_chat_runs_an_alias_as_its_target():
     out = [e async for e in runner.stream_chat("s1", "what did we do")]
 
     assert calls == [("recall_deep", {"hours": 24})]
+    assert store.inputs == [("recall_deep", {"hours": 24})]  # the durable row is the target's
     # tool_start carries the name the model used, tool_end the target (accepted)
     assert any(e.type == "tool_start" and e.tool_name == "recall_recent" for e in out)
     assert any(e.type == "tool_end" and e.tool_name == "recall_deep" for e in out)

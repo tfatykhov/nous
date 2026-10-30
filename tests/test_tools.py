@@ -358,6 +358,44 @@ class TestResolveDecision:
         assert [(await brain.get(uuid.UUID(d))).outcome for d in (first, second)] == ["pending", "pending"]
 
     @pytest.mark.asyncio
+    async def test_an_item_rolled_back_after_its_record_leaves_the_others_records_intact(
+        self, tools, brain, monkeypatch
+    ):
+        """The middle item fails AFTER its written state was merged into the shared snapshot row: its
+        SAVEPOINT takes that merge back, and the next item's merge must not write it back."""
+        from nous.api.call_outcome import _current as outcome_var
+        from nous.api.compensation import snapshot_is_revertible
+
+        first, middle, last = [await self._make_decision(tools, brain) for _ in range(3)]
+        store, entry, outcome = await self._snapshotted_call(brain, first, middle, last)
+        emit = brain._emit_event
+
+        async def fail_for_middle(session, event_type, data, *args, **kwargs):
+            if data.get("decision_id") == middle:
+                raise RuntimeError("boom after the record")
+            return await emit(session, event_type, data, *args, **kwargs)
+
+        monkeypatch.setattr(brain, "_emit_event", fail_for_middle)
+        token = outcome_var.set(outcome)
+        try:
+            result = await tools["resolve_decisions"](
+                resolutions=[
+                    {"decision_id": d, "outcome": "noise", "resolution_note": "tick"} for d in (first, middle, last)
+                ]
+            )
+        finally:
+            outcome_var.reset(token)
+        monkeypatch.undo()
+        assert "Resolved 2/3" in result["content"][0]["text"]
+        items = (await store.get_by_ledger_entry(entry)).snapshot_data["items"]
+        assert [("written" in it) for it in items] == [True, False, True]
+        assert snapshot_is_revertible("resolve_decisions", {"items": items})
+        assert (await brain.get(uuid.UUID(middle))).outcome == "pending"
+        res = await self._revert(brain, store, entry)
+        assert res.success and "2 decision" in res.message, res.message
+        assert [(await brain.get(uuid.UUID(d))).outcome for d in (first, middle, last)] == ["pending"] * 3
+
+    @pytest.mark.asyncio
     async def test_one_stale_item_refuses_the_whole_revert(self, tools, brain):
         from nous.api.call_outcome import _current as outcome_var
 
