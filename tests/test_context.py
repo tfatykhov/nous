@@ -355,7 +355,8 @@ async def test_build_with_working_memory(context_engine, brain, heart, session):
     frame = _frame_selection()
     result = await context_engine.build("nous-default", sid, "continue building", frame, session=session)
 
-    wm_sections = [s for s in result.sections if "working" in s.label.lower() or "memory" in s.label.lower()]
+    # By its label: "memory" alone also matches the static "Tools Outrank Memory" section.
+    wm_sections = [s for s in result.sections if s.label == "Working Memory"]
     if wm_sections:
         assert "REST API" in wm_sections[0].content or "Build" in wm_sections[0].content
 
