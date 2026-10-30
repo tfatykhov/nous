@@ -86,3 +86,67 @@ async def test_an_update_against_a_stored_old_name_passes_the_subset_check():
     session.execute, session.commit = AsyncMock(return_value=found), AsyncMock()
     result = await loader.manage_check(action="update", name="c", updates={"on_complete_tools": ["recall_recent"]})
     assert result["status"] == "updated" and stored.on_complete_tools == ["recall_deep"]
+
+
+# ---- procedures and skills -------------------------------------------------------------------------------------
+
+
+def _procedure(core_tools: list[str], notes: list[str] | None = None):
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from nous.heart.schemas import ProcedureDetail
+
+    return ProcedureDetail(
+        id=uuid4(),
+        agent_id="a",
+        name="Catch up",
+        domain="memory",
+        description="Catch up on the day",
+        goals=[],
+        core_patterns=[],
+        core_tools=core_tools,
+        core_concepts=[],
+        implementation_notes=notes or [],
+        activation_count=0,
+        success_count=0,
+        failure_count=0,
+        neutral_count=0,
+        last_activated=None,
+        effectiveness=None,
+        tags=[],
+        active=True,
+        created_at=datetime.now(UTC),
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_procedure_renders_core_tools_under_their_current_names():
+    from nous.api.tools import create_nous_tools
+
+    heart = MagicMock()
+    heart.get_procedure_by_name = AsyncMock(return_value=_procedure(["recall_recent", "bash", "recall_hubs"]))
+    result = await create_nous_tools(MagicMock(), heart)["get_procedure"](procedure_id="Catch up")
+    assert "Tools: recall_deep, bash\n" in result["content"][0]["text"] + "\n"
+
+
+def test_a_skill_file_naming_an_old_tool_is_parsed_with_the_new_name():
+    from nous.skills.parser import SkillParser
+
+    manifest = SkillParser().parse(
+        "---\nname: catch-up\ndescription: Catch up\ntools:\n  - recall_recent\n  - bash\n---\nBody\n"
+    )
+    assert manifest.tools == ["recall_deep", "bash"]
+    assert SkillParser().to_procedure_input(manifest).core_tools == ["recall_deep", "bash"]
+
+
+def test_a_learned_procedure_stores_the_new_tool_names():
+    from uuid import uuid4
+
+    from test_procedure_learner import _build_learner, _llm_procedure_data
+
+    learner, *_ = _build_learner()
+    ids = {str(uuid4()): "completed", str(uuid4()): "completed"}
+    data = {**_llm_procedure_data(cited_ids=list(ids)), "core_tools": ["recall_recent", "resolve_decision", "bash"]}
+    proc = learner._gated_procedure_input(data, ids, "auto:x", min_sources=2)
+    assert proc.core_tools == ["recall_deep", "resolve_decisions", "bash"]

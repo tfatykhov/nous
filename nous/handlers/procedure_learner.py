@@ -34,6 +34,7 @@ from nous.handlers import LLMClient, call_background_llm, parse_llm_json
 from nous.heart.heart import Heart
 from nous.heart.procedures import ProcedureConflictError, _build_embed_text, new_evidence_notes
 from nous.heart.schemas import ProcedureDetail, ProcedureInput, ProcedureSummary
+from nous.tool_names import canonical_tool_names
 
 logger = logging.getLogger(__name__)
 
@@ -764,7 +765,7 @@ class ProcedureLearner:
                 description=data.get("description"),
                 goals=[cue, *(g for g in _str_list(data.get("goals")) if g != cue)],
                 core_patterns=_str_list(data.get("core_patterns")),
-                core_tools=_str_list(data.get("core_tools")),
+                core_tools=canonical_tool_names(_str_list(data.get("core_tools"))),  # the model may use an old name
                 core_concepts=_str_list(data.get("core_concepts")),
                 implementation_notes=[
                     f"lesson: {data['lesson'].strip()}",

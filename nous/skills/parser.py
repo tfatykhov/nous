@@ -9,6 +9,7 @@ import re
 from dataclasses import dataclass, field
 
 from nous.heart.schemas import ProcedureInput
+from nous.tool_names import canonical_tool_names
 
 
 @dataclass
@@ -382,7 +383,7 @@ class SkillParser:
             domain=domain,
             triggers=_ensure_list(data.get("triggers")),
             frames=_ensure_list(data.get("frames")),
-            tools=_ensure_list(data.get("tools")),
+            tools=canonical_tool_names(_ensure_list(data.get("tools"))),  # a renamed tool under its new name
             requires=_ensure_list(data.get("requires")),
             source_url=source_url if isinstance(source_url, str) else source_hint,
             version=version if isinstance(version, str) else None,

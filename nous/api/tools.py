@@ -57,7 +57,7 @@ from nous.heart.subtasks import INLINE_WORKER_ID
 from nous.observability.retrieval_logger import get_active as get_active_retrieval_logger
 from nous.observability.retrieval_trace import RETURNED_TO_SCRIPT, SLICED_OFF
 from nous.skills.parser import SkillParser
-from nous.tool_names import CHANGED_TOOLS, ToolAlias, changed_tools_note
+from nous.tool_names import CHANGED_TOOLS, ToolAlias, canonical_tool_names, changed_tools_note
 from nous.utils import leaked_markup_start as _leak_tail_start
 
 logger = logging.getLogger(__name__)
@@ -2139,8 +2139,10 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 lines.append(f"Description: {detail.description}")
             if detail.goals:
                 lines.append(f"Triggers: {', '.join(detail.goals)}")
-            if detail.core_tools:
-                lines.append(f"Tools: {', '.join(detail.core_tools)}")
+            # The tools under their current names: a procedure learned before a rename still names the old one.
+            core_tools = canonical_tool_names(detail.core_tools or [])
+            if core_tools:
+                lines.append(f"Tools: {', '.join(core_tools)}")
             if detail.core_patterns:
                 lines.append("")
                 lines.append("Core patterns:")

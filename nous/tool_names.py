@@ -78,8 +78,9 @@ _CHANGED_NAME = re.compile(r"\b(" + "|".join(map(re.escape, CHANGED_TOOLS)) + r"
 
 
 def canonical_tool_name(name: str) -> str | None:
-    """The name a tool has now: an alias becomes its target, a retired name None (logged)."""
-    change = CHANGED_TOOLS.get(name)
+    """The name a tool has now: an alias becomes its target, a retired name None (logged). Anything that is not
+    a string is returned as it is, for the caller's own validation."""
+    change = CHANGED_TOOLS.get(name) if isinstance(name, str) else None
     if change is None:
         return name
     if change.target is None:
