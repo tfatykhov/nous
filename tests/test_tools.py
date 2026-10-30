@@ -56,10 +56,8 @@ class TestCreateNousTools:
             "learn_fact",
             "recall_deep",
             "create_censor",
-            "recall_recent",
             "learn_skill",
             "get_procedure",
-            "recall_hubs",  # F065
             "ingest_document",  # F069
             "resolve_decision",
             "resolve_decisions",

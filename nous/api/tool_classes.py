@@ -32,9 +32,9 @@ _EXTERNAL = ToolClass("external")
 
 TOOL_CLASSES: Mapping[str, ToolClass] = MappingProxyType({
     # reads
-    "recall_deep": _READ, "recall_recent": _READ, "read_file": _READ, "get_procedure": _READ,
+    "recall_deep": _READ, "read_file": _READ, "get_procedure": _READ,
     "web_search": _READ, "web_fetch": _READ, "list_tasks": _READ, "cache_retrieve": _READ,
-    "recall_hubs": _READ, "list_decisions": _READ,
+    "list_decisions": _READ,
     "db_query": _READ,  # read-only SQL as its own login, which PostgreSQL holds to SELECT on a fixed list
     "submit_final_report": _READ,  # injected via extra_tools in hardened subtasks
     # local writes — compensable where a compensator exists. heartbeat_check_manage

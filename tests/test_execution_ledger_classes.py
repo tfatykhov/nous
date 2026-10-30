@@ -19,7 +19,6 @@ def test_send_email_is_external():
 
 
 def test_pure_decision_and_graph_reads_are_reads():
-    assert classify_side_effect("recall_hubs", {}) == "none"
     assert classify_side_effect("list_decisions", {}) == "none"
 
 

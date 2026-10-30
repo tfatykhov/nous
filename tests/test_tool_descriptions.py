@@ -206,9 +206,8 @@ def test_web_fetch_names_browser_task_only_where_it_is_registered():
 
 
 def test_the_memory_tools_say_when_to_use_another(tools):
-    assert "recall_recent" in tools["recall_deep"]["description"]
-    assert "recall_deep" in tools["recall_recent"]["description"]
-    assert "recall_deep" in tools["recall_hubs"]["description"]
+    assert "hours" in tools["recall_deep"]["description"]
+    assert not {"recall_recent", "recall_hubs"} & set(tools)
     assert "chatter" in tools["learn_fact"]["description"]
     assert "learn_fact" in tools["create_censor"]["description"]
     assert "alternatives" in tools["record_decision"]["description"]

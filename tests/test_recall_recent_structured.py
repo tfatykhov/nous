@@ -1,6 +1,6 @@
-"""recall_recent must prefer the summarizer's structured summary (parity
+"""recall_deep(hours=N) (the former recall_recent tool) must prefer the summarizer's structured summary (parity
 with recall_deep's COALESCE(structured_summary->>'summary', summary) — the
-codex fix that never reached this tool) and must mark un-summarized
+codex fix that never reached the old tool) and must mark un-summarized
 episodes' raw creation echo as such."""
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ def _make_tool(episodes: list[EpisodeSummary]):
     heart.list_episodes = AsyncMock(return_value=episodes)
     brain = MagicMock()
     tools = create_nous_tools(brain, heart)
-    return tools["recall_recent"]
+    return tools["recall_deep"]
 
 
 def _text(resp: dict) -> str:

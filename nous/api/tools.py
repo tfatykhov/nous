@@ -57,7 +57,7 @@ from nous.heart.subtasks import INLINE_WORKER_ID
 from nous.observability.retrieval_logger import get_active as get_active_retrieval_logger
 from nous.observability.retrieval_trace import RETURNED_TO_SCRIPT, SLICED_OFF
 from nous.skills.parser import SkillParser
-from nous.tool_names import ToolAlias
+from nous.tool_names import CHANGED_TOOLS, ToolAlias, changed_tools_note
 from nous.utils import leaked_markup_start as _leak_tail_start
 
 logger = logging.getLogger(__name__)
@@ -1530,14 +1530,14 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             logger.exception("learn_fact tool failed")
             return _tool_error(f"Error learning fact: {e}")
 
-    async def recall_deep(  # noqa: C901
+    async def _search_memory(  # noqa: C901
         query: str,
         limit: int = 10,
         memory_types: list[str] | None = None,
         _session_id: str | None = None,
         _turn_number: int | None = None,
     ) -> dict[str, Any]:
-        """Search memory in Heart and Brain.
+        """recall_deep's search by meaning: memory in Heart and Brain.
 
         Thin wrapper around ``run_recall_pipeline`` (F051 refactor): the
         pipeline runs the full retrieval stack and returns structured
@@ -1919,14 +1919,12 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             logger.exception("create_censor tool failed")
             return _tool_error(f"Error creating censor: {e}")
 
-    async def recall_recent(
+    async def _recent_episodes(
         hours: int = 48,
         limit: int = 10,
     ) -> dict[str, Any]:
-        """Recall recent episodes by time, not topic similarity.
-
-        Use this when the user asks "what did we talk about", "what happened
-        recently", or you need a comprehensive overview of recent activity.
+        """recall_deep's time listing: recent episodes by time, not topic similarity
+        (the former recall_recent tool).
 
         Args:
             hours: Look back this many hours (default 48)
@@ -1962,8 +1960,41 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             return {"content": [{"type": "text", "text": "\n".join(lines)}]}
 
         except Exception as e:
-            logger.exception("recall_recent tool failed")
+            logger.exception("recall_deep recent-episode listing failed")
             return _tool_error(f"Error fetching recent episodes: {e}")
+
+    async def recall_deep(
+        query: str | None = None,
+        hours: int | None = None,
+        limit: int = 10,
+        memory_types: list[str] | None = None,
+        _session_id: str | None = None,
+        _turn_number: int | None = None,
+    ) -> dict[str, Any]:
+        """Search memory by meaning (``query``), list the latest conversations (``hours``), or both.
+
+        query only: the search (``_search_memory``). hours only: the time listing (``_recent_episodes``), which
+        opens no retrieval trace and records nothing surfaced. Both: the listing first, then the search; ``limit``
+        applies to each, ``memory_types`` to the search only. Neither: an error. A result that names a changed
+        tool ends with a one-line note (``changed_tools_note``).
+        """
+        if not query and hours is None:
+            return _tool_error(
+                "recall_deep needs query (search memory by topic) or hours (list the latest conversations), or both."
+            )
+        parts: list[dict[str, Any]] = []
+        if hours is not None:
+            parts.append(await _recent_episodes(hours=hours, limit=limit))
+        if query:
+            parts.append(await _search_memory(query, limit, memory_types, _session_id, _turn_number))
+        text = "\n\n".join(p["content"][0]["text"] for p in parts)
+        note = changed_tools_note(text)
+        if note:
+            text = f"{text}\n\n{note}"
+        out: dict[str, Any] = {"content": [{"type": "text", "text": text}]}
+        if all(p.get("is_error") for p in parts):
+            out["is_error"] = True
+        return out
 
     # F011: learn_skill tool — register skills from URL, local path, or inline markdown
     _skill_parser = SkillParser()
@@ -2131,38 +2162,6 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         except Exception as e:
             logger.exception("get_procedure tool failed")
             return _tool_error(f"Error fetching procedure: {e}")
-
-    async def recall_hubs(
-        limit: int = 10,
-        node_type: str | None = None,
-    ) -> dict[str, Any]:
-        """F065: return the most-connected (highest-degree) nodes in the graph.
-
-        Args:
-            limit: Top-N to return (1..50, default 10).
-            node_type: Optional filter ('decision' | 'fact' | 'episode' | 'procedure').
-
-        Returns:
-            MCP-compliant response with a labeled list of hubs, their degree,
-            and a per-tier provenance breakdown.
-        """
-        try:
-            hubs = await brain.top_hubs(limit=max(1, min(50, limit)), node_type=node_type)
-            if not hubs:
-                return {"content": [{"type": "text", "text": "No graph hubs found yet — the graph may be empty."}]}
-
-            lines = [f"Top-{len(hubs)} hubs by degree:"]
-            for i, h in enumerate(hubs, start=1):
-                bk = h["extraction_method_breakdown"]
-                lines.append(
-                    f"{i}. [{h['node_type']}] {h['label'][:80]} — "
-                    f"degree {h['degree']} "
-                    f"(det={bk['deterministic']}, heu={bk['heuristic']}, inf={bk['inferred']})"
-                )
-            return {"content": [{"type": "text", "text": "\n".join(lines)}]}
-        except Exception as e:
-            logger.exception("recall_hubs tool failed")
-            return _tool_error(f"Error fetching hubs: {e}")
 
     async def ingest_document(
         content: str,
@@ -2433,10 +2432,8 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         "learn_fact": learn_fact,
         "recall_deep": recall_deep,
         "create_censor": create_censor,
-        "recall_recent": recall_recent,
         "learn_skill": learn_skill,
         "get_procedure": get_procedure,
-        "recall_hubs": recall_hubs,
         "ingest_document": ingest_document,
         "resolve_decision": resolve_decision,
         "resolve_decisions": resolve_decisions,
@@ -2629,14 +2626,19 @@ _RECALL_DEEP_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
         "Search your memory by meaning: past conversations, facts and decisions (procedures and censors when "
-        "named in memory_types). Use it before asking the user about anything from earlier sessions. For the "
-        "latest conversations in time order, use recall_recent."
+        "named in memory_types). Use it before asking the user about anything from earlier sessions. Pass "
+        "hours to list the latest conversations in time order ('what did we discuss lately'); pass query, "
+        "hours or both."
     ),
     "properties": {
         "query": {"type": "string", "description": "What to look for, in plain words"},
+        "hours": {
+            "type": "integer",
+            "description": "List the conversations of the last this-many hours, newest first (48 is typical)",
+        },
         "limit": {
             "type": "integer",
-            "description": "Maximum results to return",
+            "description": "Maximum results to return (with query and hours, for each)",
             "default": 10,
             "minimum": 1,
             "maximum": 50,
@@ -2656,7 +2658,7 @@ _RECALL_DEEP_SCHEMA: dict[str, Any] = {
             ),
         },
     },
-    "required": ["query"],
+    "required": [],
 }
 
 _CREATE_CENSOR_SCHEMA: dict[str, Any] = {
@@ -2686,28 +2688,6 @@ _CREATE_CENSOR_SCHEMA: dict[str, Any] = {
     },
     "required": ["trigger_pattern", "reason"],
 }
-
-_RECALL_RECENT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "description": (
-        "List your latest conversations in time order, with no topic search: for 'what did we discuss "
-        "lately'. To search by topic, use recall_deep."
-    ),
-    "properties": {
-        "hours": {
-            "type": "integer",
-            "description": "Look back this many hours (default 48)",
-            "default": 48,
-        },
-        "limit": {
-            "type": "integer",
-            "description": "Maximum episodes to return (default 10)",
-            "default": 10,
-        },
-    },
-    "required": [],
-}
-
 
 _LEARN_SKILL_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -2746,30 +2726,6 @@ _GET_PROCEDURE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["procedure_id"],
-}
-
-
-_RECALL_HUBS_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "description": (
-        "List the memories that the most other memories link to (facts, decisions, conversations or "
-        "procedures): what your memory centres on. To search by topic, use recall_deep."
-    ),
-    "properties": {
-        "limit": {
-            "type": "integer",
-            "description": "Top-N to return (1..50, default 10)",
-            "default": 10,
-            "minimum": 1,
-            "maximum": 50,
-        },
-        "node_type": {
-            "type": "string",
-            "description": "Optional filter by node type",
-            "enum": ["decision", "fact", "episode", "procedure"],
-        },
-    },
-    "required": [],
 }
 
 
@@ -2815,15 +2771,21 @@ def register_nous_tools(
     dispatcher.register("learn_fact", closures["learn_fact"], _LEARN_FACT_SCHEMA)
     dispatcher.register("recall_deep", closures["recall_deep"], _RECALL_DEEP_SCHEMA)
     dispatcher.register("create_censor", closures["create_censor"], _CREATE_CENSOR_SCHEMA)
-    dispatcher.register("recall_recent", closures["recall_recent"], _RECALL_RECENT_SCHEMA)
     dispatcher.register("learn_skill", closures["learn_skill"], _LEARN_SKILL_SCHEMA)
     dispatcher.register("get_procedure", closures["get_procedure"], _GET_PROCEDURE_SCHEMA)
-    dispatcher.register("recall_hubs", closures["recall_hubs"], _RECALL_HUBS_SCHEMA)
     dispatcher.register("ingest_document", closures["ingest_document"], _INGEST_DOCUMENT_SCHEMA)
     if settings is None or settings.decision_resolution_enabled:
         dispatcher.register("resolve_decision", closures["resolve_decision"], _RESOLVE_DECISION_SCHEMA)
         dispatcher.register("resolve_decisions", closures["resolve_decisions"], _RESOLVE_DECISIONS_SCHEMA)
         dispatcher.register("list_decisions", closures["list_decisions"], _LIST_DECISIONS_SCHEMA)
+    # Old tool names (nous/tool_names.py): an alias whose target is registered here, or a retired name.
+    for old_name, change in CHANGED_TOOLS.items():
+        if dispatcher.is_registered(old_name):
+            continue  # still a tool of its own
+        if change.target is None:
+            dispatcher.retire(old_name, change.note)
+        elif dispatcher.is_registered(change.target):
+            dispatcher.register_alias(old_name, change.target, change.translate, change.note)
 
 
 # ---------------------------------------------------------------------------

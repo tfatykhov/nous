@@ -60,7 +60,7 @@ def test_reads_and_stops_are_not_violations(name, action):
 
 
 def test_local_tools_are_not_violations():
-    for name in ("recall_deep", "recall_recent", "read_file", "learn_fact", "record_decision", "cancel_task"):
+    for name in ("recall_deep", "read_file", "learn_fact", "record_decision", "cancel_task"):
         assert not heartbeat_spawn_violation(name, {})
 
 

@@ -39,7 +39,6 @@ CHECK_DECLARED = frozenset(
         "web_search",
         "web_fetch",
         "recall_deep",
-        "recall_recent",
         "bash",
         "read_file",
         "heartbeat_check_create",
@@ -188,7 +187,7 @@ def test_a_lineage_check_loses_the_tools_it_declared_that_the_narrowing_denies(l
     declared = sorted(CHECK_TOOLS)
     ctx = _internal("heartbeat_check", declared_tools=tuple(declared))
     tools = r._offered_tools(ctx, "conversation", is_subtask=True, tool_filter=declared, refuse_active=False)
-    expected = {"web_search", "web_fetch", "recall_deep", "recall_recent", "read_file"} | _shell(lineage_shell)
+    expected = {"web_search", "web_fetch", "recall_deep", "read_file"} | _shell(lineage_shell)
     assert _names(tools) == expected
     assert not _names(tools) & {"heartbeat_check_create", "heartbeat_check_manage"}
     # PIN: the same check with no lineage is offered everything it declared.

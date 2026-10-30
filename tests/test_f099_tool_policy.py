@@ -32,14 +32,12 @@ IID, RID, OTHER = (uuid.UUID(f"00000000-0000-0000-0000-00000000000{n}") for n in
 LINEAGE_ALLOWED = frozenset(
     {
         "recall_deep",
-        "recall_recent",
         "read_file",
         "get_procedure",
         "web_search",
         "web_fetch",
         "list_tasks",
         "cache_retrieve",
-        "recall_hubs",
         "list_decisions",
         "db_query",  # read-only SQL as a login PostgreSQL holds to SELECT on a fixed list of tables
         "submit_final_report",

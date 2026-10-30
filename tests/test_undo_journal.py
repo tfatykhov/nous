@@ -606,6 +606,20 @@ class TestCheckKind:
         assert (await undo_journal.restore(entry["id"], RestoreDeps(check_loader=loader), journal)).success
         assert (await _row(db, DynamicCheckModel, check_id))["tools"] == ["web_search"]
 
+    async def test_restored_row_gets_the_current_tool_names(self, db, loader, journal):
+        # A snapshot taken before a tool rename restores under the new name (nous/tool_names.py).
+        check_id = await _make_check(loader)
+        name = (await _row(db, DynamicCheckModel, check_id))["name"]
+        await loader.manage_check("update", name, {"prompt": "p2"})
+        entry = await journal.get((await _only(journal, "heartbeat_check", "update"))["id"])
+        entry["before"]["tools"] = ["recall_recent", "web_search"]
+        entry["before"]["on_complete_tools"] = ["recall_recent"]
+        journal._write_file(journal._find(entry["id"]).name, entry)
+        assert (await undo_journal.restore(entry["id"], RestoreDeps(check_loader=loader), journal)).success
+        row = await _row(db, DynamicCheckModel, check_id)
+        assert (row["tools"], row["on_complete_tools"]) == (["recall_deep", "web_search"], ["recall_deep"])
+        assert loader._registry.get_check(name)._tools == ["recall_deep", "web_search"]
+
     @pytest.mark.parametrize(
         "updates",
         [
