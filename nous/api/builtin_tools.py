@@ -927,9 +927,16 @@ async def write_file_tool(
 # Tool schemas
 # ---------------------------------------------------------------------------
 
+# Where SmartCompress starts to cut a tool result, by default (a deployment can raise it).
+_COMPRESS_MIN_CHARS: int = Settings.model_fields["smart_compress_min_chars"].default
+
 _BASH_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "description": "Execute a shell command in the workspace directory",
+    "description": (
+        "Run a shell command in the workspace: builds, tests, git and gh, processes. To read a file use "
+        "read_file, and to create or replace one use write_file, not cat/head/tail/sed or heredocs. Output over "
+        f"{_COMPRESS_MIN_CHARS:,} characters may be cut; the marker then names a cache_retrieve key for the rest."
+    ),
     "properties": {
         "command": {"type": "string", "description": "Shell command to execute"},
         "timeout": {
@@ -947,7 +954,12 @@ _BASH_SCHEMA: dict[str, Any] = {
 
 _READ_FILE_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "description": "Read a file from the workspace directory",
+    "description": (
+        "Read a text file in the workspace. Use it instead of cat, head, tail or sed: its output is never "
+        f"compressed. One call returns at most {_READ_FILE_MAX_LINES} lines or {_READ_FILE_MAX_CHARS:,} characters; "
+        "when more remains, a trailer names the offset for the next call. Files over "
+        f"{_MAX_FILE_SIZE // (1024 * 1024)} MB are refused."
+    ),
     "properties": {
         "path": {"type": "string", "description": "File path (relative or absolute within workspace)"},
         "offset": {
@@ -958,12 +970,7 @@ _READ_FILE_SCHEMA: dict[str, Any] = {
         },
         "limit": {
             "type": "integer",
-            "description": (
-                f"Number of lines to read (0 = all). A page is capped at {_READ_FILE_MAX_LINES} lines / "
-                f"{_READ_FILE_MAX_CHARS:,} chars; a page that stops before the end of the file ends with a "
-                "trailer naming the next offset. A single line over the char cap is cut, with a trailer "
-                "saying so."
-            ),
+            "description": "Number of lines to read (0 = to the end, a page at a time).",
             "default": 0,
             "minimum": 0,
         },
@@ -973,10 +980,14 @@ _READ_FILE_SCHEMA: dict[str, Any] = {
 
 _WRITE_FILE_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "description": "Write content to a file in the workspace directory",
+    "description": (
+        "Create or replace a text file in the workspace with the given content; missing directories are "
+        "created. Use it instead of heredocs or echo > in bash. The path must stay inside the workspace. "
+        "A write can be reverted from the action review."
+    ),
     "properties": {
         "path": {"type": "string", "description": "File path (relative or absolute within workspace)"},
-        "content": {"type": "string", "description": "Content to write to the file"},
+        "content": {"type": "string", "description": "The file's whole new content"},
     },
     "required": ["path", "content"],
 }
