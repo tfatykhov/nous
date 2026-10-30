@@ -119,7 +119,21 @@ def test_read_file_states_its_page_caps_from_the_constants(tools):
 
 def test_write_file_replaces_heredocs(tools):
     text = tools["write_file"]["description"]
-    assert "heredocs" in text and "workspace" in text and "reverted" in text
+    assert "heredocs" in text and "workspace" in text
+
+
+@pytest.mark.parametrize(
+    ("over", "revertible"),
+    [
+        ({}, False),  # the defaults, as prod runs: no snapshot, no review card
+        ({"compensation_enabled": True}, False),  # snapshots, but no review card to revert from
+        ({"compensation_enabled": True, "compensation_auto_review_enabled": True}, True),
+    ],
+    ids=["defaults", "compensation_only", "compensation_and_review"],
+)
+def test_write_file_promises_a_revert_only_where_the_review_card_can_do_it(over, revertible):
+    text = _tools(**over)["write_file"]["description"]
+    assert ("reverted from the action review" in text) is revertible
 
 
 # -- web --------------------------------------------------------------------------------------------------------
@@ -201,8 +215,10 @@ def test_heartbeat_check_create_lists_the_allowed_tools_and_minimum_from_the_cod
 def test_dag_create_states_its_limits_and_the_source_values(tools):
     schema = tools["dag_create"]["input_schema"]
     text = schema["description"]
-    assert f"{dag_schemas.MAX_NODES} nodes" in text and f"{dag_schemas.MAX_WAVES} waves" in text
-    assert f"{dag_schemas.MAX_PARALLEL_PER_WAVE} nodes per wave" in text
+    # The node cap counts every node (schemas.py: len(self.nodes)); only the wave limits leave fix nodes out.
+    assert f"{dag_schemas.MAX_NODES} nodes in all, fix nodes included;" in text
+    assert f"{dag_schemas.MAX_WAVES} waves" in text
+    assert f"{dag_schemas.MAX_PARALLEL_PER_WAVE} nodes per wave, fix nodes not counted." in text
     source = schema["properties"]["source"]
     assert source["enum"] == list(get_args(dag_schemas.DAGCreateRequest.model_fields["source"].annotation))
     assert source["enum"] == ["conversation", "critic", "heartbeat", "schedule"]
@@ -218,7 +234,20 @@ def test_dag_create_reads_its_limits_at_registration(monkeypatch):
     monkeypatch.setattr(dag_schemas, "MAX_WAVES", 3)
     monkeypatch.setattr(dag_schemas, "MAX_PARALLEL_PER_WAVE", 2)
     text = _tools()["dag_create"]["description"]
-    assert "7 nodes, 3 waves" in text and "2 nodes per wave" in text
+    assert "7 nodes in all" in text and "3 waves" in text and "2 nodes per wave" in text
+
+
+def test_the_caveats_the_code_needs_are_stated(tools):
+    """A check disables itself only when its prompt says to; an amended retry is a plain retry where the LLM
+    fix dispatch is off; decision_sweep reads its own rows."""
+    assert (
+        "It can disable itself (its prompt calls heartbeat_check_manage"
+        in tools["heartbeat_check_create"]["description"]
+    )
+    node = tools["dag_create"]["input_schema"]["properties"]["nodes"]["items"]["properties"]
+    assert "where amended retries are switched off, it retries as is" in node["fix_actions"]["description"]
+    template = tools["push_surface"]["input_schema"]["properties"]["template"]["description"]
+    assert "decision rows in params are ignored" in template
 
 
 def test_dag_manage_describes_its_action_and_id(tools):

@@ -982,8 +982,7 @@ _WRITE_FILE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
         "Create or replace a text file in the workspace with the given content; missing directories are "
-        "created. Use it instead of heredocs or echo > in bash. The path must stay inside the workspace. "
-        "A write can be reverted from the action review."
+        "created. Use it instead of heredocs or echo > in bash. The path must stay inside the workspace."
     ),
     "properties": {
         "path": {"type": "string", "description": "File path (relative or absolute within workspace)"},
@@ -1033,6 +1032,16 @@ def register_builtin_tools(dispatcher: ToolDispatcher, settings: Settings) -> No
     async def _write_file(path: str, content: str) -> dict[str, Any]:
         return await write_file_tool(path, content, _workspace_dir=workspace)
 
+    write_schema = _WRITE_FILE_SCHEMA
+    if getattr(settings, "compensation_enabled", False) is True and (
+        getattr(settings, "compensation_auto_review_enabled", False) is True
+    ):
+        # Only where a write is snapshotted and offered on a review card: a description must not promise an undo
+        # this deployment cannot do.
+        write_schema = {
+            **_WRITE_FILE_SCHEMA,
+            "description": _WRITE_FILE_SCHEMA["description"] + " A write can be reverted from the action review.",
+        }
     dispatcher.register("bash", _bash, _BASH_SCHEMA)
     dispatcher.register("read_file", _read_file, _READ_FILE_SCHEMA)
-    dispatcher.register("write_file", _write_file, _WRITE_FILE_SCHEMA)
+    dispatcher.register("write_file", _write_file, write_schema)

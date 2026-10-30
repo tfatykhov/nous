@@ -357,8 +357,8 @@ async def test_build_with_working_memory(context_engine, brain, heart, session):
 
     # By its label: "memory" alone also matches the static "Tools Outrank Memory" section.
     wm_sections = [s for s in result.sections if s.label == "Working Memory"]
-    if wm_sections:
-        assert "REST API" in wm_sections[0].content or "Build" in wm_sections[0].content
+    assert wm_sections, [s.label for s in result.sections]
+    assert "REST API" in wm_sections[0].content or "Build" in wm_sections[0].content
 
 
 # ---------------------------------------------------------------------------

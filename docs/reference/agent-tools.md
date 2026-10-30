@@ -2,6 +2,8 @@
 
 Documented tools the agent can call, and the cognitive frames each is offered in; the `dispatcher.register()` calls are the full list. Part of the [Nous development guide](../../CLAUDE.md).
 
+Tool descriptions name other tools to use instead. Those cross-references assume the default flags (`dag_create`/`dag_manage`, the `heartbeat_check_*` tools and `run_python` are registered by default); the exceptions are decided at registration: web_fetch names `browser_task` only where it is registered, and write_file mentions reverting from the action review only with `NOUS_COMPENSATION_ENABLED` and `NOUS_COMPENSATION_AUTO_REVIEW_ENABLED` both on.
+
 | Tool | Frame Access | Description |
 |------|-------------|-------------|
 | `record_decision` | decision, task, debug, conversation, question | Record a decision with confidence + reasoning |

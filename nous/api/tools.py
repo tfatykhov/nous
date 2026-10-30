@@ -5576,8 +5576,9 @@ def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: Any) -> None:
             "type": "object",
             "description": (
                 "Create a recurring monitor: a check that runs its prompt on an interval or cron schedule with a "
-                "few tools and reports what it finds. When its job is done it disables itself, and "
-                "on_complete_prompt then runs once. For a one-off task later, use schedule_task."
+                "few tools and reports what it finds. It can disable itself (its prompt calls heartbeat_check_manage "
+                "disable on its own name); on_complete_prompt then runs once. For a one-off task later, use "
+                "schedule_task."
             ),
             "properties": {
                 "name": {"type": "string", "description": "Unique check name (slug, e.g. 'arxiv-agent-papers')"},
@@ -6202,9 +6203,10 @@ def register_dag_tools(
             "type": "object",
             "description": (
                 "Run several steps with dependencies, waits or approvals as a DAG of nodes. Limits: "
-                f"{MAX_NODES} nodes, {MAX_WAVES} waves (steps in a dependency chain) and {MAX_PARALLEL_PER_WAVE} "
-                "nodes per wave; fix nodes are not counted. Do not poll: the outcome is delivered to you when it "
-                "ends. Use dag_manage to cancel, retry or check progress. For one task, use spawn_task."
+                f"{MAX_NODES} nodes in all, fix nodes included; {MAX_WAVES} waves (steps in a dependency chain) "
+                f"and {MAX_PARALLEL_PER_WAVE} nodes per wave, fix nodes not counted. Do not poll: the outcome is "
+                "delivered to you when it ends. Use dag_manage to cancel, retry or check progress. For one task, "
+                "use spawn_task."
             ),
             "properties": {
                 "name": {"type": "string", "description": "DAG name"},
@@ -6363,7 +6365,8 @@ def register_dag_tools(
                                 },
                                 "description": (
                                     "(type='fix' only) The actions the fix may take: retry the node as it was or "
-                                    "with amended instructions, skip it and let the DAG go on, or fail it for good."
+                                    "with amended instructions (where amended retries are switched off, it retries "
+                                    "as is), skip it and let the DAG go on, or fail it for good."
                                 ),
                             },
                             "max_fix_attempts": {
