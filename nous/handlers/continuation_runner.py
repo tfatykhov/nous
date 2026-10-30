@@ -291,6 +291,12 @@ def make_propose_action_executor(
             return "Error: arguments must be a JSON object: the exact arguments the tool will receive.", True
         if not isinstance(rationale, str) or not rationale.strip():
             return "Error: rationale is required: say why the owner should approve this call.", True
+        alias = dispatcher.alias_for(tool)
+        if alias is not None:
+            # An old tool name is staged as the call it becomes, so the owner approves exactly what runs.
+            if alias.target is None:
+                return f"Error: {alias.note}", True
+            tool, arguments = alias.target, alias.translate(arguments)
         if not dispatcher.is_registered(tool):
             return f"Error: {tool} is not a registered tool, so there is nothing to propose.", True
         cls = tool_class(tool)

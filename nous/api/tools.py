@@ -57,6 +57,7 @@ from nous.heart.subtasks import INLINE_WORKER_ID
 from nous.observability.retrieval_logger import get_active as get_active_retrieval_logger
 from nous.observability.retrieval_trace import RETURNED_TO_SCRIPT, SLICED_OFF
 from nous.skills.parser import SkillParser
+from nous.tool_names import ToolAlias
 from nous.utils import leaked_markup_start as _leak_tail_start
 
 logger = logging.getLogger(__name__)
@@ -361,10 +362,33 @@ class ToolDispatcher:
         # where the call came from. Opt-in per registration, set only while
         # NOUS_INTENTIONS_ENABLED is on: with it off no handler sees a new argument.
         self._origin_aware: set[str] = set()
+        # Old tool names: an alias the runner rewrites to its target before any check, or a retired name
+        # that answers with its message. Never offered, never registered (see nous/tool_names.py).
+        self._aliases: dict[str, ToolAlias] = {}
 
     def is_registered(self, name: str) -> bool:
         """True when ``name`` has a handler -- the only way a call can run."""
         return name in self._handlers
+
+    def register_alias(
+        self, old_name: str, target: str, translate: Callable[[dict[str, Any]], dict[str, Any]], note: str
+    ) -> None:
+        """Accept ``old_name`` as a call to ``target``: ``translate`` maps its arguments, and ``note`` becomes
+        the first line of the result. The alias is not a tool: it is never offered and ``is_registered`` stays
+        False for it."""
+        if old_name in self._handlers or target not in self._handlers:
+            raise ValueError(f"alias {old_name!r} -> {target!r}: the old name is a tool or the target is not")
+        self._aliases[old_name] = ToolAlias(target, note, translate)
+
+    def retire(self, old_name: str, message: str) -> None:
+        """Answer a call to ``old_name`` with ``message`` as an error; nothing runs."""
+        if old_name in self._handlers:
+            raise ValueError(f"cannot retire {old_name!r}: it is a registered tool")
+        self._aliases[old_name] = ToolAlias(None, message)
+
+    def alias_for(self, name: str) -> ToolAlias | None:
+        """The alias or retirement registered for ``name``, or None."""
+        return self._aliases.get(name)
 
     def register(
         self, name: str, handler: Callable[..., Any], schema: dict[str, Any], *, origin_aware: bool = False
@@ -413,6 +437,12 @@ class ToolDispatcher:
         shown. It is refused here instead."""
         if not isinstance(args, dict):
             return ["arguments must be a JSON object"]
+        alias = self._aliases.get(name)
+        if alias is not None:
+            # An old name is judged as the call it becomes; a retired one cannot run.
+            if alias.target is None:
+                return [alias.note]
+            name, args = alias.target, alias.translate(args)
         schema = self._schemas.get(name)
         if schema is None:
             return [f"{name} is not a registered tool"]
