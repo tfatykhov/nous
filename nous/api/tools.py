@@ -2483,15 +2483,11 @@ _RECORD_DECISION_SCHEMA: dict[str, Any] = {
 _RESOLVE_DECISION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
-        "Persist an outcome on an existing decision, closing the calibration "
-        "loop. Use 'noise' for sweep/tick artifacts and 'superseded' when a "
-        "later decision replaced this one (both excluded from calibration). "
-        "'superseded' REQUIRES superseded_by — record the replacing decision "
-        "first, then pass its UUID; without it the call is rejected. "
-        "Always include a resolution_note as the evidence trail. In background "
-        "turns (heartbeat, subtask, schedule, DAG) only 'noise' and 'superseded' "
-        "are accepted, and never on a decision that already has a success/"
-        "partial/failure outcome — grading needs an interactive turn."
+        "Record the outcome of an earlier decision: success, partial or failure, or 'noise' (a sweep or tick "
+        "artifact) or 'superseded' (a later decision replaced it), which calibration leaves out. 'superseded' "
+        "needs superseded_by: record the replacing decision first. Add a resolution_note as evidence. In "
+        "background turns only 'noise' and 'superseded' apply, never over a graded outcome. Not available in "
+        "heartbeat triage turns."
     ),
     "properties": {
         "decision_id": {"type": "string", "description": "UUID of the decision to resolve"},
@@ -2515,11 +2511,9 @@ _RESOLVE_DECISION_SCHEMA: dict[str, Any] = {
 _RESOLVE_DECISIONS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
-        "Resolve a batch of decisions in one transaction (for sweeps). "
-        "A per-item failure is reported and does not abort the batch. In "
-        "background turns only 'noise' and 'superseded' items are applied, and "
-        "never over an existing success/partial/failure outcome; other items "
-        "are reported as failures."
+        "Resolve several decisions in one transaction (for sweeps); a failed item is reported and the rest still "
+        "apply. In background turns only 'noise' and 'superseded' items apply, never over a graded outcome. Not "
+        "available in heartbeat triage turns."
     ),
     "properties": {
         "resolutions": {
@@ -5576,8 +5570,8 @@ def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: Any) -> None:
         {
             "type": "object",
             "description": (
-                "Create a recurring monitor: a check that runs its prompt on an interval or cron schedule with a "
-                "few tools and reports what it finds. It can disable itself (its prompt calls heartbeat_check_manage "
+                "Create a recurring monitor: a check runs its prompt on an interval or cron schedule with a few "
+                "tools and reports what it finds. It can disable itself (its prompt calls heartbeat_check_manage "
                 "disable on its own name); on_complete_prompt then runs once. For a one-off task later, use "
                 "schedule_task."
             ),
@@ -6140,6 +6134,25 @@ def register_dag_tools(
             }
         }
 
+    # Decided at registration, like web_fetch's browser_task sentence: the model cannot read a setting, so the
+    # text says what this server does. Fixed per deployment, so every frame gets the same bytes (#528).
+    callbacks_run = getattr(cfg, "dag_callback_execution_enabled", False) is True
+    amended_retries = getattr(cfg, "dag_fix_llm_dispatch_enabled", False) is True
+    budget_enforced = getattr(cfg, "dag_token_budget_enforcement_enabled", False) is True
+    callback_note = (
+        "" if callbacks_run else " On this server a callback completes at once without running: act with a 'subtask'."
+    )
+    fix_retry_note = (
+        "retry the node as it was or with amended instructions"
+        if amended_retries
+        else "retry the node as it was (an amended retry also retries as is on this server)"
+    )
+    budget_note = (
+        "once it is spent, nodes that have not started are cancelled"
+        if budget_enforced
+        else "it is tracked and reported, not enforced, on this server"
+    )
+
     node_type_enum = ["subtask", "check", "gate", "callback", "fix", "wait"]
     approval_help = ""
     approval_properties: dict[str, Any] = {}
@@ -6161,10 +6174,10 @@ def register_dag_tools(
             f"{proceed_note}. Wire it "
             "with two context_flow edges: draft → approval (the card shows the draft) and "
             "approval → the acting node (it runs only after a 'proceed' answer and "
-            "receives the answer). The acting node must be a 'subtask': a 'callback' "
-            "may run nothing (see 'callback'). You cannot "
-            "answer the card yourself: tell the person to open the companion. You cannot "
-            "re-ask a question the person declined."
+            "receives the answer)."
+            + ("" if callbacks_run else " The acting node must be a 'subtask': a callback runs nothing here.")
+            + " You cannot answer the card yourself (tell the person to open the companion) or re-ask a "
+            "declined question."
         )
         approval_properties = {
             "options": {
@@ -6207,7 +6220,8 @@ def register_dag_tools(
                 f"{MAX_NODES} nodes in all, fix nodes included; {MAX_WAVES} waves (steps in a dependency chain) "
                 f"and {MAX_PARALLEL_PER_WAVE} nodes per wave, fix nodes not counted. Do not poll: the outcome is "
                 "delivered to you when it ends. Use dag_manage to cancel, retry or check progress. For one task, "
-                "use spawn_task."
+                "use spawn_task, unless it must wait for a Claude Code job, a PR or a file (then a DAG with a "
+                "wait node)."
             ),
             "properties": {
                 "name": {"type": "string", "description": "DAG name"},
@@ -6231,16 +6245,17 @@ def register_dag_tools(
                                     "completion_check, and only a 'check' node honors 'tools': every other type "
                                     "ignores them. 'callback' runs AFTER its predecessors and receives their "
                                     "results as context (point a context_flow edge at it); it accepts frame_type / "
-                                    "model / timeout_seconds like a subtask. If callbacks are switched off on this "
-                                    "server, a callback completes at once without running. 'gate' auto-passes: a "
-                                    "marker, not a quality check. 'fix' repairs a failed node (parent_node). "
+                                    "model / timeout_seconds like a subtask."
+                                    + callback_note
+                                    + " 'gate' auto-passes: a marker, not a quality check. 'fix' repairs a failed "
+                                    "node (parent_node). "
                                     "'wait' waits for a Claude Code job, a pull request or a file (wait_for) with "
                                     "no model and no shell, polled every completion_check_interval seconds (a pr "
                                     "wait at most once a minute), until the condition holds (it completes), can no "
                                     "longer hold, or timeout_seconds or max_check_attempts runs out (it fails). A "
                                     "node that only waits for a job, a PR or a file must be a 'wait' node, not a "
-                                    "'check' node. In a DAG created by a background (internal_only) turn, waits and "
-                                    "the built-in PR check are the only conditions allowed. A wait node takes "
+                                    "'check' node. In a DAG a continuation turn creates, waits and the built-in PR "
+                                    "check are the only conditions allowed. A wait node takes "
                                     'name, type, instructions "" and wait_for, and optionally timeout_seconds, '
                                     "completion_check_interval, max_check_attempts and description."
                                 )
@@ -6276,15 +6291,13 @@ def register_dag_tools(
                                     "Shell command polled each tick: exit 0 = success, 1 = failed, 2 = still running. "
                                     "For work that ends in a pull request, use the built-in check "
                                     "'python -m nous.dag.typed_checks pr <owner/repo> --head <branch>' (or --pr <n>) "
-                                    "exactly as written, with a completion_check_interval of 300 or more: it passes "
-                                    "once that PR exists and fails if it is closed without a merge. If the node "
-                                    "launches a Claude Code job (claude-jobs/runner.sh launch) that opens the PR, "
-                                    "have it write the job id to a workspace file (redirect runner.sh launch's output) "
-                                    "and add ' --job-file <absolute path of that file>' to the same check: the node "
-                                    "then fails when the job ends without the PR. Only this exact check, on the node "
-                                    "that opens the PR, counts toward your score; a job-status or gh check of your "
-                                    "own, or a pr wait on another node, earns nothing. A DAG created by a background "
-                                    "(internal_only) turn may carry no other completion_check: use a 'wait' node."
+                                    "exactly, with a completion_check_interval of 300+: it passes once the PR exists "
+                                    "and fails if it closes unmerged. If the node launches a Claude Code job that "
+                                    "opens the PR, write the job id to a workspace file and add ' --job-file "
+                                    "<absolute path>': the node then fails if the job ends without the PR. Only this "
+                                    "check, on the node that opens the PR, counts toward your score (not a check of "
+                                    "your own, nor a pr wait on another node). A DAG a continuation turn creates may "
+                                    "carry no other completion_check: use a 'wait' node."
                                 ),
                             },
                             "completion_check_interval": {
@@ -6336,8 +6349,8 @@ def register_dag_tools(
                                     "ones named; pending while GitHub lists no check run on the head, so a "
                                     'repository without CI never passes it; with "head", fails if the head moved) '
                                     'or "review_on_head" (a review on the current head, from a login starting with '
-                                    '"reviewer" when given). GitHub errors never fail a pr wait; it polls at most '
-                                    'once a minute. file: {"kind": "file", "path": "research/out.md", "nonempty": '
+                                    '"reviewer" when given). GitHub errors never fail a pr wait. '
+                                    'file: {"kind": "file", "path": "research/out.md", "nonempty": '
                                     "true}: a workspace path with no hidden component (nonempty waits for content, "
                                     "or an entry in a directory)."
                                 ),
@@ -6365,9 +6378,8 @@ def register_dag_tools(
                                     ],
                                 },
                                 "description": (
-                                    "(type='fix' only) The actions the fix may take: retry the node as it was or "
-                                    "with amended instructions (where amended retries are switched off, it retries "
-                                    "as is), skip it and let the DAG go on, or fail it for good."
+                                    f"(type='fix' only) The actions the fix may take: {fix_retry_note}, skip it "
+                                    "and let the DAG go on, or fail it for good."
                                 ),
                             },
                             "max_fix_attempts": {
@@ -6403,8 +6415,9 @@ def register_dag_tools(
                                 "type": "string",
                                 "enum": ["dependency", "cancel_cascade", "context_flow", "on_failure"],
                                 "description": (
-                                    "'dependency' (default): to_node runs after from_node. 'context_flow': the "
-                                    "same, and to_node also gets from_node's result. 'on_failure': from a node to "
+                                    "'dependency' (default): to_node runs after from_node; if from_node fails and "
+                                    "no fix node recovers it, to_node and all below it are blocked. 'context_flow': "
+                                    "the same, and to_node also gets from_node's result. 'on_failure': from a node to "
                                     "its fix node. 'cancel_cascade': to_node does not wait, but is cancelled if "
                                     "from_node fails."
                                 ),
@@ -6421,7 +6434,7 @@ def register_dag_tools(
                 "token_budget": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Optional token budget for the whole DAG; the server may stop it once spent.",
+                    "description": f"Optional token budget for the whole DAG; {budget_note}.",
                 },
             },
             # `edges` is NOT required: the handler reads kwargs.get("edges", []) and
@@ -6459,7 +6472,10 @@ def register_dag_tools(
                         "'list': running DAGs. 'recent': finished ones (completed/failed/cancelled), the only way "
                         "to find one you have no id for. 'status': every node with a preview of its result (cut "
                         f"past {_STATUS_RESULT_PREVIEW_CHARS} chars, and it says so). 'node_result': one named "
-                        "node's complete result; use it when 'status' cut a preview. 'cancel': stop the DAG. "
+                        "node's complete result; use it when 'status' cut a preview. 'cancel': every unfinished "
+                        "node is cancelled; a node's subtask is marked cancelled (a running one is not interrupted, "
+                        "and its result is dropped) and a check node's check is disabled; a Claude Code job a node "
+                        "launched keeps running. "
                         "'retry_node': re-queue a failed node (and the nodes it alone blocked); refused on a "
                         "cancelled DAG."
                     ),

@@ -111,10 +111,59 @@ def test_bash_points_at_the_file_tools_and_states_the_compress_threshold(tools):
 
 def test_read_file_states_its_page_caps_from_the_constants(tools):
     text = tools["read_file"]["description"]
-    assert "never compressed" in text and "cat" in text
+    assert "not cut by SmartCompress" in text and "cat" in text
     assert f"{builtin_tools._READ_FILE_MAX_LINES} lines" in text
     assert f"{builtin_tools._READ_FILE_MAX_CHARS:,} characters" in text
     assert f"{builtin_tools._MAX_FILE_SIZE // (1024 * 1024)} MB" in text
+
+
+async def test_read_file_states_its_refusals_as_the_handler_words_them(tmp_path):
+    """A directory answers "Not a file" and a path outside the workspace is refused, as the description says."""
+    text = _tools()["read_file"]["description"]
+    assert "'Not a file'" in text and "bash ls" in text and "paths outside the workspace are refused" in text
+    (tmp_path / "sub").mkdir()
+    directory = await builtin_tools.read_file_tool("sub", _workspace_dir=str(tmp_path))
+    assert directory.get("is_error") and "Not a file" in directory["content"][0]["text"]
+    outside = await builtin_tools.read_file_tool(str(tmp_path.parent / "elsewhere.txt"), _workspace_dir=str(tmp_path))
+    assert outside.get("is_error")
+
+
+# -- the lineage rules (a continuation turn and the work it starts) ----------------------------------------------
+
+
+def test_bash_names_the_lineage_allowlist_from_the_policy_tables():
+    from nous.api.tool_policy import LINEAGE_BUILD_PROGRAMS, LINEAGE_READ_COMMANDS, LINEAGE_TURNS_TEXT
+
+    text = _tools()["bash"]["description"]  # f099_lineage_shell and build commands default on
+    assert f"{LINEAGE_TURNS_TEXT}, bash runs only allowlisted commands" in text
+    assert all(f"{c}" in text for c in sorted(LINEAGE_READ_COMMANDS - {"cd", "echo", "pwd", "sleep", "true"}))
+    assert "/".join(sorted(LINEAGE_BUILD_PROGRAMS)) in text and "runner.sh (not cancel)" in text
+    no_builds = _tools(f099_lineage_build_commands=False)["bash"]["description"]
+    assert LINEAGE_TURNS_TEXT in no_builds and "/".join(sorted(LINEAGE_BUILD_PROGRAMS)) not in no_builds
+    # Without the lineage shell those turns are not offered bash, so the sentence is not there either.
+    assert LINEAGE_TURNS_TEXT not in _tools(f099_lineage_shell=False)["bash"]["description"]
+
+
+def test_write_file_names_the_lineage_directories_from_the_settings(tmp_path):
+    from nous.api.tool_policy import LINEAGE_TURNS_TEXT
+
+    text = _tools(workspace_dir=str(tmp_path))["write_file"]["description"]
+    assert f"{LINEAGE_TURNS_TEXT}, write_file writes only under intentions/<root id>/ or claude-jobs/prompts/." in text
+    extra = _tools(workspace_dir=str(tmp_path), f099_lineage_write_dirs=["research", "agent-notes"])
+    assert (
+        "intentions/<root id>/, claude-jobs/prompts/, research/ or agent-notes/." in extra["write_file"]["description"]
+    )
+    no_shell = _tools(workspace_dir=str(tmp_path), f099_lineage_shell=False)["write_file"]["description"]
+    assert "write_file writes only under intentions/<root id>/." in no_shell and "claude-jobs" not in no_shell
+
+
+def test_the_lineage_sentences_are_the_same_in_every_conversational_frame():
+    """#528: they are decided at registration, so a frame change never changes the tool array's bytes."""
+    settings = Settings(_env_file=None)
+    d = ToolDispatcher(stable_tool_set_enabled=settings.stable_tool_set_enabled)
+    register_builtin_tools(d, settings)
+    frames = ("conversation", "task", "question", "decision", "debug", "creative")
+    assert len({json.dumps(d.available_tools(frame)) for frame in frames}) == 1
 
 
 def test_write_file_replaces_heredocs(tools):
@@ -238,16 +287,57 @@ def test_dag_create_reads_its_limits_at_registration(monkeypatch):
 
 
 def test_the_caveats_the_code_needs_are_stated(tools):
-    """A check disables itself only when its prompt says to; an amended retry is a plain retry where the LLM
-    fix dispatch is off; decision_sweep reads its own rows."""
+    """A check disables itself only when its prompt says to; decision_sweep reads its own rows; the resolve
+    tools say triage does not get them."""
     assert (
         "It can disable itself (its prompt calls heartbeat_check_manage"
         in tools["heartbeat_check_create"]["description"]
     )
-    node = tools["dag_create"]["input_schema"]["properties"]["nodes"]["items"]["properties"]
-    assert "where amended retries are switched off, it retries as is" in node["fix_actions"]["description"]
     template = tools["push_surface"]["input_schema"]["properties"]["template"]["description"]
     assert "decision rows in params are ignored" in template
+    for name in ("resolve_decision", "resolve_decisions"):
+        assert tools[name]["description"].endswith("Not available in heartbeat triage turns."), name
+
+
+def _dag_create(**over) -> dict:
+    return _tools(**over)["dag_create"]["input_schema"]
+
+
+@pytest.mark.parametrize("on", [False, True], ids=["off", "on"])
+def test_dag_create_says_what_this_server_does_with_callbacks(on):
+    schema = _dag_create(dag_callback_execution_enabled=on, dag_approval_nodes_enabled=True, a2ui_enabled=True)
+    text = schema["properties"]["nodes"]["items"]["properties"]["type"]["description"]
+    assert ("a callback completes at once without running" in text) is not on
+    assert ("a callback runs nothing here" in text) is not on  # the approval wiring note
+    assert "frame_type / model / timeout_seconds" in text
+
+
+@pytest.mark.parametrize("on", [False, True], ids=["off", "on"])
+def test_fix_actions_say_whether_an_amended_retry_amends(on):
+    node = _dag_create(dag_fix_llm_dispatch_enabled=on)["properties"]["nodes"]["items"]["properties"]
+    text = node["fix_actions"]["description"]
+    assert ("or with amended instructions" in text) is on
+    assert ("an amended retry also retries as is on this server" in text) is not on
+
+
+@pytest.mark.parametrize("on", [False, True], ids=["off", "on"])
+def test_token_budget_says_whether_it_is_enforced(on):
+    text = _dag_create(dag_token_budget_enforcement_enabled=on)["properties"]["token_budget"]["description"]
+    assert ("nodes that have not started are cancelled" in text) is on
+    assert ("tracked and reported, not enforced" in text) is not on
+
+
+def test_dag_create_and_its_edges_say_what_the_orchestrator_does(tools):
+    schema = tools["dag_create"]["input_schema"]
+    one_task = "use spawn_task, unless it must wait for a Claude Code job, a PR or a file (then a DAG with a wait node)"
+    assert one_task in schema["description"]
+    edge_type = schema["properties"]["edges"]["items"]["properties"]["edge_type"]["description"]
+    # orchestrator._propagate_failures: a failed predecessor blocks its dependency successors, after a fix had its go
+    assert "if from_node fails and no fix node recovers it, to_node and all below it are blocked" in edge_type
+    action = tools["dag_manage"]["input_schema"]["properties"]["action"]["description"]
+    # orchestrator._cancel_node: subtask rows are cancelled, checks disabled; runner.sh jobs are not touched
+    assert "a running one is not interrupted" in action and "a check node's check is disabled" in action
+    assert "a Claude Code job a node launched keeps running" in action
 
 
 def test_dag_manage_describes_its_action_and_id(tools):

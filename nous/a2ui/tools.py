@@ -46,8 +46,7 @@ _PUSH_SURFACE_SCHEMA = {
                 "(params: findings=[{message,urgency,check,fingerprint?}], title); never use it to ask a question "
                 "(offer a choice with approval_gate). Pass a finding's 16-hex fingerprint from GET "
                 "/heartbeat/findings to triage it, or omit it to register a new finding; never invent one. "
-                "Suppressed items (just after a restart, already acknowledged, flapping) are left off the card "
-                "and listed under 'suppressed'. "
+                "Suppressed items (already acknowledged, flapping) are listed under 'suppressed'. "
                 "decision_sweep: cards for unreviewed decisions, always read from your own records, so decision "
                 "rows in params are ignored (optional params: max_age_days, max_decisions, title). "
                 "memory_graph: a graph explorer seeded on one node (params: node_id UUID, node_type, label). "
@@ -79,8 +78,8 @@ _PUSH_SURFACE_SCHEMA = {
 _COMPOSE_SURFACE_SCHEMA = {
     "type": "object",
     "description": (
-        "Build a one-off, read-only app in the companion for one intent (a trip status, a sailing briefing, a "
-        "project ledger). It lasts until the user closes it and is rebuilt, not restored, next time. For "
+        "Build a one-off, read-only app in the companion for one intent. It lasts until the user closes it "
+        "and is rebuilt, not restored, next time. For "
         "recurring shapes use push_surface's templates. Data comes from server-side sources; anything you "
         "supply without one is marked as model-supplied."
     ),
@@ -145,10 +144,7 @@ _COMPOSE_SURFACE_SCHEMA = {
                 },
                 "required": ["key", "source"],
             },
-            "description": (
-                "Server-side data the app should show. The server resolves "
-                "these and owns the values; app.refresh re-runs them."
-            ),
+            "description": "Server-side data the app shows; the server resolves it, and a refresh re-runs it.",
         },
         "dedup_key": {
             "type": "string",

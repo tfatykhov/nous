@@ -222,7 +222,7 @@ def _error(text: str) -> dict[str, Any]:
 _SEND_FILE_SCHEMA = {
     "description": (
         "Send a file to Telegram. Images (png, jpg, gif, webp) are sent as photos; "
-        "all other files (docx, pdf, xlsx, csv, svg, etc.) as documents. "
+        "all other files as documents. "
         "Use after generating a file with write_file, bash, or run_python."
     ),
     "type": "object",

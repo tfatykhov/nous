@@ -189,10 +189,10 @@
   },
   {
     "name": "dag_create",
-    "description": "Run several steps with dependencies, waits or approvals as a DAG of nodes. Limits: 10 nodes in all, fix nodes included; 4 waves (steps in a dependency chain) and 4 nodes per wave, fix nodes not counted. Do not poll: the outcome is delivered to you when it ends. Use dag_manage to cancel, retry or check progress. For one task, use spawn_task.",
+    "description": "Run several steps with dependencies, waits or approvals as a DAG of nodes. Limits: 10 nodes in all, fix nodes included; 4 waves (steps in a dependency chain) and 4 nodes per wave, fix nodes not counted. Do not poll: the outcome is delivered to you when it ends. Use dag_manage to cancel, retry or check progress. For one task, use spawn_task, unless it must wait for a Claude Code job, a PR or a file (then a DAG with a wait node).",
     "input_schema": {
       "type": "object",
-      "description": "Run several steps with dependencies, waits or approvals as a DAG of nodes. Limits: 10 nodes in all, fix nodes included; 4 waves (steps in a dependency chain) and 4 nodes per wave, fix nodes not counted. Do not poll: the outcome is delivered to you when it ends. Use dag_manage to cancel, retry or check progress. For one task, use spawn_task.",
+      "description": "Run several steps with dependencies, waits or approvals as a DAG of nodes. Limits: 10 nodes in all, fix nodes included; 4 waves (steps in a dependency chain) and 4 nodes per wave, fix nodes not counted. Do not poll: the outcome is delivered to you when it ends. Use dag_manage to cancel, retry or check progress. For one task, use spawn_task, unless it must wait for a Claude Code job, a PR or a file (then a DAG with a wait node).",
       "properties": {
         "name": {
           "type": "string",
@@ -221,7 +221,7 @@
                   "fix",
                   "wait"
                 ],
-                "description": "'subtask' runs its instructions as a subtask. 'check' polls its completion_check, and only a 'check' node honors 'tools': every other type ignores them. 'callback' runs AFTER its predecessors and receives their results as context (point a context_flow edge at it); it accepts frame_type / model / timeout_seconds like a subtask. If callbacks are switched off on this server, a callback completes at once without running. 'gate' auto-passes: a marker, not a quality check. 'fix' repairs a failed node (parent_node). 'wait' waits for a Claude Code job, a pull request or a file (wait_for) with no model and no shell, polled every completion_check_interval seconds (a pr wait at most once a minute), until the condition holds (it completes), can no longer hold, or timeout_seconds or max_check_attempts runs out (it fails). A node that only waits for a job, a PR or a file must be a 'wait' node, not a 'check' node. In a DAG created by a background (internal_only) turn, waits and the built-in PR check are the only conditions allowed. A wait node takes name, type, instructions \"\" and wait_for, and optionally timeout_seconds, completion_check_interval, max_check_attempts and description."
+                "description": "'subtask' runs its instructions as a subtask. 'check' polls its completion_check, and only a 'check' node honors 'tools': every other type ignores them. 'callback' runs AFTER its predecessors and receives their results as context (point a context_flow edge at it); it accepts frame_type / model / timeout_seconds like a subtask. On this server a callback completes at once without running: act with a 'subtask'. 'gate' auto-passes: a marker, not a quality check. 'fix' repairs a failed node (parent_node). 'wait' waits for a Claude Code job, a pull request or a file (wait_for) with no model and no shell, polled every completion_check_interval seconds (a pr wait at most once a minute), until the condition holds (it completes), can no longer hold, or timeout_seconds or max_check_attempts runs out (it fails). A node that only waits for a job, a PR or a file must be a 'wait' node, not a 'check' node. In a DAG a continuation turn creates, waits and the built-in PR check are the only conditions allowed. A wait node takes name, type, instructions \"\" and wait_for, and optionally timeout_seconds, completion_check_interval, max_check_attempts and description."
               },
               "instructions": {
                 "type": "string"
@@ -253,7 +253,7 @@
               },
               "completion_check": {
                 "type": "string",
-                "description": "Shell command polled each tick: exit 0 = success, 1 = failed, 2 = still running. For work that ends in a pull request, use the built-in check 'python -m nous.dag.typed_checks pr <owner/repo> --head <branch>' (or --pr <n>) exactly as written, with a completion_check_interval of 300 or more: it passes once that PR exists and fails if it is closed without a merge. If the node launches a Claude Code job (claude-jobs/runner.sh launch) that opens the PR, have it write the job id to a workspace file (redirect runner.sh launch's output) and add ' --job-file <absolute path of that file>' to the same check: the node then fails when the job ends without the PR. Only this exact check, on the node that opens the PR, counts toward your score; a job-status or gh check of your own, or a pr wait on another node, earns nothing. A DAG created by a background (internal_only) turn may carry no other completion_check: use a 'wait' node."
+                "description": "Shell command polled each tick: exit 0 = success, 1 = failed, 2 = still running. For work that ends in a pull request, use the built-in check 'python -m nous.dag.typed_checks pr <owner/repo> --head <branch>' (or --pr <n>) exactly, with a completion_check_interval of 300+: it passes once the PR exists and fails if it closes unmerged. If the node launches a Claude Code job that opens the PR, write the job id to a workspace file and add ' --job-file <absolute path>': the node then fails if the job ends without the PR. Only this check, on the node that opens the PR, counts toward your score (not a check of your own, nor a pr wait on another node). A DAG a continuation turn creates may carry no other completion_check: use a 'wait' node."
               },
               "completion_check_interval": {
                 "type": "integer",
@@ -312,7 +312,7 @@
                 "required": [
                   "kind"
                 ],
-                "description": "(type='wait' only) What to wait for. job: {\"kind\": \"job\", \"job_id\": \"job-20261027-101500-ab12cd34\", \"until\": \"completed\"}: a Claude Code job (runner.sh launch prints its id); until \"finished\" (the default) takes any end, \"completed\" fails the node if the job ends any other way (a dead process counts as failed). pr: {\"kind\": \"pr\", \"number\": 810, \"repo\": \"owner/name\", \"until\": \"merged\"}: repo defaults to the server's default repository; until is \"merged\" (fails if closed without a merge), \"closed\", \"head_changed\" (needs \"head\", the sha it waits to move from), \"checks_done\" (every check run on the head finished, failed ones named; pending while GitHub lists no check run on the head, so a repository without CI never passes it; with \"head\", fails if the head moved) or \"review_on_head\" (a review on the current head, from a login starting with \"reviewer\" when given). GitHub errors never fail a pr wait; it polls at most once a minute. file: {\"kind\": \"file\", \"path\": \"research/out.md\", \"nonempty\": true}: a workspace path with no hidden component (nonempty waits for content, or an entry in a directory)."
+                "description": "(type='wait' only) What to wait for. job: {\"kind\": \"job\", \"job_id\": \"job-20261027-101500-ab12cd34\", \"until\": \"completed\"}: a Claude Code job (runner.sh launch prints its id); until \"finished\" (the default) takes any end, \"completed\" fails the node if the job ends any other way (a dead process counts as failed). pr: {\"kind\": \"pr\", \"number\": 810, \"repo\": \"owner/name\", \"until\": \"merged\"}: repo defaults to the server's default repository; until is \"merged\" (fails if closed without a merge), \"closed\", \"head_changed\" (needs \"head\", the sha it waits to move from), \"checks_done\" (every check run on the head finished, failed ones named; pending while GitHub lists no check run on the head, so a repository without CI never passes it; with \"head\", fails if the head moved) or \"review_on_head\" (a review on the current head, from a login starting with \"reviewer\" when given). GitHub errors never fail a pr wait. file: {\"kind\": \"file\", \"path\": \"research/out.md\", \"nonempty\": true}: a workspace path with no hidden component (nonempty waits for content, or an entry in a directory)."
               },
               "parent_node": {
                 "type": "string",
@@ -329,7 +329,7 @@
                     "skip_and_continue"
                   ]
                 },
-                "description": "(type='fix' only) The actions the fix may take: retry the node as it was or with amended instructions (where amended retries are switched off, it retries as is), skip it and let the DAG go on, or fail it for good."
+                "description": "(type='fix' only) The actions the fix may take: retry the node as it was (an amended retry also retries as is on this server), skip it and let the DAG go on, or fail it for good."
               },
               "max_fix_attempts": {
                 "type": "integer",
@@ -372,7 +372,7 @@
                   "context_flow",
                   "on_failure"
                 ],
-                "description": "'dependency' (default): to_node runs after from_node. 'context_flow': the same, and to_node also gets from_node's result. 'on_failure': from a node to its fix node. 'cancel_cascade': to_node does not wait, but is cancelled if from_node fails."
+                "description": "'dependency' (default): to_node runs after from_node; if from_node fails and no fix node recovers it, to_node and all below it are blocked. 'context_flow': the same, and to_node also gets from_node's result. 'on_failure': from a node to its fix node. 'cancel_cascade': to_node does not wait, but is cancelled if from_node fails."
               }
             },
             "required": [
@@ -394,7 +394,7 @@
         "token_budget": {
           "type": "integer",
           "minimum": 1,
-          "description": "Optional token budget for the whole DAG; the server may stop it once spent."
+          "description": "Optional token budget for the whole DAG; it is tracked and reported, not enforced, on this server."
         }
       },
       "required": [

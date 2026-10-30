@@ -579,8 +579,8 @@ class TestCallbackDocumented:
         assert "callback" in node_props["type"]["enum"]
         blob = str(schema)
         assert "predecessor" in blob.lower()
-        # The off switch is described in plain words: a tool description names no env var.
-        assert "If callbacks are switched off on this server, a callback completes at once without running" in blob
+        # Callbacks are off by default, and the text says what this server does, in plain words: no env var.
+        assert "On this server a callback completes at once without running" in blob
         assert "NOUS_" not in blob
 
     def test_callback_description_does_not_claim_tools(self, tools):
