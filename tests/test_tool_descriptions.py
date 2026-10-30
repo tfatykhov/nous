@@ -287,15 +287,15 @@ def test_dag_create_reads_its_limits_at_registration(monkeypatch):
 
 def test_the_caveats_the_code_needs_are_stated(tools):
     """A check disables itself only when its prompt says to; decision_sweep reads its own rows; the resolve
-    tools say triage does not get them."""
+    tool says triage does not get it (resolve_decision is its alias now, never offered)."""
     assert (
         "It can disable itself (its prompt calls heartbeat_check_manage"
         in tools["heartbeat_check_create"]["description"]
     )
     template = tools["push_surface"]["input_schema"]["properties"]["template"]["description"]
     assert "decision rows in params are ignored" in template
-    for name in ("resolve_decision", "resolve_decisions"):
-        assert tools[name]["description"].endswith("Not available in heartbeat triage turns."), name
+    assert tools["resolve_decisions"]["description"].endswith("Not available in heartbeat triage turns.")
+    assert "resolve_decision" not in tools
 
 
 def _dag_create(**over) -> dict:
