@@ -34,7 +34,7 @@ _BROWSER_TASK_SCHEMA: dict[str, Any] = {
         "start_url": {"type": "string", "description": "Optional page to open first; must be on allowed_domains."},
         "max_steps": {
             "type": "integer",
-            "description": "Model turns before it gives up (default 30, capped by NOUS_BROWSER_TASK_MAX_STEPS).",
+            "description": "Model turns before it gives up (default 30; the server caps it).",
             "minimum": 1,
         },
     },

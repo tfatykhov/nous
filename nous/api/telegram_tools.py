@@ -237,7 +237,7 @@ _SEND_FILE_SCHEMA = {
         },
         "chat_id": {
             "type": "string",
-            "description": "Telegram chat ID. Defaults to configured NOUS_TELEGRAM_CHAT_ID.",
+            "description": "Telegram chat ID. Default: the owner's chat.",
         },
         "cleanup": {
             "type": "boolean",

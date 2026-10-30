@@ -27,6 +27,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# web_fetch's hard ceiling on max_chars, whatever the caller or the setting asks for.
+_WEB_FETCH_CEILING_CHARS = 200_000
+
 # Rate limit state (in-memory, resets on restart)
 _rate_limit: dict[str, Any] = {"date": "", "count": 0}
 
@@ -237,7 +240,7 @@ async def _web_fetch(
         # F069 (2026-05-26): hard ceiling bumped from 50,000 -> 200,000.
         # Lets explicit doc-ingest callers (ingest_document path) pull a
         # full arxiv paper into one fetch instead of paginating.
-        effective_max = min(max_chars or _settings.web_fetch_max_chars, 200000)
+        effective_max = min(max_chars or _settings.web_fetch_max_chars, _WEB_FETCH_CEILING_CHARS)
 
         # Manual redirect following with SSRF check on each hop (P1-1 fix)
         max_redirects = 5
@@ -328,7 +331,10 @@ def _extract_readable(html: str) -> str:
 
 _WEB_SEARCH_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "description": "Search the web for current information. Returns titles, URLs, and snippets.",
+    "description": (
+        "Search the web for current information; returns titles, URLs and snippets. Use it to find sources; "
+        "to read one known page, use web_fetch."
+    ),
     "properties": {
         "query": {"type": "string", "description": "Search query string"},
         "count": {
@@ -349,19 +355,16 @@ _WEB_SEARCH_SCHEMA: dict[str, Any] = {
 
 _WEB_FETCH_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "description": "Fetch and extract readable content from a URL. Returns clean text.",
+    "description": "Fetch one known URL and return its readable text. To find pages, use web_search.",
     "properties": {
         "url": {"type": "string", "description": "URL to fetch (must be http or https)"},
         "max_chars": {
             "type": "integer",
             "description": (
-                "Maximum characters to return. Default 50000 (good for "
-                "most pages). Pass up to 200000 (hard ceiling) when "
-                "fetching a full document body to hand off to "
-                "ingest_document — F069 raised the ceiling so doc-ingest "
-                "calls are not silently truncated."
+                f"Maximum characters to return (default {Settings.model_fields['web_fetch_max_chars'].default:,}). "
+                f"Pass up to {_WEB_FETCH_CEILING_CHARS:,} for a whole document you will pass to ingest_document."
             ),
-            "maximum": 200000,
+            "maximum": _WEB_FETCH_CEILING_CHARS,
         },
     },
     "required": ["url"],
@@ -394,5 +397,14 @@ def register_web_tools(
     async def _fetch(url: str, max_chars: int | None = None) -> dict[str, Any]:
         return await _web_fetch(url, max_chars, _settings=settings, _http=http_client, _bus=bus)
 
+    fetch_schema = _WEB_FETCH_SCHEMA
+    if getattr(settings, "browser_task_enabled", False) is True:
+        # Named only where browser_task is registered: a description must not offer a tool that does not exist.
+        fetch_schema = {
+            **_WEB_FETCH_SCHEMA,
+            "description": (
+                _WEB_FETCH_SCHEMA["description"] + " Use browser_task only when a page needs JavaScript or clicks."
+            ),
+        }
     dispatcher.register("web_search", _search, _WEB_SEARCH_SCHEMA)
-    dispatcher.register("web_fetch", _fetch, _WEB_FETCH_SCHEMA)
+    dispatcher.register("web_fetch", _fetch, fetch_schema)
