@@ -649,6 +649,14 @@ class TestFrameInstructions:
     required language after the 005.5 changes are applied.
     """
 
+    def test_conversation_frame_names_the_memory_tools(self):
+        """The conversation frame points at recall_deep for earlier sessions and learn_fact for durable facts."""
+        runner = _make_runner()
+        instructions = runner._get_frame_instructions(_make_turn_context("conversation"))
+
+        assert "`recall_deep`" in instructions and "earlier sessions" in instructions
+        assert "`learn_fact`" in instructions and "durable fact" in instructions
+
     # 23. Decision frame mentions "what IS a decision"
     def test_decision_frame_defines_what_is_a_decision(self):
         """Decision frame instructions explicitly define what IS a decision."""

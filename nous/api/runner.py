@@ -3922,8 +3922,10 @@ Rules:
         elif frame_id == "conversation":
             return (
                 "## Tool Instructions\n\n"
-                "You are in a CONVERSATION frame. Use `web_search` and `web_fetch` "
-                "to find current information when needed."
+                "You are in a CONVERSATION frame. Use `recall_deep` for anything from "
+                "earlier sessions. When the user states a durable fact (about them, "
+                "their preferences or a standing rule), store it with `learn_fact`. "
+                "Use `web_search` and `web_fetch` to find current information when needed."
             )
 
         return ""
