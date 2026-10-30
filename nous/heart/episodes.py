@@ -337,7 +337,7 @@ class EpisodeManager:
                 outcome=e.outcome,
                 started_at=e.started_at,
                 tags=e.tags or [],
-                # Without this, consumers (recall_recent) can only show the
+                # Without this, consumers (recall_deep's hours listing) can only show the
                 # legacy creation-time echo even for summarized episodes —
                 # the recall_deep parent-episode path already COALESCEs to
                 # structured_summary->>'summary' (tools.py, codex fix).

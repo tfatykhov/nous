@@ -485,7 +485,7 @@ class ContextEngine:
             recall_first = (
                 "Before asking the user to clarify a referent — a pronoun, "
                 '"that", "the thing/option you mentioned", or a continuation of '
-                "earlier work — first call recall_deep or recall_recent to resolve "
+                "earlier work — first call recall_deep (with hours for the latest conversations) to resolve "
                 "it from your memory of prior sessions. Only ask the user to "
                 "clarify if recall returns nothing relevant."
             )

@@ -5403,7 +5403,8 @@ _RUN_PYTHON_SCHEMA: dict[str, Any] = {
     "description": (
         "Run Python with memory functions in scope, to batch lookups and return only what you need. "
         "recall_deep(query, limit=5) is the recall_deep tool's search (dicts with id/type/description/score/"
-        "source; about 5 s a call, so a handful per script); also recall_recent(hours=24, limit=5), "
+        "source; about 5 s a call, so a handful per script); recall_recent(hours=24, limit=5) lists recent "
+        "conversations (a script function: the tool for that is recall_deep with hours); also "
         f"list_tasks(status=None) and learn_fact(content, category, subject, confidence), at most {_MAX_WRITES} "
         "per run. json, re, math, datetime, collections, itertools, functools and statistics are pre-imported. "
         "Set result = <value> or print(). The run is stopped after "

@@ -2170,7 +2170,7 @@ class Brain:
             from nous.storage.models import Procedure
             # A strategy card or job lesson that is a hub is listed without its name (it
             # falls back to "[procedure] <id>" below): these labels go into the
-            # recall_hubs tool result and the hub-shift notice in the system prompt.
+            # hub-shift notice in the system prompt.
             proc_result = await session.execute(
                 select(Procedure.id, Procedure.name)
                 .where(Procedure.id.in_(proc_ids))

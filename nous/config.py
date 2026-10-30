@@ -2796,7 +2796,7 @@ class Settings(BaseSettings):
     recall_before_clarify_prompt: bool = Field(
         default=True,
         description=(
-            "F083 C2. When true, inject a static instruction to call recall_deep/recall_recent "
+            "F083 C2. When true, inject a static instruction to call recall_deep "
             "to resolve a referent before asking the user to clarify."
         ),
     )
