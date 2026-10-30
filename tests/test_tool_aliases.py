@@ -15,6 +15,7 @@ from nous.api.anthropic_client import StreamEvent
 from nous.api.execution_context import ExecutionContext
 from nous.api.models import ApiResponse
 from nous.api.runner import AgentRunner
+from nous.api.tool_classes import TOOL_CLASSES
 from nous.api.tools import ToolDispatcher
 from nous.tool_names import CHANGED_TOOLS, canonical_tool_name, canonical_tool_names, changed_tools_note
 
@@ -53,6 +54,11 @@ def test_the_translations():
     original = {"hours": 5}
     recent(original)
     assert original == {"hours": 5}  # never mutated in place
+
+
+def test_old_names_have_no_tool_class():
+    """They never reach the ledger: the runner rewrites them first."""
+    assert not set(CHANGED_TOOLS) & set(TOOL_CLASSES)
 
 
 def test_canonical_names_map_aliases_drop_retired_and_dedup():
@@ -387,3 +393,36 @@ async def test_a_proposal_under_an_old_name_is_staged_as_its_target():
     assert staged == [("resolve_decisions", {"resolutions": [call]})]
     text, is_error = await executor(tool="recall_hubs", arguments={}, rationale="r")
     assert is_error and HUBS_MESSAGE in text
+
+
+def test_the_memory_tools_offer_three_fewer_names():
+    """recall_recent, recall_hubs and resolve_decision left the offered set (12 memory tools became 9)."""
+    from nous.api.tools import register_nous_tools
+
+    d = ToolDispatcher()
+    settings = MagicMock()
+    settings.decision_resolution_enabled = True
+    register_nous_tools(d, MagicMock(), MagicMock(), settings=settings)
+    assert [t["name"] for t in d.tool_definitions()] == [
+        "record_decision",
+        "learn_fact",
+        "recall_deep",
+        "create_censor",
+        "learn_skill",
+        "get_procedure",
+        "ingest_document",
+        "resolve_decisions",
+        "list_decisions",
+    ]
+    assert {old for old in CHANGED_TOOLS if d.alias_for(old) is not None} == set(CHANGED_TOOLS)
+
+
+def test_with_resolution_off_the_resolve_alias_is_not_registered():
+    """An alias is registered only next to its target (NOUS_DECISION_RESOLUTION_ENABLED off)."""
+    from nous.api.tools import register_nous_tools
+
+    d = ToolDispatcher()
+    settings = MagicMock()
+    settings.decision_resolution_enabled = False
+    register_nous_tools(d, MagicMock(), MagicMock(), settings=settings)
+    assert d.alias_for("resolve_decision") is None and d.alias_for("recall_recent") is not None

@@ -222,7 +222,6 @@ def _build_exclude_ids(
 FRAME_TOOLS: dict[str, list[str]] = {
     "conversation": [
         "record_decision",
-        "resolve_decision",
         "resolve_decisions",
         "list_decisions",
         "learn_fact",
@@ -261,7 +260,6 @@ FRAME_TOOLS: dict[str, list[str]] = {
         "read_file",
         "write_file",
         "record_decision",
-        "resolve_decision",
         "resolve_decisions",
         "list_decisions",
         "learn_fact",
@@ -279,7 +277,6 @@ FRAME_TOOLS: dict[str, list[str]] = {
     ],
     "decision": [
         "record_decision",
-        "resolve_decision",
         "resolve_decisions",
         "list_decisions",
         "recall_deep",
@@ -874,8 +871,11 @@ class AgentRunner:
         store = self._snap_store
 
         async def persist(session: Any, capture: dict) -> None:
-            if tool_name == "resolve_decision":
-                await store.record_written_state_in(session, entry_id, capture["written"], prior=capture["prior"])
+            if tool_name == "resolve_decisions":
+                # One item, inside its own SAVEPOINT: it merges into the snapshot's items[index].
+                await store.record_written_state_in(
+                    session, entry_id, capture["written"], prior=capture["prior"], item=capture["index"]
+                )
             else:
                 await store.record_written_state_in(
                     session, entry_id, capture["written"], extra={"prior_enabled": capture["prior_enabled"]}
@@ -909,10 +909,14 @@ class AgentRunner:
         # ``unknown`` too: a call cancelled mid-commit may have written; its
         # written state commits with it or not at all.
         landed = status in ("success", "unknown")
-        if snapshotted and landed and tool_name in ("resolve_decision", "heartbeat_check_manage"):
-            capture = None
-            if outcome is not None:
-                capture = outcome.review_capture if tool_name == "resolve_decision" else outcome.check_capture
+        if snapshotted and landed and tool_name == "resolve_decisions":
+            # Every item that wrote recorded what it wrote (the tool drops ``written`` from an item that failed).
+            captures = outcome.review_capture if outcome is not None else None
+            recorded = isinstance(captures, list) and all(
+                capture.get("persisted") is True for capture in captures if "written" in capture
+            )
+        elif snapshotted and landed and tool_name == "heartbeat_check_manage":
+            capture = outcome.check_capture if outcome is not None else None
             # Advisory: set inside the transaction, so a commit cancelled in
             # flight may still have rolled it back. The DB snapshot stays
             # authoritative (the card derives Revert from it).
@@ -1109,19 +1113,25 @@ class AgentRunner:
                     # A disable that cancels an active run is not undoable:
                     # manage_check refuses it, under its mutation lock.
                     outcome.check_refuse_if_running = True
-            elif tool_name == "resolve_decision":
-                # The prior review state the revert restores. The state this
-                # call writes is recorded in its own transaction
+            elif tool_name == "resolve_decisions":
+                # Per item, the prior review state the revert restores. The
+                # state each item writes is recorded in its own SAVEPOINT
                 # (_written_state_persister); the revert applies only while
-                # the decision still carries all of it.
-                decision_id = str(tool_input.get("decision_id") or "")
-                prior = await self._snap_store.decision_state(decision_id)
-                if prior is None:
-                    return _unrevertible(f"decision {decision_id!r} was not found")
-                snap_data = {
-                    "decision_id": decision_id,
-                    "prior": prior,
-                }
+                # every decision still carries all of it. An id that is not a
+                # UUID or not found records prior None: that item can change
+                # nothing, so the revert skips it and the call stays revertible.
+                resolutions = tool_input.get("resolutions")
+                if not isinstance(resolutions, list) or not resolutions:
+                    return False  # nothing to resolve (dispatch refuses a non-list), nothing to revert
+                items: list[dict] = []
+                for resolution in resolutions:
+                    decision_id = str(resolution.get("decision_id") or "") if isinstance(resolution, dict) else ""
+                    try:
+                        prior = await self._snap_store.decision_state(decision_id)
+                    except ValueError:
+                        prior = None
+                    items.append({"decision_id": decision_id, "prior": prior})
+                snap_data = {"items": items}
             else:
                 return False
             await self._snap_store.capture(
@@ -1132,7 +1142,7 @@ class AgentRunner:
                 # the side effect, so no crash after it can lose the card.
                 card_pending=card,
             )
-            if tool_name in ("resolve_decision", "heartbeat_check_manage") and outcome is not None:
+            if tool_name in ("resolve_decisions", "heartbeat_check_manage") and outcome is not None:
                 # The written state is recorded by the mutation itself, in
                 # its own transaction (see _written_state_persister).
                 outcome.persist_written = self._written_state_persister(tool_name, entry_id)

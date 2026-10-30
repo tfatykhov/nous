@@ -115,7 +115,6 @@ def test_the_denylist_names_only_classified_tools_and_is_the_specs():
             "bash",
             "run_python",
             "spawn_sync",
-            "resolve_decision",
             "resolve_decisions",
         }
     )

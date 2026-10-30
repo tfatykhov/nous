@@ -31,6 +31,7 @@ from sqlalchemy import select, update
 
 from nous.api.tool_classes import TOOL_CLASSES
 from nous.storage.models import CompensationSnapshot
+from nous.tool_names import canonical_tool_name
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +126,8 @@ class CompensationRegistry:
         self._compensators: dict[str, Compensator] = {}
 
     def register(self, tool_name: str, fn: Compensator) -> None:
-        tc = TOOL_CLASSES.get(tool_name)
+        # A snapshot stored under an old tool name (nous/tool_names.py) is judged by the tool it became.
+        tc = TOOL_CLASSES.get(canonical_tool_name(tool_name) or tool_name)
         if tc is None or not tc.compensable:
             raise ValueError(
                 f"cannot register a compensator for {tool_name!r}: it must be declared compensable in TOOL_CLASSES"
@@ -328,11 +330,15 @@ class SnapshotStore:
         *,
         prior: dict[str, Any] | None = None,
         extra: dict[str, Any] | None = None,
+        item: int | None = None,
     ) -> None:
         """Merge ``written`` -- the state the call left behind -- into its
         snapshot, so the revert can refuse once anything has changed that
-        state since. Runs on the MUTATION's own ``session`` and never
-        commits: the snapshot update commits or rolls back together with the
+        state since. With ``item`` (resolve_decisions), ``written`` and
+        ``prior`` go to ``snapshot_data["items"][item]`` instead of the top
+        level; an item the snapshot does not hold raises LookupError. Runs
+        on the MUTATION's own ``session`` and never commits: the snapshot
+        update commits or rolls back together with the
         state change itself, so no crash or cancellation after that commit
         can leave a change whose revert lacks its written state (codex P1 on
         #652). ``prior``, when given, replaces the pre-dispatch prior state
@@ -359,9 +365,20 @@ class SnapshotStore:
                 f"refused to keep the change revertible: its compensation snapshot (ledger entry "
                 f"{ledger_entry_id}) is missing, so nothing was changed; retrying is safe"
             )
-        merged = {**(row.snapshot_data or {}), "written": written}
-        if prior is not None:
-            merged["prior"] = prior
+        data = row.snapshot_data or {}
+        if item is None:
+            merged = {**data, "written": written}
+            if prior is not None:
+                merged["prior"] = prior
+        else:
+            items = [dict(it) for it in data.get("items") or []]
+            if not 0 <= item < len(items):
+                raise LookupError(
+                    f"refused to keep the change revertible: item {item} is not in its compensation snapshot "
+                    f"(ledger entry {ledger_entry_id}), so nothing was changed; retrying is safe"
+                )
+            items[item] = {**items[item], "written": written, **({"prior": prior} if prior is not None else {})}
+            merged = {**data, "items": items}
         if extra:
             merged.update(extra)
         row.snapshot_data = merged
@@ -405,8 +422,8 @@ class SnapshotStore:
 
     async def decision_state(self, decision_id: str) -> dict[str, Any] | None:
         """The review fields ``Brain.review`` overwrites, as they are now, or
-        None when this agent has no such decision. Read before a
-        ``resolve_decision`` so its revert restores exactly this state."""
+        None when this agent has no such decision. Read for each item before a
+        ``resolve_decisions`` so its revert restores exactly this state."""
         from nous.storage.models import Decision
 
         async def _read() -> dict[str, Any] | None:
@@ -677,8 +694,13 @@ def snapshot_is_revertible(tool_name: str, snapshot_data: dict[str, Any]) -> boo
             and isinstance(data.get("written_size"), int)
             and bool(data.get("workspace_root"))
         )
-    if tool_name in ("resolve_decision", "heartbeat_check_manage"):
+    if tool_name in ("resolve_decision", "heartbeat_check_manage"):  # resolve_decision: a pre-merge snapshot
         return isinstance(data.get("written"), dict)
+    if tool_name == "resolve_decisions":
+        # The items that changed a decision; one that failed or was not found wrote nothing.
+        items = data.get("items") or []
+        written = [it for it in items if isinstance(it, dict) and isinstance(it.get("written"), dict)]
+        return bool(written) and all(isinstance(it.get("prior"), dict) for it in written)
     return False
 
 
@@ -738,12 +760,64 @@ async def compensate_heartbeat_check_manage(
         return CompensationResult(False, f"revert failed: {exc}")
 
 
+def _ts(value: Any) -> datetime | None:
+    return datetime.fromisoformat(value) if value else None
+
+
+def _uuid(value: Any) -> UUID | None:
+    return UUID(value) if value else None
+
+
+def _review_state_tuple(state: dict[str, Any]) -> tuple:
+    """The five review fields ``Brain.review`` writes, as their columns hold them."""
+    return (
+        state.get("outcome"),
+        state.get("outcome_result"),
+        _ts(state.get("reviewed_at")),
+        state.get("reviewer"),
+        _uuid(state.get("superseded_by")),
+    )
+
+
+async def _restore_decision(session: Any, agent_id: str, decision_id: str, prior: dict, written: dict) -> str | None:
+    """Put one decision's review fields back to ``prior`` on ``session``, only while it still carries every
+    field ``written`` recorded: ``"restored"``. ``"already"`` when it already carries ``prior`` (an earlier
+    revert whose completion was not recorded); None when it is not found or was reviewed again since."""
+    from nous.storage.models import Decision
+
+    columns = (
+        Decision.outcome,
+        Decision.outcome_result,
+        Decision.reviewed_at,
+        Decision.reviewer,
+        Decision.superseded_by,
+    )
+    names = ("outcome", "outcome_result", "reviewed_at", "reviewer", "superseded_by")
+    result = await session.execute(
+        update(Decision)
+        .where(Decision.id == UUID(decision_id))
+        .where(Decision.agent_id == agent_id)
+        .where(*(column.is_not_distinct_from(value) for column, value in zip(columns, _review_state_tuple(written))))
+        .values(**dict(zip(names, _review_state_tuple(prior))))
+    )
+    if (result.rowcount or 0) > 0:
+        return "restored"
+    row = (
+        await session.execute(
+            select(*columns).where(Decision.id == UUID(decision_id)).where(Decision.agent_id == agent_id)
+        )
+    ).first()
+    return "already" if row is not None and tuple(row) == _review_state_tuple(prior) else None
+
+
 async def compensate_resolve_decision(
     entry_id: UUID,
     snapshot_data: dict[str, Any],
     deps: Any,
 ) -> CompensationResult:
-    """Restore the review fields ``Brain.review`` overwrote.
+    """Restore the review fields ``Brain.review`` overwrote, for a snapshot
+    the single-decision tool wrote before it became an alias of
+    resolve_decisions.
 
     Uses the Brain's public ``db`` / ``agent_id``. Stale guard: the update
     applies only while the decision still carries EVERY review field this
@@ -752,8 +826,6 @@ async def compensate_resolve_decision(
     reviewer or timestamp -- is never silently undone. A snapshot without
     the written state cannot make that distinction and is refused.
     """
-    from nous.storage.models import Decision
-
     decision_id = snapshot_data.get("decision_id")
     prior = snapshot_data.get("prior")
     written = snapshot_data.get("written")
@@ -768,60 +840,13 @@ async def compensate_resolve_decision(
     brain = getattr(deps, "brain", None)
     if brain is None:
         return CompensationResult(False, "brain not available")
-
-    def _ts(value: Any) -> datetime | None:
-        return datetime.fromisoformat(value) if value else None
-
-    def _uuid(value: Any) -> UUID | None:
-        return UUID(value) if value else None
-
     try:
-        stmt = (
-            update(Decision)
-            .where(Decision.id == UUID(decision_id))
-            .where(Decision.agent_id == brain.agent_id)
-            .where(Decision.outcome.is_not_distinct_from(written.get("outcome")))
-            .where(Decision.outcome_result.is_not_distinct_from(written.get("outcome_result")))
-            .where(Decision.reviewed_at.is_not_distinct_from(_ts(written.get("reviewed_at"))))
-            .where(Decision.reviewer.is_not_distinct_from(written.get("reviewer")))
-            .where(Decision.superseded_by.is_not_distinct_from(_uuid(written.get("superseded_by"))))
-            .values(
-                outcome=prior.get("outcome"),
-                outcome_result=prior.get("outcome_result"),
-                reviewed_at=_ts(prior.get("reviewed_at")),
-                reviewer=prior.get("reviewer"),
-                superseded_by=_uuid(prior.get("superseded_by")),
-            )
-        )
         async with brain.db.session() as s:
-            result = await s.execute(stmt)
+            restored = await _restore_decision(s, brain.agent_id, decision_id, prior, written)
             await s.commit()
-        if (result.rowcount or 0) > 0:
+        if restored == "restored":
             return CompensationResult(True, f"restored decision {decision_id} to outcome={prior.get('outcome')!r}")
-        # Idempotent: the decision already carries EVERY prior review field
-        # (the microsecond reviewed_at included) -- an earlier revert whose
-        # completion was not recorded. Report it done.
-        async with brain.db.session() as s:
-            row = (
-                await s.execute(
-                    select(
-                        Decision.outcome,
-                        Decision.outcome_result,
-                        Decision.reviewed_at,
-                        Decision.reviewer,
-                        Decision.superseded_by,
-                    )
-                    .where(Decision.id == UUID(decision_id))
-                    .where(Decision.agent_id == brain.agent_id)
-                )
-            ).first()
-        if row is not None and tuple(row) == (
-            prior.get("outcome"),
-            prior.get("outcome_result"),
-            _ts(prior.get("reviewed_at")),
-            prior.get("reviewer"),
-            _uuid(prior.get("superseded_by")),
-        ):
+        if restored == "already":
             return CompensationResult(True, f"decision {decision_id} already carries its prior review state")
         return CompensationResult(
             False,
@@ -831,8 +856,52 @@ async def compensate_resolve_decision(
         return CompensationResult(False, f"revert failed: {exc}")
 
 
+async def compensate_resolve_decisions(
+    entry_id: UUID,
+    snapshot_data: dict[str, Any],
+    deps: Any,
+) -> CompensationResult:
+    """Restore the review fields each item of a ``resolve_decisions`` call
+    overwrote, all or nothing, in one transaction.
+
+    Only the items that changed a decision are restored: their ``written``
+    was recorded in that item's own SAVEPOINT. An item whose id was not
+    found, or that failed, wrote nothing and is skipped. Each restored item
+    has the single-decision stale guard, and if any one of them was reviewed
+    again since, no decision is restored: the revert is one result for the
+    whole call (``CompensationResult``, ``mark_reverted``).
+    """
+    items = snapshot_data.get("items")
+    if not isinstance(items, list):
+        return CompensationResult(False, "no items in snapshot")
+    written = [it for it in items if isinstance(it, dict) and isinstance(it.get("written"), dict)]
+    if not written:
+        return CompensationResult(False, "revert refused: no decision was recorded as changed by this call")
+    if any(not it.get("decision_id") or not isinstance(it.get("prior"), dict) for it in written):
+        return CompensationResult(False, "prior state of a decision was not recorded; not reverting")
+    brain = getattr(deps, "brain", None)
+    if brain is None:
+        return CompensationResult(False, "brain not available")
+    try:
+        async with brain.db.session() as s:
+            for it in written:
+                if await _restore_decision(s, brain.agent_id, it["decision_id"], it["prior"], it["written"]) is None:
+                    await s.rollback()
+                    return CompensationResult(
+                        False,
+                        f"revert refused: decision {it['decision_id']} not found or reviewed again since the "
+                        "original call; no decision was restored",
+                    )
+            await s.commit()
+        return CompensationResult(True, f"restored {len(written)} decision(s) to their prior review state")
+    except Exception as exc:
+        return CompensationResult(False, f"revert failed: {exc}")
+
+
 def register_compensators(registry: CompensationRegistry) -> None:
     """Register all built-in compensators."""
     registry.register("write_file", compensate_write_file)
     registry.register("heartbeat_check_manage", compensate_heartbeat_check_manage)
+    registry.register("resolve_decisions", compensate_resolve_decisions)
+    # Snapshots the single-decision tool wrote before it became an alias keep their Revert.
     registry.register("resolve_decision", compensate_resolve_decision)

@@ -32,7 +32,7 @@ MODES = ("off", "warn", "enforce")
 SPAWN = frozenset({"spawn_task", "dag_create"})
 HEARTBEAT_TRIAGE_UNOFFERED = frozenset(
     {"spawn_task", "spawn_sync", "schedule_task", "heartbeat_check_create", "dag_create"}
-    | {"resolve_decision", "resolve_decisions"}
+    | {"resolve_decisions"}
 )
 CHECK_DECLARED = frozenset(
     {

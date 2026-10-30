@@ -115,7 +115,10 @@ async def test_no_snapshot_without_a_card_and_no_card_without_a_snapshot(
     ("tool", "tool_input"),
     [
         ("write_file", {"path": "plain.txt", "content": "x"}),
-        ("resolve_decision", {"decision_id": "7b0c7b1e-3f0e-4c57-9d4e-0d4f8f0f6a11", "outcome": "noise"}),
+        (
+            "resolve_decisions",
+            {"resolutions": [{"decision_id": "7b0c7b1e-3f0e-4c57-9d4e-0d4f8f0f6a11", "outcome": "noise"}]},
+        ),
         ("heartbeat_check_manage", {"name": "c", "action": "disable"}),
     ],
 )

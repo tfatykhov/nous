@@ -48,7 +48,7 @@ def test_ledger_sets_are_derived_from_the_table():
 
 
 def test_previously_unclassified_tools_are_writes_now():
-    for name in ("ingest_document", "resolve_decision", "resolve_decisions", "spawn_sync",
+    for name in ("ingest_document", "resolve_decisions", "spawn_sync",
                  "dag_create", "dag_manage", "push_surface", "compose_surface"):
         assert el.classify_side_effect(name, {}) == "write", name
 
@@ -91,7 +91,7 @@ def test_spawn_flags():
 def test_refuse_strips_every_non_read_tool():
     denied = refuse_denylist()
     assert {"dag_create", "push_surface", "compose_surface", "ingest_document",
-            "resolve_decision", "spawn_sync", "send_email", "bash"} <= denied
+            "resolve_decisions", "spawn_sync", "send_email", "bash"} <= denied
     assert not denied & {"recall_deep", "read_file", "submit_final_report"}
 
 

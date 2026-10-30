@@ -42,7 +42,7 @@ TOOL_CLASSES: Mapping[str, ToolClass] = MappingProxyType({
     "write_file": _WRITE_C, "learn_fact": _WRITE, "record_decision": _WRITE, "create_censor": _WRITE,
     "store_identity": _WRITE, "learn_skill": _WRITE, "complete_initiation": _WRITE,
     "cancel_task": _WRITE, "heartbeat_check_manage": _WRITE_C, "ingest_document": _WRITE,
-    "resolve_decision": _WRITE_C, "resolve_decisions": _WRITE, "push_surface": _WRITE,
+    "resolve_decisions": _WRITE_C, "push_surface": _WRITE,
     "compose_surface": _WRITE, "dag_manage": _WRITE,
     # F099: a continuation's decision and its staged proposals, injected per turn via extra_tools (never
     # registered); classified so the ledger and the internal_only rules read one table.

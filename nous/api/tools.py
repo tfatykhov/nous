@@ -338,7 +338,7 @@ class ToolDispatcher:
 
     # Tools that read the injected ``_is_background`` flag (#541/#642 decision
     # resolution; F092.1 compose_surface origin). One set for every consumer.
-    _BACKGROUND_AWARE_TOOLS: frozenset[str] = frozenset({"resolve_decision", "resolve_decisions", "compose_surface"})
+    _BACKGROUND_AWARE_TOOLS: frozenset[str] = frozenset({"resolve_decisions", "compose_surface"})
 
     def __init__(
         self,
@@ -2234,10 +2234,11 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         )
 
     # ------------------------------------------------------------------
-    # Decision resolution (closes the calibration loop). resolve_decision /
-    # resolve_decisions persist an outcome on an existing decision via the
-    # pre-existing Brain.review(); list_decisions surfaces the pending set so
-    # a sweep can enumerate what to resolve.
+    # Decision resolution (closes the calibration loop). resolve_decisions
+    # persists an outcome on one or more existing decisions via the
+    # pre-existing Brain.review_many(); list_decisions surfaces the pending set
+    # so a sweep can enumerate what to resolve. (resolve_decision, the
+    # one-decision tool, is now an alias: nous/tool_names.py.)
     #
     # Background turns (heartbeat / subtask / schedule / DAG, dispatched with
     # _is_background=True) may apply only the NON-PREDICTION outcomes
@@ -2263,84 +2264,24 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             "prediction as success/partial/failure requires an interactive turn."
         )
 
-    async def resolve_decision(
-        decision_id: str,
-        outcome: str,
-        resolution_note: str | None = None,
-        superseded_by: str | None = None,
-        _is_background: bool = False,
-    ) -> dict[str, Any]:
-        """Persist an outcome on an existing decision.
-
-        Args:
-            decision_id: UUID of the decision to resolve.
-            outcome: success, partial, failure, noise, or superseded.
-                noise/superseded are excluded from calibration.
-            resolution_note: Evidence/why — the resolution trail.
-            superseded_by: UUID of the replacing decision. Required when
-                outcome=superseded.
-        """
-        if _is_background and outcome not in NON_PREDICTION_OUTCOMES:
-            return _tool_error(_bg_outcome_error(outcome))
-        # A supersession without a successor is a lineage dead end: retrieval
-        # can label the row `[superseded]` but cannot point at what replaced
-        # it. Validated here, not as a JSON-schema conditional — the dispatcher
-        # only enforces `required` keys flatly.
-        if outcome == "superseded" and not superseded_by:
-            return {
-                "is_error": True,
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            "Error: outcome='superseded' requires superseded_by — the UUID of the "
-                            "decision that replaces this one. Record the replacement decision first, "
-                            "then resolve this one with its ID. If nothing replaced it, use a "
-                            "different outcome (e.g. 'noise' or 'failure')."
-                        ),
-                    }
-                ],
-            }
-        # Phase 2.8: the review state around this write, read inside the
-        # resolving transaction, is what a compensation snapshot records.
-        call_outcome = _outcome_var.get()
-        capture: dict | None = {} if call_outcome is not None else None
-        # Attached BEFORE the await: Brain._review fills it in place before
-        # its commit, so a call cancelled mid-commit (outcome unknown) still
-        # reports the state it may have written.
-        if call_outcome is not None:
-            call_outcome.review_capture = capture
-            if call_outcome.persist_written is not None:
-                capture["persist"] = call_outcome.persist_written
-        try:
-            detail = await brain.review(
-                UUID(decision_id),
-                outcome=outcome,
-                result=resolution_note,
-                reviewer=_BG_REVIEWER if _is_background else "agent",
-                superseded_by=UUID(superseded_by) if superseded_by else None,
-                preserve_graded=_is_background,
-                capture=capture,
-            )
-            text = f"Decision {detail.id} resolved: outcome={detail.outcome}"
-            if detail.superseded_by:
-                text += f", superseded_by={detail.superseded_by}"
-            return {"content": [{"type": "text", "text": text}]}
-        except Exception as e:
-            logger.exception("resolve_decision tool failed")
-            return _tool_error(f"Error resolving decision: {e}")
-
     async def resolve_decisions(
         resolutions: list[dict[str, Any]],
         _is_background: bool = False,
     ) -> dict[str, Any]:
-        """Resolve a batch of decisions in one transaction (sweep path).
+        """Resolve one or more decisions in one transaction.
 
         Each item: {decision_id, outcome, resolution_note?, superseded_by?}.
         A per-item failure — a not-found id, a supersession without its
         successor, and in a background turn either a disallowed outcome or an
         already-graded decision — is reported and does not abort the batch.
+
+        Phase 2.8: each item gets its own review capture, ``{"index": i}`` plus
+        the runner's ``persist`` when a compensation snapshot exists. Brain
+        fills it in that item's SAVEPOINT and the persist merges it into the
+        snapshot's ``items[i]``; an item that failed changed nothing, so its
+        ``written`` is dropped afterwards.
         """
+        call_outcome = _outcome_var.get()
         try:
             # codex #577 r3: NO batch-wide lineage precheck here. ReviewInput's
             # validator (shared by every entry point) rejects a missing-lineage
@@ -2357,6 +2298,16 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 }
                 for r in resolutions
             ]
+            captures: list[dict] | None = None
+            if call_outcome is not None:
+                # Attached BEFORE the await: Brain._review fills them in place
+                # before its commit, so a call cancelled mid-commit (outcome
+                # unknown) still reports the state it may have written.
+                captures = [{"index": i} for i in range(len(items))]
+                if call_outcome.persist_written is not None:
+                    for capture in captures:
+                        capture["persist"] = call_outcome.persist_written
+                call_outcome.review_capture = captures
             if _is_background:
                 # Refuse disallowed outcomes per item (same contract as a
                 # not-found id) and re-merge in input order, so the sweep
@@ -2367,6 +2318,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                         [items[i] for i in allowed],
                         reviewer=_BG_REVIEWER,
                         preserve_graded=True,
+                        captures=[captures[i] for i in allowed] if captures is not None else None,
                     )
                     if allowed
                     else []
@@ -2383,7 +2335,12 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     for i, it in enumerate(items)
                 ]
             else:
-                results = await brain.review_many(items, reviewer="agent")
+                results = await brain.review_many(items, reviewer="agent", captures=captures)
+            for capture, result in zip(captures or (), results):
+                if not result["ok"]:
+                    # Its SAVEPOINT rolled back (or it never ran): nothing to revert.
+                    capture.pop("written", None)
+                    capture.pop("persisted", None)
             ok = sum(1 for r in results if r["ok"])
             failed = [r for r in results if not r["ok"]]
             text = f"Resolved {ok}/{len(results)} decisions."
@@ -2435,7 +2392,6 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         "learn_skill": learn_skill,
         "get_procedure": get_procedure,
         "ingest_document": ingest_document,
-        "resolve_decision": resolve_decision,
         "resolve_decisions": resolve_decisions,
         "list_decisions": list_decisions,
     }
@@ -2507,55 +2463,34 @@ _RECORD_DECISION_SCHEMA: dict[str, Any] = {
     "required": ["description", "confidence", "category", "stakes"],
 }
 
-_RESOLVE_DECISION_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "description": (
-        "Record the outcome of an earlier decision: success, partial or failure, or 'noise' (a sweep or tick "
-        "artifact) or 'superseded' (a later decision replaced it), which calibration leaves out. 'superseded' "
-        "needs superseded_by: record the replacing decision first. Add a resolution_note as evidence. In "
-        "background turns only 'noise' and 'superseded' apply, never over a graded outcome. Not available in "
-        "heartbeat triage turns."
-    ),
-    "properties": {
-        "decision_id": {"type": "string", "description": "UUID of the decision to resolve"},
-        "outcome": {
-            "type": "string",
-            "description": "Resolution outcome",
-            "enum": ["success", "partial", "failure", "noise", "superseded"],
-        },
-        "resolution_note": {"type": "string", "description": "Evidence / why — the resolution trail"},
-        "superseded_by": {
-            "type": "string",
-            "description": (
-                "UUID of the decision that replaces this one. REQUIRED when "
-                "outcome=superseded (the call is rejected without it); ignored otherwise."
-            ),
-        },
-    },
-    "required": ["decision_id", "outcome"],
-}
-
 _RESOLVE_DECISIONS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
-        "Resolve several decisions in one transaction (for sweeps); a failed item is reported and the rest still "
-        "apply. In background turns only 'noise' and 'superseded' items apply, never over a graded outcome. Not "
-        "available in heartbeat triage turns."
+        "Record the outcome of one or more earlier decisions, in one transaction: success, partial or failure, or "
+        "'noise' (a sweep or tick artifact) or 'superseded' (a later decision replaced it), which calibration "
+        "leaves out. 'superseded' needs superseded_by: record the replacing decision first. Add a resolution_note "
+        "as evidence to every item. A failed item is reported and the rest still apply. In background turns only "
+        "'noise' and 'superseded' apply, never over a graded outcome. Not available in heartbeat triage turns."
     ),
     "properties": {
         "resolutions": {
             "type": "array",
-            "description": "Decisions to resolve",
+            "description": "One item per decision to resolve",
             "items": {
                 "type": "object",
                 "properties": {
-                    "decision_id": {"type": "string"},
+                    "decision_id": {"type": "string", "description": "UUID of the decision"},
                     "outcome": {
                         "type": "string",
                         "enum": ["success", "partial", "failure", "noise", "superseded"],
                     },
-                    "resolution_note": {"type": "string"},
-                    "superseded_by": {"type": "string"},
+                    "resolution_note": {"type": "string", "description": "The evidence for this outcome"},
+                    "superseded_by": {
+                        "type": "string",
+                        "description": (
+                            "Required for 'superseded': the UUID of the replacing decision (record it first)"
+                        ),
+                    },
                 },
                 "required": ["decision_id", "outcome"],
             },
@@ -2775,13 +2710,10 @@ def register_nous_tools(
     dispatcher.register("get_procedure", closures["get_procedure"], _GET_PROCEDURE_SCHEMA)
     dispatcher.register("ingest_document", closures["ingest_document"], _INGEST_DOCUMENT_SCHEMA)
     if settings is None or settings.decision_resolution_enabled:
-        dispatcher.register("resolve_decision", closures["resolve_decision"], _RESOLVE_DECISION_SCHEMA)
         dispatcher.register("resolve_decisions", closures["resolve_decisions"], _RESOLVE_DECISIONS_SCHEMA)
         dispatcher.register("list_decisions", closures["list_decisions"], _LIST_DECISIONS_SCHEMA)
     # Old tool names (nous/tool_names.py): an alias whose target is registered here, or a retired name.
     for old_name, change in CHANGED_TOOLS.items():
-        if dispatcher.is_registered(old_name):
-            continue  # still a tool of its own
         if change.target is None:
             dispatcher.retire(old_name, change.note)
         elif dispatcher.is_registered(change.target):

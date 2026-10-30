@@ -59,7 +59,6 @@ class TestCreateNousTools:
             "learn_skill",
             "get_procedure",
             "ingest_document",  # F069
-            "resolve_decision",
             "resolve_decisions",
             "list_decisions",
         }
@@ -132,8 +131,14 @@ class TestRecordDecision:
         assert "Error" in text or "error" in text.lower()
 
 
+def _resolve_one(tools, **call):
+    """A one-item resolve_decisions call: what the resolve_decision alias becomes (nous/tool_names.py)."""
+    background = call.pop("_is_background", False)
+    return tools["resolve_decisions"](resolutions=[call], _is_background=background)
+
+
 class TestResolveDecision:
-    """Test the resolve_decision / resolve_decisions / list_decisions tools."""
+    """Test resolve_decisions (one item and a batch) and list_decisions."""
 
     async def _make_decision(self, tools, brain) -> str:
         """Record a decision and return its UUID string.
@@ -156,14 +161,15 @@ class TestResolveDecision:
 
     @pytest.mark.asyncio
     async def test_resolve_decision_success(self, tools, brain):
-        """resolve_decision persists outcome + note."""
+        """A one-item call persists outcome + note."""
         did = await self._make_decision(tools, brain)
-        result = await tools["resolve_decision"](
+        result = await _resolve_one(
+            tools,
             decision_id=did,
             outcome="noise",
             resolution_note="sweep artifact",
         )
-        assert "resolved" in result["content"][0]["text"]
+        assert "Resolved 1/1" in result["content"][0]["text"]
         detail = await brain.get(uuid.UUID(did))
         assert detail.outcome == "noise"
 
@@ -183,7 +189,7 @@ class TestResolveDecision:
         outcome = CallOutcome()
         token = outcome_var.set(outcome)
         try:
-            await tools["resolve_decision"](decision_id=did, outcome="noise", resolution_note="mine")
+            await _resolve_one(tools, decision_id=did, outcome="noise", resolution_note="mine")
         finally:
             outcome_var.reset(token)
         written = await store.decision_state(did)
@@ -194,7 +200,8 @@ class TestResolveDecision:
             ts = state["reviewed_at"]
             return {**state, "reviewed_at": ts and ts.split("+")[0]}
 
-        cap = outcome.review_capture
+        (cap,) = outcome.review_capture
+        assert cap["index"] == 0
         assert _naive(cap["prior"]) == _naive(before)
         assert _naive(cap["written"]) == _naive(written)
         assert cap["prior"]["outcome_result"] == "earlier review"
@@ -213,24 +220,24 @@ class TestResolveDecision:
 
         did = await self._make_decision(tools, brain)
 
-        async def review_cancelled_mid_commit(*args, capture=None, **kwargs):
-            capture["prior"] = {"outcome": None}
-            capture["written"] = {"outcome": "noise"}
+        async def review_cancelled_mid_commit(*args, captures=None, **kwargs):
+            captures[0]["prior"] = {"outcome": None}
+            captures[0]["written"] = {"outcome": "noise"}
             raise asyncio.CancelledError  # the commit was cancelled in flight
 
-        monkeypatch.setattr(brain, "review", review_cancelled_mid_commit)
+        monkeypatch.setattr(brain, "review_many", review_cancelled_mid_commit)
         outcome = CallOutcome()
         token = outcome_var.set(outcome)
         try:
             with pytest.raises(asyncio.CancelledError):
-                await tools["resolve_decision"](decision_id=did, outcome="noise", resolution_note="x")
+                await _resolve_one(tools, decision_id=did, outcome="noise", resolution_note="x")
         finally:
             outcome_var.reset(token)
-        assert outcome.review_capture == {"prior": {"outcome": None}, "written": {"outcome": "noise"}}
+        assert outcome.review_capture == [{"index": 0, "prior": {"outcome": None}, "written": {"outcome": "noise"}}]
 
-    async def _snapshotted_call(self, brain, did):
-        """A runner snapshot for a resolve_decision on an undoable DAG node:
-        returns (store, entry_id, outcome) as dispatch would see them."""
+    async def _snapshotted_call(self, brain, *decision_ids):
+        """A runner snapshot for a resolve_decisions call (one noise item per id) on an
+        undoable DAG node: returns (store, entry_id, outcome) as dispatch would see them."""
         from nous.api.call_outcome import CallOutcome
         from nous.api.compensation import SnapshotStore
         from nous.api.execution_context import ExecutionContext
@@ -240,8 +247,8 @@ class TestResolveDecision:
         entry, outcome = uuid.uuid4(), CallOutcome()
         assert await runner._capture_compensation_snapshot(
             ExecutionContext(kind="dag_node", undoable=True),
-            "resolve_decision",
-            {"decision_id": did, "outcome": "noise"},
+            "resolve_decisions",
+            {"resolutions": [{"decision_id": d, "outcome": "noise"} for d in decision_ids]},
             entry,
             outcome=outcome,
         )
@@ -257,23 +264,23 @@ class TestResolveDecision:
         post-dispatch hook never reached, the snapshot already holds it and
         the revert works."""
         from nous.api.call_outcome import _current as outcome_var
-        from nous.api.compensation import compensate_resolve_decision, snapshot_is_revertible
+        from nous.api.compensation import compensate_resolve_decisions, snapshot_is_revertible
 
         did = await self._make_decision(tools, brain)
         store, entry, outcome = await self._snapshotted_call(brain, did)
         token = outcome_var.set(outcome)
         try:
-            result = await tools["resolve_decision"](decision_id=did, outcome="noise", resolution_note="mine")
+            result = await _resolve_one(tools, decision_id=did, outcome="noise", resolution_note="mine")
         finally:
             outcome_var.reset(token)
         assert not result.get("is_error")
         # The call is cut off here (process exit / CancelledError from the
         # ledger close): _after_compensable_call never runs.
         snap = await store.get_by_ledger_entry(entry)
-        assert snapshot_is_revertible("resolve_decision", snap.snapshot_data)
-        assert snap.snapshot_data["written"]["outcome_result"] == "mine"
-        assert outcome.review_capture["persisted"] is True
-        res = await compensate_resolve_decision(entry, snap.snapshot_data, type("D", (), {"brain": brain})())
+        assert snapshot_is_revertible("resolve_decisions", snap.snapshot_data)
+        assert snap.snapshot_data["items"][0]["written"]["outcome_result"] == "mine"
+        assert outcome.review_capture[0]["persisted"] is True
+        res = await compensate_resolve_decisions(entry, snap.snapshot_data, type("D", (), {"brain": brain})())
         assert res.success, res.message
         assert (await brain.get(uuid.UUID(did))).outcome == "pending"
 
@@ -289,33 +296,137 @@ class TestResolveDecision:
         monkeypatch.setattr(brain, "_emit_event", AsyncMock(side_effect=RuntimeError("boom")))
         token = outcome_var.set(outcome)
         try:
-            result = await tools["resolve_decision"](decision_id=did, outcome="noise", resolution_note="mine")
+            result = await _resolve_one(tools, decision_id=did, outcome="noise", resolution_note="mine")
         finally:
             outcome_var.reset(token)
         monkeypatch.undo()
         assert result.get("is_error") is True
-        assert outcome.review_capture.get("persisted") is True  # recorded, then rolled back
+        # recorded, then rolled back with its item: nothing to revert
+        assert "written" not in outcome.review_capture[0] and "persisted" not in outcome.review_capture[0]
         snap = await store.get_by_ledger_entry(entry)
-        assert "written" not in snap.snapshot_data
+        assert "written" not in snap.snapshot_data["items"][0]
         assert (await brain.get(uuid.UUID(did))).outcome == "pending"
 
         # No snapshot row to record into: the review itself is refused.
         did2 = await self._make_decision(tools, brain)
         store, entry, outcome = await self._snapshotted_call(brain, did2)
-        outcome.persist_written = _compensating_runner(store)._written_state_persister("resolve_decision", uuid.uuid4())
+        outcome.persist_written = _compensating_runner(store)._written_state_persister(
+            "resolve_decisions", uuid.uuid4()
+        )
         token = outcome_var.set(outcome)
         try:
-            result = await tools["resolve_decision"](decision_id=did2, outcome="noise", resolution_note="x")
+            result = await _resolve_one(tools, decision_id=did2, outcome="noise", resolution_note="x")
         finally:
             outcome_var.reset(token)
         assert result.get("is_error") is True
         assert (await brain.get(uuid.UUID(did2))).outcome == "pending"
 
+    # -- resolve_decisions is compensable per item (harness Phase 2.8) ------------------------------------------
+
+    async def _revert(self, brain, store, entry):
+        from nous.api.compensation import compensate_resolve_decisions
+
+        snap = await store.get_by_ledger_entry(entry)
+        return await compensate_resolve_decisions(entry, snap.snapshot_data, type("D", (), {"brain": brain})())
+
+    @pytest.mark.asyncio
+    async def test_a_batch_records_each_item_and_reverts_all_of_them(self, tools, brain):
+        from nous.api.call_outcome import _current as outcome_var
+        from nous.api.compensation import snapshot_is_revertible
+
+        first, second = await self._make_decision(tools, brain), await self._make_decision(tools, brain)
+        missing = str(uuid.uuid4())
+        store, entry, outcome = await self._snapshotted_call(brain, first, missing, second)
+        snap = await store.get_by_ledger_entry(entry)
+        assert [it["decision_id"] for it in snap.snapshot_data["items"]] == [first, missing, second]
+        assert snap.snapshot_data["items"][1]["prior"] is None  # not found: skipped, the call stays revertible
+        token = outcome_var.set(outcome)
+        try:
+            result = await tools["resolve_decisions"](
+                resolutions=[
+                    {"decision_id": d, "outcome": "noise", "resolution_note": "tick"} for d in (first, missing, second)
+                ]
+            )
+        finally:
+            outcome_var.reset(token)
+        assert "Resolved 2/3" in result["content"][0]["text"]
+        items = (await store.get_by_ledger_entry(entry)).snapshot_data["items"]
+        assert [("written" in it) for it in items] == [True, False, True]
+        assert snapshot_is_revertible("resolve_decisions", {"items": items})
+        res = await self._revert(brain, store, entry)
+        assert res.success, res.message
+        assert [(await brain.get(uuid.UUID(d))).outcome for d in (first, second)] == ["pending", "pending"]
+
+    @pytest.mark.asyncio
+    async def test_one_stale_item_refuses_the_whole_revert(self, tools, brain):
+        from nous.api.call_outcome import _current as outcome_var
+
+        first, second = await self._make_decision(tools, brain), await self._make_decision(tools, brain)
+        store, entry, outcome = await self._snapshotted_call(brain, first, second)
+        token = outcome_var.set(outcome)
+        try:
+            await tools["resolve_decisions"](
+                resolutions=[{"decision_id": d, "outcome": "noise", "resolution_note": "tick"} for d in (first, second)]
+            )
+        finally:
+            outcome_var.reset(token)
+        await brain.review(uuid.UUID(second), "noise", result="reviewed again", reviewer="someone")
+        res = await self._revert(brain, store, entry)
+        assert not res.success and second in res.message
+        assert (await brain.get(uuid.UUID(first))).outcome == "noise"  # all or nothing: first is not restored
+        assert (await brain.get(uuid.UUID(second))).outcome_result == "reviewed again"
+
+    @pytest.mark.asyncio
+    async def test_a_failed_item_is_skipped_by_the_revert(self, tools, brain):
+        from nous.api.call_outcome import _current as outcome_var
+
+        good, bad = await self._make_decision(tools, brain), await self._make_decision(tools, brain)
+        store, entry, outcome = await self._snapshotted_call(brain, good, bad)
+        token = outcome_var.set(outcome)
+        try:
+            result = await tools["resolve_decisions"](
+                resolutions=[
+                    {"decision_id": good, "outcome": "noise", "resolution_note": "tick"},
+                    {"decision_id": bad, "outcome": "superseded", "resolution_note": "no successor"},
+                ]
+            )
+        finally:
+            outcome_var.reset(token)
+        assert "Resolved 1/2" in result["content"][0]["text"]
+        assert "written" not in outcome.review_capture[1]
+        res = await self._revert(brain, store, entry)
+        assert res.success, res.message
+        assert (await brain.get(uuid.UUID(good))).outcome == "pending"
+
+    @pytest.mark.asyncio
+    async def test_nothing_is_snapshotted_for_an_empty_list_and_a_bad_id_is_skipped(self, tools, brain):
+        from nous.api.call_outcome import CallOutcome
+        from nous.api.compensation import SnapshotStore
+        from nous.api.execution_context import ExecutionContext
+
+        store = SnapshotStore(brain.db, brain.agent_id)
+        runner = _compensating_runner(store)
+        ctx = ExecutionContext(kind="dag_node", undoable=True)
+        assert not await runner._capture_compensation_snapshot(
+            ctx, "resolve_decisions", {"resolutions": []}, uuid.uuid4(), outcome=CallOutcome()
+        )
+        entry = uuid.uuid4()
+        assert await runner._capture_compensation_snapshot(
+            ctx,
+            "resolve_decisions",
+            {"resolutions": [{"decision_id": "not-a-uuid", "outcome": "noise"}, "not an item"]},
+            entry,
+            outcome=CallOutcome(),
+        )
+        items = (await store.get_by_ledger_entry(entry)).snapshot_data["items"]
+        assert items == [{"decision_id": "not-a-uuid", "prior": None}, {"decision_id": "", "prior": None}]
+
     @pytest.mark.asyncio
     async def test_resolve_decision_noise_allowed_in_background(self, tools, brain):
         """A background turn may mark a pending decision as noise, attributed to it."""
         did = await self._make_decision(tools, brain)
-        result = await tools["resolve_decision"](
+        result = await _resolve_one(
+            tools,
             decision_id=did,
             outcome="noise",
             resolution_note="heartbeat tick artifact",
@@ -332,7 +443,7 @@ class TestResolveDecision:
     async def test_resolve_decision_foreground_reviewer_unchanged(self, tools, brain):
         """Interactive resolutions keep reviewer='agent'."""
         did = await self._make_decision(tools, brain)
-        await tools["resolve_decision"](decision_id=did, outcome="noise")
+        await _resolve_one(tools, decision_id=did, outcome="noise")
         detail = await brain.get(uuid.UUID(did))
         assert detail.reviewer == "agent"
 
@@ -341,7 +452,8 @@ class TestResolveDecision:
     async def test_resolve_decision_graded_outcome_blocked_in_background(self, tools, brain, outcome):
         """Background turns cannot grade a prediction; the error names what IS allowed."""
         did = await self._make_decision(tools, brain)
-        result = await tools["resolve_decision"](
+        result = await _resolve_one(
+            tools,
             decision_id=did,
             outcome=outcome,
             _is_background=True,
@@ -358,7 +470,8 @@ class TestResolveDecision:
         """Supersession is allowed in background, still only with its successor."""
         old_id = await self._make_decision(tools, brain)
         new_id = await self._make_decision(tools, brain)
-        refused = await tools["resolve_decision"](
+        refused = await _resolve_one(
+            tools,
             decision_id=old_id,
             outcome="superseded",
             _is_background=True,
@@ -367,7 +480,8 @@ class TestResolveDecision:
         assert "superseded_by" in refused["content"][0]["text"]
         assert (await brain.get(uuid.UUID(old_id))).outcome == "pending"
 
-        result = await tools["resolve_decision"](
+        result = await _resolve_one(
+            tools,
             decision_id=old_id,
             outcome="superseded",
             superseded_by=new_id,
@@ -383,8 +497,9 @@ class TestResolveDecision:
         """noise/superseded are excluded from calibration, so relabelling a graded
         decision in background would delete a data point from the Brier score."""
         did = await self._make_decision(tools, brain)
-        await tools["resolve_decision"](decision_id=did, outcome="failure", resolution_note="broke prod")
-        result = await tools["resolve_decision"](
+        await _resolve_one(tools, decision_id=did, outcome="failure", resolution_note="broke prod")
+        result = await _resolve_one(
+            tools,
             decision_id=did,
             outcome="noise",
             _is_background=True,
@@ -400,8 +515,9 @@ class TestResolveDecision:
         """noise -> superseded moves between non-prediction outcomes: allowed."""
         old_id = await self._make_decision(tools, brain)
         new_id = await self._make_decision(tools, brain)
-        await tools["resolve_decision"](decision_id=old_id, outcome="noise", _is_background=True)
-        result = await tools["resolve_decision"](
+        await _resolve_one(tools, decision_id=old_id, outcome="noise", _is_background=True)
+        result = await _resolve_one(
+            tools,
             decision_id=old_id,
             outcome="superseded",
             superseded_by=new_id,
@@ -416,13 +532,15 @@ class TestResolveDecision:
         neither this tool nor list_decisions reports stale lineage."""
         old_id = await self._make_decision(tools, brain)
         new_id = await self._make_decision(tools, brain)
-        await tools["resolve_decision"](
+        await _resolve_one(
+            tools,
             decision_id=old_id,
             outcome="superseded",
             superseded_by=new_id,
             _is_background=True,
         )
-        result = await tools["resolve_decision"](
+        result = await _resolve_one(
+            tools,
             decision_id=old_id,
             outcome="noise",
             _is_background=True,
@@ -440,7 +558,7 @@ class TestResolveDecision:
         noise_id = await self._make_decision(tools, brain)
         graded_req_id = await self._make_decision(tools, brain)
         graded_row_id = await self._make_decision(tools, brain)
-        await tools["resolve_decision"](decision_id=graded_row_id, outcome="success")
+        await _resolve_one(tools, decision_id=graded_row_id, outcome="success")
 
         result = await tools["resolve_decisions"](
             resolutions=[
@@ -526,7 +644,8 @@ class TestResolveDecision:
         so retrieval cannot tell what replaced them.
         """
         did = await self._make_decision(tools, brain)
-        result = await tools["resolve_decision"](
+        result = await _resolve_one(
+            tools,
             decision_id=did,
             outcome="superseded",
             resolution_note="replaced it",
@@ -541,7 +660,8 @@ class TestResolveDecision:
     async def test_other_outcomes_do_not_require_superseded_by(self, tools, brain):
         """Non-supersession outcomes are unaffected by the new requirement."""
         did = await self._make_decision(tools, brain)
-        result = await tools["resolve_decision"](
+        result = await _resolve_one(
+            tools,
             decision_id=did,
             outcome="success",
             resolution_note="shipped",
@@ -552,10 +672,11 @@ class TestResolveDecision:
 
     @pytest.mark.asyncio
     async def test_superseded_by_roundtrip_via_tool(self, tools, brain):
-        """resolve_decision with outcome=superseded preserves superseded_by on the summary."""
+        """A one-item call with outcome=superseded preserves superseded_by on the summary."""
         old_id = await self._make_decision(tools, brain)
         new_id = await self._make_decision(tools, brain)
-        await tools["resolve_decision"](
+        await _resolve_one(
+            tools,
             decision_id=old_id,
             outcome="superseded",
             superseded_by=new_id,
