@@ -579,7 +579,9 @@ class TestCallbackDocumented:
         assert "callback" in node_props["type"]["enum"]
         blob = str(schema)
         assert "predecessor" in blob.lower()
-        assert "NOUS_DAG_CALLBACK_EXECUTION_ENABLED" in blob
+        # The off switch is described in plain words: a tool description names no env var.
+        assert "If callbacks are switched off on this server, a callback completes at once without running" in blob
+        assert "NOUS_" not in blob
 
     def test_callback_description_does_not_claim_tools(self, tools):
         """The description must not tell the LLM that callbacks accept

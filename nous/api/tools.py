@@ -2423,12 +2423,15 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
 
 _RECORD_DECISION_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "description": "Record a decision to the Brain (decision intelligence organ)",
+    "description": (
+        "Record a choice you made between alternatives, with how confident you are; it is graded later "
+        "against what happened. Not for status updates, routine completions or observations."
+    ),
     "properties": {
         "description": {"type": "string", "description": "What was decided"},
         "confidence": {
             "type": "number",
-            "description": "0.0-1.0 confidence level",
+            "description": "0.0-1.0: how likely the choice turns out right",
             "minimum": 0.0,
             "maximum": 1.0,
         },
@@ -2543,13 +2546,13 @@ _RESOLVE_DECISIONS_SCHEMA: dict[str, Any] = {
 _LIST_DECISIONS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
-        "List this agent's decisions for a sweep. Filter by outcome (e.g. "
-        "'pending'), reviewed status, and age to enumerate what to resolve."
+        "List your recorded decisions, filtered by outcome, review state and age, to find what to resolve. "
+        "To search decisions by topic, use recall_deep."
     ),
     "properties": {
         "outcome": {
             "type": "string",
-            "description": "Filter by outcome",
+            "description": "Filter by outcome ('pending' = not resolved yet)",
             "enum": ["pending", "success", "partial", "failure", "noise", "superseded"],
         },
         "reviewed": {"type": "boolean", "description": "Filter to reviewed (true) or unreviewed (false) decisions"},
@@ -2561,9 +2564,12 @@ _LIST_DECISIONS_SCHEMA: dict[str, Any] = {
 
 _LEARN_FACT_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "description": "Store a fact in the Heart (memory system)",
+    "description": (
+        "Save a durable fact that future turns will recall: about the user, a standing rule, or a lasting "
+        "technical detail. Not for session chatter or one-off task status."
+    ),
     "properties": {
-        "content": {"type": "string", "description": "The fact content"},
+        "content": {"type": "string", "description": "The fact, stated so it stands on its own"},
         "category": {
             "type": "string",
             "description": (
@@ -2584,8 +2590,8 @@ _LEARN_FACT_SCHEMA: dict[str, Any] = {
             "default": 1.0,
         },
         "source": {"type": "string", "description": "Where this fact came from"},
-        "source_episode_id": {"type": "string", "description": "Episode UUID"},
-        "source_decision_id": {"type": "string", "description": "Decision UUID"},
+        "source_episode_id": {"type": "string", "description": "UUID of the conversation it came from"},
+        "source_decision_id": {"type": "string", "description": "UUID of the decision it came from"},
         "tags": {
             "type": "array",
             "items": {"type": "string"},
@@ -2597,9 +2603,13 @@ _LEARN_FACT_SCHEMA: dict[str, Any] = {
 
 _RECALL_DEEP_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "description": "Search across all memory types in Heart and Brain",
+    "description": (
+        "Search your memory by meaning: past conversations, facts and decisions (procedures and censors when "
+        "named in memory_types). Use it before asking the user about anything from earlier sessions. For the "
+        "latest conversations in time order, use recall_recent."
+    ),
     "properties": {
-        "query": {"type": "string", "description": "Search query string"},
+        "query": {"type": "string", "description": "What to look for, in plain words"},
         "limit": {
             "type": "integer",
             "description": "Maximum results to return",
@@ -2627,26 +2637,28 @@ _RECALL_DEEP_SCHEMA: dict[str, Any] = {
 
 _CREATE_CENSOR_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "description": "Create a guardrail censor in the Heart",
+    "description": (
+        "Add a standing guardrail, checked on every later turn against the user's message or the task text. "
+        "Use it for a rule that must hold every time; for a preference to remember, use learn_fact."
+    ),
     "properties": {
         "trigger_pattern": {
             "type": "string",
-            "description": "Pattern to match (substring or regex)",
+            "description": "Regex (or plain text) to match; with the reason it is also matched by meaning",
         },
-        "reason": {"type": "string", "description": "Why this censor exists"},
+        "reason": {"type": "string", "description": "Why this censor exists; shown when it fires"},
         "action": {
             "type": "string",
             "description": (
-                "Censor tier: steer (advisory directive, non-blocking), "
-                "refuse (LLM declines + write tools stripped), or abort (hard cut). "
-                "Agent-created censors are capped at refuse."
+                "On a match: steer adds the reason as guidance and the turn goes on; refuse makes the turn "
+                "decline, with write tools removed; abort stops the turn. You can create at most refuse."
             ),
             "enum": ["steer", "refuse", "abort"],
             "default": "steer",
         },
         "domain": {"type": "string", "description": "Domain this censor applies to"},
-        "learned_from_decision": {"type": "string", "description": "Decision UUID"},
-        "learned_from_episode": {"type": "string", "description": "Episode UUID"},
+        "learned_from_decision": {"type": "string", "description": "UUID of the decision that taught it"},
+        "learned_from_episode": {"type": "string", "description": "UUID of the conversation that taught it"},
     },
     "required": ["trigger_pattern", "reason"],
 }
@@ -2654,8 +2666,8 @@ _CREATE_CENSOR_SCHEMA: dict[str, Any] = {
 _RECALL_RECENT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
-        "Recall recent episodes by time (not topic similarity). Use when the user asks what you discussed recently or "
-        "you need a temporal overview."
+        "List your latest conversations in time order, with no topic search: for 'what did we discuss "
+        "lately'. To search by topic, use recall_deep."
     ),
     "properties": {
         "hours": {
@@ -2676,8 +2688,10 @@ _RECALL_RECENT_SCHEMA: dict[str, Any] = {
 _LEARN_SKILL_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
-        "Register a skill from a URL, local file path, or raw markdown. "
-        "Skills are stored as procedures and auto-activate during recall when relevant to the task."
+        "Register a skill from a SKILL.md file. It is stored as a procedure that get_procedure loads; a skill "
+        "with the same name is updated. The file must start with YAML front matter: a '---' line, 'name: ...' "
+        "and 'description: ...' (both required), optionally 'domain: ...' and the lists 'triggers', 'tools' and "
+        "'requires' (env vars it needs), then a closing '---'. The markdown body below holds the steps."
     ),
     "properties": {
         "source": {
@@ -2686,7 +2700,7 @@ _LEARN_SKILL_SCHEMA: dict[str, Any] = {
         },
         "content": {
             "type": "string",
-            "description": "Raw SKILL.md markdown when source is 'inline'",
+            "description": "The whole SKILL.md, front matter first, when source is 'inline'",
         },
     },
     "required": ["source"],
@@ -2714,10 +2728,8 @@ _GET_PROCEDURE_SCHEMA: dict[str, Any] = {
 _RECALL_HUBS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
-        "F065: return the most-connected (highest-degree) nodes in Nous's "
-        "knowledge graph. Use to discover which concepts, decisions, facts, "
-        "or episodes act as hubs that many other memories reference. "
-        "Optionally filter by node_type."
+        "List the memories that the most other memories link to (facts, decisions, conversations or "
+        "procedures): what your memory centres on. To search by topic, use recall_deep."
     ),
     "properties": {
         "limit": {
@@ -2740,38 +2752,25 @@ _RECALL_HUBS_SCHEMA: dict[str, Any] = {
 _INGEST_DOCUMENT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
-        "F069: chunk and persist a full document body (arxiv paper, doc "
-        "page, parsed PDF/.docx text) to long-term memory at full fidelity. "
-        "Use after you have extracted text yourself (e.g. via run_python "
-        "with pypdf for PDFs, python-docx for .docx, or after fetching "
-        "with web_fetch at max_chars=200000 for a large HTML page). "
-        "Unlike web_fetch + dialogue chunking which retains ~1% of a paper, "
-        "this writes the full content to heart.episode_chunks with "
-        "source_kind='document' using a 1500-char structure-aware chunker."
+        "Save a whole document (a paper, a doc page, text from a PDF or .docx) to long-term memory in full, "
+        "as searchable passages; of a page you only read with web_fetch, memory keeps a small part. Pass plain text: "
+        "extract it first (run_python with pypdf or python-docx, or web_fetch with a larger max_chars)."
     ),
     "properties": {
         "content": {
             "type": "string",
             "description": (
-                "Full document body to ingest. Should already be plain text "
-                "(decode binary formats client-side via run_python). Must be "
-                "at least document_chunk_min_chars (default 100) chars."
+                "The document's plain text, at least "
+                f"{Settings.model_fields['document_chunk_min_chars'].default} characters."
             ),
         },
         "source_ref": {
             "type": "string",
-            "description": (
-                "URL or workspace path the document came from. Persisted on "
-                "every chunk for traceability and so the agent can recall "
-                "where a fact was sourced."
-            ),
+            "description": "URL or workspace path the document came from; it is kept with every passage.",
         },
         "episode_id": {
             "type": "string",
-            "description": (
-                "Optional explicit episode UUID. If omitted, chunks are "
-                "attached to the active episode of the current session."
-            ),
+            "description": "Conversation UUID to attach it to. Default: the current conversation.",
         },
     },
     "required": ["content", "source_ref"],
@@ -3952,8 +3951,9 @@ def create_subtask_tools(
 _SPAWN_TASK_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
-        "Spawn a subtask. Use await_result=true to wait for the result inline, or leave false for fire-and-forget "
-        "background execution."
+        "Start one-off work now as a subtask: in the background, or inline with await_result=true when you need "
+        "the answer in this turn. For later or recurring work use schedule_task; for several steps with "
+        "dependencies, waits or approvals use dag_create."
     ),
     "properties": {
         "task": {
@@ -4019,7 +4019,10 @@ _SPAWN_TASK_SCHEMA: dict[str, Any] = {
 
 _SCHEDULE_TASK_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "description": "Schedule a task for later or recurring execution. Provide exactly one of 'when' or 'every'.",
+    "description": (
+        "Run a task later, once ('when'), or on a repeat ('every'); give exactly one. For work to start now "
+        "use spawn_task; to watch for a change and report it use heartbeat_check_create."
+    ),
     "properties": {
         "task": {
             "type": "string",
@@ -4077,7 +4080,10 @@ _SCHEDULE_TASK_SCHEMA: dict[str, Any] = {
 
 _LIST_TASKS_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "description": "List current subtasks and active schedules",
+    "description": (
+        "List recent subtasks (optionally by status) and active schedules, with the ids cancel_task takes. "
+        "DAGs are listed by dag_manage, monitors by heartbeat_check_manage."
+    ),
     "properties": {
         "status": {
             "type": "string",
@@ -4176,12 +4182,9 @@ def _build_spawn_task_schema(payload_schema_enabled: bool) -> dict[str, Any]:
             # (true/false) — mirror the same fix already in _SPAWN_SYNC_SCHEMA.
             "type": ["object", "boolean"],
             "description": (
-                "F062: optional JSON Schema (draft 2020-12 compatible) for "
-                "the subtask's result payload. When supplied, the executor "
-                "validates submit_final_report.payload against this schema; "
-                "on mismatch the subtask retries (per F061) and ultimately "
-                "persists final_outcome='validation_failed'. Accepts a JSON "
-                "object or a boolean (true accepts any payload, false rejects)."
+                "Optional JSON Schema (draft 2020-12) for the subtask's result payload. On a mismatch "
+                "the subtask retries, then ends as 'validation_failed'. A JSON object or a boolean "
+                "(true accepts any payload, false rejects all)."
             ),
         }
     return schema
@@ -5470,23 +5473,13 @@ def create_programmatic_tools(
 _RUN_PYTHON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
-        "Execute Python code with Nous memory functions in scope. "
-        "Full Python: import, try/except, class and function definitions, open() all work. "
-        "Memory functions: recall_deep(query, limit=5) — the SAME full retrieval "
-        "as the recall_deep tool (facts, episodes, decisions, chunks, graph), "
-        "returning at most `limit` dicts with id/type/description/score/source, "
-        "and costing about 5s per call, so budget a handful per script, not dozens; "
-        "recall_recent(hours=24, limit=5), "
-        "list_tasks(status=None), learn_fact(content, category, subject, confidence). "
-        "Pre-imported for convenience (no import needed): json, re, math, datetime, "
-        "collections, itertools, functools, statistics — anything else, just import it. "
-        "Use this to batch multiple memory lookups, filter results, and return only what's needed — "
-        "reducing token usage compared to separate tool calls. "
-        "Set result = <value> to return structured data. Use print() to emit text output. "
-        "Runs in-process on a worker thread with a wall-clock deadline (default 90s): "
-        "Python-level code is interrupted when it expires and the call returns a timeout error, "
-        "so keep work short and shell out to `bash` for anything long-running. "
-        "Max 5 learn_fact calls per execution."
+        "Run Python with memory functions in scope, to batch lookups and return only what you need. "
+        "recall_deep(query, limit=5) is the recall_deep tool's search (dicts with id/type/description/score/"
+        "source; about 5 s a call, so a handful per script); also recall_recent(hours=24, limit=5), "
+        f"list_tasks(status=None) and learn_fact(content, category, subject, confidence), at most {_MAX_WRITES} "
+        "per run. json, re, math, datetime, collections, itertools, functools and statistics are pre-imported. "
+        "Set result = <value> or print(). The run is stopped after "
+        f"{Settings.model_fields['programmatic_tools_timeout'].default} s by default: use bash for long work."
     ),
     "properties": {
         "code": {
@@ -5525,6 +5518,8 @@ def register_programmatic_tools(
 
 def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: Any) -> None:
     """F034.5: Register dynamic heartbeat check management tools."""
+    from nous.heartbeat.dynamic import ALLOWED_TOOLS as check_tools
+    from nous.heartbeat.dynamic import MIN_INTERVAL_SECONDS
 
     async def heartbeat_check_create(**kwargs) -> dict:
         try:
@@ -5575,7 +5570,11 @@ def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: Any) -> None:
         heartbeat_check_create,
         {
             "type": "object",
-            "description": "Create a new dynamic heartbeat check that runs on a schedule",
+            "description": (
+                "Create a recurring monitor: a check that runs its prompt on an interval or cron schedule with a "
+                "few tools and reports what it finds. When its job is done it disables itself, and "
+                "on_complete_prompt then runs once. For a one-off task later, use schedule_task."
+            ),
             "properties": {
                 "name": {"type": "string", "description": "Unique check name (slug, e.g. 'arxiv-agent-papers')"},
                 "description": {
@@ -5587,28 +5586,30 @@ def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: Any) -> None:
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "Tools the check can use (allowed: web_search, web_fetch, recall_deep, recall_recent, bash, "
-                        "read_file, heartbeat_check_create, heartbeat_check_manage)"
+                        f"Tools the check can use, from: {', '.join(sorted(check_tools))}. Others are dropped."
                     ),
                 },
-                "interval_seconds": {"type": "integer", "description": "Seconds between runs (min 300, default 3600)"},
+                "interval_seconds": {
+                    "type": "integer",
+                    "description": f"Seconds between runs (at least {MIN_INTERVAL_SECONDS}, default 3600)",
+                },
                 "cron_expr": {
                     "type": "string",
                     "description": "Cron expression for scheduling (overrides interval_seconds)",
                 },
                 "timeout_seconds": {
                     "type": "integer",
-                    "description": "Max seconds per run (default from NOUS_HEARTBEAT_DEFAULT_CHECK_TIMEOUT)",
+                    "description": "Max seconds per run (default: the server's)",
                 },
                 "urgent": {"type": "boolean", "description": "If true, runs during quiet hours too"},
                 "on_complete_prompt": {
                     "type": "string",
-                    "description": "Prompt to execute when check self-disables (callback)",
+                    "description": "Prompt run once after the check disables itself",
                 },
                 "on_complete_tools": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Tools for callback (must be subset of check tools)",
+                    "description": "Tools for on_complete_prompt (a subset of the check's tools)",
                 },
             },
             "required": ["name", "description", "prompt"],
@@ -5620,7 +5621,10 @@ def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: Any) -> None:
         heartbeat_check_manage,
         {
             "type": "object",
-            "description": "List, enable, disable, delete, or update dynamic heartbeat checks",
+            "description": (
+                "List your monitors (heartbeat checks), or enable, disable, delete or update one by name. A check "
+                "whose job is done disables itself with action='disable' on its own name."
+            ),
             "properties": {
                 "action": {
                     "type": "string",
@@ -5667,10 +5671,15 @@ def register_dag_tools(
     settings: Any = None,
 ) -> None:
     """F038: Register DAG orchestration tools."""
+    from typing import get_args
+
     from pydantic import ValidationError
 
     from nous.dag.approval import approval_line, card_link
     from nous.dag.schemas import (
+        MAX_NODES,
+        MAX_PARALLEL_PER_WAVE,
+        MAX_WAVES,
         DAGCreateRequest,
         DAGEdgeSpec,
         DAGNodeSpec,
@@ -6119,10 +6128,8 @@ def register_dag_tools(
             "undoable": {
                 "type": "boolean",
                 "description": (
-                    "Harness Phase 2.8: declare that this node's effects can be undone. When true, the "
-                    "harness enforces at runtime that every tool call from this node uses a "
-                    "compensable tool. Required for all acting nodes downstream of a proceed-default "
-                    "approval."
+                    "Declare that this node's effects can be undone: every tool call it makes must then be "
+                    "one that can be reverted. Required for every acting node below a proceed-default approval."
                 ),
             }
         }
@@ -6148,8 +6155,8 @@ def register_dag_tools(
             f"{proceed_note}. Wire it "
             "with two context_flow edges: draft → approval (the card shows the draft) and "
             "approval → the acting node (it runs only after a 'proceed' answer and "
-            "receives the answer). The acting node must be a 'subtask' — a 'callback' "
-            "executes nothing while NOUS_DAG_CALLBACK_EXECUTION_ENABLED is off. You cannot "
+            "receives the answer). The acting node must be a 'subtask': a 'callback' "
+            "may run nothing (see 'callback'). You cannot "
             "answer the card yourself: tell the person to open the companion. You cannot "
             "re-ask a question the person declined."
         )
@@ -6190,20 +6197,17 @@ def register_dag_tools(
         {
             "type": "object",
             "description": (
-                "Create a DAG to orchestrate subtasks and checks with dependency tracking. "
-                "A node that only waits for a Claude Code job, a pull request or a file must be a "
-                "'wait' node, not a 'check' node (see the node type). "
-                "You do NOT need to poll for the result: when the DAG reaches a terminal "
-                "state its outcome is delivered to you automatically (F087), so create it "
-                "and move on. Use dag_manage only when the user asks about progress "
-                "mid-flight, to cancel or retry, or to look up a DAG whose delivery you "
-                "missed or that finished before this session (dag_manage action='recent')."
+                "Run several steps with dependencies, waits or approvals as a DAG of nodes. Limits: "
+                f"{MAX_NODES} nodes, {MAX_WAVES} waves (steps in a dependency chain) and {MAX_PARALLEL_PER_WAVE} "
+                "nodes per wave; fix nodes are not counted. Do not poll: the outcome is delivered to you when it "
+                "ends. Use dag_manage to cancel, retry or check progress. For one task, use spawn_task."
             ),
             "properties": {
                 "name": {"type": "string", "description": "DAG name"},
-                "description": {"type": "string"},
+                "description": {"type": "string", "description": "Optional: what the DAG is for"},
                 "nodes": {
                     "type": "array",
+                    "description": f"The steps, 1 to {MAX_NODES}, each with a unique name",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -6216,29 +6220,22 @@ def register_dag_tools(
                                 "type": "string",
                                 "enum": node_type_enum,
                                 "description": (
-                                    "'callback' runs AFTER its predecessors and receives "
-                                    "their results as context — use it to interpret or act "
-                                    "on what earlier nodes produced (point a context_flow "
-                                    "edge at it). It accepts frame_type / model / "
-                                    "timeout_seconds like a subtask. Requires "
-                                    "NOUS_DAG_CALLBACK_EXECUTION_ENABLED=true; with the flag "
-                                    "off a callback completes instantly without running. "
-                                    "'gate' currently auto-passes — it is a marker, not an "
-                                    "enforced quality check. Note: 'tools' below is honored "
-                                    "ONLY for 'check' nodes — on every other node type "
-                                    "(subtask, callback, gate, fix) it is silently ignored. "
-                                    "'wait' waits for a Claude Code job, a pull request or a file (wait_for) and "
-                                    "runs no model and no shell: the orchestrator checks the condition every "
-                                    "completion_check_interval seconds (default: every tick; a pr wait at most once "
-                                    "a minute) until it holds (the node completes, and its result says what was "
-                                    "seen), can no longer hold (it fails), or timeout_seconds or max_check_attempts "
-                                    "runs out (it fails). A node that only waits for a job, a PR or a file must be "
-                                    "a 'wait' node, not a 'check' node: a wait costs no worker. In a DAG created by "
-                                    "a background (internal_only) turn, waits and the built-in PR check are the only "
-                                    "conditions allowed: any other completion_check is refused there. A wait node "
-                                    'takes name, type, instructions "" (put any note in description) and wait_for, '
-                                    "and optionally timeout_seconds, completion_check_interval, max_check_attempts "
-                                    "and description."
+                                    "'subtask' runs its instructions as a subtask. 'check' polls its "
+                                    "completion_check, and only a 'check' node honors 'tools': every other type "
+                                    "ignores them. 'callback' runs AFTER its predecessors and receives their "
+                                    "results as context (point a context_flow edge at it); it accepts frame_type / "
+                                    "model / timeout_seconds like a subtask. If callbacks are switched off on this "
+                                    "server, a callback completes at once without running. 'gate' auto-passes: a "
+                                    "marker, not a quality check. 'fix' repairs a failed node (parent_node). "
+                                    "'wait' waits for a Claude Code job, a pull request or a file (wait_for) with "
+                                    "no model and no shell, polled every completion_check_interval seconds (a pr "
+                                    "wait at most once a minute), until the condition holds (it completes), can no "
+                                    "longer hold, or timeout_seconds or max_check_attempts runs out (it fails). A "
+                                    "node that only waits for a job, a PR or a file must be a 'wait' node, not a "
+                                    "'check' node. In a DAG created by a background (internal_only) turn, waits and "
+                                    "the built-in PR check are the only conditions allowed. A wait node takes "
+                                    'name, type, instructions "" and wait_for, and optionally timeout_seconds, '
+                                    "completion_check_interval, max_check_attempts and description."
                                 )
                                 + approval_help,
                             },
@@ -6250,46 +6247,37 @@ def register_dag_tools(
                                 "type": "integer",
                                 "minimum": 1,
                                 "description": (
-                                    "Execution timeout in seconds (default: NOUS_DAG_NODE_DEFAULT_TIMEOUT, ceiling: "
-                                    "NOUS_DAG_NODE_MAX_TIMEOUT). F087: now a REAL bound — a node still executing past "
-                                    "this plus NOUS_DAG_NODE_TIMEOUT_GRACE_SECONDS is cancelled and failed, so size it "
-                                    "to the work rather than leaving the default on a long job. For a 'check' or "
-                                    "'wait' node with max_check_attempts and completion_check_interval, the timeout "
-                                    "is raised to cover its polls (interval x attempts + one interval; the result "
-                                    "says so in a Note line) and the DAG is refused when that is above "
-                                    "NOUS_DAG_NODE_MAX_TIMEOUT. For a 'check' node the raised value is also its "
-                                    "worker's own run timeout."
+                                    "Seconds the node may run (the server has a default and a ceiling). A node "
+                                    "still running past it is cancelled and failed, so size it to the work. For a "
+                                    "'check' or 'wait' node with max_check_attempts and completion_check_interval, "
+                                    "it is raised to cover the polls (a Note line says so), and the DAG is refused "
+                                    "when that is above the ceiling."
                                 ),
                             },
                             "stall_timeout_seconds": {
                                 "type": "integer",
                                 "minimum": 0,
                                 "description": (
-                                    "F064.1: max seconds without activity before failing this node. 0 = disabled for "
-                                    "this node. Unset = inherit NOUS_DAG_NODE_DEFAULT_STALL_TIMEOUT."
+                                    "Seconds without activity before the node fails; 0 = no stall check. Omitted: "
+                                    "the server's default."
                                 ),
                             },
                             "completion_condition": {"type": "string"},
                             "completion_check": {
                                 "type": "string",
                                 "description": (
-                                    "Shell command polled each tick. Exit 0 = success, 1 = failed, 2 = still running. "
+                                    "Shell command polled each tick: exit 0 = success, 1 = failed, 2 = still running. "
                                     "For work that ends in a pull request, use the built-in check "
-                                    "'python -m nous.dag.typed_checks pr <owner/repo> --head <branch>' (or --pr <n>), "
-                                    "exactly as written: it passes once that PR exists and fails if it is closed "
-                                    "without a merge. Give it a completion_check_interval of 300 or more. "
-                                    "When the node launches a Claude Code job (claude-jobs/runner.sh launch) that "
-                                    "opens the PR, have it write the job id to a file under the workspace (redirecting "
-                                    "runner.sh launch's output into the file will do) and add "
-                                    "' --job-file <absolute path of that file>' to the same check instead of "
-                                    "checking the job's status yourself: the node then waits while the job runs and "
-                                    "fails when the job ends without the PR. Only this exact check counts as the PR "
-                                    "check: a merged PR it names is the outside confirmation your work is scored "
-                                    "on, and a job-status or gh check you write yourself earns nothing. "
-                                    "A DAG created by a background (internal_only) turn may carry no other "
-                                    "completion_check: wait for a job, a PR or a file with a 'wait' node instead. "
-                                    "A pr wait on a separate node earns no score: to be scored on a PR, keep this "
-                                    "check on the node that opens it."
+                                    "'python -m nous.dag.typed_checks pr <owner/repo> --head <branch>' (or --pr <n>) "
+                                    "exactly as written, with a completion_check_interval of 300 or more: it passes "
+                                    "once that PR exists and fails if it is closed without a merge. If the node "
+                                    "launches a Claude Code job (claude-jobs/runner.sh launch) that opens the PR, "
+                                    "have it write the job id to a workspace file (redirect runner.sh launch's output) "
+                                    "and add ' --job-file <absolute path of that file>' to the same check: the node "
+                                    "then fails when the job ends without the PR. Only this exact check, on the node "
+                                    "that opens the PR, counts toward your score; a job-status or gh check of your "
+                                    "own, or a pr wait on another node, earns nothing. A DAG created by a background "
+                                    "(internal_only) turn may carry no other completion_check: use a 'wait' node."
                                 ),
                             },
                             "completion_check_interval": {
@@ -6329,24 +6317,22 @@ def register_dag_tools(
                                 },
                                 "required": ["kind"],
                                 "description": (
-                                    "(type='wait' only) What to wait for; one of three kinds. "
+                                    "(type='wait' only) What to wait for. "
                                     'job: {"kind": "job", "job_id": "job-20261027-101500-ab12cd34", '
-                                    '"until": "completed"}: a Claude Code job (claude-jobs/runner.sh launch prints '
-                                    'its id). until "finished" (the default) takes any final status, "completed" '
-                                    "fails the node when the job ends any other way; a job whose process died "
-                                    'counts as failed. pr: {"kind": "pr", "number": 810, "repo": "owner/name", '
-                                    '"until": "merged"}: repo defaults to NOUS_GITHUB_DEFAULT_REPO; until is '
-                                    '"merged" (fails if the PR is closed without a merge), "closed", '
-                                    '"head_changed" (needs "head", the commit sha it waits to move away from), '
-                                    '"checks_done" (every check run on the head finished; failed ones are named in '
-                                    "the result; pending while GitHub lists no check run on the head, so a "
+                                    '"until": "completed"}: a Claude Code job (runner.sh launch prints its id); until '
+                                    '"finished" (the default) takes any end, "completed" fails the node if the job '
+                                    "ends any other way (a dead process counts as failed). "
+                                    'pr: {"kind": "pr", "number": 810, "repo": "owner/name", "until": "merged"}: repo '
+                                    'defaults to the server\'s default repository; until is "merged" (fails if '
+                                    'closed without a merge), "closed", "head_changed" (needs "head", the sha it '
+                                    'waits to move from), "checks_done" (every check run on the head finished, failed '
+                                    "ones named; pending while GitHub lists no check run on the head, so a "
                                     'repository without CI never passes it; with "head", fails if the head moved) '
-                                    'or "review_on_head" (a '
-                                    'review on the current head, from a login starting with "reviewer" when one is '
-                                    "given). GitHub errors never fail a pr wait, and it polls at most once a "
-                                    'minute. file: {"kind": "file", "path": "research/out.md", "nonempty": true}: '
-                                    "a path under the workspace with no hidden component (nonempty waits for "
-                                    "content, or an entry in a directory)."
+                                    'or "review_on_head" (a review on the current head, from a login starting with '
+                                    '"reviewer" when given). GitHub errors never fail a pr wait; it polls at most '
+                                    'once a minute. file: {"kind": "file", "path": "research/out.md", "nonempty": '
+                                    "true}: a workspace path with no hidden component (nonempty waits for content, "
+                                    "or an entry in a directory)."
                                 ),
                             },
                             # F066.1 — fix-stage recovery fields. Only meaningful
@@ -6356,11 +6342,8 @@ def register_dag_tools(
                             "parent_node": {
                                 "type": "string",
                                 "description": (
-                                    "F066.1 (type='fix' only): name of the node this fix attaches to. Fires when the "
-                                    "parent transitions to 'failed'. The matching 'on_failure' edge MUST point from "
-                                    "the parent to this fix node — i.e. from_node = (this parent_node value), to_node "
-                                    "= (the fix node's own name). Pointing the edge the other direction fails "
-                                    "validation."
+                                    "(type='fix' only) The node this fix repairs; the fix runs when that node fails. "
+                                    "Add an 'on_failure' edge with from_node = that node and to_node = this fix node."
                                 ),
                             },
                             "fix_actions": {
@@ -6375,28 +6358,20 @@ def register_dag_tools(
                                     ],
                                 },
                                 "description": (
-                                    "F066.1 (type='fix' only): allowed action vocabulary. Phase 1 dispatcher rules: "
-                                    "incomplete/validation_failed errors → retry_as_is; timed_out → skip_and_continue "
-                                    "(or mark_unrecoverable); other errors → skip_and_continue then mark_unrecoverable "
-                                    "as final fallback. retry_with_amended_prompt only acts when "
-                                    "NOUS_DAG_FIX_LLM_DISPATCH_ENABLED=true."
+                                    "(type='fix' only) The actions the fix may take: retry the node as it was or "
+                                    "with amended instructions, skip it and let the DAG go on, or fail it for good."
                                 ),
                             },
                             "max_fix_attempts": {
                                 "type": "integer",
                                 "minimum": 1,
                                 "maximum": 3,
-                                "description": (
-                                    "F066.1 (type='fix' only): max fix attempts per parent failure. Default 1."
-                                ),
+                                "description": "(type='fix' only) Fix attempts per failure of the node. Default 1.",
                             },
                             "expected_modes": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": (
-                                    "F066.1 (type='fix' only): declared failure modes for typed dispatch (Phase 2). "
-                                    "Phase 1 ignores this field."
-                                ),
+                                "description": "(type='fix' only) Failure modes you expect. Not used yet.",
                             },
                             **undoable_properties,
                             **approval_properties,
@@ -6406,6 +6381,7 @@ def register_dag_tools(
                 },
                 "edges": {
                     "type": "array",
+                    "description": "Links between nodes, by name. Omit for a single node.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -6418,13 +6394,27 @@ def register_dag_tools(
                             "edge_type": {
                                 "type": "string",
                                 "enum": ["dependency", "cancel_cascade", "context_flow", "on_failure"],
+                                "description": (
+                                    "'dependency' (default): to_node runs after from_node. 'context_flow': the "
+                                    "same, and to_node also gets from_node's result. 'on_failure': from a node to "
+                                    "its fix node. 'cancel_cascade': to_node does not wait, but is cancelled if "
+                                    "from_node fails."
+                                ),
                             },
                         },
                         "required": ["from_node", "to_node"],
                     },
                 },
-                "source": {"type": "string"},
-                "token_budget": {"type": "integer"},
+                "source": {
+                    "type": "string",
+                    "enum": list(get_args(DAGCreateRequest.model_fields["source"].annotation)),
+                    "description": "What started this DAG. Default 'conversation'.",
+                },
+                "token_budget": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional token budget for the whole DAG; the server may stop it once spent.",
+                },
             },
             # `edges` is NOT required: the handler reads kwargs.get("edges", []) and
             # DAGCreateRequest.edges is default_factory=list, so a single-node DAG
@@ -6451,23 +6441,28 @@ def register_dag_tools(
             "description": (
                 "List, inspect, cancel, or retry nodes in DAGs. Not needed to collect "
                 "results — a finished DAG announces itself; use 'recent' only as a "
-                "fallback when a delivery was missed or you want an older outcome. "
-                "'recent' lists finished DAGs (completed/failed/cancelled) — the only way "
-                "to find one you don't already have the id or id-prefix for. 'status' "
-                f"shows every node with a preview of its result (truncated past "
-                f"{_STATUS_RESULT_PREVIEW_CHARS} chars — it says so when it does, and "
-                "names the node). 'node_result' returns one named node's COMPLETE "
-                "result, byte-for-byte — use it whenever 'status' shows a truncated "
-                "preview. 'retry_node' re-queues a failed node (and any descendants it "
-                "alone blocked); it is refused on a cancelled DAG, since cancellation "
-                "is deliberate."
+                "fallback when a delivery was missed or you want an older outcome."
             ),
             "properties": {
                 "action": {
                     "type": "string",
                     "enum": ["list", "recent", "status", "cancel", "retry_node", "node_result"],
+                    "description": (
+                        "'list': running DAGs. 'recent': finished ones (completed/failed/cancelled), the only way "
+                        "to find one you have no id for. 'status': every node with a preview of its result (cut "
+                        f"past {_STATUS_RESULT_PREVIEW_CHARS} chars, and it says so). 'node_result': one named "
+                        "node's complete result; use it when 'status' cut a preview. 'cancel': stop the DAG. "
+                        "'retry_node': re-queue a failed node (and the nodes it alone blocked); refused on a "
+                        "cancelled DAG."
+                    ),
                 },
-                "dag_id": {"type": "string"},
+                "dag_id": {
+                    "type": "string",
+                    "description": (
+                        "The DAG's full id or an id prefix, as list and recent print it. Needed by every action "
+                        "but list and recent."
+                    ),
+                },
                 "node_name": {
                     "type": "string",
                     "description": "Required for 'retry_node' and 'node_result'; ignored by every other action.",
