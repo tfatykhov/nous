@@ -181,9 +181,10 @@ class TestSummarizeArgsAllTools:
         result = self._s("recall_deep", {"q": "short"})
         assert result == {"q": "short"}
 
-    def test_recall_recent_limit(self):
-        result = self._s("recall_recent", {"limit": "10"})
-        assert result == {"limit": "10"}
+    def test_recall_deep_hours(self):
+        """hours is what tells two time listings apart (the former recall_recent tool)."""
+        result = self._s("recall_deep", {"hours": 24, "limit": "10"})
+        assert result == {"hours": "24"}
 
     def test_record_decision_title(self):
         result = self._s("record_decision", {"title": "deploy now", "confidence": "0.9"})
@@ -506,7 +507,6 @@ class TestFormatKeyArgs:
 class TestFriendlyLabel:
     def test_known_labels(self):
         assert _friendly_label("recall_deep") == "searches"
-        assert _friendly_label("recall_recent") == "searches"
         assert _friendly_label("web_search") == "searches"
         assert _friendly_label("web_fetch") == "fetches"
         assert _friendly_label("read_file") == "file reads"
@@ -769,7 +769,7 @@ class TestToolClassificationSets:
         assert READ_TOOLS.isdisjoint(WRITE_TOOLS)
 
     def test_expected_read_tools_present(self):
-        expected = {"recall_deep", "recall_recent", "read_file", "web_search", "web_fetch"}
+        expected = {"recall_deep", "read_file", "web_search", "web_fetch"}
         assert expected.issubset(READ_TOOLS)
 
     def test_expected_write_tools_present(self):

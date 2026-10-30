@@ -31,15 +31,13 @@ MODES = ("off", "warn", "enforce")
 # Literals on purpose, not the production constants: widening either constant must fail here.
 SPAWN = frozenset({"spawn_task", "dag_create"})
 HEARTBEAT_TRIAGE_UNOFFERED = frozenset(
-    {"spawn_task", "spawn_sync", "schedule_task", "heartbeat_check_create", "dag_create"}
-    | {"resolve_decision", "resolve_decisions"}
+    {"spawn_task", "spawn_sync", "schedule_task", "heartbeat_check_create", "dag_create"} | {"resolve_decisions"}
 )
 CHECK_DECLARED = frozenset(
     {
         "web_search",
         "web_fetch",
         "recall_deep",
-        "recall_recent",
         "bash",
         "read_file",
         "heartbeat_check_create",
@@ -188,7 +186,7 @@ def test_a_lineage_check_loses_the_tools_it_declared_that_the_narrowing_denies(l
     declared = sorted(CHECK_TOOLS)
     ctx = _internal("heartbeat_check", declared_tools=tuple(declared))
     tools = r._offered_tools(ctx, "conversation", is_subtask=True, tool_filter=declared, refuse_active=False)
-    expected = {"web_search", "web_fetch", "recall_deep", "recall_recent", "read_file"} | _shell(lineage_shell)
+    expected = {"web_search", "web_fetch", "recall_deep", "read_file"} | _shell(lineage_shell)
     assert _names(tools) == expected
     assert not _names(tools) & {"heartbeat_check_create", "heartbeat_check_manage"}
     # PIN: the same check with no lineage is offered everything it declared.

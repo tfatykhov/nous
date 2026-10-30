@@ -885,7 +885,7 @@ class TestErrorReturnsAreMarked:
     # inverted, not widened: this one cannot miss a new failure path, because
     # it does not try to recognise one. Adding ANY unflagged MCP return fails
     # here until it is classified via _tool_error() or counted in deliberately.
-    _UNFLAGGED_BASELINE = 38
+    _UNFLAGGED_BASELINE = 35  # 38 before recall_hubs and the single-decision resolve_decision were removed
 
     def test_unflagged_mcp_returns_do_not_grow(self):
         tree = ast.parse(Path("nous/api/tools.py").read_text(encoding="utf-8"))
@@ -935,7 +935,6 @@ class TestErrorReturnsAreMarked:
         source = Path("nous/api/tools.py").read_text(encoding="utf-8")
         for message in (
             "No episodes found in the last",
-            "No graph hubs found yet",
             "No matching decisions.",
             "No active DAGs.",
         ):

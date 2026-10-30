@@ -102,6 +102,22 @@ def test_shape_proven_values_are_kept():
     assert durable_key_args("learn_skill", {"source": "inline"})["source"] == "inline"
 
 
+def test_resolve_decisions_keeps_each_decision_and_outcome_never_the_note():
+    """The single-decision tool kept its id and outcome; its merge into resolve_decisions must not lose them."""
+    ids = [str(uuid.uuid4()) for _ in range(6)]
+    one = durable_key_args(
+        "resolve_decisions", {"resolutions": [{"decision_id": ids[0], "outcome": "noise", "resolution_note": "sk-X1"}]}
+    )
+    assert one == {"resolutions": f"{ids[0]}:noise"}
+    many = durable_key_args("resolve_decisions", {"resolutions": [{"decision_id": d, "outcome": "noise"} for d in ids]})
+    kept = many["resolutions"].split(",")
+    assert kept[-1].startswith("+") and len(kept) - 1 + int(kept[-1][1:]) == 6  # whole items, then a count
+    assert len(many["resolutions"]) <= 200
+    for bad in ([{"decision_id": "sk-ABCDEFGHIJKLMNOP", "outcome": "noise"}], [{"decision_id": ids[0]}], ["x"], "x"):
+        out = durable_key_args("resolve_decisions", {"resolutions": bad})
+        assert "resolutions" not in out and "resolutions_sha256" in out and "sk-" not in str(out)
+
+
 def test_unknown_tools_store_argument_names_only():
     args = durable_key_args("brand_new_tool", {"token": "abc", "target": "x"})
     assert args == {"arg_names": "target,token"}

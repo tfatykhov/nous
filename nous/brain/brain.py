@@ -1137,6 +1137,7 @@ class Brain:
         reviewer: str | None = None,
         session: AsyncSession | None = None,
         preserve_graded: bool = False,
+        captures: list[dict | None] | None = None,
     ) -> list[dict]:
         """Resolve a batch of decisions in one transaction.
 
@@ -1146,10 +1147,13 @@ class Brain:
         row under ``preserve_graded``) is captured in the returned row and
         does not abort the batch — the failing item is simply not mutated.
         Returns one ``{decision_id, ok, error}`` dict per input item, in order.
+        captures: one ``review(capture=)`` dict (or None) per item, filled
+        inside that item's SAVEPOINT, where its ``persist`` also runs: an
+        item that rolls back takes its compensation record with it.
         """
         if session is None:
             async with self.db.session() as session:
-                results = await self._review_many(items, reviewer, session, preserve_graded)
+                results = await self._review_many(items, reviewer, session, preserve_graded, captures)
                 await session.commit()
             # Emit AFTER commit — one event per successfully reviewed item.
             for item, result in zip(items, results):
@@ -1161,14 +1165,14 @@ class Brain:
                         item_reviewer,
                     )
             return results
-        return await self._review_many(items, reviewer, session, preserve_graded)
+        return await self._review_many(items, reviewer, session, preserve_graded, captures)
 
     async def _review_many(
         self, items: list[dict], reviewer: str | None, session: AsyncSession,
-        preserve_graded: bool = False,
+        preserve_graded: bool = False, captures: list[dict | None] | None = None,
     ) -> list[dict]:
         results: list[dict] = []
-        for item in items:
+        for index, item in enumerate(items):
             raw_id = item.get("decision_id")
             try:
                 decision_id = raw_id if isinstance(raw_id, UUID) else UUID(str(raw_id))
@@ -1188,6 +1192,7 @@ class Brain:
                         sup_uuid,
                         session,
                         preserve_graded,
+                        captures[index] if captures else None,
                     )
                 results.append({"decision_id": str(raw_id), "ok": True, "error": None})
             except Exception as e:  # noqa: BLE001 — surface per-item, keep batch alive
@@ -2165,7 +2170,7 @@ class Brain:
             from nous.storage.models import Procedure
             # A strategy card or job lesson that is a hub is listed without its name (it
             # falls back to "[procedure] <id>" below): these labels go into the
-            # recall_hubs tool result and the hub-shift notice in the system prompt.
+            # hub-shift notice in the system prompt.
             proc_result = await session.execute(
                 select(Procedure.id, Procedure.name)
                 .where(Procedure.id.in_(proc_ids))

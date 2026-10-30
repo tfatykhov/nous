@@ -415,7 +415,7 @@ class TestTemporalContextTier:
 
 
 class TestRecallRecentTool:
-    """recall_recent tool returns time-ordered episodes."""
+    """recall_deep(hours=N) (the former recall_recent tool) returns time-ordered episodes."""
 
     @pytest.mark.asyncio
     async def test_recall_recent_returns_formatted_episodes(self):
@@ -449,7 +449,7 @@ class TestRecallRecentTool:
         mock_heart.list_episodes = AsyncMock(return_value=episodes)
 
         tools = create_nous_tools(mock_brain, mock_heart)
-        result = await tools["recall_recent"](hours=48, limit=10)
+        result = await tools["recall_deep"](hours=48, limit=10)
 
         text = result["content"][0]["text"]
         assert "Ski Trip Planning" in text
@@ -467,7 +467,7 @@ class TestRecallRecentTool:
         mock_heart.list_episodes = AsyncMock(return_value=[])
 
         tools = create_nous_tools(mock_brain, mock_heart)
-        result = await tools["recall_recent"](hours=48, limit=10)
+        result = await tools["recall_deep"](hours=48, limit=10)
 
         text = result["content"][0]["text"]
         assert "No episodes" in text
@@ -483,20 +483,22 @@ class TestRecallRecentTool:
         mock_heart.list_episodes = AsyncMock(return_value=[])
 
         tools = create_nous_tools(mock_brain, mock_heart)
-        await tools["recall_recent"](hours=72, limit=5)
+        await tools["recall_deep"](hours=72, limit=5)
 
         mock_heart.list_episodes.assert_called_once_with(limit=5, hours=72)
 
     def test_recall_recent_in_frame_tools(self):
+        """Every frame that lists recall_deep reaches the time listing through it; the old name is in none."""
         from nous.api.runner import FRAME_TOOLS
 
         for frame, tools in FRAME_TOOLS.items():
+            assert "recall_recent" not in tools, frame
             if frame == "initiation":
-                assert "recall_recent" not in tools
+                assert "recall_deep" not in tools
             elif tools == ["*"]:
                 pass  # task frame includes all
             else:
-                assert "recall_recent" in tools, f"recall_recent missing from {frame}"
+                assert "recall_deep" in tools, f"recall_deep missing from {frame}"
 
 
 # ---------------------------------------------------------------------------

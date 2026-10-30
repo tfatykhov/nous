@@ -57,6 +57,7 @@ from nous.heart.subtasks import INLINE_WORKER_ID
 from nous.observability.retrieval_logger import get_active as get_active_retrieval_logger
 from nous.observability.retrieval_trace import RETURNED_TO_SCRIPT, SLICED_OFF
 from nous.skills.parser import SkillParser
+from nous.tool_names import CHANGED_TOOLS, ToolAlias, canonical_tool_names, changed_tools_note
 from nous.utils import leaked_markup_start as _leak_tail_start
 
 logger = logging.getLogger(__name__)
@@ -337,7 +338,7 @@ class ToolDispatcher:
 
     # Tools that read the injected ``_is_background`` flag (#541/#642 decision
     # resolution; F092.1 compose_surface origin). One set for every consumer.
-    _BACKGROUND_AWARE_TOOLS: frozenset[str] = frozenset({"resolve_decision", "resolve_decisions", "compose_surface"})
+    _BACKGROUND_AWARE_TOOLS: frozenset[str] = frozenset({"resolve_decisions", "compose_surface"})
 
     def __init__(
         self,
@@ -361,10 +362,33 @@ class ToolDispatcher:
         # where the call came from. Opt-in per registration, set only while
         # NOUS_INTENTIONS_ENABLED is on: with it off no handler sees a new argument.
         self._origin_aware: set[str] = set()
+        # Old tool names: an alias the runner rewrites to its target before any check, or a retired name
+        # that answers with its message. Never offered, never registered (see nous/tool_names.py).
+        self._aliases: dict[str, ToolAlias] = {}
 
     def is_registered(self, name: str) -> bool:
         """True when ``name`` has a handler -- the only way a call can run."""
         return name in self._handlers
+
+    def register_alias(
+        self, old_name: str, target: str, translate: Callable[[dict[str, Any]], dict[str, Any]], note: str
+    ) -> None:
+        """Accept ``old_name`` as a call to ``target``: ``translate`` maps its arguments, and ``note`` becomes
+        the first line of the result. The alias is not a tool: it is never offered and ``is_registered`` stays
+        False for it."""
+        if old_name in self._handlers or target not in self._handlers:
+            raise ValueError(f"alias {old_name!r} -> {target!r}: the old name is a tool or the target is not")
+        self._aliases[old_name] = ToolAlias(target, note, translate)
+
+    def retire(self, old_name: str, message: str) -> None:
+        """Answer a call to ``old_name`` with ``message`` as an error; nothing runs."""
+        if old_name in self._handlers:
+            raise ValueError(f"cannot retire {old_name!r}: it is a registered tool")
+        self._aliases[old_name] = ToolAlias(None, message)
+
+    def alias_for(self, name: str) -> ToolAlias | None:
+        """The alias or retirement registered for ``name``, or None."""
+        return self._aliases.get(name)
 
     def register(
         self, name: str, handler: Callable[..., Any], schema: dict[str, Any], *, origin_aware: bool = False
@@ -413,6 +437,12 @@ class ToolDispatcher:
         shown. It is refused here instead."""
         if not isinstance(args, dict):
             return ["arguments must be a JSON object"]
+        alias = self._aliases.get(name)
+        if alias is not None:
+            # An old name is judged as the call it becomes; a retired one cannot run.
+            if alias.target is None:
+                return [alias.note]
+            name, args = alias.target, alias.translate(args)
         schema = self._schemas.get(name)
         if schema is None:
             return [f"{name} is not a registered tool"]
@@ -1500,14 +1530,14 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             logger.exception("learn_fact tool failed")
             return _tool_error(f"Error learning fact: {e}")
 
-    async def recall_deep(  # noqa: C901
+    async def _search_memory(  # noqa: C901
         query: str,
         limit: int = 10,
         memory_types: list[str] | None = None,
         _session_id: str | None = None,
         _turn_number: int | None = None,
     ) -> dict[str, Any]:
-        """Search memory in Heart and Brain.
+        """recall_deep's search by meaning: memory in Heart and Brain.
 
         Thin wrapper around ``run_recall_pipeline`` (F051 refactor): the
         pipeline runs the full retrieval stack and returns structured
@@ -1889,14 +1919,12 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             logger.exception("create_censor tool failed")
             return _tool_error(f"Error creating censor: {e}")
 
-    async def recall_recent(
+    async def _recent_episodes(
         hours: int = 48,
         limit: int = 10,
     ) -> dict[str, Any]:
-        """Recall recent episodes by time, not topic similarity.
-
-        Use this when the user asks "what did we talk about", "what happened
-        recently", or you need a comprehensive overview of recent activity.
+        """recall_deep's time listing: recent episodes by time, not topic similarity
+        (the former recall_recent tool).
 
         Args:
             hours: Look back this many hours (default 48)
@@ -1932,8 +1960,41 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             return {"content": [{"type": "text", "text": "\n".join(lines)}]}
 
         except Exception as e:
-            logger.exception("recall_recent tool failed")
+            logger.exception("recall_deep recent-episode listing failed")
             return _tool_error(f"Error fetching recent episodes: {e}")
+
+    async def recall_deep(
+        query: str | None = None,
+        hours: int | None = None,
+        limit: int = 10,
+        memory_types: list[str] | None = None,
+        _session_id: str | None = None,
+        _turn_number: int | None = None,
+    ) -> dict[str, Any]:
+        """Search memory by meaning (``query``), list the latest conversations (``hours``), or both.
+
+        query only: the search (``_search_memory``). hours only: the time listing (``_recent_episodes``), which
+        opens no retrieval trace and records nothing surfaced. Both: the listing first, then the search; ``limit``
+        applies to each, ``memory_types`` to the search only. Neither: an error. A result that names a changed
+        tool ends with a one-line note (``changed_tools_note``).
+        """
+        if not query and hours is None:
+            return _tool_error(
+                "recall_deep needs query (search memory by topic) or hours (list the latest conversations), or both."
+            )
+        parts: list[dict[str, Any]] = []
+        if hours is not None:
+            parts.append(await _recent_episodes(hours=hours, limit=limit))
+        if query:
+            parts.append(await _search_memory(query, limit, memory_types, _session_id, _turn_number))
+        text = "\n\n".join(p["content"][0]["text"] for p in parts)
+        note = changed_tools_note(text)
+        if note:
+            text = f"{text}\n\n{note}"
+        out: dict[str, Any] = {"content": [{"type": "text", "text": text}]}
+        if all(p.get("is_error") for p in parts):
+            out["is_error"] = True
+        return out
 
     # F011: learn_skill tool — register skills from URL, local path, or inline markdown
     _skill_parser = SkillParser()
@@ -2078,8 +2139,10 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 lines.append(f"Description: {detail.description}")
             if detail.goals:
                 lines.append(f"Triggers: {', '.join(detail.goals)}")
-            if detail.core_tools:
-                lines.append(f"Tools: {', '.join(detail.core_tools)}")
+            # The tools under their current names: a procedure learned before a rename still names the old one.
+            core_tools = canonical_tool_names(detail.core_tools or [])
+            if core_tools:
+                lines.append(f"Tools: {', '.join(core_tools)}")
             if detail.core_patterns:
                 lines.append("")
                 lines.append("Core patterns:")
@@ -2095,44 +2158,15 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             )
             if detail.effectiveness is not None:
                 lines.append(f"Effectiveness: {detail.effectiveness:.0%}")
+            note = changed_tools_note("\n".join(lines))  # its steps may name a tool that changed
+            if note:
+                lines.append(note)
 
             return {"content": [{"type": "text", "text": "\n".join(lines)}]}
 
         except Exception as e:
             logger.exception("get_procedure tool failed")
             return _tool_error(f"Error fetching procedure: {e}")
-
-    async def recall_hubs(
-        limit: int = 10,
-        node_type: str | None = None,
-    ) -> dict[str, Any]:
-        """F065: return the most-connected (highest-degree) nodes in the graph.
-
-        Args:
-            limit: Top-N to return (1..50, default 10).
-            node_type: Optional filter ('decision' | 'fact' | 'episode' | 'procedure').
-
-        Returns:
-            MCP-compliant response with a labeled list of hubs, their degree,
-            and a per-tier provenance breakdown.
-        """
-        try:
-            hubs = await brain.top_hubs(limit=max(1, min(50, limit)), node_type=node_type)
-            if not hubs:
-                return {"content": [{"type": "text", "text": "No graph hubs found yet — the graph may be empty."}]}
-
-            lines = [f"Top-{len(hubs)} hubs by degree:"]
-            for i, h in enumerate(hubs, start=1):
-                bk = h["extraction_method_breakdown"]
-                lines.append(
-                    f"{i}. [{h['node_type']}] {h['label'][:80]} — "
-                    f"degree {h['degree']} "
-                    f"(det={bk['deterministic']}, heu={bk['heuristic']}, inf={bk['inferred']})"
-                )
-            return {"content": [{"type": "text", "text": "\n".join(lines)}]}
-        except Exception as e:
-            logger.exception("recall_hubs tool failed")
-            return _tool_error(f"Error fetching hubs: {e}")
 
     async def ingest_document(
         content: str,
@@ -2205,10 +2239,11 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         )
 
     # ------------------------------------------------------------------
-    # Decision resolution (closes the calibration loop). resolve_decision /
-    # resolve_decisions persist an outcome on an existing decision via the
-    # pre-existing Brain.review(); list_decisions surfaces the pending set so
-    # a sweep can enumerate what to resolve.
+    # Decision resolution (closes the calibration loop). resolve_decisions
+    # persists an outcome on one or more existing decisions via the
+    # pre-existing Brain.review_many(); list_decisions surfaces the pending set
+    # so a sweep can enumerate what to resolve. (resolve_decision, the
+    # one-decision tool, is now an alias: nous/tool_names.py.)
     #
     # Background turns (heartbeat / subtask / schedule / DAG, dispatched with
     # _is_background=True) may apply only the NON-PREDICTION outcomes
@@ -2234,91 +2269,41 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             "prediction as success/partial/failure requires an interactive turn."
         )
 
-    async def resolve_decision(
-        decision_id: str,
-        outcome: str,
-        resolution_note: str | None = None,
-        superseded_by: str | None = None,
-        _is_background: bool = False,
-    ) -> dict[str, Any]:
-        """Persist an outcome on an existing decision.
-
-        Args:
-            decision_id: UUID of the decision to resolve.
-            outcome: success, partial, failure, noise, or superseded.
-                noise/superseded are excluded from calibration.
-            resolution_note: Evidence/why — the resolution trail.
-            superseded_by: UUID of the replacing decision. Required when
-                outcome=superseded.
-        """
-        if _is_background and outcome not in NON_PREDICTION_OUTCOMES:
-            return _tool_error(_bg_outcome_error(outcome))
-        # A supersession without a successor is a lineage dead end: retrieval
-        # can label the row `[superseded]` but cannot point at what replaced
-        # it. Validated here, not as a JSON-schema conditional — the dispatcher
-        # only enforces `required` keys flatly.
-        if outcome == "superseded" and not superseded_by:
-            return {
-                "is_error": True,
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            "Error: outcome='superseded' requires superseded_by — the UUID of the "
-                            "decision that replaces this one. Record the replacement decision first, "
-                            "then resolve this one with its ID. If nothing replaced it, use a "
-                            "different outcome (e.g. 'noise' or 'failure')."
-                        ),
-                    }
-                ],
-            }
-        # Phase 2.8: the review state around this write, read inside the
-        # resolving transaction, is what a compensation snapshot records.
-        call_outcome = _outcome_var.get()
-        capture: dict | None = {} if call_outcome is not None else None
-        # Attached BEFORE the await: Brain._review fills it in place before
-        # its commit, so a call cancelled mid-commit (outcome unknown) still
-        # reports the state it may have written.
-        if call_outcome is not None:
-            call_outcome.review_capture = capture
-            if call_outcome.persist_written is not None:
-                capture["persist"] = call_outcome.persist_written
-        try:
-            detail = await brain.review(
-                UUID(decision_id),
-                outcome=outcome,
-                result=resolution_note,
-                reviewer=_BG_REVIEWER if _is_background else "agent",
-                superseded_by=UUID(superseded_by) if superseded_by else None,
-                preserve_graded=_is_background,
-                capture=capture,
-            )
-            text = f"Decision {detail.id} resolved: outcome={detail.outcome}"
-            if detail.superseded_by:
-                text += f", superseded_by={detail.superseded_by}"
-            return {"content": [{"type": "text", "text": text}]}
-        except Exception as e:
-            logger.exception("resolve_decision tool failed")
-            return _tool_error(f"Error resolving decision: {e}")
+    # A supersession without a successor is a lineage dead end: retrieval can label the row `[superseded]` but
+    # cannot point at what replaced it. Refused per item, with what to do instead (ReviewInput refuses it too,
+    # in pydantic's words).
+    _SUPERSEDED_NEEDS_SUCCESSOR = (
+        "Error: outcome='superseded' requires superseded_by — the UUID of the "
+        "decision that replaces this one. Record the replacement decision first, "
+        "then resolve this one with its ID. If nothing replaced it, use a "
+        "different outcome (e.g. 'noise' or 'failure')."
+    )
 
     async def resolve_decisions(
         resolutions: list[dict[str, Any]],
         _is_background: bool = False,
     ) -> dict[str, Any]:
-        """Resolve a batch of decisions in one transaction (sweep path).
+        """Resolve one or more decisions in one transaction.
 
         Each item: {decision_id, outcome, resolution_note?, superseded_by?}.
         A per-item failure — a not-found id, a supersession without its
         successor, and in a background turn either a disallowed outcome or an
         already-graded decision — is reported and does not abort the batch.
+
+        Phase 2.8: each item gets its own review capture, ``{"index": i}`` plus
+        the runner's ``persist`` when a compensation snapshot exists. Brain
+        fills it in that item's SAVEPOINT and the persist merges it into the
+        snapshot's ``items[i]``; an item that failed changed nothing, so its
+        ``written`` is dropped afterwards.
         """
+        call_outcome = _outcome_var.get()
         try:
-            # codex #577 r3: NO batch-wide lineage precheck here. ReviewInput's
-            # validator (shared by every entry point) rejects a missing-lineage
-            # item inside review_many, which reports it as a per-item failure
-            # and keeps the rest of the sweep alive — the documented contract.
-            # A precheck that aborted the whole batch would discard every valid
-            # resolution alongside the one malformed item.
+            # codex #577 r3: NO batch-wide lineage precheck here. A
+            # missing-lineage item is refused per item below (ReviewInput's
+            # validator, shared by every entry point, would reject it inside
+            # review_many too), and the rest of the sweep stays alive — the
+            # documented contract. A precheck that aborted the whole batch would
+            # discard every valid resolution alongside the one malformed item.
             items = [
                 {
                     "decision_id": r.get("decision_id"),
@@ -2328,36 +2313,62 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 }
                 for r in resolutions
             ]
-            if _is_background:
-                # Refuse disallowed outcomes per item (same contract as a
-                # not-found id) and re-merge in input order, so the sweep
-                # keeps every item it was allowed to resolve.
-                allowed = [i for i, it in enumerate(items) if it["outcome"] in NON_PREDICTION_OUTCOMES]
-                reviewed = (
-                    await brain.review_many(
-                        [items[i] for i in allowed],
-                        reviewer=_BG_REVIEWER,
-                        preserve_graded=True,
-                    )
-                    if allowed
-                    else []
+            captures: list[dict] | None = None
+            if call_outcome is not None:
+                # Attached BEFORE the await: Brain._review fills them in place
+                # before its commit, so a call cancelled mid-commit (outcome
+                # unknown) still reports the state it may have written.
+                captures = [{"index": i} for i in range(len(items))]
+                if call_outcome.persist_written is not None:
+                    for capture in captures:
+                        capture["persist"] = call_outcome.persist_written
+                call_outcome.review_capture = captures
+            # Refuse per item (same contract as a not-found id) and re-merge in
+            # input order, so the batch keeps every item it was allowed to
+            # resolve: a supersession without its successor, and in a
+            # background turn an outcome other than noise/superseded.
+            refused: dict[int, str] = {}
+            for i, it in enumerate(items):
+                if _is_background and it["outcome"] not in NON_PREDICTION_OUTCOMES:
+                    refused[i] = _bg_outcome_error(it["outcome"])
+                elif it["outcome"] == "superseded" and not it["superseded_by"]:
+                    refused[i] = _SUPERSEDED_NEEDS_SUCCESSOR
+            allowed = [i for i in range(len(items)) if i not in refused]
+            reviewed = (
+                await brain.review_many(
+                    [items[i] for i in allowed],
+                    reviewer=_BG_REVIEWER if _is_background else "agent",
+                    preserve_graded=_is_background,
+                    captures=[captures[i] for i in allowed] if captures is not None else None,
                 )
-                by_index = dict(zip(allowed, reviewed))
-                results = [
-                    by_index[i]
-                    if i in by_index
-                    else {
-                        "decision_id": str(it["decision_id"]),
-                        "ok": False,
-                        "error": _bg_outcome_error(it["outcome"]),
-                    }
-                    for i, it in enumerate(items)
-                ]
-            else:
-                results = await brain.review_many(items, reviewer="agent")
+                if allowed
+                else []
+            )
+            by_index = dict(zip(allowed, reviewed))
+            results = [
+                by_index[i]
+                if i in by_index
+                else {"decision_id": str(it["decision_id"]), "ok": False, "error": refused[i]}
+                for i, it in enumerate(items)
+            ]
+            for capture, result in zip(captures or (), results):
+                if not result["ok"]:
+                    # Its SAVEPOINT rolled back (or it never ran): nothing to revert.
+                    capture.pop("written", None)
+                    capture.pop("persisted", None)
             ok = sum(1 for r in results if r["ok"])
             failed = [r for r in results if not r["ok"]]
-            text = f"Resolved {ok}/{len(results)} decisions."
+            # Each resolved item echoed by its short id, as the one-decision tool echoed it.
+            done = [
+                f"{str(it['decision_id'])[:8]} → {it['outcome']}"
+                + (f" (by {str(it['superseded_by'])[:8]})" if it["outcome"] == "superseded" else "")
+                for it, r in zip(items, results)
+                if r["ok"]
+            ]
+            if len(results) == 1 and done:
+                text = f"Resolved 1/1: {done[0]}"
+            else:
+                text = f"Resolved {ok}/{len(results)}" + (":\n" + "\n".join(f"- {d}" for d in done) if done else ".")
             if failed:
                 text += "\nFailures:\n" + "\n".join(f"- {r['decision_id']}: {r['error']}" for r in failed)
             return {"content": [{"type": "text", "text": text}], "is_error": bool(failed and ok == 0)}
@@ -2403,12 +2414,9 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         "learn_fact": learn_fact,
         "recall_deep": recall_deep,
         "create_censor": create_censor,
-        "recall_recent": recall_recent,
         "learn_skill": learn_skill,
         "get_procedure": get_procedure,
-        "recall_hubs": recall_hubs,
         "ingest_document": ingest_document,
-        "resolve_decision": resolve_decision,
         "resolve_decisions": resolve_decisions,
         "list_decisions": list_decisions,
     }
@@ -2480,55 +2488,34 @@ _RECORD_DECISION_SCHEMA: dict[str, Any] = {
     "required": ["description", "confidence", "category", "stakes"],
 }
 
-_RESOLVE_DECISION_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "description": (
-        "Record the outcome of an earlier decision: success, partial or failure, or 'noise' (a sweep or tick "
-        "artifact) or 'superseded' (a later decision replaced it), which calibration leaves out. 'superseded' "
-        "needs superseded_by: record the replacing decision first. Add a resolution_note as evidence. In "
-        "background turns only 'noise' and 'superseded' apply, never over a graded outcome. Not available in "
-        "heartbeat triage turns."
-    ),
-    "properties": {
-        "decision_id": {"type": "string", "description": "UUID of the decision to resolve"},
-        "outcome": {
-            "type": "string",
-            "description": "Resolution outcome",
-            "enum": ["success", "partial", "failure", "noise", "superseded"],
-        },
-        "resolution_note": {"type": "string", "description": "Evidence / why — the resolution trail"},
-        "superseded_by": {
-            "type": "string",
-            "description": (
-                "UUID of the decision that replaces this one. REQUIRED when "
-                "outcome=superseded (the call is rejected without it); ignored otherwise."
-            ),
-        },
-    },
-    "required": ["decision_id", "outcome"],
-}
-
 _RESOLVE_DECISIONS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
-        "Resolve several decisions in one transaction (for sweeps); a failed item is reported and the rest still "
-        "apply. In background turns only 'noise' and 'superseded' items apply, never over a graded outcome. Not "
-        "available in heartbeat triage turns."
+        "Record the outcome of one or more earlier decisions, in one transaction: success, partial or failure, or "
+        "'noise' (a sweep or tick artifact) or 'superseded' (a later decision replaced it), which calibration "
+        "leaves out. 'superseded' needs superseded_by: record the replacing decision first. Add a resolution_note "
+        "as evidence to every item. A failed item is reported and the rest still apply. In background turns only "
+        "'noise' and 'superseded' apply, never over a graded outcome. Not available in heartbeat triage turns."
     ),
     "properties": {
         "resolutions": {
             "type": "array",
-            "description": "Decisions to resolve",
+            "description": "One item per decision to resolve",
             "items": {
                 "type": "object",
                 "properties": {
-                    "decision_id": {"type": "string"},
+                    "decision_id": {"type": "string", "description": "UUID of the decision"},
                     "outcome": {
                         "type": "string",
                         "enum": ["success", "partial", "failure", "noise", "superseded"],
                     },
-                    "resolution_note": {"type": "string"},
-                    "superseded_by": {"type": "string"},
+                    "resolution_note": {"type": "string", "description": "The evidence for this outcome"},
+                    "superseded_by": {
+                        "type": "string",
+                        "description": (
+                            "Required for 'superseded': the UUID of the replacing decision (record it first)"
+                        ),
+                    },
                 },
                 "required": ["decision_id", "outcome"],
             },
@@ -2599,14 +2586,19 @@ _RECALL_DEEP_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
         "Search your memory by meaning: past conversations, facts and decisions (procedures and censors when "
-        "named in memory_types). Use it before asking the user about anything from earlier sessions. For the "
-        "latest conversations in time order, use recall_recent."
+        "named in memory_types). Use it before asking the user about anything from earlier sessions. Pass "
+        "hours to list the latest conversations in time order ('what did we discuss lately'); pass query, "
+        "hours or both."
     ),
     "properties": {
         "query": {"type": "string", "description": "What to look for, in plain words"},
+        "hours": {
+            "type": "integer",
+            "description": "List the conversations of the last this-many hours, newest first (48 is typical)",
+        },
         "limit": {
             "type": "integer",
-            "description": "Maximum results to return",
+            "description": "Maximum results to return (with query and hours, for each)",
             "default": 10,
             "minimum": 1,
             "maximum": 50,
@@ -2626,7 +2618,7 @@ _RECALL_DEEP_SCHEMA: dict[str, Any] = {
             ),
         },
     },
-    "required": ["query"],
+    "required": [],
 }
 
 _CREATE_CENSOR_SCHEMA: dict[str, Any] = {
@@ -2656,28 +2648,6 @@ _CREATE_CENSOR_SCHEMA: dict[str, Any] = {
     },
     "required": ["trigger_pattern", "reason"],
 }
-
-_RECALL_RECENT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "description": (
-        "List your latest conversations in time order, with no topic search: for 'what did we discuss "
-        "lately'. To search by topic, use recall_deep."
-    ),
-    "properties": {
-        "hours": {
-            "type": "integer",
-            "description": "Look back this many hours (default 48)",
-            "default": 48,
-        },
-        "limit": {
-            "type": "integer",
-            "description": "Maximum episodes to return (default 10)",
-            "default": 10,
-        },
-    },
-    "required": [],
-}
-
 
 _LEARN_SKILL_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -2716,30 +2686,6 @@ _GET_PROCEDURE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["procedure_id"],
-}
-
-
-_RECALL_HUBS_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "description": (
-        "List the memories that the most other memories link to (facts, decisions, conversations or "
-        "procedures): what your memory centres on. To search by topic, use recall_deep."
-    ),
-    "properties": {
-        "limit": {
-            "type": "integer",
-            "description": "Top-N to return (1..50, default 10)",
-            "default": 10,
-            "minimum": 1,
-            "maximum": 50,
-        },
-        "node_type": {
-            "type": "string",
-            "description": "Optional filter by node type",
-            "enum": ["decision", "fact", "episode", "procedure"],
-        },
-    },
-    "required": [],
 }
 
 
@@ -2785,15 +2731,18 @@ def register_nous_tools(
     dispatcher.register("learn_fact", closures["learn_fact"], _LEARN_FACT_SCHEMA)
     dispatcher.register("recall_deep", closures["recall_deep"], _RECALL_DEEP_SCHEMA)
     dispatcher.register("create_censor", closures["create_censor"], _CREATE_CENSOR_SCHEMA)
-    dispatcher.register("recall_recent", closures["recall_recent"], _RECALL_RECENT_SCHEMA)
     dispatcher.register("learn_skill", closures["learn_skill"], _LEARN_SKILL_SCHEMA)
     dispatcher.register("get_procedure", closures["get_procedure"], _GET_PROCEDURE_SCHEMA)
-    dispatcher.register("recall_hubs", closures["recall_hubs"], _RECALL_HUBS_SCHEMA)
     dispatcher.register("ingest_document", closures["ingest_document"], _INGEST_DOCUMENT_SCHEMA)
     if settings is None or settings.decision_resolution_enabled:
-        dispatcher.register("resolve_decision", closures["resolve_decision"], _RESOLVE_DECISION_SCHEMA)
         dispatcher.register("resolve_decisions", closures["resolve_decisions"], _RESOLVE_DECISIONS_SCHEMA)
         dispatcher.register("list_decisions", closures["list_decisions"], _LIST_DECISIONS_SCHEMA)
+    # Old tool names (nous/tool_names.py): an alias whose target is registered here, or a retired name.
+    for old_name, change in CHANGED_TOOLS.items():
+        if change.target is None:
+            dispatcher.retire(old_name, change.note)
+        elif dispatcher.is_registered(change.target):
+            dispatcher.register_alias(old_name, change.target, change.translate, change.note)
 
 
 # ---------------------------------------------------------------------------
@@ -5474,7 +5423,8 @@ _RUN_PYTHON_SCHEMA: dict[str, Any] = {
     "description": (
         "Run Python with memory functions in scope, to batch lookups and return only what you need. "
         "recall_deep(query, limit=5) is the recall_deep tool's search (dicts with id/type/description/score/"
-        "source; about 5 s a call, so a handful per script); also recall_recent(hours=24, limit=5), "
+        "source; about 5 s a call, so a handful per script); recall_recent(hours=24, limit=5) lists recent "
+        "conversations (a script function: the tool for that is recall_deep with hours); also "
         f"list_tasks(status=None) and learn_fact(content, category, subject, confidence), at most {_MAX_WRITES} "
         "per run. json, re, math, datetime, collections, itertools, functools and statistics are pre-imported. "
         "Set result = <value> or print(). The run is stopped after "

@@ -50,8 +50,7 @@ _KEY_ARGS: dict[str, list[str]] = {
     "bash": ["command", "cmd"],
     "learn_fact": ["subject", "content", "fact"],
     "learn_skill": ["name", "url", "path"],
-    "recall_deep": ["query", "q"],
-    "recall_recent": ["query", "q", "limit"],
+    "recall_deep": ["query", "q", "hours"],
     "record_decision": ["title", "decision", "description"],
     "create_censor": ["name", "expression"],
     "store_identity": ["section", "key"],
@@ -642,7 +641,6 @@ def _friendly_label(tool_name: str) -> str:
     """Map tool names to human-readable activity labels."""
     _LABELS: dict[str, str] = {
         "recall_deep": "searches",
-        "recall_recent": "searches",
         "web_search": "searches",
         "web_fetch": "fetches",
         "read_file": "file reads",

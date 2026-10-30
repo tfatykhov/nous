@@ -206,9 +206,8 @@ def test_web_fetch_names_browser_task_only_where_it_is_registered():
 
 
 def test_the_memory_tools_say_when_to_use_another(tools):
-    assert "recall_recent" in tools["recall_deep"]["description"]
-    assert "recall_deep" in tools["recall_recent"]["description"]
-    assert "recall_deep" in tools["recall_hubs"]["description"]
+    assert "hours" in tools["recall_deep"]["description"]
+    assert not {"recall_recent", "recall_hubs"} & set(tools)
     assert "chatter" in tools["learn_fact"]["description"]
     assert "learn_fact" in tools["create_censor"]["description"]
     assert "alternatives" in tools["record_decision"]["description"]
@@ -288,15 +287,15 @@ def test_dag_create_reads_its_limits_at_registration(monkeypatch):
 
 def test_the_caveats_the_code_needs_are_stated(tools):
     """A check disables itself only when its prompt says to; decision_sweep reads its own rows; the resolve
-    tools say triage does not get them."""
+    tool says triage does not get it (resolve_decision is its alias now, never offered)."""
     assert (
         "It can disable itself (its prompt calls heartbeat_check_manage"
         in tools["heartbeat_check_create"]["description"]
     )
     template = tools["push_surface"]["input_schema"]["properties"]["template"]["description"]
     assert "decision rows in params are ignored" in template
-    for name in ("resolve_decision", "resolve_decisions"):
-        assert tools[name]["description"].endswith("Not available in heartbeat triage turns."), name
+    assert tools["resolve_decisions"]["description"].endswith("Not available in heartbeat triage turns.")
+    assert "resolve_decision" not in tools
 
 
 def _dag_create(**over) -> dict:

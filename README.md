@@ -150,7 +150,7 @@ Capabilities that change behavior sit behind documented flags. Items marked *opt
 
 - **Pre-action protocol** — recall similar decisions, check guardrails, record intent before acting.
 - **Decision records** — confidence, category, stakes, several independent reasons and a live deliberation trace.
-- **Outcome review** — `resolve_decision` closes the loop; Brier scores and a calibration factor keep confidence honest.
+- **Outcome review** — `resolve_decisions` closes the loop; Brier scores and a calibration factor keep confidence honest.
 - **Guardrails** — CEL rules that block risky decisions.
 - **Critic** — a smart frame selector and diagnostic critics, plus a decision-quality rubric fed by outcome signals (letting the rubric evolve itself is *opt-in*).
 
@@ -203,7 +203,7 @@ Capabilities that change behavior sit behind documented flags. Items marked *opt
 <details>
 <summary><b>🛠️ Tools</b></summary>
 
-- **Memory** — `record_decision`, `recall_deep`, `recall_recent`, `learn_fact`, `learn_skill`, `ingest_document`, `get_procedure`, `create_censor`, `cache_retrieve`.
+- **Memory** — `record_decision`, `recall_deep` (by topic, or the latest conversations), `learn_fact`, `learn_skill`, `ingest_document`, `get_procedure`, `create_censor`, `cache_retrieve`.
 - **Work** — `bash`, `read_file`, `write_file`, `run_python`, `send_file`.
 - **Web** — `web_search` (routed by query type across Tavily, Exa and Brave), `web_fetch`, and `browser_task` *(opt-in)*, an isolated agent loop on headless Chromium.
 - **Delegation** — `spawn_task`, `spawn_sync`, `schedule_task`, `dag_create`, `list_tasks`, `cancel_task`, `heartbeat_check_create`, `heartbeat_check_manage`.

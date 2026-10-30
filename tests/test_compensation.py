@@ -78,7 +78,7 @@ def _written(text: str) -> dict:
 def test_compensable_tools_are_marked() -> None:
     """Option A: only the clearly-reversible, non-spawning tools are compensable
     (heartbeat_check_manage per-call -- see is_compensable_call)."""
-    expected = {"write_file", "heartbeat_check_manage", "resolve_decision"}
+    expected = {"write_file", "heartbeat_check_manage", "resolve_decisions"}
     actual = {name for name, cls in TOOL_CLASSES.items() if cls.compensable}
     assert actual == expected
 
@@ -127,7 +127,8 @@ def test_registry_rejects_non_compensable_tool() -> None:
 def test_register_compensators_registers_the_compensable_surface() -> None:
     registry = CompensationRegistry()
     register_compensators(registry)
-    for name in ("write_file", "heartbeat_check_manage", "resolve_decision"):
+    # resolve_decision: snapshots the single-decision tool wrote before it became an alias keep their Revert
+    for name in ("write_file", "heartbeat_check_manage", "resolve_decisions", "resolve_decision"):
         assert registry.is_registered(name), f"{name} not registered"
     for name in ("schedule_task", "heartbeat_check_create"):
         assert not registry.is_registered(name), f"{name} must not be revertible"
@@ -1478,22 +1479,24 @@ async def test_undoable_check_disable_asks_the_handler_to_refuse_if_running(undo
 
 @pytest.mark.asyncio
 async def test_capture_resolve_decision_records_prior_review_state() -> None:
-    """The snapshot used to hard-code prior_outcome=None; it now records the
-    fields Brain.review overwrites. The state the call writes is recorded
-    after it succeeds (_after_compensable_call), not guessed beforehand."""
+    """The snapshot used to hard-code prior_outcome=None; it now records, per
+    item, the fields Brain.review overwrites. The state each item writes is
+    recorded in its own SAVEPOINT, not guessed beforehand. A missing id records
+    prior None (its item changes nothing) and the call is still snapshotted."""
     from unittest.mock import AsyncMock
 
     prior = {"outcome": "pending", "outcome_result": None, "reviewed_at": None, "reviewer": None, "superseded_by": None}
     store = AsyncMock()
-    store.decision_state.return_value = prior
+    store.decision_state.side_effect = [prior, None]
     runner = _bare_runner(store)
-    did = str(uuid4())
+    did, missing = str(uuid4()), str(uuid4())
+    resolutions = [{"decision_id": did, "outcome": "noise"}, {"decision_id": missing, "outcome": "noise"}]
     assert await runner._capture_compensation_snapshot(
-        ExecutionContext(kind="subtask"), "resolve_decision", {"decision_id": did, "outcome": "noise"}, uuid4()
+        ExecutionContext(kind="dag_node", undoable=True), "resolve_decisions", {"resolutions": resolutions}, uuid4()
     )
-    store.decision_state.assert_awaited_once_with(did)
+    assert [c.args for c in store.decision_state.await_args_list] == [(did,), (missing,)]
     data = store.capture.await_args.kwargs["snapshot_data"]
-    assert data == {"decision_id": did, "prior": prior}
+    assert data == {"items": [{"decision_id": did, "prior": prior}, {"decision_id": missing, "prior": None}]}
 
 
 class _FakeSession:
@@ -1515,6 +1518,9 @@ class _FakeSession:
 
     async def commit(self):
         self.committed = True
+
+    async def rollback(self):
+        self.rolled_back = True
 
 
 _WRITTEN_DECISION = {
@@ -1597,6 +1603,70 @@ async def test_compensate_resolve_decision_refuses_stale_or_unrecorded() -> None
     assert not res.success and brain.session_obj.stmts == []
 
 
+@pytest.mark.asyncio
+async def test_compensate_resolve_decisions_restores_only_the_items_that_wrote() -> None:
+    from nous.api.compensation import compensate_resolve_decisions
+
+    brain = _FakeBrain(rowcount=1)
+    written, skipped = str(uuid4()), str(uuid4())
+    prior = {"outcome": "pending", "outcome_result": None, "reviewed_at": None, "reviewer": None, "superseded_by": None}
+    snap = {
+        "items": [
+            {"decision_id": written, "prior": prior, "written": _WRITTEN_DECISION},
+            {"decision_id": skipped, "prior": None},  # not found: it changed nothing
+        ]
+    }
+    res = await compensate_resolve_decisions(uuid4(), snap, SimpleNamespace(brain=brain))
+    assert res.success and "1 decision" in res.message, res.message
+    assert brain.session_obj.committed and len(brain.session_obj.stmts) == 1
+    assert written in str(brain.session_obj.stmts[0].compile().params.values())
+
+
+@pytest.mark.asyncio
+async def test_compensate_resolve_decisions_restores_a_repeated_decision_once() -> None:
+    """Two items naming one decision: one restore, to the first item's prior, guarded by the last item's write."""
+    from nous.api.compensation import compensate_resolve_decisions
+
+    brain = _FakeBrain(rowcount=1)
+    did = str(uuid4())
+    first_prior = {"outcome": "pending", "outcome_result": None, "reviewed_at": None, "reviewer": None}
+    middle = {**_WRITTEN_DECISION, "outcome_result": "first write"}
+    snap = {
+        "items": [
+            {"decision_id": did, "prior": first_prior, "written": middle},
+            {"decision_id": did.upper(), "prior": middle, "written": _WRITTEN_DECISION},  # same id, other spelling
+        ]
+    }
+    res = await compensate_resolve_decisions(uuid4(), snap, SimpleNamespace(brain=brain))
+    assert res.success and res.message == "restored 1 decision(s) to their prior review state", res.message
+    (stmt,) = brain.session_obj.stmts
+    params = stmt.compile().params
+    assert "later reviewer" in params.values() and "first write" not in params.values()  # guarded by the last write
+    assert {c.key: v.value for c, v in stmt._values.items()}["outcome"] == "pending"  # back before the first
+
+
+@pytest.mark.asyncio
+async def test_compensate_resolve_decisions_is_all_or_nothing() -> None:
+    from nous.api.compensation import compensate_resolve_decisions
+
+    item = {"prior": {"outcome": "pending"}, "written": _WRITTEN_DECISION}
+    snap = {"items": [{"decision_id": str(uuid4()), **item}, {"decision_id": str(uuid4()), **item}]}
+    # the guarded UPDATE matches nothing and the row is not at its prior state: reviewed again since
+    brain = _FakeBrain(rowcount=0, current_row=("success", "later", None, "agent", None))
+    res = await compensate_resolve_decisions(uuid4(), snap, SimpleNamespace(brain=brain))
+    assert not res.success and "reviewed again" in res.message and "no decision was restored" in res.message
+    assert not brain.session_obj.committed and brain.session_obj.rolled_back
+    # nothing recorded as written, or a written item without its prior: never writes
+    for bad in (
+        {"items": [{"decision_id": str(uuid4()), "prior": {}}]},
+        {"items": [{"decision_id": "x", "written": {}}]},
+        {},
+    ):
+        brain = _FakeBrain(rowcount=1)
+        res = await compensate_resolve_decisions(uuid4(), bad, SimpleNamespace(brain=brain))
+        assert not res.success and brain.session_obj.stmts == []
+
+
 @pytest.mark.parametrize("off", [{"a2ui_enabled": False}, {"execution_ledger_persist_enabled": False}])
 def test_compensation_requires_persisted_ledger_and_a2ui(off) -> None:
     """codex P1 (config.py:2960, main.py:1224): compensation without a durable
@@ -1655,7 +1725,7 @@ async def test_server_compensation_ignores_caller_handler() -> None:
     assert comp["revertible"] is True and comp["handler"] == "write_file"
     # a snapshot missing its guard state: the compensator would refuse, so no Revert
     store.get_by_ledger_entry.return_value = SimpleNamespace(
-        tool_name="resolve_decision", reverted_at=None, snapshot_data={"prior": {}}
+        tool_name="resolve_decisions", reverted_at=None, snapshot_data={"items": [{"prior": {}}]}
     )
     comp = await _server_compensation({"revertible": True}, str(uuid4()), store, registry)
     assert comp["revertible"] is False
@@ -1881,18 +1951,30 @@ async def test_after_compensable_call_only_confirms_the_transactional_record() -
     runner._settings = SimpleNamespace(compensation_auto_review_enabled=False)
     runner._action_review_pusher = None
     entry = uuid4()
-    kwargs = dict(snapshotted=True, tool_input={"decision_id": str(uuid4()), "outcome": "noise"})
-    persisted = CallOutcome(review_capture={"prior": {}, "written": _WRITTEN_DECISION, "persisted": True})
+    kwargs = dict(snapshotted=True, tool_input={"resolutions": [{"decision_id": str(uuid4()), "outcome": "noise"}]})
+    # the item that failed (no "written") changed nothing and needs no record
+    persisted = CallOutcome(
+        review_capture=[{"index": 0, "prior": {}, "written": _WRITTEN_DECISION, "persisted": True}, {"index": 1}]
+    )
     note = await runner._after_compensable_call(
-        ExecutionContext(kind="subtask"), "resolve_decision", entry, "s1", status="success", outcome=persisted, **kwargs
+        ExecutionContext(kind="subtask"),
+        "resolve_decisions",
+        entry,
+        "s1",
+        status="success",
+        outcome=persisted,
+        **kwargs,
     )
     assert note is None
     assert store.method_calls == []  # no snapshot write after the call
     # captured but never persisted in the transaction -> not revertible
-    for outcome in (CallOutcome(review_capture={"prior": {}, "written": _WRITTEN_DECISION}), CallOutcome()):
+    for outcome in (
+        CallOutcome(review_capture=[{"index": 0, "prior": {}, "written": _WRITTEN_DECISION}]),
+        CallOutcome(),
+    ):
         note = await runner._after_compensable_call(
             ExecutionContext(kind="subtask"),
-            "resolve_decision",
+            "resolve_decisions",
             entry,
             "s1",
             status="success",
@@ -1903,7 +1985,7 @@ async def test_after_compensable_call_only_confirms_the_transactional_record() -
     # a failed call changed nothing: no note
     note = await runner._after_compensable_call(
         ExecutionContext(kind="subtask"),
-        "resolve_decision",
+        "resolve_decisions",
         entry,
         "s1",
         status="error",
@@ -2125,9 +2207,9 @@ async def test_check_revert_uses_the_disable_transactions_prior_state() -> None:
 
     store.reset_mock()
     prior = {**_WRITTEN_DECISION, "outcome": None}
-    capture = {"prior": prior, "written": _WRITTEN_DECISION}
-    await runner._written_state_persister("resolve_decision", entry)(session, capture)
-    store.record_written_state_in.assert_awaited_once_with(session, entry, _WRITTEN_DECISION, prior=prior)
+    capture = {"index": 2, "prior": prior, "written": _WRITTEN_DECISION}
+    await runner._written_state_persister("resolve_decisions", entry)(session, capture)
+    store.record_written_state_in.assert_awaited_once_with(session, entry, _WRITTEN_DECISION, prior=prior, item=2)
     assert capture["persisted"] is True
 
 
@@ -2182,7 +2264,7 @@ async def test_unknown_outcome_still_gets_a_review_card() -> None:
     runner._action_review_pusher = pusher = AsyncMock()
     ctx = ExecutionContext(kind="subtask")
     entry = uuid4()
-    for tool in ("write_file", "resolve_decision", "heartbeat_check_manage"):
+    for tool in ("write_file", "resolve_decisions", "heartbeat_check_manage"):
         pusher.reset_mock()
         await runner._maybe_push_action_review(ctx, tool, entry, "s1", snapshotted=True, status="unknown")
         pusher.assert_awaited_once_with(tool, entry, "s1")
@@ -2193,7 +2275,7 @@ async def test_unknown_outcome_still_gets_a_review_card() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tool", ["resolve_decision", "heartbeat_check_manage"])
+@pytest.mark.parametrize("tool", ["resolve_decisions", "heartbeat_check_manage"])
 async def test_unknown_db_outcome_with_a_transactional_record_is_revertible(tool) -> None:
     """codex P1 #652 (runner.py:645): a DB call cancelled after its commit
     landed is closed `unknown`; its written state committed with it, so it
@@ -2206,9 +2288,9 @@ async def test_unknown_db_outcome_with_a_transactional_record_is_revertible(tool
     runner._settings = SimpleNamespace(compensation_auto_review_enabled=True)
     runner._action_review_pusher = pusher = AsyncMock()
     entry = uuid4()
-    if tool == "resolve_decision":
+    if tool == "resolve_decisions":
         outcome = CallOutcome(
-            review_capture={"prior": {"outcome": None}, "written": _WRITTEN_DECISION, "persisted": True}
+            review_capture=[{"index": 0, "prior": {"outcome": None}, "written": _WRITTEN_DECISION, "persisted": True}]
         )
     else:
         outcome = CallOutcome(check_capture={"prior_enabled": True, "written": _WRITTEN_CHECK, "persisted": True})
@@ -2313,7 +2395,7 @@ async def test_sweep_pending_cards_follows_the_ledger_outcome() -> None:
     ok, unknown, absent, failed = uuid4(), uuid4(), uuid4(), uuid4()
     snap_store.get_pending_cards.return_value = [
         (ok, "write_file", "success"),
-        (unknown, "resolve_decision", "unknown"),
+        (unknown, "resolve_decisions", "unknown"),
         (absent, "write_file", None),
         (failed, "write_file", "error"),
     ]
@@ -2908,9 +2990,14 @@ def test_card_offers_revert_only_when_the_guard_state_is_recorded() -> None:
     # without its workspace root the revert cannot walk to the file safely
     assert not snapshot_is_revertible("write_file", _written("x"))
     assert not snapshot_is_revertible("write_file", {})
-    for tool in ("resolve_decision", "heartbeat_check_manage"):
+    for tool in ("resolve_decision", "heartbeat_check_manage"):  # resolve_decision: a pre-alias snapshot
         assert not snapshot_is_revertible(tool, {"prior": {}})
         assert snapshot_is_revertible(tool, {"written": {}})
+    # resolve_decisions: revertible once an item wrote, and every item that wrote has its prior state
+    assert not snapshot_is_revertible("resolve_decisions", {"items": [{"prior": {}}, {"prior": None}]})
+    assert snapshot_is_revertible("resolve_decisions", {"items": [{"prior": {}, "written": {}}, {"prior": None}]})
+    assert not snapshot_is_revertible("resolve_decisions", {"items": [{"prior": None, "written": {}}]})
+    assert not snapshot_is_revertible("resolve_decisions", {})
 
 
 @pytest.mark.asyncio

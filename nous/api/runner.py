@@ -71,6 +71,7 @@ from nous.config import Settings
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput
 from nous.observability.context_logger import HEARTBEAT_CALL_TYPE
+from nous.tool_names import CHANGED_TOOLS, canonical_tool_names
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,12 @@ def _close_status(is_error: bool, uncertain: bool) -> str:
     if is_error and uncertain:
         return "unknown"
     return "error" if is_error else "success"
+
+
+def _with_alias_note(note: str | None, text: str) -> str:
+    """A tool result whose first line is the alias note, when the model called a tool by an old name
+    (``AgentRunner._resolve_alias``). Added ahead of any ``[input repaired]`` or harness prefix."""
+    return f"{note}\n{text}" if note else text
 
 
 @dataclass(frozen=True)
@@ -215,14 +222,11 @@ def _build_exclude_ids(
 FRAME_TOOLS: dict[str, list[str]] = {
     "conversation": [
         "record_decision",
-        "resolve_decision",
         "resolve_decisions",
         "list_decisions",
         "learn_fact",
         "learn_skill",
         "recall_deep",
-        "recall_recent",
-        "recall_hubs",
         "get_procedure",
         "create_censor",
         "bash",
@@ -251,14 +255,11 @@ FRAME_TOOLS: dict[str, list[str]] = {
     ],
     "question": [
         "recall_deep",
-        "recall_recent",
-        "recall_hubs",
         "get_procedure",
         "bash",
         "read_file",
         "write_file",
         "record_decision",
-        "resolve_decision",
         "resolve_decisions",
         "list_decisions",
         "learn_fact",
@@ -276,12 +277,9 @@ FRAME_TOOLS: dict[str, list[str]] = {
     ],
     "decision": [
         "record_decision",
-        "resolve_decision",
         "resolve_decisions",
         "list_decisions",
         "recall_deep",
-        "recall_recent",
-        "recall_hubs",
         "get_procedure",
         "create_censor",
         "bash",
@@ -299,8 +297,6 @@ FRAME_TOOLS: dict[str, list[str]] = {
     "creative": [
         "learn_fact",
         "recall_deep",
-        "recall_recent",
-        "recall_hubs",
         "get_procedure",
         "write_file",
         "web_search",
@@ -310,8 +306,6 @@ FRAME_TOOLS: dict[str, list[str]] = {
     "debug": [
         "record_decision",
         "recall_deep",
-        "recall_recent",
-        "recall_hubs",
         "get_procedure",
         "bash",
         "read_file",
@@ -465,6 +459,36 @@ class AgentRunner:
         except Exception:  # noqa: BLE001
             # Persistence is best-effort — never let it break a turn.
             logger.debug("F026 persistence failed (suppressed)", exc_info=True)
+
+    def log_tool_alias_used(
+        self, ctx: ExecutionContext, alias: str, target: str | None, session_id: str | None
+    ) -> None:
+        """One ``tool_alias_used`` event (the F026 event path): the model named a tool by an old name. The
+        aliases are to be removed once these stop (docs/reference/agent-tools.md, "Old tool names")."""
+        self._log_f026_decision(
+            "tool_alias_used",
+            {"alias": alias, "target": target, "context_kind": ctx.kind},
+            session_id=session_id,
+        )
+
+    def _resolve_alias(
+        self, ctx: ExecutionContext, tool_name: str, tool_input: dict, session_id: str | None
+    ) -> tuple[str, dict, str | None, str | None]:
+        """``(name, input, note, retired_error)`` for a call the model made: an old tool name becomes the call
+        to its target (new name, translated input, and the note that is the first line of its result); a
+        retired name returns its message as ``retired_error`` and must not run. Any other call is returned
+        unchanged. Runs before every check: the ledger, the offered set and the policies know only the target.
+        Never mutates ``tool_input``: the assistant message keeps what the model emitted."""
+        # Only a name in nous/tool_names.py can be old; the dispatcher says what it became in this process.
+        if tool_name not in CHANGED_TOOLS or self._dispatcher is None:
+            return tool_name, tool_input, None, None
+        alias = self._dispatcher.alias_for(tool_name)
+        if alias is None:
+            return tool_name, tool_input, None, None
+        self.log_tool_alias_used(ctx, tool_name, alias.target, session_id)
+        if alias.target is None:
+            return tool_name, tool_input, None, alias.note
+        return alias.target, alias.translate(tool_input), alias.note, None
 
     def _offered_tools(
         self,
@@ -854,8 +878,11 @@ class AgentRunner:
         store = self._snap_store
 
         async def persist(session: Any, capture: dict) -> None:
-            if tool_name == "resolve_decision":
-                await store.record_written_state_in(session, entry_id, capture["written"], prior=capture["prior"])
+            if tool_name == "resolve_decisions":
+                # One item, inside its own SAVEPOINT: it merges into the snapshot's items[index].
+                await store.record_written_state_in(
+                    session, entry_id, capture["written"], prior=capture["prior"], item=capture["index"]
+                )
             else:
                 await store.record_written_state_in(
                     session, entry_id, capture["written"], extra={"prior_enabled": capture["prior_enabled"]}
@@ -889,10 +916,14 @@ class AgentRunner:
         # ``unknown`` too: a call cancelled mid-commit may have written; its
         # written state commits with it or not at all.
         landed = status in ("success", "unknown")
-        if snapshotted and landed and tool_name in ("resolve_decision", "heartbeat_check_manage"):
-            capture = None
-            if outcome is not None:
-                capture = outcome.review_capture if tool_name == "resolve_decision" else outcome.check_capture
+        if snapshotted and landed and tool_name == "resolve_decisions":
+            # Every item that wrote recorded what it wrote (the tool drops ``written`` from an item that failed).
+            captures = outcome.review_capture if outcome is not None else None
+            recorded = isinstance(captures, list) and all(
+                capture.get("persisted") is True for capture in captures if "written" in capture
+            )
+        elif snapshotted and landed and tool_name == "heartbeat_check_manage":
+            capture = outcome.check_capture if outcome is not None else None
             # Advisory: set inside the transaction, so a commit cancelled in
             # flight may still have rolled it back. The DB snapshot stays
             # authoritative (the card derives Revert from it).
@@ -1089,19 +1120,25 @@ class AgentRunner:
                     # A disable that cancels an active run is not undoable:
                     # manage_check refuses it, under its mutation lock.
                     outcome.check_refuse_if_running = True
-            elif tool_name == "resolve_decision":
-                # The prior review state the revert restores. The state this
-                # call writes is recorded in its own transaction
+            elif tool_name == "resolve_decisions":
+                # Per item, the prior review state the revert restores. The
+                # state each item writes is recorded in its own SAVEPOINT
                 # (_written_state_persister); the revert applies only while
-                # the decision still carries all of it.
-                decision_id = str(tool_input.get("decision_id") or "")
-                prior = await self._snap_store.decision_state(decision_id)
-                if prior is None:
-                    return _unrevertible(f"decision {decision_id!r} was not found")
-                snap_data = {
-                    "decision_id": decision_id,
-                    "prior": prior,
-                }
+                # every decision still carries all of it. An id that is not a
+                # UUID or not found records prior None: that item can change
+                # nothing, so the revert skips it and the call stays revertible.
+                resolutions = tool_input.get("resolutions")
+                if not isinstance(resolutions, list) or not resolutions:
+                    return False  # nothing to resolve (dispatch refuses a non-list), nothing to revert
+                items: list[dict] = []
+                for resolution in resolutions:
+                    decision_id = str(resolution.get("decision_id") or "") if isinstance(resolution, dict) else ""
+                    try:
+                        prior = await self._snap_store.decision_state(decision_id)
+                    except ValueError:
+                        prior = None
+                    items.append({"decision_id": decision_id, "prior": prior})
+                snap_data = {"items": items}
             else:
                 return False
             await self._snap_store.capture(
@@ -1112,7 +1149,7 @@ class AgentRunner:
                 # the side effect, so no crash after it can lose the card.
                 card_pending=card,
             )
-            if tool_name in ("resolve_decision", "heartbeat_check_manage") and outcome is not None:
+            if tool_name in ("resolve_decisions", "heartbeat_check_manage") and outcome is not None:
                 # The written state is recorded by the mutation itself, in
                 # its own transaction (see _written_state_persister).
                 outcome.persist_written = self._written_state_persister(tool_name, entry_id)
@@ -2665,54 +2702,72 @@ class AgentRunner:
                             yield StreamEvent(type="tool_end", tool_name=tc["name"])
                             continue
 
+                        # An old tool name becomes the call to its target before any check (tc is left as
+                        # the model emitted it); a retired name runs nothing and reaches no ledger.
+                        tool_name, tool_input, alias_note, retired = self._resolve_alias(
+                            _ctx, tc["name"], tc.get("input", {}), session_id
+                        )
+                        if retired is not None:
+                            tool_results_for_message.append(
+                                {"type": "tool_result", "tool_use_id": tc["id"], "content": retired, "is_error": True}
+                            )
+                            all_tool_results.append(
+                                ToolResult(
+                                    tool_name=tool_name, arguments=tool_input, result=None, error=retired, duration_ms=0
+                                )
+                            )
+                            yield StreamEvent(type="tool_end", tool_name=tool_name)
+                            continue
+
                         # Harness: was this tool offered this turn, and may this context use it?
                         refusal = self._authorize_tool_call(
                             _ctx,
-                            tc["name"],
+                            tool_name,
                             offered_names,
                             session_id,
-                            tc.get("input", {}),
+                            tool_input,
                         )
                         if refusal is not None:
+                            refusal_text = _with_alias_note(alias_note, refusal.text)
                             tool_results_for_message.append(
                                 {
                                     "type": "tool_result",
                                     "tool_use_id": tc["id"],
-                                    "content": refusal.text,
+                                    "content": refusal_text,
                                     "is_error": True,
                                 }
                             )
                             all_tool_results.append(
                                 ToolResult(
-                                    tool_name=tc["name"],
-                                    arguments=tc.get("input", {}),
+                                    tool_name=tool_name,
+                                    arguments=tool_input,
                                     result=None,
-                                    error=refusal.text,
+                                    error=refusal_text,
                                     duration_ms=0,
                                 )
                             )
                             if ledger:
-                                ledger.record(tc["name"], tc.get("input", {}), refusal.text, "blocked")
+                                ledger.record(tool_name, tool_input, refusal.text, "blocked")
                             await self._ledger_blocked(
                                 _ctx,
-                                tc["name"],
-                                tc.get("input", {}),
+                                tool_name,
+                                tool_input,
                                 ledger.current_turn if ledger else None,
                                 refusal.code,
                             )
-                            yield StreamEvent(type="tool_end", tool_name=tc["name"])
+                            yield StreamEvent(type="tool_end", tool_name=tool_name)
                             continue
 
                         # F022: Auto-inject source_episode_id into learn_fact.
                         # Use a local variable (not tc["input"]) to avoid mutating the
                         # shared block dict that content_blocks already references.
-                        dispatch_input = self._maybe_inject_episode_id(tc["name"], tc["input"], session_id)
+                        dispatch_input = self._maybe_inject_episode_id(tool_name, tool_input, session_id)
 
                         # F026: Action gating (pre-dispatch)
                         gated = False
                         if self._action_gate and ledger:
                             gate_result = await self._action_gate.check(
-                                tc["name"],
+                                tool_name,
                                 dispatch_input,
                                 ledger,
                                 user_message=user_message,
@@ -2720,7 +2775,7 @@ class AgentRunner:
                             self._log_f026_decision(
                                 "f026_action_gate",
                                 {
-                                    "tool_name": tc["name"],
+                                    "tool_name": tool_name,
                                     "approved": gate_result.approved,
                                     "reason": gate_result.reason,
                                     "mode": self._settings.action_gating_mode,
@@ -2729,7 +2784,7 @@ class AgentRunner:
                                 session_id=session_id,
                             )
                             if gate_result.approved:
-                                logger.info("F026 gate: %s approved (%s)", tc["name"], gate_result.reason)
+                                logger.info("F026 gate: %s approved (%s)", tool_name, gate_result.reason)
                             else:
                                 if self._settings.action_gating_mode == "enforce":
                                     result_text = f"[BLOCKED by ActionGate] {gate_result.reason}"
@@ -2737,19 +2792,19 @@ class AgentRunner:
                                         result_text += f"\n{gate_result.suggestion}"
                                     is_error = True
                                     gated = True
-                                    ledger.record(tc["name"], dispatch_input, result_text, "blocked")
+                                    ledger.record(tool_name, dispatch_input, result_text, "blocked")
                                     await self._ledger_blocked(
                                         _ctx,
-                                        tc["name"],
+                                        tool_name,
                                         dispatch_input,
                                         ledger.current_turn,
                                         "action_gate",
                                     )
-                                    logger.info("F026 gate: %s BLOCKED (%s)", tc["name"], gate_result.reason)
+                                    logger.info("F026 gate: %s BLOCKED (%s)", tool_name, gate_result.reason)
                                 elif self._settings.action_gating_mode == "warn":
-                                    logger.warning("F026 gate: %s would block (%s)", tc["name"], gate_result.reason)
+                                    logger.warning("F026 gate: %s would block (%s)", tool_name, gate_result.reason)
                                 else:
-                                    logger.debug("F026 gate: %s would block (%s)", tc["name"], gate_result.reason)
+                                    logger.debug("F026 gate: %s would block (%s)", tool_name, gate_result.reason)
 
                         if not gated:
                             start_time = time.monotonic()
@@ -2758,7 +2813,7 @@ class AgentRunner:
                             # Phase 2b: a keyed send is claimed first, or suppressed.
                             entry_id, send_key, suppressed = await self._open_for_call(
                                 _ctx,
-                                tc["name"],
+                                tool_name,
                                 dispatch_input,
                                 ledger.current_turn if ledger else None,
                                 keys_this_turn,
@@ -2778,11 +2833,11 @@ class AgentRunner:
                                 outcome = CallOutcome()
                                 try:
                                     _write_lock = outcome.write_lock = await self._acquire_write_lock(
-                                        tc["name"], dispatch_input
+                                        tool_name, dispatch_input
                                     )
                                     _snapshotted = await self._capture_compensation_snapshot(
                                         _ctx,
-                                        tc["name"],
+                                        tool_name,
                                         dispatch_input,
                                         entry_id,
                                         outcome=outcome,
@@ -2800,7 +2855,7 @@ class AgentRunner:
                                         )
                                         if ledger:
                                             ledger.record(
-                                                tc["name"],
+                                                tool_name,
                                                 dispatch_input,
                                                 _snap_blocked,
                                                 "blocked",
@@ -2812,7 +2867,7 @@ class AgentRunner:
                                     result_text, is_error = suppressed.text, suppressed.is_error
                                     if ledger:
                                         ledger.record(
-                                            tc["name"],
+                                            tool_name,
                                             dispatch_input,
                                             result_text,
                                             "blocked" if is_error else "success",
@@ -2821,7 +2876,7 @@ class AgentRunner:
                                     timed_out = False
                                     try:
                                         async for item in self._dispatch_with_keepalive(
-                                            tc["name"],
+                                            tool_name,
                                             dispatch_input,
                                             session_id=session_id,
                                             turn_number=_stream_turn_number,  # F091
@@ -2844,7 +2899,7 @@ class AgentRunner:
                                         )
                                         await self._after_compensable_call(
                                             _ctx,
-                                            tc["name"],
+                                            tool_name,
                                             entry_id,
                                             session_id,
                                             snapshotted=_snapshotted,
@@ -2858,13 +2913,13 @@ class AgentRunner:
                                         entry_id,
                                         _status,
                                         result_text,
-                                        output_of=tc["name"],
+                                        output_of=tool_name,
                                         external_ref=outcome.external_ref,
                                         keyed=send_key is not None,
                                     )
                                     _unrevertible_note = await self._after_compensable_call(
                                         _ctx,
-                                        tc["name"],
+                                        tool_name,
                                         entry_id,
                                         session_id,
                                         snapshotted=_snapshotted,
@@ -2877,7 +2932,7 @@ class AgentRunner:
                                     # F026: Record in execution ledger (post-dispatch)
                                     if ledger:
                                         ledger.record(
-                                            tc["name"],
+                                            tool_name,
                                             dispatch_input,
                                             result_text,
                                             "error" if is_error else "success",
@@ -2893,6 +2948,8 @@ class AgentRunner:
                             duration_ms = int((time.monotonic() - start_time) * 1000)
                         else:
                             duration_ms = 0
+                        # After the in-memory ledger, which keeps the head of the tool's own output.
+                        result_text = _with_alias_note(alias_note, result_text)
 
                         tool_results_for_message.append(
                             {
@@ -2905,15 +2962,15 @@ class AgentRunner:
 
                         all_tool_results.append(
                             ToolResult(
-                                tool_name=tc["name"],
-                                arguments=tc["input"],
+                                tool_name=tool_name,
+                                arguments=tool_input,
                                 result=result_text if not is_error else None,
                                 error=result_text if is_error else None,
                                 duration_ms=duration_ms,
                             )
                         )
 
-                        yield StreamEvent(type="tool_end", tool_name=tc["name"])
+                        yield StreamEvent(type="tool_end", tool_name=tool_name)
 
                     messages.append({"role": "user", "content": tool_results_for_message})
 
@@ -3210,10 +3267,16 @@ class AgentRunner:
             raise ValueError(f"execute_single_call runs an approved_action context, not {ctx.kind!r}")
         if not self._dispatcher:
             raise RuntimeError("No tool dispatcher set -- call set_dispatcher() first")
+        tool_name, tool_input, alias_note, retired = self._resolve_alias(ctx, tool_name, tool_input, ctx.session_id)
+        if retired is not None:
+            return SingleCall(retired, True, None)
+        if alias_note is not None:
+            # A proposal stored under the old name declares the old name: the call it becomes is the one approved.
+            ctx = dataclasses.replace(ctx, declared_tools=tuple(canonical_tool_names(ctx.declared_tools or ())))
         refusal = self._authorize_tool_call(ctx, tool_name, frozenset({tool_name}), ctx.session_id, tool_input)
         if refusal is not None:
             await self._ledger_blocked(ctx, tool_name, tool_input, None, refusal.code)
-            return SingleCall(refusal.text, True, None)
+            return SingleCall(_with_alias_note(alias_note, refusal.text), True, None)
         dispatched = await self._dispatch_with_ledger(
             ctx,
             tool_name,
@@ -3225,7 +3288,7 @@ class AgentRunner:
             turn_number=None,
             is_background=ctx.is_background,
         )
-        return SingleCall(dispatched.text, dispatched.is_error, dispatched.send_key)
+        return SingleCall(_with_alias_note(alias_note, dispatched.text), dispatched.is_error, dispatched.send_key)
 
     async def _tool_loop(
         self,
@@ -3489,14 +3552,31 @@ class AgentRunner:
                         )
                         continue
 
+                    # An old tool name becomes the call to its target before any check (the block is left as
+                    # the model emitted it); a retired name runs nothing and reaches no ledger.
+                    tool_name, tool_input, alias_note, retired = self._resolve_alias(
+                        ctx, tool_name, tool_input, session_id
+                    )
+                    if retired is not None:
+                        tool_results_for_message.append(
+                            {"type": "tool_result", "tool_use_id": tool_use_id, "content": retired, "is_error": True}
+                        )
+                        all_tool_results.append(
+                            ToolResult(
+                                tool_name=tool_name, arguments=tool_input, result=None, error=retired, duration_ms=0
+                            )
+                        )
+                        continue
+
                     # Harness: was this tool offered this iteration, and may this context use it?
                     refusal = self._authorize_tool_call(ctx, tool_name, offered_names, session_id, tool_input)
                     if refusal is not None:
+                        refusal_text = _with_alias_note(alias_note, refusal.text)
                         tool_results_for_message.append(
                             {
                                 "type": "tool_result",
                                 "tool_use_id": tool_use_id,
-                                "content": refusal.text,
+                                "content": refusal_text,
                                 "is_error": True,
                             }
                         )
@@ -3505,7 +3585,7 @@ class AgentRunner:
                                 tool_name=tool_name,
                                 arguments=tool_input,
                                 result=None,
-                                error=refusal.text,
+                                error=refusal_text,
                                 duration_ms=0,
                             )
                         )
@@ -3613,6 +3693,8 @@ class AgentRunner:
                             )
                     else:
                         duration_ms = 0
+                    # After the in-memory ledger, which keeps the head of the tool's own output; before SmartCompress.
+                    result_text = _with_alias_note(alias_note, result_text)
 
                     # F020: SmartCompress — ingestion-time compression
                     compress_result = await smart_compress(

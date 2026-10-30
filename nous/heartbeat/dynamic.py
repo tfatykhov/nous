@@ -25,6 +25,7 @@ from nous.handlers import schedule_guard
 from nous.heartbeat import check_guard
 from nous.heartbeat.registry import BaseCheck
 from nous.heartbeat.schemas import CheckResult, Finding
+from nous.tool_names import canonical_tool_names
 
 if TYPE_CHECKING:
     from nous.api.runner import AgentRunner
@@ -78,18 +79,25 @@ RUN_OUTCOME: contextvars.ContextVar[dict[str, bool] | None] = contextvars.Contex
 # check creation is restricted to admin/conversation so risk is accepted.
 # heartbeat_check_create/manage enable autonomous sequential pipelines:
 # a check can spawn follow-up checks and disable itself when done.
+# A stored or requested list is read through _allowed_tools: an old tool name
+# (recall_recent) counts as the tool it became.
 ALLOWED_TOOLS = frozenset(
     {
         "web_search",
         "web_fetch",
         "recall_deep",
-        "recall_recent",
         "bash",
         "read_file",
         "heartbeat_check_create",
         "heartbeat_check_manage",
     }
 )
+
+
+def _allowed_tools(tools: list[str] | None) -> list[str]:
+    """``tools`` under their current names (no data migration rewrites a stored list), kept to ALLOWED_TOOLS."""
+    return [t for t in canonical_tool_names(tools or []) if t in ALLOWED_TOOLS]
+
 
 MIN_INTERVAL_SECONDS = 300  # 5 minutes minimum
 
@@ -166,7 +174,7 @@ class DynamicCheck(BaseCheck):
         self.check_id = check_id
         self.name = name
         self._prompt = prompt
-        self._tools = [t for t in tools if t in ALLOWED_TOOLS] if tools else []
+        self._tools = _allowed_tools(tools)
         self.interval = interval
         self.timeout = timeout
         self.urgent_override = urgent
@@ -174,7 +182,7 @@ class DynamicCheck(BaseCheck):
         self._model_override = model_override
         self._cron_expr: str | None = None
         self.on_complete_prompt = on_complete_prompt
-        self.on_complete_tools = [t for t in on_complete_tools if t in ALLOWED_TOOLS] if on_complete_tools else []
+        self.on_complete_tools = _allowed_tools(on_complete_tools)
         self._self_disabled = False
         # F099 I3: the lineage of the DAG this check runs for (its row's
         # metadata.intention); read into the heartbeat_check context.
@@ -934,10 +942,10 @@ class DynamicCheckLoader:
                 raise ValueError(f"Invalid cron expression: {e}")
 
         # Filter tools to allowed set
-        validated_tools = [t for t in (tools or []) if t in ALLOWED_TOOLS]
+        validated_tools = _allowed_tools(tools)
 
         # Validate on_complete_tools
-        validated_on_complete_tools = [t for t in (on_complete_tools or []) if t in ALLOWED_TOOLS]
+        validated_on_complete_tools = _allowed_tools(on_complete_tools)
         if validated_on_complete_tools and not set(validated_on_complete_tools).issubset(set(validated_tools)):
             raise ValueError("on_complete_tools must be a subset of check tools")
 
@@ -1212,9 +1220,9 @@ class DynamicCheckLoader:
                     if key == "on_complete_tools" and not isinstance(value, list):
                         raise ValueError("on_complete_tools must be a list")
                     if key == "tools":
-                        value = [t for t in value if t in ALLOWED_TOOLS]
+                        value = _allowed_tools(value)
                     if key == "on_complete_tools":
-                        value = [t for t in value if t in ALLOWED_TOOLS]
+                        value = _allowed_tools(value)
                     if key == "interval_seconds" and value < MIN_INTERVAL_SECONDS:
                         raise ValueError(f"Minimum interval is {MIN_INTERVAL_SECONDS} seconds")
                     changes[key] = value
@@ -1232,9 +1240,9 @@ class DynamicCheckLoader:
                             f"Minimum interval is {MIN_INTERVAL_SECONDS} seconds "
                             f"(current: {_after('interval_seconds')}s) — set a valid interval or cron expression"
                         )
-                # Re-validate on_complete_tools subset after all updates
-                current_tools = set(_after("tools") or [])
-                current_on_complete = set(_after("on_complete_tools") or [])
+                # Re-validate on_complete_tools subset after all updates (a stored list may hold an old name)
+                current_tools = set(_allowed_tools(_after("tools")))
+                current_on_complete = set(_allowed_tools(_after("on_complete_tools")))
                 if current_on_complete and not current_on_complete.issubset(current_tools):
                     raise ValueError("on_complete_tools must be a subset of check tools")
                 # Undo journal: the row before this update (never blocks).
@@ -1310,7 +1318,7 @@ class DynamicCheckLoader:
                     # The journal lives in the workspace: a row read from it
                     # gets the same tool filter as create_check.
                     for key in ("tools", "on_complete_tools"):
-                        values[key] = [t for t in (values.get(key) or []) if t in ALLOWED_TOOLS]
+                        values[key] = _allowed_tools(values.get(key))
                     if current is None:
                         await session.execute(insert(table).values(**values))
                     else:

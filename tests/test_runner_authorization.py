@@ -27,6 +27,9 @@ class _RecordingDispatcher:
     def is_registered(self, name):
         return self.registered is None or name in self.registered
 
+    def alias_for(self, name):
+        return None  # no old tool names here (tests/test_tool_aliases.py covers them)
+
     def available_tools(self, frame_id):
         return [{"name": n, "description": n, "input_schema": {"type": "object"}} for n in self.offered]
 

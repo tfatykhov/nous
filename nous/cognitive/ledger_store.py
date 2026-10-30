@@ -89,6 +89,8 @@ _WORD, _UUID, _EMAILS, _CHAT, _PATH, _SOURCE, _HASH = (
 # A UUID, or a short hex id prefix: the one `dag_manage list` prints and dag_manage accepts, or the task id
 # prefix cancel_task accepts.
 _DAG_ID = "dag_id"
+# resolve_decisions' items, each kept as `<decision uuid>:<outcome>` while every item has both shapes.
+_RESOLUTIONS = "resolutions"
 _DURABLE_ARGS: dict[str, dict[str, str]] = {
     # A bash command is code: hashed like run_python's, never kept.
     "bash": {"command": _HASH},
@@ -110,10 +112,7 @@ _DURABLE_ARGS: dict[str, dict[str, str]] = {
     "dag_manage": {"action": _WORD, "dag_id": _DAG_ID, "node_name": _HASH},
     "push_surface": {"template": _WORD, "dedup_key": _HASH, "params": _HASH},
     "compose_surface": {"archetype": _WORD, "dedup_key": _HASH, "intent": _HASH, "data_sources": _HASH},
-    "resolve_decision": {
-        "decision_id": _UUID, "outcome": _WORD, "superseded_by": _UUID, "resolution_note": _HASH,
-    },
-    "resolve_decisions": {"resolutions": _HASH},
+    "resolve_decisions": {"resolutions": _RESOLUTIONS},
     "ingest_document": {"source_ref": _SOURCE, "episode_id": _UUID, "content": _HASH},
     "store_identity": {"section": _WORD, "content": _HASH},
 }
@@ -142,6 +141,8 @@ def _shaped(kind: str, value: Any) -> str | None:
         if parts and all(_EMAIL_SHAPE.fullmatch(v) for v in parts):
             return ",".join(parts)[:KEY_ARG_CHARS]
         return None
+    if kind == _RESOLUTIONS:
+        return _shaped_resolutions(value)
     if isinstance(value, bool) or not isinstance(value, (str, int)):
         return None
     text = str(value)
@@ -171,6 +172,28 @@ def _shaped(kind: str, value: Any) -> str | None:
             return f"{parts.scheme}://{parts.hostname}"
         return None
     return None
+
+
+def _shaped_resolutions(value: Any) -> str | None:
+    """resolve_decisions' items as `<uuid>:<outcome>,...`, or None (hashed) unless every item has both shapes.
+    Whole items only: past the cap, ``+N`` counts the items left out. The notes are never kept."""
+    if not isinstance(value, list):
+        return None
+    parts: list[str] = []
+    for item in value:
+        if not isinstance(item, dict):
+            return None
+        decision_id, outcome = _shaped(_UUID, item.get("decision_id")), _shaped(_WORD, item.get("outcome"))
+        if decision_id is None or outcome is None:
+            return None
+        parts.append(f"{decision_id}:{outcome}")
+    kept: list[str] = []
+    for part in parts:
+        if len(",".join([*kept, part])) > KEY_ARG_CHARS - 8:  # room for ",+<count>"
+            break
+        kept.append(part)
+    left_out = len(parts) - len(kept)
+    return ",".join([*kept, f"+{left_out}"] if left_out else kept)
 
 
 def durable_key_args(tool_name: str, args: dict[str, Any]) -> dict[str, str]:

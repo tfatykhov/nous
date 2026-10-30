@@ -1185,7 +1185,7 @@ class Settings(BaseSettings):
     # string arg (dispatch-level repair; see ToolDispatcher.dispatch).
     tool_arg_salvage_enabled: bool = Field(default=True, validation_alias="NOUS_TOOL_ARG_SALVAGE_ENABLED")
     # Kill-switch for the agent-facing decision-resolution tools
-    # (resolve_decision / resolve_decisions / list_decisions). Set False to
+    # (resolve_decisions, its alias resolve_decision, list_decisions). Set False to
     # un-register them; the migration + calibration filter are unconditional.
     decision_resolution_enabled: bool = Field(default=True, validation_alias="NOUS_DECISION_RESOLUTION_ENABLED")
 
@@ -2796,7 +2796,7 @@ class Settings(BaseSettings):
     recall_before_clarify_prompt: bool = Field(
         default=True,
         description=(
-            "F083 C2. When true, inject a static instruction to call recall_deep/recall_recent "
+            "F083 C2. When true, inject a static instruction to call recall_deep "
             "to resolve a referent before asking the user to clarify."
         ),
     )

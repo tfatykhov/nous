@@ -42,7 +42,7 @@ TOOL_DECAY_PROFILES: dict[str, str] = {
 # profile. POSITIVE allowlist (codex round 12): only operation-shaped tools
 # qualify — for retrieval tools (registered or future) re-running is cheap
 # and benign, so the bulk do-NOT-re-run stub would be wrong; defaulting
-# unknown tools to escalation mislabeled cache_retrieve/recall_recent/etc.
+# unknown tools to escalation mislabeled cache_retrieve/recall_deep/etc.
 BULK_ESCALATION_TOOLS: frozenset[str] = frozenset({"bash", "run_python"})
 
 # Profile -> (soft_trim_age, metadata_degrade_age, hard_clear_age)

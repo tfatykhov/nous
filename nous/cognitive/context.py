@@ -37,6 +37,7 @@ from nous.observability.retrieval_trace import (
     SLICED_OFF,
     SUPERSEDED,
 )
+from nous.tool_names import changed_tools_note
 from nous.utils import text_overlap
 
 
@@ -91,6 +92,21 @@ TOOLS_OUTRANK_MEMORY_TEXT = (
     "The tool list and tool errors describe how tools work now. Memory about tools (facts, procedures, notes) "
     "is history and can be out of date. When they disagree, follow the tool's description and its error "
     "message, and do not repeat a workaround that memory recommends for a tool that now behaves differently."
+)
+
+# The sections rendered from recalled memory. One that names a tool that changed (nous/tool_names.py) ends with a
+# line saying what that tool is now. Dynamic-tier sections only: a line in a cached tier would come and go with
+# what is recalled and break the cached prefix.
+RECALLED_MEMORY_SECTIONS = frozenset(
+    {
+        "Related Decisions",
+        "Relevant Facts",
+        "Session Profile",
+        "Recommended Procedures",
+        "Known Procedures",
+        "Recent Conversations",
+        "Past Episodes",
+    }
 )
 
 
@@ -469,7 +485,7 @@ class ContextEngine:
             recall_first = (
                 "Before asking the user to clarify a referent — a pronoun, "
                 '"that", "the thing/option you mentioned", or a continuation of '
-                "earlier work — first call recall_deep or recall_recent to resolve "
+                "earlier work — first call recall_deep (with hours for the latest conversations) to resolve "
                 "it from your memory of prior sessions. Only ask the user to "
                 "clarify if recall returns nothing relevant."
             )
@@ -1667,6 +1683,9 @@ class ContextEngine:
                 logger.warning("Heart.search_episodes failed during context build: %s", e)
                 tr.leg("context_episodes", attempted=True, error=str(e)[:200])
 
+        # After every budget cut, so the line is never cut itself.
+        self._note_changed_tools(sections)
+
         # Assemble system prompt with markdown headers
         parts: list[str] = []
         for section in sorted(sections, key=lambda s: s.priority):
@@ -2002,6 +2021,16 @@ class ContextEngine:
     def _estimate_tokens(self, text: str) -> int:
         """Rough token count: len(text) / CHARS_PER_TOKEN."""
         return max(1, len(text) // self.CHARS_PER_TOKEN)
+
+    def _note_changed_tools(self, sections: list[ContextSection]) -> None:
+        """A recalled-memory section (``RECALLED_MEMORY_SECTIONS``, dynamic tier only) that names a tool that
+        changed ends with one line listing only the changed names it mentions."""
+        for section in sections:
+            if section.tier == "dynamic" and section.label in RECALLED_MEMORY_SECTIONS:
+                note = changed_tools_note(section.content)
+                if note:
+                    section.content = f"{section.content}\n{note}"
+                    section.token_estimate += self._estimate_tokens(note)
 
     def _truncate_to_budget(self, text: str, token_budget: int) -> str:
         """Truncate text to fit within token budget."""

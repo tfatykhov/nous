@@ -17,9 +17,10 @@ from typing import Any
 class CallOutcome:
     external_ref: str | None = None  # provider id: SMTP Message-ID, Telegram message_id
     uncertain: bool = False  # the provider may have acted although the call failed
-    # Phase 2.8: resolve_decision's review state before/after its write, read
-    # inside the resolving transaction under a row lock (Brain.review capture=).
-    review_capture: dict | None = None
+    # Phase 2.8: resolve_decisions' review state before/after its write, one
+    # dict per item ({"index": i, "prior", "written"}), read inside that item's
+    # SAVEPOINT under a row lock (Brain.review_many captures=).
+    review_capture: list[dict] | None = None
     # Phase 2.8: a heartbeat_check_manage disable's prior state and the
     # state token it wrote (DynamicCheckLoader.manage_check capture=).
     check_capture: dict | None = None
