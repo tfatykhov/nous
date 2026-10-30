@@ -2158,6 +2158,9 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             )
             if detail.effectiveness is not None:
                 lines.append(f"Effectiveness: {detail.effectiveness:.0%}")
+            note = changed_tools_note("\n".join(lines))  # its steps may name a tool that changed
+            if note:
+                lines.append(note)
 
             return {"content": [{"type": "text", "text": "\n".join(lines)}]}
 
