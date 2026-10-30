@@ -3112,6 +3112,24 @@ async def _close_inline_intention(heart: Any, subtask_id: UUID, reason: str = in
 # Subtask & Schedule tool closures (011.1)
 # ---------------------------------------------------------------------------
 
+# The shortest task id prefix cancel_task resolves: the 8-character short ids that notices and logs print.
+TASK_ID_PREFIX_MIN = 8
+_TASK_ID_PREFIX_RE = re.compile(rf"[0-9a-fA-F]{{{TASK_ID_PREFIX_MIN}}}[0-9a-fA-F-]{{0,{35 - TASK_ID_PREFIX_MIN}}}")
+# How many characters of each match's task text an ambiguous prefix's error shows.
+_TASK_PREFIX_MATCH_TEXT_CHARS = 60
+
+
+def _is_task_id_prefix(task_id: object) -> bool:
+    """Whether cancel_task reads ``task_id`` as an id prefix: at least ``TASK_ID_PREFIX_MIN`` hex characters
+    (then hex or hyphens), and not a whole UUID in any spelling ``uuid.UUID`` reads."""
+    if not isinstance(task_id, str) or not _TASK_ID_PREFIX_RE.fullmatch(task_id):
+        return False
+    try:
+        UUID(task_id)
+    except ValueError:
+        return True
+    return False
+
 
 def create_subtask_tools(
     heart: Heart,
@@ -3688,14 +3706,19 @@ def create_subtask_tools(
     ) -> dict[str, Any]:
         """Cancel a subtask or deactivate a schedule by ID.
 
+        An id prefix (``_is_task_id_prefix``) is resolved first, against this agent's pending
+        or running subtasks and active schedules: one match is cancelled by its full id, more
+        than one is an error listing them, none is the "No pending subtask or active schedule"
+        error. Then the id is parsed, so a non-UUID still answers "Invalid task ID".
+
         F099: an ``internal_only`` turn (``_authority``, injected by the dispatcher) may
-        cancel only a target whose intention has ``root_id == _root_intention_id``. A
-        missing root (a damaged stamp), work from before F099 (no intention row), another
-        lineage's work, a schedule created outside this lineage and a DAG node's subtask
-        are all refused. The id is parsed first, so a non-UUID still answers "Invalid task ID".
+        cancel only a target whose intention has ``root_id == _root_intention_id``, checked
+        on the resolved id. A missing root (a damaged stamp), work from before F099 (no
+        intention row), another lineage's work, a schedule created outside this lineage
+        and a DAG node's subtask are all refused.
 
         Args:
-            task_id: UUID of the subtask or schedule to cancel
+            task_id: UUID of the subtask or schedule to cancel, or an id prefix
 
         Returns:
             MCP-compliant response confirming cancellation or error
@@ -3703,7 +3726,21 @@ def create_subtask_tools(
         try:
             from uuid import UUID as _UUID
 
-            uid = _UUID(task_id)
+            resolved = task_id
+            if _is_task_id_prefix(task_id):
+                matches = [
+                    *await heart.subtasks.find_cancellable_by_id_prefix(task_id),
+                    *await heart.schedules.find_active_by_id_prefix(task_id),
+                ]
+                if not matches:
+                    return _tool_error(f"No pending subtask or active schedule found for {task_id}.")
+                if len(matches) > 1:
+                    listed = "\n".join(f"- {m.id}: {m.task[:_TASK_PREFIX_MATCH_TEXT_CHARS]}" for m in matches)
+                    return _tool_error(
+                        f"Task id prefix {task_id} matches {len(matches)} tasks; pass the full id of one:\n{listed}"
+                    )
+                resolved = str(matches[0].id)
+            uid = _UUID(resolved)
 
             # F099 section 4.4: an internal_only turn may cancel only work its own lineage started.
             if _authority == AUTHORITY_INTERNAL and not await _in_lineage(uid, _root_intention_id):
@@ -3715,13 +3752,13 @@ def create_subtask_tools(
             # Try subtask cancel first
             cancelled = await heart.subtasks.cancel(uid)
             if cancelled:
-                return {"content": [{"type": "text", "text": f"Subtask {task_id} cancelled."}]}
+                return {"content": [{"type": "text", "text": f"Subtask {resolved} cancelled."}]}
 
             # Try schedule deactivation
             schedule = await heart.schedules.get(uid)
             if schedule:
                 await heart.schedules.deactivate(uid)
-                return {"content": [{"type": "text", "text": f"Schedule {task_id} deactivated."}]}
+                return {"content": [{"type": "text", "text": f"Schedule {resolved} deactivated."}]}
 
             # A cancel that cancelled nothing did not happen.
             return _tool_error(f"No pending subtask or active schedule found for {task_id}.")
@@ -4053,11 +4090,15 @@ _LIST_TASKS_SCHEMA: dict[str, Any] = {
 
 _CANCEL_TASK_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "description": "Cancel a subtask or deactivate a schedule by ID",
+    "description": (
+        "Cancel a pending or running subtask, or deactivate an active schedule (list_tasks shows their ids). "
+        f"An id prefix of {TASK_ID_PREFIX_MIN}+ characters works when it matches one task; when it matches more, "
+        "the error lists them. An internal-only turn must pass the full id. To stop a DAG, use dag_manage."
+    ),
     "properties": {
         "task_id": {
             "type": "string",
-            "description": "UUID of the subtask or schedule to cancel",
+            "description": f"The subtask's or schedule's id, or its first {TASK_ID_PREFIX_MIN}+ characters.",
         },
     },
     "required": ["task_id"],

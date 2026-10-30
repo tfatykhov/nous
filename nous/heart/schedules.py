@@ -1,13 +1,14 @@
 """Schedule manager -- CRUD and due-task operations for recurring/timed tasks."""
 
 import logging
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
 from croniter import croniter
-from sqlalchemy import insert, or_, select, update
+from sqlalchemy import String, cast, insert, or_, select, update
 
 from nous import undo_journal
 from nous.brain import intentions
@@ -25,6 +26,8 @@ _CLOSED_INTENTION_STATES = ("closed", "cancelled", "expired")
 CONCURRENCY_POLICIES = ("coalesce_if_active", "skip_if_active", "always_enqueue")
 CATCH_UP_POLICIES = ("skip_missed", "enqueue_missed_with_cap")
 CATCH_UP_CAP_MAX = 25
+# An id prefix a lookup accepts: only what a UUID's text can hold, so no LIKE wildcard gets through.
+_ID_PREFIX_RE = re.compile(r"[0-9a-fA-F-]{1,36}")
 
 
 class ScheduleManager:
@@ -397,6 +400,25 @@ class ScheduleManager:
         """Get a schedule by ID."""
         async with self._db.session() as session:
             return await session.get(Schedule, schedule_id)
+
+    async def find_active_by_id_prefix(self, prefix: str, limit: int = 10) -> list[Schedule]:
+        """This agent's active schedules whose id starts with ``prefix``, newest first.
+
+        Anything but hex digits and hyphens returns [] before the query, so ``%`` and ``_`` never reach
+        ``LIKE``. The prefix is lowercased: ``id::text`` is lowercase and ``LIKE`` is case-sensitive.
+        """
+        if not _ID_PREFIX_RE.fullmatch(prefix):
+            return []
+        async with self._db.session() as session:
+            result = await session.execute(
+                select(Schedule)
+                .where(Schedule.agent_id == self._agent_id)
+                .where(Schedule.active.is_(True))
+                .where(cast(Schedule.id, String).like(f"{prefix.lower()}%"))
+                .order_by(Schedule.created_at.desc())
+                .limit(limit)
+            )
+            return list(result.scalars().all())
 
     async def list_with_metadata_key(self, key: str, *, state_not: str | None = None) -> list[Schedule]:
         """This agent's schedules (active or not) whose metadata has ``key``.

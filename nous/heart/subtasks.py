@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import String, cast, func, select, text, update
 
 from nous.brain import intentions
 from nous.storage.database import Database
@@ -20,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 _PRIORITY_MAP = {"urgent": 50, "normal": 100, "low": 200}
 _MAX_PENDING = 5
+# An id prefix a lookup accepts: only what a UUID's text can hold, so no LIKE wildcard gets through.
+_ID_PREFIX_RE = re.compile(r"[0-9a-fA-F-]{1,36}")
 
 # worker_id of a subtask its caller runs itself, in the calling turn
 # (spawn_task with await_result, spawn_sync) instead of leaving it to a worker.
@@ -383,6 +386,26 @@ class SubtaskManager:
         """Get a subtask by ID."""
         async with self._db.session() as session:
             return await session.get(Subtask, subtask_id)
+
+    async def find_cancellable_by_id_prefix(self, prefix: str, limit: int = 10) -> list[Subtask]:
+        """This agent's pending or running subtasks (the ones ``cancel`` can still stop) whose id starts with
+        ``prefix``, newest first.
+
+        Anything but hex digits and hyphens returns [] before the query, so ``%`` and ``_`` never reach
+        ``LIKE``. The prefix is lowercased: ``id::text`` is lowercase and ``LIKE`` is case-sensitive.
+        """
+        if not _ID_PREFIX_RE.fullmatch(prefix):
+            return []
+        async with self._db.session() as session:
+            result = await session.execute(
+                select(Subtask)
+                .where(Subtask.agent_id == self._agent_id)
+                .where(Subtask.status.in_(("pending", "running")))
+                .where(cast(Subtask.id, String).like(f"{prefix.lower()}%"))
+                .order_by(Subtask.created_at.desc())
+                .limit(limit)
+            )
+            return list(result.scalars().all())
 
     async def get_by_spawn_sync_token(self, token: str) -> Subtask | None:
         """F062: get a subtask by its metadata-embedded spawn_sync token.

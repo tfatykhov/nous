@@ -86,7 +86,9 @@ _TERMINAL = frozenset(s for s in LEDGER_STATUSES if s != "pending")
 _WORD, _UUID, _EMAILS, _CHAT, _PATH, _SOURCE, _HASH = (
     "word", "uuid", "emails", "chat", "path", "source", "hash",
 )
-_DAG_ID = "dag_id"  # a UUID, or the short hex id `dag_manage list` prints and dag_manage accepts
+# A UUID, or a short hex id prefix: the one `dag_manage list` prints and dag_manage accepts, or the task id
+# prefix cancel_task accepts.
+_DAG_ID = "dag_id"
 _DURABLE_ARGS: dict[str, dict[str, str]] = {
     # A bash command is code: hashed like run_python's, never kept.
     "bash": {"command": _HASH},
@@ -101,7 +103,7 @@ _DURABLE_ARGS: dict[str, dict[str, str]] = {
     "spawn_task": {"frame_type": _WORD, "task": _HASH},
     "spawn_sync": {"frame_type": _WORD, "task": _HASH},
     "schedule_task": {"frame_type": _WORD, "every": _HASH, "when": _HASH, "task": _HASH},
-    "cancel_task": {"task_id": _UUID},
+    "cancel_task": {"task_id": _DAG_ID},
     "heartbeat_check_create": {"name": _HASH, "prompt": _HASH},
     "heartbeat_check_manage": {"action": _WORD, "name": _HASH},
     "dag_create": {"name": _HASH, "nodes": _HASH},
