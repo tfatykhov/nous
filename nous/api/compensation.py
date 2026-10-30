@@ -866,7 +866,9 @@ async def compensate_resolve_decisions(
 
     Only the items that changed a decision are restored: their ``written``
     was recorded in that item's own SAVEPOINT. An item whose id was not
-    found, or that failed, wrote nothing and is skipped. Each restored item
+    found, or that failed, wrote nothing and is skipped. Items naming the
+    same decision are one restore: back to the state before the FIRST of
+    them, guarded by the state the LAST one left. Each restored decision
     has the single-decision stale guard, and if any one of them was reviewed
     again since, no decision is restored: the revert is one result for the
     whole call (``CompensationResult``, ``mark_reverted``).
@@ -882,18 +884,38 @@ async def compensate_resolve_decisions(
     brain = getattr(deps, "brain", None)
     if brain is None:
         return CompensationResult(False, "brain not available")
+    # One decision named by two items: the second item's prior is the first one's write, so restoring them
+    # one by one would find the row past the first guard and refuse.
+    by_decision: dict[str, dict[str, Any]] = {}
+    for it in written:
+        try:
+            key = str(UUID(str(it["decision_id"])))
+        except ValueError:
+            key = str(it["decision_id"])
+        first = by_decision.setdefault(key, {"decision_id": it["decision_id"], "prior": it["prior"]})
+        first["written"] = it["written"]
     try:
+        restored = 0
         async with brain.db.session() as s:
-            for it in written:
-                if await _restore_decision(s, brain.agent_id, it["decision_id"], it["prior"], it["written"]) is None:
+            for it in by_decision.values():
+                outcome = await _restore_decision(s, brain.agent_id, it["decision_id"], it["prior"], it["written"])
+                if outcome is None:
                     await s.rollback()
                     return CompensationResult(
                         False,
                         f"revert refused: decision {it['decision_id']} not found or reviewed again since the "
                         "original call; no decision was restored",
                     )
+                restored += outcome == "restored"
             await s.commit()
-        return CompensationResult(True, f"restored {len(written)} decision(s) to their prior review state")
+        if not restored:
+            return CompensationResult(True, f"{len(by_decision)} decision(s) already carry their prior review state")
+        already = len(by_decision) - restored
+        return CompensationResult(
+            True,
+            f"restored {restored} decision(s) to their prior review state"
+            + (f"; {already} already carried it" if already else ""),
+        )
     except Exception as exc:
         return CompensationResult(False, f"revert failed: {exc}")
 

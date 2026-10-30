@@ -2269,6 +2269,16 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             "prediction as success/partial/failure requires an interactive turn."
         )
 
+    # A supersession without a successor is a lineage dead end: retrieval can label the row `[superseded]` but
+    # cannot point at what replaced it. Refused per item, with what to do instead (ReviewInput refuses it too,
+    # in pydantic's words).
+    _SUPERSEDED_NEEDS_SUCCESSOR = (
+        "Error: outcome='superseded' requires superseded_by — the UUID of the "
+        "decision that replaces this one. Record the replacement decision first, "
+        "then resolve this one with its ID. If nothing replaced it, use a "
+        "different outcome (e.g. 'noise' or 'failure')."
+    )
+
     async def resolve_decisions(
         resolutions: list[dict[str, Any]],
         _is_background: bool = False,
@@ -2288,12 +2298,12 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         """
         call_outcome = _outcome_var.get()
         try:
-            # codex #577 r3: NO batch-wide lineage precheck here. ReviewInput's
-            # validator (shared by every entry point) rejects a missing-lineage
-            # item inside review_many, which reports it as a per-item failure
-            # and keeps the rest of the sweep alive — the documented contract.
-            # A precheck that aborted the whole batch would discard every valid
-            # resolution alongside the one malformed item.
+            # codex #577 r3: NO batch-wide lineage precheck here. A
+            # missing-lineage item is refused per item below (ReviewInput's
+            # validator, shared by every entry point, would reject it inside
+            # review_many too), and the rest of the sweep stays alive — the
+            # documented contract. A precheck that aborted the whole batch would
+            # discard every valid resolution alongside the one malformed item.
             items = [
                 {
                     "decision_id": r.get("decision_id"),
@@ -2313,34 +2323,34 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     for capture in captures:
                         capture["persist"] = call_outcome.persist_written
                 call_outcome.review_capture = captures
-            if _is_background:
-                # Refuse disallowed outcomes per item (same contract as a
-                # not-found id) and re-merge in input order, so the sweep
-                # keeps every item it was allowed to resolve.
-                allowed = [i for i, it in enumerate(items) if it["outcome"] in NON_PREDICTION_OUTCOMES]
-                reviewed = (
-                    await brain.review_many(
-                        [items[i] for i in allowed],
-                        reviewer=_BG_REVIEWER,
-                        preserve_graded=True,
-                        captures=[captures[i] for i in allowed] if captures is not None else None,
-                    )
-                    if allowed
-                    else []
+            # Refuse per item (same contract as a not-found id) and re-merge in
+            # input order, so the batch keeps every item it was allowed to
+            # resolve: a supersession without its successor, and in a
+            # background turn an outcome other than noise/superseded.
+            refused: dict[int, str] = {}
+            for i, it in enumerate(items):
+                if _is_background and it["outcome"] not in NON_PREDICTION_OUTCOMES:
+                    refused[i] = _bg_outcome_error(it["outcome"])
+                elif it["outcome"] == "superseded" and not it["superseded_by"]:
+                    refused[i] = _SUPERSEDED_NEEDS_SUCCESSOR
+            allowed = [i for i in range(len(items)) if i not in refused]
+            reviewed = (
+                await brain.review_many(
+                    [items[i] for i in allowed],
+                    reviewer=_BG_REVIEWER if _is_background else "agent",
+                    preserve_graded=_is_background,
+                    captures=[captures[i] for i in allowed] if captures is not None else None,
                 )
-                by_index = dict(zip(allowed, reviewed))
-                results = [
-                    by_index[i]
-                    if i in by_index
-                    else {
-                        "decision_id": str(it["decision_id"]),
-                        "ok": False,
-                        "error": _bg_outcome_error(it["outcome"]),
-                    }
-                    for i, it in enumerate(items)
-                ]
-            else:
-                results = await brain.review_many(items, reviewer="agent", captures=captures)
+                if allowed
+                else []
+            )
+            by_index = dict(zip(allowed, reviewed))
+            results = [
+                by_index[i]
+                if i in by_index
+                else {"decision_id": str(it["decision_id"]), "ok": False, "error": refused[i]}
+                for i, it in enumerate(items)
+            ]
             for capture, result in zip(captures or (), results):
                 if not result["ok"]:
                     # Its SAVEPOINT rolled back (or it never ran): nothing to revert.
@@ -2348,7 +2358,17 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     capture.pop("persisted", None)
             ok = sum(1 for r in results if r["ok"])
             failed = [r for r in results if not r["ok"]]
-            text = f"Resolved {ok}/{len(results)} decisions."
+            # Each resolved item echoed by its short id, as the one-decision tool echoed it.
+            done = [
+                f"{str(it['decision_id'])[:8]} → {it['outcome']}"
+                + (f" (by {str(it['superseded_by'])[:8]})" if it["outcome"] == "superseded" else "")
+                for it, r in zip(items, results)
+                if r["ok"]
+            ]
+            if len(results) == 1 and done:
+                text = f"Resolved 1/1: {done[0]}"
+            else:
+                text = f"Resolved {ok}/{len(results)}" + (":\n" + "\n".join(f"- {d}" for d in done) if done else ".")
             if failed:
                 text += "\nFailures:\n" + "\n".join(f"- {r['decision_id']}: {r['error']}" for r in failed)
             return {"content": [{"type": "text", "text": text}], "is_error": bool(failed and ok == 0)}

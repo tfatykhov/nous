@@ -1623,6 +1623,29 @@ async def test_compensate_resolve_decisions_restores_only_the_items_that_wrote()
 
 
 @pytest.mark.asyncio
+async def test_compensate_resolve_decisions_restores_a_repeated_decision_once() -> None:
+    """Two items naming one decision: one restore, to the first item's prior, guarded by the last item's write."""
+    from nous.api.compensation import compensate_resolve_decisions
+
+    brain = _FakeBrain(rowcount=1)
+    did = str(uuid4())
+    first_prior = {"outcome": "pending", "outcome_result": None, "reviewed_at": None, "reviewer": None}
+    middle = {**_WRITTEN_DECISION, "outcome_result": "first write"}
+    snap = {
+        "items": [
+            {"decision_id": did, "prior": first_prior, "written": middle},
+            {"decision_id": did.upper(), "prior": middle, "written": _WRITTEN_DECISION},  # same id, other spelling
+        ]
+    }
+    res = await compensate_resolve_decisions(uuid4(), snap, SimpleNamespace(brain=brain))
+    assert res.success and res.message == "restored 1 decision(s) to their prior review state", res.message
+    (stmt,) = brain.session_obj.stmts
+    params = stmt.compile().params
+    assert "later reviewer" in params.values() and "first write" not in params.values()  # guarded by the last write
+    assert {c.key: v.value for c, v in stmt._values.items()}["outcome"] == "pending"  # back before the first
+
+
+@pytest.mark.asyncio
 async def test_compensate_resolve_decisions_is_all_or_nothing() -> None:
     from nous.api.compensation import compensate_resolve_decisions
 

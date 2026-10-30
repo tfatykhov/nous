@@ -169,9 +169,26 @@ class TestResolveDecision:
             outcome="noise",
             resolution_note="sweep artifact",
         )
-        assert "Resolved 1/1" in result["content"][0]["text"]
+        # the decision and its outcome are echoed, as the one-decision tool echoed them
+        assert result["content"][0]["text"] == f"Resolved 1/1: {did[:8]} → noise"
         detail = await brain.get(uuid.UUID(did))
         assert detail.outcome == "noise"
+
+    @pytest.mark.asyncio
+    async def test_a_batch_echoes_each_resolved_item_and_lists_the_failures(self, tools, brain):
+        old, new = await self._make_decision(tools, brain), await self._make_decision(tools, brain)
+        missing = str(uuid.uuid4())
+        result = await tools["resolve_decisions"](
+            resolutions=[
+                {"decision_id": old, "outcome": "superseded", "superseded_by": new, "resolution_note": "replaced"},
+                {"decision_id": missing, "outcome": "noise"},
+                {"decision_id": new, "outcome": "success", "resolution_note": "shipped"},
+            ]
+        )
+        assert result["content"][0]["text"].split("\nFailures:\n") == [
+            f"Resolved 2/3:\n- {old[:8]} → superseded (by {new[:8]})\n- {new[:8]} → success",
+            f"- {missing}: Decision {missing} not found",
+        ]
 
     @pytest.mark.asyncio
     async def test_resolve_decision_reports_review_state_from_its_own_transaction(self, tools, brain):
@@ -394,6 +411,35 @@ class TestResolveDecision:
         res = await self._revert(brain, store, entry)
         assert res.success and "2 decision" in res.message, res.message
         assert [(await brain.get(uuid.UUID(d))).outcome for d in (first, middle, last)] == ["pending"] * 3
+
+    @pytest.mark.asyncio
+    async def test_two_items_naming_one_decision_revert_once_to_its_original_state(self, tools, brain):
+        """The second item's prior is the first one's write: restored one by one, the first guard would find the
+        row past it and refuse. Collapsed by decision, it goes back to the state before the first item."""
+        from nous.api.call_outcome import _current as outcome_var
+
+        did = await self._make_decision(tools, brain)
+        store, entry, outcome = await self._snapshotted_call(brain, did, did)
+        token = outcome_var.set(outcome)
+        try:
+            result = await tools["resolve_decisions"](
+                resolutions=[
+                    {"decision_id": did, "outcome": "noise", "resolution_note": "first"},
+                    {"decision_id": did, "outcome": "failure", "resolution_note": "second"},
+                ]
+            )
+        finally:
+            outcome_var.reset(token)
+        assert "Resolved 2/2" in result["content"][0]["text"]
+        assert (await brain.get(uuid.UUID(did))).outcome == "failure"
+        items = (await store.get_by_ledger_entry(entry)).snapshot_data["items"]
+        assert items[1]["prior"] == items[0]["written"]  # what the one-by-one revert tripped on
+        res = await self._revert(brain, store, entry)
+        assert res.success and res.message.startswith("restored 1 decision"), res.message
+        detail = await brain.get(uuid.UUID(did))
+        assert (detail.outcome, detail.reviewed_at) == ("pending", None)
+        again = await self._revert(brain, store, entry)  # idempotent: a re-revert finds it already back
+        assert again.success and "already carry" in again.message, again.message
 
     @pytest.mark.asyncio
     async def test_one_stale_item_refuses_the_whole_revert(self, tools, brain):
@@ -689,7 +735,12 @@ class TestResolveDecision:
             resolution_note="replaced it",
         )
         assert result.get("is_error") is True
-        assert "superseded_by" in result["content"][0]["text"]
+        # the hand-written message, with what to do instead -- not pydantic's ValidationError text
+        assert result["content"][0]["text"] == (
+            f"Resolved 0/1.\nFailures:\n- {did}: Error: outcome='superseded' requires superseded_by — the UUID of "
+            "the decision that replaces this one. Record the replacement decision first, then resolve this one with "
+            "its ID. If nothing replaced it, use a different outcome (e.g. 'noise' or 'failure')."
+        )
         # Outcome unchanged — nothing was persisted
         detail = await brain.get(uuid.UUID(did))
         assert detail.outcome == "pending"
