@@ -439,8 +439,7 @@ Tools available to the agent during conversations:
 | Tool | Description |
 |------|-------------|
 | `record_decision` | Record a decision with confidence level and reasoning |
-| `recall_deep` | Search across all memory types (decisions, facts, episodes, procedures) |
-| `recall_recent` | Recall recent conversations and context |
+| `recall_deep` | Search across all memory types (decisions, facts, episodes, procedures); with `hours`, list recent conversations |
 | `learn_fact` | Store a new fact in semantic memory |
 | `create_censor` | Create a guardrail censor (warn/block triggers) |
 | `bash` | Execute shell commands in the workspace |
