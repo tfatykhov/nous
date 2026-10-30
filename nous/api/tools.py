@@ -3113,15 +3113,19 @@ async def _close_inline_intention(heart: Any, subtask_id: UUID, reason: str = in
 
 # The shortest task id prefix cancel_task resolves: the 8-character short ids that notices and logs print.
 TASK_ID_PREFIX_MIN = 8
-_TASK_ID_PREFIX_RE = re.compile(rf"[0-9a-fA-F]{{{TASK_ID_PREFIX_MIN}}}[0-9a-fA-F-]{{0,{35 - TASK_ID_PREFIX_MIN}}}")
+# Hex with optional hyphens, at most a UUID's 36 characters; hyphens do not count toward the minimum.
+_TASK_ID_PREFIX_RE = re.compile(r"[0-9a-fA-F-]{1,36}")
 # How many characters of each match's task text an ambiguous prefix's error shows.
 _TASK_PREFIX_MATCH_TEXT_CHARS = 60
 
 
 def _is_task_id_prefix(task_id: object) -> bool:
-    """Whether cancel_task reads ``task_id`` as an id prefix: at least ``TASK_ID_PREFIX_MIN`` hex characters
-    (then hex or hyphens), and not a whole UUID in any spelling ``uuid.UUID`` reads."""
+    """Whether cancel_task reads ``task_id`` as an id prefix: hex with optional hyphens, at most 36 characters
+    and at least ``TASK_ID_PREFIX_MIN`` hex digits, and not a whole UUID in any spelling ``uuid.UUID`` reads.
+    The stores compare it without hyphens, so ``3745ab2c1111`` and ``3745ab2c-1111`` are the same prefix."""
     if not isinstance(task_id, str) or not _TASK_ID_PREFIX_RE.fullmatch(task_id):
+        return False
+    if len(task_id.replace("-", "")) < TASK_ID_PREFIX_MIN:
         return False
     try:
         UUID(task_id)
@@ -4099,7 +4103,7 @@ _CANCEL_TASK_SCHEMA: dict[str, Any] = {
     "description": (
         "Cancel a pending or running subtask, or deactivate an active schedule (list_tasks shows their ids). "
         f"An id prefix of {TASK_ID_PREFIX_MIN}+ characters works when it matches one task; when it matches more, "
-        "the error lists them. An internal-only turn must pass the full id. To stop a DAG, use dag_manage."
+        "the error lists them. In a background continuation turn, pass the full id. To stop a DAG, use dag_manage."
     ),
     "properties": {
         "task_id": {

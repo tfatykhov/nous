@@ -57,7 +57,11 @@ def _text(result) -> str:
         ("3745AB2C", True),
         ("3745ab2c-11", True),
         ("3745ab2c1111", True),
+        ("3745ab2c-1111-4222", True),
+        ("3745ab2c111142228333", True),
         ("3745ab2", False),  # shorter than the minimum
+        ("3745-ab2", False),  # 8 characters but 7 hex digits: hyphens do not count
+        ("3745ab2c-1111-4222-8333-4444555566667", False),  # longer than any UUID
         ("3745ab2g", False),  # not hex
         ("3745ab2c%", False),  # a LIKE wildcard never reads as a prefix
         (FULL, False),  # a whole UUID
@@ -142,6 +146,9 @@ async def test_the_lineage_check_runs_on_the_resolved_id():
 def test_the_description_states_the_prefix_rule():
     assert f"{TASK_ID_PREFIX_MIN}+ characters" in _CANCEL_TASK_SCHEMA["description"]
     assert f"first {TASK_ID_PREFIX_MIN}+ characters" in _CANCEL_TASK_SCHEMA["properties"]["task_id"]["description"]
+    # In words the model can act on, not harness vocabulary.
+    assert "In a background continuation turn, pass the full id" in _CANCEL_TASK_SCHEMA["description"]
+    assert "internal-only" not in _CANCEL_TASK_SCHEMA["description"]
 
 
 # -- the durable ledger and the claim verifier --------------------------------
@@ -149,6 +156,8 @@ def test_the_description_states_the_prefix_rule():
 
 def test_the_ledger_keeps_a_prefix_instead_of_hashing_it():
     assert durable_key_args("cancel_task", {"task_id": "3745AB2C"}) == {"task_id": "3745ab2c"}
+    assert durable_key_args("cancel_task", {"task_id": "3745AB2C-1111"}) == {"task_id": "3745ab2c-1111"}
+    assert durable_key_args("cancel_task", {"task_id": "3745ab2c11114222"}) == {"task_id": "3745ab2c11114222"}
     assert durable_key_args("cancel_task", {"task_id": FULL}) == {"task_id": FULL}
     hashed = durable_key_args("cancel_task", {"task_id": "sk-ABCDEFGHIJKLMNOP"})
     assert "task_id" not in hashed and "task_id_sha256" in hashed

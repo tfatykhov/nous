@@ -8,7 +8,7 @@ from typing import Any
 from uuid import UUID
 
 from croniter import croniter
-from sqlalchemy import String, cast, insert, or_, select, update
+from sqlalchemy import String, cast, func, insert, or_, select, update
 
 from nous import undo_journal
 from nous.brain import intentions
@@ -26,8 +26,8 @@ _CLOSED_INTENTION_STATES = ("closed", "cancelled", "expired")
 CONCURRENCY_POLICIES = ("coalesce_if_active", "skip_if_active", "always_enqueue")
 CATCH_UP_POLICIES = ("skip_missed", "enqueue_missed_with_cap")
 CATCH_UP_CAP_MAX = 25
-# An id prefix a lookup accepts: only what a UUID's text can hold, so no LIKE wildcard gets through.
-_ID_PREFIX_RE = re.compile(r"[0-9a-fA-F-]{1,36}")
+# An id prefix a lookup accepts, once its hyphens are dropped: only hex digits, so no LIKE wildcard gets through.
+_HEX_PREFIX_RE = re.compile(r"[0-9a-f]{1,32}")
 
 
 class ScheduleManager:
@@ -404,17 +404,19 @@ class ScheduleManager:
     async def find_active_by_id_prefix(self, prefix: str, limit: int = 10) -> list[Schedule]:
         """This agent's active schedules whose id starts with ``prefix``, newest first.
 
-        Anything but hex digits and hyphens returns [] before the query, so ``%`` and ``_`` never reach
-        ``LIKE``. The prefix is lowercased: ``id::text`` is lowercase and ``LIKE`` is case-sensitive.
+        Hyphens do not count: the prefix and ``id::text`` are both compared without them. Anything else but
+        hex digits returns [] before the query, and the value is bound and LIKE-escaped. The prefix is
+        lowercased: ``id::text`` is lowercase and ``LIKE`` is case-sensitive.
         """
-        if not _ID_PREFIX_RE.fullmatch(prefix):
+        digits = prefix.replace("-", "").lower()
+        if not _HEX_PREFIX_RE.fullmatch(digits):
             return []
         async with self._db.session() as session:
             result = await session.execute(
                 select(Schedule)
                 .where(Schedule.agent_id == self._agent_id)
                 .where(Schedule.active.is_(True))
-                .where(cast(Schedule.id, String).like(f"{prefix.lower()}%"))
+                .where(func.replace(cast(Schedule.id, String), "-", "").startswith(digits, autoescape=True))
                 .order_by(Schedule.created_at.desc())
                 .limit(limit)
             )

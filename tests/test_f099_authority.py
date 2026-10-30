@@ -447,6 +447,25 @@ async def test_an_owner_turn_cancels_by_prefix(authority_env):
     assert await _status(env, child) == "cancelled"
 
 
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        lambda task_id: task_id.hex[:12],  # hex only, past the first hyphen of the id's text
+        lambda task_id: str(task_id)[:13],  # with the hyphen, as the id's text has it
+        lambda task_id: str(task_id)[:18].upper(),  # two hyphens, upper case
+    ],
+    ids=["hex12", "hyphenated", "upper"],
+)
+async def test_a_longer_prefix_matches_with_or_without_hyphens(authority_env, spelling):
+    """The stores compare without hyphens, so a 12-hex prefix finds the task its 13-character text names."""
+    env = await authority_env()
+    owner = ExecutionContext(kind="interactive", session_id="S1", channel="telegram:1")
+    child = await _spawn(env, owner)
+    text, is_error = await _cancel(env, spelling(child), owner)
+    assert not is_error and f"Subtask {child} cancelled." in text, text
+    assert await _status(env, child) == "cancelled"
+
+
 async def test_a_prefix_matches_only_work_a_cancel_can_still_stop(authority_env):
     env = await authority_env()
     prefix = uuid.uuid4().hex[:TASK_ID_PREFIX_MIN]
@@ -480,12 +499,13 @@ async def test_an_active_schedule_matches_a_prefix_and_an_inactive_one_does_not(
     env = await authority_env()
     owner = ExecutionContext(kind="interactive", session_id="S1")
     live = await env.heart.schedules.create(task="daily digest", schedule_type="recurring", interval_seconds=3600)
-    text, is_error = await _cancel(env, str(live.id)[:TASK_ID_PREFIX_MIN], owner)
+    text, is_error = await _cancel(env, live.id.hex[:12], owner)  # hex only, past the id's first hyphen
     assert not is_error and f"Schedule {live.id} deactivated." in text, text
     async with env.db.session() as s:
         assert (await s.execute(select(Schedule.active).where(Schedule.id == live.id))).scalar_one() is False
-    text, is_error = await _cancel(env, str(live.id)[:TASK_ID_PREFIX_MIN], owner)
-    assert is_error and "No pending subtask or active schedule" in text, text
+    for prefix in (str(live.id)[:TASK_ID_PREFIX_MIN], str(live.id)[:13]):
+        text, is_error = await _cancel(env, prefix, owner)
+        assert is_error and "No pending subtask or active schedule" in text, text
 
 
 async def test_a_continuation_cancels_its_own_lineage_work_by_prefix(authority_env):
