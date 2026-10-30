@@ -1482,6 +1482,20 @@ def heartbeat_spawn_violation(tool_name: str, tool_input: Mapping[str, Any]) -> 
     return not isinstance(action, str) or action not in allowed
 
 
+# A triage turn may not grade or close decisions either: the owner's rule, and the source of the background
+# resolve errors. Stripping the tools from its offered set alone refuses nothing under `warn`, so this is a floor.
+HEARTBEAT_RESOLVE_TOOLS: frozenset[str] = frozenset({"resolve_decision", "resolve_decisions"})
+HEARTBEAT_RESOLVE_TEXT = (
+    "Tool error: a heartbeat turn may not resolve decisions. Do not retry it in another form; note which "
+    "decision you would resolve and why in your reply, and stop."
+)
+
+
+def heartbeat_resolve_violation(tool_name: str) -> bool:
+    """Whether a heartbeat_triage call resolves a decision (``HEARTBEAT_RESOLVE_TOOLS``)."""
+    return tool_name in HEARTBEAT_RESOLVE_TOOLS
+
+
 def undoable_violation(ctx: ExecutionContext, tool_name: str, tool_input: Mapping[str, Any]) -> str | None:
     """``"not_compensable"`` when an ``undoable`` context makes a call that
     has a side effect and cannot be undone, else None.
