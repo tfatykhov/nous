@@ -147,7 +147,7 @@ def test_the_description_states_the_prefix_rule():
     assert f"{TASK_ID_PREFIX_MIN}+ characters" in _CANCEL_TASK_SCHEMA["description"]
     assert f"first {TASK_ID_PREFIX_MIN}+ characters" in _CANCEL_TASK_SCHEMA["properties"]["task_id"]["description"]
     # In words the model can act on, not harness vocabulary.
-    assert "In a background continuation turn, pass the full id" in _CANCEL_TASK_SCHEMA["description"]
+    assert "In a background turn, pass the full id (list_tasks shows it)." in _CANCEL_TASK_SCHEMA["description"]
     assert "internal-only" not in _CANCEL_TASK_SCHEMA["description"]
 
 

@@ -614,6 +614,8 @@ class AgentRunner:
                         extra_write_dirs=self._settings.f099_lineage_write_dirs,
                         workspace_dir=self._settings.workspace_dir,
                     )
+                elif strict == "foreign_cancel":
+                    text += " " + tool_policy.FOREIGN_CANCEL_HINT
                 return Refusal(text, "internal_only")
 
         # Gate criterion 1: a heartbeat triage turn may not act outward (the PR #721 merge), whatever the modes

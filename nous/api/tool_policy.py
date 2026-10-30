@@ -1024,6 +1024,37 @@ def lineage_runs_runner(command: str) -> bool:
     )
 
 
+# Who the lineage rules bind, in the words the turns themselves see: a continuation turn ("This is a continuation
+# turn") runs internal_only, and so does every task and DAG node it starts (intentions.prepare_intention narrows).
+LINEAGE_TURNS_TEXT = "In a continuation turn and the tasks it starts"
+
+
+def lineage_bash_description(*, build_commands: bool) -> str:
+    """The one sentence bash's description gives the lineage shell (``lineage_bash_allowed``), from its tables."""
+    reads = ", ".join(sorted(LINEAGE_READ_COMMANDS - {"cd", "echo", "pwd", "sleep", "true"}))
+    writes = "/".join(sorted(_FS_WRITE_ROLES))
+    builds = f", {'/'.join(sorted(LINEAGE_BUILD_PROGRAMS))} checks in a repo" if build_commands else ""
+    return (
+        f"{LINEAGE_TURNS_TEXT}, bash runs only allowlisted commands: reads ({reads}) in the workspace, "
+        f"{writes} into write_file's directories, read-only gh, claude-jobs/runner.sh (not cancel){builds}; "
+        "anything else is refused."
+    )
+
+
+def lineage_write_file_description(workspace_dir: str, *, lineage_shell: bool, extra_write_dirs: Sequence[str]) -> str:
+    """The one sentence write_file's description gives the directories ``lineage_write_dirs`` allows, by name:
+    the root's own directory, ``claude-jobs/prompts/`` with ``lineage_shell``, and each owner's directory that
+    resolves now."""
+    dirs = ["intentions/<root id>/"] + (["claude-jobs/prompts/"] if lineage_shell else [])
+    dirs += [
+        f"{d.rstrip('/')}/"
+        for d in extra_write_dirs
+        if lineage_write_dir_resolved(workspace_dir, d)[0] is not None and f"{d.rstrip('/')}/" not in dirs
+    ]
+    listed = dirs[0] if len(dirs) == 1 else f"{', '.join(dirs[:-1])} or {dirs[-1]}"
+    return f"{LINEAGE_TURNS_TEXT}, write_file writes only under {listed}."
+
+
 def lineage_bash_refusal_hint(
     *, build_commands: bool, extra_write_dirs: Sequence[str] = (), workspace_dir: str | None = None
 ) -> str:
@@ -1227,6 +1258,13 @@ def internal_only_call_violation(
         except (TypeError, ValueError):
             return "foreign_cancel"
     return None
+
+
+# Appended to a foreign_cancel refusal: the lineage check reads the target's row, so it needs the whole id.
+FOREIGN_CANCEL_HINT = (
+    "Pass the task's full id (list_tasks shows it): this turn may cancel only work its own lineage started, "
+    "and that is checked on the full id."
+)
 
 
 # Gate criterion 1 (PR #721, 2026-10-10): a heartbeat triage turn merged a PR 36 minutes after the owner parked

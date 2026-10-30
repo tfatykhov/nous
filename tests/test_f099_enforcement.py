@@ -20,6 +20,7 @@ from test_runner_authorization import _run_loop, _runner, _tool_calls_then_done_
 from test_runner_ledger import _FakeStore
 from test_runner_ledger import _runner as _ledger_runner
 
+from nous.api import tool_policy
 from nous.api.execution_context import ExecutionContext
 from nous.cognitive.ledger_store import REFUSAL_CODES
 
@@ -210,6 +211,9 @@ def test_a_cancel_task_whose_id_is_not_a_uuid_is_refused_in_every_mode(offered_m
     r, _ = _runner(OFFERED, tool_offered_set_enforcement_mode=offered_mode, tool_context_policy_mode=policy_mode)
     refusal = _auth(r, _internal(), "cancel_task", OFFERED, {"task_id": "not-a-uuid"})
     assert refusal is not None and refusal.code == "internal_only" and "(foreign_cancel)" in refusal.text
+    # The refusal says what to do: pass the full id, which list_tasks shows; the lineage rule still holds.
+    assert refusal.text.endswith(" " + tool_policy.FOREIGN_CANCEL_HINT)
+    assert "list_tasks" in tool_policy.FOREIGN_CANCEL_HINT and "lineage" in tool_policy.FOREIGN_CANCEL_HINT
     # A UUID passes the strict block; the own-lineage check is the handler's (it needs the row).
     assert _auth(r, _internal(), "cancel_task", OFFERED, {"task_id": str(OTHER)}) is None
 

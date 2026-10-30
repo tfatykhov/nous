@@ -4101,9 +4101,10 @@ _LIST_TASKS_SCHEMA: dict[str, Any] = {
 _CANCEL_TASK_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
-        "Cancel a pending or running subtask, or deactivate an active schedule (list_tasks shows their ids). "
+        "Cancel a pending or running subtask, or deactivate an active schedule. "
         f"An id prefix of {TASK_ID_PREFIX_MIN}+ characters works when it matches one task; when it matches more, "
-        "the error lists them. In a background continuation turn, pass the full id. To stop a DAG, use dag_manage."
+        "the error lists them. In a background turn, pass the full id (list_tasks shows it). To stop a DAG, use "
+        "dag_manage."
     ),
     "properties": {
         "task_id": {
