@@ -954,8 +954,9 @@ def test_a_durable_dag_cancel_keeps_the_short_id_it_was_given():
     assert not _verify("I cancelled DAG 7c7c7c7c.", [_ledger_row_evidence(row)]).verified
     # anything else that is no UUID is still hashed, not kept
     assert "dag_id" not in durable_key_args("dag_manage", {"action": "cancel", "dag_id": "nightly-sync"})
-    # only dag_manage takes a short id: cancel_task needs a UUID, so a prefix there is still hashed
-    assert "task_id" not in durable_key_args("cancel_task", {"task_id": "8f10c3ba"})
+    # cancel_task takes an id prefix too, so it keeps one the same way; free text there is still hashed
+    assert durable_key_args("cancel_task", {"task_id": "8F10C3BA"}) == {"task_id": "8f10c3ba"}
+    assert "task_id" not in durable_key_args("cancel_task", {"task_id": "nightly-sync"})
 
 
 def test_the_in_memory_ledger_keeps_the_cancelled_id():

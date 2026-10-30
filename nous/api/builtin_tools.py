@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from nous import undo_journal
+from nous.api import tool_policy
 from nous.api.call_outcome import current_outcome
 from nous.api.execution_context import BACKGROUND_BASH_TIMEOUT
 from nous.api.tools import ToolDispatcher, _tool_error
@@ -927,9 +928,16 @@ async def write_file_tool(
 # Tool schemas
 # ---------------------------------------------------------------------------
 
+# Where SmartCompress starts to cut a tool result, by default (a deployment can raise it).
+_COMPRESS_MIN_CHARS: int = Settings.model_fields["smart_compress_min_chars"].default
+
 _BASH_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "description": "Execute a shell command in the workspace directory",
+    "description": (
+        "Run a shell command in the workspace: builds, tests, git and gh, processes. Read files with read_file "
+        "and write them with write_file, not cat/head/tail/sed or heredocs. Output over "
+        f"{_COMPRESS_MIN_CHARS:,} characters may be cut; the marker names a cache_retrieve key for the rest."
+    ),
     "properties": {
         "command": {"type": "string", "description": "Shell command to execute"},
         "timeout": {
@@ -947,7 +955,13 @@ _BASH_SCHEMA: dict[str, Any] = {
 
 _READ_FILE_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "description": "Read a file from the workspace directory",
+    "description": (
+        "Read a text file in the workspace. Use it instead of cat, head, tail or sed: its output is not cut by "
+        f"SmartCompress. One call returns at most {_READ_FILE_MAX_LINES} lines or {_READ_FILE_MAX_CHARS:,} "
+        "characters; a trailer names the next offset. Files over "
+        f"{_MAX_FILE_SIZE // (1024 * 1024)} MB and paths outside the workspace are refused; a directory answers "
+        "'Not a file' (list it with bash ls)."
+    ),
     "properties": {
         "path": {"type": "string", "description": "File path (relative or absolute within workspace)"},
         "offset": {
@@ -958,12 +972,7 @@ _READ_FILE_SCHEMA: dict[str, Any] = {
         },
         "limit": {
             "type": "integer",
-            "description": (
-                f"Number of lines to read (0 = all). A page is capped at {_READ_FILE_MAX_LINES} lines / "
-                f"{_READ_FILE_MAX_CHARS:,} chars; a page that stops before the end of the file ends with a "
-                "trailer naming the next offset. A single line over the char cap is cut, with a trailer "
-                "saying so."
-            ),
+            "description": "Number of lines to read (0 = to the end, a page at a time).",
             "default": 0,
             "minimum": 0,
         },
@@ -973,10 +982,13 @@ _READ_FILE_SCHEMA: dict[str, Any] = {
 
 _WRITE_FILE_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "description": "Write content to a file in the workspace directory",
+    "description": (
+        "Create or replace a text file in the workspace (missing directories are created), instead of heredocs "
+        "or echo > in bash. The path must stay inside the workspace."
+    ),
     "properties": {
         "path": {"type": "string", "description": "File path (relative or absolute within workspace)"},
-        "content": {"type": "string", "description": "Content to write to the file"},
+        "content": {"type": "string", "description": "The file's whole new content"},
     },
     "required": ["path", "content"],
 }
@@ -1022,6 +1034,34 @@ def register_builtin_tools(dispatcher: ToolDispatcher, settings: Settings) -> No
     async def _write_file(path: str, content: str) -> dict[str, Any]:
         return await write_file_tool(path, content, _workspace_dir=workspace)
 
-    dispatcher.register("bash", _bash, _BASH_SCHEMA)
+    # Decided here, from the settings, so every frame gets the same bytes (#528): a continuation turn and the work
+    # it starts are held to the lineage rules (tool_policy), and the descriptions say so in one sentence each.
+    lineage_shell = getattr(settings, "f099_lineage_shell", False) is True
+    write_text = (
+        _WRITE_FILE_SCHEMA["description"]
+        + " "
+        + tool_policy.lineage_write_file_description(
+            workspace,
+            lineage_shell=lineage_shell,
+            extra_write_dirs=getattr(settings, "f099_lineage_write_dirs", None) or (),
+        )
+    )
+    if getattr(settings, "compensation_enabled", False) is True and (
+        getattr(settings, "compensation_auto_review_enabled", False) is True
+    ):
+        # Only where a write is snapshotted and offered on a review card: a description must not promise an undo
+        # this deployment cannot do.
+        write_text += " A write can be reverted from the action review."
+    bash_schema = _BASH_SCHEMA
+    if lineage_shell:
+        # Without the lineage shell those turns are not offered bash at all.
+        build_commands = getattr(settings, "f099_lineage_build_commands", False) is True
+        bash_schema = {
+            **_BASH_SCHEMA,
+            "description": _BASH_SCHEMA["description"]
+            + " "
+            + tool_policy.lineage_bash_description(build_commands=build_commands),
+        }
+    dispatcher.register("bash", _bash, bash_schema)
     dispatcher.register("read_file", _read_file, _READ_FILE_SCHEMA)
-    dispatcher.register("write_file", _write_file, _WRITE_FILE_SCHEMA)
+    dispatcher.register("write_file", _write_file, {**_WRITE_FILE_SCHEMA, "description": write_text})

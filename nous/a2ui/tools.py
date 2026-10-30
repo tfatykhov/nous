@@ -27,51 +27,31 @@ logger = logging.getLogger(__name__)
 _PUSH_SURFACE_SCHEMA = {
     "type": "object",
     "description": (
-        "Push a structured, interactive surface to the companion app "
-        "(A2UI). Use for things that are bad as prose and good as an "
-        "interface: escalations needing a decision, reviews of actions you "
-        "took, batch triage. The user sees it at /companion and their "
-        "button presses come back as recorded actions."
+        "Push an interactive card to the companion app, for what works better as an interface than as prose: "
+        "escalations needing a decision, reviews of actions you took, batch triage. The user's button presses "
+        "come back as recorded actions."
     ),
     "properties": {
         "template": {
             "type": "string",
             "enum": sorted(TEMPLATES),
             "description": (
-                "approval_gate: pre-execution escalation with options "
-                "(params: title, summary, risk, options=[{id,label}], "
-                "recommendation, trace_id). It records the user's choice only "
-                "as an audit row and resolves the card — nothing reads that "
-                "choice back to you and nothing resumes for you, so do not "
-                "wait on it. (With DAG approval nodes enabled, an 'approval' "
-                "node in dag_create is how work waits on a person's answer.) "
-                "action_review: post-hoc review of an action already taken "
-                "(params: title, did, why, cost, compensation={revertible,"
-                "handler,note}, trace_id). "
-                "heartbeat_findings: triage list whose buttons are FIXED "
-                "to Acknowledge/Resolve/Dismiss (params: findings=[{message,"
-                "urgency,check,fingerprint?}], title). Use it for items you "
-                "want to TRIAGE, never to ask a question — 'Acknowledge' is "
-                "not an answer to 'A or B'. Offer a CHOICE between "
-                "alternatives with approval_gate options=[{id,label}] "
-                "instead. Pass a 16-hex fingerprint from GET /heartbeat/"
-                "findings to triage an existing heartbeat finding; omit it "
-                "and the item is registered as a new tracked finding under "
-                "its own message text so its buttons work too. Never invent "
-                "a fingerprint: they are derived, not chosen, and a made-up "
-                "one is ignored. Items the finding lifecycle suppresses "
-                "(5-min startup window after a restart, already acknowledged, "
-                "flapping) are left off the card and listed under 'suppressed' "
-                "in the result. "
-                "decision_sweep: unreviewed-decision review cards, ALWAYS "
-                "self-sourced from the brain — decision rows in params are "
-                "ignored (optional: max_age_days, max_decisions, title). "
-                "memory_graph: interactive graph explorer seeded on one "
-                "node (params: node_id UUID, node_type, label; tap-to-"
-                "expand happens client-side). "
-                "dag_monitor: DAG node/status graph with retry+cancel; "
-                "params={dag_id} — nodes/edges/name/status are ALWAYS "
-                "fetched from the store, supplied values are ignored."
+                "approval_gate: an escalation with options before you act (params: title, summary, risk, "
+                "options=[{id,label}], recommendation, trace_id). It only records the user's choice and closes "
+                "the card: nothing reads the choice back to you or resumes you, so do not wait on it (to make "
+                "work wait for an answer, use an 'approval' node in dag_create, where enabled). "
+                "action_review: a review of an action already taken (params: title, did, why, cost, "
+                "compensation={revertible,handler,note}, trace_id). "
+                "heartbeat_findings: a triage list whose buttons are FIXED to Acknowledge/Resolve/Dismiss "
+                "(params: findings=[{message,urgency,check,fingerprint?}], title); never use it to ask a question "
+                "(offer a choice with approval_gate). Pass a finding's 16-hex fingerprint from GET "
+                "/heartbeat/findings to triage it, or omit it to register a new finding; never invent one. "
+                "Suppressed items (already acknowledged, flapping) are listed under 'suppressed'. "
+                "decision_sweep: cards for unreviewed decisions, always read from your own records, so decision "
+                "rows in params are ignored (optional params: max_age_days, max_decisions, title). "
+                "memory_graph: a graph explorer seeded on one node (params: node_id UUID, node_type, label). "
+                "dag_monitor: a DAG's node graph with retry and cancel (params: {dag_id}; the rest is read from "
+                "the store)."
             ),
         },
         "params": {
@@ -98,14 +78,10 @@ _PUSH_SURFACE_SCHEMA = {
 _COMPOSE_SURFACE_SCHEMA = {
     "type": "object",
     "description": (
-        "Compose an EPHEMERAL MICRO-APP for the companion (F092.1): a "
-        "read-only, navigable UI built fresh for one intent — a vacation "
-        "status app, a sailing briefing, a project ledger. It lives until "
-        "the user closes it and is rebuilt (not restored) next time. Use "
-        "push_surface's templates for recurring shapes; compose for "
-        "genuinely ad-hoc intents. Data comes from registered server-side "
-        "sources; anything you can't source is stamped model-supplied and "
-        "rendered amber."
+        "Build a one-off, read-only app in the companion for one intent. It lasts until the user closes it "
+        "and is rebuilt, not restored, next time. For "
+        "recurring shapes use push_surface's templates. Data comes from server-side sources; anything you "
+        "supply without one is marked as model-supplied."
     ),
     "properties": {
         "intent": {
@@ -147,30 +123,20 @@ _COMPOSE_SURFACE_SCHEMA = {
                         "description": (
                             "Fetcher params (e.g. {q}, {dag_id}, {days}). For "
                             '`agent_script`: {"code": "<python>", "shape": '
-                            '"records"|"series", "series_keys": [...]} — the '
-                            "script assigns its data "
-                            "to a variable named `result`, and `shape` declares "
-                            "what it produces so a later failure returns a "
-                            "value the app's existing bindings still accept "
-                            '(refresh does not re-validate). Use "series" ONLY '
-                            "when the TOP-LEVEL `result` is one series, and set "
-                            '`series_keys` to the keys your chart binds (`["v"]` '
-                            "for a Sparkline/BarChart, the LineChart's series keys "
-                            "otherwise) so a later refresh cannot silently drop one "
-                            'and leave the chart empty. Use "records" for a LIST '
-                            "— including a metric-grid list whose records each "
-                            "embed a `trend` series (to_series per record); "
-                            'declaring that list "series" turns the whole grid '
-                            "into one empty series. It may "
-                            "import and fetch anything, so an external API or "
-                            "link needs no new code and no new env var. It is "
-                            "STORED and RE-RUN on every refresh, which is what "
-                            "keeps the app live instead of a snapshot — so "
-                            "make it self-contained and deterministic, not a "
-                            "one-off. Memory reads (recall_deep, "
-                            "recall_recent, list_tasks) are in scope; "
-                            "learn_fact is disabled because it would repeat "
-                            "unattended. For a chart, return a series: "
+                            '"records"|"series", "series_keys": [...]}. The '
+                            "script sets `result`; `shape` declares what it "
+                            "produces, so a later failure still fits the app's "
+                            'bindings. Use "series" ONLY when the TOP-LEVEL '
+                            "`result` is one series, with `series_keys` the keys "
+                            'your chart binds (`["v"]` for a Sparkline/BarChart, '
+                            "the LineChart's series keys otherwise); "
+                            'use "records" for a LIST, including a metric-grid '
+                            "list whose records each embed a `trend` series. The "
+                            "script may import and fetch anything; it is stored "
+                            "and re-run on every refresh, so make it "
+                            "self-contained and deterministic. recall_deep, "
+                            "recall_recent and list_tasks are in scope; "
+                            "learn_fact is not. For a chart: "
                             "`from nous.a2ui.sources import to_series; "
                             "result = to_series(rows, 't', 'v')`."
                         ),
@@ -178,10 +144,7 @@ _COMPOSE_SURFACE_SCHEMA = {
                 },
                 "required": ["key", "source"],
             },
-            "description": (
-                "Server-side data the app should show. The server resolves "
-                "these and owns the values; app.refresh re-runs them."
-            ),
+            "description": "Server-side data the app shows; the server resolves it, and a refresh re-runs it.",
         },
         "dedup_key": {
             "type": "string",

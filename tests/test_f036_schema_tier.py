@@ -69,6 +69,10 @@ def test_section_tiers_context_safety_is_static() -> None:
     assert SECTION_TIERS["Context Safety"] == "static"
 
 
+def test_section_tiers_tools_outrank_memory_is_static() -> None:
+    assert SECTION_TIERS["Tools Outrank Memory"] == "static"
+
+
 def test_section_tiers_user_profile_is_semi_stable() -> None:
     assert SECTION_TIERS["User Profile"] == "semi_stable"
 

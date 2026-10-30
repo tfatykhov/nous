@@ -424,6 +424,110 @@ async def test_an_owner_turn_still_cancels_any_task(authority_env):  # PIN
     assert await _status(env, foreign) == "cancelled"
 
 
+# cancel_task id prefixes, through the real dispatcher and stores (the handler's rules: test_cancel_task_prefix.py)
+
+from nous.api.tools import TASK_ID_PREFIX_MIN  # noqa: E402
+
+
+async def _insert_subtasks(env, prefix: str, statuses: tuple[str, ...]) -> list[uuid.UUID]:
+    ids = [uuid.UUID(prefix + uuid.uuid4().hex[len(prefix) :]) for _ in statuses]
+    async with env.db.session() as s:
+        for task_id, status in zip(ids, statuses, strict=True):
+            s.add(Subtask(id=task_id, agent_id=env.agent, task=f"work {status}", priority=100, status=status))
+        await s.commit()
+    return ids
+
+
+async def test_an_owner_turn_cancels_by_prefix(authority_env):
+    env = await authority_env()
+    owner = ExecutionContext(kind="interactive", session_id="S1", channel="telegram:1")
+    child = await _spawn(env, owner)
+    text, is_error = await _cancel(env, str(child)[:TASK_ID_PREFIX_MIN], owner)
+    assert not is_error and f"Subtask {child} cancelled." in text, text
+    assert await _status(env, child) == "cancelled"
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        lambda task_id: task_id.hex[:12],  # hex only, past the first hyphen of the id's text
+        lambda task_id: str(task_id)[:13],  # with the hyphen, as the id's text has it
+        lambda task_id: str(task_id)[:18].upper(),  # two hyphens, upper case
+    ],
+    ids=["hex12", "hyphenated", "upper"],
+)
+async def test_a_longer_prefix_matches_with_or_without_hyphens(authority_env, spelling):
+    """The stores compare without hyphens, so a 12-hex prefix finds the task its 13-character text names."""
+    env = await authority_env()
+    owner = ExecutionContext(kind="interactive", session_id="S1", channel="telegram:1")
+    child = await _spawn(env, owner)
+    text, is_error = await _cancel(env, spelling(child), owner)
+    assert not is_error and f"Subtask {child} cancelled." in text, text
+    assert await _status(env, child) == "cancelled"
+
+
+async def test_a_prefix_matches_only_work_a_cancel_can_still_stop(authority_env):
+    env = await authority_env()
+    prefix = uuid.uuid4().hex[:TASK_ID_PREFIX_MIN]
+    done, running = await _insert_subtasks(env, prefix, ("completed", "running"))
+    owner = ExecutionContext(kind="interactive", session_id="S1")
+    text, is_error = await _cancel(env, prefix.upper(), owner)
+    assert not is_error and f"Subtask {running} cancelled." in text, text
+    assert await _status(env, done) == "completed"
+
+
+async def test_a_prefix_shared_by_two_live_tasks_is_refused(authority_env):
+    env = await authority_env()
+    prefix = uuid.uuid4().hex[:TASK_ID_PREFIX_MIN]
+    first, second = await _insert_subtasks(env, prefix, ("pending", "pending"))
+    text, is_error = await _cancel(env, prefix, ExecutionContext(kind="interactive", session_id="S1"))
+    assert is_error and "matches 2 tasks" in text and str(first) in text and str(second) in text, text
+    assert await _status(env, first) == "pending" and await _status(env, second) == "pending"
+
+
+async def test_another_agents_task_never_matches_a_prefix(authority_env):
+    env, other = await authority_env(), await authority_env()
+    prefix = uuid.uuid4().hex[:TASK_ID_PREFIX_MIN]
+    (theirs,) = await _insert_subtasks(other, prefix, ("pending",))
+    text, is_error = await _cancel(env, prefix, ExecutionContext(kind="interactive", session_id="S1"))
+    assert is_error and "No pending subtask or active schedule" in text, text
+    assert await _status(other, theirs) == "pending"
+
+
+@pytest.mark.postgres_only  # SQLite's stand-in for heart.schedules.id does not cast to the UUID's text
+async def test_an_active_schedule_matches_a_prefix_and_an_inactive_one_does_not(authority_env):
+    env = await authority_env()
+    owner = ExecutionContext(kind="interactive", session_id="S1")
+    live = await env.heart.schedules.create(task="daily digest", schedule_type="recurring", interval_seconds=3600)
+    text, is_error = await _cancel(env, live.id.hex[:12], owner)  # hex only, past the id's first hyphen
+    assert not is_error and f"Schedule {live.id} deactivated." in text, text
+    async with env.db.session() as s:
+        assert (await s.execute(select(Schedule.active).where(Schedule.id == live.id))).scalar_one() is False
+    for prefix in (str(live.id)[:TASK_ID_PREFIX_MIN], str(live.id)[:13]):
+        text, is_error = await _cancel(env, prefix, owner)
+        assert is_error and "No pending subtask or active schedule" in text, text
+
+
+async def test_a_continuation_cancels_its_own_lineage_work_by_prefix(authority_env):
+    """The handler resolves the prefix, then runs the lineage check on the full id. (The runner's floor refuses
+    an internal_only call whose task_id is no whole UUID before this handler runs: test_f099_enforcement.py.)"""
+    env = await authority_env()
+    root = await _root(env)
+    cont = _cont(root)
+    child = await _spawn(env, cont)
+    text, is_error = await _cancel(env, str(child)[:TASK_ID_PREFIX_MIN], cont)
+    assert not is_error and "cancelled" in text, text
+    assert await _status(env, child) == "cancelled"
+
+
+async def test_a_continuation_may_not_cancel_foreign_work_by_prefix(authority_env):
+    env = await authority_env()
+    foreign = await _spawn(env, ExecutionContext(kind="interactive", session_id="S1", channel="telegram:1"))
+    text, is_error = await _cancel(env, str(foreign)[:TASK_ID_PREFIX_MIN], _cont(await _root(env)))
+    assert is_error and "is not part of this lineage" in text, text
+    assert await _status(env, foreign) == "pending"
+
+
 async def test_a_cancel_task_dispatch_from_an_owner_turn_injects_nothing():  # PIN
     d, seen = _recording_dispatcher({"cancel_task": False})
     owner = ExecutionContext(kind="interactive", session_id="S1")

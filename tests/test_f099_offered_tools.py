@@ -32,6 +32,7 @@ MODES = ("off", "warn", "enforce")
 SPAWN = frozenset({"spawn_task", "dag_create"})
 HEARTBEAT_TRIAGE_UNOFFERED = frozenset(
     {"spawn_task", "spawn_sync", "schedule_task", "heartbeat_check_create", "dag_create"}
+    | {"resolve_decision", "resolve_decisions"}
 )
 CHECK_DECLARED = frozenset(
     {
@@ -120,7 +121,7 @@ def test_owner_contexts_are_offered_exactly_what_they_were_before_f099():  # PIN
             }
             got = r._offered_tools(ctx, frame_id, **kwargs)
             want = _legacy_offered(d, frame_id, **kwargs)
-            if kind == "heartbeat_triage":  # Codex P1 on PR #773: a triage turn is not offered the spawn tools
+            if kind == "heartbeat_triage":  # Codex P1 on PR #773: no spawn tools in triage, nor the resolve tools
                 want = [t for t in want if t["name"] not in HEARTBEAT_TRIAGE_UNOFFERED]
             assert json.dumps(got) == json.dumps(want), (kind, frame_id, kwargs)
             checked += 1

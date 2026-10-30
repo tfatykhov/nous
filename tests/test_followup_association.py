@@ -103,6 +103,22 @@ async def test_recall_before_clarify_section_present():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("recall_before_clarify", [True, False])
+async def test_tools_outrank_memory_is_always_in_the_static_tier(recall_before_clarify):
+    """The tools-outrank-memory rule is fixed text with no flag, built like Recall Before Clarifying."""
+    from nous.cognitive.context import TOOLS_OUTRANK_MEMORY_TEXT
+
+    engine = _make_context_engine(Settings(recall_before_clarify_prompt=recall_before_clarify))
+    result = await engine.build(
+        agent_id="test", session_id="test-session", input_text="hello", frame=_conv_frame()
+    )
+    (section,) = [s for s in result.sections if s.label == "Tools Outrank Memory"]
+    assert section.tier == "static" and section.content == TOOLS_OUTRANK_MEMORY_TEXT
+    assert f"## Tools Outrank Memory\n\n{TOOLS_OUTRANK_MEMORY_TEXT}" in result.sections_by_tier["static"]
+    assert "follow the tool's description and its error message" in TOOLS_OUTRANK_MEMORY_TEXT
+
+
+@pytest.mark.asyncio
 async def test_recall_before_clarify_absent_when_off():
     """C2: section is NOT injected when recall_before_clarify_prompt=False."""
     s = Settings(recall_before_clarify_prompt=False)

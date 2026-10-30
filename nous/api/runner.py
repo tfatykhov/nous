@@ -477,7 +477,7 @@ class AgentRunner:
         extra_tools: dict[str, tuple[dict, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         """Exactly the tool definitions a turn is offered, in this order: frame tools (D5),
-        the subtask exclusion (012.2), the heartbeat_triage spawn exclusion, ``tool_filter`` (F034.5),
+        the subtask exclusion (012.2), the heartbeat_triage spawn and resolve exclusion, ``tool_filter`` (F034.5),
         the F078 refuse denylist, F099's ``internal_only`` narrowing, then the per-call ``extra_tools`` schemas (F061).
 
         Both loops call this, so there is one definition of the offered set. The
@@ -491,7 +491,12 @@ class AgentRunner:
             tools = [t for t in tools if t["name"] not in _SUBTASK_EXCLUDED_TOOLS]
         if ctx.kind == "heartbeat_triage":
             # Codex P1 on PR #773: a triage turn is local-only; _authorize_tool_call refuses the spawn tools too.
-            tools = [t for t in tools if not tool_policy.is_spawn_tool(t["name"])]
+            # It may not resolve decisions either (the same floor refuses those).
+            tools = [
+                t
+                for t in tools
+                if not tool_policy.is_spawn_tool(t["name"]) and not tool_policy.heartbeat_resolve_violation(t["name"])
+            ]
         if tool_filter is not None:
             tools = [t for t in tools if t["name"] in tool_filter]
         if refuse_active and tools:
@@ -609,6 +614,8 @@ class AgentRunner:
                         extra_write_dirs=self._settings.f099_lineage_write_dirs,
                         workspace_dir=self._settings.workspace_dir,
                     )
+                elif strict == "foreign_cancel":
+                    text += " " + tool_policy.FOREIGN_CANCEL_HINT
                 return Refusal(text, "internal_only")
 
         # Gate criterion 1: a heartbeat triage turn may not act outward (the PR #721 merge), whatever the modes
@@ -641,6 +648,20 @@ class AgentRunner:
                 session_id=session_id,
             )
             return Refusal(tool_policy.HEARTBEAT_SPAWN_TEXT, "context_policy")
+        # Nor may it resolve decisions: stripping the tools from its offered set alone refuses nothing under `warn`.
+        if ctx.kind == "heartbeat_triage" and tool_policy.heartbeat_resolve_violation(tool_name):
+            logger.warning("Harness: refused %r in a heartbeat_triage turn (session=%s)", tool_name, session_id)
+            self._log_f026_decision(
+                "harness_context_policy_violation",
+                {
+                    "tool_name": tool_name,
+                    "context_kind": ctx.kind,
+                    "violation": "heartbeat_resolve",
+                    "mode": "enforce",
+                },
+                session_id=session_id,
+            )
+            return Refusal(tool_policy.HEARTBEAT_RESOLVE_TEXT, "context_policy")
 
         offered_mode = self._settings.tool_offered_set_enforcement_mode
         if offered_mode != "off" and tool_name not in offered_names:
@@ -3903,8 +3924,10 @@ Rules:
         elif frame_id == "conversation":
             return (
                 "## Tool Instructions\n\n"
-                "You are in a CONVERSATION frame. Use `web_search` and `web_fetch` "
-                "to find current information when needed."
+                "You are in a CONVERSATION frame. Use `recall_deep` for anything from "
+                "earlier sessions. When the user states a durable fact (about them, "
+                "their preferences or a standing rule), store it with `learn_fact`. "
+                "Use `web_search` and `web_fetch` to find current information when needed."
             )
 
         return ""

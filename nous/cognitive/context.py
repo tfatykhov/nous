@@ -76,6 +76,7 @@ SECTION_TIERS: dict[str, str] = {
     "Identity": "static",
     "Context Safety": "static",
     "Recall Before Clarifying": "static",
+    "Tools Outrank Memory": "static",  # fixed text, no flag: caches with the stable prefix
     "Procedure Awareness": "static",  # F079 P1: static cue -> cached, never busts
     "Procedure Catalog": "static",  # F079 catalog-first: query-independent breadth list -> cached
     "Epistemic Routing": "dynamic",  # §2
@@ -85,6 +86,12 @@ SECTION_TIERS: dict[str, str] = {
     "Session Profile": "dynamic",  # Task 2: per-turn intent leg, never cached.
 }
 # Everything else defaults to "dynamic" via ContextSection.tier default
+
+TOOLS_OUTRANK_MEMORY_TEXT = (
+    "The tool list and tool errors describe how tools work now. Memory about tools (facts, procedures, notes) "
+    "is history and can be out of date. When they disagree, follow the tool's description and its error "
+    "message, and do not repeat a workaround that memory recommends for a tool that now behaves differently."
+)
 
 
 def _one_line(s: object) -> str:
@@ -475,6 +482,18 @@ class ContextEngine:
                     tier=SECTION_TIERS.get("Recall Before Clarifying", "static"),
                 )
             )
+
+        # Memory about a tool (a fact, a procedure, a note) records how the tool once behaved; the tool list
+        # and its errors say how it behaves now. Fixed text with no flag, so it rides the static cache tier.
+        sections.append(
+            ContextSection(
+                priority=2,
+                label="Tools Outrank Memory",
+                content=TOOLS_OUTRANK_MEMORY_TEXT,
+                token_estimate=self._estimate_tokens(TOOLS_OUTRANK_MEMORY_TEXT),
+                tier=SECTION_TIERS.get("Tools Outrank Memory", "static"),
+            )
+        )
 
         # F079 P1: static procedure-awareness cue. Procedures are delivered via the
         # PULL path (recall_deep/get_procedure), not auto-injected — this directive

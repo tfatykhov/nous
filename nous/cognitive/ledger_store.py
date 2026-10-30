@@ -86,7 +86,9 @@ _TERMINAL = frozenset(s for s in LEDGER_STATUSES if s != "pending")
 _WORD, _UUID, _EMAILS, _CHAT, _PATH, _SOURCE, _HASH = (
     "word", "uuid", "emails", "chat", "path", "source", "hash",
 )
-_DAG_ID = "dag_id"  # a UUID, or the short hex id `dag_manage list` prints and dag_manage accepts
+# A UUID, or a short hex id prefix: the one `dag_manage list` prints and dag_manage accepts, or the task id
+# prefix cancel_task accepts.
+_DAG_ID = "dag_id"
 _DURABLE_ARGS: dict[str, dict[str, str]] = {
     # A bash command is code: hashed like run_python's, never kept.
     "bash": {"command": _HASH},
@@ -101,7 +103,7 @@ _DURABLE_ARGS: dict[str, dict[str, str]] = {
     "spawn_task": {"frame_type": _WORD, "task": _HASH},
     "spawn_sync": {"frame_type": _WORD, "task": _HASH},
     "schedule_task": {"frame_type": _WORD, "every": _HASH, "when": _HASH, "task": _HASH},
-    "cancel_task": {"task_id": _UUID},
+    "cancel_task": {"task_id": _DAG_ID},
     "heartbeat_check_create": {"name": _HASH, "prompt": _HASH},
     "heartbeat_check_manage": {"action": _WORD, "name": _HASH},
     "dag_create": {"name": _HASH, "nodes": _HASH},
@@ -120,7 +122,10 @@ _WORD_SHAPE = re.compile(r"[a-z][a-z_]{0,31}")
 _MAX_ARG_NAMES = 16
 _EMAIL_SHAPE = re.compile(r"[^@\s,;<>\"']+@[^@\s,;<>\"']+\.[A-Za-z]{2,}")
 _CHAT_SHAPE = re.compile(r"-?\d{1,20}")
-_ID_PREFIX_SHAPE = re.compile(r"[0-9a-fA-F]{6,12}")
+# An id prefix as dag_manage and cancel_task take it: hex with optional hyphens, at most a UUID's 36 characters,
+# with at least _ID_PREFIX_MIN_HEX hex digits.
+_ID_PREFIX_SHAPE = re.compile(r"[0-9a-fA-F-]{1,36}")
+_ID_PREFIX_MIN_HEX = 6
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -142,13 +147,14 @@ def _shaped(kind: str, value: Any) -> str | None:
     text = str(value)
     if kind == _WORD:
         return text if _WORD_SHAPE.fullmatch(text) else None
-    if kind == _DAG_ID and _ID_PREFIX_SHAPE.fullmatch(text):
-        return text.lower()
     if kind in (_UUID, _DAG_ID):
         try:
             return str(UUID(text))
         except ValueError:
-            return None
+            pass
+        if kind == _DAG_ID and _ID_PREFIX_SHAPE.fullmatch(text) and len(text.replace("-", "")) >= _ID_PREFIX_MIN_HEX:
+            return text.lower()
+        return None
     if kind == _CHAT:
         return text if _CHAT_SHAPE.fullmatch(text) else None
     if kind == _PATH:

@@ -47,11 +47,15 @@ def test_run_python_stores_a_hash_never_the_code():
 @pytest.mark.parametrize(
     ("dag_id", "kept"),
     [
-        ("5E6F7A", "5e6f7a"),  # the short id dag_manage list prints: 6 to 12 hex
+        ("5E6F7A", "5e6f7a"),  # an id prefix: 6 or more hex digits, hyphens allowed, up to 36 characters
         ("5e6f7a8b9c0d", "5e6f7a8b9c0d"),
         ("5e6f7", None),  # 5: too short to be one
-        ("5e6f7a8b9c0d1", None),  # 13: no short id, and no UUID
+        ("5e6f7a8b9c0d1", "5e6f7a8b9c0d1"),  # a longer hex-only prefix, as cancel_task takes it
+        ("5E6F7A8B-1111", "5e6f7a8b-1111"),  # a hyphenated prefix
+        ("5e6f7-", None),  # hyphens do not count toward the 6
+        ("5e6f7a8b-1111-4222-8333-4444555566667", None),  # 37: longer than any UUID
         ("5e6f7a8b-1111-4222-8333-444455556666", "5e6f7a8b-1111-4222-8333-444455556666"),
+        ("5e6f7a8b111142228333444455556666", "5e6f7a8b-1111-4222-8333-444455556666"),  # a UUID, canonical
     ],
 )
 def test_dag_manage_keeps_only_a_short_id_or_a_uuid(dag_id, kept):
