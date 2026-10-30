@@ -57,7 +57,8 @@ CHANGED_TOOLS: Mapping[str, ToolAlias] = MappingProxyType(
             "recall_deep",
             "recall_recent is now recall_deep(hours=N): pass hours to list recent episodes.",
             _recall_recent_args,
-            "recall_recent → recall_deep(hours=…)",
+            # A memory may mean the run_python helper of the same name, which did not change.
+            "recall_recent (tool) → recall_deep(hours=…), while run_python's recall_recent() helper is unchanged",
         ),
         "resolve_decision": ToolAlias(
             "resolve_decisions",

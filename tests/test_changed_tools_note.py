@@ -15,7 +15,10 @@ from nous.api.tools import create_nous_tools
 from nous.cognitive.context import RECALLED_MEMORY_SECTIONS, SECTION_TIERS, ContextEngine
 from nous.cognitive.schemas import ContextSection
 
-NOTE_RECENT = "Note: some memories name tools that changed: recall_recent → recall_deep(hours=…)."
+NOTE_RECENT = (
+    "Note: some memories name tools that changed: recall_recent (tool) → recall_deep(hours=…), "
+    "while run_python's recall_recent() helper is unchanged."
+)
 
 
 def _section(label: str, content: str, tier: str = "dynamic") -> ContextSection:

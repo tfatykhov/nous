@@ -489,3 +489,34 @@ async def test_a_runner_without_a_dispatcher_does_not_offer_propose_action(runne
     await record(env, root)
     await _cont(env, dispatcher=False).run_arrival(root.id)
     assert "propose_action" not in {tool["name"] for tool in env.model.calls[0]["tools"]}
+
+
+@pytest.mark.postgres_only
+async def test_a_proposal_under_an_old_tool_name_is_staged_as_its_target_and_logged(runner_env):  # noqa: F811
+    """nous/tool_names.py: the owner approves the call that would run, and the alias use is counted like a call's."""
+    from nous.tool_names import CHANGED_TOOLS
+
+    item = {"decision_id": str(uuid.uuid4()), "outcome": "noise", "resolution_note": "tick artifact"}
+    env = await runner_env(
+        [use("propose_action", tool="resolve_decision", arguments=dict(item), rationale="Close it.")], [_ask()]
+    )
+
+    async def resolve_decisions(**kwargs):
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+    schema = {"type": "object", "properties": {"resolutions": {"type": "array"}}, "required": ["resolutions"]}
+    env.dispatcher.register("resolve_decisions", resolve_decisions, schema)
+    change = CHANGED_TOOLS["resolve_decision"]
+    env.dispatcher.register_alias("resolve_decision", change.target, change.translate, change.note)
+    events: list = []
+    env.runner._log_f026_decision = lambda kind, data, session_id: events.append((kind, data))
+    root = await make_root(env)
+    await record(env, root)
+    await _cont(env).run_arrival(root.id)
+    async with env.db.session() as s:
+        (row,) = (await s.execute(select(IntentionProposal).where(IntentionProposal.agent_id == env.agent))).scalars()
+    assert (row.tool, row.arguments) == ("resolve_decisions", {"resolutions": [item]})
+    assert (
+        "tool_alias_used",
+        {"alias": "resolve_decision", "target": "resolve_decisions", "context_kind": "continuation"},
+    ) in events

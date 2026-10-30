@@ -117,7 +117,8 @@ async def test_a_listing_that_names_a_changed_tool_ends_with_the_note():
     brain, heart = _env([_episode("Used recall_recent to catch up")])
     result = await create_nous_tools(brain, heart, settings=_settings())["recall_deep"](hours=48)
     assert _text(result).splitlines()[-1] == (
-        "Note: some memories name tools that changed: recall_recent → recall_deep(hours=…)."
+        "Note: some memories name tools that changed: recall_recent (tool) → recall_deep(hours=…), "
+        "while run_python's recall_recent() helper is unchanged."
     )
     brain, heart = _env([_episode("Plain day")])
     assert "Note:" not in _text(await create_nous_tools(brain, heart, settings=_settings())["recall_deep"](hours=48))

@@ -75,7 +75,10 @@ def test_the_recall_time_note_lists_only_the_names_present():
     assert changed_tools_note("use recall_deep and resolve_decisions") is None
     assert changed_tools_note("") is None
     note = changed_tools_note("Always call recall_recent first.")
-    assert note == "Note: some memories name tools that changed: recall_recent → recall_deep(hours=…)."
+    assert (
+        note == "Note: some memories name tools that changed: recall_recent (tool) → recall_deep(hours=…), "
+        "while run_python's recall_recent() helper is unchanged."
+    )
     both = changed_tools_note("recall_hubs, then resolve_decision")
     assert "resolve_decision → resolve_decisions" in both and "recall_hubs" in both and "recall_recent" not in both
     assert changed_tools_note("my_recall_recent_helper") is None  # a whole word only
@@ -389,13 +392,18 @@ async def test_a_proposal_under_an_old_name_is_staged_as_its_target():
         ),
         dispatcher=_dispatcher(),
         stage=stage,
+        on_alias=lambda alias, target: used.append((alias, target)),
     )
+    used: list = []
     call = {"decision_id": DECISION, "outcome": "noise", "resolution_note": "tick"}
     text, is_error = await executor(tool="resolve_decision", arguments=call, rationale="close it")
     assert not is_error, text
     assert staged == [("resolve_decisions", {"resolutions": [call]})]
     text, is_error = await executor(tool="recall_hubs", arguments={}, rationale="r")
     assert is_error and HUBS_MESSAGE in text
+    assert used == [("resolve_decision", "resolve_decisions"), ("recall_hubs", None)]  # counted like a call's
+    await executor(tool="resolve_decisions", arguments={"resolutions": [call]}, rationale="r")
+    assert len(used) == 2  # a current name is not an alias use
 
 
 def test_the_memory_tools_offer_three_fewer_names():

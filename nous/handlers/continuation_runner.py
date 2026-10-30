@@ -266,6 +266,7 @@ def make_propose_action_executor(
     build_commands: bool = False,
     workspace_dir: str = "",
     extra_write_dirs: Sequence[str] = (),
+    on_alias: Callable[[str, str | None], None] | None = None,
 ) -> Callable[..., Awaitable[tuple[str, bool]]]:
     """The executor of ``propose_action`` for one turn (the ``extra_tools`` shape: ``(text, is_error)``).
 
@@ -277,7 +278,8 @@ def make_propose_action_executor(
     allowlist refuses (``tool_policy.lineage_bash_allowed``, with ``build_commands`` and ``extra_write_dirs``) is
     still a proposal. The call must satisfy the tool's schema, and no argument may start with an underscore. A
     refusal is an error text the model can act on; a non-terminal success returns to the model, which then ends the
-    turn with ``ask``."""
+    turn with ``ask``. An old tool name (nous/tool_names.py) is staged as the call it becomes, and ``on_alias(old,
+    target)`` records the use, as the runner does for a call."""
     probe = dataclasses.replace(ctx, spawn_blocked=False)
 
     async def propose_action(**kwargs: Any) -> tuple[str, bool]:
@@ -294,6 +296,8 @@ def make_propose_action_executor(
         alias = dispatcher.alias_for(tool)
         if alias is not None:
             # An old tool name is staged as the call it becomes, so the owner approves exactly what runs.
+            if on_alias is not None:
+                on_alias(tool, alias.target)
             if alias.target is None:
                 return f"Error: {alias.note}", True
             tool, arguments = alias.target, alias.translate(arguments)
@@ -1256,6 +1260,7 @@ class ContinuationRunner:
                     build_commands=settings.f099_lineage_build_commands,
                     workspace_dir=settings.workspace_dir,
                     extra_write_dirs=settings.f099_lineage_write_dirs,
+                    on_alias=lambda alias, target: self._runner.log_tool_alias_used(context, alias, target, session_id),
                 ),
             )
         try:

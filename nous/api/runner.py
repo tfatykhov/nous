@@ -460,6 +460,17 @@ class AgentRunner:
             # Persistence is best-effort — never let it break a turn.
             logger.debug("F026 persistence failed (suppressed)", exc_info=True)
 
+    def log_tool_alias_used(
+        self, ctx: ExecutionContext, alias: str, target: str | None, session_id: str | None
+    ) -> None:
+        """One ``tool_alias_used`` event (the F026 event path): the model named a tool by an old name. The
+        aliases are to be removed once these stop (docs/reference/agent-tools.md, "Old tool names")."""
+        self._log_f026_decision(
+            "tool_alias_used",
+            {"alias": alias, "target": target, "context_kind": ctx.kind},
+            session_id=session_id,
+        )
+
     def _resolve_alias(
         self, ctx: ExecutionContext, tool_name: str, tool_input: dict, session_id: str | None
     ) -> tuple[str, dict, str | None, str | None]:
@@ -474,11 +485,7 @@ class AgentRunner:
         alias = self._dispatcher.alias_for(tool_name)
         if alias is None:
             return tool_name, tool_input, None, None
-        self._log_f026_decision(
-            "tool_alias_used",
-            {"alias": tool_name, "target": alias.target, "context_kind": ctx.kind},
-            session_id=session_id,
-        )
+        self.log_tool_alias_used(ctx, tool_name, alias.target, session_id)
         if alias.target is None:
             return tool_name, tool_input, None, alias.note
         return alias.target, alias.translate(tool_input), alias.note, None
