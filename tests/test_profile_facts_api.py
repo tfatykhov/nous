@@ -134,6 +134,17 @@ async def _insert_fact_raw(db, agent_id, content, category, subject):
     return fid
 
 
+async def _assert_deactivated_by_user(db, fact_id):
+    """Migration 094: an owner edit or delete records ``user`` on the old row."""
+    from nous.storage.models import Fact
+
+    async with db.session() as session:
+        row = await session.get(Fact, fact_id)
+        assert row.active is False
+        assert row.deactivation_reason == "user"
+        assert row.deactivated_at is not None
+
+
 # ---------------------------------------------------------------------------
 # GET /profile/facts (Task 1)
 # ---------------------------------------------------------------------------
@@ -192,6 +203,7 @@ class TestFactEditEndpoints:
         assert new["category"] == "preference"      # inherited from target (no body category)
         assert abs(new["confidence"] - 0.8) < 1e-6  # preserved, NOT clobbered to 1.0
         assert str(old.id) not in by_id             # old is inactive
+        await _assert_deactivated_by_user(db, old.id)
 
     @pytest.mark.asyncio
     async def test_put_validation_and_scope(self, client, heart, db):
@@ -238,6 +250,7 @@ class TestFactEditEndpoints:
         assert resp.status_code == 200
         listing = (await client.get("/profile/facts")).json()
         assert str(f.id) not in [x["id"] for x in listing["facts"]]
+        await _assert_deactivated_by_user(db, f.id)
 
 
 class TestMergedIntoExisting:

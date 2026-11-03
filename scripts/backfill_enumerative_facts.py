@@ -6,8 +6,10 @@ write; --agent-id scoping; idempotent (Leg-2 native-cosine dedup at 0.95 makes
 re-runs safe; already-extracted episodes converge to dedup-skips).
 
 ROLLBACK: all facts written by this script have source='enumerative_extractor'.
-    UPDATE heart.facts SET active=false
-    WHERE agent_id=:a AND source='enumerative_extractor' AND created_at >= :watermark;
+    UPDATE heart.facts SET active=false,
+        deactivated_at=now(), deactivation_reason='rollback'
+    WHERE agent_id=:a AND source='enumerative_extractor' AND created_at >= :watermark
+      AND active;
 (never hard-delete; reactivation is the inverse.)
 """
 # argparse: --agent-id (required), --dry-run, --max-episodes (default 0 = all),

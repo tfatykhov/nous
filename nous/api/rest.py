@@ -663,7 +663,7 @@ def create_app(
                     tags=list(target.tags or []),
                 )
                 try:
-                    new_fact = await heart.supersede_fact(fact_id, new_input, session=session)
+                    new_fact = await heart.supersede_fact(fact_id, new_input, session=session, reason="user")
                 except ValueError:
                     return JSONResponse({"error": "fact not found"}, status_code=404)
                 # codex #574 r5: on a dedup-merge, supersede returns a
@@ -722,7 +722,7 @@ def create_app(
                 if target.category not in TIER1_FACT_CATEGORIES:
                     return JSONResponse({"error": "not_profile_fact"}, status_code=409)
                 try:
-                    await heart.deactivate_fact(fact_id, session=session)
+                    await heart.deactivate_fact(fact_id, session=session, reason="user")
                 except ValueError:
                     return JSONResponse({"error": "fact not found"}, status_code=404)
                 await session.commit()

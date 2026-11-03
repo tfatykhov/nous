@@ -16,7 +16,8 @@ unaffected.
 ROLLBACK SQL
     -- Undo all supersessions written by this backfill (replace :a and :w):
     UPDATE heart.facts
-       SET superseded_by = NULL, active = true
+       SET superseded_by = NULL, active = true,
+           deactivated_at = NULL, deactivation_reason = NULL
      WHERE agent_id = :a
        AND superseded_by IS NOT NULL
        AND updated_at >= :w;

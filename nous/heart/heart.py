@@ -30,7 +30,7 @@ from nous.events import Event, EventBus
 from nous.heart.admission import AdmissionConfig, AdmissionController
 from nous.heart.censors import CensorManager
 from nous.heart.episodes import EpisodeManager
-from nous.heart.facts import FactManager
+from nous.heart.facts import FactDeactivationReason, FactManager
 from nous.heart.job_runs import JobRunReader
 from nous.heart.procedures import ProcedureManager
 from nous.heart.reranker import CROSS_ENCODER_AVAILABLE, cross_encoder_rerank
@@ -363,9 +363,11 @@ class Heart:
         old_id: UUID,
         new_fact: FactInput,
         session: AsyncSession | None = None,
+        *,
+        reason: FactDeactivationReason = "superseded",
     ) -> FactDetail:
-        """Replace a fact with a newer version."""
-        return await self.facts.supersede(old_id, new_fact, session)
+        """Replace a fact with a newer version. ``reason`` is recorded on the old row."""
+        return await self.facts.supersede(old_id, new_fact, session, reason=reason)
 
     async def contradict_fact(
         self,
@@ -488,9 +490,15 @@ class Heart:
             session,
         )
 
-    async def deactivate_fact(self, fact_id: UUID, session: AsyncSession | None = None) -> None:
-        """Soft-delete a fact."""
-        await self.facts.deactivate(fact_id, session)
+    async def deactivate_fact(
+        self,
+        fact_id: UUID,
+        session: AsyncSession | None = None,
+        *,
+        reason: FactDeactivationReason = "removed",
+    ) -> None:
+        """Soft-delete a fact. ``reason`` is recorded on the row."""
+        await self.facts.deactivate(fact_id, session, reason=reason)
 
     async def set_fact_tag(self, fact_id: UUID, tag: str, present: bool, session: AsyncSession | None = None) -> None:
         """Add or remove a tag on a fact (curation surface for profile core)."""

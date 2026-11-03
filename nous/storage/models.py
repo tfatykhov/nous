@@ -699,7 +699,15 @@ class EpisodeChunk(Base):
 
 class Fact(Base):
     __tablename__ = "facts"
-    __table_args__ = {"schema": "heart"}
+    __table_args__ = (
+        # Migration 094: why the fact was deactivated.
+        CheckConstraint(
+            "deactivation_reason IS NULL"
+            " OR deactivation_reason IN ('stale', 'superseded', 'merged', 'removed', 'user', 'rollback')",
+            name="chk_facts_deactivation_reason",
+        ),
+        {"schema": "heart"},
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
     agent_id: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -753,6 +761,11 @@ class Fact(Base):
     entity_keys_extracted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), default=None
     )
+
+    # 094: when and why the fact went inactive. Stamped on the active-to-inactive
+    # transition, cleared on reactivation, NULL on active facts.
+    deactivated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, default=None)
+    deactivation_reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
     # Relationships
     source_episode: Mapped["Episode | None"] = relationship(foreign_keys=[source_episode_id])

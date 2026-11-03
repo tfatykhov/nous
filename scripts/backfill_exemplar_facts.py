@@ -36,9 +36,10 @@ ROLLBACK: all facts written by this script (and by the live write path,
 NOUS_EXEMPLAR_EXTRACTION_ENABLED) carry source='exemplar_extractor'.
     --phase rollback --watermark <iso-ts>  (the "ROLLBACK KEY" printed at
     the start of the run you want to undo) soft-deactivates:
-        UPDATE heart.facts SET active = false
+        UPDATE heart.facts SET active = false,
+            deactivated_at = now(), deactivation_reason = 'rollback'
         WHERE agent_id = :a AND source = 'exemplar_extractor'
-          AND created_at >= :watermark;
+          AND created_at >= :watermark AND active;
     (never hard-delete; reactivation is the inverse.) Aborts (no writes)
     if any of those facts derive from episode_chunks THEMSELVES newer than
     the watermark (i.e. content that did not exist yet when this run
@@ -310,9 +311,15 @@ async def rollback_exemplar_facts(
             "--include-live-writes to proceed anyway."
         )
 
+    # Migration 094: record why on the rows this rollback deactivates. A row
+    # that is already inactive keeps the time and reason it went inactive with
+    # (SET reads the old value of active).
     result = await session.execute(
         text(
-            "UPDATE heart.facts SET active = false "
+            "UPDATE heart.facts SET active = false, "
+            "deactivated_at = CASE WHEN active IS DISTINCT FROM false THEN now() ELSE deactivated_at END, "
+            "deactivation_reason = CASE WHEN active IS DISTINCT FROM false THEN 'rollback' "
+            "ELSE deactivation_reason END "
             "WHERE agent_id = :a AND source = 'exemplar_extractor' AND created_at >= :w"
         ),
         {"a": agent_id, "w": watermark},
@@ -350,7 +357,8 @@ async def rollback_exemplar_facts_by_manifest(
         return {"facts_deactivated": n}
     result = await session.execute(
         text(
-            "UPDATE heart.facts SET active = false WHERE agent_id = :a "
+            "UPDATE heart.facts SET active = false, deactivated_at = now(), "
+            "deactivation_reason = 'rollback' WHERE agent_id = :a "
             "AND source = 'exemplar_extractor' AND active = true "
             "AND id = ANY(CAST(:ids AS uuid[]))"
         ),

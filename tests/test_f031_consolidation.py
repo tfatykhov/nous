@@ -325,6 +325,7 @@ class TestOrientContext:
         heart.supersede_fact.assert_called_once()
         call_args = heart.supersede_fact.call_args
         assert call_args[0][0] == existing_fact.id
+        assert call_args.kwargs["reason"] == "superseded"
 
     @pytest.mark.asyncio
     async def test_updates_prefix_case_insensitive(self):
@@ -553,6 +554,8 @@ class TestContradictionResolution:
                 f"orig {orig_id} should be linked to merged_id"
             )
             assert orm.active is False
+            assert orm.deactivation_reason == "merged"
+            assert orm.deactivated_at is not None
         assert sleep_stats["facts_created"] == 1
         assert sleep_stats["contradictions_resolved"] == 1
 
@@ -687,7 +690,37 @@ class TestContradictionResolution:
         )
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
         await handler._phase_resolve_contradictions(sleep_stats)
-        heart.deactivate_fact.assert_called_once_with(fact1_id)
+        heart.deactivate_fact.assert_called_once_with(fact1_id, reason="removed")
+
+    @pytest.mark.asyncio
+    async def test_remove_b_deactivates_fact(self):
+        """REMOVE_B should deactivate fact2 and record why (migration 094)."""
+        fact2_id = uuid4()
+
+        heart = AsyncMock()
+        heart.find_contradiction_candidates = AsyncMock(return_value=[{
+            "fact1_id": uuid4(),
+            "fact2_id": fact2_id,
+            "content1": "Correct fact",
+            "content2": "Wrong fact",
+            "date1": "2026-03-01",
+            "date2": "2026-03-15",
+            "similarity": 0.85,
+        }])
+        heart.deactivate_fact = AsyncMock()
+        heart.search_facts = AsyncMock(return_value=[])
+
+        llm_response = json.dumps({
+            "action": "REMOVE_B",
+            "confidence": 0.9,
+            "reason": "Fact B is stale",
+        })
+        handler, _, _, bus, _ = _make_sleep_handler(
+            heart=heart, llm_client=_mock_llm_client(llm_response)
+        )
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        await handler._phase_resolve_contradictions(sleep_stats)
+        heart.deactivate_fact.assert_called_once_with(fact2_id, reason="removed")
 
     @pytest.mark.asyncio
     async def test_low_confidence_treated_as_keep_both(self):
