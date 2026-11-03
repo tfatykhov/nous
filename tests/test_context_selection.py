@@ -1,16 +1,18 @@
-"""PR-G1: pre-turn context selection bugs (memory review 2026-11-03, items E-x).
+"""Pre-turn context selection: ranking, pinning, abandoned episodes and trace labels.
 
-E-1   staleness lowers a score without re-sorting, so the gap cut (which walks
-      the list as if sorted) drops a fresh, higher-scored decision behind it.
-E-6   fact_pin_top_k >= the plan's fact limit pins every fetched fact and
-      undoes the whole fact pipeline; pinned facts get their own trace stage.
-E-19d a re-inserted pinned fact carries its pre-boost score while survivors
-      carry boosted ones.
-E-7   score modifiers are recorded as trace mutations, and a gap cut names
-      the modifier that last changed the dropped item's score.
-E-14  abandoned episodes are never rendered, so they must not take a slot or
-      count as recalled.
-E-19b each leg records the query text it actually searched with.
+- The relevance filter's max_k cap and gap cut assume score order, so it sorts
+  first; a modifier that lowers a score in place (staleness, the recency
+  resolver's demotion) must not get a fresher, higher-scored item cut.
+- fact_pin_top_k is bounded below both the plan's fact limit and the number of
+  facts returned, so pinning never re-inserts the whole result set and the
+  diversity / dedup / relevance pipeline still decides at least one fact.
+- A re-inserted pin carries the score a survivor would (after frame and usage
+  boost), and finalizes as rendered with stage ``pinned``.
+- Score modifiers are traced as mutations when they move a score by more than
+  1%, and a gap cut names the modifier that last moved the dropped item.
+- Abandoned episodes are never rendered, so they are filtered before they take
+  a relevance slot, count as recalled, or show in Recent Conversations.
+- Each leg records the query text it actually searched with.
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ NOW = datetime.now(UTC)
 
 
 class FakeFact:
-    def __init__(self, id, score, subject=None, content=None):
+    def __init__(self, id, score, subject=None, content=None, event_date=None, encoded_frame=None):
         self.id = id
         self.score = score
         self.subject = subject
@@ -44,6 +46,8 @@ class FakeFact:
         self.superseded_by = None
         self.recency_status = None
         self.recency_date = None
+        self.event_date = event_date
+        self.encoded_frame = encoded_frame
 
 
 class FakeDecision:
@@ -136,7 +140,7 @@ def _leg(result, name):
 
 
 # ---------------------------------------------------------------------------
-# E-1: re-sort after the staleness penalty
+# Score order before the gap cut
 # ---------------------------------------------------------------------------
 
 
@@ -166,8 +170,26 @@ async def test_fresh_decision_behind_a_penalised_one_survives_the_gap_cut():
     assert "d-old" not in result.recalled_ids["decision"]
 
 
+def test_relevance_filter_sorts_before_cutting_a_recency_demoted_list():
+    # Staleness off, so nothing re-sorts after the recency resolver demotes
+    # "old" (0.89 -> 0.267) in place at index 3, ahead of the better "good".
+    engine = _engine(staleness_penalty_enabled=False, recency_resolver_enabled=True)
+    facts = [
+        FakeFact("a", 0.95, subject="s0"),
+        FakeFact("b", 0.92, subject="s1"),
+        FakeFact("c", 0.90, subject="s2"),
+        FakeFact("old", 0.89, subject="price", content="the price is 10 dollars", event_date=datetime(2025, 1, 1)),
+        FakeFact("good", 0.85, subject="s3"),
+        FakeFact("new", 0.50, subject="price", content="the price is 12 dollars", event_date=datetime(2026, 1, 1)),
+    ]
+    facts = engine._apply_staleness_penalty(engine._resolve_recency(facts))
+    assert [f.id for f in facts][3] == "old"  # demoted in place, list unsorted
+    kept = [f.id for f in engine._apply_relevance_filter(facts, "fact")]
+    assert "good" in kept
+
+
 # ---------------------------------------------------------------------------
-# E-6: fact_pin_top_k is bounded by the plan's fact limit
+# Pinning is bounded below the fact limit and the result count
 # ---------------------------------------------------------------------------
 
 
@@ -198,6 +220,14 @@ async def test_pin_clamp_warns_once_per_process(monkeypatch, caplog):
     assert len(clamp) == 1
 
 
+async def test_short_result_set_is_not_pinned_whole():
+    # pin_k=4 is below the limit (5), but only 3 facts came back.
+    engine = _engine(fact_pin_top_k=4)
+    engine._heart.search_facts.return_value = _same_subject_facts()
+    result = await _build(engine, plan=_plan(fact=5))
+    assert result.recalled_ids["fact"] == ["f0", "f1"]
+
+
 async def test_pinned_facts_are_traced_as_pinned():
     engine = _engine(fact_pin_top_k=2)
     engine._heart.search_facts.return_value = _same_subject_facts()
@@ -208,7 +238,7 @@ async def test_pinned_facts_are_traced_as_pinned():
 
 
 # ---------------------------------------------------------------------------
-# E-19d + E-7: boosted scores for pinned facts, modifier mutations and labels
+# Pinned scores, modifier mutations and gap-cut labels
 # ---------------------------------------------------------------------------
 
 
@@ -230,6 +260,22 @@ async def test_reinserted_pinned_fact_carries_its_boosted_score():
     result = await _build(engine, usage_tracker=FakeUsageTracker({"p0": 0.3}))
     assert result.recalled_ids["fact"][0] == "p0"  # pin re-inserts at the front
     assert result.recalled_score_map["p0"] == pytest.approx(0.27)
+
+
+async def test_pin_dropped_at_diversity_carries_the_score_a_survivor_would():
+    # Frame boost (1.3x) lifts f1 and f2 above the pinned f0, so diversity (2
+    # per subject) drops f0 before the usage boost runs. Re-inserted, f0 must
+    # still carry its usage-boosted score (0.6 * 0.5), like the survivors.
+    engine = _engine(fact_pin_top_k=1)
+    engine._heart.search_facts.return_value = [
+        FakeFact("f0", 0.60, subject="same"),
+        FakeFact("f1", 0.58, subject="same", encoded_frame="question"),
+        FakeFact("f2", 0.55, subject="same", encoded_frame="question"),
+    ]
+    result = await _build(engine, usage_tracker=FakeUsageTracker({"f0": 0.5}))
+    assert _cands(result)["f0"]["restored_from"] == "filter_dropped@diversity"
+    assert result.recalled_score_map["f0"] == pytest.approx(0.30)
+    assert result.recalled_score_map["f1"] == pytest.approx(0.58 * 1.3)
 
 
 async def test_gap_cut_names_the_usage_boost_that_sank_the_item():
@@ -273,12 +319,28 @@ async def test_episode_decay_is_traced_as_a_mutation():
     old.started_at = NOW - timedelta(days=30)
     engine._heart.search_episodes.return_value = [FakeEpisode("e-new", 0.95), old]
     result = await _build(engine)
-    muts = _cands(result)["e-old"]["mutations"]
-    assert [m["stage"] for m in muts] == ["episode_recency"]
+    cands = _cands(result)
+    assert [m["stage"] for m in cands["e-old"]["mutations"]] == ["episode_recency"]
+    # One hour old: recency moves the score by well under 1%, so no row.
+    assert cands["e-new"]["mutations"] == []
+
+
+async def test_frame_boost_is_traced_and_named_in_the_gap_cut():
+    engine = _engine()
+    engine._heart.search_facts.return_value = [
+        FakeFact("a", 0.95, subject="s0"),
+        FakeFact("b", 0.93, subject="s1"),
+        FakeFact("c", 0.90, subject="s2"),
+        FakeFact("low", 0.10, subject="s3", encoded_frame="question"),
+    ]
+    result = await _build(engine)
+    low = _cands(result)["low"]
+    assert low["disposition_stage"] == "relevance_filter:score_gap<0.5x|after:frame_boost"
+    assert [m["stage"] for m in low["mutations"]] == ["frame_boost"]
 
 
 # ---------------------------------------------------------------------------
-# E-14: abandoned episodes are filtered before they take a slot
+# Abandoned episodes
 # ---------------------------------------------------------------------------
 
 
@@ -294,8 +356,22 @@ async def test_abandoned_episode_is_not_recalled():
     assert (gone["disposition"], gone["disposition_stage"]) == ("filter_dropped", "abandoned_episode")
 
 
+async def test_abandoned_episode_is_not_shown_in_recent_conversations():
+    engine = _engine(temporal_context_enabled=True)
+    engine._heart.list_episodes.return_value = [
+        FakeEpisode("t-gone", None, outcome="abandoned"),
+        FakeEpisode("t-ok", None, outcome="success"),
+    ]
+    result = await _build(engine)
+    recent = next(s for s in result.sections if s.label == "Recent Conversations")
+    assert "episode t-ok" in recent.content
+    assert "episode t-gone" not in recent.content
+    gone = _cands(result)["t-gone"]
+    assert (gone["disposition"], gone["disposition_stage"]) == ("filter_dropped", "abandoned_episode")
+
+
 # ---------------------------------------------------------------------------
-# E-19b: each leg records the query text it searched with
+# Per-leg query text
 # ---------------------------------------------------------------------------
 
 

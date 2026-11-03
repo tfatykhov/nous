@@ -236,6 +236,11 @@ def _is_system_episode(episode) -> bool:
     )
 
 
+def _is_abandoned_episode(episode) -> bool:
+    """Same test as ``_format_episodes``, which never renders these."""
+    return (getattr(episode, "outcome", None) or "ongoing") == "abandoned"
+
+
 class ContextEngine:
     """Assembles context from Brain and Heart within token budgets."""
 
@@ -426,18 +431,20 @@ class ContextEngine:
 
         @_tr_guard
         def _tr_rescored(before: list, after: list, mem_type: str, stage: str) -> None:
-            """Record each score ``stage`` changed as a mutation.
+            """Record each score ``stage`` changed by more than 1% as a mutation.
 
-            For the score modifiers (staleness, episode recency, usage boost),
-            which re-score items without removing them. A later gap cut names
-            the last mutation in its drop label.
+            For the score modifiers (staleness, frame boost, episode recency,
+            usage boost), which re-score items without removing them. A later
+            gap cut names the last mutation in its drop label. The 1% floor
+            keeps nudges (episode recency touches every episode a little on
+            every turn) out of the trace.
             """
             was = {str(getattr(i, "id", "")): getattr(i, "score", None) for i in (before or [])}
             for it in after or []:
                 iid = str(getattr(it, "id", ""))
                 old = was.get(iid)
                 new = getattr(it, "score", None)
-                if iid and old is not None and new != old:
+                if iid and old is not None and new is not None and abs(new - old) > 0.01 * abs(old):
                     tr.mutate(iid, mem_type, stage, old, new)
 
         recalled_score_map: dict[str, float] = {}
@@ -1090,6 +1097,8 @@ class ContextEngine:
                             tr.mutate(_fid, "fact", "recency_resolver", _was, _now,
                                       reason=SUPERSEDED)
                     pin_k = _clamp_pin_k(getattr(self._settings, "fact_pin_top_k", 0), limit)
+                    # A result set shorter than the limit must not be pinned whole either.
+                    pin_k = min(pin_k, max(len(facts) - 1, 0))
                     pinned_facts = list(facts[:pin_k]) if pin_k > 0 else []
                     # The pins _reinsert_pinned guarantees, for the trace's
                     # `pinned` stage.
@@ -1103,11 +1112,16 @@ class ContextEngine:
                     facts = self._apply_staleness_penalty(facts)
                     _tr_rescored(_before, facts, "fact", "staleness")
                     # F10: apply_frame_boost (preserved from existing pipeline)
+                    _before = facts
                     facts = apply_frame_boost(facts, frame.frame_id, _active_censor_names)
-                    # Each fact's latest scored copy by id, so a re-inserted pin
-                    # carries the boosted score the survivors carry, not its
-                    # pre-boost one. Every fact is still present here.
-                    _scored_by_id = {str(getattr(f, "id", "")): f for f in facts}
+                    _tr_rescored(_before, facts, "fact", "frame_boost")
+                    # Every fact's score after all the modifiers (the usage boost
+                    # below gives survivors the same values), so a re-inserted pin
+                    # carries the score a survivor would, also when diversity or
+                    # dedup dropped it before the usage boost ran.
+                    _scored_by_id = {
+                        str(getattr(f, "id", "")): f for f in self._apply_usage_boost(facts, usage_tracker)
+                    }
 
                     # 007.2: Diversity filter — use subject as topic key
                     _before = facts
@@ -1123,7 +1137,6 @@ class ContextEngine:
                     _before = facts
                     facts = self._apply_usage_boost(facts, usage_tracker)
                     _tr_rescored(_before, facts, "fact", "usage_boost")
-                    _scored_by_id.update({str(getattr(f, "id", "")): f for f in facts})
                     # Adaptive relevance filter (min/max K + gap detection)
                     # NOTE: this is the max_k=5 cap at _apply_relevance_filter:1420 —
                     # the single largest silent drop on this path.
@@ -1494,9 +1507,11 @@ class ContextEngine:
                     _before = embedding_procedures
                     embedding_procedures = self._apply_staleness_penalty(embedding_procedures)
                     _tr_rescored(_before, embedding_procedures, "procedure", "staleness")
+                    _before = embedding_procedures
                     embedding_procedures = apply_frame_boost(
                         embedding_procedures, frame.frame_id, _active_censor_names,
                     )
+                    _tr_rescored(_before, embedding_procedures, "procedure", "frame_boost")
                     _before = embedding_procedures
                     embedding_procedures = await self._apply_dedup(
                         embedding_procedures, _conv_msgs, "name",
@@ -1650,6 +1665,10 @@ class ContextEngine:
                     recent = [e for e in recent if not _is_system_episode(e)]
                     _tr_filtered(_before, recent, "episode",
                                  FILTER_DROPPED, "system_episode")
+                    # Abandoned episodes are not shown in Past Episodes either.
+                    _before = recent
+                    recent = [e for e in recent if not _is_abandoned_episode(e)]
+                    _tr_filtered(_before, recent, "episode", FILTER_DROPPED, "abandoned_episode")
                 if recent:
                     _temporal_episode_ids = {str(e.id) for e in recent}
                     recent_lines = []
@@ -1711,7 +1730,7 @@ class ContextEngine:
                 # it here: otherwise it takes a relevance slot and is counted
                 # as recalled (F071 exclusion, usage tracker) though unseen.
                 _before = episodes
-                episodes = [e for e in episodes if (getattr(e, "outcome", None) or "ongoing") != "abandoned"]
+                episodes = [e for e in episodes if not _is_abandoned_episode(e)]
                 _tr_filtered(_before, episodes, "episode", FILTER_DROPPED, "abandoned_episode")
                 # 008.6: Exclude episodes already shown in temporal tier
                 if _temporal_episode_ids:
@@ -1730,7 +1749,9 @@ class ContextEngine:
                     episodes = self._apply_episode_recency(episodes)
                     _tr_rescored(_before, episodes, "episode", "episode_recency")
                     # F10: apply_frame_boost
+                    _before = episodes
                     episodes = apply_frame_boost(episodes, frame.frame_id, _active_censor_names)
+                    _tr_rescored(_before, episodes, "episode", "frame_boost")
 
                     # 007.2: Diversity filter — use first tag as topic key
                     _before = episodes
@@ -1931,6 +1952,11 @@ class ContextEngine:
         if len(results) <= min_k:
             return results
 
+        # The cap and the gap walk below both assume score order, and a score
+        # modifier upstream (the recency resolver's demotion, for one) can
+        # leave the list unsorted. Stable, so equal scores keep their order.
+        results = sorted(results, key=lambda r: getattr(r, "score", 0) or 0, reverse=True)
+
         # Cap at max_k
         for _over in results[max_k:]:
             trace.drop(getattr(_over, "id", _over), memory_type,
@@ -1992,9 +2018,11 @@ class ContextEngine:
     def _apply_staleness_penalty(self, results: list) -> list:
         """Apply time-decay penalty to relevance scores (F017 Phase 5).
 
-        Returns the items re-sorted by score, descending and stable: the
-        relevance filter's gap cut walks the list as if sorted, so a penalised
-        item left in place would cut every fresher, higher-scored item behind it.
+        Returns the items re-sorted by score, descending and stable. The
+        relevance filter sorts again before its gap cut; this sort is for the
+        order-reading stages in between (decision diversity keeps the first
+        items per category, so a penalised decision would otherwise take a
+        slot ahead of a fresher one).
         """
         if not self._settings.staleness_penalty_enabled:
             return results
