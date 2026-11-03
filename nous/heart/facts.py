@@ -11,7 +11,7 @@ import logging
 import time
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 from uuid import UUID
 
 from sqlalchemy import and_, func, or_, select, text, update
@@ -161,6 +161,23 @@ class ExemplarHit(NamedTuple):
 # caller already holds, `score` is search-time, and `recency_status`/
 # `recency_date` are transient verdicts the recency resolver writes downstream.
 _NOT_PERSISTED_FACT_FIELDS = frozenset({"id", "content", "score", "recency_status", "recency_date"})
+
+
+# Migration 094: why a fact went inactive (heart.facts.deactivation_reason and
+# its CHECK constraint chk_facts_deactivation_reason).
+FactDeactivationReason = Literal["stale", "superseded", "merged", "removed", "user", "rollback"]
+
+
+def mark_fact_inactive(fact: Fact, reason: FactDeactivationReason) -> None:
+    """Deactivate ``fact`` and record when and why on the row.
+
+    The stamp records the active-to-inactive transition: a fact that is
+    already inactive keeps the time and reason it went inactive with.
+    """
+    if fact.active is not False:
+        fact.deactivated_at = datetime.now(UTC)
+        fact.deactivation_reason = reason
+    fact.active = False
 
 
 class FactManager:
@@ -1290,7 +1307,7 @@ class FactManager:
                         old_fact = await self._get_fact_orm(row.id, session)
                         if old_fact:
                             old_fact.superseded_by = new_fact_id
-                            old_fact.active = False
+                            mark_fact_inactive(old_fact, "superseded")
                             old_fact.confidence = max(0.0, (old_fact.confidence or 1.0) * 0.3)
                         await self._create_graph_edge(
                             new_fact_id,
@@ -1306,7 +1323,7 @@ class FactManager:
                         # Old is current — deactivate new fact
                         new_fact = await self._get_fact_orm(new_fact_id, session)
                         if new_fact:
-                            new_fact.active = False
+                            mark_fact_inactive(new_fact, "superseded")
                         return None
 
                 if relation == "UPDATE" and conf < 0.8:
@@ -1470,7 +1487,7 @@ class FactManager:
                                 # Old is current — deactivate new fact
                                 new_fact = await self._get_fact_orm(new_fact_id, session)
                                 if new_fact:
-                                    new_fact.active = False
+                                    mark_fact_inactive(new_fact, "superseded")
                                 # Codex r11 FIX 2: new fact is now inactive —
                                 # stop scanning remaining candidates (an
                                 # inactive fact must not go on to supersede
@@ -1510,7 +1527,7 @@ class FactManager:
                                 continue  # keep scanning remaining candidates
                             # UPDATE + current=="new" or unknown → fall through to supersede
 
-                    old.active = False
+                    mark_fact_inactive(old, "superseded")
                     old.superseded_by = new_fact_id
                     # Mirror the column write with the graph edge so the
                     # supersession reaches the graph layer (densifier, adjacency
@@ -1650,7 +1667,7 @@ class FactManager:
             return None
         if action == "supersede_old":
             dupe.superseded_by = new_fact.id
-            dupe.active = False
+            mark_fact_inactive(dupe, "superseded")
             dupe.confidence = max(0.0, (dupe.confidence or 1.0) * 0.3)
             await self._create_graph_edge(
                 new_fact.id,
@@ -2113,11 +2130,13 @@ class FactManager:
         old_fact_id: UUID,
         new_fact: FactInput,
         session: AsyncSession | None = None,
+        *,
+        reason: FactDeactivationReason = "superseded",
     ) -> FactDetail:
-        """Replace a fact with a newer version."""
+        """Replace a fact with a newer version. ``reason`` is recorded on the old row."""
         if session is None:
             async with self.db.session() as session:
-                result = await self._supersede(old_fact_id, new_fact, session)
+                result = await self._supersede(old_fact_id, new_fact, session, reason=reason)
                 await session.commit()
                 # codex P2 round 13: _supersede's inherit_conflict_slot_keys
                 # call can write new entity-key rows within THIS commit —
@@ -2128,13 +2147,15 @@ class FactManager:
                 return result
         # Injected-session callers own their own commit point (same contract
         # as learn()) — no place here to re-invalidate post-commit.
-        return await self._supersede(old_fact_id, new_fact, session)
+        return await self._supersede(old_fact_id, new_fact, session, reason=reason)
 
     async def _supersede(
         self,
         old_fact_id: UUID,
         new_fact: FactInput,
         session: AsyncSession,
+        *,
+        reason: FactDeactivationReason = "superseded",
     ) -> FactDetail:
         # Verify old fact exists
         old_fact = await self._get_fact_orm(old_fact_id, session)
@@ -2158,7 +2179,7 @@ class FactManager:
 
         # Update old fact
         old_fact.superseded_by = new_detail.id
-        old_fact.active = False
+        mark_fact_inactive(old_fact, reason)
         await session.flush()
 
         # F022: Bridge — also create graph edge
@@ -2184,12 +2205,15 @@ class FactManager:
         winner_id: UUID,
         loser_id: UUID,
         session: AsyncSession,
+        *,
+        reason: FactDeactivationReason = "superseded",
     ) -> bool:
         """064 R2: shared supersession primitive extracted from sleep _apply_supersede.
 
-        Sets ``loser.superseded_by = winner_id``, ``loser.active = False``,
-        and writes the ``supersedes`` graph edge — all within the caller-owned
-        session.  Caller is responsible for ``session.commit()``.
+        Sets ``loser.superseded_by = winner_id``, ``loser.active = False``
+        (recording ``reason`` on the row), and writes the ``supersedes`` graph
+        edge — all within the caller-owned session.  Caller is responsible for
+        ``session.commit()``.
 
         Returns ``True`` if the supersession was applied, ``False`` if skipped
         due to the clobber guard (loser not found, or already superseded by a
@@ -2210,7 +2234,7 @@ class FactManager:
             )
             return False
         loser.superseded_by = winner_id
-        loser.active = False
+        mark_fact_inactive(loser, reason)
         await self._create_graph_edge(winner_id, loser_id, "fact", "fact", "supersedes", 1.0, session)
         return True
 
@@ -3800,6 +3824,8 @@ class FactManager:
                 )
                 winner.superseded_by = None
                 winner.active = True
+                winner.deactivated_at = None
+                winner.deactivation_reason = None
                 await session.flush()
                 return self._to_detail(winner)
 
@@ -3813,20 +3839,32 @@ class FactManager:
     # deactivate()
     # ------------------------------------------------------------------
 
-    async def deactivate(self, fact_id: UUID, session: AsyncSession | None = None) -> None:
-        """Soft-delete a fact."""
+    async def deactivate(
+        self,
+        fact_id: UUID,
+        session: AsyncSession | None = None,
+        *,
+        reason: FactDeactivationReason = "removed",
+    ) -> None:
+        """Soft-delete a fact. ``reason`` is recorded on the row."""
         if session is None:
             async with self.db.session() as session:
-                await self._deactivate(fact_id, session)
+                await self._deactivate(fact_id, session, reason=reason)
                 await session.commit()
                 return
-        await self._deactivate(fact_id, session)
+        await self._deactivate(fact_id, session, reason=reason)
 
-    async def _deactivate(self, fact_id: UUID, session: AsyncSession) -> None:
+    async def _deactivate(
+        self,
+        fact_id: UUID,
+        session: AsyncSession,
+        *,
+        reason: FactDeactivationReason = "removed",
+    ) -> None:
         fact = await self._get_fact_orm(fact_id, session)
         if fact is None:
             raise ValueError(f"Fact {fact_id} not found")
-        fact.active = False
+        mark_fact_inactive(fact, reason)
         await session.flush()
 
     async def set_tag(self, fact_id: UUID, tag: str, present: bool, session: AsyncSession | None = None) -> None:

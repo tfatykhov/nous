@@ -738,8 +738,11 @@ class Settings(BaseSettings):
     stale_scan_age_days: int = 60
     # Categories excluded from stale_scan. `rule` represents explicit user
     # directives that may be infrequently exercised but still in force —
-    # deactivating them on recall stats alone is unsafe.
-    stale_scan_excluded_categories: list[str] = Field(default_factory=lambda: ["rule"])
+    # deactivating them on recall stats alone is unsafe. `person` and
+    # `preference` join it: the tier-1 profile channel renders all three
+    # every turn (TIER1_FACT_CATEGORIES) through a path that never stamps
+    # last_recalled_at, so the scan would deactivate still-true user facts.
+    stale_scan_excluded_categories: list[str] = Field(default_factory=lambda: ["rule", "person", "preference"])
 
     # Sleep-cycle cluster_consolidation phase (F027): merge near-duplicate
     # facts under the same subject into one. Prior code picked top-5 clusters

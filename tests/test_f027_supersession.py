@@ -772,6 +772,7 @@ class TestClusterConsolidationTier1Exclusion:
                 for fid in concept_ids:
                     f = await check.get(Fact, fid)
                     assert f is not None and f.active is False, "the non-tier-1 members still consolidate"
+                    assert f.deactivation_reason == "merged" and f.deactivated_at is not None
                 merged_q = select(Fact).where(Fact.agent_id == agent_id, Fact.source == "cluster_consolidation")
                 merged = (await check.execute(merged_q)).scalars().all()
                 assert [m.category for m in merged] == ["concept"]

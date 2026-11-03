@@ -34,6 +34,7 @@ from nous.events import Event, EventBus
 from nous.handlers import LLMClient, call_background_llm_structured
 from nous.handlers.consolidation_audit import ConsolidationAuditor, preview
 from nous.heart.category_prompts import TIER1_CATEGORY_GUIDANCE
+from nous.heart.facts import mark_fact_inactive
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput, FactRejected
 from nous.storage.models import Fact
@@ -1134,6 +1135,7 @@ class SleepHandler:
                     confidence=0.8,
                     category=fact.get("category", best_match.category or "concept"),
                 ),
+                reason="superseded",
             )
             sleep_stats["facts_created"] += 1
             logger.info("F031 orient: superseded fact %s with updated content", best_match.id)
@@ -1403,7 +1405,7 @@ class SleepHandler:
                                                 )
                                                 continue
                                             orm_fact.superseded_by = merged_detail.id
-                                            orm_fact.active = False
+                                            mark_fact_inactive(orm_fact, "merged")
                                             # A: persist the supersedes graph
                                             # edge alongside the column so the
                                             # MERGE reaches the graph layer
@@ -1441,11 +1443,11 @@ class SleepHandler:
                                     exc_info=True,
                                 )
                     elif action == "REMOVE_A":
-                        await self._heart.deactivate_fact(fact1_id)
+                        await self._heart.deactivate_fact(fact1_id, reason="removed")
                         sleep_stats["contradictions_resolved"] += 1
                         logger.info("F031 resolve: REMOVE_A — deactivated %s (%.2f confidence)", fact1_id, confidence)
                     elif action == "REMOVE_B":
-                        await self._heart.deactivate_fact(fact2_id)
+                        await self._heart.deactivate_fact(fact2_id, reason="removed")
                         sleep_stats["contradictions_resolved"] += 1
                         logger.info("F031 resolve: REMOVE_B — deactivated %s (%.2f confidence)", fact2_id, confidence)
                     elif action == "KEEP_BOTH":
@@ -1580,10 +1582,12 @@ class SleepHandler:
         facts recalled once years ago and never since — the same
         silent-failure pattern the original code had in reverse.
 
-        The ``rule`` category is excluded by default since rules
-        represent explicit user directives that may be infrequently
-        exercised but still in force; deactivating them on recall
-        stats alone is unsafe.
+        The ``rule``, ``person`` and ``preference`` categories are
+        excluded by default: rules are explicit user directives that may
+        be infrequently exercised but still in force, and the tier-1
+        profile channel renders all three every turn without stamping
+        ``last_recalled_at``, so their recall stats say nothing about
+        whether they are still true.
         """
         try:
             settings = self._heart.settings
@@ -1622,7 +1626,7 @@ class SleepHandler:
                 # that never landed (codex P2).
                 _deactivated: list[tuple] = []
                 for fact in stale_facts:
-                    fact.active = False
+                    mark_fact_inactive(fact, "stale")
                     count += 1
                     if self._auditor is not None:
                         _deactivated.append((fact.id, fact.subject, fact.content))
@@ -1874,7 +1878,7 @@ class SleepHandler:
                             )
                             continue
                         orm_fact.superseded_by = merged_detail.id
-                        orm_fact.active = False
+                        mark_fact_inactive(orm_fact, "merged")
                         # Mirror the supersedes edge (same fix as the F031
                         # MERGE path) so cluster merges don't recreate the
                         # column/graph mismatch the backfill repairs.
