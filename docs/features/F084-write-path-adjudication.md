@@ -35,6 +35,12 @@ variants (the enumerative leg produces keyed facts; the legacy leg produces keyl
 R2's exact-key lookup can never merge them, so paraphrases in the 0.92–0.95 cosine band evade
 both dedup legs permanently — round-2 devil finding #3).
 
+**Profile carve-out:** when the enumerative leg stores facts, summarizer candidates in the profile
+categories (person, preference, rule) are still stored; every other candidate is dropped. They are
+the only automatic source of profile facts, and no enumerative fact carries those categories (the
+extraction schema offers technical/concept/tool and a drifted profile label is stored as technical),
+so no profile-category variant pair can form.
+
 ### Extraction
 
 The raw transcript is chunked in-memory via `chunk_text()` (same helper/params as F067, but **no

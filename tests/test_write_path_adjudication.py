@@ -298,7 +298,10 @@ def _make_settings(*, flag_on: bool = False, **kw):
 _DENSE_TRANSCRIPT = "\n".join(
     f"{i}. Fact number {i}: item {i} belongs to person {i}." for i in range(40)
 )
-_VALID_SUMMARY = {"candidate_facts": [{"content": "Tim likes coffee " + "x" * 20, "subject": "Tim", "category": "preference", "confidence": 0.9}]}
+# A non-profile candidate: when the enumerative leg stores facts, candidates of
+# this kind are dropped (modal), so the routing tests below can assert that the
+# candidate path stored nothing. Profile candidates are covered separately.
+_VALID_SUMMARY = {"candidate_facts": [{"content": "Tim likes coffee " + "x" * 20, "subject": "Tim", "category": "technical", "confidence": 0.9}]}
 
 
 @pytest.mark.asyncio
@@ -364,6 +367,127 @@ async def test_flag_on_enumerable_routes_modally(monkeypatch):
     assert heart._captured == []
     # Returns the enumerative UUIDs.
     assert result == fake_ids
+
+
+def _mixed_candidates(profile_category: str) -> list[dict]:
+    """One profile candidate and one technical candidate, as the summarizer
+    emits them in event.data["candidate_facts"]."""
+    return [
+        {
+            "content": "Tim prefers answers in metric units, always",
+            "subject": "Tim",
+            "category": profile_category,
+            "confidence": 0.9,
+        },
+        {
+            "content": "The staging cluster runs Postgres seventeen with pgvector",
+            "subject": "staging",
+            "category": "technical",
+            "confidence": 0.9,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile_category", ["person", "preference", "rule"])
+async def test_enumerative_fired_still_stores_profile_candidates(monkeypatch, profile_category):
+    """When the enumerative leg stores facts, a summarizer candidate whose
+    category is person/preference/rule is still stored, and a technical
+    candidate is still dropped. The returned ids are the enumerative ids
+    followed by the profile ids."""
+    fake_ids = [uuid4(), uuid4()]
+    monkeypatch.setattr(
+        "nous.handlers.enumerative_extractor.EnumerativeExtractor.process_transcript",
+        AsyncMock(return_value=fake_ids),
+    )
+
+    from nous.handlers import fact_extractor as fe_mod
+
+    heart = _stub_heart_for_extractor()
+    ext = fe_mod.FactExtractor.__new__(fe_mod.FactExtractor)
+    ext._heart = heart
+    ext._settings = _make_settings(flag_on=True, enumerative_density_threshold=0.0)
+    ext._dedup_via_search = False
+    ext._llm = object()
+
+    # handle() passes the candidates at the event-data level, not in summary.
+    result = await ext.extract_and_store(
+        summary={"summary": "Tim talked about units and the staging cluster."},
+        episode_id=str(uuid4()),
+        transcript=_DENSE_TRANSCRIPT,
+        candidate_facts=_mixed_candidates(profile_category),
+    )
+
+    assert [fi.category for fi in heart._captured] == [profile_category]
+    assert heart._captured[0].content == "Tim prefers answers in metric units, always"
+    assert heart._captured[0].source == "episode_summarizer"
+    assert len(result) == 3
+    assert result[:2] == fake_ids
+
+
+@pytest.mark.asyncio
+async def test_enumerative_fired_profile_candidates_read_from_summary(monkeypatch):
+    """Direct callers (ingest) leave candidate_facts=None and carry the
+    candidates in summary; the profile carve-out reads them from there too."""
+    fake_ids = [uuid4()]
+    monkeypatch.setattr(
+        "nous.handlers.enumerative_extractor.EnumerativeExtractor.process_transcript",
+        AsyncMock(return_value=fake_ids),
+    )
+
+    from nous.handlers import fact_extractor as fe_mod
+
+    heart = _stub_heart_for_extractor()
+    ext = fe_mod.FactExtractor.__new__(fe_mod.FactExtractor)
+    ext._heart = heart
+    ext._settings = _make_settings(flag_on=True, enumerative_density_threshold=0.0)
+    ext._dedup_via_search = False
+    ext._llm = object()
+
+    result = await ext.extract_and_store(
+        summary={"candidate_facts": _mixed_candidates("preference")},
+        episode_id=str(uuid4()),
+        transcript=_DENSE_TRANSCRIPT,
+    )
+
+    assert [fi.category for fi in heart._captured] == ["preference"]
+    assert len(result) == 2
+
+
+@pytest.mark.asyncio
+async def test_enumerative_not_fired_stores_every_candidate(monkeypatch):
+    """When the enumerative leg does not fire, the candidate path is unchanged:
+    profile and non-profile candidates are all stored."""
+    sentinel = AsyncMock(side_effect=AssertionError("enumerative ran on narrative"))
+    monkeypatch.setattr(
+        "nous.handlers.enumerative_extractor.EnumerativeExtractor.process_transcript",
+        sentinel,
+    )
+
+    from nous.handlers import fact_extractor as fe_mod
+
+    heart = _stub_heart_for_extractor()
+    ext = fe_mod.FactExtractor.__new__(fe_mod.FactExtractor)
+    ext._heart = heart
+    ext._settings = _make_settings(flag_on=True, enumerative_density_threshold=0.99)
+    ext._dedup_via_search = False
+    ext._llm = object()
+
+    narrative = (
+        "User: hey, how was your weekend?\n"
+        "Assistant: It went well! I spent time reading about distributed systems.\n"
+    ) * 20
+
+    result = await ext.extract_and_store(
+        summary={"summary": "Small talk."},
+        episode_id=str(uuid4()),
+        transcript=narrative,
+        candidate_facts=_mixed_candidates("preference"),
+    )
+
+    sentinel.assert_not_called()
+    assert [fi.category for fi in heart._captured] == ["preference", "technical"]
+    assert len(result) == 2
 
 
 @pytest.mark.asyncio
@@ -5409,3 +5533,29 @@ def test_enumerative_non_tier1_category_passes_through(settings_fixture):
     inputs = ex._to_fact_inputs(raw, chunk_index=0, episode_id=uuid4())
     assert len(inputs) == 1
     assert inputs[0].category == "concept"
+
+
+@pytest.mark.parametrize("missing", [None, "", "omitted"])
+def test_enumerative_missing_category_stored_as_technical(settings_fixture, missing):
+    """An enumerated fact whose category the LLM left out (or sent empty) is
+    stored as technical, never with a NULL category."""
+    ex = EnumerativeExtractor.__new__(EnumerativeExtractor)
+    ex._settings = settings_fixture()
+
+    fact = {
+        "content": "The subject has some documented attribute value here.",
+        "subject_key": "subject",
+        "attribute_key": "attribute",
+    }
+    if missing != "omitted":
+        fact["category"] = missing
+    inputs = ex._to_fact_inputs([fact], chunk_index=0, episode_id=uuid4())
+    assert len(inputs) == 1
+    assert inputs[0].category == "technical"
+
+
+def test_enumerative_schema_requires_category():
+    """The schema asks the LLM for a category on every fact."""
+    from nous.handlers.enumerative_extractor import _EXTRACTION_SCHEMA
+
+    assert "category" in _EXTRACTION_SCHEMA["properties"]["facts"]["items"]["required"]

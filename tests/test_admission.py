@@ -254,6 +254,15 @@ class TestConfidence:
         # 0.8 - 0.10 = 0.70
         assert score == pytest.approx(0.70, abs=0.01)
 
+    def test_user_direct_without_source_text_keeps_declared_confidence(self):
+        """G-7: a fact the agent stores with learn_fact has no transcript
+        source_text. It is the user's own statement, so its declared
+        confidence stands instead of the 0.3 ungrounded floor."""
+        ctrl = _controller()
+        fact = _fact(source="user_direct", confidence=1.0)
+        score = ctrl._score_confidence(fact, None)
+        assert score == pytest.approx(1.0, abs=0.01)
+
 
 # ---------------------------------------------------------------------------
 # Utility — Heuristic
@@ -696,14 +705,19 @@ class TestUserDirectBonus:
         # Score same fact with and without user_direct source
         fact_ud = _fact(source="user_direct")
         fact_ext = _fact(source="fact_extractor")
+        # The same source_text for both, so the confidence dimension is the
+        # same ROUGE-L score and the difference is the bonus alone (without it,
+        # user_direct keeps its declared confidence while fact_extractor is
+        # capped at the ungrounded floor).
+        source = "Tim said he prefers dark mode in his IDE"
 
         result_ud = await ctrl.score(
             fact_input=fact_ud, embedding=None,
-            max_existing_similarity=None, source_text=None, session=None,
+            max_existing_similarity=None, source_text=source, session=None,
         )
         result_ext = await ctrl.score(
             fact_input=fact_ext, embedding=None,
-            max_existing_similarity=None, source_text=None, session=None,
+            max_existing_similarity=None, source_text=source, session=None,
         )
         # user_direct should score 0.15 higher
         assert abs(result_ud.composite_score - result_ext.composite_score - 0.15) < 0.001
@@ -728,6 +742,31 @@ class TestUserDirectBonus:
         )
         assert result.admitted is True
         assert result.composite_score >= ctrl.config.threshold
+
+    @pytest.mark.asyncio
+    async def test_plain_user_fact_admitted_at_prod_threshold(self):
+        """G-7: learn_fact with no category and no source text, scored with a
+        weak utility and some similar facts already stored, passes the 0.60
+        threshold. Before user_direct kept its declared confidence it was
+        capped at 0.3 and this scored 0.58, so the fact was rejected."""
+        ctrl = _controller(utility_llm_enabled=False, shadow_mode=False, threshold=0.60)
+        result = await ctrl.score(
+            fact_input=_fact(
+                content="My dentist appointments are on Thursdays at three",
+                category=None,
+                subject=None,
+                confidence=1.0,
+                source="user_direct",
+            ),
+            embedding=None,
+            max_existing_similarity=0.7,
+            source_text=None,
+            session=None,
+            utility_override=0.3,
+        )
+        # 0.25*0.3 + 0.15*1.0 + 0.20*0.3 + 0.10*1.0 + 0.30*0.5 + 0.15 bonus
+        assert result.composite_score == pytest.approx(0.685, abs=0.001)
+        assert result.admitted is True
 
     @pytest.mark.asyncio
     async def test_admission_user_direct_bonus_capped_at_1(self):

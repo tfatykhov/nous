@@ -30,6 +30,7 @@ def _parse_episode_uuid(episode_id: str | None) -> UUID | None:
     except (ValueError, TypeError):
         return None
 
+from nous.cognitive.context import TIER1_FACT_CATEGORIES
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.handlers import LLMClient, call_background_llm, cap_candidate_facts, parse_llm_json
@@ -272,6 +273,11 @@ class FactExtractor:
         # no conflict-slot keys, so R2 could never merge them with their
         # enumerative paraphrases; storing both would mint permanent variant
         # pairs, devil-2 #3). Narrative transcripts keep today's path exactly.
+        # One carve-out: summarizer candidates in the profile categories
+        # (person/preference/rule) are still stored. They are the only automatic
+        # source of profile facts, and they have no enumerative twin in their
+        # category: the enumerative schema offers only technical/concept/tool
+        # and remaps a drifted profile label to technical.
         if (
             getattr(self._settings, "extraction_enumerative_enabled", False) is True
             and getattr(self._settings, "enumerative_classifier", "heuristic") != "off"
@@ -280,6 +286,7 @@ class FactExtractor:
         ):
             from nous.handlers.enumerative_extractor import EnumerativeExtractor, is_enumerable
             if is_enumerable(transcript, self._settings.enumerative_density_threshold):
+                stored_ids: list[UUID] = []
                 try:
                     if getattr(self, "_enumerative_extractor", None) is None:
                         self._enumerative_extractor = EnumerativeExtractor(
@@ -289,12 +296,11 @@ class FactExtractor:
                     ex = self._enumerative_extractor
                     stored_ids = await ex.process_transcript(transcript, _parse_episode_uuid(episode_id))
                     logger.info("R1: stored %d enumerative facts for episode %s", len(stored_ids), episode_id)
-                    if stored_ids:
-                        return stored_ids
-                    logger.warning(
-                        "R1: enumerative leg stored 0 facts for episode %s — falling back to legacy path",
-                        episode_id,
-                    )
+                    if not stored_ids:
+                        logger.warning(
+                            "R1: enumerative leg stored 0 facts for episode %s — falling back to legacy path",
+                            episode_id,
+                        )
                     # fall through: zero enumerative facts stored (e.g. API failure
                     # swallowed by call_background_llm_structured) — legacy path
                     # ensures the episode's facts are never silently dropped.
@@ -308,6 +314,17 @@ class FactExtractor:
                     # process_transcript catches per-chunk failures internally and returns
                     # partial results; reaching this except means nothing was stored, so
                     # the legacy fallback cannot create variant pairs.
+                if stored_ids:
+                    # Outside the try: a failure while storing the profile
+                    # candidates must not reach the legacy fallback, which would
+                    # store every candidate beside the enumerative facts.
+                    cands = candidate_facts if candidate_facts is not None else summary.get("candidate_facts", [])
+                    profile = [c for c in cands if isinstance(c, dict) and c.get("category") in TIER1_FACT_CATEGORIES]
+                    if profile:
+                        stored_ids = stored_ids + await self._store_candidate_facts(
+                            profile, episode_id, transcript=transcript
+                        )
+                    return stored_ids
 
         # Legacy path — byte-identical to today.
         cands = candidate_facts if candidate_facts is not None else summary.get("candidate_facts", [])

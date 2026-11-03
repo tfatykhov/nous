@@ -102,7 +102,10 @@ _EXTRACTION_SCHEMA = {
                 # prompt level. _to_fact_inputs still carries a belt+braces
                 # fallback (entity_extraction_complete) for any response
                 # that reaches Python having dropped the field anyway.
-                "required": ["content", "subject_key", "attribute_key", "entities"],
+                # "category" is required for the same reason: an omitted one
+                # stored a NULL category. _to_fact_inputs still defaults it
+                # to technical for a response that drops it anyway.
+                "required": ["content", "subject_key", "attribute_key", "entities", "category"],
             },
         }
     },
@@ -350,7 +353,8 @@ class EnumerativeExtractor:
             # schema enum no longer offers person/preference/rule; post-map any
             # drifted label to technical (enum sample: preference 100% / person
             # ~90% / rule ~80% noise). Mirrors #571: enum removal + drift guard.
-            category = f.get("category")
+            # A missing category takes the same home, technical, never NULL.
+            category = f.get("category") or "technical"
             if category in ("preference", "person", "rule"):
                 category = "technical"
 

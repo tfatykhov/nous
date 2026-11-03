@@ -1497,7 +1497,9 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     f"Fact not stored (admission score {result.composite_score:.2f} "
                     f"< {result.threshold} threshold).\n"
                     f"Scores: {', '.join(f'{k}={v:.2f}' for k, v in result.scores.items())}\n"
-                    f"Override with explicit instruction if this should be stored."
+                    f"To store it, state it as one specific, self-contained fact and "
+                    f"give it a subject and a category: person, preference and rule "
+                    f"score highest, and are only for durable facts about the user."
                 )
 
             warning_msg = ""
