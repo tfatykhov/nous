@@ -2844,6 +2844,37 @@ class TestGate1ContradictionOrderResolution:
 # dedup-confirm (F085 Gate-1 fixes plan, Task 3).
 
 
+@pytest.fixture
+async def isolated_heart(db, session, mock_embeddings):
+    """A Heart on an agent of its own, seeded with one unrelated active fact.
+
+    Admission scores a new fact's novelty against the agent's other active
+    facts. With none to compare against, _find_max_similarity returns None
+    and novelty falls back to 0.5, which puts the first learn of the tests
+    below the admission threshold. On the shared default agent the result
+    therefore depended on whether an earlier test had committed facts. The
+    seed's embedding is orthogonal to every _unit_vec these tests use, so
+    novelty is 1.0 whatever else the database holds. The seed lives in the
+    test's rolled-back session, like everything the tests write.
+    """
+    from nous.config import Settings
+    from nous.heart import Heart
+
+    settings = Settings().model_copy(update={"agent_id": f"gate1-{uuid4().hex[:8]}"})
+    h = Heart(db, settings, embedding_provider=mock_embeddings)
+    session.add(
+        Fact(
+            agent_id=h.agent_id,
+            content="An unrelated background fact for admission novelty scoring.",
+            active=True,
+            embedding=_unit_vec(1535),
+        )
+    )
+    await session.flush()
+    yield h
+    await h.close()
+
+
 @pytest.mark.postgres_only
 class TestGate1SameSlotDedupRouting:
     async def test_same_slot_value_variant_not_swallowed(self, heart, session, monkeypatch):
@@ -2941,7 +2972,7 @@ class TestGate1SameSlotDedupRouting:
         ), session=session, precomputed_embedding=vec)
         assert r2.id == r1.id
 
-    async def test_routed_dupe_excluded_from_admission_novelty_only(self, heart, session, monkeypatch):
+    async def test_routed_dupe_excluded_from_admission_novelty_only(self, isolated_heart, session, monkeypatch):
         """Codex r2: a same-slot value-variant routed past dedup (Gate-1 D2)
         is definitionally near-identical to the dupe it was routed against
         (that's why it hit the >= fact_native_cosine_threshold dedup check).
@@ -2957,6 +2988,8 @@ class TestGate1SameSlotDedupRouting:
         Amendment 1 preserved)."""
         from nous.heart.admission import AdmissionConfig, AdmissionController
         from nous.heart.schemas import FactRejected
+
+        heart = isolated_heart
 
         monkeypatch.setattr(
             "nous.heart.facts.FactManager.is_distinct_fact",
@@ -2982,7 +3015,7 @@ class TestGate1SameSlotDedupRouting:
 
         monkeypatch.setattr(heart.facts, "_find_max_similarity", _capturing_find_max_similarity)
 
-        ep_id = await _insert_episode(session)
+        ep_id = await _insert_episode(session, agent_id=heart.agent_id)
         vec = _unit_vec(25)
         r1 = await heart.learn(FactInput(
             content="The author of Work Y is Carla First.",
@@ -3010,7 +3043,7 @@ class TestGate1SameSlotDedupRouting:
         new = await _get_fact(heart, r2.id, session)
         assert new.active and not old.active and old.superseded_by == new.id
 
-    async def test_routed_dupe_cluster_excludes_all_active_same_slot_facts(self, heart, session, monkeypatch):
+    async def test_routed_dupe_cluster_excludes_all_active_same_slot_facts(self, isolated_heart, session, monkeypatch):
         """Codex r4/r5: the cluster extension of r2. When MORE than one
         active same-slot fact exists, admission's novelty exclusion must
         cover the WHOLE conflict-slot cluster, not just the single routed
@@ -3028,6 +3061,7 @@ class TestGate1SameSlotDedupRouting:
         active same-slot facts to prove the admission exclusion is uncapped."""
         from nous.heart.admission import AdmissionConfig, AdmissionController
 
+        heart = isolated_heart
         monkeypatch.setattr(
             "nous.heart.facts.FactManager.is_distinct_fact",
             AsyncMock(return_value=True))
@@ -3050,7 +3084,7 @@ class TestGate1SameSlotDedupRouting:
 
         monkeypatch.setattr(heart.facts, "_find_max_similarity", _capturing_find_max_similarity)
 
-        ep_id = await _insert_episode(session)
+        ep_id = await _insert_episode(session, agent_id=heart.agent_id)
         vec_first = _unit_vec(26)
         cluster_names = ["Alice Prior", "Bob Middle", "Dana Second", "Erin Third"]
         cluster_facts = []
