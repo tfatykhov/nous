@@ -266,6 +266,28 @@ def episode_decision_bounds_sql(*, agent_param: str = "agent_id") -> str:
     """
 
 
+def episode_close_at_sql(*, agent_param: str = "agent_id") -> str:
+    """Derived table ``(id, close_at)`` over the agent's episodes: the
+    ``ended_at`` that closes an open episode without moving any decision window.
+
+    The bounds above treat a closed episode's ``ended_at`` as authoritative.
+    An open one's window ends where its successor in the same session begins
+    (less the grace band), or at now() when it has none. So closing an open
+    row at now() would claim every later decision of its successor and push
+    the successor's window start past them (codex P2 on #825). ``close_at``
+    is the open row's current ``decision_window_end``: closing at it leaves
+    both windows where they were. A row outside the correlation (no
+    session_id) gets now(). Every bulk close of an open row uses this; a live
+    session ending now (``EpisodeManager._end``) does not need it."""
+    return f"""
+        SELECT ep.id, COALESCE(b.decision_window_end, now()) AS close_at
+        FROM heart.episodes ep
+        LEFT JOIN ({episode_decision_bounds_sql(agent_param=agent_param)}) b
+          ON b.id = ep.id
+        WHERE ep.agent_id = :{agent_param}
+    """
+
+
 def episode_decision_join_sql(ep_prefix: str = "e.", dec_prefix: str = "d.") -> str:
     """ON-clause joining ``brain.decisions`` to the derived table produced by
     :func:`episode_decision_bounds_sql`."""

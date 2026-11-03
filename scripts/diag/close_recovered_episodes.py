@@ -6,8 +6,10 @@ episode forever. An open row with a structured summary is exactly such a row:
 the summarizer's own path runs after ``_end``. This closes them with the same
 SET clause and the same live-session guard as the fixed sleep phase (no
 working-memory write for the episode's session inside the min-age window).
+Each row ends where its decision window already ended (episode_close_at_sql),
+so it needs an image that contains that helper (#825).
 
-Standalone, for the agent container:
+For the agent container:
     docker exec -i nous-agent python - < scripts/diag/close_recovered_episodes.py
     docker exec -i nous-agent python - --apply < scripts/diag/close_recovered_episodes.py
 
@@ -24,6 +26,7 @@ import asyncio
 
 from sqlalchemy import text
 
+from nous.brain.graph_constants import episode_close_at_sql
 from nous.config import Settings
 from nous.storage.database import Database
 
@@ -49,14 +52,19 @@ _LIST = f"""
 """
 
 _CLOSE = f"""
-    UPDATE heart.episodes
-    SET ended_at = COALESCE(ended_at, now()),
-        duration_seconds = COALESCE(duration_seconds, EXTRACT(EPOCH FROM now() - started_at)::int),
+    UPDATE heart.episodes h
+    SET ended_at = COALESCE(h.ended_at, c.close_at),
+        duration_seconds = COALESCE(
+            h.duration_seconds,
+            EXTRACT(EPOCH FROM COALESCE(h.ended_at, c.close_at) - h.started_at)::int
+        ),
         active = false,
-        outcome = COALESCE(outcome, 'partial')
-    WHERE agent_id = :agent_id
-      AND ended_at IS NULL
-      AND id IN ({_SELECT})
+        outcome = COALESCE(h.outcome, 'partial')
+    FROM ({episode_close_at_sql()}) c
+    WHERE c.id = h.id
+      AND h.agent_id = :agent_id
+      AND h.ended_at IS NULL
+      AND h.id IN ({_SELECT})
 """
 
 

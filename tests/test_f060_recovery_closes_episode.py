@@ -14,6 +14,7 @@ under a per-test agent_id and delete them afterwards.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
@@ -21,7 +22,7 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import select, text
 
-from nous.brain.graph_constants import episode_dead_sql, episode_live_sql
+from nous.brain.graph_constants import episode_dead_sql, episode_decisions_query, episode_live_sql
 from nous.config import Settings
 from nous.handlers.sleep_handler import SleepHandler
 from nous.heart import Heart
@@ -128,6 +129,7 @@ async def _open_episode_for_session(db, agent_id: str, session_id: str) -> UUID 
 async def _cleanup(db, agent_id: str) -> None:
     async with db.session() as s:
         for table in (
+            "brain.decisions",
             "brain.graph_edges",
             "heart.facts",
             "heart.episodes",
@@ -299,4 +301,110 @@ async def test_f057_relinks_an_episode_the_recovery_sweep_closed(db, agent_id, m
             assert {r.source_id for r in edges.all()} == {fact_id}
     finally:
         await heart.close()
+        await _cleanup(db, agent_id)
+
+
+# ---------------------------------------------------------------------------
+# Closing an open episode must not move any decision window (codex P2, #825)
+# ---------------------------------------------------------------------------
+# An open episode's decision window ends where its successor in the same
+# session begins, less the grace band; a closed one's ends at ended_at. A close
+# at now() made a stuck-open predecessor claim its successor's decisions.
+
+
+async def _insert_episode(db, agent_id, session_id, started, *, ended=None, summary=_PLAIN_SUMMARY) -> UUID:
+    async with db.session() as s:
+        row = await s.execute(
+            text(
+                "INSERT INTO heart.episodes (agent_id, summary, session_id, started_at, ended_at, active, outcome) "
+                "VALUES (:a, :summary, :sid, :st, :en, :active, :outcome) RETURNING id"
+            ),
+            {
+                "a": agent_id,
+                "summary": summary,
+                "sid": session_id,
+                "st": started,
+                "en": ended,
+                "active": ended is None,
+                "outcome": None if ended is None else "success",
+            },
+        )
+        episode_id = row.scalar_one()
+        await s.commit()
+    return episode_id
+
+
+async def _insert_decision(db, agent_id, session_id, created) -> UUID:
+    decision_id = uuid4()
+    async with db.session() as s:
+        await s.execute(
+            text(
+                "INSERT INTO brain.decisions (id, agent_id, description, confidence, category, stakes, "
+                "session_id, created_at) VALUES (:id, :a, 'fixture decision', 0.8, 'process', 'low', :sid, :ts)"
+            ),
+            {"id": decision_id, "a": agent_id, "sid": session_id, "ts": created},
+        )
+        await s.commit()
+    return decision_id
+
+
+async def _decisions_of(db, agent_id, episode_id) -> set[UUID]:
+    async with db.session() as s:
+        rows = await s.execute(
+            text(episode_decisions_query("d.id")),
+            {"agent_id": agent_id, "episode_id": episode_id},
+        )
+        return {r[0] for r in rows.all()}
+
+
+async def test_recovery_close_keeps_every_decision_in_its_episode(db, agent_id):
+    settings = _settings(agent_id)
+    handler = _handler(db, settings, _WritingSummarizer(db))
+    t0 = datetime.now(UTC)
+    sid = "f060-decision-session"
+    try:
+        stuck = await _insert_episode(db, agent_id, sid, t0 - timedelta(hours=30))
+        successor_start = t0 - timedelta(hours=10)
+        successor = await _insert_episode(db, agent_id, sid, successor_start, ended=t0 - timedelta(hours=9))
+        in_stuck = await _insert_decision(db, agent_id, sid, t0 - timedelta(hours=20))
+        in_grace_band = await _insert_decision(db, agent_id, sid, successor_start - timedelta(seconds=30))
+        in_successor = await _insert_decision(db, agent_id, sid, t0 - timedelta(hours=9, minutes=30))
+
+        before = {ep: await _decisions_of(db, agent_id, ep) for ep in (stuck, successor)}
+        assert before == {stuck: {in_stuck}, successor: {in_grace_band, in_successor}}
+
+        stats: dict = {}
+        await handler._phase_recover_abandoned_episodes(stats)
+
+        row = await _row(db, stuck)
+        assert (row.active, row.outcome) == (False, "partial")
+        assert stats["episodes_recovery_closed"] == 1
+        after = {ep: await _decisions_of(db, agent_id, ep) for ep in (stuck, successor)}
+        assert after == before
+    finally:
+        await _cleanup(db, agent_id)
+
+
+async def test_abandon_close_ends_before_the_successor(db, agent_id):
+    """Loop B closes an open row the same way: it ends where its window did."""
+    settings = _settings(agent_id)
+    handler = _handler(db, settings, _WritingSummarizer(db))
+    t0 = datetime.now(UTC)
+    sid = "f060-abandon-session"
+    try:
+        empty = await _insert_episode(db, agent_id, sid, t0 - timedelta(days=8), summary="hi")
+        successor_start = t0 - timedelta(days=7, hours=12)
+        await _insert_episode(db, agent_id, sid, successor_start, ended=successor_start + timedelta(hours=1))
+
+        stats: dict = {}
+        await handler._phase_recover_abandoned_episodes(stats)
+
+        assert stats["episodes_marked_abandoned"] == 1
+        async with db.session() as s:
+            row = (
+                await s.execute(text("SELECT ended_at, outcome FROM heart.episodes WHERE id = :id"), {"id": empty})
+            ).one()
+        assert row.outcome == "abandoned"
+        assert row.ended_at == successor_start - timedelta(seconds=60, microseconds=1)
+    finally:
         await _cleanup(db, agent_id)
