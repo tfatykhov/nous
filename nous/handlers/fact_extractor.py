@@ -228,8 +228,15 @@ class FactExtractor:
             return None
         try:
             started_at = (await self._heart.get_episode(uid)).started_at
+        except ValueError:  # Heart.get_episode: the episode does not exist
+            logger.debug("No reference time: episode %s not found", episode_id)
+            return None
         except Exception:
-            logger.debug("No reference time for episode %s", episode_id, exc_info=True)
+            logger.warning(
+                "No reference time for episode %s: reading it failed; its facts get no mentioned_at",
+                episode_id,
+                exc_info=True,
+            )
             return None
         return started_at if isinstance(started_at, datetime) else None
 

@@ -2715,6 +2715,8 @@ class FactManager:
 
         - ``valid_from`` is the earliest, and only when every source has one;
           ``valid_to`` is NULL if any source is open, else the latest.
+        - An inherited interval also stamps ``event_date_classified_at``, so the
+          F075.1 backfill never re-classifies the merged text over it.
         - ``event_date`` is the one date every dated source shares. With no
           interval it becomes a one-day interval. When the interval is wider
           than that day, event_date is dropped: a row's event_date is always
@@ -2752,7 +2754,14 @@ class FactManager:
                 elif (valid_from, valid_to) != (event_date, event_date):
                     event_date = None
             if valid_from is not None:
-                values.update(valid_from=valid_from, valid_to=valid_to, event_date=event_date)
+                # Stamped as classified, or the F075.1 backfill would re-ask the
+                # LLM about the merged text and overwrite the inherited span.
+                values.update(
+                    valid_from=valid_from,
+                    valid_to=valid_to,
+                    event_date=event_date,
+                    event_date_classified_at=datetime.now(UTC),
+                )
         if values:
             await session.execute(update(Fact).where(Fact.id == replacement_id).values(**values))
 

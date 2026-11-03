@@ -6,9 +6,12 @@
 -- mentioned_at is statement time, when the fact was said: the start of the
 -- source episode. NULL means unknown, and readers fall back to learned_at,
 -- which stays ingestion time.
--- Backfill, no LLM: dated rows become one-day intervals, and mentioned_at
--- comes from the source episode's start, else learned_at. Every UPDATE
--- touches only rows still NULL, so a second run changes nothing.
+-- Backfill, no LLM: dated rows become one-day intervals, and a row with a
+-- source episode gets that episode's start as mentioned_at. A row with no
+-- episode stays NULL: copying learned_at would add nothing readers do not
+-- already fall back to, and would rewrite every such row under this
+-- migration's exclusive lock. Every UPDATE touches only rows still NULL, so
+-- a second run changes nothing.
 -- The backfill is not an edit, so it must not move updated_at. The
 -- set_updated_at trigger (init.sql) would stamp every row it fills, and the
 -- heartbeat stale count and anything else that reads updated_at would then
@@ -35,10 +38,10 @@ UPDATE heart.facts
     WHERE event_date IS NOT NULL AND valid_from IS NULL;
 
 UPDATE heart.facts AS f
-    SET mentioned_at = COALESCE(
-        (SELECT e.started_at FROM heart.episodes AS e WHERE e.id = f.source_episode_id),
-        f.learned_at
-    )
-    WHERE f.mentioned_at IS NULL;
+    SET mentioned_at = e.started_at
+    FROM heart.episodes AS e
+    WHERE f.mentioned_at IS NULL
+      AND f.source_episode_id IS NOT NULL
+      AND e.id = f.source_episode_id;
 
 ALTER TABLE heart.facts ENABLE TRIGGER set_updated_at;

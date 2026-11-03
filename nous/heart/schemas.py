@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Literal
 from uuid import UUID
 
@@ -201,6 +201,15 @@ class FactInput(BaseModel):
     @classmethod
     def _parse_dates(cls, v, info: ValidationInfo):
         return _parse_date(v, info.field_name)
+
+    @field_validator("mentioned_at", mode="after")
+    @classmethod
+    def _mentioned_at_is_utc_when_naive(cls, v: datetime | None) -> datetime | None:
+        """A naive timestamp is taken as UTC, as every producer writes UTC. Left
+        naive, asyncpg would read it in the host's local zone and shift it."""
+        if v is not None and v.tzinfo is None:
+            return v.replace(tzinfo=UTC)
+        return v
 
     @model_validator(mode="after")
     def _derive_interval(self) -> FactInput:

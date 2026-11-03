@@ -15,7 +15,7 @@ import ast
 import json
 import logging
 import re
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -105,6 +105,16 @@ def test_one_parser_reduces_a_datetime_to_its_date(field):
 def test_mentioned_at_is_a_plain_optional_timestamp():
     assert FactInput(content="c").mentioned_at is None
     assert FactInput(content="c", mentioned_at=EPISODE_START).mentioned_at == EPISODE_START
+
+
+def test_a_naive_mentioned_at_is_taken_as_utc():
+    naive = datetime(2024, 4, 11, 9, 30)
+    fi = FactInput(content="c", mentioned_at=naive)
+    assert fi.mentioned_at == EPISODE_START and fi.mentioned_at.tzinfo is UTC
+    assert FactInput(content="c", mentioned_at="2024-04-11T09:30:00").mentioned_at == EPISODE_START
+    # An aware value keeps its own offset.
+    plus2 = datetime(2024, 4, 11, 11, 30, tzinfo=timezone(timedelta(hours=2)))
+    assert FactInput(content="c", mentioned_at=plus2).mentioned_at.utcoffset() == timedelta(hours=2)
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +376,11 @@ async def test_the_enumerative_extractor_under_w_reads_spans_and_states(monkeypa
     message, schema = calls[0]["user_message"], calls[0]["output_schema"]
     assert f"Observation date: {EPISODE_START.isoformat()}" in message
     assert message.index("Observation date") < message.index("<chunk>")
+    # One rule for event_date: relative days resolve against the observation date,
+    # and the W-off "explicit date only" line is gone, not contradicted.
+    assert "resolved against the observation date" in message
+    assert "ONLY when the statement itself carries an explicit" not in message
+    assert message.count("Report event_date") == 1
     item = schema["properties"]["facts"]["items"]["properties"]
     assert {"valid_from", "valid_to"} <= set(item)
     assert "valid_from" not in schema["properties"]["facts"]["items"]["required"]
@@ -382,7 +397,11 @@ async def test_the_enumerative_extractor_under_w_without_a_reference_time(monkey
     calls, inputs = await _run_enumerative(
         monkeypatch, {"temporal_extraction_enabled": True, "temporal_intervals_enabled": True}, None
     )
-    assert "Observation date" not in calls[0]["user_message"]
+    message = calls[0]["user_message"]
+    # No observation date: explicit dates only, and nothing refers to one.
+    assert "observation date" not in message.lower()
+    assert "ONLY when the statement itself carries an explicit single-day date" in message
+    assert message.count("Report event_date") == 1 and "valid_from" in message
     assert all(fi.mentioned_at is None for fi in inputs)
 
 
@@ -475,9 +494,10 @@ async def test_the_migration_backfills_and_a_second_run_changes_nothing(session)
         text("INSERT INTO heart.episodes (id, agent_id, summary, started_at) VALUES (:id, :a, 's', :t)"),
         {"id": ep, "a": agent, "t": EPISODE_START},
     )
-    ids = {k: uuid4() for k in ("dated_ep", "undated_noep", "merged_span")}
+    ids = {k: uuid4() for k in ("dated_ep", "undated_ep", "undated_noep", "merged_span")}
     rows = [
         (ids["dated_ep"], date(2024, 4, 10), None, None, ep),
+        (ids["undated_ep"], None, None, None, ep),
         (ids["undated_noep"], None, None, None, None),
         # A row already carrying an interval is left alone.
         (ids["merged_span"], None, date(2026, 2, 1), date(2026, 2, 28), None),
@@ -507,9 +527,11 @@ async def test_the_migration_backfills_and_a_second_run_changes_nothing(session)
         await session.execute(text(statement))
     first = await _state()
     assert first[ids["dated_ep"]] == (date(2024, 4, 10),) * 3 + (EPISODE_START, edited)
-    assert first[ids["undated_noep"]] == (None, None, None, learned, edited)
-    assert first[ids["merged_span"]] == (None, date(2026, 2, 1), date(2026, 2, 28), learned, edited)
-    # Every row was filled and none got a new updated_at: the backfill is not an edit.
+    assert first[ids["undated_ep"]] == (None, None, None, EPISODE_START, edited)
+    # No episode, no statement time: the row is not rewritten, and readers use learned_at.
+    assert first[ids["undated_noep"]] == (None, None, None, None, edited)
+    assert first[ids["merged_span"]] == (None, date(2026, 2, 1), date(2026, 2, 28), None, edited)
+    # None got a new updated_at: the backfill is not an edit.
 
     touched = [(s, (await session.execute(text(s))).rowcount) for s in statements]
     assert [n for s, n in touched if s.startswith("UPDATE")] == [0, 0]  # nothing left to fill, anywhere
@@ -685,6 +707,21 @@ async def test_a_merge_with_w_off_inherits_only_the_statement_time(heart, sessio
     )
     assert (row.event_date, row.valid_from, row.valid_to) == (None, None, None)
     assert row.mentioned_at == T2
+    assert row.event_date_classified_at is None  # still eligible for the F075.1 backfill
+
+
+@pytest.mark.postgres_only
+async def test_an_inherited_interval_is_stamped_classified(heart, session):
+    """Unstamped, the F075.1 backfill would re-ask the LLM about the merged text
+    and overwrite the inherited span with whatever single day it answers."""
+    row = await _merged(
+        heart,
+        session,
+        [({"valid_from": "2026-02-01", "valid_to": "2026-02-28"}, T1), ({"event_date": "2026-02-10"}, T2)],
+        w=True,
+    )
+    assert (row.event_date, row.valid_from, row.valid_to) == (None, date(2026, 2, 1), date(2026, 2, 28))
+    assert row.event_date_classified_at is not None
 
 
 @pytest.mark.postgres_only
@@ -800,17 +837,24 @@ async def test_the_summarizer_round_trip_stores_event_and_statement_time(db, moc
         await heart.close()
 
 
-async def test_the_reference_time_lookup_never_raises():
+async def test_the_reference_time_lookup_never_raises(caplog):
     from nous.handlers.fact_extractor import FactExtractor
 
     fx = FactExtractor.__new__(FactExtractor)
     ep = str(uuid4())
 
+    # An unexpected failure is a WARNING: the episode's facts lose their statement time.
     fx._heart = MagicMock()  # get_episode is not awaitable
-    assert await fx._episode_ref_time(ep) is None
+    with caplog.at_level(logging.DEBUG, logger="nous.handlers.fact_extractor"):
+        assert await fx._episode_ref_time(ep) is None
+    assert [r.levelno for r in caplog.records] == [logging.WARNING]
+    caplog.clear()
+    # A missing episode is only DEBUG.
     fx._heart = AsyncMock()
     fx._heart.get_episode = AsyncMock(side_effect=ValueError("Episode not found"))
-    assert await fx._episode_ref_time(ep) is None
+    with caplog.at_level(logging.DEBUG, logger="nous.handlers.fact_extractor"):
+        assert await fx._episode_ref_time(ep) is None
+    assert [r.levelno for r in caplog.records] == [logging.DEBUG]
     fx._heart.get_episode = AsyncMock(return_value=SimpleNamespace(started_at=MagicMock()))
     assert await fx._episode_ref_time(ep) is None
     fx._heart.get_episode = AsyncMock(return_value=SimpleNamespace(started_at=EPISODE_START))

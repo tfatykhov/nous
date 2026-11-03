@@ -169,8 +169,8 @@ For each fact also list its participating named entities (subject and object sid
 
 # 097 bi-temporal facts, flag W (temporal_intervals_enabled; dates are read only
 # with temporal_extraction_enabled too): the schema gains optional
-# valid_from/valid_to, and the prompt gets the observation date (the episode
-# start) to resolve relative dates against, plus the span rules, before the chunk.
+# valid_from/valid_to, and the prompt's date rules get the observation date (the
+# episode start) to resolve relative dates against, plus the span rules.
 _EXTRACTION_SCHEMA_INTERVALS = copy.deepcopy(_EXTRACTION_SCHEMA)
 _EXTRACTION_SCHEMA_INTERVALS["properties"]["facts"]["items"]["properties"].update(
     {
@@ -189,8 +189,25 @@ _EXTRACTION_SCHEMA_INTERVALS["properties"]["facts"]["items"]["properties"].updat
     }
 )
 
-_OBSERVATION_DATE_LINE = (
-    "Observation date: {iso}. Resolve relative dates (\"yesterday\", \"last week\") against it.\n"
+# Under W the template's event_date line is replaced, so the prompt never says
+# "explicit date only" and "resolve relative dates" at once.
+_EVENT_DATE_RULE = (
+    "Report event_date in ISO YYYY-MM-DD format ONLY when the statement itself carries an explicit date; "
+    "omit otherwise.\n"
+)
+
+# With the observation date: relative dates resolve against it.
+_EVENT_DATE_RULE_OBSERVED = (
+    "Observation date: {iso} (when the text was written).\n"
+    "Report event_date in ISO YYYY-MM-DD format when the statement is anchored to a single day: an explicit "
+    "date, or a relative one (\"yesterday\", \"last Tuesday\") resolved against the observation date; "
+    "omit otherwise.\n"
+)
+
+# Without it: explicit dates only, as with W off.
+_EVENT_DATE_RULE_UNOBSERVED = (
+    "Report event_date in ISO YYYY-MM-DD format ONLY when the statement itself carries an explicit "
+    "single-day date; omit otherwise.\n"
 )
 
 _INTERVALS_RULES = (
@@ -203,13 +220,15 @@ _INTERVALS_RULES = (
 
 def _extraction_prompt(chunk: str, *, intervals: bool, ref_time: datetime | None) -> str:
     """The chunk prompt. With W off it is exactly ``_EXTRACTION_PROMPT``."""
-    prompt = _EXTRACTION_PROMPT.format(chunk=chunk)
     if not intervals:
-        return prompt
-    observation = _OBSERVATION_DATE_LINE.format(iso=ref_time.isoformat()) if ref_time is not None else ""
-    # The template's own <chunk> tag is the first one: the chunk text comes after it.
-    head, tag, tail = prompt.partition("\n<chunk>\n")
-    return head + "\n" + observation + _INTERVALS_RULES + tag + tail
+        return _EXTRACTION_PROMPT.format(chunk=chunk)
+    if ref_time is not None:
+        date_rules = _EVENT_DATE_RULE_OBSERVED.format(iso=ref_time.isoformat())
+    else:
+        date_rules = _EVENT_DATE_RULE_UNOBSERVED
+    # Replaced in the template, before the chunk is filled in, so chunk text is never matched.
+    template = _EXTRACTION_PROMPT.replace(_EVENT_DATE_RULE, date_rules + _INTERVALS_RULES, 1)
+    return template.format(chunk=chunk)
 
 
 class EnumerativeExtractor:
