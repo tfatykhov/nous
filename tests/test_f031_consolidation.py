@@ -295,7 +295,9 @@ class TestOrientContext:
         existing_fact = MagicMock()
         existing_fact.id = uuid4()
         existing_fact.content = "Tim's timezone is EST"
-        existing_fact.category = "person"
+        # A tier-1 match is learned beside, never superseded
+        # (tests/test_fact_writes_fail_closed.py); this test covers the rest.
+        existing_fact.category = "technical"
         existing_fact.subject = "Tim timezone"
         existing_fact.score = 0.95  # Above threshold
 
@@ -425,6 +427,7 @@ class TestContradictionResolution:
         heart.search_facts = AsyncMock(return_value=[])
         heart.facts = MagicMock()
         heart.facts.apply_supersession = AsyncMock(return_value=True)
+        heart.facts.current_pair = AsyncMock()  # the pair is still current
         mock_session = MagicMock()
         mock_session.commit = AsyncMock()
         cm = MagicMock()
@@ -506,6 +509,7 @@ class TestContradictionResolution:
         }])
         merged_detail = MagicMock()
         merged_detail.id = merged_id
+        merged_detail.confirmation_count = 0  # a fresh insert, not a confirmed third fact
         heart.learn = AsyncMock(return_value=merged_detail)
         heart.deactivate_fact = AsyncMock()
         heart.search_facts = AsyncMock(return_value=[])
@@ -520,8 +524,10 @@ class TestContradictionResolution:
         orm2 = MagicMock()
         orm2.superseded_by = None
         orm_facts = {fact1_id: orm1, fact2_id: orm2}
+        # The merge re-reads the merged fact before touching the sources.
+        merged_row = MagicMock(active=True, superseded_by=None)
         mock_session = MagicMock()
-        mock_session.get = AsyncMock(side_effect=lambda _model, fid: orm_facts.get(fid))
+        mock_session.get = AsyncMock(side_effect=lambda _model, fid: {**orm_facts, merged_id: merged_row}.get(fid))
         mock_session.commit = AsyncMock()
         cm = MagicMock()
         cm.__aenter__ = AsyncMock(return_value=mock_session)
@@ -548,7 +554,7 @@ class TestContradictionResolution:
         heart.db.session.assert_called_once()
         mock_session.commit.assert_awaited_once()
         # Both originals fetched and linked to merged fact.
-        assert mock_session.get.await_count == 2
+        assert mock_session.get.await_count == 3  # the merged fact + both originals
         for orig_id, orm in orm_facts.items():
             assert orm.superseded_by == merged_id, (
                 f"orig {orig_id} should be linked to merged_id"
@@ -583,6 +589,7 @@ class TestContradictionResolution:
         }])
         merged_detail = MagicMock()
         merged_detail.id = merged_id
+        merged_detail.confirmation_count = 0  # a fresh insert, not a confirmed third fact
         heart.learn = AsyncMock(return_value=merged_detail)
         heart.deactivate_fact = AsyncMock()
         heart.search_facts = AsyncMock(return_value=[])
@@ -595,8 +602,10 @@ class TestContradictionResolution:
         orm2.superseded_by = None
         orm2.active = True
         orm_facts = {fact1_id: orm1, fact2_id: orm2}
+        # The merge re-reads the merged fact before touching the sources.
+        merged_row = MagicMock(active=True, superseded_by=None)
         mock_session = MagicMock()
-        mock_session.get = AsyncMock(side_effect=lambda _model, fid: orm_facts.get(fid))
+        mock_session.get = AsyncMock(side_effect=lambda _model, fid: {**orm_facts, merged_id: merged_row}.get(fid))
         mock_session.commit = AsyncMock()
         cm = MagicMock()
         cm.__aenter__ = AsyncMock(return_value=mock_session)

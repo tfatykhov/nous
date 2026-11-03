@@ -9,6 +9,7 @@ transaction injection (P1-1).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
@@ -26,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nous.brain.embeddings import EmbeddingProvider
 from nous.brain.intentions import IntentionStore
 from nous.config import Settings
-from nous.events import Event, EventBus
+from nous.events import Event, EventBus, emit_after_commit
 from nous.heart.admission import AdmissionConfig, AdmissionController
 from nous.heart.censors import CensorManager
 from nous.heart.episodes import EpisodeManager
@@ -144,6 +145,8 @@ class Heart:
         # Injected post-construction in main.py (not a constructor param
         # to keep Heart's interface stable).
         self._bus: EventBus | None = None
+        # Strong refs for fact_learned emits scheduled after a caller's commit.
+        self._pending_emits: set[asyncio.Task] = set()
 
         # F050: Optional QueryExpander for multi-query expansion.
         # Wired via set_query_expander() in main.py (mirrors set_llm_client
@@ -288,7 +291,8 @@ class Heart:
 
         Args:
             input: Fact data.
-            session: Optional DB session.
+            session: Optional DB session. With one, the ``fact_learned`` bus
+                event is published only after that session commits.
             encoded_frame: Active frame when fact was learned (003.2).
             encoded_censors: Active censors when fact was learned (003.2).
             exclude_ids: Fact IDs to skip in the native-cosine dedup check.
@@ -326,19 +330,25 @@ class Heart:
         # bus-bound, not consumed by the linker). Gate on input.source — the same
         # idiom as the other isolation touchpoints.
         if self._bus is not None and input.source != "exemplar_extractor":
-            await self._bus.emit(
-                Event(
-                    type="fact_learned",
-                    agent_id=self.agent_id,
-                    data={
-                        "fact_id": str(result.id),
-                        "content": result.content,
-                        "category": result.category,
-                        "subject": result.subject,
-                        "modifies": "memory",
-                    },
-                )
+            event = Event(
+                type="fact_learned",
+                agent_id=self.agent_id,
+                data={
+                    "fact_id": str(result.id),
+                    "content": result.content,
+                    "category": result.category,
+                    "subject": result.subject,
+                    "modifies": "memory",
+                },
             )
+            if session is None:
+                # facts.learn owned the session and has committed.
+                await self._bus.emit(event)
+            else:
+                # Caller-owned transaction: publish only once the CALLER
+                # commits (the linker reads the row in its own session), and
+                # publish nothing on rollback. Same as Brain.record.
+                emit_after_commit(session, self._bus, event, self._pending_emits, key="nous_heart_pending_bus_events")
 
         return result
 

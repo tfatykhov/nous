@@ -963,6 +963,7 @@ class TestStructuredContradictionResolution:
         heart.db.session = MagicMock(return_value=_sess)
         heart.facts = MagicMock()
         heart.facts.apply_supersession = AsyncMock(return_value=True)
+        heart.facts.current_pair = AsyncMock()  # the pair is still current
 
         resolution = {"action": "SUPERSEDE_A", "confidence": 0.9, "reason": "Newer info"}
         response = MagicMock()

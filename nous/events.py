@@ -15,10 +15,15 @@ import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from uuid import uuid4
 
+from sqlalchemy import event as sa_event
+
 from nous.cancellation import cancel_requested
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
@@ -291,3 +296,47 @@ class EventBus:
     def pending(self) -> int:
         """Number of events waiting in queue."""
         return self._queue.qsize()
+
+
+def emit_after_commit(
+    session: AsyncSession,
+    bus: EventBus,
+    event: Event,
+    tasks: set[asyncio.Task],
+    *,
+    key: str,
+) -> None:
+    """Queue ``event`` for ``bus`` when ``session``'s outer transaction commits.
+
+    Dropped if the transaction rolls back first. ``EventBus.emit`` only does
+    ``put_nowait``, so scheduling it as a task from the synchronous SQLAlchemy
+    hook preserves post-commit ordering. ``tasks`` holds strong references to
+    the scheduled emits; ``key`` names the per-session queue in
+    ``session.info``, one per caller, so each caller's hooks run once.
+    """
+    sync_session = session.sync_session
+    pending = sync_session.info.get(key)
+    if pending is None:
+        pending = sync_session.info[key] = []
+
+        def _on_commit(sess: Any) -> None:
+            # after_commit also fires when a SAVEPOINT is released; the
+            # outer transaction can still roll back, so wait for it.
+            if sess.in_nested_transaction():
+                return
+            loop = asyncio.get_running_loop()
+            for ev in pending:
+                task = loop.create_task(bus.emit(ev))
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
+            pending.clear()
+
+        def _on_end(_sess: Any, transaction: Any) -> None:
+            # Only the OUTER transaction's end discards (after_commit has
+            # already drained on commit); a SAVEPOINT rollback keeps them.
+            if transaction.parent is None:
+                pending.clear()
+
+        sa_event.listen(sync_session, "after_commit", _on_commit)
+        sa_event.listen(sync_session, "after_transaction_end", _on_end)
+    pending.append(event)

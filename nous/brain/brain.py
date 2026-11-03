@@ -16,7 +16,6 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import ColumnElement, and_, case, delete, exists, func, or_, select, text, update
-from sqlalchemy import event as sa_event
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -42,6 +41,7 @@ from nous.brain.schemas import (
     ThoughtInfo,
 )
 from nous.config import Settings
+from nous.events import emit_after_commit
 from nous.storage.database import Database
 from nous.storage.models import (
     CalibrationSnapshot,
@@ -410,38 +410,9 @@ class Brain:
         )
 
     def _emit_after_commit(self, session: AsyncSession, bus_event: Any) -> None:
-        """Queue ``bus_event`` for the bus when ``session``'s outer transaction commits.
-
-        Dropped if the transaction rolls back first. ``EventBus.emit`` only
-        does ``put_nowait``, so scheduling it as a task from the synchronous
-        SQLAlchemy hook preserves post-commit ordering.
-        """
-        sync_session = session.sync_session
-        pending = sync_session.info.get("nous_brain_pending_bus_events")
-        if pending is None:
-            pending = sync_session.info["nous_brain_pending_bus_events"] = []
-
-            def _on_commit(sess: Any) -> None:
-                # after_commit also fires when a SAVEPOINT is released; the
-                # outer transaction can still roll back, so wait for it.
-                if sess.in_nested_transaction():
-                    return
-                loop = asyncio.get_running_loop()
-                for ev in pending:
-                    task = loop.create_task(self._bus.emit(ev))
-                    self._pending_emits.add(task)
-                    task.add_done_callback(self._pending_emits.discard)
-                pending.clear()
-
-            def _on_end(_sess: Any, transaction: Any) -> None:
-                # Only the OUTER transaction's end discards (after_commit has
-                # already drained on commit); a SAVEPOINT rollback keeps them.
-                if transaction.parent is None:
-                    pending.clear()
-
-            sa_event.listen(sync_session, "after_commit", _on_commit)
-            sa_event.listen(sync_session, "after_transaction_end", _on_end)
-        pending.append(bus_event)
+        """Queue ``bus_event`` for the bus when ``session``'s outer transaction
+        commits (dropped on rollback). See ``nous.events.emit_after_commit``."""
+        emit_after_commit(session, self._bus, bus_event, self._pending_emits, key="nous_brain_pending_bus_events")
 
     def _is_noise_decision(self, description: str, reasons: list[ReasonInput]) -> bool:
         """Lightweight pre-check to detect obvious non-decisions.

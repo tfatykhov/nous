@@ -316,7 +316,8 @@ class GraphEdge(Base):
             "'informed_by', 'evidence_for', 'discussed_in', 'extracted_from', "
             "'part_of', 'summarized_by', "             # F070 catch-up (migration 051)
             "'happened_before', "                       # F075 (migration 053)
-            "'co_occurred')",                           # Gap-1 formation (migration 055)
+            "'co_occurred', "                           # Gap-1 formation (migration 055)
+            "'refines')",                               # F027 REFINEMENT (migration 095)
             name="ck_edges_relation",
         ),
         CheckConstraint(

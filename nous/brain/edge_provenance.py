@@ -64,13 +64,14 @@ def classify(
         One of 'deterministic', 'inferred', 'heuristic'.
     """
     # Precedence: structural-provenance relations win over any source
-    # tag, because supersedes/contradicts encode the writer's intent in
-    # the relation itself. The `source` tag only disambiguates relations
+    # tag, because supersedes/contradicts/refines encode the writer's intent
+    # in the relation itself. The `source` tag only disambiguates relations
     # that COULD be either heuristic or inferred (related_to,
     # evidence_for, informed_by, etc.).
     if relation == "supersedes":
         return "deterministic"
-    if relation == "contradicts":
+    # contradicts and refines are both F027 classifier (LLM) verdicts.
+    if relation in ("contradicts", "refines"):
         return "inferred"
     if source == "structural":
         return "deterministic"

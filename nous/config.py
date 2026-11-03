@@ -1495,7 +1495,10 @@ class Settings(BaseSettings):
             "LLM calls, and at scale they fill the ORDER BY similarity LIMIT slots and "
             "starve new candidates. When > 0, a pair with an f031_contradiction_resolution "
             "event within this many days is skipped (re-evaluated after the window, so a "
-            "changed pair still gets reconsidered). 0 disables the cooldown."
+            "changed pair still gets reconsidered). The same window skips a pair or an "
+            "F027 cluster (of unchanged size) whose sleep merge was aborted because the "
+            "merged content confirmed a third fact or the merged fact went inactive. "
+            "0 disables the cooldown."
         ),
     )
 

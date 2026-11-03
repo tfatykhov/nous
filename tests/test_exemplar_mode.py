@@ -2157,6 +2157,11 @@ class TestExemplarResolverCandidateExclusion:
             await s.commit()
         try:
             n_vec = _vec_at_cosine(base, 0.90, "nn-supersede")
+            # Inside the band only a confident classifier UPDATE supersedes.
+            fm._llm = MagicMock()
+            fm._classify_fact_pair = AsyncMock(
+                return_value={"relation": "UPDATE", "current_fact": "new", "confidence": 0.9}
+            )
             result = await fm.learn(
                 FactInput(
                     content="The Nous framework version is currently 0.2 release.",
