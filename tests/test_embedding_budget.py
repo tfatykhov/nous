@@ -46,8 +46,8 @@ def fast_limits(monkeypatch):
     monkeypatch.setattr(embeddings_mod, "_RETRY_BACKOFF", (0.01, 0.01, 0.01))
 
 
-async def _provider(handler) -> EmbeddingProvider:
-    provider = EmbeddingProvider(api_key="test", cache_size=0)
+async def _provider(handler, cache_size: int = 0) -> EmbeddingProvider:
+    provider = EmbeddingProvider(api_key="test", cache_size=cache_size)
     await provider._client.aclose()
     provider._client = httpx.AsyncClient(
         base_url="https://api.openai.com/v1",
@@ -268,4 +268,24 @@ async def test_a_400_is_not_retried_and_does_not_open_the_window(fast_limits):
     # A per-request rejection says nothing about the provider's health.
     assert await _guarded(provider.embed("fine", fail_fast=True)) == [0.1, 0.2]
     assert calls == 2
+    await provider.close()
+
+
+async def test_oversized_input_is_cut_before_it_is_sent_and_cache_keyed():
+    sent: list = []
+
+    def handler(request):
+        sent.append(json.loads(request.content)["input"])
+        return _ok(request)
+
+    provider = await _provider(handler, cache_size=16)
+    cap = embeddings_mod._EMBED_CHAR_CAP
+    await _guarded(provider.embed("a" * (cap + 5000)))
+    assert sent == ["a" * cap]
+    # The cache keys on what was sent: the capped text itself is now a hit.
+    await _guarded(provider.embed("a" * cap))
+    assert len(sent) == 1
+
+    await _guarded(provider.embed_batch(["b" * (cap + 1), "short"]))
+    assert sent[1] == ["b" * cap, "short"]
     await provider.close()

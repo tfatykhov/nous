@@ -195,49 +195,70 @@ async def test_a_provider_failure_still_stops_the_backfill(db, status):
         await _drop_agent(db, agent_id)
 
 
-async def test_backfill_text_is_capped_like_procedure_embeds(db):
+async def _provider_with_token_limit():
+    """A real EmbeddingProvider whose mock API 400s any input over 16,000 chars.
+
+    Returns the provider and the list of input lengths it was sent. Vectors are
+    seeded from the text, so different texts get different vectors.
+    """
+    import hashlib
+    import json
+    import random
+
+    import httpx
+
+    from nous.brain.embeddings import EmbeddingProvider
+
+    sent: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        inputs = json.loads(request.content)["input"]
+        texts = inputs if isinstance(inputs, list) else [inputs]
+        sent.extend(len(t) for t in texts)
+        if any(len(t) > 16_000 for t in texts):
+            return httpx.Response(400, json={"error": "maximum context length is 8192 tokens"})
+        data = []
+        for i, t in enumerate(texts):
+            rng = random.Random(hashlib.sha256(t.encode()).hexdigest())
+            data.append({"index": i, "embedding": [rng.gauss(0, 1) for _ in range(1536)]})
+        return httpx.Response(200, json={"data": data})
+
+    provider = EmbeddingProvider(api_key="test", cache_size=0)
+    await provider._client.aclose()
+    provider._client = httpx.AsyncClient(base_url="https://api.openai.com/v1", transport=httpx.MockTransport(handler))
+    return provider, sent
+
+
+async def test_backfill_embeds_an_oversized_episode(db):
     from nous.heart.episodes import EpisodeManager
 
     agent_id = f"reembed-cap-{uuid4().hex[:8]}"
     await _add_agent(db, agent_id)
+    provider, sent = await _provider_with_token_limit()
     try:
         (huge,) = await _closed_episodes_without_vectors(db, agent_id, ["x" * 40_000])
-        embedder = _ScriptedEmbedder("never", RuntimeError("unused"))
-        manager = EpisodeManager(db, embedder, agent_id)
-
-        assert await manager.reembed_missing() == 1
-        assert len(embedder.texts[0]) == 16_000
+        assert await EpisodeManager(db, provider, agent_id).reembed_missing() == 1
+        assert sent == [16_000]
         assert await _has_vector(db, huge)
     finally:
+        await provider.close()
         await _drop_agent(db, agent_id)
 
 
-class _TokenLimitEmbedder:
-    """Rejects input over the 16,000-char cap with a 400, as the API does over its token limit."""
-
-    def __init__(self) -> None:
-        self.texts: list[str] = []
-
-    async def embed(self, text: str, fail_fast: bool = False) -> list[float]:
-        self.texts.append(text)
-        if len(text) > 16_000:
-            raise _http_error(400)
-        return [1.0] + [0.0] * 1535
-
-
 async def test_an_oversized_summary_gets_a_vector_at_start(db):
-    """The live writes cap their embed text too, so they do not rely on the backfill."""
+    """The provider cuts every input, so live writes do not rely on the backfill."""
     from nous.heart.episodes import EpisodeManager
     from nous.heart.schemas import EpisodeInput
 
     agent_id = f"embed-cap-start-{uuid4().hex[:8]}"
     await _add_agent(db, agent_id)
+    provider, sent = await _provider_with_token_limit()
     try:
-        embedder = _TokenLimitEmbedder()
-        ep = await EpisodeManager(db, embedder, agent_id).start(EpisodeInput(title="Long", summary="y" * 40_000))
+        ep = await EpisodeManager(db, provider, agent_id).start(EpisodeInput(title="Long", summary="y" * 40_000))
         assert await _has_vector(db, ep.id), "start() stored no vector for an oversized summary"
-        assert len(embedder.texts[0]) == 16_000
+        assert sent == [16_000]
     finally:
+        await provider.close()
         await _drop_agent(db, agent_id)
 
 
@@ -246,6 +267,7 @@ async def test_an_oversized_summary_gets_a_vector_at_end(db):
 
     agent_id = f"embed-cap-end-{uuid4().hex[:8]}"
     await _add_agent(db, agent_id)
+    provider, sent = await _provider_with_token_limit()
     try:
         ep_id = uuid4()
         async with db.session() as s:  # an open episode whose start() embed failed
@@ -257,11 +279,35 @@ async def test_an_oversized_summary_gets_a_vector_at_end(db):
                 {"id": ep_id, "aid": agent_id, "s": "y" * 40_000},
             )
             await s.commit()
-        embedder = _TokenLimitEmbedder()
-        await EpisodeManager(db, embedder, agent_id).end(ep_id, "success", lessons_learned=["keep it short"])
+        await EpisodeManager(db, provider, agent_id).end(ep_id, "success", lessons_learned=["keep it short"])
         assert await _has_vector(db, ep_id), "_end() stored no vector for an oversized summary"
-        assert len(embedder.texts[0]) == 16_000
+        assert sent == [16_000]
     finally:
+        await provider.close()
+        await _drop_agent(db, agent_id)
+
+
+async def test_an_oversized_fact_gets_a_vector_through_learn(db):
+    """The cap lives in the provider, so callers that never cut their text (facts) are covered."""
+    from nous.heart import FactInput, Heart
+
+    agent_id = f"embed-cap-fact-{uuid4().hex[:8]}"
+    await _add_agent(db, agent_id)
+    provider, sent = await _provider_with_token_limit()
+    try:
+        settings = Settings(_env_file=None)
+        object.__setattr__(settings, "agent_id", agent_id)
+        heart = Heart(db, settings, embedding_provider=provider)
+        fact = await heart.learn(FactInput(subject="load test", content="the soak run logged " + "z" * 40_000))
+        async with db.session() as s:
+            row = await s.execute(
+                sql_text("SELECT embedding IS NOT NULL AS has_vec FROM heart.facts WHERE id = :id"), {"id": fact.id}
+            )
+            assert row.one().has_vec, "an oversized fact was stored without a vector"
+        assert sent and max(sent) == 16_000
+        await heart.close()
+    finally:
+        await provider.close()
         await _drop_agent(db, agent_id)
 
 

@@ -48,6 +48,11 @@ _EMBED_BUDGET_S = 10.0
 _EMBED_BATCH_BUDGET_S = 30.0
 # After a failure, fail_fast calls raise at once for this many seconds.
 _FAIL_FAST_WINDOW_S = 10.0
+# Each input is cut to this many chars before it is sent (and cache-keyed).
+# text-embedding-3 caps an input at 8191 tokens and longer input gets a 400;
+# tiktoken is not a dependency, so this is a conservative CHAR bound: English
+# prose and code run >= 2 chars/token. Dense CJK text can still exceed it.
+_EMBED_CHAR_CAP = 16000
 _DEFAULT_CACHE_SIZE = 1024
 
 # OpenAI embeddings per-request hard limits (API facts, not tuning knobs).
@@ -65,6 +70,14 @@ _MAX_BATCH_BYTES = 250_000
 
 class EmbeddingUnavailableError(RuntimeError):
     """A fail_fast embed skipped the API because a recent call failed."""
+
+
+def _capped(text: str) -> str:
+    """``text`` cut to _EMBED_CHAR_CAP chars, so an oversized input is embedded, not rejected."""
+    if len(text) <= _EMBED_CHAR_CAP:
+        return text
+    logger.debug("Embedding input cut from %d to %d chars", len(text), _EMBED_CHAR_CAP)
+    return text[:_EMBED_CHAR_CAP]
 
 
 def _retry_after_seconds(response: httpx.Response) -> float | None:
@@ -233,8 +246,10 @@ class EmbeddingProvider:
         failed call it raises EmbeddingUnavailableError without calling the
         API. After the window one fail_fast call goes through as a probe, and
         the others still raise until it returns. Write paths leave it False,
-        so they always try.
+        so they always try. Text over _EMBED_CHAR_CAP chars is cut first; the
+        cache keys on what is sent.
         """
+        text = _capped(text)
         key = self._cache_key(text)
         cached = self._cache_get(key)
         if cached is not None:
@@ -266,10 +281,12 @@ class EmbeddingProvider:
         per-request limits (_MAX_BATCH_ITEMS inputs, _MAX_BATCH_BYTES
         UTF-8 bytes) and sent sequentially; each sub-batch is cached as it
         succeeds, so a mid-run failure doesn't re-pay completed requests
-        when the caller retries.
+        when the caller retries. Each text is cut to _EMBED_CHAR_CAP chars
+        first, as in embed().
         """
         if not texts:
             return []
+        texts = [_capped(t) for t in texts]
         keys = [self._cache_key(t) for t in texts]
         # Per-call memo so duplicate texts within one batch count a single
         # hit/miss (review P2: cache_misses must track API-item count).

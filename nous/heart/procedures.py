@@ -17,7 +17,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
 
-from nous.brain.embeddings import EmbeddingProvider
+from nous.brain.embeddings import _EMBED_CHAR_CAP, EmbeddingProvider
 from nous.heart.schemas import (
     JOB_LESSON_KIND,
     STRATEGY_CARD_KIND,
@@ -165,7 +165,9 @@ def _build_embed_text(
     # markdown (English prose + code) runs >=2 chars/token, so 16000 chars stays
     # under 8191 tokens. _embed_with_retry NULLs+logs on a pathological (e.g.
     # CJK-dense) overflow as the backstop — but skill bodies are English markdown.
-    _EMBED_CHAR_CAP = 16000
+    # The provider cuts every input to the same _EMBED_CHAR_CAP; cutting here
+    # too keeps this text, which callers also pass on as a query, equal to what
+    # is embedded.
     return text[:_EMBED_CHAR_CAP] if len(text) > _EMBED_CHAR_CAP else text
 
 
