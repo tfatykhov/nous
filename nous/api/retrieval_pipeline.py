@@ -37,7 +37,12 @@ from sqlalchemy import select
 from nous.brain.graph_constants import is_associative
 from nous.heart.exemplars import parse_label
 from nous.heart.keys import extract_entity_candidates, normalize_key
-from nous.heart.search import summarize_keyword_stats, with_keyword_stats
+from nous.heart.search import (
+    VECTOR_LEG_EF_SEARCH,
+    set_local_ef_search,
+    summarize_keyword_stats,
+    with_keyword_stats,
+)
 from nous.observability.retrieval_trace import (
     BELOW_FLOOR,
     BUDGET_TRUNCATED,
@@ -2776,6 +2781,7 @@ async def _search_episode_chunks(
         attempted.add("chunk")
     vec_lit = "[" + ",".join(f"{v:.6f}" for v in query_vec) + "]"
     async with heart.db.session() as s:
+        await set_local_ef_search(s, VECTOR_LEG_EF_SEARCH)
         # P1.1: include episode_id so the formatter can session-group chunks.
         rows = (await s.execute(sa_text(
             "SELECT id, content, 1 - (embedding <=> CAST(:v AS vector)) AS sim, episode_id "

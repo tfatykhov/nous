@@ -32,7 +32,7 @@ from nous.brain.backfill_rerank import (
 from nous.brain.embeddings import EmbeddingProvider
 from nous.brain.graph_linker import GraphLinker, common_template_text, edge_confidence
 from nous.config import Settings
-from nous.heart.search import hybrid_search
+from nous.heart.search import hybrid_search, reset_local_ef_search
 from nous.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -421,6 +421,9 @@ class GraphDensifier:
 
         if source_embedding:
             embedding_str = "[" + ",".join(str(float(v)) for v in source_embedding) + "]"
+            # The same-type leg's hybrid_search widened the HNSW horizon for the
+            # rest of this transaction. This linking query keeps the defaults.
+            await reset_local_ef_search(session)
             sql = text(f"""
                 SELECT t.id
                 FROM {target_table} t

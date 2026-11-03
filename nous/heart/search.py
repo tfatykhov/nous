@@ -36,6 +36,15 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+# ef_search for the filtered retrieval vector legs that set none of their own:
+# the hybrid legs, the decision leg and the chunk leg. pgvector applies WHERE
+# filters after the HNSW walk, so at the default (40) these queries return
+# only the survivors among the ~40 nearest rows.
+# set_local_ef_search also turns on iterative scan. The value is fixed, not
+# derived from the LIMIT: a small ef_search with iterative scan measured slower.
+VECTOR_LEG_EF_SEARCH = 200
+
+
 async def set_local_ef_search(session: AsyncSession, value: int) -> None:
     """Prepare a filtered HNSW query — Postgres only, no-op elsewhere.
 
@@ -70,6 +79,26 @@ async def set_local_ef_search(session: AsyncSession, value: int) -> None:
             )
     except Exception:
         pass  # pgvector < 0.8 — GUC absent; ef_search margin still applies
+
+
+async def reset_local_ef_search(session: AsyncSession) -> None:
+    """Undo ``set_local_ef_search`` for the rest of the transaction.
+
+    ``SET LOCAL`` lasts until the transaction ends, so a query that must run
+    at pgvector's defaults after a ``hybrid_search`` in the same transaction
+    calls this first. ``iterative_scan`` is reset under a savepoint for the
+    same reason the helper sets it under one: pgvector < 0.8 has no such
+    parameter. Postgres only, no-op elsewhere.
+    """
+    bind = getattr(session, "bind", None)
+    if bind is None or getattr(getattr(bind, "dialect", None), "name", "") != "postgresql":
+        return
+    await session.execute(text("SET LOCAL hnsw.ef_search TO DEFAULT"))
+    try:
+        async with session.begin_nested():
+            await session.execute(text("SET LOCAL hnsw.iterative_scan TO DEFAULT"))
+    except Exception:
+        pass  # pgvector < 0.8 — GUC absent
 
 
 @lru_cache(maxsize=8)
@@ -672,6 +701,7 @@ async def hybrid_search(
     if embedding is not None:
         # Vector search
         params["query_embedding"] = "[" + ",".join(str(float(v)) for v in embedding) + "]"
+        await set_local_ef_search(session, VECTOR_LEG_EF_SEARCH)
         vector_sql = text(f"""
             SELECT t.id, 1 - (t.embedding <=> CAST(:query_embedding AS vector)) AS score
             FROM {table} t
@@ -702,7 +732,7 @@ async def hybrid_search(
             FROM {table} t
             WHERE t.search_tsv @@ plainto_tsquery('english', :query_text)
                 {filter_clauses}
-            ORDER BY score DESC
+            ORDER BY score DESC, t.id
             LIMIT :limit_expanded
         """)
         result = await session.execute(keyword_sql, params)

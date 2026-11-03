@@ -22,7 +22,7 @@ from nous.brain.embeddings import EmbeddingProvider
 from nous.heart.admission import AdmissionController, AdmissionResult
 from nous.heart.keys import is_keyable_entity, normalize_key
 from nous.heart.schemas import ContradictionWarning, FactDetail, FactInput, FactRejected, FactSummary
-from nous.heart.search import hybrid_search, hybrid_search_multi, set_local_ef_search
+from nous.heart.search import VECTOR_LEG_EF_SEARCH, hybrid_search, hybrid_search_multi, set_local_ef_search
 from nous.storage.database import Database
 from nous.storage.models import Episode, Event, Fact, FactEntityKey, GraphEdge
 
@@ -3433,6 +3433,7 @@ class FactManager:
 
         if embedding is not None:
             params["query_embedding"] = "[" + ",".join(str(float(v)) for v in embedding) + "]"
+            await set_local_ef_search(session, VECTOR_LEG_EF_SEARCH)
             vector_sql = text(f"""
                 SELECT t.id, 1 - (t.embedding <=> CAST(:query_embedding AS vector)) AS score
                 FROM heart.facts t
@@ -3451,7 +3452,7 @@ class FactManager:
             FROM heart.facts t
             WHERE t.search_tsv @@ plainto_tsquery('english', :query_text)
               AND t.agent_id = :agent_id {filter_extra}
-            ORDER BY score DESC
+            ORDER BY score DESC, t.id
             LIMIT :limit_expanded
         """)
         result = await session.execute(keyword_sql, params)
