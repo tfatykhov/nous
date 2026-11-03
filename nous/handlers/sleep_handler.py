@@ -2461,7 +2461,7 @@ class SleepHandler:
             async with self._heart.db.session() as session:
                 rows = await session.execute(
                     sql_text("""
-                    SELECT e.id, e.transcript, e.summary
+                    SELECT e.id, e.transcript, e.summary, e.session_id
                     FROM heart.episodes e
                     WHERE e.agent_id = :agent_id
                       AND e.active = true
@@ -2478,7 +2478,7 @@ class SleepHandler:
                 )
                 candidates = rows.all()
 
-            for ep_id, transcript, plain_summary in candidates:
+            for ep_id, transcript, plain_summary, ep_session_id in candidates:
                 if self._interrupted:
                     break
 
@@ -2513,10 +2513,14 @@ class SleepHandler:
                             # a plain-summary recovery: that read only the user's
                             # first message, and admission would be the only guard
                             # against the facts extraction mints from it.
+                            # The episode's own session id rides along, as on
+                            # the live path, so FactExtractor still knows a
+                            # background session (no enumerative leg for it).
                             await self._bus.emit(
                                 Event(
                                     type="episode_summarized",
                                     agent_id=agent_id,
+                                    session_id=ep_session_id,
                                     data={
                                         "episode_id": str(ep_id),
                                         "summary": summary,

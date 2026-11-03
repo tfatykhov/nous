@@ -168,8 +168,8 @@ async def test_recovers_with_full_transcript():
     ep1, ep2 = uuid4(), uuid4()
     long_transcript = "user: hello" + ("x" * 100)
     factory = _make_session_cm(
-        [(ep1, long_transcript, "short summary"),
-         (ep2, long_transcript, None)],
+        [(ep1, long_transcript, "short summary", None),
+         (ep2, long_transcript, None, None)],
         update_rowcount=0,
     )
     handler._heart.db.session = MagicMock(side_effect=factory)
@@ -200,7 +200,7 @@ async def test_fallback_to_summary_when_transcript_missing():
     ep1 = uuid4()
     plain_summary = "User asked about NOUS_MAX_TOKENS configuration"
     factory = _make_session_cm(
-        [(ep1, None, plain_summary)],
+        [(ep1, None, plain_summary, None)],
         update_rowcount=0,
     )
     handler._heart.db.session = MagicMock(side_effect=factory)
@@ -227,7 +227,7 @@ async def test_fallback_disabled_skips_when_only_summary():
 
     ep1 = uuid4()
     factory = _make_session_cm(
-        [(ep1, None, "User asked about NOUS_MAX_TOKENS configuration")],
+        [(ep1, None, "User asked about NOUS_MAX_TOKENS configuration", None)],
         update_rowcount=0,
     )
     handler._heart.db.session = MagicMock(side_effect=factory)
@@ -246,7 +246,7 @@ async def test_no_transcript_no_summary_skipped_no_data():
     handler = _make_handler(settings, summarizer=summarizer)
 
     ep1 = uuid4()
-    factory = _make_session_cm([(ep1, None, None)], update_rowcount=0)
+    factory = _make_session_cm([(ep1, None, None, None)], update_rowcount=0)
     handler._heart.db.session = MagicMock(side_effect=factory)
 
     sleep_stats: dict = {}
@@ -264,7 +264,7 @@ async def test_short_summary_skipped_no_data():
 
     ep1 = uuid4()
     factory = _make_session_cm(
-        [(ep1, None, "tiny")],  # 4 chars < 20
+        [(ep1, None, "tiny", None)],  # 4 chars < 20
         update_rowcount=0,
     )
     handler._heart.db.session = MagicMock(side_effect=factory)
@@ -288,9 +288,9 @@ async def test_mixed_recovery_paths_in_one_cycle():
     long_transcript = "user: hello" + ("x" * 100)
     factory = _make_session_cm(
         [
-            (ep1, long_transcript, "summary one"),  # full
-            (ep2, None, "User asked about config" * 3),  # fallback
-            (ep3, None, None),  # skip
+            (ep1, long_transcript, "summary one", None),  # full
+            (ep2, None, "User asked about config" * 3, None),  # fallback
+            (ep3, None, None, None),  # skip
         ],
         update_rowcount=0,
     )
@@ -322,7 +322,7 @@ async def test_summarize_exception_counted_no_phase_failure():
     ep1 = uuid4()
     long_transcript = "user: hi" + ("x" * 100)
     factory = _make_session_cm(
-        [(ep1, long_transcript, None)],
+        [(ep1, long_transcript, None, None)],
         update_rowcount=0,
     )
     handler._heart.db.session = MagicMock(side_effect=factory)
@@ -347,7 +347,7 @@ async def test_interrupt_short_circuits_loop():
     ep1, ep2 = uuid4(), uuid4()
     long_transcript = "user: hi" + ("x" * 100)
     factory = _make_session_cm(
-        [(ep1, long_transcript, None), (ep2, long_transcript, None)],
+        [(ep1, long_transcript, None, None), (ep2, long_transcript, None, None)],
         update_rowcount=0,
     )
     handler._heart.db.session = MagicMock(side_effect=factory)
@@ -409,7 +409,7 @@ async def test_recovery_and_mark_abandoned_both_fire_in_one_cycle():
     ep1 = uuid4()
     long_transcript = "user: hi" + ("x" * 100)
     factory = _make_session_cm(
-        [(ep1, long_transcript, None)],
+        [(ep1, long_transcript, None, None)],
         update_rowcount=3,
     )
     handler._heart.db.session = MagicMock(side_effect=factory)
@@ -449,8 +449,9 @@ async def test_transcript_recovery_hands_the_episode_to_fact_extraction():
     handler._bus = bus
 
     ep1 = uuid4()
+    chat_session = "3f2b8c1e-9d4a-4b7e-a1c2-5d6e7f8a9b0c"
     long_transcript = "user: hello" + ("x" * 100)
-    factory = _make_session_cm([(ep1, long_transcript, "short summary")])
+    factory = _make_session_cm([(ep1, long_transcript, "short summary", chat_session)])
     handler._heart.db.session = MagicMock(side_effect=factory)
 
     sleep_stats: dict = {}
@@ -461,6 +462,7 @@ async def test_transcript_recovery_hands_the_episode_to_fact_extraction():
     assert bus._queue.empty()
     assert event.type == "episode_summarized"
     assert event.agent_id == "test-agent"
+    assert event.session_id == chat_session
     assert event.data == {
         "episode_id": str(ep1),
         "summary": summary,
@@ -473,7 +475,46 @@ async def test_transcript_recovery_hands_the_episode_to_fact_extraction():
         episode_id=str(ep1),
         transcript=long_transcript,
         candidate_facts=["The deploy host is vm-a"],
+        session_id=chat_session,
     )
+
+
+@pytest.mark.asyncio
+async def test_recovered_background_episode_skips_the_enumerative_leg(monkeypatch):
+    """A recovered episode keeps its session id on the way to fact extraction,
+    so one from a DAG summary session is still a background session there:
+    its key: value prompt does not reach the enumerative leg, and its
+    candidates take the normal path."""
+    settings = _make_settings()
+    object.__setattr__(settings, "extraction_enumerative_enabled", True)
+    summary = {"title": "ok", "candidate_facts": ["The nightly report DAG publishes at 02:00 UTC"]}
+    summarizer = SimpleNamespace(summarize_episode=AsyncMock(return_value=summary))
+    handler = _make_handler(settings, summarizer=summarizer)
+    bus = EventBus()
+    heart = MagicMock()
+    heart.learn = AsyncMock(return_value=SimpleNamespace(id=uuid4()))
+    FactExtractor(heart, settings, bus, llm_client=object(), dedup_via_search=False)  # subscribes to the bus
+    process = AsyncMock(return_value=[uuid4()])
+    monkeypatch.setattr("nous.handlers.enumerative_extractor.EnumerativeExtractor.process_transcript", process)
+    handler._bus = bus
+
+    dag_prompt = "User: " + "\n".join(
+        ["DAG: nightly-report", "Status: completed", "Node: fetch", "Result: ok", "Node: publish", "Result: ok"]
+    )
+    dag_session = "dag-summary-0123456789abcdef-g1"
+    from nous.handlers.enumerative_extractor import is_enumerable
+
+    assert is_enumerable(dag_prompt, settings.enumerative_density_threshold)  # the gate alone would fire
+    factory = _make_session_cm([(uuid4(), dag_prompt + ("x" * 60), None, dag_session)])
+    handler._heart.db.session = MagicMock(side_effect=factory)
+
+    assert await handler._phase_recover_abandoned_episodes({}) is True
+    event = bus._queue.get_nowait()
+    assert event.session_id == dag_session
+    await bus._dispatch(event)
+
+    process.assert_not_called()
+    heart.learn.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -486,7 +527,7 @@ async def test_summary_only_recovery_is_not_handed_to_fact_extraction():
     bus, extractor = _bus_with_fact_extractor(settings)
     handler._bus = bus
 
-    factory = _make_session_cm([(uuid4(), None, "User asked about NOUS_MAX_TOKENS configuration")])
+    factory = _make_session_cm([(uuid4(), None, "User asked about NOUS_MAX_TOKENS configuration", None)])
     handler._heart.db.session = MagicMock(side_effect=factory)
 
     sleep_stats: dict = {}
