@@ -454,6 +454,37 @@ class Settings(BaseSettings):
             "keeping dual-leg domain matches (~0.98). 0 disables the gate."
         ),
     )
+    # Bounded profile card (2026-11-03 spec). A sleep phase rewrites a short card of durable profile lines from the
+    # tier-1 facts, each line citing its source facts. The writer and the reader land dark and separately: the
+    # owner inspects GET /profile-card before the reader (a later PR) renders it.
+    profile_card_writer_enabled: bool = Field(
+        default=False,
+        description="Run the profile card sleep phase and allow POST /profile-card/rebuild. Land dark.",
+    )
+    profile_card_enabled: bool = Field(
+        default=False,
+        description="Render the profile card as the User Profile section. Read by nothing yet. Land dark.",
+    )
+    profile_card_max_tokens: int = Field(
+        default=400,
+        ge=1,
+        description="Size bound of the profile card in tokens (characters / 4); whole lines are dropped to fit.",
+    )
+    profile_card_max_entries: int = Field(
+        default=25,
+        ge=1,
+        description="Most lines the profile card keeps.",
+    )
+    profile_card_source_limit: int = Field(
+        default=80,
+        ge=1,
+        description="Tier-1 facts the card writer reads, by confidence then recency; profile_core facts come on top.",
+    )
+    profile_card_episodes: int = Field(
+        default=5,
+        ge=0,
+        description="Recent closed episode summaries the card writer sees, for currency only (0 shows none).",
+    )
     fact_pin_top_k: int = Field(
         default=0,
         ge=0,

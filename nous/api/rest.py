@@ -780,6 +780,51 @@ def create_app(
             return JSONResponse({"error": str(e)}, status_code=500)
         return JSONResponse({"status": "core_set" if core else "core_unset"})
 
+    # ------------------------------------------------------------------
+    # Profile card (written by a sleep phase; the owner reads it, deletes a line, or rebuilds it)
+    # ------------------------------------------------------------------
+
+    def _profile_card_store():
+        from nous.heart.profile_card import ProfileCardStore
+
+        return ProfileCardStore(database, settings.agent_id)
+
+    async def get_profile_card(request: Request) -> JSONResponse:
+        """GET /profile-card — the card's lines with the fact ids each cites, its size and the rejected lines."""
+        try:
+            card = await _profile_card_store().get()
+        except Exception as e:
+            logger.error("get_profile_card failed: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+        if card is None:
+            return JSONResponse({"entries": [], "tokens": 0, "rejected": [], "updated_at": None})
+        return JSONResponse({k: card[k] for k in ("entries", "tokens", "rejected", "updated_at")})
+
+    async def delete_profile_card_entry(request: Request) -> JSONResponse:
+        """DELETE /profile-card/entries/{entry_id} — remove a line now; a later rewrite never brings it back."""
+        try:
+            deleted = await _profile_card_store().delete_entry(request.path_params["entry_id"])
+        except Exception as e:
+            logger.error("delete_profile_card_entry failed: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+        if not deleted:
+            return JSONResponse({"error": "entry not found"}, status_code=404)
+        return JSONResponse({"status": "deleted"})
+
+    async def rebuild_profile_card(request: Request) -> JSONResponse:
+        """POST /profile-card/rebuild — rewrite the card once now; 409 when the writer is off, asleep or running."""
+        writer = getattr(sleep_handler, "_profile_card_writer", None) if sleep_handler else None
+        if writer is None:
+            return JSONResponse({"error": "the profile card writer is off"}, status_code=409)
+        if sleep_handler.is_sleeping or writer.busy:
+            return JSONResponse({"error": "a sleep cycle or another rebuild is running"}, status_code=409)
+        try:
+            result = await writer.rebuild()
+        except Exception as e:
+            logger.error("rebuild_profile_card failed: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+        return JSONResponse(result)
+
     async def list_chunks(request: Request) -> JSONResponse:
         """GET /chunks?q=&episode_id=&limit=&offset= — browse F067 episode chunks.
 
@@ -3543,6 +3588,9 @@ def create_app(
         Route("/episodes", list_episodes),
         Route("/profile/facts", list_profile_facts),
         Route("/facts/{fact_id}/core", set_fact_core, methods=["POST"]),
+        Route("/profile-card", get_profile_card),
+        Route("/profile-card/entries/{entry_id}", delete_profile_card_entry, methods=["DELETE"]),
+        Route("/profile-card/rebuild", rebuild_profile_card, methods=["POST"]),
         Route("/facts/{fact_id}", update_fact, methods=["PUT"]),
         Route("/facts/{fact_id}", delete_fact, methods=["DELETE"]),
         Route("/facts", search_facts),

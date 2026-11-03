@@ -816,6 +816,16 @@ async def create_components(settings: Settings) -> dict:
             else:
                 logger.warning("NOUS_JOB_FIXES_ENABLED needs sleep: job fixes stay off")
 
+        # Profile card: a sleep phase rewrites the bounded profile card from the tier-1 facts (needs sleep)
+        if settings.profile_card_writer_enabled:
+            if sleep_handler is not None:
+                from nous.heart.profile_card import ProfileCardWriter
+
+                sleep_handler._profile_card_writer = ProfileCardWriter(database, settings, api_client)
+                logger.info("Profile card: ProfileCardWriter wired into sleep handler")
+            else:
+                logger.warning("NOUS_PROFILE_CARD_WRITER_ENABLED needs sleep: the profile card writer stays off")
+
         try:
             from nous.handlers.decision_reviewer import DecisionReviewer
 

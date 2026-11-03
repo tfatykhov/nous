@@ -68,6 +68,8 @@ async def test_all_tables_exist(db):
         ("nous_system", "compensation_snapshots"),
         # Scorer v5: the owner's sampled audits of completion checks (migration 090)
         ("nous_system", "check_audits"),
+        # The bounded profile card, one row per agent (migration 097)
+        ("nous_system", "profile_card"),
         # Task scores, in a schema of their own (migration 087)
         ("scoring", "task_scores"),
         # The scoring command's heartbeat, one row per agent (migration 088)

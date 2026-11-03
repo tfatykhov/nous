@@ -2086,3 +2086,24 @@ class CheckAudit(Base):
     verdict: Mapped[str | None] = mapped_column(Text, nullable=True)
     actor: Mapped[str | None] = mapped_column(Text, nullable=True)
     answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ProfileCard(Base):
+    """Migration 097: the bounded profile card, one row per agent.
+
+    Written by ``nous.heart.profile_card``: the sleep phase and ``POST /profile-card/rebuild`` replace ``entries``
+    (the old ones move to ``previous_entries``); ``DELETE /profile-card/entries/{id}`` moves one line's text to
+    ``rejected``. Each entry is ``{id, text, fact_ids}``.
+    """
+
+    __tablename__ = "profile_card"
+    __table_args__ = ({"schema": "nous_system"},)
+
+    agent_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    entries: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    previous_entries: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    source_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    rejected: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
