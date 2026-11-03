@@ -452,7 +452,9 @@ async def test_close_without_session_ends_at_last_live_activity(db, agent_id):
         episode_id = await _insert_episode(db, agent_id, None, t0 - timedelta(days=30))
         last_activity = t0 - timedelta(days=29)
         await _insert_fact(db, agent_id, episode_id, "user_direct", t0 - timedelta(days=29, hours=5))
-        await _insert_fact(db, agent_id, episode_id, "telegram-attachment", last_activity)
+        await _insert_fact(db, agent_id, episode_id, "telegram-attachment", t0 - timedelta(days=29, hours=1))
+        # post_turn's inline correction (F039) is written inside a live turn too.
+        await _insert_fact(db, agent_id, episode_id, "inline_correction", last_activity)
         # Written now, after the session died: not activity.
         await _insert_fact(db, agent_id, episode_id, "fact_extractor", t0)
         async with db.session() as s:

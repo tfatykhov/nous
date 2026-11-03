@@ -271,13 +271,14 @@ def episode_decision_bounds_sql(*, agent_param: str = "agent_id") -> str:
     """
 
 
-# Facts a live turn wrote for its episode: the learn_fact tool and stored
-# attachments. Every other writer that sets source_episode_id runs once the
-# session is over or its summary is written (fact_extractor,
-# episode_summarizer, enumerative_extractor, exemplar_extractor, end_session's
-# reflection), so its created_at says nothing about when the episode was last
-# active. An allowlist: a new writer is ignored until it is known to be live.
-_LIVE_TURN_FACT_SQL = "(f.source = 'user_direct' OR f.source LIKE '%-attachment')"
+# Facts a live turn wrote for its episode: the learn_fact tool, stored
+# attachments, and post_turn's inline correction (F039). Every other writer
+# that sets source_episode_id runs once the session is over or its summary is
+# written (fact_extractor, episode_summarizer, enumerative_extractor,
+# exemplar_extractor, end_session's reflection), so its created_at says
+# nothing about when the episode was last active. An allowlist: a new writer
+# is ignored until it is known to be live.
+_LIVE_TURN_FACT_SQL = "(f.source IN ('user_direct', 'inline_correction') OR f.source LIKE '%-attachment')"
 
 
 def episode_close_at_sql(target_ids_sql: str, *, agent_param: str = "agent_id") -> str:
