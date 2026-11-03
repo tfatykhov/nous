@@ -10,6 +10,7 @@ transaction injection (P1-1).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
@@ -69,6 +70,7 @@ from nous.heart.working_memory import WorkingMemoryManager
 from nous.runtime_config import RuntimeConfig
 from nous.storage.database import Database
 from nous.storage.models import ConversationState
+from nous.utils import note_stage_error
 
 logger = logging.getLogger(__name__)
 
@@ -1051,6 +1053,7 @@ class Heart:
         date_window: DateWindow | None = None,
         stage_errors: dict[str, int] | None = None,
         dropped_out: list | None = None,
+        stage_error_msgs: dict[str, str] | None = None,
     ) -> list[RecallResult]:
         """Search across ALL memory types, return ranked results.
 
@@ -1090,7 +1093,11 @@ class Heart:
         indistinguishable between the two. Mirrors the accumulator pattern
         in ``retrieval_pipeline`` (``acc.stage_errors`` →
         ``PipelineStats.n_stage_errors``). Fail-open behaviour is unchanged:
-        recall still returns whatever the surviving legs produced.
+        recall still returns whatever the surviving legs produced. The same
+        dict also counts degraded legs: ``query_expansion`` (the expander
+        raised), ``query_expansion_embed_fallback`` and ``<type>_embed_fallback``
+        (the query embedding failed, so that search ran keyword-only).
+        ``stage_error_msgs``, when given, keeps each key's first error text.
         """
         if session is None:
             async with self.db.session() as session:
@@ -1105,10 +1112,12 @@ class Heart:
                     date_window=date_window,
                     stage_errors=stage_errors,
                     dropped_out=dropped_out,
+                    stage_error_msgs=stage_error_msgs,
                 )
-        # Caller-provided session: caller owns transaction recovery. We do
-        # NOT rollback after a sub-search failure (would silently discard
-        # uncommitted caller work earlier in the same transaction).
+        # Caller-provided session: we never roll the whole session back (that
+        # would discard uncommitted caller work earlier in the same
+        # transaction). Each sub-search runs in its own SAVEPOINT instead, so a
+        # failed one rolls back only itself (see _recall).
         return await self._recall(
             query,
             limit,
@@ -1120,6 +1129,7 @@ class Heart:
             date_window=date_window,
             stage_errors=stage_errors,
             dropped_out=dropped_out,
+            stage_error_msgs=stage_error_msgs,
         )
 
     def set_residual_activator(self, activator: ResidualActivator | None) -> None:
@@ -1167,6 +1177,7 @@ class Heart:
         date_window: DateWindow | None = None,
         stage_errors: dict[str, int] | None = None,
         dropped_out: list | None = None,
+        stage_error_msgs: dict[str, str] | None = None,
     ) -> list[RecallResult]:
         search_types = types or ["episode", "fact", "procedure", "censor"]
         fetch_limit = limit * 2  # Fetch more for merging
@@ -1206,7 +1217,10 @@ class Heart:
                 variants = await self._query_expander.expand(query, self.agent_id)
             except Exception as exc:
                 # Defensive — expand() should never raise per spec, but belt & braces.
+                # expand() fails open on its own LLM errors, so this counts only
+                # what escapes it; those are logged inside query_expansion.
                 logger.warning("F050: query_expander.expand raised, using [query]: %s", exc)
+                note_stage_error(stage_errors, stage_error_msgs, "query_expansion", exc)
                 variants = [query]
 
             if len(variants) > 1:
@@ -1220,45 +1234,59 @@ class Heart:
                         len(variants),
                         exc,
                     )
+                    note_stage_error(stage_errors, stage_error_msgs, "query_expansion_embed_fallback", exc)
                     variant_pairs = None
 
         keys: list[str] = []
         results_list: list[object] = []
         for memory_type, (_mgr_name, _kw) in search_map.items():
             try:
-                if memory_type == "episode":
-                    result = await self.episodes.search(
-                        query,
-                        fetch_limit,
-                        session,
-                        variant_pairs=variant_pairs,
-                        penalty_limit=heart_penalty_limit,
-                    )
-                elif memory_type == "fact":
-                    # This fetches twice what survives the cut below
-                    # (fetch_limit), so access is tracked for the survivors
-                    # there, not here.
-                    result = await self.facts.search(
-                        query,
-                        fetch_limit,
-                        session=session,
-                        variant_pairs=variant_pairs,
-                        date_window=date_window,
-                        penalty_limit=heart_penalty_limit,
-                        track_access=False,
-                    )
-                elif memory_type == "procedure":
-                    result = await self.procedures.search(
-                        query,
-                        fetch_limit,
-                        session=session,
-                        variant_pairs=variant_pairs,
-                        penalty_limit=heart_penalty_limit,
-                    )
-                else:
-                    # P1-5: Use read-only search, not check.
-                    # censors use cosine similarity, not hybrid_search — variants do not apply.
-                    result = await self.censors.search(query, fetch_limit, session=session)
+                # Caller-owned session: each sub-search runs in a SAVEPOINT, so a
+                # SQL error rolls back only that sub-search. Without it the error
+                # aborted the caller's transaction, every later sub-search failed
+                # with "current transaction is aborted", and recall read as "no
+                # results". An owned session is rolled back in the except below.
+                savepoint = contextlib.nullcontext() if owns_session else session.begin_nested()
+                async with savepoint:
+                    if memory_type == "episode":
+                        result = await self.episodes.search(
+                            query,
+                            fetch_limit,
+                            session,
+                            variant_pairs=variant_pairs,
+                            penalty_limit=heart_penalty_limit,
+                            stage_errors=stage_errors,
+                            stage_error_msgs=stage_error_msgs,
+                        )
+                    elif memory_type == "fact":
+                        # This fetches twice what survives the cut below
+                        # (fetch_limit), so access is tracked for the survivors
+                        # there, not here.
+                        result = await self.facts.search(
+                            query,
+                            fetch_limit,
+                            session=session,
+                            variant_pairs=variant_pairs,
+                            date_window=date_window,
+                            penalty_limit=heart_penalty_limit,
+                            track_access=False,
+                            stage_errors=stage_errors,
+                            stage_error_msgs=stage_error_msgs,
+                        )
+                    elif memory_type == "procedure":
+                        result = await self.procedures.search(
+                            query,
+                            fetch_limit,
+                            session=session,
+                            variant_pairs=variant_pairs,
+                            penalty_limit=heart_penalty_limit,
+                            stage_errors=stage_errors,
+                            stage_error_msgs=stage_error_msgs,
+                        )
+                    else:
+                        # P1-5: Use read-only search, not check.
+                        # censors use cosine similarity, not hybrid_search — variants do not apply.
+                        result = await self.censors.search(query, fetch_limit, session=session)
                 keys.append(memory_type)
                 results_list.append(result)
             except Exception as exc:
@@ -1272,8 +1300,8 @@ class Heart:
                 #
                 # Only rollback when we own the session — otherwise we'd
                 # silently discard uncommitted caller work in the same
-                # transaction. Caller-provided-session callers must handle
-                # their own transaction recovery.
+                # transaction. A caller-provided session was recovered by the
+                # SAVEPOINT above, which rolled back just this sub-search.
                 if owns_session:
                     try:
                         await session.rollback()
@@ -1302,9 +1330,7 @@ class Heart:
                 # value — a store two migrations behind raises
                 # UndefinedColumnError on the fact leg and recall still
                 # returns plausible episode/chunk results with no signal.
-                if stage_errors is not None:
-                    key = f"heart_recall_{memory_type}"
-                    stage_errors[key] = stage_errors.get(key, 0) + 1
+                note_stage_error(stage_errors, stage_error_msgs, f"heart_recall_{memory_type}", raw_results)
                 continue
 
             for item in raw_results:

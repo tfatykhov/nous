@@ -35,6 +35,7 @@ from nous.heart.schemas import (
 from nous.heart.search import cosine_similarity, hybrid_search, hybrid_search_multi
 from nous.storage.database import Database
 from nous.storage.models import Event, Procedure, ProcedureTaskAffinity, ProcedureVersion
+from nous.utils import note_stage_error
 
 logger = logging.getLogger(__name__)
 
@@ -759,6 +760,8 @@ class ProcedureManager:
         session: AsyncSession | None = None,
         variant_pairs: list[tuple[str, list[float] | None]] | None = None,
         penalty_limit: int | None = None,
+        stage_errors: dict[str, int] | None = None,
+        stage_error_msgs: dict[str, str] | None = None,
     ) -> list[ProcedureSummary]:
         """Hybrid search over procedures. Optional domain filter.
 
@@ -770,11 +773,34 @@ class ProcedureManager:
                 hybrid_search_multi for RRF fusion across query variants.
                 F037 utility-boost still applies downstream of routing.
                 Defaults to None (single-query path; backwards compatible).
+            stage_errors / stage_error_msgs: optional caller maps. A failed
+                query embedding (the search then runs keyword-only, on another
+                score scale) is counted under ``procedure_embed_fallback``.
         """
         if session is None:
             async with self.db.session() as session:
-                return await self._search(query, limit, domain, frame_type, session, variant_pairs, penalty_limit)
-        return await self._search(query, limit, domain, frame_type, session, variant_pairs, penalty_limit)
+                return await self._search(
+                    query,
+                    limit,
+                    domain,
+                    frame_type,
+                    session,
+                    variant_pairs,
+                    penalty_limit,
+                    stage_errors=stage_errors,
+                    stage_error_msgs=stage_error_msgs,
+                )
+        return await self._search(
+            query,
+            limit,
+            domain,
+            frame_type,
+            session,
+            variant_pairs,
+            penalty_limit,
+            stage_errors=stage_errors,
+            stage_error_msgs=stage_error_msgs,
+        )
 
     async def _search(
         self,
@@ -785,13 +811,16 @@ class ProcedureManager:
         session: AsyncSession,
         variant_pairs: list[tuple[str, list[float] | None]] | None = None,
         penalty_limit: int | None = None,
+        stage_errors: dict[str, int] | None = None,
+        stage_error_msgs: dict[str, str] | None = None,
     ) -> list[ProcedureSummary]:
         embedding = None
         if self.embeddings:
             try:
                 embedding = await self.embeddings.embed(query, fail_fast=True)
-            except Exception:
+            except Exception as exc:
                 logger.warning("Embedding generation failed for procedure search")
+                note_stage_error(stage_errors, stage_error_msgs, "procedure_embed_fallback", exc)
 
         # Reasoning Maps L1: a strategy card is a lesson, not a how-to
         # procedure, so no search-driven read returns one (passive Track B, the

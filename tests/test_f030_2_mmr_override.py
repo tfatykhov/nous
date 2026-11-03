@@ -192,6 +192,9 @@ class TestF030_2MMROverride:
             cross_encoder_enabled=False,
         )
         session = AsyncMock()
+        # AsyncSession.begin_nested() is sync and returns an async context
+        # manager; a caller-owned session's sub-searches each run in one.
+        session.begin_nested = MagicMock()
         r1, r2 = _two_facts()
         heart.facts.search = AsyncMock(return_value=[r1, r2])
         heart.episodes.search = AsyncMock(return_value=[])

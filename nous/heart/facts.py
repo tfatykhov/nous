@@ -31,6 +31,7 @@ from nous.heart.search import (
 )
 from nous.storage.database import Database
 from nous.storage.models import Episode, Event, Fact, FactEntityKey, GraphEdge
+from nous.utils import note_stage_error
 
 if TYPE_CHECKING:
     from nous.config import Settings
@@ -3421,6 +3422,8 @@ class FactManager:
         require_keyword_hit: bool = False,
         penalty_limit: int | None = None,
         track_access: bool = True,
+        stage_errors: dict[str, int] | None = None,
+        stage_error_msgs: dict[str, str] | None = None,
     ) -> list[FactSummary]:
         """Hybrid search over facts.
 
@@ -3439,6 +3442,9 @@ class FactManager:
                 Forces the single-query path (variant fusion unsupported).
             track_access: when False, skip _fire_track_access so probe/canary
                 paths do not inflate recall_count or refresh last_recalled_at.
+            stage_errors / stage_error_msgs: optional caller maps. A failed
+                query embedding (the search then runs keyword-only, on another
+                score scale) is counted under ``fact_embed_fallback``.
         """
         if session is None:
             async with self.db.session() as session:
@@ -3455,6 +3461,8 @@ class FactManager:
                     require_keyword_hit,
                     penalty_limit,
                     track_access=track_access,
+                    stage_errors=stage_errors,
+                    stage_error_msgs=stage_error_msgs,
                 )
         return await self._search(
             query,
@@ -3469,6 +3477,8 @@ class FactManager:
             require_keyword_hit,
             penalty_limit,
             track_access=track_access,
+            stage_errors=stage_errors,
+            stage_error_msgs=stage_error_msgs,
         )
 
     async def _search(
@@ -3485,14 +3495,17 @@ class FactManager:
         require_keyword_hit: bool = False,
         penalty_limit: int | None = None,
         track_access: bool = True,
+        stage_errors: dict[str, int] | None = None,
+        stage_error_msgs: dict[str, str] | None = None,
     ) -> list[FactSummary]:
         # Generate query embedding
         embedding = None
         if self.embeddings:
             try:
                 embedding = await self.embeddings.embed(query, fail_fast=True)
-            except Exception:
+            except Exception as exc:
                 logger.warning("Embedding generation failed for fact search")
+                note_stage_error(stage_errors, stage_error_msgs, "fact_embed_fallback", exc)
 
         extra_where = ""
         extra_params: dict = {}

@@ -172,3 +172,36 @@ def leaked_markup_start(value: str) -> int | None:
     while start > 0 and value[start - 1].isspace():
         start -= 1
     return start
+
+
+# Retrieval failure text is persisted in `nous_system.retrieval_log.legs`, so it
+# is bounded and never carries memory content.
+_ERROR_TEXT_MAX = 200
+
+
+def short_error(exc: BaseException) -> str:
+    """The exception's class and the first line of its message, at most 200 chars.
+
+    Only the first line: SQLAlchemy appends ``[SQL: ...]`` and ``[parameters: ...]``
+    on later lines, and the parameters can hold the query text or a vector.
+    """
+    lines = str(exc).strip().splitlines()
+    name = type(exc).__name__
+    return (f"{name}: {lines[0]}" if lines else name)[:_ERROR_TEXT_MAX]
+
+
+def note_stage_error(
+    stage_errors: dict[str, int] | None,
+    stage_error_msgs: dict[str, str] | None,
+    key: str,
+    exc: BaseException,
+) -> None:
+    """Count a retrieval stage failure under ``key`` and keep its first error text.
+
+    Either map may be None (the caller did not ask). The first message wins: a
+    later failure under the same key is often a consequence of the first.
+    """
+    if stage_errors is not None:
+        stage_errors[key] = stage_errors.get(key, 0) + 1
+    if stage_error_msgs is not None:
+        stage_error_msgs.setdefault(key, short_error(exc))

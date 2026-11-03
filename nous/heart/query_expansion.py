@@ -54,6 +54,10 @@ _MAX_VARIANT_LEN = 200
 # noise — at a few recall_deep calls per minute, this lands ~one log
 # every 30-60 min during normal use.
 _SUCCESS_LOG_SAMPLE = 100
+# Failures fail open to [query], and at DEBUG a sustained Haiku outage left
+# nothing in the prod log. WARN on the first failure of a streak and every Nth
+# after, so an outage is visible without one line per recall.
+_FAILURE_LOG_SAMPLE = 50
 
 _INJECTION_PREFIXES: tuple[str, ...] = (
     "ignore ",
@@ -151,6 +155,8 @@ class QueryExpander:
         # the per-call DEBUG firehose. Query text is NOT logged (privacy
         # — matches gbrain's expansion.ts pattern).
         self._success_count: int = 0
+        # Failure counter for the sampled WARN in _log_failure.
+        self._failure_count: int = 0
 
     # ------------------------------------------------------------------
     # Public entrypoint
@@ -265,13 +271,13 @@ class QueryExpander:
             raise
         except asyncio.TimeoutError:
             # Ordering: TimeoutError BEFORE Exception (python-pro P2).
-            logger.debug(
+            self._log_failure(
                 "F050: Haiku timeout after %.1fs — falling back to [query]",
                 self._settings.query_expansion_timeout_seconds,
             )
             return [query]
         except Exception:
-            logger.debug("F050: expansion failed", exc_info=True)
+            self._log_failure("F050: expansion failed", exc_info=True)
             return [query]
         finally:
             # Always release single-flight followers + clear the inflight slot.
@@ -360,6 +366,9 @@ class QueryExpander:
             return []
 
         raw = tool_input["alternative_queries"]
+        # Haiku answered: the failure streak is over, so the next failure WARNs
+        # again instead of waiting out the rest of the 1-in-N sample.
+        self._failure_count = 0
         if not isinstance(raw, list):
             return []
         return [v for v in raw if isinstance(v, str)]
@@ -410,7 +419,25 @@ class QueryExpander:
             else:
                 logger.debug("F050: Haiku 401 (suppressed; warned once): %s", msg)
         else:
-            logger.debug("F050: Haiku call failed (%s): %s", status or "?", msg)
+            self._log_failure("F050: Haiku call failed (%s): %s", status or "?", msg)
+
+    def _log_failure(self, msg: str, *args: object, exc_info: bool = False) -> None:
+        """WARN on a streak's first failure and every ``_FAILURE_LOG_SAMPLE``-th after, DEBUG otherwise.
+
+        A Haiku answer ends the streak (``_call_haiku`` resets the count).
+        """
+        self._failure_count += 1
+        n = self._failure_count
+        if n == 1 or n % _FAILURE_LOG_SAMPLE == 0:
+            logger.warning(
+                msg + " [consecutive failure %d, WARN sampled 1/%d]",
+                *args,
+                n,
+                _FAILURE_LOG_SAMPLE,
+                exc_info=exc_info,
+            )
+        else:
+            logger.debug(msg, *args, exc_info=exc_info)
 
     # ------------------------------------------------------------------
     # Stage 4: output sanitization (spec §5)
