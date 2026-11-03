@@ -2895,6 +2895,19 @@ class Settings(BaseSettings):
         default=500,
         description="F067 per-parent-episode summary char truncation.",
     )
+    recall_merge_history_enabled: bool = Field(
+        default=False,
+        description=(
+            "K-6. When true, recall_deep lists under each of the top 3 merged facts it returns "
+            "the sources a sleep merge (F027 cluster merge, F031 MERGE) built it from, dated by "
+            "learned_at. Off: the text is byte-identical."
+        ),
+    )
+    recall_merge_history_max: int = Field(
+        default=6,
+        ge=1,
+        description="K-6 cap on the sources listed per merged fact (newest first; the rest are counted).",
+    )
 
     # --- F083 Follow-up Association ---
     followup_episode_budget_enabled: bool = Field(

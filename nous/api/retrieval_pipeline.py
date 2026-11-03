@@ -421,6 +421,7 @@ _NOTE_EXEMPT_STAGE_ERRORS = frozenset(
         "exemplar_strip",  # stray exemplar rows stay in the results
         "query_expansion",  # the original query is still searched
         "query_expansion_embed_fallback",  # same: the single-query path runs
+        "merge_history",  # merged facts render without their sources, as with the flag off
     }
 )
 
@@ -859,6 +860,17 @@ async def run_recall_pipeline(
         before = len(results)
         results = _apply_spreading_budget(results, settings, tr)
         n_budget_cut = before - len(results)
+
+    # K-6: the dated sources of the top merged facts. After every sort and
+    # filter, so the slots go to facts that are served; scores are untouched.
+    if getattr(settings, "recall_merge_history_enabled", False):
+        results = await _attach_merge_history(
+            heart,
+            results,
+            int(getattr(settings, "recall_merge_history_max", 6)),
+            stage_errors=acc.stage_errors,
+            stage_error_msgs=acc.stage_error_msgs,
+        )
 
     # F044 v1.1: record edges among the final co-retrieved set as STC recall
     # reactivations. Read-only here (one query); the ltp write is deferred to
@@ -2662,6 +2674,47 @@ async def _attach_fact_source_episodes(
                 out.append(replace(r, metadata=new_md))
             else:
                 out.append(r)
+        else:
+            out.append(r)
+    return out
+
+
+# K-6: merged facts per call that get their sources, and the chars per source.
+_MERGE_HISTORY_HITS = 3
+_MERGE_HISTORY_MAX_CHARS = 300
+
+
+async def _attach_merge_history(
+    heart: Heart,
+    results: list[PipelineResult],
+    per_fact: int,
+    *,
+    stage_errors: dict[str, int] | None = None,
+    stage_error_msgs: dict[str, str] | None = None,
+) -> list[PipelineResult]:
+    """K-6: set ``metadata["merge_history"]`` on the first three facts, in
+    result order, that a sleep merge built from other facts.
+
+    One lookup for every fact in ``results`` (exemplar rows render in their own
+    section, so they are left out). Scores and order do not change. A failed
+    lookup leaves ``results`` as they are, which is the flag-off output.
+    """
+    fact_ids = [r.id for r in results if r.type == "fact" and r.metadata.get("retrieval_leg") != "exemplar"]
+    if not fact_ids:
+        return results
+    try:
+        history = await heart.facts.get_merge_history(fact_ids, per_fact=per_fact, max_chars=_MERGE_HISTORY_MAX_CHARS)
+    except Exception as exc:
+        logger.warning("Merge-history lookup failed; merged facts render without their sources", exc_info=True)
+        note_stage_error(stage_errors, stage_error_msgs, "merge_history", exc)
+        return results
+    out: list[PipelineResult] = []
+    left = _MERGE_HISTORY_HITS
+    for r in results:
+        hist = history.get(r.id) if left and r.type == "fact" else None
+        if hist:
+            out.append(replace(r, metadata={**r.metadata, "merge_history": hist}))
+            left -= 1
         else:
             out.append(r)
     return out

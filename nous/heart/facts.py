@@ -3443,6 +3443,93 @@ class FactManager:
                 bucket.append(content or "")
         return out
 
+    async def get_merge_history(
+        self,
+        fact_ids: Sequence[UUID],
+        per_fact: int = 6,
+        max_chars: int = 300,
+        session: AsyncSession | None = None,
+    ) -> dict[UUID, dict[str, Any]]:
+        """K-6: the sources a sleep merge folded into each of ``fact_ids``.
+
+        Maps a merged fact id to ``{"sources": [{"content", "learned_at"}],
+        "dropped": n}``: one hop, newest ``learned_at`` first, at most
+        ``per_fact`` sources (``dropped`` counts the older rest), content
+        trimmed to ``max_chars`` and ``learned_at`` as a ``YYYY-MM-DD`` string.
+        Facts without merge sources are absent.
+
+        Only MERGE sources count. A loser of a non-merge supersession is a
+        stale belief, so it is never returned. Rows deactivated since migration
+        094 say so in ``deactivation_reason``. Older rows have NULL there and
+        count only when the event that recorded their merge names them: the
+        ``f027_cluster_merge`` event that wrote this merged fact, or an
+        ``f031_contradiction_resolution`` MERGE of a ``contradiction_resolution``
+        fact. (That F031 event carries no merged id, so a fact in a MERGE that
+        aborted and that later lost a SUPERSEDE to a ``contradiction_resolution``
+        fact would still match.)
+        """
+        if not fact_ids:
+            return {}
+        if session is None:
+            async with self.db.session() as session:
+                return await self._get_merge_history_impl(fact_ids, per_fact, max_chars, session)
+        return await self._get_merge_history_impl(fact_ids, per_fact, max_chars, session)
+
+    async def _get_merge_history_impl(
+        self, fact_ids: Sequence[UUID], per_fact: int, max_chars: int, session: AsyncSession
+    ) -> dict[UUID, dict[str, Any]]:
+        rows = await session.execute(
+            text(
+                """
+                SELECT s.superseded_by AS merged_id, s.content, s.learned_at
+                FROM heart.facts s
+                JOIN heart.facts m ON m.id = s.superseded_by
+                WHERE s.agent_id = :agent_id
+                  AND s.superseded_by = ANY(CAST(:ids AS uuid[]))
+                  AND s.active = false
+                  AND (
+                    s.deactivation_reason = 'merged'
+                    OR (
+                      s.deactivation_reason IS NULL
+                      AND (
+                        EXISTS (
+                          SELECT 1 FROM nous_system.events e
+                          WHERE e.agent_id = s.agent_id
+                            AND e.event_type = 'f027_cluster_merge'
+                            AND e.data->>'merged_fact_id' = s.superseded_by::text
+                            AND e.data->'source_fact_ids' @> jsonb_build_array(s.id::text)
+                        )
+                        OR (
+                          m.source = 'contradiction_resolution'
+                          AND EXISTS (
+                            SELECT 1 FROM nous_system.events e
+                            WHERE e.agent_id = s.agent_id
+                              AND e.event_type = 'f031_contradiction_resolution'
+                              AND e.data->>'applied_action' = 'MERGE'
+                              AND s.id::text IN (e.data->>'fact1_id', e.data->>'fact2_id')
+                          )
+                        )
+                      )
+                    )
+                  )
+                ORDER BY s.superseded_by, s.learned_at DESC, s.id DESC
+                """
+            ),
+            {"agent_id": self.agent_id, "ids": [str(i) for i in fact_ids]},
+        )
+        out: dict[UUID, dict[str, Any]] = {}
+        for merged_id, content, learned_at in rows:
+            # A text() query returns asyncpg's own UUID type; key by uuid.UUID.
+            hist = out.setdefault(UUID(str(merged_id)), {"sources": [], "dropped": 0})
+            if len(hist["sources"]) >= per_fact:
+                hist["dropped"] += 1
+                continue
+            body = " ".join((content or "").split())
+            if len(body) > max_chars:
+                body = body[: max_chars - 3].rstrip() + "..."
+            hist["sources"].append({"content": body, "learned_at": learned_at.astimezone(UTC).date().isoformat()})
+        return out
+
     async def _find_similar_for_dedup(
         self,
         content: str,
