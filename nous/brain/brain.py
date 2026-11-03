@@ -895,7 +895,14 @@ class Brain:
 
         if query_embedding is not None:
             # Full hybrid search using RRF (F025)
-            from nous.heart.search import _resolve_vector_weight, _resolve_rrf_k, _rrf_merge
+            from nous.heart.search import (
+                VECTOR_LEG_EF_SEARCH,
+                VECTOR_LEG_MAX_SCAN_TUPLES,
+                _resolve_rrf_k,
+                _resolve_vector_weight,
+                _rrf_merge,
+                set_local_ef_search,
+            )
 
             vw = _resolve_vector_weight()
             rrf_k = _resolve_rrf_k()
@@ -903,6 +910,7 @@ class Brain:
             params["query_embedding"] = "[" + ",".join(str(float(v)) for v in query_embedding) + "]"
 
             # Vector search
+            await set_local_ef_search(session, VECTOR_LEG_EF_SEARCH, max_scan_tuples=VECTOR_LEG_MAX_SCAN_TUPLES)
             vector_sql = text(f"""
                 SELECT d.id, 1 - (d.embedding <=> CAST(:query_embedding AS vector)) AS score
                 FROM brain.decisions d
@@ -923,7 +931,7 @@ class Brain:
                 {bridge_join}
                 WHERE d.search_tsv @@ plainto_tsquery('english', :query_text)
                     {filter_clauses}
-                ORDER BY score DESC
+                ORDER BY score DESC, d.id
                 LIMIT :limit_expanded
             """)
             k_result = await session.execute(keyword_sql, params)
@@ -955,7 +963,7 @@ class Brain:
                 {bridge_join}
                 WHERE d.search_tsv @@ plainto_tsquery('english', :query_text)
                     {filter_clauses}
-                ORDER BY score DESC
+                ORDER BY score DESC, d.id
                 LIMIT {':limit_expanded' if _demotion_active else ':limit'}
             """)
             result = await session.execute(sql, params)
