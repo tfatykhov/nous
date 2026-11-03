@@ -32,7 +32,7 @@ from nous.heart.schemas import (
     is_job_lesson,
     is_strategy_card,
 )
-from nous.heart.search import cosine_similarity, hybrid_search, hybrid_search_multi
+from nous.heart.search import cosine_similarity, has_vector_input, hybrid_search, hybrid_search_multi
 from nous.storage.database import Database
 from nous.storage.models import Event, Procedure, ProcedureTaskAffinity, ProcedureVersion
 from nous.utils import note_stage_error
@@ -815,12 +815,13 @@ class ProcedureManager:
         stage_error_msgs: dict[str, str] | None = None,
     ) -> list[ProcedureSummary]:
         embedding = None
+        embed_exc: Exception | None = None
         if self.embeddings:
             try:
                 embedding = await self.embeddings.embed(query, fail_fast=True)
             except Exception as exc:
                 logger.warning("Embedding generation failed for procedure search")
-                note_stage_error(stage_errors, stage_error_msgs, "procedure_embed_fallback", exc)
+                embed_exc = exc
 
         # Reasoning Maps L1: a strategy card is a lesson, not a how-to
         # procedure, so no search-driven read returns one (passive Track B, the
@@ -835,7 +836,12 @@ class ProcedureManager:
             extra_where += " AND t.domain = :domain"
             extra_params["domain"] = domain
 
-        if variant_pairs and len(variant_pairs) > 1:
+        # A failed base embed is a keyword-only fallback only when the search
+        # that runs has no vector: the variant fusion carries its own.
+        use_variants = bool(variant_pairs) and len(variant_pairs) > 1
+        if embed_exc is not None and not has_vector_input(use_variants, embedding, variant_pairs):
+            note_stage_error(stage_errors, stage_error_msgs, "procedure_embed_fallback", embed_exc)
+        if use_variants:
             results = await hybrid_search_multi(
                 session=session,
                 table="heart.procedures",

@@ -17,7 +17,7 @@ from nous.utils import note_stage_error, text_overlap
 
 from nous.brain.embeddings import _REEMBED_MAX_PER_CYCLE, EmbeddingProvider, reembed_rows
 from nous.heart.schemas import EpisodeDetail, EpisodeInput, EpisodeSummary
-from nous.heart.search import hybrid_search, hybrid_search_multi
+from nous.heart.search import has_vector_input, hybrid_search, hybrid_search_multi
 from nous.storage.database import Database
 from nous.storage.models import Episode, Event
 
@@ -557,12 +557,13 @@ class EpisodeManager:
     ) -> list[EpisodeSummary]:
         # Generate query embedding
         embedding = None
+        embed_exc: Exception | None = None
         if self.embeddings:
             try:
                 embedding = await self.embeddings.embed(query, fail_fast=True)
             except Exception as exc:
                 logger.warning("Embedding generation failed for episode search")
-                note_stage_error(stage_errors, stage_error_msgs, "episode_embed_fallback", exc)
+                embed_exc = exc
 
         # Audit HT-1 (2026-06-09): episode hybrid search was structurally dead.
         # For episodes `active` is a LIFECYCLE flag — _end() sets active=False
@@ -581,7 +582,12 @@ class EpisodeManager:
             "AND (t.active = true OR t.ended_at IS NOT NULL) "
             "AND t.outcome IS DISTINCT FROM 'abandoned'"
         )
-        if variant_pairs and len(variant_pairs) > 1:
+        # A failed base embed is a keyword-only fallback only when the search
+        # that runs has no vector: the variant fusion carries its own.
+        use_variants = bool(variant_pairs) and len(variant_pairs) > 1
+        if embed_exc is not None and not has_vector_input(use_variants, embedding, variant_pairs):
+            note_stage_error(stage_errors, stage_error_msgs, "episode_embed_fallback", embed_exc)
+        if use_variants:
             results = await hybrid_search_multi(
                 session=session,
                 table="heart.episodes",

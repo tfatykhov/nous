@@ -522,3 +522,89 @@ class TestEmbeddingUnavailableIsAFallback:
 
         assert stage_errors == {"chunk_embed_fallback": 1}
         assert msgs["chunk_embed_fallback"].startswith("EmbeddingUnavailableError")
+
+
+# ---------------------------------------------------------------------------
+# Codex P2 (#827): a failed base embed is a fallback only when the search that
+# runs has no vector. The variant fusion carries its own vectors.
+# ---------------------------------------------------------------------------
+
+
+async def _recall_with_failed_base_embed(heart, session, mock_embeddings, monkeypatch, *, variants):
+    """heart.recall over episodes/facts/procedures with the per-manager query
+    embed failing and query expansion returning ``variants`` (embedded fine)."""
+    from nous.brain.embeddings import EmbeddingUnavailableError
+
+    query = "lighthouse keeper rota for the winter"
+    vectors = [await mock_embeddings.embed(v) for v in variants]
+    monkeypatch.setattr(heart.settings, "query_expansion_enabled", True)
+    monkeypatch.setattr(heart, "_query_expander", SimpleNamespace(expand=AsyncMock(return_value=variants)))
+    monkeypatch.setattr(mock_embeddings, "embed_batch", AsyncMock(return_value=vectors))
+    monkeypatch.setattr(
+        mock_embeddings, "embed", AsyncMock(side_effect=EmbeddingUnavailableError("skipped on a read path"))
+    )
+    stage_errors: dict[str, int] = {}
+    msgs: dict[str, str] = {}
+    await heart.recall(
+        query,
+        types=["episode", "fact", "procedure"],
+        session=session,
+        stage_errors=stage_errors,
+        stage_error_msgs=msgs,
+    )
+    return stage_errors, msgs
+
+
+@pytest.mark.postgres_only
+class TestFallbackOnlyWithoutVectorInput:
+    @pytest.mark.asyncio
+    async def test_variants_embedded_means_no_fallback_and_no_note(self, heart, session, mock_embeddings, monkeypatch):
+        from nous.api.retrieval_pipeline import PipelineStats, failure_note
+
+        stage_errors, msgs = await _recall_with_failed_base_embed(
+            heart,
+            session,
+            mock_embeddings,
+            monkeypatch,
+            variants=["lighthouse keeper rota for the winter", "winter schedule for the lighthouse keepers"],
+        )
+
+        assert stage_errors == {}, "the variant fusion ran with vectors: not keyword-only"
+        assert failure_note(PipelineStats(n_stage_errors=stage_errors, stage_error_msgs=msgs)) is None
+
+    @pytest.mark.asyncio
+    async def test_no_variants_means_the_fallback_is_counted(self, heart, session, mock_embeddings, monkeypatch):
+        from nous.api.retrieval_pipeline import PipelineStats, failure_note
+
+        stage_errors, msgs = await _recall_with_failed_base_embed(
+            heart,
+            session,
+            mock_embeddings,
+            monkeypatch,
+            variants=["lighthouse keeper rota for the winter"],
+        )
+
+        assert stage_errors == {
+            "episode_embed_fallback": 1,
+            "fact_embed_fallback": 1,
+            "procedure_embed_fallback": 1,
+        }
+        assert failure_note(PipelineStats(n_stage_errors=stage_errors, stage_error_msgs=msgs)) == (
+            "Note: episode search used keyword-only (embedding unavailable); "
+            "fact search used keyword-only (embedding unavailable); "
+            "procedure search used keyword-only (embedding unavailable); results may be incomplete."
+        )
+
+
+class TestHasVectorInput:
+    def test_single_path_reads_the_base_embedding(self):
+        from nous.heart.search import has_vector_input
+
+        assert has_vector_input(False, [0.1], [("a", None), ("b", None)]) is True
+        assert has_vector_input(False, None, [("a", [0.1]), ("b", [0.2])]) is False
+
+    def test_variant_path_reads_only_the_variants(self):
+        from nous.heart.search import has_vector_input
+
+        assert has_vector_input(True, None, [("a", [0.1]), ("b", None)]) is True
+        assert has_vector_input(True, [0.1], [("a", None), ("b", [])]) is False

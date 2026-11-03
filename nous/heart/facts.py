@@ -25,6 +25,7 @@ from nous.heart.schemas import ContradictionWarning, FactDetail, FactInput, Fact
 from nous.heart.search import (
     VECTOR_LEG_EF_SEARCH,
     VECTOR_LEG_MAX_SCAN_TUPLES,
+    has_vector_input,
     hybrid_search,
     hybrid_search_multi,
     set_local_ef_search,
@@ -3500,12 +3501,21 @@ class FactManager:
     ) -> list[FactSummary]:
         # Generate query embedding
         embedding = None
+        embed_exc: Exception | None = None
         if self.embeddings:
             try:
                 embedding = await self.embeddings.embed(query, fail_fast=True)
             except Exception as exc:
                 logger.warning("Embedding generation failed for fact search")
-                note_stage_error(stage_errors, stage_error_msgs, "fact_embed_fallback", exc)
+                embed_exc = exc
+
+        # Which primary search runs (below): the inactive-facts scan, the
+        # variant fusion, or the single-query hybrid. Only the variant fusion
+        # carries its own vectors, so a failed base embed is a keyword-only
+        # fallback on the other two, and on it only when no variant has one.
+        use_variants = active_only and bool(variant_pairs) and len(variant_pairs) > 1 and not require_keyword_hit
+        if embed_exc is not None and not has_vector_input(use_variants, embedding, variant_pairs):
+            note_stage_error(stage_errors, stage_error_msgs, "fact_embed_fallback", embed_exc)
 
         extra_where = ""
         extra_params: dict = {}
@@ -3547,7 +3557,7 @@ class FactManager:
         # penalty_limit + 1, not penalty_limit: the boundary rank drifts at
         # exactly penalty_limit.
         primary_limit = max(penalty_limit + 1, limit) if penalty_limit is not None else limit
-        if variant_pairs and len(variant_pairs) > 1 and not require_keyword_hit:
+        if use_variants:
             results = await hybrid_search_multi(
                 session=session,
                 table="heart.facts",
