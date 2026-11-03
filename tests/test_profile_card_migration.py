@@ -1,4 +1,4 @@
-"""Migration 097 (nous_system.profile_card): the file the migrator runs matches the ORM model, creates only the table
+"""Migration 096 (nous_system.profile_card): the file the migrator runs matches the ORM model, creates only the table
 and keeps one card per agent."""
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from nous.storage.migrator import _split_sql_statements
 from nous.storage.models import ProfileCard
 
 ROOT = Path(__file__).resolve().parents[1]
-MIGRATION = ROOT / "sql" / "migrations" / "097_profile_card.sql"
+MIGRATION = ROOT / "sql" / "migrations" / "096_profile_card.sql"
 
 
 def _sql() -> str:

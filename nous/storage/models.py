@@ -2089,7 +2089,7 @@ class CheckAudit(Base):
 
 
 class ProfileCard(Base):
-    """Migration 097: the bounded profile card, one row per agent.
+    """Migration 096: the bounded profile card, one row per agent.
 
     Written by ``nous.heart.profile_card``: the sleep phase and ``POST /profile-card/rebuild`` replace ``entries``
     (the old ones move to ``previous_entries``); ``DELETE /profile-card/entries/{id}`` moves one line's text to

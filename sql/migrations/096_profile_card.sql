@@ -1,4 +1,4 @@
--- 097: the bounded profile card
+-- 096: the bounded profile card
 --
 -- A short card of durable profile lines (preference, person, rule) that a sleep phase writes from the
 -- agent's tier-1 facts (nous/heart/profile_card.py). One row per agent: each write moves the old entries
