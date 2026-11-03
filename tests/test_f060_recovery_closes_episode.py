@@ -163,7 +163,9 @@ async def test_recovery_closes_the_episode_it_recovers(db, agent_id):
             assert row.ended_at is not None
             assert row.active is False
             assert row.outcome == "partial"
-            assert row.duration_seconds >= 30 * 3600 - 60
+            # Nothing bounds it and nothing shows later activity: it ends at its
+            # start, and its duration is unknown rather than invented.
+            assert row.duration_seconds is None
             # Closed, not deleted: still searchable, and F053 does not prune its edges.
             assert row.live is True
             assert row.dead is False
@@ -408,3 +410,118 @@ async def test_abandon_close_ends_before_the_successor(db, agent_id):
         assert row.ended_at == successor_start - timedelta(seconds=60, microseconds=1)
     finally:
         await _cleanup(db, agent_id)
+
+
+# ---------------------------------------------------------------------------
+# An episode with no successor bound ends at its last real activity
+# ---------------------------------------------------------------------------
+# Without a later episode in its session, nothing bounds an open episode, and
+# now() would stamp a months-old episode as ending today. The close takes the
+# latest write a live turn made for it; what the recovery itself writes now
+# (extracted facts, dialogue chunks) is not evidence. No evidence: it ends at
+# its start and its duration stays unknown.
+
+
+async def _insert_fact(db, agent_id, episode_id, source, created) -> None:
+    async with db.session() as s:
+        await s.execute(
+            text(
+                "INSERT INTO heart.facts (agent_id, content, source, source_episode_id, created_at) "
+                "VALUES (:a, :c, :src, :e, :ts)"
+            ),
+            {"a": agent_id, "c": f"fixture fact from {source}", "src": source, "e": episode_id, "ts": created},
+        )
+        await s.commit()
+
+
+async def _close_fields(db, episode_id):
+    async with db.session() as s:
+        return (
+            await s.execute(
+                text("SELECT started_at, ended_at, duration_seconds, outcome FROM heart.episodes WHERE id = :id"),
+                {"id": episode_id},
+            )
+        ).one()
+
+
+async def test_close_without_session_ends_at_last_live_activity(db, agent_id):
+    settings = _settings(agent_id)
+    handler = _handler(db, settings, _WritingSummarizer(db))
+    t0 = datetime.now(UTC)
+    try:
+        episode_id = await _insert_episode(db, agent_id, None, t0 - timedelta(days=30))
+        last_activity = t0 - timedelta(days=29)
+        await _insert_fact(db, agent_id, episode_id, "user_direct", t0 - timedelta(days=29, hours=5))
+        await _insert_fact(db, agent_id, episode_id, "telegram-attachment", last_activity)
+        # Written now, after the session died: not activity.
+        await _insert_fact(db, agent_id, episode_id, "fact_extractor", t0)
+        async with db.session() as s:
+            await s.execute(
+                text(
+                    "INSERT INTO heart.episode_chunks (agent_id, episode_id, chunk_index, content) "
+                    "VALUES (:a, :e, 0, 'dialogue chunk the summarizer wrote')"
+                ),
+                {"a": agent_id, "e": episode_id},
+            )
+            await s.commit()
+
+        await handler._phase_recover_abandoned_episodes({})
+
+        row = await _close_fields(db, episode_id)
+        assert row.outcome == "partial"
+        assert row.ended_at == last_activity
+        assert row.duration_seconds == int((last_activity - row.started_at).total_seconds())
+    finally:
+        await _cleanup(db, agent_id)
+
+
+async def test_close_without_successor_counts_the_sessions_decisions(db, agent_id):
+    settings = _settings(agent_id)
+    handler = _handler(db, settings, _WritingSummarizer(db))
+    t0 = datetime.now(UTC)
+    sid = "f060-last-decision-session"
+    try:
+        episode_id = await _insert_episode(db, agent_id, sid, t0 - timedelta(days=30))
+        last_decision = t0 - timedelta(days=29, hours=20)
+        await _insert_decision(db, agent_id, sid, t0 - timedelta(days=29, hours=23))
+        await _insert_decision(db, agent_id, sid, last_decision)
+
+        await handler._phase_recover_abandoned_episodes({})
+
+        row = await _close_fields(db, episode_id)
+        assert row.outcome == "partial"
+        assert row.ended_at == last_decision
+        assert await _decisions_of(db, agent_id, episode_id) == await _decisions_in_session(db, agent_id, sid)
+    finally:
+        await _cleanup(db, agent_id)
+
+
+async def test_close_without_evidence_ends_at_start_with_unknown_duration(db, agent_id):
+    settings = _settings(agent_id)
+    handler = _handler(db, settings, _WritingSummarizer(db))
+    t0 = datetime.now(UTC)
+    try:
+        recovered = await _insert_episode(db, agent_id, None, t0 - timedelta(days=30))
+        abandoned = await _insert_episode(db, agent_id, None, t0 - timedelta(days=30), summary="hi")
+
+        stats: dict = {}
+        await handler._phase_recover_abandoned_episodes(stats)
+
+        assert stats["episodes_recovery_closed"] == 1
+        assert stats["episodes_marked_abandoned"] == 1
+        for episode_id, outcome in ((recovered, "partial"), (abandoned, "abandoned")):
+            row = await _close_fields(db, episode_id)
+            assert row.outcome == outcome
+            assert row.ended_at == row.started_at
+            assert row.duration_seconds is None
+    finally:
+        await _cleanup(db, agent_id)
+
+
+async def _decisions_in_session(db, agent_id, session_id) -> set[UUID]:
+    async with db.session() as s:
+        rows = await s.execute(
+            text("SELECT id FROM brain.decisions WHERE agent_id = :a AND session_id = :sid"),
+            {"a": agent_id, "sid": session_id},
+        )
+        return {r[0] for r in rows.all()}

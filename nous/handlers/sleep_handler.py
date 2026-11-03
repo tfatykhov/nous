@@ -2421,39 +2421,42 @@ class SleepHandler:
             # sweep and not a per-row close inside Loop A. Bounded by Loop B's
             # cheap-UPDATE cap. No episode_ended event: a bulk close must not
             # fan out to handlers. ended_at is episode_close_at_sql's close_at,
-            # not now(): an open row's decision window ends at its successor.
+            # never now(): the successor bound or the last real activity; with
+            # neither, the duration stays NULL.
             if not self._interrupted:
+                recovered_open = """
+                    SELECT e.id FROM heart.episodes e
+                    WHERE e.agent_id = :agent_id
+                      AND e.active = true
+                      AND e.ended_at IS NULL
+                      AND e.structured_summary IS NOT NULL
+                      AND e.started_at < now() - make_interval(hours => :hours)
+                      AND NOT EXISTS (
+                        SELECT 1 FROM heart.working_memory wm
+                        WHERE wm.agent_id = e.agent_id
+                          AND wm.session_id = e.session_id
+                          AND wm.updated_at >= now() - make_interval(hours => :hours)
+                      )
+                    ORDER BY e.started_at ASC
+                    LIMIT :lim
+                """
                 async with self._heart.db.session() as session:
                     result = await session.execute(
                         sql_text(f"""
                         UPDATE heart.episodes h
-                        SET ended_at = COALESCE(h.ended_at, c.close_at),
+                        SET ended_at = c.close_at,
                             duration_seconds = COALESCE(
                                 h.duration_seconds,
-                                EXTRACT(EPOCH FROM COALESCE(h.ended_at, c.close_at) - h.started_at)::int
+                                CASE WHEN c.end_known
+                                     THEN EXTRACT(EPOCH FROM c.close_at - h.started_at)::int
+                                END
                             ),
                             active = false,
                             outcome = COALESCE(h.outcome, 'partial')
-                        FROM ({episode_close_at_sql()}) c
+                        FROM ({episode_close_at_sql(recovered_open)}) c
                         WHERE c.id = h.id
                           AND h.agent_id = :agent_id
                           AND h.ended_at IS NULL
-                          AND h.id IN (
-                            SELECT e.id FROM heart.episodes e
-                            WHERE e.agent_id = :agent_id
-                              AND e.active = true
-                              AND e.ended_at IS NULL
-                              AND e.structured_summary IS NOT NULL
-                              AND e.started_at < now() - make_interval(hours => :hours)
-                              AND NOT EXISTS (
-                                SELECT 1 FROM heart.working_memory wm
-                                WHERE wm.agent_id = e.agent_id
-                                  AND wm.session_id = e.session_id
-                                  AND wm.updated_at >= now() - make_interval(hours => :hours)
-                              )
-                            ORDER BY e.started_at ASC
-                            LIMIT :lim
-                          )
                     """),
                         {"agent_id": agent_id, "hours": min_age, "lim": mark_max},
                     )
@@ -2464,6 +2467,17 @@ class SleepHandler:
             # content AND age >= mark_age_days. Cheap SQL UPDATE; can clear
             # a large legacy backlog quickly.
             if mark_enabled and not self._interrupted:
+                unrecoverable = """
+                    SELECT id FROM heart.episodes
+                    WHERE agent_id = :agent_id
+                      AND active = true
+                      AND structured_summary IS NULL
+                      AND started_at < now() - make_interval(days => :days)
+                      AND (transcript IS NULL OR length(transcript) < :min_t)
+                      AND (summary IS NULL OR length(summary) < :min_s)
+                    ORDER BY started_at ASC
+                    LIMIT :lim
+                """
                 async with self._heart.db.session() as session:
                     result = await session.execute(
                         sql_text(f"""
@@ -2471,19 +2485,9 @@ class SleepHandler:
                         SET active = false,
                             outcome = 'abandoned',
                             ended_at = COALESCE(h.ended_at, c.close_at)
-                        FROM ({episode_close_at_sql()}) c
+                        FROM ({episode_close_at_sql(unrecoverable)}) c
                         WHERE c.id = h.id
-                          AND h.id IN (
-                            SELECT id FROM heart.episodes
-                            WHERE agent_id = :agent_id
-                              AND active = true
-                              AND structured_summary IS NULL
-                              AND started_at < now() - make_interval(days => :days)
-                              AND (transcript IS NULL OR length(transcript) < :min_t)
-                              AND (summary IS NULL OR length(summary) < :min_s)
-                            ORDER BY started_at ASC
-                            LIMIT :lim
-                          )
+                          AND h.agent_id = :agent_id
                     """),
                         {
                             "agent_id": agent_id,

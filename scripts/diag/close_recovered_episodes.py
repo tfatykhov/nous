@@ -6,8 +6,10 @@ episode forever. An open row with a structured summary is exactly such a row:
 the summarizer's own path runs after ``_end``. This closes them with the same
 SET clause and the same live-session guard as the fixed sleep phase (no
 working-memory write for the episode's session inside the min-age window).
-Each row ends where its decision window already ended (episode_close_at_sql),
-so it needs an image that contains that helper (#825).
+Each row ends at episode_close_at_sql's close_at: where its decision window
+already ended when a later episode of its session bounds it, otherwise at its
+last real activity, otherwise at its start with duration_seconds left NULL. It
+needs an image that contains that helper (#825).
 
 For the agent container:
     docker exec -i nous-agent python - < scripts/diag/close_recovered_episodes.py
@@ -53,18 +55,17 @@ _LIST = f"""
 
 _CLOSE = f"""
     UPDATE heart.episodes h
-    SET ended_at = COALESCE(h.ended_at, c.close_at),
+    SET ended_at = c.close_at,
         duration_seconds = COALESCE(
             h.duration_seconds,
-            EXTRACT(EPOCH FROM COALESCE(h.ended_at, c.close_at) - h.started_at)::int
+            CASE WHEN c.end_known THEN EXTRACT(EPOCH FROM c.close_at - h.started_at)::int END
         ),
         active = false,
         outcome = COALESCE(h.outcome, 'partial')
-    FROM ({episode_close_at_sql()}) c
+    FROM ({episode_close_at_sql(_SELECT)}) c
     WHERE c.id = h.id
       AND h.agent_id = :agent_id
       AND h.ended_at IS NULL
-      AND h.id IN ({_SELECT})
 """
 
 
