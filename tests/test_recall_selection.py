@@ -305,6 +305,60 @@ class TestRecencyByStatementTime:
         assert r2[0].metadata["learned_at"] == stated.isoformat()
 
 
+def _summary(content: str, *, learned_at: datetime, event_date: date) -> FactSummary:
+    return FactSummary(
+        id=uuid.uuid4(),
+        content=content,
+        category=None,
+        subject="dentist",
+        confidence=1.0,
+        active=True,
+        score=0.9,
+        learned_at=learned_at,
+        event_date=event_date,
+    )
+
+
+class TestPreTurnRecencyByStatementTime:
+    """The pre-turn copy of the resolver (ContextEngine._resolve_recency) follows the same rule."""
+
+    @staticmethod
+    def _engine():
+        from nous.cognitive.context import ContextEngine
+
+        engine = ContextEngine.__new__(ContextEngine)
+        engine._settings = SimpleNamespace(recency_resolver_enabled=True, recency_resolver_similarity_floor=0.55)
+        return engine
+
+    def test_newer_correction_with_earlier_event_date_wins(self):
+        original = _summary(
+            "Dentist appointment is on the 25th",
+            learned_at=datetime(2026, 10, 1, 9, 0, tzinfo=UTC),
+            event_date=date(2026, 11, 25),
+        )
+        correction = _summary(
+            "Dentist appointment is on the 20th",
+            learned_at=datetime(2026, 10, 20, 9, 0, tzinfo=UTC),
+            event_date=date(2026, 11, 20),
+        )
+
+        self._engine()._resolve_recency([original, correction])
+
+        assert correction.recency_status == "current"
+        assert original.recency_status == "superseded"
+        assert original.score < correction.score
+
+    def test_same_statement_time_falls_back_to_event_date(self):
+        stamp = datetime(2026, 10, 1, 9, 0, tzinfo=UTC)
+        earlier = _summary("Dentist appointment is on the 20th", learned_at=stamp, event_date=date(2026, 11, 20))
+        later = _summary("Dentist appointment is on the 25th", learned_at=stamp, event_date=date(2026, 11, 25))
+
+        self._engine()._resolve_recency([earlier, later])
+
+        assert later.recency_status == "current"
+        assert earlier.recency_status == "superseded"
+
+
 # ---------------------------------------------------------------------------
 # F-2: F055 records only the rows the formatter rendered
 # ---------------------------------------------------------------------------
@@ -463,11 +517,12 @@ def _db_settings(agent: str, **overrides):
     return Settings(agent_id=agent).model_copy(update=base)
 
 
-async def _two_dated_facts(db, agent, vec, *, old, new):
+async def _two_dated_facts(db, agent, vec, *, old, new, edge_agent=None):
     """Store two same-subject facts and a ``contradicts`` edge from the NEW one to the old one.
 
     ``old``/``new`` are (content, learned_at, event_date). The contents are
-    difflib-dissimilar (ratio < 0.55), so only the edge can pair them.
+    difflib-dissimilar (ratio < 0.55), so only the edge can pair them. The edge
+    row carries ``edge_agent`` (default: the facts' agent).
     """
     old_id, new_id = uuid.uuid4(), uuid.uuid4()
     async with db.session() as s:
@@ -491,7 +546,7 @@ async def _two_dated_facts(db, agent, vec, *, old, new):
                 source_type="fact",
                 target_id=old_id,
                 target_type="fact",
-                agent_id=agent,
+                agent_id=edge_agent or agent,
                 relation="contradicts",
                 weight=1.0,
             )
@@ -542,6 +597,46 @@ class TestFactContradictionEdgesReachTheResolver:
             assert by_id[old_id].metadata.get("recency_status") == "superseded"
         finally:
             await _purge(db, agent)
+            await heart.close()
+            await brain.close()
+
+    async def test_another_agents_edge_is_not_fetched(self, db, mock_embeddings):
+        """Stage 5 reads only this agent's edges, even between this agent's ids."""
+        from nous.brain.brain import Brain
+        from nous.heart import Heart
+
+        agent, other = _agent("a4-own"), _agent("a4-other")
+        settings = _db_settings(agent)
+        heart = Heart(db, settings, embedding_provider=mock_embeddings)
+        brain = Brain(database=db, settings=settings)
+        query = "zanzibar ferry schedule"
+        try:
+            old_id, new_id = await _two_dated_facts(
+                db,
+                agent,
+                await mock_embeddings.embed(query),
+                old=(
+                    "Zanzibar ferry trip planned with the north pier operator for the spring holiday",
+                    datetime(2026, 3, 1, tzinfo=UTC),
+                    date(2026, 4, 1),
+                ),
+                new=(
+                    "Boat crossing to the island now set for an earlier morning slot",
+                    datetime(2026, 3, 20, tzinfo=UTC),
+                    date(2026, 4, 10),
+                ),
+                edge_agent=other,
+            )
+
+            results, stats = await run_recall_pipeline(query, heart, brain, settings, memory_types=["fact"])
+
+            by_id = {r.id: r for r in results}
+            assert stats.contradiction_checks_ran is True
+            assert by_id[new_id].contradicts == []
+            assert stats.contradiction_edges == []
+        finally:
+            await _purge(db, agent)
+            await _purge(db, other)
             await heart.close()
             await brain.close()
 
@@ -668,6 +763,30 @@ async def test_pending_zero_confidence_decision_is_searchable(db):
 
         assert null_id in found
         assert failed_id not in found
+    finally:
+        await _purge(db, agent)
+        await brain.close()
+
+
+@pytest.mark.postgres_only
+async def test_graph_resolver_keeps_a_pending_zero_confidence_decision(db):
+    """The graph-node resolver mirrors brain.query's abandoned-decision predicate, NULL-safe too."""
+    from nous.brain.brain import Brain
+
+    agent = _agent("f6-graph")
+    brain = Brain(database=db, settings=_db_settings(agent))
+    try:
+        async with db.session() as s:
+            null_id = await _decision(s, agent, description="pending plan", confidence=0.0)
+            failed_id = await _decision(s, agent, description="abandoned plan", confidence=0.0, outcome="failure")
+            await s.execute(text("UPDATE brain.decisions SET outcome = NULL WHERE id = :id"), {"id": null_id})
+            await s.commit()
+
+        async with db.session() as s:
+            resolved = await brain._resolve_node_descriptions(s, {"decision": [null_id, failed_id]})
+
+        assert null_id in resolved
+        assert failed_id not in resolved
     finally:
         await _purge(db, agent)
         await brain.close()

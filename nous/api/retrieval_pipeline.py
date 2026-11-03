@@ -2022,6 +2022,7 @@ async def _run_stages(
                 async with brain.db.session() as cs:
                     cr = await cs.execute(
                         select(GE).where(
+                            GE.agent_id == brain.agent_id,
                             GE.relation == "contradicts",
                             GE.source_id.in_(all_ids),
                             GE.target_id.in_(all_ids),

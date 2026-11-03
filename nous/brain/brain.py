@@ -1970,9 +1970,9 @@ class Brain:
                 select(Decision.id, Decision.description, Decision.created_at)
                 .where(Decision.id.in_(ids_by_type["decision"]))
                 .where(Decision.agent_id == self.agent_id)
-                .where(
-                    ~((Decision.outcome == "failure") & (Decision.confidence == 0.0))
-                )
+                # NULL-safe, like _query's: `~(outcome == 'failure' & ...)` is
+                # NULL for a NULL outcome with confidence 0.0, which dropped it.
+                .where(Decision.outcome.is_distinct_from("failure") | (Decision.confidence != 0.0))
             )
             # codex #577 r2: only outcomes actually DEMOTED (factor < 1.0)
             # belong in the exclusion set. 1.0 is a legal identity value an
