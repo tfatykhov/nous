@@ -154,19 +154,20 @@ async def _has_vector(db, ep_id) -> bool:
         return row.one().has_vec
 
 
-async def test_a_rejected_newest_episode_does_not_block_older_ones(db):
-    """A 400 is about that row's text, not the provider: skip it, keep going.
+@pytest.mark.parametrize("status", [400, 413, 422])
+async def test_a_rejected_newest_episode_does_not_block_older_ones(db, status):
+    """A 400/413/422 is about that row's text, not the provider: skip it, keep going.
 
     Before, the backfill stopped at any failure, and newest-first ordering
     made the same rejected row stop every later cycle too.
     """
     from nous.heart.episodes import EpisodeManager
 
-    agent_id = f"reembed-400-{uuid4().hex[:8]}"
+    agent_id = f"reembed-{status}-{uuid4().hex[:8]}"
     await _add_agent(db, agent_id)
     try:
         rejected, older = await _closed_episodes_without_vectors(db, agent_id, ["REJECT me", "a normal summary"])
-        manager = EpisodeManager(db, _ScriptedEmbedder("REJECT", _http_error(400)), agent_id)
+        manager = EpisodeManager(db, _ScriptedEmbedder("REJECT", _http_error(status)), agent_id)
 
         assert await manager.reembed_missing() == 1
         assert not await _has_vector(db, rejected)
@@ -175,8 +176,9 @@ async def test_a_rejected_newest_episode_does_not_block_older_ones(db):
         await _drop_agent(db, agent_id)
 
 
-@pytest.mark.parametrize("status", [429, 503])
+@pytest.mark.parametrize("status", [401, 403, 429, 503])
 async def test_a_provider_failure_still_stops_the_backfill(db, status):
+    """A bad key, a forbidden account, rate limiting or a server error fails every row alike."""
     from nous.heart.episodes import EpisodeManager
 
     agent_id = f"reembed-{status}-{uuid4().hex[:8]}"
@@ -206,6 +208,59 @@ async def test_backfill_text_is_capped_like_procedure_embeds(db):
         assert await manager.reembed_missing() == 1
         assert len(embedder.texts[0]) == 16_000
         assert await _has_vector(db, huge)
+    finally:
+        await _drop_agent(db, agent_id)
+
+
+class _TokenLimitEmbedder:
+    """Rejects input over the 16,000-char cap with a 400, as the API does over its token limit."""
+
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    async def embed(self, text: str, fail_fast: bool = False) -> list[float]:
+        self.texts.append(text)
+        if len(text) > 16_000:
+            raise _http_error(400)
+        return [1.0] + [0.0] * 1535
+
+
+async def test_an_oversized_summary_gets_a_vector_at_start(db):
+    """The live writes cap their embed text too, so they do not rely on the backfill."""
+    from nous.heart.episodes import EpisodeManager
+    from nous.heart.schemas import EpisodeInput
+
+    agent_id = f"embed-cap-start-{uuid4().hex[:8]}"
+    await _add_agent(db, agent_id)
+    try:
+        embedder = _TokenLimitEmbedder()
+        ep = await EpisodeManager(db, embedder, agent_id).start(EpisodeInput(title="Long", summary="y" * 40_000))
+        assert await _has_vector(db, ep.id), "start() stored no vector for an oversized summary"
+        assert len(embedder.texts[0]) == 16_000
+    finally:
+        await _drop_agent(db, agent_id)
+
+
+async def test_an_oversized_summary_gets_a_vector_at_end(db):
+    from nous.heart.episodes import EpisodeManager
+
+    agent_id = f"embed-cap-end-{uuid4().hex[:8]}"
+    await _add_agent(db, agent_id)
+    try:
+        ep_id = uuid4()
+        async with db.session() as s:  # an open episode whose start() embed failed
+            await s.execute(
+                sql_text(
+                    "INSERT INTO heart.episodes (id, agent_id, title, summary, started_at, active, tags) "
+                    "VALUES (:id, :aid, 'Long', :s, now(), true, '{}')"
+                ),
+                {"id": ep_id, "aid": agent_id, "s": "y" * 40_000},
+            )
+            await s.commit()
+        embedder = _TokenLimitEmbedder()
+        await EpisodeManager(db, embedder, agent_id).end(ep_id, "success", lessons_learned=["keep it short"])
+        assert await _has_vector(db, ep_id), "_end() stored no vector for an oversized summary"
+        assert len(embedder.texts[0]) == 16_000
     finally:
         await _drop_agent(db, agent_id)
 

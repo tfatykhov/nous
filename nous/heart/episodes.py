@@ -27,9 +27,12 @@ logger = logging.getLogger(__name__)
 # Closed episodes with a NULL embedding re-embedded per sleep cycle (H-5).
 _REEMBED_MAX_PER_CYCLE = 20
 # The char bound procedures._build_embed_text puts on embed input (8191-token
-# model limit, no tokenizer dependency). The backfill applies it so an
-# oversized episode is embedded truncated instead of rejected every cycle.
-_REEMBED_CHAR_CAP = 16000
+# model limit, no tokenizer dependency). Every episode embed applies it, so an
+# oversized summary is embedded truncated instead of rejected with a 400.
+_EMBED_CHAR_CAP = 16000
+# A 4xx that rejects this request's input. Any other failure (401/403, 429,
+# 5xx, transport) would fail every row alike, so it stops the backfill.
+_REJECTED_INPUT_STATUSES = frozenset({400, 413, 422})
 
 
 class EpisodeManager:
@@ -101,7 +104,7 @@ class EpisodeManager:
         # Generate embedding from title + summary
         embedding = None
         if self.embeddings:
-            embed_text = f"{input.title or ''} {input.summary}".strip()
+            embed_text = f"{input.title or ''} {input.summary}".strip()[:_EMBED_CHAR_CAP]
             try:
                 embedding = await self.embeddings.embed(embed_text)
             except Exception:
@@ -165,7 +168,7 @@ class EpisodeManager:
 
             # 008.3: Refresh embedding with real content
             if self.embeddings:
-                embed_text = f"{episode.title or ''} {episode.summary or ''}".strip()
+                embed_text = f"{episode.title or ''} {episode.summary or ''}".strip()[:_EMBED_CHAR_CAP]
                 if embed_text:
                     try:
                         episode.embedding = await self.embeddings.embed(embed_text)
@@ -259,7 +262,7 @@ class EpisodeManager:
         if self.embeddings:
             embed_text = (
                 f"{episode.title or ''} {episode.summary} {outcome} {' '.join(lessons_learned or [])}"
-            ).strip()
+            ).strip()[:_EMBED_CHAR_CAP]
             try:
                 episode.embedding = await self.embeddings.embed(embed_text)
             except Exception:
@@ -294,11 +297,11 @@ class EpisodeManager:
         hides the episode from vector search and the densifier until something
         re-embeds it. The text is the one _end() embeds (with a missing summary
         as empty, where _end() would embed the word "None"), cut to
-        _REEMBED_CHAR_CAP. Newest first. A provider failure (transport error,
-        timeout, 429, 5xx, or a fail-fast skip) stops the batch: the next cycle
-        retries. A row the API rejects (any other 4xx) is skipped, so it cannot
-        block older rows. No transaction is held while embedding. Returns the
-        number re-embedded.
+        _EMBED_CHAR_CAP. Newest first. A row whose input the API rejects (400,
+        413, 422) is skipped, so it cannot block older rows. Any other failure
+        (401/403, 429, 5xx, transport error, timeout, fail-fast skip) would
+        fail every row, so it stops the batch and the next cycle retries. No
+        transaction is held while embedding. Returns the number re-embedded.
         """
         if not self.embeddings or limit <= 0:
             return 0
@@ -323,14 +326,14 @@ class EpisodeManager:
         for row in rows:
             embed_text = (
                 f"{row.title or ''} {row.summary or ''} {row.outcome or ''} {' '.join(row.lessons_learned or [])}"
-            ).strip()[:_REEMBED_CHAR_CAP]
+            ).strip()[:_EMBED_CHAR_CAP]
             if not embed_text:
                 continue
             try:
                 vectors[row.id] = await self.embeddings.embed(embed_text)
             except httpx.HTTPStatusError as e:
                 status = e.response.status_code
-                if status != 429 and 400 <= status < 500:
+                if status in _REJECTED_INPUT_STATUSES:
                     logger.warning("Episode re-embed rejected for %s (HTTP %d); skipped", row.id, status)
                     continue
                 logger.warning(
