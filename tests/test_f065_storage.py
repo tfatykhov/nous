@@ -36,6 +36,7 @@ _GRAPH_EDGE_RELATIONS = [
     "evidence_for",
     "discussed_in",
     "extracted_from",
+    "refines",  # migration 095
 ]
 
 
@@ -60,6 +61,10 @@ class TestClassify:
 
     def test_contradicts_is_inferred(self) -> None:
         assert classify("contradicts") == "inferred"
+
+    def test_refines_is_inferred(self) -> None:
+        # Like contradicts, refines is an F027 classifier (LLM) verdict.
+        assert classify("refines") == "inferred"
 
     @pytest.mark.parametrize(
         "relation",

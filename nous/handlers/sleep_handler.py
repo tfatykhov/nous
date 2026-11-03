@@ -26,6 +26,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain.brain import Brain
 from nous.cognitive.context import TIER1_FACT_CATEGORIES
@@ -36,13 +37,20 @@ from nous.handlers.consolidation_audit import ConsolidationAuditor, preview
 from nous.heart.category_prompts import TIER1_CATEGORY_GUIDANCE
 from nous.heart.facts import mark_fact_inactive
 from nous.heart.heart import Heart
-from nous.heart.schemas import FactInput, FactRejected
+from nous.heart.schemas import FactDetail, FactInput, FactRejected
+from nous.storage.models import Event as EventRow
 from nous.storage.models import Fact
 
 logger = logging.getLogger(__name__)
 
 # #592: a cluster-consolidation member is never a tier-1 fact (NULL category stays in scope).
 _NOT_TIER1 = or_(Fact.category.is_(None), Fact.category.notin_(TIER1_FACT_CATEGORIES))
+
+# Why a sleep merge was aborted (see SleepHandler._merge_abort_outcome). Both
+# repeat on a re-run, so the F031 and F027 re-check cooldowns skip them.
+_MERGE_CONFIRMED_THIRD_FACT = "merge_confirmed_third_fact"
+_MERGE_TARGET_INACTIVE = "merge_target_inactive"
+_MERGE_ABORT_OUTCOMES = (_MERGE_CONFIRMED_THIRD_FACT, _MERGE_TARGET_INACTIVE)
 
 _REFLECTION_PROMPT = (
     """You are an AI agent reviewing your recent activity. Analyze the following
@@ -1176,7 +1184,7 @@ class SleepHandler:
             return ok
 
     @staticmethod
-    async def _merge_abort_outcome(session, merged_detail) -> str | None:
+    async def _merge_abort_outcome(session: AsyncSession, merged_detail: FactDetail) -> str | None:
         """Why a merge must not deactivate its sources, or None to go ahead.
 
         ``merged_detail`` is what ``heart.learn`` returned inside the merge's
@@ -1186,10 +1194,10 @@ class SleepHandler:
         the sources would point at a fact nobody reads.
         """
         if merged_detail.confirmation_count >= 1:
-            return "merge_confirmed_third_fact"
+            return _MERGE_CONFIRMED_THIRD_FACT
         merged_row = await session.get(Fact, merged_detail.id)
         if merged_row is None or merged_row.active is False:
-            return "merge_target_inactive"
+            return _MERGE_TARGET_INACTIVE
         return None
 
     async def _phase_resolve_contradictions(self, sleep_stats: dict) -> bool:
@@ -1361,7 +1369,7 @@ class SleepHandler:
                         # case); but keep a defensive check just in case.
                         if merged_content:
                             try:
-                                # K-7: one transaction. heart.learn does not
+                                # One transaction: heart.learn does not
                                 # commit an injected session, so the merged
                                 # fact and the deactivated sources land
                                 # together or not at all.
@@ -1754,8 +1762,8 @@ class SleepHandler:
                 # inheriting a tier-1 category would launder a mislabeled source
                 # into the always-on User Profile, and recategorizing instead would
                 # drop genuine profile facts out of it. NULL category stays in scope.
-                stmt = (
-                    select(Fact.subject, func.count().label("cnt"))
+                grouped = (
+                    select(Fact.subject.label("subject"), func.count().label("cnt"))
                     .where(
                         Fact.agent_id == self._heart.agent_id,
                         Fact.active == True,  # noqa: E712
@@ -1766,9 +1774,28 @@ class SleepHandler:
                     .group_by(Fact.subject)
                     .having(func.count() >= min_facts)
                     .having(func.count() <= max_facts)
-                    .order_by(func.count().desc())
-                    .limit(5)
+                    .subquery()
                 )
+                stmt = select(grouped.c.subject, grouped.c.cnt)
+                cooldown_days = int(getattr(settings, "contradiction_recheck_cooldown_days", 30))
+                if cooldown_days > 0:
+                    # A cluster whose merge was aborted would abort again: skip
+                    # it for the F031 re-check window unless its size changed.
+                    # Filtered before the LIMIT so aborted clusters cannot hold
+                    # the five slots.
+                    stmt = stmt.where(
+                        ~select(EventRow.id)
+                        .where(
+                            EventRow.agent_id == self._heart.agent_id,
+                            EventRow.event_type == "f027_cluster_merge",
+                            EventRow.created_at > datetime.now(UTC) - timedelta(days=cooldown_days),
+                            EventRow.data["outcome"].astext.in_(_MERGE_ABORT_OUTCOMES),
+                            EventRow.data["subject"].astext == func.left(grouped.c.subject, 200),
+                            EventRow.data["source_count"].as_integer() == grouped.c.cnt,
+                        )
+                        .exists()
+                    )
+                stmt = stmt.order_by(grouped.c.cnt.desc()).limit(5)
                 result = await session.execute(stmt)
                 clusters = result.all()
 
@@ -1882,7 +1909,7 @@ class SleepHandler:
                     continue
 
                 # Create the merged fact and deactivate the originals in ONE
-                # transaction (K-7: heart.learn does not commit an injected
+                # transaction (heart.learn does not commit an injected
                 # session), so a failure leaves no orphan merged fact behind.
                 async with self._heart.db.session() as session:
                     # 1c: exclude the still-active cluster members so Leg-2

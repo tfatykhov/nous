@@ -84,13 +84,13 @@ class TestClassifyDupeInBand:
         ("CONTRADICTION", "new", "contradiction"),  # real conflict — routes
         ("UPDATE", "new", "supersede_old"),         # state change — supersedes (codex P1 r2)
         ("UPDATE", "old", None),                    # old is current — confirm (dedup)
-        ("UNRELATED", "new", "unrelated"),          # PR-D G-5: not a paraphrase — insert
+        ("UNRELATED", "new", "unrelated"),          # not a paraphrase — insert
         ("REFINEMENT", "new", None),                # F377 tiebreaker unavailable — confirm
     ])
     async def test_extended_range_routes_contradiction_and_update_new(self, relation, current, expected):
         """codex P1 (PR #519 r1+r2): in [threshold, 0.85) a real state-change
         (CONTRADICTION or UPDATE-new supersede) acts; UPDATE-old confirms
-        (dedup), preserving aggressive low-threshold dedup. PR-D G-5: a
+        (dedup), preserving aggressive low-threshold dedup. A
         confident UNRELATED inserts, and a REFINEMENT confirms unless the F377
         tiebreaker calls it DISTINCT."""
         fm = _fm_with_llm({"relation": relation, "current_fact": current, "confidence": 0.9})

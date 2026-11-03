@@ -519,7 +519,7 @@ class TestFactSupersessionThresholdConfigurable:
     async def test_default_threshold_triggers_at_0_82(self):
         """Default threshold=0.80 → similarity 0.82 triggers supersession.
 
-        PR-D G-2: inside the band only a confident UPDATE supersedes, so the
+        Inside the band only a confident UPDATE supersedes, so the
         classifier is stubbed to give one; the threshold is what is tested."""
         fm = self._fm(0.80)
         fm._llm = MagicMock()

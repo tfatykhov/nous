@@ -2157,7 +2157,7 @@ class TestExemplarResolverCandidateExclusion:
             await s.commit()
         try:
             n_vec = _vec_at_cosine(base, 0.90, "nn-supersede")
-            # PR-D G-2: inside the band only a confident UPDATE supersedes.
+            # Inside the band only a confident classifier UPDATE supersedes.
             fm._llm = MagicMock()
             fm._classify_fact_pair = AsyncMock(
                 return_value={"relation": "UPDATE", "current_fact": "new", "confidence": 0.9}

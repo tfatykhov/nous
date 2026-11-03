@@ -1,22 +1,23 @@
 """Fact writes and merges fail closed: no supersession or merge on uncertain
 evidence.
 
-One test (or a small group) per item of the PR-D brief:
-
-- G-2  legacy same-subject supersession keeps both facts unless the
-       classifier confidently says UPDATE (sentinel subjects never take part;
-       the candidate scan is a capped pgvector query gated on the key budget).
-- G-3  a different-dated fact is never a contradiction candidate.
-- G-4  a new fact that loses to an existing one keeps its lineage and the
-       caller sees it inactive.
-- G-5  an in-band dedup hit the classifier did not call a duplicate does not
-       hand its metadata to the existing fact.
-- K-2  a merge whose content confirms a third fact is aborted.
-- K-3  supersession never points at a winner that is gone, inactive or
-       superseded; F031 re-reads each pair before judging it.
-- K-7  a merge is one transaction: a failure leaves no merged fact behind.
-- K-9  F031 never MERGEs a tier-1 (person/preference/rule) fact.
-- K-10 an UPDATES: prefix never supersedes a tier-1 fact.
+- Legacy same-subject supersession keeps both facts unless the classifier
+  confidently says UPDATE. Bucket subjects never take part, and the candidate
+  scan is a capped pgvector query gated on the key-classifier budget.
+- A differently dated fact is never a contradiction candidate.
+- A new fact that loses to an existing one keeps its lineage, and the caller
+  sees it inactive.
+- An in-band dedup hit the classifier did not call a duplicate does not hand
+  its metadata to the existing fact.
+- Supersession never points at a winner that is gone, inactive or
+  superseded, and F031 re-reads each pair before judging it.
+- A sleep merge is one transaction. It is aborted, and the pair or cluster
+  cools down, when the merged content confirms a third fact or the merged
+  fact loses its own write-time scan.
+- F031 never MERGEs a tier-1 (person/preference/rule) fact, and an UPDATES:
+  line never supersedes one.
+- fact_learned on a caller's session is published only after that commit.
+- Migration 095 lets refines edges land.
 """
 
 from __future__ import annotations
@@ -94,7 +95,7 @@ UPDATE_OLD = {"relation": "UPDATE", "current_fact": "old", "confidence": 0.95}
 
 
 # ---------------------------------------------------------------------------
-# G-2: legacy same-subject supersession
+# Legacy same-subject supersession
 # ---------------------------------------------------------------------------
 
 
@@ -108,7 +109,7 @@ UPDATE_OLD = {"relation": "UPDATE", "current_fact": "old", "confidence": 0.95}
     ],
     ids=["classifier-failed", "unknown-relation", "low-confidence-update"],
 )
-async def test_g2_an_uncertain_verdict_keeps_both_facts(heart, session, verdict):
+async def test_an_uncertain_verdict_keeps_both_facts(heart, session, verdict):
     fm = _fm(heart)
     classify = _classifier(fm, verdict)
     old = await _add(session, fm, "The deploy window is Tuesday at noon UTC.", ANCHOR, subject="deploy window")
@@ -122,7 +123,7 @@ async def test_g2_an_uncertain_verdict_keeps_both_facts(heart, session, verdict)
 
 
 @pytest.mark.postgres_only
-async def test_g2_a_confident_update_still_supersedes(heart, session):
+async def test_a_confident_update_still_supersedes(heart, session):
     fm = _fm(heart)
     _classifier(fm, UPDATE_NEW)
     old = await _add(session, fm, "The deploy window is Tuesday at noon UTC.", ANCHOR, subject="deploy window")
@@ -137,7 +138,7 @@ async def test_g2_a_confident_update_still_supersedes(heart, session):
 
 @pytest.mark.postgres_only
 @pytest.mark.parametrize("subject", ["lesson_learned", "Daily_Reflection", "reflection", " unknown "])
-async def test_g2_a_sentinel_subject_never_supersedes(heart, session, subject):
+async def test_a_sentinel_subject_never_supersedes(heart, session, subject):
     fm = _fm(heart)
     old = await _add(session, fm, "Always rerun the flaky suite before blaming the change.", ANCHOR, subject=subject)
     new = await _add(session, fm, "Always rerun the flaky suite before blaming a change.", _vec(0.99), subject=subject)
@@ -149,7 +150,7 @@ async def test_g2_a_sentinel_subject_never_supersedes(heart, session, subject):
 
 
 @pytest.mark.postgres_only
-async def test_g2_a_spent_key_budget_keeps_both_without_a_classifier_call(heart, session):
+async def test_a_spent_key_budget_keeps_both_without_a_classifier_call(heart, session):
     fm = _fm(heart, supersession_classifier_max_per_hour=1)
     assert fm._key_budget_ok() is True  # spend the only slot
     classify = _classifier(fm, UPDATE_NEW)
@@ -164,7 +165,7 @@ async def test_g2_a_spent_key_budget_keeps_both_without_a_classifier_call(heart,
 
 
 @pytest.mark.postgres_only
-async def test_g2_the_candidate_scan_is_capped_at_the_five_nearest(heart, session):
+async def test_the_candidate_scan_is_capped_at_the_five_nearest(heart, session):
     fm = _fm(heart)
     classify = _classifier(fm, {"relation": "UNRELATED", "current_fact": "new", "confidence": 0.9})
     sims = [0.93, 0.92, 0.91, 0.90, 0.89, 0.86, 0.85]
@@ -182,12 +183,12 @@ async def test_g2_the_candidate_scan_is_capped_at_the_five_nearest(heart, sessio
 
 
 # ---------------------------------------------------------------------------
-# G-3: a different-dated fact is never a contradiction candidate
+# A differently dated fact is never a contradiction candidate
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.postgres_only
-async def test_g3_a_dated_event_bypass_is_not_superseded_by_the_contradiction_scan(heart, session):
+async def test_a_dated_event_bypass_is_not_superseded_by_the_contradiction_scan(heart, session):
     # 0.90 clears the 0.85 dedup threshold, so this lands on the F075
     # distinct-date bypass, then sits inside the 0.85-0.95 contradiction band.
     fm = _fm(heart, fact_native_cosine_threshold=0.85)
@@ -207,12 +208,12 @@ async def test_g3_a_dated_event_bypass_is_not_superseded_by_the_contradiction_sc
 
 
 # ---------------------------------------------------------------------------
-# G-4: a new fact that loses keeps its lineage, and the caller sees it inactive
+# A new fact that loses keeps its lineage, and the caller sees it inactive
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.postgres_only
-async def test_g4_losing_the_contradiction_scan_records_lineage_and_returns_inactive(heart, session):
+async def test_losing_the_contradiction_scan_records_lineage_and_returns_inactive(heart, session):
     fm = _fm(heart)
     _classifier(fm, UPDATE_OLD)
     old = await _add(session, fm, "The billing export runs on the first of the month.", ANCHOR)
@@ -233,7 +234,7 @@ async def test_g4_losing_the_contradiction_scan_records_lineage_and_returns_inac
 
 
 @pytest.mark.postgres_only
-async def test_g4_losing_the_subject_scan_records_lineage(heart, session):
+async def test_losing_the_subject_scan_records_lineage(heart, session):
     fm = _fm(heart)
     _classifier(fm, UPDATE_OLD)
     old = await _add(session, fm, "The deploy window is Tuesday at noon UTC.", ANCHOR, subject="deploy window")
@@ -252,12 +253,12 @@ async def test_g4_losing_the_subject_scan_records_lineage(heart, session):
 
 
 # ---------------------------------------------------------------------------
-# G-5: an in-band dedup hit not judged a duplicate keeps its own metadata
+# An in-band dedup hit not judged a duplicate keeps its own metadata
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.postgres_only
-async def test_g5_an_unjudged_band_confirm_only_counts_the_confirmation(heart, session):
+async def test_an_unjudged_band_confirm_only_counts_the_confirmation(heart, session):
     fm = _fm(heart, fact_native_cosine_threshold=0.80)
     _classifier(fm, UPDATE_OLD)  # in [0.85, 0.95): UPDATE/old confirms
     old = await _add(session, fm, "The release train leaves every Thursday at noon.", ANCHOR)
@@ -284,7 +285,7 @@ async def test_g5_an_unjudged_band_confirm_only_counts_the_confirmation(heart, s
 
 
 @pytest.mark.postgres_only
-async def test_g5_a_confident_unrelated_verdict_below_the_band_inserts(heart, session):
+async def test_a_confident_unrelated_verdict_below_the_band_inserts(heart, session):
     fm = _fm(heart, fact_native_cosine_threshold=0.80)
     _classifier(fm, {"relation": "UNRELATED", "current_fact": "new", "confidence": 0.9})
     old = await _add(session, fm, "The staging database runs Postgres seventeen.", ANCHOR)
@@ -300,7 +301,7 @@ async def test_g5_a_confident_unrelated_verdict_below_the_band_inserts(heart, se
 
 
 @pytest.mark.postgres_only
-async def test_g5_a_distinct_refinement_below_the_band_inserts(heart, session):
+async def test_a_distinct_refinement_below_the_band_inserts(heart, session):
     fm = _fm(heart, fact_native_cosine_threshold=0.80)
     _classifier(fm, {"relation": "REFINEMENT", "current_fact": "new", "confidence": 0.9})
     fm.is_distinct_fact = AsyncMock(return_value=True)
@@ -319,7 +320,7 @@ async def test_g5_a_distinct_refinement_below_the_band_inserts(heart, session):
 
 
 @pytest.mark.postgres_only
-async def test_g5_a_refinement_judged_duplicate_confirms_and_copies_metadata(heart, session):
+async def test_a_refinement_judged_duplicate_confirms_and_copies_metadata(heart, session):
     fm = _fm(heart, fact_native_cosine_threshold=0.80)
     _classifier(fm, {"relation": "REFINEMENT", "current_fact": "new", "confidence": 0.9})
     fm.is_distinct_fact = AsyncMock(return_value=False)
@@ -337,13 +338,13 @@ async def test_g5_a_refinement_judged_duplicate_confirms_and_copies_metadata(hea
 
 
 # ---------------------------------------------------------------------------
-# K-3: apply_supersession re-reads the winner
+# apply_supersession re-reads the winner
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.postgres_only
 @pytest.mark.parametrize("winner_state", ["missing", "inactive", "superseded"])
-async def test_k3_supersession_never_points_at_a_gone_winner(heart, session, winner_state):
+async def test_supersession_never_points_at_a_gone_winner(heart, session, winner_state):
     fm = _fm(heart)
     loser = await _add(session, fm, "The on-call rotation hands over on Fridays.", ANCHOR)
     if winner_state == "missing":
@@ -458,7 +459,7 @@ def _outcomes(handler, event_type: str) -> list[str]:
 
 
 @pytest.mark.postgres_only
-async def test_k3_f031_skips_a_pair_an_earlier_verdict_already_resolved(heart, monkeypatch):
+async def test_f031_skips_a_pair_an_earlier_verdict_already_resolved(heart, monkeypatch):
     async with _Agent(heart) as agent:
         a = await agent.fact("The build cache lives on the shared NFS volume.")
         b = await agent.fact("The build cache lives on the local SSD of each runner.")
@@ -482,7 +483,7 @@ async def test_k3_f031_skips_a_pair_an_earlier_verdict_already_resolved(heart, m
 
 
 @pytest.mark.postgres_only
-async def test_k9_f031_never_merges_a_tier1_fact(heart, monkeypatch):
+async def test_f031_never_merges_a_tier1_fact(heart, monkeypatch):
     async with _Agent(heart) as agent:
         person = await agent.fact("Tim prefers to be called by his first name only.", category="person")
         other = await agent.fact("Tim's team calls the weekly sync the Tuesday huddle.")
@@ -502,7 +503,7 @@ async def test_k9_f031_never_merges_a_tier1_fact(heart, monkeypatch):
 
 
 @pytest.mark.postgres_only
-async def test_k9_f031_still_supersedes_a_tier1_fact(heart, monkeypatch):
+async def test_f031_still_supersedes_a_tier1_fact(heart, monkeypatch):
     async with _Agent(heart) as agent:
         old = await agent.fact("Tim's timezone is US Eastern for all scheduling.", category="person")
         new = await agent.fact("Tim's timezone is US Pacific for all scheduling.", category="person")
@@ -520,7 +521,7 @@ async def test_k9_f031_still_supersedes_a_tier1_fact(heart, monkeypatch):
 
 
 @pytest.mark.postgres_only
-async def test_k2_f031_merge_that_confirms_a_third_fact_is_aborted(heart, monkeypatch):
+async def test_f031_merge_that_confirms_a_third_fact_is_aborted(heart, monkeypatch):
     async with _Agent(heart) as agent:
         a = await agent.fact("The metrics pipeline samples every ten seconds.")
         b = await agent.fact("The metrics pipeline keeps raw samples for a week.")
@@ -546,7 +547,7 @@ async def test_k2_f031_merge_that_confirms_a_third_fact_is_aborted(heart, monkey
 
 
 @pytest.mark.postgres_only
-async def test_k2_f027_cluster_merge_that_confirms_a_third_fact_is_aborted(heart, monkeypatch):
+async def test_f027_cluster_merge_that_confirms_a_third_fact_is_aborted(heart, monkeypatch):
     async with _Agent(heart) as agent:
         members = [
             await agent.fact(f"Cluster member {i}: the ingest worker retries {i} times.", subject="ingest worker")
@@ -570,12 +571,12 @@ async def test_k2_f027_cluster_merge_that_confirms_a_third_fact_is_aborted(heart
 
 
 # ---------------------------------------------------------------------------
-# K-7: a merge is one transaction
+# A merge is one transaction
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.postgres_only
-async def test_k7_a_failed_f031_merge_leaves_no_merged_fact(heart, monkeypatch):
+async def test_a_failed_f031_merge_leaves_no_merged_fact(heart, monkeypatch):
     async with _Agent(heart) as agent:
         a = await agent.fact("The search index rebuilds every Sunday night.")
         b = await agent.fact("The search index rebuild takes about forty minutes.")
@@ -596,7 +597,7 @@ async def test_k7_a_failed_f031_merge_leaves_no_merged_fact(heart, monkeypatch):
 
 
 @pytest.mark.postgres_only
-async def test_k7_a_failed_f027_merge_leaves_no_merged_fact(heart, monkeypatch):
+async def test_a_failed_f027_merge_leaves_no_merged_fact(heart, monkeypatch):
     async with _Agent(heart) as agent:
         members = [
             await agent.fact(f"Cluster member {i}: the export job writes shard {i}.", subject="export job")
@@ -703,22 +704,28 @@ async def _wait_for_event(heart, agent_id: str, event_type: str) -> None:
     raise AssertionError(f"no {event_type} event was written")
 
 
+def _persisting_handler(heart, agent):
+    """A handler whose events land in nous_system.events, as Brain.emit_event writes them."""
+    from nous.handlers.sleep_handler import SleepHandler
+
+    async def emit_event(event_type, data):
+        async with heart.db.session() as s:
+            s.add(Event(agent_id=agent.agent_id, event_type=event_type, data=data))
+            await s.commit()
+
+    brain = SimpleNamespace(emit_event=emit_event)
+    return SleepHandler(brain, heart, heart.settings, MagicMock(), llm_client=MagicMock())
+
+
 @pytest.mark.postgres_only
-async def test_k9_a_tier1_merge_downgrade_is_not_rejudged_next_cycle(heart, monkeypatch):
+async def test_a_tier1_merge_downgrade_is_not_rejudged_next_cycle(heart, monkeypatch):
     monkeypatch.setattr(heart.facts._settings, "contradiction_recheck_cooldown_days", 30)
     async with _Agent(heart) as agent:
         await agent.fact("Tim prefers short written updates over calls.", category="person", embedding=ANCHOR)
         await agent.fact("Tim's team sends its written updates every Friday.", embedding=_vec(0.85))
-
-        async def emit_event(event_type, data):  # what Brain.emit_event writes
-            async with heart.db.session() as s:
-                s.add(Event(agent_id=agent.agent_id, event_type=event_type, data=data))
-                await s.commit()
-
         llm = AsyncMock(return_value=_merge("Tim prefers short written updates, which his team sends on Fridays."))
         monkeypatch.setattr("nous.handlers.sleep_handler.call_background_llm_structured", llm)
-        handler = _handler(heart)
-        handler._brain = SimpleNamespace(emit_event=emit_event)
+        handler = _persisting_handler(heart, agent)
 
         assert len(await heart.find_contradiction_candidates(limit=10)) == 1
         await handler._phase_resolve_contradictions({"facts_created": 0})
@@ -728,6 +735,82 @@ async def test_k9_a_tier1_merge_downgrade_is_not_rejudged_next_cycle(heart, monk
         assert await heart.find_contradiction_candidates(limit=10) == []
         await handler._phase_resolve_contradictions({"facts_created": 0})
         assert llm.await_count == 1  # skipped on the next cycle
+
+
+# ---------------------------------------------------------------------------
+# An aborted sleep merge cools down: the same content would abort again
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+async def test_an_aborted_f031_merge_is_not_rejudged_next_cycle(heart, monkeypatch):
+    monkeypatch.setattr(heart.facts._settings, "contradiction_recheck_cooldown_days", 30)
+    async with _Agent(heart) as agent:
+        await agent.fact("The metrics pipeline samples every ten seconds.", embedding=ANCHOR)
+        await agent.fact("The metrics pipeline keeps raw samples for a week.", embedding=_vec(0.85))
+        third = await agent.fact("The metrics pipeline samples every 10s, keeps raw data 7 days.", subject="metrics")
+        llm = AsyncMock(return_value=_merge(third.content))
+        monkeypatch.setattr("nous.handlers.sleep_handler.call_background_llm_structured", llm)
+        handler = _persisting_handler(heart, agent)
+
+        assert len(await heart.find_contradiction_candidates(limit=10)) == 1
+        await handler._phase_resolve_contradictions({"facts_created": 0})
+        await asyncio.gather(*list(handler._pending_emits))
+        await _wait_for_event(heart, agent.agent_id, "f031_contradiction_resolution")
+        assert llm.await_count == 1
+
+        assert await heart.find_contradiction_candidates(limit=10) == []
+        await handler._phase_resolve_contradictions({"facts_created": 0})
+        assert llm.await_count == 1  # skipped on the next cycle
+
+
+@pytest.mark.postgres_only
+async def test_an_aborted_f027_merge_is_skipped_until_the_cluster_changes(heart, monkeypatch):
+    monkeypatch.setattr(heart.settings, "contradiction_recheck_cooldown_days", 30)
+    async with _Agent(heart) as agent:
+        for i in range(3):
+            await agent.fact(f"Cluster member {i}: the ingest worker retries {i} times.", subject="ingest worker")
+        third = await agent.fact("The ingest worker retries up to three times.", subject="ingest retries")
+        llm = AsyncMock(return_value={"should_merge": True, "merged_content": third.content, "confidence": 0.9})
+        monkeypatch.setattr("nous.handlers.sleep_handler.call_background_llm_structured", llm)
+        handler = _persisting_handler(heart, agent)
+
+        assert await handler._phase_cluster_consolidation({}) is True
+        await asyncio.gather(*list(handler._pending_emits))
+        assert llm.await_count == 1
+
+        assert await handler._phase_cluster_consolidation({}) is True
+        assert llm.await_count == 1  # skipped on the next cycle
+
+        await agent.fact("Cluster member 3: the ingest worker retries 3 times.", subject="ingest worker")
+        assert await handler._phase_cluster_consolidation({}) is True
+        await asyncio.gather(*list(handler._pending_emits))
+        assert llm.await_count == 2  # a cluster that changed size is judged again
+
+
+# ---------------------------------------------------------------------------
+# A sub-band REFINEMENT's tiebreaker call spends its own band-budget slot
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("cap, tiebreaker_called", [(1, False), (2, True)])
+async def test_a_sub_band_refinement_spends_a_second_band_budget_slot(cap, tiebreaker_called):
+    fm = FactManager(
+        db=MagicMock(),
+        embeddings=None,
+        agent_id="test",
+        settings=SimpleNamespace(fact_band_classification_max_per_hour=cap),
+    )
+    _classifier(fm, {"relation": "REFINEMENT", "current_fact": "new", "confidence": 0.9})
+    fm.is_distinct_fact = AsyncMock(return_value=True)
+    dupe = SimpleNamespace(content="The nightly backup writes to the archive bucket.")
+
+    action = await fm._classify_dupe_in_band(
+        dupe, 0.82, FactInput(content="The nightly backup writes to the archive bucket in eu-west-2."), True
+    )
+
+    assert fm.is_distinct_fact.await_count == int(tiebreaker_called)
+    assert action == ("refines" if tiebreaker_called else None)
 
 
 # ---------------------------------------------------------------------------
@@ -813,12 +896,12 @@ async def test_095_applies_twice_and_a_refines_edge_lands(session):
 
 
 # ---------------------------------------------------------------------------
-# K-10: an UPDATES: prefix never supersedes a tier-1 fact
+# An UPDATES: prefix never supersedes a tier-1 fact
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("category", ["person", "preference", "rule"])
-async def test_k10_updates_prefix_learns_new_instead_of_superseding_tier1(category):
+async def test_updates_prefix_learns_new_instead_of_superseding_tier1(category):
     from nous.handlers.sleep_handler import SleepHandler
 
     match = SimpleNamespace(

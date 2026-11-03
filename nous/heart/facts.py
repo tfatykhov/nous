@@ -1395,7 +1395,13 @@ class FactManager:
                         return None
                     if current == "old":
                         # Old is current: the new fact loses, with lineage.
-                        await self.apply_supersession(row.id, new_fact_id, session)
+                        if not await self.apply_supersession(row.id, new_fact_id, session):
+                            logger.warning(
+                                "F027: UPDATE/old for new fact %s refused by apply_supersession "
+                                "(winner %s gone, inactive or superseded); both stay active",
+                                new_fact_id,
+                                row.id,
+                            )
                         return None
                     # Unknown direction: fall through to the plain warning.
 
@@ -1745,6 +1751,9 @@ class FactManager:
             if relation == "UNRELATED":
                 return "unrelated"
             if relation == "REFINEMENT":
+                # A second Haiku call: it spends its own budget slot.
+                if not self._band_budget_ok():
+                    return None
                 distinct = await self.is_distinct_fact(dupe.content, input.content)
                 if distinct is True:
                     return "refines"
@@ -4121,16 +4130,24 @@ class FactManager:
               AND NOT EXISTS (
                   SELECT 1 FROM nous_system.events e
                   WHERE e.agent_id = :agent_id
-                    AND e.event_type = 'f031_contradiction_resolution'
+                    AND e.event_type IN ('f031_contradiction_resolution', 'f031_merge')
                     AND e.created_at > now() - (:cooldown_days * interval '1 day')
-                    -- Only cool down GENUINE keep-both verdicts. Truncation-
+                    -- Only cool down verdicts a re-run would repeat. Truncation-
                     -- downgraded merges (raw_action='MERGE') must still retry —
                     -- they are mergeable and now succeed under the 1000-token cap,
                     -- so they should NOT be suppressed by the cooldown. A MERGE
                     -- downgraded because a source is a tier-1 fact is a genuine
-                    -- keep-both too, it would be downgraded again next cycle.
-                    AND (e.data->>'raw_action' = 'KEEP_BOTH'
-                         OR e.data->>'downgraded_tier1' = 'true')
+                    -- keep-both too, it would be downgraded again next cycle. So
+                    -- is a MERGE the sleep handler aborted (its merged content
+                    -- confirmed a third fact, or the merged fact lost its own
+                    -- write-time scan), the same content would abort again.
+                    AND (
+                        (e.event_type = 'f031_contradiction_resolution'
+                         AND (e.data->>'raw_action' = 'KEEP_BOTH'
+                              OR e.data->>'downgraded_tier1' = 'true'))
+                        OR (e.event_type = 'f031_merge'
+                            AND e.data->>'outcome' IN ('merge_confirmed_third_fact', 'merge_target_inactive'))
+                    )
                     AND (
                         (e.data->>'fact1_id' = f1.id::text AND e.data->>'fact2_id' = f2.id::text)
                         OR (e.data->>'fact1_id' = f2.id::text AND e.data->>'fact2_id' = f1.id::text)
