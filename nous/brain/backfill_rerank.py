@@ -180,6 +180,11 @@ async def ce_rerank_backfill_candidates(
 
     if not wrapped:
         return []
+    if len(wrapped) == 1:
+        # The F042 reranker returns a lone candidate unscored, still carrying
+        # its RRF score (~0.016); the CE floor below is a sigmoid threshold and
+        # would drop it. Returned here, as the docstring NOTE says.
+        return [(wrapped[0].id, wrapped[0].score)]
 
     top_k = max(int(getattr(settings, "ce_backfill_top_k", 10)), 1)
     min_score = float(getattr(settings, "ce_backfill_min_score", 0.30))

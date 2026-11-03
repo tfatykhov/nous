@@ -151,6 +151,15 @@ class TestUserProfileBudgetScaling:
 # ---------------------------------------------------------------------------
 
 
+def _session_returning(episode):
+    """An AsyncSession stand-in whose agent-scoped Episode select returns ``episode``."""
+    session = AsyncMock()
+    result = MagicMock()
+    result.scalars.return_value.first.return_value = episode
+    session.execute = AsyncMock(return_value=result)
+    return session
+
+
 class TestSourceTextPassthrough:
     """P2-E: Fact admission should ground against transcript, not summary."""
 
@@ -180,7 +189,7 @@ class TestSourceTextPassthrough:
         session = AsyncMock()
         result = await manager._get_source_text(inp, session)
         assert result == "the original transcript text"
-        session.get.assert_not_called()
+        session.execute.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_get_source_text_falls_back_to_episode_summary(self):
@@ -196,8 +205,8 @@ class TestSourceTextPassthrough:
         mock_episode.transcript = None  # F025 P3-C: no transcript available
         mock_episode.summary = "episode summary text"
 
-        session = AsyncMock()
-        session.get = AsyncMock(return_value=mock_episode)
+        manager.agent_id = "agent-a"
+        session = _session_returning(mock_episode)
 
         result = await manager._get_source_text(inp, session)
         assert result == "episode summary text"
@@ -246,8 +255,8 @@ class TestTranscriptPersistence:
         mock_episode.transcript = "full transcript text here"
         mock_episode.summary = "short summary"
 
-        session = AsyncMock()
-        session.get = AsyncMock(return_value=mock_episode)
+        manager.agent_id = "agent-a"
+        session = _session_returning(mock_episode)
 
         result = await manager._get_source_text(inp, session)
         assert result == "full transcript text here"
@@ -267,8 +276,8 @@ class TestTranscriptPersistence:
         mock_episode.transcript = None
         mock_episode.summary = "summary text"
 
-        session = AsyncMock()
-        session.get = AsyncMock(return_value=mock_episode)
+        manager.agent_id = "agent-a"
+        session = _session_returning(mock_episode)
 
         result = await manager._get_source_text(inp, session)
         assert result == "summary text"

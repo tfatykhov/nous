@@ -324,6 +324,25 @@ async def test_ce_rerank_single_candidate_bypass(install_fake):
     assert out[0][1] == 0.42
 
 
+async def test_ce_rerank_single_candidate_below_floor_is_kept(install_fake):
+    """A lone candidate keeps its RRF score (~0.016), which is not a CE sigmoid:
+    comparing it to the 0.30 CE floor would drop every single-candidate backfill."""
+    fake = FakeModel()
+    install_fake(fake)
+    settings = make_settings()  # default ce_backfill_min_score=0.30
+
+    rows = [(_uuid(1), 0.016)]
+    out = await br.ce_rerank_backfill_candidates(
+        query_text="q",
+        candidate_rows=rows,
+        content_map={_uuid(1): "alpha"},
+        settings=settings,
+    )
+
+    assert fake.call_count == 0
+    assert out == [(_uuid(1), 0.016)]
+
+
 # ---------------------------------------------------------------------------
 # 11. Under-filled top_k
 # ---------------------------------------------------------------------------

@@ -661,7 +661,6 @@ async def test_a_weak_review_revise_rewrites_the_row_and_leaves_its_sibling_alon
     heart, a, b = await _weak_review_setup(db, agent)
     try:
         learner = _weak_review_learner(heart, _REVISE)
-        heart.search_procedures = _returns([a])
 
         assert await learner._review_weak_procedures() == 1
 
@@ -686,7 +685,6 @@ async def test_the_next_weak_review_leaves_a_freshly_revised_row_alone(db):
     heart, a, _b = await _weak_review_setup(db, agent)
     try:
         learner = _weak_review_learner(heart, _REVISE)
-        heart.search_procedures = _returns([a])
         await learner._review_weak_procedures()
         learner._call_llm.reset_mock()
 
@@ -707,7 +705,6 @@ async def test_a_weak_review_revise_keeps_the_rows_runtime_metadata(db):
             (await s.get(Procedure, a.id)).runtime_metadata = {"skip_until_scored": 10}
             await s.commit()
         learner = _weak_review_learner(heart, _REVISE)
-        heart.search_procedures = _returns([a])
 
         await learner._review_weak_procedures()
 
@@ -727,7 +724,6 @@ async def test_a_weak_review_revise_keeps_the_rows_kind(db):
             await s.commit()
         a = await heart.get_procedure(a.id)
         learner = _weak_review_learner(heart, _REVISE)
-        heart.search_procedures = _returns([a])
 
         assert await learner._review_weak_procedures() == 1
 
@@ -737,10 +733,102 @@ async def test_a_weak_review_revise_keeps_the_rows_kind(db):
         await heart.close()
 
 
-def _returns(value):
-    from unittest.mock import AsyncMock
+async def test_the_weak_review_selects_by_the_auto_tag_not_by_the_text_auto(db):
+    """A hand-written procedure whose text says "auto:" is not an auto-learned one."""
+    agent = "weak-review-by-tag"
+    heart, a, _b = await _weak_review_setup(db, agent)
+    try:
+        setup = ProcedureManager(db, _AxisEmbeddings({}), agent, dedupe_enabled=False)
+        manual = await setup.store(
+            _input(
+                name="Hand written auto: checklist",
+                description="auto: run the checklist by hand",
+                core_patterns=["auto: is just a word here"],
+                tags=["manual"],
+            )
+        )
+        async with db.session() as s:
+            row = await s.get(Procedure, manual.id)
+            row.success_count, row.failure_count, row.activation_count = 0, 5, 5
+            await s.commit()
+        learner = _weak_review_learner(heart, {"action": "keep"})
 
-    return AsyncMock(return_value=value)
+        assert await learner._review_weak_procedures() == 1
+
+        prompts = [call.args[0] for call in learner._call_llm.await_args_list]
+        assert len(prompts) == 1
+        assert a.name in prompts[0]
+    finally:
+        await _cleanup(db, agent)
+        await heart.close()
+
+
+async def test_the_weak_review_skips_a_procedure_that_is_not_weak(db):
+    """Weakness is decided in SQL; a healthy, recently used procedure is not reviewed."""
+    agent = "weak-review-healthy"
+    heart, a, _b = await _weak_review_setup(db, agent)
+    try:
+        async with db.session() as s:
+            row = await s.get(Procedure, a.id)
+            row.success_count, row.failure_count = 9, 1
+            await s.commit()
+        learner = _weak_review_learner(heart, {"action": "keep"})
+
+        assert await learner._review_weak_procedures() == 0
+        learner._call_llm.assert_not_called()
+    finally:
+        await _cleanup(db, agent)
+        await heart.close()
+
+
+async def test_the_weak_review_window_rotates_by_day(db):
+    """More weak procedures than the window: each day orders them by md5(id || day),
+    so a review that keeps every row it reads still reaches the others on later days."""
+    import hashlib
+    from datetime import UTC, date, datetime, timedelta
+
+    from nous.handlers.procedure_learner import _REVISE_REASON
+
+    agent = "weak-review-rotation"
+    manager = ProcedureManager(db, _AxisEmbeddings({}), agent, dedupe_enabled=False)
+    try:
+        ids = []
+        for i in range(6):
+            stored = await manager.store(_input(name=f"Weak rotation {i}", description=f"rotation body {i}"))
+            ids.append(stored.id)
+        async with db.session() as s:
+            for pid in ids:
+                row = await s.get(Procedure, pid)
+                row.success_count, row.failure_count, row.activation_count = 0, 5, 5
+            await s.commit()
+
+        def window(day: date) -> list:
+            def rank(pid) -> tuple[str, str]:
+                return hashlib.md5(f"{pid}{day.isoformat()}".encode()).hexdigest(), str(pid)
+
+            return sorted(ids, key=rank)[:3]
+
+        async def selected(day: date) -> list:
+            return await manager.weak_learned_ids(
+                weakness_threshold=0.3,
+                stale_before=datetime.now(UTC) - timedelta(days=30),
+                revise_reason_prefix=_REVISE_REASON,
+                limit=3,
+                day=day,
+            )
+
+        days = [date(2026, 11, 1) + timedelta(days=n) for n in range(30)]
+        first, other = days[0], next(d for d in days[1:] if set(window(d)) != set(window(days[0])))
+
+        assert await selected(first) == window(first)
+        assert await selected(other) == window(other)
+        assert set(await selected(first)) != set(await selected(other))
+        reached = set()
+        for day in days:
+            reached |= set(await selected(day))
+        assert reached == set(ids)
+    finally:
+        await _cleanup(db, agent)
 
 
 # ---------------------------------------------------------------------------
@@ -1019,7 +1107,6 @@ async def test_the_weak_review_looks_again_once_the_revision_is_older_than_the_w
     heart, a, _b = await _weak_review_setup(db, agent)
     try:
         learner = _weak_review_learner(heart, _REVISE)
-        heart.search_procedures = _returns([a])
         await learner._review_weak_procedures()
         window = timedelta(days=heart.settings.procedure_staleness_days + 1)
         async with db.session() as s:
@@ -1045,7 +1132,6 @@ async def test_another_body_write_does_not_hold_the_weak_review_off(db):
     try:
         await heart.update_procedure_body(a.id, _input(name="Sibling A", description="ALPHA", core_patterns=["x"]))
         learner = _weak_review_learner(heart, {"action": "keep", "reason": "fine"})
-        heart.search_procedures = _returns([a])
 
         assert await learner._review_weak_procedures() == 1
         learner._call_llm.assert_awaited_once()

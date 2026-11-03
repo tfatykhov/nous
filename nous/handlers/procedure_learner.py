@@ -602,30 +602,19 @@ class ProcedureLearner:
             return 0
 
         try:
-            # Search for auto-learned procedures
-            auto_procs = await self._heart.search_procedures("auto:", limit=50)
+            # Auto-learned (an ``auto:*`` tag), weak or stale, and not revised by a weak
+            # review within the staleness window (its score is the old body's: the
+            # revision gets that window to earn its own). Selected in SQL, by tag.
+            weak_ids = await self._heart.weak_learned_procedure_ids(
+                weakness_threshold=self._settings.procedure_weakness_threshold,
+                stale_before=datetime.now(UTC) - timedelta(days=self._settings.procedure_staleness_days),
+                revise_reason_prefix=_REVISE_REASON,
+                limit=50,
+            )
 
             reviewed = 0
-            staleness_cutoff = datetime.now(UTC) - timedelta(days=self._settings.procedure_staleness_days)
-
-            for proc_summary in auto_procs:
-                # Get full detail
-                proc_detail = await self._heart.get_procedure(proc_summary.id)
-
-                # Check weakness criteria
-                is_weak = False
-                if proc_detail.effectiveness is not None and proc_detail.effectiveness < self._settings.procedure_weakness_threshold:
-                    is_weak = True
-                if proc_detail.last_activated and proc_detail.last_activated < staleness_cutoff:
-                    is_weak = True
-                if proc_detail.last_activated is None and proc_detail.created_at < staleness_cutoff:
-                    is_weak = True
-
-                if not is_weak:
-                    continue
-                if await self._revised_since(proc_detail.id, staleness_cutoff):
-                    # Its score is the old body's: the revision gets a staleness window to earn its own.
-                    continue
+            for procedure_id in weak_ids:
+                proc_detail = await self._heart.get_procedure(procedure_id)
 
                 # Ask LLM to evaluate
                 review_data = await self._call_llm(
@@ -698,15 +687,6 @@ class ProcedureLearner:
         except Exception:
             logger.exception("Weak procedure review failed")
             return 0
-
-    async def _revised_since(self, procedure_id: UUID, since: datetime) -> bool:
-        """True if a weak review revised the procedure after ``since``."""
-        return any(
-            version.change_source == "update_body"
-            and (version.reason or "").startswith(_REVISE_REASON)
-            and version.created_at >= since
-            for version in await self._heart.list_procedure_versions(procedure_id)
-        )
 
     # ==================================================================
     # Shared helpers

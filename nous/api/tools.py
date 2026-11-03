@@ -869,11 +869,14 @@ def _format_pipeline_text(
     """
     search_all = "all" in search_types
     results_text: list[str] = []
+    # Ids written into the text so far; the contradiction warnings name only these.
+    shown_ids: set[Any] = set()
 
     def _emit(r: Any) -> None:
         """Record that ``r`` was written into the text. Call at the emission
         site, immediately alongside the ``results_text.append`` that renders it,
         so the two cannot drift."""
+        shown_ids.add(r.id)
         if emitted_out is not None:
             emitted_out.append((r.id, r.type))
 
@@ -908,6 +911,24 @@ def _format_pipeline_text(
         if r.metadata.get("stage_origin") == "heart_graph_memory" and getattr(r, "edge_relation", None):
             return f"[via {r.edge_relation}] "
         return ""
+
+    def _score_tag(r) -> str:
+        # The printed scores come from different scales; name the one each
+        # row's score is on so the model does not compare across them. (Heart
+        # rows read "rrf"; with the cross-encoder on, their score is its
+        # sigmoid, which nothing on the row records.)
+        if r.source == "spreading_activation":
+            return "[activation]"
+        if r.source == "graph_expanded":
+            return "[graph]"
+        if r.metadata.get("retrieval_leg") in ("keyed", "keyed_r2"):
+            return "[keyed band]"
+        if r.type == "censor":
+            # A pattern hit scores the semantic floor, not a cosine.
+            return "[regex]" if r.metadata.get("matched_by") == "regex" else "[cosine]"
+        if r.type == "chunk":
+            return "[chunk]"
+        return "[rrf]"
 
     # Prominence fix: graph-memory neighbours (Path A — fact/episode/chunk surfaced via
     # an edge) are INTERLEAVED into the ranked Heart Memory list (``results`` is
@@ -957,7 +978,7 @@ def _format_pipeline_text(
                     for result in items:
                         results_text.append(
                             f"{i}. [{result.type}] {_via_tag(result)}{result.description}{_recency_tag(result)} "
-                            f"(id: {result.id}, score: {result.score:.3f})"
+                            f"(id: {result.id}, score: {result.score:.3f} {_score_tag(result)})"
                         )
                         _emit(result)
                         i += 1
@@ -967,7 +988,7 @@ def _format_pipeline_text(
                     for result in no_session:
                         results_text.append(
                             f"{i}. [{result.type}] {_via_tag(result)}{result.description}{_recency_tag(result)} "
-                            f"(id: {result.id}, score: {result.score:.3f})"
+                            f"(id: {result.id}, score: {result.score:.3f} {_score_tag(result)})"
                         )
                         _emit(result)
                         i += 1
@@ -977,7 +998,7 @@ def _format_pipeline_text(
                 for i, result in enumerate(heart_results, 1):
                     results_text.append(
                         f"{i}. [{result.type}] {_via_tag(result)}{result.description}{_recency_tag(result)} "
-                        f"(id: {result.id}, score: {result.score:.3f})"
+                        f"(id: {result.id}, score: {result.score:.3f} {_score_tag(result)})"
                     )
                     _emit(result)
         elif not exemplar_rows:
@@ -1004,7 +1025,9 @@ def _format_pipeline_text(
     if heart_graph:
         results_text.append("\n=== Graph-Connected Decisions ===")
         for i, n in enumerate(heart_graph, 1):
-            results_text.append(f"{i}. [via {n.edge_relation}] {n.description} (id: {n.id}, score: {n.score:.3f})")
+            results_text.append(
+                f"{i}. [via {n.edge_relation}] {n.description} (id: {n.id}, score: {n.score:.3f} {_score_tag(n)})"
+            )
             _emit(n)
 
     # NOTE: Path-A graph-memory neighbours (stage_origin == "heart_graph_memory") are no
@@ -1038,7 +1061,7 @@ def _format_pipeline_text(
                 # is None or 0.0 -> empty string. Don't use ``dec.score``
                 # because it's normalized to 0.0 for None (see _decisions_to_pipeline).
                 raw = dec.metadata.get("raw_score")
-                score_str = f", score: {raw:.3f}" if raw else ""
+                score_str = f", score: {raw:.3f} {_score_tag(dec)}" if raw else ""
                 category = dec.metadata.get("category", "")
                 stakes = dec.metadata.get("stakes", "")
                 confidence = dec.metadata.get("confidence", 0.0)
@@ -1067,7 +1090,8 @@ def _format_pipeline_text(
                 _emit(dec)
             for j, n in enumerate(brain_graph, len(decision_results) + 1):
                 results_text.append(
-                    f"{j}. [via graph: {n.edge_relation}] {n.description} (id: {n.id}, score: {n.score:.3f})"
+                    f"{j}. [via graph: {n.edge_relation}] {n.description} "
+                    f"(id: {n.id}, score: {n.score:.3f} {_score_tag(n)})"
                 )
                 _emit(n)
         elif not exemplar_rows:
@@ -1078,7 +1102,13 @@ def _format_pipeline_text(
     # ------------------------------------------------------------------
     # Contradiction warnings (F022 Phase 3)
     # ------------------------------------------------------------------
+    # Only edges whose two ends this output shows: a warning naming a row the
+    # reader cannot see tells it nothing. The examples block renders below, but
+    # every exemplar row in it is shown.
+    shown_or_example = shown_ids | {r.id for r in exemplar_rows}
     for src_id, src_type, tgt_id, tgt_type in stats.contradiction_edges:
+        if src_id not in shown_or_example or tgt_id not in shown_or_example:
+            continue
         results_text.append(
             f"\nWarning: Contradiction detected between {src_type}({str(src_id)[:8]}) and {tgt_type}({str(tgt_id)[:8]})"
         )
@@ -1738,7 +1768,8 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             # was delivered while the tool returned only an error. Committing
             # first also let the exception handler attempt a SECOND insert on
             # the same trace id, which merely collided on the primary key.
-            _emitted: list[tuple[Any, str]] | None = [] if _tr is not None else None
+            # Collected on every call: F055 below records only rendered rows.
+            _emitted: list[tuple[Any, str]] = []
             text = _format_pipeline_text(
                 results,
                 stats,
@@ -1760,23 +1791,27 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             # Two failures in opposite directions from one predicate is the
             # signature of predicting a rule instead of asking its owner.
             #
-            # Set semantics, not a count: the same decision legitimately renders
-            # in BOTH the Graph-Connected and Brain sections (Stage 2 and Stage 3
-            # do not cross-dedup), so `_emitted` may hold a duplicate pair.
-            if _tr is not None and _emitted is not None:
-                _emitted_keys = set(_emitted)
-                # The parent-episode section (:1540-1550) renders UNCONDITIONALLY
-                # and is marked rendered above, but its ids are not collected —
-                # they arrive via `parent_episodes`, not `results`. An episode
-                # that is in BOTH (e.g. reached through heart_graph_memory on a
-                # decision-only recall) would otherwise be downgraded here after
-                # its summary genuinely reached the model, re-creating in a new
-                # place exactly the false-negative this block was written to end.
-                _parent_ids = {str(_e) for _e, _ in (parent_episodes or ())}
+            # Set semantics, not a count: the same decision can render in BOTH
+            # the Graph-Connected and Brain sections, because Stage 2's
+            # heart-graph decisions and Stage 3's search hits are not deduped
+            # against each other (Stage 4's graph rows now skip both), so
+            # `_emitted` may hold a duplicate pair.
+            _emitted_keys = set(_emitted)
+            # The parent-episode section (:1540-1550) renders UNCONDITIONALLY
+            # and is marked rendered above, but its ids are not collected —
+            # they arrive via `parent_episodes`, not `results`. An episode
+            # that is in BOTH (e.g. reached through heart_graph_memory on a
+            # decision-only recall) would otherwise be downgraded here after
+            # its summary genuinely reached the model, re-creating in a new
+            # place exactly the false-negative this block was written to end.
+            _parent_ids = {str(_e) for _e, _ in (parent_episodes or ())}
+
+            def _was_rendered(r: Any) -> bool:
+                return (r.id, r.type) in _emitted_keys or (r.type == "episode" and str(r.id) in _parent_ids)
+
+            if _tr is not None:
                 for _r in results:
-                    if (_r.id, _r.type) in _emitted_keys:
-                        continue
-                    if _r.type == "episode" and str(_r.id) in _parent_ids:
+                    if _was_rendered(_r):
                         continue
                     _tr.mark_not_delivered(
                         _r.id,
@@ -1811,7 +1846,10 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                             float(r.score) if r.score is not None else 0.0,
                             (r.description or "")[:160],  # audit E2: real summary
                         )
+                        # Only what reached the model; the formatter's
+                        # scope filter drops the rest.
                         for r in results
+                        if _was_rendered(r)
                     ]
                     asyncio.create_task(
                         heart._residual_activator.record_surfaced(

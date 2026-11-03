@@ -370,7 +370,6 @@ class _PipelineAccumulator:
     exemplar_leg_used: bool = False
 
     # Flags
-    searched_decisions: bool = False
     searched_heart: bool = False
     coherent_ranking_applied: bool = False  # F080: filter actually ran this call
     spreading_activation_used: bool = False
@@ -680,8 +679,9 @@ async def run_recall_pipeline(
     if acc.contradictions:
         _attach_contradictions(results, acc.contradictions)
 
-    # §1: event_date-only recency conflict resolution (same-subject conflicting
-    # facts). Runs on the full cross-leg candidate set with contradiction links
+    # §1: recency conflict resolution (same-subject facts with conflicting
+    # event_dates; the later-stated one is current). Runs on the full
+    # cross-leg candidate set with contradiction links
     # present, BEFORE the rerank_by_score sort below.
     if getattr(settings, "recency_resolver_enabled", False):
         _pre_recency = {(r.id, r.type): r.score for r in results}
@@ -1369,6 +1369,18 @@ async def _run_stages(
             logger.warning("exemplar leg failed", exc_info=True)
             acc.stage_errors["exemplar"] = acc.stage_errors.get("exemplar", 0) + 1
 
+    # The fact rows the keyed legs will serve, so the graph legs below do
+    # not serve them again (at a weaker score, with graph provenance) and the
+    # keyed hit is not lost as a duplicate at assembly. Round 1 renders whole.
+    # Round 2 renders only its top K2: its ranked list is already disjoint from
+    # round 1, the Stage-1 facts and the F071 set (the SQL fetch excludes
+    # them), so once the graph legs skip this slice, the assembly-time K2 cut
+    # selects exactly it. Excluding the whole ranked list would keep the graph
+    # legs off rows that never render.
+    keyed_ids: set[UUID] = {row.id for row in acc.keyed_results} | {
+        row.id for row in acc.keyed_r2_results[: getattr(settings, "keyed_fact_leg_k2", 8)]
+    }
+
     # ------------------------------------------------------------------
     # Stage 2: F022 Phase 2 cross-type graph expansion from Heart seeds
     # ------------------------------------------------------------------
@@ -1602,7 +1614,7 @@ async def _run_stages(
                         # duplicates as a separate counter so eval can distinguish
                         # "graph found nothing new" from "graph corroborated a
                         # direct hit" — the latter is signal, not noise.
-                        if n.id in heart_ids or n.id in chunk_ids:
+                        if n.id in heart_ids or n.id in chunk_ids or n.id in keyed_ids:
                             acc.stage_errors["heart_graph_memory_duplicates"] = (
                                 acc.stage_errors.get(
                                     "heart_graph_memory_duplicates", 0,
@@ -1621,7 +1633,6 @@ async def _run_stages(
     graph_expanded: list["NeighborResult"] = []
 
     if search_all or "decision" in search_types:
-        acc.searched_decisions = True
         acc.attempted_legs.add("brain")
         decision_results = await brain.query(query, limit=limit)
 
@@ -1643,6 +1654,15 @@ async def _run_stages(
     # fire spreading even with zero decision hits / no decision scope).
     if settings.graph_recall_enabled and (decision_results or heart_fact_seeds):
         seen_ids: set[UUID] = {d.id for d in decision_results}
+        # Rows earlier legs already serve. Spreading excludes (or rescores)
+        # them; the 1-hop fallback skips them.
+        candidate_ids: set[UUID] = (
+            {hr.id for hr in acc.heart_results}
+            | {item[0] for item in acc.chunk_results}
+            | {n.id for n in acc.heart_graph_decisions}
+            | {n.id for n in acc.heart_graph_memory_neighbors}
+            | keyed_ids
+        )
 
         # F022 Phase 4: density-gated spreading activation
         use_spreading = False
@@ -1705,18 +1725,12 @@ async def _run_stages(
                     if seeds:
                         acc.attempted_legs.add("spreading_activation")
                     # Heart-seeded spreading re-reaches existing heart/
-                    # chunk candidates AND prior graph-stage outputs
+                    # chunk/keyed candidates AND prior graph-stage outputs
                     # (Stage 2 decisions, Path A neighbors) constantly —
-                    # exclude all of them so the same item never ranks
-                    # twice (codex P2, PR #556: in the decision-less
-                    # path seen_ids starts empty, so graph-stage ids
-                    # must be excluded here too).
-                    candidate_ids: set[UUID] = (
-                        {hr.id for hr in acc.heart_results}
-                        | {item[0] for item in acc.chunk_results}
-                        | {n.id for n in acc.heart_graph_decisions}
-                        | {n.id for n in acc.heart_graph_memory_neighbors}
-                    )
+                    # exclude all of them (candidate_ids, above) so the
+                    # same item never ranks twice (codex P2, PR #556: in
+                    # the decision-less path seen_ids starts empty, so
+                    # graph-stage ids must be excluded here too).
                     seed_ids = {s[0] for s in seeds}
                     # Known duplicates are excluded INSIDE the CTE's
                     # final SELECT (before its LIMIT) so they never
@@ -1918,6 +1932,11 @@ async def _run_stages(
             ):
                 acc.attempted_legs.add("brain_graph")
                 acc.attempted_legs.add("heart_graph_memory")
+            # A neighbour an earlier leg already serves is skipped, not
+            # appended again. Seeded here only: the spreading branch passes
+            # seen_ids to the CTE as exclude_ids, where candidate_ids would
+            # override the rescore that branch gives them.
+            seen_ids |= candidate_ids
             seen_hop: dict[UUID, "NeighborResult"] = {}
             for dec in decision_results[: settings.graph_recall_max_expand]:
                 if dec.score is None:
@@ -1950,8 +1969,9 @@ async def _run_stages(
                         # (guaranteed non-None here by the guard above).
                         n.seed_score = dec.score
                         if n.id in seen_ids:
-                            # prev is None when the id is a seed decision or
-                            # a spreading leftover — skip without compare.
+                            # prev is None when the id is a seed decision, a
+                            # spreading leftover or an earlier leg's row —
+                            # skip without compare.
                             if (
                                 prev is not None
                                 and getattr(settings, "graph_neighbor_seed_score_enabled", False)
@@ -1985,12 +2005,18 @@ async def _run_stages(
     # ------------------------------------------------------------------
     if settings.graph_recall_enabled and settings.contradiction_detection:
         try:
-            all_ids: set[UUID] = set()
-            if acc.searched_decisions:
-                for d in decision_results:
-                    all_ids.add(d.id)
-                for n in graph_expanded:
-                    all_ids.add(n.id)
+            # Every served fact and decision, on every scope, so any two that
+            # contradict pair up (fact-to-fact edges reach the recency
+            # resolver's strong branch). Keyed round 2 contributes only the
+            # slice that renders (keyed_ids).
+            all_ids: set[UUID] = (
+                {d.id for d in decision_results}
+                | {n.id for n in graph_expanded}
+                | {hr.id for hr in acc.heart_results if hr.type == "fact"}
+                | keyed_ids
+                | {n.id for n in acc.heart_graph_decisions}
+                | {n.id for n in acc.heart_graph_memory_neighbors}
+            )
 
             if len(all_ids) >= 2:
                 acc.contradiction_checks_ran = True
@@ -1999,6 +2025,7 @@ async def _run_stages(
                 async with brain.db.session() as cs:
                     cr = await cs.execute(
                         select(GE).where(
+                            GE.agent_id == brain.agent_id,
                             GE.relation == "contradicts",
                             GE.source_id.in_(all_ids),
                             GE.target_id.in_(all_ids),
@@ -2563,6 +2590,9 @@ def _keyed_to_pipeline(
         }
         if row.event_date is not None:
             metadata["event_date"] = row.event_date.isoformat()
+        # When the fact was stated; the recency resolver orders by it.
+        if row.learned_at is not None:
+            metadata["learned_at"] = row.learned_at.isoformat()
         if row.source_episode_id:
             metadata["source_episode_id"] = row.source_episode_id
         out.append(PipelineResult(
@@ -2671,6 +2701,9 @@ def _keyed_r2_to_pipeline(
         }
         if row.event_date is not None:
             metadata["event_date"] = row.event_date.isoformat()
+        # When the fact was stated; the recency resolver orders by it.
+        if row.learned_at is not None:
+            metadata["learned_at"] = row.learned_at.isoformat()
         if row.source_episode_id:
             metadata["source_episode_id"] = row.source_episode_id
         out.append(PipelineResult(
@@ -3090,19 +3123,33 @@ def _recency_key(meta: dict) -> tuple[date | None, str]:
     return (parsed, parsed.strftime("%Y-%m"))
 
 
+def _stated_at(meta: dict) -> datetime | None:
+    """When the fact was stated (``metadata["learned_at"]``, an ISO string), or None.
+
+    Fails open like ``_recency_key``: absent/None/unparseable is None. A naive
+    value is read as UTC so two values always compare.
+    """
+    try:
+        parsed = datetime.fromisoformat(meta.get("learned_at"))  # type: ignore[arg-type]
+    except (ValueError, TypeError):
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
 def _resolve_recency_conflicts(
     results: list[PipelineResult],
     settings: "Settings",
     *,
     stale_penalty: float = 0.3,  # mirrors apply_supersession_filter penalty
 ) -> list[PipelineResult]:
-    """Annotate + down-rank same-subject conflicting facts by event_date.
+    """Annotate + down-rank same-subject conflicting facts.
 
     Scope: ``type == "fact"`` only (chunks/episodes/decisions have no
-    subject+event_date). EVENT_DATE ONLY — ordering AND the
-    ``[current]``/``[superseded]`` tag use event_date. A pair contributes to
-    the status map ONLY when BOTH facts have a non-None, DIFFERING event_date;
-    else no-op. Frozen ``PipelineResult`` => rebuild via ``dataclasses.replace``.
+    subject+event_date). A pair contributes to the status map ONLY when BOTH
+    facts have a non-None, DIFFERING event_date; else no-op. The fact STATED
+    later (``learned_at``) is current; event_date orders only a pair without
+    two distinct statement times, and gives the ``[current]``/``[superseded]``
+    tag its month. Frozen ``PipelineResult`` => rebuild via ``dataclasses.replace``.
     Sets ``metadata["recency_status"] = "current"|"superseded"`` and
     ``metadata["recency_date"] = "YYYY-MM"``. Down-ranks superseded by
     ``*stale_penalty`` (NOT deleted). The inline annotation is the only live
@@ -3157,11 +3204,13 @@ def _resolve_recency_conflicts(
                 kb, _ = _recency_key(b.metadata)
                 if ka is None or kb is None or ka == kb:
                     continue
-                # Resolve: later date => current, earlier => superseded.
-                if ka > kb:
-                    newer, older = a, b
-                else:
-                    newer, older = b, a
+                # Resolve: the fact stated later is current, since a
+                # correction can move an event EARLIER. event_date decides
+                # only a pair without two distinct statement times (facts
+                # stored in one transaction share learned_at).
+                sa, sb = _stated_at(a.metadata), _stated_at(b.metadata)
+                a_newer = sa > sb if sa is not None and sb is not None and sa != sb else ka > kb
+                newer, older = (a, b) if a_newer else (b, a)
                 _mark(newer.id, "current", newer.metadata.get("recency_date", ""))
                 _mark(older.id, "superseded", "")
 

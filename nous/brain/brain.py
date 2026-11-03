@@ -739,9 +739,18 @@ class Brain:
         """Internal delete — cascading removal of decision + related records.
 
         Most FK references use CASCADE (auto-handled by Postgres).
-        Two NO ACTION FKs need explicit NULL-out: heart.facts.source_decision_id
-        and heart.censors.learned_from_decision.
+        Three NO ACTION FKs need explicit NULL-out: heart.facts.source_decision_id,
+        heart.censors.learned_from_decision and brain.decisions.superseded_by.
+
+        A no-op unless the decision is this agent's: every statement below
+        acts by decision id alone.
         """
+        owned = await session.execute(
+            text("SELECT 1 FROM brain.decisions WHERE id = :did AND agent_id = :agent_id"),
+            {"did": decision_id, "agent_id": self.agent_id},
+        )
+        if owned.first() is None:
+            return
         # NULL-out NO ACTION FK references in heart tables
         await session.execute(
             text("UPDATE heart.facts SET source_decision_id = NULL WHERE source_decision_id = :did"),
@@ -749,6 +758,11 @@ class Brain:
         )
         await session.execute(
             text("UPDATE heart.censors SET learned_from_decision = NULL WHERE learned_from_decision = :did"),
+            {"did": decision_id},
+        )
+        # A decision this one superseded points at it (init.sql: no ON DELETE).
+        await session.execute(
+            text("UPDATE brain.decisions SET superseded_by = NULL WHERE superseded_by = :did"),
             {"did": decision_id},
         )
         # Audit D1 (2026-06-09): brain.graph_edges lost its FK constraints in
@@ -768,8 +782,8 @@ class Brain:
         # Delete the decision — CASCADE handles brain.thoughts, decision_tags,
         # decision_reasons, decision_bridge (NOT graph_edges — see above)
         await session.execute(
-            text("DELETE FROM brain.decisions WHERE id = :did"),
-            {"did": decision_id},
+            text("DELETE FROM brain.decisions WHERE id = :did AND agent_id = :agent_id"),
+            {"did": decision_id, "agent_id": self.agent_id},
         )
 
     # ------------------------------------------------------------------
@@ -880,8 +894,10 @@ class Brain:
             filter_clauses += " AND d.outcome = :outcome"
         else:
             # Exclude abandoned decisions (outcome='failure', confidence=0.0)
-            # unless caller explicitly requests a specific outcome
-            filter_clauses += " AND NOT (d.outcome = 'failure' AND d.confidence = 0.0)"
+            # unless caller explicitly requests a specific outcome. NULL-safe:
+            # `NOT (outcome = 'failure' AND ...)` is NULL for a NULL outcome
+            # with confidence 0.0, which excluded that pending decision too.
+            filter_clauses += " AND (d.outcome IS DISTINCT FROM 'failure' OR d.confidence <> 0.0)"
 
         # Bridge-side filter (P2-10: ILIKE on bridge columns)
         bridge_join = ""
@@ -1954,9 +1970,9 @@ class Brain:
                 select(Decision.id, Decision.description, Decision.created_at)
                 .where(Decision.id.in_(ids_by_type["decision"]))
                 .where(Decision.agent_id == self.agent_id)
-                .where(
-                    ~((Decision.outcome == "failure") & (Decision.confidence == 0.0))
-                )
+                # NULL-safe, like _query's: `~(outcome == 'failure' & ...)` is
+                # NULL for a NULL outcome with confidence 0.0, which dropped it.
+                .where(Decision.outcome.is_distinct_from("failure") | (Decision.confidence != 0.0))
             )
             # codex #577 r2: only outcomes actually DEMOTED (factor < 1.0)
             # belong in the exclusion set. 1.0 is a legal identity value an

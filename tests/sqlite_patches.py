@@ -729,8 +729,10 @@ def patch_brain():
                 if outcome and d.outcome != outcome:
                     continue
                 elif not outcome:
-                    # Exclude abandoned (outcome='failure', confidence=0.0)
-                    if d.outcome == "failure" and d.confidence == 0.0:
+                    # Exclude abandoned (outcome='failure', confidence=0.0).
+                    # Mirrors `outcome IS DISTINCT FROM 'failure' OR confidence <> 0.0`:
+                    # a NULL (pending) outcome is kept.
+                    if not (d.outcome != "failure" or d.confidence != 0.0):
                         continue
                 filtered.append(d)
 

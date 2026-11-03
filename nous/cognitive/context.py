@@ -236,6 +236,14 @@ def _is_system_episode(episode) -> bool:
     )
 
 
+def _stated_at(fact) -> datetime | None:
+    """When ``fact`` was stated (``learned_at``), or None; a naive value is read as UTC so two compare."""
+    stated = getattr(fact, "learned_at", None)
+    if not isinstance(stated, datetime):
+        return None
+    return stated if stated.tzinfo is not None else stated.replace(tzinfo=UTC)
+
+
 def _is_abandoned_episode(episode) -> bool:
     """Same test as ``_format_episodes``, which never renders these."""
     return (getattr(episode, "outcome", None) or "ongoing") == "abandoned"
@@ -2228,8 +2236,9 @@ class ContextEngine:
         resolves a current-vs-stale value — so the agent can answer from a superseded fact
         (the c12 contradiction failure). Gated by ``recency_resolver_enabled``. A pair resolves
         only when BOTH facts carry a non-None, DIFFERING event_date AND either share a
-        superseded_by link or are content-similar (difflib >= floor). The older is down-ranked
-        (*0.3) and tagged 'superseded'; the newer tagged 'current'. Transient tags only.
+        superseded_by link or are content-similar (difflib >= floor). The one stated earlier
+        (``learned_at``; event_date when the two share one) is down-ranked (*0.3) and tagged
+        'superseded'; the other tagged 'current'. Transient tags only.
         """
         import difflib
 
@@ -2258,7 +2267,13 @@ class ContextEngine:
                         None, a.content or "", b.content or ""
                     ).ratio() < floor:
                         continue
-                    newer, older = (a, b) if da > db else (b, a)
+                    # The fact stated later is current, since a correction
+                    # can move an event EARLIER. event_date decides only a pair
+                    # without two distinct statement times (one transaction
+                    # gives its facts one learned_at).
+                    sa, sb = _stated_at(a), _stated_at(b)
+                    a_newer = sa > sb if sa is not None and sb is not None and sa != sb else da > db
+                    newer, older = (a, b) if a_newer else (b, a)
                     newer.recency_status = "current"
                     newer.recency_date = newer.event_date.strftime("%Y-%m")
                     if older.recency_status != "current":

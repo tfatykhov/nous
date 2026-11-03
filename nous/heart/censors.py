@@ -37,6 +37,11 @@ _VALID_ACTIONS = ("steer", "refuse", "abort")
 # Maximum length of text input to evaluate against regex patterns (ReDoS guard)
 _MAX_REGEX_INPUT_LEN = 10_000
 
+# search(): the cosine a semantic match must exceed. A regex-only match scores
+# exactly this, so it ranks with the weakest semantic match instead of above
+# every scored row of a cross-type recall.
+_SEARCH_SIMILARITY_FLOOR = 0.7
+
 
 def _safe_regex_match(pattern: str, text_input: str) -> bool:
     """Match pattern against text with ReDoS protection.
@@ -373,16 +378,21 @@ class CensorManager:
         domain: str | None,
         session: AsyncSession,
     ) -> list[CensorMatch]:
-        if self.embeddings:
-            try:
-                embedding = await self.embeddings.embed(query, fail_fast=True)
-            except Exception:
-                logger.warning("Embedding failed for censor search, falling back to ILIKE")
-                return await self._keyword_search(query, limit, domain, session)
-
-            return await self._semantic_search(embedding, limit, domain, session)
-
-        return await self._keyword_search(query, limit, domain, session)
+        keyword = await self._keyword_search(query, limit, domain, session)
+        if not self.embeddings:
+            return keyword
+        try:
+            embedding = await self.embeddings.embed(query, fail_fast=True)
+        except Exception:
+            logger.warning("Embedding failed for censor search, using the regex match only")
+            return keyword
+        # Both legs run, not the regex only when embedding fails: a censor whose
+        # pattern matches but whose embedding is distant is still a match. One
+        # row per censor; a censor both legs found keeps its semantic row.
+        by_id: dict[UUID, CensorMatch] = {m.id: m for m in keyword}
+        for match in await self._semantic_search(embedding, limit, domain, session):
+            by_id[match.id] = match
+        return sorted(by_id.values(), key=lambda m: m.score or 0.0, reverse=True)[:limit]
 
     async def _semantic_search(
         self,
@@ -398,7 +408,7 @@ class CensorManager:
         params: dict = {
             "embedding": embedding_str,
             "agent_id": self.agent_id,
-            "threshold": 0.7,
+            "threshold": _SEARCH_SIMILARITY_FLOOR,
             "limit": limit,
         }
         if domain:
@@ -443,6 +453,7 @@ class CensorManager:
                 reason=c.reason,
                 domain=c.domain,
                 score=scores.get(c.id),
+                matched_by="semantic",
                 trigger_action=c.trigger_action,
                 action_instruction=c.action_instruction,
                 unblock_pattern=c.unblock_pattern,
@@ -488,7 +499,8 @@ class CensorManager:
                             action=censor.action,
                             reason=censor.reason,
                             domain=censor.domain,
-                            score=1.0,
+                            score=_SEARCH_SIMILARITY_FLOOR,
+                            matched_by="regex",
                             trigger_action=censor.trigger_action,
                             action_instruction=censor.action_instruction,
                             unblock_pattern=censor.unblock_pattern,
@@ -733,8 +745,16 @@ class CensorManager:
             censor.action_instruction = action_instruction
         if unblock_pattern is not SENTINEL:
             censor.unblock_pattern = unblock_pattern
-        if reason is not SENTINEL and reason is not None:
+        if reason is not SENTINEL and reason is not None and reason != censor.reason:
             censor.reason = reason
+            # _add embeds "<trigger_pattern> <reason>"; a new reason
+            # re-embeds it. On failure the old vector stays (its pattern half
+            # is still right) rather than none.
+            if self.embeddings:
+                try:
+                    censor.embedding = await self.embeddings.embed(f"{censor.trigger_pattern} {reason}")
+                except Exception:
+                    logger.warning("Embedding refresh failed for censor %s update", censor_id)
         if domain is not SENTINEL:
             censor.domain = domain
 
