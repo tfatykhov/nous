@@ -275,14 +275,23 @@ class ContextEngine:
         self._settings = settings
         self._identity_prompt = identity_prompt
         self._deduplicator = deduplicator
-        # context_skip_unchanged_query: each session's last plan query, in-process.
-        self._last_query_by_session: OrderedDict[str, tuple[str, ...]] = OrderedDict()
+        # context_skip_unchanged_query: each session's last searched plan query
+        # and when it was searched (time.monotonic), in-process.
+        self._last_query_by_session: OrderedDict[str, tuple[tuple[str, ...], float]] = OrderedDict()
 
-    def _query_unchanged(self, session_id: str, query: tuple[str, ...]) -> bool:
-        """Whether ``query`` equals this session's previous one. Records it
-        either way, for at most ``_LAST_QUERY_SESSIONS`` sessions (LRU)."""
-        unchanged = self._last_query_by_session.get(session_id) == query
-        self._last_query_by_session[session_id] = query
+    def _query_unchanged(self, session_id: str, query: tuple[str, ...], ttl_seconds: float) -> bool:
+        """Whether this session searched with ``query`` less than ``ttl_seconds`` ago.
+
+        Only a search (a False answer) records the query and its time; a skip
+        does not, so a repeated query is searched again once ``ttl_seconds``
+        have passed since its last search. At most ``_LAST_QUERY_SESSIONS``
+        sessions are remembered (LRU).
+        """
+        now = time.monotonic()
+        last = self._last_query_by_session.get(session_id)
+        unchanged = last is not None and last[0] == query and now - last[1] < ttl_seconds
+        if not unchanged:
+            self._last_query_by_session[session_id] = (query, now)
         self._last_query_by_session.move_to_end(session_id)
         if len(self._last_query_by_session) > _LAST_QUERY_SESSIONS:
             self._last_query_by_session.popitem(last=False)
@@ -386,8 +395,8 @@ class ContextEngine:
                 "section budget is 0" if budget_value <= 0
                 else f"retrieval plan skipped '{mem_type}'"
             )
-            if _unchanged_skip:
-                reason = "query unchanged since this session's previous build"
+            if mem_type in _unchanged_types and budget_value > 0:
+                reason = "query unchanged since this session's previous search"
             tr.leg(leg, attempted=False, n_returned=0, skip_reason=reason)
 
         @_tr_guard
@@ -479,25 +488,6 @@ class ContextEngine:
         recalled_score_map: dict[str, float] = {}
         _pinned_fact_ids: set[str] = set()
 
-        # context_skip_unchanged_query: a plan whose query equals this session's
-        # previous one is replaced by the plan a short input gets (intent.py),
-        # so no memory leg runs and no memory section renders. A plan that
-        # already skips has no query and leaves the remembered one alone.
-        _unchanged_skip = False
-        if (
-            retrieval_plan
-            and retrieval_plan.queries
-            and getattr(self._settings, "context_skip_unchanged_query", False) is True
-        ):
-            _plan_query = tuple(q.query_text for q in retrieval_plan.queries)
-            if self._query_unchanged(session_id, _plan_query):
-                _unchanged_skip = True
-                logger.info("Context build skips memory legs: query unchanged for session %s", session_id)
-                retrieval_plan = RetrievalPlan(
-                    skip_types={"decision", "fact", "procedure", "episode"},
-                    budget_overrides={"decisions": 0, "facts": 0, "procedures": 0, "episodes": 0},
-                )
-
         # Apply budget overrides from retrieval plan (F6: REPLACE semantics)
         skip_types: set[str] = set()
         if retrieval_plan:
@@ -514,6 +504,28 @@ class ContextEngine:
         # operator policy wins; keys the operator did NOT pin stay frame-adaptive.
         if self._settings.context_budget_overrides:
             budget.apply_overrides(self._settings.context_budget_overrides)
+
+        # context_skip_unchanged_query (conditional mode only: distinct questions
+        # share a keyword bag): a plan whose query this session searched less
+        # than the TTL ago skips the four memory types, as a short input's plan
+        # does. Every reader of those budgets is gated on skip_types too, so no
+        # memory leg runs and no memory section renders. A plan that already
+        # skips has no query and leaves the remembered one alone.
+        _unchanged_types: set[str] = set()
+        if (
+            retrieval_plan
+            and retrieval_plan.queries
+            and getattr(self._settings, "context_skip_unchanged_query", False) is True
+            and getattr(self._settings, "context_query_mode", "bag") == "conditional"
+            and self._query_unchanged(
+                session_id,
+                tuple(q.query_text for q in retrieval_plan.queries),
+                self._settings.context_skip_unchanged_ttl_seconds,
+            )
+        ):
+            _unchanged_types = {"decision", "fact", "procedure", "episode"} - skip_types
+            skip_types = skip_types | _unchanged_types
+            logger.info("Context build skips memory legs: query unchanged for session %s", session_id)
 
         # Determine per-type query text and limits from plan
         _query_texts: dict[str, str] = {}

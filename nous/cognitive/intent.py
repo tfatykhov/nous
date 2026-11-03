@@ -95,10 +95,10 @@ _MEMORY_HINTS = {
 }
 
 
-# E-4: the words an acknowledgement is made of, for conditional mode.
+# The words an acknowledgement is made of, for conditional mode.
 _ACK_WORDS = frozenset(
     "ok okay k kk yes yeah yep yup no nope nah sure thanks thank you thx ty cheers cool great nice good"
-    " perfect awesome fine alright got it sounds noted lol haha hmm np there all everyone again very much so".split()
+    " perfect awesome fine alright got it sounds noted lol haha hmm np there all everyone very much so".split()
 )
 
 
@@ -106,8 +106,8 @@ def _is_short_input(signals: IntentSignals, text: str | None = None) -> bool:
     """F20: no question, no memory hint, no topic keyword and no strong recency:
     a short acknowledgement ("ok", "yes", "sure") that needs no retrieval.
 
-    E-4: conditional mode passes the input ``text`` instead. Then only an
-    empty input, or one whose every word is an acknowledgement word (emoji and
+    Conditional mode passes the input ``text`` instead. Then only an empty
+    input, or one whose every word is an acknowledgement word (emoji and
     punctuation are not words), is short, so an imperative without a keyword
     ("fix the cron job") still retrieves.
     """
@@ -121,20 +121,23 @@ def _is_short_input(signals: IntentSignals, text: str | None = None) -> bool:
     )
 
 
-# E-2/E-3: lines a pre-turn prompt builder writes just before the task text,
-# most specific first. A DAG check node's prompt is a dynamic check wrapping
-# the node's augmented instructions, so "## Instructions" must be tried before
-# "Instructions:".
-_TASK_MARKERS = tuple(
-    re.compile(p, re.MULTILINE)
-    for p in (
-        r"^## Why this work exists",  # continuation turns (handlers/continuation_runner.py)
-        r"^=== DAG outcome ===",  # DAG delivery summary (dag/delivery.py)
-        r"^\[Heartbeat\] The following items need attention:",  # heartbeat triage (heartbeat/runner.py)
-        r"^## Instructions",  # DAG node with context_flow inputs (dag/orchestrator.py)
-        r"^Instructions:",  # dynamic check and its callback (heartbeat/dynamic.py, heartbeat/runner.py)
-    )
+# Lines a pre-turn prompt builder writes just before the task text. Each of
+# these builders writes its marker before any text it did not write itself
+# (result rows, findings, node results, the check's own prompt), so the
+# EARLIEST marker line in the input is the builder's.
+_PREFIX_MARKER = re.compile(
+    r"^(?:## Why this work exists"  # continuation turn (handlers/continuation_runner.py)
+    r"|=== DAG outcome ==="  # DAG delivery summary (dag/delivery.py)
+    r"|\[Heartbeat\] The following items need attention:"  # heartbeat triage (heartbeat/runner.py)
+    r"|Instructions:)",  # dynamic check and its callback (heartbeat/dynamic.py, heartbeat/runner.py)
+    re.MULTILINE,
 )
+# A DAG node with context_flow inputs (dag/orchestrator.py) is the other way
+# round: its predecessors' results come first and its own "## Instructions"
+# LAST, so a result holding such a line must not win. A DAG check node wraps
+# that text in a dynamic check, after "Instructions: ".
+_DAG_CONTEXT = re.compile(r"^(?:Instructions: )?## Context from prior steps", re.MULTILINE)
+_DAG_INSTRUCTIONS = re.compile(r"^## Instructions", re.MULTILINE)
 _QUESTION_TAIL_CHARS = 600
 # A sentence ending in "?" followed by whitespace or the end ("a?b=1" is a URL).
 _QUESTION = re.compile(r"[^.!?\n]+\?(?=\s|$)")
@@ -162,7 +165,9 @@ def extract_query(input_text: str, short_chars: int = 300) -> str:
     own query. A longer one is a prompt, usually templated, and its query is,
     in order:
 
-    (a) the paragraph after the first known task marker (``_TASK_MARKERS``);
+    (a) the paragraph after the builder's task marker: the last
+        "## Instructions" of a DAG node with prior-step context, else the
+        earliest marker of ``_PREFIX_MARKER``;
     (b) else the last sentence ending in "?" within the last 600 chars;
     (c) else the first paragraph.
 
@@ -173,12 +178,17 @@ def extract_query(input_text: str, short_chars: int = 300) -> str:
     text = " ".join(input_text.split())
     if len(text) <= short_chars:
         return text
-    for marker in _TASK_MARKERS:
-        found = marker.search(input_text)
-        if found:
-            task = _first_paragraph(input_text[found.end() :])
-            if task:
-                return _cap(task, short_chars)
+    prefix = _PREFIX_MARKER.search(input_text)
+    dag = _DAG_CONTEXT.search(input_text)
+    markers = []
+    if dag and (prefix is None or dag.start() <= prefix.start()):
+        markers += list(_DAG_INSTRUCTIONS.finditer(input_text, dag.end()))[-1:]  # the node's own: the last
+    if prefix:
+        markers.append(prefix)
+    for found in markers:
+        task = _first_paragraph(input_text[found.end() :])
+        if task:
+            return _cap(task, short_chars)
     questions = [q for q in _QUESTION.findall(input_text[-_QUESTION_TAIL_CHARS:]) if re.search(r"\w", q)]
     if questions:
         return _cap(" ".join(questions[-1].split()), short_chars)
@@ -306,7 +316,7 @@ class IntentClassifier:
         # Inputs with no extractable keywords, no memory hints, and not a question
         # are likely short acknowledgements ("ok", "yes", "thanks") -- skip retrieval
         # 008.6: Don't skip if temporal recency is high (recap queries)
-        # E-4: conditional mode skips only an empty or acknowledgement input.
+        # Conditional mode skips only an empty or acknowledgement input.
         if _is_short_input(signals, (signals.text or input_text) if self._conditional else None):
             return RetrievalPlan(
                 queries=[],
@@ -323,7 +333,7 @@ class IntentClassifier:
         # F27: Fall back to original input_text, not empty string -- or to the part
         # of it the signals describe, when that is not all of it
         if self._conditional:
-            # E-2/E-3: the user's words, or the task part of a long prompt.
+            # The user's words, or the task part of a long prompt.
             query_text = extract_query(signals.text or input_text, self._settings.context_query_short_chars)
         else:
             query_text = " ".join(signals.topic_keywords) if signals.topic_keywords else signals.text or input_text
