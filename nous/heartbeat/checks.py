@@ -273,16 +273,21 @@ class SelfInitiatedCheck(BaseCheck):
         }
 
     async def _ensure_prototypes(self) -> list[list[float]]:
-        """Embed prototype strings on first call, cache result."""
+        """Embed prototype strings on first success, cache result.
+
+        A failure is not cached (caching [] switched the embedding search off
+        until restart): this run falls back to keywords, and the next check,
+        one heartbeat interval later, retries.
+        """
         if self._prototype_cache is not None:
             return self._prototype_cache
         if self._embeddings is None:
             return []
         try:
             self._prototype_cache = await self._embeddings.embed_batch(PENDING_PROTOTYPES)
-        except Exception:
-            logger.debug("SelfInitiatedCheck: prototype embedding failed", exc_info=True)
-            self._prototype_cache = []
+        except Exception as exc:
+            logger.warning("SelfInitiatedCheck: prototype embedding failed, retrying on the next check: %r", exc)
+            return []
         return self._prototype_cache
 
     async def _embedding_search(self) -> list[Finding]:
