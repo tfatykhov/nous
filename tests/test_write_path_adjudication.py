@@ -736,6 +736,99 @@ async def test_technical_fact_dedup_unchanged(heart, session):
     assert second.id == first.id
 
 
+async def _entity_keys(session, fact_id) -> set[str]:
+    from nous.storage.models import FactEntityKey
+
+    rows = await session.execute(select(FactEntityKey.entity_key).where(FactEntityKey.fact_id == fact_id))
+    return set(rows.scalars().all())
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_profile_fact_does_not_supersede_same_subject_technical_fact(heart, session):
+    """Subject supersession keeps the classes apart too: a preference candidate
+    with the same subject and identical content as an enumerated technical
+    fact is stored beside it, and the technical row stays active with its
+    conflict-slot keys and entity-key rows (keyed retrieval and same-slot
+    resolution still find it)."""
+    content = _same_statement()
+    subject = f"Alex {uuid4().hex[:8]}"
+    technical = await heart.learn(
+        FactInput(
+            content=content,
+            subject=subject,
+            subject_key="alex rivera",
+            attribute_key="unit preference",
+            entity_keys=["metric system"],
+            category="technical",
+            source="enumerative_extractor",
+        ),
+        session=session,
+    )
+    keys_before = await _entity_keys(session, technical.id)
+    assert keys_before, "the enumerated fact must have entity-key rows to protect"
+
+    preference = await heart.learn(
+        FactInput(content=content, subject=subject, category="preference", source="episode_summarizer"),
+        session=session,
+    )
+
+    assert preference.id != technical.id
+    tech_row = await _get_fact(heart, technical.id, session)
+    pref_row = await _get_fact(heart, preference.id, session)
+    assert tech_row.active and tech_row.superseded_by is None
+    assert (tech_row.subject_key, tech_row.attribute_key) == ("alex rivera", "unit preference")
+    assert await _entity_keys(session, technical.id) == keys_before
+    assert pref_row.active and pref_row.category == "preference"
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_non_profile_fact_does_not_supersede_same_subject_profile_fact(heart, session, monkeypatch):
+    """The other direction: a technical fact with the same subject, judged an
+    UPDATE of a profile fact by the classifier, does not supersede it. The
+    similarity (0.83) is above the supersession gate (0.80) and below both the
+    dedup threshold and the contradiction band, so only subject supersession
+    could act on the pair."""
+    import math
+
+    def vec(sim_to_base: float) -> list[float]:
+        v = [0.0] * 1536
+        v[1500] = sim_to_base
+        v[1501] = math.sqrt(max(0.0, 1.0 - sim_to_base**2))
+        return v
+
+    verdict = {"relation": "UPDATE", "current_fact": "new", "confidence": 0.9}
+    monkeypatch.setattr(heart.facts, "_llm", object())
+    monkeypatch.setattr(heart.facts, "_classify_fact_pair", AsyncMock(return_value=verdict))
+    monkeypatch.setattr(heart.facts, "_key_budget_ok", lambda: True)
+    subject = f"Alex {uuid4().hex[:8]}"
+    profile = await heart.learn(
+        FactInput(
+            content=f"Alex prefers answers in metric units ({subject})",
+            subject=subject,
+            category="preference",
+            source="episode_summarizer",
+        ),
+        session=session,
+        precomputed_embedding=vec(1.0),
+    )
+    technical = await heart.learn(
+        FactInput(
+            content=f"Alex's reports are generated with imperial units ({subject})",
+            subject=subject,
+            category="technical",
+            source="episode_summarizer",
+        ),
+        session=session,
+        precomputed_embedding=vec(0.83),
+    )
+
+    assert technical.id != profile.id
+    profile_row = await _get_fact(heart, profile.id, session)
+    assert profile_row.active and profile_row.superseded_by is None
+
+
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
 async def test_profile_fact_novelty_ignores_technical_twin(heart, session, monkeypatch):

@@ -1204,6 +1204,7 @@ class FactManager:
                 new_event_date=input.event_date,
                 exclude_ids=exclude_ids,
                 keep_both_ids=keep_both_ids,
+                new_category=input.category,
             )
 
         if (
@@ -1495,12 +1496,21 @@ class FactManager:
         new_event_date: date | None = None,
         exclude_ids: list[UUID] | None = None,
         keep_both_ids: list[UUID] | None = None,
+        new_category: str | None = None,
     ) -> bool:
         """Supersede older facts with same subject AND similar content (006.2).
 
         Only supersedes when both conditions are met:
         1. Same subject (case-insensitive exact match)
         2. Cosine similarity > ``fact_supersession_threshold`` setting (default 0.80)
+
+        Profile (tier-1) and non-profile facts never supersede each other:
+        ``new_category`` keeps the candidates to the new fact's class (a fact
+        with no category is non-profile). Otherwise a profile candidate would
+        deactivate the identical technical fact the enumerative extractor
+        stored, and that row's conflict-slot and entity keys would leave keyed
+        retrieval with it; the other way round, a technical fact would
+        deactivate a profile fact.
 
         F027: For ambiguous range (``fact_supersession_threshold``–``fact_native_cosine_threshold``,
         default 0.80–0.95) with LLM available, use classifier to disambiguate
@@ -1549,6 +1559,11 @@ class FactManager:
             # INPUTS out). is_distinct_from keeps NULL-source normals in.
             Fact.source.is_distinct_from("exemplar_extractor"),
             distance < 1 - _supersession_threshold,
+            (
+                Fact.category.in_(_TIER1_CATEGORIES)
+                if new_category in _TIER1_CATEGORIES
+                else or_(Fact.category.is_(None), Fact.category.notin_(_TIER1_CATEGORIES))
+            ),
         ]
         if excluded:
             conditions.append(Fact.id.notin_(excluded))
