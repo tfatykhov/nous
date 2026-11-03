@@ -695,7 +695,7 @@ class _CountingEmbedder:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    async def embed(self, text: str) -> list[float]:
+    async def embed(self, text: str, fail_fast: bool = False) -> list[float]:
         self.calls.append(text)
         return [float(len(text)), 1.0]
 

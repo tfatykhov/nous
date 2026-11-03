@@ -25,7 +25,7 @@ class _AxisEmbeddings:
     def __init__(self, angles: dict[str, float]) -> None:
         self.angles = angles
 
-    async def embed(self, text: str) -> list[float]:
+    async def embed(self, text: str, fail_fast: bool = False) -> list[float]:
         vec = [0.0] * 1536
         for marker, angle in self.angles.items():
             if marker in text:

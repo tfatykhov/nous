@@ -249,7 +249,7 @@ class TestMergedIntoExisting:
         class _ConstEmbeddings:
             dimensions = 1536
 
-            async def embed(self, text: str):
+            async def embed(self, text: str, fail_fast: bool = False):
                 return [1.0] + [0.0] * 1535
 
             async def embed_batch(self, texts):

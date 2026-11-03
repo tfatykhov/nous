@@ -2266,7 +2266,19 @@ class SleepHandler:
 
         Recovered episodes stay `active=true` (matching F057). Marked-
         abandoned episodes go `active=false` so search excludes them.
+
+        H-5: first, closed episodes whose embed failed (NULL embedding) are
+        re-embedded, a bounded batch per cycle. That step needs neither the
+        summarizer nor the recovery flag, and it runs before
+        graph_densification, which skips rows without a vector.
         """
+        try:
+            reembedded = await self._heart.episodes.reembed_missing()
+            if reembedded:
+                sleep_stats["episodes_reembedded"] = reembedded
+        except Exception:
+            logger.warning("Episode re-embed backfill failed", exc_info=True)
+
         if not getattr(self._settings, "abandoned_recovery_enabled", True):
             return True
         summarizer = self._episode_summarizer
@@ -2567,40 +2579,47 @@ class SleepHandler:
                 for ep_id in ep_ids:
                     if self._interrupted:
                         break
-                    # Anchors: facts referencing this episode + decisions linked
-                    f_rows = await session.execute(
-                        sql_text(
-                            "SELECT id FROM heart.facts WHERE agent_id=:aid AND source_episode_id=:eid AND active=true"
-                        ),
-                        {"aid": agent_id, "eid": ep_id},
-                    )
-                    fact_ids = [r[0] for r in f_rows.all()]
-                    # Codex r5: gating the candidate-selection clause above was
-                    # not enough. An orphan episode still enters this loop via
-                    # its FACT anchor, and this per-episode lookup then pulled
-                    # the existing session-tagged deliberation decisions and
-                    # link_episode_deterministic persisted discussed_in edges
-                    # for them -- so the F057 phase kept re-enabling the
-                    # supposedly dark correlation for every fact-bearing
-                    # episode. Both the candidate query and this lookup have to
-                    # be gated for the flag to mean anything here.
-                    decision_ids = []
-                    if getattr(self._settings, "decision_session_id_enabled", False):
-                        d_rows = await session.execute(
-                            sql_text(episode_decisions_query("d.id")),
-                            {"agent_id": agent_id, "episode_id": ep_id},
-                        )
-                        decision_ids = [r[0] for r in d_rows.all()]
-
-                    if not fact_ids and not decision_ids:
-                        continue  # no anchors — this episode needs semantic backfill, not deterministic
+                    # K-8: one savepoint per episode. A DB error rolls back only
+                    # this episode's work, so the next one's SELECT does not run
+                    # on an aborted transaction and the batch still commits
+                    # (before, the phase failed and re-selected the same batch
+                    # every cycle).
                     try:
-                        new_edges = await graph_linker.link_episode_deterministic(
-                            episode_id=ep_id,
-                            decision_ids=decision_ids,
-                            fact_ids=fact_ids,
-                            session=session,
-                        )
+                        async with session.begin_nested():
+                            # Anchors: facts referencing this episode + decisions linked
+                            f_rows = await session.execute(
+                                sql_text(
+                                    "SELECT id FROM heart.facts "
+                                    "WHERE agent_id=:aid AND source_episode_id=:eid AND active=true"
+                                ),
+                                {"aid": agent_id, "eid": ep_id},
+                            )
+                            fact_ids = [r[0] for r in f_rows.all()]
+                            # Codex r5: gating the candidate-selection clause above was
+                            # not enough. An orphan episode still enters this loop via
+                            # its FACT anchor, and this per-episode lookup then pulled
+                            # the existing session-tagged deliberation decisions and
+                            # link_episode_deterministic persisted discussed_in edges
+                            # for them -- so the F057 phase kept re-enabling the
+                            # supposedly dark correlation for every fact-bearing
+                            # episode. Both the candidate query and this lookup have to
+                            # be gated for the flag to mean anything here.
+                            decision_ids = []
+                            if getattr(self._settings, "decision_session_id_enabled", False):
+                                d_rows = await session.execute(
+                                    sql_text(episode_decisions_query("d.id")),
+                                    {"agent_id": agent_id, "episode_id": ep_id},
+                                )
+                                decision_ids = [r[0] for r in d_rows.all()]
+
+                            if not fact_ids and not decision_ids:
+                                continue  # no anchors — this episode needs semantic backfill, not deterministic
+                            new_edges = await graph_linker.link_episode_deterministic(
+                                episode_id=ep_id,
+                                decision_ids=decision_ids,
+                                fact_ids=fact_ids,
+                                session=session,
+                            )
                         relinked += 1
                         edges_created += len(new_edges) if new_edges else 0
                     except Exception:

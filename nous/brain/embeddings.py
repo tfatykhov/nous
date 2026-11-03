@@ -14,6 +14,16 @@ disables). Vectors are stored PACKED (array('f'), 4 bytes/dim — codex P2:
 a list of boxed Python floats is ~50 MB at 1024x1536, not the naive 13);
 packed float32 matches pgvector's float4 storage, so no downstream
 precision is lost. 1024 entries x 1536 dims ~ 6 MB packed.
+
+F-1/F-5 (2026-11-03): one wall-clock budget bounds each embed() and each
+embed_batch sub-batch across all attempts (it was a 30 s timeout per attempt,
+three attempts, and pre-turn legs embed one after another). Transport errors,
+429 and 5xx are retried inside the budget. Read paths pass ``fail_fast=True``:
+after a failed embed() those calls raise EmbeddingUnavailableError at once for
+_FAIL_FAST_WINDOW_S, then one call goes through as a probe. Write paths do not
+pass it, because a skipped write embed leaves a NULL vector. A sub-batch gets
+the larger _EMBED_BATCH_BUDGET_S, and its failure does not start the window:
+a large healthy batch can be slow, and that says nothing about one query.
 """
 
 from __future__ import annotations
@@ -22,6 +32,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import time
 from array import array
 from collections import OrderedDict
 
@@ -29,8 +40,14 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-_MAX_RETRIES = 3
+_MAX_ATTEMPTS = 4
 _RETRY_BACKOFF = (0.5, 1.0, 2.0)
+# Wall-clock seconds for one embed(), all attempts and backoff included.
+_EMBED_BUDGET_S = 10.0
+# The same for one embed_batch sub-batch (up to 2048 inputs / 250 kB).
+_EMBED_BATCH_BUDGET_S = 30.0
+# After a failure, fail_fast calls raise at once for this many seconds.
+_FAIL_FAST_WINDOW_S = 10.0
 _DEFAULT_CACHE_SIZE = 1024
 
 # OpenAI embeddings per-request hard limits (API facts, not tuning knobs).
@@ -44,6 +61,21 @@ _DEFAULT_CACHE_SIZE = 1024
 # the F067 chunk path aborted and stored nothing.
 _MAX_BATCH_ITEMS = 2048
 _MAX_BATCH_BYTES = 250_000
+
+
+class EmbeddingUnavailableError(RuntimeError):
+    """A fail_fast embed skipped the API because a recent call failed."""
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    """The response's Retry-After in seconds, or None when absent or not a number."""
+    value = response.headers.get("Retry-After")
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return None
 
 
 class EmbeddingProvider:
@@ -69,10 +101,17 @@ class EmbeddingProvider:
         self._cache: OrderedDict[str, array] = OrderedDict()
         self.cache_hits = 0
         self.cache_misses = 0
+        # fail_fast state: monotonic time until which fail_fast calls raise
+        # (None = the last call did not fail), and whether the one probe
+        # allowed after that time is still running.
+        self._unavailable_until: float | None = None
+        self._probe_in_flight = False
         self._client = httpx.AsyncClient(
             base_url="https://api.openai.com/v1",
             headers={"Authorization": f"Bearer {api_key}"},
-            timeout=30.0,
+            # The per-call budgets (asyncio.timeout) are the real bound. This
+            # per-phase timeout must not cut a slow sub-batch short of its own.
+            timeout=_EMBED_BATCH_BUDGET_S,
         )
 
     # ------------------------------------------------------------------
@@ -126,47 +165,94 @@ class EmbeddingProvider:
     # ------------------------------------------------------------------
 
     async def _post_with_retry(self, payload: dict) -> httpx.Response:
-        """POST to embeddings endpoint with retry on 5xx/network errors."""
-        last_exc: Exception | None = None
-        for attempt in range(_MAX_RETRIES):
+        """POST to the embeddings endpoint within one wall-clock budget.
+
+        Transport errors, timeouts, 429 and 5xx are retried with backoff (or
+        the response's Retry-After when it fits) until the budget runs out.
+        Any other 4xx raises at once and leaves the fail_fast window as it
+        was: it is about this request, not the provider. An exhausted
+        retryable failure of a single text opens the window; a sub-batch's
+        does not. Any success closes it.
+        """
+        # embed_batch sends a list: a sub-batch gets the batch budget, and its
+        # failure (possibly a large, slow but healthy request) opens no window.
+        batch = isinstance(payload.get("input"), list)
+        budget = _EMBED_BATCH_BUDGET_S if batch else _EMBED_BUDGET_S
+        deadline = time.monotonic() + budget
+        last_exc: Exception = TimeoutError(f"embeddings budget of {budget}s spent")
+        for attempt in range(_MAX_ATTEMPTS):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            retry_after: float | None = None
             try:
-                response = await self._client.post("/embeddings", json=payload)
-                if response.status_code < 500:
+                # The hard bound: httpx timeouts are per phase, not per request.
+                async with asyncio.timeout(remaining):
+                    response = await self._client.post("/embeddings", json=payload)
+            except (httpx.TransportError, TimeoutError) as e:
+                logger.warning(
+                    "OpenAI embeddings network error (attempt %d/%d): %r",
+                    attempt + 1,
+                    _MAX_ATTEMPTS,
+                    e,
+                )
+                last_exc = e
+            else:
+                if response.status_code != 429 and response.status_code < 500:
                     response.raise_for_status()
+                    self._unavailable_until = None
                     return response
-                # 5xx — retry
                 logger.warning(
                     "OpenAI embeddings API returned %d (attempt %d/%d)",
-                    response.status_code, attempt + 1, _MAX_RETRIES,
+                    response.status_code,
+                    attempt + 1,
+                    _MAX_ATTEMPTS,
                 )
                 last_exc = httpx.HTTPStatusError(
                     f"Server error {response.status_code}",
                     request=response.request,
                     response=response,
                 )
-            except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout) as e:
-                logger.warning(
-                    "OpenAI embeddings network error (attempt %d/%d): %s",
-                    attempt + 1, _MAX_RETRIES, e,
-                )
-                last_exc = e
+                retry_after = _retry_after_seconds(response)
 
-            if attempt < _MAX_RETRIES - 1:
-                await asyncio.sleep(_RETRY_BACKOFF[attempt])
+            if attempt == _MAX_ATTEMPTS - 1:
+                break
+            delay = retry_after if retry_after is not None else _RETRY_BACKOFF[min(attempt, len(_RETRY_BACKOFF) - 1)]
+            if time.monotonic() + delay >= deadline:
+                break
+            await asyncio.sleep(delay)
 
-        raise last_exc  # type: ignore[misc]
+        if not batch:
+            self._unavailable_until = time.monotonic() + _FAIL_FAST_WINDOW_S
+        raise last_exc
 
-    async def embed(self, text: str) -> list[float]:
-        """Generate embedding for a single text (LRU-cached)."""
+    async def embed(self, text: str, *, fail_fast: bool = False) -> list[float]:
+        """Generate embedding for a single text (LRU-cached).
+
+        ``fail_fast`` is for read paths: within _FAIL_FAST_WINDOW_S of a
+        failed call it raises EmbeddingUnavailableError without calling the
+        API. After the window one fail_fast call goes through as a probe, and
+        the others still raise until it returns. Write paths leave it False,
+        so they always try.
+        """
         key = self._cache_key(text)
         cached = self._cache_get(key)
         if cached is not None:
             return cached
-        response = await self._post_with_retry({
-            "model": self.model,
-            "input": text,
-            "dimensions": self.dimensions,
-        })
+        probe = False
+        if fail_fast and self._unavailable_until is not None:
+            if time.monotonic() < self._unavailable_until or self._probe_in_flight:
+                raise EmbeddingUnavailableError("embeddings API failed recently; skipped on a read path")
+            self._probe_in_flight = probe = True
+        try:
+            response = await self._post_with_retry({
+                "model": self.model,
+                "input": text,
+                "dimensions": self.dimensions,
+            })
+        finally:
+            if probe:
+                self._probe_in_flight = False
         vec = response.json()["data"][0]["embedding"]
         self._cache_put(key, vec)
         return vec

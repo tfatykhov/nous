@@ -25,7 +25,7 @@ class MockEmbeddingProvider:
     texts is near zero while identical texts produce identical vectors.
     """
 
-    async def embed(self, text: str) -> list[float]:
+    async def embed(self, text: str, fail_fast: bool = False) -> list[float]:
         h = hashlib.sha256(text.encode()).hexdigest()
         rng = random.Random(h)
         vec = [rng.gauss(0, 1) for _ in range(1536)]

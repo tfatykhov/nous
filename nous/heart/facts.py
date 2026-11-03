@@ -44,6 +44,10 @@ _ENTITY_VOCAB_TTL_SECONDS = 300.0
 # and shape as _ENTITY_VOCAB_TTL_SECONDS above.
 _EXEMPLAR_EXISTS_TTL_SECONDS = 300.0
 
+# Strong references to fire-and-forget track_access tasks: the event loop keeps
+# only weak ones, so an unreferenced task can be garbage-collected mid-flight.
+_TRACK_ACCESS_TASKS: set[asyncio.Task] = set()
+
 # F027: classifier prompt. Exported so the F027 eval script
 # (scripts/eval/eval_f027_supersession.py) tests the same prompt prod uses.
 # Apply this decision tree IN ORDER, returning the first match. UPDATE is
@@ -359,14 +363,16 @@ class FactManager:
                 await session.execute(stmt)
                 await session.commit()
         except Exception:
-            logger.debug("F027: access tracking failed for %d facts", len(fact_ids))
+            logger.warning("F027: access tracking failed for %d facts", len(fact_ids), exc_info=True)
 
     def _fire_track_access(self, fact_ids: list[UUID]) -> None:
         """Fire-and-forget access tracking."""
         if fact_ids:
             try:
                 loop = asyncio.get_running_loop()
-                loop.create_task(self.track_access(fact_ids))
+                task = loop.create_task(self.track_access(fact_ids))
+                _TRACK_ACCESS_TASKS.add(task)
+                task.add_done_callback(_TRACK_ACCESS_TASKS.discard)
             except RuntimeError:
                 pass  # No running event loop
 
@@ -431,7 +437,7 @@ class FactManager:
                 max_tokens=100,
             )
         except Exception:
-            logger.debug("F377 dedup tiebreaker call failed; failing open", exc_info=True)
+            logger.warning("F377 dedup tiebreaker call failed; failing open", exc_info=True)
             return None
 
         if not result or "verdict" not in result:
@@ -3265,7 +3271,7 @@ class FactManager:
         embedding = None
         if self.embeddings:
             try:
-                embedding = await self.embeddings.embed(query)
+                embedding = await self.embeddings.embed(query, fail_fast=True)
             except Exception:
                 logger.warning("Embedding generation failed for fact search")
 
@@ -4162,9 +4168,10 @@ class FactManager:
                     )
                     await session.commit()
                 except Exception:
-                    logger.debug(
+                    logger.warning(
                         "R3.3: keyed-leg access tracking failed for %d facts",
                         len(result_rows),
+                        exc_info=True,
                     )
             return result_rows
 

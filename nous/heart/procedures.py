@@ -733,7 +733,7 @@ class ProcedureManager:
         embedding = None
         if self.embeddings:
             try:
-                embedding = await self.embeddings.embed(query)
+                embedding = await self.embeddings.embed(query, fail_fast=True)
             except Exception:
                 logger.warning("Embedding generation failed for procedure search")
 

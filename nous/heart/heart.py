@@ -1376,7 +1376,7 @@ class Heart:
                 )
 
                 # Generate query embedding for MMR relevance term
-                query_embedding = await self._embeddings.embed(query)
+                query_embedding = await self._embeddings.embed(query, fail_fast=True)
 
                 pre_mmr_order = [r.id for r in merged[:limit]]
                 merged = mmr_rerank(

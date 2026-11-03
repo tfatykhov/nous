@@ -571,7 +571,7 @@ class _StubEmbeddings:
     async def embed_batch(self, texts):
         return [[0.1, 0.2, 0.3, 0.4] for _ in texts]
 
-    async def embed(self, text):
+    async def embed(self, text, fail_fast: bool = False):
         return [0.1, 0.2, 0.3, 0.4]
 
 

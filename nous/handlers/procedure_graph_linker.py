@@ -151,4 +151,4 @@ class ProcedureGraphLinker:
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.debug("F040: procedure graph linking failed for procedure %s", proc_id_str)
+            logger.warning("F040: procedure graph linking failed for procedure %s", proc_id_str, exc_info=True)

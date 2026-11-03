@@ -131,12 +131,15 @@ class FactExtractor:
         # bare-MagicMock truthiness is a known test footgun).
         if getattr(self._settings, "fact_dedup_tiebreaker_enabled", False) is not True:
             return True
-        if await self._heart.facts.is_distinct_fact(existing_content, candidate_content) is True:
+        verdict = await self._heart.facts.is_distinct_fact(existing_content, candidate_content)
+        if verdict is True:
             logger.debug(
                 "F377 tiebreaker: DISTINCT — storing despite RRF dup: %s",
                 candidate_content[:50],
             )
             return False
+        if verdict is None:
+            logger.warning("F377 tiebreaker gave no verdict; failing open, the candidate is deduped")
         return True
 
     async def _resolve_dedup(
@@ -574,4 +577,5 @@ class FactExtractor:
         try:
             return parse_llm_json(text)
         except json.JSONDecodeError:
+            logger.warning("Fact extraction response was not valid JSON (%d chars); no facts extracted", len(text))
             return []

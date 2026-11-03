@@ -187,4 +187,4 @@ class DecisionGraphLinker:
         except asyncio.CancelledError:
             raise  # Let the EventBus handle cancellation for clean shutdown
         except Exception:
-            logger.debug("F040 decision graph linking failed for decision %s", decision_id_str)
+            logger.warning("F040 decision graph linking failed for decision %s", decision_id_str, exc_info=True)

@@ -673,7 +673,7 @@ class Brain:
             try:
                 decision.embedding = await self.embeddings.embed(embed_text)
             except Exception:
-                logger.warning("Embedding re-generation failed during update")
+                logger.warning("Embedding re-generation failed during update; keeping the old vector", exc_info=True)
 
         # Re-extract bridge
         bridge_info = self.bridge_extractor.extract(decision.description, decision.context, decision.pattern)
@@ -849,7 +849,7 @@ class Brain:
         query_embedding = None
         if self.embeddings:
             try:
-                query_embedding = await self.embeddings.embed(query_text)
+                query_embedding = await self.embeddings.embed(query_text, fail_fast=True)
             except Exception:
                 logger.warning("Embedding generation failed for query, falling back to keyword-only")
 

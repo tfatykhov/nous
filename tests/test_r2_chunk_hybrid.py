@@ -146,6 +146,33 @@ class TestFlagOn:
         assert out == [(cid, "kw-content", 0.7, eid)]
 
     @pytest.mark.asyncio
+    async def test_failed_embed_falls_back_to_keyword_only(self, monkeypatch):
+        """A raising embed (e.g. fail_fast during an outage) takes the same
+        keyword-only path as a missing one, instead of skipping the leg."""
+        from nous.brain.embeddings import EmbeddingUnavailableError
+
+        cid, eid = uuid4(), uuid4()
+        seen = {}
+
+        async def fake_hybrid(session, table, embedding, query_text, agent_id,
+                              limit=10, active_filter=True, **kw):
+            seen["embedding"] = embedding
+            return [(cid, 0.7)]
+
+        monkeypatch.setattr("nous.heart.search.hybrid_search", fake_hybrid)
+
+        embedder = MagicMock()
+        embedder.embed = AsyncMock(side_effect=EmbeddingUnavailableError("down"))
+        heart, _ = _heart_shim(embedder, lambda sql, params: [(cid, "kw-content", eid)])
+        out = await _search_episode_chunks(
+            heart=heart, query="rare gold token", agent_id="test-agent", limit=10,
+            settings=SimpleNamespace(chunk_hybrid_search_enabled=True),
+        )
+        embedder.embed.assert_awaited_once_with("rare gold token", fail_fast=True)
+        assert seen["embedding"] is None
+        assert out == [(cid, "kw-content", 0.7, eid)]
+
+    @pytest.mark.asyncio
     async def test_empty_hybrid_result_returns_empty(self, monkeypatch):
         async def fake_hybrid(*a, **kw):
             return []
