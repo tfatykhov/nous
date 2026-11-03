@@ -13,7 +13,8 @@ evidence.
   superseded, and F031 re-reads each pair before judging it.
 - A sleep merge is one transaction. It is aborted, and the pair or cluster
   cools down, when the merged content confirms a third fact or the merged
-  fact loses its own write-time scan.
+  fact loses its own write-time scan. An F027 cluster the LLM refused cools
+  down for its own, shorter window.
 - F031 never MERGEs a tier-1 (person/preference/rule) fact, and an UPDATES:
   line never supersedes one.
 - fact_learned on a caller's session is published only after that commit.
@@ -25,14 +26,14 @@ from __future__ import annotations
 import asyncio
 import math
 import re
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 
 from nous.heart.facts import FactManager
 from nous.heart.schemas import FactInput
@@ -786,6 +787,72 @@ async def test_an_aborted_f027_merge_is_skipped_until_the_cluster_changes(heart,
         assert await handler._phase_cluster_consolidation({}) is True
         await asyncio.gather(*list(handler._pending_emits))
         assert llm.await_count == 2  # a cluster that changed size is judged again
+
+
+# ---------------------------------------------------------------------------
+# A refused F027 cluster gives up its slot until it changes or its TTL ends
+# ---------------------------------------------------------------------------
+
+
+REFUSE = {"should_merge": False, "refuse_reason": "entity collision", "confidence": 0.9}
+
+
+def _judged(llm: AsyncMock) -> list[str]:
+    """The subject of each cluster sent to the merge LLM, in call order."""
+    return [re.search(r"^Subject: (.+)$", c.kwargs["user_message"], re.M).group(1) for c in llm.call_args_list]
+
+
+async def _run_cycle(handler) -> None:
+    assert await handler._phase_cluster_consolidation({}) is True
+    await asyncio.gather(*list(handler._pending_emits))
+
+
+@pytest.mark.postgres_only
+async def test_a_refused_f027_cluster_gives_its_slot_to_the_next_until_it_changes(heart, monkeypatch):
+    async with _Agent(heart) as agent:
+        subjects = {size: f"refused cluster of {size}" for size in (8, 7, 6, 5, 4, 3)}
+        for size, subject in subjects.items():
+            for i in range(size):
+                await agent.fact(f"Member {i} of the {subject}: detail {i}.", subject=subject)
+        llm = AsyncMock(return_value=REFUSE)
+        monkeypatch.setattr("nous.handlers.sleep_handler.call_background_llm_structured", llm)
+        handler = _persisting_handler(heart, agent)
+
+        await _run_cycle(handler)
+        assert _judged(llm) == [subjects[s] for s in (8, 7, 6, 5, 4)]
+
+        await _run_cycle(handler)
+        assert _judged(llm)[5:] == [subjects[3]]  # the five refused clusters gave up their slots
+
+        await agent.fact(f"Member 8 of the {subjects[8]}: detail 8.", subject=subjects[8])
+        await _run_cycle(handler)
+        assert _judged(llm)[6:] == [subjects[8]]  # a refused cluster that changed size is judged again
+
+
+@pytest.mark.postgres_only
+async def test_a_refused_f027_cluster_is_judged_again_after_its_ttl(heart, monkeypatch):
+    # The abort cooldown stays at 30 days: a refusal has its own, shorter window.
+    monkeypatch.setattr(heart.settings, "contradiction_recheck_cooldown_days", 30)
+    async with _Agent(heart) as agent:
+        for i in range(3):
+            await agent.fact(f"Cluster member {i}: the deploy hook pings channel {i}.", subject="deploy hook")
+        llm = AsyncMock(return_value=REFUSE)
+        monkeypatch.setattr("nous.handlers.sleep_handler.call_background_llm_structured", llm)
+        handler = _persisting_handler(heart, agent)
+
+        await _run_cycle(handler)
+        await _run_cycle(handler)
+        assert llm.await_count == 1  # skipped inside the TTL
+
+        async with heart.db.session() as s:
+            await s.execute(
+                update(Event)
+                .where(Event.agent_id == agent.agent_id)
+                .values(created_at=datetime.now(UTC) - timedelta(days=heart.settings.cluster_refusal_ttl_days + 1))
+            )
+            await s.commit()
+        await _run_cycle(handler)
+        assert llm.await_count == 2  # judged again once the refusal is older than the TTL
 
 
 # ---------------------------------------------------------------------------

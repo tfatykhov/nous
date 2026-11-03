@@ -25,7 +25,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain.brain import Brain
@@ -51,10 +51,13 @@ _NOT_TIER1 = or_(Fact.category.is_(None), Fact.category.notin_(TIER1_FACT_CATEGO
 _MERGE_CONFIRMED_THIRD_FACT = "merge_confirmed_third_fact"
 _MERGE_TARGET_INACTIVE = "merge_target_inactive"
 _MERGE_ABORT_OUTCOMES = (_MERGE_CONFIRMED_THIRD_FACT, _MERGE_TARGET_INACTIVE)
+# The F027 merge LLM said should_merge=false. F027 cluster selection skips the
+# cluster for cluster_refusal_ttl_days unless its size changed.
+_LLM_REFUSED = "llm_refused"
 
 _REFLECTION_PROMPT = (
     """You are an AI agent reviewing your recent activity. Analyze the following
-episode summaries from the past 24 hours and identify:
+episode summaries from the past {hours} hours and identify:
 
 1. Patterns — recurring topics, user needs, or behaviors
 2. Lessons — what worked well, what didn't
@@ -408,7 +411,31 @@ class SleepHandler:
         """
         if self._sleeping:
             return  # Already sleeping
-        self._sleep_task = asyncio.create_task(self._run_sleep(event), name="sleep-work")
+        # Claim the flag before the task exists, so a second call made before
+        # the task's first step returns above. Hygiene only: the bus awaits each
+        # dispatch, so two sleep_started events cannot interleave here today.
+        self._sleeping = True
+        self._interrupted = False
+        coro = self._run_sleep(event)
+        try:
+            task = asyncio.create_task(coro, name="sleep-work")
+        except BaseException:
+            coro.close()
+            self._sleeping = False
+            raise
+        self._sleep_task = task
+        task.add_done_callback(self._on_sleep_task_done)
+
+    def _on_sleep_task_done(self, task: asyncio.Task) -> None:
+        """Release the flag of a run cancelled before its body (and finally) ran.
+
+        _run_sleep's finally resets both fields on every run that started. The
+        identity check leaves alone a newer run that handle() started between
+        that finally and this callback.
+        """
+        if self._sleep_task is task:
+            self._sleeping = False
+            self._sleep_task = None
 
     @property
     def is_sleeping(self) -> bool:
@@ -509,8 +536,9 @@ class SleepHandler:
 
     async def _run_sleep(self, event: Event) -> None:
         """Actual sleep work — runs as independent task, NOT blocking bus."""
+        # handle() already set both flags and cleared _interrupted; clearing it
+        # again here would drop a wake that arrived before this first step.
         self._sleeping = True
-        self._interrupted = False
         self._currently_sleeping = True
         phases_completed: list[str] = []
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
@@ -861,8 +889,9 @@ class SleepHandler:
         if not self._llm:
             return True
         sleep_reflection_summary_chars = self._settings.sleep_reflection_summary_chars
+        hours = self._settings.sleep_reflection_hours
         try:
-            recent = await self._heart.list_episodes(limit=10)
+            recent = await self._heart.list_episodes(limit=10, hours=hours)
             if not recent or len(recent) < 2:
                 logger.debug("Not enough recent episodes for reflection")
                 return True
@@ -877,6 +906,7 @@ class SleepHandler:
             orient_context = await self._build_orient_context(episodes_text)
 
             prompt = _REFLECTION_PROMPT.format(
+                hours=hours,
                 episodes=episodes_text,
                 orient_context=orient_context,
             )
@@ -1777,19 +1807,38 @@ class SleepHandler:
                     .subquery()
                 )
                 stmt = select(grouped.c.subject, grouped.c.cnt)
-                cooldown_days = int(getattr(settings, "contradiction_recheck_cooldown_days", 30))
-                if cooldown_days > 0:
-                    # A cluster whose merge was aborted would abort again: skip
-                    # it for the F031 re-check window unless its size changed.
-                    # Filtered before the LIMIT so aborted clusters cannot hold
-                    # the five slots.
+                # A cluster whose merge was aborted would abort again: skip it
+                # for the F031 re-check window unless its size changed. A
+                # cluster the LLM refused is skipped the same way for its own,
+                # shorter window (a refusal is a judgment that may differ on a
+                # later run). Filtered before the LIMIT so these clusters cannot
+                # hold the five slots. A window of 0 days turns its arm off.
+                now = datetime.now(UTC)
+                windows = [
+                    (outcomes, days)
+                    for outcomes, days in (
+                        (_MERGE_ABORT_OUTCOMES, int(getattr(settings, "contradiction_recheck_cooldown_days", 30))),
+                        ((_LLM_REFUSED,), int(getattr(settings, "cluster_refusal_ttl_days", 7))),
+                    )
+                    if days > 0
+                ]
+                if windows:
+                    arms = [
+                        and_(
+                            EventRow.data["outcome"].astext.in_(outcomes),
+                            EventRow.created_at > now - timedelta(days=days),
+                        )
+                        for outcomes, days in windows
+                    ]
                     stmt = stmt.where(
                         ~select(EventRow.id)
                         .where(
                             EventRow.agent_id == self._heart.agent_id,
                             EventRow.event_type == "f027_cluster_merge",
-                            EventRow.created_at > datetime.now(UTC) - timedelta(days=cooldown_days),
-                            EventRow.data["outcome"].astext.in_(_MERGE_ABORT_OUTCOMES),
+                            # The widest window, outside the OR, keeps a range
+                            # scan on idx_events_created available.
+                            EventRow.created_at > now - timedelta(days=max(days for _, days in windows)),
+                            or_(*arms),
                             EventRow.data["subject"].astext == func.left(grouped.c.subject, 200),
                             EventRow.data["source_count"].as_integer() == grouped.c.cnt,
                         )
@@ -1884,7 +1933,7 @@ class SleepHandler:
                 if not merge_result:
                     merge_outcome = "llm_malformed"
                 elif merge_result.get("should_merge") is False:
-                    merge_outcome = "llm_refused"
+                    merge_outcome = _LLM_REFUSED
                 elif not merge_result.get("merged_content"):
                     merge_outcome = "llm_malformed"
                 else:

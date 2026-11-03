@@ -11,11 +11,15 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import pytest
+from sqlalchemy import delete
 
 from nous.events import Event, EventBus
 from nous.heart.schemas import FactInput
@@ -56,6 +60,7 @@ def _mock_settings(**overrides) -> MagicMock:
     # drive _phase_reflect / _phase_resolve_contradictions without overrides
     # slice with an int, not a MagicMock attribute.
     s.sleep_reflection_summary_chars = 500
+    s.sleep_reflection_hours = 24
     s.sleep_contradiction_fact_chars = 1000
     for k, v in overrides.items():
         setattr(s, k, v)
@@ -1715,3 +1720,131 @@ class TestJobFixesPhase:
         handler._job_fixer = None
         await handler._run_sleep(_make_event("sleep_started"))
         assert "job_fixes" not in bus.emit.call_args[0][0].data["phases_completed"]
+
+
+# ===========================================================================
+# K-12: reflection reads only the episodes inside its window
+# ===========================================================================
+
+
+class TestReflectionWindow:
+    @pytest.mark.postgres_only
+    async def test_episodes_older_than_the_window_are_not_reflected_on(self, heart, monkeypatch):
+        from nous.handlers.sleep_handler import SleepHandler
+        from nous.storage.models import Episode
+
+        agent_id = f"test-k12-{uuid4()}"
+        original = heart.episodes.agent_id
+        heart.episodes.agent_id = agent_id
+        now = datetime.now(UTC)
+        try:
+            async with heart.db.session() as s:
+                for hours_ago in (30, 30, 30, 30, 2):
+                    started = now - timedelta(hours=hours_ago)
+                    s.add(
+                        Episode(
+                            agent_id=agent_id,
+                            summary=f"An episode that started {hours_ago} hours ago.",
+                            started_at=started,
+                            ended_at=started + timedelta(minutes=30),
+                            outcome="success",
+                        )
+                    )
+                await s.commit()
+            llm = AsyncMock(return_value=None)
+            monkeypatch.setattr("nous.handlers.sleep_handler.call_background_llm_structured", llm)
+            handler = SleepHandler(AsyncMock(), heart, heart.settings, MagicMock(), llm_client=MagicMock())
+            handler._build_orient_context = AsyncMock(return_value="")
+
+            assert await handler._phase_reflect({"facts_created": 0}) is True
+            assert llm.await_count == 0  # one episode in the 24 h window: fewer than 2, no LLM call
+        finally:
+            heart.episodes.agent_id = original
+            async with heart.db.session() as s:
+                await s.execute(delete(Episode).where(Episode.agent_id == agent_id))
+                await s.commit()
+
+    async def test_the_prompt_names_the_window_it_read(self, monkeypatch):
+        handler, brain, heart, bus, _ = _make_sleep_handler(settings=_mock_settings(sleep_reflection_hours=6))
+        heart.list_episodes = AsyncMock(return_value=[MagicMock(summary="One"), MagicMock(summary="Two")])
+        handler._build_orient_context = AsyncMock(return_value="")
+        llm = AsyncMock(return_value=None)
+        monkeypatch.setattr("nous.handlers.sleep_handler.call_background_llm_structured", llm)
+
+        await handler._phase_reflect({"facts_created": 0})
+
+        heart.list_episodes.assert_awaited_once_with(limit=10, hours=6)
+        assert "episode summaries from the past 6 hours" in llm.call_args.kwargs["user_message"]
+
+
+# ===========================================================================
+# K-15: a sleep run starts once (hygiene: the bus awaits each dispatch, so two
+# sleep_started events cannot interleave through it today)
+# ===========================================================================
+
+
+class TestSleepStartsOnce:
+    async def test_two_back_to_back_handle_calls_start_one_run(self):
+        handler, *_ = _make_sleep_handler()
+        runs: list[Event] = []
+        release = asyncio.Event()
+
+        async def run_sleep(event):
+            runs.append(event)
+            await release.wait()
+
+        handler._run_sleep = run_sleep
+        await handler.handle(_make_event("sleep_started"))
+        await handler.handle(_make_event("sleep_started"))
+        await asyncio.sleep(0)
+
+        assert len(runs) == 1
+        release.set()
+        await handler._sleep_task
+
+    async def test_a_run_cancelled_before_its_body_releases_the_flag(self):
+        handler, *_ = _make_sleep_handler()
+        await handler.handle(_make_event("sleep_started"))
+        task = handler._sleep_task
+        assert handler.is_sleeping is True  # claimed before the task's first step
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0)  # the done-callback runs on the next loop pass
+
+        assert handler.is_sleeping is False
+        assert handler._sleep_task is None
+
+    async def test_a_wake_before_the_runs_first_step_is_kept(self):
+        handler, brain, heart, bus, _ = _make_sleep_handler()
+        for name in _ALL_OTHER_PHASES:
+            setattr(handler, f"_phase_{name}", AsyncMock(return_value=True))
+        await handler.handle(_make_event("sleep_started"))
+        await handler._on_wake(_make_event("message_received"))
+
+        await handler._sleep_task
+
+        assert bus.emit.call_args[0][0].data["interrupted"] is True
+        handler._phase_review_decisions.assert_not_awaited()
+
+    async def test_a_finished_runs_late_callback_leaves_a_newer_run_alone(self):
+        handler, *_ = _make_sleep_handler()
+        release = asyncio.Event()
+
+        async def run_sleep(event):
+            await release.wait()
+
+        handler._run_sleep = run_sleep
+        await handler.handle(_make_event("sleep_started"))
+        old = handler._sleep_task
+        handler._sleeping, handler._sleep_task = False, None  # what _run_sleep's finally does
+        await handler.handle(_make_event("sleep_started"))
+        new = handler._sleep_task
+
+        handler._on_sleep_task_done(old)
+
+        assert handler.is_sleeping is True
+        assert handler._sleep_task is new
+        release.set()
+        await asyncio.gather(old, new)
