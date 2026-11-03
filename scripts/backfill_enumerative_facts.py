@@ -48,6 +48,7 @@ from datetime import UTC, date, datetime
 
 from sqlalchemy import text
 
+from nous.api.execution_context import BACKGROUND_SESSION_PREFIXES
 from nous.config import Settings
 from nous.storage.database import Database
 
@@ -56,6 +57,11 @@ logger = logging.getLogger("enumerative-backfill")
 
 async def select_backfill_episodes(session, agent_id: str, since, limit: int):
     """Return episodes with non-empty transcript, oldest first (id + transcript).
+
+    Episodes of background sessions (``is_background_session``: DAG summary,
+    subtask, heartbeat, continuation, job report) are left out, as the live
+    enumerative leg skips them; the filter is in SQL so ``limit`` counts only
+    episodes the backfill would process.
 
     Args:
         session: SQLAlchemy AsyncSession.
@@ -66,7 +72,14 @@ async def select_backfill_episodes(session, agent_id: str, since, limit: int):
     Returns:
         List of Row objects with .id and .transcript attributes.
     """
-    params: dict = {"agent_id": agent_id}
+    params: dict = {
+        "agent_id": agent_id,
+        # LIKE patterns: escape the wildcards a prefix could contain.
+        "background": [
+            prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            for prefix in BACKGROUND_SESSION_PREFIXES
+        ],
+    }
     since_clause = ""
     if since is not None:
         since_clause = "AND started_at >= :since"
@@ -93,6 +106,7 @@ async def select_backfill_episodes(session, agent_id: str, since, limit: int):
               AND outcome IS DISTINCT FROM 'abandoned'
               AND transcript IS NOT NULL
               AND length(transcript) > 0
+              AND (session_id IS NULL OR NOT (session_id LIKE ANY(CAST(:background AS text[]))))
               {since_clause}
             ORDER BY started_at ASC
             {limit_clause}

@@ -4282,6 +4282,49 @@ async def test_select_backfill_episodes_includes_closed_episodes(session):
 
 
 @pytest.mark.postgres_only
+async def test_select_backfill_episodes_skips_background_sessions(session):
+    """The backfill skips background sessions as the live enumerative leg does
+    (is_background_session): a DAG summary, subtask or job transcript is a
+    generated prompt, not knowledge a user supplied. Chats, the MAB ingest
+    sessions and episodes with no session id are still selected."""
+    from datetime import UTC
+
+    from nous.storage.models import Episode
+    from scripts.backfill_enumerative_facts import select_backfill_episodes
+
+    agent_id = f"test-enum-bg-{uuid4().hex[:8]}"
+    now = datetime.now(UTC)
+    sessions = {
+        "chat": "3f2b8c1e-9d4a-4b7e-a1c2-5d6e7f8a9b0c",
+        "no session": None,
+        "ingest": "ingest-factconsolidation_sh_6k-1a2b3c4d",
+        "dag": "dag-summary-0123456789abcdef-g1",
+        "subtask": "subtask-1a2b3c4d",
+        "claude": "claude-job-20261103-1",
+        "heartbeat": "heartbeat-1a2b3c4d",
+    }
+    episodes = {
+        name: Episode(
+            agent_id=agent_id,
+            summary=f"{name} episode",
+            session_id=sid,
+            transcript="Fact one.\nFact two.\nFact three.",
+            started_at=now,
+            ended_at=now,
+            active=False,
+        )
+        for name, sid in sessions.items()
+    }
+    session.add_all(episodes.values())
+    await session.flush()
+
+    rows = await select_backfill_episodes(session, agent_id, None, 0)
+    selected = {name for name, ep in episodes.items() if ep.id in {r.id for r in rows}}
+
+    assert selected == {"chat", "no session", "ingest"}
+
+
+@pytest.mark.postgres_only
 async def test_select_backfill_episodes_orders_oldest_first(session):
     """select_backfill_episodes: returns episodes ordered oldest-first (started_at ASC)."""
     from scripts.backfill_enumerative_facts import select_backfill_episodes
