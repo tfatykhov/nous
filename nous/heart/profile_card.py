@@ -21,13 +21,18 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nous.cognitive.context import PROFILE_CORE_TAG, TIER1_FACT_CATEGORIES, ContextEngine
 from nous.config import Settings
 from nous.handlers import LLMClient, call_background_llm_structured
+from nous.heart.facts import _TIER1_CATEGORIES as TIER1_CATEGORIES
 from nous.storage.database import Database
 from nous.storage.models import Episode, Fact, ProfileCard
 
 logger = logging.getLogger(__name__)
+
+# Copies of the cognitive layer's PROFILE_CORE_TAG and ContextEngine.CHARS_PER_TOKEN: heart does not import
+# nous.cognitive. A test keeps them equal.
+PROFILE_CORE_TAG = "profile_core"
+CHARS_PER_TOKEN = 4
 
 TOOL_NAME = "store_profile_card"
 LINE_CHARS = 160
@@ -83,7 +88,7 @@ def _norm(text: str) -> str:
 
 def card_tokens(entries: list[dict]) -> int:
     """The card's size as the reader renders it (``- text`` lines), in the context engine's tokens."""
-    return len("\n".join(f"- {e['text']}" for e in entries)) // ContextEngine.CHARS_PER_TOKEN
+    return len("\n".join(f"- {e['text']}" for e in entries)) // CHARS_PER_TOKEN
 
 
 def source_hash(facts: list[Fact]) -> str:
@@ -366,7 +371,7 @@ class ProfileCardWriter:
         """
         base = select(Fact).where(
             Fact.agent_id == self.agent_id,
-            Fact.category.in_(TIER1_FACT_CATEGORIES),
+            Fact.category.in_(TIER1_CATEGORIES),
             Fact.active.is_(True),
         )
         exclude = self._settings.profile_exclude_sources
