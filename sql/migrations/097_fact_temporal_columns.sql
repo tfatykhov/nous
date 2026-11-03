@@ -12,6 +12,8 @@
 -- already fall back to, and would rewrite every such row under this
 -- migration's exclusive lock. Every UPDATE touches only rows still NULL, so
 -- a second run changes nothing.
+-- The mentioned_at backfill rewrites heart.facts' HNSW indexes and takes about
+-- a minute on a 25k-fact table (47 s measured on the 2026-11-03 prod copy).
 -- The backfill is not an edit, so it must not move updated_at. The
 -- set_updated_at trigger (init.sql) would stamp every row it fills, and the
 -- heartbeat stale count and anything else that reads updated_at would then
