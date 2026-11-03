@@ -939,6 +939,22 @@ def _rrf_merge_n(
     return scored[: (return_limit if return_limit is not None else limit)]
 
 
+def has_vector_input(
+    use_variants: bool,
+    embedding: list[float] | None,
+    variant_pairs: list[tuple[str, list[float] | None]] | None,
+) -> bool:
+    """Whether the search a manager is about to run has a query vector.
+
+    ``hybrid_search_multi`` reads only the variants' vectors and ``hybrid_search``
+    only ``embedding``. So a failed base embed makes the search keyword-only only
+    on the single-query path, or when no variant has a vector either.
+    """
+    if use_variants:
+        return any(vec for _text, vec in variant_pairs or ())
+    return bool(embedding)
+
+
 async def hybrid_search_multi(
     session: AsyncSession,
     table: str,

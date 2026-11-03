@@ -57,6 +57,7 @@ from nous.observability.retrieval_trace import (
     TYPE_EXCLUDED,
     UNACCOUNTED,
 )
+from nous.utils import note_stage_error
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -189,7 +190,7 @@ class PipelineStats:
     n_brain_results: int = 0
     n_graph_expanded: int = 0
     # Per-stage error counts surfaced to eval reports. Keys are pipeline
-    # stage names: "heart_recall", "brain_query", "heart_graph_neighbors",
+    # stage names: "heart_recall", "brain", "heart_graph_neighbors",
     # "decision_neighbors", "spreading_activation", "contradiction_query".
     # N1 (2026-08-02): Heart's INTERNAL per-sub-search exceptions are now
     # included too, under "heart_recall_<type>" (e.g. "heart_recall_fact") —
@@ -198,6 +199,9 @@ class PipelineStats:
     # logged at WARN inside Heart with nothing reaching the caller, so a
     # crashed fact leg was indistinguishable from an empty one.
     n_stage_errors: dict[str, int] = field(default_factory=dict)
+    # The first error text per ``n_stage_errors`` key ("Class: first line").
+    # ``failure_note`` turns the two into the line recall_deep shows the model.
+    stage_error_msgs: dict[str, str] = field(default_factory=dict)
     # Raw contradiction edges (source_id, source_type, target_id, target_type).
     # Preserves byte-identical warning emission for the legacy formatter
     # because PipelineResult.contradicts deduplicates and loses source-type
@@ -385,6 +389,10 @@ class _PipelineAccumulator:
     # Per-stage error counter — incremented when a try/except around a stage
     # call catches an exception. Surfaced via PipelineStats.n_stage_errors.
     stage_errors: dict[str, int] = field(default_factory=dict)
+    # Parallel to ``stage_errors``: the first failure's text per key (class and
+    # first message line, see ``nous.utils.short_error``). It goes into the
+    # trace leg's ``error`` beside the count, so the leg says what failed.
+    stage_error_msgs: dict[str, str] = field(default_factory=dict)
 
     # N7 follow-up: legs this call ATTEMPTED, marked at each stage's entry
     # BEFORE its work runs — so a leg that ran and produced nothing is still
@@ -393,6 +401,82 @@ class _PipelineAccumulator:
     # runs depends on whether spreading succeeded at RUNTIME, and no
     # combination of flags predicts that. The producer reports it instead.
     attempted_legs: set[str] = field(default_factory=set)
+
+
+# ---------------------------------------------------------------------------
+# Failure note: the model-visible side of ``stage_errors``
+# ---------------------------------------------------------------------------
+
+# Stage-error keys left out of the note: the returned results are as complete
+# as without the failure, because the step only chooses a mechanism, refines
+# ranking or does bookkeeping, or the search falls back to the original query.
+_NOTE_EXEMPT_STAGE_ERRORS = frozenset(
+    {
+        "spreading_density_check",  # chooses spreading vs 1-hop; 1-hop runs instead
+        "spreading_query_gate",  # rows stay ungated, none lost
+        "path_a_associative_gate",  # batch stays ungated, none lost
+        "adjacency_boost",  # ranking refinement only
+        "recall_reactivation",  # write-side bookkeeping, after results are final
+        "fact_source_episodes",  # formatter session grouping only
+        "exemplar_strip",  # stray exemplar rows stay in the results
+        "query_expansion",  # the original query is still searched
+        "query_expansion_embed_fallback",  # same: the single-query path runs
+    }
+)
+
+_NOTE_LABELS = {
+    "brain": "decision search",
+    "chunk_recall": "episode chunk search",
+    "keyed": "keyed fact lookup",
+    "keyed_r2": "keyed fact lookup",
+    "exemplar": "example search",
+    "heart_graph_neighbors": "graph expansion",
+    "heart_graph_memory_neighbors": "graph expansion",
+    "decision_neighbors": "graph expansion",
+    "spreading_activation": "graph expansion",
+    "contradiction_query": "contradiction check",
+    "date_window": "date-window search",
+}
+
+# The note's verb when it is not "failed". The date-window leg never fails on
+# its own: the search runs without it when the parse raises or the base embed
+# fails ("skipped (embedding unavailable)": facts._search gives that cause).
+_NOTE_VERBS = {"date_window": "skipped"}
+
+
+def failure_note(stats: PipelineStats) -> str | None:
+    """One line telling the model which legs failed, or None when none did.
+
+    The trace goes to ``retrieval_log``, which the agent never reads, so without
+    this a partly failed recall reads as a complete one with fewer hits. Skips
+    ``*_duplicates`` (dedup counts, not errors) and ``_NOTE_EXEMPT_STAGE_ERRORS``.
+    A key with no label (a future stage) is named as it is, not dropped.
+    """
+    errors = getattr(stats, "n_stage_errors", None) or {}
+    msgs = getattr(stats, "stage_error_msgs", None) or {}
+    failed: dict[str, str] = {}  # label -> part; one part per label, first wins
+    keyword_only: dict[str, str] = {}
+    for key in errors:
+        if key.endswith("_duplicates") or key in _NOTE_EXEMPT_STAGE_ERRORS:
+            continue
+        if key.endswith("_embed_fallback"):
+            # Same label as the leg's own failure key, so the two can be matched.
+            base = key.removesuffix("_embed_fallback")
+            label = "episode chunk search" if base == "chunk" else f"{base} search"
+            keyword_only.setdefault(label, f"{label} used keyword-only (embedding unavailable)")
+            continue
+        label = _NOTE_LABELS.get(key) or (
+            f"{key.removeprefix('heart_recall_')} search" if key.startswith("heart_recall_") else key
+        )
+        # The text's first field: the exception class, or the cause a skip was given.
+        cause = msgs.get(key, "").split(":", 1)[0]
+        verb = _NOTE_VERBS.get(key, "failed")
+        failed.setdefault(label, f"{label} {verb} ({cause})" if cause else f"{label} {verb}")
+    # A search that failed outright says so; its keyword-only fallback is moot.
+    parts = list(failed.values()) + [p for label, p in keyword_only.items() if label not in failed]
+    if not parts:
+        return None
+    return f"Note: {'; '.join(parts)}; results may be incomplete."
 
 
 # ---------------------------------------------------------------------------
@@ -445,11 +529,12 @@ async def run_recall_pipeline(
         plus the per-result ``contradicts`` field.
     """
     # F075 L3: parse the date window once per query when the leg is enabled.
-    # The parser is fail-open (returns None on timeout/error/no-date), so
-    # no try/except is needed; None → no leg → byte-identical to today.
+    # The parser fails open on its own LLM errors (returns None); anything that
+    # still escapes it is caught below, so None → no leg → byte-identical to today.
     tr = trace if trace is not None else NULL_TRACE
     _t0 = time.monotonic()
     date_window = None
+    date_exc: Exception | None = None
     parser = getattr(heart, "date_window_parser", None)
     # Only the fact leg consumes the window, so skip the Haiku parse (latency +
     # budget) when facts aren't in scope, e.g. memory_types=["decision"] (codex P2).
@@ -458,13 +543,22 @@ async def run_recall_pipeline(
     _facts_in_scope = not memory_types or "all" in memory_types or "fact" in memory_types
     if getattr(settings, "date_leg_enabled", False) and parser is not None and _facts_in_scope:
         import datetime as _dt
-        date_window = await parser.parse(query, _dt.date.today())
+
+        try:
+            date_window = await parser.parse(query, _dt.date.today())
+        except Exception as exc:
+            # Without the guard this aborted the retrieval. Counted once the
+            # accumulator exists, just below.
+            logger.warning("date-window parse raised; searching without a date window", exc_info=True)
+            date_exc = exc
 
     acc = await _run_stages(
         query, heart, brain, settings, limit, memory_types,
         residual_activations, apply_mmr=apply_mmr, date_window=date_window,
         exclude_ids=exclude_ids, trace=tr,
     )
+    if date_exc is not None:
+        note_stage_error(acc.stage_errors, acc.stage_error_msgs, "date_window", date_exc)
 
     # Build flat PipelineResult list in stage order
     results: list[PipelineResult] = []
@@ -504,7 +598,12 @@ async def run_recall_pipeline(
     # Codex round-5 P2: gated behind the consumer flag so the extra
     # DB round-trip doesn't run on every recall when the feature is off.
     if getattr(settings, "session_group_heart_section", False):
-        results = await _attach_fact_source_episodes(heart, results)
+        results = await _attach_fact_source_episodes(
+            heart,
+            results,
+            stage_errors=acc.stage_errors,
+            stage_error_msgs=acc.stage_error_msgs,
+        )
 
     # P2: graph-adjacency boost (gbrain-inspired). When connected via
     # sleep-built edges (F040), candidates reinforce each other. Gated
@@ -513,7 +612,11 @@ async def run_recall_pipeline(
         alpha = float(getattr(settings, "graph_adjacency_boost_alpha", 0.15))
         _pre_boost = {(r.id, r.type): r.score for r in results}
         results = await _apply_graph_adjacency_boost(
-            brain, results, alpha=alpha,
+            brain,
+            results,
+            alpha=alpha,
+            stage_errors=acc.stage_errors,
+            stage_error_msgs=acc.stage_error_msgs,
         )
         for r in results:
             before = _pre_boost.get((r.id, r.type))
@@ -654,7 +757,13 @@ async def run_recall_pipeline(
         remaining_fact_ids = [
             r.id for r in results if r.type == "fact" and r.metadata.get("retrieval_leg") != "exemplar"
         ]
-        stray_exemplar_ids = await heart.facts.exemplar_ids_among(remaining_fact_ids)
+        try:
+            stray_exemplar_ids = await heart.facts.exemplar_ids_among(remaining_fact_ids)
+        except Exception as exc:
+            # Skip only the stray strip; the fetched exemplars still render.
+            logger.warning("exemplar stray-strip lookup failed; strays stay in place", exc_info=True)
+            note_stage_error(acc.stage_errors, acc.stage_error_msgs, "exemplar_strip", exc)
+            stray_exemplar_ids = set()
         if stray_exemplar_ids:
             # Distinct from the fetched-set strip above — collapsing the two
             # into one disposition would hide which rule removed the row.
@@ -758,7 +867,12 @@ async def run_recall_pipeline(
         getattr(settings, "tinyhippo_lite_enabled", False)
         and getattr(settings, "tinyhippo_recall_touch_enabled", False)
     ):
-        await _record_recall_reactivation(brain, results)
+        await _record_recall_reactivation(
+            brain,
+            results,
+            stage_errors=acc.stage_errors,
+            stage_error_msgs=acc.stage_error_msgs,
+        )
 
     # F091: leg summaries for the stages that mark themselves in
     # ``attempted_legs``. Reported here (not at each stage) because
@@ -827,7 +941,8 @@ async def run_recall_pipeline(
         if _stage.endswith("_duplicates"):
             tr.leg(_stage[: -len("_duplicates")], attempted=True, n_deduped=_n_err)
         else:
-            tr.leg(_stage, attempted=True, error=f"{_n_err} error(s)")
+            _msg = acc.stage_error_msgs.get(_stage)
+            tr.leg(_stage, attempted=True, error=f"{_n_err} error(s): {_msg}" if _msg else f"{_n_err} error(s)")
 
     # C1: drain the chunk leg's discard set LAST — after every other leg has
     # claimed its slots against the shared `max_candidates` budget, and after
@@ -884,6 +999,7 @@ async def run_recall_pipeline(
         n_brain_results=len(acc.decision_results),
         n_graph_expanded=len(acc.graph_expanded),
         n_stage_errors=dict(acc.stage_errors),
+        stage_error_msgs=dict(acc.stage_error_msgs),
         contradiction_edges=list(acc.contradictions),
         excluded_in_context=excluded_in_context,  # F071
         attempted_legs=frozenset(acc.attempted_legs),
@@ -991,6 +1107,7 @@ async def _run_stages(
                 # surfaces them as n_stage_errors["heart_recall_<type>"],
                 # so a crashed fact leg no longer looks like an empty one.
                 stage_errors=acc.stage_errors,
+                stage_error_msgs=acc.stage_error_msgs,
                 ),
             )
             acc.heart_results = list(heart_results or [])
@@ -1073,6 +1190,10 @@ async def _run_stages(
                 # round-trips. `tr.add` still no-ops on unsampled rows, so only
                 # the tuples are wasted, and only briefly.
                 dropped_out=acc.chunk_dropped if tr.enabled else None,
+                # A failed query embed on the hybrid path is counted as
+                # chunk_embed_fallback (keyword-only), like the heart legs.
+                stage_errors=acc.stage_errors,
+                stage_error_msgs=acc.stage_error_msgs,
                 ),
             )
             if not getattr(settings, "chunk_hybrid_search_enabled", False):
@@ -1095,7 +1216,7 @@ async def _run_stages(
                         "no in-memory surplus"
                     ),
                 )
-        except Exception:
+        except Exception as exc:
             # C1: `dropped_out` is populated INSIDE hybrid_search, before the
             # content fetch that may have just raised. Leaving it populated
             # would report ~150 candidates as `sliced_off@chunk_rrf_merge` for
@@ -1115,9 +1236,7 @@ async def _run_stages(
                 "(non-fatal, no chunk results this turn)",
                 heart.agent_id, query[:80], exc_info=True,
             )
-            acc.stage_errors["chunk_recall"] = (
-                acc.stage_errors.get("chunk_recall", 0) + 1
-            )
+            note_stage_error(acc.stage_errors, acc.stage_error_msgs, "chunk_recall", exc)
 
     # ------------------------------------------------------------------
     # Stage 1.6 (R3.3, F085): keyed fact leg — land-dark, flag + entity-
@@ -1143,7 +1262,7 @@ async def _run_stages(
                     candidates, limit=getattr(settings, "keyed_fact_leg_k", 8)
                 )
         except Exception as exc:
-            acc.stage_errors["keyed"] = acc.stage_errors.get("keyed", 0) + 1
+            note_stage_error(acc.stage_errors, acc.stage_error_msgs, "keyed", exc)
             logger.warning("keyed fact leg failed: %s", exc)
 
         # R3v2: bounded round 2 — one deterministic, zero-LLM iterative hop
@@ -1294,7 +1413,7 @@ async def _run_stages(
                 # "selected" count can only be known there, after cross-leg
                 # dedup — see the combined keyed_r2 log line there.
             except Exception as exc:
-                acc.stage_errors["keyed_r2"] = acc.stage_errors.get("keyed_r2", 0) + 1
+                note_stage_error(acc.stage_errors, acc.stage_error_msgs, "keyed_r2", exc)
                 logger.warning("keyed_r2 fact leg failed: %s", exc)
 
     # ------------------------------------------------------------------
@@ -1365,9 +1484,9 @@ async def _run_stages(
                         # de-dup-and-retag has to run once over the fully assembled
                         # `results` list, not per-leg here.
                         await heart.facts.track_access([h.id for h in surviving])
-        except Exception:
+        except Exception as exc:
             logger.warning("exemplar leg failed", exc_info=True)
-            acc.stage_errors["exemplar"] = acc.stage_errors.get("exemplar", 0) + 1
+            note_stage_error(acc.stage_errors, acc.stage_error_msgs, "exemplar", exc)
 
     # The fact rows the keyed legs will serve, so the graph legs below do
     # not serve them again (at a weaker score, with graph provenance) and the
@@ -1463,13 +1582,11 @@ async def _run_stages(
                             continue
                         acc.heart_graph_decisions.append(n)
                         seen_graph[n.id] = n
-                except Exception:
+                except Exception as exc:
                     # 3a: log (was silent) so a graph-expansion outage is
                     # diagnosable, not just counted. Still non-fatal.
                     logger.warning("Stage 2 heart-graph neighbor expansion failed", exc_info=True)
-                    acc.stage_errors["heart_graph_neighbors"] = (
-                        acc.stage_errors.get("heart_graph_neighbors", 0) + 1
-                    )
+                    note_stage_error(acc.stage_errors, acc.stage_error_msgs, "heart_graph_neighbors", exc)
 
         # ------------------------------------------------------------------
         # Stage 2b (Path A): non-decision graph neighbors from Heart seeds.
@@ -1535,7 +1652,7 @@ async def _run_stages(
                             limit=mem_limit,
                             neighbor_type=nbr_type,
                         )
-                    except Exception:
+                    except Exception as exc:
                         # Mirror chunk-recall (Stage 1.5) pattern: log + count.
                         # ``stage_errors`` is discarded by prod callers
                         # (recall_deep tool), so the log is the operator's
@@ -1547,8 +1664,11 @@ async def _run_stages(
                             brain.agent_id, seed_id, seed_type, nbr_type,
                             exc_info=True,
                         )
-                        acc.stage_errors["heart_graph_memory_neighbors"] = (
-                            acc.stage_errors.get("heart_graph_memory_neighbors", 0) + 1
+                        note_stage_error(
+                            acc.stage_errors,
+                            acc.stage_error_msgs,
+                            "heart_graph_memory_neighbors",
+                            exc,
                         )
                         continue
                     # F106: gate the batch's associative neighbours BEFORE the
@@ -1634,7 +1754,20 @@ async def _run_stages(
 
     if search_all or "decision" in search_types:
         acc.attempted_legs.add("brain")
-        decision_results = await brain.query(query, limit=limit)
+        try:
+            decision_results = await brain.query(
+                query,
+                limit=limit,
+                stage_errors=acc.stage_errors,
+                stage_error_msgs=acc.stage_error_msgs,
+            )
+        except Exception as exc:
+            # Unguarded, a DB error here discarded every leg already fetched
+            # and recall_deep returned a tool error. Fail open like the siblings.
+            # Keyed "brain" so the error lands on the brain leg itself.
+            logger.warning("Stage 3 brain.query failed; no decisions this call", exc_info=True)
+            note_stage_error(acc.stage_errors, acc.stage_error_msgs, "brain", exc)
+            decision_results = []
 
     # F022 extension (2026-07-11): heart FACT seeds for spreading. Top-3
     # fact results with their RRF scores — same seed shape as decision
@@ -1694,11 +1827,9 @@ async def _run_stages(
                 use_spreading = should_use_spreading_activation(
                     settings, density
                 )
-            except Exception:
-                logger.debug("Density check failed, using 1-hop")
-                acc.stage_errors["spreading_density_check"] = (
-                    acc.stage_errors.get("spreading_density_check", 0) + 1
-                )
+            except Exception as exc:
+                logger.warning("Density check failed, using 1-hop", exc_info=True)
+                note_stage_error(acc.stage_errors, acc.stage_error_msgs, "spreading_density_check", exc)
 
         if use_spreading:
             rescore_on = bool(getattr(settings, "spreading_rescore_existing_enabled", False))
@@ -1902,13 +2033,9 @@ async def _run_stages(
                     acc.spreading_rescore = {
                         nid: a for nid, a in rescore_out.items() if nid not in seed_ids
                     }
-            except Exception:
-                logger.debug(
-                    "Spreading activation failed, falling back to 1-hop"
-                )
-                acc.stage_errors["spreading_activation"] = (
-                    acc.stage_errors.get("spreading_activation", 0) + 1
-                )
+            except Exception as exc:
+                logger.warning("Spreading activation failed, falling back to 1-hop", exc_info=True)
+                note_stage_error(acc.stage_errors, acc.stage_error_msgs, "spreading_activation", exc)
                 use_spreading = False
 
         if not use_spreading:
@@ -1986,13 +2113,9 @@ async def _run_stages(
                         graph_expanded.append(n)
                         seen_hop[n.id] = n
                         seen_ids.add(n.id)
-                except Exception:
-                    logger.debug(
-                        "Graph expansion failed for decision %s", dec.id
-                    )
-                    acc.stage_errors["decision_neighbors"] = (
-                        acc.stage_errors.get("decision_neighbors", 0) + 1
-                    )
+                except Exception as exc:
+                    logger.warning("Graph expansion failed for decision %s", dec.id, exc_info=True)
+                    note_stage_error(acc.stage_errors, acc.stage_error_msgs, "decision_neighbors", exc)
 
         if graph_expanded:
             acc.graph_expansion_used = True
@@ -2035,13 +2158,11 @@ async def _run_stages(
                         acc.contradictions.append(
                             (c.source_id, c.source_type, c.target_id, c.target_type)
                         )
-        except Exception:
+        except Exception as exc:
             # 3a: log (was silent) so a contradiction-query outage is
             # diagnosable, not just counted. Still non-fatal.
             logger.warning("Stage 5 contradiction detection failed", exc_info=True)
-            acc.stage_errors["contradiction_query"] = (
-                acc.stage_errors.get("contradiction_query", 0) + 1
-            )
+            note_stage_error(acc.stage_errors, acc.stage_error_msgs, "contradiction_query", exc)
 
     return acc
 
@@ -2191,11 +2312,9 @@ async def _query_gate(
             mode, len(gated), sum(1 for nid, *_ in activated if cos.get(nid) is None),
         )
         return gated
-    except Exception:
+    except Exception as exc:
         logger.debug("Spreading query gate failed; rows stay ungated", exc_info=True)
-        acc.stage_errors["spreading_query_gate"] = (
-            acc.stage_errors.get("spreading_query_gate", 0) + 1
-        )
+        note_stage_error(acc.stage_errors, acc.stage_error_msgs, "spreading_query_gate", exc)
         return activated
 
 
@@ -2286,11 +2405,9 @@ class _PathAAssociativeGate:
                 factors[n.id] = factor
                 if drop:
                     dropped.add(n.id)
-        except Exception:
+        except Exception as exc:
             logger.debug("Path A associative query gate failed; the batch stays ungated", exc_info=True)
-            self.acc.stage_errors["path_a_associative_gate"] = (
-                self.acc.stage_errors.get("path_a_associative_gate", 0) + 1
-            )
+            note_stage_error(self.acc.stage_errors, self.acc.stage_error_msgs, "path_a_associative_gate", exc)
             return {}, set()
         for n in assoc:
             n.query_gate_factor = factors[n.id]
@@ -2302,6 +2419,8 @@ async def _apply_graph_adjacency_boost(
     results: list[PipelineResult],
     *,
     alpha: float = 0.15,
+    stage_errors: dict[str, int] | None = None,
+    stage_error_msgs: dict[str, str] | None = None,
 ) -> list[PipelineResult]:
     """Boost candidates connected to other candidates via graph edges.
 
@@ -2317,7 +2436,8 @@ async def _apply_graph_adjacency_boost(
         3. Apply multiplicative boost: ``score *= (1 + alpha * d/max_d)``.
         4. Re-sort by boosted score.
 
-    Fails open: any DB error returns the original list unchanged.
+    Fails open: any DB error returns the original list unchanged, counted in
+    ``stage_errors["adjacency_boost"]`` when the caller passes the maps.
     """
     from sqlalchemy import text as sa_text
 
@@ -2354,10 +2474,11 @@ async def _apply_graph_adjacency_boost(
                 "  AND source_id = ANY(CAST(:ids AS uuid[])) "
                 "  AND target_id = ANY(CAST(:ids AS uuid[]))"
             ), {"a": brain.agent_id, "ids": candidate_ids})).all()
-    except Exception:
+    except Exception as exc:
         # R-11: fail-open (boost is a refinement) but log — previously silent,
         # so a broken graph table degraded ranking with no operator signal.
         logger.warning("Adjacency boost failed; returning unboosted results", exc_info=True)
+        note_stage_error(stage_errors, stage_error_msgs, "adjacency_boost", exc)
         return results
 
     # F044 v1.1: weight consolidated edges higher so STC consolidation actually
@@ -2433,6 +2554,9 @@ def _apply_spreading_rescore(
 
 async def _record_recall_reactivation(
     brain: "Brain", results: list[PipelineResult],
+    *,
+    stage_errors: dict[str, int] | None = None,
+    stage_error_msgs: dict[str, str] | None = None,
 ) -> None:
     """F044 v1.1: buffer edges among co-retrieved results as STC reactivations.
 
@@ -2464,8 +2588,9 @@ async def _record_recall_reactivation(
                 "  AND source_id = ANY(CAST(:ids AS uuid[])) "
                 "  AND target_id = ANY(CAST(:ids AS uuid[]))"
             ), {"a": brain.agent_id, "ids": candidate_ids})).all()
-    except Exception:
+    except Exception as exc:
         logger.warning("F044 recall reactivation read failed; skipping", exc_info=True)
+        note_stage_error(stage_errors, stage_error_msgs, "recall_reactivation", exc)
         return
     if rows:
         from nous.brain.tinyhippo_lite import record_recall_touches
@@ -2476,6 +2601,9 @@ async def _record_recall_reactivation(
 
 async def _attach_fact_source_episodes(
     heart: "Heart", results: list[PipelineResult],
+    *,
+    stage_errors: dict[str, int] | None = None,
+    stage_error_msgs: dict[str, str] | None = None,
 ) -> list[PipelineResult]:
     """P1.1: batch-attach source_episode_id to fact-type PipelineResults.
 
@@ -2501,10 +2629,12 @@ async def _attach_fact_source_episodes(
             rows = res.all()
         for fid, src in rows:
             src_map[fid] = src
-    except Exception:
+    except Exception as exc:
         # Fail-open: formatter will fall back to flat listing.
         # Also catches test fixtures where heart.db.session() returns mocks
         # that don't fully implement the async context-manager protocol.
+        logger.warning("Fact source-episode lookup failed; flat Heart listing", exc_info=True)
+        note_stage_error(stage_errors, stage_error_msgs, "fact_source_episodes", exc)
         return results
 
     out = []
@@ -2723,6 +2853,8 @@ async def _search_episode_chunks(
     settings: "Settings | None" = None,
     attempted: "set[str] | None" = None,
     dropped_out: list | None = None,
+    stage_errors: dict[str, int] | None = None,
+    stage_error_msgs: dict[str, str] | None = None,
 ) -> list[tuple[UUID, str, float]]:
     """F067: search over heart.episode_chunks.
 
@@ -2775,9 +2907,10 @@ async def _search_episode_chunks(
         if embedder is not None:
             try:
                 query_vec = await embedder.embed(query, fail_fast=True)
-            except Exception:
+            except Exception as exc:
                 # A failed embed takes the keyword-only path below, as an empty one does.
                 logger.warning("Embedding generation failed for chunk search, searching keywords only")
+                note_stage_error(stage_errors, stage_error_msgs, "chunk_embed_fallback", exc)
         query_vec = query_vec or None  # empty or failed embed → keyword-only fallback
         # Hybrid always queries (keyword-only when the vector is absent).
         if attempted is not None:

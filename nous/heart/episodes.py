@@ -13,11 +13,11 @@ from uuid import UUID
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nous.utils import text_overlap
+from nous.utils import note_stage_error, text_overlap
 
 from nous.brain.embeddings import _REEMBED_MAX_PER_CYCLE, EmbeddingProvider, reembed_rows
 from nous.heart.schemas import EpisodeDetail, EpisodeInput, EpisodeSummary
-from nous.heart.search import hybrid_search, hybrid_search_multi
+from nous.heart.search import has_vector_input, hybrid_search, hybrid_search_multi
 from nous.storage.database import Database
 from nous.storage.models import Episode, Event
 
@@ -506,6 +506,8 @@ class EpisodeManager:
         session: AsyncSession | None = None,
         variant_pairs: list[tuple[str, list[float] | None]] | None = None,
         penalty_limit: int | None = None,
+        stage_errors: dict[str, int] | None = None,
+        stage_error_msgs: dict[str, str] | None = None,
     ) -> list[EpisodeSummary]:
         """Hybrid search over episodes using search.py helper.
 
@@ -518,11 +520,30 @@ class EpisodeManager:
                 ``limit * 2`` from an LLM-controlled parameter, so without
                 this the penalty base — and every single-leg score — moves
                 with whatever the model happened to request.
+            stage_errors / stage_error_msgs: optional caller maps. A failed
+                query embedding (the search then runs keyword-only, on another
+                score scale) is counted under ``episode_embed_fallback``.
         """
         if session is None:
             async with self.db.session() as session:
-                return await self._search(query, limit, session, variant_pairs, penalty_limit)
-        return await self._search(query, limit, session, variant_pairs, penalty_limit)
+                return await self._search(
+                    query,
+                    limit,
+                    session,
+                    variant_pairs,
+                    penalty_limit,
+                    stage_errors=stage_errors,
+                    stage_error_msgs=stage_error_msgs,
+                )
+        return await self._search(
+            query,
+            limit,
+            session,
+            variant_pairs,
+            penalty_limit,
+            stage_errors=stage_errors,
+            stage_error_msgs=stage_error_msgs,
+        )
 
     async def _search(
         self,
@@ -531,14 +552,18 @@ class EpisodeManager:
         session: AsyncSession,
         variant_pairs: list[tuple[str, list[float] | None]] | None = None,
         penalty_limit: int | None = None,
+        stage_errors: dict[str, int] | None = None,
+        stage_error_msgs: dict[str, str] | None = None,
     ) -> list[EpisodeSummary]:
         # Generate query embedding
         embedding = None
+        embed_exc: Exception | None = None
         if self.embeddings:
             try:
                 embedding = await self.embeddings.embed(query, fail_fast=True)
-            except Exception:
+            except Exception as exc:
                 logger.warning("Embedding generation failed for episode search")
+                embed_exc = exc
 
         # Audit HT-1 (2026-06-09): episode hybrid search was structurally dead.
         # For episodes `active` is a LIFECYCLE flag — _end() sets active=False
@@ -557,7 +582,12 @@ class EpisodeManager:
             "AND (t.active = true OR t.ended_at IS NOT NULL) "
             "AND t.outcome IS DISTINCT FROM 'abandoned'"
         )
-        if variant_pairs and len(variant_pairs) > 1:
+        # A failed base embed is a keyword-only fallback only when the search
+        # that runs has no vector: the variant fusion carries its own.
+        use_variants = bool(variant_pairs) and len(variant_pairs) > 1
+        if embed_exc is not None and not has_vector_input(use_variants, embedding, variant_pairs):
+            note_stage_error(stage_errors, stage_error_msgs, "episode_embed_fallback", embed_exc)
+        if use_variants:
             results = await hybrid_search_multi(
                 session=session,
                 table="heart.episodes",

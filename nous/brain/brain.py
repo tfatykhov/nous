@@ -58,6 +58,7 @@ from nous.storage.models import (
     Procedure,
     Thought,
 )
+from nous.utils import note_stage_error
 
 logger = logging.getLogger(__name__)
 
@@ -853,12 +854,39 @@ class Brain:
         outcome: str | None = None,
         bridge_side: str | None = None,
         session: AsyncSession | None = None,
+        stage_errors: dict[str, int] | None = None,
+        stage_error_msgs: dict[str, str] | None = None,
     ) -> list[DecisionSummary]:
-        """Perform hybrid search (vector + keyword) with optional filters."""
+        """Perform hybrid search (vector + keyword) with optional filters.
+
+        ``stage_errors`` / ``stage_error_msgs`` are optional caller maps. A
+        failed query embedding (the search then runs keyword-only, on another
+        score scale) is counted under ``decision_embed_fallback``.
+        """
         if session is None:
             async with self.db.session() as session:
-                return await self._query(query_text, limit, category, stakes, outcome, bridge_side, session)
-        return await self._query(query_text, limit, category, stakes, outcome, bridge_side, session)
+                return await self._query(
+                    query_text,
+                    limit,
+                    category,
+                    stakes,
+                    outcome,
+                    bridge_side,
+                    session,
+                    stage_errors=stage_errors,
+                    stage_error_msgs=stage_error_msgs,
+                )
+        return await self._query(
+            query_text,
+            limit,
+            category,
+            stakes,
+            outcome,
+            bridge_side,
+            session,
+            stage_errors=stage_errors,
+            stage_error_msgs=stage_error_msgs,
+        )
 
     async def _query(
         self,
@@ -869,6 +897,8 @@ class Brain:
         outcome: str | None,
         bridge_side: str | None,
         session: AsyncSession,
+        stage_errors: dict[str, int] | None = None,
+        stage_error_msgs: dict[str, str] | None = None,
     ) -> list[DecisionSummary]:
         """Internal query implementation.
 
@@ -881,8 +911,9 @@ class Brain:
         if self.embeddings:
             try:
                 query_embedding = await self.embeddings.embed(query_text, fail_fast=True)
-            except Exception:
+            except Exception as exc:
                 logger.warning("Embedding generation failed for query, falling back to keyword-only")
+                note_stage_error(stage_errors, stage_error_msgs, "decision_embed_fallback", exc)
 
         # Build filter clause fragments
         filter_clauses = "AND d.agent_id = :agent_id"

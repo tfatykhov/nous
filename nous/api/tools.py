@@ -59,6 +59,7 @@ from nous.observability.retrieval_trace import RETURNED_TO_SCRIPT, SLICED_OFF
 from nous.skills.parser import SkillParser
 from nous.tool_names import CHANGED_TOOLS, ToolAlias, canonical_tool_names, changed_tools_note
 from nous.utils import leaked_markup_start as _leak_tail_start
+from nous.utils import short_error
 
 logger = logging.getLogger(__name__)
 
@@ -865,7 +866,9 @@ def _format_pipeline_text(
     entries tagged ``metadata["retrieval_leg"] == "exemplar"`` are excluded
     from the Heart Memory section and rendered instead in a trailing
     `=== Nearest stored examples ===` section; absent when no exemplar rows
-    are present (default, flag off).
+    are present (default, flag off). When a retrieval leg failed, the text
+    ends with one ``Note: ...; results may be incomplete.`` line
+    (``retrieval_pipeline.failure_note``); absent when none failed.
     """
     search_all = "all" in search_types
     results_text: list[str] = []
@@ -1159,6 +1162,15 @@ def _format_pipeline_text(
             # served-ness by regexing rendered ids is silently blind here.
             # Collection works because the id comes from the row, not the text.
             _emit(r)
+
+    # The model never sees the retrieval trace, so a leg that failed would read
+    # as a complete result with fewer hits. One closing line names it. Absent
+    # when nothing failed, so the text is byte-identical then.
+    from nous.api.retrieval_pipeline import failure_note
+
+    note = failure_note(stats)
+    if note:
+        results_text.append(f"\n{note}")
 
     return "\n".join(results_text)
 
@@ -1743,7 +1755,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                         max_parents=settings.recall_max_parent_episodes,
                         truncate=settings.recall_parent_episode_truncate,
                     )
-                except Exception:
+                except Exception as exc:
                     n_facts = sum(1 for r in results if getattr(r, "type", None) == "fact")
                     logger.warning(
                         "F067: parent-episode fetch failed for agent=%s "
@@ -1754,6 +1766,10 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                         exc_info=True,
                     )
                     parent_episodes = []
+                    # The leg below is registered only when non-empty, so a
+                    # failure would otherwise read as "no parent episodes".
+                    if _tr is not None:
+                        _tr.leg("parent_episode", attempted=True, error=short_error(exc))
             # F091: parent episodes are memory DELIVERED to the model, appended
             # by the formatter below. Register them as their own leg and mark
             # them rendered, then commit — committing before this fetch left
@@ -1826,7 +1842,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     _rl.commit(_tr)
                     _tr_committed = True
                 except Exception:
-                    logger.debug("F091: retrieval trace commit failed", exc_info=True)
+                    logger.warning("F091: retrieval trace commit failed", exc_info=True)
 
             # F055: fire-and-forget record_surfaced so the request returns
             # immediately. record_surfaced opens its OWN DB session inside
@@ -1885,11 +1901,11 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     # after the pipeline finished) must be un-claimed before
                     # this row is persisted.
                     _tr_err.undeliver_all(SLICED_OFF, "recall_deep_failed")
-                    _tr_err.leg("recall_deep", attempted=True, error=str(e)[:200])
+                    _tr_err.leg("recall_deep", attempted=True, error=short_error(e))
                     _tr_err.finalize([])
                     _rl_err.commit(_tr_err)
             except Exception:
-                logger.debug("F091: failed to commit partial trace", exc_info=True)
+                logger.warning("F091: failed to commit partial trace", exc_info=True)
             return _tool_error(f"Error searching memory: {e}")
 
     async def create_censor(
@@ -4882,7 +4898,7 @@ def create_programmatic_tools(
                 try:
                     loop.call_soon_threadsafe(_rl.commit, tr)
                 except Exception:
-                    logger.debug(
+                    logger.warning(
                         "F091: script retrieval trace commit failed",
                         exc_info=True,
                     )
@@ -4921,7 +4937,7 @@ def create_programmatic_tools(
                     pass
                 try:
                     _tr.undeliver_all(SLICED_OFF, "script_recall_failed")
-                    _tr.leg("script_recall", attempted=True, error=str(exc)[:200])
+                    _tr.leg("script_recall", attempted=True, error=short_error(exc))
                     _tr.finalize([])
                     _commit(_tr)
                 finally:

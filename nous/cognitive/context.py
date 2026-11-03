@@ -11,6 +11,7 @@ import time
 from datetime import UTC, datetime
 from uuid import UUID
 
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain.brain import Brain
@@ -38,7 +39,7 @@ from nous.observability.retrieval_trace import (
     SUPERSEDED,
 )
 from nous.tool_names import changed_tools_note
-from nous.utils import text_overlap
+from nous.utils import short_error, text_overlap
 
 
 class _RenderedRef:
@@ -325,6 +326,8 @@ class ContextEngine:
             "episode": [],
         }
         recalled_content_map: dict[str, str] = {}
+        # Memory legs that raised this turn, for the closing failure note.
+        _failed_legs: list[tuple[str, Exception]] = []
 
         # F091: this path runs on EVERY turn and fills the system prompt, but
         # until now its only telemetry was counting bullets in the rendered
@@ -1054,7 +1057,8 @@ class ContextEngine:
                 # F091: a leg that CRASHED must not read as one that never
                 # ran. Registration lives after the await, so the exception
                 # path skips it entirely.
-                tr.leg("context_decisions", attempted=True, error=str(e)[:200])
+                tr.leg("context_decisions", attempted=True, error=short_error(e))
+                _failed_legs.append(("decision recall", e))
 
         facts_injected = False
         # 6. Facts (F10: retrieve -> apply_frame_boost -> dedup -> usage_boost -> truncate)
@@ -1200,7 +1204,8 @@ class ContextEngine:
                     )
             except Exception as e:
                 logger.warning("Heart.search_facts failed during context build: %s", e)
-                tr.leg("context_facts", attempted=True, error=str(e)[:200])
+                tr.leg("context_facts", attempted=True, error=short_error(e))
+                _failed_legs.append(("fact recall", e))
 
         # 6a. Session Profile intent leg (Task 2, land dark): intent-selected
         # tier-1 domain facts (trading stances, sailing contacts, project
@@ -1209,6 +1214,7 @@ class ContextEngine:
         # budget.user_profile. priority=6 TIES Relevant Facts above; sorted() is
         # stable, so this renders immediately after (mirrors the priority-1
         # Identity/User-Profile tie note at the top of build()).
+        _profile_leg_ids: set[str] = set()
         if (
             getattr(self._settings, "profile_intent_leg_enabled", False)
             # codex r1: respect the retrieval plan's fact skip (greetings /
@@ -1233,6 +1239,8 @@ class ContextEngine:
                     # floor alone cannot exclude nearest-neighbor noise.
                     require_keyword_hit=True,
                 )
+                # Outside the `if` — see the decisions leg above.
+                _tr_enter(leg_facts or [], "fact", "context_profile_intent")
                 if leg_facts:
                     # Pipeline parity with the Tier-3 fact path: staleness then
                     # the adaptive relevance floor (hybrid RRF always returns
@@ -1246,25 +1254,32 @@ class ContextEngine:
                     # lower scale and would be wrongly filtered).
                     if self._has_embeddings:
                         _floor = self._settings.profile_intent_leg_min_score
+                        _before = leg_facts
                         leg_facts = [
                             f for f in leg_facts
                             if (getattr(f, "score", 0) or 0) >= _floor
                         ]
+                        _tr_filtered(_before, leg_facts, "fact", BELOW_FLOOR, "profile_intent_min_score")
+                    _before = leg_facts
                     leg_facts = self._apply_relevance_filter(leg_facts, "fact")
+                    _tr_filtered(_before, leg_facts, "fact", SLICED_OFF, "relevance_filter")
                     # Double-injection guard: drop facts already rendered in the
                     # User Profile section (Task 1's profile_fact_ids). The
                     # recalled_ids["fact"] set holds only non-tier-1 facts
                     # (category-disjoint from this leg), so excluding it would be
                     # a documented no-op — profile_fact_ids is the real guard.
+                    _before = leg_facts
                     leg_facts = [
                         f for f in leg_facts
                         if str(getattr(f, "id", "")) not in profile_fact_ids
                     ]
+                    _tr_filtered(_before, leg_facts, "fact", DEDUPED, "user_profile_dedup")
                 if leg_facts:
                     leg_text = self._format_facts(leg_facts)
                     leg_text = self._truncate_to_budget_lines(
                         leg_text, self._settings.profile_intent_leg_budget
                     )
+                    _tr_budget(leg_facts, "fact", leg_text)
                     sections.append(
                         ContextSection(
                             priority=6,
@@ -1274,8 +1289,14 @@ class ContextEngine:
                             tier=SECTION_TIERS.get("Session Profile", "dynamic"),
                         )
                     )
+                    # Rendered, for the trace only (see finalize below). Kept out
+                    # of recalled_ids: that feeds procedure seeds, usage rows and
+                    # next turn's working memory, which this leg never fed.
+                    _profile_leg_ids = {str(f.id) for f in leg_facts if getattr(f, "id", None)}
             except Exception as e:
                 logger.warning("Session Profile intent leg failed during context build: %s", e)
+                tr.leg("context_profile_intent", attempted=True, error=short_error(e))
+                _failed_legs.append(("session profile recall", e))
 
         # 6b. Recall backstop (2026-07-13 plan): empty final fact list => tell the
         # agent to recall before answering. Fires on search failure too (the
@@ -1423,7 +1444,8 @@ class ContextEngine:
                             recalled_score_map[mid] = 1.0
             except Exception as e:
                 logger.warning("F080 §14.7 procedure selection failed: %s", e)
-                tr.leg("context_procedures_ladder", attempted=True, error=str(e)[:200])
+                tr.leg("context_procedures_ladder", attempted=True, error=short_error(e))
+                _failed_legs.append(("procedure selection", e))
 
         # 7. Procedures (dual-track: Critic reserved slots + embedding slots, issue #229)
         # F079 unified pull: `proc_passive_injection_enabled=False` removes only the
@@ -1714,7 +1736,8 @@ class ContextEngine:
                     )
             except Exception as e:
                 logger.warning("Temporal tier failed: %s", e)
-                tr.leg("context_episodes_temporal", attempted=True, error=str(e)[:200])
+                tr.leg("context_episodes_temporal", attempted=True, error=short_error(e))
+                _failed_legs.append(("recent conversations", e))
 
         # 8. Episodes
         if not (budget.episodes > 0 and "episode" not in skip_types):
@@ -1800,10 +1823,27 @@ class ContextEngine:
                     )
             except Exception as e:
                 logger.warning("Heart.search_episodes failed during context build: %s", e)
-                tr.leg("context_episodes", attempted=True, error=str(e)[:200])
+                tr.leg("context_episodes", attempted=True, error=short_error(e))
+                _failed_legs.append(("episode recall", e))
 
         # After every budget cut, so the line is never cut itself.
         self._note_changed_tools(sections)
+
+        # A memory leg that raised would otherwise read to the model as "nothing
+        # relevant is stored". One dynamic line after every memory section says
+        # so; absent when nothing failed, so the prompt is byte-identical then.
+        if _failed_legs:
+            parts = dict.fromkeys(f"{label} failed ({type(e).__name__})" for label, e in _failed_legs)
+            note = f"Note: {'; '.join(parts)}; results may be incomplete."
+            sections.append(
+                ContextSection(
+                    priority=9,
+                    label="Retrieval Failures",
+                    content=note,
+                    token_estimate=self._estimate_tokens(note),
+                    tier="dynamic",
+                )
+            )
 
         # Assemble system prompt with markdown headers
         parts: list[str] = []
@@ -1863,6 +1903,11 @@ class ContextEngine:
                 # outside n_rendered while their summaries were in the prompt.
                 _rendered.extend(
                     _RenderedRef(mid, "episode") for mid in _temporal_episode_ids
+                )
+                # Same for the Session Profile leg's facts: in the prompt, kept
+                # out of recalled_ids. A budget-cut one did not reach the model.
+                _rendered.extend(
+                    _RenderedRef(mid, "fact") for mid in _profile_leg_ids if (mid, "fact") not in _tr_budget_cut
                 )
                 tr.finalize(_rendered, duration_ms=(time.monotonic() - _tr_t0) * 1000.0)
             except Exception:
@@ -2590,7 +2635,14 @@ class ContextEngine:
                     continue
                 try:
                     detail = await self._heart.get_procedure(summ.id, session=session)
-                except Exception:
+                except Exception as e:
+                    logger.warning("F080 §14.7: cosine procedure fetch failed for %s: %s", summ.id, e)
+                    # A database error on a shared session has aborted its
+                    # transaction, so every later fetch would fail too. Any
+                    # other error (get_procedure's ValueError for not-found)
+                    # leaves the session usable: pass over just this one.
+                    if session is not None and isinstance(e, DBAPIError):
+                        break
                     continue
                 if detail is not None and getattr(detail, "active", False) and not is_job_lesson(detail):
                     if trace is not None:
@@ -2621,7 +2673,11 @@ class ContextEngine:
                     continue
                 try:
                     detail = await self._heart.get_procedure(summ.id, session=session)
-                except Exception:
+                except Exception as e:
+                    logger.warning("Strategy-card fetch failed for %s: %s", summ.id, e)
+                    # Same rule as the cosine rung above.
+                    if session is not None and isinstance(e, DBAPIError):
+                        break
                     continue
                 if detail is not None and getattr(detail, "active", False):
                     if trace is not None:
