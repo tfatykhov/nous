@@ -195,13 +195,19 @@ def note_stage_error(
     stage_error_msgs: dict[str, str] | None,
     key: str,
     exc: BaseException,
+    *,
+    cause: str | None = None,
 ) -> None:
     """Count a retrieval stage failure under ``key`` and keep its first error text.
 
     Either map may be None (the caller did not ask). The first message wins: a
     later failure under the same key is often a consequence of the first.
+    ``cause`` goes before the error text when ``exc`` is not this stage's own
+    failure (a skip forced by an earlier one). The failure note shows the text's
+    first field in brackets, so it then shows ``cause``, not the class.
     """
     if stage_errors is not None:
         stage_errors[key] = stage_errors.get(key, 0) + 1
     if stage_error_msgs is not None:
-        stage_error_msgs.setdefault(key, short_error(exc))
+        text = short_error(exc) if cause is None else f"{cause}: {short_error(exc)}"[:_ERROR_TEXT_MAX]
+        stage_error_msgs.setdefault(key, text)

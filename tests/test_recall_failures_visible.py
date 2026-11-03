@@ -95,7 +95,7 @@ class TestDateParseFailure:
         heart = _date_heart(parser=parser)
         tr = RetrievalTrace(query="q")
 
-        results, _stats = await run_recall_pipeline(
+        results, stats = await run_recall_pipeline(
             query="what happened last week",
             heart=heart,
             brain=_date_brain(),
@@ -109,6 +109,9 @@ class TestDateParseFailure:
         leg = _legs(tr)["date_window"]
         assert leg["attempted"] is True
         assert "ValueError: bad window" in leg["error"]
+        from nous.api.retrieval_pipeline import failure_note
+
+        assert failure_note(stats) == "Note: date-window search skipped (ValueError); results may be incomplete."
 
 
 # ---------------------------------------------------------------------------
@@ -530,9 +533,11 @@ class TestEmbeddingUnavailableIsAFallback:
 # ---------------------------------------------------------------------------
 
 
-async def _recall_with_failed_base_embed(heart, session, mock_embeddings, monkeypatch, *, variants):
-    """heart.recall over episodes/facts/procedures with the per-manager query
-    embed failing and query expansion returning ``variants`` (embedded fine)."""
+async def _recall_with_failed_base_embed(
+    heart, session, mock_embeddings, monkeypatch, *, variants, types=("episode", "fact", "procedure"), date_window=None
+):
+    """heart.recall over ``types`` with the per-manager query embed failing and
+    query expansion returning ``variants`` (embedded fine)."""
     from nous.brain.embeddings import EmbeddingUnavailableError
 
     query = "lighthouse keeper rota for the winter"
@@ -547,8 +552,9 @@ async def _recall_with_failed_base_embed(heart, session, mock_embeddings, monkey
     msgs: dict[str, str] = {}
     await heart.recall(
         query,
-        types=["episode", "fact", "procedure"],
+        types=list(types),
         session=session,
+        date_window=date_window,
         stage_errors=stage_errors,
         stage_error_msgs=msgs,
     )
@@ -608,3 +614,34 @@ class TestHasVectorInput:
 
         assert has_vector_input(True, None, [("a", [0.1]), ("b", None)]) is True
         assert has_vector_input(True, [0.1], [("a", None), ("b", [])]) is False
+
+
+@pytest.mark.postgres_only
+class TestDateWindowSkipCounted:
+    @pytest.mark.asyncio
+    async def test_failed_base_embed_skips_the_date_leg_and_it_is_counted(
+        self, heart, session, mock_embeddings, monkeypatch
+    ):
+        """The variant fusion still runs with vectors (no keyword-only fallback),
+        but the F075 date leg needs the base embedding, so it is skipped. That
+        was silent; it is counted under date_window and named in the note."""
+        import datetime
+
+        from nous.api.retrieval_pipeline import PipelineStats, failure_note
+        from nous.heart.date_window import DateWindow
+
+        stage_errors, msgs = await _recall_with_failed_base_embed(
+            heart,
+            session,
+            mock_embeddings,
+            monkeypatch,
+            variants=["lighthouse keeper rota for the winter", "winter schedule for the lighthouse keepers"],
+            types=("fact",),
+            date_window=DateWindow(start=datetime.date(2026, 10, 1), end=datetime.date(2026, 10, 31)),
+        )
+
+        assert stage_errors == {"date_window": 1}
+        assert msgs["date_window"].startswith("embedding unavailable: EmbeddingUnavailableError")
+        assert failure_note(PipelineStats(n_stage_errors=stage_errors, stage_error_msgs=msgs)) == (
+            "Note: date-window search skipped (embedding unavailable); results may be incomplete."
+        )

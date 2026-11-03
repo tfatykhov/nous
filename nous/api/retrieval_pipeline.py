@@ -438,6 +438,11 @@ _NOTE_LABELS = {
     "date_window": "date-window search",
 }
 
+# The note's verb when it is not "failed". The date-window leg never fails on
+# its own: the search runs without it when the parse raises or the base embed
+# fails ("skipped (embedding unavailable)": facts._search gives that cause).
+_NOTE_VERBS = {"date_window": "skipped"}
+
 
 def failure_note(stats: PipelineStats) -> str | None:
     """One line telling the model which legs failed, or None when none did.
@@ -463,8 +468,10 @@ def failure_note(stats: PipelineStats) -> str | None:
         label = _NOTE_LABELS.get(key) or (
             f"{key.removeprefix('heart_recall_')} search" if key.startswith("heart_recall_") else key
         )
-        cls = msgs.get(key, "").split(":", 1)[0]
-        failed.setdefault(label, f"{label} failed ({cls})" if cls else f"{label} failed")
+        # The text's first field: the exception class, or the cause a skip was given.
+        cause = msgs.get(key, "").split(":", 1)[0]
+        verb = _NOTE_VERBS.get(key, "failed")
+        failed.setdefault(label, f"{label} {verb} ({cause})" if cause else f"{label} {verb}")
     # A search that failed outright says so; its keyword-only fallback is moot.
     parts = list(failed.values()) + [p for label, p in keyword_only.items() if label not in failed]
     if not parts:

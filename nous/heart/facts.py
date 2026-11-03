@@ -3587,6 +3587,11 @@ class FactManager:
         # F075 L3: fuse the date-window leg (position-based RRF). Present only when
         # the caller parsed a window and we have a query embedding. Empty leg is a
         # no-op, so this preserves today's ordering when the window finds nothing.
+        # A window with no embedding because the base embed failed is a skipped
+        # leg, not an empty one, so it is counted, even when the variant fusion
+        # above ran with vectors.
+        if date_window is not None and embedding is None and embed_exc is not None:
+            note_stage_error(stage_errors, stage_error_msgs, "date_window", embed_exc, cause="embedding unavailable")
         if date_window is not None and embedding is not None:
             from nous.heart.search import _resolve_rrf_k, _rrf_merge_n
 
