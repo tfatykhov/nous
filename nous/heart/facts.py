@@ -173,6 +173,14 @@ class ExemplarHit(NamedTuple):
 _NOT_PERSISTED_FACT_FIELDS = frozenset({"id", "content", "score", "recency_status", "recency_date"})
 
 
+# Subjects that name a bucket, not an entity: many unrelated facts share them,
+# so the legacy same-subject supersession path never runs for them.
+_SENTINEL_SUBJECTS = frozenset({"lesson_learned", "daily_reflection", "reflection", "unknown"})
+
+# Legacy same-subject supersession judges at most this many nearest candidates.
+_SUBJECT_SUPERSESSION_CANDIDATES = 5
+
+
 # Migration 094: why a fact went inactive (heart.facts.deactivation_reason and
 # its CHECK constraint chk_facts_deactivation_reason).
 FactDeactivationReason = Literal["stale", "superseded", "merged", "removed", "user", "rollback"]
@@ -908,9 +916,18 @@ class FactManager:
                     routed_dupe_id = dupe.id
                 else:
                     band_action = await self._classify_dupe_in_band(dupe, dupe_similarity, input, check_contradictions)
-                    if band_action is None:
-                        # Confirm existing fact instead of creating new
-                        return await self._confirm_duplicate(dupe, input, session)
+                    if band_action is None or band_action == "duplicate":
+                        # Confirm existing fact instead of creating new. Its
+                        # metadata moves onto the existing fact only for a true
+                        # duplicate: >= 0.95, or judged DUPLICATE in the band.
+                        return await self._confirm_duplicate(
+                            dupe,
+                            input,
+                            session,
+                            copy_metadata=(
+                                dupe_similarity >= self.CONTRADICTION_SIMILARITY_MAX or band_action == "duplicate"
+                            ),
+                        )
                     # Routed: insert proceeds; exclude the dupe from the
                     # supersession + contradiction passes below so it is
                     # not re-classified or superseded against the verdict.
@@ -1201,9 +1218,7 @@ class FactManager:
             },
         )
 
-        detail = self._to_detail(fact)
-        if band_warning is not None:
-            detail.contradiction_warning = band_warning
+        contradiction_warning: ContradictionWarning | None = band_warning
 
         if check_contradictions and not is_exemplar and not new_fact_lost:
             # Contradiction detection: similarity 0.85-0.95 with different content
@@ -1225,9 +1240,10 @@ class FactManager:
                     safe_excludes,
                     session,
                     new_fact_id=fact.id,
+                    new_event_date=input.event_date,
                 )
                 if contradiction is not None:
-                    detail.contradiction_warning = contradiction
+                    contradiction_warning = contradiction
                     logger.info(
                         "Contradiction detected for fact %s: similar to %s (%.2f)",
                         fact.id,
@@ -1239,6 +1255,10 @@ class FactManager:
             if input.category:
                 await self._check_domain_threshold(input.category, session)
 
+        # Built after the contradiction scan, which can deactivate the new fact.
+        detail = self._to_detail(fact)
+        if contradiction_warning is not None:
+            detail.contradiction_warning = contradiction_warning
         return detail
 
     async def _find_contradiction(
@@ -1248,6 +1268,7 @@ class FactManager:
         exclude_ids: list[UUID],
         session: AsyncSession,
         new_fact_id: UUID | None = None,
+        new_event_date: date | None = None,
     ) -> ContradictionWarning | None:
         """Detect potential contradictions: similar embedding (0.85-0.95) but different content.
 
@@ -1257,6 +1278,9 @@ class FactManager:
 
         F027: When LLM is available, classifies the pair to route to the
         correct action (UNRELATED/REFINEMENT/UPDATE/CONTRADICTION).
+
+        F075: a fact dated differently from ``new_event_date`` is a separate
+        event, never a candidate (the same guard _supersede_by_subject has).
         """
         if not embedding:
             return None
@@ -1268,6 +1292,7 @@ class FactManager:
             "agent_id": self.agent_id,
             "sim_min": self.CONTRADICTION_SIMILARITY_MIN,
             "sim_max": self.CONTRADICTION_SIMILARITY_MAX,
+            "new_event_date": new_event_date,
         }
 
         exclude_clause = ""
@@ -1298,6 +1323,8 @@ class FactManager:
               AND source IS DISTINCT FROM 'exemplar_extractor'
               AND 1 - (embedding <=> CAST(:embedding AS vector)) > :sim_min
               AND 1 - (embedding <=> CAST(:embedding AS vector)) <= :sim_max
+              AND (CAST(:new_event_date AS date) IS NULL OR event_date IS NULL
+                   OR event_date = CAST(:new_event_date AS date))
               {exclude_clause}
             ORDER BY embedding <=> CAST(:embedding AS vector)
             LIMIT 1
@@ -1366,12 +1393,11 @@ class FactManager:
                             session,
                         )
                         return None
-                    else:
-                        # Old is current — deactivate new fact
-                        new_fact = await self._get_fact_orm(new_fact_id, session)
-                        if new_fact:
-                            mark_fact_inactive(new_fact, "superseded")
+                    if current == "old":
+                        # Old is current: the new fact loses, with lineage.
+                        await self.apply_supersession(row.id, new_fact_id, session)
                         return None
+                    # Unknown direction: fall through to the plain warning.
 
                 if relation == "UPDATE" and conf < 0.8:
                     # Low confidence UPDATE — fall through to ContradictionWarning
@@ -1462,6 +1488,12 @@ class FactManager:
         default 0.80–0.95) with LLM available, use classifier to disambiguate
         UNRELATED/REFINEMENT/UPDATE before superseding.
 
+        Fail closed in that range: no LLM, a spent key-classifier budget, a
+        failed or malformed classification, confidence below 0.5, an UPDATE
+        below 0.8 or an unknown relation all keep both facts. Only the
+        ``_SUBJECT_SUPERSESSION_CANDIDATES`` nearest same-subject facts are
+        judged, and bucket subjects (``_SENTINEL_SUBJECTS``) are skipped.
+
         F075: when ``new_event_date`` is non-NULL and a candidate's
         ``event_date`` differs, skip supersession — same subject on different
         dates is a separate event (e.g., "API key obtained March 10" vs
@@ -1483,21 +1515,32 @@ class FactManager:
         call is appended to it, so the caller can exclude it from a
         subsequent contradiction scan in the same learn.
         """
-        result = await session.execute(
-            select(Fact).where(
-                Fact.agent_id == self.agent_id,
-                Fact.active == True,  # noqa: E712
-                func.lower(Fact.subject) == subject.lower(),
-                Fact.id != new_fact_id,
-                # Codex r13 (F086): exemplar rows share subject=utterance[:200]
-                # across labels by design — they must NEVER be a supersession
-                # CANDIDATE (the symmetric half of FIX 1, which gated exemplar
-                # INPUTS out). is_distinct_from keeps NULL-source normals in.
-                Fact.source.is_distinct_from("exemplar_extractor"),
-            )
-        )
+        if subject.strip().lower() in _SENTINEL_SUBJECTS:
+            return False
         excluded = set(exclude_ids or [])
         _supersession_threshold = self._settings.fact_supersession_threshold if self._settings else 0.80
+        distance = Fact.embedding.cosine_distance(embedding)
+        conditions = [
+            Fact.agent_id == self.agent_id,
+            Fact.active == True,  # noqa: E712
+            func.lower(Fact.subject) == subject.lower(),
+            Fact.id != new_fact_id,
+            # Codex r13 (F086): exemplar rows share subject=utterance[:200]
+            # across labels by design — they must NEVER be a supersession
+            # CANDIDATE (the symmetric half of FIX 1, which gated exemplar
+            # INPUTS out). is_distinct_from keeps NULL-source normals in.
+            Fact.source.is_distinct_from("exemplar_extractor"),
+            distance < 1 - _supersession_threshold,
+        ]
+        if excluded:
+            conditions.append(Fact.id.notin_(excluded))
+        if new_event_date is not None:
+            conditions.append(or_(Fact.event_date.is_(None), Fact.event_date == new_event_date))
+        # Only the nearest few candidates, served by the HNSW index.
+        await set_local_ef_search(session, 100)
+        result = await session.execute(
+            select(Fact).where(*conditions).order_by(distance).limit(_SUBJECT_SUPERSESSION_CANDIDATES)
+        )
         for old in result.scalars().all():
             # Audit S11: a fact the F377 tiebreaker (or the S3 band
             # classifier) just ruled DISTINCT must not be superseded —
@@ -1511,68 +1554,82 @@ class FactManager:
             if old.embedding is not None:
                 similarity = self._cosine_similarity(embedding, old.embedding)
                 if similarity > _supersession_threshold:
-                    # F027: LLM disambiguation for ambiguous range
-                    if similarity <= 0.95 and self._llm is not None and new_content:
+                    # F027: LLM disambiguation for ambiguous range. Fail
+                    # closed: without a confident verdict both facts stay.
+                    if similarity <= 0.95:
+                        if self._llm is None or not new_content or not self._key_budget_ok():
+                            continue
                         classification = await self._classify_fact_pair(old.content, new_content)
-                        if classification:
-                            relation = classification.get("relation", "")
-                            current = classification.get("current_fact", "")
-                            if relation == "UNRELATED":
-                                continue  # Skip — not actually related
-                            if relation == "REFINEMENT":
-                                await self._create_graph_edge(
-                                    new_fact_id,
-                                    old.id,
-                                    "fact",
-                                    "fact",
-                                    "refines",
-                                    0.8,
-                                    session,
-                                )
-                                continue  # Keep both
-                            if relation == "UPDATE" and current == "old":
-                                # Old is current — deactivate new fact
-                                new_fact = await self._get_fact_orm(new_fact_id, session)
-                                if new_fact:
-                                    mark_fact_inactive(new_fact, "superseded")
-                                # Codex r11 FIX 2: new fact is now inactive —
-                                # stop scanning remaining candidates (an
-                                # inactive fact must not go on to supersede
-                                # others) and signal the loss to _learn.
-                                return True
-                            if relation == "CONTRADICTION":
-                                # Gate-1 D1 (codex r10): the legacy path DOES
-                                # have ordering data whenever it's actually
-                                # present on the two rows (same-episode
-                                # source_ordinal, or differing learned_at) —
-                                # _pick_contradiction_winner resolves by
-                                # statement order exactly like the keyed
-                                # paths do. This is the ONLY write-time
-                                # resolver when R2 is off (the prod default),
-                                # so it must not discard ordering data it
-                                # has. KEEP-BOTH+flag only when neither fact
-                                # carries an ordering signal (the true
-                                # unordered case — _pick_contradiction_winner
-                                # returns None). The old fall-through silently
-                                # superseded with a wrong-type 'supersedes'
-                                # edge; this uses the same uniform primitive
-                                # (apply_supersession) the keyed paths use.
-                                new_fact = await self._get_fact_orm(new_fact_id, session)
-                                if new_fact is not None:
-                                    winner = self._pick_contradiction_winner(old, new_fact)
-                                    if winner is None:
-                                        await self._flag_contradiction_pair(old, new_fact, session)
-                                        if keep_both_ids is not None:
-                                            keep_both_ids.append(old.id)
-                                    else:
-                                        loser = old if winner is new_fact else new_fact
-                                        await self.apply_supersession(winner.id, loser.id, session)
-                                        if loser is new_fact:
-                                            # Codex r11 FIX 2: new fact lost —
-                                            # stop scanning, signal the loss.
-                                            return True
-                                continue  # keep scanning remaining candidates
-                            # UPDATE + current=="new" or unknown → fall through to supersede
+                        if not classification:
+                            continue
+                        relation = classification.get("relation", "")
+                        current = classification.get("current_fact", "")
+                        try:
+                            conf = float(classification.get("confidence", 0.0))
+                        except (TypeError, ValueError):
+                            continue
+                        if conf < 0.5:
+                            continue
+                        if relation == "UNRELATED":
+                            continue  # Skip — not actually related
+                        if relation == "REFINEMENT":
+                            await self._create_graph_edge(
+                                new_fact_id,
+                                old.id,
+                                "fact",
+                                "fact",
+                                "refines",
+                                0.8,
+                                session,
+                            )
+                            continue  # Keep both
+                        if relation == "UPDATE":
+                            if conf < 0.8 or current not in ("new", "old"):
+                                continue
+                            if current == "old":
+                                # Old is current: the new fact loses, with lineage.
+                                if await self.apply_supersession(old.id, new_fact_id, session):
+                                    # Codex r11 FIX 2: new fact is now inactive —
+                                    # stop scanning remaining candidates (an
+                                    # inactive fact must not go on to supersede
+                                    # others) and signal the loss to _learn.
+                                    return True
+                                continue
+                            # UPDATE + current=="new" falls through to supersede
+                        elif relation == "CONTRADICTION":
+                            # Gate-1 D1 (codex r10): the legacy path DOES
+                            # have ordering data whenever it's actually
+                            # present on the two rows (same-episode
+                            # source_ordinal, or differing learned_at) —
+                            # _pick_contradiction_winner resolves by
+                            # statement order exactly like the keyed
+                            # paths do. This is the ONLY write-time
+                            # resolver when R2 is off (the prod default),
+                            # so it must not discard ordering data it
+                            # has. KEEP-BOTH+flag only when neither fact
+                            # carries an ordering signal (the true
+                            # unordered case — _pick_contradiction_winner
+                            # returns None). The old fall-through silently
+                            # superseded with a wrong-type 'supersedes'
+                            # edge; this uses the same uniform primitive
+                            # (apply_supersession) the keyed paths use.
+                            new_fact = await self._get_fact_orm(new_fact_id, session)
+                            if new_fact is not None:
+                                winner = self._pick_contradiction_winner(old, new_fact)
+                                if winner is None:
+                                    await self._flag_contradiction_pair(old, new_fact, session)
+                                    if keep_both_ids is not None:
+                                        keep_both_ids.append(old.id)
+                                else:
+                                    loser = old if winner is new_fact else new_fact
+                                    await self.apply_supersession(winner.id, loser.id, session)
+                                    if loser is new_fact:
+                                        # Codex r11 FIX 2: new fact lost —
+                                        # stop scanning, signal the loss.
+                                        return True
+                            continue  # keep scanning remaining candidates
+                        else:
+                            continue  # unknown relation: keep both
 
                     mark_fact_inactive(old, "superseded")
                     old.superseded_by = new_fact_id
@@ -1625,11 +1682,13 @@ class FactManager:
         confirm swallows the band — conflicting facts reinforce the stale one.
 
         Returns a band action ("unrelated" | "refines" | "supersede_old" |
-        "contradiction") when the new fact should be INSERTED, or None when
-        the dupe should be confirmed (similarity >= 0.95 true duplicate,
-        sub-band paraphrase, UPDATE where the old fact is current,
-        low-confidence verdict, no LLM, or classifier failure — fail-open to
-        dedup, mirroring the F377 tiebreaker contract).
+        "contradiction") when the new fact should be INSERTED, "duplicate"
+        when a sub-band REFINEMENT is judged a paraphrase by the F377
+        tiebreaker, or None when the dupe should be confirmed (similarity >=
+        0.95 true duplicate, UPDATE where the old fact is current,
+        low-confidence verdict, no LLM, spent budget or classifier failure).
+        The caller confirms on "duplicate" and None, but hands the new fact's
+        metadata to the dupe only on "duplicate" or similarity >= 0.95.
         """
         # 1a (2026-06-13 audit): the caller (_find_duplicate) only returns hits
         # >= fact_native_cosine_threshold, so the lower bound is already
@@ -1665,18 +1724,29 @@ class FactManager:
             return None
         # codex P1 (PR #519, round 2): in the EXTENDED range [threshold, 0.85) —
         # below the true contradiction band — the classifier has no DUPLICATE
-        # verdict, so routing UNRELATED/REFINEMENT would INSERT a paraphrase and
+        # verdict, so routing every REFINEMENT would INSERT a paraphrase and
         # defeat the operator's aggressive low-threshold dedup. But a real
         # state-change MUST still act: a CONTRADICTION (insert+edge+warn) and an
         # UPDATE that supersedes the stale fact ("API returns 200" -> "500", which
         # the classifier maps to UPDATE/current=new) — otherwise the current-state
-        # change is swallowed onto the stale fact. Only UNRELATED/REFINEMENT/
-        # UPDATE-old confirm (dedup). Full routing applies inside [0.85, 0.95).
+        # change is swallowed onto the stale fact. Full routing applies inside
+        # [0.85, 0.95). Below it, a confident UNRELATED is not a paraphrase:
+        # insert. A REFINEMENT gets the binary F377 tiebreaker, which does have
+        # a DUPLICATE verdict; "duplicate" tells the caller to confirm and hand
+        # the metadata over. Everything else confirms without it.
         if similarity < self.CONTRADICTION_SIMILARITY_MIN:
             if relation == "CONTRADICTION":
                 return "contradiction"
             if relation == "UPDATE" and current == "new" and conf >= 0.8:
                 return "supersede_old"
+            if relation == "UNRELATED":
+                return "unrelated"
+            if relation == "REFINEMENT":
+                distinct = await self.is_distinct_fact(dupe.content, input.content)
+                if distinct is True:
+                    return "refines"
+                if distinct is False:
+                    return "duplicate"
             return None
         if relation == "UNRELATED":
             return "unrelated"
@@ -1754,6 +1824,8 @@ class FactManager:
         dupe: Fact,
         input: FactInput,
         session: AsyncSession,
+        *,
+        copy_metadata: bool = True,
     ) -> FactDetail:
         """Confirm an existing fact as the dedup outcome of a new candidate.
 
@@ -1764,7 +1836,13 @@ class FactManager:
 
         codex r11 — dedup-confirm must not discard adjudication metadata;
         fill-if-empty only (never overwrite existing non-NULL values).
+
+        ``copy_metadata=False`` (an in-band hit nobody judged a duplicate)
+        only increments ``confirmation_count``: the candidate's date, keys,
+        entity rows, ordinal and override flag may describe a different fact.
         """
+        if not copy_metadata:
+            return await self._confirm(dupe.id, session)
         if input.event_date is not None and dupe.event_date is None:
             dupe.event_date = input.event_date
             dupe.event_date_classified_at = input.event_date_classified_at or datetime.now(UTC)
@@ -2264,7 +2342,9 @@ class FactManager:
 
         Returns ``True`` if the supersession was applied, ``False`` if skipped
         due to the clobber guard (loser not found, or already superseded by a
-        prior path so the chain would be overwritten).
+        prior path so the chain would be overwritten) or because the winner
+        is gone, inactive or itself superseded (the chain would point at a
+        fact nobody can read).
 
         Both IDs must belong to ``self.agent_id``; cross-agent IDs are not
         validated by this primitive and will return ``False`` silently if the
@@ -2279,6 +2359,11 @@ class FactManager:
                 loser_id,
                 loser.superseded_by,
             )
+            return False
+        winner = await self._get_fact_orm(winner_id, session)
+        # active IS NULL counts as active (server default), as in resolve_key_conflict_pair.
+        if winner is None or winner.active is False or winner.superseded_by is not None:
+            logger.debug("apply_supersession: skip %s — winner %s is not current", loser_id, winner_id)
             return False
         loser.superseded_by = winner_id
         mark_fact_inactive(loser, reason)
@@ -3993,6 +4078,18 @@ class FactManager:
             async with self.db.session() as session:
                 return await self._find_contradiction_candidates(limit, session)
         return await self._find_contradiction_candidates(limit, session)
+
+    async def current_pair(self, id1: UUID, id2: UUID) -> list[Fact] | None:
+        """F031: re-read a candidate pair just before it is judged.
+
+        Returns both rows, or None when either is gone, inactive or already
+        superseded (an earlier pair in the same batch may have resolved it).
+        """
+        async with self.db.session() as session:
+            rows = [await self._get_fact_orm(fid, session) for fid in (id1, id2)]
+        if any(r is None or r.active is False or r.superseded_by is not None for r in rows):
+            return None
+        return rows
 
     async def _find_contradiction_candidates(
         self,

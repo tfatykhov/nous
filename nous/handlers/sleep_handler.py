@@ -1106,10 +1106,16 @@ class SleepHandler:
 
             # Check similarity threshold before superseding (review fix P0-1)
             best_match = results[0]
-            if hasattr(best_match, "score") and best_match.score is not None and best_match.score < 0.80:
+            low_score = hasattr(best_match, "score") and best_match.score is not None and best_match.score < 0.80
+            # A tier-1 (person/preference/rule) fact is never replaced by an
+            # UPDATES: line, whose category may differ; learn it beside it.
+            tier1_match = getattr(best_match, "category", None) in TIER1_FACT_CATEGORIES
+            if low_score or tier1_match:
                 logger.debug(
-                    "UPDATES: best match score %.2f below threshold 0.80, learning as new fact",
+                    "UPDATES: best match %s (score %s, category %s), learning as new fact",
+                    best_match.id,
                     best_match.score,
+                    best_match.category,
                 )
                 result = await self._heart.learn(
                     FactInput(
@@ -1122,7 +1128,8 @@ class SleepHandler:
                 )
                 if not isinstance(result, FactRejected):
                     sleep_stats["facts_created"] += 1
-                    self._record_reflect_learn(result, referenced_content, fact["content"], "UPDATES: low score")
+                    rationale = "UPDATES: low score" if low_score else "UPDATES: tier-1 match kept"
+                    self._record_reflect_learn(result, referenced_content, fact["content"], rationale)
                     return True
                 return False
 
@@ -1197,6 +1204,13 @@ class SleepHandler:
                 if self._interrupted:
                     break
 
+                # An earlier pair in this batch may already have resolved one
+                # of these rows: re-read both before spending a judgement.
+                current_rows = await self._heart.facts.current_pair(pair["fact1_id"], pair["fact2_id"])
+                if current_rows is None:
+                    continue
+                tier1_pair = any(row.category in TIER1_FACT_CATEGORIES for row in current_rows)
+
                 prompt = _CONTRADICTION_RESOLUTION_PROMPT.format(
                     date_a=_fmt_ts(pair["date1"]),
                     date_b=_fmt_ts(pair["date2"]),
@@ -1257,7 +1271,13 @@ class SleepHandler:
                         fact1_id,
                         fact2_id,
                     )
-                if downgraded_by_floor or downgraded_due_to_missing_content:
+                # A merged fact would launder a tier-1 (profile) fact into a new
+                # row this phase writes without admission (#592); SUPERSEDE/
+                # REMOVE stay allowed.
+                downgraded_tier1 = action == "MERGE" and tier1_pair
+                if downgraded_tier1:
+                    logger.info("F031 resolve: MERGE of a tier-1 fact %s/%s — keeping both", fact1_id, fact2_id)
+                if downgraded_by_floor or downgraded_due_to_missing_content or downgraded_tier1:
                     action = "KEEP_BOTH"
 
                 # F031 persistence — log every resolution decision so a
@@ -1276,6 +1296,7 @@ class SleepHandler:
                                 "confidence": confidence,
                                 "downgraded_by_floor": downgraded_by_floor,
                                 "downgraded_due_to_missing_content": downgraded_due_to_missing_content,
+                                "downgraded_tier1": downgraded_tier1,
                                 "merged_content_present": bool(merged_content),
                                 "fact1_id": str(fact1_id),
                                 "fact2_id": str(fact2_id),
@@ -1323,42 +1344,69 @@ class SleepHandler:
                         # case); but keep a defensive check just in case.
                         if merged_content:
                             try:
-                                merged_detail = await self._heart.learn(
-                                    FactInput(
-                                        subject=pair.get("subject", None),
-                                        content=merged_content,
-                                        source="contradiction_resolution",
-                                        confidence=0.8,
-                                        category=pair.get("category", None),
-                                    ),
-                                    # 1c: exclude the still-active sources so
-                                    # Leg-2 dedup can't confirm the merged
-                                    # restatement AS a source and discard the
-                                    # merged content (MERGE-collapse).
-                                    exclude_ids=[fact1_id, fact2_id],
-                                )
-                                # PR #411 follow-up (Codex P1): F031
-                                # MERGE used to discard the learn()
-                                # result and call deactivate_fact() on
-                                # both originals — leaving them
-                                # active=False with NO superseded_by
-                                # link. That orphaned every successful
-                                # MERGE's source facts (chain broken,
-                                # recoverable only via manual SQL).
-                                # Mirror F027's pattern: capture the
-                                # merged ID, set superseded_by AND
-                                # active=False on both originals in a
-                                # single transaction.
-                                if isinstance(merged_detail, FactRejected):
-                                    # contradiction_resolution is in
-                                    # bypass_sources so this should not
-                                    # happen, but defend in depth.
-                                    logger.warning(
-                                        "F031 MERGE: heart.learn rejected the merged fact unexpectedly: %s",
-                                        merged_detail.explanation,
+                                # K-7: one transaction. heart.learn does not
+                                # commit an injected session, so the merged
+                                # fact and the deactivated sources land
+                                # together or not at all.
+                                async with self._heart.db.session() as session:
+                                    merged_detail = await self._heart.learn(
+                                        FactInput(
+                                            subject=pair.get("subject", None),
+                                            content=merged_content,
+                                            source="contradiction_resolution",
+                                            confidence=0.8,
+                                            category=pair.get("category", None),
+                                        ),
+                                        session=session,
+                                        # 1c: exclude the still-active sources so
+                                        # Leg-2 dedup can't confirm the merged
+                                        # restatement AS a source and discard the
+                                        # merged content (MERGE-collapse).
+                                        exclude_ids=[fact1_id, fact2_id],
                                     )
-                                else:
-                                    async with self._heart.db.session() as session:
+                                    # PR #411 follow-up (Codex P1): F031
+                                    # MERGE used to discard the learn()
+                                    # result and call deactivate_fact() on
+                                    # both originals — leaving them
+                                    # active=False with NO superseded_by
+                                    # link. That orphaned every successful
+                                    # MERGE's source facts (chain broken,
+                                    # recoverable only via manual SQL).
+                                    # Mirror F027's pattern: capture the
+                                    # merged ID, set superseded_by AND
+                                    # active=False on both originals in a
+                                    # single transaction.
+                                    if isinstance(merged_detail, FactRejected):
+                                        # contradiction_resolution is in
+                                        # bypass_sources so this should not
+                                        # happen, but defend in depth.
+                                        logger.warning(
+                                            "F031 MERGE: heart.learn rejected the merged fact unexpectedly: %s",
+                                            merged_detail.explanation,
+                                        )
+                                    elif merged_detail.confirmation_count >= 1:
+                                        # K-2: dedup confirmed a THIRD fact (a
+                                        # fresh insert has 0). Superseding the
+                                        # sources by it would drop what they
+                                        # say: abort, keep both sources.
+                                        await session.rollback()
+                                        self._emit_action_event(
+                                            "f031_merge",
+                                            {
+                                                "fact1_id": str(fact1_id),
+                                                "fact2_id": str(fact2_id),
+                                                "confirmed_fact_id": str(merged_detail.id),
+                                                "merged_content": merged_content[:500],
+                                                "outcome": "merge_confirmed_third_fact",
+                                            },
+                                        )
+                                        logger.info(
+                                            "F031 MERGE: merged content confirmed %s — keeping %s and %s",
+                                            merged_detail.id,
+                                            fact1_id,
+                                            fact2_id,
+                                        )
+                                    else:
                                         # codex P2 round 9: the merged
                                         # replacement fact was created from a
                                         # bare FactInput (subject/content/
@@ -1426,15 +1474,15 @@ class SleepHandler:
                                         # (this session's commit is the only place
                                         # that knows those writes just landed).
                                         self._heart.facts.invalidate_entity_vocab()
-                                    sleep_stats["contradictions_resolved"] += 1
-                                    sleep_stats["facts_created"] += 1
-                                    logger.info(
-                                        "F031 resolve: MERGE — combined %s + %s into %s (%.2f confidence)",
-                                        fact1_id,
-                                        fact2_id,
-                                        merged_detail.id,
-                                        confidence,
-                                    )
+                                        sleep_stats["contradictions_resolved"] += 1
+                                        sleep_stats["facts_created"] += 1
+                                        logger.info(
+                                            "F031 resolve: MERGE — combined %s + %s into %s (%.2f confidence)",
+                                            fact1_id,
+                                            fact2_id,
+                                            merged_detail.id,
+                                            confidence,
+                                        )
                             except Exception:
                                 logger.warning(
                                     "MERGE partially failed for %s/%s",
@@ -1780,6 +1828,8 @@ class SleepHandler:
                 #     audit doesn't conflate "LLM said no on purpose"
                 #     with "LLM responded incoherently"
                 #   rejected_by_admission: heart.learn returned FactRejected
+                #   merge_confirmed_third_fact: the merged content confirmed an
+                #     existing non-member fact; nothing written
                 #   merged: full success (originals deactivated, new fact stored)
                 merged_fact_id: str | None = None
 
@@ -1814,39 +1864,49 @@ class SleepHandler:
                     )
                     continue
 
-                # Create merged fact. 1c: exclude the still-active cluster
-                # members so Leg-2 dedup can't confirm the merged restatement
-                # AS one of them and discard the merged content.
-                merged_detail = await self._heart.learn(
-                    FactInput(
-                        subject=subject,
-                        content=merge_result["merged_content"],
-                        source="cluster_consolidation",
-                        confidence=float(merge_result.get("confidence", 0.8)),
-                        category=facts[0].category,
-                    ),
-                    exclude_ids=[f.id for f in facts],
-                )
-
-                if isinstance(merged_detail, FactRejected):
-                    merge_outcome = "rejected_by_admission"
-                    self._emit_action_event(
-                        "f027_cluster_merge",
-                        {
-                            "subject": str(subject)[:200],
-                            "source_fact_ids": [str(f.id) for f in facts],
-                            "source_count": len(facts),
-                            "merged_content": str(merge_result.get("merged_content", ""))[:500],
-                            "merged_fact_id": None,
-                            "confidence": float(merge_result.get("confidence", 0.8)),
-                            "refuse_reason": None,
-                            "outcome": merge_outcome,
-                        },
-                    )
-                    continue
-
-                # Deactivate originals
+                # Create the merged fact and deactivate the originals in ONE
+                # transaction (K-7: heart.learn does not commit an injected
+                # session), so a failure leaves no orphan merged fact behind.
                 async with self._heart.db.session() as session:
+                    # 1c: exclude the still-active cluster members so Leg-2
+                    # dedup can't confirm the merged restatement AS one of
+                    # them and discard the merged content.
+                    merged_detail = await self._heart.learn(
+                        FactInput(
+                            subject=subject,
+                            content=merge_result["merged_content"],
+                            source="cluster_consolidation",
+                            confidence=float(merge_result.get("confidence", 0.8)),
+                            category=facts[0].category,
+                        ),
+                        session=session,
+                        exclude_ids=[f.id for f in facts],
+                    )
+
+                    # K-2: a confirmed dupe (confirmation_count >= 1, a fresh
+                    # insert has 0) is a THIRD fact; superseding the members
+                    # by it would drop what they say. Abort, keep them.
+                    rejected = isinstance(merged_detail, FactRejected)
+                    if rejected or merged_detail.confirmation_count >= 1:
+                        if not rejected:
+                            await session.rollback()
+                        merge_outcome = "rejected_by_admission" if rejected else "merge_confirmed_third_fact"
+                        self._emit_action_event(
+                            "f027_cluster_merge",
+                            {
+                                "subject": str(subject)[:200],
+                                "source_fact_ids": [str(f.id) for f in facts],
+                                "source_count": len(facts),
+                                "merged_content": str(merge_result.get("merged_content", ""))[:500],
+                                "merged_fact_id": None,
+                                "confirmed_fact_id": None if rejected else str(merged_detail.id),
+                                "confidence": float(merge_result.get("confidence", 0.8)),
+                                "refuse_reason": None,
+                                "outcome": merge_outcome,
+                            },
+                        )
+                        continue
+
                     # codex P2 round 9: mirrors the F031 fix — copy
                     # subject_key/attribute_key + the union of entity_keys
                     # rows from the cluster members onto the merged

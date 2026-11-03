@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -517,15 +517,22 @@ class TestFactSupersessionThresholdConfigurable:
 
     @pytest.mark.asyncio
     async def test_default_threshold_triggers_at_0_82(self):
-        """Default threshold=0.80 → similarity 0.82 triggers supersession."""
+        """Default threshold=0.80 → similarity 0.82 triggers supersession.
+
+        PR-D G-2: inside the band only a confident UPDATE supersedes, so the
+        classifier is stubbed to give one; the threshold is what is tested."""
         fm = self._fm(0.80)
+        fm._llm = MagicMock()
+        fm._classify_fact_pair = AsyncMock(
+            return_value={"relation": "UPDATE", "current_fact": "new", "confidence": 0.9}
+        )
         anchor = [1.0, 0.0, 0.0]
         candidate = self._embedding_at_similarity(0.82)
         fact = _orm_fact_t7(content="old fact about subject", embedding=list(anchor))
         session = _ScriptedSessionT7([_ScalarsResultT7([fact])])
         new_id = uuid4()
 
-        await fm._supersede_by_subject(new_id, "subj", candidate, session)
+        await fm._supersede_by_subject(new_id, "subj", candidate, session, new_content="new fact about subject")
 
         assert fact.active is False
         assert fact.superseded_by == new_id
@@ -534,13 +541,18 @@ class TestFactSupersessionThresholdConfigurable:
     async def test_higher_threshold_skips_supersession_at_0_82(self):
         """With threshold=0.90 → similarity 0.82 does NOT trigger supersession."""
         fm = self._fm(0.90)
+        # Same confident classifier as above, so only the threshold differs.
+        fm._llm = MagicMock()
+        fm._classify_fact_pair = AsyncMock(
+            return_value={"relation": "UPDATE", "current_fact": "new", "confidence": 0.9}
+        )
         anchor = [1.0, 0.0, 0.0]
         candidate = self._embedding_at_similarity(0.82)
         fact = _orm_fact_t7(content="old fact about subject", embedding=list(anchor))
         session = _ScriptedSessionT7([_ScalarsResultT7([fact])])
         new_id = uuid4()
 
-        await fm._supersede_by_subject(new_id, "subj", candidate, session)
+        await fm._supersede_by_subject(new_id, "subj", candidate, session, new_content="new fact about subject")
 
         assert fact.active is True, "Similarity 0.82 < threshold 0.90 should NOT supersede"
         assert fact.superseded_by is None

@@ -610,6 +610,7 @@ class TestPhaseClusterConsolidation:
         # Mock learn to return a FactDetail-like object
         merged_detail = MagicMock()
         merged_detail.id = uuid4()
+        merged_detail.confirmation_count = 0  # PR-D K-2: a fresh insert, not a confirmed third fact
         heart.learn = AsyncMock(return_value=merged_detail)
         # 2026-06-13 audit: cluster consolidation now writes the supersedes edge.
         heart.link_facts = AsyncMock()

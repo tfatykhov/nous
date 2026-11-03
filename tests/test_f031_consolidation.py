@@ -295,7 +295,9 @@ class TestOrientContext:
         existing_fact = MagicMock()
         existing_fact.id = uuid4()
         existing_fact.content = "Tim's timezone is EST"
-        existing_fact.category = "person"
+        # PR-D K-10: a tier-1 match is learned beside, never superseded
+        # (tests/test_fact_writes_fail_closed.py); this test covers the rest.
+        existing_fact.category = "technical"
         existing_fact.subject = "Tim timezone"
         existing_fact.score = 0.95  # Above threshold
 
@@ -425,6 +427,7 @@ class TestContradictionResolution:
         heart.search_facts = AsyncMock(return_value=[])
         heart.facts = MagicMock()
         heart.facts.apply_supersession = AsyncMock(return_value=True)
+        heart.facts.current_pair = AsyncMock()  # PR-D K-3: the pair is still current
         mock_session = MagicMock()
         mock_session.commit = AsyncMock()
         cm = MagicMock()
@@ -506,6 +509,7 @@ class TestContradictionResolution:
         }])
         merged_detail = MagicMock()
         merged_detail.id = merged_id
+        merged_detail.confirmation_count = 0  # PR-D K-2: a fresh insert, not a confirmed third fact
         heart.learn = AsyncMock(return_value=merged_detail)
         heart.deactivate_fact = AsyncMock()
         heart.search_facts = AsyncMock(return_value=[])
@@ -583,6 +587,7 @@ class TestContradictionResolution:
         }])
         merged_detail = MagicMock()
         merged_detail.id = merged_id
+        merged_detail.confirmation_count = 0  # PR-D K-2: a fresh insert, not a confirmed third fact
         heart.learn = AsyncMock(return_value=merged_detail)
         heart.deactivate_fact = AsyncMock()
         heart.search_facts = AsyncMock(return_value=[])
