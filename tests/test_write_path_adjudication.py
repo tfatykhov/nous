@@ -736,6 +736,54 @@ async def test_technical_fact_dedup_unchanged(heart, session):
 
 
 @pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_profile_fact_novelty_ignores_technical_twin(heart, session, monkeypatch):
+    """Admission's novelty term for a profile fact is measured against profile
+    facts only. An identical technical twin would put novelty at 0, and a
+    summarizer candidate (confidence = ROUGE-L against the whole transcript,
+    small on a real episode) then scores under the 0.60 threshold, so the
+    profile fact that survived dedup is lost at admission."""
+    from nous.heart.admission import AdmissionConfig, AdmissionController
+    from nous.heart.schemas import FactRejected
+
+    monkeypatch.setattr(
+        heart.facts,
+        "_admission_controller",
+        AdmissionController(config=AdmissionConfig(shadow_mode=False, utility_llm_enabled=False, threshold=0.60)),
+    )
+    content = _same_statement()
+    transcript = "\n\n".join(
+        [f"User: {content}"]
+        + [
+            f"Assistant: Noted. Item {i} of the plan covers the staging cluster, the release train and the "
+            f"on-call rota, and I will keep it in mind for the rest of this conversation."
+            for i in range(12)
+        ]
+    )
+    technical, preference = await _learn_twice(
+        heart,
+        session,
+        FactInput(
+            content=content,
+            subject="units",
+            subject_key="tim",
+            attribute_key="unit preference",
+            category="technical",
+            source="enumerative_extractor",
+        ),
+        FactInput(
+            content=content,
+            subject="Tim",
+            category="preference",
+            source="episode_summarizer",
+            confidence=0.8,
+            source_text=transcript,
+        ),
+    )
+    assert not isinstance(preference, FactRejected), preference.explanation
+    assert preference.id != technical.id
+
+
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
 async def test_profile_candidate_survives_both_dedup_legs(heart):
@@ -2706,9 +2754,9 @@ class TestGate1SameSlotDedupRouting:
         captured_excludes: list[list] = []
         original_find_max = heart.facts._find_max_similarity
 
-        async def _capturing_find_max_similarity(embedding, exclude_ids, session):
+        async def _capturing_find_max_similarity(embedding, exclude_ids, session, **kwargs):
             captured_excludes.append(list(exclude_ids))
-            return await original_find_max(embedding, exclude_ids, session)
+            return await original_find_max(embedding, exclude_ids, session, **kwargs)
 
         monkeypatch.setattr(heart.facts, "_find_max_similarity", _capturing_find_max_similarity)
 
@@ -2774,9 +2822,9 @@ class TestGate1SameSlotDedupRouting:
         captured_excludes: list[list] = []
         original_find_max = heart.facts._find_max_similarity
 
-        async def _capturing_find_max_similarity(embedding, exclude_ids, session):
+        async def _capturing_find_max_similarity(embedding, exclude_ids, session, **kwargs):
             captured_excludes.append(list(exclude_ids))
-            return await original_find_max(embedding, exclude_ids, session)
+            return await original_find_max(embedding, exclude_ids, session, **kwargs)
 
         monkeypatch.setattr(heart.facts, "_find_max_similarity", _capturing_find_max_similarity)
 
@@ -2868,9 +2916,9 @@ class TestGate1SameSlotDedupRouting:
         captured_excludes: list[list] = []
         original_find_max = heart.facts._find_max_similarity
 
-        async def _capturing_find_max_similarity(embedding, exclude_ids, session):
+        async def _capturing_find_max_similarity(embedding, exclude_ids, session, **kwargs):
             captured_excludes.append(list(exclude_ids))
-            return await original_find_max(embedding, exclude_ids, session)
+            return await original_find_max(embedding, exclude_ids, session, **kwargs)
 
         monkeypatch.setattr(heart.facts, "_find_max_similarity", _capturing_find_max_similarity)
 

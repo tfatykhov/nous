@@ -993,7 +993,13 @@ class FactManager:
                 admission_excludes = list({*exclude_ids, routed_dupe_id, *same_slot_ids, *probed_ids})
             else:
                 admission_excludes = exclude_ids
-            max_sim = await self._find_max_similarity(embedding, admission_excludes, session) if embedding else None
+            max_sim = (
+                await self._find_max_similarity(
+                    embedding, admission_excludes, session, tier1_only=input.category in _TIER1_CATEGORIES
+                )
+                if embedding
+                else None
+            )
             source_text = await self._get_source_text(input, session)
 
             admission_result = await self._admission_controller.score(
@@ -2162,6 +2168,7 @@ class FactManager:
         embedding: list[float],
         exclude_ids: list[UUID],
         session: AsyncSession,
+        tier1_only: bool = False,
     ) -> float | None:
         """Find highest cosine similarity to any existing active fact.
 
@@ -2173,6 +2180,11 @@ class FactManager:
         isolation touchpoint; exemplar inputs themselves bypass admission
         scoring, so the exclusion only ever changes a NON-exemplar input's
         novelty. Returns None if no facts exist or no embedding available.
+
+        ``tier1_only`` (a person/preference/rule input) scans tier-1 facts
+        only, matching ``_find_duplicate``: a profile fact that dedup kept
+        apart from an identical technical fact must not then be rejected
+        because that technical fact zeroes its novelty.
         """
         if not embedding:
             return None
@@ -2186,6 +2198,10 @@ class FactManager:
             exclude_clause = f"AND id NOT IN ({placeholders})"
             for i, eid in enumerate(exclude_ids):
                 params[f"excl_{i}"] = eid
+        category_clause = ""
+        if tier1_only:
+            category_clause = "AND category = ANY(CAST(:tier1 AS text[]))"
+            params["tier1"] = list(_TIER1_CATEGORIES)
 
         # Codex r19 (F086): self-issue the HNSW widening + iterative scan so this
         # novelty probe does not depend on _find_duplicate having run earlier in
@@ -2205,6 +2221,7 @@ class FactManager:
               AND embedding IS NOT NULL
               AND source IS DISTINCT FROM 'exemplar_extractor'
               {exclude_clause}
+              {category_clause}
             ORDER BY embedding <=> CAST(:embedding AS vector)
             LIMIT 1
         """)
