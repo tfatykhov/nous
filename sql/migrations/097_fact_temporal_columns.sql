@@ -9,6 +9,13 @@
 -- Backfill, no LLM: dated rows become one-day intervals, and mentioned_at
 -- comes from the source episode's start, else learned_at. Every UPDATE
 -- touches only rows still NULL, so a second run changes nothing.
+-- The backfill is not an edit, so it must not move updated_at. The
+-- set_updated_at trigger (init.sql) would stamp every row it fills, and the
+-- heartbeat stale count and anything else that reads updated_at would then
+-- see every fact as edited today. The trigger is off for the two UPDATEs
+-- only. The application role owns heart.facts, which is all DISABLE TRIGGER
+-- needs for a named trigger, and the migrator runs every migration in one
+-- transaction, so a failure rolls the DISABLE back with the rest.
 -- No index on valid_from: the date leg walks HNSW and applies its predicates
 -- after, so a btree there would only be written, never read.
 -- Plain statements, no DO block and no semicolon in a comment.
@@ -21,6 +28,8 @@ ALTER TABLE heart.facts
 ALTER TABLE heart.facts
     ADD COLUMN IF NOT EXISTS mentioned_at TIMESTAMPTZ;
 
+ALTER TABLE heart.facts DISABLE TRIGGER set_updated_at;
+
 UPDATE heart.facts
     SET valid_from = event_date, valid_to = event_date
     WHERE event_date IS NOT NULL AND valid_from IS NULL;
@@ -31,3 +40,5 @@ UPDATE heart.facts AS f
         f.learned_at
     )
     WHERE f.mentioned_at IS NULL;
+
+ALTER TABLE heart.facts ENABLE TRIGGER set_updated_at;

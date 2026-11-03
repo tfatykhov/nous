@@ -431,12 +431,22 @@ def test_the_merge_prompts_keep_dated_events_only_under_w():
 
 def test_the_migration_adds_three_nullable_columns_and_no_index():
     statements = _split_sql_statements(_sql())
-    assert len(statements) == 5
+    assert len(statements) == 7
     assert "ADD COLUMN IF NOT EXISTS valid_from DATE" in statements[0]
     assert "ADD COLUMN IF NOT EXISTS valid_to DATE" in statements[1]
     assert "ADD COLUMN IF NOT EXISTS mentioned_at TIMESTAMPTZ" in statements[2]
     assert all(s.startswith(("ALTER TABLE heart.facts", "UPDATE heart.facts")) for s in statements)
     assert "INDEX" not in _code().upper()
+
+
+def test_the_backfill_and_only_the_backfill_runs_without_the_updated_at_trigger():
+    statements = _split_sql_statements(_sql())
+    assert statements[3] == "ALTER TABLE heart.facts DISABLE TRIGGER set_updated_at"
+    assert [s.split()[0] for s in statements[4:6]] == ["UPDATE", "UPDATE"]
+    assert statements[6] == "ALTER TABLE heart.facts ENABLE TRIGGER set_updated_at"
+    # The exact name of the trigger init.sql puts on heart.facts.
+    init_sql = (ROOT / "sql" / "init.sql").read_text(encoding="utf-8")
+    assert "CREATE TRIGGER set_updated_at BEFORE UPDATE ON heart.facts" in init_sql
 
 
 def test_the_migration_has_nothing_the_splitter_would_mangle_and_no_grants():
@@ -459,6 +469,7 @@ def test_the_eval_preflight_probes_the_three_columns():
 async def test_the_migration_backfills_and_a_second_run_changes_nothing(session):
     agent = f"test-097-backfill-{uuid4()}"
     learned = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    edited = datetime(2026, 6, 1, 8, 0, tzinfo=UTC)  # the rows' last real edit
     ep = uuid4()
     await session.execute(
         text("INSERT INTO heart.episodes (id, agent_id, summary, started_at) VALUES (:id, :a, 's', :t)"),
@@ -475,31 +486,47 @@ async def test_the_migration_backfills_and_a_second_run_changes_nothing(session)
         await session.execute(
             text(
                 "INSERT INTO heart.facts (id, agent_id, content, event_date, valid_from, valid_to, "
-                "mentioned_at, source_episode_id, learned_at) "
-                "VALUES (:id, :a, 'c', :ed, :vf, :vt, NULL, :src, :la)"
+                "mentioned_at, source_episode_id, learned_at, updated_at) "
+                "VALUES (:id, :a, 'c', :ed, :vf, :vt, NULL, :src, :la, :ua)"
             ),
-            {"id": fid, "a": agent, "ed": event_date, "vf": vf, "vt": vt, "src": src, "la": learned},
+            {"id": fid, "a": agent, "ed": event_date, "vf": vf, "vt": vt, "src": src, "la": learned, "ua": edited},
         )
 
     async def _state():
         res = await session.execute(
-            text("SELECT id, event_date, valid_from, valid_to, mentioned_at FROM heart.facts WHERE agent_id = :a"),
+            text(
+                "SELECT id, event_date, valid_from, valid_to, mentioned_at, updated_at FROM heart.facts "
+                "WHERE agent_id = :a"
+            ),
             {"a": agent},
         )
-        return {r.id: (r.event_date, r.valid_from, r.valid_to, r.mentioned_at) for r in res}
+        return {r.id: (r.event_date, r.valid_from, r.valid_to, r.mentioned_at, r.updated_at) for r in res}
 
-    for statement in _split_sql_statements(_sql()):
+    statements = _split_sql_statements(_sql())
+    for statement in statements:
         await session.execute(text(statement))
     first = await _state()
-    assert first[ids["dated_ep"]] == (date(2024, 4, 10), date(2024, 4, 10), date(2024, 4, 10), EPISODE_START)
-    assert first[ids["undated_noep"]] == (None, None, None, learned)
-    assert first[ids["merged_span"]] == (None, date(2026, 2, 1), date(2026, 2, 28), learned)
+    assert first[ids["dated_ep"]] == (date(2024, 4, 10),) * 3 + (EPISODE_START, edited)
+    assert first[ids["undated_noep"]] == (None, None, None, learned, edited)
+    assert first[ids["merged_span"]] == (None, date(2026, 2, 1), date(2026, 2, 28), learned, edited)
+    # Every row was filled and none got a new updated_at: the backfill is not an edit.
 
-    touched = []
-    for statement in _split_sql_statements(_sql()):
-        touched.append((await session.execute(text(statement))).rowcount)
-    assert touched[3:] == [0, 0]  # both UPDATEs find nothing left to fill, anywhere
+    touched = [(s, (await session.execute(text(s))).rowcount) for s in statements]
+    assert [n for s, n in touched if s.startswith("UPDATE")] == [0, 0]  # nothing left to fill, anywhere
     assert await _state() == first
+
+    # The trigger is back on: a real edit after the migration still stamps updated_at.
+    enabled = (
+        await session.execute(
+            text(
+                "SELECT tgenabled::text FROM pg_trigger "
+                "WHERE tgrelid = 'heart.facts'::regclass AND tgname = 'set_updated_at'"
+            )
+        )
+    ).scalar_one()
+    assert enabled == "O"
+    await session.execute(text("UPDATE heart.facts SET content = 'edited' WHERE id = :id"), {"id": ids["dated_ep"]})
+    assert (await _state())[ids["dated_ep"]][4] > edited
 
     cols = (
         await session.execute(
