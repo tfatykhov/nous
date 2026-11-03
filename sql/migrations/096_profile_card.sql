@@ -4,7 +4,7 @@
 -- agent's tier-1 facts (nous/heart/profile_card.py). One row per agent: each write moves the old entries
 -- to previous_entries, so there is no version table.
 -- entries: [{id, text, fact_ids}], every line cites 1 to 5 source fact ids.
--- source_hash: digest of the source facts (id, content, tags, active, superseded_by) at the last write.
+-- source_hash: digest of the source facts at the last write (every field the prompt shows, active, superseded_by).
 -- An unchanged digest skips the model call.
 -- rejected: up to 20 line texts the owner deleted. A later write never brings one back.
 -- tokens: the rendered card's size (characters divided by 4).

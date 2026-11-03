@@ -92,7 +92,12 @@ def card_tokens(entries: list[dict]) -> int:
 
 
 def source_hash(facts: list[Fact]) -> str:
-    """Digest of what the card is written from. ``updated_at`` is left out: a recall touch moves it."""
+    """Digest of what the card is written from: every field the prompt shows, plus ``active`` and ``superseded_by``.
+
+    ``overrides_prior`` is set in place when a duplicate is confirmed as a correction. ``confidence`` and
+    ``updated_at`` are left out: a confirmation or a recall touch moves them, the prompt does not show them, and the
+    facts they let into the source set are already counted by their ids.
+    """
     rows = sorted(
         (
             str(f.id),
@@ -100,6 +105,11 @@ def source_hash(facts: list[Fact]) -> str:
             sorted(f.tags or []),
             bool(f.active),
             str(f.superseded_by) if f.superseded_by else None,
+            bool(f.overrides_prior),
+            f.category,
+            f.subject,
+            f.source,
+            f.learned_at.isoformat() if f.learned_at else None,
         )
         for f in facts
     )
@@ -441,6 +451,10 @@ class ProfileCardWriter:
                 stats["entries"], stats["tokens"] = len(card["entries"]), card["tokens"]
             digest = source_hash(facts)
 
+            if not facts and card is not None and card["entries"]:
+                # Every source fact is gone: empty the card without a model call. Its lines move to
+                # previous_entries and the rejected lines stay.
+                return await self._write(stats, card, [], digest, session, outcome="cleared")
             if not facts:
                 stats["outcome"] = "empty_source"
             elif not force and card is not None and card["source_hash"] == digest:
@@ -479,17 +493,28 @@ class ProfileCardWriter:
                     counts["dropped"],
                 )
                 return stats
+            return await self._write(stats, card, entries, digest, session, outcome="written")
 
-            async with _session_scope(self._db, session) as s:
-                written = await self.store.write(entries, digest, session=s)
-            old = {e["text"] for e in (card["entries"] if card else [])}
-            new = {e["text"] for e in written["entries"]}
-            stats.update(
-                outcome="written",
-                rewritten=1,
-                entries=len(written["entries"]),
-                tokens=written["tokens"],
-                added=sorted(new - old),
-                removed=sorted(old - new),
-            )
-            return stats
+    async def _write(
+        self,
+        stats: dict[str, Any],
+        card: dict | None,
+        entries: list[dict],
+        digest: str,
+        session: AsyncSession | None,
+        *,
+        outcome: str,
+    ) -> dict:
+        async with _session_scope(self._db, session) as s:
+            written = await self.store.write(entries, digest, session=s)
+        old = {e["text"] for e in (card["entries"] if card else [])}
+        new = {e["text"] for e in written["entries"]}
+        stats.update(
+            outcome=outcome,
+            rewritten=1,
+            entries=len(written["entries"]),
+            tokens=written["tokens"],
+            added=sorted(new - old),
+            removed=sorted(old - new),
+        )
+        return stats

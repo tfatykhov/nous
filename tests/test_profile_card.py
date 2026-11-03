@@ -98,9 +98,12 @@ async def test_an_unchanged_source_set_makes_no_llm_call_even_after_a_recall_tou
     first = await writer.run_sleep(session=session)
     assert first["outcome"] == "written" and llm.call.await_count == 1
 
-    # track_access bumps recall_count and, through the trigger, updated_at: not a source change.
+    # track_access bumps recall_count and, through the trigger, updated_at, and a confirmation moves confidence:
+    # none of them is a source change.
     await session.execute(
-        update(Fact).where(Fact.id == f1.id).values(recall_count=5, last_recalled_at=NOW, confirmation_count=3)
+        update(Fact)
+        .where(Fact.id == f1.id)
+        .values(recall_count=5, last_recalled_at=NOW, confirmation_count=3, confidence=0.4)
     )
     second = await writer.run_sleep(session=session)
     assert second["outcome"] == "unchanged" and second["rewritten"] == 0
@@ -195,6 +198,37 @@ async def test_an_empty_source_set_writes_no_card_and_makes_no_call(db, session)
 
     assert result["outcome"] == "empty_source" and llm.call.await_count == 0
     assert await ProfileCardStore(db, agent).get(session=session) is None
+
+
+@pytest.mark.postgres_only
+async def test_a_card_whose_sources_are_all_gone_is_cleared_without_a_call_and_keeps_its_rejected_lines(db, session):
+    agent = _agent()
+    f1, f2 = await _facts(session, agent, {"content": "prefers Celsius"}, {"content": "lives in Lisbon"})
+    llm = _llm([_line(f1, "The user prefers Celsius."), _line(f2, "The user lives in Lisbon.")])
+    writer = _writer(db, agent, llm)
+    await writer.run_sleep(session=session)
+    store = ProfileCardStore(db, agent)
+    before = await store.get(session=session)
+    lisbon = next(e for e in before["entries"] if "Lisbon" in e["text"])
+    await store.delete_entry(lisbon["id"], session=session)
+
+    await session.execute(update(Fact).where(Fact.agent_id == agent).values(active=False))
+    result = await writer.run_sleep(session=session)
+
+    assert llm.call.await_count == 1
+    assert result["outcome"] == "cleared" and result["rewritten"] == 1
+    assert result["removed"] == ["The user prefers Celsius."]
+    card = await store.get(session=session)
+    assert card["entries"] == [] and card["tokens"] == 0
+    assert [e["text"] for e in card["previous_entries"]] == ["The user prefers Celsius."]
+    assert card["rejected"] == ["The user lives in Lisbon."]
+    assert card["source_hash"] != before["source_hash"]
+
+    # Nothing left to clear: no write, so previous_entries keeps the cleared lines; a rebuild does the same.
+    for again in (writer.run_sleep(session=session), writer.rebuild(session=session)):
+        assert (await again)["outcome"] == "empty_source"
+    assert [e["text"] for e in (await store.get(session=session))["previous_entries"]] == ["The user prefers Celsius."]
+    assert llm.call.await_count == 1
 
 
 @pytest.mark.postgres_only
@@ -359,6 +393,31 @@ def test_over_length_lines_count_toward_failing_closed():
     long = "z" * (LINE_CHARS + 1)
     entries, counts = _settle([_line(f1, "Fine."), _line(f2, long), _line(f3, long)], [f1, f2, f3])
     assert entries is None and counts["dropped"] == 2
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "moves"),
+    [
+        ("overrides_prior", True, True),
+        ("category", "rule", True),
+        ("subject", "partner", True),
+        ("source", "user_correction", True),
+        ("learned_at", NOW - timedelta(days=3), True),
+        ("content", "likes coffee", True),
+        ("tags", ["profile_core"], True),
+        ("confidence", 0.2, False),
+        ("recall_count", 9, False),
+        ("confirmation_count", 4, False),
+        ("updated_at", NOW + timedelta(hours=1), False),
+    ],
+)
+def test_the_source_hash_moves_with_every_field_the_prompt_shows_and_not_with_counters(field, value, moves):
+    from nous.heart.profile_card import source_hash
+
+    fact = _mem_fact("likes tea", overrides_prior=False, confidence=0.9, recall_count=0, confirmation_count=0)
+    before = source_hash([fact])
+    setattr(fact, field, value)
+    assert (source_hash([fact]) != before) is moves
 
 
 def test_a_repeated_line_is_kept_once():
