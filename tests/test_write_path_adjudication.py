@@ -209,6 +209,106 @@ def test_density_gate_still_fires_on_list_shaped_text():
         assert is_enumerable(doc, threshold=0.6) is True
 
 
+def _chat_with_list_answers(user: str, assistant: str) -> str:
+    """A chat in which the user asks in prose and the assistant answers in
+    markdown lists, turns joined by a blank line as layer.py joins them."""
+    packing = [
+        "Ski jacket",
+        "Thermal base layers",
+        "Gloves and liners",
+        "Goggles",
+        "Helmet",
+        "Neck gaiter",
+        "Wool socks",
+        "Sunscreen",
+        "Lip balm",
+        "Hand warmers",
+    ]
+    food = [
+        "Trail mix",
+        "Energy bars",
+        "Dried fruit",
+        "Cheese and crackers",
+        "A thermos of soup",
+        "Dark chocolate",
+        "Bananas",
+        "Plenty of water",
+    ]
+    return "\n\n".join(
+        [
+            f"{user}: What should I pack for a week of skiing in the Alps?",
+            f"{assistant}: Here is a packing list for the week:\n" + "\n".join(f"- {p}." for p in packing),
+            f"{user}: Thanks, and what should I eat on the mountain?",
+            f"{assistant}: A few options that travel well:\n"
+            + "\n".join(f"{i}. {f}." for i, f in enumerate(food, start=1)),
+        ]
+    )
+
+
+@pytest.mark.parametrize(("user", "assistant"), [("User", "Assistant"), ("user", "assistant")])
+def test_density_gate_skips_assistant_list_answers(user, assistant):
+    """Facts come from what the user supplied: list lines inside Assistant
+    turns are not counted, so a chat whose assistant answers in markdown lists
+    is not enumerable (layer.py writes User/Assistant, nous_eval ingest the
+    lower-case roles)."""
+    doc = _chat_with_list_answers(user, assistant)
+    assert density_score(doc) == 0.0
+    assert is_enumerable(doc, threshold=0.6) is False
+    # Nothing outside Assistant turns: the gate does not fire.
+    only_answer = f"{assistant}: Packing list:\n" + "\n".join(f"- Item number {i}." for i in range(12))
+    assert is_enumerable(only_answer, threshold=0.6) is False
+
+
+def test_density_gate_counts_user_pasted_list_in_chat():
+    """A list the user pastes into a chat still fires, and a long assistant
+    answer does not dilute it: its lines are left out of the line count too."""
+    notes = [
+        "- Alice is the team lead.",
+        "- Bob owns the billing service.",
+        "- Carol joined in March.",
+        "- Dan is on call this week.",
+        "- Erin runs the Friday demo.",
+        "- Frank prefers async reviews.",
+        "- Grace maintains the CI runners.",
+        "- Heidi is based in Berlin.",
+    ]
+    answer = "\n".join(
+        f"Noted, and I will bring point {i} about the team back up whenever it becomes relevant to your work."
+        for i in range(20)
+    )
+    doc = "\n\n".join(
+        [
+            "User: Please keep these notes about the team:\n" + "\n".join(notes),
+            "Assistant: " + answer,
+            "User: Thanks, that is everything for now.",
+        ]
+    )
+    assert is_enumerable(doc, threshold=0.6) is True
+    # A CR document as the MemoryAgentBench adapter sends it, in a User turn.
+    cr_turn = "User: [Source document for later questions — part 1/3]\n\n" + "\n".join(
+        f"{i}. The director of Organisation {i} is Person {i}." for i in range(30)
+    )
+    assert is_enumerable(cr_turn, threshold=0.6) is True
+
+
+def test_density_gate_label_inside_a_turn_does_not_switch_turns():
+    """A turn starts only at the top of the text or after a blank line, as
+    layer.py joins turns. "Assistant: Bob Jones" inside a user's pasted roster
+    is a roster line, so the rest of the roster still counts."""
+    roster = "\n".join(
+        [
+            "User: Here is who does what on the project:",
+            "Lead: Alice Smith",
+            "Assistant: Bob Jones",
+            "Reviewer: Carol White",
+            "Tester: Dan Brown",
+            "Writer: Erin Black",
+            "Designer: Frank Green",
+        ]
+    )
+    assert is_enumerable(roster, threshold=0.6) is True
+
+
 # ---------------------------------------------------------------------------
 # R1.2/R1.3: EnumerativeExtractor — chunked LLM extraction + batched store
 # ---------------------------------------------------------------------------

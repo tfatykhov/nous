@@ -29,7 +29,7 @@ _KEY_VALUE = re.compile(r"^[^:]{1,40}:\s+\S")
 _SHORT_STATEMENT = re.compile(r"^.{10,80}[.;]\s*$")
 # A transcript turn ("User: ..." / "Assistant: ...", layer.py). It looks like
 # "key: value" but is a chat turn, so it never counts.
-_SPEAKER_LABEL = re.compile(r"^(?:user|assistant|system|human):", re.IGNORECASE)
+_SPEAKER_LABEL = re.compile(r"^(user|assistant|system|human):", re.IGNORECASE)
 _MIN_HITS = 5
 
 from nous.heart.keys import is_keyable_entity, normalize_key  # noqa: F401 — re-exported; R3.2 single canonicalizer
@@ -43,11 +43,38 @@ def _is_list_line(line: str) -> bool:
     return bool(_LIST_MARKER.match(line) or _KEY_VALUE.match(line) or _SHORT_STATEMENT.match(line))
 
 
+def _lines_outside_assistant_turns(text: str) -> list[str]:
+    """Non-empty stripped lines that are not part of an Assistant turn.
+
+    layer.py joins turns ("User: ..." / "Assistant: ...") with a blank line,
+    so a turn starts with a speaker label at the top of the text or after a
+    blank line; a labelled line anywhere else (a roster's "Assistant: Bob")
+    stays in the current turn. Text before any label counts as supplied text.
+    """
+    kept: list[str] = []
+    in_assistant = False
+    turn_may_start = True
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            turn_may_start = True
+            continue
+        if turn_may_start:
+            label = _SPEAKER_LABEL.match(line)
+            if label:
+                in_assistant = label.group(1).lower() == "assistant"
+            turn_may_start = False
+        if not in_assistant:
+            kept.append(line)
+    return kept
+
+
 def density_score(text: str) -> float:
-    """Fraction of non-empty lines that look like list items, "key: value"
-    lines or short standalone statements; 0.0 below five such lines. Pure
-    heuristic — no LLM (R1.1)."""
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    """Fraction of the lines outside Assistant turns that look like list
+    items, "key: value" lines or short standalone statements; 0.0 below five
+    such lines. Facts come from what the user supplied, so an assistant's
+    answer neither counts nor dilutes. Pure heuristic — no LLM (R1.1)."""
+    lines = _lines_outside_assistant_turns(text)
     hits = sum(1 for ln in lines if _is_list_line(ln))
     if hits < _MIN_HITS:
         return 0.0

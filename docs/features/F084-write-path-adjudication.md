@@ -27,7 +27,9 @@ Two measured write-path failures from the MAB evaluation:
 R1 is **modal (density-adaptive, per R1.1)**. A cheap heuristic (`density_score`) counts the
 fraction of transcript lines that are list items, `key: value` lines or short (10–80 char)
 statements; a line starting with a speaker label (`User:`, `Assistant:`, `System:`, `Human:`)
-never counts, and fewer than five such lines scores 0. If
+never counts, and fewer than five such lines scores 0. Lines inside Assistant turns are left out
+of both counts, since facts come from what the user supplied (a turn starts with a speaker label
+at the top of the transcript or after a blank line, as layer.py joins turns). If
 the score meets `NOUS_ENUMERATIVE_DENSITY_THRESHOLD` (default 0.6), the episode is **enumerable**
 and routes fact storage through the enumerative leg INSTEAD of the candidate-facts leg (the legacy
 summarize-then-extract path). Narrative episodes are byte-identical to today.
